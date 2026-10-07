@@ -48,19 +48,19 @@ func TestResidentContractFallbackSharedCapDropsWithoutWaiting(t *testing.T) {
 		started := make(chan struct{}, residentContractFallbackMaxConcurrent)
 		release := make(chan struct{})
 		var calls atomic.Int32
-		fallback.readContract = func(context.Context, server.Id, server.Id) (bool, error) {
+		fallback.readContract = residentContractSourceForTest(func(context.Context, server.Id, server.Id) (bool, error) {
 			calls.Add(1)
 			started <- struct{}{}
 			<-release
 			return true, nil
-		}
+		})
 		var managers []*residentContractManager
 		results := make(chan bool, residentContractFallbackMaxConcurrent)
 		for range residentContractFallbackMaxConcurrent {
 			ctx, cancel := context.WithCancel(t.Context())
 			t.Cleanup(cancel)
 			manager := newResidentContractManagerWithFallback(ctx, cancel, server.NewId(), DefaultExchangeSettings(), fallback)
-			manager.readContract = func(_ context.Context, source, destination server.Id) bool {
+			manager.readContract = func(_ context.Context, source, destination server.Id) residentContractAllowance {
 				return fallback.check(ctx, source, destination)
 			}
 			managers = append(managers, manager)
@@ -70,7 +70,7 @@ func TestResidentContractFallbackSharedCapDropsWithoutWaiting(t *testing.T) {
 			<-started
 		}
 		for range 128 {
-			if fallback.check(t.Context(), server.NewId(), server.NewId()) {
+			if fallback.check(t.Context(), server.NewId(), server.NewId()).active {
 				t.Fatal("saturated fallback admitted or retained work")
 			}
 		}
@@ -80,14 +80,14 @@ func TestResidentContractFallbackSharedCapDropsWithoutWaiting(t *testing.T) {
 		manager := managers[0]
 		destination := server.NewId()
 		manager.stateLock.Lock()
-		manager.activeContracts[model.NewUnorderedTransferPair(manager.clientId, destination)] = &activeContractEntry{checkTime: time.Now()}
+		manager.activeContracts[model.NewUnorderedTransferPair(manager.clientId, destination)] = &activeContractEntry{checkTime: time.Now(), validUntil: time.Now().Add(time.Hour)}
 		manager.stateLock.Unlock()
 		if !manager.HasActiveContract(manager.clientId, destination) {
 			t.Fatal("full source budget refused an already fresh permission")
 		}
 		independent := newResidentContractFallback()
-		independent.readContract = func(context.Context, server.Id, server.Id) (bool, error) { return true, nil }
-		if !independent.check(t.Context(), server.NewId(), server.NewId()) {
+		independent.readContract = residentContractSourceForTest(func(context.Context, server.Id, server.Id) (bool, error) { return true, nil })
+		if !independent.check(t.Context(), server.NewId(), server.NewId()).active {
 			t.Fatal("independent exchange contended for a process singleton")
 		}
 		close(release)
@@ -115,9 +115,9 @@ func TestResidentContractFallbackRechecksAtExactPairInterval(t *testing.T) {
 		defer cancel()
 		fallback := newResidentContractFallback()
 		calls, active := 0, false
-		fallback.readContract = func(context.Context, server.Id, server.Id) (bool, error) { calls++; return active, nil }
+		fallback.readContract = residentContractSourceForTest(func(context.Context, server.Id, server.Id) (bool, error) { calls++; return active, nil })
 		manager := newResidentContractManagerWithFallback(ctx, cancel, server.NewId(), DefaultExchangeSettings(), fallback)
-		manager.readContract = func(_ context.Context, source, destination server.Id) bool {
+		manager.readContract = func(_ context.Context, source, destination server.Id) residentContractAllowance {
 			return fallback.check(ctx, source, destination)
 		}
 		source, destination := server.NewId(), server.NewId()
@@ -147,26 +147,26 @@ func TestResidentContractFallbackDeadlineErrorAndPanicReleaseAdmission(t *testin
 	synctest.Test(t, func(t *testing.T) {
 		fallback := newResidentContractFallback()
 		source, destination := server.NewId(), server.NewId()
-		fallback.readContract = func(ctx context.Context, _, _ server.Id) (bool, error) {
+		fallback.readContract = residentContractSourceForTest(func(ctx context.Context, _, _ server.Id) (bool, error) {
 			deadline, ok := ctx.Deadline()
 			if !ok || deadline.Sub(time.Now()) != residentContractFallbackTimeout {
 				t.Fatal("source did not receive the exact bounded deadline")
 			}
 			<-ctx.Done()
 			return true, nil
-		}
+		})
 		start := time.Now()
-		if fallback.check(t.Context(), source, destination) || time.Since(start) != residentContractFallbackTimeout || len(fallback.slots) != 0 {
+		if fallback.check(t.Context(), source, destination).active || time.Since(start) != residentContractFallbackTimeout || len(fallback.slots) != 0 {
 			t.Fatal("timed out source authorized or retained capacity")
 		}
-		fallback.readContract = func(context.Context, server.Id, server.Id) (bool, error) {
+		fallback.readContract = residentContractSourceForTest(func(context.Context, server.Id, server.Id) (bool, error) {
 			return true, errors.New("synthetic source failure")
-		}
-		if fallback.check(t.Context(), source, destination) || len(fallback.slots) != 0 {
+		})
+		if fallback.check(t.Context(), source, destination).active || len(fallback.slots) != 0 {
 			t.Fatal("failed source authorized or retained capacity")
 		}
 		failure := errors.New("synthetic source panic")
-		fallback.readContract = func(context.Context, server.Id, server.Id) (bool, error) { panic(failure) }
+		fallback.readContract = residentContractSourceForTest(func(context.Context, server.Id, server.Id) (bool, error) { panic(failure) })
 		func() {
 			defer func() {
 				if recover() != failure {
@@ -189,15 +189,15 @@ func TestResidentContractFallbackCloseJoinsSourceOwner(t *testing.T) {
 		defer cancel()
 		fallback := newResidentContractFallback()
 		started, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
-		fallback.readContract = func(ctx context.Context, _, _ server.Id) (bool, error) {
+		fallback.readContract = residentContractSourceForTest(func(ctx context.Context, _, _ server.Id) (bool, error) {
 			close(started)
 			<-ctx.Done()
 			close(canceled)
 			<-release
 			return true, nil
-		}
+		})
 		manager := newResidentContractManagerWithFallback(ctx, cancel, server.NewId(), DefaultExchangeSettings(), fallback)
-		manager.readContract = func(_ context.Context, source, destination server.Id) bool {
+		manager.readContract = func(_ context.Context, source, destination server.Id) residentContractAllowance {
 			return fallback.check(ctx, source, destination)
 		}
 		result := make(chan bool, 1)
@@ -230,7 +230,7 @@ func TestResidentContractFallbackCloseJoinsSourceOwner(t *testing.T) {
 func TestResidentContractFallbackPreservesInheritedPostgresGuard(t *testing.T) {
 	ctx := server.WithoutPostgres(t.Context())
 	fallback := newResidentContractFallback()
-	if fallback.check(ctx, server.NewId(), server.NewId()) || server.PacketPostgresAttempts(ctx) != 1 || len(fallback.slots) != 0 {
+	if fallback.check(ctx, server.NewId(), server.NewId()).active || server.PacketPostgresAttempts(ctx) != 1 || len(fallback.slots) != 0 {
 		t.Fatal("source fallback bypassed an inherited guard or retained capacity")
 	}
 }
@@ -241,8 +241,8 @@ func TestResidentContractFallbackCanceledAdmissionHasNoSource(t *testing.T) {
 	cancel()
 	fallback := newResidentContractFallback()
 	calls := 0
-	fallback.readContract = func(context.Context, server.Id, server.Id) (bool, error) { calls++; return true, nil }
-	if fallback.check(ctx, server.NewId(), server.NewId()) || calls != 0 || len(fallback.slots) != 0 {
+	fallback.readContract = residentContractSourceForTest(func(context.Context, server.Id, server.Id) (bool, error) { calls++; return true, nil })
+	if fallback.check(ctx, server.NewId(), server.NewId()).active || calls != 0 || len(fallback.slots) != 0 {
 		t.Fatal("canceled caller entered the source or retained admission")
 	}
 }

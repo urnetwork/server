@@ -27,13 +27,13 @@ func TestResidentContractReadCloseJoinsColdOwner(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		manager, _, source, destination := residentReadControl(t)
 		started, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
-		manager.readContract = func(ctx context.Context, _, _ server.Id) bool {
+		manager.readContract = residentContractReadForTest(func(ctx context.Context, _, _ server.Id) bool {
 			close(started)
 			<-ctx.Done()
 			close(cancelled)
 			<-release
 			return true
-		}
+		})
 		result := make(chan bool, 1)
 		go func() { result <- manager.HasActiveContract(source, destination) }()
 		<-started
@@ -66,7 +66,7 @@ func TestResidentContractReadDropsConcurrentUncheckedPackets(t *testing.T) {
 		manager, _, source, destination := residentReadControl(t)
 		var calls atomic.Int32
 		started, release := make(chan struct{}), make(chan struct{})
-		manager.readContract = func(ctx context.Context, s, d server.Id) bool {
+		manager.readContract = residentContractReadForTest(func(ctx context.Context, s, d server.Id) bool {
 			if ctx != manager.ctx || s != source || d != destination {
 				panic("contract read changed its context or pair")
 			}
@@ -74,7 +74,7 @@ func TestResidentContractReadDropsConcurrentUncheckedPackets(t *testing.T) {
 			close(started)
 			<-release
 			return true
-		}
+		})
 		first := make(chan bool, 1)
 		go func() { first <- manager.HasActiveContract(source, destination) }()
 		<-started
@@ -108,7 +108,7 @@ func TestResidentContractReadLimitsNegativeAndRechecksAtOneSecond(t *testing.T) 
 	synctest.Test(t, func(t *testing.T) {
 		manager, _, source, destination := residentReadControl(t)
 		calls, active := 0, false
-		manager.readContract = func(context.Context, server.Id, server.Id) bool { calls++; return active }
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls++; return active })
 		for range 128 {
 			if manager.HasActiveContract(source, destination) {
 				t.Fatal("missing contract authorized a packet")
@@ -132,10 +132,10 @@ func TestResidentContractReadCanonicalPairIsolation(t *testing.T) {
 	manager, _, source, destination := residentReadControl(t)
 	other := server.NewId()
 	calls := map[model.TransferPair]int{}
-	manager.readContract = func(_ context.Context, s, d server.Id) bool {
+	manager.readContract = residentContractReadForTest(func(_ context.Context, s, d server.Id) bool {
 		calls[model.NewUnorderedTransferPair(s, d)]++
 		return false
-	}
+	})
 	pairs := []model.TransferPair{
 		{A: source, B: destination}, {A: destination, B: source},
 		{A: source, B: other}, {A: other, B: destination},
@@ -162,13 +162,13 @@ func TestResidentContractReadOtherPairsRemainParallel(t *testing.T) {
 		manager, _, source, destination := residentReadControl(t)
 		other := server.NewId()
 		started, release := make(chan struct{}), make(chan struct{})
-		manager.readContract = func(_ context.Context, s, _ server.Id) bool {
+		manager.readContract = residentContractReadForTest(func(_ context.Context, s, _ server.Id) bool {
 			if s == source {
 				close(started)
 				<-release
 			}
 			return true
-		}
+		})
 		first := make(chan bool, 1)
 		go func() { first <- manager.HasActiveContract(source, destination) }()
 		<-started
@@ -189,14 +189,14 @@ func TestResidentContractReadRefreshPreservesFiveSecondBoundary(t *testing.T) {
 		manager, _, source, destination := residentReadControl(t)
 		var calls atomic.Int32
 		started, release := make(chan struct{}), make(chan struct{})
-		manager.readContract = func(context.Context, server.Id, server.Id) bool {
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool {
 			if calls.Add(1) == 1 {
 				return true
 			}
 			close(started)
 			<-release
 			return false
-		}
+		})
 		if !manager.HasActiveContract(source, destination) {
 			t.Fatal("initial positive result was refused")
 		}
@@ -227,7 +227,7 @@ func TestResidentContractReadCanceledOwnerDoesNotPublish(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		manager, cancel, source, destination := residentReadControl(t)
 		started, release := make(chan struct{}), make(chan struct{})
-		manager.readContract = func(context.Context, server.Id, server.Id) bool { close(started); <-release; return true }
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { close(started); <-release; return true })
 		result := make(chan bool, 1)
 		go func() { result <- manager.HasActiveContract(source, destination) }()
 		<-started
@@ -246,7 +246,7 @@ func TestResidentContractReadFailureRetainsInterval(t *testing.T) {
 		manager, _, source, destination := residentReadControl(t)
 		want := errors.New("synthetic contract read failure")
 		calls := 0
-		manager.readContract = func(context.Context, server.Id, server.Id) bool { calls++; panic(want) }
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls++; panic(want) })
 		func() {
 			defer func() {
 				if recover() != want {
@@ -255,7 +255,7 @@ func TestResidentContractReadFailureRetainsInterval(t *testing.T) {
 			}()
 			manager.HasActiveContract(source, destination)
 		}()
-		manager.readContract = func(context.Context, server.Id, server.Id) bool { calls++; return true }
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls++; return true })
 		if manager.HasActiveContract(source, destination) || calls != 1 || len(manager.activeReads) != 0 {
 			t.Fatal("failed check retried early or retained its owner")
 		}

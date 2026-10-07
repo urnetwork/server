@@ -21,14 +21,21 @@ const (
 // stored here. Source calls remain joined by each resident's read ownership.
 type residentContractFallback struct {
 	slots        chan struct{}
-	readContract func(context.Context, server.Id, server.Id) (bool, error)
+	readContract func(context.Context, server.Id, server.Id) (model.ContractHoleStatus, time.Time, error)
+}
+
+// A successful read carries its strict source deadline to every cached offer.
+// No boolean-only conversion may manufacture or extend authority.
+type residentContractAllowance struct {
+	active     bool
+	validUntil time.Time
 }
 
 // Constructs one fixed budget; default settings never retain shared state.
 func newResidentContractFallback() *residentContractFallback {
 	return &residentContractFallback{
 		slots:        make(chan struct{}, residentContractFallbackMaxConcurrent),
-		readContract: model.HasResumableContractForPair,
+		readContract: model.ReadResumableContractLease,
 	}
 }
 
@@ -40,20 +47,24 @@ func readResidentContractAllowance(
 	sourceCtx context.Context,
 	source, destination server.Id,
 	fallback *residentContractFallback,
-) bool {
+) residentContractAllowance {
 	if packetCtx.Err() != nil {
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceCanceled)
-		return false
+		return residentContractAllowance{}
 	}
-	status, err := model.ReadContractHole(packetCtx, source, destination)
+	status, validUntil, err := model.ReadContractHoleLease(packetCtx, source, destination)
 	if err == nil {
 		switch status {
 		case model.ContractHolePositive:
+			if !time.Now().Before(validUntil) {
+				defaultResidentContractAllowanceMetrics.add(contractAllowanceRedisError)
+				break
+			}
 			defaultResidentContractAllowanceMetrics.add(contractAllowanceRedisPositive)
-			return true
+			return residentContractAllowance{active: true, validUntil: validUntil}
 		case model.ContractHoleNegative:
 			defaultResidentContractAllowanceMetrics.add(contractAllowanceRedisNegative)
-			return false
+			return residentContractAllowance{}
 		default:
 			defaultResidentContractAllowanceMetrics.add(contractAllowanceRedisUnknown)
 		}
@@ -62,11 +73,11 @@ func readResidentContractAllowance(
 	}
 	if packetCtx.Err() != nil || sourceCtx.Err() != nil {
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceCanceled)
-		return false
+		return residentContractAllowance{}
 	}
 	if fallback == nil {
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackDisabled)
-		return false
+		return residentContractAllowance{}
 	}
 	return fallback.check(sourceCtx, source, destination)
 }
@@ -74,34 +85,37 @@ func readResidentContractAllowance(
 // Try once without queuing. The original lifetime context is used only for this
 // specific source operation; inherited PostgreSQL guards are never removed.
 // Deadline, error, saturation, and cancellation all refuse the packet.
-func (self *residentContractFallback) check(ctx context.Context, source, destination server.Id) bool {
+func (self *residentContractFallback) check(ctx context.Context, source, destination server.Id) residentContractAllowance {
 	if ctx.Err() != nil {
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceCanceled)
-		return false
+		return residentContractAllowance{}
 	}
 	select {
 	case self.slots <- struct{}{}:
 		defer func() { <-self.slots }()
 	default:
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackSaturated)
-		return false
+		return residentContractAllowance{}
 	}
 	readCtx, cancel := context.WithTimeout(ctx, residentContractFallbackTimeout)
 	defer cancel()
 	if readCtx.Err() != nil {
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceCanceled)
-		return false
+		return residentContractAllowance{}
 	}
 	defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackStarted)
-	active, err := self.readContract(readCtx, source, destination)
+	status, validUntil, err := self.readContract(readCtx, source, destination)
 	if readCtx.Err() != nil || err != nil {
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackError)
-		return false
+		return residentContractAllowance{}
 	}
-	if active {
+	if status == model.ContractHolePositive && time.Now().Before(validUntil) {
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackPositive)
-	} else {
+		return residentContractAllowance{active: true, validUntil: validUntil}
+	} else if status == model.ContractHoleNegative {
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackNegative)
+	} else {
+		defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackError)
 	}
-	return active
+	return residentContractAllowance{}
 }

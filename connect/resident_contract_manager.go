@@ -27,9 +27,12 @@ type residentContractManager struct {
 	activeContracts map[model.TransferPair]*activeContractEntry
 	activeReads     map[model.TransferPair]bool
 	checkLimiters   map[model.TransferPair]*limiter
-	readContract    func(context.Context, server.Id, server.Id) bool
+	readContract    func(context.Context, server.Id, server.Id) residentContractAllowance
 	readsClosed     bool
 	readWorkers     sync.WaitGroup
+	// Nil in production. Tests pause after the first clock sample and before
+	// taking the map lock, without relying on scheduling of a blocked mutex.
+	beforeCheckLockForTest func()
 
 	nextActiveContractSweepTime time.Time
 }
@@ -63,7 +66,7 @@ func newResidentContractManagerWithFallback(
 		activeReads:     map[model.TransferPair]bool{},
 		checkLimiters:   map[model.TransferPair]*limiter{},
 	}
-	manager.readContract = func(packetCtx context.Context, source, destination server.Id) bool {
+	manager.readContract = func(packetCtx context.Context, source, destination server.Id) residentContractAllowance {
 		return readResidentContractAllowance(packetCtx, ctx, source, destination, fallback)
 	}
 	return manager
@@ -88,6 +91,10 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
 	pair := model.NewUnorderedTransferPair(sourceId, destinationId)
 	now := time.Now()
 	cached, read := false, false
+	var cachedDeadline time.Time
+	if self.beforeCheckLockForTest != nil {
+		self.beforeCheckLockForTest()
+	}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -96,7 +103,7 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
 		}
 		if !now.Before(self.nextActiveContractSweepTime) {
 			for key, entry := range self.activeContracts {
-				if self.settings.ContractManagerCheckTimeout <= 0 || !now.Before(entry.checkTime.Add(self.settings.ContractManagerCheckTimeout)) {
+				if self.settings.ContractManagerCheckTimeout <= 0 || !now.Before(entry.deadline(self.settings.ContractManagerCheckTimeout)) {
 					delete(self.activeContracts, key)
 				}
 			}
@@ -107,9 +114,15 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
 			}
 			self.nextActiveContractSweepTime = now.Add(residentContractCheckMinTimeout)
 		}
+		// Admission may have waited for a map sweep or another short owner
+		// operation; a timestamp from before taking the lock is not authority.
+		now = time.Now()
 		entry := self.activeContracts[pair]
-		cached = entry != nil && self.settings.ContractManagerCheckTimeout > 0 && now.Before(entry.checkTime.Add(self.settings.ContractManagerCheckTimeout))
-		if cached && now.Before(entry.checkTime.Add(self.settings.ContractManagerCheckTimeout/2)) {
+		if entry != nil {
+			cachedDeadline = entry.deadline(self.settings.ContractManagerCheckTimeout)
+		}
+		cached = entry != nil && self.settings.ContractManagerCheckTimeout > 0 && now.Before(cachedDeadline)
+		if cached && now.Before(entry.checkTime.Add(cachedDeadline.Sub(entry.checkTime)/2)) {
 			return
 		}
 		if self.activeReads[pair] {
@@ -130,6 +143,7 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
 			self.readWorkers.Add(1)
 		}
 	}()
+	cached = cached && time.Now().Before(cachedDeadline)
 	if !read {
 		if !cached {
 			defaultResidentContractAllowanceMetrics.add(contractAllowanceCheckRefused)
@@ -138,7 +152,7 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
 	}
 	if cached {
 		go server.HandleError(func() { self.performActiveContractRead(pair, sourceId, destinationId) }, self.cancel)
-		return true
+		return time.Now().Before(cachedDeadline)
 	}
 	return self.performActiveContractRead(pair, sourceId, destinationId)
 }
@@ -147,23 +161,26 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
 // compatibility source check shares the same read join and positive cache.
 func (self *residentContractManager) performActiveContractRead(pair model.TransferPair, sourceId, destinationId server.Id) bool {
 	defer self.readWorkers.Done()
+	var allowance residentContractAllowance
 	var active, completed bool
 	var panicValue any
 	func() {
 		defer func() { panicValue = recover() }()
 		handleContractManagerDone(func() {
-			active = self.readContract(self.ctx, sourceId, destinationId)
+			allowance = self.readContract(self.ctx, sourceId, destinationId)
 			completed = true
 		})
 	}()
 	self.stateLock.Lock()
 	delete(self.activeReads, pair)
+	now := time.Now()
+	active = allowance.active && now.Before(allowance.validUntil)
 	if self.ctx.Err() != nil {
 		active = false
 	}
 	if completed {
 		if active && self.settings.ContractManagerCheckTimeout > 0 {
-			self.activeContracts[pair] = &activeContractEntry{checkTime: time.Now()}
+			self.activeContracts[pair] = &activeContractEntry{checkTime: now, validUntil: allowance.validUntil}
 		} else {
 			delete(self.activeContracts, pair)
 		}
@@ -172,7 +189,7 @@ func (self *residentContractManager) performActiveContractRead(pair model.Transf
 	if panicValue != nil {
 		panic(panicValue)
 	}
-	return active
+	return active && time.Now().Before(allowance.validUntil)
 }
 
 // Closes read admission under the same lock as worker registration. The owner
@@ -193,5 +210,16 @@ func (self *residentContractManager) CloseAndWait(ctx context.Context) error {
 // Records only successful reads; denied reads retain admission state, not an
 // authorization result.
 type activeContractEntry struct {
-	checkTime time.Time
+	checkTime  time.Time
+	validUntil time.Time
+}
+
+// Source authority and local freshness are independent ceilings. A missing
+// source deadline is never an unlimited permission, including after refresh.
+func (self *activeContractEntry) deadline(timeout time.Duration) time.Time {
+	deadline := self.checkTime.Add(timeout)
+	if self.validUntil.Before(deadline) {
+		deadline = self.validUntil
+	}
+	return deadline
 }

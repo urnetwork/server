@@ -19,10 +19,10 @@ func TestResidentContractCacheRetiresExpiredProviderHistory(t *testing.T) {
 		settings := DefaultExchangeSettings()
 		manager := newResidentContractManager(ctx, cancel, server.NewId(), settings)
 		var calls int
-		manager.readContract = func(context.Context, server.Id, server.Id) bool {
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool {
 			calls++
 			return true
-		}
+		})
 		const cohorts, providers = 8, 128
 		var peakRetained int
 		for cohort := range cohorts {
@@ -55,7 +55,7 @@ func TestResidentContractCacheRetiresDeniedProviderHistory(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		manager, _, source, _ := residentReadControl(t)
 		var calls int
-		manager.readContract = func(context.Context, server.Id, server.Id) bool { calls++; return false }
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls++; return false })
 		const cohorts, providers = 8, 128
 		for cohort := range cohorts {
 			if cohort > 0 {
@@ -84,10 +84,10 @@ func TestResidentContractCacheDisabledDoesNotRetainProviderHistory(t *testing.T)
 	defer cancel()
 	manager := newResidentContractManager(ctx, cancel, server.NewId(), &ExchangeSettings{MaxConcurrentForwardsPerResident: 128})
 	var calls int
-	manager.readContract = func(context.Context, server.Id, server.Id) bool {
+	manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool {
 		calls++
 		return true
-	}
+	})
 	for range 128 {
 		providerId := server.NewId()
 		if !manager.HasActiveContract(manager.clientId, providerId) ||

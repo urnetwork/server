@@ -45,10 +45,10 @@ func TestResidentPacketDeniedCohortHasOneCheckPerPair(t *testing.T) {
 			settings.ResidentForwardQueueShardCount = 1
 			resident := newResidentCallbackLifecycleFixture(t, ctx, settings)
 			resident.residentContractManager = newResidentContractManager(resident.ctx, resident.cancel, resident.clientId, settings)
-			resident.residentContractManager.readContract = func(context.Context, server.Id, server.Id) bool {
+			resident.residentContractManager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool {
 				calls.Add(1)
 				return false
-			}
+			})
 			ledger := &residentPayloadLedger{}
 			resident.exchange.payloadOwnerLedger = ledger
 			ledgers = append(ledgers, ledger)
@@ -107,7 +107,7 @@ func TestResidentPacketWrongSourceDoesNotReadAuthorization(t *testing.T) {
 		resident := newResidentCallbackLifecycleFixture(t, ctx, settings)
 		resident.residentContractManager = newResidentContractManager(resident.ctx, resident.cancel, resident.clientId, settings)
 		var calls atomic.Int32
-		resident.residentContractManager.readContract = func(context.Context, server.Id, server.Id) bool { calls.Add(1); return true }
+		resident.residentContractManager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls.Add(1); return true })
 		witness := offerResidentPacket(t, resident, server.NewId(), server.NewId())
 		synctest.Wait()
 		if calls.Load() != 0 || len(resident.forwards) != 0 {
@@ -132,7 +132,7 @@ func TestResidentPacketWrongSourceDoesNotReadAuthorization(t *testing.T) {
 // client ids only. Model lifecycle tests separately prove how it is populated.
 func residentPacketHoleKey(source, destination server.Id) string {
 	pair := model.NewUnorderedTransferPair(source, destination)
-	return fmt.Sprintf("contract-hole:v1:{%s:%s}:count", pair.A, pair.B)
+	return fmt.Sprintf("contract-hole:v2:{%s:%s}:count", pair.A, pair.B)
 }
 
 // Drives the unmocked Redis authorization and destination reader through the
@@ -167,7 +167,7 @@ func testResidentPacketRedisProjectionWithFallback(t testing.TB, value string, a
 	destination, sentinel := server.NewId(), server.NewId()
 	if value != "" {
 		server.Redis(ctx, func(client server.RedisClient) {
-			server.Raise(client.Set(ctx, residentPacketHoleKey(resident.clientId, destination), value, time.Minute).Err())
+			residentPacketSeedHole(ctx, client, resident.clientId, destination, value)
 		})
 	}
 	for _, change := range mutate {
@@ -176,11 +176,11 @@ func testResidentPacketRedisProjectionWithFallback(t testing.TB, value string, a
 	barrier, release := make(chan struct{}), make(chan struct{})
 	defaultRead := resident.residentContractManager.readContract
 	var calls atomic.Int32
-	resident.residentContractManager.readContract = func(ctx context.Context, source, target server.Id) bool {
+	resident.residentContractManager.readContract = func(ctx context.Context, source, target server.Id) residentContractAllowance {
 		if target == sentinel {
 			close(barrier)
 			<-release
-			return false
+			return residentContractAllowance{}
 		} else {
 			calls.Add(1)
 		}
@@ -270,7 +270,7 @@ func TestResidentPacketRedisWrongPairHasNoPostgres(t *testing.T) {
 		testResidentPacketRedisProjection(t, "1", false, func(ctx context.Context, source, destination server.Id) {
 			server.Redis(ctx, func(client server.RedisClient) {
 				server.Raise(client.Del(ctx, residentPacketHoleKey(source, destination)).Err())
-				server.Raise(client.Set(ctx, residentPacketHoleKey(source, server.NewId()), "1", time.Minute).Err())
+				residentPacketSeedHole(ctx, client, source, server.NewId(), "1")
 			})
 		})
 	})
@@ -320,7 +320,7 @@ func TestResidentPacketRedisPositiveDeliversAndReusesSocket(t *testing.T) {
 			}
 		}()
 		server.Redis(ctx, func(client server.RedisClient) {
-			server.Raise(client.Set(ctx, residentPacketHoleKey(resident.clientId, destination), "1", time.Minute).Err())
+			residentPacketSeedHole(ctx, client, resident.clientId, destination, "1")
 		})
 		if !model.NominateResident(ctx, nil, &model.NetworkClientResident{
 			ClientId: destination, InstanceId: server.NewId(), ResidentId: destinationResident,
@@ -331,7 +331,7 @@ func TestResidentPacketRedisPositiveDeliversAndReusesSocket(t *testing.T) {
 		delivered := make(chan string, 2)
 		var dials, reads atomic.Int32
 		defaultRead := resident.residentContractManager.readContract
-		resident.residentContractManager.readContract = func(ctx context.Context, source, target server.Id) bool {
+		resident.residentContractManager.readContract = func(ctx context.Context, source, target server.Id) residentContractAllowance {
 			reads.Add(1)
 			return defaultRead(ctx, source, target)
 		}
@@ -422,7 +422,7 @@ func TestResidentPacketLiveForwardRechecksAndRevokes(t *testing.T) {
 		var calls atomic.Int32
 		var active atomic.Bool
 		active.Store(true)
-		resident.residentContractManager.readContract = func(context.Context, server.Id, server.Id) bool { calls.Add(1); return active.Load() }
+		resident.residentContractManager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls.Add(1); return active.Load() })
 		first := offerResidentPacket(t, resident, resident.clientId, destination)
 		synctest.Wait()
 		if len(forward.send) != 1 || calls.Load() != 1 {
@@ -474,7 +474,7 @@ func TestResidentPacketForwardLimitDoesNotReadNewPair(t *testing.T) {
 		defer forward.Close()
 		resident.forwards[destination] = forward
 		var calls atomic.Int32
-		resident.residentContractManager.readContract = func(context.Context, server.Id, server.Id) bool { calls.Add(1); return true }
+		resident.residentContractManager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls.Add(1); return true })
 		refused := offerResidentPacket(t, resident, resident.clientId, server.NewId())
 		synctest.Wait()
 		if calls.Load() != 0 || len(resident.forwards) != 1 {
@@ -514,10 +514,10 @@ func TestResidentPacketDeniedPairHistoryHasOwnerBound(t *testing.T) {
 		defer forward.Close()
 		resident.forwards[healthy] = forward
 		var calls atomic.Int32
-		resident.residentContractManager.readContract = func(_ context.Context, _, target server.Id) bool {
+		resident.residentContractManager.readContract = residentContractReadForTest(func(_ context.Context, _, target server.Id) bool {
 			calls.Add(1)
 			return target == healthy
-		}
+		})
 		var witnesses [][]byte
 		witnesses = append(witnesses, offerResidentPacket(t, resident, resident.clientId, healthy))
 		synctest.Wait()
@@ -535,7 +535,7 @@ func TestResidentPacketDeniedPairHistoryHasOwnerBound(t *testing.T) {
 		}
 		other := newResidentCallbackLifecycleFixture(t, ctx, settings)
 		var otherCalls atomic.Int32
-		other.residentContractManager.readContract = func(context.Context, server.Id, server.Id) bool { otherCalls.Add(1); return false }
+		other.residentContractManager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { otherCalls.Add(1); return false })
 		witnesses = append(witnesses, offerResidentPacket(t, other, other.clientId, server.NewId()))
 		synctest.Wait()
 		if otherCalls.Load() != 1 {
@@ -567,7 +567,7 @@ func TestResidentPacketDeniedPairRechecksAtExactInterval(t *testing.T) {
 		resident := newResidentCallbackLifecycleFixture(t, ctx, DefaultExchangeSettings())
 		destination := server.NewId()
 		var calls atomic.Int32
-		resident.residentContractManager.readContract = func(context.Context, server.Id, server.Id) bool { calls.Add(1); return false }
+		resident.residentContractManager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls.Add(1); return false })
 		var witnesses [][]byte
 		witnesses = append(witnesses, offerResidentPacket(t, resident, resident.clientId, destination))
 		synctest.Wait()
@@ -604,7 +604,7 @@ func TestResidentPacketCloseJoinsPositiveRefresh(t *testing.T) {
 		resident.forwards[destination] = forward
 		var calls atomic.Int32
 		started, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
-		resident.residentContractManager.readContract = func(ctx context.Context, _, _ server.Id) bool {
+		resident.residentContractManager.readContract = residentContractReadForTest(func(ctx context.Context, _, _ server.Id) bool {
 			if calls.Add(1) == 1 {
 				return true
 			}
@@ -613,7 +613,7 @@ func TestResidentPacketCloseJoinsPositiveRefresh(t *testing.T) {
 			close(cancelled)
 			<-release
 			return true
-		}
+		})
 		first := offerResidentPacket(t, resident, resident.clientId, destination)
 		synctest.Wait()
 		time.Sleep(resident.exchange.settings.ContractManagerCheckTimeout / 2)

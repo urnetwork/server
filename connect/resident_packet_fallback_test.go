@@ -85,11 +85,11 @@ func testResidentPacketSourceFallback(t testing.TB, caseName string, active bool
 	defer stopPostgresTripwire()
 	fallback := newResidentContractFallback()
 	var sourceReads atomic.Int32
-	fallback.readContract = func(ctx context.Context, source, target server.Id) (bool, error) {
+	fallback.readContract = func(ctx context.Context, source, target server.Id) (model.ContractHoleStatus, time.Time, error) {
 		sourceReads.Add(1)
 		sourceCtx, revoke := server.PermitPostgresAcquisitionForTest(t, ctx)
 		defer revoke()
-		return model.HasResumableContractForPair(sourceCtx, source, target)
+		return model.ReadResumableContractLease(sourceCtx, source, target)
 	}
 	resident.residentContractManager = newResidentContractManagerWithFallback(resident.ctx, resident.cancel, resident.clientId, settings, fallback)
 	forward := NewResidentForward(ctx, resident.exchange, destination)
@@ -104,11 +104,11 @@ func testResidentPacketSourceFallback(t testing.TB, caseName string, active bool
 		forward.Close() // The test owns the held forward consumer.
 	}()
 	defaultRead := resident.residentContractManager.readContract
-	resident.residentContractManager.readContract = func(ctx context.Context, source, target server.Id) bool {
+	resident.residentContractManager.readContract = func(ctx context.Context, source, target server.Id) residentContractAllowance {
 		if target == sentinel {
 			close(barrier)
 			<-release
-			return false
+			return residentContractAllowance{}
 		}
 		return defaultRead(ctx, source, target)
 	}
@@ -164,6 +164,18 @@ func TestResidentPacketFallbackUsesExactResumableSource(t *testing.T) {
 			{name: "open", active: true, prepare: func(ctx context.Context, source, destination server.Id) {
 				insertResidentFallbackContract(ctx, source, destination)
 			}},
+			{name: "absolute_expired", active: false, prepare: func(ctx context.Context, source, destination server.Id) {
+				id := insertResidentFallbackContract(ctx, source, destination)
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, time.Now().UTC().Add(-time.Hour)))
+				})
+			}},
+			{name: "absolute_live", active: true, prepare: func(ctx context.Context, source, destination server.Id) {
+				id := insertResidentFallbackContract(ctx, source, destination)
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, time.Now().UTC().Add(time.Hour)))
+				})
+			}},
 			{name: "reverse", active: true, prepare: func(ctx context.Context, source, destination server.Id) {
 				insertResidentFallbackContract(ctx, destination, source)
 			}},
@@ -209,7 +221,7 @@ func TestResidentPacketFallbackUsesExactResumableSource(t *testing.T) {
 			{name: "expired_redis", active: false, prepare: func(ctx context.Context, source, destination server.Id) {
 				server.Redis(ctx, func(client server.RedisClient) {
 					key := residentPacketHoleKey(source, destination)
-					server.Raise(client.Set(ctx, key, "1", time.Minute).Err())
+					residentPacketSeedHole(ctx, client, source, destination, "1")
 					server.Raise(client.PExpireAt(ctx, key, time.Unix(1, 0)).Err())
 				})
 			}},

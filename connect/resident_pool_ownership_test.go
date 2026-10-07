@@ -104,7 +104,7 @@ func newResidentCallbackLifecycleFixture(
 	// These fixtures isolate ownership from contract projection. Authorization
 	// integration controls replace this seam with the real Redis reader.
 	resident.residentContractManager = newResidentContractManager(residentCtx, residentCancel, resident.clientId, settings)
-	resident.residentContractManager.readContract = func(context.Context, server.Id, server.Id) bool { return true }
+	resident.residentContractManager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { return true })
 	resident.controlLimiter = newLimiter(residentCtx, 0)
 	resident.residentController = newResidentController(residentCtx, resident.clientId, nil, settings)
 	resident.startClientCallbackWorkers()
