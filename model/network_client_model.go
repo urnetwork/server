@@ -3438,9 +3438,9 @@ func removeProvideKeysForClientIds(ctx context.Context, clientIds []server.Id) {
 // tables whose parent row no longer exists. RemoveDisconnectedNetworkClients
 // cascades dependents together with the parent deletes, so this is a
 // low-cadence safety net for orphans left by other deletion paths or older
-// releases, not the primary cleanup mechanism. Each table is paged fully by its
-// primary key in bounded sliceSize slices (see sweepOrphanCursor), so a call
-// never full-scans a child table even when there are no orphans.
+// releases, not the primary cleanup mechanism. Each call intentionally traverses
+// every child table in primary-key order, with at most sliceSize selected keys
+// per page (see sweepOrphanCursor).
 func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCount int64) {
 	// per-connection tables whose connection is gone, keyed by connection_id
 	removedCount += sweepOrphanTable(
@@ -3727,107 +3727,8 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 		func() []any { return []any{new(string), new(string), new(int64)} },
 	)
 
-	// provide keys whose client is gone, paged by (client_id, provide_mode).
-	// RETURNING feeds the redis mirror cleanup, so this is an inline cursor loop
-	// (like proxy_device_config above): a bound sentinel row carries pagination
-	// so slices with no deletions still advance the cursor.
-	{
-		var cursorClientId server.Id
-		var cursorProvideMode ProvideMode
-		firstSlice := true
-		for {
-			clientProvideModes := map[server.Id][]ProvideMode{}
-			var sliceCount int64
-			var maxClientId server.Id
-			var maxProvideMode ProvideMode
-			gotBound := false
-			server.MaintenanceTx(ctx, func(tx server.PgTx) {
-				// reset in case the tx is retried on a transient error
-				clientProvideModes = map[server.Id][]ProvideMode{}
-				sliceCount = 0
-				gotBound = false
-
-				result, err := tx.Query(
-					ctx,
-					`
-					WITH slice AS (
-						SELECT client_id, provide_mode
-						FROM provide_key
-						WHERE ($1 OR (client_id, provide_mode) > ($2, $3))
-						ORDER BY client_id, provide_mode
-						LIMIT $4
-					), del AS (
-						DELETE FROM provide_key
-						USING slice
-						WHERE
-							provide_key.client_id = slice.client_id AND
-							provide_key.provide_mode = slice.provide_mode AND
-							NOT EXISTS (
-								SELECT 1 FROM network_client
-								WHERE network_client.client_id = provide_key.client_id
-							)
-						RETURNING provide_key.client_id, provide_key.provide_mode
-					), bound AS (
-						SELECT client_id, provide_mode
-						FROM slice
-						ORDER BY client_id DESC, provide_mode DESC
-						LIMIT 1
-					)
-					SELECT true, (SELECT count(*) FROM slice), bound.client_id, bound.provide_mode
-					FROM bound
-					UNION ALL
-					SELECT false, NULL, del.client_id, del.provide_mode
-					FROM del
-					`,
-					firstSlice,
-					cursorClientId,
-					cursorProvideMode,
-					sliceSize,
-				)
-				server.WithPgResult(result, err, func() {
-					for result.Next() {
-						var isBound bool
-						var sc *int64
-						var clientId server.Id
-						var provideMode ProvideMode
-						server.Raise(result.Scan(&isBound, &sc, &clientId, &provideMode))
-						if isBound {
-							gotBound = true
-							if sc != nil {
-								sliceCount = *sc
-							}
-							maxClientId = clientId
-							maxProvideMode = provideMode
-						} else {
-							clientProvideModes[clientId] = append(clientProvideModes[clientId], provideMode)
-						}
-					}
-				})
-			}, server.TxReadCommitted)
-
-			server.Redis(ctx, func(r server.RedisClient) {
-				for clientId, provideModes := range clientProvideModes {
-					pipe := r.TxPipeline()
-					pipe.Del(ctx, provideModesKey(clientId))
-					for _, provideMode := range provideModes {
-						pipe.Del(ctx, provideModeSecretKeyKey(clientId, provideMode))
-					}
-					_, err := pipe.Exec(ctx)
-					server.Raise(err)
-				}
-			})
-
-			for _, provideModes := range clientProvideModes {
-				removedCount += int64(len(provideModes))
-			}
-			if !gotBound || sliceCount < int64(sliceSize) {
-				break
-			}
-			cursorClientId = maxClientId
-			cursorProvideMode = maxProvideMode
-			firstSlice = false
-		}
-	}
+	// Provide keys use a bounded full-key page and locked-tuple deletion.
+	removedCount += sweepOrphanProvideKeys(ctx, sliceSize)
 
 	// TLS certificates whose client is gone, keyed by client_id
 	removedCount += sweepOrphanTable(
