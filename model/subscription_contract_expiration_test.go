@@ -51,8 +51,8 @@ func TestContractExpirationDefaultAcrossCreationPaths(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		noEscrow, err := CreateContractNoEscrow(ctx, f.sourceNetworkId, f.sourceId,
-			f.destinationNetworkId, f.destinationId, 100)
+		noEscrow, noEscrowExpiration, err := CreateContractNoEscrowWithExpiration(ctx, f.sourceNetworkId, f.sourceId,
+			f.destinationNetworkId, f.destinationId, 100, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -63,7 +63,7 @@ func TestContractExpirationDefaultAcrossCreationPaths(t *testing.T) {
 			{id: legacy.ContractId, returned: legacy.ExpirationTime},
 			{id: reserved.ContractId, returned: reserved.ExpirationTime},
 			{id: companion.ContractId, returned: companion.ExpirationTime},
-			{id: noEscrow},
+			{id: noEscrow, returned: noEscrowExpiration},
 		} {
 			expires, err := GetContractExpirationTime(ctx, test.id)
 			if err != nil || expires == nil {
@@ -77,7 +77,7 @@ func TestContractExpirationDefaultAcrossCreationPaths(t *testing.T) {
 				!expires.Equal(time.UnixMilli(expires.UnixMilli())) {
 				t.Fatalf("deadline=%s created=%s, want 60 minutes at wire precision", expires, created)
 			}
-			if !test.returned.IsZero() && !test.returned.Equal(*expires) {
+			if test.returned.IsZero() || !test.returned.Equal(*expires) {
 				t.Fatal("returned reservation deadline differs from its committed row")
 			}
 		}

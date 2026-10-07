@@ -67,7 +67,7 @@ func TestNewContractChecksInactiveDestinationWithOneAcquisition(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active = false WHERE client_id = $1`, destinationId))
 		})
 		before := contractPairAcquireCount(t)
-		contractId, _, _, _, err := newContract(ctx, sourceId, destinationId, nil, false, true, 1024,
+		contractId, _, _, _, _, err := newContract(ctx, sourceId, destinationId, nil, false, true, 1024,
 			model.ProvideModeNetwork, false, 0, connect.DefaultContractManagerSettings())
 		after := contractPairAcquireCount(t)
 		if !errors.Is(err, errContractDestinationInactive) || contractResultError(err) != protocol.ContractError_Reliability || contractId != (server.Id{}) {
@@ -105,7 +105,7 @@ func TestNewContractPairReadPreservesRejectionPrecedence(t *testing.T) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active = CASE client_id WHEN $1 THEN $3::boolean ELSE $4::boolean END WHERE client_id IN ($1,$2)`, sourceId, destinationId, test.sourceActive, test.destinationActive))
 			})
 			before := contractPairAcquireCount(t)
-			contractId, _, _, _, err := newContract(ctx, test.sourceId, test.destinationId, nil, false, true, 1024, model.ProvideModeNetwork, false, 0, connect.DefaultContractManagerSettings())
+			contractId, _, _, _, _, err := newContract(ctx, test.sourceId, test.destinationId, nil, false, true, 1024, model.ProvideModeNetwork, false, 0, connect.DefaultContractManagerSettings())
 			if !errors.Is(err, test.want) || contractResultError(err) != test.wantResult || contractId != (server.Id{}) {
 				t.Fatalf("%s: changed rejection precedence: %v", test.name, err)
 			}
@@ -125,7 +125,7 @@ func TestNewContractPairReadCreatesActivePairs(t *testing.T) {
 		model.StampTopLevelClientContractTime(ctx, sourceId)
 		for _, targetId := range []server.Id{destinationId, sourceId} {
 			before := contractPairAcquireCount(t)
-			contractId, bytes, priority, streamId, err := newContract(ctx, sourceId, targetId, nil, false, true, 1024, model.ProvideModeNetwork, false, 0, connect.DefaultContractManagerSettings())
+			contractId, bytes, priority, streamId, _, err := newContract(ctx, sourceId, targetId, nil, false, true, 1024, model.ProvideModeNetwork, false, 0, connect.DefaultContractManagerSettings())
 			if err != nil || contractId == (server.Id{}) || bytes != max(MinContractTransferByteCount, 1024) || priority != model.TrustedPriority || streamId != nil {
 				t.Fatalf("active pair changed contract result: %v", err)
 			}
@@ -172,7 +172,7 @@ func TestNewContractPairReadRechecksAfterRelationship(t *testing.T) {
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active = false WHERE client_id = $1`, test.id))
 			})
-			contractId, _, _, _, err := newContract(ctx, sourceId, destinationId, nil, false, true, 1024, model.ProvideModeNetwork, false, 0, connect.DefaultContractManagerSettings())
+			contractId, _, _, _, _, err := newContract(ctx, sourceId, destinationId, nil, false, true, 1024, model.ProvideModeNetwork, false, 0, connect.DefaultContractManagerSettings())
 			if !errors.Is(err, test.want) || contractId != (server.Id{}) {
 				t.Fatalf("stale relationship bypassed fresh endpoint check: %v", err)
 			}
@@ -191,7 +191,7 @@ func TestNewContractPairReadPreservesIntermediaryCheck(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active = false WHERE client_id = $1`, intermediaryId))
 		})
-		contractId, _, _, _, err := newContract(ctx, sourceId, destinationId, []server.Id{intermediaryId}, false, true, 1024, model.ProvideModePublic, false, 1, connect.DefaultContractManagerSettings())
+		contractId, _, _, _, _, err := newContract(ctx, sourceId, destinationId, []server.Id{intermediaryId}, false, true, 1024, model.ProvideModePublic, false, 1, connect.DefaultContractManagerSettings())
 		if !errors.Is(err, model.ErrActiveClientNotFound) || contractId != (server.Id{}) {
 			t.Fatalf("inactive intermediary reached contract allocation: %v", err)
 		}

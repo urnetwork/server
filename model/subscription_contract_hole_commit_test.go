@@ -63,7 +63,7 @@ func TestContractHoleCommittedLifecycleSurvivesCallerCancellation(t *testing.T) 
 		var id server.Id
 		server.Tx(requestCtx, func(tx server.PgTx) {
 			var err error
-			id, err = createContractNoEscrowInTx(requestCtx, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 100, true)
+			id, _, err = createContractNoEscrowInTx(requestCtx, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 100, true)
 			server.Raise(err)
 			cancel()
 		}, server.OptNoRetry())
