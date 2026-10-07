@@ -2674,6 +2674,9 @@ func ConnectNetworkClient(
 // family the transport declared it intends to prove: 0 (legacy), 4 or 6. The
 // observed family is derived here from the client address and stored beside
 // the intent; see ConnectionProvenIpFamily for how the pair is judged.
+// The endpoint and shard locks retain the original session cut through commit.
+// Read committed observes the head after an endpoint wait instead of replaying
+// the whole admission because its pre-wait snapshot became stale.
 // Transport callers pass their authenticated network so a late handshake is
 // ordered with disposable probe-account teardown, even after client deletion.
 func ConnectNetworkClientWithIpFamily(
@@ -2820,7 +2823,7 @@ func ConnectNetworkClientWithIpFamily(
 			connectTime,
 			connectTime.Add(-clientAuthTimeRefreshMinInterval),
 		))
-	})
+	}, server.TxReadCommitted)
 
 	if err != nil {
 		return
@@ -2834,8 +2837,9 @@ func ConnectNetworkClientWithIpFamily(
 	return
 }
 
-// Endpoint conflicts retry within Tx's bound. If transport cancellation exhausts
-// that bound, handler expiry retires the remaining connection asynchronously.
+// The exclusive endpoint fence orders retirement; read committed observes its
+// current head after a wait. Conflicts still retry within Tx's existing bound.
+// Handler expiry retires any connection left after transport cancellation.
 func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error {
 	ctx = providerWorkSessionContext(ctx)
 	var disconnectErr error
@@ -2870,7 +2874,7 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 		if originalClientId != nil {
 			providerWorkRetainSessionEventsInTx(ctx, tx, *originalClientId)
 		}
-	})
+	}, server.TxReadCommitted)
 
 	return disconnectErr
 }
@@ -3869,6 +3873,9 @@ func HeartbeatNetworkClientHandler(ctx context.Context, handlerId server.Id) (re
 	return
 }
 
+// Recheck orphan eligibility under the endpoint fences with a fresh snapshot.
+// A queued cleanup must not replay its handler delete and census merely because
+// a preceding connection owner advanced a selected endpoint head.
 func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 	ctx = providerWorkSessionContext(ctx)
 	disconnectTime := server.NowUtc()
@@ -3934,7 +3941,7 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 			originalClientIds,
 		))
 		providerWorkRetainSessionEventsInTx(ctx, tx, originalClientIds...)
-	})
+	}, server.TxReadCommitted)
 }
 
 type NetworkClientConnectionStatus struct {
