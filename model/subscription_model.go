@@ -5633,210 +5633,6 @@ func SweepOrphanContractData(
 	)
 }
 
-// sweepOrphanContractSteps is the ordered list of child tables the contract
-// sweep pages. The order is part of the persisted cursor (SweepOrphanCursor.Step
-// indexes it), so inserting or removing a step invalidates in-flight cursors —
-// sweepOrphanSteps restarts the pass rather than skipping a table when the
-// persisted step is out of range.
-func sweepOrphanContractSteps() []sweepOrphanStep {
-	return []sweepOrphanStep{
-		// contract_close, keyed by (contract_id, party)
-		{
-			table: "contract_close",
-			newCursorTargets: func() []any {
-				return []any{new(server.Id), new(string)}
-			},
-			sql: `
-		WITH slice AS (
-			SELECT contract_id, party
-			FROM contract_close
-			WHERE ($1 OR (contract_id, party) > ($2, $3))
-			ORDER BY contract_id, party
-			LIMIT $4
-		), del AS (
-			DELETE FROM contract_close
-			USING slice
-			WHERE
-				contract_close.contract_id = slice.contract_id AND
-				contract_close.party = slice.party AND
-				NOT EXISTS (
-					SELECT 1 FROM transfer_contract
-					WHERE transfer_contract.contract_id = contract_close.contract_id
-				)
-			RETURNING 1
-		), bound AS (
-			SELECT contract_id, party
-			FROM slice
-			ORDER BY contract_id DESC, party DESC
-			LIMIT 1
-		)
-		SELECT
-			(SELECT count(*) FROM slice),
-			(SELECT count(*) FROM del),
-			bound.contract_id, bound.party
-		FROM bound
-		`,
-		},
-
-		// transfer_escrow, keyed by (contract_id, balance_id)
-		{
-			table: "transfer_escrow",
-			newCursorTargets: func() []any {
-				return []any{new(server.Id), new(server.Id)}
-			},
-			sql: `
-		WITH slice AS (
-			SELECT contract_id, balance_id
-			FROM transfer_escrow
-			WHERE ($1 OR (contract_id, balance_id) > ($2, $3))
-			ORDER BY contract_id, balance_id
-			LIMIT $4
-		), del AS (
-			DELETE FROM transfer_escrow
-			USING slice
-			WHERE
-				transfer_escrow.contract_id = slice.contract_id AND
-				transfer_escrow.balance_id = slice.balance_id AND
-				NOT EXISTS (
-					SELECT 1 FROM transfer_contract
-					WHERE transfer_contract.contract_id = transfer_escrow.contract_id
-				)
-			RETURNING 1
-		), bound AS (
-			SELECT contract_id, balance_id
-			FROM slice
-			ORDER BY contract_id DESC, balance_id DESC
-			LIMIT 1
-		)
-		SELECT
-			(SELECT count(*) FROM slice),
-			(SELECT count(*) FROM del),
-			bound.contract_id, bound.balance_id
-		FROM bound
-		`,
-		},
-
-		// transfer_escrow_sweep, keyed by (contract_id, balance_id, network_id)
-		{
-			table: "transfer_escrow_sweep",
-			newCursorTargets: func() []any {
-				return []any{new(server.Id), new(server.Id), new(server.Id)}
-			},
-			sql: `
-		WITH slice AS (
-			SELECT contract_id, balance_id, network_id
-			FROM transfer_escrow_sweep
-			WHERE ($1 OR (contract_id, balance_id, network_id) > ($2, $3, $4))
-			ORDER BY contract_id, balance_id, network_id
-			LIMIT $5
-		), del AS (
-			DELETE FROM transfer_escrow_sweep
-			USING slice
-			WHERE
-				transfer_escrow_sweep.contract_id = slice.contract_id AND
-				transfer_escrow_sweep.balance_id = slice.balance_id AND
-				transfer_escrow_sweep.network_id = slice.network_id AND
-				NOT EXISTS (
-					SELECT 1 FROM transfer_contract
-					WHERE transfer_contract.contract_id = transfer_escrow_sweep.contract_id
-				)
-			RETURNING 1
-		), bound AS (
-			SELECT contract_id, balance_id, network_id
-			FROM slice
-			ORDER BY contract_id DESC, balance_id DESC, network_id DESC
-			LIMIT 1
-		)
-		SELECT
-			(SELECT count(*) FROM slice),
-			(SELECT count(*) FROM del),
-			bound.contract_id, bound.balance_id, bound.network_id
-		FROM bound
-			`,
-		},
-
-		// contract_participant, keyed by (stream_id, client_id)
-		{
-			table: "contract_participant",
-			newCursorTargets: func() []any {
-				return []any{new(server.Id), new(server.Id)}
-			},
-			sql: `
-		WITH slice AS (
-			SELECT stream_id, client_id
-			FROM contract_participant
-			WHERE ($1 OR (stream_id, client_id) > ($2, $3))
-			ORDER BY stream_id, client_id
-			LIMIT $4
-		), del AS (
-			DELETE FROM contract_participant
-			USING slice
-			WHERE
-				contract_participant.stream_id = slice.stream_id AND
-				contract_participant.client_id = slice.client_id AND
-				NOT EXISTS (
-					SELECT 1 FROM transfer_contract
-					WHERE transfer_contract.stream_id = contract_participant.stream_id
-				)
-			RETURNING 1
-		), bound AS (
-			SELECT stream_id, client_id
-			FROM slice
-			ORDER BY stream_id DESC, client_id DESC
-			LIMIT 1
-		)
-		SELECT
-			(SELECT count(*) FROM slice),
-			(SELECT count(*) FROM del),
-			bound.stream_id, bound.client_id
-		FROM bound
-		`,
-		},
-
-		// contract_extender, keyed by (contract_id, extender_id, party).
-		// Appended, not grouped with the other contract-keyed tables, so that
-		// a cursor persisted before this step existed still names the table it
-		// was paging.
-		{
-			table: "contract_extender",
-			newCursorTargets: func() []any {
-				return []any{new(server.Id), new(server.Id), new(string)}
-			},
-			sql: `
-		WITH slice AS (
-			SELECT contract_id, extender_id, party
-			FROM contract_extender
-			WHERE ($1 OR (contract_id, extender_id, party) > ($2, $3, $4))
-			ORDER BY contract_id, extender_id, party
-			LIMIT $5
-		), del AS (
-			DELETE FROM contract_extender
-			USING slice
-			WHERE
-				contract_extender.contract_id = slice.contract_id AND
-				contract_extender.extender_id = slice.extender_id AND
-				contract_extender.party = slice.party AND
-				NOT EXISTS (
-					SELECT 1 FROM transfer_contract
-					WHERE transfer_contract.contract_id = contract_extender.contract_id
-				)
-			RETURNING 1
-		), bound AS (
-			SELECT contract_id, extender_id, party
-			FROM slice
-			ORDER BY contract_id DESC, extender_id DESC, party DESC
-			LIMIT 1
-		)
-		SELECT
-			(SELECT count(*) FROM slice),
-			(SELECT count(*) FROM del),
-			bound.contract_id, bound.extender_id, bound.party
-		FROM bound
-		`,
-		},
-	}
-}
-
 // SweepOrphanCursor is a resumable position in a multi-table orphan sweep: which
 // table step, and how far that step's key cursor has advanced. It is returned in
 // the task result and handed back as the next run's start, which is what keeps a
@@ -5850,12 +5646,14 @@ type SweepOrphanCursor struct {
 	Key  []string `json:"key,omitempty"`
 }
 
-// sweepOrphanStep is one child table's paged orphan sweep: the slice statement
-// (shape documented on sweepOrphanCursor) and a source of fresh typed pointers
-// for its key columns.
+// A step supplies the page SQL and fresh typed cursor targets. Contract-scale
+// steps separate first/resumed SQL. Smaller legacy steps omit firstSql and use
+// the boolean-plus-cursor parameter convention documented below.
 type sweepOrphanStep struct {
 	table            string
+	firstSql         string
 	sql              string
+	deleteSql        string
 	newCursorTargets func() []any
 }
 
@@ -5966,55 +5764,18 @@ func decodeSweepCursorKey(key []string, targets []any) (values []any, ok bool) {
 	return values, true
 }
 
-// sweepOrphanCursor pages a child table by its primary key in fixed-size slices
-// and deletes orphan rows (parent gone) within each slice, returning the total
-// removed. Paging by the key (WHERE key > cursor ORDER BY key LIMIT sliceSize)
-// means every statement scans a BOUNDED slice of the table, even when orphans
-// are rare (steady state ~= 0). This is the fix for the incident pattern of the
-// old "DELETE ... USING (SELECT ... WHERE NOT EXISTS(parent) LIMIT n)" sweep: a
-// bare LIMIT can only stop once it has FOUND n orphans, so with no orphans it
-// scanned the entire child table every call. Each slice runs in its own
-// maintenance tx (server.MaintenanceTx), so no single statement holds a long
-// lock; a full call still pages the whole table one bounded slice at a time.
+// Page a child table and advance past every examined key, including retained
+// rows. Each page has its own read-committed maintenance transaction. Contract
+// steps use firstSql(limit) or sql(cursor..., limit) to select and lock a page,
+// then deleteSql(locked tuple addresses) in the same transaction. The second
+// statement sees row versions returned after a concurrent update's lock wait.
 //
-// sql must be a single statement parameterized as:
-//
-//	$1           bool, true only for the first slice (disables the lower bound)
-//	$2..$(k+1)   the cursor: the previous slice's max key columns, in key order
-//	$(k+2)       the slice size
-//
-// and it must return exactly one row when the slice is non-empty:
-//
-//	(slice row count int8, deleted row count int8, max key columns...)
-//
-// or no rows when the slice is empty (the table has been fully paged). The
-// canonical shape (single-uuid key, see the composite variants at the call
-// sites) is:
-//
-//	WITH slice AS (
-//	    SELECT pk FROM child
-//	    WHERE ($1 OR pk > $2)
-//	    ORDER BY pk LIMIT $3
-//	), del AS (
-//	    DELETE FROM child USING slice
-//	    WHERE child.pk = slice.pk
-//	      AND NOT EXISTS (SELECT 1 FROM parent WHERE parent.fk = child.fk)
-//	    RETURNING 1
-//	), bound AS (
-//	    SELECT pk FROM slice ORDER BY pk DESC LIMIT 1
-//	)
-//	SELECT (SELECT count(*) FROM slice), (SELECT count(*) FROM del), bound.pk
-//	FROM bound
-//
-// bound reads slice (materialized once, pre-delete), so the cursor advances past
-// every row the slice examined — deleted or not — and no row is skipped at a
-// slice boundary. newCursorTargets returns k fresh pointers to scan the max key
-// columns into; their dereferenced values become the next slice's cursor.
-//
-// startKey resumes an earlier call at that key (nil starts at the head of the
-// table). Paging stops when the table is fully paged (done) or maxRowCount rows
-// have been examined, whichever comes first; when it stops early, endKey is the
-// resume point. maxRowCount <= 0 pages to the end.
+// Legacy small-table steps omit firstSql and use sql(first, cursor..., limit).
+// Contract pages return (examined int8, locked tuple addresses text[], max key
+// columns...). Legacy pages return (examined int8, deleted int8, max keys...).
+// A nonempty page supplies its original cursor; no result row means EOF.
+// Nil startKey starts at the head; maxRowCount <= 0 pages to EOF, otherwise the
+// returned cursor resumes the next invocation without restarting the history.
 func sweepOrphanCursor(
 	ctx context.Context,
 	step sweepOrphanStep,
@@ -6031,29 +5792,56 @@ func sweepOrphanCursor(
 		cursor = derefCursor(step.newCursorTargets())
 	}
 	for {
+		query := step.sql
 		args := make([]any, 0, len(cursor)+2)
-		args = append(args, firstSlice)
-		args = append(args, cursor...)
+		if step.firstSql != "" {
+			if firstSlice {
+				query = step.firstSql
+			} else {
+				args = append(args, cursor...)
+			}
+		} else {
+			// Small legacy sweeps still use the boolean-plus-cursor form.
+			args = append(args, firstSlice)
+			args = append(args, cursor...)
+		}
 		args = append(args, sliceSize)
 
 		var sliceCount, deletedCount int64
-		targets := step.newCursorTargets()
+		var targets []any
 		gotRow := false
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// reset in case the tx is retried on a transient error
 			sliceCount = 0
 			deletedCount = 0
 			gotRow = false
+			targets = step.newCursorTargets()
+			var lockedTuples []string
 			scanTargets := make([]any, 0, len(targets)+2)
-			scanTargets = append(scanTargets, &sliceCount, &deletedCount)
+			scanTargets = append(scanTargets, &sliceCount)
+			if step.deleteSql != "" {
+				scanTargets = append(scanTargets, &lockedTuples)
+			} else {
+				scanTargets = append(scanTargets, &deletedCount)
+			}
 			scanTargets = append(scanTargets, targets...)
-			result, err := tx.Query(ctx, step.sql, args...)
+			result, err := tx.Query(ctx, query, args...)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
 					server.Raise(result.Scan(scanTargets...))
 					gotRow = true
 				}
 			})
+			// WithPgResult closes the page before the fresh snapshot is taken.
+			// The acquired child locks stay held until this transaction commits.
+			if 0 < len(lockedTuples) {
+				if int64(len(lockedTuples)) > sliceCount {
+					panic("orphan sweep locked beyond its selected page")
+				}
+				tag, err := tx.Exec(ctx, step.deleteSql, lockedTuples)
+				server.Raise(err)
+				deletedCount = tag.RowsAffected()
+			}
 		}, server.TxReadCommitted)
 
 		removedCount += deletedCount

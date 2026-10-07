@@ -16404,6 +16404,31 @@ global reset cannot rule out eviction/recreation or selective resets. Withhold
 an ambiguous delta. Calls, rows and buffer/WAL work distinguish demand and
 amplification; cumulative execution wall time remains distinct from CPU.
 
+An orphan sweep's output limit is not its physical work bound. The 2026-10-07
+isolated controls reproduced two independent amplifiers: a boolean-OR resume
+predicate filtered the historical prefix under generic planning, and the
+DELETE join scanned child history after selecting a bounded page. A full-tuple
+range alone also failed against the migrated schema: a competing covering
+index constrained only the leading key and filtered the remaining key columns.
+Qualify both custom and generic plans with the actual indexes, dense rows sharing
+one leading key, first/resumed/terminal pages, and full-key index conditions;
+small returned counts and valid indexes do not establish bounded work.
+
+Preserve concurrent-update semantics while correcting that access path. A
+same-statement DELETE of tuple addresses returned after a locking read can miss
+the updated row version. A two-statement implementation must retain one
+read-committed transaction, lock only selected orphan candidates, close the
+selection result, then delete those locked versions under a fresh snapshot and
+recheck parent membership. Reset all page outputs on transaction retry; advance
+the persisted cursor only after commit. Native controls must force the actual
+update wait, key movement to a retained parent, concurrent deletion, rollback,
+and a parent committed between the statements. A newly visible parent may
+conservatively retain a child; this does not make parent membership serializable.
+These are local query and correctness mechanisms. A matching retained SQL shape
+does not establish live parameters, a customer lock owner, CPU share, or benefit
+from an undeployed candidate; verify the running source and fresh bounded work
+after rollout before closing the resource finding.
+
 ### 5.9 Providers/peers visible but cannot be pinged (grey dots)
 The 2026-07-17 evening composite: app connects, the provider/peer list
 arrives, no dot ever turns green — while EVERY aggregate is healthy. The
