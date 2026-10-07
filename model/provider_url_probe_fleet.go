@@ -40,9 +40,19 @@ type ProviderUrlProbeFleet struct {
 // This aggregate belongs on the periodic metrics path, not on every claim.
 // Missing quota rows remain in the denominator and show their full deficit.
 func GetProviderUrlProbeFleet(ctx context.Context, now time.Time) ProviderUrlProbeFleet {
+	return GetProviderUrlProbeFleetObserved(ctx, now, nil)
+}
+
+// GetProviderUrlProbeFleetObserved retains the exact census query and deadline.
+// Query completion includes result iteration, decoding, and result cleanup;
+// rows count decoded aggregate rows, never eligible providers or quota credits.
+func GetProviderUrlProbeFleetObserved(ctx context.Context, now time.Time, observation *server.DbReadObservation) ProviderUrlProbeFleet {
 	fleet := ProviderUrlProbeFleet{}
 	policy := SelectedProviderUrlProbePolicyVersion()
 	server.Db(ctx, func(conn server.PgConn) {
+		observation.BeginQuery()
+		querySucceeded := false
+		defer func() { observation.FinishQuery(querySucceeded) }()
 		var deficitJson []byte
 		rows, err := conn.Query(ctx, providerUrlProbeFleetSql(policy), now.UTC(), ProvideModePublic, ProviderUrlProbeRunTarget,
 			now.Add(-ProviderEgressProbeRefreshAge).UTC())
@@ -54,10 +64,12 @@ func GetProviderUrlProbeFleet(ctx context.Context, now time.Time) ProviderUrlPro
 					&fleet.MatureEligible, &fleet.MatureQuotaComplete, &fleet.MatureRunsNeeded,
 					&fleet.WarmingEligible, &fleet.WarmingQuotaComplete, &fleet.WarmingRunsNeeded,
 					&fleet.EligibilityAgeUnknown, &fleet.AgeUnknownQuotaComplete, &fleet.AgeUnknownRunsNeeded, &deficitJson))
+				observation.Row()
 				fleet.MatureDeficitDiagnostics = providerUrlProbeMatureDeficitDiagnostics(deficitJson, policy, fleet.MatureEligible-fleet.MatureQuotaComplete)
 			}
 		})
-	})
+		querySucceeded = true
+	}, observation)
 	fleet.SuccessesNeeded = fleet.RunsNeeded
 	return fleet
 }

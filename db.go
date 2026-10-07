@@ -594,6 +594,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()
 	var timing *DbTiming
+	var readObservation *DbReadObservation
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -603,6 +604,8 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			rwOptions = v
 		case *DbTiming:
 			timing = v
+		case *DbReadObservation:
+			readObservation = v
 			// case DbDebugOptions:
 			// 	debugOptions = v
 		}
@@ -619,7 +622,10 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		callbackWrites := pgWriteSnapshot{}
 		connectionRetrySafe := false
 		acquireStarted := timing.start()
-		conn, connErr := pool.open().Acquire(ctx)
+		pgPool := pool.open()
+		readObservation.BeginAcquire()
+		conn, connErr := pgPool.Acquire(ctx)
+		readObservation.FinishAcquire(connErr == nil)
 		timing.finish(DbTimingAcquire, acquireStarted)
 		if connErr != nil {
 			if retryOptions.rerunOnConnectionError {

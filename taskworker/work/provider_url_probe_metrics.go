@@ -59,11 +59,13 @@ type providerUrlProbeFleetCollector struct {
 	deficit         *prometheus.Desc
 	deficitContract *prometheus.Desc
 	refreshMetrics  *providerUrlProbeFleetRefreshCollectors
+	readMetrics     *providerUrlProbeFleetReadCollector
 }
 
 func newProviderUrlProbeFleetCollector() *providerUrlProbeFleetCollector {
 	return &providerUrlProbeFleetCollector{
 		refreshMetrics: urlProbeFleetRefreshMetrics,
+		readMetrics:    urlProbeFleetReadMetrics,
 		fleet: prometheus.NewDesc("urnetwork_url_probe_fleet",
 			"Current reliability and ARIN-risk eligible URL cohort, rolling measured-run quota, and unresolved TLS state", []string{"state"}, nil),
 		oldest: prometheus.NewDesc("urnetwork_url_probe_oldest_due_seconds",
@@ -203,14 +205,24 @@ var urlProbeFleetMetrics = newProviderUrlProbeFleetCollector()
 // Accepted URL history and unresolved TLS are read in one SQL snapshot at the
 // supplied comparison clock. A failed or late census retains the old generation.
 func (self *providerUrlProbeFleetCollector) refresh(ctx context.Context, observedAt time.Time, read func(context.Context, time.Time) model.ProviderUrlProbeFleet) (refreshErr error) {
+	return self.refreshRead(ctx, observedAt, func(ctx context.Context, at time.Time, _ *server.DbReadObservation) model.ProviderUrlProbeFleet {
+		return read(ctx, at)
+	})
+}
+
+func (self *providerUrlProbeFleetCollector) refreshRead(ctx context.Context, observedAt time.Time, read func(context.Context, time.Time, *server.DbReadObservation) model.ProviderUrlProbeFleet) (refreshErr error) {
 	snapshotCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	started := time.Now()
+	observation := self.readMetrics.begin(observedAt)
 	// Observe before the deferred cleanup cancellation; retained generations
 	// keep their original comparison clock and complete atomic shape.
-	defer func() { self.refreshMetrics.observe(snapshotCtx, refreshErr, time.Since(started)) }()
+	defer func() {
+		observation.Finish(refreshErr == nil)
+		self.refreshMetrics.observe(snapshotCtx, refreshErr, time.Since(started))
+	}()
 	var fleet model.ProviderUrlProbeFleet
-	if failure := server.HandleError(func() { fleet = read(snapshotCtx, observedAt) }); failure != nil {
+	if failure := server.HandleError(func() { fleet = read(snapshotCtx, observedAt, observation) }); failure != nil {
 		return fmt.Errorf("URL fleet census failed: %v", failure)
 	}
 	if err := snapshotCtx.Err(); err != nil {
@@ -255,7 +267,7 @@ func refreshProviderUrlProbeFleetMetrics(ctx context.Context) {
 	if !due {
 		return
 	}
-	_ = urlProbeFleetMetrics.refresh(ctx, time.Now(), model.GetProviderUrlProbeFleet)
+	_ = urlProbeFleetMetrics.refreshRead(ctx, time.Now(), model.GetProviderUrlProbeFleetObserved)
 }
 
 // A heartbeat describes only its actual task owner. Observers must collect all
