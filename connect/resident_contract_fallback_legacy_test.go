@@ -1,6 +1,5 @@
-// Temporary compatibility for open contracts created before all writers publish
-// Redis holes. Only unresolved Redis evidence can enter this bounded source
-// check. Checkpoints are resumable, so removal requires cohort coverage, not age.
+// Historical bridge controls retain the retired bounded source implementation
+// only in the test binary. Production constructors cannot configure or reach it.
 package connect
 
 import (
@@ -24,13 +23,6 @@ type residentContractFallback struct {
 	readContract func(context.Context, server.Id, server.Id) (model.ContractHoleStatus, time.Time, error)
 }
 
-// A successful read carries its strict source deadline to every cached offer.
-// No boolean-only conversion may manufacture or extend authority.
-type residentContractAllowance struct {
-	active     bool
-	validUntil time.Time
-}
-
 // Constructs one fixed budget; default settings never retain shared state.
 func newResidentContractFallback() *residentContractFallback {
 	return &residentContractFallback{
@@ -42,7 +34,7 @@ func newResidentContractFallback() *residentContractFallback {
 // A validated negative is authoritative. Errors and absent/expired evidence are
 // unknown, never positive; during the bridge only, they may try the same source
 // predicate used to build the projection. No source boolean warms Redis.
-func readResidentContractAllowance(
+func readResidentContractAllowanceWithFallbackForTest(
 	packetCtx context.Context,
 	sourceCtx context.Context,
 	source, destination server.Id,
@@ -118,4 +110,23 @@ func (self *residentContractFallback) check(ctx context.Context, source, destina
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackError)
 	}
 	return residentContractAllowance{}
+}
+
+// Historical controls may reconstruct the retired bridge explicitly. Ordinary
+// resident construction uses the Redis-only manager and has no source context.
+func newResidentContractManagerWithFallback(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	clientId server.Id,
+	settings *ExchangeSettings,
+	fallback *residentContractFallback,
+) *residentContractManager {
+	manager := newResidentContractManager(ctx, cancel, clientId, settings)
+	if fallback == nil {
+		return manager
+	}
+	manager.readContract = func(packetCtx context.Context, source, destination server.Id) residentContractAllowance {
+		return readResidentContractAllowanceWithFallbackForTest(packetCtx, ctx, source, destination, fallback)
+	}
+	return manager
 }

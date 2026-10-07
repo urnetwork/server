@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +14,64 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// The server withholds the commit reply beyond the old registration lifetime.
+// Request cancellation cannot discard a confirmed commit's bounded publication.
+func TestTxPostCommitTimestampFollowsHeldCommitAndCallerCancellation(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	_, pool := newPgPoolWireFixture(t, func(_ int, query string) bool {
+		if query == "commit" {
+			close(entered)
+			<-release
+		}
+		return true
+	}, func(context.Context, pgxpool.ShouldPingParams) bool { return false })
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	requestCtx, cancelRequest := context.WithCancel(ctx)
+	defer cancelRequest()
+	stamped := make(chan time.Time, 1)
+	finished := make(chan struct{})
+	var failure any
+	go func() {
+		defer close(finished)
+		failure = captureDbErrorPanic(func() {
+			txWithPool(requestCtx, pool, func(tx PgTx) {
+				AddTxPostCommitAt(tx, "held-commit", func(committedAt time.Time) any {
+					stamped <- committedAt
+					return nil
+				})
+			}, OptNoRetry())
+		})
+	}()
+	defer func() { releaseOnce.Do(func() { close(release) }); cancelRequest(); <-finished }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("commit did not reach reply barrier")
+	}
+	cancelRequest()
+	select {
+	case <-time.After(TxPostCommitTimeout + 10*time.Millisecond):
+	case <-ctx.Done():
+		t.Fatal("held commit lost its test owner")
+	}
+	releasedAt := time.Now()
+	releaseOnce.Do(func() { close(release) })
+	<-finished
+	if failure != nil {
+		t.Fatal("confirmed commit failed after request cancellation", failure)
+	}
+	select {
+	case committedAt := <-stamped:
+		if committedAt.Before(releasedAt) || time.Since(committedAt) >= TxPostCommitTimeout {
+			t.Fatal("publication was stamped before the confirmed commit", committedAt, releasedAt)
+		}
+	default:
+		t.Fatal("confirmed commit lost its post")
+	}
+}
 
 // A single-connection pool can be re-entered by a post only after release.
 func TestTxPostCommitRunsAfterConnectionReleaseAndCoalesces(t *testing.T) {

@@ -812,6 +812,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 		var pgErr error
 		var commitErr error
 		var commitPosts []PostFunction
+		var committedAt time.Time
 		dbWithPool(ctx, pool, func(conn PgConn) {
 			// an earlier use of the pooled connection is not evidence about
 			// this attempt
@@ -874,6 +875,8 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				commitStarted := timing.start()
 				commitErr = tx.Commit(commitCtx)
 				if commitErr == nil {
+					committedAt = time.Now()
+					tx.committedAt = committedAt
 					commitPosts = tx.posts
 				}
 				timing.finish(DbTimingCommit, commitStarted)
@@ -940,10 +943,14 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 			panic(commitErr)
 		}
 
-		// A reaper can register many independent projections. Bound this
-		// transaction owner's post fanout rather than parking one worker per row.
-		for offset := 0; offset < len(commitPosts); offset += 8 {
-			RunPosts(ctx, commitPosts[offset:min(offset+8, len(commitPosts))]...)
+		// A confirmed commit owns its bounded publications even if the request
+		// canceled. The commit timestamp includes post queueing in that budget.
+		if len(commitPosts) > 0 {
+			postCtx, postCancel := context.WithDeadline(context.WithoutCancel(ctx), committedAt.Add(TxPostCommitTimeout))
+			for offset := 0; offset < len(commitPosts) && postCtx.Err() == nil; offset += 8 {
+				RunPosts(postCtx, commitPosts[offset:min(offset+8, len(commitPosts))]...)
+			}
+			postCancel()
 		}
 		return
 	}

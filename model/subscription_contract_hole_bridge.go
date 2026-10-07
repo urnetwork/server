@@ -1,7 +1,7 @@
 package model
 
-// Temporary rollout callers own source permission, rate limits and the
-// coverage-based transition to Redis-only. The Redis reader never calls this seam.
+// Explicit control-plane source observations retain the resumable predicate.
+// Redis packet authorization never calls this historical rollout seam.
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Bounded source-only existence for an explicitly authorized rollout bridge.
+// Bounded source-only existence for independent control-plane work.
 // A caller may impose a shorter budget; SQL errors remain unknown, not false
 // evidence. Normal authorization calls ReadContractHole instead of this seam.
 func HasResumableContractForPair(ctx context.Context, sourceClientId, destinationClientId server.Id) (bool, error) {

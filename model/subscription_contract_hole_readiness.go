@@ -46,7 +46,7 @@ func validContractHoleReadiness(receipt *ContractHoleReadiness, now time.Time) b
 	if receipt == nil || receipt.Version != 1 || receipt.Pages <= 0 || receipt.PairVisits < 0 ||
 		receipt.UnknownPairs != 0 || receipt.SuccessfulPairs != receipt.PairVisits || receipt.PositivePairs < 0 || receipt.PositivePairs > receipt.SuccessfulPairs ||
 		receipt.PassCompleted.Before(receipt.PassStarted) || receipt.PassCompleted.After(now) ||
-		receipt.PassCompleted.Sub(receipt.PassStarted) >= ContractHoleRefreshInterval || !now.Before(receipt.PassStarted.Add(ContractHoleTtl)) {
+		receipt.PassCompleted.Sub(receipt.PassStarted) >= contractHoleReadinessMargin || !now.Before(receipt.PassStarted.Add(ContractHoleTtl)) {
 		return false
 	}
 	if receipt.PositivePairs == 0 {
@@ -96,7 +96,7 @@ func PublishContractHoleReadiness(ctx context.Context, receipt *ContractHoleRead
 	receipt.CoveredUntil = receipt.CoveredUntil.Truncate(time.Millisecond)
 	now = server.NowUtc()
 	remaining := receipt.CoveredUntil.Sub(now)
-	if now.Sub(receipt.PassStarted) >= ContractHoleRefreshInterval || remaining <= ContractHoleRefreshInterval {
+	if now.Sub(receipt.PassStarted) >= contractHoleReadinessMargin || remaining <= contractHoleReadinessMargin {
 		return false, InvalidateContractHoleReadiness(ctx)
 	}
 	if receipt.EarliestPositive != nil {

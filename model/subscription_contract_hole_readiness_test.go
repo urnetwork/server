@@ -23,7 +23,7 @@ func TestContractHoleReadinessCapsMeasuredLeaseAndAbsoluteDeadline(t *testing.T)
 			start := server.NowUtc()
 			bound := start.Add(ContractHoleTtl - 5*time.Millisecond).Truncate(time.Millisecond)
 			if finite {
-				bound = start.Add(45 * time.Second).Truncate(time.Millisecond)
+				bound = start.Add(3 * ContractHoleTtl / 4).Truncate(time.Millisecond)
 				server.Raise(applyContractHoleEvent(ctx, contract, source, destination, "create", bound))
 			} else {
 				server.Raise(applyContractHoleEvent(ctx, contract, source, destination, "create"))
@@ -37,7 +37,7 @@ func TestContractHoleReadinessCapsMeasuredLeaseAndAbsoluteDeadline(t *testing.T)
 				PairVisits: 1, SuccessfulPairs: 1, PositivePairs: 1, Pages: 1,
 				EarliestPositive: &ContractHoleWitness{SourceClientId: source, DestinationClientId: destination, SourceStarted: start}}
 			ready, err := PublishContractHoleReadiness(ctx, receipt)
-			if err != nil || !ready || receipt.CoveredUntil.After(bound) || receipt.MinimumRemainingTtlMillis <= ContractHoleRefreshInterval.Milliseconds() {
+			if err != nil || !ready || receipt.CoveredUntil.After(bound) || receipt.MinimumRemainingTtlMillis <= contractHoleReadinessMargin.Milliseconds() {
 				t.Fatalf("measured finite=%t readiness=%t receipt=%+v error=%v", finite, ready, receipt, err)
 			}
 			server.Redis(ctx, func(client server.RedisClient) {
@@ -98,7 +98,7 @@ func TestContractHoleReadinessRequiresCompleteTimelyPass(t *testing.T) {
 		case "future":
 			receipt.PassCompleted = now.Add(time.Nanosecond)
 		case "half_ttl":
-			now = start.Add(ContractHoleRefreshInterval)
+			now = start.Add(contractHoleReadinessMargin)
 			receipt.PassCompleted = now
 		case "expired":
 			now = start.Add(ContractHoleTtl)
@@ -128,7 +128,7 @@ func TestContractHoleReadinessDoesNotGatePacketPermission(t *testing.T) {
 			t.Fatalf("healthy readiness=%t error=%v", ready, err)
 		}
 		observed, err := ReadContractHoleReadiness(ctx)
-		if err != nil || observed == nil || observed.PairVisits != 1 || observed.UnknownPairs != 0 || observed.MinimumRemainingTtlMillis <= ContractHoleRefreshInterval.Milliseconds() {
+		if err != nil || observed == nil || observed.PairVisits != 1 || observed.UnknownPairs != 0 || observed.MinimumRemainingTtlMillis <= contractHoleReadinessMargin.Milliseconds() {
 			t.Fatalf("healthy receipt=%+v error=%v", observed, err)
 		}
 		server.Raise(InvalidateContractHoleReadiness(ctx))

@@ -1,6 +1,5 @@
-// Forward authorization checks the Redis contract projection first. The rollout
-// bridge may check unresolved evidence against the exact resumable source under
-// one shared exchange budget. Pair admission never waits or retains retries.
+// Forward authorization checks only the Redis contract projection. Missing or
+// unavailable leases refuse; pair admission never waits or retains retries.
 package connect
 
 import (
@@ -38,24 +37,12 @@ type residentContractManager struct {
 }
 
 // Creates the packet-side reader; durable contract creation and repair stay in
-// model control operations and the background projection refresher.
+// independently owned model control operations.
 func newResidentContractManager(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	clientId server.Id,
 	settings *ExchangeSettings,
-) *residentContractManager {
-	return newResidentContractManagerWithFallback(ctx, cancel, clientId, settings, nil)
-}
-
-// Only this constructor retains an unmodified context for the temporary hole
-// source check. No normal packet dependency receives a PostgreSQL capability.
-func newResidentContractManagerWithFallback(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	clientId server.Id,
-	settings *ExchangeSettings,
-	fallback *residentContractFallback,
 ) *residentContractManager {
 	manager := &residentContractManager{
 		ctx:             server.WithoutPostgres(ctx),
@@ -67,7 +54,7 @@ func newResidentContractManagerWithFallback(
 		checkLimiters:   map[model.TransferPair]*limiter{},
 	}
 	manager.readContract = func(packetCtx context.Context, source, destination server.Id) residentContractAllowance {
-		return readResidentContractAllowance(packetCtx, ctx, source, destination, fallback)
+		return readResidentContractAllowance(packetCtx, source, destination)
 	}
 	return manager
 }
@@ -157,8 +144,8 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
 	return self.performActiveContractRead(pair, sourceId, destinationId)
 }
 
-// Publishes one admitted result and releases its ownership on all exits. The
-// compatibility source check shares the same read join and positive cache.
+// Publishes one admitted result and releases its ownership on all exits.
+// Redis reads share the owner join and strictly bounded positive cache.
 func (self *residentContractManager) performActiveContractRead(pair model.TransferPair, sourceId, destinationId server.Id) bool {
 	defer self.readWorkers.Done()
 	var allowance residentContractAllowance
