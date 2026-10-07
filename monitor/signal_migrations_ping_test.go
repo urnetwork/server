@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/urnetwork/server"
 )
 
@@ -202,7 +204,7 @@ func (self *migrationPingDatabaseSource) PostgreSQL(ctx context.Context, query s
 	rows := []Row{}
 	var queryErr error
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(ctx, query)
+		result, err := conn.Query(ctx, query, pgx.QueryExecModeSimpleProtocol)
 		if err != nil {
 			queryErr = err
 			return

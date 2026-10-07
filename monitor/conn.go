@@ -205,7 +205,8 @@ type monitorConfig struct {
 
 	// Shared across the fresh probe environments created by Signal.Run. It
 	// bounds actual SSH handshakes rather than just top-level signal calls.
-	remoteCommands *hostCommandLimiter
+	remoteCommands     *hostCommandLimiter
+	sharedSshAdmission sshAdmissionBackend
 }
 
 func (self *monitorConfig) activeSshUser() string {
@@ -304,7 +305,7 @@ func (self *runner) ssh(ctx context.Context, h *host, remoteCmd string, stdin st
 // sshTimeout is ssh with an explicit per-command timeout, for the few
 // deliberately slow reads (the daily keyspace scan) that exceed the default
 // budget.
-func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, stdin string, timeout time.Duration) (string, error) {
+func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, stdin string, timeout time.Duration) (output string, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -325,6 +326,17 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 		return "", &unreachableError{host: h.name, err: fmt.Errorf("waiting for remote command slot: %w", err)}
 	}
 	defer release()
+	if self.cfg.sharedSshAdmission != nil {
+		releaseShared, err := self.cfg.sharedSshAdmission.acquire(ctx, h.name)
+		if err != nil {
+			return "", &sshAdmissionUnavailableError{err: err}
+		}
+		defer func() {
+			if err := releaseShared(); err != nil {
+				resultErr = errors.Join(resultErr, &sshAdmissionUnavailableError{err: err})
+			}
+		}()
+	}
 
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
