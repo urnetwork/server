@@ -151,8 +151,14 @@ func TestHandlerCacheRenewingNativeSocketDeadline(t *testing.T) {
 		defer cancel()
 		store := redisHandlerCacheStore{}
 		key := newHandlerCacheKeys("renewing-native-deadline-" + server.NewId().String()).fill
+		var pauseUntil time.Time
 		defer func() {
 			// Join the finite server pause and remove the key on failure too.
+			// The deadline pool's native 1s socket cap is shorter than this
+			// test's deliberate pause, regardless of the cleanup ctx deadline.
+			if remaining := time.Until(pauseUntil); remaining > 0 {
+				time.Sleep(remaining)
+			}
 			cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancelCleanup()
 			if err := server.RedisWithDeadline(cleanupCtx, func(client server.RedisClient) error {
@@ -170,6 +176,7 @@ func TestHandlerCacheRenewingNativeSocketDeadline(t *testing.T) {
 		server.Raise(handlerCacheRedisOperation(ctx, func(client server.RedisClient) error {
 			return client.Do(ctx, "CLIENT", "PAUSE", 2500, "ALL").Err()
 		}))
+		pauseUntil = time.Now().Add(2500 * time.Millisecond)
 		callCtx, cancelCall := context.WithTimeout(ctx, 100*time.Millisecond)
 		start := time.Now()
 		ok, err := store.renew(callCtx, key, "current", 30*time.Second)
