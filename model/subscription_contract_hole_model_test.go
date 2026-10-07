@@ -217,75 +217,25 @@ func TestContractHoleRetentionDeleteRevokesMembership(t *testing.T) {
 	})
 }
 
-// Equal creation timestamps force the included contract-id tie breaker across
-// page boundaries, without an unbounded read or skipped members.
-func TestContractHoleBackgroundCursorAndMemberBound(t *testing.T) {
+// Explicit initialization refuses an oversized pair instead of publishing a
+// partial membership count. No periodic source traversal performs this work.
+func TestContractHoleExplicitInitializationMemberBound(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		source, destination := server.NewId(), server.NewId()
-		count := ContractHoleRefreshPageSize + 1
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
  (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count)
- SELECT gen_random_uuid(),$1,$2,$3,$4,0 FROM generate_series(1,$5)`, server.NewId(), source, server.NewId(), destination, count))
-		})
-		page, err := RefreshContractHolesPage(ctx, nil)
-		if err != nil || page == nil || page.Cursor == nil || page.Pairs != 1 || page.FailedPairs != 0 {
-			t.Fatalf("first page=%+v error=%v", page, err)
-		}
-		requireContractHoleCount(t, ctx, source, destination, int64(count))
-		page, err = RefreshContractHolesPage(ctx, page.Cursor)
-		if err != nil || page == nil || page.Cursor != nil || page.Pairs != 1 || page.FailedPairs != 0 {
-			t.Fatalf("final page=%+v error=%v", page, err)
-		}
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
- (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count)
- SELECT gen_random_uuid(),$1,$2,$3,$4,0 FROM generate_series(1,$5)`, server.NewId(), source, server.NewId(), destination, contractHoleMemberLimit+1-count))
+ SELECT gen_random_uuid(),$1,$2,$3,$4,0 FROM generate_series(1,$5)`, server.NewId(), source, server.NewId(), destination, contractHoleMemberLimit+1))
 		})
 		published, err := refreshContractHole(ctx, source, destination)
 		if err != nil || published {
-			t.Fatalf("oversized snapshot published=%t error=%v", published, err)
+			t.Fatal("oversized initialization published", published, err)
 		}
 		requireContractHoleCount(t, ctx, source, destination, 0)
 		server.Raise(applyContractHoleEvent(ctx, server.NewId(), source, destination, "create"))
 		requireContractHoleCount(t, ctx, source, destination, 0)
-	})
-}
-
-// One unavailable Redis slot cannot starve later healthy pairs. The page reports
-// incomplete coverage and a subsequent full pass retries the failed pair.
-func TestContractHoleBackgroundFailureDoesNotStarveHealthyPairs(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		ctx := t.Context()
-		source := server.NewId()
-		first, second, third := server.NewId(), server.NewId(), server.NewId()
-		insertContractHoleSourceRow(ctx, source, first)
-		insertContractHoleSourceRow(ctx, source, second)
-		insertContractHoleSourceRow(ctx, source, third)
-		failure := &contractHoleRedisFailure{key: contractHoleKeys(source, second)[0]}
-		install, cancel := context.WithTimeout(ctx, time.Second)
-		server.Raise(server.RedisWithDeadline(install, func(client server.RedisClient) error { client.AddHook(failure); return nil }))
-		cancel()
-		failure.enabled.Store(true)
-		defer failure.enabled.Store(false)
-		page, err := RefreshContractHolesPage(ctx, nil)
-		if err != nil || page == nil || page.Cursor != nil || page.Pairs != 3 || page.FailedPairs != 1 {
-			t.Fatalf("partial coverage was hidden: page=%+v error=%v", page, err)
-		}
-		requireContractHoleCount(t, ctx, source, first, 1)
-		requireContractHoleCount(t, ctx, source, second, 0)
-		requireContractHoleCount(t, ctx, source, third, 1)
-		failure.enabled.Store(false)
-		page, err = RefreshContractHolesPage(ctx, nil)
-		if err != nil || page == nil || page.Cursor != nil || page.FailedPairs != 0 {
-			t.Fatalf("next pass did not complete: page=%+v error=%v", page, err)
-		}
-		requireContractHoleCount(t, ctx, source, second, 1)
-		requireContractHoleCount(t, ctx, source, third, 1)
 	})
 }

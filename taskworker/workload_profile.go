@@ -130,7 +130,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: model.NewLegacyProviderTotalsTaskTarget()},
 		{target: task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror)},
 		{target: task.NewTaskTarget(work.SweepOrphanContractData), schedule: work.ScheduleSweepOrphanContractData},
-		{target: task.NewTaskTarget(work.RefreshContractHoles), schedule: work.ScheduleRefreshContractHoles},
+		// Drain a previously queued retired refresher; startup never seeds it.
+		{target: task.NewTaskTarget(work.RefreshContractHoles)},
 		{target: task.NewTaskTarget(task.TaskCleanup), schedule: task.ScheduleTaskCleanup},
 		{target: task.NewTaskTarget(work.BackfillInitialTransferBalance), schedule: work.ScheduleBackfillInitialTransferBalance},
 		{target: task.NewTaskTarget(work.IndexSearchLocations), schedule: work.ScheduleIndexSearchLocations},
