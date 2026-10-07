@@ -208,7 +208,11 @@ func drainProberShardInTx(ctx context.Context, tx server.PgTx, owner *ProberShar
 		return nil
 	}
 	var clients []server.Id
-	rows, err := tx.Query(ctx, `SELECT client_id FROM network_client WHERE network_id=$1 ORDER BY client_id`, owner.NetworkId)
+	// The registry fence prevents new shard admissions. Already retired clients
+	// need no second timestamp or index rewrite; lock the remaining live set in
+	// the same order as ordinary deactivation before reading its common clock.
+	rows, err := tx.Query(ctx, `SELECT client_id FROM network_client
+		WHERE network_id=$1 AND active=true ORDER BY client_id FOR UPDATE`, owner.NetworkId)
 	if err != nil {
 		return err
 	}
@@ -225,7 +229,7 @@ func drainProberShardInTx(ctx context.Context, tx server.PgTx, owner *ProberShar
 	if err != nil {
 		return err
 	}
-	if _, err = deactivateNetworkClientsInTx(ctx, tx, clients, owner.NetworkId); err != nil {
+	if _, err = deactivateLockedNetworkClientsInTx(ctx, tx, clients, owner.NetworkId); err != nil {
 		return err
 	}
 	// active is a generated amount predicate. Expire admission without changing
