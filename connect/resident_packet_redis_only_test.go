@@ -167,7 +167,7 @@ func TestResidentPacketRedisOnlyConstructorsRejectUnknownWithoutPostgres(t *test
 			}},
 			{name: "overlong", value: "1", mutate: func(ctx context.Context, source, destination server.Id) {
 				server.Redis(ctx, func(client server.RedisClient) {
-					server.Raise(client.PExpire(ctx, residentPacketHoleKey(source, destination), 2*model.ContractHoleTtl).Err())
+					server.Raise(client.PExpire(ctx, residentPacketHoleKey(source, destination), 2*model.DefaultContractExpiration).Err())
 				})
 			}},
 			{name: "missing_members", value: "1", mutate: func(ctx context.Context, source, destination server.Id) {
