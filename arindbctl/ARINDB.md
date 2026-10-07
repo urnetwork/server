@@ -761,6 +761,56 @@ reader's identity. State/province/country top-30 completeness remains open:
 availability and service-presence sources do not supply comparable subscriber
 rankings or attribute the sampled Main providers to these operators.
 
+The twelve-ASN augmentation has a separately qualified reuse executor
+(`db1631d8`) and full/native/mapped readback preparation (`1a6c7beb`). It keeps
+the validated registration base, all 38 original feed bytes and observation
+times, and the qualified existing builder. Its earliest feed expiry remains
+October 8 at 02:03:14 UTC. The new artifact must have an epoch later than
+`1791310718`; the older four successful readbacks cannot qualify it. Startup
+still requires 12 GiB of available host memory, nine GiB free on root and
+28 GiB on the archive, with the existing live floors. The measured preceding
+11.034-GiB RSS peak does not support lowering that memory admission merely
+because current capacity is smaller.
+
+An isolated disk-backed writer candidate addresses that peak without dropping
+records or classifier stages. It retains the existing prefix trie, key
+deduplication and insertion policy, while storing record values and the final
+encoded data section in bounded files. Decoding uses a fresh per-record
+unmarshaler, verified record hashes and bounded type/depth/count checks;
+failed reads, appends or closes prevent successful publication. The ARIN
+factory is explicitly opt-in through `ARINDB_WRITER_STORAGE=disk-v1`, and
+the ordinary writer remains the default. Disk mode stores a snapshot of each
+inserted value; the reviewed ARIN callbacks do not rely on later alias
+mutation. This implementation and its local module replacement remain an
+isolated source candidate.
+
+Independent native receipt `a629a27c` passed the complete writer-library
+package and three focused ARIN test families. The latter include complete
+synthetic MMDB/manifest comparisons and the existing exclusion/risk controls.
+The copied upstream library test needed a test-only `FromBytes` to `OpenBytes`
+API adaptation for the pinned dependency graph; production code was unchanged
+by that correction. These bounded tests do not establish full-input memory
+fit. Native receipt `151e695b` subsequently compiled a dedicated full-input
+profile binary and verified that its disabled test skips before reading any
+retained input. The full profile has not run.
+
+That profile compares every output MMDB byte with `bfe38627` and every manifest
+field except the explicit builder identity, using catalog `320b4c10`, all
+original snapshots and the exact October 6 build time. It is a historical
+differential experiment, not a new twelve-ASN artifact. Source review
+`99b9ef12` qualifies a Root-only wrapper with a six-GiB hard cgroup, no swap,
+seven-GiB host startup admission, complete input pinning, archive bounds and
+independent cgroup/Go-heap telemetry coverage checks. The smaller cap is an
+experimental limit, not a measured success or a change to production's
+12-GiB admission. Root must retain the actual terminal, full output comparison
+and complete resource observations before evaluating a new build contract.
+
+The separately reviewed Config client-temp change (`6f20230e`) passes a
+validated private archive `TMPDIR` through both Docker client entrypoints.
+It does not relocate Docker daemon storage. Existing Config build and
+verification free-space thresholds therefore remain unchanged; archive
+temporary files alone do not resolve insufficient root-image storage.
+
 Source inspection distinguishes the adoption owners. Connect announces call
 the controller's actual-address lookup and persist its database epoch and
 lookup time. API also opens the ARIN reader on IP-info and extender location
