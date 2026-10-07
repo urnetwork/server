@@ -23,7 +23,7 @@ func retainResidentPoolWitness(message []byte) []byte {
 }
 
 // Verifies that joined production teardown released the other exact reference.
-func requireResidentPoolOwnerReturned(t *testing.T, witness []byte, description string) {
+func requireResidentPoolOwnerReturned(t testing.TB, witness []byte, description string) {
 	t.Helper()
 	if !clientconnect.MessagePoolReturn(witness) {
 		t.Fatalf("%s did not leave the retained witness as final pool owner", description)
@@ -62,7 +62,7 @@ func (self *exchangeReadObservedListener) Accept() (net.Conn, error) {
 }
 
 // Verifies a collection of independently retained exact-message references.
-func requireResidentPoolOwnersReturned(t *testing.T, witnesses [][]byte, description string) {
+func requireResidentPoolOwnersReturned(t testing.TB, witnesses [][]byte, description string) {
 	t.Helper()
 	for witnessIndex, witness := range witnesses {
 		requireResidentPoolOwnerReturned(
@@ -101,6 +101,10 @@ func newResidentCallbackLifecycleFixture(
 		transports: map[*clientTransport]bool{},
 		forwards:   map[server.Id]*ResidentForward{},
 	}
+	// These fixtures isolate ownership from contract projection. Authorization
+	// integration controls replace this seam with the real Redis reader.
+	resident.residentContractManager = newResidentContractManager(residentCtx, residentCancel, resident.clientId, settings)
+	resident.residentContractManager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { return true })
 	resident.controlLimiter = newLimiter(residentCtx, 0)
 	resident.residentController = newResidentController(residentCtx, resident.clientId, nil, settings)
 	resident.startClientCallbackWorkers()

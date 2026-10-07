@@ -77,7 +77,8 @@ func retainedContractExpiryUsage(data []byte) (*contractUsageSnapshot, error) {
 
 // A successful preparation commits the original proof before billing can
 // synthesize or finalize a close. Restarts reuse that exact proof. A recent
-// real report withdraws a stale scan candidate without closing its stream.
+// real report withdraws a stale quiet-period candidate until its absolute
+// deadline. Once due, checkpoints retain usage without extending the lifetime.
 func prepareContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId server.Id, cutoff time.Time) (*contractExpiryState, error) {
 	return inspectContractExpiryInTx(ctx, tx, contractId, cutoff, true)
 }
@@ -91,16 +92,17 @@ func inspectContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId s
 	state := &contractExpiryState{contractId: contractId}
 	var outcome *ContractOutcome
 	var created time.Time
+	var expirationTime *time.Time
 	var originIsSource *bool
 	var unverified bool
 	var retained []byte
 	proof := &contractUsageExpiry{Reports: map[ContractParty]contractUsageClose{}}
 	if err := tx.QueryRow(ctx, `
 		SELECT source_id, destination_id, dispute, outcome, create_time,
-			usage_origin_is_source, usage_unverified, provider_usage, transfer_byte_count
+			usage_origin_is_source, usage_unverified, provider_usage, transfer_byte_count, expiration_time
 		FROM transfer_contract WHERE contract_id=$1
 	`+lock, contractId).Scan(&state.sourceId, &state.destinationId, &state.dispute, &outcome, &created,
-		&originIsSource, &unverified, &retained, &proof.Capacity); err != nil {
+		&originIsSource, &unverified, &retained, &proof.Capacity, &expirationTime); err != nil {
 		return nil, fmt.Errorf("lock expiring contract: %w", err)
 	}
 	if outcome != nil {
@@ -145,7 +147,7 @@ func inspectContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId s
 		state.usageUnverifiedRetained = writeProof && err == nil
 		return state, err
 	}
-	if lastReport.After(cutoff) {
+	if !contractExpirationDue(expirationTime, lastReport, cutoff, server.NowUtc()) {
 		return nil, nil
 	}
 	byteCount, err := contractExpiryCompletedUsage(proof)

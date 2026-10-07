@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
@@ -313,6 +314,9 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 	if err := redisGrantSelectedCurrent(ctx, tx, selectedIds); err != nil {
 		return nil, nil, err
 	}
+	if err := validateCompanionContractExpirationInTx(ctx, tx, companionId); err != nil {
+		return nil, nil, err
+	}
 	// Per-contract rows only. The compatibility triggers omit marked rows from
 	// legacy revision maintenance, and no shared snapshot is read or published.
 	slices.SortFunc(selected, func(a, b *TransferEscrowBalance) int { return a.BalanceId.Cmp(b.BalanceId) })
@@ -320,17 +324,25 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 	// round trip is not proof of absence, so compensation must not release a
 	// possibly committed contract. Existing reconciliation/lease recovery owns it.
 	admission.notePublication()
+	var expirationTime time.Time
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, b := range selected {
 			batch.Queue(`INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count,redis_reserved) VALUES($1,$2,$3,true)`, admission.contractId, b.BalanceId, b.BalanceByteCount)
 		}
-		batch.Queue(`INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,companion_contract_id,payer_network_id,usage_origin_is_source,create_time,priority)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,($7::uuid IS NULL),clock_timestamp() AT TIME ZONE 'UTC',$9)`,
-			admission.contractId, sourceNetworkId, sourceId, destinationNetworkId, destinationId, granted, companionId, payerNetworkId, priority)
+		batch.Queue(`WITH creation_clock AS MATERIALIZED (
+                SELECT clock_timestamp() AT TIME ZONE 'UTC' AS create_time
+            )
+            INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,companion_contract_id,payer_network_id,usage_origin_is_source,create_time,priority,expiration_time)
+            SELECT $1,$2,$3,$4,$5,$6,$7,$8,($7::uuid IS NULL),create_time,$9,date_trunc('milliseconds', create_time) + $10 * INTERVAL '1 millisecond'
+            FROM creation_clock RETURNING expiration_time`,
+			admission.contractId, sourceNetworkId, sourceId, destinationNetworkId, destinationId, granted, companionId, payerNetworkId, priority,
+			DefaultContractExpiration.Milliseconds(),
+		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
 		batch.Queue(contractExtenderInsertSql, admission.contractId, sourceId, destinationId, ContractPartySource, ContractPartyDestination)
 	})
 	providerWorkRetainReservationInTx(ctx, tx, admission.contractId)
-	return &TransferEscrow{ContractId: admission.contractId, CompanionContractId: companionId, TransferByteCount: granted, Priority: priority, Balances: selected}, nil, nil
+	contractHoleEventInTx(ctx, tx, admission.contractId, sourceId, destinationId, "create", expirationTime)
+	return &TransferEscrow{ContractId: admission.contractId, CompanionContractId: companionId, ExpirationTime: expirationTime, TransferByteCount: granted, Priority: priority, Balances: selected}, nil, nil
 }
 
 // reserveRedisTransferEscrowBalances reserves up to `requested` bytes from

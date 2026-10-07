@@ -5,6 +5,7 @@ package model
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -231,6 +232,13 @@ func TestRedisAdmissionPrePublicationPanicCompensatesAndPropagates(t *testing.T)
 // must survive compensation; a numeric total alone could hide substitution.
 func requireRedisRefusalOnlyContract(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, neighbor server.Id) {
 	t.Helper()
+	requireRedisRefusalOnlyContractWithByteCount(t, ctx, f, neighbor, 17)
+}
+
+// The same strict custody and token-identity check also covers other fixture
+// sizes; retaining the wrong neighbor amount must still fail compensation.
+func requireRedisRefusalOnlyContractWithByteCount(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, neighbor server.Id, byteCount ByteCount) {
+	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {
 		var contracts, escrows int
 		server.Raise(conn.QueryRow(ctx, `SELECT
@@ -243,7 +251,7 @@ func requireRedisRefusalOnlyContract(t testing.TB, ctx context.Context, f netEsc
 	server.Redis(ctx, func(client server.RedisClient) {
 		values, err := client.HGetAll(ctx, redisContractReservationKeys(f.balanceId)[1]).Result()
 		server.Raise(err)
-		if len(values) != 1 || values[neighbor.String()] != "17" {
+		if len(values) != 1 || values[neighbor.String()] != strconv.FormatInt(int64(byteCount), 10) {
 			t.Fatal("compensation changed the live neighbor token", values)
 		}
 	})

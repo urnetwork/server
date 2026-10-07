@@ -50,11 +50,29 @@ func settleExpiredContractDispute(ctx context.Context, tag string, contractId se
 		// queued. The worker clears it only in the debit/outcome transaction;
 		// an accounting rejection rolls that clear back with everything else.
 		var owned bool
-		rows, queryErr := tx.Query(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id=$1 AND dispute AND outcome IS NULL FOR UPDATE`, contractId)
-		server.WithPgResult(rows, queryErr, func() { owned = rows.Next() })
+		var expiryOwned bool
+		var retained []byte
+		rows, queryErr := tx.Query(ctx, `SELECT usage_unverified,provider_usage FROM transfer_contract WHERE contract_id=$1 AND dispute AND outcome IS NULL FOR UPDATE`, contractId)
+		server.WithPgResult(rows, queryErr, func() {
+			owned = rows.Next()
+			if owned {
+				server.Raise(rows.Scan(&expiryOwned, &retained))
+			}
+		})
 		if !owned {
 			return
 		}
+		if !expiryOwned {
+			panic(errors.New("disputed expiry lacks retained ownership"))
+		}
+		_, proofErr := retainedContractExpiryUsage(retained)
+		server.Raise(proofErr)
+		// Ordinary CloseContract refuses a disputed row. This expiry owner may
+		// finalize its existing checkpoints after their original proof commits,
+		// retaining every byte count and the immutable proof. A failed financial
+		// transaction rolls these flags back with its dispute clear; legacy work
+		// commits them with its intent and keeps the dispute until settlement.
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET checkpoint=false WHERE contract_id=$1 AND checkpoint`, contractId))
 		var legacy bool
 		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT redis_reserved)`, contractId).Scan(&legacy))
 		if legacy {

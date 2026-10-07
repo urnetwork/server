@@ -46,6 +46,7 @@ type forceCloseDisputeState struct {
 	requestTokenByteCount   ByteCount
 	redisReserved           bool
 	providerPayoutByteCount ByteCount
+	providerEarnedByteCount ByteCount
 	streamFound             bool
 }
 
@@ -157,6 +158,15 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
 			}
 		})
 	})
+	// Provider earnings commit to their sweep and exact projection payload.
+	// The display projection runs separately; the old Redis counter is not
+	// the financial owner for either reservation mode used by this fixture.
+	projection := readForceCloseProviderProjection(t, ctx, self)
+	state.providerEarnedByteCount = projection.accountBytes + projection.unappliedBytes
+	if projection.sweptBytes != state.providerEarnedByteCount ||
+		projection.sweptRevenue != projection.accountRevenue+projection.unappliedRevenue {
+		t.Fatalf("provider earnings lost or duplicated their durable owner: %+v", projection)
+	}
 	server.Redis(ctx, func(r server.RedisClient) {
 		value, err := r.Get(ctx, netEscrowKey(self.balanceId)).Int64()
 		if err != server.RedisNil {
@@ -179,6 +189,9 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
 		if err != server.RedisNil {
 			server.Raise(err)
 			state.providerPayoutByteCount = ByteCount(value)
+			if value != 0 {
+				t.Fatal("durable provider earnings were also incremented in Redis", value)
+			}
 		}
 	})
 	_, _, state.streamFound = GetStream(ctx, self.contractId)
@@ -241,7 +254,7 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 			if state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.streamFound ||
 				!state.escrowSettled || !state.redisReserved || state.sourceCheckpoint || state.destinationCheckpoint ||
 				state.sourceByteCount != fixture.sourceByteCount || state.destinationByteCount != fixture.destinationByteCount ||
-				state.escrowPayoutByteCount != mean || state.providerPayoutByteCount != mean ||
+				state.escrowPayoutByteCount != mean || state.providerEarnedByteCount != mean ||
 				state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.legacyEscrowByteCount != 0 ||
 				state.netEscrowByteCount != mean || state.requestTokenByteCount != mean || state.redisEscrowByteCount != mean {
 				t.Errorf("%s: first sweep did not finalize with conserved pending debt", caseNames[index])
@@ -280,7 +293,7 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 			if state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.streamFound ||
 				!state.escrowSettled || state.sourceCheckpoint || state.destinationCheckpoint ||
 				state.sourceByteCount != fixture.sourceByteCount || state.destinationByteCount != fixture.destinationByteCount ||
-				state.escrowPayoutByteCount != mean || state.providerPayoutByteCount != mean ||
+				state.escrowPayoutByteCount != mean || state.providerEarnedByteCount != mean ||
 				state.payerBalanceByteCount != forceCloseDisputeInitialBalance-mean || state.netEscrowByteCount != 0 ||
 				state.requestTokenByteCount != 0 || state.redisEscrowByteCount != 0 {
 				t.Errorf("%s: debit completion did not preserve exact settlement accounting", caseNames[index])
@@ -299,6 +312,7 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 				t.Errorf("%s: repeat sweep or debit worker changed terminal or accounting state", caseNames[index])
 			}
 		}
+		drainForceCloseProviderProjections(t, ctx, fixtures)
 	})
 }
 
@@ -347,7 +361,7 @@ func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 			if state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.streamFound ||
 				!state.escrowSettled || !state.redisReserved || state.sourceCheckpoint || state.destinationCheckpoint ||
 				state.sourceByteCount != 1024 || state.destinationByteCount != 1024 ||
-				state.escrowPayoutByteCount != 1024 || state.providerPayoutByteCount != 1024 ||
+				state.escrowPayoutByteCount != 1024 || state.providerEarnedByteCount != 1024 ||
 				state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.legacyEscrowByteCount != 0 ||
 				state.netEscrowByteCount != 1024 || state.requestTokenByteCount != 1024 || state.redisEscrowByteCount != 1024 {
 				t.Fatalf("case %d: healthy finalization did not retain exact pending debt: %+v", index, state)
@@ -385,6 +399,7 @@ func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 				t.Fatalf("case %d: repeated healthy close changed drained accounting: before=%+v after=%+v", index, finalStates[index], state)
 			}
 		}
+		drainForceCloseProviderProjections(t, ctx, fixtures)
 	})
 }
 
@@ -421,7 +436,7 @@ func TestForceCloseDisputeSettlementFailureRollsBack(t *testing.T) {
 			for index, fixture := range fixtures {
 				state := fixture.state(t, ctx)
 				if state.outcome != "" || !state.dispute || state.open || state.escrowSettled ||
-					state.escrowPayoutByteCount != 0 || state.providerPayoutByteCount != 0 ||
+					state.escrowPayoutByteCount != 0 || state.providerPayoutByteCount != 0 || state.providerEarnedByteCount != 0 ||
 					state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.netEscrowByteCount != escrow ||
 					state.requestTokenByteCount != escrow || state.legacyEscrowByteCount != 0 {
 					t.Errorf("case %d: failed dispute settlement changed terminal or accounting state: %+v", index, state)

@@ -2,13 +2,11 @@ package connect
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
 )
 
 // A live resident can visit fresh provider pairs for its entire lifetime. The
@@ -21,10 +19,10 @@ func TestResidentContractCacheRetiresExpiredProviderHistory(t *testing.T) {
 		settings := DefaultExchangeSettings()
 		manager := newResidentContractManager(ctx, cancel, server.NewId(), settings)
 		var calls int
-		manager.readContract = func(context.Context, server.Id, server.Id) bool {
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool {
 			calls++
 			return true
-		}
+		})
 		const cohorts, providers = 8, 128
 		var peakRetained int
 		for cohort := range cohorts {
@@ -52,58 +50,29 @@ func TestResidentContractCacheRetiresExpiredProviderHistory(t *testing.T) {
 	})
 }
 
-// Expiring an old cache entry must not detach the database-read owner. A late
-// caller still joins that owner and receives its fresh positive result.
-func TestResidentContractCacheExpiryPreservesInFlightRefresh(t *testing.T) {
+// Expired history includes denied-pair admission state, not only positives.
+func TestResidentContractCacheRetiresDeniedProviderHistory(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		manager := newResidentContractManager(ctx, cancel, server.NewId(), DefaultExchangeSettings())
-		providerId := server.NewId()
-		pair := model.NewTransferPair(manager.clientId, providerId)
-		refreshStarted, releaseRefresh := make(chan struct{}), make(chan struct{})
-		var calls atomic.Int32
-		manager.readContract = func(_ context.Context, _, destinationId server.Id) bool {
-			if destinationId == providerId && calls.Add(1) == 2 {
-				close(refreshStarted)
-				<-releaseRefresh
+		manager, _, source, _ := residentReadControl(t)
+		var calls int
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls++; return false })
+		const cohorts, providers = 8, 128
+		for cohort := range cohorts {
+			if cohort > 0 {
+				time.Sleep(time.Second)
 			}
-			return true
+			for range providers {
+				provider := server.NewId()
+				if manager.HasActiveContract(source, provider) || manager.HasActiveContract(source, provider) {
+					t.Fatal("denied provider authorized a packet")
+				}
+			}
+			if len(manager.checkLimiters) != providers || len(manager.activeContracts) != 0 || len(manager.activeReads) != 0 {
+				t.Fatalf("denied history accumulated: limiters=%d", len(manager.checkLimiters))
+			}
 		}
-		if !manager.HasActiveContract(manager.clientId, providerId) {
-			t.Fatal("initial positive read failed")
-		}
-		time.Sleep(3 * time.Second)
-		if !manager.HasActiveContract(manager.clientId, providerId) {
-			t.Fatal("fresh positive cache blocked on its refresh")
-		}
-		<-refreshStarted
-		time.Sleep(3 * time.Second)
-		if !manager.HasActiveContract(manager.clientId, server.NewId()) {
-			t.Fatal("unrelated provider did not remain independent")
-		}
-		result := make(chan bool, 1)
-		go func() { result <- manager.HasActiveContract(manager.clientId, providerId) }()
-		synctest.Wait()
-		manager.stateLock.Lock()
-		read := manager.activeReads[pair]
-		joined := read != nil && read.waiters == 1
-		manager.stateLock.Unlock()
-		if !joined {
-			t.Error("late caller did not join the held refresh owner")
-		}
-		close(releaseRefresh)
-		if !<-result {
-			t.Fatal("shared fresh positive result became a refusal")
-		}
-		synctest.Wait()
-		if !manager.HasActiveContract(manager.clientId, providerId) || calls.Load() != 2 {
-			t.Fatal("completed refresh did not publish one reusable positive cache entry")
-		}
-		manager.stateLock.Lock()
-		defer manager.stateLock.Unlock()
-		if len(manager.activeReads) != 0 {
-			t.Fatal("completed read owner remained registered")
+		if calls != cohorts*providers {
+			t.Fatalf("denied cohort reads=%d", calls)
 		}
 	})
 }
@@ -113,21 +82,21 @@ func TestResidentContractCacheExpiryPreservesInFlightRefresh(t *testing.T) {
 func TestResidentContractCacheDisabledDoesNotRetainProviderHistory(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	manager := newResidentContractManager(ctx, cancel, server.NewId(), &ExchangeSettings{})
+	manager := newResidentContractManager(ctx, cancel, server.NewId(), &ExchangeSettings{MaxConcurrentForwardsPerResident: 128})
 	var calls int
-	manager.readContract = func(context.Context, server.Id, server.Id) bool {
+	manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool {
 		calls++
 		return true
-	}
+	})
 	for range 128 {
 		providerId := server.NewId()
 		if !manager.HasActiveContract(manager.clientId, providerId) ||
-			!manager.HasActiveContract(manager.clientId, providerId) {
-			t.Fatal("disabled cache changed a positive database result")
+			manager.HasActiveContract(manager.clientId, providerId) {
+			t.Fatal("disabled cache bypassed the one-second check interval")
 		}
 	}
-	if calls != 256 {
-		t.Fatalf("disabled cache reused a result: reads=%d", calls)
+	if calls != 128 {
+		t.Fatalf("disabled cache bypassed the check limit: reads=%d", calls)
 	}
 	manager.stateLock.Lock()
 	defer manager.stateLock.Unlock()

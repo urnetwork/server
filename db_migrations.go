@@ -9642,4 +9642,10 @@ var migrations = []any{
 	// existing rows are validated, not rewritten, and old binaries keep writing
 	// valid rows.
 	newSqlMigration(hotkeyWalletMappingConsentSchemaSql),
+	// 790: only new writers assign an absolute contract deadline. No default or
+	// backfill: old contracts and rolling old writers retain their quiet expiry.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE transfer_contract ADD COLUMN expiration_time timestamp NULL;
+	`),
 }

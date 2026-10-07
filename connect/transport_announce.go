@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	// "fmt"
+	"math"
 	mathrand "math/rand"
 	"net/netip"
 	"sync"
@@ -124,6 +125,8 @@ type ConnectionAnnounceSettings struct {
 	LifecycleDone    func()
 	// Synchronous test barrier after the Redis recorder returns.
 	reliabilityStatsRecordedForTest func(server.Id, model.ClientReliabilityStats)
+	// Runs after the fresh connection identity and initial samples are admitted.
+	connectionRegisteredForTest func(*ConnectionAnnounce)
 }
 
 type LatencyTest struct {
@@ -166,7 +169,10 @@ func (self *TestConfig) AllowSpeed() bool {
 }
 
 // Owns the asynchronous model registration and all measurement children for
-// one transport. Close is nonjoining; the handler owner uses CloseAndWait.
+// one transport. Packet counters and measurement responses take only stateLock.
+// One joined child publishes a bounded, cumulative scalar snapshot, so neither
+// a packet callback nor its state lock waits for a measurement transaction.
+// Close is nonjoining; the handler owner uses CloseAndWait.
 type ConnectionAnnounce struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -194,6 +200,11 @@ type ConnectionAnnounce struct {
 	receiveByteCount    ByteCount
 	sendMessageCount    uint64
 	sendByteCount       ByteCount
+
+	measurementWake     chan struct{}
+	measurementSnapshot connectionMeasurements
+	measurementPending  bool
+	measurementsClosed  bool
 
 	latencyCount        int
 	latencyTest         *LatencyTest
@@ -226,6 +237,23 @@ type ConnectionAnnounce struct {
 	done            chan struct{}
 
 	beforeWorkersWaitForTest func()
+	// Nil in production. Tests hold an acquired transaction before its sample
+	// write, after the packet-state lock has been released.
+	beforeMeasurementWriteForTest func()
+	measurementPublishedForTest   func(connectionMeasurements)
+}
+
+// Scalar event values become cumulative counts and capped integer averages
+// under stateLock. A publisher copies this whole snapshot before durable work;
+// coalescing never discards a sample's contribution or the other metric.
+type connectionMeasurements struct {
+	connectionId       server.Id
+	latency            bool
+	latencyMillis      uint64
+	latencySampleCount uint64
+	speed              bool
+	bytesPerSecond     ByteCount
+	speedSampleCount   uint64
 }
 
 func NewConnectionAnnounceWithDefaults(
@@ -310,6 +338,7 @@ func NewConnectionAnnounceWithIpFamily(
 		passiveWindowStartTime: time.Now(),
 		PendingLatencyTest:     make(chan *LatencyTest),
 		PendingSpeedTest:       make(chan *SpeedTest),
+		measurementWake:        make(chan struct{}, 1),
 		done:                   make(chan struct{}),
 	}
 	lifecycleStarted := settings.LifecycleStarted
@@ -345,6 +374,12 @@ func (self *ConnectionAnnounce) startWorker(run func()) bool {
 
 // Closes child admission before joining every previously admitted worker.
 func (self *ConnectionAnnounce) closeWorkersAndWait() {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.measurementsClosed = true
+		self.measurementPending = false
+	}()
 	self.workerStateLock.Lock()
 	self.workerClosing = true
 	self.workerStateLock.Unlock()
@@ -365,7 +400,6 @@ func (self *ConnectionAnnounce) run() {
 			cleanup()
 		}
 	}()
-
 	if 0 < self.announceTimeout {
 		model.SetPendingNetworkClientConnection(self.ctx, self.clientId, self.announceTimeout+5*time.Second)
 		select {
@@ -470,12 +504,10 @@ func (self *ConnectionAnnounce) run() {
 	}
 
 	self.setConnectionId(connectionId)
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.setLatencyWithLock()
-		self.setSpeedWithLock()
-	}()
+	self.startWorker(self.runMeasurementPublisher)
+	if registered := self.settings.connectionRegisteredForTest; registered != nil {
+		registered(self)
+	}
 
 	// the provider rollout gauge, kept current from the provide modes each
 	// sync below reads anyway
@@ -510,19 +542,6 @@ func (self *ConnectionAnnounce) run() {
 			// no resident nominated yet: the resident heartbeat registers it
 		}
 	}
-
-	// continuously measure the passive speed of the connection.
-	// active traffic proves the connection speed without a synthetic test.
-	self.startWorker(func() {
-		for {
-			select {
-			case <-self.ctx.Done():
-				return
-			case <-time.After(self.settings.PassiveSpeedWindowDuration):
-			}
-			self.samplePassiveSpeed()
-		}
-	})
 
 	nextTestTime := server.NowUtc().Add(self.settings.MaxTestTimeout)
 	nextTest := func() time.Duration {
@@ -706,11 +725,20 @@ func connectionVerifySettings() (*model.VerifySettings, bool) {
 	return controller.VerifySettings(), true
 }
 
+// Installs the freshly minted registration identity and admits earlier samples
+// in the same critical section as later responses. Identities are not reused.
 func (self *ConnectionAnnounce) setConnectionId(connectionId server.Id) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
 	self.connectionId = &connectionId
+	self.measurementSnapshot = connectionMeasurements{connectionId: connectionId}
+	self.addMeasurementsWithLock(connectionMeasurements{
+		latency:        0 < self.latencyCount,
+		latencyMillis:  self.minLatencyMillis,
+		speed:          0 < self.speedCount,
+		bytesPerSecond: self.maxBytesPerSecond,
+	})
 	self.shadowCaptureLease.close()
 	self.shadowCaptureLease = currentArinShadowOwners.add(connectionId, self)
 }
@@ -743,31 +771,31 @@ func (self *ConnectionAnnounce) SendMessage(messageByteCount ByteCount) {
 // samplePassiveSpeed closes the current passive window and updates the speed
 // result when the window rate is a new maximum for the connection
 func (self *ConnectionAnnounce) samplePassiveSpeed() {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+	self.updateMeasurements(func() connectionMeasurements {
+		now := time.Now()
+		windowMillis := ByteCount(now.Sub(self.passiveWindowStartTime) / time.Millisecond)
+		windowByteCount := max(self.passiveWindowSendByteCount, self.passiveWindowReceiveByteCount)
+		self.passiveWindowStartTime = now
+		self.passiveWindowSendByteCount = 0
+		self.passiveWindowReceiveByteCount = 0
 
-	now := time.Now()
-	windowMillis := ByteCount(now.Sub(self.passiveWindowStartTime) / time.Millisecond)
-	windowByteCount := max(self.passiveWindowSendByteCount, self.passiveWindowReceiveByteCount)
-	self.passiveWindowStartTime = now
-	self.passiveWindowSendByteCount = 0
-	self.passiveWindowReceiveByteCount = 0
-
-	if windowByteCount < self.settings.PassiveSpeedMinByteCount {
-		return
-	}
-	if windowMillis <= 0 {
-		return
-	}
-
-	bytesPerSecond := 1000 * windowByteCount / windowMillis
-	if self.passiveMaxBytesPerSecond < bytesPerSecond {
-		self.passiveMaxBytesPerSecond = bytesPerSecond
-		if glog.V(1) {
-			glog.Infof("[ta][%s]passive speed %.2fmib/s\n", self.clientId, float64(bytesPerSecond)/float64(1024*1024))
+		if windowByteCount < self.settings.PassiveSpeedMinByteCount {
+			return connectionMeasurements{}
 		}
-		self.setSpeedSampleWithLock(bytesPerSecond)
-	}
+		if windowMillis <= 0 {
+			return connectionMeasurements{}
+		}
+
+		bytesPerSecond := 1000 * windowByteCount / windowMillis
+		if self.passiveMaxBytesPerSecond < bytesPerSecond {
+			self.passiveMaxBytesPerSecond = bytesPerSecond
+			if glog.V(1) {
+				glog.Infof("[ta][%s]passive speed %.2fmib/s\n", self.clientId, float64(bytesPerSecond)/float64(1024*1024))
+			}
+			return connectionMeasurements{speed: true, bytesPerSecond: bytesPerSecond}
+		}
+		return connectionMeasurements{}
+	})
 }
 
 // a synthetic speed test runs only when the connection has not passively
@@ -829,14 +857,14 @@ func (self *ConnectionAnnounce) SendLatency(latencyTest *LatencyTest) bool {
 	return false
 }
 
+// Applies one matching latency response and publishes its completed sample
+// without holding the lock used by ordinary packet counters.
 func (self *ConnectionAnnounce) ReceiveLatency(latencyTest *LatencyTest) (success bool) {
 	receiveTime := time.Now()
 	nextLatency := false
 	nextSpeed := false
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-
+	self.updateMeasurements(func() connectionMeasurements {
+		measurements := connectionMeasurements{}
 		if self.latencyTest != nil && self.latencyTest.TestId == latencyTest.TestId {
 			latencyMillis := uint64((receiveTime.Sub(self.latencyTestSendTime) + time.Millisecond/2) / time.Millisecond)
 
@@ -853,7 +881,8 @@ func (self *ConnectionAnnounce) ReceiveLatency(latencyTest *LatencyTest) (succes
 
 			nextLatency = self.latencyCount < self.settings.MaxLatencyCount
 			if !nextLatency {
-				self.setLatencyWithLock()
+				measurements.latency = true
+				measurements.latencyMillis = self.minLatencyMillis
 				if self.allowSyntheticSpeedWithLock() {
 					nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
 				}
@@ -861,40 +890,14 @@ func (self *ConnectionAnnounce) ReceiveLatency(latencyTest *LatencyTest) (succes
 
 			success = true
 		}
-	}()
+		return measurements
+	})
 	if nextLatency {
 		self.nextLatency()
 	} else if nextSpeed {
 		self.nextSpeed()
 	}
 	return
-}
-
-func (self *ConnectionAnnounce) setLatencyWithLock() {
-	if 0 < self.latencyCount && self.connectionId != nil {
-		// average of `LatencySampleWindowCount` samples
-		server.Tx(self.ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				self.ctx,
-				`
-				INSERT INTO network_client_latency (
-					connection_id,
-					latency_ms,
-					sample_count
-				)
-				VALUES ($1, $2, $3)
-				ON CONFLICT (connection_id) DO UPDATE
-				SET
-					latency_ms = ((LEAST(network_client_latency.sample_count + $3, $4) - 1) * network_client_latency.latency_ms + $2) / LEAST(network_client_latency.sample_count + $3, $4),
-					sample_count = network_client_latency.sample_count + $3
-				`,
-				*self.connectionId,
-				self.minLatencyMillis,
-				1,
-				self.settings.LatencySampleWindowCount,
-			))
-		})
-	}
 }
 
 func (self *ConnectionAnnounce) nextSpeed() {
@@ -929,13 +932,13 @@ func (self *ConnectionAnnounce) SendSpeed(speedTest *SpeedTest) bool {
 	return false
 }
 
+// Applies one matching speed response and publishes its completed sample
+// without holding the lock used by ordinary packet counters.
 func (self *ConnectionAnnounce) ReceiveSpeed(speedTest *SpeedTest) (success bool) {
 	receiveTime := time.Now()
 	nextSpeed := false
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-
+	self.updateMeasurements(func() connectionMeasurements {
+		measurements := connectionMeasurements{}
 		if speedTest != nil && self.speedTest != nil && self.speedTest.TestId == speedTest.TestId && self.speedTest.TotalByteCount == speedTest.TotalByteCount {
 			testMillis := model.ByteCount((receiveTime.Sub(self.speedTestSendTime) + time.Millisecond/2) / time.Millisecond)
 			bytesPerSecond := (1000*speedTest.TotalByteCount + testMillis/2) / testMillis
@@ -953,48 +956,163 @@ func (self *ConnectionAnnounce) ReceiveSpeed(speedTest *SpeedTest) (success bool
 
 			nextSpeed = self.speedCount < self.testConfig.MaxSpeedCount
 			if !nextSpeed {
-				self.setSpeedWithLock()
+				measurements.speed = true
+				measurements.bytesPerSecond = self.maxBytesPerSecond
 			}
 
 			success = true
 		}
-	}()
+		return measurements
+	})
 	if nextSpeed {
 		self.nextSpeed()
 	}
 	return
 }
 
-func (self *ConnectionAnnounce) setSpeedWithLock() {
-	if 0 < self.speedCount {
-		self.setSpeedSampleWithLock(self.maxBytesPerSecond)
+// Applies one measurement state transition and admits its scalar result without
+// waiting for the publisher. This is safe on the shared transport reader.
+func (self *ConnectionAnnounce) updateMeasurements(updateWithLock func() connectionMeasurements) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.addMeasurementsWithLock(updateWithLock())
+}
+
+// Each fresh connection has one announcement and no preexisting measurement
+// rows (ConnectNetworkClientWithIpFamily mints its id inside registration).
+// Fold every sample in order before coalescing publication, retaining both
+// metrics. Counts saturate at the database bigint limit; further samples for a
+// saturated metric are ignored rather than wrapping or changing an unfenced
+// value. Closing refuses admission and discards the final unpublished snapshot.
+func (self *ConnectionAnnounce) addMeasurementsWithLock(measurements connectionMeasurements) {
+	if self.connectionId == nil || self.measurementsClosed ||
+		(self.ctx != nil && self.ctx.Err() != nil) || (!measurements.latency && !measurements.speed) {
+		return
+	}
+	updated := false
+	snapshot := &self.measurementSnapshot
+	if measurements.latency && snapshot.latencySampleCount < math.MaxInt64 {
+		snapshot.latencySampleCount++
+		snapshot.latencyMillis = connectionMeasurementAverage(
+			snapshot.latencyMillis, measurements.latencyMillis,
+			snapshot.latencySampleCount, self.settings.LatencySampleWindowCount,
+		)
+		snapshot.latency = true
+		updated = true
+	}
+	if measurements.speed && snapshot.speedSampleCount < math.MaxInt64 {
+		snapshot.speedSampleCount++
+		snapshot.bytesPerSecond = ByteCount(connectionMeasurementAverage(
+			uint64(snapshot.bytesPerSecond), uint64(measurements.bytesPerSecond),
+			snapshot.speedSampleCount, self.settings.SpeedSampleWindowCount,
+		))
+		snapshot.speed = true
+		updated = true
+	}
+	if updated {
+		snapshot.connectionId = *self.connectionId
+		self.measurementPending = true
+		select {
+		case self.measurementWake <- struct{}{}:
+		default:
+		}
 	}
 }
 
-func (self *ConnectionAnnounce) setSpeedSampleWithLock(bytesPerSecond ByteCount) {
-	if self.connectionId == nil {
-		return
+// Computes floor(((window-1)*previous + sample)/window) without overflowing
+// the intermediate product. A nonpositive configuration means a one-sample
+// window; the first sample always replaces the initial zero value.
+func connectionMeasurementAverage(previous, sample, sampleCount uint64, sampleWindowCount int) uint64 {
+	window := min(sampleCount, uint64(max(1, sampleWindowCount)))
+	if window <= 1 {
+		return sample
 	}
-	// average of `SpeedSampleWindowCount` samples
+	if previous <= sample {
+		return previous + (sample-previous)/window
+	}
+	difference := previous - sample
+	value := previous - difference/window
+	if difference%window != 0 {
+		value--
+	}
+	return value
+}
+
+// Reuses the passive-sampling child as the only measurement database owner:
+// one in-flight snapshot and one coalesced successor, with no additional worker
+// per connection. A database stall may delay passive sampling, as before, but
+// cannot delay the reader. Cancellation joins this child before model cleanup.
+func (self *ConnectionAnnounce) runMeasurementPublisher() {
+	passiveSampleTime := time.After(self.settings.PassiveSpeedWindowDuration)
+	for {
+		passiveSampleDue := false
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-self.measurementWake:
+		case <-passiveSampleTime:
+			passiveSampleDue = true
+		}
+		if self.ctx.Err() != nil {
+			return
+		}
+		// A continuously ready wake must not postpone an expired sample timer.
+		if !passiveSampleDue {
+			select {
+			case <-passiveSampleTime:
+				passiveSampleDue = true
+			default:
+			}
+		}
+		if passiveSampleDue {
+			self.samplePassiveSpeed()
+		}
+		measurements, pending := func() (connectionMeasurements, bool) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if self.measurementsClosed || !self.measurementPending {
+				return connectionMeasurements{}, false
+			}
+			self.measurementPending = false
+			return self.measurementSnapshot, true
+		}()
+		if pending {
+			self.writeMeasurements(measurements)
+			if published := self.measurementPublishedForTest; published != nil {
+				published(measurements)
+			}
+		}
+		if passiveSampleDue {
+			passiveSampleTime = time.After(self.settings.PassiveSpeedWindowDuration)
+		}
+	}
+}
+
+// Persists absolute cumulative values from the single publisher. The count
+// fence makes replay after an ambiguous transaction result idempotent and
+// prevents an older snapshot from regressing either metric independently.
+func (self *ConnectionAnnounce) writeMeasurements(measurements connectionMeasurements) {
 	server.Tx(self.ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			self.ctx,
-			`
-			INSERT INTO network_client_speed (
-				connection_id,
-				bytes_per_second,
-				sample_count
-			)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (connection_id) DO UPDATE
-			SET
-				bytes_per_second = ((LEAST(network_client_speed.sample_count + $3, $4) - 1) * network_client_speed.bytes_per_second + $2) / LEAST(network_client_speed.sample_count + $3, $4),
-				sample_count = network_client_speed.sample_count + $3
-			`,
-			*self.connectionId,
-			bytesPerSecond,
-			1,
-			self.settings.SpeedSampleWindowCount,
-		))
+		if self.beforeMeasurementWriteForTest != nil {
+			self.beforeMeasurementWriteForTest()
+		}
+		if measurements.latency {
+			server.RaisePgResult(tx.Exec(self.ctx, `
+				INSERT INTO network_client_latency (connection_id, latency_ms, sample_count)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (connection_id) DO UPDATE
+				SET latency_ms = EXCLUDED.latency_ms, sample_count = EXCLUDED.sample_count
+				WHERE network_client_latency.sample_count < EXCLUDED.sample_count
+			`, measurements.connectionId, measurements.latencyMillis, measurements.latencySampleCount))
+		}
+		if measurements.speed {
+			server.RaisePgResult(tx.Exec(self.ctx, `
+				INSERT INTO network_client_speed (connection_id, bytes_per_second, sample_count)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (connection_id) DO UPDATE
+				SET bytes_per_second = EXCLUDED.bytes_per_second, sample_count = EXCLUDED.sample_count
+				WHERE network_client_speed.sample_count < EXCLUDED.sample_count
+			`, measurements.connectionId, measurements.bytesPerSecond, measurements.speedSampleCount))
+		}
 	})
 }

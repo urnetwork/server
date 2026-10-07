@@ -1,3 +1,6 @@
+// Forward authorization checks the Redis contract projection first. The rollout
+// bridge may check unresolved evidence against the exact resumable source under
+// one shared exchange budget. Pair admission never waits or retains retries.
 package connect
 
 import (
@@ -5,218 +8,218 @@ import (
 	"sync"
 	"time"
 
-	// "fmt"
-
-	// "maps"
-
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
+const residentContractCheckMinTimeout = time.Second
+
+// Owns recent positive results and per-pair admission. All maps are guarded by
+// stateLock; Redis reads run outside it. No waiter or retry queue is retained.
 type residentContractManager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	clientId server.Id
-
 	settings *ExchangeSettings
 
-	stateLock                   sync.Mutex
-	activeContracts             map[model.TransferPair]*activeContractEntry
-	activeReads                 map[model.TransferPair]*activeContractRead
-	readSequence                uint64
-	readContract                func(context.Context, server.Id, server.Id) bool
+	stateLock       sync.Mutex
+	activeContracts map[model.TransferPair]*activeContractEntry
+	activeReads     map[model.TransferPair]bool
+	checkLimiters   map[model.TransferPair]*limiter
+	readContract    func(context.Context, server.Id, server.Id) residentContractAllowance
+	readsClosed     bool
+	readWorkers     sync.WaitGroup
+	// Nil in production. Tests pause after the first clock sample and before
+	// taking the map lock, without relying on scheduling of a blocked mutex.
+	beforeCheckLockForTest func()
+
 	nextActiveContractSweepTime time.Time
 }
 
+// Creates the packet-side reader; durable contract creation and repair stay in
+// model control operations and the background projection refresher.
 func newResidentContractManager(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	clientId server.Id,
 	settings *ExchangeSettings,
 ) *residentContractManager {
-	residentContractManager := &residentContractManager{
-		ctx:             ctx,
+	return newResidentContractManagerWithFallback(ctx, cancel, clientId, settings, nil)
+}
+
+// Only this constructor retains an unmodified context for the temporary hole
+// source check. No normal packet dependency receives a PostgreSQL capability.
+func newResidentContractManagerWithFallback(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	clientId server.Id,
+	settings *ExchangeSettings,
+	fallback *residentContractFallback,
+) *residentContractManager {
+	manager := &residentContractManager{
+		ctx:             server.WithoutPostgres(ctx),
 		cancel:          cancel,
 		clientId:        clientId,
 		settings:        settings,
 		activeContracts: map[model.TransferPair]*activeContractEntry{},
-		activeReads:     map[model.TransferPair]*activeContractRead{},
-		readContract:    model.HasOpenContractForPair,
+		activeReads:     map[model.TransferPair]bool{},
+		checkLimiters:   map[model.TransferPair]*limiter{},
 	}
-
-	return residentContractManager
+	manager.readContract = func(packetCtx context.Context, source, destination server.Id) residentContractAllowance {
+		return readResidentContractAllowance(packetCtx, ctx, source, destination, fallback)
+	}
+	return manager
 }
 
+// Cancellation is an inactive result; programming failures keep their cause.
 func handleContractManagerDone(do func()) {
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			if !server.IsDoneError(recovered) {
-				panic(recovered)
-			}
+		if recovered := recover(); recovered != nil && !server.IsDoneError(recovered) {
+			panic(recovered)
 		}
 	}()
 	do()
 }
 
-// all other controller activity moved to `controller.resident_oob_controller` via the api
-
-func (self *residentContractManager) HasActiveContract(sourceId server.Id, destinationId server.Id) bool {
+// Reuses the existing positive freshness window and half-window refresh. A
+// refused cold check returns immediately, including when a read is in flight.
+func (self *residentContractManager) HasActiveContract(sourceId, destinationId server.Id) bool {
 	if self.ctx.Err() != nil {
 		return false
 	}
-
-	transferPair := model.NewTransferPair(sourceId, destinationId)
-
-	// entry is either not expired or nil
-	var entry *activeContractEntry
-	refresh := false
-	var startedSequence uint64
-
+	pair := model.NewUnorderedTransferPair(sourceId, destinationId)
+	now := time.Now()
+	cached, read := false, false
+	var cachedDeadline time.Time
+	if self.beforeCheckLockForTest != nil {
+		self.beforeCheckLockForTest()
+	}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		startedSequence = self.readSequence
-		now := time.Now()
-		// A resident can outlive many provider pairs. Reclaim expired positive
-		// checks on the next use instead of retaining their historical keys for
-		// the resident's lifetime. The existing freshness interval bounds sweep
-		// frequency; active reads retain their separate ownership and result.
-		if !now.Before(self.nextActiveContractSweepTime) {
-			for pair, cached := range self.activeContracts {
-				if self.settings.ContractManagerCheckTimeout <= 0 || cached.checkTime.Add(self.settings.ContractManagerCheckTimeout).Before(now) {
-					delete(self.activeContracts, pair)
-				}
-			}
-			self.nextActiveContractSweepTime = now.Add(self.settings.ContractManagerCheckTimeout)
+		if self.readsClosed || self.ctx.Err() != nil {
+			return
 		}
-
-		if 0 < self.settings.ContractManagerCheckTimeout {
-			var ok bool
-			entry, ok = self.activeContracts[transferPair]
-			if ok {
-				if entry.checkTime.Add(self.settings.ContractManagerCheckTimeout).Before(time.Now()) {
-					entry = nil
-				} else if !entry.refresh && entry.checkTime.Add(self.settings.ContractManagerCheckTimeout/2).Before(time.Now()) {
-					entry.refresh = true
-					refresh = true
+		if !now.Before(self.nextActiveContractSweepTime) {
+			for key, entry := range self.activeContracts {
+				if self.settings.ContractManagerCheckTimeout <= 0 || !now.Before(entry.deadline(self.settings.ContractManagerCheckTimeout)) {
+					delete(self.activeContracts, key)
 				}
 			}
+			for key, checkLimiter := range self.checkLimiters {
+				if !self.activeReads[key] && self.activeContracts[key] == nil && checkLimiter.expired(now) {
+					delete(self.checkLimiters, key)
+				}
+			}
+			self.nextActiveContractSweepTime = now.Add(residentContractCheckMinTimeout)
+		}
+		// Admission may have waited for a map sweep or another short owner
+		// operation; a timestamp from before taking the lock is not authority.
+		now = time.Now()
+		entry := self.activeContracts[pair]
+		if entry != nil {
+			cachedDeadline = entry.deadline(self.settings.ContractManagerCheckTimeout)
+		}
+		cached = entry != nil && self.settings.ContractManagerCheckTimeout > 0 && now.Before(cachedDeadline)
+		if cached && now.Before(entry.checkTime.Add(cachedDeadline.Sub(entry.checkTime)/2)) {
+			return
+		}
+		if self.activeReads[pair] {
+			return
+		}
+		checkLimiter := self.checkLimiters[pair]
+		if checkLimiter == nil {
+			// Reuse the resident's destination budget for recent denied pairs
+			// too; rotating unknown ids must not allocate unbounded history.
+			if len(self.checkLimiters) >= max(0, self.settings.MaxConcurrentForwardsPerResident) {
+				return
+			}
+			checkLimiter = newLimiter(self.ctx, residentContractCheckMinTimeout)
+			self.checkLimiters[pair] = checkLimiter
+		}
+		if read = checkLimiter.allow(now); read {
+			self.activeReads[pair] = true
+			self.readWorkers.Add(1)
 		}
 	}()
-
-	if entry == nil {
-		entry = self.readActiveContract(transferPair, sourceId, destinationId, startedSequence, nil)
-	} else if refresh {
-		go server.HandleError(func() {
-			self.readActiveContract(transferPair, sourceId, destinationId, 0, entry)
-		})
+	cached = cached && time.Now().Before(cachedDeadline)
+	if !read {
+		if !cached {
+			defaultResidentContractAllowanceMetrics.add(contractAllowanceCheckRefused)
+		}
+		return cached
 	}
-
-	return entry != nil
+	if cached {
+		go server.HandleError(func() { self.performActiveContractRead(pair, sourceId, destinationId) }, self.cancel)
+		return time.Now().Before(cachedDeadline)
+	}
+	return self.performActiveContractRead(pair, sourceId, destinationId)
 }
 
-// Reads for one pair share their result without holding stateLock during the
-// database call or the wait. A negative result from a read that started before
-// this invocation must be checked again: a contract may have opened meanwhile.
-func (self *residentContractManager) readActiveContract(
-	transferPair model.TransferPair,
-	sourceId server.Id,
-	destinationId server.Id,
-	startedSequence uint64,
-	refreshEntry *activeContractEntry,
-) *activeContractEntry {
-	for {
-		if self.ctx.Err() != nil {
-			return nil
-		}
-		self.stateLock.Lock()
-		entry := self.activeContracts[transferPair]
-		if refreshEntry != nil {
-			if entry != refreshEntry {
-				self.stateLock.Unlock()
-				return entry
-			}
-		} else if entry != nil && 0 < self.settings.ContractManagerCheckTimeout && !entry.checkTime.Add(self.settings.ContractManagerCheckTimeout).Before(time.Now()) {
-			self.stateLock.Unlock()
-			return entry
-		}
-		read := self.activeReads[transferPair]
-		if read == nil {
-			self.readSequence++
-			read = &activeContractRead{done: make(chan struct{}), sequence: self.readSequence}
-			self.activeReads[transferPair] = read
-			self.stateLock.Unlock()
-			return self.performActiveContractRead(transferPair, sourceId, destinationId, read)
-		}
-		read.waiters++
-		self.stateLock.Unlock()
-
-		select {
-		case <-read.done:
-		case <-self.ctx.Done():
-		}
-		self.stateLock.Lock()
-		read.waiters--
-		self.stateLock.Unlock()
-		if self.ctx.Err() != nil {
-			return nil
-		}
-		if read.panicValue != nil {
-			panic(read.panicValue)
-		}
-		if read.entry != nil || read.sequence > startedSequence {
-			return read.entry
-		}
-	}
-}
-
-func (self *residentContractManager) performActiveContractRead(
-	transferPair model.TransferPair,
-	sourceId server.Id,
-	destinationId server.Id,
-	read *activeContractRead,
-) *activeContractEntry {
-	var hasActiveContract, completed bool
+// Publishes one admitted result and releases its ownership on all exits. The
+// compatibility source check shares the same read join and positive cache.
+func (self *residentContractManager) performActiveContractRead(pair model.TransferPair, sourceId, destinationId server.Id) bool {
+	defer self.readWorkers.Done()
+	var allowance residentContractAllowance
+	var active, completed bool
 	var panicValue any
 	func() {
 		defer func() { panicValue = recover() }()
 		handleContractManagerDone(func() {
-			hasActiveContract = self.readContract(self.ctx, sourceId, destinationId)
+			allowance = self.readContract(self.ctx, sourceId, destinationId)
 			completed = true
 		})
 	}()
-
 	self.stateLock.Lock()
+	delete(self.activeReads, pair)
+	now := time.Now()
+	active = allowance.active && now.Before(allowance.validUntil)
+	if self.ctx.Err() != nil {
+		active = false
+	}
 	if completed {
-		if hasActiveContract {
-			read.entry = &activeContractEntry{checkTime: time.Now()}
-			if 0 < self.settings.ContractManagerCheckTimeout {
-				self.activeContracts[transferPair] = read.entry
-			}
+		if active && self.settings.ContractManagerCheckTimeout > 0 {
+			self.activeContracts[pair] = &activeContractEntry{checkTime: now, validUntil: allowance.validUntil}
 		} else {
-			delete(self.activeContracts, transferPair)
+			delete(self.activeContracts, pair)
 		}
 	}
-	read.panicValue = panicValue
-	delete(self.activeReads, transferPair)
-	close(read.done)
 	self.stateLock.Unlock()
 	if panicValue != nil {
 		panic(panicValue)
 	}
-	return read.entry
+	return active && time.Now().Before(allowance.validUntil)
 }
 
+// Closes read admission under the same lock as worker registration. The owner
+// cancellation interrupts Redis I/O; existing reads still belong to the join.
+func (self *residentContractManager) Close() {
+	self.stateLock.Lock()
+	self.readsClosed = true
+	self.stateLock.Unlock()
+	self.cancel()
+}
+
+// Joins cold reads and half-window refreshes after admission is closed.
+func (self *residentContractManager) CloseAndWait(ctx context.Context) error {
+	self.Close()
+	return waitForWorkerGroup(ctx, &self.readWorkers, "resident contract reads")
+}
+
+// Records only successful reads; denied reads retain admission state, not an
+// authorization result.
 type activeContractEntry struct {
-	checkTime time.Time
-	refresh   bool
+	checkTime  time.Time
+	validUntil time.Time
 }
 
-type activeContractRead struct {
-	done       chan struct{}
-	sequence   uint64
-	waiters    int
-	entry      *activeContractEntry
-	panicValue any
+// Source authority and local freshness are independent ceilings. A missing
+// source deadline is never an unlimited permission, including after refresh.
+func (self *activeContractEntry) deadline(timeout time.Duration) time.Time {
+	deadline := self.checkTime.Add(timeout)
+	if self.validUntil.Before(deadline) {
+		deadline = self.validUntil
+	}
+	return deadline
 }

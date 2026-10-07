@@ -16,6 +16,7 @@ SELECT EXISTS (
     SELECT 1 FROM transfer_contract AS contract
     WHERE (CASE WHEN contract.outcome IS NULL THEN contract.dispute = false ELSE false END)
         AND contract.source_id = $1 AND contract.destination_id = $2
+        AND (contract.expiration_time IS NULL OR contract.expiration_time > statement_timestamp() AT TIME ZONE 'UTC')
         AND NOT EXISTS (
             SELECT 1 FROM contract_close AS close
             WHERE close.contract_id = contract.contract_id
@@ -26,6 +27,7 @@ SELECT EXISTS (
     SELECT 1 FROM transfer_contract AS contract
     WHERE (CASE WHEN contract.outcome IS NULL THEN contract.dispute = false ELSE false END)
         AND contract.source_id = $2 AND contract.destination_id = $1
+        AND (contract.expiration_time IS NULL OR contract.expiration_time > statement_timestamp() AT TIME ZONE 'UTC')
         AND NOT EXISTS (
             SELECT 1 FROM contract_close AS close
             WHERE close.contract_id = contract.contract_id
