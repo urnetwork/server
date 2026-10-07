@@ -244,7 +244,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanNetworkClientData,
 			work.SweepOrphanNetworkClientDataPost,
 		),
-		task.NewTaskTarget(model.ApplyLegacyProviderTotals),
+		model.NewLegacyProviderTotalsTaskTarget(),
 		task.NewTaskTargetWithPost(model.ApplyLegacyNetEscrowMirror, model.ApplyLegacyNetEscrowMirrorPost),
 		task.NewTaskTargetWithPost(
 			model.RemoveNetworkClientsTask,

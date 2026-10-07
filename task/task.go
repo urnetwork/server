@@ -1423,6 +1423,7 @@ type TaskWorker struct {
 	drainLogf func(string, ...any)
 	// Test barriers sit at real claim boundaries, without changing production
 	// ownership: nil leaves the direct PostgreSQL path untouched.
+	claimBeforeQuery     func(server.PgTx) error
 	claimCandidatesReady func()
 	claimBeforeCommit    func(*taskClaimGuard) error
 
@@ -1782,11 +1783,15 @@ func (self *TaskWorker) takeTasks(n int) (
 		_ = tx.Rollback(rollbackCtx)
 		rollbackCancel()
 	}()
+	if self.claimBeforeQuery != nil {
+		if err := self.claimBeforeQuery(tx); err != nil {
+			return nil, nil, err
+		}
+	}
 
-	// Select from the backlog as well as the current block. The extra candidates
-	// let this worker step past expired timestamp leases that are still protected
-	// by a live owner's advisory lock, rather than repeatedly sticking on the
-	// queue head. Only n advisory locks are actually attempted successfully.
+	// Keep the existing ordered fallback window, but fetch only enough rows to
+	// fill the batch. Unneeded fallback rows must remain unlocked for other
+	// evaluators, and their saturated-target suffix must not be scanned eagerly.
 	type taskPriority struct {
 		priority       int
 		maxTimeSeconds int
@@ -1799,109 +1804,79 @@ func (self *TaskWorker) takeTasks(n int) (
 
 	nowBlock := server.NowUtc().Unix() / BlockSizeSeconds
 	candidateLimit := n + 64
-	claimPredicate := ""
-	queryArgs := []any{nowBlock, candidateLimit}
-	if self.settings.ClaimRegisteredTargetsOnly {
-		functionNames := make([]string, 0, len(self.targets))
-		for functionName := range self.targets {
-			functionNames = append(functionNames, functionName)
-		}
-		// Match the same version-normalized aliases as dispatch. RunPost is a
-		// wrapper: admitting its name alone would execute excluded post hooks.
-		// Invalid or orphaned wrappers stay available to the ordinary worker;
-		// they cannot poison this profile's queue or consume its candidate limit.
-		claimPredicate = `
-			AND CASE WHEN regexp_replace(function_name, '/v[0-9]+', '', 'g') = $4 THEN
-				EXISTS (
-					SELECT 1 FROM finished_task
-					WHERE finished_task.task_id = CASE
-						WHEN pg_input_is_valid(pending_task.args_json, 'jsonb')
-						THEN CASE WHEN (pending_task.args_json::jsonb ->> 'task_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-							THEN (pending_task.args_json::jsonb ->> 'task_id')::uuid
-						END
-					END
-					AND regexp_replace(finished_task.function_name, '/v[0-9]+', '', 'g') = ANY($3)
-				)
-			ELSE regexp_replace(function_name, '/v[0-9]+', '', 'g') = ANY($3)
-			END
-		`
-		queryArgs = append(queryArgs, functionNames, functionName(self.RunPost))
-	}
-	if excluded := self.saturatedClaimFunctionNames(); len(excluded) != 0 {
-		claimPredicate += fmt.Sprintf(`
-			AND NOT (regexp_replace(function_name, '/v[0-9]+', '', 'g') = ANY($%d))
-		`, len(queryArgs)+1)
-		queryArgs = append(queryArgs, excluded)
-	}
-	result, err := tx.Query(
+	query, queryArgs := self.claimCandidatesQuery(nowBlock, candidateLimit)
+	// Keep the queue name visible in FETCH for the existing query monitors.
+	_, err = tx.Exec(
 		self.ctx,
-		`
-			SELECT
-				task_id,
-				function_name,
-				run_priority,
-				run_max_time_seconds
-			FROM pending_task
-			WHERE available_block <= $1
-		`+claimPredicate+`
-			ORDER BY available_block, run_priority DESC, run_max_time_seconds DESC
-			LIMIT $2
-			FOR UPDATE SKIP LOCKED
-		`,
+		`DECLARE pending_task_claim_candidates NO SCROLL CURSOR FOR `+query,
 		queryArgs...,
 	)
 	if err != nil {
 		return nil, nil, err
 	}
-	candidates := []taskCandidate{}
-	for result.Next() {
-		candidate := taskCandidate{}
-		if err := result.Scan(
-			&candidate.taskId,
-			&candidate.functionName,
-			&candidate.priority.priority,
-			&candidate.priority.maxTimeSeconds,
-		); err != nil {
-			result.Close()
-			return nil, nil, err
-		}
-		candidates = append(candidates, candidate)
-	}
-	if err := result.Err(); err != nil {
-		result.Close()
-		return nil, nil, err
-	}
-	result.Close()
-	if self.claimCandidatesReady != nil {
-		self.claimCandidatesReady()
-	}
 
 	taskIds := []server.Id{}
 	taskIdPriorities := map[server.Id]taskPriority{}
-	for _, candidate := range candidates {
-		reservation, admitted := self.reserveTaskClaim(candidate.functionName)
-		if !admitted {
-			continue
-		}
-		if reservation != nil {
-			guard.admissionKVs[candidate.taskId] = reservation
-		}
-		lockKey := taskAdvisoryLockKey(candidate.taskId)
-		var acquired bool
-		if err := tx.QueryRow(
+	for candidateCount := 0; len(taskIds) < n && candidateCount < candidateLimit; {
+		fetchCount := min(n-len(taskIds), candidateLimit-candidateCount)
+		// A forward cursor preserves one scan and snapshot across refusals.
+		// PostgreSQL locks FOR UPDATE rows only when FETCH returns them; the
+		// transaction closes this non-holdable cursor on commit or rollback.
+		result, err := tx.Query(
 			self.ctx,
-			`SELECT pg_try_advisory_lock($1)`,
-			lockKey,
-		).Scan(&acquired); err != nil {
+			fmt.Sprintf(`FETCH FORWARD %d FROM pending_task_claim_candidates`, fetchCount),
+		)
+		if err != nil {
 			return nil, nil, err
 		}
-		if !acquired {
-			guard.releaseAdmission(candidate.taskId)
-			continue
+		candidates := make([]taskCandidate, 0, fetchCount)
+		for result.Next() {
+			candidate := taskCandidate{}
+			if err := result.Scan(
+				&candidate.taskId,
+				&candidate.functionName,
+				&candidate.priority.priority,
+				&candidate.priority.maxTimeSeconds,
+			); err != nil {
+				result.Close()
+				return nil, nil, err
+			}
+			candidates = append(candidates, candidate)
 		}
-		taskIds = append(taskIds, candidate.taskId)
-		taskIdPriorities[candidate.taskId] = candidate.priority
-		if len(taskIds) == n {
+		if err := result.Err(); err != nil {
+			result.Close()
+			return nil, nil, err
+		}
+		result.Close()
+		if candidateCount == 0 && self.claimCandidatesReady != nil {
+			self.claimCandidatesReady()
+		}
+		candidateCount += len(candidates)
+		for _, candidate := range candidates {
+			reservation, admitted := self.reserveTaskClaim(candidate.functionName)
+			if !admitted {
+				continue
+			}
+			if reservation != nil {
+				guard.admissionKVs[candidate.taskId] = reservation
+			}
+			lockKey := taskAdvisoryLockKey(candidate.taskId)
+			var acquired bool
+			if err := tx.QueryRow(
+				self.ctx,
+				`SELECT pg_try_advisory_lock($1)`,
+				lockKey,
+			).Scan(&acquired); err != nil {
+				return nil, nil, err
+			}
+			if !acquired {
+				guard.releaseAdmission(candidate.taskId)
+				continue
+			}
+			taskIds = append(taskIds, candidate.taskId)
+			taskIdPriorities[candidate.taskId] = candidate.priority
+		}
+		if len(candidates) < fetchCount {
 			break
 		}
 	}
@@ -2093,6 +2068,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 		// update legacy function names
 		task.FunctionName = updateFunctionName(task.FunctionName)
 	}
+	executionTargets := self.prepareTaskBatchTargets(tasks)
 
 	taskCtx, taskCancel := context.WithCancel(evalCtx)
 	results := make(chan *taskExecutionResult)
@@ -2124,7 +2100,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 					task:         task,
 					runStartTime: server.NowUtc(),
 				}
-				if target, ok := self.targets[task.FunctionName]; ok {
+				if target, ok := executionTargets[task.FunctionName]; ok {
 					glog.V(1).Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, ArgumentsForLog(task.ArgsJson))
 					r.runStartTime = server.NowUtc()
 					var result any
