@@ -9,19 +9,25 @@ import (
 )
 
 // statsCacheTtl bounds how stale a per-network provider-stats response can be.
-// The underlying aggregates are cheap indexed reads, but dashboards poll these
-// endpoints, so a short per-network cache absorbs repeated calls. The stats
-// depend only on (network_id, args), which is what makes the network-scoped
-// cache safe.
+// Dashboards poll these endpoints, so a short per-network cache absorbs
+// repeated calls. The stats depend only on (network_id, args), which makes
+// the network-scoped cache safe.
 const statsCacheTtl = 30 * time.Second
+
+// A slow provider-list fill keeps its lease while queries run. Two minutes is
+// an explicit owner budget, not a request or SQL timeout increase: an earlier
+// caller deadline or cancellation still wins. This permits a fill longer than
+// the 30s cache lease while bounding repeated renewal. Response TTL is unchanged.
+const providerListStatsFillTimeout = 2 * time.Minute
 
 // GET /stats/providers — all providers in the caller network, last 24h.
 func StatsProviders(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(
-		router.CacheWithNetworkAuth(
+		router.CacheWithNetworkAuthRenewingFill(
 			model.StatsProviders,
 			"api_stats_providers",
 			statsCacheTtl,
+			providerListStatsFillTimeout,
 		),
 		w, r,
 	)
@@ -30,10 +36,11 @@ func StatsProviders(w http.ResponseWriter, r *http.Request) {
 // POST /stats/providers-last-n — all providers in the caller network, last_n hours.
 func StatsProvidersLastN(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(
-		router.CacheWithNetworkAuthInput(
+		router.CacheWithNetworkAuthInputRenewingFill(
 			model.StatsProvidersLastN,
 			"api_stats_providers_last_n",
 			statsCacheTtl,
+			providerListStatsFillTimeout,
 		),
 		w, r,
 	)
