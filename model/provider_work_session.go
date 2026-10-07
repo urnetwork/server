@@ -32,8 +32,12 @@ func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(serve
 func providerWorkOptionalSchemaInTx(ctx context.Context, tx server.PgTx, fn func(server.PgTx) error) bool {
 	optional := server.RaisePgResult(tx.Begin(ctx))
 	if err := fn(optional); err != nil {
-		server.Raise(optional.Rollback(ctx))
-		server.Raise(ctx.Err())
+		// Cancellation can close pgx before savepoint cleanup. Preserve the
+		// refused operation and caller stop when cleanup reports only conn closed.
+		rollbackErr := optional.Rollback(ctx)
+		if rollbackErr != nil || ctx.Err() != nil {
+			server.Raise(errors.Join(err, rollbackErr, ctx.Err()))
+		}
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "40001" {
 			server.Raise(err)
