@@ -37,6 +37,26 @@ const (
 	maxStatsWindow = 366 * 24 * time.Hour
 )
 
+// Select the requested providers' closed contracts before looking up reports.
+// The lateral fence keeps each report lookup on its complete primary key even
+// when a large provider array makes a whole-history join look inexpensive.
+const providerStatsTransferBytesSQL = `
+	WITH eligible AS MATERIALIZED (
+		SELECT contract_id, destination_id
+		FROM transfer_contract
+		WHERE destination_id = ANY($1::uuid[]) AND close_time >= $2
+	)
+	SELECT tc.destination_id, COALESCE(SUM(cc.used_transfer_byte_count), 0)
+	FROM eligible tc
+	CROSS JOIN LATERAL (
+		SELECT used_transfer_byte_count
+		FROM contract_close cc
+		WHERE cc.contract_id = tc.contract_id AND cc.party = 'destination'
+		OFFSET 0
+	) cc
+	GROUP BY tc.destination_id
+`
+
 // resolveStatsWindow computes the lookback window from a last_n hours value
 // (preferred) or a legacy lookback in days, clamped to [1 hour, maxStatsWindow].
 func resolveStatsWindow(lastNHours float64, legacyLookbackDays int) time.Duration {
@@ -145,14 +165,7 @@ func statsProviders(
 		transferBytes := map[server.Id]int64{}
 		result, err = conn.Query(
 			clientSession.Ctx,
-			`
-			SELECT tc.destination_id, COALESCE(SUM(cc.used_transfer_byte_count), 0)
-			FROM transfer_contract tc
-			INNER JOIN contract_close cc ON
-				cc.contract_id = tc.contract_id AND cc.party = 'destination'
-			WHERE tc.destination_id = ANY($1::uuid[]) AND tc.close_time >= $2
-			GROUP BY tc.destination_id
-			`,
+			providerStatsTransferBytesSQL,
 			ids,
 			windowStart,
 		)
