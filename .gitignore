@@ -29,3 +29,6 @@ temp/*
 .direnv
 
 .android-output.lock
+
+# Local Cloudflare tooling state
+.cloudflare/
