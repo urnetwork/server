@@ -90,3 +90,43 @@ func TestPacketPostgresGuardProcessScopeCatchesFreshContexts(t *testing.T) {
 		t.Fatal("stale cleanup cleared successor or recovered panic lost its attempt")
 	}
 }
+
+// A permit belongs to one exact oracle and context. Fresh contexts, a second
+// acquisition, explicit revocation and marked packet contexts must still fail.
+func TestPacketPostgresGuardSingleAcquisitionPermitHasExactScope(t *testing.T) {
+	attempts, stop := DenyPostgresForTest(t)
+	defer stop()
+	permitted, revoke := PermitPostgresAcquisitionForTest(t, t.Context())
+	defer revoke()
+	checkPostgresAllowed(permitted)
+	if attempts() != 1 {
+		t.Fatal("healthy permitted acquisition was not counted")
+	}
+	revoked, revokeBeforeUse := PermitPostgresAcquisitionForTest(t, t.Context())
+	revokeBeforeUse()
+	marked := WithoutPostgres(t.Context())
+	stillMarked, revokeMarked := PermitPostgresAcquisitionForTest(t, marked)
+	defer revokeMarked()
+	for index, ctx := range []context.Context{context.Background(), permitted, revoked, stillMarked} {
+		func() {
+			defer func() {
+				if recover() != ErrPacketPostgres {
+					t.Errorf("refusal case %d escaped the scoped permit", index)
+				}
+			}()
+			checkPostgresAllowed(ctx)
+		}()
+	}
+	if attempts() != 5 || PacketPostgresAttempts(marked) != 1 {
+		t.Fatal("permitted scope lost a refused attempt or bypassed a context guard")
+	}
+	stale, revokeStale := PermitPostgresAcquisitionForTest(t, t.Context())
+	defer revokeStale()
+	stop()
+	nextAttempts, nextStop := DenyPostgresForTest(t)
+	defer nextStop()
+	recovered := HandleError(func() { checkPostgresAllowed(stale) })
+	if recovered != ErrPacketPostgres || nextAttempts() != 1 {
+		t.Fatal("old permit escaped or failed to count in a successor oracle")
+	}
+}

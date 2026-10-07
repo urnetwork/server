@@ -17,6 +17,16 @@ type packetPostgresGuard struct {
 	attempts atomic.Uint64
 }
 
+type packetPostgresTestPermitKey struct{}
+
+// Only the native test helper can install this permit for its current oracle.
+// State 0 is unused, 1 consumed and 2 revoked; one atomic transition admits at
+// most one acquisition. A normal packet context remains forbidden regardless.
+type packetPostgresTestPermit struct {
+	guard *packetPostgresGuard
+	state atomic.Uint32
+}
+
 // Installed only by the serial native test helper. It detects fresh Background
 // escapes in a packet fixture without imposing a production process boundary.
 var packetPostgresTestGuard atomic.Pointer[packetPostgresGuard]
@@ -45,7 +55,8 @@ func checkPostgresAllowed(ctx context.Context) {
 	forbidden := false
 	if guard := packetPostgresTestGuard.Load(); guard != nil {
 		guard.attempts.Add(1)
-		forbidden = true
+		permit, ok := ctx.Value(packetPostgresTestPermitKey{}).(*packetPostgresTestPermit)
+		forbidden = !ok || permit.guard != guard || !permit.state.CompareAndSwap(0, 1)
 	}
 	if guard, ok := ctx.Value(packetPostgresKey{}).(*packetPostgresGuard); ok {
 		guard.attempts.Add(1)
