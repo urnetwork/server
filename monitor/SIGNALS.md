@@ -1692,6 +1692,36 @@ plan controls, not production CPU savings. Correlate fresh deployed source,
 statement call deltas, full plan rows/buffers, cache fallback state and this
 independent CPU counter; completed statement execution wall time is not CPU.
 
+The 2026-10-07 08:54Z query/native-CPU bracket retained the exact
+`countContractRange` statement, including its stable parallel workers, for
+1.93 CPU seconds (1.53 seconds after conservative counter quantization) across
+four selected 100-ms intervals. Source maps it to the partial-hour contract
+stats count, not settlement-page discovery. The periodic Taskworker collector
+previously repeated that count on every host's fifth 60-second tick; sharing
+only completed hourly buckets did not coalesce the current partial hour.
+The collector's shared hourly-window cache now admits one bounded source read
+per five-minute source window, with a token-fenced Redis publication and no
+database fallback on coordination failure. Explicit model callers retain
+their requested exact window. Cold followers retry on their normal minute
+tick; failed fills retain a short ownership lease to prevent retry fanout.
+The three hourly gauges use one generation with the original window-end and
+completion clocks. Scraping an expired or failed snapshot emits NaN and
+`contract_hour_available=0`, including if the refresh loop stalls.
+
+This bracket selected active backend lifetimes; it was not a whole-cluster CPU
+partition. Changed, idle, missing or otherwise unqualified statements remained
+6.89 of the 11.63 native CPU seconds in those selected intervals. The separate
+systemd window cannot be used as their denominator. Exact SQL/source matching
+does not by itself prove the emitting service artifact or fleet call rate.
+Healthy independent collectors must share a legitimate zero or populated
+snapshot without renewing its source age; malformed, future, expired,
+cancelled, replaced-owner and unavailable Redis controls must not publish a
+current result or trigger an unfenced scan. Verify all Taskworker artifacts,
+then obtain a fresh matched statement call/work interval and source-clock
+coverage with continuing traffic. Require the independent sustained CPU gate
+before claiming resource recovery; this repair does not establish a cause of
+pending settlement work or close unrelated query, lock or capacity findings.
+
 A fresh autoanalyze timestamp does not establish accurate selectivity for
 current settlement traffic over large historical escrow. Compare the exact
 owning query's custom and generic estimates with finite column/relation
