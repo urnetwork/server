@@ -469,8 +469,11 @@ type ExchangeSettings struct {
 	ForwardEnforceActiveContracts bool
 
 	ContractManagerCheckTimeout time.Duration
-	DrainOneTimeout             time.Duration
-	DrainAllTimeout             time.Duration
+	// Temporary rollout bridge for contracts created by older writers. Disable
+	// only after old-writer retirement and verified eligible-cohort coverage.
+	ContractHoleCompatibilityFallback bool
+	DrainOneTimeout                   time.Duration
+	DrainAllTimeout                   time.Duration
 
 	// drain coordination (CONNECTDRAIN2.md). `EnableDrainExcuse` gates the
 	// excuse markers written at drain / migrate and their consumption in the
@@ -547,7 +550,8 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		// this must match the warp `settings.yml` for the environment
 		StartInternalPort: 5080,
 
-		MaxConcurrentForwardsPerResident: 8 * 1024,
+		MaxConcurrentForwardsPerResident:  8 * 1024,
+		ContractHoleCompatibilityFallback: true,
 
 		// ResidentIdleTimeout: 300 * time.Minute,
 		ForwardIdleTimeout: 15 * time.Minute,
@@ -658,7 +662,9 @@ type Exchange struct {
 	hostToServicePorts map[int]int
 	routes             map[string]string
 
-	settings              *ExchangeSettings
+	settings *ExchangeSettings
+	// One shared, zero-wait compatibility budget for this exchange's residents.
+	contractHoleFallback  *residentContractFallback
 	memoryOwnerLedger     *connect.TransferMemoryOwnerLedger
 	payloadOwnerLedger    *residentPayloadLedger
 	sdkPayloadOwnerLedger *connect.TransferPayloadOwnerLedger
@@ -789,6 +795,9 @@ func newExchange(
 		residentChanges:       map[server.Id]chan struct{}{},
 		connections:           map[server.Id]map[server.Id]context.CancelFunc{},
 		drainedClients:        map[server.Id]struct{}{},
+	}
+	if settings.ContractHoleCompatibilityFallback {
+		exchange.contractHoleFallback = newResidentContractFallback()
 	}
 
 	if settings.KeyEventDelivery.Enabled {
@@ -3377,7 +3386,7 @@ func NewResidentForward(
 	exchange *Exchange,
 	clientId server.Id,
 ) *ResidentForward {
-	cancelCtx, cancel := context.WithCancel(ctx)
+	cancelCtx, cancel := context.WithCancel(server.WithoutPostgres(ctx))
 	transport := &ResidentForward{
 		ctx:      cancelCtx,
 		cancel:   cancel,
@@ -3651,8 +3660,8 @@ type Resident struct {
 	forwardWorkers       sync.WaitGroup
 
 	// Client callbacks only validate and offer borrowed input to these bounded
-	// queues. Their owned workers may rate-limit, query storage, or block as a
-	// sender without parking the shared Client receive sequence.
+	// queues. The control owner may use durable storage; forward workers use
+	// Redis allowance and may block as senders without parking shared receive.
 	controlIngressAdmission pooledMessageSendAdmission
 	forwardIngressAdmission pooledMessageSendAdmission
 	controlIngress          chan []*protocol.Frame
@@ -3737,11 +3746,12 @@ func newResidentDuringAdmission(
 	// because the platform creates the contracts for the client
 	client.ContractManager().AddNoContractPeer(connect.Id(clientId))
 
-	residentContractManager := newResidentContractManager(
+	residentContractManager := newResidentContractManagerWithFallback(
 		cancelCtx,
 		cancel,
 		clientId,
 		exchange.settings,
+		exchange.contractHoleFallback,
 	)
 
 	residentController := newResidentController(
@@ -4354,27 +4364,16 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 	// FIXME deep packet inspection to look at the contract frames and verify contracts before forwarding
 
 	initForward := func() *ResidentForward {
-		// Fast path: reuse a live existing forward without doing any slow work.
-		// This is the per-frame lookup, so it takes only a read lock.
-		if existing := func() *ResidentForward {
+		var existing *ResidentForward
+		var limit bool
+		func() {
 			self.stateLock.RLock()
 			defer self.stateLock.RUnlock()
-			if f := self.forwards[destinationId]; f != nil && !f.IsDone() {
-				return f
+			if forward := self.forwards[destinationId]; forward != nil && !forward.IsDone() {
+				existing = forward
 			}
-			return nil
-		}(); existing != nil {
-			return existing
-		}
-
-		// Check the per-resident forward limit (snapshot; the limit can be
-		// momentarily exceeded by one if multiple goroutines race past this
-		// point, which is acceptable).
-		limit := func() bool {
-			self.stateLock.RLock()
-			defer self.stateLock.RUnlock()
-			_, ok := self.forwards[destinationId]
-			return !ok && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards)
+			_, known := self.forwards[destinationId]
+			limit = !known && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards)
 		}()
 		if limit {
 			glog.Infof("[rf]abuse forward limit %s->%s", sourceId, destinationId)
@@ -4382,16 +4381,20 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 			return nil
 		}
 
-		// Slow path: contract check may hit the DB. Do it without holding
-		// Resident.stateLock so concurrent forwards do not serialize on it.
+		// Every admitted packet offer uses the bounded Redis authorization
+		// cache, including a live forward. Checkpoints remain resumable in
+		// that projection; a meaningful final close withdraws admission.
 		if self.exchange.settings.ForwardEnforceActiveContracts {
-			if !self.residentContractManager.HasActiveContract(sourceId, destinationId) {
+			if self.residentContractManager == nil || !self.residentContractManager.HasActiveContract(sourceId, destinationId) {
 				if glog.V(1) {
 					glog.Infof("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
 				}
 				abuseDroppedCounter.Inc()
 				return nil
 			}
+		}
+		if existing != nil {
+			return existing
 		}
 
 		// Build a new forward. No lock needed.
@@ -4826,6 +4829,9 @@ func (self *Resident) Close() {
 		self.forwardWorkerLock.Unlock()
 
 		self.cancel()
+		if self.residentContractManager != nil {
+			self.residentContractManager.Close()
+		}
 		self.client.Cancel()
 		if self.clientReceiveUnsub != nil {
 			self.clientReceiveUnsub()
@@ -4866,7 +4872,11 @@ func (self *Resident) CloseAndWait(ctx context.Context) error {
 	// after the first snapshot. The client join makes this second sweep final.
 	self.cancelForwards()
 	forwardErr := waitForWorkerGroup(ctx, &self.forwardWorkers, "resident forward workers")
-	return errors.Join(clientErr, callbackErr, forwardErr)
+	var contractErr error
+	if self.residentContractManager != nil {
+		contractErr = self.residentContractManager.CloseAndWait(ctx)
+	}
+	return errors.Join(clientErr, callbackErr, forwardErr, contractErr)
 }
 
 type clientTransport struct {
@@ -4887,6 +4897,26 @@ func newLimiter(ctx context.Context, minTimeout time.Duration) *limiter {
 		minTimeout:    minTimeout,
 		lastCheckTime: time.Time{},
 	}
+}
+
+// Admits without sleeping. Refused attempts do not move the next admission
+// time, so a packet flood cannot postpone a legitimate future check forever.
+func (self *limiter) allow(now time.Time) bool {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if self.ctx.Err() != nil || (!self.lastCheckTime.IsZero() && now.Before(self.lastCheckTime.Add(self.minTimeout))) {
+		return false
+	}
+	self.lastCheckTime = now
+	return true
+}
+
+// Reports when idle admission state can be discarded without changing the
+// next decision. The owner separately preserves any in-flight operation.
+func (self *limiter) expired(now time.Time) bool {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return self.lastCheckTime.IsZero() || !now.Before(self.lastCheckTime.Add(self.minTimeout))
 }
 
 // a simple delay since the last call

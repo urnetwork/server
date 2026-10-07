@@ -130,6 +130,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(model.ApplyLegacyProviderTotals)},
 		{target: task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror)},
 		{target: task.NewTaskTarget(work.SweepOrphanContractData), schedule: work.ScheduleSweepOrphanContractData},
+		{target: task.NewTaskTarget(work.RefreshContractHoles), schedule: work.ScheduleRefreshContractHoles},
 		{target: task.NewTaskTarget(task.TaskCleanup), schedule: task.ScheduleTaskCleanup},
 		{target: task.NewTaskTarget(work.BackfillInitialTransferBalance), schedule: work.ScheduleBackfillInitialTransferBalance},
 		{target: task.NewTaskTarget(work.IndexSearchLocations), schedule: work.ScheduleIndexSearchLocations},

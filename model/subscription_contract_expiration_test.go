@@ -334,7 +334,7 @@ func TestContractExpirationCompanionRechecksAfterClientWait(t *testing.T) {
 				if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 100 {
 					t.Fatalf("refused child's reservation was retained: %d", got)
 				}
-				requireRedisRefusalOnlyContract(t, ctx, f, origin.ContractId)
+				requireRedisRefusalOnlyContractWithByteCount(t, ctx, f, origin.ContractId, 100)
 			}()
 		}
 	})

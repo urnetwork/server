@@ -341,6 +341,7 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 		batch.Queue(contractExtenderInsertSql, admission.contractId, sourceId, destinationId, ContractPartySource, ContractPartyDestination)
 	})
 	providerWorkRetainReservationInTx(ctx, tx, admission.contractId)
+	contractHoleEventInTx(ctx, tx, admission.contractId, sourceId, destinationId, "create", expirationTime)
 	return &TransferEscrow{ContractId: admission.contractId, CompanionContractId: companionId, ExpirationTime: expirationTime, TransferByteCount: granted, Priority: priority, Balances: selected}, nil, nil
 }
 

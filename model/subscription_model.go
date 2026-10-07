@@ -1801,6 +1801,7 @@ func createTransferEscrowInTx(
 		}
 	})
 	providerWorkRetainReservationInTx(ctx, tx, contractId)
+	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "create", expirationTime)
 
 	if 0 < contractTransferByteCount {
 		// The escrow insert and subsequent open-contract insert each advance
@@ -2544,6 +2545,7 @@ func createContractNoEscrowInTx(
 		ContractPartyDestination,
 	))
 	providerWorkRetainReservationInTx(ctx, tx, contractId)
+	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "create", expirationTime)
 	return
 }
 
@@ -2678,6 +2680,9 @@ func applyContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 				returnErr = fmt.Errorf("close report identity payload conflicts")
 			} else {
 				terminalReplay = outcome != nil || dispute
+				if !priorCheckpoint || terminalReplay {
+					contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
+				}
 			}
 			return
 		}
@@ -2754,6 +2759,11 @@ func applyContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report
  (contract_id,party,report_id,used_transfer_byte_count,checkpoint) VALUES($1,$2,$3,$4,$5)`,
 			contractId, party, *reportId, usedTransferByteCount, checkpoint))
+	}
+	// A checkpoint permits resuming the same contract. A final party close
+	// revokes transport permission even when financial settlement is deferred.
+	if !checkpoint {
+		contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
 	}
 	return
 }
@@ -2902,6 +2912,7 @@ func claimContractOutcomeInTx(
 	// Return the database clock from the outcome write, avoiding another round
 	// trip while grants are held. The signed original uses this exact stored time.
 	var closedAt time.Time
+	var sourceId, destinationId server.Id
 	err = tx.QueryRow(
 		ctx,
 		`
@@ -2913,12 +2924,12 @@ func claimContractOutcomeInTx(
             WHERE
                 contract_id = $1 AND
                 outcome IS NULL
-            RETURNING close_time
+            RETURNING close_time, source_id, destination_id
         `,
 		contractId,
 		outcome,
 		usage,
-	).Scan(&closedAt)
+	).Scan(&closedAt, &sourceId, &destinationId)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -2926,6 +2937,7 @@ func claimContractOutcomeInTx(
 		return false, err
 	}
 	providerWorkRetainOutcomeInTx(ctx, tx, contractId, outcome, closedAt)
+	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
 	return true, nil
 }
 
@@ -3722,7 +3734,8 @@ func setContractDisputeInTx(
 	contractId server.Id,
 	dispute bool,
 ) bool {
-	tag := server.RaisePgResult(tx.Exec(
+	var sourceId, destinationId server.Id
+	err := tx.QueryRow(
 		ctx,
 		`
             UPDATE transfer_contract
@@ -3732,12 +3745,24 @@ func setContractDisputeInTx(
             WHERE
                 contract_id = $1 AND
                 outcome IS NULL
+            RETURNING source_id, destination_id
         `,
 		contractId,
 		dispute,
 		server.NowUtc(),
-	))
-	return tag.RowsAffected() == 1
+	).Scan(&sourceId, &destinationId)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false
+	}
+	server.Raise(err)
+	operation := "remove"
+	if !dispute {
+		// Reopening requires the complete close predicate; let background source
+		// reconciliation restore it rather than guessing from one updated flag.
+		operation = "invalidate"
+	}
+	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, operation)
+	return true
 }
 
 func GetOpenContractIdsWithNoPartialClose(
@@ -4241,6 +4266,9 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 				usage,
 			))
 			claimed = commandTag.RowsAffected() == 1
+			if claimed {
+				contractHoleEventInTx(ctx, tx, openContract.contractId, openContract.sourceId, openContract.destinationId, "remove")
+			}
 		}, server.TxReadCommitted)
 
 		// the quarantine settles the contract with no payout, so release its
@@ -5437,16 +5465,25 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					DELETE FROM transfer_contract
 					USING candidate
 					WHERE transfer_contract.contract_id = candidate.contract_id
+					RETURNING transfer_contract.contract_id, source_id, destination_id
 				)
-				SELECT COUNT(*) FROM due
+				SELECT (SELECT COUNT(*) FROM due), contract_id, source_id, destination_id
+				FROM deleted_contract
+				UNION ALL
+				SELECT (SELECT COUNT(*) FROM due), NULL, NULL, NULL
+				WHERE NOT EXISTS (SELECT 1 FROM deleted_contract)
 				`,
 				minTime.UTC(),
 				minStragglerCreateTime.UTC(),
 				maxRowCount,
 			)
 			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&processedCount))
+				for result.Next() {
+					var contractId, sourceId, destinationId *server.Id
+					server.Raise(result.Scan(&processedCount, &contractId, &sourceId, &destinationId))
+					if contractId != nil {
+						contractHoleEventInTx(ctx, tx, *contractId, *sourceId, *destinationId, "remove")
+					}
 				}
 			})
 		}, server.TxReadCommitted)

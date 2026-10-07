@@ -50,6 +50,7 @@ func TestSubnetOperatorWorkloadKeepsRequiredTargets(t *testing.T) {
 		task.NewTaskTarget(work.RollupVerifyProviderStats), task.NewTaskTarget(work.RemoveOldVerifyProviderStats),
 		task.NewTaskTarget(work.RefreshVerifyProxyEgress), task.NewTaskTarget(work.CloseExpiredContracts),
 		task.NewTaskTarget(work.ReconcileNetEscrow), task.NewTaskTarget(work.FlushLegacySettlements),
+		task.NewTaskTarget(work.RefreshContractHoles),
 		task.NewTaskTarget(model.RemoveNetworkClientsTask),
 		task.NewTaskTarget(work.DbMaintenance), task.NewTaskTarget(work.BackfillClock),
 		task.NewTaskTarget(work.UpdateClientLocations), task.NewTaskTarget(work.UpdateClientScores),
