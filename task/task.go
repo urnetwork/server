@@ -2093,6 +2093,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 		// update legacy function names
 		task.FunctionName = updateFunctionName(task.FunctionName)
 	}
+	executionTargets := self.prepareTaskBatchTargets(tasks)
 
 	taskCtx, taskCancel := context.WithCancel(evalCtx)
 	results := make(chan *taskExecutionResult)
@@ -2124,7 +2125,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 					task:         task,
 					runStartTime: server.NowUtc(),
 				}
-				if target, ok := self.targets[task.FunctionName]; ok {
+				if target, ok := executionTargets[task.FunctionName]; ok {
 					glog.V(1).Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, ArgumentsForLog(task.ArgsJson))
 					r.runStartTime = server.NowUtc()
 					var result any

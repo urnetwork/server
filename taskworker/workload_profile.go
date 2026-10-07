@@ -127,7 +127,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.RemoveDisconnectedNetworkClients), schedule: work.ScheduleRemoveDisconnectedNetworkClients},
 		{target: task.NewTaskTarget(work.SweepOrphanNetworkClientData), schedule: work.ScheduleSweepOrphanNetworkClientData},
 		{target: task.NewTaskTarget(model.RemoveNetworkClientsTask)},
-		{target: task.NewTaskTarget(model.ApplyLegacyProviderTotals)},
+		{target: model.NewLegacyProviderTotalsTaskTarget()},
 		{target: task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror)},
 		{target: task.NewTaskTarget(work.SweepOrphanContractData), schedule: work.ScheduleSweepOrphanContractData},
 		{target: task.NewTaskTarget(work.RefreshContractHoles), schedule: work.ScheduleRefreshContractHoles},

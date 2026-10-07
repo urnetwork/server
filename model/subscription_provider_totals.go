@@ -62,6 +62,12 @@ func ApplyLegacyProviderTotals(_ json.RawMessage, clientSession *session.ClientS
 	if !ok {
 		return nil, errors.New("legacy provider totals require durable task execution")
 	}
+	if batch, ok := clientSession.Ctx.Value(legacyProviderTotalsBatchKey{}).(*legacyProviderTotalsBatch); ok {
+		if err := batch.apply(clientSession.Ctx); err != nil {
+			return nil, err
+		}
+		return &struct{}{}, nil
+	}
 	bounded, cancel := context.WithTimeout(clientSession.Ctx, 5*time.Second)
 	defer cancel()
 	server.HandleError(func() {
@@ -84,30 +90,15 @@ func applyLegacyProviderTotalsInTx(ctx context.Context, tx server.PgTx, taskId s
 	if err != nil {
 		return err
 	}
-	var payload legacyProviderTotalsPayload
-	decoder := json.NewDecoder(bytes.NewBufferString(data))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&payload) != nil || decoder.Decode(new(any)) != io.EOF ||
-		!payload.Private || payload.Version != 1 || payload.ContractId == (server.Id{}) || len(payload.Totals) == 0 {
-		return errors.New("invalid legacy provider total payload")
-	}
-	for i, total := range payload.Totals {
-		if total.NetworkId == (server.Id{}) || total.Bytes < 0 || total.Revenue < 0 || (total.Bytes == 0 && total.Revenue == 0) ||
-			(i > 0 && payload.Totals[i-1].NetworkId.Cmp(total.NetworkId) >= 0) {
-			return errors.New("invalid legacy provider total allocation")
-		}
+	payload, err := decodeLegacyProviderTotals(data)
+	if err != nil {
+		return err
 	}
 	if payload.Applied {
 		return nil
 	}
 	for _, total := range payload.Totals {
-		_, err := tx.Exec(ctx, `INSERT INTO account_balance
-            (network_id,provided_byte_count,provided_net_revenue_nano_cents) VALUES($1,$2,$3)
-            ON CONFLICT(network_id) DO UPDATE SET
-            provided_byte_count=account_balance.provided_byte_count+EXCLUDED.provided_byte_count,
-            provided_net_revenue_nano_cents=account_balance.provided_net_revenue_nano_cents+EXCLUDED.provided_net_revenue_nano_cents`,
-			total.NetworkId, total.Bytes, total.Revenue)
-		if err != nil {
+		if err := writeLegacyProviderTotalInTx(ctx, tx, total); err != nil {
 			return err
 		}
 	}
@@ -119,4 +110,32 @@ func applyLegacyProviderTotalsInTx(ctx context.Context, tx server.PgTx, taskId s
 		return fmt.Errorf("legacy provider total marker ownership missing")
 	}
 	return nil
+}
+
+// Decode the retained representation equally for admission hints and locked rows.
+func decodeLegacyProviderTotals(data string) (payload legacyProviderTotalsPayload, returnErr error) {
+	decoder := json.NewDecoder(bytes.NewBufferString(data))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&payload) != nil || decoder.Decode(new(any)) != io.EOF ||
+		!payload.Private || payload.Version != 1 || payload.ContractId == (server.Id{}) || len(payload.Totals) == 0 {
+		return payload, errors.New("invalid legacy provider total payload")
+	}
+	for i, total := range payload.Totals {
+		if total.NetworkId == (server.Id{}) || total.Bytes < 0 || total.Revenue < 0 || (total.Bytes == 0 && total.Revenue == 0) ||
+			(i > 0 && payload.Totals[i-1].NetworkId.Cmp(total.NetworkId) >= 0) {
+			return payload, errors.New("invalid legacy provider total allocation")
+		}
+	}
+	return payload, nil
+}
+
+// The caller owns every contributing pending row until the total and markers commit.
+func writeLegacyProviderTotalInTx(ctx context.Context, tx server.PgTx, total legacyProviderTotal) error {
+	_, err := tx.Exec(ctx, `INSERT INTO account_balance
+            (network_id,provided_byte_count,provided_net_revenue_nano_cents) VALUES($1,$2,$3)
+            ON CONFLICT(network_id) DO UPDATE SET
+            provided_byte_count=account_balance.provided_byte_count+EXCLUDED.provided_byte_count,
+            provided_net_revenue_nano_cents=account_balance.provided_net_revenue_nano_cents+EXCLUDED.provided_net_revenue_nano_cents`,
+		total.NetworkId, total.Bytes, total.Revenue)
+	return err
 }

@@ -5234,11 +5234,40 @@ prefix; it cannot merge or replace an earlier allocation. The terminal outcome
 remains the lifetime enqueue fence after normal task finalization releases the
 queue key. No provider-total row is acquired while this transaction owns grants.
 For a contract with N eligible provider networks this replaces N inline total
-upserts with one independent task insertion. Application still needs N upserts,
-one owning-row read and one marker write, plus ordinary scheduler claim and
-finalization work. It adds one task per eligible legacy or Redis-mode settlement;
-it does not establish task capacity, reduce the total write count or add a
+upserts with one independent task insertion. Single-task application still needs
+N upserts, one owning-row read and one marker write, plus ordinary scheduler
+claim and finalization work. It adds one task per eligible legacy or Redis-mode
+settlement; the producer itself does not reduce the total write count or add a
 shared-provider queue key.
+
+Claimed provider-total batches (2026-10-06): the registered reader can combine
+single-provider allocations already claimed by one evaluator for the same
+network, at most 64 owners per transaction. The default claim size remains four;
+there is no wait for a larger batch, new queue or cross-process coalescer. Each
+cohort locks its exact pending rows in id order, re-reads and validates the durable
+payloads, skips applied owners, checks integer addition and performs one account
+upsert with all contributing markers in the same transaction. Unrelated providers,
+multi-provider allocations and invalid payloads retain independent execution.
+The original target name, private payload, per-task result/finalization and
+single-task replay path remain compatible with older workers.
+
+The elected invocation owns the bounded transaction. A canceled follower leaves
+its own owner for normal retry; a canceled leader or ambiguous commit leaves the
+durable markers as authority for every retry. Same-provider allocations in one
+batch share a failure outcome, including account overflow, and no marker can
+certify a rolled-back total. Per-contract durable enqueue and finalization costs
+remain. Shared-row serialization between independent batches also remains.
+
+Qualification requires actual account-write counts at the real worker entry,
+exact totals and independently finalized markers, a native batch-to-provider
+blocking edge, cancellation rollback, marker-write rollback, checked integer
+overflow, and stale single-task replay after a discarded commit reply. Compare
+completed allocations, total statement work, queue age and drain progress under
+the same workload. A lower count of provider upserts alone can hide stalled or
+less-complete projection. Retained statement counters are aggregate elapsed
+lower bounds, not per-call latency, CPU, distinct providers or observed lock
+chains; same-provider batch opportunities require their own source-qualified
+evidence. The controls do not establish Main throughput or account recovery.
 
 Redis-mode payout ownership (2026-10-06): the final outcome, asynchronous payer
 debit journal, exact provider sweeps and per-contract total-projection task now
