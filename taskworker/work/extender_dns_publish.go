@@ -408,12 +408,9 @@ func sampleExtenderDnsRecordSets(
 	desiredSets := []*extenderDnsRecordSet{}
 	for _, ipVersion := range extenderDnsIpVersions {
 		globalPool := extenderDnsPool{ipVersion: ipVersion}
-		if len(poolKeyHexes[globalPool]) == 0 {
-			continue
-		}
 		for _, continentCode := range model.ContinentCodes {
 			continentPool := extenderDnsPool{continentCode: continentCode, ipVersion: ipVersion}
-			if len(poolKeyHexes[continentPool]) == 0 {
+			if len(poolKeyHexes[continentPool]) == 0 && len(canaryIps[continentPool]) == 0 {
 				// no open address on this continent at all; the set is not
 				// desired and an existing one is deleted
 				continue
@@ -423,6 +420,9 @@ func sampleExtenderDnsRecordSets(
 				ipVersion:     ipVersion,
 				ips:           sample([]byte(continentCode), continentPool, globalPool, continentPool),
 			})
+		}
+		if len(poolKeyHexes[globalPool]) == 0 && len(canaryIps[globalPool]) == 0 {
+			continue
 		}
 		desiredSets = append(desiredSets, &extenderDnsRecordSet{
 			ipVersion: ipVersion,

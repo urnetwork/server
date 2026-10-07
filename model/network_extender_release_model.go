@@ -2,7 +2,10 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,6 +73,7 @@ func getActiveNetworkExtendersWithAddresses(ctx context.Context, directoryTier i
 			LEFT JOIN location AS derived_country ON
 				derived_country.location_id = derived_location.country_location_id
 			WHERE network_extender.active AND network_extender.directory_tier = $1
+				AND (network_extender.canary_channel IS NULL OR network_extender.canary_channel = 'gated')
 			ORDER BY network_extender.extender_id, network_extender_address.ip_version
 			`,
 			directoryTier,
@@ -170,11 +174,8 @@ func SetNetworkExtenderCanaryChannel(ctx context.Context, extenderId server.Id, 
 
 // The release ledger over the database (R3), one per request: the policy's
 // counts of requests per identity and vantage and of distinct identities per
-// record and country, and its stamps of both. Every method is one statement,
-// so two replicas serving one identity at once each count the other's rows
-// as soon as they commit. `extenderIds` maps a record's key to its row; a key
-// the map does not hold is counted as never released and its release is not
-// recorded.
+// record and country. Replicas serialize admission on identity, vantage and
+// country locks. Counts and writes share one READ COMMITTED transaction.
 type NetworkExtenderReleaseLedger struct {
 	ctx         context.Context
 	extenderIds map[string]server.Id
@@ -187,56 +188,116 @@ func NewNetworkExtenderReleaseLedger(ctx context.Context, extenderIds map[string
 	}
 }
 
-func (self *NetworkExtenderReleaseLedger) RequestCounts(identity []byte, vantage string, since time.Time) (int, int) {
+// Locks shared budget keys in stable order to avoid deadlocks across replicas.
+// Hash collisions only serialize unrelated requests; they never weaken a cap.
+func (self *NetworkExtenderReleaseLedger) Transact(identity []byte, vantage string, countryCode string, _ []string, apply func(connect.ExtenderReleaseLedgerTx)) {
+	lockIds := []int64{}
+	addLock := func(namespace string, value string) {
+		sum := sha256.Sum256([]byte("extender-release\x00" + namespace + "\x00" + value))
+		lockIds = append(lockIds, int64(binary.BigEndian.Uint64(sum[:8])))
+	}
+	addLock("identity", hex.EncodeToString(identity))
+	addLock("vantage", vantage)
+	// Country-wide serialization keeps lock usage constant even for a large
+	// partition. Releases are low-frequency control-plane work; unrelated
+	// countries can still proceed concurrently.
+	addLock("country", countryCode)
+	slices.Sort(lockIds)
+	lockIds = slices.Compact(lockIds)
+	server.Tx(self.ctx, func(tx server.PgTx) {
+		for _, lockId := range lockIds {
+			server.RaisePgResult(tx.Exec(self.ctx, "SELECT pg_advisory_xact_lock($1)", lockId))
+		}
+		apply(&networkExtenderReleaseTx{NetworkExtenderReleaseLedger: self, tx: tx})
+	}, server.TxReadCommitted)
+}
+
+// Transaction-local view; the parent context and key map are immutable.
+type networkExtenderReleaseTx struct {
+	*NetworkExtenderReleaseLedger
+	tx server.PgTx
+}
+
+// Loads only the identity's bounded epoch disclosures for eligibility checks.
+// Admission re-reads after acquiring its transaction locks.
+func (self *NetworkExtenderReleaseLedger) IssuedKeyHexes(identity []byte, epoch uint64) ([]string, error) {
+	var keyHexes []string
+	server.Tx(self.ctx, func(tx server.PgTx) {
+		view := &networkExtenderReleaseTx{NetworkExtenderReleaseLedger: self, tx: tx}
+		keyHexes, _ = view.IssuedKeyHexes(identity, epoch)
+	}, server.TxReadCommitted)
+	return keyHexes, nil
+}
+
+// Reads every prior disclosure in the epoch, independent of current eligibility.
+func (self *networkExtenderReleaseTx) IssuedKeyHexes(identity []byte, epoch uint64) ([]string, error) {
+	keyHexes := []string{}
+	result, err := self.tx.Query(self.ctx, `
+		SELECT COALESCE(encode(network_extender.public_key, 'hex'), 'removed:' || network_extender_release.extender_id::varchar)
+		FROM network_extender_release
+		LEFT JOIN network_extender USING (extender_id)
+		WHERE identity = $1 AND epoch = $2
+		GROUP BY network_extender.public_key, network_extender_release.extender_id
+		ORDER BY MIN(release_id::varchar)
+	`, identity, int64(epoch))
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var keyHex string
+			server.Raise(result.Scan(&keyHex))
+			keyHexes = append(keyHexes, keyHex)
+		}
+	})
+	return keyHexes, nil
+}
+
+// Counts rates after all shared admission locks have been acquired.
+func (self *networkExtenderReleaseTx) RequestCounts(identity []byte, vantage string, since time.Time) (int, int) {
 	identityCount := 0
 	vantageCount := 0
-	server.Db(self.ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			self.ctx,
-			`
+	result, err := self.tx.Query(
+		self.ctx,
+		`
 			SELECT
 				(SELECT COUNT(*) FROM network_extender_release_request WHERE identity = $1 AND $3 <= request_time),
 				(SELECT COUNT(*) FROM network_extender_release_request WHERE vantage = $2 AND $3 <= request_time)
 			`,
-			identity,
-			vantage,
-			since.UTC(),
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&identityCount, &vantageCount))
-			}
-		})
+		identity,
+		vantage,
+		since.UTC(),
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&identityCount, &vantageCount))
+		}
 	})
 	return identityCount, vantageCount
 }
 
-func (self *NetworkExtenderReleaseLedger) RecordRequest(identity []byte, vantage string, now time.Time) {
-	server.Tx(self.ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			self.ctx,
-			`
+// Refused requests commit in the same transaction as admitted requests.
+func (self *networkExtenderReleaseTx) RecordRequest(identity []byte, vantage string, now time.Time) {
+	server.RaisePgResult(self.tx.Exec(
+		self.ctx,
+		`
 			INSERT INTO network_extender_release_request (request_id, identity, vantage, request_time)
 			VALUES ($1, $2, $3, $4)
 			`,
-			server.NewId(),
-			identity,
-			vantage,
-			now.UTC(),
-		))
-	})
+		server.NewId(),
+		identity,
+		vantage,
+		now.UTC(),
+	))
 }
 
-func (self *NetworkExtenderReleaseLedger) ClientCount(keyHex string, countryCode string, identity []byte, since time.Time) int {
+// Country reservations are read while every competing replica is excluded.
+func (self *networkExtenderReleaseTx) ClientCount(keyHex string, countryCode string, identity []byte, since time.Time) int {
 	extenderId, ok := self.extenderIds[strings.ToLower(keyHex)]
 	if !ok {
-		return 0
+		panic("release ledger is missing an extender key")
 	}
 	count := 0
-	server.Db(self.ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			self.ctx,
-			`
+	result, err := self.tx.Query(
+		self.ctx,
+		`
 			SELECT COUNT(DISTINCT identity)
 			FROM network_extender_release
 			WHERE
@@ -245,40 +306,38 @@ func (self *NetworkExtenderReleaseLedger) ClientCount(keyHex string, countryCode
 				identity != $3 AND
 				$4 <= release_time
 			`,
-			extenderId,
-			countryCode,
-			identity,
-			since.UTC(),
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&count))
-			}
-		})
+		extenderId,
+		countryCode,
+		identity,
+		since.UTC(),
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&count))
+		}
 	})
 	return count
 }
 
-func (self *NetworkExtenderReleaseLedger) RecordRelease(identity []byte, keyHex string, countryCode string, epoch uint64, now time.Time) {
+// A disclosed record is reserved before any replica may inspect the budget.
+func (self *networkExtenderReleaseTx) RecordRelease(identity []byte, keyHex string, countryCode string, epoch uint64, now time.Time) {
 	extenderId, ok := self.extenderIds[strings.ToLower(keyHex)]
 	if !ok {
-		return
+		panic("release ledger is missing an extender key")
 	}
-	server.Tx(self.ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			self.ctx,
-			`
+	server.RaisePgResult(self.tx.Exec(
+		self.ctx,
+		`
 			INSERT INTO network_extender_release (release_id, extender_id, identity, country_code, epoch, release_time)
 			VALUES ($1, $2, $3, $4, $5, $6)
 			`,
-			server.NewId(),
-			extenderId,
-			identity,
-			countryCode,
-			int64(epoch),
-			now.UTC(),
-		))
-	})
+		server.NewId(),
+		extenderId,
+		identity,
+		countryCode,
+		int64(epoch),
+		now.UTC(),
+	))
 }
 
 // Records that a client in a country could not reach an extender (R4).
@@ -391,6 +450,48 @@ func (self *NetworkExtenderBlockedSource) Blocked(keyHex string, countryCode str
 		self.settings.ProbeWindow,
 		server.NowUtc(),
 	)
+}
+
+// Loads one partition's blocked flags in one database round trip, outside the
+// admission transaction. Unknown or removed records have no live blocked flag.
+func (self *NetworkExtenderBlockedSource) BlockedKeys(keyHexes []string, countryCode string) map[string]bool {
+	keyHexesById := map[server.Id]string{}
+	extenderIds := []server.Id{}
+	for _, keyHex := range keyHexes {
+		if id, ok := self.extenderIds[strings.ToLower(keyHex)]; ok {
+			if _, seen := keyHexesById[id]; !seen {
+				extenderIds = append(extenderIds, id)
+			}
+			keyHexesById[id] = strings.ToLower(keyHex)
+		}
+	}
+	blocked := map[string]bool{}
+	if len(extenderIds) == 0 {
+		return blocked
+	}
+	now := server.NowUtc()
+	server.Db(self.ctx, func(conn server.PgConn) {
+		result, err := conn.Query(self.ctx, `
+			SELECT candidate.extender_id
+			FROM unnest($1::uuid[]) AS candidate(extender_id)
+			WHERE (
+				SELECT COUNT(DISTINCT client_id) FROM network_extender_block_report
+				WHERE extender_id = candidate.extender_id AND country_code = $2 AND $4 <= report_time
+			) >= $3 AND EXISTS (
+				SELECT 1 FROM network_extender_address
+				WHERE extender_id = candidate.extender_id AND active AND $5 <= last_probe_success_time
+			)
+		`, extenderIds, strings.ToLower(strings.TrimSpace(countryCode)), self.settings.ReportThreshold,
+			now.Add(-self.settings.ReportWindow).UTC(), now.Add(-self.settings.ProbeWindow).UTC())
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var id server.Id
+				server.Raise(result.Scan(&id))
+				blocked[keyHexesById[id]] = true
+			}
+		})
+	})
+	return blocked
 }
 
 // Drops the release, request and report rows older than `minTime`, which a

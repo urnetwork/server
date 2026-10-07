@@ -9722,4 +9722,9 @@ var migrations = []any{
 		CREATE INDEX network_extender_block_report_report_time
 		ON network_extender_block_report (report_time);
 	`),
+	newSqlMigration(`
+		-- Atomic releases read prior disclosures by identity and epoch.
+		CREATE INDEX network_extender_release_identity_epoch
+		ON network_extender_release (identity, epoch, extender_id)
+	`),
 }

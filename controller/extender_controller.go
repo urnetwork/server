@@ -197,6 +197,11 @@ func SignExtenderRecord(
 	}
 	slices.Sort(dnsPorts)
 	countryCode := extender.RecordCountryCode()
+	directoryTier := extender.DirectoryTier
+	if extender.CanaryChannel != "" {
+		// Older tier-aware readers must also suppress open redistribution.
+		directoryTier = connect.ExtenderDirectoryTierGated
+	}
 	record, err := connect.SignExtenderRecord(rootPrivateKey, &protocol.ExtenderRecordBody{
 		PublicKey:   extender.PublicKey,
 		Addresses:   recordAddresses,
@@ -214,7 +219,8 @@ func SignExtenderRecord(
 		NetworkHost:   config.NetworkHost,
 		// the tier is signed in (connect/EXTENDER.md R1), so a client that
 		// holds a gated record never serves it on an open channel
-		DirectoryTier: uint32(extender.DirectoryTier),
+		DirectoryTier: uint32(directoryTier),
+		CanaryChannel: extender.CanaryChannel,
 	})
 	if err != nil {
 		return nil, nil, err
