@@ -5360,6 +5360,33 @@ its actual plan before equating it with the worker expression. A statement
 timeout with no projection leaves backlog unknown, not empty. Main recovery
 still requires current source and fresh bounded progress evidence.
 
+Transaction-setup qualifier (2026-10-07): the automatic legacy owner and explicit
+applying drain send `BEGIN` and their existing transaction-local statement/lock
+limits in one simple-query request. The transaction remains read committed,
+read write and not deferrable, with one independent commit per contract. Preview
+keeps its separate read-only repeatable-read contract. No connection remains
+borrowed for a later contract or its post callbacks.
+
+The native control counts frontend Query/Sync and backend ReadyForQuery frames
+with sixteen contenders sharing two warmed pool slots, at zero and 5ms injected
+request latency. It compares the old separate setup against the production begin
+string, then the actual financial entrypoints check transaction settings, exact
+debit/payout, independent accounting rollback, replay and session restoration.
+These controls qualify a saved protocol cycle; their setup-only timings are not
+Main settlement throughput. Independent native qualification is required before
+promotion; see [the source and research boundary](../docs/operator/legacy-settlement-pool-capacity-20261007.md).
+
+False-positive qualifier: client `Begin` time through transaction pooling may
+contain waiting for a backend, while application `Acquire` may include a queued
+checkout, construction or idle validation. Neither is server statement execution
+time. A slower combined begin now also includes the local setup it absorbed.
+False-negative qualifier: one fewer request does not resolve grant serialization,
+the sixteen settlement task identities, failed/busy visits, post joins or missing
+matched arrival/completion evidence. Current task finalization already publishes
+a successor before unrelated batch members finish; a slow member alone does not
+prove that all idle workers are unable to claim that successor. Keep settlement
+age and missing-worker findings open until fresh qualified progress is observed.
+
 ### 2.6 Open-contract set size — the close-backlog canary
 Probe: `open-contracts`
 
