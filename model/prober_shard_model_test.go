@@ -92,7 +92,7 @@ func TestProberShardIndependentNetworksAndPayerIsolation(t *testing.T) {
 			t.Fatal("two shards shared a contract")
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
-			_, crossErr = createContractNoEscrowInTx(ctx, tx, a.NetworkId, a.ClientId, p.providerNetworkId, p.providerId, 0, true)
+			_, _, crossErr = createContractNoEscrowInTx(ctx, tx, a.NetworkId, a.ClientId, p.providerNetworkId, p.providerId, 0, true)
 		})
 		if crossErr == nil {
 			t.Fatal("private contract bypassed its payer")

@@ -2447,9 +2447,25 @@ func CreateContractNoEscrowWithUsageOrigin(
 	contractTransferByteCount ByteCount,
 	usageOriginIsSource bool,
 ) (contractId server.Id, returnErr error) {
+	contractId, _, returnErr = CreateContractNoEscrowWithExpiration(ctx, sourceNetworkId, sourceId,
+		destinationNetworkId, destinationId, contractTransferByteCount, usageOriginIsSource)
+	return
+}
+
+// Returns the INSERT's immutable database deadline only after its transaction
+// commits. The usage origin is independent of the no-escrow funding mode.
+func CreateContractNoEscrowWithExpiration(
+	ctx context.Context,
+	sourceNetworkId server.Id,
+	sourceId server.Id,
+	destinationNetworkId server.Id,
+	destinationId server.Id,
+	contractTransferByteCount ByteCount,
+	usageOriginIsSource bool,
+) (contractId server.Id, expirationTime time.Time, returnErr error) {
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	server.Tx(ctx, func(tx server.PgTx) {
-		contractId, returnErr = createContractNoEscrowInTx(
+		contractId, expirationTime, returnErr = createContractNoEscrowInTx(
 			ctx,
 			tx,
 			sourceNetworkId,
@@ -2475,6 +2491,7 @@ func CreateContractNoEscrowWithUsageOrigin(
 	return
 }
 
+// Returns the attempt's INSERT result; the caller owns the commit boundary.
 func createContractNoEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -2484,12 +2501,12 @@ func createContractNoEscrowInTx(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 	usageOriginIsSource bool,
-) (contractId server.Id, returnErr error) {
+) (contractId server.Id, expirationTime time.Time, returnErr error) {
 	ctx = providerWorkSessionContext(ctx)
 	// A shard-owned probe always pays from its private grant. Ordinary network
 	// and friends-and-family contracts keep their existing no-payer behavior.
 	if _, err := validateProberShardPayerInTx(ctx, tx, sourceNetworkId, destinationNetworkId, server.Id{}); err != nil {
-		return server.Id{}, err
+		return server.Id{}, time.Time{}, err
 	}
 	if err := lockActiveContractClientsInTx(
 		ctx,
@@ -2499,11 +2516,10 @@ func createContractNoEscrowInTx(
 		destinationNetworkId,
 		destinationId,
 	); err != nil {
-		return server.Id{}, err
+		return server.Id{}, time.Time{}, err
 	}
 
 	contractId = server.NewId()
-	var expirationTime time.Time
 	server.Raise(tx.QueryRow(
 		ctx,
 		`

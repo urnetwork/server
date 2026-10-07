@@ -98,7 +98,7 @@ func TestCompanionContractWaitsForRacedOrigin(t *testing.T) {
 		resultC := make(chan companionResult, 1)
 		start := time.Now()
 		go func() {
-			contractId, _, _, _, err := nextContract(
+			contractId, _, _, _, _, err := nextContract(
 				ctx,
 				sourceId,
 				companionCreateContract(sourceId, destinationId),
@@ -158,7 +158,7 @@ func TestCompanionContractMissingOriginIsBounded(t *testing.T) {
 		_, sourceId, _, destinationId := companionOriginTestSetup(ctx, t)
 
 		start := time.Now()
-		_, _, _, _, err := nextContract(
+		_, _, _, _, _, err := nextContract(
 			ctx,
 			sourceId,
 			companionCreateContract(sourceId, destinationId),

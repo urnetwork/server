@@ -86,6 +86,7 @@ func TestContractOriginPublicationAllCreatorsAreCommitted(t *testing.T) {
 	})
 }
 
+// A scanned INSERT deadline is not a successful result until commit returns.
 func TestContractOriginPublicationDoesNotEscapeFailedCommit(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -104,12 +105,17 @@ func TestContractOriginPublicationDoesNotEscapeFailedCommit(t *testing.T) {
 		defer owner.Close()
 		before := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("enqueued"))
 		var recovered any
+		var returnedId server.Id
+		var returnedExpiration time.Time
 		func() {
 			defer func() { recovered = recover() }()
-			_, _ = CreateContractNoEscrow(WithContractOriginNotifications(ctx, owner), sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024)
+			returnedId, returnedExpiration, _ = CreateContractNoEscrowWithExpiration(WithContractOriginNotifications(ctx, owner), sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024, true)
 		}()
 		if recovered == nil {
 			t.Fatal("deferred commit failure did not reach transaction caller")
+		}
+		if returnedId != (server.Id{}) || !returnedExpiration.IsZero() {
+			t.Fatal("failed commit returned a signable contract id or deadline")
 		}
 		if after := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("enqueued")); after != before {
 			t.Fatalf("failed commit enqueued an origin: %v -> %v", before, after)

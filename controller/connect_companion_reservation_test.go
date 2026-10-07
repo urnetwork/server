@@ -36,7 +36,7 @@ func TestProberCompanionResponseUsesActualReservation(t *testing.T) {
 		}
 		request := companionCreateContract(providerId, proberId)
 		request.TransferByteCount = 128 * uint64(opening)
-		contractId, count, _, _, err := nextContract(ctx, providerId, request, true, model.ProvideModeStream, connect.DefaultContractManagerSettings())
+		contractId, count, _, _, _, err := nextContract(ctx, providerId, request, true, model.ProvideModeStream, connect.DefaultContractManagerSettings())
 		if err != nil {
 			t.Fatal(err)
 		}

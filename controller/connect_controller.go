@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
@@ -854,7 +855,7 @@ func CreateContract(
 		return nil, err
 	}
 
-	contractId, transferByteCount, priority, streamId, err := nextContract(ctx, clientId, createContract, companion, provideMode, contractManagerSettings)
+	contractId, transferByteCount, priority, streamId, expirationTime, err := nextContract(ctx, clientId, createContract, companion, provideMode, contractManagerSettings)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
@@ -887,11 +888,10 @@ func CreateContract(
 
 	leaveResponse := server.EnterContractCreationStage(ctx, server.ContractStageResponse)
 	defer leaveResponse()
-	expirationTime, err := model.GetContractExpirationTime(ctx, contractId)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if expirationTime == nil {
+	if expirationTime.IsZero() {
 		return nil, fmt.Errorf("new contract has no expiration time: %s", contractId)
 	}
 	expirationTimeUnixMilli := expirationTime.UnixMilli()
@@ -952,6 +952,7 @@ func CreateContract(
 	return []*protocol.Frame{frame}, nil
 }
 
+// Carries the committed creation result through to signing without another read.
 func nextContract(
 	ctx context.Context,
 	clientId server.Id,
@@ -959,7 +960,7 @@ func nextContract(
 	companion bool,
 	provideMode model.ProvideMode,
 	contractManagerSettings *connect.ContractManagerSettings,
-) (server.Id, model.ByteCount, model.Priority, *server.Id, error) {
+) (server.Id, model.ByteCount, model.Priority, *server.Id, time.Time, error) {
 	destinationId := server.Id(createContract.DestinationId)
 
 	/*
@@ -1066,6 +1067,8 @@ func payerMaxContractTransferByteCount(ctx context.Context, payerNetworkId serve
 	)
 }
 
+// Model creation owns commit and returns its immutable database deadline.
+// Later stream work may reject the response but never changes that deadline.
 func newContract(
 	ctx context.Context,
 	sourceId server.Id,
@@ -1078,7 +1081,7 @@ func newContract(
 	forceStream bool,
 	streamVersion int,
 	contractManagerSettings *connect.ContractManagerSettings,
-) (contractId server.Id, contractTransferByteCount model.ByteCount, priority model.Priority, streamId *server.Id, returnErr error) {
+) (contractId server.Id, contractTransferByteCount model.ByteCount, priority model.Priority, streamId *server.Id, expirationTime time.Time, returnErr error) {
 	// Recheck lifecycle at the write boundary. CreateContract's detailed lookup
 	// provides the fast rejection and diagnosis; this fresh active-only read closes
 	// the race where either endpoint is deactivated before the contract insert.
@@ -1116,7 +1119,7 @@ func newContract(
 	) * model.ByteCount(len(intermediaryIds)+1)
 
 	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
-		contractId, err = model.CreateContractNoEscrowWithUsageOrigin(
+		contractId, expirationTime, err = model.CreateContractNoEscrowWithExpiration(
 			ctx,
 			sourceNetworkId,
 			sourceId,
@@ -1208,6 +1211,7 @@ func newContract(
 			return
 		}
 		contractId = escrow.ContractId
+		expirationTime = escrow.ExpirationTime
 		// The prober's companion reservation may be smaller than the remote
 		// provider requested. Sign only the capacity actually held in escrow.
 		contractTransferByteCount = escrow.TransferByteCount
@@ -1252,6 +1256,7 @@ func newContract(
 			return
 		}
 		contractId = escrow.ContractId
+		expirationTime = escrow.ExpirationTime
 		// The escrow shrinks to fit when the payer's balance is below the
 		// request. Sign only the capacity actually held in escrow.
 		contractTransferByteCount = escrow.TransferByteCount
