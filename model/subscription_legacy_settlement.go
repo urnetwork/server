@@ -39,6 +39,7 @@ const (
 	legacySettlementBusyIntent
 	legacySettlementBusyContract
 	legacySettlementBusyGrantSet
+	legacySettlementBusyAdmission
 )
 
 // The fixed pass cutoff lets skipped owners return after a finite cohort.
@@ -70,13 +71,16 @@ type LegacySettlementFlushResult struct {
 	HeadCompleted  int `json:"head_completed"`
 	HeadBusyOrGone int `json:"head_busy_or_gone"`
 	HeadFailed     int `json:"head_failed"`
-	// The three gates partition busy visits; head counts remain total subsets.
+	// The four gates partition busy visits; head counts remain total subsets.
+	// Admission is a Redis hint, not evidence of a current PostgreSQL lock.
 	BusyIntentUnavailable       int `json:"busy_intent_unavailable"`
 	BusyContractUnavailable     int `json:"busy_contract_unavailable"`
 	BusyGrantSetMismatch        int `json:"busy_grant_set_mismatch"`
 	HeadBusyIntentUnavailable   int `json:"head_busy_intent_unavailable"`
 	HeadBusyContractUnavailable int `json:"head_busy_contract_unavailable"`
 	HeadBusyGrantSetMismatch    int `json:"head_busy_grant_set_mismatch"`
+	BusyAdmissionDeferred       int `json:"busy_admission_deferred"`
+	HeadBusyAdmissionDeferred   int `json:"head_busy_admission_deferred"`
 	// One of each sixteen head visits may join the grant queue. These are head
 	// subsets, not additional visits; absent fields in earlier results are unknown.
 	HeadGrantWaitAttempted int `json:"head_grant_wait_attempted"`
@@ -250,6 +254,13 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 	server.HandleError(func() {
 		func() {
 			defer enterLegacySettlementTiming(ctx, legacySettlementFinancial)()
+			admission, deferred := tryLegacySettlementAdmission(ctx, contractId, wait)
+			if deferred {
+				completed, busy, busyGate = false, true, legacySettlementBusyAdmission
+				return
+			}
+			transactionReturned := false
+			defer func() { admission.finish(ctx, transactionReturned, completed, busyGate) }()
 			defer func() {
 				if r := recover(); r != nil {
 					if r == errLegacySettlementGrantWaitBusy {
@@ -270,6 +281,7 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 				posts, completed, busy, busyGate, err = flushLegacySettlementWithGrantWaitInTx(ctx, tx, contractId, wait)
 				server.Raise(err)
 			}, server.TxReadCommitted, server.OptNoRetry())
+			transactionReturned = true
 		}()
 		func() {
 			defer enterLegacySettlementTiming(ctx, legacySettlementJoinedPosts)()
@@ -306,6 +318,7 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 // Tests can interrupt after a real committed prefix.
 func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *LegacySettlementCursor, limit int,
 	settle func(context.Context, server.Id, *legacySettlementGrantWait) (bool, bool, legacySettlementBusyGate, error)) (result LegacySettlementFlushResult, returnErr error) {
+	bounded = context.WithValue(bounded, legacySettlementAdmissionPageKey{}, &legacySettlementAdmissionPage{allowForwardHints: after != nil, probed: map[string]bool{}})
 	pageBudgetExceeded := func(err error) bool {
 		return ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errLegacySettlementPageBudget &&
 			isSettlementPageCancellation(err)
@@ -398,7 +411,11 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 			if visitHead && result.HeadVisited%legacySettlementHeadGrantWaitStride == 0 {
 				grantWait = &legacySettlementGrantWait{}
 			}
-			completed, busy, busyGate, err := settle(bounded, next.ContractId, grantWait)
+			settlementContext := bounded
+			if visitHead {
+				settlementContext = context.WithValue(bounded, legacySettlementAdmissionHeadKey{}, true)
+			}
+			completed, busy, busyGate, err := settle(settlementContext, next.ContractId, grantWait)
 			if err != nil && bounded.Err() != nil {
 				// The current transaction may have rolled back or its commit
 				// acknowledgement may be unknown. Retain the previous cursor;
@@ -450,6 +467,11 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 					result.BusyGrantSetMismatch++
 					if visitHead {
 						result.HeadBusyGrantSetMismatch++
+					}
+				case legacySettlementBusyAdmission:
+					result.BusyAdmissionDeferred++
+					if visitHead {
+						result.HeadBusyAdmissionDeferred++
 					}
 				}
 			}
