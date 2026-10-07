@@ -576,6 +576,9 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (
 	valid := false
 	var credentialChangeTime time.Time
 	server.Db(ctx, func(conn server.PgConn) {
+		query := beginStateQuery(ctx, byJwt.ClientId != nil)
+		defer query.finish(ctx)
+		queryFound := false
 		if byJwt.ClientId == nil {
 			result, err := conn.Query(ctx, `
 				SELECT network_user.credential_change_time
@@ -589,8 +592,10 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (
 				if result.Next() {
 					server.Raise(result.Scan(&credentialChangeTime))
 					valid = true
+					queryFound = true
 				}
 			})
+			query.complete(queryFound, byJwt.CreateTime, credentialChangeTime)
 			return
 		}
 
@@ -612,8 +617,10 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (
 			if result.Next() {
 				server.Raise(result.Scan(&credentialChangeTime))
 				valid = true
+				queryFound = true
 			}
 		})
+		query.complete(queryFound, byJwt.CreateTime, credentialChangeTime)
 	})
 
 	// the caller-facing message stays the same for both branches; the split

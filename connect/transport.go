@@ -1431,7 +1431,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		if byJwt.ClientId == nil {
 			return http.StatusForbidden, nil
 		}
-		if err := jwt.ValidateByJwtState(authCtx, byJwt, true); err != nil {
+		if err := jwt.ValidateByJwtState(jwt.WithStateQuerySource(authCtx, jwt.StateQueryConnectH1), byJwt, true); err != nil {
 			if glog.V(1) {
 				glog.Infof("[t]inactive auth jwt: %s\n", err)
 			}
@@ -2262,7 +2262,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			if byJwt.ClientId == nil {
 				return fmt.Errorf("Missing client id.")
 			}
-			if authErr = jwt.ValidateByJwtState(authCtx, byJwt, true); authErr != nil {
+			if authErr = jwt.ValidateByJwtState(jwt.WithStateQuerySource(authCtx, jwt.StateQueryConnectH3), byJwt, true); authErr != nil {
 				return authErr
 			}
 

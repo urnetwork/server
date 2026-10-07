@@ -30,6 +30,7 @@ func newProviderEgressControl(credentials *providerEgressCredentials, notificati
 }
 
 func (self *providerEgressControl) ConnectControl(ctx context.Context, token string, args *connect.ConnectControlArgs) (*connect.ConnectControlResult, error) {
+	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryProberControl)
 	return server.HandleError2(func() (*connect.ConnectControlResult, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err

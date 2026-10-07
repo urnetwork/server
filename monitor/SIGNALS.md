@@ -12241,8 +12241,74 @@ The opt-in API instrumentation adds only fixed cells:
   `urnetwork_connect_control_frames_inflight` and
   `urnetwork_connect_control_frame_seconds_{sum,count}` locate handler
   residence. Every child exists at zero on a capable executable. `internal`
-  includes resident and other direct controller callers; it is not a provider
-  identity. HTTP ingress is stamped by the server entry point.
+  includes resident and direct prober controller callers; it is not a provider
+  identity. `http` is stamped by the shared `controller.ConnectControl`
+  wrapper, including hosted `localclient.Authority.ConnectControl` calls that
+  perform no HTTP request. This label identifies the wrapper, not the network
+  transport or emitting service. Preserve this qualifier for the contract
+  stage and rejection families that inherit the same context marker.
+
+Trusted JWT-state work is separately exposed by
+`urnetwork_jwt_state_queries_total{caller,operation,credential,outcome}` at
+`jwt.ValidateByJwtState`. It has 252 initialized cells: 21 server-selected
+caller/operation pairs, `account|client` statement shapes, and
+`query_error|state_valid|no_active_row|credential_rotated|canceled|deadline`.
+The caller/operation pairs are:
+
+| Caller | Operations and owning entry points |
+|---|---|
+| `api` | `control`, `mint`, `retire`, `discovery`, `refresh`, `other`, selected by exact method/path classes at `session.ClientSession.Auth` |
+| `connect_h1`, `connect_h3` | `handshake`, selected by the actual transport admission handler; H1 header, auth-frame and H1+ share H1 |
+| `hosted` | `bootstrap`, `mint`, `retire`, `control`, `discovery`, `refresh`, `public_key`, `read`, `other`, selected by local authority construction or typed/raw dispatch |
+| `prober` | `mint`, `retire`, `control`, selected by direct provider-egress credential/control owners |
+| `unknown` | `unknown`, for unannotated or invalid internal source markers |
+
+These names identify a code boundary, not a process role, client identity or
+distinct caller count. Request headers cannot select them. Fixed child handles
+are resolved during initialization; observation adds no DB/API calls, auth
+cache, goroutine, retry, deadline or authorization-policy change. Require the
+exact qualified source in API, Connect, Proxy and Taskworker, and current
+host/block/process inventory before comparing their contributions. A missing
+family on an older executable is unavailable coverage, not zero work. On a
+capable executable, nonzero `unknown` is measured unclassified work and must
+remain in the total; it cannot be reassigned from a SQL shape or service name.
+
+One event belongs to one client-side `conn.Query` attempt after pool acquisition
+and is recorded on result completion or panic unwind. Each DB callback retry
+counts separately. Unfinished attempts, failures before this query boundary,
+signature/claim refusals and ownership refusals before validation are excluded.
+`no_active_row` means this query returned no matching state; a returned row
+can instead produce `credential_rotated` when the Go timestamp check rejects
+it. `state_valid` describes that state check only: the request, controller,
+handshake or downstream operation can still fail. Query failures use canceled
+or deadline only when that attempt's context supplies the corresponding error;
+other query failures remain `query_error`.
+
+The multiplicity control is per authenticated operation, not per frame or
+unique credential. A hosted child control pack currently makes one ownership
+query and one JWT-state query, even when it contains 16 frames; its frames use
+the existing `http` wrapper label. Direct prober control makes one JWT-state
+query per pack and uses `internal` frames. Verified resident in-band control
+uses that same `internal` label but does not revalidate JWT state per pack.
+Durable control frames can perform their own model work. The raw hosted mint
+wrapper currently validates twice; the typed SDK mint validates once. An
+inactive hosted child can stop at the ownership query before JWT validation;
+an externally revoked prober child retained in its owner's registry reaches
+the state check until that owner removes its membership. Keep these distinct
+when examining retry pressure; neither query count proves new-client churn.
+
+The existing session-auth family covers `ClientSession.Auth` only, and the
+HTTP route's `probe_claimed` header partition is client supplied. Neither
+substitutes for the trusted JWT boundary. Pair fresh complete counters from
+the same exact build, process and boot at both ends; mixed generations,
+missing scrapes and resets leave interval ownership unknown. These client-side
+attempt events are not identical to PostgreSQL completed-statement counters.
+For PGSS 1.10 captures without per-entry lifetime markers, retain conditional
+lower bounds and full native-key/source-template joins; do not derive auth
+success fractions, query means, rates, CPU share, or runtime-service ownership
+from those captures. A unique source template narrows possible code paths but
+does not supply the missing same-process emitter evidence. No raw IDs, tokens,
+SQL, URLs or arbitrary error labels belong in this metric or its alerts.
 
 The shared controller also exports
 `urnetwork_contract_creation_completed_stage_seconds_total{ingress,stage}`,

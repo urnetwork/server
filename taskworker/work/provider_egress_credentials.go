@@ -97,6 +97,7 @@ func recordProviderEgressCredentialResult(operation string, err error) {
 }
 
 func (self *providerEgressCredentials) AuthNetworkClient(ctx context.Context, args *connect.AuthNetworkClientArgs) (result *connect.AuthNetworkClientResult, returnErr error) {
+	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryProberMint)
 	defer func() { recordProviderEgressCredentialResult("mint", returnErr) }()
 	return server.HandleError2(func() (*connect.AuthNetworkClientResult, error) {
 		if args == nil || args.ClientId != nil || args.SourceClientId == nil || server.Id(*args.SourceClientId) != self.clientId {
@@ -134,6 +135,7 @@ func (self *providerEgressCredentials) AuthNetworkClient(ctx context.Context, ar
 }
 
 func (self *providerEgressCredentials) RemoveNetworkClient(ctx context.Context, args *connect.RemoveNetworkClientArgs) (result *connect.RemoveNetworkClientResult, returnErr error) {
+	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryProberRetire)
 	defer func() { recordProviderEgressCredentialResult("retire", returnErr) }()
 	return server.HandleError2(func() (*connect.RemoveNetworkClientResult, error) {
 		if args == nil || args.ClientId == (connect.Id{}) || server.Id(args.ClientId) == self.clientId {

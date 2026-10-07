@@ -213,7 +213,7 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request) 
 				if err != nil {
 					return err
 				}
-				if err := jwt.ValidateByJwtState(ctx, byJwt, false); err != nil {
+				if err := jwt.ValidateByJwtState(jwt.WithStateQuerySource(ctx, sessionStateQuerySource(req)), byJwt, false); err != nil {
 					return err
 				}
 				if glog.V(2) {
