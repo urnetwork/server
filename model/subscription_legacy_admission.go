@@ -192,8 +192,9 @@ func acquireLegacySettlementAdmission(ctx context.Context, balanceIds []server.I
 	return nil, err == nil && busy
 }
 
-// Run only after the financial transaction has unwound and released its PG
-// connection. No joined projection or stream callback extends the hint lease.
+// Cleanup follows PG release, or a partial acquisition with no transaction.
+// Confirmed transactions release in their first post group; outer cleanup also
+// covers rollback and unknown commit. Every delete still checks this token.
 func (self *legacySettlementAdmission) release(ctx context.Context) {
 	if self == nil || len(self.keys) == 0 {
 		return
