@@ -6083,6 +6083,7 @@ func loadClientScoresWithCursor(
 
 		addTarget := func(
 			read targetRead,
+			groupId *server.Id,
 			facetSampleKey func(effectiveClientLocationId server.Id, facet ipFamilyFacet, index int) string,
 			sampleKey func(effectiveClientLocationId server.Id, index int) string,
 		) {
@@ -6113,7 +6114,7 @@ func loadClientScoresWithCursor(
 			if returnErr != nil || !ok {
 				sourceIncomplete = true
 				if returnErr == nil && observation != nil {
-					observation.missingTargets++
+					observation.missingTarget(groupId, clientLocationId, rankMode)
 				}
 				return
 			}
@@ -6125,6 +6126,7 @@ func loadClientScoresWithCursor(
 		for locationId, read := range locationReads {
 			addTarget(
 				read,
+				nil,
 				func(effectiveClientLocationId server.Id, facet ipFamilyFacet, index int) string {
 					return clientScoreLocationFacetSampleKey(forceMinimum, rankMode, locationId, effectiveClientLocationId, facet, index)
 				},
@@ -6139,6 +6141,7 @@ func loadClientScoresWithCursor(
 		for locationGroupId, read := range locationGroupReads {
 			addTarget(
 				read,
+				&locationGroupId,
 				func(effectiveClientLocationId server.Id, facet ipFamilyFacet, index int) string {
 					return clientScoreLocationGroupFacetSampleKey(forceMinimum, rankMode, locationGroupId, effectiveClientLocationId, facet, index)
 				},
@@ -6247,6 +6250,7 @@ func FindProviders2(
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
 	observation := newFindProviders2SelectionObservation(findProviders2)
+	observation.beginPrivateCapture(session.Ctx)
 	defer observation.finish(session.Ctx)
 	providers := []*FindProvidersProvider{}
 	rankMode := RankModeQuality
@@ -6320,6 +6324,7 @@ func FindProviders2(
 
 	if 0 < len(locationIds) || 0 < len(locationGroupIds) {
 		observation.discovery = true
+		observation.privateGroupCount = len(locationGroupIds)
 		requestSettings := requestEgressIndexSettings()
 		// use a min block size to reduce db activity
 		var count int
@@ -6358,6 +6363,7 @@ func FindProviders2(
 		observation.targetKind = findProviders2TargetKind(findProviders2, countryLocations, targetDirectory)
 
 		observation.enter("load_primary")
+		observation.load.privateSource = "primary_legacy"
 		loadStartTime := time.Now()
 		clientScores, primaryCursor, err := loadPreferredClientScoresWithCursor(
 			requestSettings.NativeReaderEnabled,
@@ -6882,6 +6888,7 @@ func FindProviders2(
 				backfillTierOffset := requestSettings.BackfillTierOffset
 
 				observation.enter("load_backfill")
+				observation.load.privateSource = "alternate_legacy"
 				otherClientScores, otherCursor, err := loadPreferredClientScoresWithCursor(
 					requestSettings.NativeReaderEnabled,
 					false,
@@ -6960,6 +6967,7 @@ func FindProviders2(
 						pool, cursor := source.scores, source.cursor
 						if cursor == nil || cursor.nativeOnly {
 							observation.enter("load_backfill")
+							observation.load.privateSource = "online_legacy"
 							var err error
 							pool, cursor, err = loadClientScoresWithCursor(false, source.mode, session.Ctx, locationIds, locationGroupIds, clientLocationId, loadCount, facets, &observation.load)
 							if err != nil {
