@@ -4,6 +4,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -116,6 +117,21 @@ func updateProviderUrlProbeEligibilityForClient(ctx context.Context, tx server.P
 // pass, or reactivate a false hint. Keep this maintenance outside claim calls;
 // existing tokens, progress and retry deadlines never move.
 func updateProviderUrlProbeEligibility(ctx context.Context, tx server.PgTx) {
+	updateProviderUrlProbeEligibilityForClients(ctx, tx, nil, server.NowUtc(), providerUrlProbeAdmissionSql("provider_location"))
+}
+
+// Scope both source admission and existing-cycle reconciliation before writing.
+// Nil retains the atomic fleet helper used by score transactions.
+func updateProviderUrlProbeEligibilityForClients(ctx context.Context, tx server.PgTx, clientIds []server.Id, now time.Time, admissionSql string) {
+	locationScope, cycleScope := "", ""
+	insertArgs := []any{now, ProvideModePublic}
+	updateArgs := []any{ProvideModePublic}
+	if clientIds != nil {
+		locationScope = " AND provider_location.client_id = ANY($3)"
+		cycleScope = " WHERE cycle.client_id = ANY($2)"
+		insertArgs = append(insertArgs, clientIds)
+		updateArgs = append(updateArgs, clientIds)
+	}
 	server.RaisePgResult(tx.Exec(ctx, `
 		INSERT INTO provider_egress_probe_cycle (client_id, cycle_started_at, next_attempt_at, eligible)
 		SELECT provider_location.client_id, $1, LEAST($1::timestamp, COALESCE((
@@ -129,8 +145,8 @@ func updateProviderUrlProbeEligibility(ctx context.Context, tx server.PgTx) {
 		AND provider.active AND provider.source_client_id IS NULL
 		AND NOT EXISTS (SELECT 1 FROM provider_egress_probe_cycle AS cycle WHERE cycle.client_id = provider_location.client_id)
 		AND EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = provider_location.client_id AND provide_mode = $2)
-		AND `+providerUrlProbeAdmissionSql("provider_location")+`
-		ON CONFLICT (client_id) DO NOTHING`, server.NowUtc(), ProvideModePublic))
+		AND `+admissionSql+locationScope+`
+		ON CONFLICT (client_id) DO NOTHING`, insertArgs...))
 
 	// Claims still recheck current gates. Reconcile both admission and rejection
 	// in the same transaction as the scores that determine their eligibility.
@@ -144,10 +160,10 @@ func updateProviderUrlProbeEligibility(ctx context.Context, tx server.PgTx) {
 				AND (provider_location.ipv4_proven OR NOT provider_location.ipv6_proven)
 				AND provider.active AND provider.source_client_id IS NULL
 				AND EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = cycle.client_id AND provide_mode = $1)
-				AND `+providerUrlProbeAdmissionSql("provider_location")+`
-			) AS eligible FROM provider_egress_probe_cycle AS cycle
+				AND `+admissionSql+`
+			) AS eligible FROM provider_egress_probe_cycle AS cycle`+cycleScope+`
 		)
 		UPDATE provider_egress_probe_cycle AS cycle SET eligible = eligibility.eligible
 		FROM eligibility WHERE cycle.client_id = eligibility.client_id
-		AND cycle.eligible IS DISTINCT FROM eligibility.eligible`, ProvideModePublic))
+		AND cycle.eligible IS DISTINCT FROM eligibility.eligible`, updateArgs...))
 }
