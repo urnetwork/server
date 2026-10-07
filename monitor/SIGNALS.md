@@ -3615,6 +3615,35 @@ locally trusted key for the selected address. It does not prove inventory or
 source completeness, establish the original key's trust, or make a successful
 remote command a service-health result.
 
+**Local capture context:** a watcher audit can fail before SSH admission or
+any remote command. Preserve that stage and its fixed failure cause separately
+from transport and application results. For a watcher managed by the local
+user systemd instance, validate the actual invoking UID, user runtime directory
+and bus socket ownership, and the intended `systemctl --user` context before
+checking the pinned unit, PID, boot/start identity and executable hash. Setting
+the process UID in a system-wide transient unit does not by itself provide
+`XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`.
+
+A retained local RED/GREEN control reproduced `command_failed` with both
+variables absent; supplying the correct user's runtime directory and bus
+address let the unchanged watcher verifier complete. It invoked no binder,
+shared SSH queue or remote reader. This establishes a local prerequisite, not
+reader readiness or the cause of an earlier receipt that discarded its nested
+`AuditError.cause`. Preserve a closed cause enum through the outer owner; do
+not reconstruct a lost cause from a later successful control or expose raw
+stderr/environment values.
+
+The capture process's own manager and cgroup are a separate requirement. If
+the shared lease client verifies its caller through `systemctl --user`, the
+caller must belong to that manager's exact unit and `ControlGroup`; exporting
+bus variables into a system-wide unit does not satisfy that ownership check.
+Qualify the actual bounded entrypoint, including its resource fence and queue
+ownership, before declaring the reader ready. A local audit failure says
+nothing about remote service health; a successful local audit says nothing
+about remote reachability or application output. These are capture runbook
+requirements, not an additional automatic probe or a reason to weaken the
+existing identity and admission checks.
+
 ACTION: first distinguish SSH transport/authentication from the remote
 command's status. Before attributing a local overlay failure, correlate
 contemporaneous failures across independent inventory targets with bounded
@@ -18221,6 +18250,39 @@ from the current `services.yml` inventory: first require the remote hostname
 to match, then read the running container image/digest, embedded source
 revision, process start, and drain ancestors. A legacy address table or a
 normal edge's 404 is neither host assignment nor runtime provenance.
+
+**Native worker unit identity:** derive the exact systemd filename from that
+same current inventory and the owning Warp unit generator. A transparent
+interface contributes to the service key: the generated filename is
+`warp-<env>-<service>-<interface>-<short-block>.service`, while the worker's
+`service run` arguments still identify the actual service and block. Do not
+substitute the ordinary plain-service filename or confuse the interface key
+with the command's block argument. Use the same derived name in the unit
+lookup, worker cgroup check and returned observation schema. See §18's related
+LB interface-versus-block identity qualifier.
+
+Treat `LoadState=not-found` for an incorrectly derived plain-service name as
+a collector refusal. It does not prove the assigned worker is absent. A
+successful SSH child and a released shared lease do not make that observation
+complete. If unit validation stopped before Docker or journal access, retain
+those unreached stages explicitly: application panic cause, log contents and
+container state remain unknown. Conversely, a correct source derivation or
+passing synthetic control does not prove that the generated unit is present
+on the current host; require the actual native observation.
+
+The bounded private Proxy discriminator keeps worker and container generation
+stable across its before/after bracket and clips the fresh log window to each
+selected container's start. Correcting a unit name must preserve its original
+host/block scope, hostname-before-sudo check, shared SSH admission and byte,
+row and time limits. Its qualified two-block profile allows a 120-second
+window, at most 16 matching journal rows and four private error samples per
+block, 32 rows/eight samples total, 256 KiB journal and 128 KiB private output,
+with 20-second native, 25-second SSH and 40-second reader budgets. Matching a
+function in a stack selects evidence; it does not assign the fault to that
+function. Raw error samples stay private. Regression controls must accept the
+inventory-generated name and reject the observed plain-name `not-found`, a
+wrong block and a mismatched worker cgroup. This diagnostic contract adds no
+automatic service-health coverage and authorizes no restart or redeployment.
 
 The 2026-09-01 post-fix audit found the source closure ready but the tools
 stale. Warp `217392e6` contains `2e13328`; its deterministic transparent
