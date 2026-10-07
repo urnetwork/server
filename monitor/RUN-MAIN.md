@@ -673,8 +673,23 @@ the grant, and start only its qualified finite read. Write `release\n` only
 after every transport descendant is joined or the owner proves none started.
 EOF, cancellation and timeout deliberately retain the active reservation until
 native dead-owner cleanup proves its exact original cgroup empty or removed.
-The helper's 240-second process budget does not extend the existing read or
-outer resource limits. A failed grant is a local refusal, not Main contact.
+The helper defaults to a 240-second process budget, including admission and
+setup. A separately qualified long-operation wrapper can invoke
+`monitor ssh-lease PRIVATE_REQUEST_JSON --lifetime-seconds N`, where `N` is a
+canonical integer from 1 through 1900. Derive `N` from the remaining original
+owner-service budget before spawning the helper. Before starting the owned
+operation, require enough time in both the helper and owner budgets for its
+complete existing work limit and joined cleanup; include queue wait and setup
+in that accounting. Do not reset either deadline or renew a reservation to
+extend work. The option changes no read, SQL, owner-service or SSH capacity
+limit. Ordinary finite readers keep the default invocation. A failed grant is
+a local refusal, not Main contact.
+
+The long-operation helper may be a separately pinned compatible build while
+the watcher remains on its exact current binary. Keep the request's watcher
+identity and the caller's full live-watcher verification unchanged; bind the
+helper executable and its source qualification separately. Its queue protocol,
+native owner checks and retained-reservation behavior must match the watcher.
 
 Before this profile is used, qualify the coupled watcher and diagnostic source,
 normal/race/vet controls, rendered target, one direct/one atomic-hop admission,
