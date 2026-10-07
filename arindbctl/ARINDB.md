@@ -1,7 +1,7 @@
 # ARIN database design
 
 This document describes the implementation and retained research and measurements
-through 2026-10-06, including the discriminator reviews recorded in
+through 2026-10-07, including the discriminator reviews recorded in
 [CLASSIFICATION.md](CLASSIFICATION.md) and the release evidence below.
 `arindbctl` builds an immutable IPv4/IPv6 MaxMind database that combines
 registration facts, reviewed network-use evidence, and geographic risk. A
@@ -633,6 +633,121 @@ They do not identify the publisher's loaded ARIN reader, attribute the counts
 to the new catalog, prove affected-group availability, or repair historical
 classification rows. The catalog length and readiness markers also do not
 prove provider membership or usable selection.
+
+The October 7 04:24:05 UTC bounded native observation now supplies later
+post-release evidence. Actual receipt `7393f20e` passed the closed public
+contract replay and independent interpretation `8c9afb3e`. The publication
+contains **707 native Quality, 6,488 Speed and 77,317 Online** providers,
+including 5,781 Speed-without-Quality providers. Its source evaluation ran
+04:17:49.212198 to 04:18:36.970133 UTC and publication occurred at
+04:23:47.221464 UTC. The source is later than the actual V17 eight-Taskworker
+runtime observation completed at 04:12:48.888979 UTC. That runtime evidence is
+metric self-report; it does not identify the native publisher or every process
+holding an ARIN mapping. The earlier 287-Quality count is a different
+observation, not a control proving a catalog-caused increase.
+
+Two equal fixed Redis publication/sample pairs bracketed one indexed,
+read-only query. The query took 0.836 seconds and the native body took 1.077
+seconds. It classified 256 publication-salted-hash-selected Speed-only
+providers into these first-failing **current** facts:
+
+| Current fact | Sample providers | US | France |
+| --- | ---: | ---: | ---: |
+| Live nonquality classification and nonquality rollup | 248 | 211 | 10 |
+| Egress ratio now below the source threshold | 8 | 6 | 2 |
+
+All 256 observed live connection rows have selected epoch `1791310718` and a
+lookup within the selected-resource interval; the retained sample has no
+observed live-row lookup deficit. The aggregate does not establish one live
+row per provider. The eight ratio failures occur before live-classification
+checks in the ordered discriminator, while all sampled members passed the
+ratio at the earlier publication evaluation. These are different observation
+times, not a reconstruction of why the publisher originally excluded them.
+The 248 late-branch providers passed the earlier current guards and retained
+nonquality classifications plus nonquality rollups. Their stored booleans
+cannot distinguish an unknown subscriber identity, ambiguous ownership,
+explicit hosting/proxy/virtual-ISP exclusion, or an origin withholding reason.
+The sample proportions cannot be extrapolated to the 5,781-member Speed-only
+population, a country, or a state/province; missing first-failure categories
+also do not establish that their underlying conditions are absent elsewhere.
+
+The next cause discriminator is an isolated source candidate, not deployed
+diagnostic evidence. It caps requests at 64 exact connection keys and reuses
+the authenticated Connect owner registry, a fresh primary-key fact read, and
+the serving ARIN reader. It checks the same owner before and after decoding
+typed classification state, allocation/rule identity, complete bounded origin
+ASN sets and the four closed withholding reasons. It does not hash or open a
+second database, refresh stored lookup clocks, export addresses, or change
+Quality policy. The existing capture protocol is kept separate. Independent
+source reviews accepted the core (`5dbd1062`) and its bounded Connect-only
+caller (`482037ee`). Go formatting/compilation, native controls, the new SQL
+selector and final publication-pair composition remain unqualified. A selected
+compatible service and explicit current diagnostic endpoint authority are
+also required before Root can execute it. The caller selects at most 32 exact
+Connect processes, retains missing or duplicate handler ownership as unknown,
+and does not require a native publisher endpoint or all-fleet retirement proof.
+Its public projection explicitly leaves publication binding unproved until the
+parent validates the unchanged source pair after capture.
+Unavailable owners, changed owners, stale facts and unsupported records must
+remain explicit unknowns. The policy remains: an identified residential or
+business subscriber ISP defaults clean unless additional contrary evidence
+applies; explicit proxy, hosting, virtual-ISP, origin and independent risk
+exclusions remain in force.
+
+The separate October 7 US/France research packet proposes twelve exact
+subscriber ASNs on the unchanged `320b4c10` catalog baseline:
+
+| Reviewed operator group | Exact ASN additions | Country and limited regional evidence |
+| --- | --- | --- |
+| GCI | 8047 | Alaska communities, subject to address availability |
+| Alaska Communications | 7782 | Alaska home access; Lower-48 transport is not retail presence |
+| altafiber / Hawaiian Telcom | 36149 | Hawaii; extends the existing group while retaining 6181 |
+| Sonic | 7065, 46375 | California and limited Dallas activations, not statewide Texas coverage |
+| EPB | 26827 | Current Chattanooga/Tennessee; North Georgia remains dated historical evidence |
+| C Spire Fiber | 11272 | Listed fiber towns in Alabama, Florida, Mississippi and Tennessee |
+| SFR | 21502 | French household THD; extends the existing group while retaining 15557 |
+| K-Net | 24904 | Conditional named networks; 15 departments are a conservative subset |
+| Nordnet | 8362 | Conditional communes in 66 departments across 13 metropolitan regions |
+| Vialis | 12727, 42487 | Bas-Rhin and Haut-Rhin; the ASN name does not establish Moselle service |
+
+Each exact ASN has retained primary registry and subscriber-service evidence,
+with independent cross-review. AS36149 qualifies through Hawaiian Telcom's own
+residential terms before the documented altafiber relationship supplies group
+deduplication. Both Sonic legal entities have separate service evidence. GCI's
+retained ARIN contacts establish the current operating-network/brand link;
+the unavailable DBA certificate is not evidence of a formal legal name change.
+The Nordnet contract closes Manche to new customers, so its territorial listing
+does not establish new-order availability. K-Net's 15-department list is not
+exhaustive. FDN-to-AS20766 was rejected because the registry identity is Gitoyen;
+Ozone-to-AS39886 remains deferred. No affiliate ASN or prefix is approved by
+association.
+
+The source-only cumulative candidate `5bbba6ad` contains 5,222 subscriber
+groups and 5,495 unique subscriber ASNs across the same 160 countries. US
+coverage becomes 33 groups/53 ASNs and France 8 groups/10 ASNs. These are
+catalog counts, not subscription counts, market ranks or Main Quality gains.
+Eight groups are new and two existing groups are extended; all unowned stanza
+bytes, six negative groups, evidence-feed pins and policy controls are retained.
+All six US operators have mixed hosting/cloud/colocation evidence, and French
+mixed-service caveats remain explicit. The identified-ISP default does not
+override an applicable hosting, proxy, virtual-ISP, address, origin or risk
+finding, and a mixed product portfolio alone does not exclude an entire ASN.
+
+Research and composition receipts are retained under
+`artifacts/arin-us-state-research-20261007-v1`,
+`artifacts/arin-fr-regional-research-20261007-v1`,
+`artifacts/arin-fr-independent-review-20261007-us-v1` and
+`artifacts/arin-us-fr-subscriber-candidate-20261007-v1`. US cross-review
+`8c20dd95`, France cross-review `986b3aa0` and composition source review
+`e16ae2f3` passed. Seven deterministic composition controls passed; native
+catalog parsing, fresh evidence/artifact construction, readbacks, publication
+and actual adoption have not run for this candidate. The already selected
+MMDB and its retained V17 measurement are unchanged. The later V19 Taskworker
+runtime observation at 05:21:14.641977 UTC is a separate eight-slot metric
+witness and does not relabel that earlier ARIN observation or prove a loaded
+reader's identity. State/province/country top-30 completeness remains open:
+availability and service-presence sources do not supply comparable subscriber
+rankings or attribute the sampled Main providers to these operators.
 
 Source inspection distinguishes the adoption owners. Connect announces call
 the controller's actual-address lookup and persist its database epoch and
