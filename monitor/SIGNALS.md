@@ -179,6 +179,7 @@ active missing capability and must not be read as green.
 | Section | Kind | Executable boundary |
 |---|---|---|
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
+| 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
@@ -405,6 +406,42 @@ pre-incident throughput. Disappearance from an emitted-only alert history is
 not recovery. Before incident closure, compare current absolute throughput
 with the retained pre-incident same-scope baseline and verify actual caller
 admission/delivery success; backlog and churn remain independent evidence.
+
+Committed lifecycle rate contract (2026-10-07): the paired model-counter and
+Connect-dashboard change defines `urnetwork_contract_opened_total` and
+`urnetwork_contract_closed_total`, with no application labels. Opened counts the
+acknowledged commit of a first contract INSERT; closed counts the acknowledged
+commit of the first transition to a terminal outcome. Legacy, Redis-backed and
+no-escrow paths use the same unit: one contract. Reusing a contract, a checkpoint,
+an accepted settlement intent, an expiry candidate, a busy attempt, rollback,
+retry or terminal replay is not another committed create/close. A malformed-row
+terminal quarantine counts as closed, so this counter is not a count of verified
+financial settlements. Deletion/retention is not a new terminal outcome.
+
+The dashboard must sum per-process `rate(...[$__rate_interval])` across **all
+model-writing services in the selected environment**, not only Taskworker or the
+service hosting the dashboard. Apply rate before summing so resets are handled
+per series. Show opened/s, closed/s, signed opened-minus-closed/s and its positive
+deficit; a negative signed value can be backlog drain. The selected-range
+increase difference is observed counter growth, not a current SQL stock count;
+exporting-process counts by service expose partial coverage without blocking the
+graphs. Keep the units and observed writer scope visible. Missing series or
+insufficient scrape history is **No data**,
+not zero, and the panel must not query PostgreSQL or impose a separate inventory
+gate to fill the gap. The existing SQL `contract-rate` probe remains independent.
+
+A short positive deficit is expected during arrivals and normal contract
+lifetimes, including the signed 60-minute lifespan below. Sustained positive
+deficit together with a growing overdue backlog is the actionable combination;
+same-window opens and closes are not necessarily the same contract cohort.
+Counter balance alone cannot clear aged intents, disputes or projection debt.
+Counters are process observations: a crash after commit but before increment or
+scrape, an unsampled CLI, or a writer without the new source can undercount. A
+lost commit reply leaves the counter's completion unknown even if a later point
+read finds a committed row. Verify producer adoption and scrape continuity before
+using rates to claim fleet capacity. This source/dashboard contract does not
+itself establish deployment or Main recovery. §2.5c records the evidence needed
+to connect a rate to actual customer state.
 
 Contract packet authorization has a separate Redis projection. Its key is
 `contract-hole:v2:{<lower-client-id>:<higher-client-id>}:count`, using the source
@@ -2020,6 +2057,42 @@ statement counts/timing do not attribute Main's historical long query or prove
 CPU/coverage recovery. The 23:38 current-status read (`05159bed`) found a scheduled
 no-error task and all four checkpoints ending 23:07, but no historical backend,
 score-publication or durable task-finalization join. Preserve those limits.
+
+Settlement capacity experiments (2026-10-07) must retain their distinct units
+and qualification levels. These are local source/fixture findings, not an
+attribution of Main CPU or a claim that the account backlog cleared:
+
+| Mechanism | Established observation | Remaining boundary |
+| --- | --- | --- |
+| Already-owned legacy metadata | Reusing the exact positive unmarked escrow/grant ownership removes four redundant reads/locks; mixed, zero, settled, missing or changed-revision inputs keep the full path (§2.5b). | Local elapsed comparisons do not identify Main's dominant owner. Preserve exact finance, rollback and lost-reply controls; count actual statements as well as completed contracts. |
+| Immutable financial input reuse candidate `d9c357d6` | Reusing the already-owned contract header/report snapshot removes four reads per contract. The local 129-contract comparison counted 2,840→2,324 calls: 516 fewer, about 18.2%. | This is a separate optimization from escrow metadata ownership. Shared participant state is intentionally read fresh; escrow/grant locks and finance remain unchanged. The percentage is a statement-count reduction, not elapsed-time or Main CPU improvement. Targeted qualification does not waive unrelated broad-suite failures. |
+| Inline post barrier | The real held clock, mirror and stream control on baseline `1193f72df` commits the first contract but prevents the next independently funded contract from committing. The baseline RED receipt `3a7a1052` and candidate GREEN log `00793ef8` establish that causal barrier. | Financial locks and admission tokens can already be released while the caller still joins a post. This is a local sequencing cause, not proof that a particular Main target waited there. |
+| Page-owned post batching candidate | In the matched 512-contract fixture, clock, mirror and stream-lookup client dispatches each fell from 512 to 2; mirror commands fell from 512 to 4 and joined-post time from 236ms to 21ms. | Total elapsed time was **2.982s baseline versus 3.373s candidate**: this pair did not show a wall-time gain. Client dispatches are not actual cluster-wide network round trips. The current-source composition still needs its own owning controls and runtime adoption. |
+| PostgreSQL setup candidate | Combining fixed BEGIN/transaction-local timeout setup removes one sequential protocol exchange while keeping one financial transaction per contract. | Pool checkout, transaction-pool backend admission, grant ownership and the financial body remain separate. A setup-only loaded fixture cannot prove financial throughput, justify larger pools, or replace native rollback/settings-restoration controls. |
+| Redis debit-release script-cache candidate | A warm EVALSHA pipeline can avoid transmitting the same program for each of up to 512 contract/balance journal rows; explicit NOSCRIPT can fall back for only the affected commands. | Cache misses, ambiguous replies and non-idempotent operations need their existing ownership rules. Do not replay all successful commands after one error. Wire-byte savings are not measured Main CPU, release latency, or proof of expiry visitation. |
+
+The post-batching candidate owns and joins a finite page's projection work; it
+does not replace a financial commit with a goroutine or keep grant ownership
+until a background queue drains. Durable mirror tasks still own missing/cold
+publication. Best-effort clock increments may wait until the page ends and can
+be lost on process exit; aggregate backfill is not exact per-contract repair.
+Stream cleanup retains its own cancellation/expiry semantics. The later
+`713e7a18` source correction preserves the old Redis transaction's continuation
+after a malformed command: slot-local `pcall` records the first error while
+allowing the remaining membership/expiry commands to run. Its malformed-state
+RED/GREEN and owning normal/race controls are a separate gate; the earlier
+dispatch-count and held-post passes do not qualify this successor or an entire
+merge. A command-count improvement must not silently redefine any of these
+delivery guarantees.
+
+Separate acquisition, BEGIN/setup, SQL body, commit acknowledgement and joined
+posts before tuning a pool or prepared-statement policy. Client Acquire includes
+opening/validation, not only queue residence; BEGIN through PgBouncer can include
+backend admission. A candidate that moves setup inside BEGIN changes the timing
+boundary. Prepared statement reuse does not prove a good custom/generic plan.
+Require same-source, matched workload and committed-outcome counts alongside
+phase times, query/lock evidence and an independent CPU interval. More visits,
+lower query counts or lower post time with less completed work is not recovery.
 
 ### 1.3d Empty transfer-escrow write amplification
 Probe: `escrow-amplification`
@@ -4963,6 +5036,16 @@ already adds those to Redis deltas from other writers. They are not incremented
 in Redis again. Payment selection still uses the committed sweep ledger, while
 the lifetime totals returned by `GetAccountBalance` can catch up afterward.
 
+The test oracle must follow this ownership change. A historical test that reads
+only Redis for a legacy provider's lifetime payout is stale once the durable
+task owns `account_balance.provided_*`; a committed sweep can coexist with an
+unapplied total-projection marker. Exercise the real task/finalizer, verify its
+applied marker and compare the public PG-plus-Redis account view, exact sweep
+ledger and replay. Do not manufacture a Redis total to pass the assertion.
+Reproducing the same stale expectation on unchanged baseline and candidate
+separates an inherited test issue from a new regression; it does not make the
+broad suite green or excuse a distinct conservation/custody failure.
+
 The outcome trigger refuses an old writer after an intent has been accepted;
 the worker deletes its locked intent inside the financial transaction before
 claiming the outcome. Rollback restores all state. An old writer that wins before
@@ -4985,13 +5068,16 @@ warns after two observations; a future task lease alone is not a live owner.
 An accounting rejection keeps its reservation and dispute, stores a finite
 failure code and waits 15 minutes before the next attempt; operational failures
 wait 30 seconds. Neither is a verified close. The original error remains logged,
-and this signal retains the unresolved financial state between retries. A page
-visits at most 64 items, advances past busy/failed keys, and persists its composite
+and this signal retains the unresolved financial state between retries. The
+original 64-visit page advances past busy/failed keys and persists its composite
 cursor. Immediate continuation requires successful progress; otherwise normal
 scheduling waits two seconds. The database loop has a 15-second context and
 individual worker statements use 2-second statement / 250ms lock timeouts.
 Already-started projection posts retain their existing separately bounded joins;
 this is not a 15-second end-to-end claim for a failed Redis dependency.
+The current 256-visit and payer-turn profiles below supersede the historical
+page/count limits; consumers must bind the exact producer before interpreting
+either profile.
 
 Legacy mirror ownership (2026-10-06): each inline settlement also touches one
 immutable `ApplyLegacyNetEscrowMirror` pending task per affected balance in its
@@ -5071,7 +5157,7 @@ one forward visit precedes the first head, then three forward visits separate
 later heads. A 64-visit page can visit 16 heads and 48 forward keys. Limits two
 and three retain one head slot; single-item pages retain ordinary traversal.
 The page-local head cursor advances past a busy head without rewinding the
-persisted forward cursor or cutoff. All visits share the existing 64-item limit
+persisted forward cursor or cutoff. All visits in that profile share the 64-item limit
 and page budget. Missing heads consume no visits and return unused slots to
 forward traversal. A head accounting/operational failure keeps its
 15-minute/30-second delay and the already completed forward prefix.
@@ -5086,7 +5172,7 @@ recovery guarantee. Sixteen continuously busy oldest heads can still fill the
 head allocation; fixed-cohort forward traversal remains the fairness backstop.
 Readers must bind the producer artifact: earlier one-head results use the same
 four fields, absent fields are unknown, and JSON shape alone cannot establish
-the allocation policy. For this source each head count is at most 16 per page;
+the allocation policy. For that historical source each head count is at most 16 per page;
 completed plus the larger of busy/failed cannot exceed visited. Busy and failed
 can overlap when a transaction's acknowledgement fails.
 
@@ -5117,7 +5203,7 @@ open edge barely advanced. This does not identify the busy gate or a current
 lock owner. The worker now records `busy_intent_unavailable`,
 `busy_contract_unavailable`, and `busy_grant_set_mismatch`, plus corresponding
 `head_busy_...` counters, directly at the existing refusal branches. These add
-no queries, locks, retry mutations or concurrency. Each three-counter sum equals
+no queries, locks, retry mutations or concurrency. Each historical three-counter sum equals
 its recorded busy-or-gone total; each head reason is a subset of its total reason.
 Readers require all six source-qualified fields. Missing fields remain unknown,
 partial or contradictory fields are invalid, and sums include only gate-valid
@@ -5169,7 +5255,7 @@ Source-qualified task results add `head_grant_wait_attempted`,
 `head_grant_wait_completed` and `head_grant_wait_timed_out`. Attempted means the
 blocking-mode query was issued, not that PostgreSQL actually waited. Completed
 means that visit returned financial success, not just grant acquisition. Each
-page has at most one attempted query; completed plus timed-out cannot exceed
+page in that profile has at most one attempted query; completed plus timed-out cannot exceed
 attempted, completed is a head-completed subset, and timed-out is a
 head-grant-busy subset. The existing grant-set counter now includes this scoped
 timeout as well as incomplete or changing joined membership. Missing fields
@@ -5384,6 +5470,185 @@ its actual plan before equating it with the worker expression. A statement
 timeout with no projection leaves backlog unknown, not empty. Main recovery
 still requires current source and fresh bounded progress evidence.
 
+Current legacy page profile (2026-10-07): `LegacySettlementPageLimit` is 256,
+with at most 64 chronological head revisits and one bounded grant-wait opportunity
+per 16 head visits, hence at most four per full page. Persisted `head_after` moves
+the revisit frontier past a retained busy prefix; the forward key and fixed pass
+cutoff remain separate. Increasing a cap alone neither proves visits to a payer
+nor fixes a dense queue. The four current busy reasons are intent unavailable,
+contract unavailable, grant-set mismatch and admission deferred, with matching
+head subsets. A typed reader must require the complete source-qualified partition;
+the older three-reason or 64-visit parser must not silently accept this profile.
+Admission deferral is an optional Redis hint decision, not insufficient funding
+or proof that PostgreSQL grant ownership was attempted. Head revisits bypass that
+hint while preserving ordinary financial ownership and accounting guards.
+
+Payer service discriminator: a global chronological shard can spend repeated
+bounded pages on one dense payer while another payer's due contract remains
+ahead of both saved frontiers. All shards completing other contracts, a higher
+page cap, or a moving oldest edge does not establish service to that second
+payer. In the retained customer investigation, due/failure-free target keys stayed
+unchanged across observations and recorded page intervals did not reach them.
+This establishes the coverage gap in the observations, not an unconditional
+claim of no prior attempt: disappearance, skipped ownership and transactions
+committing older due keys can invalidate a simple rank-to-visit inference.
+
+The payer-aware source in `model/subscription_legacy_payer.go` adds bounded turns
+before the chronological remainder, under the same 256 visits and fifteen-second
+financial budget. It probes at most 16 payers, takes at most one oldest candidate
+per payer per turn, and persists a separate `payer_cursor` with fixed payer end
+and due cutoff. A future-only payer consumes a discovery probe, not a financial
+visit. Discovery advances past that payer; new payers beyond the saved round end
+wait for a later round. Payer turns bypass the optional admission hint but add no
+new blocking grant wait and retain the ordinary transaction, insufficiency,
+dispute, ownership, rollback and retry rules. An interrupted item or failed
+retry-state write cannot certify cursor progress.
+
+`payer_probes`, `payer_visited`, `payer_completed`, `payer_busy_or_gone` and
+`payer_failed` distinguish discovery from actual owner results. Payer financial
+counts are subsets of the page totals, not extra completed contracts.
+`payer_registered`, `payer_registration_failed` and `payer_registration_ms`
+describe compatibility registration, not financial settlement. Registration
+visits at most 256 missing identities in its own bounded transaction; a failure
+rolls that step back and does not by itself suppress already registered work.
+Missing additive fields from an older producer remain unknown.
+
+This path requires migration 791's nullable payer column/compatibility trigger
+and the exact valid, ready partial indexes from 792 and 793 (§8.9). A migration
+number or index name alone is insufficient. Registration must seek the missing
+identity index in `(shard, contract_id)` order; the one-payer candidate must keep
+its payer/due/full-key index boundary under skewed statistics. A child estimate
+or a small returned LIMIT does not prove bounded underlying work. Preserve actual
+custom/generic plans, exact catalog predicates and future-only negative controls;
+invalid concurrent indexes and unsupported schema remain visibility/prerequisite
+failures, not zero backlog.
+
+The owning recurring-task controls in
+`taskworker/work/legacy_payer_fairness_test.go` put 8,193 older contracts on one
+payer before an independently funded target, with both a healthy and a held
+prefix. They require target completion through durable task continuation within
+two pages, exact conservation and no-op replay without moving its due key.
+`model/subscription_legacy_payer_test.go` additionally covers old-writer/NULL
+registration, round restart and arrivals, future-only discovery, owned-budget
+prefix, registration timeout and retry-write failure. This is bounded service in
+those controlled distributions, not a universal two-page or elapsed-time bound
+over arbitrary payer counts, missing registrations, held owners or scheduler
+capacity. Schema readiness, current worker adoption and a fresh same-cohort
+outcome/reservation witness remain separate Main gates.
+
+### 2.5c Contract progress evidence — selection, commit and projection
+
+This runbook joins the existing probes; it adds no account scan or automatic
+financial action. Keep the current unresolved observation visible even when a
+local test, deployment, healthy sibling or manually selected cohort succeeds.
+The unit of evidence must match the question:
+
+| Question | Required observation | What does not answer it |
+| --- | --- | --- |
+| How much pending work exists? | Exact predicate, payer/fleet scope, SQL snapshot, coverage bound and EOF/sentinel status. Preserve disputed, terminal-but-unreleased and generated `open` distinctions. | A fixed 32-row cohort, oldest sample, physical scan prefix, byte total, or capped lower bound is not the whole-account count. |
+| Could a target be selected? | Same-snapshot contract, reports, intent, due/failure state and complete saved lane/cutoff bounds joined by exact private identity. | Old age, NULL PG expiration, `usage_unverified`, a fresh task claim, or backend inferred only from retained escrow flags does not prove current expiry or financial eligibility. |
+| Was this target actually attempted? | A source-qualified exact invocation/target trace, or an owning selection witness with its result. Keep automatic page and explicit point-owner origins separate. | Saved task arguments are invocation inputs. Current cursor distance, changed cursor hashes, a lower-bound rank or global completion counters do not prove a target visit. |
+| Did financial ownership commit? | The same invocation's acknowledged transaction plus a later exact outcome/escrow witness when the response was incomplete or ambiguous. | Staged outcome writes, entering commit, process exit 0, a returned batch with refused rows, or a post callback's return alone is not financial success. |
+| Did recovery finish? | Terminal outcome and unsettled reservation state, then the applicable debit journal, provider-total marker and Redis/stream/packet projections under their own owners. | Intent deletion, low CPU, no errors, a drained journal or terminal count cannot certify every downstream projection or customer UI. |
+
+The 2026-10-07 retained case demonstrates the scope boundary. The original fixed
+32-contract cohort was all closed/SETTLED with zero unsettled escrow at
+10:06:00.785079Z. A separate complete payer count at 10:06:36.913535Z was 179,540
+pending contracts. Those statements are compatible. Sixteen Redis-backed sampled
+contracts had completed before the explicit legacy operations; one ordinary
+point-owner operation completed in about 0.372s, and a later ordinary batch
+acknowledged the remaining fourteen. Exact before/after joins, not batch exit
+status, established their closure and unchanged neighbors. These were normal
+guarded owners, not forced financial corrections, and the explicit legacy
+operations do not prove automatic queue recovery or predict fleet throughput.
+The payer-wide problem remained unresolved at that observation.
+
+A later bounded classification stopped on its owner deadline after 87,296 rows
+without EOF. Its 40,068 legacy and 47,228 Redis-marked observations describe only
+that physical prefix. They cannot be extrapolated to the separate account count,
+nor can a sparse indexed sample be called representative. Retain stop reason,
+source clock, scanned/candidate/selected caps and underfilled strata. An accepted
+partial envelope is not full classification. A local capacity refusal has no SQL
+observation; a PostgreSQL timeout has no inferred empty sample. Report each failed
+stage before authorizing a separately bounded diagnostic, rather than silently
+retrying a consumed operation or raising its budget.
+
+Diagnostic guards need causal controls too. A unique full-key lookup under a
+direct LIMIT can have an inflated planner row estimate; rejecting that estimate
+alone is a false positive, not evidence of an account defect. Missing plan fields
+must fail closed with NULL-safe comparisons. Conversely, a returned-row cap or
+an index name does not bound dead-version/heap work. Preserve the statement and
+child deadlines, record fixed failure phase/predicate enums, and test the actual
+rendered transport budget as well as SQL. An inherited shorter transport can
+discard a valid bounded observation before its native deadline. Resource
+admission can change between a quiet sample and contact, so recheck immediately
+before the one authorized read and retain a refusal as no observation.
+
+For automatic legacy progress, join exact pending task ID, arguments and run_at
+to its finished record and returned forward/head/payer cursors. Whole bounded
+arguments/results must decode; truncation is unknown, never a usable prefix.
+Use the SQL snapshot clock, not the host's earlier capture-start timestamp.
+Function start/end, post completion, row finalization, successor publication and
+the next claim are separate events. A recorded run_end before a still-pending
+SQL snapshot supplies only a lower bound on delayed finalization for that exact
+attempt; run_end is not commit time. No such ordering means no measured delay,
+not proof of immediate finalization. Fresh unclaimed successors and expired
+claims must remain distinct. A held sibling in one evaluator does not prove that
+another idle worker could not claim an already published successor.
+
+The seven legacy timing families are selection, financial, joined_posts, mirror,
+cold_census, clock and stream. Their counts include failed/interrupted calls;
+an interrupted last financial attempt can be timed without becoming a visited
+item. Cold census is inside mirror; mirror/clock/stream can overlap inside
+joined posts. Financial includes client acquisition and transaction completion.
+Sum a family only within matched source-qualified pages. Adding all families
+does not produce wall time or CPU, and a high financial count is not a count of
+commits. Comparing per-visit milliseconds across releases with different admission,
+selection or post ownership is descriptive until work and timing boundaries are
+matched. All pages ending near the page deadline can still do very different
+amounts of committed work.
+
+The targeted trace is a finite diagnostic, not a high-cardinality metric or a new
+financial path. A private target digest, capture label, expiry and page/event caps
+are loaded outside financial/admission locks. The invocation uses an opaque local
+join identity; account IDs, amounts, credentials and raw SQL stay out of public
+events. Record stage entry before waiting, and separate stage return, confirmed
+commit, rollback and unknown commit. A blocked stage may never emit a return.
+Publication is nonblocking, with dropped/partial coverage explicit; concurrent
+event arrival or offsets need not be globally ordered. Buffer loss, unsupported
+source, cancellation or an unclassified error is cause unavailable, not success.
+Controls must hold the real grant or post, reject/roll back the ordinary owner,
+discard a commit reply, hold the trace consumer and verify replay/conservation.
+Observability must not prolong a grant lock, admission token or financial retry.
+
+Use an exact bounded lock-holder/SQL observation when a stage is slow. A
+`SKIP LOCKED` empty result does not identify the skipped owner, a grant-set
+mismatch can arise across ReadCommitted snapshots, and a positive current funding
+coverage flag is neither an exact amount proof nor permission to override the
+financial guard. PGSS elapsed time includes waits; a query prefix, oldest
+transaction, idle count or nearby high cgroup CPU does not attribute CPU to this
+contract. Match executable, connection/backend generation, source family and
+observation interval before making that claim (§1.3c).
+
+Post-terminal ownership remains deliberately split. Redis debit `applied` and
+`released` counts are contract/balance journal rows; balance visits and flush
+events are other units, not distinct closed contracts. A provider-total marker
+can be applied while task finalization remains pending. A cold mirror task can
+repair a stale reservation projection after finance has committed. Healthy
+asynchronous lag is a false positive for lost accounting; missing projection
+telemetry is a false negative for complete customer recovery. Keep durable owners
+until their normal acknowledgement/finalization, and test real downstream
+admission after projection repair rather than deleting a counter or owner to
+make the graph green. §§2.5a–b and 5.11 retain the accounting/projection contracts.
+
+Current observation gaps stay explicit: the simple counters cannot identify a
+particular payer, the oldest-row probes cannot prove every target visit, generic
+task durations cannot measure each projection's completion age, and an absent
+or stale series cannot certify zero retries or zero debt. The counter/dashboard
+owner addresses committed-rate visibility; exact traces and existing source-
+qualified point readers address bounded causal questions. Neither introduces
+automatic account cleanup, a broader financial scan or a new fleet SLO.
+
 ### 2.6 Open-contract set size — the close-backlog canary
 Probe: `open-contracts`
 
@@ -5543,7 +5808,8 @@ short successful task alone does not prove that the aged backlog is draining.
 2026-10-06 retained-epoch discriminator: a fresh claim with no retry error can
 still traverse a historical scan epoch for days. An exact private cursor join
 found post-epoch contracts outside that pass and older candidates still ahead
-of its open cursor; none had yet been visited. Task freshness therefore proves
+of its saved open cursor. Those inputs do not prove a previous visit or the
+position inside an in-flight page. Task freshness therefore proves
 executor activity, not coverage of recently created contracts. Preserve that
 historical epoch and position, and alternate its complete raw subpages with a
 second pass covering contracts created strictly after the historical epoch.
@@ -5605,6 +5871,17 @@ over the remaining subpages. All lanes share the existing 256-row subpages,
 proof, and financial posts. Completing backlog or catch-up cannot discard
 another unfinished lane. No larger rolling window, cursor rewind, financial
 adjustment, or new schema is required.
+
+Legacy NULL `expiration_time` is not proof of an immortal active Redis
+reservation, and a retained `redis_reserved` escrow flag does not prove the
+current Redis hash, expiry index, TTL or recovery-token state. Match those live
+keys and their source clocks to the same private contract before diagnosing a
+Redis expiry defect. A report that is quiet at a new observation can still be
+newer than the running invocation's fixed quiet cutoff. Use the captured
+`catchup_checked` and complete report/input bounds; a hypothetical new-invocation
+eligibility predicate does not prove the running task admitted that row.
+Absolute packet permission, expiry scan eligibility and financial settlement
+remain separate owners (§1.1 and §2.5c).
 
 The original coordinator fails deterministic controls for a quiet gap visit,
 native funded gap settlement, and recent completing before the first catch-up
