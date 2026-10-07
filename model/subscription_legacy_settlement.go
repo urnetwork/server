@@ -276,6 +276,18 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 				}
 			}()
 			server.Tx(ctx, func(tx server.PgTx) {
+				// Register before projections so token cleanup joins the first
+				// post group after PG release, even when another post is held.
+				if admission != nil && admission.owner != nil {
+					owner := admission.owner
+					server.AddTxPostCommit(tx, "legacy-settlement-admission:"+owner.token, func() any {
+						owner.release(ctx)
+						// Tx joins this post before finish can run. Keep the outer
+						// fallback for rollback, unknown commit or an unowned Tx.
+						admission.owner = nil
+						return nil
+					})
+				}
 				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
 				var err error
 				posts, completed, busy, busyGate, err = flushLegacySettlementWithGrantWaitInTx(ctx, tx, contractId, wait)
