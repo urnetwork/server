@@ -688,6 +688,13 @@ Connect processes, retains missing or duplicate handler ownership as unknown,
 and does not require a native publisher endpoint or all-fleet retirement proof.
 Its public projection explicitly leaves publication binding unproved until the
 parent validates the unchanged source pair after capture.
+The selector limits each indexed connected/client read to 33 rows before
+sorting. A 33-row sentinel refuses that provider; smaller sets retain the
+lowest eligible connection deterministically. Source review `a707bf09`
+accepted the three-table plan guard and disabled local fixture adapter. The
+guard requires direct indexed limit children and point handler/location reads,
+with JIT disabled and a three-second SQL deadline. Its five new local SQL
+controls remain unexecuted; earlier plan-only controls cover a different query.
 Unavailable owners, changed owners, stale facts and unsupported records must
 remain explicit unknowns. The policy remains: an identified residential or
 business subscriber ISP defaults clean unless additional contrary evidence
@@ -739,9 +746,14 @@ Research and composition receipts are retained under
 `artifacts/arin-fr-independent-review-20261007-us-v1` and
 `artifacts/arin-us-fr-subscriber-candidate-20261007-v1`. US cross-review
 `8c20dd95`, France cross-review `986b3aa0` and composition source review
-`e16ae2f3` passed. Seven deterministic composition controls passed; native
-catalog parsing, fresh evidence/artifact construction, readbacks, publication
-and actual adoption have not run for this candidate. The already selected
+`e16ae2f3` passed. Seven deterministic composition controls passed. Native
+receipt `4589c9e4` then passed the strict catalog parser and all twelve exact-ASN
+subtests on the immutable `cf6621c4` source with the qualified Go 1.27.1/e32
+module graph. Synthetic cases retained independent base exclusions/risk,
+visibility/RPKI withholding and exact proxy vetoes. This fixture-free gate
+opened no evidence feed or MMDB and does not qualify the entire later source
+graph. Fresh evidence/artifact construction, readbacks, publication and actual
+adoption have not run for this candidate. The already selected
 MMDB and its retained V17 measurement are unchanged. The later V19 Taskworker
 runtime observation at 05:21:14.641977 UTC is a separate eight-slot metric
 witness and does not relabel that earlier ARIN observation or prove a loaded
