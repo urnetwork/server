@@ -24,7 +24,6 @@ package work
 // incidental.
 
 import (
-	mathrand "math/rand/v2"
 	"testing"
 
 	"github.com/urnetwork/server"
@@ -129,7 +128,8 @@ func TestExtenderDnsTxtVouchesForEveryAnsweredAddress(t *testing.T) {
 	desiredSets := sampleExtenderDnsRecordSets(
 		addresses,
 		4,
-		mathrand.New(mathrand.NewPCG(7, 11)),
+		testExtenderDnsSecret,
+		testExtenderDnsEpoch,
 		func(extenderId server.Id) (string, bool) {
 			signed[extenderId] = true
 			return "record-" + extenderId.String(), true

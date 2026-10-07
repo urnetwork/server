@@ -9674,4 +9674,52 @@ var migrations = []any{
 		CREATE INDEX legacy_settlement_intent_payer_missing
 		ON legacy_settlement_intent (shard, contract_id) WHERE payer_network_id IS NULL
 	`),
+	// 794: the tiered extender directory (connect/EXTENDER.md R). The tier an
+	// extender is signed into and the one place a canary is published, both
+	// on the extender row with defaults an old binary never reads; the
+	// release ledger of the gated tier (R3: requests per identity and
+	// vantage, releases per record and country); and the block reports the
+	// per-country blocked state is derived from (R4). New columns with
+	// defaults and new tables: nothing is rewritten.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_extender ADD COLUMN directory_tier smallint NOT NULL DEFAULT 0;
+		ALTER TABLE network_extender ADD COLUMN canary_channel varchar NULL;
+
+		CREATE TABLE network_extender_release_request (
+			request_id uuid NOT NULL PRIMARY KEY,
+			identity bytea NOT NULL,
+			vantage varchar NOT NULL,
+			request_time timestamp NOT NULL
+		);
+		CREATE INDEX network_extender_release_request_identity_request_time
+		ON network_extender_release_request (identity, request_time);
+		CREATE INDEX network_extender_release_request_vantage_request_time
+		ON network_extender_release_request (vantage, request_time);
+
+		CREATE TABLE network_extender_release (
+			release_id uuid NOT NULL PRIMARY KEY,
+			extender_id uuid NOT NULL,
+			identity bytea NOT NULL,
+			country_code varchar NOT NULL,
+			epoch bigint NOT NULL,
+			release_time timestamp NOT NULL
+		);
+		CREATE INDEX network_extender_release_extender_id_country_code_release_time
+		ON network_extender_release (extender_id, country_code, release_time);
+		CREATE INDEX network_extender_release_release_time
+		ON network_extender_release (release_time);
+
+		CREATE TABLE network_extender_block_report (
+			report_id uuid NOT NULL PRIMARY KEY,
+			extender_id uuid NOT NULL,
+			client_id uuid NOT NULL,
+			country_code varchar NOT NULL,
+			report_time timestamp NOT NULL
+		);
+		CREATE INDEX network_extender_block_report_extender_id_country_code_report_time
+		ON network_extender_block_report (extender_id, country_code, report_time);
+		CREATE INDEX network_extender_block_report_report_time
+		ON network_extender_block_report (report_time);
+	`),
 }

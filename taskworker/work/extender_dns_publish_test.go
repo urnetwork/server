@@ -1,9 +1,10 @@
 package work
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
-	mathrand "math/rand/v2"
 	"net/netip"
 	"slices"
 	"strings"
@@ -144,10 +145,7 @@ func (self *testExtenderDnsPublisher) onlyBatch(t testing.TB) *testExtenderDnsBa
 	return self.batches[0]
 }
 
-// Replaces the publisher and the sample source for one test.
-//
-// The seed is fixed, so the same rows draw the same sets on every run; without
-// it every assertion about which addresses a set holds would be a coin flip.
+// Replaces the publisher for one test.
 func stubExtenderDnsPublisher(t testing.TB) *testExtenderDnsPublisher {
 	t.Helper()
 	publisher := newTestExtenderDnsPublisher()
@@ -155,15 +153,23 @@ func stubExtenderDnsPublisher(t testing.TB) *testExtenderDnsPublisher {
 	newExtenderDnsPublisher = func(_ *controller.ExtenderConfig) (extenderDnsPublisher, error) {
 		return publisher, nil
 	}
-	previousRandom := extenderDnsRandom
-	extenderDnsRandom = func() *mathrand.Rand {
-		return mathrand.New(mathrand.NewPCG(7, 11))
-	}
 	t.Cleanup(func() {
 		newExtenderDnsPublisher = previousPublisher
-		extenderDnsRandom = previousRandom
 	})
 	return publisher
+}
+
+// The secret and epoch every pure sampler test keys by (R2), pinned so the
+// same rows draw the same sets on every run.
+var testExtenderDnsSecret = bytes.Repeat([]byte{0x5a}, 32)
+
+const testExtenderDnsEpoch = 7
+
+// The identity key of a fixture extender, derived from what names it so a
+// run places it where the last run did.
+func testExtenderDnsKey(name string) []byte {
+	sum := sha256.Sum256([]byte("extender-dns-fixture:" + name))
+	return sum[:]
 }
 
 // Synthetic documentation addresses only (RFC 5737, RFC 3849), one per index.
@@ -184,6 +190,7 @@ func testExtenderDnsAddresses(
 	for _, index := range indexes {
 		addresses = append(addresses, &model.NetworkExtenderDnsAddress{
 			ExtenderId:  server.NewId(),
+			PublicKey:   testExtenderDnsKey(fmt.Sprintf("%s/%d/%d", countryCode, ipVersion, index)),
 			IpVersion:   ipVersion,
 			Ip:          netip.MustParseAddr(testExtenderDnsIp(ipVersion, index)),
 			CountryCode: countryCode,
@@ -200,7 +207,7 @@ func testExtenderDnsIps(ipVersion int, indexes ...int) []string {
 	return ips
 }
 
-// Draws the sets of a sampler run with the fixed seed.
+// Draws the sets of a sampler run under the fixed secret and epoch.
 func sampleTestExtenderDnsRecordSets(
 	addresses []*model.NetworkExtenderDnsAddress,
 	sampleCount int,
@@ -208,7 +215,8 @@ func sampleTestExtenderDnsRecordSets(
 	return sampleExtenderDnsRecordSets(
 		addresses,
 		sampleCount,
-		mathrand.New(mathrand.NewPCG(7, 11)),
+		testExtenderDnsSecret,
+		testExtenderDnsEpoch,
 		nil,
 	)
 }
@@ -388,34 +396,41 @@ func TestExtenderDnsSampleKeepsAnUnknownCountryOutOfTheContinents(t *testing.T) 
 	}
 }
 
-// Successive ticks redraw. Without the rotation a ttl of a minute would pin
-// every client in a continent to the same few addresses until one of them
-// failed, which is the load concentration the sample exists to avoid.
-func TestExtenderDnsSampleRotatesBetweenTicks(t *testing.T) {
-	addresses := testExtenderDnsAddresses("DE", 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-	first := sampleExtenderDnsRecordSets(
-		addresses,
-		testExtenderDnsSampleCount,
-		mathrand.New(mathrand.NewPCG(7, 11)),
-		nil,
-	)
-	second := sampleExtenderDnsRecordSets(
-		addresses,
-		testExtenderDnsSampleCount,
-		mathrand.New(mathrand.NewPCG(13, 17)),
-		nil,
-	)
-	connect.AssertNotEqual(t, first[0].ips, second[0].ips)
-
-	// and the same source draws the same sets, which is what makes every
-	// assertion here reproducible
-	repeated := sampleExtenderDnsRecordSets(
-		addresses,
-		testExtenderDnsSampleCount,
-		mathrand.New(mathrand.NewPCG(7, 11)),
-		nil,
-	)
-	connect.AssertEqual(t, first[0].ips, repeated[0].ips)
+// The sets rotate with the epoch, within a location's partition, and the
+// same epoch draws the same sets, which is what makes every assertion here
+// reproducible and what makes most ticks an unchanged upsert (R2).
+func TestExtenderDnsSampleRotatesBetweenEpochs(t *testing.T) {
+	// six addresses are one partition, so every epoch deals all of them
+	addresses := testExtenderDnsAddresses("DE", 4, 1, 2, 3, 4, 5, 6)
+	sample := func(epoch uint64) []string {
+		desiredSets := sampleExtenderDnsRecordSets(
+			addresses,
+			testExtenderDnsSampleCount,
+			testExtenderDnsSecret,
+			epoch,
+			nil,
+		)
+		return assertTestExtenderDnsSet(
+			t,
+			desiredSets,
+			"extender-EU-A",
+			testExtenderDnsSampleCount,
+			testExtenderDnsIps(4, 1, 2, 3, 4, 5, 6),
+		).ips
+	}
+	first := sample(testExtenderDnsEpoch)
+	connect.AssertEqual(t, sample(testExtenderDnsEpoch), first)
+	rotated := false
+	for epoch := uint64(1); epoch <= 64 && !rotated; epoch += 1 {
+		next := sample(testExtenderDnsEpoch + epoch)
+		slices.Sort(next)
+		sortedFirst := slices.Clone(first)
+		slices.Sort(sortedFirst)
+		rotated = !slices.Equal(next, sortedFirst)
+	}
+	if !rotated {
+		t.Fatal("sixty-four epochs drew the same set")
+	}
 }
 
 // The Route 53 calls, delivered one record per page so the pager's early stop

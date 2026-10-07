@@ -125,6 +125,11 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// supersedes it (connect/GEOMAP.md D14)
 		router.NewRoute("GET", "/network/extender-hint", handlers.ExtenderHint),
 		router.NewRoute("POST", "/network/extender-latency", handlers.ExtenderLatencyReport),
+		// the gated tier of the directory: a release to the calling identity,
+		// and a client's report of an extender it could not reach
+		// (connect/EXTENDER.md R3, R4)
+		router.NewRoute("POST", "/network/extender-release", handlers.ExtenderRelease),
+		router.NewRoute("POST", "/network/extender-block-report", handlers.ExtenderBlockReport),
 		// the pings a provider or an extender measured, reported by the pinger
 		// with the target's co-signature (connect/GEOMAP.md §2.5)
 		router.NewRoute("POST", "/network/ping-report", handlers.ExtenderPingReport),

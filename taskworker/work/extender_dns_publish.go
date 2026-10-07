@@ -3,8 +3,8 @@ package work
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
-	mathrand "math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
@@ -16,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/route53"
 
 	"github.com/urnetwork/glog"
+
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
@@ -32,10 +34,14 @@ import (
 // addresses of a family at all is not published; its set is deleted instead,
 // so the record never answers with a continent's worth of dead addresses.
 //
-// The sample is redrawn every tick from a fresh random source. That rotation
-// is the point: with a ttl of a minute, successive samples spread clients over
-// the whole active set instead of pinning every client in a continent to the
-// same eight addresses until one of them fails.
+// The sample is keyed, not random (connect/EXTENDER.md R2): each location is
+// a vantage of the dns channel, placed by the operator's directory secret in
+// one partition of the open tier of each family, and each epoch deals that
+// partition in a keyed order of which the set is the head. A poller at one
+// location therefore sees its partition and no more however long it polls,
+// and the set changes only when the epoch turns, so most ticks upsert what
+// is already there. Only the open tier is sampled: a gated extender is in no
+// dns set, and a canary is pinned in its own region's sets alone (R1, R4).
 //
 // One apply is one change batch. Route 53 applies a batch atomically, so the
 // record never exists in a half-updated state where a continent has been
@@ -55,8 +61,11 @@ import (
 // name is resolved to an id once per process (resolveExtenderDnsHostedZoneId).
 
 const (
-	// Addresses per set when the configuration does not say.
-	ExtenderDnsDefaultSampleCount = 8
+	// Addresses per set when the configuration does not say: the open
+	// tier's answer size (connect/EXTENDER.md R2), small because the set is
+	// one epoch's draw from the location's partition and the partition is
+	// the bound.
+	ExtenderDnsDefaultSampleCount = connect.ExtenderOpenSampleCount
 
 	// Seconds a resolver may cache a set when the configuration does not say.
 	// Short on purpose: the set is a rotating sample, and a long ttl would
@@ -152,15 +161,6 @@ var newExtenderDnsPublisher = func(
 	return publisher, nil
 }
 
-// extenderDnsRandom is the source one tick's sample is drawn from.
-//
-// It is a variable for the same reason: seeded in a test the sets are exactly
-// reproducible, while production draws a fresh seed per tick, which is what
-// makes successive ticks rotate the addresses a set answers with.
-var extenderDnsRandom = func() *mathrand.Rand {
-	return mathrand.New(mathrand.NewPCG(mathrand.Uint64(), mathrand.Uint64()))
-}
-
 // publishExtenderDns refreshes the geolocation sets for this tick (C5).
 //
 // A deployment with no dns block, or with it disabled, leaves dns untouched
@@ -184,11 +184,21 @@ func publishExtenderDns(ctx context.Context, config *controller.ExtenderConfig) 
 		return err
 	}
 
+	// the secret every location's partition is keyed by (R2). An operator
+	// with no root key has no secret and no TXT sets either; its address
+	// sets are keyed under an empty secret, which still bounds a location to
+	// one partition, just a predictable one, and the tick says so once
+	secret, err := config.DirectorySecret()
+	if err != nil {
+		glog.Errorf("[extenderpublish]no root key, the dns partitions are unkeyed: %s\n", err)
+		secret = nil
+	}
 	addresses := model.GetActiveNetworkExtenderDnsAddresses(ctx)
 	desiredSets := sampleExtenderDnsRecordSets(
 		addresses,
 		extenderDnsSampleCount(config),
-		extenderDnsRandom(),
+		secret,
+		connect.ExtenderEpoch(server.NowUtc(), connect.ExtenderOpenEpochTimeout),
 		newExtenderDnsRecordSigner(ctx, config),
 	)
 	// what this tick converges the zone to, which is the only record of what
@@ -257,84 +267,166 @@ type extenderDnsPool struct {
 	ipVersion     int
 }
 
-// sampleExtenderDnsRecordSets draws the sets one tick wants (C5).
+// The vantage of the default sets on the dns channel, which no continent
+// code can be.
+const extenderDnsDefaultVantage = "default"
+
+// The key one address is partitioned by: its extender's identity key, hex,
+// or the extender id where a row carries no key, so a key-less row still has
+// one stable place.
+func extenderDnsAddressKeyHex(address *model.NetworkExtenderDnsAddress) string {
+	if 0 < len(address.PublicKey) {
+		return hex.EncodeToString(address.PublicKey)
+	}
+	return address.ExtenderId.String()
+}
+
+// sampleExtenderDnsRecordSets draws the sets one tick wants (C5, R2).
 //
-// A continent set takes its own addresses first and fills from the global pool
-// of the family only when it is short, so a client is answered with local
-// addresses whenever local addresses exist and with something reachable
-// otherwise. No address appears twice in a set: the global pool contains the
-// continent's own addresses, so the fill has to skip what was already drawn.
+// Each location -- a continent, or the default -- is a vantage of the dns
+// channel. Its set for a family is, in order: the location's own dns
+// canaries of the family, pinned (R4); then the epoch's keyed order of the
+// location's partition of its own addresses, so a client is answered local
+// addresses whenever local addresses exist; then, when short, the location's
+// partition of the family's global pool, and then the partitions after it
+// around the ring, so a short continent is bound to few partitions rather
+// than filled from the whole pool. No address appears twice in a set.
 //
-// A family with no active address anywhere produces no sets at all, not even a
-// default one -- an empty set is a record that resolves to nothing, which is
-// worse than no record, since a client that gets NXDOMAIN for AAAA falls
-// straight through to A.
+// Only the open tier is drawn from (R1): a gated address is in no set, and a
+// canary is in its own region's sets alone, never in another location's fill
+// and never in the default sets unless the default is its region. A family
+// with no open address anywhere produces no sets at all, not even a default
+// one -- an empty set is a record that resolves to nothing, which is worse
+// than no record, since a client that gets NXDOMAIN for AAAA falls straight
+// through to A. A continent with no open address of a family is not desired
+// either; its set is deleted.
 func sampleExtenderDnsRecordSets(
 	addresses []*model.NetworkExtenderDnsAddress,
 	sampleCount int,
-	random *mathrand.Rand,
+	secret []byte,
+	epoch uint64,
 	signRecord extenderDnsRecordSigner,
 ) []*extenderDnsRecordSet {
-	poolIps := map[extenderDnsPool][]string{}
+	if sampleCount <= 0 {
+		sampleCount = ExtenderDnsDefaultSampleCount
+	}
+	// the open pool's keys per family and continent, each key once, and the
+	// address of each key per family
+	poolKeyHexes := map[extenderDnsPool][]string{}
+	keyIps := map[extenderDnsPool]map[string]string{}
+	// the pinned canary addresses per family and region
+	canaryIps := map[extenderDnsPool][]string{}
 	// which extender an address belongs to, for the TXT set of its location
 	ipExtenderIds := map[string]server.Id{}
+	addPool := func(pool extenderDnsPool, keyHex string, ip string) {
+		if _, ok := keyIps[pool]; !ok {
+			keyIps[pool] = map[string]string{}
+		}
+		if _, ok := keyIps[pool][keyHex]; ok {
+			return
+		}
+		keyIps[pool][keyHex] = ip
+		poolKeyHexes[pool] = append(poolKeyHexes[pool], keyHex)
+	}
 	for _, address := range addresses {
+		if address.DirectoryTier != connect.ExtenderDirectoryTierOpen {
+			// the gated tier is in no open channel (R1), a gated canary
+			// included: its place is its gated partition
+			continue
+		}
 		ip := address.Ip.String()
 		ipExtenderIds[ip] = address.ExtenderId
-		globalPool := extenderDnsPool{ipVersion: address.IpVersion}
-		poolIps[globalPool] = append(poolIps[globalPool], ip)
+		keyHex := extenderDnsAddressKeyHex(address)
 		// an extender whose country has no continent -- unset, or a code the
 		// table does not carry -- is in the global pool only, rather than
 		// being guessed into a continent it may be nowhere near
-		if continentCode := model.ContinentCodeForCountry(address.CountryCode); continentCode != "" {
-			continentPool := extenderDnsPool{continentCode: continentCode, ipVersion: address.IpVersion}
-			poolIps[continentPool] = append(poolIps[continentPool], ip)
-		}
-	}
-
-	sample := func(candidateIps []string, fillIps []string) []string {
-		ips := []string{}
-		draw := func(pool []string) {
-			shuffled := slices.Clone(pool)
-			random.Shuffle(len(shuffled), func(i int, j int) {
-				shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-			})
-			for _, ip := range shuffled {
-				if sampleCount <= len(ips) {
-					return
-				}
-				if !slices.Contains(ips, ip) {
-					ips = append(ips, ip)
+		continentCode := model.ContinentCodeForCountry(address.CountryCode)
+		if address.CanaryChannel != "" {
+			if address.CanaryChannel == connect.ExtenderChannelDns {
+				regionPool := extenderDnsPool{continentCode: continentCode, ipVersion: address.IpVersion}
+				if !slices.Contains(canaryIps[regionPool], ip) {
+					canaryIps[regionPool] = append(canaryIps[regionPool], ip)
 				}
 			}
+			continue
 		}
-		draw(candidateIps)
-		draw(fillIps)
+		addPool(extenderDnsPool{ipVersion: address.IpVersion}, keyHex, ip)
+		if continentCode != "" {
+			addPool(extenderDnsPool{continentCode: continentCode, ipVersion: address.IpVersion}, keyHex, ip)
+		}
+	}
+	for pool := range poolKeyHexes {
+		slices.Sort(poolKeyHexes[pool])
+	}
+
+	// the set of one location and family
+	sample := func(vantage []byte, localPool extenderDnsPool, globalPool extenderDnsPool, canaryPool extenderDnsPool) []string {
+		ips := []string{}
+		take := func(ip string) {
+			if sampleCount <= len(ips) || slices.Contains(ips, ip) {
+				return
+			}
+			ips = append(ips, ip)
+		}
+		for _, ip := range canaryIps[canaryPool] {
+			take(ip)
+		}
+		// the location's own partition first
+		if localKeyHexes := poolKeyHexes[localPool]; 0 < len(localKeyHexes) {
+			members, _, _ := connect.ExtenderPartitionMembers(secret, connect.ExtenderChannelDns, vantage, localKeyHexes)
+			for _, keyHex := range connect.ExtenderPartitionOrder(secret, connect.ExtenderChannelDns, vantage, epoch, members) {
+				take(keyIps[localPool][keyHex])
+			}
+		}
+		if sampleCount <= len(ips) {
+			return ips
+		}
+		// then the location's partition of the global pool, and the ring
+		// after it, each in the epoch's order
+		globalKeyHexes := poolKeyHexes[globalPool]
+		if len(globalKeyHexes) == 0 {
+			return ips
+		}
+		_, partition, partitionCount := connect.ExtenderPartitionMembers(secret, connect.ExtenderChannelDns, vantage, globalKeyHexes)
+		partitionKeyHexes := map[int][]string{}
+		for _, keyHex := range globalKeyHexes {
+			p := connect.ExtenderRecordPartition(secret, connect.ExtenderChannelDns, keyHex, partitionCount)
+			partitionKeyHexes[p] = append(partitionKeyHexes[p], keyHex)
+		}
+		for offset := range partitionCount {
+			if sampleCount <= len(ips) {
+				break
+			}
+			members := partitionKeyHexes[(partition+offset)%partitionCount]
+			for _, keyHex := range connect.ExtenderPartitionOrder(secret, connect.ExtenderChannelDns, vantage, epoch, members) {
+				take(keyIps[globalPool][keyHex])
+			}
+		}
 		return ips
 	}
 
 	desiredSets := []*extenderDnsRecordSet{}
 	for _, ipVersion := range extenderDnsIpVersions {
-		globalIps := poolIps[extenderDnsPool{ipVersion: ipVersion}]
-		if len(globalIps) == 0 {
+		globalPool := extenderDnsPool{ipVersion: ipVersion}
+		if len(poolKeyHexes[globalPool]) == 0 {
 			continue
 		}
 		for _, continentCode := range model.ContinentCodes {
-			continentIps := poolIps[extenderDnsPool{continentCode: continentCode, ipVersion: ipVersion}]
-			if len(continentIps) == 0 {
-				// no address on this continent at all; the set is not desired
-				// and an existing one is deleted
+			continentPool := extenderDnsPool{continentCode: continentCode, ipVersion: ipVersion}
+			if len(poolKeyHexes[continentPool]) == 0 {
+				// no open address on this continent at all; the set is not
+				// desired and an existing one is deleted
 				continue
 			}
 			desiredSets = append(desiredSets, &extenderDnsRecordSet{
 				continentCode: continentCode,
 				ipVersion:     ipVersion,
-				ips:           sample(continentIps, globalIps),
+				ips:           sample([]byte(continentCode), continentPool, globalPool, continentPool),
 			})
 		}
 		desiredSets = append(desiredSets, &extenderDnsRecordSet{
 			ipVersion: ipVersion,
-			ips:       sample(globalIps, nil),
+			ips:       sample([]byte(extenderDnsDefaultVantage), globalPool, globalPool, globalPool),
 		})
 	}
 

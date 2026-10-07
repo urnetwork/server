@@ -40,6 +40,26 @@ func ExtenderLatencyReport(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireClient(controller.ExtenderLatencyReport, w, r)
 }
 
+// Backs `POST /network/extender-release` (connect/EXTENDER.md R3): the gated
+// tier's records released to the calling identity.
+//
+// The client jwt is required because the release is keyed and capped by the
+// account and the device together, and the caller address is the vantage
+// the per-prefix cap counts by.
+func ExtenderRelease(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireClient(controller.ExtenderRelease, w, r)
+}
+
+// Backs `POST /network/extender-block-report` (connect/EXTENDER.md R4): a
+// client's report that it could not reach an extender, from the country its
+// address places it in.
+//
+// The client jwt is required because a report counts once per client toward
+// the per-country blocked state, and the report is rate limited per user.
+func ExtenderBlockReport(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireClient(controller.ExtenderBlockReport, w, r)
+}
+
 // Backs `POST /network/ping-report` (connect/GEOMAP.md §2.5): the pings a
 // provider or an extender measured, reported by the pinger itself.
 //
