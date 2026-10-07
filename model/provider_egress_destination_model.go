@@ -652,7 +652,7 @@ type ProviderEgressSiteTally struct {
 }
 
 // Sums the site tally over the days at or after minDay, per site and place.
-func GetProviderEgressSiteTallies(ctx context.Context, minDay time.Time) []ProviderEgressSiteTally {
+func GetProviderEgressSiteTallies(ctx context.Context, minDay time.Time, excluded ...ProviderEgressTallyExclusion) []ProviderEgressSiteTally {
 	tallies := []ProviderEgressSiteTally{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -670,10 +670,15 @@ func GetProviderEgressSiteTallies(ctx context.Context, minDay time.Time) []Provi
 				sum(canary_pass_count)::bigint
 			FROM provider_egress_site_tally
 			WHERE $1 <= tally_day
+			AND (tally_day,country_code,region) NOT IN (
+				SELECT day,country_code,region FROM jsonb_to_recordset($2::jsonb)
+				AS excluded(day date,country_code text,region text)
+			)
 			GROUP BY name, country_code, region
 			ORDER BY name, country_code, region
 			`,
 			minDay.UTC().Truncate(24*time.Hour),
+			providerEgressTallyExclusionJson(excluded),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1088,7 +1093,7 @@ type ProviderEgressSiteDayTotal struct {
 // the named sites only: what judging a site on probation on every load since
 // its promotion day needs, without reading every place's rows for the whole
 // retention.
-func GetProviderEgressSiteDayTotals(ctx context.Context, minDay time.Time, names []string) []ProviderEgressSiteDayTotal {
+func GetProviderEgressSiteDayTotals(ctx context.Context, minDay time.Time, names []string, excluded ...ProviderEgressTallyExclusion) []ProviderEgressSiteDayTotal {
 	totals := []ProviderEgressSiteDayTotal{}
 	if len(names) == 0 {
 		return totals
@@ -1106,11 +1111,16 @@ func GetProviderEgressSiteDayTotals(ctx context.Context, minDay time.Time, names
 				sum(healthy_failure_count)::bigint
 			FROM provider_egress_site_tally
 			WHERE $1 <= tally_day AND name = ANY($2)
+			AND (tally_day,country_code,region) NOT IN (
+				SELECT day,country_code,region FROM jsonb_to_recordset($3::jsonb)
+				AS excluded(day date,country_code text,region text)
+			)
 			GROUP BY tally_day, name
 			ORDER BY tally_day, name
 			`,
 			minDay.UTC().Truncate(24*time.Hour),
 			names,
+			providerEgressTallyExclusionJson(excluded),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

@@ -95,6 +95,7 @@ func initTaskSchedule(ctx context.Context) {
 		// registered task below without scheduling a successor
 		work.ScheduleProviderEgressProbeTasks(clientSession, tx)
 		work.ScheduleRefreshEgressDestinations(clientSession, tx)
+		work.ScheduleRollupProviderEgressTallies(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
 		work.ScheduleRemoveOldExtenderLatencies(clientSession, tx)
@@ -348,6 +349,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ProviderEgressProbe,
 			work.ProviderEgressProbePost,
 		),
+		task.NewTaskTargetWithPost(work.RollupProviderEgressTallies, work.RollupProviderEgressTalliesPost),
 		task.NewTaskTargetWithPost(
 			work.RefreshEgressDestinations,
 			work.RefreshEgressDestinationsPost,
