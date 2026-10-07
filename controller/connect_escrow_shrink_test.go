@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
@@ -21,6 +22,7 @@ func TestNewContractReturnsGrantedEscrowSize(t *testing.T) {
 	destinationNetworkId := server.NewId()
 	destinationId := server.NewId()
 	grantedContractId := server.NewId()
+	expirationTime := time.UnixMilli(2_000_000_000_000).UTC()
 	granted := 3 * model.Mib
 	requested := 128 * model.Mib
 
@@ -41,12 +43,13 @@ func TestNewContractReturnsGrantedEscrowSize(t *testing.T) {
 		escrowRequest = contractTransferByteCount
 		return &model.TransferEscrow{
 			ContractId:        grantedContractId,
+			ExpirationTime:    expirationTime,
 			TransferByteCount: granted,
 			Priority:          model.PaidPriority,
 		}, nil
 	}
 
-	contractId, count, priority, streamId, err := newContract(
+	contractId, count, priority, streamId, returnedExpirationTime, err := newContract(
 		context.Background(),
 		sourceId,
 		destinationId,
@@ -70,5 +73,8 @@ func TestNewContractReturnsGrantedEscrowSize(t *testing.T) {
 	}
 	if count != granted {
 		t.Fatalf("controller would sign %d bytes, want granted escrow %d", count, granted)
+	}
+	if !returnedExpirationTime.Equal(expirationTime) {
+		t.Fatal("controller discarded the escrow's immutable deadline")
 	}
 }

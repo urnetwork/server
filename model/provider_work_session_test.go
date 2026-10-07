@@ -623,7 +623,7 @@ func TestProviderWorkSessionReservationRollsBackWithItsContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer tx.Rollback(context.WithoutCancel(f.ctx))
-			id, err = createContractNoEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121, true)
+			id, _, err = createContractNoEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -669,7 +669,7 @@ func TestProviderWorkSessionRepeatableReadCannotCertifyAnOldAdmissionHead(t *tes
 				t.Fatal(err)
 			}
 			server.HandleError(func() {
-				_, err := createContractNoEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121, true)
+				_, _, err := createContractNoEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121, true)
 				observedErr = err
 			}, func(err error) { observedErr = err })
 		})

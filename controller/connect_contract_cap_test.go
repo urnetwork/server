@@ -149,7 +149,7 @@ func TestNewContractCapsFreePayerEscrow(t *testing.T) {
 				}, nil
 			}
 
-			contractId, count, _, _, err := newContract(
+			contractId, count, _, _, _, err := newContract(
 				context.Background(),
 				sourceId,
 				destinationId,
