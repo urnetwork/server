@@ -43,6 +43,7 @@ func TestLegacyProviderTotalsClaimedBatchCoalescesWritesAndFinalizesOwners(t *te
 		defer worker.Close()
 		worker.AddTargets(NewLegacyProviderTotalsTaskTarget())
 		totalCount := 0
+		expectedWrites := 0
 		for _, count := range []int{4, 4, legacyProviderTotalsBatchLimit + 1} {
 			taskIds := make([]server.Id, 0, count)
 			for range count {
@@ -64,18 +65,19 @@ func TestLegacyProviderTotalsClaimedBatchCoalescesWritesAndFinalizesOwners(t *te
 				}
 			}
 			totalCount += count
-		}
-		server.Db(ctx, func(conn server.PgConn) {
-			var writes, pending int
-			var provided, revenue int64
-			server.Raise(conn.QueryRow(ctx, `SELECT provided_byte_count,provided_net_revenue_nano_cents,
+			expectedWrites += (count + legacyProviderTotalsBatchLimit - 1) / legacyProviderTotalsBatchLimit
+			server.Db(ctx, func(conn server.PgConn) {
+				var writes, pending int
+				var provided, revenue int64
+				server.Raise(conn.QueryRow(ctx, `SELECT provided_byte_count,provided_net_revenue_nano_cents,
                 (SELECT count(*) FROM test_provider_total_write WHERE network_id=$1),
                 (SELECT count(*) FROM pending_task) FROM account_balance WHERE network_id=$1`, networkId).
-				Scan(&provided, &revenue, &writes, &pending))
-			if provided != int64(17*totalCount) || revenue != int64(29*totalCount) || writes != 4 || pending != 0 {
-				t.Fatalf("expected exact totals in four writes and no backlog: bytes=%d revenue=%d writes=%d pending=%d", provided, revenue, writes, pending)
-			}
-		})
+					Scan(&provided, &revenue, &writes, &pending))
+				if provided != int64(17*totalCount) || revenue != int64(29*totalCount) || writes != expectedWrites || pending != 0 {
+					t.Fatalf("expected exact totals and %d writes with no backlog: bytes=%d revenue=%d writes=%d pending=%d", expectedWrites, provided, revenue, writes, pending)
+				}
+			})
+		}
 	})
 }
 
