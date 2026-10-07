@@ -299,6 +299,18 @@ invocation, cgroup device/inode and private state are checked. Reused or unknown
 group identities retain capacity. Corruption is unavailable capacity, never
 an empty queue. Queue observations do not rewrite unchanged state.
 
+A long-operation wrapper must account for the helper's lifetime independently
+of its SQL and CLI limits. The 2026-10-07 C5 wrapper observed its shared helper
+exit while the owned CLI was still running. Its helper branch had a fixed
+240-second context while the CLI allowed 1800 seconds; that mismatch can abort
+healthy owned work without a database timeout. The fake-clock command control
+includes admission, setup, all 1800 seconds of work and joined cleanup inside
+the existing 1900-second owner envelope. Long operations explicitly select a
+bounded helper lifetime derived from their remaining owner budget. Default
+240-second helpers, finite readers, capacity limits and dead-owner cleanup
+semantics are unchanged. A retained claim's later absence proves current
+closure, not a successful historical release or migration result.
+
 The diagnostic helper receives fresh empty private Config/Site/Vault roots and
 a minimal local user-bus environment. This contains the shared binary's generic
 package initialization while the watcher's configuration remains unchanged.

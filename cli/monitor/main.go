@@ -74,14 +74,9 @@ func runMonitorProcess(runCommand func() error, stderr io.Writer, scrubLogs func
 
 func run(args []string, stdout io.Writer) error {
 	if len(args) > 0 && args[0] == "ssh-lease" {
-		if len(args) != 2 {
-			return errors.New("usage: monitor ssh-lease PRIVATE_REQUEST_JSON")
-		}
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 		defer stop()
-		ctx, cancel := context.WithTimeout(ctx, 240*time.Second)
-		defer cancel()
-		return servermonitor.RunSshAdmissionLease(ctx, args[1], os.Stdin, stdout)
+		return runSshLeaseCommand(ctx, args, os.Stdin, stdout, servermonitor.RunSshAdmissionLease)
 	}
 	return runWithSettingsLoader(args, stdout, servermonitor.LoadSignalSettings)
 }
