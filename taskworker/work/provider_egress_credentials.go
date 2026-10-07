@@ -55,7 +55,7 @@ func newProviderEgressCredentials(identity *model.ProberIdentity) (*providerEgre
 	return &providerEgressCredentials{
 		networkId: *identity.NetworkId, userId: *identity.UserId, clientId: *identity.ClientId, parentJwt: identity.ByClientJwt,
 		parse: jwt.ParseByJwtForAudience, validate: jwt.ValidateByJwtState,
-		mint: model.AuthNetworkClient, retire: model.RemoveNetworkClient,
+		mint: model.AuthNetworkClient, retire: model.RetireProberNetworkClient,
 		captureResident: model.CaptureResidentForClientRetirement, removeResident: model.RemoveCapturedResidentForClient,
 	}, nil
 }

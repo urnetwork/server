@@ -1034,6 +1034,43 @@ func RemoveNetworkClient(
 	return removeClientResult, removeClientErr
 }
 
+// RetireProberNetworkClient completes an internal prober cleanup operation.
+// A repeated cleanup of an owned inactive client succeeds without extending
+// its deactivation timestamp. Public removal retains its existing timestamp
+// refresh semantics. No in-memory minted set is required after reconstruction.
+func RetireProberNetworkClient(
+	removeClient *RemoveNetworkClientArgs,
+	clientSession *session.ClientSession,
+) (*RemoveNetworkClientResult, error) {
+	var result *RemoveNetworkClientResult
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		matched, err := retireProberNetworkClientInTx(clientSession.Ctx, tx, removeClient.ClientId, clientSession.ByJwt.NetworkId)
+		server.Raise(err)
+		result = &RemoveNetworkClientResult{}
+		if !matched {
+			result.Error = &RemoveNetworkClientError{Message: "Client does not exist."}
+		}
+	}, server.TxReadCommitted)
+	return result, nil
+}
+
+func retireProberNetworkClientInTx(ctx context.Context, tx server.PgTx, clientId, networkId server.Id) (bool, error) {
+	var active bool
+	err := tx.QueryRow(ctx, `SELECT active FROM network_client
+		WHERE client_id=$1 AND network_id=$2 FOR UPDATE`, clientId, networkId).Scan(&active)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !active {
+		return true, nil
+	}
+	count, err := deactivateLockedNetworkClientsInTx(ctx, tx, []server.Id{clientId}, networkId)
+	return count == 1, err
+}
+
 // matches the batch size `RemoveDisconnectedNetworkClients` already uses for
 // bounded maintenance sweeps of this same table (see `markTopLevelBatchCount`
 // above): large enough to make a real dent per transaction, small enough that
@@ -1082,6 +1119,14 @@ func deactivateNetworkClientsInTx(
 	if err := result.Err(); err != nil {
 		return 0, err
 	}
+	if len(lockedClientIds) == 0 {
+		return 0, nil
+	}
+	return deactivateLockedNetworkClientsInTx(ctx, tx, lockedClientIds, networkId)
+}
+
+// The caller must hold FOR UPDATE on every client in this exact owned set.
+func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, lockedClientIds []server.Id, networkId server.Id) (int64, error) {
 	if len(lockedClientIds) == 0 {
 		return 0, nil
 	}
