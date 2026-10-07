@@ -18790,6 +18790,18 @@ missing or disabled guard, a nullable key column, a widened link key, a missing
 nonce reference or owner index, a narrowed or widened mode, or a dropped hotkey
 column rule is drift at head 789.
 
+Version 790 adds `transfer_contract.expiration_time` as a nullable timestamp
+without time zone, with no precision override, default, generated expression
+or identity. Old writers therefore retain NULL deadlines; this catalog check
+does not backfill them or infer expiration eligibility. The 2026-10-07 full
+monitor gate found that the source head included 790 while its artifact list
+and SELECT still ended at 789. That is a detector coverage gap, not proof that
+Main lacks the column. The appended exact catalog predicate reports drift
+only at a published head of at least 790; absence at 789 remains pending
+migration. Native controls cover missing, wrong-type, nonnullable, defaulted
+and generated columns plus healthy restoration. A failed catalog read remains
+unknown, and matching schema does not prove any contract closed.
+
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
 nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp

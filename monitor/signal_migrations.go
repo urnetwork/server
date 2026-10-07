@@ -245,7 +245,7 @@ var contractUsageGuardArtifactQuery = `(
     )
 )`
 
-var migrationArtifacts = append([]migrationArtifact{
+var migrationArtifacts = append(append([]migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},
 	{name: "competition_job_immutable_guard", requiredVersion: 589, rowColumn: 2},
 	{name: "competition_round.providers_sha256", requiredVersion: 590, rowColumn: 3},
@@ -426,7 +426,9 @@ var migrationArtifacts = append([]migrationArtifact{
 	{name: "original contract close evidence custody", requiredVersion: 767, rowColumn: 178},
 	{name: "original client close signature companions", requiredVersion: 768, rowColumn: 179},
 	{name: "original client report inventory", requiredVersion: 769, rowColumn: 180},
-}, snMainnetMigrationArtifacts()...)
+}, snMainnetMigrationArtifacts()...), migrationArtifact{
+	name: "transfer_contract.expiration_time nullable timestamp without default", requiredVersion: 790, rowColumn: 201,
+})
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	// Every artifact is queried before its version is checked. Nullable catalog
@@ -2183,7 +2185,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       `+playPurchaseBindingArtifactQuery+`,
 		       `+contractCloseEvidenceArtifactQuery+`,
 		       `+contractCloseOriginalArtifactQuery+`,
-		       `+contractCloseInventoryArtifactQuery+snMainnetMigrationArtifactQueries()+`
+		       `+contractCloseInventoryArtifactQuery+snMainnetMigrationArtifactQueries()+`,
+		       `+contractExpirationArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {
