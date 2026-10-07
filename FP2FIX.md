@@ -1,13 +1,13 @@
 # FindProviders2 supply and quality-probe repair plan
 
-Latest URL-quota checkpoint, 2026-10-06 21:01 UTC: the sole qualified aa71
-watcher reports **75,052 / 75,173 mature providers at quota (99.839038%)**
-from the 20:57:32 UTC source snapshot, leaving 121 deficient providers needing
-871 measured credits. Warming providers remain separate. Sustained 100%
-mature coverage and a current durable credit rate are unproved. The
-[21:01 checkpoint](#2026-10-06-2101-utc-mature-quota-variation-and-url-refill-investigation)
-supersedes the earlier URL quota/monitor status; the dated evidence below
-remains historical.
+Latest URL-quota checkpoint, 2026-10-07 01:32 UTC: the qualified aa71
+watcher reports **76,016 / 76,422 mature providers at quota (99.468739%)**
+from the 01:30:56 UTC source snapshot, leaving 406 deficient providers needing
+441 measured credits. Warming providers remain separate; hourly source coverage
+is incomplete. Sustained 100% mature coverage and a current durable credit rate
+remain unproved. The
+[01:32 checkpoint](#2026-10-07-0132-utc-quota-observation-and-tally-source-handoff)
+supersedes the earlier URL-quota status; dated evidence below remains historical.
 
 Expanded offline subscriber candidate, 2026-10-04 07:55 UTC: the second reviewed
 catalog covers 78 subscriber operators, 85 ASNs and 45 countries, preserving
@@ -8287,3 +8287,59 @@ Finite evidence under `temp/pg-contention-20261004`:
 The frozen, unrun control handoff is
 `temp/fp2-underfilled-due-20261006/source-only-controls.json` (SHA-256
 `d166b89e84089a77b8d882d85d3e44e74989b365cfebf4449f4ab0fbec8e0c9a`).
+
+### 2026-10-07 01:32 UTC quota observation and tally source handoff
+
+The sole qualified aa71 watcher recorded a coherent global census at
+**01:32:03.099 UTC**, from source observation **01:30:56.177511 UTC** and
+sample **01:32:00.052 UTC**. Mature coverage is **76,016 / 76,422
+(99.468739%)**: 406 providers are deficient and need 441 accepted measured
+credits. Warming coverage is 5 / 14, needing 62 credits; unknown cycle age is
+zero. Warming providers remain outside the mature target. The exact retained
+row SHA-256 is
+`d637d86ae5d3c237e2b525a7a6c6494833db4b48beaab5af17099c076aa91add`.
+
+`source_coverage_complete=false`; its sole gap is
+`hourly_measured_run_ranges_or_expected_process_coverage_incomplete`.
+This qualifies the coherent quota stock, not a current durable-credit rate.
+The preceding 01:16:51 observation was 76,424 / 76,427 (99.996075%), needing
+seven credits, with additional shard-2/7 owner gaps. These rolling cohorts
+can differ; no fixed-provider trend, release effect or sustained 100% result
+follows. The ten accepted measured successes-plus-failures per rolling four
+hours contract remains unchanged.
+
+The separate **01:25:39.198414 UTC V16 admission adoption** receipt qualifies
+all eight selected Taskworker slots as current and ready on source
+`a3d79092770f6dbf067df65410f3ac37bb95b184`, image
+`sha256:94f5426406cce55d9bfcf015c342ff20c817f6d7390dc172eac0830fe3f52ddd`.
+These are finite self-reported source/config/start/readiness facts, not old
+writer retirement, continuous health or a quota-causality join. Receipt
+SHA-256 `a93d18314533eb423d3e7fdaa9ce3b8bc2ffabce22f0db6a6cdafdf501d108cc`
+and independent gate
+`9aec5696e7765f19dcf767a67a120006addfba1eac69dbae992089bb290d2117`
+are retained under
+`temp/pg-contention-20261004/root-tw-census-v16-a3d79-runtime-v1/run-20261007T012538Z/`.
+
+The subsequent asynchronous tally source freeze is a separate **V15/schema785
+candidate**, commit `561dbd36a1aab1476a5ae369a9f53f4e53d24930`. It hands off
+auxiliary destination statistics through bounded Redis storage, then coalesces
+SQL updates under durable task cursors. Known loss excludes affected day/place
+evidence while unaffected refreshes continue. Those statistics are neither
+measured quota credits nor financial authority. The callback validates its
+whole saved batch and serializes its receipt before checkpoint mutations,
+including the generic Post retry boundary. Independent source review passed;
+**the 27 native controls, preserved expected-failure baselines, race and
+lifecycle gates still require qualification on the explicit Go1.27.1 profile**.
+No deployment or Main improvement is claimed.
+The graph is `release-graph-v5.json`, SHA-256
+`c96ff2df7423537c2088e07772c51fe408efd0f94f70090f02eac30076c85ce0`;
+source-only gate SHA-256
+`e37deaa45246dbadd16dbbb9742fb57f9a749f66883811da8fc8de1f8f7f782b`,
+under `/run/media/by/archive1/urnetwork-build/fp2-tally-aggregation-20261006/`.
+
+The retained rows and source/adoption pins are frozen in that archive's
+`fp2fix-checkpoint-20261007T0132Z-v2/evidence.json`, SHA-256
+`6a3253265a838e6ad9bbb8ad88839811ab611a220da8dd40853a30d7b328b247`. This documentation update starts no watcher,
+Main read, compiler or fixture. Earlier V6/V10 acknowledged-outcome rates remain
+historical process averages and cannot substitute for a current durable-credit
+rate or prove native provider supply.
