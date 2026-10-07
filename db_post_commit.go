@@ -11,9 +11,10 @@ const TxPostCommitTimeout = 5 * time.Second
 // The transaction owner alone registers posts; registration is not concurrent.
 type postCommitPgTx struct {
 	PgTx
-	posts          []PostFunction
-	postKeyIndexes map[string]int
-	committedAt    time.Time
+	posts              []PostFunction
+	postKeyIndexes     map[string]int
+	committedAt        time.Time
+	commitObservations *txCommitObservations
 }
 
 // Registers one optional projection per key on a server-owned transaction. A

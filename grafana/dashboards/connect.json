@@ -46,11 +46,245 @@
     },
     "panels": [
         {
+            "id": 22,
+            "type": "row",
+            "title": "contract opens and closes — all writing services",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 0
+            }
+        },
+        {
+            "id": 23,
+            "type": "timeseries",
+            "title": "contracts opened and closed / s",
+            "description": "Opens count first committed inserts across legacy, Redis and no-escrow backends; reuse and rollback do not count. Closes count first committed terminal outcomes, including quarantine, not completion of later Redis debit/projection work. Observed across all scraped writing services in the selected env; Connect block/host filters do not apply. Missing counters are No data, not zero. Rates may undercount during mixed deployment, missed scrapes, process failure or unsampled CLI writes.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 1
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0,
+                    "custom": {
+                        "lineWidth": 2
+                    }
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "opened / s"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "mode": "fixed",
+                                    "fixedColor": "blue"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "closed / s"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "mode": "fixed",
+                                    "fixedColor": "green"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(rate(urnetwork_contract_opened_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "opened / s"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum(rate(urnetwork_contract_closed_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "closed / s"
+                }
+            ]
+        },
+        {
+            "id": 24,
+            "type": "timeseries",
+            "title": "open backlog growth / s — red when opens exceed closes",
+            "description": "Signed opened minus closed rate; the red area shows positive opening excess directly. Short positive windows can reflect arrivals and normal contract lifetime. Sustained positive growth together with a growing overdue backlog indicates insufficient closing progress. This is observed net growth, not an absolute or overdue backlog census. Observed across all scraped writing services in the selected env; Connect block/host filters do not apply. Missing counters are No data, not zero. Rates may undercount during mixed deployment, missed scrapes, process failure or unsampled CLI writes.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 1
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "custom": {
+                        "lineWidth": 2
+                    }
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "opened - closed / s"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "mode": "fixed",
+                                    "fixedColor": "blue"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "opening excess / s"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "mode": "fixed",
+                                    "fixedColor": "red"
+                                }
+                            },
+                            {
+                                "id": "custom.fillOpacity",
+                                "value": 30
+                            }
+                        ]
+                    }
+                ]
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(rate(urnetwork_contract_opened_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) - sum(rate(urnetwork_contract_closed_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "opened - closed / s"
+                },
+                {
+                    "refId": "B",
+                    "expr": "clamp_min((sum(rate(urnetwork_contract_opened_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) - sum(rate(urnetwork_contract_closed_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))), 0)",
+                    "legendFormat": "opening excess / s"
+                }
+            ]
+        },
+        {
+            "id": 25,
+            "type": "stat",
+            "title": "observed open backlog change over selected range",
+            "description": "Counter-reset-aware opened increase minus closed increase over the selected dashboard range. Positive means more opens than closes; negative means more closes. This is the observed change, not an absolute or overdue backlog count. Observed across all scraped writing services in the selected env; Connect block/host filters do not apply. Missing counters are No data, not zero. Rates may undercount during mixed deployment, missed scrapes, process failure or unsampled CLI writes.",
+            "gridPos": {
+                "h": 6,
+                "w": 12,
+                "x": 0,
+                "y": 9
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "decimals": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "textMode": "value"
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(increase(urnetwork_contract_opened_total{env=\"$env\",instance!=\"\"}[$__range])) - sum(increase(urnetwork_contract_closed_total{env=\"$env\",instance!=\"\"}[$__range]))",
+                    "legendFormat": "opened - closed",
+                    "instant": true,
+                    "range": false
+                }
+            ]
+        },
+        {
+            "id": 26,
+            "type": "timeseries",
+            "title": "processes exposing contract counters by service",
+            "description": "Current scraped series for each counter, including legitimate zero-valued counters. Compare with deployed writers to spot missing instrumentation; a nonzero count is not proof of complete fleet coverage. Graphs above remain useful observed rates without a whole-fleet attestation gate. Observed across all scraped writing services in the selected env; Connect block/host filters do not apply. Missing counters are No data, not zero. Rates may undercount during mixed deployment, missed scrapes, process failure or unsampled CLI writes.",
+            "gridPos": {
+                "h": 6,
+                "w": 12,
+                "x": 12,
+                "y": 9
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "decimals": 0,
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "count by (service) (urnetwork_contract_opened_total{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "opened {{service}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "count by (service) (urnetwork_contract_closed_total{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "closed {{service}}"
+                }
+            ]
+        },
+        {
             "id": 1,
             "type": "timeseries",
             "title": "client transport connections",
             "description": "Open client transports, aggregated per deploy block and host. This is not a distinct-device count: one resident device may own multiple transports. Distinct devices are charted on the signals and public network-stats boards.",
-            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0}, "overrides": []},
             "targets": [
@@ -71,7 +305,7 @@
             "type": "timeseries",
             "title": "dropped messages / s",
             "description": "Lossless drop counters by bounded drop point: destination-forward queue full, receiving resident queue full, resident abuse validation, or zero-wait receive queue admission (by boundary; the byte-rate query is hidden by default and can be toggled on for sizing). Rates are summed per host across the selected deploy blocks.",
-            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
             "targets": [
@@ -108,14 +342,14 @@
             "type": "row",
             "title": "exchange I/O (application protocol frames)",
             "collapsed": false,
-            "gridPos": {"h": 1, "w": 24, "x": 0, "y": 8}
+            "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23}
         },
         {
             "id": 4,
             "type": "stat",
             "title": "active exchange connections",
             "description": "Post-handshake exchange socket endpoints. Outbound is the logical fleet connection count; inbound is the peer-side copy of those same sockets, so do not add the two values. A host-only selection can legitimately be asymmetric.",
-            "gridPos": {"h": 5, "w": 6, "x": 0, "y": 9},
+            "gridPos": {"h": 5, "w": 6, "x": 0, "y": 24},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0}, "overrides": []},
             "options": {
@@ -148,7 +382,7 @@
             "type": "stat",
             "title": "current exchange data TX",
             "description": "Current completed exchange data-frame write rate. Grafana automatically scales bits/s to Kbps, Mbps, or Gbps. The count includes the exchange protocol's 4-byte frame header but excludes pings and handshakes.",
-            "gridPos": {"h": 5, "w": 6, "x": 6, "y": 9},
+            "gridPos": {"h": 5, "w": 6, "x": 6, "y": 24},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "bps", "min": 0}, "overrides": []},
             "options": {
@@ -172,7 +406,7 @@
             "type": "stat",
             "title": "current exchange data RX",
             "description": "Current completed exchange data-frame read rate. Grafana automatically scales bits/s to Kbps, Mbps, or Gbps. The count includes the exchange protocol's 4-byte frame header but excludes pings and handshakes.",
-            "gridPos": {"h": 5, "w": 6, "x": 12, "y": 9},
+            "gridPos": {"h": 5, "w": 6, "x": 12, "y": 24},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "bps", "min": 0}, "overrides": []},
             "options": {
@@ -196,7 +430,7 @@
             "type": "stat",
             "title": "current exchange data frames / s",
             "description": "Completed application-protocol data frames per second in each I/O direction. These are exchange packets, not kernel TCP segments; TCP segmentation and retransmission are below this measurement boundary.",
-            "gridPos": {"h": 5, "w": 6, "x": 18, "y": 9},
+            "gridPos": {"h": 5, "w": 6, "x": 18, "y": 24},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
             "options": {
@@ -222,7 +456,7 @@
             "type": "timeseries",
             "title": "exchange data throughput",
             "description": "Live exchange data-frame throughput by process-local I/O direction. Fleet TX and RX are two observations of the same inter-server traffic and should converge; never sum them into a traffic total.",
-            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {
                 "defaults": {"unit": "bps", "min": 0, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never"}},
@@ -245,7 +479,7 @@
             "type": "timeseries",
             "title": "exchange protocol frames / s",
             "description": "Completed exchange frames by direction and kind. Data is relayed traffic, ping is keepalive/control traffic, and handshake is connection setup. A frame is counted only after the complete frame succeeds.",
-            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {
                 "defaults": {"unit": "ops", "min": 0, "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 8, "showPoints": "never"}},
@@ -268,7 +502,7 @@
             "type": "timeseries",
             "title": "average exchange data-frame payload",
             "description": "Mean data payload bytes per completed exchange frame. The query removes the fixed 4-byte exchange header from the byte/frame ratio; compare sent and received to spot partial fleet selection or rollout skew.",
-            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 37},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {
                 "defaults": {"unit": "bytes", "min": 0, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never"}},
@@ -291,7 +525,7 @@
             "type": "timeseries",
             "title": "active exchange connections by operation",
             "description": "Post-handshake exchange endpoint history by socket direction and purpose. Outbound is the non-duplicated logical fleet count; inbound is retained as a symmetry and host-placement signal.",
-            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 22},
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 37},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {
                 "defaults": {"unit": "short", "decimals": 0, "min": 0, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never"}},
@@ -314,7 +548,7 @@
             "type": "timeseries",
             "title": "H3 listener health",
             "description": "Listener availability plus supervised restart and failure rates by transport, port, and lifecycle stage.",
-            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 30},
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 45},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
             "targets": [
@@ -340,7 +574,7 @@
             "type": "timeseries",
             "title": "Proxy Protocol UDP drops",
             "description": "Packets rejected at the Proxy Protocol socket before QUIC, grouped by bounded reason.",
-            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 30},
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 45},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "pps", "min": 0}, "overrides": []},
             "targets": [
@@ -360,7 +594,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 38
+                "y": 53
             },
             "datasource": {
                 "type": "prometheus",
@@ -390,7 +624,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 12,
-                "y": 38
+                "y": 53
             },
             "datasource": {
                 "type": "prometheus",
@@ -420,7 +654,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 46
+                "y": 61
             },
             "datasource": {
                 "type": "prometheus",
@@ -450,7 +684,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 12,
-                "y": 46
+                "y": 61
             },
             "datasource": {
                 "type": "prometheus",
@@ -480,7 +714,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 54
+                "y": 69
             },
             "datasource": {
                 "type": "prometheus",
@@ -510,7 +744,7 @@
                 "h": 1,
                 "w": 24,
                 "x": 0,
-                "y": 62
+                "y": 77
             }
         },
         {
@@ -522,7 +756,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 63
+                "y": 78
             },
             "datasource": {
                 "type": "prometheus",
@@ -583,7 +817,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 12,
-                "y": 63
+                "y": 78
             },
             "datasource": {
                 "type": "prometheus",
