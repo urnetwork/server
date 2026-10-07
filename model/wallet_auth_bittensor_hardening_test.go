@@ -166,11 +166,13 @@ func TestUseWalletAuthChallengeSignatureErrorsStay4xx(t *testing.T) {
 			wantPrefix: "400 invalid signature encoding",
 		},
 		{
+			// no schnorrkel marker: well formed ed25519 bytes that do not
+			// verify, so the signature is wrong rather than undecodable
 			name:       "tao 64 zero bytes",
 			blockchain: "tao",
 			publicKey:  wallet.address,
 			signature:  strings.Repeat("00", 64),
-			wantPrefix: "400 invalid signature encoding",
+			wantPrefix: "401 invalid signature",
 		},
 		{
 			name:       "tao non hex",
@@ -272,9 +274,18 @@ func TestUseWalletAuthChallengeSignatureMismatchIsMarked(t *testing.T) {
 			wantMessage: "400 invalid signature encoding",
 		},
 		{
-			name:        "64 bytes that are no signature",
+			// no schnorrkel marker, so these are well formed ed25519 bytes:
+			// they decode and do not verify, which is a mismatch
+			name:         "64 bytes that are no signature",
+			message:      message,
+			signature:    strings.Repeat("00", 64),
+			wantMismatch: true,
+			wantMessage:  "401 invalid signature",
+		},
+		{
+			name:        "64 bytes with the sr25519 marker that are no signature",
 			message:     message,
-			signature:   strings.Repeat("00", 64),
+			signature:   strings.Repeat("ff", 64),
 			wantMessage: "400 invalid signature encoding",
 		},
 		{
