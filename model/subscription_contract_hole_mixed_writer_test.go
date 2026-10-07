@@ -141,8 +141,11 @@ func TestContractHoleMixedWriterExpiryLeavesEligibleSourceUnknown(t *testing.T) 
 		})
 		priorPairExpiration := pairExpiry()
 		status, until, err := ReadContractHoleLease(packetCtx, f.destinationId, f.sourceId)
-		if err != nil || status != ContractHolePositive || !until.Before(priorExpiration) || until.After(time.UnixMilli(priorPairExpiration)) {
-			t.Fatal("prior publication did not bound the final reader", status, until, priorExpiration, err)
+		// PTTL and PEXPIRETIME expose milliseconds; started+PTTL retains the
+		// Go sample's sub-millisecond fraction. Compare that Redis bound at
+		// its precision while keeping the signed deadline comparison exact.
+		if err != nil || status != ContractHolePositive || !until.Before(priorExpiration) || until.UnixMilli() > priorPairExpiration {
+			t.Fatal("prior publication did not bound the final reader", status, until, priorExpiration, priorPairExpiration, err)
 		}
 
 		server.Redis(packetCtx, func(client server.RedisClient) {
