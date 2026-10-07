@@ -983,6 +983,25 @@ func startOfUtcDay(t time.Time) time.Time {
 	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 }
 
+// Keep both outcome branches explicit so PostgreSQL can combine the existing
+// transfer_contract_closed_usage (outcome IS NOT NULL) and
+// transfer_contract_outcome_null partial indexes for a selective day. The
+// disjunction includes every outcome, including closed contracts whose outcome
+// is still NULL. A dense day can retain a sequential scan and ordinary join.
+// The work reduction depends on those indexes being installed, valid and ready;
+// this query does not create or repair them, or force report PK lookups.
+const transferAuditDailyBytesSQL = `
+SELECT COALESCE(SUM(contract_close.used_transfer_byte_count), 0)
+FROM transfer_contract
+INNER JOIN contract_close ON
+    contract_close.contract_id = transfer_contract.contract_id AND
+    contract_close.party = 'destination'
+WHERE
+    $1 <= transfer_contract.close_time AND
+    transfer_contract.close_time < $2 AND
+    (transfer_contract.outcome IS NULL OR transfer_contract.outcome IS NOT NULL)
+`
+
 // RollupTransferAuditEvents writes one aggregate audit_contract_event per
 // complete UTC day in [minTime, maxTime), summing settled destination-party
 // bytes from transfer_contract x contract_close — the same settled-bytes join
@@ -1027,16 +1046,7 @@ func RollupTransferAuditEvents(
 			var settledByteCount int64
 			result, err := tx.Query(
 				ctx,
-				`
-				SELECT COALESCE(SUM(contract_close.used_transfer_byte_count), 0)
-				FROM transfer_contract
-				INNER JOIN contract_close ON
-					contract_close.contract_id = transfer_contract.contract_id AND
-					contract_close.party = 'destination'
-				WHERE
-					$1 <= transfer_contract.close_time AND
-					transfer_contract.close_time < $2
-				`,
+				transferAuditDailyBytesSQL,
 				dayStart,
 				dayEnd,
 			)
