@@ -12657,7 +12657,8 @@ The opt-in API instrumentation adds only fixed cells:
 
 Trusted JWT-state work is separately exposed by
 `urnetwork_jwt_state_queries_total{caller,operation,credential,outcome}` at
-`jwt.ValidateByJwtState`. It has 252 initialized cells: 21 server-selected
+the shared query boundary of `jwt.ValidateByJwtState` and
+`jwt.ValidateByJwtStateInTx`. It has 252 initialized cells: 21 server-selected
 caller/operation pairs, `account|client` statement shapes, and
 `query_error|state_valid|no_active_row|credential_rotated|canceled|deadline`.
 The caller/operation pairs are:
@@ -12680,7 +12681,7 @@ family on an older executable is unavailable coverage, not zero work. On a
 capable executable, nonzero `unknown` is measured unclassified work and must
 remain in the total; it cannot be reassigned from a SQL shape or service name.
 
-One event belongs to one client-side `conn.Query` attempt after pool acquisition
+One event belongs to one client-side connection or transaction `Query` attempt after pool acquisition
 and is recorded on result completion or panic unwind. Each DB callback retry
 counts separately. Unfinished attempts, failures before this query boundary,
 signature/claim refusals and ownership refusals before validation are excluded.
@@ -12703,6 +12704,21 @@ inactive hosted child can stop at the ownership query before JWT validation;
 an externally revoked prober child retained in its owner's registry reaches
 the state check until that owner removes its membership. Keep these distinct
 when examining retry pressure; neither query count proves new-client churn.
+
+Hosted typed mint now uses two pool acquisitions in the successful path without
+retries: the existing fresh entitlement read, followed by the child-creation
+transaction. Signature and owning-parent checks remain before model work. The
+transaction's first query validates current parent state and its claimed device;
+that verified device replaces the separate source-client lookup. Every retried
+transaction repeats validation. No permission is cached across operations, and
+the fresh entitlement read still bypasses both cache tiers before issuing a
+durable JWT. A live-state refusal now follows the entitlement read; malformed
+or foreign complete credentials still stop at local preflight. Revocation is
+observed at the validation snapshot, without adding a lock that serializes
+parent operations. The raw mint wrapper retains its additional outer check.
+Compare source-qualified generations: a callback count is neither a completed
+mint count nor a closed decomposition of all default-pool acquisitions. Pool
+acquisition wait is not SQL execution latency.
 
 The existing session-auth family covers `ClientSession.Auth` only, and the
 HTTP route's `probe_claimed` header partition is client supplied. Neither

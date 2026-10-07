@@ -29,6 +29,21 @@ func AuthNetworkClient(
 	authClient *model.AuthNetworkClientArgs,
 	clientSession *session.ClientSession,
 ) (*model.AuthNetworkClientResult, error) {
+	return authNetworkClient(authClient, clientSession, model.AuthNetworkClient)
+}
+
+// Hosted child mint keeps the controller's existing configuration and post
+// behavior while the model validates live parent state in its transaction.
+func AuthNetworkClientFromParent(authClient *model.AuthNetworkClientArgs, clientSession *session.ClientSession) (*model.AuthNetworkClientResult, error) {
+	return authNetworkClient(authClient, clientSession, model.AuthNetworkClientFromParent)
+}
+
+// The supplied model entry point owns validation and the durable allocation.
+func authNetworkClient(
+	authClient *model.AuthNetworkClientArgs,
+	clientSession *session.ClientSession,
+	authenticate func(*model.AuthNetworkClientArgs, *session.ClientSession) (*model.AuthNetworkClientResult, error),
+) (*model.AuthNetworkClientResult, error) {
 	var verifySettings *model.VerifySettings
 	if StEnabled() {
 		// Validate the enabled subsystem's required vault/config before the
@@ -36,7 +51,7 @@ func AuthNetworkClient(
 		// into a post-commit 500 with an ownerless allocation.
 		verifySettings = VerifySettings()
 	}
-	result, err := model.AuthNetworkClient(authClient, clientSession)
+	result, err := authenticate(authClient, clientSession)
 	if err == nil && result != nil && result.ClientId != nil && clientSession.ByJwt != nil {
 		recordAuthNetworkClientOnboarding(authClient, clientSession)
 	}
