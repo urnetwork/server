@@ -1,7 +1,7 @@
 package work
 
 // The dns sets as an open channel of the tiered directory
-// (connect/EXTENDER.md Q1, Q2, Q4): the gated tier is in no set, a location
+// (connect/EXTENDER.md R1, R2, R4): the gated tier is in no set, a location
 // is bound to its partition across epochs, and a canary is pinned in its one
 // region. Pure sampler runs under the fixed secret and epoch; no database.
 
@@ -44,7 +44,7 @@ func testExtenderDnsAnsweredIps(desiredSets []*extenderDnsRecordSet) map[string]
 
 // Root cause: operator hosts are in the open channels. A gated address is in
 // no dns set and no TXT set, whatever its continent and however short the
-// sets around it are (Q1).
+// sets around it are (R1).
 func TestExtenderDnsSampleExcludesTheGatedTier(t *testing.T) {
 	addresses := slices.Concat(
 		testExtenderDnsAddresses("DE", 4, 1, 2),
@@ -96,7 +96,7 @@ func TestExtenderDnsSampleExcludesTheGatedTier(t *testing.T) {
 // from the whole pool every tick. A location is a vantage bound to its
 // partition: over many epochs its sets reach the partition and no more, the
 // same epoch draws the same set, and the default location is its own vantage
-// with its own partition (Q2).
+// with its own partition (R2).
 func TestExtenderDnsSampleBindsALocationToItsPartition(t *testing.T) {
 	indexes := []int{}
 	for i := range 64 {
@@ -146,7 +146,7 @@ func TestExtenderDnsSampleBindsALocationToItsPartition(t *testing.T) {
 // Root cause: a leak cannot be attributed. A dns canary is pinned in its
 // own region's sets every epoch and is in no other location's set -- not a
 // short continent's fill and not the default sets -- so a block of it names
-// its region and nothing else (Q4). A canary is still vouched for by its
+// its region and nothing else (R4). A canary is still vouched for by its
 // region's TXT set, since a client is answered with it.
 func TestExtenderDnsSamplePinsACanaryInItsRegionOnly(t *testing.T) {
 	canary := testExtenderDnsTieredAddress("DE", 4, 1, connect.ExtenderDirectoryTierOpen, connect.ExtenderChannelDns)

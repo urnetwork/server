@@ -34,14 +34,14 @@ import (
 // addresses of a family at all is not published; its set is deleted instead,
 // so the record never answers with a continent's worth of dead addresses.
 //
-// The sample is keyed, not random (connect/EXTENDER.md Q2): each location is
+// The sample is keyed, not random (connect/EXTENDER.md R2): each location is
 // a vantage of the dns channel, placed by the operator's directory secret in
 // one partition of the open tier of each family, and each epoch deals that
 // partition in a keyed order of which the set is the head. A poller at one
 // location therefore sees its partition and no more however long it polls,
 // and the set changes only when the epoch turns, so most ticks upsert what
 // is already there. Only the open tier is sampled: a gated extender is in no
-// dns set, and a canary is pinned in its own region's sets alone (Q1, Q4).
+// dns set, and a canary is pinned in its own region's sets alone (R1, R4).
 //
 // One apply is one change batch. Route 53 applies a batch atomically, so the
 // record never exists in a half-updated state where a continent has been
@@ -62,7 +62,7 @@ import (
 
 const (
 	// Addresses per set when the configuration does not say: the open
-	// tier's answer size (connect/EXTENDER.md Q2), small because the set is
+	// tier's answer size (connect/EXTENDER.md R2), small because the set is
 	// one epoch's draw from the location's partition and the partition is
 	// the bound.
 	ExtenderDnsDefaultSampleCount = connect.ExtenderOpenSampleCount
@@ -184,7 +184,7 @@ func publishExtenderDns(ctx context.Context, config *controller.ExtenderConfig) 
 		return err
 	}
 
-	// the secret every location's partition is keyed by (Q2). An operator
+	// the secret every location's partition is keyed by (R2). An operator
 	// with no root key has no secret and no TXT sets either; its address
 	// sets are keyed under an empty secret, which still bounds a location to
 	// one partition, just a predictable one, and the tick says so once
@@ -281,18 +281,18 @@ func extenderDnsAddressKeyHex(address *model.NetworkExtenderDnsAddress) string {
 	return address.ExtenderId.String()
 }
 
-// sampleExtenderDnsRecordSets draws the sets one tick wants (C5, Q2).
+// sampleExtenderDnsRecordSets draws the sets one tick wants (C5, R2).
 //
 // Each location -- a continent, or the default -- is a vantage of the dns
 // channel. Its set for a family is, in order: the location's own dns
-// canaries of the family, pinned (Q4); then the epoch's keyed order of the
+// canaries of the family, pinned (R4); then the epoch's keyed order of the
 // location's partition of its own addresses, so a client is answered local
 // addresses whenever local addresses exist; then, when short, the location's
 // partition of the family's global pool, and then the partitions after it
 // around the ring, so a short continent is bound to few partitions rather
 // than filled from the whole pool. No address appears twice in a set.
 //
-// Only the open tier is drawn from (Q1): a gated address is in no set, and a
+// Only the open tier is drawn from (R1): a gated address is in no set, and a
 // canary is in its own region's sets alone, never in another location's fill
 // and never in the default sets unless the default is its region. A family
 // with no open address anywhere produces no sets at all, not even a default
@@ -330,7 +330,7 @@ func sampleExtenderDnsRecordSets(
 	}
 	for _, address := range addresses {
 		if address.DirectoryTier != connect.ExtenderDirectoryTierOpen {
-			// the gated tier is in no open channel (Q1), a gated canary
+			// the gated tier is in no open channel (R1), a gated canary
 			// included: its place is its gated partition
 			continue
 		}

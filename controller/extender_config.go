@@ -76,11 +76,11 @@ type ExtenderConfig struct {
 	// the ed25519 seed of the operator's gossip node identity (C6, C7)
 	GossipIdentityKeyHex string            `yaml:"gossip_identity_key_hex"`
 	Dns                  ExtenderDnsConfig `yaml:"dns"`
-	// the tiers of the directory (connect/EXTENDER.md Q1)
+	// the tiers of the directory (connect/EXTENDER.md R1)
 	Directory ExtenderDirectoryConfig `yaml:"directory"`
 }
 
-// The directory tiers (connect/EXTENDER.md Q1). An extender activated by a
+// The directory tiers (connect/EXTENDER.md R1). An extender activated by a
 // client of one of the durable networks -- the operator's own account
 // networks, whose extenders are its hosts -- is signed into the gated tier;
 // every other activation is the open tier. An unset list gates nothing, which
@@ -93,7 +93,7 @@ type ExtenderDirectoryConfig struct {
 const extenderDirectorySecretDomain = "ur-extender-directory-secret-v1"
 
 // DirectorySecret keys every partition of the directory the operator serves
-// (connect/EXTENDER.md Q2, Q3): the dns sets' locations and the gated tier's
+// (connect/EXTENDER.md R2, R3): the dns sets' locations and the gated tier's
 // identities. It is derived from the root seed under a fixed domain, so every
 // replica computes the same secret, nothing new is stored, and the secret
 // rotates with the root key. It is never served.
@@ -125,7 +125,7 @@ func (self *ExtenderConfig) DurableNetworkIds() []server.Id {
 }
 
 // DirectoryTierForNetwork is the tier an activation by a client of the
-// network is signed into (Q1).
+// network is signed into (R1).
 func (self *ExtenderConfig) DirectoryTierForNetwork(networkId server.Id) int {
 	if slices.Contains(self.DurableNetworkIds(), networkId) {
 		return connect.ExtenderDirectoryTierGated

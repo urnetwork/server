@@ -11,7 +11,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The gated tier's tables (connect/EXTENDER.md Q3, Q4): the durable fleet a
+// The gated tier's tables (connect/EXTENDER.md R3, R4): the durable fleet a
 // release draws from, the ledger the release policy reads and writes, the
 // block reports the per-country blocked state is derived from, and the
 // operator's designations of a tier and a canary.
@@ -21,7 +21,7 @@ import (
 // api shares one count of requests, releases and reports. Nothing here is on
 // a packet path.
 
-// The gated tier with active addresses, which a release draws from (Q3):
+// The gated tier with active addresses, which a release draws from (R3):
 // every active extender signed into the gated tier, canaries included, since
 // a gated canary is placed by its partition like any other gated record.
 func GetActiveGatedNetworkExtenders(ctx context.Context) []*NetworkExtenderWithAddresses {
@@ -128,7 +128,7 @@ func getActiveNetworkExtendersWithAddresses(ctx context.Context, directoryTier i
 	return extenders
 }
 
-// Moves one extender between tiers (Q1), the operator's decision. The next
+// Moves one extender between tiers (R1), the operator's decision. The next
 // record signed for it carries the tier; a gated extender's records already
 // in client directories expire within a day and are never dripped again.
 func SetNetworkExtenderDirectoryTier(ctx context.Context, extenderId server.Id, directoryTier int) {
@@ -146,7 +146,7 @@ func SetNetworkExtenderDirectoryTier(ctx context.Context, extenderId server.Id, 
 	})
 }
 
-// Designates one extender a canary of one channel (Q4), or none with the
+// Designates one extender a canary of one channel (R4), or none with the
 // empty channel. The placement follows from the channel: a dns canary is in
 // its continent's sets alone, a gated canary in its gated partition.
 func SetNetworkExtenderCanaryChannel(ctx context.Context, extenderId server.Id, canaryChannel string) {
@@ -168,7 +168,7 @@ func SetNetworkExtenderCanaryChannel(ctx context.Context, extenderId server.Id, 
 	})
 }
 
-// The release ledger over the database (Q3), one per request: the policy's
+// The release ledger over the database (R3), one per request: the policy's
 // counts of requests per identity and vantage and of distinct identities per
 // record and country, and its stamps of both. Every method is one statement,
 // so two replicas serving one identity at once each count the other's rows
@@ -281,7 +281,7 @@ func (self *NetworkExtenderReleaseLedger) RecordRelease(identity []byte, keyHex 
 	})
 }
 
-// Records that a client in a country could not reach an extender (Q4).
+// Records that a client in a country could not reach an extender (R4).
 func RecordNetworkExtenderBlockReport(
 	ctx context.Context,
 	extenderId server.Id,
@@ -305,7 +305,7 @@ func RecordNetworkExtenderBlockReport(
 	})
 }
 
-// Whether an extender is blocked in a country at `now` (Q4,
+// Whether an extender is blocked in a country at `now` (R4,
 // connect.ExtenderBlockedState's rule over the tables): at least
 // `reportThreshold` distinct clients there reported it since the report
 // window began, and the operator's own probe reached one of its active
@@ -395,7 +395,7 @@ func (self *NetworkExtenderBlockedSource) Blocked(keyHex string, countryCode str
 
 // Drops the release, request and report rows older than `minTime`, which a
 // maintenance task runs past the longest window the policy reads (the client
-// window, Q3). Phased: the task that calls it is not wired yet.
+// window, R3). Phased: the task that calls it is not wired yet.
 func RemoveExpiredNetworkExtenderReleases(ctx context.Context, minTime time.Time) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(

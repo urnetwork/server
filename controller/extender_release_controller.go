@@ -16,7 +16,7 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// The gated tier's two routes (connect/EXTENDER.md Q3, Q4).
+// The gated tier's two routes (connect/EXTENDER.md R3, R4).
 //
 // A release hands an authenticated identity -- the account and the device of
 // its client jwt -- a few records of the durable fleet, chosen by
@@ -65,7 +65,7 @@ func extenderReleaseSettings() *connect.ExtenderReleaseSettings {
 	return settings
 }
 
-// ExtenderRelease backs `POST /network/extender-release` (Q3).
+// ExtenderRelease backs `POST /network/extender-release` (R3).
 func ExtenderRelease(
 	args *ExtenderReleaseArgs,
 	clientSession *session.ClientSession,
@@ -203,7 +203,7 @@ type ExtenderBlockReportResult struct {
 	Error string `json:"error,omitempty"`
 }
 
-// ExtenderBlockReport backs `POST /network/extender-block-report` (Q4).
+// ExtenderBlockReport backs `POST /network/extender-block-report` (R4).
 func ExtenderBlockReport(
 	args *ExtenderBlockReportArgs,
 	clientSession *session.ClientSession,

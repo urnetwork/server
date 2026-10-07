@@ -212,7 +212,7 @@ func SignExtenderRecord(
 		IssueTimeMs:   uint64(issueTime.UnixMilli()),
 		ExpireTimeMs:  uint64(issueTime.Add(ExtenderRecordExpireTimeout).UnixMilli()),
 		NetworkHost:   config.NetworkHost,
-		// the tier is signed in (connect/EXTENDER.md Q1), so a client that
+		// the tier is signed in (connect/EXTENDER.md R1), so a client that
 		// holds a gated record never serves it on an open channel
 		DirectoryTier: uint32(extender.DirectoryTier),
 	})
@@ -550,7 +550,7 @@ func ExtenderActivate(
 			Ip:          clientIp,
 			Carriers:    carriers,
 			DnsPorts:    activeDnsPorts,
-			// the operator's policy, by the activating network (Q1)
+			// the operator's policy, by the activating network (R1)
 			DirectoryTier: config.DirectoryTierForNetwork(clientSession.ByJwt.NetworkId),
 
 			ClientAddressHash: clientAddressHash,

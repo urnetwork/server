@@ -159,7 +159,7 @@ func stubExtenderDnsPublisher(t testing.TB) *testExtenderDnsPublisher {
 	return publisher
 }
 
-// The secret and epoch every pure sampler test keys by (Q2), pinned so the
+// The secret and epoch every pure sampler test keys by (R2), pinned so the
 // same rows draw the same sets on every run.
 var testExtenderDnsSecret = bytes.Repeat([]byte{0x5a}, 32)
 
@@ -398,7 +398,7 @@ func TestExtenderDnsSampleKeepsAnUnknownCountryOutOfTheContinents(t *testing.T) 
 
 // The sets rotate with the epoch, within a location's partition, and the
 // same epoch draws the same sets, which is what makes every assertion here
-// reproducible and what makes most ticks an unchanged upsert (Q2).
+// reproducible and what makes most ticks an unchanged upsert (R2).
 func TestExtenderDnsSampleRotatesBetweenEpochs(t *testing.T) {
 	// six addresses are one partition, so every epoch deals all of them
 	addresses := testExtenderDnsAddresses("DE", 4, 1, 2, 3, 4, 5, 6)

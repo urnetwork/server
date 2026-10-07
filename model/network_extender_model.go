@@ -71,17 +71,17 @@ type NetworkExtender struct {
 	// from, which is its genesis.
 	DerivedCountryCode string
 	// The directory tier the extender is signed into (connect/EXTENDER.md
-	// Q1): connect.ExtenderDirectoryTierOpen, which the open channels carry,
+	// R1): connect.ExtenderDirectoryTierOpen, which the open channels carry,
 	// or connect.ExtenderDirectoryTierGated, which only a release does.
 	DirectoryTier int
-	// The one channel this extender is published on as a canary (Q4):
+	// The one channel this extender is published on as a canary (R4):
 	// connect.ExtenderChannelDns or connect.ExtenderChannelGated, empty for
 	// an extender that is no canary. A canary is never dripped and never in
 	// an activation's bootstrap, whatever its tier.
 	CanaryChannel string
 }
 
-// Whether the extender may be carried by an open channel at all (Q1, Q4):
+// Whether the extender may be carried by an open channel at all (R1, R4):
 // the open tier and no canary. The drip, the activation bootstrap and the
 // dns fill read this; a dns canary is placed in its own region's sets by the
 // dns sampler and nowhere else.
@@ -149,8 +149,8 @@ type NetworkExtenderProbeTarget struct {
 // One address the geo dns sets are sampled from (C5), flattened the same way
 // as a probe target: the family decides which record type an address can
 // appear in, and the country decides which continent set it is local to. The
-// key is what the sampler partitions by (Q2), the tier and the canary channel
-// decide whether and where the address may appear at all (Q1, Q4).
+// key is what the sampler partitions by (R2), the tier and the canary channel
+// decide whether and where the address may appear at all (R1, R4).
 type NetworkExtenderDnsAddress struct {
 	ExtenderId    server.Id
 	PublicKey     []byte
@@ -224,7 +224,7 @@ type NetworkExtenderActivation struct {
 	// the dns ports that passed their probe on this address (L2)
 	DnsPorts []int
 	// the directory tier the activation is signed into (connect/EXTENDER.md
-	// Q1), decided by the caller from the operator's policy
+	// R1), decided by the caller from the operator's policy
 	DirectoryTier int
 	// the privacy-preserving hash of the activating address, kept with the
 	// activation history the way a connection keeps it (M1); nil when the
@@ -648,8 +648,8 @@ func ActivateNetworkExtender(
 
 		message, err := signRecord(extender, addresses, issueTime)
 		server.Raise(err)
-		// a gated extender and a canary are carried by no open channel (Q1,
-		// Q4): the record answers the caller and goes on no publish queue
+		// a gated extender and a canary are carried by no open channel (R1,
+		// R4): the record answers the caller and goes on no publish queue
 		if extender.OpenChannelPublishable() {
 			insertNetworkExtenderPublishInTx(
 				ctx,
@@ -836,7 +836,7 @@ func PublishNetworkExtenderRecord(
 			return
 		}
 		if !extender.OpenChannelPublishable() {
-			// never on the queue (Q1, Q4): the selection leaves these out,
+			// never on the queue (R1, R4): the selection leaves these out,
 			// and this is the backstop for an extender whose tier moved
 			// between the selection and the publish
 			return
@@ -995,7 +995,7 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 
 // CountActiveNetworkExtenders counts the open tier's extenders with at least
 // one active address, canaries left out, which is the population the drip has
-// to rotate through (C4, Q1): a gated extender is never dripped and a canary
+// to rotate through (C4, R1): a gated extender is never dripped and a canary
 // is published in its one place alone.
 func CountActiveNetworkExtenders(ctx context.Context) int {
 	count := 0

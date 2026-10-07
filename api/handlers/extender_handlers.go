@@ -40,7 +40,7 @@ func ExtenderLatencyReport(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireClient(controller.ExtenderLatencyReport, w, r)
 }
 
-// Backs `POST /network/extender-release` (connect/EXTENDER.md Q3): the gated
+// Backs `POST /network/extender-release` (connect/EXTENDER.md R3): the gated
 // tier's records released to the calling identity.
 //
 // The client jwt is required because the release is keyed and capped by the
@@ -50,7 +50,7 @@ func ExtenderRelease(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireClient(controller.ExtenderRelease, w, r)
 }
 
-// Backs `POST /network/extender-block-report` (connect/EXTENDER.md Q4): a
+// Backs `POST /network/extender-block-report` (connect/EXTENDER.md R4): a
 // client's report that it could not reach an extender, from the country its
 // address places it in.
 //

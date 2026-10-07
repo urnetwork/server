@@ -9674,12 +9674,12 @@ var migrations = []any{
 		CREATE INDEX legacy_settlement_intent_payer_missing
 		ON legacy_settlement_intent (shard, contract_id) WHERE payer_network_id IS NULL
 	`),
-	// 794: the tiered extender directory (connect/EXTENDER.md Q). The tier an
+	// 794: the tiered extender directory (connect/EXTENDER.md R). The tier an
 	// extender is signed into and the one place a canary is published, both
 	// on the extender row with defaults an old binary never reads; the
-	// release ledger of the gated tier (Q3: requests per identity and
+	// release ledger of the gated tier (R3: requests per identity and
 	// vantage, releases per record and country); and the block reports the
-	// per-country blocked state is derived from (Q4). New columns with
+	// per-country blocked state is derived from (R4). New columns with
 	// defaults and new tables: nothing is rewritten.
 	newSqlMigration(`
 		SET LOCAL lock_timeout = '5s';
