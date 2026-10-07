@@ -37,7 +37,7 @@ func TestContractHoleLeaseAbsoluteAndTransportBoundaries(t *testing.T) {
 		{name: "fraction", values: []any{int64(1), int64(1000), "1000000.5"}, now: start, status: ContractHoleUnknown, wantError: true},
 		{name: "nan", values: []any{int64(1), int64(1000), "NaN"}, now: start, status: ContractHoleUnknown, wantError: true},
 		{name: "count", values: []any{int64(8193), int64(1000), "inf"}, now: start, status: ContractHoleUnknown, wantError: true},
-		{name: "ttl", values: []any{int64(1), int64(60001), "inf"}, now: start, status: ContractHoleUnknown, wantError: true},
+		{name: "ttl", values: []any{int64(1), contractHoleMaximumTtl.Milliseconds() + 1, "inf"}, now: start, status: ContractHoleUnknown, wantError: true},
 		{name: "shape", values: []any{int64(1)}, now: start, status: ContractHoleUnknown, wantError: true},
 	} {
 		status, validUntil, err := contractHoleLease(sample.values, start, sample.now)
