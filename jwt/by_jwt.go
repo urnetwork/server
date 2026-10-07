@@ -564,6 +564,26 @@ func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience strin
 // and client state. Password resets invalidate older credentials through
 // credential_change_time, and removed clients stop working immediately.
 func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (returnErr error) {
+	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
+		return err
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		returnErr = validateByJwtStateQuery(ctx, conn, byJwt)
+	})
+	return
+}
+
+// Checks the same live state through the caller's already-owned transaction.
+// This grants no cached authority: each transaction attempt runs the query.
+func ValidateByJwtStateInTx(ctx context.Context, tx server.PgTx, byJwt *ByJwt, requireClient bool) error {
+	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
+		return err
+	}
+	return validateByJwtStateQuery(ctx, tx, byJwt)
+}
+
+// Refuses incomplete identities before a standalone caller acquires a pool slot.
+func validateByJwtStateIdentity(byJwt *ByJwt, requireClient bool) error {
 	if byJwt == nil {
 		authRejectionCounter.WithLabelValues(string(AuthRejectionMissingToken)).Inc()
 		return errors.New("Missing signed token.")
@@ -572,10 +592,15 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (
 		authRejectionCounter.WithLabelValues(string(AuthRejectionClientRequired)).Inc()
 		return errors.New("Client credential required.")
 	}
+	return nil
+}
 
+// One entered SQL query owns one observation, through a connection or a
+// transaction. Operational failures still unwind to the owning DB boundary.
+func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt) error {
 	valid := false
 	var credentialChangeTime time.Time
-	server.Db(ctx, func(conn server.PgConn) {
+	func() {
 		query := beginStateQuery(ctx, byJwt.ClientId != nil)
 		defer query.finish(ctx)
 		queryFound := false
@@ -621,7 +646,7 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (
 			}
 		})
 		query.complete(queryFound, byJwt.CreateTime, credentialChangeTime)
-	})
+	}()
 
 	// the caller-facing message stays the same for both branches; the split
 	// (row gone/inactive vs credential rotation) is visible in the counter,

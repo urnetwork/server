@@ -55,6 +55,10 @@ const MaxClientPrincipalLength = 256
 // errors.Is to separate this terminal state from infrastructure failures.
 var ErrActiveClientNotFound = errors.New("Client does not exist.")
 
+// An owned child mint failed its live parent credential check. Database and
+// cancellation failures unwind separately and must not become an auth refusal.
+var ErrClientParentInactive = errors.New("Signed parent token is no longer active.")
+
 // Identifies a destination that cannot participate at the contract write
 // boundary. Controllers map this state to a route-specific reliability result.
 var ErrContractDestinationInactive = errors.New("Contract destination is inactive.")
@@ -309,9 +313,27 @@ func AuthNetworkClient(
 	return authNetworkClient(authClient, session, nil)
 }
 
+// A local owner supplies cryptographically verified parent claims. Their live
+// state is checked in every mint transaction before any client/device write;
+// the verified device replaces the otherwise separate source-device lookup.
+func AuthNetworkClientFromParent(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession) (*AuthNetworkClientResult, error) {
+	if authClient == nil || authClient.ClientId != nil || authClient.SourceClientId == nil ||
+		clientSession == nil || clientSession.ByJwt == nil || clientSession.ByJwt.ClientId == nil ||
+		clientSession.ByJwt.DeviceId == nil || *authClient.SourceClientId != *clientSession.ByJwt.ClientId {
+		return nil, errors.New("Client mint requires its credential's parent.")
+	}
+	return authNetworkClientWithParentState(authClient, clientSession, nil, true)
+}
+
 // The optional registration owner is created only by the versioned endpoint.
 // Ordinary client creation retains its original request and response contract.
 func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.ClientSession, registration *networkClientRegistrationOwner) (authClientResult *AuthNetworkClientResult, authClientError error) {
+	return authNetworkClientWithParentState(authClient, session, registration, false)
+}
+
+// Parent validation belongs to the transaction that creates the child. Other
+// entry points keep their existing caller-owned authentication boundary.
+func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session *session.ClientSession, registration *networkClientRegistrationOwner, validateParent bool) (authClientResult *AuthNetworkClientResult, authClientError error) {
 	if authClient.ClientId == nil {
 		roles, principal, message := validateClientIdentityArgs(authClient.Roles, authClient.Principal, session)
 		if message != "" {
@@ -520,6 +542,12 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 			proxyDeviceConfigJson = nil
 			proxyClient = nil
 
+			if validateParent {
+				if err := jwt.ValidateByJwtStateInTx(session.Ctx, tx, session.ByJwt, true); err != nil {
+					authClientError = ErrClientParentInactive
+					return
+				}
+			}
 			if err := lockProberShardClientAdmissionInTx(session.Ctx, tx, session.ByJwt.NetworkId); err != nil {
 				authClientError = err
 				return
@@ -611,6 +639,10 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 					authClient.DeviceSpec,
 					createTime,
 				))
+			} else if validateParent {
+				// The same snapshot just verified this exact active client and
+				// claimed device; no second source-client read is needed.
+				deviceId = *session.ByJwt.DeviceId
 			} else {
 				// copy the device id from the source
 				// important: validate the source client id is in the same network

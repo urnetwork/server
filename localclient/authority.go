@@ -74,6 +74,22 @@ func (self *Authority) token() string {
 }
 
 func (self *Authority) authenticate(ctx context.Context, token string, parentOnly bool) (*session.ClientSession, error) {
+	claims, err := self.parseOwnedClaims(ctx, token, parentOnly)
+	if err != nil {
+		return nil, err
+	}
+	if err = jwt.ValidateByJwtState(ctx, claims, true); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &connect.HttpStatusError{StatusCode: http.StatusUnauthorized}
+	}
+	return self.newSession(ctx, claims), nil
+}
+
+// Signature, audience and owner binding are local preflight. A successful
+// result still requires live-state validation at the operation's DB boundary.
+func (self *Authority) parseOwnedClaims(ctx context.Context, token string, parentOnly bool) (*jwt.ByJwt, error) {
 	if self.closed.Load() {
 		return nil, context.Canceled
 	}
@@ -97,17 +113,16 @@ func (self *Authority) authenticate(ctx context.Context, token string, parentOnl
 	} else if parentOnly || !self.ownsChild(ctx, *claims.ClientId) {
 		return nil, &connect.HttpStatusError{StatusCode: http.StatusUnauthorized}
 	}
-	if err = jwt.ValidateByJwtState(ctx, claims, true); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, &connect.HttpStatusError{StatusCode: http.StatusUnauthorized}
-	}
+	return claims, nil
+}
+
+// The operation owns the session and must validate its claims before writing.
+func (self *Authority) newSession(ctx context.Context, claims *jwt.ByJwt) *session.ClientSession {
 	ctx = model.WithContractOriginNotifications(ctx, self.notifications)
 	if self.appearances != nil {
 		ctx = model.WithProviderAppearances(ctx, self.appearances)
 	}
-	return session.NewLocalClientSession(ctx, "0.0.0.0:0", claims), nil
+	return session.NewLocalClientSession(ctx, "0.0.0.0:0", claims)
 }
 
 // Restored window identities belong to the durable parent, not merely an
@@ -139,16 +154,23 @@ func (self *Authority) AuthNetworkClient(ctx context.Context, args *connect.Auth
 		if args == nil || args.ClientId != nil || args.SourceClientId == nil || server.Id(*args.SourceClientId) != self.clientId {
 			return nil, errors.New("local mint requires its owning parent")
 		}
-		s, err := self.authenticate(ctx, self.token(), true)
+		claims, err := self.parseOwnedClaims(ctx, self.token(), true)
 		if err != nil {
 			return nil, err
 		}
+		s := self.newSession(ctx, claims)
 		defer s.Cancel()
 		request, err := convert[model.AuthNetworkClientArgs](args)
 		if err != nil {
 			return nil, err
 		}
-		result, err := controller.AuthNetworkClient(request, s)
+		result, err := controller.AuthNetworkClientFromParent(request, s)
+		if errors.Is(err, model.ErrClientParentInactive) {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, &connect.HttpStatusError{StatusCode: http.StatusUnauthorized}
+		}
 		if err != nil {
 			return nil, err
 		}
