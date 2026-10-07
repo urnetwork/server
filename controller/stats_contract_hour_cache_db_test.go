@@ -16,9 +16,13 @@ import (
 // The winner executes the real PostgreSQL hourly-window reader after the
 // barrier; seven followers return before that source read is released.
 func TestStatsContractHourCacheNativeEightCollectors(t *testing.T) {
-	(&server.TestEnv{}).Run(t, func(t testing.TB) {
+	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
+		created := time.Now().Add(-time.Minute)
+		testStatsContract(ctx, created, false, false)
+		testStatsContract(ctx, created, false, true)
+		testStatsContract(ctx, created, true, false)
 		keys := statsContractHourKeys("native-" + server.NewId().String())
 		started, release := make(chan struct{}), make(chan struct{})
 		var once sync.Once
@@ -75,13 +79,16 @@ func TestStatsContractHourCacheNativeEightCollectors(t *testing.T) {
 		select {
 		case result := <-results:
 			if result.err != nil || result.snapshot == nil {
-				t.Fatal("native owner did not publish real SQL result")
+				t.Fatalf("native owner did not publish real SQL result: unavailable=%t invalid=%t busy=%t", errors.Is(result.err, errStatsContractHourUnavailable), errors.Is(result.err, errStatsContractHourInvalid), errors.Is(result.err, errStatsContractHourBusy))
 			}
 			winner = result.snapshot
 		case <-ctx.Done():
 			t.Fatal("native SQL/publication did not complete")
 		}
 		workers.Wait()
+		if winner.Counts != (model.ContractHourCounts{Contracts: 3, WithExtender: 1, Disputes: 1}) {
+			t.Fatal("native shared result lost populated exact counts")
+		}
 		if stats := model.Testing_ContractHourCacheStats(); stats.LiveQueries != 2 {
 			t.Fatal("native winner did not run both live range counts")
 		}
