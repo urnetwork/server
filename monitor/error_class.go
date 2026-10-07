@@ -137,19 +137,20 @@ func representativeTaskErrorClass(taskName, rawValue string, classCount int, cla
 }
 
 const (
-	observationErrorClassTimeout           = "observation-timeout"
-	observationErrorClassCanceled          = "observation-canceled"
-	observationErrorClassUnreachable       = "observation-unreachable"
-	observationErrorClassCounterReset      = "observation-counter-reset"
-	observationErrorClassContractMismatch  = "observation-contract-mismatch"
-	observationErrorClassStateUnavailable  = "observation-state-unavailable"
-	observationErrorClassBoundExceeded     = "observation-bound-exceeded"
-	observationErrorClassInvalidResponse   = "observation-invalid-response"
-	observationErrorClassMetricUnavailable = "observation-metric-unavailable"
-	observationErrorClassAccessDenied      = "observation-access-denied"
-	observationErrorClassCommandFailed     = "observation-command-failed"
-	observationErrorClassSSHExit255        = "observation-ssh-exit-255"
-	observationErrorClassUnclassified      = "observation-unclassified"
+	observationErrorClassTimeout              = "observation-timeout"
+	observationErrorClassCanceled             = "observation-canceled"
+	observationErrorClassUnreachable          = "observation-unreachable"
+	observationErrorClassCounterReset         = "observation-counter-reset"
+	observationErrorClassContractMismatch     = "observation-contract-mismatch"
+	observationErrorClassStateUnavailable     = "observation-state-unavailable"
+	observationErrorClassAdmissionUnavailable = "observation-admission-unavailable"
+	observationErrorClassBoundExceeded        = "observation-bound-exceeded"
+	observationErrorClassInvalidResponse      = "observation-invalid-response"
+	observationErrorClassMetricUnavailable    = "observation-metric-unavailable"
+	observationErrorClassAccessDenied         = "observation-access-denied"
+	observationErrorClassCommandFailed        = "observation-command-failed"
+	observationErrorClassSSHExit255           = "observation-ssh-exit-255"
+	observationErrorClassUnclassified         = "observation-unclassified"
 )
 
 // SIGNALS.md §1.7 shared observation taxonomy and observer-route coverage gap.
@@ -165,6 +166,10 @@ func classifyObservationError(err error) string {
 	}
 	if errors.Is(err, context.Canceled) {
 		return observationErrorClassCanceled
+	}
+	var admissionUnavailable *sshAdmissionUnavailableError
+	if errors.As(err, &admissionUnavailable) {
+		return observationErrorClassAdmissionUnavailable
 	}
 	var logQueryError *warpctlLogQueryError
 	if errors.As(err, &logQueryError) {
@@ -233,6 +238,9 @@ func classifyObservationError(err error) string {
 // observationFailureAction keeps the SSH status discriminator identical for
 // whole-signal and partial-target visibility without attributing a route cause.
 func observationFailureAction(errorClass, fallback string) string {
+	if errorClass == observationErrorClassAdmissionUnavailable {
+		return "Inspect the private shared SSH queue and exact local owner generation. Preserve active reservations until transport children join or the original owner cgroup is proved empty. A local admission refusal leaves the target unobserved; do not attribute host failure or raise concurrency caps."
+	}
 	if errorClass == observationErrorClassSSHExit255 {
 		return "Determine whether status 255 came from SSH transport/authentication or the remote command. Correlate failures across independent targets with bounded observer route and intended VPN-session evidence before attributing local overlay loss. Restore the proved observation path and rerun every affected signal."
 	}

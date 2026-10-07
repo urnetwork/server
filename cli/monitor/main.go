@@ -46,6 +46,7 @@ type monitorOptions struct {
 	pgQuerySampleContinuous bool
 	urlProbeCoverageOutput  string
 	providerSelectionOutput string
+	sshAdmissionDirectory   string
 }
 
 // Exit only after the command-owned process lifecycle has returned.
@@ -72,6 +73,16 @@ func runMonitorProcess(runCommand func() error, stderr io.Writer, scrubLogs func
 }
 
 func run(args []string, stdout io.Writer) error {
+	if len(args) > 0 && args[0] == "ssh-lease" {
+		if len(args) != 2 {
+			return errors.New("usage: monitor ssh-lease PRIVATE_REQUEST_JSON")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+		defer stop()
+		ctx, cancel := context.WithTimeout(ctx, 240*time.Second)
+		defer cancel()
+		return servermonitor.RunSshAdmissionLease(ctx, args[1], os.Stdin, stdout)
+	}
 	return runWithSettingsLoader(args, stdout, servermonitor.LoadSignalSettings)
 }
 
@@ -165,6 +176,14 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	if err := settings.Validate(); err != nil {
 		return err
 	}
+	if opts.sshAdmissionDirectory != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		settings, err = settings.WithSharedSshAdmission(ctx, opts.sshAdmissionDirectory)
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
 	if opts.urlProbeCoverageOutput != "" {
 		output, err := os.OpenFile(opts.urlProbeCoverageOutput, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 		if err != nil {
@@ -233,6 +252,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.StringVar(&opts.mode, "mode", "", "SSH address mode: lan or overlay")
 	flags.StringVar(&opts.format, "format", alertFormatMarkdown, "alert output format: markdown or jsonl")
 	flags.StringVar(&opts.output, "output", "", "write one-shot alert output directly to this file")
+	flags.StringVar(&opts.sshAdmissionDirectory, "ssh-admission-dir", "", "private shared Linux SSH queue for the watcher and one bounded diagnostic")
 	flags.BoolVar(&opts.pgQuerySampleContinuous, "pg-query-sample-continuous", false, "continuously collect bounded PostgreSQL query/load samples at the 15m cadence floor")
 	flags.StringVar(&opts.urlProbeCoverageOutput, "url-probe-coverage-output", "", "append one URL quota observation per existing signal execution, including healthy and unavailable results, as JSONL")
 	flags.StringVar(&opts.providerSelectionOutput, "provider-selection-output", "", "append every bounded selection reason observation per existing signal execution, including nonempty and unavailable results, as JSONL")
@@ -249,6 +269,9 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	}
 	if opts.minimumProbeCadence < 0 {
 		return monitorOptions{}, errors.New("monitor: -min-probe-cadence must not be negative")
+	}
+	if opts.sshAdmissionDirectory != "" && (opts.once || opts.listSignals) {
+		return monitorOptions{}, errors.New("monitor: shared SSH admission requires continuous mode")
 	}
 	if opts.urlProbeCoverageOutput != "" && (opts.listSignals || opts.urlProbeCoverageOutput == opts.output) {
 		return monitorOptions{}, errors.New("monitor: URL coverage output requires a distinct observation file and cannot be used with -list-signals")

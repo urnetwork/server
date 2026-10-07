@@ -132,5 +132,6 @@ func comparableSignalSettings(settings SignalSettings) SignalSettings {
 	settings.Source = nil
 	settings.Now = nil
 	settings.runtime = nil
+	settings.sharedSshAdmission = nil
 	return settings
 }
