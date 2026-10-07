@@ -90,7 +90,7 @@ var stateQueryOutcomeLabels = [stateQueryOutcomeCount]string{
 
 var stateQueryCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork", Subsystem: "jwt", Name: "state_queries_total",
-	Help: "JWT-state conn.Query attempts recorded on return or unwind by trusted caller, operation, credential shape and Go state verdict; retries count separately, state_valid is not request success, unknown marks unannotated callers.",
+	Help: "JWT-state SQL query attempts recorded on return or unwind by trusted caller, operation, credential shape and Go state verdict; retries count separately, state_valid is not request success, unknown marks unannotated callers.",
 }, []string{"caller", "operation", "credential", "outcome"})
 
 // Resolve bounded child handles once, avoiding label-map work on each query.
@@ -107,7 +107,7 @@ func init() {
 	prometheus.MustRegister(stateQueryCounter)
 }
 
-// An observation belongs to one actual conn.Query attempt, after acquisition.
+// An observation belongs to one actual connection or transaction Query attempt, after acquisition.
 // Pool failures before that boundary, signature rejection and missing claims
 // create no observation. A database callback retry creates another one.
 type stateQueryObservation struct {
