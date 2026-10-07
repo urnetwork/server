@@ -78,6 +78,18 @@ func flushLegacySettlementShardPage(ctx, bounded context.Context, shard int, aft
 		result.PayerCursor = &cursor
 	}
 	server.HandleError(func() {
+		if !legacySettlementPayerIndexesReady(bounded) {
+			// An unfinished online migration disables only payer scheduling.
+			// Reuse this page's budget and post owner; retain its dormant payer
+			// cursor without manufacturing more chronological work at eof.
+			ordered, err := flushLegacySettlementsPage(ctx, bounded, shard, after, limit, flushLegacySettlementWithGrantWait)
+			result.LegacySettlementFlushResult = ordered
+			if err != nil && ordered.Visited == 0 {
+				result.Cursor = after
+			}
+			server.Raise(err)
+			return
+		}
 		registeredAt := time.Now()
 		var registrationErr error
 		server.HandleError(func() {
