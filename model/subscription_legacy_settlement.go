@@ -206,8 +206,7 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 		}
 	}
 	// Only best-effort projections with separate recovery/expiry remain after commit.
-	posts = append(posts, observeLegacySettlementPost(ctx, legacySettlementStream,
-		func() any { RemoveFromStream(ctx, contractId); return nil }))
+	posts = append(posts, legacySettlementStreamPost(ctx, contractId))
 	return posts, true, false, legacySettlementBusyNone, nil
 }
 
@@ -320,8 +319,12 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 			transactionReturned = true
 		}()
 		func() {
-			defer enterLegacySettlementTiming(ctx, legacySettlementJoinedPosts)()
-			defer enterLegacyTargetTrace(ctx, "joined_posts")()
+			if batch, _ := ctx.Value(legacySettlementPostBatchKey{}).(*legacySettlementPostBatch); batch == nil {
+				defer enterLegacySettlementTiming(ctx, legacySettlementJoinedPosts)()
+				defer enterLegacyTargetTrace(ctx, "joined_posts")()
+			} else {
+				traceLegacySettlement(ctx, "joined_posts", "batched")
+			}
 			server.RunPosts(ctx, posts...)
 		}()
 	}, func(err error) { returnErr = err })
@@ -363,6 +366,8 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 // Tests can interrupt after a real committed prefix.
 func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *LegacySettlementCursor, limit int,
 	settle func(context.Context, server.Id, *legacySettlementGrantWait) (bool, bool, legacySettlementBusyGate, error)) (result LegacySettlementFlushResult, returnErr error) {
+	bounded, finishPosts := withLegacySettlementPostBatch(bounded)
+	defer finishPosts()
 	bounded = context.WithValue(bounded, legacySettlementAdmissionPageKey{}, &legacySettlementAdmissionPage{allowForwardHints: after != nil, probed: map[string]bool{}})
 	pageBudgetExceeded := func(err error) bool {
 		return ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errLegacySettlementPageBudget &&

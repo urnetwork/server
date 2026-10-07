@@ -22,7 +22,9 @@ type LegacySettlementPhaseDuration struct {
 // ColdCensus is a subset of Mirror; callback families are within JoinedPosts.
 // Selection and Financial include pool acquisition and transaction completion.
 // An interrupted final attempt can be timed without entering the Visited count;
-// JoinedPosts also records calls with no callbacks after a busy ownership gate.
+// Page callbacks are coalesced: JoinedPosts and callback family counts describe
+// executed batches, not settled contracts. Single-contract callers still time
+// their individual posts, including empty post groups after a busy gate.
 type LegacySettlementTimings struct {
 	Selection   LegacySettlementPhaseDuration `json:"selection"`
 	Financial   LegacySettlementPhaseDuration `json:"financial"`

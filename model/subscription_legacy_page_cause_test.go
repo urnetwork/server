@@ -67,8 +67,10 @@ func TestLegacySettlementPageDeadlinePreservesJoinedFailureAndCommittedCursor(t 
 					if calls != 2 || id != secondId {
 						t.Fatal("legacy page changed the interrupted visit")
 					}
-					requireLegacySettlementTestState(t, ctx, f, firstId, false, true, 989, 100)
-					requireLegacySettlementTestState(t, ctx, f, secondId, true, false, 989, 100)
+					// Financial ownership has advanced; the page's optional mirror
+					// batch is deliberately still pending at this next-visit seam.
+					requireLegacySettlementTestState(t, ctx, f, firstId, false, true, 989, 200)
+					requireLegacySettlementTestState(t, ctx, f, secondId, true, false, 989, 200)
 					expire(errLegacySettlementPageBudget)
 					if c.cancelParent {
 						cancelParent()

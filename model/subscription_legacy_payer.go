@@ -70,6 +70,8 @@ func FlushLegacySettlementShard(ctx context.Context, shard int, after *LegacySet
 // cursor. No input cursor is mutated, including a failure after a payer commit.
 func flushLegacySettlementShardPage(ctx, bounded context.Context, shard int, after *LegacySettlementCursor,
 	payerAfter *LegacySettlementPayerCursor, limit int) (result LegacySettlementShardResult, returnErr error) {
+	bounded, finishPosts := withLegacySettlementPostBatch(bounded)
+	defer finishPosts()
 	result.Cursor = after
 	if payerAfter != nil {
 		cursor := *payerAfter

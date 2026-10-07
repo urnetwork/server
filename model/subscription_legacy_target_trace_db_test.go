@@ -173,7 +173,7 @@ func TestLegacyTargetTraceCommittedBlockedPostAndPublisher(t *testing.T) {
 			t.Fatal("real stream callback never arrived")
 		}
 		snapshot := trace.snapshot()
-		if !legacyTraceHas(snapshot, "commit", "confirmed_tx_return") || !legacyTraceHas(snapshot, "stream_post", "entered") || legacyTraceHas(snapshot, "stream_post", "returned") || snapshot.PageReturned || snapshot.Dropped == 0 {
+		if !legacyTraceHas(snapshot, "commit", "confirmed_tx_return") || !legacyTraceHas(snapshot, "stream_post", "batched") || legacyTraceHas(snapshot, "stream_post", "returned") || snapshot.PageReturned || snapshot.Dropped == 0 {
 			t.Fatal("blocked post/publication obscured committed versus unfinished stages")
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -188,7 +188,7 @@ func TestLegacyTargetTraceCommittedBlockedPostAndPublisher(t *testing.T) {
 		unblock()
 		select {
 		case got := <-done:
-			if got.err != nil || got.result.Completed != 1 || !legacyTraceHas(got.result.Trace, "stream_post", "returned") {
+			if got.err != nil || got.result.Completed != 1 || !legacyTraceHas(got.result.Trace, "stream_post", "batched") || got.result.Timings.Stream.Count != 1 {
 				t.Fatal("released callback lost its result")
 			}
 			done <- got

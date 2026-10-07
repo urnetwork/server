@@ -606,101 +606,133 @@ func joinStream(
 	return
 }
 
+// Removes one contract using the same slot-local operations as page cleanup.
 func RemoveFromStream(ctx context.Context, contractId server.Id) (streamId server.Id, ok bool) {
+	streamId, ok = removeFromStreams(ctx, []server.Id{contractId})[contractId]
+	return
+}
+
+// Preserve the two-key transaction's atomic read and wrong-type errors while
+// allowing many independent contract slots in one pipeline.
+const readContractStreamScript = `return {redis.call('GET', KEYS[1]), redis.call('GET', KEYS[2])}`
+
+// Membership and last-member alias removal share one stream slot. Replaying a
+// confirmed removal cannot remove another member or advance a dirty counter.
+const removeStreamMemberScript = `
+local changed = redis.call('SREM', KEYS[2], ARGV[1])
+local size = redis.call('SCARD', KEYS[2])
+if size == 0 and changed > 0 then
+    redis.call('DEL', KEYS[1])
+end
+return {size, changed}
+`
+
+// The hop and its dirty version must change atomically. An ordinary pipeline
+// of separate commands would let a poll consume the version before removal.
+const removeStreamHopScript = `
+redis.call('INCR', KEYS[1])
+redis.call('SREM', KEYS[2], ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+return 1
+`
+
+// Batch independent contracts in three request groups, retaining same-slot
+// atomicity for every read pair, membership removal and client notification.
+// Cross-slot commands use a pipeline, never one cross-slot transaction/script.
+// Missing streams cost only the first group. Successful replies progress even
+// when a neighboring projection is malformed; its error remains visible after
+// healthy cleanup. Each caller owns a finite page.
+func removeFromStreams(ctx context.Context, contractIds []server.Id) (removed map[server.Id]server.Id) {
+	removed = map[server.Id]server.Id{}
+	if len(contractIds) == 0 {
+		return
+	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		pipe := r.TxPipeline()
-		streamKeyCmd := pipe.Get(ctx, contractStreamKey(contractId))
-		streamIdCmd := pipe.Get(ctx, contractStreamId(contractId))
-		_, err := pipe.Exec(ctx)
-		if err == server.RedisNil {
-			return
+		type removal struct {
+			contractId server.Id
+			streamId   server.Id
+			key        streamKey
+			read       *redis.Cmd
+			membership *redis.Cmd
 		}
-		if err != nil {
-			panic(err)
+		removals := make([]removal, 0, len(contractIds))
+		pipe := r.Pipeline()
+		for _, id := range contractIds {
+			removals = append(removals, removal{contractId: id,
+				read: pipe.Eval(ctx, readContractStreamScript, []string{contractStreamKey(id), contractStreamId(id)})})
 		}
-
-		streamKeyBytes, err := streamKeyCmd.Bytes()
-		if err == server.RedisNil {
-			return
+		_, firstErr := pipe.Exec(ctx)
+		recordError := func(err error) {
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
-		if err != nil {
-			panic(err)
-		}
-		streamKey := streamKey(streamKeyBytes)
-
-		streamIdBytes, err := streamIdCmd.Bytes()
-		if err == server.RedisNil {
-			return
-		}
-		if err != nil {
-			panic(err)
-		}
-		streamId = server.Id(streamIdBytes)
-
-		// note the keys in eval have to be in the same hash slot
-		result := r.Eval(
-			ctx,
-			`
-			local stream_id_key = KEYS[1]
-			local stream_contracts_key = KEYS[2]
-			local contract_id = ARGV[1]
-
-			local changed = redis.call('SREM', stream_contracts_key, contract_id)
-			local final_size = redis.call('SCARD', stream_contracts_key)
-
-			if final_size == 0 then
-				if 0 < changed then
-			    	redis.call('DEL', stream_id_key)
-			    end
-			end
-
-			return {final_size, changed}
-			`,
-			[]string{
-				streamIdKey(streamKey),
-				streamContractsKey(streamKey),
-			},
-			contractId.Bytes(),
-		)
-		values, err := result.Slice()
-		if err != nil {
-			panic(err)
-		}
-
-		finalSize := values[0].(int64)
-		changed := 0 < values[1].(int64)
-
-		if changed {
-			pipe := r.TxPipeline()
-			pipe.Del(ctx, contractStreamKey(contractId))
-			pipe.Del(ctx, contractStreamId(contractId))
-			_, err := pipe.Exec(ctx)
+		pipe = r.Pipeline()
+		for index := range removals {
+			entry := &removals[index]
+			values, err := entry.read.Slice()
 			if err != nil {
-				panic(err)
+				recordError(err)
+				continue
 			}
-
-			if finalSize == 0 {
-				r.SRem(ctx, pairStreamsKey(streamKey.SourceId(), streamKey.DestinationId()), streamKey.Bytes())
-
-				for clientId, edges := range streamKey.Edges() {
-					// bump the per-client hops version (PEERS2.md
-					// dirty-counter + poll; no pubsub delivery)
-					streamHopsKey := clientStreamHopsKey(clientId)
-					streamHop := NewStreamHop(edges[0], edges[1], streamId)
-
-					pipe := r.TxPipeline()
-					pipe.Incr(ctx, clientEventIdKey(clientId))
-					pipe.SRem(ctx, streamHopsKey, streamHop.Bytes())
-					pipe.Expire(ctx, clientEventIdKey(clientId), clientEventIdTtl)
-					_, err := pipe.Exec(ctx)
-					if err != nil {
-						panic(err)
-					}
-				}
+			if len(values) != 2 {
+				recordError(fmt.Errorf("invalid contract stream projection response"))
+				continue
+			}
+			if values[0] == nil || values[1] == nil {
+				continue
+			}
+			key, keyOk := values[0].(string)
+			id, idOk := values[1].(string)
+			if !keyOk || !idOk || len(key) < 32 || len(key)%16 != 0 || len(id) != 16 {
+				recordError(fmt.Errorf("invalid contract stream projection"))
+				continue
+			}
+			entry.key, entry.streamId = streamKey(key), server.Id([]byte(id))
+			entry.membership = pipe.Eval(ctx, removeStreamMemberScript,
+				[]string{streamIdKey(entry.key), streamContractsKey(entry.key)}, entry.contractId.Bytes())
+		}
+		if pipe.Len() == 0 {
+			server.Raise(firstErr)
+			return
+		}
+		_, err := pipe.Exec(ctx)
+		recordError(err)
+		pipe = r.Pipeline()
+		for _, entry := range removals {
+			if entry.membership == nil {
+				continue
+			}
+			values, err := entry.membership.Slice()
+			if err != nil {
+				recordError(err)
+				continue
+			}
+			if len(values) != 2 {
+				recordError(fmt.Errorf("invalid stream removal response"))
+				continue
+			}
+			removed[entry.contractId] = entry.streamId
+			if values[1].(int64) == 0 {
+				continue
+			}
+			pipe.Del(ctx, contractStreamKey(entry.contractId), contractStreamId(entry.contractId))
+			if values[0].(int64) != 0 {
+				continue
+			}
+			pipe.SRem(ctx, pairStreamsKey(entry.key.SourceId(), entry.key.DestinationId()), entry.key.Bytes())
+			for clientId, edges := range entry.key.Edges() {
+				hop := NewStreamHop(edges[0], edges[1], entry.streamId)
+				pipe.Eval(ctx, removeStreamHopScript,
+					[]string{clientEventIdKey(clientId), clientStreamHopsKey(clientId)},
+					hop.Bytes(), clientEventIdTtl.Milliseconds())
 			}
 		}
-
-		ok = true
+		if pipe.Len() > 0 {
+			_, err = pipe.Exec(ctx)
+			recordError(err)
+		}
+		server.Raise(firstErr)
 	})
 	return
 }
