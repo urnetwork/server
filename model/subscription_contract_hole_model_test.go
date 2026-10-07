@@ -231,6 +231,9 @@ func TestContractHoleBackgroundCursorAndMemberBound(t *testing.T) {
  (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count)
  SELECT gen_random_uuid(),$1,$2,$3,$4,0 FROM generate_series(1,$5)`, server.NewId(), source, server.NewId(), destination, count))
 		})
+		// Initialization is explicit; periodic pages only renew its existing TTL.
+		_, err := refreshContractHole(ctx, source, destination)
+		server.Raise(err)
 		page, err := RefreshContractHolesPage(ctx, nil)
 		if err != nil || page == nil || page.Cursor == nil || page.Pairs != 1 || page.FailedPairs != 0 {
 			t.Fatalf("first page=%+v error=%v", page, err)
@@ -267,6 +270,10 @@ func TestContractHoleBackgroundFailureDoesNotStarveHealthyPairs(t *testing.T) {
 		insertContractHoleSourceRow(ctx, source, first)
 		insertContractHoleSourceRow(ctx, source, second)
 		insertContractHoleSourceRow(ctx, source, third)
+		for _, destination := range []server.Id{first, second, third} {
+			_, err := refreshContractHole(ctx, source, destination)
+			server.Raise(err)
+		}
 		failure := &contractHoleRedisFailure{key: contractHoleKeys(source, second)[0]}
 		install, cancel := context.WithTimeout(ctx, time.Second)
 		server.Raise(server.RedisWithDeadline(install, func(client server.RedisClient) error { client.AddHook(failure); return nil }))
@@ -277,10 +284,10 @@ func TestContractHoleBackgroundFailureDoesNotStarveHealthyPairs(t *testing.T) {
 		if err != nil || page == nil || page.Cursor != nil || page.Pairs != 3 || page.FailedPairs != 1 {
 			t.Fatalf("partial coverage was hidden: page=%+v error=%v", page, err)
 		}
-		requireContractHoleCount(t, ctx, source, first, 1)
-		requireContractHoleCount(t, ctx, source, second, 0)
-		requireContractHoleCount(t, ctx, source, third, 1)
 		failure.enabled.Store(false)
+		requireContractHoleCount(t, ctx, source, first, 1)
+		requireContractHoleCount(t, ctx, source, second, 1)
+		requireContractHoleCount(t, ctx, source, third, 1)
 		page, err = RefreshContractHolesPage(ctx, nil)
 		if err != nil || page == nil || page.Cursor != nil || page.FailedPairs != 0 {
 			t.Fatalf("next pass did not complete: page=%+v error=%v", page, err)

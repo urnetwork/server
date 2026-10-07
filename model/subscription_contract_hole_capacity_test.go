@@ -37,6 +37,11 @@ func TestContractHoleRefreshLargeCohortHalfTtlCoverage(t *testing.T) {
 					server.NewId(), pair.source, server.NewId(), pair.destination, pair.members))
 			}
 		})
+		// Priming is independent of the periodic pass and outside its timing.
+		for _, pair := range pairs {
+			_, err := refreshContractHole(ctx, pair.source, pair.destination)
+			server.Raise(err)
+		}
 		for pass := range 2 {
 			if pass != 0 {
 				server.Redis(ctx, func(client server.RedisClient) {

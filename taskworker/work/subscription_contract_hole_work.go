@@ -1,7 +1,7 @@
 package work
 
-// One durable task chain refreshes the expiring authorization projection. Pages
-// persist their cursor; packet workers never run a source query to fill a miss.
+// One durable task chain extends existing authorization-key TTLs. Indexed pair
+// discovery never reconstructs a counter; missing projections remain unknown.
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 
 var contractHoleRefreshCompleted = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "urnetwork_contract_hole_refresh_completed_seconds",
-	Help: "Last complete contract-hole source pass; zero means no complete pass observed by this worker",
+	Help: "Last complete contract-hole TTL renewal pass; zero means none observed by this worker",
 })
 
 var contractHoleRefreshDuration = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -64,7 +64,7 @@ type RefreshContractHolesResult struct {
 	WarmReady        bool                       `json:"warm_ready"`
 }
 
-// Starts the bootstrap immediately; existing run-once ownership prevents a new
+// Starts renewal immediately; existing run-once ownership prevents a new
 // worker from creating a second refresher alongside an already running chain.
 func ScheduleRefreshContractHoles(clientSession *session.ClientSession, tx server.PgTx) {
 	now := server.NowUtc()
@@ -115,8 +115,8 @@ func refreshContractHolesWithSource(args *RefreshContractHolesArgs, clientSessio
 	return result, nil
 }
 
-// A traversed source pass is not complete coverage if any pair failed, was
-// superseded, or exceeded its bound. Only a later entire healthy pass recovers it.
+// A traversed pass cannot prove TTL coverage if any existing pair was unavailable
+// or invalid. It never proves complete source membership or repairs a missing key.
 func observeContractHoleRefreshPage(args *RefreshContractHolesArgs, page *model.ContractHoleRefreshPageResult, now time.Time) *RefreshContractHolesResult {
 	failedPairs := args.FailedPairs + page.FailedPairs
 	if failedPairs > 0 {

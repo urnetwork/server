@@ -15,7 +15,7 @@ import (
 
 const contractHoleReadinessKey = "contract-hole:v2:{refresh}:ready"
 
-// SourceStarted precedes publication and bounds refresh freshness; each member
+// SourceStarted precedes renewal and bounds refresh freshness; each member
 // may have an earlier absolute expiry, checked by the live witness lease.
 type ContractHoleWitness struct {
 	SourceClientId      server.Id `json:"source_client_id"`
@@ -25,7 +25,8 @@ type ContractHoleWitness struct {
 
 // PairVisits includes repeated candidates across page/direction boundaries; it
 // does not claim a global distinct-pair census. All successful visits must have
-// published a full snapshot. The TTL bound applies to the earliest whole pass.
+// validated and renewed existing keys. This proves TTL coverage only, not that
+// every source contract was projected; initialization remains a separate gate.
 type ContractHoleReadiness struct {
 	Version                   int                  `json:"version"`
 	PassStarted               time.Time            `json:"pass_started"`
@@ -60,7 +61,7 @@ func validContractHoleReadiness(receipt *ContractHoleReadiness, now time.Time) b
 // close or absolute expiry can invalidate this conservative gate; a later pass
 // supplies a new witness. Packet reads never depend on this receipt.
 func contractHoleWitnessLease(ctx context.Context, witness *ContractHoleWitness) (time.Time, error) {
-	status, validUntil, err := ReadContractHoleLease(ctx, witness.SourceClientId, witness.DestinationClientId)
+	status, validUntil, err := inspectContractHoleLease(ctx, witness.SourceClientId, witness.DestinationClientId)
 	if err != nil {
 		return time.Time{}, err
 	}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -110,7 +111,7 @@ func TestContractHoleRefreshPartialCoverageStaysUnknownUntilHealthyPass(t *testi
 	}
 }
 
-// The actual task qualifies a populated initial pass. A later source acquisition
+// The actual task renews a previously populated pair. A later source acquisition
 // failure returns no progress and preserves the exact unread cursor arguments.
 func TestContractHoleRefreshTaskReadinessAndSourceFailure(t *testing.T) {
 	env := server.DefaultTestEnv()
@@ -123,6 +124,20 @@ func TestContractHoleRefreshTaskReadinessAndSourceFailure(t *testing.T) {
  (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count)
  VALUES($1,$2,$3,$4,$5,0)`, contract, server.NewId(), source, server.NewId(), destination))
 		})
+		lower, higher := source, destination
+		if lower.Cmp(higher) > 0 {
+			lower, higher = higher, lower
+		}
+		prefix := fmt.Sprintf("contract-hole:v2:{%s:%s}:", lower, higher)
+		keys := []string{prefix + "count", prefix + "members"}
+		expired := server.NewId()
+		server.Redis(ctx, func(client server.RedisClient) {
+			server.Raise(client.Eval(ctx, `
+redis.call('SET',KEYS[1],2,'PX',ARGV[1])
+redis.call('ZADD',KEYS[2],'+inf',ARGV[2],1,ARGV[3])
+redis.call('PEXPIRE',KEYS[2],ARGV[1])
+return 1`, keys, model.ContractHoleRefreshInterval.Milliseconds(), contract.String(), expired.String()).Err())
+		})
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 		args := &RefreshContractHolesArgs{PassStarted: server.NowUtc()}
@@ -133,6 +148,16 @@ func TestContractHoleRefreshTaskReadinessAndSourceFailure(t *testing.T) {
 		if receipt, err := model.ReadContractHoleReadiness(ctx); err != nil || receipt == nil || receipt.PairVisits != 1 {
 			t.Fatalf("initial task receipt=%+v error=%v", receipt, err)
 		}
+		server.Redis(ctx, func(client server.RedisClient) {
+			count, err := client.Get(ctx, keys[0]).Int64()
+			server.Raise(err)
+			if count != 2 {
+				t.Fatal("task or readiness altered the counter", count)
+			}
+			if _, err := client.ZScore(ctx, keys[1], expired.String()).Result(); err != nil {
+				t.Fatal("task or readiness pruned an expired member", err)
+			}
+		})
 		args.Cursor = &model.ContractHoleCursor{SourceClientId: source, DestinationClientId: destination, CreateTime: args.PassStarted, ContractId: contract}
 		args.PairVisits, args.SuccessfulPairs, args.Pages = 17, 17, 3
 		before, err := json.Marshal(args)

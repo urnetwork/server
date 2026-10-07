@@ -457,36 +457,52 @@ groups of at most eight, are discarded on rollback/retry, and expire five second
 after registration. Closed-member tombstones last 60 seconds, preventing an old
 admitted create from reviving a close. Every delta cancels a prior background
 publication token. Deltas preserve an existing pair's earlier expiry; repeated
-traffic cannot retain a lost close indefinitely when source refresh is unavailable.
-Only a complete source refresh renews that existing expiry. A refresh must still
-own its five-second token when its
-complete source snapshot is atomically installed; a later close or newer
-refresher invalidates it. Process failure, cancellation, Redis refusal and an
-ambiguous commit can lose a post. A lost revocation can remain visible until
-source repair or the last TTL expires; packet-local positive caching has its own
+traffic cannot retain a lost close indefinitely when periodic renewal is unavailable.
+The periodic task renews only existing key expirations; it never adds, removes,
+recounts or reconstructs members. Explicit source initialization/repair remains
+separate. Such a repair must still own its five-second token when its complete
+snapshot is atomically installed; a later close or newer repair invalidates it.
+Process failure, cancellation, Redis refusal and an ambiguous commit can lose a
+post. A lost revocation can remain visible until explicit repair or the last TTL
+expires; packet-local positive caching has its own
 bounded recheck window, capped by the observed lease. These are eventual projection semantics,
 not a transactional PostgreSQL/Redis authorization guarantee.
 
 Taskworker's `RefreshContractHoles` chain starts immediately and traverses the
-existing unresolved source-pair index in 256-row cursor pages. The next complete
+existing unresolved source-pair index in 256-row cursor pages. It materializes
+each fixed candidate page before checking absolute expiration and final closes,
+and advances across ineligible rows as well; only eligible pairs receive renewal.
+This avoids scanning arbitrarily far for eligible rows inside one page. The next complete
 pass is due 30 seconds after the prior pass started, half the 60-second TTL.
-Each page owns at most eight concurrent pair snapshots and joins all admitted
-work. A failed candidate query preserves the unread source cursor for retry.
+Each page owns at most eight Redis renewal workers and joins all admitted work.
+There is no per-pair PostgreSQL snapshot or count query. Atomic renewal validates
+the existing scalar, matching expiring membership and at least one unexpired
+member, then uses only `PEXPIRE` on count and members. It preserves their values,
+including expired members awaiting packet/lifecycle cleanup. The readiness
+witness is also read-only. A concurrent final close cannot be resurrected, and a
+concurrent create is never overwritten by a source count. Missing, malformed,
+persistent, overlong, inconsistent or fully expired projections are not renewed
+or rebuilt. A failed candidate query preserves the unread source cursor for retry.
 A source refusal requests the scheduler's two-second minimum delay; the task's
 retry cap also bounds deadline failures without clearing their error count.
-A known page advances past individual failed, superseded or oversized pairs,
+A known page advances past individual unavailable or invalid pairs,
 records them as unknown and retries them on the next complete pass; one failed
 Redis slot cannot starve later healthy pairs. Packet traffic never schedules
-source work. Each pair snapshot admits at most 8,192 members;
-an oversized pair is denied instead of receiving a partial counter. The task's
+source work. Validation admits at most 8,192 existing members;
+an oversized pair remains unknown. The task's
 15-second page budget and 20-second execution deadline bound dependency work.
 The full fleet pass has no fixed capacity guarantee: scheduler lag or a cohort
 too large for the cadence can expire valid permissions and must be measured
-before enabling Redis-only reads for an existing fleet.
+before enabling Redis-only reads for an existing fleet. Eligible-pair discovery
+stops renewing a last final-closed pair even if its close post was lost. That
+projection expires after its last admitted renewal; discovery and page scheduling
+are eventual observations, not a transactional revocation guarantee.
 
 `urnetwork_contract_hole_operations_total{outcome=...}` separates positive/zero,
 missing/error reads, expired/failed events, publication, supersession, source
-failure and oversized pairs. `urnetwork_contract_hole_refresh_completed_seconds`
+failure and oversized pairs. `refresh_renewed` counts successful periodic TTL
+extensions; `refresh_published` remains explicit source initialization/repair.
+`urnetwork_contract_hole_refresh_completed_seconds`
 advances only after every visited pair was observed successfully. The duration
 and failed-pairs gauges describe the last traversed pass, including a partial one.
 `urnetwork_contract_hole_refresh_available` is zero after a failed observation or
@@ -495,7 +511,10 @@ Missing/zero/stale observations are unknown coverage, never an empty population.
 
 The independent control-plane receipt `contract-hole:v2:{refresh}:ready` records
 pass begin/end, pages, candidate pair visits, successful and unknown visits, a
-conservative remaining TTL and the earliest positive source-start witness.
+conservative remaining TTL and the earliest positive renewal-start witness.
+This receipt proves renewal of existing keys, not reconstruction or completeness
+of source membership. Initial coverage must be qualified separately; a TTL pass
+cannot warm a missing key or repair an incorrect counter.
 Visits include repeated pairs across row pages and directions; they are not a
 distinct-fleet census or an atomic fleet snapshot. A pass at least 30 seconds
 long, any unknown visit, an expired witness or insufficient expiry margin refuses

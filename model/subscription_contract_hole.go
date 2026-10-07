@@ -1,8 +1,8 @@
 package model
 
 // Packet authorization reads only the expiring Redis count and member deadlines.
-// Committed lifecycle events maintain membership; an owned background task repairs lost
-// events from PostgreSQL. No financial lock or packet read waits for that repair.
+// Committed lifecycle events maintain membership; an owned background task only
+// extends existing key TTLs. Explicit source initialization is separate.
 
 import (
 	"context"
@@ -35,7 +35,7 @@ var contractHoleCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 
 func init() {
 	for _, outcome := range []string{"read_positive", "read_zero", "read_missing", "read_error", "event_expired", "event_error",
-		"event_create", "event_remove", "event_invalidate", "refresh_oversized", "refresh_published", "refresh_superseded", "refresh_error", "refresh_incomplete"} {
+		"event_create", "event_remove", "event_invalidate", "refresh_oversized", "refresh_published", "refresh_superseded", "refresh_renewed", "refresh_error", "refresh_incomplete"} {
 		contractHoleCounter.WithLabelValues(outcome)
 	}
 	prometheus.MustRegister(contractHoleCounter)
@@ -182,7 +182,7 @@ func HasOpenContractHole(ctx context.Context, sourceClientId, destinationClientI
 // Mutation also cancels an in-flight source snapshot. Membership guards make
 // duplicate and ambiguous Redis replies safe to replay within that deadline.
 // Lifecycle traffic preserves the existing expiry, so repeated events cannot
-// renew a stale member while source reconciliation is unavailable.
+// renew a stale member on their own while periodic expiry renewal is unavailable.
 const contractHoleEventScript = `
 local now = redis.call('TIME')
 local nowms = tonumber(now[1])*1000 + math.floor(tonumber(now[2])/1000)
@@ -244,7 +244,7 @@ return count
 
 // Registers while the existing transaction still owns the contract. The fixed
 // lifetime includes commit and scheduling delay; an old callback is discarded,
-// leaving bounded background repair rather than resurrecting stale permission.
+// leaving missing authority for the bounded rollout bridge or explicit repair.
 func contractHoleEventInTx(ctx context.Context, tx server.PgTx, contractId, sourceClientId, destinationClientId server.Id, operation string, expirationTime ...time.Time) {
 	deadline := time.Now().Add(contractHoleEventLifetime)
 	server.AddTxPostCommit(tx, "contract-hole:"+contractId.String(), contractHoleEventPost(ctx, contractId, sourceClientId, destinationClientId, operation, deadline, expirationTime...))
@@ -359,8 +359,9 @@ SELECT contract_id, expiration_time FROM (
 ) AS eligible LIMIT $3
 `
 
-// Background-only source read. A fixed member ceiling bounds Redis script work;
-// an oversized pair loses its projection instead of receiving a partial count.
+// Explicit source initialization/repair, separate from periodic TTL renewal.
+// A fixed member ceiling bounds this complete snapshot; packet readers and the
+// periodic task never call it to reconstruct missing or drifted membership.
 func refreshContractHole(ctx context.Context, sourceClientId, destinationClientId server.Id) (published bool, returnErr error) {
 	return refreshContractHoleObserved(ctx, sourceClientId, destinationClientId, nil)
 }
@@ -456,13 +457,23 @@ type ContractHoleCursor struct {
 }
 
 const contractHolePageSql = `
-SELECT source_id, destination_id, create_time, contract_id
-FROM transfer_contract
-WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
-  AND source_id IS NOT NULL
-  AND (source_id, destination_id, create_time, contract_id) > ($1, $2, $3, $4)
+WITH candidate AS MATERIALIZED (
+    SELECT source_id, destination_id, create_time, contract_id, expiration_time
+    FROM transfer_contract
+    WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+      AND source_id IS NOT NULL
+      AND (source_id, destination_id, create_time, contract_id) > ($1, $2, $3, $4)
+    ORDER BY source_id, destination_id, create_time, contract_id
+    LIMIT $5
+)
+SELECT source_id, destination_id, create_time, contract_id,
+  (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC')
+  AND NOT EXISTS (
+      SELECT 1 FROM contract_close AS close WHERE close.contract_id = contract.contract_id
+        AND (NOT COALESCE(close.checkpoint, false) AND COALESCE(close.party, '') <> '') OFFSET 0
+  ) AS eligible
+FROM candidate AS contract
 ORDER BY source_id, destination_id, create_time, contract_id
-LIMIT $5
 `
 
 // Pair failures are independent observations. The cursor covers known candidate
@@ -475,16 +486,16 @@ type ContractHoleRefreshPageResult struct {
 	EarliestPositive *ContractHoleWitness
 }
 
-// Advances a bounded indexed candidate page. Final-close candidates are retained
-// here deliberately: their pair snapshot can revoke a lost lifecycle event.
-// A failed candidate query never advances unread source state. Individual pair
-// failures do not starve healthy Redis slots, and leave full-pass coverage unknown.
+// Enumerates eligible pairs through the existing bounded index cursor, then
+// extends only existing Redis expirations. A last final close stops renewal even
+// if its post was lost. No per-pair query or source count reconstruction runs.
+// A failed query preserves the cursor; missing/invalid pairs remain unknown.
 func RefreshContractHolesPage(ctx context.Context, cursor *ContractHoleCursor) (*ContractHoleRefreshPageResult, error) {
 	start := ContractHoleCursor{}
 	if cursor != nil {
 		start = *cursor
 	}
-	var positions []ContractHoleCursor
+	var positions, eligiblePositions []ContractHoleCursor
 	if recovered := server.HandleError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, contractHolePageSql, start.SourceClientId, start.DestinationClientId,
@@ -492,8 +503,12 @@ func RefreshContractHolesPage(ctx context.Context, cursor *ContractHoleCursor) (
 			server.WithPgResult(rows, err, func() {
 				for rows.Next() {
 					position := ContractHoleCursor{}
-					server.Raise(rows.Scan(&position.SourceClientId, &position.DestinationClientId, &position.CreateTime, &position.ContractId))
+					var eligible bool
+					server.Raise(rows.Scan(&position.SourceClientId, &position.DestinationClientId, &position.CreateTime, &position.ContractId, &eligible))
 					positions = append(positions, position)
+					if eligible {
+						eligiblePositions = append(eligiblePositions, position)
+					}
 				}
 			})
 		}, server.OptNoRetry())
@@ -505,18 +520,19 @@ func RefreshContractHolesPage(ctx context.Context, cursor *ContractHoleCursor) (
 	}
 	result := &ContractHoleRefreshPageResult{}
 	var stateLock sync.Mutex
-	result.Pairs, result.FailedPairs = refreshContractHolePairs(ctx, positions, func(ctx context.Context, source, destination server.Id) (bool, error) {
-		return refreshContractHoleObserved(ctx, source, destination, func(started time.Time, members int) {
-			if members == 0 {
-				return
-			}
+	result.Pairs, result.FailedPairs = refreshContractHolePairs(ctx, eligiblePositions, func(ctx context.Context, source, destination server.Id) (bool, error) {
+		started := server.NowUtc()
+		refreshed, members, err := refreshContractHoleTtl(ctx, source, destination)
+		if refreshed && members > 0 {
+			contractHoleCounter.WithLabelValues("refresh_renewed").Inc()
 			stateLock.Lock()
-			defer stateLock.Unlock()
 			result.PositivePairs++
 			if result.EarliestPositive == nil || started.Before(result.EarliestPositive.SourceStarted) {
 				result.EarliestPositive = &ContractHoleWitness{SourceClientId: source, DestinationClientId: destination, SourceStarted: started}
 			}
-		})
+			stateLock.Unlock()
+		}
+		return refreshed, err
 	})
 	if len(positions) == ContractHoleRefreshPageSize {
 		result.Cursor = &positions[len(positions)-1]
@@ -524,7 +540,7 @@ func RefreshContractHolesPage(ctx context.Context, cursor *ContractHoleCursor) (
 	return result, nil
 }
 
-// One page owns at most eight source/Redis workers and joins all admitted work.
+// One page owns at most eight Redis renewal workers and joins all admitted work.
 // The callback seam drives the actual bounded worker loop in ordering controls.
 func refreshContractHolePairs(ctx context.Context, positions []ContractHoleCursor,
 	refresh func(context.Context, server.Id, server.Id) (bool, error),
