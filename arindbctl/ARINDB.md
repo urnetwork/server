@@ -671,6 +671,61 @@ The sample proportions cannot be extrapolated to the 5,781-member Speed-only
 population, a country, or a state/province; missing first-failure categories
 also do not establish that their underlying conditions are absent elsewhere.
 
+The later October 7 19:04:31.441350 UTC fixed-key read reports **818 native
+Quality, 6,663 Speed and 77,705 Online** providers. Its source evaluation ran
+18:56:48.194453 to 18:57:18.485727 UTC; publication occurred at
+19:03:24.026978 UTC. The source age was 432.956 seconds, within the unchanged
+900-second limit, and all three readiness markers passed. Reader receipt
+`d06dc866` and the confirmed shared-queue owner receipt `c4a852bd` establish
+this one publication. They do not refresh the earlier 256-provider cause
+sample, attribute a count change to the catalog, or identify the actual
+publisher process.
+
+A separate native observation at 19:05:59.993286–19:06:00.302497 UTC found
+one stable edge1/g1 Connect owner with the qualified R22 source/image identity.
+Its mapped ARIN file is **593,608,472 bytes**, with embedded epoch
+`1791358781` (October 7 07:39:41 UTC), node count 7,729,703 and a 32-bit record
+size. The bounded tail differs from the retained October 6 `bfe38627` artifact
+at epoch `1791310718`. Receipt `5ba22638`, confirmed owner receipt `4fdd3805`
+and independent combined interpretation `5630a9ea` establish the mapped file
+metadata and the separate publication counts. The newer epoch and different
+tail do not establish catalog loss, catalog additions, request-time use,
+fleet adoption or a provider classification cause. Full artifact bytes were
+not read.
+
+The subsequent native observation at 19:51:34.006210–19:51:34.207707 UTC
+found one stable edge1/g1 owner reporting source `510777fb` and image-config
+digest `e1a993c2`. It retained the same mapped epoch, size and tail metadata.
+Those native fields establish observed process identity, not selected-release
+provenance or fleet adoption. Reader receipt `5faf5f91`, confirmed shared-queue
+owner receipt `5ea29679` and typed replay `c727b6e3` bind this observation.
+
+Three adjacent regular metadata files, totaling 16,377 bytes, were opened
+through the mapped file's parent directory descriptor with before/after owner,
+map, parent and file identity checks. Their claims agree: the update applied
+subscriber augmentation and completed validation with zero unavailable
+sources; the artifact uses classifier version one, quality policy two,
+`identified-subscriber-default` and a minimum origin visibility of ten peers.
+The update's **seed catalog is `320b4c10`**, and the artifact reports **5,220
+reviewed groups**. The recognized seed contains 5,214 subscriber groups and
+six negative groups. The artifact's refreshed
+catalog digest `59b33559` has a different role; its difference from the seed
+hash is not evidence of catalog loss. The registration output hash agrees
+with the augmentation base-input hash, and the registration and augmentation
+build clocks fall within the reported update interval, 07:29:54.774727 to
+07:43:02.552777 UTC. The artifact build time matches the mapped epoch.
+
+The artifact manifest claims 4,706,712 subscriber, 222,289 excluded, 2,721
+ambiguous and 2,699,276 unknown partitions. These are partition counts,
+not provider counts or predicted Quality gains. The adjacent claims support
+continued subscriber augmentation with the earlier reviewed seed; they do not
+claim the later `5bbba6ad` seed, 5,228 total groups or its twelve added ASNs.
+Full artifact bytes and current catalog contents were not rehashed. No
+provider cause, request-time use or effect on the earlier Quality publication
+was established. The later catalog artifact remains separate work; the next
+coverage discriminator must explain current provider classification causes
+while preserving the subscriber default and explicit negative exclusions.
+
 The next cause discriminator is an isolated source candidate, not deployed
 diagnostic evidence. It caps requests at 64 exact connection keys and reuses
 the authenticated Connect owner registry, a fresh primary-key fact read, and
