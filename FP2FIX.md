@@ -1,13 +1,18 @@
 # FindProviders2 supply and quality-probe repair plan
 
-Latest URL-quota checkpoint, 2026-10-07 01:32 UTC: the qualified aa71
-watcher reports **76,016 / 76,422 mature providers at quota (99.468739%)**
-from the 01:30:56 UTC source snapshot, leaving 406 deficient providers needing
-441 measured credits. Warming providers remain separate; hourly source coverage
-is incomplete. Sustained 100% mature coverage and a current durable credit rate
-remain unproved. The
-[01:32 checkpoint](#2026-10-07-0132-utc-quota-observation-and-tally-source-handoff)
-supersedes the earlier URL-quota status; dated evidence below remains historical.
+Latest URL-quota visibility checkpoint, 2026-10-07 04:20 UTC: **current mature
+coverage is unknown**. The aa71 watcher reports `observed_missing` with no
+coherent census or source clocks, following an 04:04 `owner_unavailable` row.
+The last numeric observation, at 03:49 UTC, was **77,315 / 77,317 mature
+providers at quota (99.997413%)**, with two deficient providers needing nine
+credits; it predates V17. Warming remains separate and hourly/process source
+coverage is incomplete. The 04:12 receipt separately qualifies eight selected
+Taskworkers as current and ready by self-report. Sustained 100% mature
+coverage, a current durable credit rate and native Quality recovery remain
+unproved. The
+[04:20 checkpoint](#2026-10-07-0420-utc-quota-visibility-and-v17-tally-adoption)
+supersedes earlier URL-quota and tally qualification status; dated evidence
+below remains historical.
 
 Expanded offline subscriber candidate, 2026-10-04 07:55 UTC: the second reviewed
 catalog covers 78 subscriber operators, 85 ASNs and 45 countries, preserving
@@ -8343,3 +8348,110 @@ The retained rows and source/adoption pins are frozen in that archive's
 Main read, compiler or fixture. Earlier V6/V10 acknowledged-outcome rates remain
 historical process averages and cannot substitute for a current durable-credit
 rate or prove native provider supply.
+
+### 2026-10-07 04:20 UTC quota visibility and V17 tally adoption
+
+The sole qualified aa71 watcher recorded a coherent global census at
+**03:49:39.899723 UTC**, from source observation **03:48:25.476061 UTC** and
+sample **03:49:25.884 UTC**. Mature coverage is **77,315 / 77,317
+(99.997413%)**: two providers are deficient and need nine accepted measured
+credits. Warming coverage is 8 / 12, needing 19 credits; unknown cycle age is
+zero. Maturity uses immutable stored first-admission cycle age. Warming is
+outside the mature target, and a changing rolling cohort cannot establish a
+fixed-provider recovery trend. The exact retained row SHA-256 is
+`00dbfdf92bcf4e577e02bc2d1aee7efb4214c7e371d76c9a87dacdf5ea13d8a6`.
+
+That is the last numeric pre-release stock. At **04:04:52.138558 UTC** the
+watcher instead reported `owner_unavailable`, with no reported owners for all
+eight shards. At **04:20:03.911836 UTC** it reported `observed_missing` and
+`census_unavailable`; the source clocks and every quota/cohort value are null.
+The latter row also lacks shard-3/7 owner observations. **Current mature quota
+is unknown.** The intervening all-ready Taskworker receipt below does not
+supply a coherent global census. These visibility failures alone do not prove
+that probes stopped or establish a release cause. The 04:20 row SHA-256 is
+`50144f9050875716cb714abc4d298fa9797dee2eb91cacd29eb8259e3b739516`.
+
+The 03:49 numeric row retains `source_coverage_complete=false`, with
+`hourly_measured_run_ranges_or_expected_process_coverage_incomplete` and
+`shard_3_owners=0`. The coherent census qualifies this quota stock; it does not
+qualify an hourly fleet rate. This row predates the **04:00:53 UTC V17
+deployment start** and cannot show its effect. The later unavailable rows
+supersede its current-status meaning; their missing percentage stays unknown. The aa71 authority check
+retains the active unit `fp2-main-monitor-mature-quota-aa71-20261006.service`,
+PID `1566642`, `NRestarts=0`, and executable SHA-256
+`1fad7b5850990a7214f1f4f7873440a3e6aff6bfd43ffef4a9a01dbae7bc3c84`.
+
+The asynchronous tally correction now has a completed local qualification.
+The exact combined source `ec2c08b2b8841bf050bc25cc73580657318902c4` passed
+**35 normal controls, 27 tally race controls, vet and the Taskworker build**
+on Go1.27.1 with the pinned e32/SN67 graph. Both causal failures were reproduced
+on the separate V15 graph: a held daily-place tally row delayed exact probe
+completion and worker return, and malformed durable Post input could advance
+its successor without applying the batch. The final controls pass, including
+an initialized Redis handoff with a real SQL tripwire and exact additive replay.
+The graph difference prevents a cross-profile performance comparison. This
+supersedes the earlier source-only/native-pending tally status.
+
+The correction hands off auxiliary destination statistics through a bounded
+Redis attempt, then coalesces finite pages under 16 durable place-shard owners.
+SQL increments, the applied receipt and successor cursor commit together;
+cleanup follows the committed successor. Known loss excludes affected UTC
+day/place evidence while unaffected refreshes continue. These eventual
+statistics influence destination selection, not measured quota credits or
+financial authority. Process-death and ambiguous-I/O loss remain possible.
+
+The **04:12:48.888979 UTC V17 Taskworker census** qualifies all eight selected
+slots as current and ready on source
+`57e3de521fe1b43dc479f82cd124b780ba821198`, image
+`sha256:f54d71678884cc2d727189f5027eb3488140ed495d460e9ad5deac0953680819`;
+no prior or unknown selected slot appears in that finite observation. V17's
+seven tally production files match the qualified combined source exactly.
+The source/config/start/readiness self-reports do not prove immutable native
+executable identity, old writer retirement, continuous health, completed rollup
+transactions, settlement throughput or recovered provider supply. One counter
+point cannot establish a release rate. The receipt SHA-256 is
+`f315d29e5ddc22139499996a50bb1462001590d997b081eb28058b9fc335519c`,
+with independent gate
+`b5c56b59dffbe68ac179a7669b3137dd51684eddcc49f815600400b3368a818c`.
+
+Main schema 790 and its required catalog objects were separately verified at
+**03:51:32.661108 UTC**, under gate
+`962976b527ea0c1c87f189ea74002653dc854a1fc843656317b27122f1710eaf`.
+This checkpoint's service observation covers the eight selected Taskworker
+slots. Later canonical admission post-ordering changes through `5c2db53`
+await a separate release and are outside the V17 adoption proof.
+The separate PostgreSQL CPU points are **48.28% at 04:01:58 UTC** and
+**73.90% at 04:17:05 UTC**, each relative to 96 logical CPUs. These are not
+matched-workload observations or causal tally, quota or settlement measurements.
+
+The remaining meaningful FP2 acceptance evidence is:
+
+- Sustained fresh, coherent **100% mature eligible coverage** under ten unique
+  accepted measured successes plus failures in `(now-4h, now]`, with warming,
+  unknown age and URL-specific security recovery kept distinct.
+- Contemporary durable accepted-history credits and per-provider renewal
+  distribution, with complete process/range coverage. Historical V6/V10 ACK
+  averages and near-complete quota stocks cannot supply that rate or headroom.
+- Source-bound native Quality/Speed/Online publication and real same-target
+  request results, including subscriber-policy overlap, common security gates,
+  native exhaustion and fallback. Catalog populations or all-ready processes
+  do not establish usable native Quality supply or successful provider traffic.
+- Current shard/claim ownership, timely rolling expiry and renewal, and the
+  required scheduling order without duplicate or abandoned credit. The
+  conditional priority policy still needs a positive activation witness; the
+  separate underfilled-Due candidate remains outside this release.
+- Post-adoption tally handoff, durable cursor/application and refusal/repair
+  evidence, with old writer retirement and unaffected refresh progress kept
+  separate from generic rollup page-read counters.
+- Matched current workload, stage, database-work and resource observations
+  showing sustained useful throughput without poorer app-facing supply.
+  Aggregate CPU movement or selected query counters alone do not establish
+  the cause or the benefit of a release.
+
+The frozen local evidence is
+`/run/media/by/archive1/urnetwork-build/fp2-tally-aggregation-20261006/fp2fix-checkpoint-20261007T0420Z-v3/evidence.json`,
+SHA-256 `8ba86622ce16196438082f2766949b4949976358660927c630e30747ae555155`.
+It pins triage `c707c0e3`, three exact quota observations, the later CPU/authority
+source `652b7e83`, V17 source/adoption, schema 790,
+and native gate `9e64e6f5`. This documentation preparation performs no Main
+read, watcher start, compiler, fixture, deployment or canonical edit.
