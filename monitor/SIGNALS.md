@@ -16375,6 +16375,27 @@ identify the current workload owner; preserve the concrete state warning and
 obtain a fresh protected discriminator. The idle projection and the separate
 active/plan-wall projection (§1.3/§5.8) do not certify other diagnostic paths.
 
+Endpoint session churn has a distinct, locally reproduced retry mechanism.
+Connection admission, disconnect and expired-handler cleanup acquire exclusive
+provider-work endpoint fences before updating the session head. Under repeatable
+read, a snapshot taken before a queued fence could make that head stale after
+the waiter acquired it, replaying the whole lifecycle transaction with `40001`.
+These three control transactions now use read committed while retaining their
+endpoint/shard fences and existing retry budget. Explicit contract transaction
+isolation remains unchanged. Actual concurrent entrypoint controls compare the
+old and new transaction owners, retain original session events, and verify
+that a different endpoint progresses while the selected endpoint is held.
+
+Cancellation has a separate cleanup boundary: a canceled statement can close
+pgx before optional-schema savepoint rollback. Preserve the original query,
+rollback and caller cancellation causes together; a cached-statement cleanup
+error alone must not replace the owning failure or imply a different SQL phase.
+Actual canceled-wait controls require no partially committed session journal.
+These regressions establish source mechanisms. Retained advisory wait/head
+shapes alone do not establish a production `40001`, its frequency, a lock key,
+borrower identity, or recovered pool capacity. Join the emitting runtime and
+original error with current waiter/holder evidence before attributing Main load.
+
 ### 5.7 Task parked / task long-running
 Covered in 1.2 gotchas: parked = error_count>0 ∧ run_at far ∧ lease expired →
 an explicitly authorized pull-forward only after the cause is fixed. Long-running = live lease + claim
