@@ -164,7 +164,9 @@ func TestStatsProviderEgressCacheNativeGaugeFreshness(t *testing.T) {
 			statsProviderEgressAvailableGauge, statsProviderEgressStartedGauge, statsProviderEgressCompletedGauge = oldAvailable, oldStarted, oldCompleted
 			statsProviderEgressIndexGauge, statsProviderExcludedGauge = oldIndexes, oldReasons
 		}()
-		now := time.Now().Truncate(time.Millisecond)
+		// Pin the fractional source second that exposed the old nanosecond
+		// conversion, while keeping the absolute window fresh for this fixture.
+		now := time.Now().Truncate(time.Second).Add(2 * time.Millisecond)
 		started, completed := now.Add(-2*time.Minute), now.Add(-time.Minute)
 		counts := statsProviderEgressTestCounts()
 		value := statsProviderEgressTestWire(t, counts, started, completed)
@@ -176,8 +178,8 @@ func TestStatsProviderEgressCacheNativeGaugeFreshness(t *testing.T) {
 		}
 		set(value)
 		statsRefreshProviderEgress(ctx)
-		wantStarted := float64(started.UnixMilli()) / 1000
-		wantCompleted := float64(completed.UnixMilli()) / 1000
+		wantStarted := statsSourceTimestampSeconds(started)
+		wantCompleted := statsSourceTimestampSeconds(completed)
 		if testStatsGaugeValue(t, statsProviderEgressAvailableGauge) != 1 || testStatsGaugeValue(t, statsProviderEgressStartedGauge) != wantStarted || testStatsGaugeValue(t, statsProviderEgressCompletedGauge) != wantCompleted {
 			t.Fatal("cache hit did not preserve original source times and availability")
 		}

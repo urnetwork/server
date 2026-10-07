@@ -59,8 +59,8 @@ func (metrics *statsContractHourMetrics) Collect(ch chan<- prometheus.Metric) {
 	}
 	windowEnd, completed, status := float64(0), float64(0), float64(0)
 	if !snapshot.WindowEnd.IsZero() {
-		windowEnd = float64(snapshot.WindowEnd.UnixMilli()) / 1000
-		completed = float64(snapshot.CompletedAt.UnixMilli()) / 1000
+		windowEnd = statsSourceTimestampSeconds(snapshot.WindowEnd)
+		completed = statsSourceTimestampSeconds(snapshot.CompletedAt)
 	}
 	if available {
 		status = 1

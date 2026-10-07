@@ -762,8 +762,8 @@ func statsRefreshProviderEgress(ctx context.Context) {
 	snapshot, err := getStatsProviderEgressSnapshot(ctx, model.ProviderEgressCountsPolicyKey())
 	server.Raise(err)
 	statsPublishProviderEgressCounts(snapshot.Counts)
-	statsProviderEgressStartedGauge.set(float64(snapshot.StartedAt.UnixNano()) / float64(time.Second))
-	statsProviderEgressCompletedGauge.set(float64(snapshot.CompletedAt.UnixNano()) / float64(time.Second))
+	statsProviderEgressStartedGauge.set(statsSourceTimestampSeconds(snapshot.StartedAt))
+	statsProviderEgressCompletedGauge.set(statsSourceTimestampSeconds(snapshot.CompletedAt))
 	statsProviderEgressAvailableGauge.set(1)
 }
 
