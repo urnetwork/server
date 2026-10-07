@@ -11,6 +11,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/task"
 )
 
 type legacyAdmissionPostReleaseKey struct{}
@@ -104,6 +105,15 @@ func TestLegacySettlementAdmissionCleanupDoesNotJoinContractHolePost(t *testing.
 		if len(beforeProof) != 0 {
 			t.Fatal("ordinary queued fixture unexpectedly had terminal usage")
 		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var mirrorPending bool
+			server.Raise(conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pending_task
+				WHERE function_name=$1 AND (args_json::jsonb->>'balance_id')::uuid=$2)`,
+				task.NewTaskTarget(ApplyLegacyNetEscrowMirror).TargetFunctionName(), fixture.balanceId).Scan(&mirrorPending))
+			if mirrorPending {
+				t.Fatal("fixture already had the financial transaction's mirror owner")
+			}
+		})
 		gate := &legacyAdmissionPostReleaseGate{
 			contractId: id.String(), ownerKey: legacySettlementAdmissionKey(fixture.balanceId),
 			postEntered: make(chan struct{}), allowPost: make(chan struct{}),
@@ -139,7 +149,11 @@ func TestLegacySettlementAdmissionCleanupDoesNotJoinContractHolePost(t *testing.
 		select {
 		case <-gate.postEntered:
 		case <-retired:
-			t.Fatal("financial commit did not reach its real transaction-owned hole post")
+			select {
+			case <-gate.postEntered:
+			default:
+				t.Fatal("financial commit did not reach its real transaction-owned hole post")
+			}
 		case <-ctx.Done():
 			t.Fatal("transaction-owned hole post barrier was not reached")
 		}
