@@ -1800,6 +1800,7 @@ func createTransferEscrowInTx(
 			batch.Queue(netEscrowPublishAdmissionCacheSQL, netEscrowAdmissionCacheArgs(pending, balanceIds)...)
 		}
 	})
+	server.AddTxCommitCount(tx, &contractOpenedCounter, 1)
 	providerWorkRetainReservationInTx(ctx, tx, contractId)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "create", expirationTime)
 
@@ -2544,6 +2545,7 @@ func createContractNoEscrowInTx(
 		ContractPartySource,
 		ContractPartyDestination,
 	))
+	server.AddTxCommitCount(tx, &contractOpenedCounter, 1)
 	providerWorkRetainReservationInTx(ctx, tx, contractId)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "create", expirationTime)
 	return
@@ -2942,6 +2944,7 @@ func claimContractOutcomeWithUsageInTx(ctx context.Context, tx server.PgTx, cont
 	if err != nil {
 		return false, err
 	}
+	server.AddTxCommitCount(tx, &contractClosedCounter, 1)
 	providerWorkRetainOutcomeInTx(ctx, tx, contractId, outcome, closedAt)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
 	return true, nil
@@ -4240,6 +4243,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 			))
 			claimed = commandTag.RowsAffected() == 1
 			if claimed {
+				server.AddTxCommitCount(tx, &contractClosedCounter, 1)
 				contractHoleEventInTx(ctx, tx, openContract.contractId, openContract.sourceId, openContract.destinationId, "remove")
 			}
 		}, server.TxReadCommitted)

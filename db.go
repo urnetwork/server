@@ -879,7 +879,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 					PgCommitTimeout,
 				)
 				commitStarted := timing.start()
-				commitErr = tx.Commit(commitCtx)
+				commitErr = commitObservedTx(commitCtx, tx)
 				if commitErr == nil {
 					committedAt = time.Now()
 					tx.committedAt = committedAt
