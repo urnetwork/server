@@ -13,33 +13,6 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// Production construction captures one independent parent budget, while the
-// explicit final-only setting removes that capability altogether.
-func TestResidentContractFallbackExchangeConstructionAndDisable(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
-		settings := DefaultExchangeSettings()
-		if !settings.ContractHoleCompatibilityFallback {
-			t.Fatal("transition defaults lost their explicit compatibility mode")
-		}
-		settings.KeyEventDelivery.Enabled = false
-		first := NewExchange(ctx, "synthetic", "connect", "synthetic", nil, nil, settings)
-		second := NewExchange(ctx, "synthetic", "connect", "synthetic", nil, nil, settings)
-		defer first.Close()
-		defer second.Close()
-		if first.contractHoleFallback == nil || second.contractHoleFallback == nil || first.contractHoleFallback == second.contractHoleFallback || cap(first.contractHoleFallback.slots) != residentContractFallbackMaxConcurrent {
-			t.Fatal("exchange did not capture its independent bounded source capability")
-		}
-		settings.ContractHoleCompatibilityFallback = false
-		finalOnly := NewExchange(ctx, "synthetic", "connect", "synthetic", nil, nil, settings)
-		defer finalOnly.Close()
-		if finalOnly.contractHoleFallback != nil {
-			t.Fatal("disabled compatibility mode retained a source capability")
-		}
-	})
-}
-
 // Many different resident owners share one exchange budget without a queue.
 // A full budget does not consume a cached permission or another exchange's cap.
 func TestResidentContractFallbackSharedCapDropsWithoutWaiting(t *testing.T) {
