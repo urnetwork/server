@@ -81,10 +81,13 @@ func enterLegacySettlementTiming(ctx context.Context, phase legacySettlementTimi
 }
 
 func observeLegacySettlementPost(ctx context.Context, phase legacySettlementTimingPhase, post server.PostFunction) server.PostFunction {
-	if observer, _ := ctx.Value(legacySettlementTimingKey{}).(*legacySettlementTimingObserver); observer == nil {
+	if observer, _ := ctx.Value(legacySettlementTimingKey{}).(*legacySettlementTimingObserver); observer == nil && legacyTargetTraceOf(ctx) == nil {
 		return post
 	}
 	return func() any {
+		if name := legacyTargetTracePostStage(phase); name != "" {
+			defer enterLegacyTargetTrace(ctx, name)()
+		}
 		defer enterLegacySettlementTiming(ctx, phase)()
 		return post()
 	}

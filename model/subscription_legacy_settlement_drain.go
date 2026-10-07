@@ -31,6 +31,7 @@ type LegacySettlementDrainContract struct {
 }
 
 type LegacySettlementDrainResult struct {
+	Trace     *LegacySettlementTrace          `json:"trace,omitempty"`
 	Apply     bool                            `json:"apply"`
 	Contracts []LegacySettlementDrainContract `json:"contracts"`
 }
@@ -43,6 +44,7 @@ func (err legacySettlementDrainRefusal) Error() string { return string(err) }
 // Both preflight owners remain locked while the unchanged owner reenters them.
 // Preview is only a consistent custody observation, not accounting admission.
 func checkLegacySettlementDrainInTx(ctx context.Context, tx server.PgTx, id, payer server.Id, lock bool) error {
+	defer enterLegacyTargetTrace(ctx, "point_preflight")()
 	lockSQL := ""
 	if lock {
 		lockSQL = " FOR UPDATE SKIP LOCKED"
@@ -158,6 +160,22 @@ func DrainLegacySettlements(ctx context.Context, request LegacySettlementDrainRe
 	if err := validateContractExpiryRepair(ContractExpiryRepairRequest{ExpectedPayerNetworkId: request.ExpectedPayerNetworkId, ContractIds: request.ContractIds}); err != nil {
 		return result, errors.New("invalid legacy settlement drain scope")
 	}
+	var trace *legacyTargetTrace
+	if len(request.ContractIds) == 1 {
+		id := request.ContractIds[0]
+		origin := "explicit_preview"
+		if request.Apply {
+			origin = "explicit_apply"
+		}
+		trace, _ = ctx.Value(legacyTargetTraceKey{}).(*legacyTargetTrace)
+		if trace == nil {
+			trace = legacyTargetTraceRuntimeState.begin(int(id[15])%LegacySettlementShardCount, nil, origin, &id)
+		}
+		if trace != nil {
+			ctx = trace.selectTarget(ctx, id, false)
+		}
+	}
+	defer func() { result.Trace = trace.finish(LegacySettlementFlushResult{}, returnErr) }()
 	bounded, cancel := context.WithTimeout(ctx, legacySettlementDrainBudget)
 	defer cancel()
 	result.Apply = request.Apply
@@ -171,11 +189,14 @@ func DrainLegacySettlements(ctx context.Context, request LegacySettlementDrainRe
 		}
 		entry := &result.Contracts[i]
 		err := captureContractExpiryRepair(func() error {
+			dbTiming, finishDatabaseTrace := legacyTargetTraceDatabase(bounded)
+			defer finishDatabaseTrace()
 			if !request.Apply {
 				server.Tx(bounded, func(tx server.PgTx) {
 					configureContractExpiryRepairTx(bounded, tx)
 					server.Raise(checkLegacySettlementDrainInTx(bounded, tx, id, request.ExpectedPayerNetworkId, false))
-				}, pgx.RepeatableRead, pgx.ReadOnly, server.OptNoRetry())
+				}, pgx.RepeatableRead, pgx.ReadOnly, server.OptNoRetry(), dbTiming)
+				traceLegacySettlement(bounded, "preview_commit", "confirmed_tx_return")
 				entry.Status = "eligible"
 				return nil
 			}
@@ -187,7 +208,9 @@ func DrainLegacySettlements(ctx context.Context, request LegacySettlementDrainRe
 				var err error
 				posts, completed, busy, gate, err = drainLegacySettlementInTx(bounded, tx, id, request.ExpectedPayerNetworkId)
 				server.Raise(err)
-			}, server.TxReadCommitted, server.OptNoRetry())
+			}, server.TxReadCommitted, server.OptNoRetry(), dbTiming)
+			traceLegacySettlement(bounded, "commit", "confirmed_tx_return")
+			traceLegacySettlementResult(bounded, completed, busy, gate, nil)
 			if busy {
 				switch gate {
 				case legacySettlementBusyIntent:
@@ -212,11 +235,15 @@ func DrainLegacySettlements(ctx context.Context, request LegacySettlementDrainRe
 				return nil
 			}
 			entry.PostProcessing = "started_unverified"
-			server.RunPosts(bounded, posts...)
+			func() {
+				defer enterLegacyTargetTrace(bounded, "joined_posts")()
+				server.RunPosts(bounded, posts...)
+			}()
 			entry.PostProcessing = "returned_unverified"
 			return nil
 		})
 		if err != nil {
+			traceLegacySettlementResult(bounded, false, false, legacySettlementBusyNone, err)
 			if entry.FinancialCommitAcknowledged {
 				entry.Status = "financial_committed_post_interrupted"
 			} else {

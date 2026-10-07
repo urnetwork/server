@@ -59,6 +59,7 @@ type LegacySettlementPosition struct {
 }
 
 type LegacySettlementFlushResult struct {
+	Trace      *LegacySettlementTrace   `json:"trace,omitempty"`
 	Cursor     *LegacySettlementCursor  `json:"cursor,omitempty"`
 	Visited    int                      `json:"visited"`
 	Completed  int                      `json:"completed"`
@@ -133,9 +134,11 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 // A nonnil wait is reserved for an allocated head grant preflight. All other
 // ownership gates and the financial transaction retain their existing behavior.
 func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx, contractId server.Id, wait *legacySettlementGrantWait) (posts []func() any, completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
+	defer enterLegacyTargetTrace(ctx, "financial_body")()
 	var outcome ContractOutcome
 	var clearDispute bool
 	var found bool
+	traceLegacySettlement(ctx, "intent_lock", "entered")
 	rows, err := tx.Query(ctx, `SELECT outcome,clear_dispute FROM legacy_settlement_intent WHERE contract_id=$1 FOR UPDATE SKIP LOCKED`, contractId)
 	server.WithPgResult(rows, err, func() {
 		if rows.Next() {
@@ -143,11 +146,13 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 			found = true
 		}
 	})
+	traceLegacySettlement(ctx, "intent_lock", "returned")
 	if !found {
 		return nil, false, true, legacySettlementBusyIntent, nil
 	}
 	var terminal bool
 	found = false
+	traceLegacySettlement(ctx, "contract_lock", "entered")
 	rows, err = tx.Query(ctx, `SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1 FOR UPDATE SKIP LOCKED`, contractId)
 	server.WithPgResult(rows, err, func() {
 		if rows.Next() {
@@ -155,6 +160,7 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 			found = true
 		}
 	})
+	traceLegacySettlement(ctx, "contract_lock", "returned")
 	if !found {
 		return nil, false, true, legacySettlementBusyContract, nil
 	}
@@ -165,7 +171,9 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 	}
 	{
 		var expected int
+		traceLegacySettlement(ctx, "grant_membership", "entered")
 		server.Raise(tx.QueryRow(ctx, legacySettlementExpectedGrantCountSQL, contractId).Scan(&expected))
+		traceLegacySettlement(ctx, "grant_membership", "returned")
 		locked, err := lockLegacySettlementGrantsInTx(ctx, tx, contractId, wait)
 		if err != nil {
 			return nil, false, false, legacySettlementBusyNone, err
@@ -183,7 +191,9 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 		// Deleting the locked intent admits only this transaction through the
 		// outcome guard. Every failure restores the intent with the finances.
 		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM legacy_settlement_intent WHERE contract_id=$1`, contractId))
+		traceLegacySettlement(ctx, "accounting", "entered")
 		posts, completed, returnErr = settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, false, true)
+		traceLegacySettlement(ctx, "accounting", legacyTargetTraceCause(returnErr))
 		if returnErr != nil {
 			return
 		}
@@ -201,6 +211,10 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 // SKIP LOCKED set in place could invert the sorted grant order. An allocated
 // head instead gets one whole-statement wait budget, not a budget per grant row.
 func lockLegacySettlementGrantsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, wait *legacySettlementGrantWait) (locked int, returnErr error) {
+	defer enterLegacyTargetTrace(ctx, "grant_lock")()
+	if wait != nil {
+		traceLegacySettlement(ctx, "grant_wait", "allocated")
+	}
 	query := `SELECT balance.balance_id FROM transfer_balance AS balance
           INNER JOIN transfer_escrow AS escrow USING(balance_id) WHERE escrow.contract_id=$1
 	          ORDER BY balance.balance_id FOR UPDATE OF balance`
@@ -221,6 +235,7 @@ func lockLegacySettlementGrantsInTx(ctx context.Context, tx server.PgTx, contrac
 	if err != nil {
 		if wait != nil && ctx.Err() == nil && legacySettlementGrantWaitExpired(err) {
 			wait.timedOut = true
+			traceLegacySettlement(ctx, "grant_wait", "refused")
 			// The transaction is aborted. The caller must unwind through Tx's
 			// rollback before treating this expected ownership refusal as busy.
 			return 0, errLegacySettlementGrantWaitBusy
@@ -250,6 +265,7 @@ func flushLegacySettlement(ctx context.Context, contractId server.Id) (completed
 // Expected grant-wait exhaustion crosses the normal rollback boundary before
 // becoming a busy result. Cancellation and every other error stay visible.
 func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.Id, wait *legacySettlementGrantWait) (completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
+	defer func() { traceLegacySettlementResult(ctx, completed, busy, busyGate, returnErr) }()
 	var posts []func() any
 	server.HandleError(func() {
 		func() {
@@ -275,12 +291,15 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 					panic(r)
 				}
 			}()
+			dbTiming, finishDatabaseTrace := legacyTargetTraceDatabase(ctx)
+			defer finishDatabaseTrace()
 			server.Tx(ctx, func(tx server.PgTx) {
 				// Register before projections so token cleanup joins the first
 				// post group after PG release, even when another post is held.
 				if admission != nil && admission.owner != nil {
 					owner := admission.owner
 					server.AddTxPostCommit(tx, "legacy-settlement-admission:"+owner.token, func() any {
+						traceLegacySettlement(ctx, "commit", "confirmed_after_release")
 						owner.release(ctx)
 						// Tx joins this post before finish can run. Keep the outer
 						// fallback for rollback, unknown commit or an unowned Tx.
@@ -292,11 +311,13 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 				var err error
 				posts, completed, busy, busyGate, err = flushLegacySettlementWithGrantWaitInTx(ctx, tx, contractId, wait)
 				server.Raise(err)
-			}, server.TxReadCommitted, server.OptNoRetry())
+			}, server.TxReadCommitted, server.OptNoRetry(), dbTiming)
+			traceLegacySettlement(ctx, "commit", "confirmed_tx_return")
 			transactionReturned = true
 		}()
 		func() {
 			defer enterLegacySettlementTiming(ctx, legacySettlementJoinedPosts)()
+			defer enterLegacyTargetTrace(ctx, "joined_posts")()
 			server.RunPosts(ctx, posts...)
 		}()
 	}, func(err error) { returnErr = err })
@@ -317,12 +338,20 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 	if shard < 0 || shard >= LegacySettlementShardCount || limit < 1 || limit > LegacySettlementPageLimit {
 		return result, fmt.Errorf("invalid legacy settlement limit")
 	}
+	trace, _ := ctx.Value(legacyTargetTraceKey{}).(*legacyTargetTrace)
+	if trace == nil {
+		trace = legacyTargetTraceRuntimeState.begin(shard, after, "automatic_page", nil)
+	}
+	if trace != nil {
+		ctx = context.WithValue(ctx, legacyTargetTraceKey{}, trace)
+	}
 	bounded, cancel := context.WithTimeoutCause(ctx, 15*time.Second, errLegacySettlementPageBudget)
 	defer cancel()
 	observer := &legacySettlementTimingObserver{now: time.Now}
 	bounded = context.WithValue(bounded, legacySettlementTimingKey{}, observer)
 	result, returnErr = flushLegacySettlementsPage(ctx, bounded, shard, after, limit, flushLegacySettlementWithGrantWait)
 	result.Timings = observer.snapshot()
+	result.Trace = trace.finish(result, returnErr)
 	return
 }
 
@@ -427,6 +456,9 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 			if visitHead {
 				settlementContext = context.WithValue(bounded, legacySettlementAdmissionHeadKey{}, true)
 			}
+			if trace, _ := bounded.Value(legacyTargetTraceKey{}).(*legacyTargetTrace); trace != nil {
+				settlementContext = trace.selectTarget(settlementContext, next.ContractId, visitHead)
+			}
 			completed, busy, busyGate, err := settle(settlementContext, next.ContractId, grantWait)
 			if err != nil && bounded.Err() != nil {
 				// The current transaction may have rolled back or its commit
@@ -496,11 +528,13 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 				if errors.Is(err, errContractInsufficientEscrow) {
 					code, delay = "accounting", 15*time.Minute
 				}
+				traceLegacySettlement(settlementContext, "retry_state", "entered")
 				server.Tx(bounded, func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(bounded, `UPDATE legacy_settlement_intent SET
                       failure_code=$2,next_attempt_time=clock_timestamp() AT TIME ZONE 'UTC'+$3::interval
                       WHERE contract_id=$1`, next.ContractId, code, delay.String()))
 				}, server.TxReadCommitted, server.OptNoRetry())
+				traceLegacySettlement(settlementContext, "retry_state", "committed")
 				if !visitHead {
 					next.HeadAfter = headAfter
 					result.Cursor = next

@@ -77,6 +77,7 @@ func legacySettlementAdmissionKey(balanceId server.Id) string {
 
 // Optional metadata errors cannot become accounting failures or alter retries.
 func legacySettlementAdmissionGrantIds(ctx context.Context, contractId server.Id) (balanceIds []server.Id) {
+	defer enterLegacyTargetTrace(ctx, "admission_lookup")()
 	defer func() {
 		if recover() != nil {
 			balanceIds = nil
@@ -107,8 +108,10 @@ func legacySettlementAdmissionGrantIds(ctx context.Context, contractId server.Id
 // grant lock queue. Other callers admit all known grants or release their prefix;
 // Redis errors, ambiguous replies and unknown metadata fall through to PG.
 func tryLegacySettlementAdmission(ctx context.Context, contractId server.Id, wait *legacySettlementGrantWait) (*legacySettlementAdmissionAttempt, bool) {
+	defer enterLegacyTargetTrace(ctx, "admission")()
 	head, _ := ctx.Value(legacySettlementAdmissionHeadKey{}).(bool)
 	if wait != nil || head {
+		traceLegacySettlement(ctx, "admission_mode", "head_bypass")
 		return nil, false
 	}
 	page, _ := ctx.Value(legacySettlementAdmissionPageKey{}).(*legacySettlementAdmissionPage)
@@ -116,8 +119,10 @@ func tryLegacySettlementAdmission(ctx context.Context, contractId server.Id, wai
 	// its original PG opportunities and avoid repeated lookup/lease churn.
 	// Only a real continuation can use hints for its forward lane.
 	if page != nil && !page.allowForwardHints {
+		traceLegacySettlement(ctx, "admission_mode", "fresh_page_bypass")
 		return nil, false
 	}
+	traceLegacySettlement(ctx, "admission_mode", "hint_probe")
 	bounded, cancel := context.WithTimeout(ctx, legacySettlementAdmissionBudget)
 	defer cancel()
 	balanceIds := legacySettlementAdmissionGrantIds(bounded, contractId)
@@ -151,6 +156,7 @@ func (self *legacySettlementAdmissionAttempt) finish(ctx context.Context, transa
 // Copy and sort the bounded grant set before acquiring any lease. There is no
 // wait while holding a partial Redis set and no cross-slot script or transaction.
 func acquireLegacySettlementAdmission(ctx context.Context, balanceIds []server.Id) (*legacySettlementAdmission, bool) {
+	defer enterLegacyTargetTrace(ctx, "admission_redis")()
 	if len(balanceIds) == 0 || len(balanceIds) > legacySettlementAdmissionGrantLimit {
 		return nil, false
 	}
@@ -199,6 +205,7 @@ func (self *legacySettlementAdmission) release(ctx context.Context) {
 	if self == nil || len(self.keys) == 0 {
 		return
 	}
+	defer enterLegacyTargetTrace(ctx, "admission_release")()
 	bounded, cancel := context.WithTimeout(context.WithoutCancel(ctx), legacySettlementAdmissionBudget)
 	defer cancel()
 	_ = server.RedisWithDeadline(bounded, func(r server.RedisClient) error {
