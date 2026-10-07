@@ -623,6 +623,17 @@ restart. Receipt `c959ed7d` records the actual start at 23:26:04.646404 UTC and
 completion at 23:26:14.011087 UTC. This establishes selection; actual reader
 identity and provider-coverage observations remain separate evidence.
 
+Root's bounded fixed-key observation at October 6 23:41:46 UTC retained a
+fresh native census with **287 Quality, 4,974 Speed and 80,592 Online**
+providers. Its source interval was 23:30:34.980192 to 23:31:31.997039 UTC,
+and publication occurred at 23:36:57.588604 UTC. All three readiness markers
+were one in both passes. Actual receipt `0f5b92a7` and its independent
+reduction establish that global publication was available after selection.
+They do not identify the publisher's loaded ARIN reader, attribute the counts
+to the new catalog, prove affected-group availability, or repair historical
+classification rows. The catalog length and readiness markers also do not
+prove provider membership or usable selection.
+
 Source inspection distinguishes the adoption owners. Connect announces call
 the controller's actual-address lookup and persist its database epoch and
 lookup time. API also opens the ARIN reader on IP-info and extender location
@@ -830,13 +841,19 @@ go build -ldflags "-X main.Version=$WARP_VERSION" -o /tmp/arindbctl ./arindbctl
 ```
 
 The all-release runner's `refresh_ip_databases` in `build/all/run.sh` runs
-exactly this before the config-updater image is built. Its inputs are
-`GEOIP_CONF_FILE`, `ARIN_CREDENTIALS_FILE`, `ARIN_RULES_FILE` and the optional
+exactly this before the config-updater image is built. Its input overrides
+are `GEOIP_CONF_FILE`, `ARIN_CREDENTIALS_FILE`, `ARIN_RULES_FILE` and
 `ARIN_SUBSCRIBER_CATALOG_FILE`, which defaults to
-`$WARP_HOME/config/$BUILD_ENV/arindb-subscribers/catalog.yml`. A catalog at the
-default path is used when present; an explicitly configured catalog that
-cannot be read stops the release rather than silently publishing a
-registration-only resource. `ARIN_RELAY_GEOFEEDS=1` adds the relay geofeeds.
+`$WARP_HOME/config/$BUILD_ENV/arindb-subscribers/catalog.yml`. The catalog is
+required: a missing or unreadable default or override stops the full release
+before the IP refresh compiles its binary or generates or publishes databases.
+The tracked Main default is
+the reviewed cumulative catalog `320b4c10`. This preserves its operator
+identities, visibility floor and country policy in subsequent full releases;
+update acquires fresh evidence instead of reusing the seed's old snapshots.
+The seed alone is not an offline augmentation bundle. Generic `arindbctl
+update` still supports an explicit registration-only invocation without
+`--subscriber-catalog`. `ARIN_RELAY_GEOFEEDS=1` adds the relay geofeeds.
 The runner moves `mmdb/` and `arindb/` into the versioned config resources,
 leaves `subscriber-evidence/` in `$BUILD_OUT/ip-databases`, and puts the update
 summary, including unavailable sources and the Atlas estimate, in the release

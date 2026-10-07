@@ -134,9 +134,15 @@ The all-release runner builds this command from its selected versioned Server
 checkout and runs `update` before constructing the config-updater image. Its
 input overrides are `GEOIP_CONF_FILE`, `ARIN_CREDENTIALS_FILE`,
 `ARIN_RULES_FILE` and `ARIN_SUBSCRIBER_CATALOG_FILE`, with the defaults shown
-above (`main` is the release's `BUILD_ENV`); a missing default catalog yields a
-registration-only resource, while an explicitly configured but unreadable one
-stops the release. `ARIN_RELAY_GEOFEEDS=1` adds the relay geofeeds. Both
+above (`main` is the release's `BUILD_ENV`). The reviewed subscriber catalog
+is required: a missing or unreadable default or override stops the full
+release before the IP refresh compiles its binary or publishes databases.
+Config tracks the cumulative
+catalog at `main/arindb-subscribers/catalog.yml`; update carries its reviewed
+identities and policy forward while pinning fresh evidence. Its historical
+source references are not a replacement for that refresh. The standalone
+`update` command still supports registration-only builds without the catalog
+flag. `ARIN_RELAY_GEOFEEDS=1` adds the relay geofeeds. Both
 resources are installed under the same `WARP_VERSION`, then committed and
 pushed together as scoped config changes. Missing inputs stop that release
 refresh. Ordinary local service builds can still use their existing caches.
