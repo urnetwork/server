@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urnetwork/connect"
+
 	"github.com/urnetwork/server"
 )
 
@@ -68,6 +70,23 @@ type NetworkExtender struct {
 	// and nowhere else: the columns above stay where the extender activated
 	// from, which is its genesis.
 	DerivedCountryCode string
+	// The directory tier the extender is signed into (connect/EXTENDER.md
+	// Q1): connect.ExtenderDirectoryTierOpen, which the open channels carry,
+	// or connect.ExtenderDirectoryTierGated, which only a release does.
+	DirectoryTier int
+	// The one channel this extender is published on as a canary (Q4):
+	// connect.ExtenderChannelDns or connect.ExtenderChannelGated, empty for
+	// an extender that is no canary. A canary is never dripped and never in
+	// an activation's bootstrap, whatever its tier.
+	CanaryChannel string
+}
+
+// Whether the extender may be carried by an open channel at all (Q1, Q4):
+// the open tier and no canary. The drip, the activation bootstrap and the
+// dns fill read this; a dns canary is placed in its own region's sets by the
+// dns sampler and nowhere else.
+func (self *NetworkExtender) OpenChannelPublishable() bool {
+	return self.DirectoryTier == connect.ExtenderDirectoryTierOpen && self.CanaryChannel == ""
 }
 
 // The country the extender's signed record carries (connect/GEOMAP.md §6):
@@ -129,12 +148,17 @@ type NetworkExtenderProbeTarget struct {
 
 // One address the geo dns sets are sampled from (C5), flattened the same way
 // as a probe target: the family decides which record type an address can
-// appear in, and the country decides which continent set it is local to.
+// appear in, and the country decides which continent set it is local to. The
+// key is what the sampler partitions by (Q2), the tier and the canary channel
+// decide whether and where the address may appear at all (Q1, Q4).
 type NetworkExtenderDnsAddress struct {
-	ExtenderId  server.Id
-	IpVersion   int
-	Ip          netip.Addr
-	CountryCode string
+	ExtenderId    server.Id
+	PublicKey     []byte
+	IpVersion     int
+	Ip            netip.Addr
+	CountryCode   string
+	DirectoryTier int
+	CanaryChannel string
 }
 
 // GetActiveNetworkExtenderForRecord loads what a record of one extender is
@@ -199,6 +223,9 @@ type NetworkExtenderActivation struct {
 	Carriers    []string
 	// the dns ports that passed their probe on this address (L2)
 	DnsPorts []int
+	// the directory tier the activation is signed into (connect/EXTENDER.md
+	// Q1), decided by the caller from the operator's policy
+	DirectoryTier int
 	// the privacy-preserving hash of the activating address, kept with the
 	// activation history the way a connection keeps it (M1); nil when the
 	// address could not be read
@@ -396,7 +423,9 @@ func getNetworkExtenderInTx(
 			country_code,
 			active,
 			revoke_time,
-			record_issue_time
+			record_issue_time,
+			directory_tier,
+			COALESCE(canary_channel, '')
 		FROM network_extender
 		WHERE extender_id = $1
 		FOR UPDATE
@@ -419,6 +448,8 @@ func getNetworkExtenderInTx(
 				&e.Active,
 				&e.RevokeTime,
 				&e.RecordIssueTime,
+				&e.DirectoryTier,
+				&e.CanaryChannel,
 			))
 			extender = e
 		}
@@ -483,6 +514,9 @@ func ActivateNetworkExtender(
 
 		var extenderId server.Id
 		var createTime time.Time
+		// the canary designation is the operator's and outlives a
+		// re-activation; the tier follows the activating network's policy
+		var canaryChannel string
 		result, err := tx.Query(
 			ctx,
 			`
@@ -503,9 +537,10 @@ func ActivateNetworkExtender(
 				location_id,
 				city_location_id,
 				region_location_id,
-				country_location_id
+				country_location_id,
+				directory_tier
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NULL, $11, $12, $13, $14, $15)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NULL, $11, $12, $13, $14, $15, $16)
 			ON CONFLICT (public_key) DO UPDATE
 			SET
 				network_id = $2,
@@ -521,8 +556,9 @@ func ActivateNetworkExtender(
 				location_id = $12,
 				city_location_id = $13,
 				region_location_id = $14,
-				country_location_id = $15
-			RETURNING extender_id, create_time
+				country_location_id = $15,
+				directory_tier = $16
+			RETURNING extender_id, create_time, COALESCE(canary_channel, '')
 			`,
 			server.NewId(),
 			activation.NetworkId,
@@ -539,10 +575,11 @@ func ActivateNetworkExtender(
 			activation.CityLocationId,
 			activation.RegionLocationId,
 			activation.CountryLocationId,
+			activation.DirectoryTier,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&extenderId, &createTime))
+				server.Raise(result.Scan(&extenderId, &createTime, &canaryChannel))
 			}
 		})
 
@@ -604,19 +641,25 @@ func ActivateNetworkExtender(
 			// extender has one (connect/GEOMAP.md §6); a re-activation writes a
 			// new genesis, which the next derivation solves from
 			DerivedCountryCode: derivedCountryCodeInTx(ctx, tx, extenderId),
+			DirectoryTier:      activation.DirectoryTier,
+			CanaryChannel:      canaryChannel,
 		}
 		addresses := getActiveNetworkExtenderAddressesInTx(ctx, tx, extenderId)
 
 		message, err := signRecord(extender, addresses, issueTime)
 		server.Raise(err)
-		insertNetworkExtenderPublishInTx(
-			ctx,
-			tx,
-			extenderId,
-			NetworkExtenderPublishKindRecord,
-			message,
-			issueTime,
-		)
+		// a gated extender and a canary are carried by no open channel (Q1,
+		// Q4): the record answers the caller and goes on no publish queue
+		if extender.OpenChannelPublishable() {
+			insertNetworkExtenderPublishInTx(
+				ctx,
+				tx,
+				extenderId,
+				NetworkExtenderPublishKindRecord,
+				message,
+				issueTime,
+			)
+		}
 
 		activated = &NetworkExtenderWithAddresses{
 			Extender:  extender,
@@ -792,6 +835,12 @@ func PublishNetworkExtenderRecord(
 		if extender == nil || !extender.Active {
 			return
 		}
+		if !extender.OpenChannelPublishable() {
+			// never on the queue (Q1, Q4): the selection leaves these out,
+			// and this is the backstop for an extender whose tier moved
+			// between the selection and the publish
+			return
+		}
 		addresses := getActiveNetworkExtenderAddressesInTx(ctx, tx, extenderId)
 		if len(addresses) == 0 {
 			return
@@ -904,9 +953,12 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 			`
 			SELECT
 				network_extender.extender_id,
+				network_extender.public_key,
 				COALESCE(LOWER(derived_country.country_code::text), network_extender.country_code::text),
 				network_extender_address.ip_version,
-				network_extender_address.ip
+				network_extender_address.ip,
+				network_extender.directory_tier,
+				COALESCE(network_extender.canary_channel, '')
 			FROM network_extender
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
@@ -926,9 +978,12 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 				address := &NetworkExtenderDnsAddress{}
 				server.Raise(result.Scan(
 					&address.ExtenderId,
+					&address.PublicKey,
 					&address.CountryCode,
 					&address.IpVersion,
 					&address.Ip,
+					&address.DirectoryTier,
+					&address.CanaryChannel,
 				))
 				addresses = append(addresses, address)
 			}
@@ -938,8 +993,10 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 	return addresses
 }
 
-// CountActiveNetworkExtenders counts extenders with at least one active
-// address, which is the population the drip has to rotate through (C4).
+// CountActiveNetworkExtenders counts the open tier's extenders with at least
+// one active address, canaries left out, which is the population the drip has
+// to rotate through (C4, Q1): a gated extender is never dripped and a canary
+// is published in its one place alone.
 func CountActiveNetworkExtenders(ctx context.Context) int {
 	count := 0
 
@@ -952,8 +1009,12 @@ func CountActiveNetworkExtenders(ctx context.Context) int {
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
 				network_extender_address.active
-			WHERE network_extender.active
+			WHERE
+				network_extender.active AND
+				network_extender.directory_tier = $1 AND
+				network_extender.canary_channel IS NULL
 			`,
+			connect.ExtenderDirectoryTierOpen,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -1007,7 +1068,10 @@ func GetNetworkExtenderIdsForPublish(ctx context.Context, limit int, staleBefore
 				INNER JOIN network_extender_address ON
 					network_extender_address.extender_id = network_extender.extender_id AND
 					network_extender_address.active
-				WHERE network_extender.active
+				WHERE
+					network_extender.active AND
+					network_extender.directory_tier = $3 AND
+					network_extender.canary_channel IS NULL
 				GROUP BY network_extender.extender_id, network_extender.record_issue_time
 			),
 			batch AS (
@@ -1025,6 +1089,7 @@ func GetNetworkExtenderIdsForPublish(ctx context.Context, limit int, staleBefore
 			`,
 			limit,
 			staleBefore.UTC(),
+			connect.ExtenderDirectoryTierOpen,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1092,7 +1157,11 @@ func GetRandomActiveNetworkExtenders(
 				INNER JOIN network_extender_address sampled_address ON
 					sampled_address.extender_id = sampled.extender_id AND
 					sampled_address.active
-				WHERE sampled.active AND sampled.extender_id != $2
+				WHERE
+					sampled.active AND
+					sampled.extender_id != $2 AND
+					sampled.directory_tier = $4 AND
+					sampled.canary_channel IS NULL
 				GROUP BY sampled.extender_id
 				ORDER BY random()
 				LIMIT $1
@@ -1102,6 +1171,7 @@ func GetRandomActiveNetworkExtenders(
 			limit,
 			excludeExtenderId,
 			DerivedLocationNodeKindExtender,
+			connect.ExtenderDirectoryTierOpen,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
