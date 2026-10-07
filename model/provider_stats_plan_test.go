@@ -71,10 +71,7 @@ func TestStatsQueryPlans(t *testing.T) {
 
 			assertStatsIndexPlan(t, ctx, conn, "01_enumerate_providers", providerStatsClientsSQL, networkId)
 
-			assertStatsIndexPlan(t, ctx, conn, "02_transfer_list", `
-				SELECT tc.destination_id, COALESCE(SUM(cc.used_transfer_byte_count), 0)
-				FROM transfer_contract tc INNER JOIN contract_close cc ON cc.contract_id = tc.contract_id AND cc.party = 'destination'
-				WHERE tc.destination_id = ANY($1::uuid[]) AND tc.close_time >= $2 GROUP BY tc.destination_id`, five, w24)
+			assertStatsIndexPlan(t, ctx, conn, "02_transfer_list", providerStatsTransferBytesSQL, five, w24)
 
 			assertStatsIndexPlan(t, ctx, conn, "03_contracts_clients_list", `
 				SELECT destination_id, COUNT(*), COUNT(DISTINCT source_id)
