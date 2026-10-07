@@ -19,6 +19,7 @@ import (
 
 const (
 	ContractHoleTtl             = 60 * time.Second
+	contractHoleMaximumTtl      = DefaultContractExpiration
 	ContractHoleRefreshInterval = ContractHoleTtl / 2
 	contractHoleEventLifetime   = 5 * time.Second
 	contractHoleRedisTimeout    = time.Second
@@ -110,7 +111,7 @@ func ReadContractHoleLease(ctx context.Context, sourceClientId, destinationClien
 	err := server.RedisWithDeadline(ctx, func(client server.RedisClient) error {
 		var err error
 		values, err = client.Eval(ctx, contractHoleReadScript,
-			contractHoleKeys(sourceClientId, destinationClientId)[:2], contractHoleMemberLimit, ContractHoleTtl.Milliseconds()).Slice()
+			contractHoleKeys(sourceClientId, destinationClientId)[:2], contractHoleMemberLimit, contractHoleMaximumTtl.Milliseconds()).Slice()
 		return err
 	})
 	if err != nil {
@@ -144,7 +145,7 @@ func contractHoleLease(values []any, started, now time.Time) (ContractHoleStatus
 	count, countOk := values[0].(int64)
 	ttl, ttlOk := values[1].(int64)
 	last, lastOk := values[2].(string)
-	if !countOk || !ttlOk || !lastOk || count < 0 || count > contractHoleMemberLimit || ttl <= 0 || ttl > ContractHoleTtl.Milliseconds() {
+	if !countOk || !ttlOk || !lastOk || count < 0 || count > contractHoleMemberLimit || ttl <= 0 || ttl > contractHoleMaximumTtl.Milliseconds() {
 		return ContractHoleUnknown, time.Time{}, errors.New("invalid contract hole lease")
 	}
 	if count == 0 {
