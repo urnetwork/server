@@ -1068,6 +1068,13 @@ by an alert or ledger record; the sampler never overwrites or deletes receipt
 bodies. Global archival/retention needs an explicit policy. A source/queue
 failure consumes its admission reservation; no immediate manual retry or
 second watcher is allowed. Monitor tests are not a sampler runtime action.
+When a projected receipt references a private SQL companion, inspect it only
+within the private evidence boundary. The companion contains bounded SQL bytes
+and query-ID/token mappings; neither belongs in alerts, chat, logs, or fixtures.
+Keep both immutable files and their combined 256 KiB cap. Prefix, source-buffer,
+selection and storage omissions remain explicit; a complete family sample is
+not a full SQL or caller identity. Older receipts cannot recover discarded SQL.
+The private extension uses the existing SELECTs and cadence, not another reader.
 An unacquired shared slot has no database attempt to record; its first-cadence
 coverage alert must say so and preserve any older durable clocks. Test the real
 RunLoop with a startup bulk wave and a later saturated queue: the enabled

@@ -3683,8 +3683,9 @@ catalog workload. The read-only primary session collects 12 activity snapshots
 separated by two seconds, clears the statistics snapshot before each read, and
 reads two bounded completed-statistic endpoints plus one final blocker census.
 There are no application-table scans, EXPLAIN ANALYZE, DDL, cancellations,
-financial changes or pool changes. Raw stderr and SQL text never enter receipts
-or alerts. The remote adapter drains stderr concurrently, keeps only its first
+financial changes or pool changes. Raw stderr never enters retained evidence;
+SQL text and query IDs never enter the projected receipt or alerts. A separate
+private SQL companion is described below. The remote adapter drains stderr concurrently, keeps only its first
 4KiB in memory and emits a fixed phase/cause plus a truncation flag. SQL source
 comments map psql's own failing statement line to identity, authority,
 history-start/end, activity, sample-wait or blockers without adding queries.
@@ -3790,7 +3791,7 @@ later attempts fail. One-shot markers remain spent.
 The private receipt retains all 12 source clocks and denominators, finite
 state/wait/backend/source-family groups, separate query/transaction/state
 ages, completed-entry lifetime endpoints and final blocker links. Query IDs
-and PIDs become run-local ordinal tokens before persistence. Families include
+and PIDs become run-local ordinal tokens in that projection. Families include
 reservation census prefixes, snapshot reads/publications, grant locks,
 settlement locks/reads, companion lookups, and generic fallback families.
 `reservation_census_prefix` means a suspected distinctive source-shaped prefix,
@@ -3798,6 +3799,41 @@ not a complete SQL identity or a caller join. The measured query buffer size
 and query-text truncation counts accompany it. Local/loopback clients and
 application labels cannot resolve API, Taskworker, Proxy or payer ownership
 through PgBouncer.
+
+The same activity SELECT also retains one representative SQL prefix for the
+union of its first eight load-ranked and first eight age-ranked groups, at most
+16 group-samples per snapshot. The representative is the smallest backend PID
+within that exact group; it is not every statement with the same query ID.
+Each prefix is at most 4,096 bytes, base64 encoded so a byte boundary through a
+UTF-8 character stays exact. Original visible byte length, missing text, local
+prefix truncation and possible activity-buffer truncation remain separate.
+The existing 2,048-character family matcher is unchanged. SQL can contain
+literal customer data and credentials: only the immutable, mode-0600
+`private-sql-<sha256>.json` companion in the private sampler directory contains
+these bytes and the query-ID/token mapping. Never paste or export that content
+into alerts, source fixtures, logs, or a conversation.
+
+The companion is written durably before its projected receipt references its
+hash. Their combined size stays within the existing 256 KiB retained-evidence
+cap, and the remote wire stays within 4 MiB. Identical representatives merge
+their sample indexes; retention prefers the already-selected public load
+groups in their existing order. Coverage counts distinguish omitted source
+group-samples, missing/truncated text, and representatives omitted by final
+selection or storage. History and blocker query tokens can have a private ID
+mapping without a captured SQL prefix. NULL IDs remain unknown, and neither an
+ID nor a prefix proves a caller, payer, full statement, or CPU contribution.
+Old receipts without this field have no recoverable SQL; absence is unknown.
+No extra source query, retry, cadence change, or raised limit supplies it.
+
+GOTCHA — complete query-family sampling is not exact source identification.
+The October 7 retained samples could report generic contract-close families
+and omitted groups, but discarded SQL before persistence. A healthy backup
+and application work can share that family. The private companion closes only
+the captured-prefix evidence gap; caps, activity-buffer clipping, unselected
+representatives, and missing caller joins still limit attribution. Qualify
+the actual populated SELECT, multibyte byte boundary, rank caps, malformed
+column refusal, private/public separation and combined persistence cap before
+promotion. A persistence failure consumes the original attempt without retry.
 
 - `pg-query-repeated-work` WARN: a current-database active query group has at
   least five concurrent backends in at least six of the 12 snapshots. This

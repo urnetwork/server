@@ -214,10 +214,16 @@ func pgSampleFindings(r pgQuerySampleReceipt, target string) []finding {
 	for _, n := range r.QueryTextTruncated {
 		textTruncated += n
 	}
-	if r.OmittedGroups > 0 || r.LoadOutputTruncated || r.HistoryTruncated || r.BlockerSelectionTruncated || textTruncated > 0 {
+	privateOmitted, privateMissing, privateTruncated := 0, 0, 0
+	if r.PrivateSql != nil {
+		privateOmitted = r.PrivateSql.OmittedGroupSamples + r.PrivateSql.OmittedStatements
+		privateMissing = r.PrivateSql.MissingGroupSamples
+		privateTruncated = r.PrivateSql.TruncatedGroupSamples
+	}
+	if r.OmittedGroups > 0 || r.LoadOutputTruncated || r.HistoryTruncated || r.BlockerSelectionTruncated || textTruncated > 0 || privateOmitted > 0 || privateMissing > 0 || privateTruncated > 0 {
 		findings = append(findings, finding{probeId: "pg/query-sample", tier: tierWarn, class: "pg-query-sample-coverage", target: target, sustain: 1,
 			symptom:   "Bounded PostgreSQL sample has incomplete query or blocker coverage",
-			observed:  fmt.Sprintf("omitted_group_samples=%d load_output_truncated=%t history_truncated=%t blockers_truncated=%t query_text_truncated_samples=%d activity_query_bytes=%d", r.OmittedGroups, r.LoadOutputTruncated, r.HistoryTruncated, r.BlockerSelectionTruncated, textTruncated, r.TrackQuerySize),
+			observed:  fmt.Sprintf("omitted_group_samples=%d load_output_truncated=%t history_truncated=%t blockers_truncated=%t query_text_truncated_samples=%d activity_query_bytes=%d private_sql_omissions=%d private_sql_missing=%d private_sql_truncated=%d", r.OmittedGroups, r.LoadOutputTruncated, r.HistoryTruncated, r.BlockerSelectionTruncated, textTruncated, r.TrackQuerySize, privateOmitted, privateMissing, privateTruncated),
 			mechanism: "Finite caps or query-text truncation can hide a slow holder or collapse source identity; retained positive observations remain valid lower bounds.",
 			baseline:  "Complete source counts and query identities are required to rule out an unobserved family; partial samples can only identify retained work.",
 			action:    "Use one separately bounded source/holder discriminator for the missing fact. Keep caps and privacy; do not dump SQL, extend transaction lifetime or treat omitted work as zero.",
@@ -262,12 +268,17 @@ func pgSampleIsSlow(load pgSampleLoad) bool {
 // sampler. The cadence file is only an index; rotating that index cannot erase
 // an incident's evidence. Global retention is an explicit operator policy.
 func pgSampleStoreReceipt(dir string, raw []byte) (string, error) {
+	return pgSampleStoreObject(dir, "receipt-", raw)
+}
+
+// Prefixes are fixed by the two evidence owners, never by source data.
+func pgSampleStoreObject(dir, prefix string, raw []byte) (string, error) {
 	if len(raw) > 262144 {
 		return "", errors.New("sample receipt exceeds bound")
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(raw))
-	target := filepath.Join(dir, "receipt-"+digest+".json")
-	tmp, err := os.CreateTemp(dir, ".receipt-")
+	target := filepath.Join(dir, prefix+digest+".json")
+	tmp, err := os.CreateTemp(dir, "."+prefix)
 	if err != nil {
 		return "", err
 	}
@@ -281,6 +292,10 @@ func pgSampleStoreReceipt(dir string, raw []byte) (string, error) {
 	if err := os.Link(tmp.Name(), target); err != nil {
 		if !errors.Is(err, os.ErrExist) {
 			return "", err
+		}
+		info, err := os.Lstat(target)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			return "", errors.New("immutable sample receipt mode conflict")
 		}
 		existing, err := os.Open(target)
 		if err != nil {

@@ -96,7 +96,7 @@ func pgSampleActivitySQL(index int) string {
  SELECT coalesce(query_id::text,'none') q, %s state, %s wait,
  %s owner, %s app, %s backend, %s family,
  CASE WHEN datid=(SELECT oid FROM pg_database WHERE datname=current_database()) THEN 'current' ELSE 'other' END db_scope,
- count(*)::int n,
+ count(*)::int n,min(pid) representative_pid,
  coalesce(greatest(0,extract(epoch FROM max(clock_timestamp()-query_start))),0)::float8 query_age,
  coalesce(greatest(0,extract(epoch FROM max(clock_timestamp()-xact_start))),0)::float8 xact_age,
  coalesce(greatest(0,extract(epoch FROM max(clock_timestamp()-state_change))),0)::float8 state_age
@@ -108,7 +108,11 @@ func pgSampleActivitySQL(index int) string {
  SELECT json_build_object('kind','activity','sample',%d,'at',extract(epoch FROM clock_timestamp()),
  'total',(SELECT count(*) FROM a),'groups',(SELECT count(*) FROM grouped),
  'query_text_truncated',(SELECT count(*) FROM a WHERE octet_length(query)>=pg_size_bytes(current_setting('track_activity_query_size'))-1 OR length(query)>2048),
- 'rows',coalesce((SELECT json_agg(json_build_array(q,state,wait,owner,app,backend,family,db_scope,n,query_age,xact_age,state_age)) FROM selected),'[]'::json));
+ 'sql_capture_version',1,
+ 'rows',coalesce((SELECT json_agg(json_build_array(s.q,s.state,s.wait,s.owner,s.app,s.backend,s.family,s.db_scope,s.n,s.query_age,s.xact_age,s.state_age,
+ CASE WHEN s.load_rank<=8 OR s.age_rank<=8 THEN json_build_array(octet_length(coalesce(p.query,'')),
+ encode(substring(convert_to(coalesce(p.query,''),'UTF8') FOR 4096),'base64'),p.query IS NULL) ELSE NULL END) ORDER BY s.load_rank)
+ FROM selected s JOIN a p ON p.pid=s.representative_pid),'[]'::json));
  `, pgSampleState("a"), pgSampleWait("a"), pgSampleOwner("a"), pgSampleApp("a"), pgSampleBackend("a"), pgSampleFamily("normalized"), index)
 }
 func pgSampleHistorySQL(index int) string {
@@ -185,6 +189,7 @@ type pgSampleWire struct {
 	TrackQuerySize     *int                `json:"track_activity_query_size"`
 	PGSSVersion        string              `json:"pgss_version"`
 	QueryTextTruncated *int                `json:"query_text_truncated"`
+	SqlCaptureVersion  *int                `json:"sql_capture_version,omitempty"`
 }
 type pgSampleLoad struct {
 	Query                  string   `json:"query_token"`
@@ -256,6 +261,9 @@ type pgQuerySampleReceipt struct {
 	LockWaiters               int                    `json:"lock_waiters"`
 	BlockerSelectionTruncated bool                   `json:"blocker_selection_truncated"`
 	Qualifiers                []string               `json:"qualifiers"`
+	PrivateSql                *pgSampleSqlCoverage   `json:"private_sql,omitempty"`
+	privateSqlRows            []pgSampleSqlRow
+	privateQueryIds           map[string]string
 }
 
 var pgSampleID = regexp.MustCompile(`^(none|-?[0-9]{1,20})$`)
@@ -324,8 +332,8 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 	if len(raw) > pgQuerySampleMaxBytes || !strings.HasSuffix(raw, "\n") {
 		return fail()
 	}
-	// Only sequential private ordinal tokens leave this reducer. Query IDs and
-	// PIDs are never included in an error, receipt, log, or alert.
+	// Public projections contain only ordinal tokens. SQL and query IDs have a
+	// separate, unexported path to the bounded private companion; PIDs do not.
 	tokens := map[string]string{}
 	token := func(kind, id string) string {
 		if id == "none" {
@@ -347,6 +355,7 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 	seenHistory := [2]bool{}
 	seenIdentity := false
 	seenBlockers := false
+	sqlCaptureVersion := 0
 	loads := map[string]*pgSampleLoad{}
 	queryForLoad := map[string]string{}
 	lastClock := float64(0)
@@ -361,6 +370,9 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 			return fail()
 		}
 		lastClock = w.At
+		if w.SqlCaptureVersion != nil && w.Kind != "activity" {
+			return fail()
+		}
 		switch w.Kind {
 		case "identity":
 			if w.TrackQuerySize == nil || *w.TrackQuerySize < 1024 || *w.TrackQuerySize > 1048576 || !regexp.MustCompile(`^[0-9]+(?:\.[0-9]+){1,2}$`).MatchString(w.PGSSVersion) {
@@ -408,6 +420,21 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 				histories[w.Sample][q] = history{a, b, c, family}
 			}
 		case "activity":
+			version := 0
+			if w.SqlCaptureVersion != nil {
+				version = *w.SqlCaptureVersion
+				if version != 1 {
+					return fail()
+				}
+			}
+			if r.Samples == 0 {
+				sqlCaptureVersion = version
+				if version == 1 {
+					r.PrivateSql = &pgSampleSqlCoverage{Schema: 1}
+				}
+			} else if version != sqlCaptureVersion {
+				return fail()
+			}
 			if w.QueryTextTruncated == nil || *w.QueryTextTruncated < 0 || *w.QueryTextTruncated > w.Total {
 				return fail()
 			}
@@ -424,8 +451,9 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 			r.OmittedGroups += w.Groups - len(w.Rows)
 			seen := map[string]bool{}
 			total := 0
+			captured := 0
 			for _, row := range w.Rows {
-				if len(row) != 12 {
+				if len(row) != 12+sqlCaptureVersion {
 					return fail()
 				}
 				parts := make([]string, 8)
@@ -467,6 +495,20 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 					loads[key] = l
 					queryForLoad[key] = parts[0]
 				}
+				if sqlCaptureVersion == 1 && string(row[12]) != "null" {
+					capture, err := pgSampleParseSql(row[12], *l, w.Sample, r.TrackQuerySize)
+					if err != nil {
+						return fail()
+					}
+					r.privateSqlRows = append(r.privateSqlRows, capture)
+					captured++
+					if capture.Missing {
+						r.PrivateSql.MissingGroupSamples++
+					}
+					if capture.PrefixTruncated || capture.ActivityBufferMaybeTruncated {
+						r.PrivateSql.TruncatedGroupSamples++
+					}
+				}
 				if nums[0] >= 5 {
 					l.PressureSamples++
 				}
@@ -485,6 +527,13 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 			}
 			if total > w.Total || (w.Groups == len(w.Rows) && total != w.Total) {
 				return fail()
+			}
+			if sqlCaptureVersion == 1 {
+				if captured < min(w.Groups, 8) || captured > min(len(w.Rows), 16) {
+					return fail()
+				}
+				r.PrivateSql.CapturedGroupSamples += captured
+				r.PrivateSql.OmittedGroupSamples += w.Groups - captured
 			}
 		case "blockers":
 			if r.Samples != pgQuerySampleCount || seenBlockers || len(w.Rows) > 256 {
@@ -583,9 +632,17 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 		r.CompletedOutputTruncated = true
 		r.Completed = r.Completed[:30]
 	}
+	if sqlCaptureVersion == 1 {
+		r.privateQueryIds = map[string]string{}
+		for key, value := range tokens {
+			if strings.HasPrefix(key, "q") {
+				r.privateQueryIds[value] = key[1:]
+			}
+		}
+	}
 
 	r.Complete = true
-	r.Qualifiers = []string{"12 snapshots are backend-samples, not distinct statements, continuous waits or CPU attribution", "query/transaction/state ages are separate; wait residence unknown", "completed statistics are endpoint entry-lifetime gauges, not sample-window or per-owner runtimes; exclude canceled/incomplete and possibly utility statements; eviction/selective-reset continuity is unproved, so interval deltas are withheld", "history is current database only, capped to top5000 lifetime execution-time IDs at each endpoint; missing entries unknown", "each snapshot retains the union of top64 active/count and top64 active/age groups; output retains40 count-ranked plus40 slow/age-ranked groups; blockers one final snapshot of oldest16 lock waiters, at most16 blockers each", "SQL family matching is descriptive source shape, not runtime executable or task ownership; reservation_census_prefix is a suspected source-shaped prefix, not full identity. SQL truncation counts include configured activity buffer and local2048-character cap", "local/loopback client owner and declared application do not identify originating service through PgBouncer", "NULL query IDs share an unknown token; recognized families only partly distinguish those statements", "raw SQL, database/application values, client addresses, PIDs and query IDs are not retained"}
+	r.Qualifiers = []string{"12 snapshots are backend-samples, not distinct statements, continuous waits or CPU attribution", "query/transaction/state ages are separate; wait residence unknown", "completed statistics are endpoint entry-lifetime gauges, not sample-window or per-owner runtimes; exclude canceled/incomplete and possibly utility statements; eviction/selective-reset continuity is unproved, so interval deltas are withheld", "history is current database only, capped to top5000 lifetime execution-time IDs at each endpoint; missing entries unknown", "each snapshot retains the union of top64 active/count and top64 active/age groups; output retains40 count-ranked plus40 slow/age-ranked groups; blockers one final snapshot of oldest16 lock waiters, at most16 blockers each", "SQL family matching is descriptive source shape, not runtime executable or task ownership; reservation_census_prefix is a suspected source-shaped prefix, not full identity. SQL truncation counts include configured activity buffer and local2048-character cap", "local/loopback client owner and declared application do not identify originating service through PgBouncer", "NULL query IDs share an unknown token; recognized families only partly distinguish those statements", "this projection excludes raw SQL, database/application values, client addresses, PIDs and query IDs; an available private SQL companion contains bounded representative prefixes and query-ID/token mappings only; absence or truncation leaves source identity unknown"}
 	return r, nil
 }
 
@@ -722,11 +779,16 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 	}
 	r.FinishedAt = env.now().UTC()
-	raw, err := json.MarshalIndent(r, "", "  ")
-	if err != nil || len(raw) > 262144 {
+	raw, privateSql, err := pgSampleEncodeReceipts(&r)
+	if err != nil {
 		return nil, errors.New("monitor: bounded PG sample receipt exceeds bound")
 	}
-	receiptSHA256, err := pgSampleStoreReceipt(dir, append(raw, '\n'))
+	if len(privateSql) > 0 {
+		if _, err := pgSampleStorePrivateSql(dir, privateSql); err != nil {
+			return nil, errors.New("monitor: bounded PG sample private SQL evidence unavailable")
+		}
+	}
+	receiptSHA256, err := pgSampleStoreReceipt(dir, raw)
 	if err != nil {
 		return nil, errors.New("monitor: bounded PG sample immutable receipt unavailable")
 	}
