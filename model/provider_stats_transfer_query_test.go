@@ -219,7 +219,11 @@ func TestProviderStatsTransferQueryWorkFollowsEligibleContracts(t *testing.T) {
 								if node.Relation == "contract_close" {
 									reportWork += work
 									reportLoops += node.Loops
-									fullKey := node.Index == "contract_close_pkey" && strings.Contains(node.Cond, "contract_id =") && strings.Contains(node.Cond, "party =")
+									// PostgreSQL deparses varchar equality as (party)::text.
+									// Ignore only these type decorations, retaining both
+									// equality keys and the exact primary-index identity.
+									condition := strings.NewReplacer("(", "", ")", "", "::text", "", "::uuid", "").Replace(node.Cond)
+									fullKey := node.Index == "contract_close_pkey" && strings.Contains(condition, "contract_id =") && strings.Contains(condition, "party =")
 									if variant == 1 && (!fullKey || node.Rows+node.Removed+node.Recheck > 1) {
 										t.Fatalf("%d/%s lost complete report PK lookup: %s", count, mode, raw)
 									}
