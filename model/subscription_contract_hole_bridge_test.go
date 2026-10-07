@@ -23,6 +23,7 @@ func TestContractHoleReadStatusDistinguishesNegativeAndUnknown(t *testing.T) {
 		if err != nil || status != ContractHoleUnknown {
 			t.Fatalf("missing status=%d error=%v", status, err)
 		}
+		server.Raise(applyContractHoleEvent(ctx, server.NewId(), source, destination, "create"))
 		for _, sample := range []struct {
 			value     string
 			expiry    time.Duration
@@ -59,9 +60,9 @@ func TestContractHoleReadStatusDistinguishesNegativeAndUnknown(t *testing.T) {
 	})
 }
 
-// An old creation timestamp is not an absolute lifetime. A real checkpoint
-// renews the expiry quiet period and permits the same contract in both directions.
-func TestContractHoleRolloutHasNoFixedMaximumAge(t *testing.T) {
+// A legacy NULL expiration has no absolute lifetime. A real checkpoint renews
+// its quiet period and permits the same contract in both directions.
+func TestContractHoleLegacyRolloutHasNoFixedMaximumAge(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {

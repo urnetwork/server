@@ -83,7 +83,7 @@ func TestContractHoleRefreshLargeCohortHalfTtlCoverage(t *testing.T) {
 					if err != nil || count != pair.members {
 						t.Fatalf("pair count=%d want=%d error=%v", count, pair.members, err)
 					}
-					members, err := client.SCard(ctx, keys[1]).Result()
+					members, err := client.ZCard(ctx, keys[1]).Result()
 					if err != nil || members != count {
 						t.Fatalf("pair membership=%d count=%d error=%v", members, count, err)
 					}

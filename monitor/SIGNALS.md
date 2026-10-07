@@ -407,11 +407,14 @@ with the retained pre-incident same-scope baseline and verify actual caller
 admission/delivery success; backlog and churn remain independent evidence.
 
 Contract packet authorization has a separate Redis projection. Its key is
-`contract-hole:v1:{<lower-client-id>:<higher-client-id>}:count`, using the source
+`contract-hole:v2:{<lower-client-id>:<higher-client-id>}:count`, using the source
 and destination **client** IDs in canonical order. Both contract directions share
-that counter; a self-pair counts each contract once. A membership set makes
-creation `INCR` and closure `DECR` idempotent. A checkpoint retains permission:
-the SDK can resume the same contract after a receive sequence checkpoints it.
+that counter; a self-pair counts each contract once. A sorted membership set makes
+creation `INCR` and closure `DECR` idempotent. Each score is the contract's stored
+absolute expiration in UTC milliseconds; legacy NULL expiration uses positive
+infinity. New contracts have a default 60-minute lifespan. A checkpoint retains permission:
+the SDK can resume the same contract after a receive sequence checkpoints it,
+until its original absolute expiration. Checkpoints never extend that deadline.
 A meaningful final party close, dispute, terminal outcome, or contract deletion
 removes its member even when financial settlement still has a null outcome.
 Empty/null party metadata is not a final close. Clearing a dispute invalidates
@@ -426,12 +429,26 @@ Redis-only policy denies both negative and unknown results. Source and destinati
 identity/activity checks remain separate from this contract predicate. Client
 retirement alone does not rewrite contract accounting or its open status.
 
+The expiry-aware reader uses one Redis script to remove due members and decrement
+their count, without waiting for financial settlement or a refresh pass. A mixed
+pair remains positive while any member survives. Its returned positive lease is
+bounded by the earlier of Redis TTL and the last surviving finite deadline; a
+legacy member contributes only the TTL bound. TTL is measured from before I/O,
+and the resident caps its positive cache by the returned deadline. A positive
+scalar without matching expiring membership is unknown. Version 1 keys are not
+accepted as deadline-aware authority, so rollout must warm version 2 or use the
+explicit bounded bridge. Both publication and reads recheck absolute expiry;
+an old source snapshot cannot restore a member that expired during its query.
+
 An explicitly enabled, temporary rollout bridge may separately check the
 source for unknown results. Its owning resident controls per-pair admission,
 the global concurrency bound, query deadline and rollout phase; explicit
 negative Redis evidence never needs a source check. The source seam uses the
 same resumable-checkpoint predicate as this projection and never publishes a
-partial count from an existence result. After the bridge is disabled, unknown remains
+partial count from an existence result. Its indexed LIMIT 1 returns the first
+eligible member's deadline as a conservative lease; finding the latest deadline
+would require scanning more source rows. An observation that expires during I/O
+is unknown, since another member may still survive. After the bridge is disabled, unknown remains
 fail-closed without invoking that source seam.
 
 Committed lifecycle events use existing transaction identities, with no added
@@ -446,8 +463,8 @@ own its five-second token when its
 complete source snapshot is atomically installed; a later close or newer
 refresher invalidates it. Process failure, cancellation, Redis refusal and an
 ambiguous commit can lose a post. A lost revocation can remain visible until
-source repair or the last TTL expires; packet-local positive caching adds its
-own separately bounded recheck window. These are eventual projection semantics,
+source repair or the last TTL expires; packet-local positive caching has its own
+bounded recheck window, capped by the observed lease. These are eventual projection semantics,
 not a transactional PostgreSQL/Redis authorization guarantee.
 
 Taskworker's `RefreshContractHoles` chain starts immediately and traverses the
@@ -476,15 +493,18 @@ and failed-pairs gauges describe the last traversed pass, including a partial on
 readiness publication; one requires a timely full pass and a surviving early pair.
 Missing/zero/stale observations are unknown coverage, never an empty population.
 
-The independent control-plane receipt `contract-hole:v1:{refresh}:ready` records
+The independent control-plane receipt `contract-hole:v2:{refresh}:ready` records
 pass begin/end, pages, candidate pair visits, successful and unknown visits, a
 conservative remaining TTL and the earliest positive source-start witness.
 Visits include repeated pairs across row pages and directions; they are not a
 distinct-fleet census or an atomic fleet snapshot. A pass at least 30 seconds
 long, any unknown visit, an expired witness or insufficient expiry margin refuses
-the receipt. Its expiry is capped at pass-start plus 60 seconds; an end-of-pass
-success cannot hide an expired early pair. Reading the receipt rechecks the
-witness. Packet reads never consult this receipt, so unrelated partial refresh
+publication. The recorded `covered_until` is the earlier of pass-start plus 60
+seconds and the observed witness lease; publication requires more than 30 seconds
+remaining and the receipt expires at that bound. Reading the receipt rechecks the
+witness and can only shorten the remaining coverage, including legitimate
+absolute expiration. A missing, expired or impossible coverage bound is unknown;
+an end-of-pass success cannot hide an expired early pair. Packet reads never consult this receipt, so unrelated partial refresh
 failure does not globally deny healthy pairs.
 Loss of coverage attempts a one-second Redis cleanup independent of source
 cancellation. If Redis itself refuses that cleanup, invalidation is best effort:
@@ -500,14 +520,13 @@ capacity and repeated half-TTL refresh; it does not predict Main capacity.
 These producer metrics and receipts are qualification evidence; this
 documentation adds no new monitor probe.
 
-There is no fixed maximum effective contract lifetime to use as a rollout
-timer. The server's 12-minute expiration cutoff is a quiet period since creation
-or the latest report; a real checkpoint updates that report time and preserves
-the same resumable contract. SDK unused-queue expiry and companion-origin linger
-also do not cap an active contract's lifetime. Record when every old creation
-writer has retired, then prove coverage of surviving pre-retirement contracts
-before permanently removing the bridge. An elapsed quiet-period estimate alone
-does not establish that all old contracts have closed.
+The new signed 60-minute expiration does not retroactively bound legacy NULL
+contracts. Their 12-minute quiet-period expiry can still be renewed by a real
+checkpoint, and SDK unused-queue expiry and companion-origin linger do not cap
+an active legacy contract's lifetime. Record when every old creation writer has
+retired, then prove coverage of surviving legacy contracts before permanently
+removing the bridge. Waiting 60 minutes retires the new finite cohort; it does
+not establish that all older NULL-expiration contracts have closed.
 
 ### 1.2 Task canaries — the cheapest end-to-end redis probes
 Probe: `task-canaries`
