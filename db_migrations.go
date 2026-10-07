@@ -9648,4 +9648,30 @@ var migrations = []any{
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE transfer_contract ADD COLUMN expiration_time timestamp NULL;
 	`),
+	// 791: nullable per-intent scheduling key; no default and no table rewrite.
+	newSqlMigration(legacySettlementPayerSchemaSql),
+	// 792: seek past a whole payer without scanning its contract prefix.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS legacy_settlement_intent_payer_due
+	`, `
+		CREATE INDEX CONCURRENTLY legacy_settlement_intent_payer_due
+		ON legacy_settlement_intent (shard, payer_network_id, next_attempt_time, contract_id)
+		WHERE payer_network_id IS NOT NULL
+	`, `
+		DROP INDEX IF EXISTS legacy_settlement_intent_payer_due;
+		CREATE INDEX legacy_settlement_intent_payer_due
+		ON legacy_settlement_intent (shard, payer_network_id, next_attempt_time, contract_id)
+		WHERE payer_network_id IS NOT NULL
+	`),
+	// 793: registration discovers only the still-unassigned bounded prefix.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS legacy_settlement_intent_payer_missing
+	`, `
+		CREATE INDEX CONCURRENTLY legacy_settlement_intent_payer_missing
+		ON legacy_settlement_intent (shard, contract_id) WHERE payer_network_id IS NULL
+	`, `
+		DROP INDEX IF EXISTS legacy_settlement_intent_payer_missing;
+		CREATE INDEX legacy_settlement_intent_payer_missing
+		ON legacy_settlement_intent (shard, contract_id) WHERE payer_network_id IS NULL
+	`),
 }

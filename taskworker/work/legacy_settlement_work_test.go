@@ -57,7 +57,7 @@ func TestLegacySettlementTaskPartitionsAndBoundedContinuation(t *testing.T) {
 			before := server.NowUtc()
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key='["flush_legacy_settlements_3"]'`))
-				server.Raise(FlushLegacySettlementsPost(&FlushLegacySettlementsArgs{Shard: 3}, &FlushLegacySettlementsResult{model.LegacySettlementFlushResult{Cursor: &cursor, More: test.more, Completed: test.released, Failed: test.failed}}, owner, tx))
+				server.Raise(FlushLegacySettlementsPost(&FlushLegacySettlementsArgs{Shard: 3}, &FlushLegacySettlementsResult{LegacySettlementShardResult: model.LegacySettlementShardResult{LegacySettlementFlushResult: model.LegacySettlementFlushResult{Cursor: &cursor, More: test.more, Completed: test.released, Failed: test.failed}}}, owner, tx))
 			})
 			server.Db(ctx, func(conn server.PgConn) {
 				var data []byte

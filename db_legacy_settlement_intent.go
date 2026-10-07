@@ -29,3 +29,25 @@ const legacySettlementIntentSchemaSql = `
  BEFORE UPDATE OF outcome ON transfer_contract FOR EACH ROW
  EXECUTE FUNCTION guard_legacy_settlement_intent_outcome();
 `
+
+// Scheduling metadata belongs to each intent. It never owns a balance, changes
+// financial eligibility, or takes a shared payer row lock. Old writers omit the
+// nullable key; their insert trigger uses the same endpoint fallback as the
+// accounting participant resolver. Existing rows are filled in bounded pages.
+const legacySettlementPayerSchemaSql = `
+ SET LOCAL lock_timeout = '5s';
+ ALTER TABLE legacy_settlement_intent ADD COLUMN payer_network_id uuid NULL;
+ CREATE FUNCTION assign_legacy_settlement_intent_payer() RETURNS trigger LANGUAGE plpgsql AS $$
+ BEGIN
+  IF NEW.payer_network_id IS NULL THEN
+   SELECT COALESCE(payer_network_id,
+     CASE WHEN companion_contract_id IS NULL THEN source_network_id ELSE destination_network_id END)
+   INTO NEW.payer_network_id FROM transfer_contract WHERE contract_id=NEW.contract_id;
+  END IF;
+  RETURN NEW;
+ END;
+ $$;
+ CREATE TRIGGER legacy_settlement_intent_assign_payer
+ BEFORE INSERT ON legacy_settlement_intent FOR EACH ROW
+ EXECUTE FUNCTION assign_legacy_settlement_intent_payer();
+`

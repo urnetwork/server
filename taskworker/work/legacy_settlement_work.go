@@ -12,31 +12,32 @@ import (
 )
 
 type FlushLegacySettlementsArgs struct {
-	Shard  int                           `json:"shard"`
-	Cursor *model.LegacySettlementCursor `json:"cursor,omitempty"`
+	Shard       int                                `json:"shard"`
+	Cursor      *model.LegacySettlementCursor      `json:"cursor,omitempty"`
+	PayerCursor *model.LegacySettlementPayerCursor `json:"payer_cursor,omitempty"`
 }
 type FlushLegacySettlementsResult struct {
-	model.LegacySettlementFlushResult
+	model.LegacySettlementShardResult
 }
 
-func scheduleFlushLegacySettlements(clientSession *session.ClientSession, tx server.PgTx, shard int, after *model.LegacySettlementCursor, more bool) {
+func scheduleFlushLegacySettlements(clientSession *session.ClientSession, tx server.PgTx, shard int, after *model.LegacySettlementCursor, payerAfter *model.LegacySettlementPayerCursor, more bool) {
 	next := server.NowUtc().Add(2 * time.Second)
 	if more {
 		next = server.NowUtc()
 	}
-	task.ScheduleTaskInTx(tx, FlushLegacySettlements, &FlushLegacySettlementsArgs{Shard: shard, Cursor: after}, clientSession,
+	task.ScheduleTaskInTx(tx, FlushLegacySettlements, &FlushLegacySettlementsArgs{Shard: shard, Cursor: after, PayerCursor: payerAfter}, clientSession,
 		task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard)), task.RunAt(next), task.MaxTime(30*time.Second))
 }
 func ScheduleFlushLegacySettlements(clientSession *session.ClientSession, tx server.PgTx) {
 	for shard := range model.LegacySettlementShardCount {
-		scheduleFlushLegacySettlements(clientSession, tx, shard, nil, false)
+		scheduleFlushLegacySettlements(clientSession, tx, shard, nil, nil, false)
 	}
 }
 func FlushLegacySettlements(args *FlushLegacySettlementsArgs, clientSession *session.ClientSession) (*FlushLegacySettlementsResult, error) {
-	result, err := model.FlushLegacySettlements(clientSession.Ctx, args.Shard, args.Cursor, model.LegacySettlementPageLimit)
-	return &FlushLegacySettlementsResult{LegacySettlementFlushResult: result}, err
+	result, err := model.FlushLegacySettlementShard(clientSession.Ctx, args.Shard, args.Cursor, args.PayerCursor, model.LegacySettlementPageLimit)
+	return &FlushLegacySettlementsResult{LegacySettlementShardResult: result}, err
 }
 func FlushLegacySettlementsPost(args *FlushLegacySettlementsArgs, result *FlushLegacySettlementsResult, clientSession *session.ClientSession, tx server.PgTx) error {
-	scheduleFlushLegacySettlements(clientSession, tx, args.Shard, result.Cursor, result.More && result.Failed == 0 && result.Completed > 0)
+	scheduleFlushLegacySettlements(clientSession, tx, args.Shard, result.Cursor, result.PayerCursor, result.More && result.Failed == 0 && result.Completed > 0)
 	return nil
 }

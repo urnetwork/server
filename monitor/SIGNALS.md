@@ -18820,6 +18820,45 @@ missing or disabled guard, a nullable key column, a widened link key, a missing
 nonce reference or owner index, a narrowed or widened mode, or a dropped hotkey
 column rule is drift at head 789.
 
+Version 790 adds `transfer_contract.expiration_time` as a nullable timestamp
+without time zone, with no precision override, default, generated expression
+or identity. Old writers therefore retain NULL deadlines; this catalog check
+does not backfill them or infer expiration eligibility. The 2026-10-07 full
+monitor gate found that the source head included 790 while its artifact list
+and SELECT still ended at 789. That is a detector coverage gap, not proof that
+Main lacks the column. The appended exact catalog predicate reports drift
+only at a published head of at least 790; absence at 789 remains pending
+migration. Native controls cover missing, wrong-type, nonnullable, defaulted
+and generated columns plus healthy restoration. A failed catalog read remains
+unknown, and matching schema does not prove any contract closed.
+
+Versions 791–793 add payer scheduling metadata to the existing legacy
+settlement intent. Version 791 requires an ordinary nullable UUID
+`payer_network_id` with no default or generated expression and the exact
+`assign_legacy_settlement_intent_payer` function. Its enabled `BEFORE INSERT`
+row trigger preserves a supplied key; an older writer's missing key is resolved
+from the contract payer or the original/companion endpoint fallback. Missing,
+replica-only, disabled, conditional, differently timed or rewritten guards are
+drift once 791 is published. The monitor reads catalog metadata only.
+
+Version 792 requires the valid, ready nonunique btree
+`legacy_settlement_intent_payer_due` on
+`(shard, payer_network_id, next_attempt_time, contract_id)` with exactly
+`payer_network_id IS NOT NULL`. Version 793 independently requires
+`legacy_settlement_intent_payer_missing` on `(shard, contract_id)` with exactly
+`payer_network_id IS NULL`. Key order, method, uniqueness, INCLUDE columns,
+predicate and concurrent-build validity/readiness are part of each contract.
+The ordinary restartable migration owns incomplete builds; this probe never
+repairs them. Native controls exercise each actual migration prefix and schema
+fault with rollback, plus projected invalid/not-ready index states.
+
+False-positive qualifier: missing future artifacts remain pending migration,
+and existing NULL payer keys are valid inputs to bounded registration. This
+catalog probe does not require registration to be finished. False-negative
+qualifier: matching schema does not prove payer fairness, worker visits,
+financial eligibility or settlement. Those need their own fresh outcome and
+cursor observations; a failed catalog read remains unknown.
+
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
 nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp

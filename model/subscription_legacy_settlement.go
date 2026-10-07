@@ -99,14 +99,18 @@ func queueLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 		return fmt.Errorf("unknown legacy settlement outcome")
 	}
 	var open bool
-	server.Raise(tx.QueryRow(ctx, `SELECT outcome IS NULL FROM transfer_contract WHERE contract_id=$1`, contractId).Scan(&open))
+	var payerNetworkId server.Id
+	server.Raise(tx.QueryRow(ctx, `SELECT outcome IS NULL,COALESCE(payer_network_id,
+      CASE WHEN companion_contract_id IS NULL THEN source_network_id ELSE destination_network_id END)
+      FROM transfer_contract WHERE contract_id=$1`, contractId).Scan(&open, &payerNetworkId))
 	if !open {
 		return nil
 	}
-	tag := server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,clear_dispute)
-      VALUES($1,$2,$3,$4) ON CONFLICT (contract_id) DO UPDATE
-      SET clear_dispute=legacy_settlement_intent.clear_dispute OR EXCLUDED.clear_dispute
-      WHERE legacy_settlement_intent.outcome=EXCLUDED.outcome`, contractId, int(contractId[15])%LegacySettlementShardCount, outcome, clearDispute))
+	tag := server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,clear_dispute,payer_network_id)
+      VALUES($1,$2,$3,$4,$5) ON CONFLICT (contract_id) DO UPDATE
+      SET clear_dispute=legacy_settlement_intent.clear_dispute OR EXCLUDED.clear_dispute,
+      payer_network_id=COALESCE(legacy_settlement_intent.payer_network_id,EXCLUDED.payer_network_id)
+      WHERE legacy_settlement_intent.outcome=EXCLUDED.outcome`, contractId, int(contractId[15])%LegacySettlementShardCount, outcome, clearDispute, payerNetworkId))
 	if tag.RowsAffected() != 1 {
 		return fmt.Errorf("legacy settlement intent outcome conflicts")
 	}
