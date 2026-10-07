@@ -207,7 +207,7 @@ func StartupReadiness(ctx context.Context) error {
 // /status latch. Services with additional startup sequencing can use this and
 // latch only after all of their own activation work is ready.
 func CheckStartupReadiness(ctx context.Context) error {
-	return startupReadinessCheckAtMigration(ctx, server.MigrationCount())
+	return startupReadinessCheckAtMigration(ctx, server.MinimumRuntimeMigrationVersion())
 }
 
 func startupReadinessCheckAtMigration(ctx context.Context, requiredMigrationVersion int) error {
