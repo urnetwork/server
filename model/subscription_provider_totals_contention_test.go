@@ -42,6 +42,12 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 			server.Raise(CloseContract(ctx, id, f.destinationId, 11, false))
 			ids = append(ids, id)
 		}
+		// Keep the cache explicitly cold so foreground financial posts cannot
+		// stand in for the independently queued historical mirror consumer.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, f.balanceId))
+		})
+		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 100*count)
 		holder := acquireContractLifecycleTestConnection(t, ctx)
 		defer holder.Release()
 		held, err := holder.Begin(ctx)
@@ -202,7 +208,14 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 			}
 		})
 		release()
-		worker := task.NewTaskWorkerWithDefaults(ctx)
+		mirrorOwner := legacyMirrorTestOwner(t, ctx, f.balanceId)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2,release_time=$2 WHERE task_id=$1`, mirrorOwner.TaskId, time.Time{}))
+		})
+		mirrorOwner = task.GetTasks(ctx, mirrorOwner.TaskId)[mirrorOwner.TaskId]
+		settings := task.DefaultTaskWorkerSettings()
+		settings.ClaimRegisteredTargetsOnly = true
+		worker := task.NewTaskWorker(ctx, settings)
 		defer worker.Close()
 		worker.AddTargets(task.NewTaskTarget(ApplyLegacyProviderTotals))
 		finished := 0
@@ -239,8 +252,12 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 			}
 		})
 		assertFinancial(true)
+		requireProviderTotalsTestMirrorUntouched(t, ctx, mirrorOwner)
+		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 100*count)
+		finalizeProviderTotalsTestMirror(t, ctx, mirrorOwner)
 		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 0)
-		t.Log("exact provider blocking edge retained no financial grant; all 512 same-grant settlements completed while provider held; real task execution projected and finalized all allocations exactly")
+		assertFinancial(true)
+		t.Log("exact provider blocking edge retained no financial grant; all 512 same-grant settlements completed while provider held; provider and cold-mirror owners independently executed and finalized with exact accounting")
 	})
 }
 

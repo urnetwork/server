@@ -47,6 +47,57 @@ func requireProviderTotalsTestState(t testing.TB, ctx context.Context, id, netwo
 	})
 }
 
+// Provider projection must neither claim nor discard the independent mirror owner.
+func requireProviderTotalsTestMirrorUntouched(t testing.TB, ctx context.Context, before *task.Task) {
+	t.Helper()
+	after := task.GetTasks(ctx, before.TaskId)[before.TaskId]
+	if after == nil || after.FunctionName != before.FunctionName || after.ArgsJson != before.ArgsJson ||
+		!after.ClaimTime.Equal(before.ClaimTime) || !after.ReleaseTime.Equal(before.ReleaseTime) ||
+		after.RescheduleErrorCount != before.RescheduleErrorCount || after.RescheduleError != before.RescheduleError {
+		t.Fatal("provider projection changed the independent mirror owner")
+	}
+}
+
+// Cold mirror recovery uses its actual target, fenced Redis publisher and normal
+// delete/post finalizer. Merely projecting provider totals cannot acknowledge it.
+func finalizeProviderTotalsTestMirror(t testing.TB, ctx context.Context, owner *task.Task) {
+	t.Helper()
+	payload, err := decodeLegacyNetEscrowMirror([]byte(owner.ArgsJson))
+	server.Raise(err)
+	target := task.NewTaskTargetWithPost(ApplyLegacyNetEscrowMirror, ApplyLegacyNetEscrowMirrorPost)
+	if owner.FunctionName != target.TargetFunctionName() {
+		t.Fatal("expected the exact durable mirror owner")
+	}
+	settings := task.DefaultTaskWorkerSettings()
+	settings.ClaimRegisteredTargetsOnly = true
+	worker := task.NewTaskWorker(ctx, settings)
+	defer worker.Close()
+	worker.AddTargets(target)
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2,release_time=$2 WHERE task_id=$1`, owner.TaskId, time.Time{}))
+	})
+	finished, retried, posts, err := worker.EvalTasks(1)
+	if err != nil || len(finished) != 1 || finished[0] != owner.TaskId || len(retried) != 0 || len(posts) != 0 {
+		t.Fatal("independent mirror owner did not complete and finalize", err)
+	}
+	completed := task.GetFinishedTasks(ctx, owner.TaskId)[owner.TaskId]
+	if completed == nil || !completed.PostCompleted || completed.ArgsJson != owner.ArgsJson {
+		t.Fatal("mirror finalization lost its exact scope or completion")
+	}
+	var result LegacyNetEscrowMirrorResult
+	server.Raise(json.Unmarshal([]byte(completed.ResultJson), &result))
+	server.Db(ctx, func(conn server.PgConn) {
+		var exact bool
+		server.Raise(conn.QueryRow(ctx, `SELECT
+            NOT EXISTS(SELECT 1 FROM pending_task WHERE run_once_key=$1) AND
+            COALESCE((SELECT revision FROM transfer_balance_net_escrow_revision WHERE balance_id=$2),0)=$3`,
+			task.RunOnce("legacy_net_escrow_mirror", payload.BalanceId).String(), payload.BalanceId, result.Revision).Scan(&exact))
+		if !exact {
+			t.Fatal("mirror finalization lost its acknowledged revision or left an owner pending")
+		}
+	})
+}
+
 // Each rollback and missing-reply boundary uses the actual PostgreSQL owner.
 func TestLegacyProviderTotalsAtomicEnqueueApplyAndReplay(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {

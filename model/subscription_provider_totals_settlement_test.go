@@ -43,23 +43,33 @@ func TestLegacyProviderTotalsQueueCollisionRollsBackFinancialPrefix(t *testing.T
 		if err != nil || !completed || busy {
 			t.Fatal("clean outcome did not enqueue its allocation")
 		}
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$1,release_time=$1`, time.Time{}))
+		var projectionId server.Id
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE run_once_key=$1`, task.RunOnce("legacy_provider_totals", id).String()).Scan(&projectionId))
 		})
-		worker := task.NewTaskWorkerWithDefaults(ctx)
+		mirrorOwner := legacyMirrorTestOwner(t, ctx, f.balanceId)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$1,release_time=$1 WHERE task_id=ANY($2)`, time.Time{}, []server.Id{projectionId, mirrorOwner.TaskId}))
+		})
+		mirrorOwner = task.GetTasks(ctx, mirrorOwner.TaskId)[mirrorOwner.TaskId]
+		settings := task.DefaultTaskWorkerSettings()
+		settings.ClaimRegisteredTargetsOnly = true
+		worker := task.NewTaskWorker(ctx, settings)
 		defer worker.Close()
 		worker.AddTargets(task.NewTaskTarget(ApplyLegacyProviderTotals))
-		finished, _, _, err := worker.EvalTasks(1)
-		server.Raise(err)
-		if len(finished) != 1 {
-			t.Fatal("projection did not finalize")
+		finished, retried, posts, err := worker.EvalTasks(1)
+		if err != nil || len(finished) != 1 || finished[0] != projectionId || len(retried) != 0 || len(posts) != 0 {
+			t.Fatal("exact provider projection did not finalize", err)
 		}
+		requireProviderTotalsTestMirrorUntouched(t, ctx, mirrorOwner)
 		// RunOnce has been released by finalization. The terminal outcome,
 		// rather than the vanished queue key, still prevents another enqueue.
 		completed, _, _, err = flushLegacySettlement(ctx, id)
 		if err != nil || completed {
 			t.Fatal("terminal outcome replay claimed a second settlement")
 		}
+		requireProviderTotalsTestMirrorUntouched(t, ctx, mirrorOwner)
+		finalizeProviderTotalsTestMirror(t, ctx, mirrorOwner)
 		server.Db(ctx, func(conn server.PgConn) {
 			var exact bool
 			server.Raise(conn.QueryRow(ctx, `SELECT (SELECT count(*) FROM pending_task)=0 AND
