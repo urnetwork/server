@@ -86,6 +86,9 @@ type RefreshEgressDestinationsArgs struct{}
 
 // What one refresh did; the same numbers are logged.
 type RefreshEgressDestinationsResult struct {
+	// Known incomplete day/place evidence is excluded; other places still run.
+	TallyExcludedPlaceDays int `json:"tally_excluded_place_days,omitempty"`
+	TallyUnknownShards     int `json:"tally_unknown_shards,omitempty"`
 	// Skipped says why nothing was judged, empty for a refresh that ran.
 	Skipped   string `json:"skipped,omitempty"`
 	Seeded    bool   `json:"seeded,omitempty"`
@@ -787,13 +790,19 @@ func refreshEgressDestinations(ctx context.Context, now time.Time, check egressC
 	if probationStart.Before(retentionStart) {
 		probationStart = retentionStart
 	}
+	projection := model.ReadProviderEgressTallyProjection(ctx, now, retentionStart)
+	result.TallyExcludedPlaceDays = len(projection.Excluded)
+	result.TallyUnknownShards = len(projection.UnknownShards)
+	if result.TallyExcludedPlaceDays > 0 || result.TallyUnknownShards > 0 {
+		glog.Warningf("[egresssites]refresh evidence excludes %d known incomplete day/places; %d rollup shards have unknown coverage; unaffected evidence continues\n", result.TallyExcludedPlaceDays, result.TallyUnknownShards)
+	}
 	recent := model.GetProviderEgressHealthClassTotals(ctx, now.Add(-settings.SiteProberFaultWindow()))[""]
 	plan := planEgressDestinationRefresh(egressRefreshInput{
 		now:             now,
 		settings:        settings,
 		destinations:    destinations,
-		windowTallies:   model.GetProviderEgressSiteTallies(ctx, windowStart),
-		probationTotals: model.GetProviderEgressSiteDayTotals(ctx, probationStart, probationNames),
+		windowTallies:   model.GetProviderEgressSiteTallies(ctx, windowStart, projection.Excluded...),
+		probationTotals: model.GetProviderEgressSiteDayTotals(ctx, probationStart, probationNames, projection.Excluded...),
 		recent:          recent,
 	})
 	if plan.skipped != "" {

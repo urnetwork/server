@@ -1766,14 +1766,18 @@ func loadProviderEgressHealthScoring(ctx context.Context) (scoring *model.Provid
 	return scoring, settings
 }
 
-// The production tally write. A failed write loses one run from the refresh's
-// evidence and nothing else, so it is logged rather than allowed to fail the
-// batch after its submissions landed.
+// The production tally handoff. Accepted health and terminal ownership do not
+// wait for destination aggregation in PostgreSQL. Refusals remain observable
+// auxiliary loss; retained records are projected by the durable rollup owner.
 func recordProviderEgressRunTally(ctx context.Context, measuredAt time.Time, run model.ProviderEgressRunTally, loads []model.ProviderEgressSiteLoad) {
-	if r := server.HandleError(func() {
-		model.AddProviderEgressRunTally(ctx, measuredAt, run, loads)
-	}); r != nil {
-		glog.Errorf("[egress]could not record a run in the site tally: %v\n", r)
+	recordProviderEgressTallyWithWriter(ctx, model.NewProviderEgressTallyWriter(), measuredAt, run, loads)
+}
+
+// A bounded optional handoff cannot revoke accepted health. The pass-owned
+// writer carries an error forward into the destination-refresh loss marker.
+func recordProviderEgressTallyWithWriter(ctx context.Context, writer *model.ProviderEgressTallyWriter, measuredAt time.Time, run model.ProviderEgressRunTally, loads []model.ProviderEgressSiteLoad) {
+	if err := writer.Record(ctx, measuredAt, run, loads); err != nil {
+		glog.Errorf("[egress]could not hand off a run to the site tally: %v\n", err)
 	}
 }
 
@@ -1844,7 +1848,7 @@ func runProviderEgressProbe(
 					TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
 				},
 				fullSink:     reporter,
-				recordTally:  recordProviderEgressRunTally,
+				recordTally:  newProviderEgressTallyRecorder(),
 				runFull:      fleetprobe.RunUrlProbes,
 				refreshFleet: providerUrlProbeFleetHeartbeat(args),
 			}
