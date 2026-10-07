@@ -3614,31 +3614,29 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 		}
 		if len(mirrorBalanceIds) > 0 {
 			if inlineFinancial {
-				// One durable owner per balance coalesces every close, including a
-				// cache hit that can be invalidated before this post gets to run.
+				// Every close leaves its mirror to the coalesced durable owner.
+				// Reclaimed admission capacity waits for that owner to publish.
 				queueLegacyNetEscrowMirrorsInTx(ctx, tx, mirrorBalanceIds)
-			}
-			mirrorPost := observeLegacySettlementPost(ctx, legacySettlementMirror, func() any {
-				if inlineFinancial {
-					refreshCachedLegacyNetEscrow(ctx, mirrorBalanceIds)
-				} else {
-					refreshNetEscrow(ctx, mirrorBalanceIds)
-				}
-				return nil
-			})
-			if len(reservationSnapshots) < len(positiveReservations) {
-				// A cold mirror must follow this metadata attempt: otherwise it
-				// can warm the preceding revision after metadata already read a
-				// cache miss, only to be invalidated by its harmless settled flag.
-				// Keep both in one independently replayable post, with no channel
-				// dependency on another callback that could be lost. As with the
-				// separate posts, report metadata errors and still try the mirror.
-				posts = append(posts, func() any {
-					server.HandleError(func() { metadataPost() })
-					return mirrorPost()
-				})
+				posts = append(posts, metadataPost)
 			} else {
-				posts = append(posts, metadataPost, mirrorPost)
+				mirrorPost := observeLegacySettlementPost(ctx, legacySettlementMirror, func() any {
+					refreshNetEscrow(ctx, mirrorBalanceIds)
+					return nil
+				})
+				if len(reservationSnapshots) < len(positiveReservations) {
+					// A cold mirror must follow this metadata attempt: otherwise it
+					// can warm the preceding revision after metadata already read a
+					// cache miss, only to be invalidated by its harmless settled flag.
+					// Keep both in one independently replayable post, with no channel
+					// dependency on another callback that could be lost. As with the
+					// separate posts, report metadata errors and still try the mirror.
+					posts = append(posts, func() any {
+						server.HandleError(func() { metadataPost() })
+						return mirrorPost()
+					})
+				} else {
+					posts = append(posts, metadataPost, mirrorPost)
+				}
 			}
 		} else if !deferRedisDebitPosts {
 			posts = append(posts, metadataPost)
