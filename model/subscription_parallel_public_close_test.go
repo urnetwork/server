@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
@@ -289,7 +288,7 @@ func parallelPublicCloseHeldNativeSnapshot(ctx context.Context, observer server.
    (SELECT count(*) FROM transfer_escrow WHERE contract_id=ANY($1) AND balance_id=$2 AND balance_byte_count=16 AND redis_reserved)`,
 			ids, fixture.payers[0].balanceId).Scan(&state.Outcomes, &state.Journals, &state.MetadataSettled, &state.OriginalReservationRows))
 	}(observer)
-	server.Redis(ctx, func(client *redis.Client) {
+	server.Redis(ctx, func(client server.RedisClient) {
 		tokens, err := client.HGetAll(ctx, redisContractReservationKeys(fixture.payers[0].balanceId)[1]).Result()
 		server.Raise(err)
 		for _, id := range ids {
@@ -450,9 +449,10 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 				}
 				invocationNs[index] = time.Since(burstStart).Nanoseconds()
 				invoked.Done()
-				err := server.HandleError(func() {
+				var err error
+				server.HandleError(func() {
 					server.Raise(CloseContract(ctx, fixture.finance.ids[index], fixture.finance.providers[fixture.finance.providerIndexes[index]].destinationId, 3, false))
-				})
+				}, func(caught error) { err = caught })
 				returnNs[index] = time.Since(burstStart).Nanoseconds()
 				replies <- closeReply{index: index, err: err}
 			}()

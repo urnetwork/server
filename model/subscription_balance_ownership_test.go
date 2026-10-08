@@ -100,16 +100,17 @@ func TestTransferBalanceOwnerCoversNativeLegacyAdmissionAndCache(t *testing.T) {
 		}
 		admissionCtx := observeRefusal("admission")
 		var admitted *TransferEscrow
-		err = server.HandleError(func() {
+		var admissionErr error
+		server.HandleError(func() {
 			server.Tx(admissionCtx, func(tx server.PgTx) {
 				var err error
 				admitted, _, err = createTransferEscrowInTx(admissionCtx, tx,
 					f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 13, nil)
 				server.Raise(err)
 			}, server.TxReadCommitted, server.OptNoRetry())
-		})
-		if !errors.Is(err, errTransferBalanceOwnershipBusy) || admitted != nil || refused["admission"] != 1 {
-			t.Fatal("legacy reservation escaped the common grant owner", admitted, refused, err)
+		}, func(err error) { admissionErr = err })
+		if !errors.Is(admissionErr, errTransferBalanceOwnershipBusy) || admitted != nil || refused["admission"] != 1 {
+			t.Fatal("legacy reservation escaped the common grant owner", admitted, refused, admissionErr)
 		}
 		var snapshots map[server.Id]netEscrowSnapshot
 		server.Db(ctx, func(conn server.PgConn) {
@@ -209,7 +210,8 @@ func holdFinancialTestOwner(t testing.TB, ctx context.Context, keys []server.PgO
 	ready, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- server.HandleError(func() {
+		var returnErr error
+		server.HandleError(func() {
 			server.OwnedTx(ctx, keys, func(tx server.PgTx) {
 				close(ready)
 				select {
@@ -218,7 +220,8 @@ func holdFinancialTestOwner(t testing.TB, ctx context.Context, keys []server.PgO
 					server.Raise(ctx.Err())
 				}
 			}, server.TxReadCommitted, server.OptNoRetry())
-		})
+		}, func(err error) { returnErr = err })
+		done <- returnErr
 	}()
 	var once sync.Once
 	finish := func() {
@@ -450,15 +453,16 @@ func TestTransferBalanceOwnerCoversMetadataAndRetention(t *testing.T) {
 				refused.Add(1)
 			}
 		})
-		err = server.HandleError(func() {
+		var metadataErr error
+		server.HandleError(func() {
 			server.Tx(observed, func(tx server.PgTx) {
 				settleEscrowMetadataInTx(observed, tx, contract, now, map[server.Id]sweepPayout{
 					f.balanceId: {escrowBalanceByteCount: 100, payoutByteCount: 11},
 				})
 			}, server.TxReadCommitted, server.OptNoRetry())
-		})
-		if !errors.Is(err, errTransferBalanceOwnershipBusy) || refused.Load() != 1 {
-			t.Fatal("metadata entered a held balance owner", refused.Load(), err)
+		}, func(err error) { metadataErr = err })
+		if !errors.Is(metadataErr, errTransferBalanceOwnershipBusy) || refused.Load() != 1 {
+			t.Fatal("metadata entered a held balance owner", refused.Load(), metadataErr)
 		}
 		removeCompletedTransferBalanceBatch(observed, []server.Id{expired.balanceId}, now.Add(-7*24*time.Hour))
 		if refused.Load() != 2 {
