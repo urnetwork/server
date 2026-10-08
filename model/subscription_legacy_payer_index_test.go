@@ -345,6 +345,11 @@ func TestLegacySettlementPayerIndexFallbackCanceledPrefix(t *testing.T) {
 		blocker := contractLifecycleTestBackendPid(t, ctx, held)
 		payer := &LegacySettlementPayerCursor{End: server.NewId(), PassEndTime: server.NowUtc()}
 		payerBytes, _ := json.Marshal(payer)
+		// A continued page gives its first forward row an individual turn.
+		// A nil cursor would group both rows in one uncommitted cohort.
+		after := &LegacySettlementCursor{ContractId: firstId, PassEndTime: server.NowUtc()}
+		server.Raise(held.QueryRow(ctx, `SELECT next_attempt_time-interval '1 second'
+		 FROM legacy_settlement_intent WHERE contract_id=$1`, firstId).Scan(&after.NextAttemptTime))
 		bounded, expire := context.WithCancelCause(ctx)
 		type outcome struct {
 			page LegacySettlementShardResult
@@ -354,10 +359,19 @@ func TestLegacySettlementPayerIndexFallbackCanceledPrefix(t *testing.T) {
 		defer func() { expire(context.Canceled); held.Rollback(context.Background()); <-joined }()
 		go func() {
 			defer close(joined)
-			page, err := flushLegacySettlementShardPage(ctx, bounded, int(firstId[15])%LegacySettlementShardCount, nil, payer, 64)
+			page, err := flushLegacySettlementShardPage(ctx, bounded, int(firstId[15])%LegacySettlementShardCount, after, payer, 64)
 			done <- outcome{page: page, err: err}
 		}()
 		requireContractLifecycleBlockedBy(t, ctx, held, blocker)
+		var firstCommitted, secondPending bool
+		server.Raise(held.QueryRow(ctx, `SELECT
+		 COALESCE((SELECT outcome='settled' FROM transfer_contract WHERE contract_id=$1),false)
+		  AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
+		 COALESCE((SELECT outcome IS NULL FROM transfer_contract WHERE contract_id=$2),false)
+		  AND EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$2)`, firstId, secondIds[0]).Scan(&firstCommitted, &secondPending))
+		if !firstCommitted || !secondPending {
+			t.Fatal("cancellation barrier did not follow a committed first owner", firstCommitted, secondPending)
+		}
 		expire(errLegacySettlementPageBudget)
 		var got outcome
 		select {
