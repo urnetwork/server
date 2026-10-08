@@ -63,6 +63,20 @@ func providerWorkLockEndpointsInTx(ctx context.Context, tx server.PgTx, clientId
 // that still have the original v776 functions; the repair removes its exclusive
 // holder and makes conflicting rolling writers retry before waiting on a fence.
 func providerWorkLockSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) bool {
+	return providerWorkLockSessionMutationHeadInTx(ctx, tx, true, clientIds...)
+}
+
+// READ COMMITTED connection owners take a fresh snapshot after their endpoint
+// wait. Their trigger's non-key sequence update needs no preliminary FOR UPDATE
+// on the head; the endpoint fence still orders every mutation and signed cut.
+// Repeatable-read callers must retain the generic stale-head guard above.
+func providerWorkLockCurrentSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) bool {
+	return providerWorkLockSessionMutationHeadInTx(ctx, tx, false, clientIds...)
+}
+
+// The compatibility bridge and endpoint key/order are identical for both
+// isolation modes. Only the old-snapshot guard depends on the caller's mode.
+func providerWorkLockSessionMutationHeadInTx(ctx context.Context, tx server.PgTx, lockHead bool, clientIds ...server.Id) bool {
 	if len(clientIds) == 0 {
 		return false
 	}
@@ -70,7 +84,11 @@ func providerWorkLockSessionMutationInTx(ctx context.Context, tx server.PgTx, cl
 		if _, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`); err != nil {
 			return err
 		}
-		if err := providerWorkLockEndpointRowsInTx(ctx, optional, clientIds); err != nil {
+		if lockHead {
+			if err := providerWorkLockEndpointRowsInTx(ctx, optional, clientIds); err != nil {
+				return err
+			}
+		} else if _, err := optional.Exec(ctx, providerWorkEndpointWriteLockSQL, clientIds); err != nil {
 			return err
 		}
 		_, err := optional.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)

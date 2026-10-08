@@ -135,9 +135,18 @@ func ProberShardIdentity(ctx context.Context, owner *ProberShardOwner) (*ProberI
 // Draining takes the exclusive lock before enumerating/deactivating clients,
 // so a late derived-client callback cannot escape the teardown cohort.
 func lockProberShardClientAdmissionInTx(ctx context.Context, tx server.PgTx, networkId server.Id) error {
+	_, err := lockProberShardClientAdmissionDeadlineInTx(ctx, tx, networkId)
+	return err
+}
+
+// Keep the registry lock first, but carry its immutable deadline across later
+// endpoint waits. Projecting a clock inside a locking SELECT can precede the
+// lock wait, so even this first check reads the clock after acquiring the row.
+func lockProberShardClientAdmissionDeadlineInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (*time.Time, error) {
 	var state string
-	var live bool
-	rows, err := tx.Query(ctx, `SELECT state, clock_timestamp() AT TIME ZONE 'UTC' < deadline FROM prober_shard_run WHERE network_id=$1 FOR SHARE`, networkId)
+	var deadline time.Time
+	var admissionDeadline *time.Time
+	rows, err := tx.Query(ctx, `SELECT state, deadline FROM prober_shard_run WHERE network_id=$1 FOR SHARE`, networkId)
 	// Only the retired-shard policy refusal returns normally. Operational
 	// failures must unwind the enclosing void Tx callback: otherwise it reaches
 	// COMMIT after a failed admission read and can mask cancellation with a
@@ -145,13 +154,15 @@ func lockProberShardClientAdmissionInTx(ctx context.Context, tx server.PgTx, net
 	server.Raise(err)
 	defer rows.Close()
 	if rows.Next() {
-		server.Raise(rows.Scan(&state, &live))
-		if state != "active" || !live {
-			return ErrProberShardRetired
+		server.Raise(rows.Scan(&state, &deadline))
+		if state != "active" {
+			return nil, ErrProberShardRetired
 		}
+		admissionDeadline = &deadline
 	}
+	rows.Close()
 	server.Raise(rows.Err())
-	return nil
+	return admissionDeadline, validateProberShardAdmissionDeadlineInTx(ctx, tx, admissionDeadline)
 }
 
 // A private probe account may fund only contracts in which it is an endpoint;
@@ -445,7 +456,7 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			})
 			slices.SortFunc(clients, func(a, b server.Id) int { return a.Cmp(b) })
 			clients = slices.Compact(clients)
-			providerWorkLockSessionMutationInTx(ctx, tx, clients...)
+			providerWorkLockCurrentSessionMutationInTx(ctx, tx, clients...)
 			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM network_client_connection WHERE client_id=ANY($1) AND connected)`, clients).Scan(&blocked))
 			if blocked {
 				return

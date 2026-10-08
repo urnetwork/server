@@ -4,38 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 )
 
-type shardAdmissionTestTx struct {
-	server.PgTx
-	balanceReads int
-	beforeCensus func()
-}
-
-func (tx *shardAdmissionTestTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	if strings.Contains(strings.Join(strings.Fields(sql), " "), "FROM transfer_balance ") {
-		tx.balanceReads++
-	}
-	if sql == netEscrowReservationPageSQL && tx.beforeCensus != nil {
-		tx.beforeCensus()
-	}
-	return tx.PgTx.Query(ctx, sql, args...)
-}
-
 type shardAdmissionTestResult struct {
 	grantWaitAdmissionResult
-	balanceReads int
+	reachedGrantBeforeReturn bool
+	grantObservationComplete bool
 }
 
-func startShardAdmissionForTest(ctx context.Context, owner *ProberShardOwner, peer escrowSelectionTestClients,
-	beforeCensus func(server.PgTx),
-) (<-chan shardAdmissionTestResult, func()) {
+// Keep the actual server transaction identity: financial ownership deliberately
+// refuses wrappers that could borrow an outer transaction's admitted keys.
+func startShardAdmissionForTest(ctx context.Context, owner *ProberShardOwner, peer escrowSelectionTestClients) (<-chan shardAdmissionTestResult, func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	result := make(chan shardAdmissionTestResult, 1)
 	done := make(chan struct{})
@@ -44,16 +27,18 @@ func startShardAdmissionForTest(ctx context.Context, owner *ProberShardOwner, pe
 		value := shardAdmissionTestResult{}
 		panicErr := server.HandleError(func() {
 			server.Tx(ctx, func(tx server.PgTx) {
-				counted := &shardAdmissionTestTx{PgTx: tx}
-				if beforeCensus != nil {
-					counted.beforeCensus = func() { beforeCensus(tx) }
-				}
 				var posts []func() any
-				value.escrow, posts, value.err = createTransferEscrowInTx(ctx, counted,
+				value.escrow, posts, value.err = createTransferEscrowInTx(ctx, tx,
 					owner.NetworkId, owner.ClientId, peer.providerNetworkId, peer.providerId,
 					owner.NetworkId, 1024, nil)
 				value.posts = len(posts)
-				value.balanceReads = counted.balanceReads
+				// Observe before COMMIT releases this backend's relation locks.
+				// The registry-refusal path must never reach grant discovery,
+				// including after the external registry holder is released.
+				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks
+					WHERE pid=pg_backend_pid() AND relation='transfer_balance'::regclass AND granted)`).
+					Scan(&value.reachedGrantBeforeReturn))
+				value.grantObservationComplete = true
 			}, server.TxReadCommitted, server.OptNoRetry())
 		})
 		if panicErr != nil {
@@ -139,7 +124,7 @@ func TestProberShardDrainFirstRejectsBeforeGrantRead(t *testing.T) {
 		var priorRevision int64
 		server.Raise(held.QueryRow(ctx, `SELECT COALESCE((SELECT revision FROM transfer_balance_net_escrow_revision WHERE balance_id=$1),0)`, owner.BalanceId).Scan(&priorRevision))
 		pid := contractLifecycleTestBackendPid(t, ctx, held)
-		result, stop := startShardAdmissionForTest(ctx, owner, peer, nil)
+		result, stop := startShardAdmissionForTest(ctx, owner, peer)
 		defer stop()
 		admissionPid := requireContractLifecycleBlockedBy(t, ctx, held, pid)
 		var prematureGrant bool
@@ -150,8 +135,8 @@ func TestProberShardDrainFirstRejectsBeforeGrantRead(t *testing.T) {
 		}
 		server.Raise(finish(true))
 		got := <-result
-		if got.err == nil || got.escrow != nil || got.posts != 0 || got.balanceReads != 0 {
-			t.Fatalf("drain-first admission crossed ownership: %+v", got)
+		if !got.grantObservationComplete || got.err == nil || got.escrow != nil || got.posts != 0 || got.reachedGrantBeforeReturn {
+			t.Fatalf("drain-first admission crossed ownership: observed=%t escrow=%v posts=%d grant=%t err=%v", got.grantObservationComplete, got.escrow, got.posts, got.reachedGrantBeforeReturn, got.err)
 		}
 		requireShardAdmissionNoWrites(t, ctx, owner, priorRevision)
 	})
@@ -188,28 +173,40 @@ func TestProberShardAdmissionRechecksDeadlineAfterWaits(t *testing.T) {
 				server.Raise(err)
 				defer held.Rollback(context.Background())
 				pid := contractLifecycleTestBackendPid(t, ctx, held)
-				var beforeCensus func(server.PgTx)
 				switch boundary {
 				case "registry":
 					server.RaisePgResult(held.Exec(ctx, `SELECT 1 FROM prober_shard_run WHERE network_id=$1 FOR UPDATE`, owner.NetworkId))
 				case "client":
 					server.RaisePgResult(held.Exec(ctx, `SELECT 1 FROM network_client WHERE client_id=$1 FOR UPDATE`, peer.providerId))
 				case "census":
-					beforeCensus = waitForDeadline
+					// A new shard has no cached reservation snapshot. Block its
+					// actual census after grant ownership, without wrapping tx.
+					server.RaisePgResult(held.Exec(ctx, `LOCK TABLE transfer_escrow IN ACCESS EXCLUSIVE MODE`))
 				}
-				result, stop := startShardAdmissionForTest(ctx, owner, peer, beforeCensus)
+				result, stop := startShardAdmissionForTest(ctx, owner, peer)
 				defer stop()
-				if boundary != "census" {
-					requireContractLifecycleBlockedBy(t, ctx, held, pid)
-					waitForDeadline(held)
+				admissionPid := requireContractLifecycleBlockedBy(t, ctx, held, pid)
+				var reachedGrant, waitingCensus, beforeDeadline bool
+				server.Raise(held.QueryRow(ctx, `SELECT
+					EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND relation='transfer_balance'::regclass AND granted),
+					EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND relation='transfer_escrow'::regclass
+						AND mode='AccessShareLock' AND NOT granted),
+					(clock_timestamp() AT TIME ZONE 'UTC') < $2::timestamp`, admissionPid, deadline).
+					Scan(&reachedGrant, &waitingCensus, &beforeDeadline))
+				if reachedGrant != (boundary != "registry") || waitingCensus != (boundary == "census") {
+					t.Fatalf("%s did not reach its actual database boundary: grant=%t census=%t", boundary, reachedGrant, waitingCensus)
 				}
+				if !beforeDeadline {
+					t.Fatalf("%s barrier was not established before the database deadline", boundary)
+				}
+				waitForDeadline(held)
 				server.Raise(held.Commit(ctx))
 				got := <-result
-				if !errors.Is(got.err, ErrProberShardRetired) || got.escrow != nil || got.posts != 0 {
-					t.Fatalf("%s wait crossed the database deadline: %+v", boundary, got)
+				if !got.grantObservationComplete || !errors.Is(got.err, ErrProberShardRetired) || got.escrow != nil || got.posts != 0 {
+					t.Fatalf("%s wait crossed the database deadline: observed=%t escrow=%v posts=%d err=%v", boundary, got.grantObservationComplete, got.escrow, got.posts, got.err)
 				}
-				if (boundary == "registry") != (got.balanceReads == 0) {
-					t.Fatalf("%s did not exercise its intended financial boundary: %+v", boundary, got)
+				if got.reachedGrantBeforeReturn != (boundary != "registry") {
+					t.Fatalf("%s did not retain its callback financial boundary: grant=%t", boundary, got.reachedGrantBeforeReturn)
 				}
 				requireShardAdmissionNoWrites(t, ctx, owner, priorRevision)
 				t.Logf("%s wait rejected after expiry with no financial writes", boundary)

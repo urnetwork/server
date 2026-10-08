@@ -189,7 +189,7 @@ func TestAuthorityMintFanoutMeasuresActualSdkWork(t *testing.T) {
 		acquires := authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) - acquiresBefore
 		queries := authorityObservedCounter(t, "urnetwork_jwt_state_queries_total", nil) - queriesBefore
 		valid := authorityStateQueryMetric(t, "hosted", "mint", "client", "state_valid") - validBefore
-		if acquires != 2*requests || queries != requests || valid != requests || httpCalls.Load() != 0 {
+		if acquires != requests || queries != requests || valid != requests || httpCalls.Load() != 0 {
 			t.Fatalf("mint work changed: acquires=%v queries=%v valid=%v http=%d", acquires, queries, valid, httpCalls.Load())
 		}
 		if pgss {
@@ -378,7 +378,7 @@ func TestAuthorityMintTransactionRetryRepeatsLiveValidation(t *testing.T) {
 		if err != nil || args == nil {
 			t.Fatal("retry did not return a child identity", err)
 		}
-		if authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) != acquiresBefore+3 ||
+		if authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) != acquiresBefore+2 ||
 			authorityStateQueryMetric(t, "hosted", "mint", "client", "state_valid") != validBefore+2 {
 			t.Fatal("transaction retry reused stale parent authority or acquired a separate validation connection")
 		}

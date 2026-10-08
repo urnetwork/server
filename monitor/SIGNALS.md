@@ -4024,6 +4024,53 @@ not native identity; `other`/`unset` and truncated text remain unattributed.
 Private query tokens are receipt-local ordinals, not reusable fingerprints or
 recoverable SQL. Other reservation-I/O and close-family groups remain separate.
 
+GOTCHA — connection lifecycle ownership can retain unnecessary head locks.
+The October 8 receipt `5e55d806` retained 12 source snapshots at
+09:08:40.392–09:09:02.930Z. Its private representatives match the frozen R40
+session-head mutation guard, endpoint advisory fence, connection retirement
+UPDATE and connection admission INSERT. The leading head-guard group had
+2,565 backend-samples, peak 272, with `LWLock:other`; the advisory group had
+1,060 backend-samples, peak 138, with `Lock:other`. Fifteen retained final
+waiter edges led from the endpoint advisory fence to those lifecycle owners.
+This is exact retained statement-shape evidence with non-NULL query-ID mapping,
+not a native caller join or proof that every group member used the same bytes.
+Declared Connect source tags do not prove deployed source parity. The other
+retained edge was daily-partition maintenance waiting behind a declared
+backup COPY; it does not establish backup failure or payer-index recovery.
+
+The source correction omits only the preliminary head `FOR UPDATE` for the
+explicit READ COMMITTED connection admission, retirement and shard-reap
+owners. These owners take a fresh snapshot after the endpoint wait; their
+trigger still advances the sequence and captures the event. The shared rolling
+compatibility bridge, sorted exclusive endpoint fences, mandatory unsigned
+events, signed original custody and registry-before-endpoint authorization
+order remain. Generic repeatable-read mutation and contract-read head guards
+still reject stale snapshots. The deterministic native boundary holds a head
+`FOR KEY SHARE` while overlapping real admissions and retirements must finish
+with exact journal/original counts and a signed reservation cut; the old
+repeatable-read snapshot must still receive `40001`. Preserve legacy writer,
+rollback, cancellation, missing-schema and unsigned-capture controls.
+
+The observed window omitted 182 public and 768 private group-samples, and
+selected only the oldest 16 of 139 final lock waiters. `LWLock:other` does not
+identify the lock-manager, buffer or WAL subevent, CPU use, or full pool demand.
+Removing a redundant statement and stronger row lock is not evidence that all
+admission/write pressure has cleared. Require post-change, source-qualified
+observations and successful traffic; a quieter capped sample cannot clear it.
+
+A separate source audit found a probe transport admission deadline gap: the
+registry check could project its clock before waiting for that row, or pass
+before a later endpoint wait crossed the deadline. The connection owner now
+retains the registry-first lock order, carries the locked deadline, and reads
+the database clock after each of those waits before creating a connection or
+session evidence. Ordinary networks have no shard deadline and add no clock
+query. Deterministic controls hold the actual registry or endpoint until that
+database deadline passes, then require the normal retired-shard refusal and
+zero connection/head/event/original rows. Keep cancellation and SQL/decode
+failures distinct from this policy refusal; those failures must unwind Tx.
+This source defect does not establish that a sampled Main waiter expired or
+that every other client provisioning wait has the same deadline boundary.
+
 FALSE-POSITIVE QUALIFIERS: useful bulk work or maintenance may explain a band.
 Backend-samples are neither distinct requests, continuous waits, CPU time nor
 per-query CPU shares. Execution wall time includes waits. Confirm successful
@@ -28567,6 +28614,43 @@ SQL wait or completed quality receipt. Verify the deployed Server/SDK/Connect
 source pins and current processes before comparing those metrics. Successful
 local control does not establish usable provider DNS/TLS/URL traffic, and a
 local contract failure remains unmeasured provider health.
+
+The 2026-10-08 08:27Z bounded Main discriminator found current recovered
+operational failures on Crisp Proxy g1/g2. Both selected worker/container
+generations were stable across the read, with active/running workers and zero
+worker restarts; the observed image reference and registry version matched
+the sealed R40 release. This is process continuity through that observation,
+not successful hosted setup or a whole-fleet health result. The window was
+08:25:37–08:27:37Z, but both 16-line and four-retained-sample bounds were hit.
+The eight retained journal emissions span only 08:27:36.940–08:27:37.128Z;
+their original application clocks are unavailable. A journal clock is not an
+application clock, and this capped window is not a census or an event rate.
+
+All eight retained errors were `*errors.joinError` containing a context
+deadline, without a SQLSTATE. Seven came from hosted child-client mint's fresh
+Pro entitlement read before its subsequent registration transaction: five
+ended at R40 `dbWithPool`'s failed Acquire/context-done branch (`db.go:640`),
+before that final attempt's callback, and two at its borrowed read callback's
+timeout/context-done branch (`db.go:722`). The eighth reached the same borrowed
+read boundary during live JWT-state validation in hosted provider discovery.
+`dbContextDoneCause` retains the physical failure and caller stop together;
+the joined type does not identify a PostgreSQL backend rejection. A recovered
+`Unexpected error` here is not a crash witness. Standing samples whose fixed
+owner remains `unknown` must retain that qualifier; the exact R40 source and
+native-generation join qualifies only these private bounded samples.
+
+The confirmed source boundary is hosted setup's database dependency. Neither
+these eight samples nor R38/R40 source parity assigns pool occupancy,
+construction/cleanup contention, database CPU, packet failure, an ordinary
+application SDK caller, or the separate contract-rejection counters. Preserve
+fresh entitlement and live credential/parent checks when reducing duplicate
+setup acquisitions; validate revocation, credential rotation, transaction
+retry, distinct child identities, and cancellation before claiming a repair.
+The immutable actual reduction is
+`current-proxy-panic-reduction-v1.json` SHA-256
+`189bdca6589e941810f3c459984e83d976a65dc7d024bad2f0d53ae9ca951682`,
+with independent actual GO SHA-256
+`f9887fdde33c76f0da98e59b19246a1afefa9efe872f9cbd9663bcde824342b1`.
 
 ---
 

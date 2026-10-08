@@ -80,6 +80,13 @@ type PgCanQuery interface {
 	Query(ctx context.Context, sql string, args ...any) (PgResult, error)
 }
 
+// TxReadBeforeBegin performs an authoritative read on the transaction's owned
+// connection before the transaction takes its first snapshot. It runs for every
+// attempt, including a connection retry, and must not write or publish effects.
+// This avoids a second pool acquisition without carrying an earlier snapshot
+// into a transaction that must observe a later credential or ownership change.
+type TxReadBeforeBegin func(PgCanQuery)
+
 const TxSerializable = pgx.Serializable
 const TxRepeatableRead = pgx.RepeatableRead
 const TxReadCommitted = pgx.ReadCommitted
@@ -600,6 +607,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 	var timing *DbTiming
 	var readObservation *DbReadObservation
 	var ownedConnection *pgOwnedConnection
+	var readBeforeBegin TxReadBeforeBegin
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -613,6 +621,8 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			readObservation = v
 		case *pgOwnedConnection:
 			ownedConnection = v
+		case TxReadBeforeBegin:
+			readBeforeBegin = v
 			// case DbDebugOptions:
 			// 	debugOptions = v
 		}
@@ -695,6 +705,12 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			if !rwOptions.readOnly {
 				// the default is read only, escalate to rw
 				RaisePgResult(conn.Exec(ctx, "SET default_transaction_read_only=off"))
+			}
+			if readBeforeBegin != nil {
+				// Only this explicitly read-only preparation precedes the
+				// callback's write/replay boundary. A failed BEGIN can still
+				// retry safely, and every new connection reloads the read.
+				readBeforeBegin(conn)
 			}
 			callbackWrites = snapshotPgWrites(conn.Conn().PgConn().Conn())
 			callbackStarted = true

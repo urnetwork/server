@@ -240,11 +240,15 @@ var testingProNetworkLoaded atomic.Pointer[func(networkId server.Id)]
 // value.
 func refreshProNetwork(ctx context.Context, networkId server.Id) bool {
 	entitlement := loadProNetwork(ctx, networkId)
+	observeProNetworkLoaded(networkId)
+	storeProNetwork(ctx, networkId, entitlement)
+	return entitlement.pro
+}
+
+func observeProNetworkLoaded(networkId server.Id) {
 	if loaded := testingProNetworkLoaded.Load(); loaded != nil {
 		(*loaded)(networkId)
 	}
-	storeProNetwork(ctx, networkId, entitlement)
-	return entitlement.pro
 }
 
 // Writes a loaded entitlement to both tiers, neither of which takes it over a newer
@@ -264,10 +268,19 @@ func storeProNetwork(ctx context.Context, networkId server.Id, entitlement proEn
 // replica's clock and replay lag would not order its reads against the primary's.
 func loadProNetwork(ctx context.Context, networkId server.Id) (entitlement proEntitlement) {
 	server.Db(ctx, func(conn server.PgConn) {
-		now := server.NowUtc()
-		result, err := conn.Query(
-			ctx,
-			`
+		entitlement = loadProNetworkWithConn(ctx, conn, networkId)
+	})
+	return
+}
+
+// The caller owns the connection and the lifetime of the read. No nested pool
+// acquisition or cache publication occurs here. A pre-BEGIN caller keeps this
+// read's implicit transaction separate from its later authorization snapshot.
+func loadProNetworkWithConn(ctx context.Context, conn server.PgCanQuery, networkId server.Id) (entitlement proEntitlement) {
+	now := server.NowUtc()
+	result, err := conn.Query(
+		ctx,
+		`
 				SELECT
 					EXISTS (
 						SELECT 1
@@ -279,17 +292,16 @@ func loadProNetwork(ctx context.Context, networkId server.Id) (entitlement proEn
 							$2 < end_time
 					),
 					transaction_timestamp()
-			`,
-			networkId,
-			now,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var readTime time.Time
-				server.Raise(result.Scan(&entitlement.pro, &readTime))
-				entitlement.version = readTime.UnixMicro()
-			}
-		})
+		`,
+		networkId,
+		now,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var readTime time.Time
+			server.Raise(result.Scan(&entitlement.pro, &readTime))
+			entitlement.version = readTime.UnixMicro()
+		}
 	})
 	return
 }

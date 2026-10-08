@@ -30,26 +30,44 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 	keys, owned, err := taskCompletionOwnershipKeys(self.targets[task.FunctionName], task, r.resultJson, r.err == nil)
 	server.Raise(err)
 	finish := func(tx server.PgTx) {
-		commitPosts = nil
-		postRescheduled = false
+		commitPosts, postRescheduled = self.finalizeTaskInTx(finalizeCtx, tx, r)
+	}
+	if owned {
+		server.OwnedTx(finalizeCtx, keys, finish, server.TxReadCommitted, server.OptNoRetry())
+	} else {
+		server.Tx(finalizeCtx, finish)
+	}
+	return
+}
 
-		if r.err != nil {
-			now := server.NowUtc()
-			// Preserve the same task and its classified retry cadence/count.
-			// Draining must not persist retry arguments from canceled work.
-			delay, errorCountDelta := taskTargetErrorRetryDelay(
-				self.targets[task.FunctionName],
-				r.err,
-				task.RescheduleErrorCount,
-				mathrand.Float64(),
-			)
-			var retryArgsJson *string
-			if self.ctx.Err() == nil && self.drainCtx.Err() == nil {
-				retryArgsJson = taskRetryArgsJson(r.err)
-			}
-			tag := server.RaisePgResult(tx.Exec(
-				finalizeCtx,
-				`
+// The caller owns one finite handback deadline and transaction. A certified
+// cohort can share those owners across member errors without extending either
+// budget, replaying a transaction, or borrowing another member's queue key.
+func (self *TaskWorker) finalizeTaskInTx(finalizeCtx context.Context, tx server.PgTx, r *taskExecutionResult) (
+	commitPosts []server.PostFunction,
+	postRescheduled bool,
+) {
+	task := r.task
+	commitPosts = nil
+	postRescheduled = false
+
+	if r.err != nil {
+		now := server.NowUtc()
+		// Preserve the same task and its classified retry cadence/count.
+		// Draining must not persist retry arguments from canceled work.
+		delay, errorCountDelta := taskTargetErrorRetryDelay(
+			self.targets[task.FunctionName],
+			r.err,
+			task.RescheduleErrorCount,
+			mathrand.Float64(),
+		)
+		var retryArgsJson *string
+		if self.ctx.Err() == nil && self.drainCtx.Err() == nil {
+			retryArgsJson = taskRetryArgsJson(r.err)
+		}
+		tag := server.RaisePgResult(tx.Exec(
+			finalizeCtx,
+			`
 					UPDATE pending_task
 					SET
 						reschedule_error = $2,
@@ -59,60 +77,54 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 						release_time = $4
 					WHERE task_id = $1 AND claim_generation = $7
 				`,
-				task.TaskId,
-				r.err.Error(),
-				now.Add(delay),
-				now,
-				errorCountDelta,
-				retryArgsJson,
-				task.ClaimGeneration,
-			))
-			if tag.RowsAffected() != 1 {
-				server.Raise(errTaskClaimOwnership)
-			}
-			return
+			task.TaskId,
+			r.err.Error(),
+			now.Add(delay),
+			now,
+			errorCountDelta,
+			retryArgsJson,
+			task.ClaimGeneration,
+		))
+		if tag.RowsAffected() != 1 {
+			server.Raise(errTaskClaimOwnership)
 		}
+		return
+	}
 
-		wakeAt := finishTaskOwnerInTx(finalizeCtx, tx, r)
+	wakeAt := finishTaskOwnerInTx(finalizeCtx, tx, r)
 
-		posts, err := r.runPost(tx)
-		if err == nil {
-			commitPosts = posts
-			taskRunOnceWakeAfterPost(finalizeCtx, tx, task.TaskId, wakeAt)
-			return
-		}
-		postRescheduled = true
-		// Raise at the failed statement; an aborted transaction cannot persist
-		// either the completion or its durable post retry.
-		server.RaisePgResult(tx.Exec(
-			finalizeCtx,
-			`
+	posts, err := r.runPost(tx)
+	if err == nil {
+		commitPosts = posts
+		taskRunOnceWakeAfterPost(finalizeCtx, tx, task.TaskId, wakeAt)
+		return
+	}
+	postRescheduled = true
+	// Raise at the failed statement; an aborted transaction cannot persist
+	// either the completion or its durable post retry.
+	server.RaisePgResult(tx.Exec(
+		finalizeCtx,
+		`
 				UPDATE finished_task
 				SET
 					post_error = $2,
 					post_completed = false
 				WHERE task_id = $1
 			`,
-			task.TaskId,
-			err.Error(),
-		))
-		rescheduleTime := server.NowUtc().Add(time.Second * time.Duration(mathrand.Intn(int(RescheduleTimeout/time.Second))))
-		clientSession, err := task.ClientSession(finalizeCtx)
-		server.Raise(err)
-		defer clientSession.Cancel()
-		ScheduleTaskInTx(
-			tx,
-			self.RunPost,
-			&RunPostArgs{TaskId: task.TaskId},
-			clientSession,
-			RunAt(rescheduleTime),
-		)
-		taskRunOnceWakeAfterPost(finalizeCtx, tx, task.TaskId, wakeAt)
-	}
-	if owned {
-		server.OwnedTx(finalizeCtx, keys, finish, server.TxReadCommitted, server.OptNoRetry())
-	} else {
-		server.Tx(finalizeCtx, finish)
-	}
+		task.TaskId,
+		err.Error(),
+	))
+	rescheduleTime := server.NowUtc().Add(time.Second * time.Duration(mathrand.Intn(int(RescheduleTimeout/time.Second))))
+	clientSession, err := task.ClientSession(finalizeCtx)
+	server.Raise(err)
+	defer clientSession.Cancel()
+	ScheduleTaskInTx(
+		tx,
+		self.RunPost,
+		&RunPostArgs{TaskId: task.TaskId},
+		clientSession,
+		RunAt(rescheduleTime),
+	)
+	taskRunOnceWakeAfterPost(finalizeCtx, tx, task.TaskId, wakeAt)
 	return
 }
