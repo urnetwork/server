@@ -13,6 +13,7 @@ import (
 type shardAdmissionTestResult struct {
 	grantWaitAdmissionResult
 	reachedGrantBeforeReturn bool
+	grantObservationComplete bool
 }
 
 // Keep the actual server transaction identity: financial ownership deliberately
@@ -37,6 +38,7 @@ func startShardAdmissionForTest(ctx context.Context, owner *ProberShardOwner, pe
 				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks
 					WHERE pid=pg_backend_pid() AND relation='transfer_balance'::regclass AND granted)`).
 					Scan(&value.reachedGrantBeforeReturn))
+				value.grantObservationComplete = true
 			}, server.TxReadCommitted, server.OptNoRetry())
 		})
 		if panicErr != nil {
@@ -133,8 +135,8 @@ func TestProberShardDrainFirstRejectsBeforeGrantRead(t *testing.T) {
 		}
 		server.Raise(finish(true))
 		got := <-result
-		if got.err == nil || got.escrow != nil || got.posts != 0 || got.reachedGrantBeforeReturn {
-			t.Fatalf("drain-first admission crossed ownership: escrow=%v posts=%d grant=%t err=%v", got.escrow, got.posts, got.reachedGrantBeforeReturn, got.err)
+		if !got.grantObservationComplete || got.err == nil || got.escrow != nil || got.posts != 0 || got.reachedGrantBeforeReturn {
+			t.Fatalf("drain-first admission crossed ownership: observed=%t escrow=%v posts=%d grant=%t err=%v", got.grantObservationComplete, got.escrow, got.posts, got.reachedGrantBeforeReturn, got.err)
 		}
 		requireShardAdmissionNoWrites(t, ctx, owner, priorRevision)
 	})
@@ -200,8 +202,8 @@ func TestProberShardAdmissionRechecksDeadlineAfterWaits(t *testing.T) {
 				waitForDeadline(held)
 				server.Raise(held.Commit(ctx))
 				got := <-result
-				if !errors.Is(got.err, ErrProberShardRetired) || got.escrow != nil || got.posts != 0 {
-					t.Fatalf("%s wait crossed the database deadline: escrow=%v posts=%d err=%v", boundary, got.escrow, got.posts, got.err)
+				if !got.grantObservationComplete || !errors.Is(got.err, ErrProberShardRetired) || got.escrow != nil || got.posts != 0 {
+					t.Fatalf("%s wait crossed the database deadline: observed=%t escrow=%v posts=%d err=%v", boundary, got.grantObservationComplete, got.escrow, got.posts, got.err)
 				}
 				if got.reachedGrantBeforeReturn != (boundary != "registry") {
 					t.Fatalf("%s did not retain its callback financial boundary: grant=%t", boundary, got.reachedGrantBeforeReturn)
