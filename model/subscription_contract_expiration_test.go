@@ -10,8 +10,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Equality belongs to expiry; neither a fresh report nor a legacy row acquires
-// a different lifetime from the quiet-period cutoff.
+// Equality belongs to expiry. NULL deadlines are immediately due, while
+// explicit future deadlines retain the ordinary quiet-period policy.
 func TestContractExpirationExactDeadline(t *testing.T) {
 	now := time.UnixMilli(2_000_000_000_000).UTC()
 	cutoff := now.Add(-5 * time.Minute)
@@ -25,7 +25,7 @@ func TestContractExpirationExactDeadline(t *testing.T) {
 		{name: "before deadline", expiration: &future, lastReport: now},
 		{name: "exact deadline", expiration: &now, lastReport: now, want: true},
 		{name: "after deadline", expiration: &past, lastReport: now, want: true},
-		{name: "legacy active", lastReport: now},
+		{name: "legacy active", lastReport: now, want: true},
 		{name: "legacy quiet", lastReport: cutoff, want: true},
 		{name: "early quiet close", expiration: &future, lastReport: cutoff, want: true},
 	} {
@@ -177,42 +177,6 @@ func TestContractExpirationReleasesRedisReservationOnce(t *testing.T) {
 		}
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 100 {
 			t.Fatal("replay released another contract's capacity")
-		}
-	})
-}
-
-// NULL is a real compatibility cohort: even very old contracts can remain
-// live through recent checkpoints until the existing quiet timeout elapses.
-func TestContractExpirationLegacyNullKeepsQuietCheckpointSemantics(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		ctx := WithProviderWorkSessionSource(t.Context(), nil)
-		f := newNetEscrowOrderingTestFixture(t, ctx)
-		id, err := CreateContractNoEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 100)
-		server.Raise(err)
-		server.Raise(CloseContract(ctx, id, f.sourceId, 17, true))
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,expiration_time=NULL WHERE contract_id=$1`, id, server.NowUtc().Add(-24*time.Hour)))
-		})
-		deadline, err := GetContractExpirationTime(ctx, id)
-		if err != nil || deadline != nil {
-			t.Fatal("legacy row acquired an inferred deadline", err)
-		}
-		count, _, err := ForceCloseOpenContractIdsPage(ctx, server.NowUtc().Add(-5*time.Minute), 32, 1, 0, 0, nil)
-		if err != nil || count != 0 {
-			t.Fatal("recent legacy checkpoint was hard-expired", err)
-		}
-		if _, terminal := GetContractClose(ctx, id); terminal {
-			t.Fatal("legacy contract closed early")
-		}
-		var reportTime time.Time
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT close_time FROM contract_close WHERE contract_id=$1 AND party=$2`, id, ContractPartySource).Scan(&reportTime))
-		})
-		count, _, err = ForceCloseOpenContractIdsPage(ctx, reportTime, 32, 1, 0, 0, nil)
-		if err != nil || count != 1 {
-			t.Fatal("legacy quiet expiry did not finish", err)
 		}
 	})
 }

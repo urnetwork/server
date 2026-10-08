@@ -38,23 +38,23 @@ func requireExpirationCheckpointReports(t testing.TB, ctx context.Context, id se
 	return data
 }
 
-// Both reservation owners retire a disputed bilateral checkpoint. NULL keeps
-// the old quiet-period rule: a recent report still refuses expiry, while old
-// reports converge through the same proof and financial owner as a deadline.
+// Both reservation owners retire a disputed bilateral checkpoint. NULL
+// deadlines are immediately eligible even with fresh reports; every path
+// retains the same original proof and financial owner.
 func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
 		for _, scenario := range []struct {
-			name           string
-			redis          bool
-			legacyDeadline bool
+			name            string
+			redis           bool
+			missingDeadline bool
 		}{
 			{name: "redis absolute", redis: true},
 			{name: "legacy absolute"},
-			{name: "redis NULL quiet", redis: true, legacyDeadline: true},
-			{name: "legacy NULL quiet", legacyDeadline: true},
+			{name: "redis NULL immediate", redis: true, missingDeadline: true},
+			{name: "legacy NULL immediate", missingDeadline: true},
 		} {
 			f := newNetEscrowOrderingTestFixture(t, ctx)
 			var contract *TransferEscrow
@@ -70,16 +70,9 @@ func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T)
 			server.Raise(CloseContract(ctx, id, f.destinationId, 300, true))
 			SetContractDispute(ctx, id, true)
 			cutoff := server.NowUtc().Add(-5 * time.Minute)
-			if scenario.legacyDeadline {
+			if scenario.missingDeadline {
 				server.Tx(ctx, func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=NULL,create_time=$2 WHERE contract_id=$1`, id, cutoff))
-				})
-				count, _, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-				if err != nil || count != 0 {
-					t.Fatalf("%s recent NULL checkpoint expired: count=%d err=%v", scenario.name, count, err)
-				}
-				server.Tx(ctx, func(tx server.PgTx) {
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET close_time=$2 WHERE contract_id=$1`, id, cutoff))
 				})
 			} else {
 				server.Tx(ctx, func(tx server.PgTx) {

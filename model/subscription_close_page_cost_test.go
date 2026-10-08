@@ -84,10 +84,10 @@ func TestForceClosePageRetainedHistoryBounded(t *testing.T) {
 		now := server.NowUtc().Truncate(time.Microsecond)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
-       (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,dispute,outcome,close_time,provider_usage)
+       (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,expiration_time,dispute,outcome,close_time,provider_usage)
        SELECT md5('synthetic-close-contract-'||g)::uuid,md5('synthetic-network')::uuid,
          md5('synthetic-source')::uuid,md5('synthetic-network')::uuid,md5('synthetic-destination')::uuid,1,
-         $1::timestamp-interval '2 hours'+(g%50000)*interval '1 microsecond',
+         $1::timestamp-interval '2 hours'+(g%50000)*interval '1 microsecond',$1::timestamp+interval '1 hour',
          g BETWEEN 50001 AND 100000,CASE WHEN g>100000 THEN 'settled' ELSE NULL END,
 				CASE WHEN g>100000 THEN $1::timestamp-interval '1 hour' ELSE NULL END,
 				CASE WHEN g>100000 THEN '{"version":1,"byte_count":0,"providers":[]}'::jsonb ELSE NULL END
