@@ -28652,6 +28652,38 @@ The immutable actual reduction is
 with independent actual GO SHA-256
 `f9887fdde33c76f0da98e59b19246a1afefa9efe872f9cbd9663bcde824342b1`.
 
+The 11:07Z successor narrowed the capture to the exact `loadProNetwork`
+frame on Crisp Proxy g1. Its native before/after clocks were
+11:07:19.672–11:07:19.769Z; the worker/container generation remained stable,
+active/running with zero worker restarts, and its image reference/version
+still matched R40. API or Connect rollout completion does not establish
+Proxy adoption. The 120-second journal window hit both the 16-line and
+four-sample limits; the retained journal emissions cover only
+11:07:19.002–11:07:19.639Z, with original application clocks unavailable.
+
+All four private error chains retained the database stop sentinel, an
+original acquisition deadline, and the caller deadline. Their exact R40
+stack ended at `db.go:640`, before the final attempt entered the entitlement
+read callback; each belonged to hosted child-client mint's fresh Pro read.
+These attempts did not reach the entitlement SELECT or its later cache
+publication, so this boundary does not demonstrate a bad entitlement value
+or a cache-corruption failure. It also does not enumerate earlier retries,
+pool occupancy, connection creation/cleanup, backend ownership or CPU. The
+separate lifecycle-query pressure sample has no exact backend/transaction
+join to these errors. Recovered deadlines on a stable process remain a real
+setup dependency failure; process continuity alone is not setup success.
+
+The qualified owned-connection mint change removes one separate acquisition
+while retaining the fresh authoritative read and live parent validation.
+Its local acquisition/retry/revocation controls do not prove production
+relief before Proxy adoption and a fresh observation. Keep the existing
+alert and preserve unknowns for unselected processes, frames, earlier causes
+and capped-out samples. The immutable successor reduction is
+`current-proxy-entitlement-reduction-v1.json` SHA-256
+`a8eddf727d09dc4a4f38c13c1283aa8ce2bba3db02f6e16b1aa52eacfb3d97bd`,
+with independent actual GO SHA-256
+`a570027ab36a073c97449a3caaf4a97954442883875ba8e54f765e7e2dbaa2dc`.
+
 ---
 
 ## 15. E2E encryption (post-quantum) signals — E2EPQ1
