@@ -1,7 +1,7 @@
 # ARIN database design
 
 This document describes the implementation and retained research and measurements
-through 2026-10-07, including the discriminator reviews recorded in
+through 2026-10-08, including the discriminator reviews recorded in
 [CLASSIFICATION.md](CLASSIFICATION.md) and the release evidence below.
 `arindbctl` builds an immutable IPv4/IPv6 MaxMind database that combines
 registration facts, reviewed network-use evidence, and geographic risk. A
@@ -803,11 +803,13 @@ for the RPKI aggregate exception. Native causal receipt `fb25c1b6` confirms the
 old behavior, exactly two failing unauthorized-sibling regressions on the old
 source, and passing corrected regressions plus six existing control families.
 Same-ASN max-length and independently authorized-sibling controls remain
-healthy. These pure tests used the qualified Core60/text41 dependency profile,
-which differs from canonical by an indirect requirement; they are not a full
-release-build gate. This is an over-admission correction, not an explanation
-for the low Quality count. The source correction still requires a rebuilt and
-validated artifact and adoption; no affected Main provider or prefix population
+healthy. The correction is now in canonical source. A later focused native
+receipt (`arin-rpki-quality-native-sol-20261008-v1/receipt.json`) passed all seven
+selected control families on the qualified c276/text41 graph (`62697538` /
+`6af11164`), with the corrected production postimage unchanged. This is an
+over-admission correction, not an explanation for the low Quality count.
+Those controls do not replace artifact validation: a rebuilt resource and
+adoption are still required, and no affected Main provider or prefix population
 has been measured.
 
 The next cause discriminator is an isolated source candidate, not deployed
@@ -819,21 +821,43 @@ ASN sets and the four closed withholding reasons. It does not hash or open a
 second database, refresh stored lookup clocks, export addresses, or change
 Quality policy. The existing capture protocol is kept separate. Independent
 source reviews accepted the core (`5dbd1062`) and its bounded Connect-only
-caller (`482037ee`). Go formatting/compilation, native controls, the new SQL
-selector and final publication-pair composition remain unqualified. A selected
-compatible service and explicit current diagnostic endpoint authority are
-also required before Root can execute it. The caller selects at most 32 exact
+caller (`482037ee`). The family-aware successor `c6fd08ab` then passed seventeen
+focused Go controls on the qualified c276/text41 graph (`da0e43df`), and the
+bounded selector passed all five local PG18 controls (`40c6b0a1`). Final
+publication-pair composition remains unqualified. A selected compatible service
+and explicit current diagnostic endpoint authority are also required before
+Root can execute it. The caller selects at most 32 exact
 Connect processes, retains missing or duplicate handler ownership as unknown,
 and does not require a native publisher endpoint or all-fleet retirement proof.
 Its public projection explicitly leaves publication binding unproved until the
-parent validates the unchanged source pair after capture.
+parent validates the unchanged source pair after capture. The October 8
+candidate is based on canonical `b3893b0a`. It samples one connection per provider, preserves refused rows in the original
+sample denominator, and cannot establish every connection's classification or
+an operator-wide error rate.
+
+A further source review found a possible mixed-family interaction. The
+reliability fold combines ARIN risk and nonquality flags across connections
+before separating proven address families, and the live Quality guard requires
+all live connections to be clean without a family predicate. Consequently, an
+IPv6 transport connection with unknown or withheld ARIN evidence can exclude
+a provider whose IPv4 connection is clean. This is a conditional source
+mechanism, not a measured cause among the 2,089 providers. A transport address
+also does not establish IPv6 provider service: legacy family intent still maps
+to IPv4 proof. The diagnostic successor reports only the closed connection
+address family (`ipv4` or `ipv6`), normalizes IPv4-mapped addresses and keeps
+owner/fact checks; it neither exports addresses nor changes admission policy.
+One selected IPv6 refusal does not prove that a clean IPv4 sibling exists or
+that the refusal is a rollout defect. Those questions remain evidence gaps.
+
 The selector limits each indexed connected/client read to 33 rows before
 sorting. A 33-row sentinel refuses that provider; smaller sets retain the
 lowest eligible connection deterministically. Source review `a707bf09`
 accepted the three-table plan guard and disabled local fixture adapter. The
 guard requires direct indexed limit children and point handler/location reads,
-with JIT disabled and a three-second SQL deadline. Its five new local SQL
-controls remain unexecuted; earlier plan-only controls cover a different query.
+with JIT disabled and a three-second SQL deadline. Its local controls preserve
+the full 64-provider denominator, accept the 32-row boundary, reject the
+33-row overflow, and refuse missing-index and unbounded-inner-sort plans.
+These synthetic results do not qualify Main's current plan or latency.
 Unavailable owners, changed owners, stale facts and unsupported records must
 remain explicit unknowns. The policy remains: an identified residential or
 business subscriber ISP defaults clean unless additional contrary evidence
@@ -868,8 +892,10 @@ exhaustive. FDN-to-AS20766 was rejected because the registry identity is Gitoyen
 Ozone-to-AS39886 remains deferred. No affiliate ASN or prefix is approved by
 association.
 
-The source-only cumulative candidate `5bbba6ad` contains 5,222 subscriber
-groups and 5,495 unique subscriber ASNs across the same 160 countries. US
+The tracked Main catalog is now the reviewed cumulative candidate `5bbba6ad`,
+with 5,222 subscriber groups, six negative groups and 5,495 unique subscriber
+ASNs across the same 160 countries. This source selection is distinct from the
+5,220-group resource mapped in the retained 05:18 UTC one-owner observation. US
 coverage becomes 33 groups/53 ASNs and France 8 groups/10 ASNs. These are
 catalog counts, not subscription counts, market ranks or Main Quality gains.
 Eight groups are new and two existing groups are extended; all unowned stanza
@@ -903,9 +929,16 @@ rankings or attribute the sampled Main providers to these operators.
 The twelve-ASN augmentation has a separately qualified reuse executor
 (`db1631d8`) and full/native/mapped readback preparation (`1a6c7beb`). It keeps
 the validated registration base, all 38 original feed bytes and observation
-times, and the qualified existing builder. Its earliest feed expiry remains
-October 8 at 02:03:14 UTC. The new artifact must have an epoch later than
-`1791310718`; the older four successful readbacks cannot qualify it. Startup
+times, and the qualified existing builder. That retained feed bundle expired
+on October 8 at 02:03:14 UTC and cannot build a current resource. The current
+RPKI/catalog preparation therefore requires fresh evidence, preserving the
+reviewed subscriber default and all requested negative-source families. It
+can reuse the validated October 6 registration base with its original clocks:
+registration source and rules are unchanged. Such a build is a fresh
+augmentation, not a fresh registration update. Full, native, mapped and targeted
+policy readbacks must bind the new artifact hash and epoch; the older four
+successful readbacks cannot qualify it. The separate resource window is still
+pending. Startup
 still requires 12 GiB of available host memory, nine GiB free on root and
 28 GiB on the archive, with the existing live floors. The measured preceding
 11.034-GiB RSS peak does not support lowering that memory admission merely
@@ -1164,7 +1197,7 @@ are `GEOIP_CONF_FILE`, `ARIN_CREDENTIALS_FILE`, `ARIN_RULES_FILE` and
 required: a missing or unreadable default or override stops the full release
 before the IP refresh compiles its binary or generates or publishes databases.
 The tracked Main default is
-the reviewed cumulative catalog `320b4c10`. This preserves its operator
+the reviewed cumulative catalog `5bbba6ad`. This preserves its operator
 identities, visibility floor and country policy in subsequent full releases;
 update acquires fresh evidence instead of reusing the seed's old snapshots.
 The seed alone is not an offline augmentation bundle. Generic `arindbctl
