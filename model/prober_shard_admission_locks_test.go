@@ -10,15 +10,20 @@ import (
 	"github.com/urnetwork/server"
 )
 
+type shardAdmissionTestResult struct {
+	grantWaitAdmissionResult
+	reachedGrantBeforeReturn bool
+}
+
 // Keep the actual server transaction identity: financial ownership deliberately
 // refuses wrappers that could borrow an outer transaction's admitted keys.
-func startShardAdmissionForTest(ctx context.Context, owner *ProberShardOwner, peer escrowSelectionTestClients) (<-chan grantWaitAdmissionResult, func()) {
+func startShardAdmissionForTest(ctx context.Context, owner *ProberShardOwner, peer escrowSelectionTestClients) (<-chan shardAdmissionTestResult, func()) {
 	ctx, cancel := context.WithCancel(ctx)
-	result := make(chan grantWaitAdmissionResult, 1)
+	result := make(chan shardAdmissionTestResult, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		value := grantWaitAdmissionResult{}
+		value := shardAdmissionTestResult{}
 		panicErr := server.HandleError(func() {
 			server.Tx(ctx, func(tx server.PgTx) {
 				var posts []func() any
@@ -26,6 +31,12 @@ func startShardAdmissionForTest(ctx context.Context, owner *ProberShardOwner, pe
 					owner.NetworkId, owner.ClientId, peer.providerNetworkId, peer.providerId,
 					owner.NetworkId, 1024, nil)
 				value.posts = len(posts)
+				// Observe before COMMIT releases this backend's relation locks.
+				// The registry-refusal path must never reach grant discovery,
+				// including after the external registry holder is released.
+				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks
+					WHERE pid=pg_backend_pid() AND relation='transfer_balance'::regclass AND granted)`).
+					Scan(&value.reachedGrantBeforeReturn))
 			}, server.TxReadCommitted, server.OptNoRetry())
 		})
 		if panicErr != nil {
@@ -122,8 +133,8 @@ func TestProberShardDrainFirstRejectsBeforeGrantRead(t *testing.T) {
 		}
 		server.Raise(finish(true))
 		got := <-result
-		if got.err == nil || got.escrow != nil || got.posts != 0 {
-			t.Fatalf("drain-first admission crossed ownership: escrow=%v posts=%d err=%v", got.escrow, got.posts, got.err)
+		if got.err == nil || got.escrow != nil || got.posts != 0 || got.reachedGrantBeforeReturn {
+			t.Fatalf("drain-first admission crossed ownership: escrow=%v posts=%d grant=%t err=%v", got.escrow, got.posts, got.reachedGrantBeforeReturn, got.err)
 		}
 		requireShardAdmissionNoWrites(t, ctx, owner, priorRevision)
 	})
@@ -191,6 +202,9 @@ func TestProberShardAdmissionRechecksDeadlineAfterWaits(t *testing.T) {
 				got := <-result
 				if !errors.Is(got.err, ErrProberShardRetired) || got.escrow != nil || got.posts != 0 {
 					t.Fatalf("%s wait crossed the database deadline: escrow=%v posts=%d err=%v", boundary, got.escrow, got.posts, got.err)
+				}
+				if got.reachedGrantBeforeReturn != (boundary != "registry") {
+					t.Fatalf("%s did not retain its callback financial boundary: grant=%t", boundary, got.reachedGrantBeforeReturn)
 				}
 				requireShardAdmissionNoWrites(t, ctx, owner, priorRevision)
 				t.Logf("%s wait rejected after expiry with no financial writes", boundary)
