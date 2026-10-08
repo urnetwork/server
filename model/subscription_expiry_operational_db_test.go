@@ -100,6 +100,17 @@ func requireForceCloseOperationalRecovery(t testing.TB, ctx context.Context, f *
 	if err != nil || count != wantCount {
 		t.Fatal("healthy recovery failed to reach its ordinary financial owner", count, err)
 	}
+	retained, snapshot := readContractExpiryTestSnapshot(t, ctx, f.contractId)
+	if snapshot.ByteCount != forceCloseOperationalUsage || snapshot.Expiry == nil || len(snapshot.Expiry.Reports) != 2 {
+		t.Fatal("healthy continuation did not retain original bilateral usage")
+	}
+	if proof == nil {
+		// The fault-free control observes proof at the same pre-worker
+		// boundary. Faulted cases supply the proof retained before recovery.
+		proof = retained
+	} else if !bytes.Equal(proof, retained) {
+		t.Fatal("healthy continuation replaced the failed attempt's original proof")
+	}
 	if legacy {
 		complete, busy, _, err := flushLegacySettlement(ctx, f.contractId)
 		if err != nil || !complete || busy {
@@ -107,25 +118,33 @@ func requireForceCloseOperationalRecovery(t testing.TB, ctx context.Context, f *
 		}
 	} else {
 		pending := f.state(t, ctx)
-		if !pending.escrowSettled || pending.escrowPayoutByteCount != forceCloseOperationalUsage ||
+		// Foreground outcome, immutable consumption, and earnings commit
+		// together. Only the debit worker owns escrow metadata and release;
+		// the original whole reservation remains until that worker commits.
+		if pending.outcome != ContractOutcomeSettled || pending.open || pending.dispute || pending.streamFound ||
+			pending.escrowSettled || pending.escrowPayoutByteCount != 0 ||
+			pending.sourceCheckpoint || pending.destinationCheckpoint || !pending.redisReserved ||
+			pending.sourceByteCount != forceCloseOperationalUsage || pending.destinationByteCount != forceCloseOperationalUsage ||
+			pending.providerEarnedByteCount != forceCloseOperationalUsage || pending.legacyEscrowByteCount != 0 ||
 			pending.payerBalanceByteCount != forceCloseDisputeInitialBalance ||
-			pending.redisEscrowByteCount != forceCloseOperationalUsage || pending.requestTokenByteCount != forceCloseOperationalUsage {
+			pending.netEscrowByteCount != forceCloseOperationalEscrow || pending.redisEscrowByteCount != forceCloseOperationalEscrow ||
+			pending.requestTokenByteCount != forceCloseOperationalEscrow {
 			t.Fatal("Redis recovery lost or prematurely released its durable pending debit", pending)
 		}
-		applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
-		if err != nil || applied != 1 || released != 1 || busy {
-			t.Fatal("Redis recovery failed to apply and release the exact debit", applied, released, busy, err)
-		}
+		requireForceCloseDebitJournal(t, ctx, f, 1, forceCloseOperationalUsage)
+		drainForceCloseDebitCustody(t, ctx, f, forceCloseOperationalEscrow, forceCloseOperationalUsage)
 	}
+	requireForceCloseDebitJournal(t, ctx, f, 0, 0)
 	settled := f.state(t, ctx)
 	if settled.outcome != ContractOutcomeSettled || settled.open || settled.dispute || settled.streamFound ||
 		!settled.escrowSettled || settled.sourceCheckpoint || settled.destinationCheckpoint ||
 		settled.sourceByteCount != forceCloseOperationalUsage || settled.destinationByteCount != forceCloseOperationalUsage ||
 		settled.escrowPayoutByteCount != forceCloseOperationalUsage || settled.providerEarnedByteCount != forceCloseOperationalUsage ||
 		settled.payerBalanceByteCount != forceCloseDisputeInitialBalance-forceCloseOperationalUsage ||
-		settled.netEscrowByteCount != 0 || settled.requestTokenByteCount != 0 {
+		settled.netEscrowByteCount != 0 || settled.legacyEscrowByteCount != 0 || settled.redisEscrowByteCount != 0 || settled.requestTokenByteCount != 0 {
 		t.Fatal("recovery changed exact financial settlement", settled)
 	}
+	requireForceCloseAvailableCredit(t, ctx, f, forceCloseDisputeInitialBalance-forceCloseOperationalUsage)
 	wantProjection := forceCloseProviderProjection{sweptBytes: forceCloseOperationalUsage,
 		sweptRevenue: NanoCents(forceCloseOperationalUsage), unappliedBytes: forceCloseOperationalUsage,
 		unappliedRevenue: NanoCents(forceCloseOperationalUsage), owners: 1}
@@ -157,9 +176,9 @@ func requireForceCloseOperationalRecovery(t testing.TB, ctx context.Context, f *
 			t.Fatal("terminal expiry replay repeated financial work", count, err)
 		}
 		if legacy {
-			complete, busy, _, err := flushLegacySettlement(ctx, f.contractId)
-			if err != nil || complete || busy {
-				t.Fatal("legacy replay reacquired terminal settlement", complete, busy, err)
+			complete, busy, gate, err := flushLegacySettlement(ctx, f.contractId)
+			if err != nil || complete || !busy || gate != legacySettlementBusyIntent {
+				t.Fatal("legacy replay lost its deleted-intent disposition", complete, busy, gate, err)
 			}
 		} else {
 			applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
@@ -167,10 +186,104 @@ func requireForceCloseOperationalRecovery(t testing.TB, ctx context.Context, f *
 				t.Fatal("debit replay repeated accounting", applied, released, busy, err)
 			}
 		}
+		requireForceCloseDebitJournal(t, ctx, f, 0, 0)
+		var intent bool
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, f.contractId).Scan(&intent))
+		})
+		if intent {
+			t.Fatal("terminal replay restored a deleted settlement intent")
+		}
 		afterProof, _ := readContractExpiryTestSnapshot(t, ctx, f.contractId)
 		if f.state(t, ctx) != settled || !bytes.Equal(proof, afterProof) {
 			t.Fatal("recovery or replay changed original proof, financial totals, or terminal state")
 		}
+	}
+}
+
+// The journal is the consumption authority while metadata and the original
+// reservation still belong to the debit worker. Count the exact contract,
+// funding balance, shard, amount and applied state before/after that owner.
+func requireForceCloseDebitJournal(t testing.TB, ctx context.Context, f *forceCloseDisputeFixture, wantCount int, wantBytes ByteCount) {
+	t.Helper()
+	var count, pending, applied int
+	var amount ByteCount
+	var exactOwner bool
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE NOT applied),count(*) FILTER(WHERE applied),
+			COALESCE(sum(debit_byte_count),0),COALESCE(bool_and(balance_id=$2 AND shard=$3),true)
+			FROM transfer_debit_journal WHERE contract_id=$1`, f.contractId, f.balanceId, transferDebitShard(f.balanceId)).
+			Scan(&count, &pending, &applied, &amount, &exactOwner))
+	})
+	if count != wantCount || pending != wantCount || applied != 0 || amount != wantBytes || !exactOwner {
+		t.Fatal("durable debit identity or amount differs from its actual worker boundary", count, pending, applied, amount, exactOwner)
+	}
+}
+
+func requireForceCloseAvailableCredit(t testing.TB, ctx context.Context, f *forceCloseDisputeFixture, want ByteCount) server.Id {
+	t.Helper()
+	var networkId server.Id
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT network_id FROM transfer_balance WHERE balance_id=$1`, f.balanceId).Scan(&networkId))
+	})
+	if got := GetActiveTransferBalanceByteCount(ctx, networkId); got != want {
+		t.Fatal("available credit differs from the debit owner's retained reservation", got, want)
+	}
+	return networkId
+}
+
+// Exercise the real public debit page, retaining its exact cursor and provider
+// invariants. The unused reservation becomes available only after debit commit.
+func drainForceCloseDebitCustody(t testing.TB, ctx context.Context, f *forceCloseDisputeFixture, reserved, consumed ByteCount) {
+	t.Helper()
+	requireForceCloseDebitJournal(t, ctx, f, 1, consumed)
+	networkId := requireForceCloseAvailableCredit(t, ctx, f, forceCloseDisputeInitialBalance-reserved)
+	payerAccount := contractPayoutTestAccountAmount(t, ctx, networkId)
+	provider := readForceCloseProviderProjection(t, ctx, f)
+	previous := f.balanceId
+	for index := len(previous) - 1; ; index-- {
+		if index < 0 {
+			t.Fatal("synthetic balance has no preceding UUID")
+		}
+		if previous[index] != 0 {
+			previous[index]--
+			break
+		}
+		previous[index] = 255
+	}
+	result, err := FlushTransferDebits(ctx, transferDebitShard(f.balanceId), &previous, 1)
+	if err != nil || result.Failed != 0 || result.Busy != 0 || result.Balances != 1 || !result.More ||
+		result.Applied != 1 || result.Released != 1 || result.LastBalanceId == nil || *result.LastBalanceId != f.balanceId {
+		t.Fatalf("public debit page lost its exact owner, consumption or cursor: %+v %v", result, err)
+	}
+	requireForceCloseDebitJournal(t, ctx, f, 0, 0)
+	requireForceCloseAvailableCredit(t, ctx, f, forceCloseDisputeInitialBalance-consumed)
+	settled := f.state(t, ctx)
+	applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
+	if err != nil || applied != 0 || released != 0 || busy {
+		t.Fatal("empty debit replay repeated accounting", applied, released, busy, err)
+	}
+	requireForceCloseDebitJournal(t, ctx, f, 0, 0)
+	if f.state(t, ctx) != settled || readForceCloseProviderProjection(t, ctx, f) != provider ||
+		contractPayoutTestAccountAmount(t, ctx, networkId) != payerAccount {
+		t.Fatal("payer debit or empty replay changed settlement identity or provider money")
+	}
+}
+
+// The same accounting assertions also run with no failure or child context.
+// This control must pass on baseline and candidate, proving the worker/replay
+// policy independently of the operational-error classifier under test.
+func TestForceCloseHealthyCheckpointWorkerCustodyAndReplay(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			env := server.DefaultTestEnv()
+			env.RerunCount = 0
+			env.Run(t, func(t testing.TB) {
+				ctx := WithProviderWorkSessionSource(t.Context(), nil)
+				f := newForceCloseOperationalFixture(t, ctx, legacy)
+				requireForceCloseOperationalRecovery(t, ctx, f, legacy, nil)
+			})
+		})
 	}
 }
 

@@ -107,13 +107,30 @@ func TestForceCloseVerifiedQuarantineDoesNotParkAccountingBatch(t *testing.T) {
 			quarantined.sourceByteCount != malformedBefore.sourceByteCount || quarantined.destinationByteCount != malformedBefore.destinationByteCount {
 			t.Fatal("verified quarantine changed the existing no-payout accounting policy")
 		}
-		if state := good.state(t, ctx); state.outcome != ContractOutcomeSettled || state.streamFound || !state.escrowSettled || state.escrowPayoutByteCount != 1024 {
-			t.Fatal("valid sibling failed ordinary settlement")
+		pending := good.state(t, ctx)
+		if pending.outcome != ContractOutcomeSettled || pending.dispute || pending.open || pending.streamFound ||
+			pending.escrowSettled || pending.escrowPayoutByteCount != 0 || pending.providerEarnedByteCount != 1024 ||
+			pending.payerBalanceByteCount != forceCloseDisputeInitialBalance || !pending.redisReserved ||
+			pending.sourceCheckpoint || pending.destinationCheckpoint || pending.sourceByteCount != 1024 || pending.destinationByteCount != 1024 ||
+			pending.netEscrowByteCount != escrow || pending.redisEscrowByteCount != escrow || pending.requestTokenByteCount != escrow || pending.legacyEscrowByteCount != 0 {
+			t.Fatal("valid sibling failed ordinary settlement or lost its debit owner", pending)
 		}
+		requireForceCloseDebitJournal(t, ctx, good, 1, 1024)
 		selected, err = ForceCloseOpenContractIds(ctx, bad.cutoff, 10, 2, 1, 0)
 		if selected != 1 || !errors.As(err, &progress) || progress.VerifiedCloseCount() != 0 || progress.AccountingRejectionCount() != 1 ||
-			bad.state(t, ctx) != before || malformed.state(t, ctx) != quarantined {
+			bad.state(t, ctx) != before || malformed.state(t, ctx) != quarantined || good.state(t, ctx) != pending {
 			t.Fatal("retry repeated terminal accounting or lost the still-reserved dispute")
+		}
+		drainForceCloseDebitCustody(t, ctx, good, escrow, 1024)
+		expected := pending
+		expected.escrowSettled = true
+		expected.escrowPayoutByteCount = 1024
+		expected.payerBalanceByteCount -= 1024
+		expected.netEscrowByteCount = 0
+		expected.redisEscrowByteCount = 0
+		expected.requestTokenByteCount = 0
+		if good.state(t, ctx) != expected || bad.state(t, ctx) != before || malformed.state(t, ctx) != quarantined {
+			t.Fatal("healthy sibling debit changed exact accounting or another contract's custody")
 		}
 	})
 }

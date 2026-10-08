@@ -317,8 +317,9 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 }
 
 // A statement trigger rejects even zero-row dispute updates, proving healthy
-// finalized rows do not enter the extra settlement transaction. Consumed bytes
-// remain reserved until the public debit worker applies them exactly once.
+// finalized rows do not enter the extra settlement transaction. The entire
+// reservation and escrow metadata stay with the public debit worker until it
+// applies the immutable consumption exactly once.
 func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -359,13 +360,14 @@ func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 			state := fixture.state(t, ctx)
 			pendingStates = append(pendingStates, state)
 			if state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.streamFound ||
-				!state.escrowSettled || !state.redisReserved || state.sourceCheckpoint || state.destinationCheckpoint ||
+				state.escrowSettled || !state.redisReserved || state.sourceCheckpoint || state.destinationCheckpoint ||
 				state.sourceByteCount != 1024 || state.destinationByteCount != 1024 ||
-				state.escrowPayoutByteCount != 1024 || state.providerEarnedByteCount != 1024 ||
+				state.escrowPayoutByteCount != 0 || state.providerEarnedByteCount != 1024 ||
 				state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.legacyEscrowByteCount != 0 ||
-				state.netEscrowByteCount != 1024 || state.requestTokenByteCount != 1024 || state.redisEscrowByteCount != 1024 {
+				state.netEscrowByteCount != 4096 || state.requestTokenByteCount != 4096 || state.redisEscrowByteCount != 4096 {
 				t.Fatalf("case %d: healthy finalization did not retain exact pending debt: %+v", index, state)
 			}
+			requireForceCloseDebitJournal(t, ctx, fixture, 1, 1024)
 		}
 		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
 		if err != nil || closeCount != 0 {
@@ -376,10 +378,13 @@ func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 			if state := fixture.state(t, ctx); state != pendingStates[index] {
 				t.Fatalf("case %d: repeated healthy close changed pending accounting: before=%+v after=%+v", index, pendingStates[index], state)
 			}
-			// Verify the journal and public available credit before the actual
-			// worker drains it, preserving all provider allocations and payouts.
-			assertPayoutDebitTestConsumptionAndDrain(t, ctx, fixture.balanceId, forceCloseDisputeInitialBalance, 1024)
+			// Metadata and the whole reservation remain unchanged until the
+			// actual debit owner commits, then releases and deletes the journal.
+			requireForceCloseDebitJournal(t, ctx, fixture, 1, 1024)
+			drainForceCloseDebitCustody(t, ctx, fixture, 4096, 1024)
 			expected := pendingStates[index]
+			expected.escrowSettled = true
+			expected.escrowPayoutByteCount = 1024
 			expected.payerBalanceByteCount -= 1024
 			expected.netEscrowByteCount = 0
 			expected.requestTokenByteCount = 0
