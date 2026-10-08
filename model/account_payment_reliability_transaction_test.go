@@ -112,13 +112,25 @@ func paymentReliabilityTransactionFixture(t testing.TB, ctx context.Context) (*p
 			(client_id, network_id, country_location_id, update_block_number, client_address_hash_count, location_count)
 			SELECT client_id, $1, $2, $3, 1, 1 FROM unnest($4::uuid[]) AS ids(client_id)`,
 			f.network, countryId, reliabilityBlockNumber(end), clientIds))
+		// The drain stores validity explicitly; counters no longer generate it.
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_reliability
 			(block_number, client_address_hash, network_id, client_id,
-			connection_established_count, provide_enabled_count, receive_message_count)
-			SELECT block_number, decode('01', 'hex'), $1, client_id, 1, 1, 1
+			connection_established_count, provide_enabled_count, receive_message_count, valid)
+			SELECT block_number, decode('01', 'hex'), $1, client_id, 1, 1, 1, true
 			FROM unnest($2::uuid[]) AS ids(client_id)
 			CROSS JOIN generate_series($3::bigint, $3::bigint+255) AS blocks(block_number)`,
 			f.network, clientIds, reliabilityBlockNumber(start)))
+		var rows, contributing, newer int
+		server.Raise(tx.QueryRow(ctx, `SELECT COUNT(*),
+			COUNT(*) FILTER (WHERE reliability.valid AND location.valid AND $2 <= block_number AND block_number < $3),
+			COUNT(*) FILTER (WHERE reliability.valid AND location.valid AND $3 <= block_number)
+			FROM client_reliability AS reliability
+			JOIN network_client_location_reliability AS location USING (client_id)
+			WHERE reliability.network_id=$1`, f.network, reliabilityBlockNumber(start), reliabilityBlockNumber(end)+1).
+			Scan(&rows, &contributing, &newer))
+		if rows != 16384 || contributing != 8192 || newer != 8192 {
+			t.Fatalf("reliability fixture rows/contributing/newer = %d/%d/%d, want 16384/8192/8192", rows, contributing, newer)
+		}
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_connection_reliability_score
 			(network_id, country_location_id, independent_reliability_score, independent_reliability_weight,
 			reliability_score, reliability_weight, min_block_number, max_block_number)
