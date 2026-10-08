@@ -21,31 +21,29 @@ func TestLegacyPayerDueIndexReadinessOutcomes(t *testing.T) {
 		{name: "canceled", err: fmt.Errorf("private read detail: %w", context.Canceled)},
 		{name: "read_error", err: errors.New("private database detail")},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			calls, clocks := 0, 0
-			observed := observeLegacySettlementPayerDueIndex(t.Context(), func(ctx context.Context) (bool, error) {
-				calls++
-				deadline, ok := ctx.Deadline()
-				if !ok || deadline.After(time.Now().Add(legacySettlementPayerIndexBudget)) {
-					t.Fatal("probe lost its original bounded deadline")
-				}
-				return test.ready, test.err
-			}, func() time.Time {
-				clocks++
-				return time.Unix(1, 0).Add(time.Duration(clocks) * 37 * time.Millisecond)
-			})
-			if observed.Outcome != test.name || observed.ElapsedMs != 37 || calls != 1 || clocks != 2 {
-				t.Fatal("probe outcome, elapsed or single-read boundary changed", observed, calls, clocks)
+		calls, clocks := 0, 0
+		observed := observeLegacySettlementPayerDueIndex(t.Context(), func(ctx context.Context) (bool, error) {
+			calls++
+			deadline, ok := ctx.Deadline()
+			if !ok || deadline.After(time.Now().Add(legacySettlementPayerIndexBudget)) {
+				t.Fatal("probe lost its original bounded deadline")
 			}
-			encoded, err := json.Marshal(observed)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var fields map[string]any
-			if err := json.Unmarshal(encoded, &fields); err != nil || len(fields) != 2 || fields["outcome"] != test.name || fields["elapsed_ms"] != float64(37) {
-				t.Fatal("readiness retained fields beyond its fixed outcome and elapsed", string(encoded), err)
-			}
+			return test.ready, test.err
+		}, func() time.Time {
+			clocks++
+			return time.Unix(1, 0).Add(time.Duration(clocks) * 37 * time.Millisecond)
 		})
+		if observed.Outcome != test.name || observed.ElapsedMs != 37 || calls != 1 || clocks != 2 {
+			t.Fatal("probe outcome, elapsed or single-read boundary changed", observed, calls, clocks)
+		}
+		encoded, err := json.Marshal(observed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(encoded, &fields); err != nil || len(fields) != 2 || fields["outcome"] != test.name || fields["elapsed_ms"] != float64(37) {
+			t.Fatal("readiness retained fields beyond its fixed outcome and elapsed", string(encoded), err)
+		}
 	}
 }
 

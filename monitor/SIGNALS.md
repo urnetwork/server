@@ -33171,3 +33171,12 @@ resource; it also cannot make a different or expired resource ready. A miss
 does not wait for that refresh or add a database retry. This reduces exposure
 to a transient redundant probe failure while known valid schema evidence is
 available; it does not cure an uncached probe failure or prove a fleet rate.
+
+Optional compatibility registration shares that exact full-index positive
+observation before its own catalog check. A miss still uses the original fresh
+both-index check within the same 250ms context, then retains the chronological
+fallback on refusal. The cache path neither refreshes nor publishes readiness.
+The task's `index_readiness` still describes dispatch entry only; it does not
+measure the registration branch or prove that a particular missing payer was
+registered. Registration's independent missing-key index and unchanged
+chronological cursor remain authoritative.

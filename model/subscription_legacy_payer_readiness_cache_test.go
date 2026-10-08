@@ -66,14 +66,14 @@ func TestLegacyPayerDueIndexPositiveObservationAvoidsTransientRefusal(t *testing
 	if uncached.Outcome != "deadline" || readCalls != 1 {
 		t.Fatal("transient-refusal control did not refuse", uncached, readCalls)
 	}
-	observed := observeLegacySettlementPayerDueIndexWithCache(t.Context(), func(ctx context.Context) bool {
+	observed := observeLegacySettlementPayerIndexWithCache(t.Context(), func(ctx context.Context) bool {
 		return cache.readyObservation(ctx, identity, now)
 	}, read, time.Now)
 	if observed.Outcome != "ready" || !observed.Cached || readCalls != 1 {
 		t.Fatal("validated cache still entered the refused catalog probe", observed, readCalls)
 	}
 	cache.expires = now
-	observed = observeLegacySettlementPayerDueIndexWithCache(t.Context(), func(ctx context.Context) bool {
+	observed = observeLegacySettlementPayerIndexWithCache(t.Context(), func(ctx context.Context) bool {
 		return cache.readyObservation(ctx, identity, now)
 	}, read, time.Now)
 	if observed.Outcome != "deadline" || observed.Cached || readCalls != 2 {

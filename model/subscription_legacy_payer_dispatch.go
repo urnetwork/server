@@ -63,11 +63,18 @@ func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int,
 // work behind that pass's fixed cutoff. An unavailable index keeps the original
 // chronological fallback; both paths share the caller's registration budget.
 func registerLegacySettlementPayerDispatchPage(ctx context.Context, shard int, after *LegacySettlementCursor) (*LegacySettlementCursor, int) {
-	bounded, cancel := context.WithTimeout(ctx, legacySettlementPayerIndexBudget)
-	ready, err := readLegacySettlementPayerIndexes(bounded)
-	ready = ready && err == nil && bounded.Err() == nil
-	cancel()
-	if ready {
+	return registerLegacySettlementPayerDispatchPageWithReadiness(ctx, shard, after,
+		cachedLegacySettlementPayerIndexesReady, readLegacySettlementPayerIndexes)
+}
+
+// Registration reuses the same full-index proof as dispatch; a cache miss keeps
+// its fresh bounded catalog check. Neither path publishes or extends the proof.
+// Invocation-local readers let controls force a transient refusal exactly.
+func registerLegacySettlementPayerDispatchPageWithReadiness(ctx context.Context, shard int, after *LegacySettlementCursor,
+	cached func(context.Context) bool, read func(context.Context) (bool, error),
+) (*LegacySettlementCursor, int) {
+	readiness := observeLegacySettlementPayerIndexWithCache(ctx, cached, read, time.Now)
+	if readiness.Outcome == "ready" {
 		return after, registerLegacySettlementPayers(ctx, shard)
 	}
 	return registerLegacySettlementPayerPage(ctx, shard, after)

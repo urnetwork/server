@@ -75,15 +75,15 @@ func legacySettlementPayerDueIndexReady(ctx context.Context) bool {
 }
 
 func legacySettlementPayerDueIndexObservation(ctx context.Context) LegacySettlementPayerIndexReadiness {
-	return observeLegacySettlementPayerDueIndexWithCache(ctx,
-		cachedLegacySettlementPayerDueIndexReady, readLegacySettlementPayerDueIndex, time.Now)
+	return observeLegacySettlementPayerIndexWithCache(ctx,
+		cachedLegacySettlementPayerIndexesReady, readLegacySettlementPayerDueIndex, time.Now)
 }
 
-// The existing both-index check already proves the due index's complete
-// definition. Reuse only its still-live positive observation for this exact
+// The existing both-index check proves both complete definitions. Reuse only
+// its still-live positive observation for this exact
 // database resource. A miss does not refresh, wait for another refresher, retry
 // a query, or extend the existing five-second expiry.
-func cachedLegacySettlementPayerDueIndexReady(ctx context.Context) bool {
+func cachedLegacySettlementPayerIndexesReady(ctx context.Context) bool {
 	// A cold, negative or expired cache adds no resource read to the ordinary
 	// probe. Identity must still be rechecked after reading any potential hit.
 	if !legacySettlementPayerIndexes.hasReadyObservation(time.Now()) {
@@ -115,7 +115,7 @@ func (self *legacySettlementPayerIndexCache) readyObservation(ctx context.Contex
 	return self.identity == identity && self.ready && now.Before(self.expires)
 }
 
-func observeLegacySettlementPayerDueIndexWithCache(ctx context.Context,
+func observeLegacySettlementPayerIndexWithCache(ctx context.Context,
 	cached func(context.Context) bool, read func(context.Context) (bool, error), now func() time.Time,
 ) LegacySettlementPayerIndexReadiness {
 	usedCache := false
