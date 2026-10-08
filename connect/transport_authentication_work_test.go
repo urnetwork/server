@@ -35,7 +35,7 @@ func TestConnectAuthenticationUsesOneLiveDatabaseAcquisition(t *testing.T) {
 		for _, source := range []struct {
 			caller string
 			value  jwt.StateQuerySource
-		}{{"connect_h1", jwt.StateQueryConnectH1}, {"connect_h3", jwt.StateQueryConnectH3}} {
+		}{{caller: "connect_h1", value: jwt.StateQueryConnectH1}, {caller: "connect_h3", value: jwt.StateQueryConnectH3}} {
 			const count = 8
 			poolLabels := map[string]string{"pool": "default", "outcome": "acquired"}
 			acquiredBefore := connectObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels)
