@@ -38,9 +38,9 @@ func requireExpirationCheckpointReports(t testing.TB, ctx context.Context, id se
 	return data
 }
 
-// Both reservation owners retire a disputed bilateral checkpoint. NULL
-// deadlines are immediately eligible even with fresh reports; every path
-// retains the same original proof and financial owner.
+// Both reservation owners retire a disputed bilateral checkpoint. Fresh NULL
+// rows stay protected, while their 60-minute fallback ignores report recency.
+// Every path retains the same original proof and financial owner.
 func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -53,8 +53,8 @@ func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T)
 		}{
 			{name: "redis absolute", redis: true},
 			{name: "legacy absolute"},
-			{name: "redis NULL immediate", redis: true, missingDeadline: true},
-			{name: "legacy NULL immediate", missingDeadline: true},
+			{name: "redis NULL hard deadline", redis: true, missingDeadline: true},
+			{name: "legacy NULL hard deadline", missingDeadline: true},
 		} {
 			f := newNetEscrowOrderingTestFixture(t, ctx)
 			var contract *TransferEscrow
@@ -73,6 +73,14 @@ func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T)
 			if scenario.missingDeadline {
 				server.Tx(ctx, func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=NULL,create_time=$2 WHERE contract_id=$1`, id, cutoff))
+				})
+				before := readRedisExpiryRepairTestState(ctx, id)
+				count, _, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
+				if err != nil || count != 0 || !bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) {
+					t.Fatalf("%s fresh dispute lost custody: count=%d error=%v", scenario.name, count, err)
+				}
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2 WHERE contract_id=$1`, id, server.NowUtc().Add(-61*time.Minute)))
 				})
 			} else {
 				server.Tx(ctx, func(tx server.PgTx) {

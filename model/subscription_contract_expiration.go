@@ -22,10 +22,14 @@ func GetContractExpirationTime(ctx context.Context, contractId server.Id) (expir
 	return
 }
 
-// Legacy rows without an explicit deadline are due immediately. A recent
-// checkpoint cannot defer them or an arrived immutable deadline.
-func contractExpirationDue(expirationTime *time.Time, lastReport, cutoff, now time.Time) bool {
-	return expirationTime == nil || !lastReport.After(cutoff) || !now.Before(*expirationTime)
+// Missing deadlines fall back to the creation clock plus the maximum lifetime.
+// Quiet contracts may close earlier; a checkpoint cannot extend either deadline.
+func contractExpirationDue(expirationTime *time.Time, created, lastReport, cutoff, now time.Time) bool {
+	deadline := created.Add(DefaultContractExpiration)
+	if expirationTime != nil {
+		deadline = *expirationTime
+	}
+	return !lastReport.After(cutoff) || !now.Before(deadline)
 }
 
 // Origin selection precedes funding/client lock waits. Recheck its immutable

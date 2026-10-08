@@ -10,8 +10,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Equality belongs to expiry. NULL deadlines are immediately due, while
-// explicit future deadlines retain the ordinary quiet-period policy.
+// Equality belongs to expiry. Missing deadlines use the creation clock plus
+// 60 minutes; explicit deadlines and early quiet closes retain their policy.
 func TestContractExpirationExactDeadline(t *testing.T) {
 	now := time.UnixMilli(2_000_000_000_000).UTC()
 	cutoff := now.Add(-5 * time.Minute)
@@ -19,17 +19,22 @@ func TestContractExpirationExactDeadline(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		expiration *time.Time
+		created    time.Time
 		lastReport time.Time
 		want       bool
 	}{
 		{name: "before deadline", expiration: &future, lastReport: now},
 		{name: "exact deadline", expiration: &now, lastReport: now, want: true},
 		{name: "after deadline", expiration: &past, lastReport: now, want: true},
-		{name: "legacy active", lastReport: now, want: true},
-		{name: "legacy quiet", lastReport: cutoff, want: true},
+		{name: "legacy fresh", created: now, lastReport: now},
+		{name: "legacy before deadline", created: now.Add(-60*time.Minute + time.Nanosecond), lastReport: now},
+		{name: "legacy exact deadline", created: now.Add(-60 * time.Minute), lastReport: now, want: true},
+		{name: "legacy after deadline", created: now.Add(-61 * time.Minute), lastReport: now, want: true},
+		{name: "legacy quiet", created: now.Add(-10 * time.Minute), lastReport: cutoff, want: true},
+		{name: "explicit deadline overrides legacy age", expiration: &future, created: now.Add(-2 * time.Hour), lastReport: now},
 		{name: "early quiet close", expiration: &future, lastReport: cutoff, want: true},
 	} {
-		if got := contractExpirationDue(test.expiration, test.lastReport, cutoff, now); got != test.want {
+		if got := contractExpirationDue(test.expiration, test.created, test.lastReport, cutoff, now); got != test.want {
 			t.Errorf("%s: due=%t want=%t", test.name, got, test.want)
 		}
 	}
