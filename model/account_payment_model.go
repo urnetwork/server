@@ -686,13 +686,21 @@ func CompletePayment(
 	paymentReceipt string,
 	txHash string,
 ) (returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		returnErr = completePaymentInTx(ctx, tx, paymentId, paymentReceipt, txHash)
-	})
+	networkId, exists := readPaymentAccountNetwork(ctx, paymentId)
+	if !exists {
+		return fmt.Errorf("Invalid payment.")
+	}
+	keys := []server.PgOwnershipKey{server.NewPgOwnershipKey("account_payment", paymentId)}
+	if networkId != nil {
+		keys = append(keys, accountBalanceOwnershipKeys([]server.Id{*networkId})...)
+	}
+	server.OwnedTx(ctx, keys, func(tx server.PgTx) {
+		returnErr = completePaymentInTx(ctx, tx, paymentId, networkId, paymentReceipt, txHash)
+	}, server.TxReadCommitted)
 	return
 }
 
-func completePaymentInTx(ctx context.Context, tx server.PgTx, paymentId server.Id, paymentReceipt, txHash string) error {
+func completePaymentInTx(ctx context.Context, tx server.PgTx, paymentId server.Id, networkId *server.Id, paymentReceipt, txHash string) error {
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -705,13 +713,14 @@ func completePaymentInTx(ctx context.Context, tx server.PgTx, paymentId server.I
                     contract_retention_cursor = NULL,
                     contract_retention_pending = NOT attribution_review_required
                 WHERE
-                    payment_id = $1 AND
+                    payment_id = $1 AND network_id IS NOT DISTINCT FROM $5::uuid AND
                     NOT completed AND NOT canceled
             `,
 		paymentId,
 		paymentReceipt,
 		server.NowUtc(),
 		txHash,
+		networkId,
 	))
 	if tag.RowsAffected() != 1 {
 		return fmt.Errorf("Invalid payment.")

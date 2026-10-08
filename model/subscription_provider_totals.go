@@ -70,8 +70,12 @@ func ApplyLegacyProviderTotals(_ json.RawMessage, clientSession *session.ClientS
 	}
 	bounded, cancel := context.WithTimeout(clientSession.Ctx, 5*time.Second)
 	defer cancel()
-	returnErr = runLegacyProviderTotalsTx(bounded, func(tx server.PgTx) error {
-		return applyLegacyProviderTotalsInTx(bounded, tx, identity.TaskId)
+	networkIds, err := readLegacyProviderOwnership(bounded, identity.TaskId)
+	if err != nil {
+		return nil, err
+	}
+	returnErr = runLegacyProviderTotalsOwnedTx(bounded, networkIds, func(tx server.PgTx) error {
+		return applyLegacyProviderTotalsWithOwnershipInTx(bounded, tx, identity.TaskId, networkIds)
 	})
 	if returnErr == nil {
 		result = &struct{}{}
@@ -80,6 +84,12 @@ func ApplyLegacyProviderTotals(_ json.RawMessage, clientSession *session.ClientS
 }
 
 func applyLegacyProviderTotalsInTx(ctx context.Context, tx server.PgTx, taskId server.Id) error {
+	return applyLegacyProviderTotalsWithOwnershipInTx(ctx, tx, taskId, nil)
+}
+
+// The production owner supplies its complete pre-admitted account set. Amounts
+// and replay status always come from the locked durable payload.
+func applyLegacyProviderTotalsWithOwnershipInTx(ctx context.Context, tx server.PgTx, taskId server.Id, networkIds []server.Id) error {
 	var data string
 	err := tx.QueryRow(ctx, `SELECT args_json FROM pending_task WHERE task_id=$1 AND function_name=$2 FOR UPDATE`,
 		taskId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(&data)
@@ -92,6 +102,11 @@ func applyLegacyProviderTotalsInTx(ctx context.Context, tx server.PgTx, taskId s
 	payload, err := decodeLegacyProviderTotals(data)
 	if err != nil {
 		return withLegacyProviderTotalsPhase(legacyProviderTotalsAllocation, err)
+	}
+	if networkIds != nil {
+		if err := validateLegacyProviderOwnership(payload, networkIds); err != nil {
+			return err
+		}
 	}
 	if payload.Applied {
 		return nil
@@ -136,5 +151,8 @@ func writeLegacyProviderTotalInTx(ctx context.Context, tx server.PgTx, total leg
             provided_byte_count=account_balance.provided_byte_count+EXCLUDED.provided_byte_count,
             provided_net_revenue_nano_cents=account_balance.provided_net_revenue_nano_cents+EXCLUDED.provided_net_revenue_nano_cents`,
 		total.NetworkId, total.Bytes, total.Revenue)
+	if err == nil {
+		observeAccountBalanceWriteForTest(ctx, tx, total.NetworkId)
+	}
 	return withLegacyProviderTotalsPhase(legacyProviderTotalsAccountWrite, err)
 }

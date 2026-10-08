@@ -15,6 +15,9 @@ type postCommitPgTx struct {
 	postKeyIndexes     map[string]int
 	committedAt        time.Time
 	commitObservations *txCommitObservations
+	ownershipAllowed   bool
+	ownership          *pgTransactionOwnership
+	ownershipKeys      []PgOwnershipKey
 }
 
 // Registers one optional projection per key on a server-owned transaction. A

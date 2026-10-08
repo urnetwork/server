@@ -30,10 +30,9 @@ type legacyProviderTotalsTaskTarget struct {
 // post or continuation; completed owners may share only their durable handback.
 func (self *legacyProviderTotalsTaskTarget) TaskCompletionBatchEnabled() bool { return true }
 
-// Claim admission serializes each provider across evaluator sessions. A single
-// provider can share one prepared accounting batch; multi-provider work takes
-// every provider exclusively, up to the fixed key bound. Larger, applied and
-// invalid payloads retain ordinary accounting/replay without new group locks.
+// Bounded claim grouping helps one provider form a prepared batch. The complete
+// account-key owner remains mandatory during execution, including allocations
+// above this optional hint's bound and writers outside the task subsystem.
 func (self *legacyProviderTotalsTaskTarget) TaskClaimGroupIds(argsJson string) ([]server.Id, int) {
 	payload, err := decodeLegacyProviderTotals(argsJson)
 	if err != nil || payload.Applied || len(payload.Totals) > task.TaskClaimGroupKeyLimit {
@@ -122,7 +121,7 @@ func (self *legacyProviderTotalsBatch) apply(ctx context.Context) error {
 			defer close(self.done)
 			bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			self.err = runLegacyProviderTotalsTx(bounded, func(tx server.PgTx) error {
+			self.err = runLegacyProviderTotalsOwnedTx(bounded, []server.Id{self.networkId}, func(tx server.PgTx) error {
 				return applyLegacyProviderTotalsBatchInTx(bounded, tx, self.taskIds, self.networkId)
 			})
 		}()
