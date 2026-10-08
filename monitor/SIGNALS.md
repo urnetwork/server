@@ -5961,13 +5961,16 @@ container to its exact native PID/start/boot, container identity and image, then
 require that same generation before and after the read. A single-container
 diagnostic may request a fixed trailing 300-second interval with 512 tail lines,
 262,144 combined log bytes, a 10-second collector budget, 131,072 private output
-bytes and at most eight whole source-qualified payer results. Selected raw lines,
+bytes and at most eight whole source-qualified records shared across payer
+results, expiry results and fixed expiry accounting lines. Selected raw lines,
 task IDs and cursor identities stay private; publish only validated counts,
 phase timings and coverage. The possible generation interval is no longer than
 `min(300 seconds, capture end - container start)`. A tail cap, malformed result
 or young generation prevents a whole-window execution census. Empty retained
 results do not prove no work, and these logs do not bind a particular payer or
 contract or measure task claim/finalization latency.
+Expiry cursor/full-result progress alone does not certify financial closure;
+an accounting batch line has no exact task or contract binding.
 
 The first such capture stopped at `native_before` with
 `bounded_reader_unavailable`: native continuity and timings were unavailable,
