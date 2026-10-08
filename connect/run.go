@@ -154,6 +154,14 @@ func runWithDependencies(
 			return fmt.Errorf("register Connect resident payload metrics: %w", err)
 		}
 		defer unregisterPayloadMetrics()
+		// Preserve the last acknowledged counters after listener/drain and
+		// exchange shutdown, before removing process-owned collectors.
+		flushStats := func() {}
+		defer func() {
+			if flushStats != nil {
+				flushStats()
+			}
+		}()
 		exchange = NewExchangeFromEnv(runCtx, settings)
 		defer exchange.Close()
 		connectRouter, err := newConnectRouterFromExchange(runCtx, cancel, exchange)
@@ -178,7 +186,7 @@ func runWithDependencies(
 		}
 		defer capture.Close()
 		// Only admitted candidates publish a process-identity metrics cohort.
-		startStatsPusher(runCtx)
+		flushStats = startStatsPusher(runCtx)
 	}
 	routes = append([]*router.Route{router.NewRoute("GET", "/status", statusHandler)}, routes...)
 	stopStartup()
