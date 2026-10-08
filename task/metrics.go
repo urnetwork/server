@@ -73,7 +73,7 @@ var taskQueueSnapshotErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "taskworker",
 	Name:      "queue_snapshot_errors_total",
-	Help:      "Pending-task queue snapshots that failed or exceeded their bounded query context.",
+	Help:      "Pending-task queue snapshot reads, queries, or publications that failed their bounded refresh.",
 })
 
 // taskQueueMetricsSample keeps every queue value with the freshness timestamp
@@ -355,37 +355,47 @@ func loadTaskQueueMetricsSnapshot(ctx context.Context, now time.Time) (taskQueue
 	return snapshot, nil
 }
 
-// publishTaskQueueMetricsSnapshot atomically advances freshness only after
-// every aggregate value was obtained successfully.
-func publishTaskQueueMetricsSnapshot(snapshot taskQueueMetricsSnapshot, now time.Time) {
-	taskQueueMetrics.publish(snapshot, now)
+// Shares one database observation per interval across taskworkers. The initial
+// read is asynchronous so this optional observer cannot gate worker readiness.
+// Failed refreshes retain the previous values and their original source time.
+func StartQueueMetrics(ctx context.Context) {
+	cache := taskQueueMetricsCache{
+		store:    redisTaskQueueMetricsStore{},
+		now:      server.NowUtc,
+		newToken: func() string { return server.NewId().String() },
+		load:     loadTaskQueueMetricsSnapshot,
+	}
+	startTaskQueueMetrics(ctx, cache.get, taskQueueMetrics, func(err error) {
+		taskQueueSnapshotErrorsTotal.Inc()
+		glog.Infof("[taskworker]queue metrics refresh failed: %v\n", err)
+	})
 }
 
-// StartQueueMetrics refreshes queue pressure until the taskworker stops. A
-// failed query preserves the old values and timestamp so dashboards turn
-// stale/no-data rather than displaying a fresh false zero.
-func StartQueueMetrics(ctx context.Context) {
-	refresh := func() {
-		now := server.NowUtc()
-		snapshot, err := loadTaskQueueMetricsSnapshot(ctx, now)
-		if err != nil {
-			taskQueueSnapshotErrorsTotal.Inc()
-			glog.Infof("[taskworker]queue metrics refresh failed: %v\n", err)
-			return
-		}
-		publishTaskQueueMetricsSnapshot(snapshot, now)
-	}
-	refresh()
-	go server.HandleError(func() {
-		ticker := time.NewTicker(taskMetricsRefreshInterval)
-		defer ticker.Stop()
-		for {
+// Keeps storage reads outside the caller's startup path and serializes refreshes.
+// Returning completion lets lifecycle tests join a canceled observer.
+func startTaskQueueMetrics(
+	ctx context.Context,
+	load func(context.Context) (*taskQueueMetricsSample, error),
+	collector *taskQueueMetricsCollector,
+	onError func(error),
+) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ctx.Err() == nil {
+			sample, err := load(ctx)
+			if err != nil {
+				onError(err)
+			}
+			if sample != nil {
+				collector.publish(sample.snapshot, sample.observedAt)
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				refresh()
+			case <-time.After(taskMetricsRefreshInterval):
 			}
 		}
-	})
+	}()
+	return done
 }
