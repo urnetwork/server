@@ -221,10 +221,11 @@ func rollupTransferAuditEvents(
 		glog.Infof("[audit]defer optional transfer rollup while logical-backup snapshot is active; preserving lower bound %s\n", minTime.UTC().Format(time.RFC3339))
 		return &RollupTransferAuditEventsResult{Deferred: true, MinTime: &minTime}
 	}
-	// A long deferral can span more than the usual three days. Keep each task
-	// at the old work bound and carry any later days to another invocation.
+	// Commit and hand off one completed UTC day per task. A later day's
+	// cancellation must not replay an already committed prefix under the same
+	// one-hour task budget. Explicit model/CLI ranges keep their own owner.
 	maxTime := now
-	batchEnd := minTime.UTC().Truncate(24 * time.Hour).Add(3 * 24 * time.Hour)
+	batchEnd := minTime.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
 	result := &RollupTransferAuditEventsResult{}
 	if batchEnd.Before(now.UTC().Truncate(24 * time.Hour)) {
 		maxTime = batchEnd
@@ -237,7 +238,10 @@ func rollupTransferAuditEvents(
 func nextTransferAuditRollup(now time.Time, result *RollupTransferAuditEventsResult) (*RollupTransferAuditEventsArgs, time.Time) {
 	if result.MinTime != nil {
 		minTime := *result.MinTime
-		return &RollupTransferAuditEventsArgs{MinTime: &minTime}, now.Add(transferAuditBackupRetry)
+		if result.Deferred {
+			return &RollupTransferAuditEventsArgs{MinTime: &minTime}, now.Add(transferAuditBackupRetry)
+		}
+		return &RollupTransferAuditEventsArgs{MinTime: &minTime}, now
 	}
 	return &RollupTransferAuditEventsArgs{}, now.Add(6 * time.Hour)
 }
