@@ -60,7 +60,7 @@ func TestRunOnceQueuedWakeBatchKeepsFutureDeadline(t *testing.T) {
 			server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 				for _, scope := range scopes {
 					for _, at := range []time.Time{wakeAt.Add(time.Hour), wakeAt, wakeAt.Add(time.Minute)} {
-						QueueTaskInBatch(batch, runOnceGenerationWork, &runOnceGenerationArgs{Scope: scope, Cursor: 99}, owner,
+						QueueTaskInBatch(tx, batch, runOnceGenerationWork, &runOnceGenerationArgs{Scope: scope, Cursor: 99}, owner,
 							runOnceGenerationKey(scope), RunAt(at))
 					}
 				}
@@ -103,6 +103,7 @@ func runOnceGenerationRollbackKeepsWake(t *testing.T, batch bool) {
 			 BEGIN RAISE EXCEPTION 'synthetic run once refused'; END $$;
 			 CREATE TRIGGER test_run_once_refused BEFORE INSERT ON finished_task FOR EACH ROW EXECUTE FUNCTION test_run_once_refused()`))
 		})
+		before := taskLifecycleCounts()
 		var caught error
 		if batch {
 			var retry bool
@@ -116,6 +117,7 @@ func runOnceGenerationRollbackKeepsWake(t *testing.T, batch bool) {
 		if caught == nil || !strings.Contains(caught.Error(), "synthetic run once refused") || len(GetFinishedTasks(ctx, ids...)) != 0 {
 			t.Fatal("refused completion did not preserve the original failure and rollback", caught)
 		}
+		requireTaskLifecycleDelta(t, before, 0, 0, 0)
 		pending := runOnceGenerationPending(ctx, scopes)
 		if len(pending) != len(ids) {
 			t.Fatal("rollback created or lost a pending owner")
@@ -135,6 +137,7 @@ func runOnceGenerationRollbackKeepsWake(t *testing.T, batch bool) {
 		} else {
 			worker.finalizeTask(results[0])
 		}
+		requireTaskLifecycleDelta(t, before, uint64(len(ids)), uint64(len(ids)), 0)
 		pending = runOnceGenerationPending(ctx, scopes)
 		if len(pending) != len(ids) || len(GetFinishedTasks(ctx, ids...)) != len(ids) {
 			t.Fatal("restored completion failed exact handoff")

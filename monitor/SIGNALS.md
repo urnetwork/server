@@ -33180,3 +33180,30 @@ The task's `index_readiness` still describes dispatch entry only; it does not
 measure the registration branch or prove that a particular missing payer was
 registered. Registration's independent missing-key index and unchanged
 chronological cursor remain authoritative.
+
+
+### Task submission, completion and RunOnce conflict counters
+
+The Taskworker dashboard starts with `urnetwork_task_submitted_total`,
+`urnetwork_task_finished_total`, and `urnetwork_task_balked_total` time series.
+These three process-local, label-free counters use acknowledged transaction
+commit replies, not queue aggregate queries. Rate each process before summing
+all scraped producer services in the selected environment; dashboard worker
+host/block filters do not restrict this lifecycle row. Missing publishers remain
+no-data, and observed series do not prove complete fleet coverage.
+
+Submitted counts newly inserted pending rows, including continuations, durable
+post-retry tasks and materialized RunOnce successors. Finished counts the first
+pending-to-finished move, including completions whose optional post is retried.
+Function errors that merely reschedule the same row are neither event. Balked
+counts a submission that conflicts with an existing RunOnce key, including
+accepted metadata/wake coalescing and committed IfAbsent refusals. A conflict
+during active execution can still cause a later successor, counted as submitted
+when inserted. An internal wake that merges into a post-created successor is
+another coalesced submission. This is not an execution failure or lost-work rate.
+
+Single and batched producers/finalizers register events with their exact outer
+transaction. Failed required batches, body rollback and retried attempts do not
+publish; an unknown commit reply remains an observation gap. Optional posts run
+after publication. Counters reset with process lifetime and are not crash-durable
+history; no IDs, task names, args or private result text become labels.

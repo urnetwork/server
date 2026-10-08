@@ -557,14 +557,14 @@ func writeLegacyFinancialCohortInTx(ctx context.Context, tx server.PgTx, contrac
 		}
 	}
 	if len(required) > 0 {
-		task.QueueRequiredTasksInBatch(batch, ApplyLegacyProviderTotals, required, owner, task.MaxTime(10*time.Second), task.RequireQueueOwnership(tx))
+		task.QueueRequiredTasksInBatch(tx, batch, ApplyLegacyProviderTotals, required, owner, task.MaxTime(10*time.Second), task.RequireQueueOwnership(tx))
 	}
 	for _, id := range balances {
 		data, err := json.Marshal(legacyNetEscrowMirrorPayload{Private: true, Version: 1, BalanceId: id})
 		if err != nil {
 			return nil, err
 		}
-		task.QueueTaskInBatch(batch, ApplyLegacyNetEscrowMirror, json.RawMessage(data), owner,
+		task.QueueTaskInBatch(tx, batch, ApplyLegacyNetEscrowMirror, json.RawMessage(data), owner,
 			task.RunOnce("legacy_net_escrow_mirror", id), task.MaxTime(netEscrowMirrorTimeout), task.RequireQueueOwnership(tx))
 	}
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil {

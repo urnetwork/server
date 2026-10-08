@@ -20,7 +20,8 @@ type RequiredTaskBatchItem[T any] struct {
 // The caller must drain the batch and roll back on error. Exact returned IDs
 // and run-once keys prove every required owner was inserted; a conflicting row
 // is never overwritten or accepted as a replacement for the new payload.
-func QueueRequiredTasksInBatch[T any, R any](batch server.PgBatch, taskFunction TaskFunction[T, R], items []RequiredTaskBatchItem[T], clientSession *session.ClientSession, opts ...any) {
+func QueueRequiredTasksInBatch[T any, R any](tx server.PgTx, batch server.PgBatch, taskFunction TaskFunction[T, R], items []RequiredTaskBatchItem[T], clientSession *session.ClientSession, opts ...any) {
+	requireTaskPublicationBackend(tx, opts)
 	if len(items) < 1 || len(items) > 64 {
 		panic("required task batch must contain one through sixty-four owners")
 	}
@@ -84,6 +85,7 @@ func QueueRequiredTasksInBatch[T any, R any](batch server.PgBatch, taskFunction 
 		if len(seen) != len(expected) {
 			return fmt.Errorf("required task batch lost an immutable owner")
 		}
+		server.AddTxCommitCount(tx, &taskSubmittedCounter, uint64(len(seen)))
 		return nil
 	})
 }
