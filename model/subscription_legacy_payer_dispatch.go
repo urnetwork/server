@@ -43,7 +43,22 @@ func DispatchLegacySettlementPayers(ctx context.Context, shard int, after *Legac
 	bounded, cancel := context.WithTimeoutCause(ctx, 5*time.Second, errLegacySettlementDispatchBudget)
 	defer cancel()
 	return dispatchLegacySettlementPayersPage(ctx, bounded, shard, after, payerAfter,
-		nextLegacySettlementPayer, registerLegacySettlementPayerPage)
+		nextLegacySettlementPayer, registerLegacySettlementPayerDispatchPage)
+}
+
+// A valid missing-key index gives registration its own finite progress lane.
+// Rewalking a registered chronological prefix must not hold newer unregistered
+// work behind that pass's fixed cutoff. An unavailable index keeps the original
+// chronological fallback; both paths share the caller's registration budget.
+func registerLegacySettlementPayerDispatchPage(ctx context.Context, shard int, after *LegacySettlementCursor) (*LegacySettlementCursor, int) {
+	bounded, cancel := context.WithTimeout(ctx, legacySettlementPayerIndexBudget)
+	ready, err := readLegacySettlementPayerIndexes(bounded)
+	ready = ready && err == nil && bounded.Err() == nil
+	cancel()
+	if ready {
+		return after, registerLegacySettlementPayers(ctx, shard)
+	}
+	return registerLegacySettlementPayerPage(ctx, shard, after)
 }
 
 // Only this page owns its time budget. A completed discovery prefix can be
