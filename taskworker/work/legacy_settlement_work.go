@@ -2,6 +2,7 @@
 package work
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -18,6 +19,7 @@ type FlushLegacySettlementsArgs struct {
 }
 type FlushLegacySettlementsResult struct {
 	model.LegacySettlementShardResult
+	Dispatch *model.LegacySettlementDispatchResult `json:"dispatch,omitempty"`
 }
 
 func scheduleFlushLegacySettlements(clientSession *session.ClientSession, tx server.PgTx, shard int, after *model.LegacySettlementCursor, payerAfter *model.LegacySettlementPayerCursor, more bool) {
@@ -34,10 +36,26 @@ func ScheduleFlushLegacySettlements(clientSession *session.ClientSession, tx ser
 	}
 }
 func FlushLegacySettlements(args *FlushLegacySettlementsArgs, clientSession *session.ClientSession) (*FlushLegacySettlementsResult, error) {
-	result, err := model.FlushLegacySettlementShard(clientSession.Ctx, args.Shard, args.Cursor, args.PayerCursor, model.LegacySettlementPageLimit)
-	return &FlushLegacySettlementsResult{LegacySettlementShardResult: result}, err
+	result, err := model.DispatchLegacySettlementPayers(clientSession.Ctx, args.Shard, args.Cursor, args.PayerCursor)
+	if errors.Is(err, model.ErrLegacySettlementPayerIndexUnavailable) {
+		// Index/schema visibility is a scheduling prerequisite. Preserve the
+		// original guarded service during migration or a transient read error.
+		legacy, legacyErr := model.FlushLegacySettlementShard(clientSession.Ctx, args.Shard, args.Cursor, args.PayerCursor, model.LegacySettlementPageLimit)
+		return &FlushLegacySettlementsResult{LegacySettlementShardResult: legacy}, legacyErr
+	}
+	return &FlushLegacySettlementsResult{Dispatch: &result}, err
 }
 func FlushLegacySettlementsPost(args *FlushLegacySettlementsArgs, result *FlushLegacySettlementsResult, clientSession *session.ClientSession, tx server.PgTx) error {
+	if result.Dispatch != nil {
+		for _, payerNetworkId := range result.Dispatch.PayerNetworkIds {
+			model.QueueLegacyPayerSettlementsInTx(clientSession, tx, payerNetworkId)
+		}
+		scheduleFlushLegacySettlements(clientSession, tx, args.Shard, result.Dispatch.Cursor,
+			result.Dispatch.PayerCursor, result.Dispatch.More)
+		return nil
+	}
+	// A persisted RunPost from the earlier financial target still owns its
+	// original continuation. The next invocation enters dispatch above.
 	scheduleFlushLegacySettlements(clientSession, tx, args.Shard, result.Cursor, result.PayerCursor, result.More && result.Failed == 0 && result.Completed > 0)
 	return nil
 }

@@ -34,6 +34,7 @@ func testLegacyPayerFairnessTaskDensePrefix(t *testing.T, holdPrefix bool) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 		defer cancel()
+		ctx = model.Testing_WithLegacyPayerSettlementCollectionWindow(ctx)
 		type payerFixture struct {
 			sourceNetworkId      server.Id
 			sourceId             server.Id
@@ -197,26 +198,25 @@ func testLegacyPayerFairnessTaskDensePrefix(t *testing.T, holdPrefix bool) {
 		owner := session.NewLocalClientSession(ctx, "192.0.2.1:0", nil)
 		defer owner.Cancel()
 		args := FlushLegacySettlementsArgs{Shard: 1}
-		visited, completed, busy, payerCompleted := 0, 0, 0, 0
+		visited, completed, busy, payerCompleted, financialPages := 0, 0, 0, 0, 0
+		settings := task.DefaultTaskWorkerSettings()
+		settings.ClaimRegisteredTargetsOnly = true
+		worker := task.NewTaskWorker(ctx, settings)
+		defer worker.Close()
+		worker.AddTargets(model.NewLegacyPayerSettlementTaskTarget())
 		for range boundedPages {
 			before, err := json.Marshal(args)
 			server.Raise(err)
 			result, err := FlushLegacySettlements(&args, owner)
-			if err != nil || result == nil || result.Failed != 0 || result.PayerFailed != 0 ||
-				result.PayerRegistrationFailed || result.Visited <= 0 || result.Visited > model.LegacySettlementPageLimit ||
-				result.PayerVisited > result.Visited || result.PayerCompleted > result.Completed ||
-				result.Cursor == nil || !result.More {
-				t.Fatalf("actual recurring task did not return a bounded financial page: %+v err=%v", result, err)
+			if err != nil || result == nil || result.Dispatch == nil || result.Dispatch.RegistrationFailed ||
+				result.Dispatch.Probes > 16 || result.Completed != 0 || result.Visited != 0 {
+				t.Fatalf("recurring shard did financial work or lost bounded dispatch: %+v err=%v", result, err)
 			}
 			after, err := json.Marshal(args)
 			server.Raise(err)
-			if !bytes.Equal(before, after) || !holdPrefix && result.BusyOrGone != 0 {
-				t.Fatal("task mutated input cursors or healthy fixture encountered contention")
+			if !bytes.Equal(before, after) {
+				t.Fatal("dispatcher mutated its input cursor")
 			}
-			visited += result.Visited
-			completed += result.Completed
-			busy += result.BusyOrGone
-			payerCompleted += result.PayerCompleted
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key='["flush_legacy_settlements_1"]'`))
 				server.Raise(FlushLegacySettlementsPost(&args, result, owner, tx))
@@ -228,12 +228,42 @@ func testLegacyPayerFairnessTaskDensePrefix(t *testing.T, holdPrefix bool) {
 			})
 			args = FlushLegacySettlementsArgs{}
 			server.Raise(json.Unmarshal(persisted, &args))
-			expected, err := json.Marshal(FlushLegacySettlementsArgs{Shard: 1, Cursor: result.Cursor, PayerCursor: result.PayerCursor})
+			expected, err := json.Marshal(FlushLegacySettlementsArgs{Shard: 1, Cursor: result.Dispatch.Cursor, PayerCursor: result.Dispatch.PayerCursor})
 			server.Raise(err)
 			restarted, err := json.Marshal(args)
 			server.Raise(err)
 			if !bytes.Equal(expected, restarted) {
-				t.Fatal("post callback lost a cursor in the durable restart")
+				t.Fatal("dispatch handoff lost a durable cursor")
+			}
+			var availableBlock int64
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT max(available_block) FROM pending_task WHERE function_name=$1`,
+					model.NewLegacyPayerSettlementTaskTarget().TargetFunctionName()).Scan(&availableBlock))
+			})
+			select {
+			case <-time.After(time.Until(time.Unix(availableBlock, 0))):
+			case <-ctx.Done():
+				t.Fatal("bounded fairness owners did not become claim eligible", ctx.Err())
+			}
+			finished, retried, postRetried, err := worker.EvalTasks(2)
+			if err != nil || len(retried)+len(postRetried) != 0 {
+				t.Fatal("actual payer task failed", err, len(retried), len(postRetried))
+			}
+			for _, done := range task.GetFinishedTasks(ctx, finished...) {
+				var result model.LegacyPayerSettlementResult
+				var scope model.LegacyPayerSettlementArgs
+				server.Raise(json.Unmarshal([]byte(done.ResultJson), &result))
+				server.Raise(json.Unmarshal([]byte(done.ArgsJson), &scope))
+				if result.Pages < 1 || result.Visited > result.Pages*model.LegacySettlementPageLimit || result.Failed != 0 {
+					t.Fatal("payer task exceeded its per-page financial bound", result)
+				}
+				visited += result.Visited
+				financialPages += result.Pages
+				completed += result.Completed
+				busy += result.BusyOrGone
+				if scope.PayerNetworkId == targetOwner.sourceNetworkId {
+					payerCompleted += result.Completed
+				}
 			}
 		}
 		// The exact audit above intentionally left the durable admission
@@ -271,9 +301,9 @@ func testLegacyPayerFairnessTaskDensePrefix(t *testing.T, holdPrefix bool) {
 			}
 		}
 		proof := assertTarget(true)
-		if payerCompleted < 1 || visited > boundedPages*model.LegacySettlementPageLimit || completed < 1 ||
+		if payerCompleted < 1 || visited > financialPages*model.LegacySettlementPageLimit || completed < 1 ||
 			holdPrefix && (completed != 1 || busy == 0) {
-			t.Fatal("independent payer was not served within two bounded actual task pages", visited, completed, busy, payerCompleted)
+			t.Fatal("independent payer was not served within two bounded dispatch pages", visited, completed, busy, payerCompleted)
 		}
 		replay, err := model.DrainLegacySettlements(ctx, model.LegacySettlementDrainRequest{
 			ExpectedPayerNetworkId: targetOwner.sourceNetworkId, ContractIds: []server.Id{target}, Apply: true,

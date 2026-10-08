@@ -86,6 +86,6 @@ func transferEscrowTx(ctx context.Context, payer server.Id, requested ByteCount,
 		defer release()
 	}
 	defer server.EnterContractCreationStage(ctx, server.ContractStageTransaction)()
-	server.Tx(ctx, callback, server.TxReadCommitted)
+	server.Tx(ctx, callback, server.TxReadCommitted, server.OptNoRetry())
 	return nil
 }

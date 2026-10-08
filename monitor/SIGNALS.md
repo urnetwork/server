@@ -5079,6 +5079,29 @@ The current 256-visit and payer-turn profiles below supersede the historical
 page/count limits; consumers must bind the exact producer before interpreting
 either profile.
 
+Payer task collection and turn policy (2026-10-08 candidate): initial dispatcher
+publication requests a run thirty seconds later. Tests opt their scheduling and
+worker contexts into five seconds; they retain that real wait in latency and
+throughput denominators. Repeated initial requests preserve the earliest
+deadline rather than restarting collection. RunOnce requests arriving after an
+owner becomes active define the next run by their earliest requested time;
+the old active deadline is not a new request. An explicit immediate Post
+continuation is also a request, so the payer Post distinguishes unfinished work
+inside its fixed database pass from arrivals afterward. New-pass work requests
+another collection window; existing accounting cooldowns remain later bounds.
+
+One admitted payer task can execute several healthy 256-visit pages under one
+fixed fifteen-second context. Each financial transaction still covers at most
+eight contracts. Each page joins its own bounded projection batch before the
+next page starts. EOF, a busy page, an accounting refusal or the owned budget
+yields to durable continuation; parent cancellation and unrelated failures
+remain errors. The result's `pages` and retained `pass_end_time` separate this
+profile from a single page. Its timing fields cover the full admitted turn, and
+`payer_turn` traces need their own source-qualified consumer profile. Detached
+transaction cleanup and joined projection deadlines mean the context is not a
+hard end-to-end wall-time guarantee. This candidate policy alone does not prove
+zero contention, all-writer ownership, fleet rollout or a throughput target.
+
 Legacy mirror ownership (2026-10-06): each inline settlement also touches one
 immutable `ApplyLegacyNetEscrowMirror` pending task per affected balance in its
 financial transaction. Repeated closes share that owner. The foreground mirror

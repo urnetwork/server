@@ -206,3 +206,37 @@ func TestLegacyTargetTraceConcurrentLoadingSkipsObservation(t *testing.T) {
 		t.Fatal("concurrent loading altered a page or allocated publication")
 	}
 }
+
+// A payer turn spans original shards, but only the private selected target can
+// emit events. Both cross-shard origins retain finite activation and lane names.
+func TestLegacyTargetTracePayerTurnActivationAndSelection(t *testing.T) {
+	// A preloaded runtime skips reading this synthetic path, while the
+	// explicit nonempty setting still admits the production diagnostic.
+	t.Setenv("URN_LEGACY_SETTLEMENT_TRACE_FILE", filepath.Join(t.TempDir(), "preloaded-private-plan.json"))
+	id := server.NewId()
+	plan := legacyTraceTestPlan(id)
+	runtime := &legacyTargetTraceRuntime{loaded: true, plan: &plan, output: make(chan legacyTargetTraceEnvelope, 64)}
+	if runtime.begin(-1, nil, "unrecognized_turn", nil) != nil {
+		t.Fatal("unknown origin bypassed the original shard scope")
+	}
+	for _, origin := range []string{"payer_turn", "payer_page"} {
+		trace := runtime.begin(-1, nil, origin, nil)
+		if trace == nil || trace.result.Origin != origin {
+			t.Fatal("declared payer producer could not activate", origin)
+		}
+		ctx := t.Context()
+		if trace.selectTarget(ctx, server.NewId(), false) != ctx {
+			t.Fatal("payer producer selected an unrelated private target", origin)
+		}
+		trace.selectTarget(ctx, id, false)
+		trace.selectTarget(ctx, id, true)
+		result := trace.finish(LegacySettlementFlushResult{Visited: 1024, Completed: 1024}, nil)
+		if result.Selected != 2 || !legacyTraceHas(result, "selected", "forward") ||
+			!legacyTraceHas(result, "selected", "head") || legacyTraceHas(result, "selected", "explicit_owner") || !result.PageReturned {
+			t.Fatal("payer producer mislabeled its automatic visits", origin, result)
+		}
+	}
+	if runtime.begin(-1, nil, "payer_turn", nil) != nil || runtime.pages != plan.MaxPages {
+		t.Fatal("multi-page turn bypassed the finite invocation cap")
+	}
+}

@@ -69,6 +69,8 @@ type LegacySettlementFlushResult struct {
 	Failed     int                      `json:"failed"`
 	More       bool                     `json:"more"`
 	Timings    *LegacySettlementTimings `json:"timings,omitempty"`
+	// Retain the fixed traversal boundary even when EOF clears the cursor.
+	PassEndTime time.Time `json:"pass_end_time,omitzero"`
 	// Cohort input selection is not proof of a financial visit. Completed
 	// counts are confirmed per-contract outcomes; attempts include rollback.
 	FinancialCohortAttempts  int `json:"financial_cohort_attempts"`
@@ -189,6 +191,9 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 		traceLegacySettlement(ctx, "grant_membership", "returned")
 		locked, err := lockLegacySettlementGrantsInTx(ctx, tx, contractId, wait)
 		if err != nil {
+			if errors.Is(err, errTransferBalanceOwnershipBusy) {
+				return nil, false, true, legacySettlementBusyAdmission, nil
+			}
 			return nil, false, false, legacySettlementBusyNone, err
 		}
 		if locked != expected {
@@ -224,6 +229,13 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 // head instead gets one whole-statement wait budget, not a budget per grant row.
 func lockLegacySettlementGrantsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, wait *legacySettlementGrantWait) (locked int, returnErr error) {
 	defer enterLegacyTargetTrace(ctx, "grant_lock")()
+	admitted, err := tryContractTransferBalanceOwnershipInTx(ctx, tx, []server.Id{contractId})
+	if err != nil {
+		return 0, err
+	}
+	if !admitted {
+		return 0, errTransferBalanceOwnershipBusy
+	}
 	if wait != nil {
 		traceLegacySettlement(ctx, "grant_wait", "allocated")
 	}
@@ -378,6 +390,9 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 	cohort ...func(context.Context, []server.Id) ([]legacyFinancialCohortAttempt, error)) (result LegacySettlementFlushResult, returnErr error) {
 	bounded, finishPosts := withLegacySettlementPostBatch(bounded)
 	defer finishPosts()
+	if after != nil {
+		result.PassEndTime = after.PassEndTime
+	}
 	bounded = context.WithValue(bounded, legacySettlementAdmissionPageKey{}, &legacySettlementAdmissionPage{allowForwardHints: after != nil, probed: map[string]bool{}})
 	pageBudgetExceeded := func(err error) bool {
 		return ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errLegacySettlementPageBudget &&
@@ -453,6 +468,10 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 							}
 						}
 						query = strings.Replace(query, "LIMIT 1", fmt.Sprintf("LIMIT %d", lookupLimit), 1)
+						if payer, ok := bounded.Value(legacySettlementPayerScopeKey{}).(server.Id); ok {
+							query = legacySettlementPayerSelectionSql(query, lookupLimit)
+							args[0] = payer
+						}
 						rows, err := conn.Query(bounded, query, args...)
 						server.WithPgResult(rows, err, func() {
 							for rows.Next() {
@@ -484,6 +503,7 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 				result.Cursor = nil
 				return
 			}
+			result.PassEndTime = next.PassEndTime
 			var grantWait *legacySettlementGrantWait
 			if visitHead && result.HeadVisited%legacySettlementHeadGrantWaitStride == 0 {
 				grantWait = &legacySettlementGrantWait{}

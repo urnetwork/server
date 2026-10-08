@@ -13,12 +13,24 @@ import (
 	"github.com/urnetwork/server"
 )
 
-const legacyFinancialCohortOutcomeSql = `UPDATE transfer_contract SET outcome=owned.outcome,
+// The owner already holds these logical rows. Fresh statement-local tuple
+// addresses bound the target scan; logical keys and exact results retain custody.
+const legacyFinancialCohortOutcomeSql = `WITH bounded_owned AS MATERIALIZED (
+    SELECT requested.*,picked.row_tid
+    FROM unnest($1::uuid[],$2::text[],$3::text[],$4::boolean[])
+        AS requested(contract_id,outcome,provider_usage,clear_dispute)
+    CROSS JOIN LATERAL (
+        SELECT point_contract.ctid AS row_tid FROM transfer_contract AS point_contract
+        WHERE point_contract.contract_id=requested.contract_id LIMIT 1 OFFSET 0
+    ) AS picked
+)
+    UPDATE transfer_contract SET outcome=owned.outcome,
     close_time=clock_timestamp() AT TIME ZONE 'UTC',provider_usage=owned.provider_usage::jsonb,
     dispute=CASE WHEN owned.clear_dispute THEN false ELSE transfer_contract.dispute END
-    FROM unnest($1::uuid[],$2::text[],$3::text[],$4::boolean[])
-        AS owned(contract_id,outcome,provider_usage,clear_dispute)
-    WHERE transfer_contract.contract_id=owned.contract_id AND transfer_contract.outcome IS NULL
+    FROM bounded_owned AS owned
+    WHERE transfer_contract.contract_id=owned.contract_id
+        AND transfer_contract.ctid=ANY(ARRAY(SELECT row_tid FROM bounded_owned))
+        AND CASE WHEN transfer_contract.outcome IS NULL THEN true ELSE false END
     RETURNING transfer_contract.contract_id,transfer_contract.close_time`
 
 // Every returned identity must match exactly one admitted owner. The two
@@ -76,10 +88,20 @@ func queueLegacyFinancialCohortOutcomes(batch *pgx.Batch, contracts []*legacyFin
 	return nil
 }
 
-const legacyFinancialCohortMetadataSql = `UPDATE transfer_escrow AS escrow
+const legacyFinancialCohortMetadataSql = `WITH bounded_owned AS MATERIALIZED (
+    SELECT requested.*,picked.row_tid
+    FROM unnest($1::uuid[],$2::uuid[],$3::bigint[]) AS requested(contract_id,balance_id,byte_count)
+    CROSS JOIN LATERAL (
+        SELECT point_escrow.ctid AS row_tid FROM transfer_escrow AS point_escrow
+        WHERE point_escrow.contract_id=requested.contract_id
+            AND point_escrow.balance_id=requested.balance_id LIMIT 1 OFFSET 0
+    ) AS picked
+)
+    UPDATE transfer_escrow AS escrow
     SET settled=true,settle_time=$4,payout_byte_count=owned.byte_count
-    FROM unnest($1::uuid[],$2::uuid[],$3::bigint[]) AS owned(contract_id,balance_id,byte_count)
-    WHERE escrow.contract_id=owned.contract_id AND escrow.balance_id=owned.balance_id`
+    FROM bounded_owned AS owned
+    WHERE escrow.contract_id=owned.contract_id AND escrow.balance_id=owned.balance_id
+        AND escrow.ctid=ANY(ARRAY(SELECT row_tid FROM bounded_owned))`
 
 // A single statement advances each distinct affected grant revision once. It
 // follows the completed outcome statement, whose trigger saw unsettled rows.

@@ -302,6 +302,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		),
 		task.NewTaskTargetWithPost(work.FlushTransferDebits, work.FlushTransferDebitsPost),
 		task.NewTaskTargetWithPost(work.FlushLegacySettlements, work.FlushLegacySettlementsPost),
+		model.NewLegacyPayerSettlementTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.ReconcileNetEscrow,
 			work.ReconcileNetEscrowPost,

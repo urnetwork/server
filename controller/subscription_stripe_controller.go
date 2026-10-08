@@ -1262,7 +1262,7 @@ func stripeHandleRefund(
 			// the ledger row and the clawback) so Stripe retries the whole thing
 			server.Raise(eventErr)
 		}
-	})
+	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if handled {
 		for _, networkId := range endedNetworkIds {

@@ -174,28 +174,52 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 		}
 	}
 	balanceIdSet := map[server.Id]bool{}
+	ownershipBalanceIdSet := map[server.Id]bool{}
 	if len(ownedIds) > 0 {
-		// Preserve inner-join membership: an absent unused grant is not an
-		// extra financial refusal. Each contract keeps its exact joined ids.
-		rows, err = tx.Query(ctx, `SELECT requested.contract_id,escrow.balance_id
+		// Missing grants still have escrow revision ownership, but do not
+		// become financial membership. Bound each exact contract seek before
+		// its join so a dangling history cannot expand before the sentinel.
+		rows, err = tx.Query(ctx, `SELECT requested.contract_id,escrow.balance_id,balance.balance_id IS NOT NULL
             FROM unnest($1::uuid[]) AS requested(contract_id)
             CROSS JOIN LATERAL (SELECT balance_id FROM transfer_escrow
-                WHERE contract_id=requested.contract_id OFFSET 0) AS escrow
-            CROSS JOIN LATERAL (SELECT balance_id FROM transfer_balance
-                WHERE balance_id=escrow.balance_id OFFSET 0) AS balance LIMIT $2`, ownedIds, legacyFinancialCohortEscrowLimit+1)
-		membershipRows := 0
+                WHERE contract_id=requested.contract_id ORDER BY balance_id LIMIT $2 OFFSET 0) AS escrow
+            LEFT JOIN LATERAL (SELECT balance_id FROM transfer_balance
+                WHERE balance_id=escrow.balance_id OFFSET 0) AS balance ON true LIMIT $2`, ownedIds, legacyFinancialCohortEscrowLimit+1)
+		escrowRows := 0
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
-				membershipRows++
+				escrowRows++
 				var id, balanceId server.Id
-				server.Raise(rows.Scan(&id, &balanceId))
-				contracts[id].expectedBalanceIds = append(contracts[id].expectedBalanceIds, balanceId)
-				balanceIdSet[balanceId] = true
+				var member bool
+				server.Raise(rows.Scan(&id, &balanceId, &member))
+				ownershipBalanceIdSet[balanceId] = true
+				if member {
+					contracts[id].expectedBalanceIds = append(contracts[id].expectedBalanceIds, balanceId)
+					balanceIdSet[balanceId] = true
+				}
 			}
 		})
-		if membershipRows > legacyFinancialCohortEscrowLimit {
+		if escrowRows > legacyFinancialCohortEscrowLimit {
 			return nil, nil, errLegacyFinancialCohortUnsupported
 		}
+	}
+	ownershipBalanceIds := make([]server.Id, 0, len(ownershipBalanceIdSet))
+	for id := range ownershipBalanceIdSet {
+		ownershipBalanceIds = append(ownershipBalanceIds, id)
+	}
+	ownershipAdmitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ownershipBalanceIds)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !ownershipAdmitted {
+		// No shared financial statement has entered. Keep every durable
+		// intent and yield this bounded payer cohort to its current owner.
+		for _, id := range contractIds {
+			attempts = append(attempts, legacyFinancialCohortAttempt{
+				contractId: id, busy: true, busyGate: legacySettlementBusyAdmission,
+			})
+		}
+		return attempts, nil, nil
 	}
 	balanceIds := make([]server.Id, 0, len(balanceIdSet))
 	for id := range balanceIdSet {

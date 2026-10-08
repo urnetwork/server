@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"time"
 
@@ -117,6 +118,30 @@ func lockTransferEscrowBalanceRows(
 			AND start_balance_byte_count >= $4`
 		args = append(args, candidateIds, ProberTransferBalanceTopUp)
 	}
+	ownershipIds := candidateIds
+	if ownershipIds == nil {
+		// Discover the complete eligible key set before any grant row lock.
+		// The locking read below is constrained to those admitted identities;
+		// a newly inserted grant cannot enter it without an ownership check.
+		rows, err := tx.Query(ctx, `SELECT selected.balance_id FROM (`+sql+`) AS selected`, args...)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var id server.Id
+				server.Raise(rows.Scan(&id))
+				ownershipIds = append(ownershipIds, id)
+			}
+		})
+	}
+	if len(ownershipIds) == 0 {
+		return nil
+	}
+	admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ownershipIds)
+	server.Raise(err)
+	if !admitted {
+		server.Raise(errTransferBalanceOwnershipBusy)
+	}
+	args = append(args, ownershipIds)
+	sql += fmt.Sprintf(" AND balance_id=ANY($%d::uuid[])", len(args))
 	if skipLocked {
 		// Read at most one row from this bounded preference list. LIMIT stops
 		// row locking after one available grant; SKIP LOCKED lets a different
@@ -184,10 +209,30 @@ func loadTransferEscrowBalances(
 		return balances
 	}
 	if requestedBytes > 0 {
+		// This compatibility allocator may expand its16/48 preference to
+		// the complete eligible set. Admit that possible scope once before
+		// shared locks or speculative savepoints. Only IDs are discovered;
+		// the established preference and exact financial census stay below.
+		// Public Redis admission returns before this legacy path.
+		var ownershipIds []server.Id
+		rows, err := tx.Query(ctx, `SELECT balance_id FROM transfer_balance
+ WHERE network_id=$1 AND active AND start_time<=$2 AND $2<end_time ORDER BY balance_id`, payerNetworkId, now)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var id server.Id
+				server.Raise(rows.Scan(&id))
+				ownershipIds = append(ownershipIds, id)
+			}
+		})
+		admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ownershipIds)
+		server.Raise(err)
+		if !admitted {
+			server.Raise(errTransferBalanceOwnershipBusy)
+		}
 		balances := []*escrowTransferBalance{}
 		internalProber := false
 		rawCount := 0
-		rows, err := tx.Query(ctx, proberGrantSelectionSql, payerNetworkId, now, proberGrantFirstCount, ProberTransferBalanceTopUp)
+		rows, err = tx.Query(ctx, proberGrantSelectionSql, payerNetworkId, now, proberGrantFirstCount, ProberTransferBalanceTopUp)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				balance := &escrowTransferBalance{}

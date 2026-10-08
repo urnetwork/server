@@ -2613,7 +2613,7 @@ func closeContractReport(
 	terminalReplay := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		applied, terminalReplay, returnErr = applyContractCloseReportInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId)
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if terminalReplay {
 		return
@@ -3228,21 +3228,16 @@ func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId 
 	return settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, contractId, outcome, nil)
 }
 
-// Scoped Redis expiry already commits the debit worker's recovery authority.
-// It leaves metadata and reservation release to that owner, preserving clock
-// posts: the clock's startup aggregate backfill is not a per-contract retry.
-func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, scope *contractExpiryRepairScope) ([]func() any, bool, error) {
-	return settleEscrowWithProjectionOptionsInTx(ctx, tx, contractId, outcome, true, false, scope != nil && scope.redis != nil)
+// Ordinary and scoped closes use the same durable debit owner. The caller's
+// expiry transaction already enforces its scope before this continuation.
+func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, _ *contractExpiryRepairScope) ([]func() any, bool, error) {
+	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, true, false)
 }
 
 // Current Redis contracts append independent consumption records. Legacy
 // callers queue an intent without releasing their reservation; the worker uses
 // the original atomic debit/outcome path and commits exact earnings plus durable total-projection ownership.
 func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
-	return settleEscrowWithProjectionOptionsInTx(ctx, tx, contractId, outcome, deferLegacy, inlineFinancial, false)
-}
-
-func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial, deferRedisDebitPosts bool) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
@@ -3251,7 +3246,6 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 	var asyncDebit, hasEscrow bool
 	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(bool_and(redis_reserved),false),count(*)>0
         FROM transfer_escrow WHERE contract_id=$1`, contractId).Scan(&asyncDebit, &hasEscrow))
-	deferRedisDebitPosts = deferRedisDebitPosts && asyncDebit
 	if deferLegacy && hasEscrow && !asyncDebit {
 		return nil, false, queueLegacySettlementInTx(ctx, tx, contractId, outcome, false)
 	}
@@ -3260,6 +3254,13 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 	if asyncDebit {
 		result, err = tx.Query(ctx, `SELECT balance_id FROM transfer_escrow WHERE contract_id=$1 ORDER BY balance_id`, contractId)
 	} else {
+		admitted, ownershipErr := tryContractTransferBalanceOwnershipInTx(ctx, tx, []server.Id{contractId})
+		if ownershipErr != nil {
+			return nil, false, ownershipErr
+		}
+		if !admitted {
+			return nil, false, errTransferBalanceOwnershipBusy
+		}
 		result, err = tx.Query(ctx, `
 			SELECT transfer_balance.balance_id
 			FROM transfer_balance INNER JOIN transfer_escrow USING (balance_id)
@@ -3360,14 +3361,14 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 		metadataPost := func() any {
 			server.Tx(ctx, func(tx server.PgTx) {
 				settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
-			}, server.TxReadCommitted)
+			}, server.TxReadCommitted, server.OptNoRetry())
 			return nil
 		}
-		if inlineFinancial {
+		if inlineFinancial && !asyncDebit {
 			// Only the synchronous branch actually owns the grant rows. Reuse
 			// its exact reservation locks and already-advanced snapshots when
 			// they cover every metadata target; unusual sets retain fresh locks.
-			if asyncDebit || !settleEscrowOwnedMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts, positiveReservations, reservationSnapshots) {
+			if !settleEscrowOwnedMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts, positiveReservations, reservationSnapshots) {
 				settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
 			}
 			metadataPost = func() any { return nil }
@@ -3428,15 +3429,18 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 			} else {
 				posts = append(posts, metadataPost, mirrorPost)
 			}
-		} else if !deferRedisDebitPosts {
+		} else if !asyncDebit {
 			posts = append(posts, metadataPost)
 		}
 	}
 
-	if len(redisReservations) > 0 && !deferRedisDebitPosts {
+	// The durable debit worker alone updates marked escrow metadata and releases
+	// its Redis reservation after the debit commit. A foreground metadata post
+	// can race that same row; releasing earlier also duplicates its cleanup work.
+	// Retain the original reservation until the worker confirms consumption.
+	// Unusual mixed-mode reservations keep their existing reconciliation path.
+	if len(redisReservations) > 0 && !asyncDebit {
 		posts = append(posts, func() any {
-			// Read committed journal state, not captured transaction predictions.
-			// Lost posts leave the original reservation conservatively outstanding.
 			ReconcileRedisContractReservation(ctx, contractId)
 			return nil
 		})
@@ -5170,6 +5174,24 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 	for {
 		var processedCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			// Fix the bounded contract slice before shared balance ownership.
+			// The mutation below can only revisit these admitted identities;
+			// newly due contracts remain for the next pass.
+			var contractIds []server.Id
+			rows, err := tx.Query(ctx, `SELECT contract_id FROM transfer_contract
+ WHERE reap_time IS NOT NULL AND reap_time<$1 ORDER BY reap_time LIMIT $2`, minTime.UTC(), maxRowCount)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var id server.Id
+					server.Raise(rows.Scan(&id))
+					contractIds = append(contractIds, id)
+				}
+			})
+			admitted, err := tryContractTransferBalanceOwnershipInTx(ctx, tx, contractIds)
+			server.Raise(err)
+			if !admitted || len(contractIds) == 0 {
+				return
+			}
 			result, err := tx.Query(
 				ctx,
 				`
@@ -5180,7 +5202,8 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					FROM transfer_contract
 					WHERE
 						transfer_contract.reap_time IS NOT NULL AND
-						transfer_contract.reap_time < $1
+						transfer_contract.reap_time < $1 AND
+						transfer_contract.contract_id=ANY($4::uuid[])
 					ORDER BY transfer_contract.reap_time
 					LIMIT $3
 				), protected AS MATERIALIZED (
@@ -5265,6 +5288,7 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 				minTime.UTC(),
 				minStragglerCreateTime.UTC(),
 				maxRowCount,
+				contractIds,
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
@@ -5275,7 +5299,7 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					}
 				}
 			})
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if processedCount == 0 || budgetEnd.Before(server.NowUtc()) {
 			return
 		}
@@ -5599,8 +5623,8 @@ func sweepOrphanCursor(
 		var sliceCount, deletedCount int64
 		var targets []any
 		gotRow := false
+		ownershipRefused := false
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			// reset in case the tx is retried on a transient error
 			sliceCount = 0
 			deletedCount = 0
 			gotRow = false
@@ -5614,13 +5638,22 @@ func sweepOrphanCursor(
 				scanTargets = append(scanTargets, &deletedCount)
 			}
 			scanTargets = append(scanTargets, targets...)
-			result, err := tx.Query(ctx, query, args...)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(scanTargets...))
-					gotRow = true
+			if step.table == "transfer_escrow" {
+				var admitted bool
+				sliceCount, lockedTuples, targets, gotRow, admitted = ownedTransferEscrowOrphanPageInTx(ctx, tx, firstSlice, cursor, sliceSize)
+				if !admitted {
+					ownershipRefused = true
+					return
 				}
-			})
+			} else {
+				result, err := tx.Query(ctx, query, args...)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(scanTargets...))
+						gotRow = true
+					}
+				})
+			}
 			// WithPgResult closes the page before the fresh snapshot is taken.
 			// The acquired child locks stay held until this transaction commits.
 			if 0 < len(lockedTuples) {
@@ -5631,7 +5664,15 @@ func sweepOrphanCursor(
 				server.Raise(err)
 				deletedCount = tag.RowsAffected()
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
+		if ownershipRefused {
+			// Keep the refused page's input cursor. Durable orphan rows remain
+			// discoverable after the admitted financial owner has completed.
+			if firstSlice {
+				return removedCount, rowCount, nil, false
+			}
+			return removedCount, rowCount, cursor, false
+		}
 
 		removedCount += deletedCount
 		rowCount += int(sliceCount)

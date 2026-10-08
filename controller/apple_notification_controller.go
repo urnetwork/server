@@ -143,7 +143,7 @@ func ProcessAppleNotification(
 		}
 
 		processed = appleCreditSubscriptionTransactionInTx(tx, ctx, notificationId, transaction)
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if processed {
 		model.UpdateProNetwork(ctx, transaction.networkId)

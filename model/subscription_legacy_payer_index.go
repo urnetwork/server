@@ -45,6 +45,32 @@ type legacySettlementPayerIndexCache struct {
 
 var legacySettlementPayerIndexes legacySettlementPayerIndexCache
 
+// Dispatch and payer execution need only this read index. An invalid optional
+// NULL-registration index must not disable already-registered payer service.
+const legacySettlementPayerDueIndexSql = `SELECT COALESCE(
+ index_relation.relkind='i'
+ AND index_state.indrelid=to_regclass('public.legacy_settlement_intent')
+ AND index_state.indisvalid AND index_state.indisready AND index_state.indislive
+ AND pg_get_indexdef(index_relation.oid)=
+ 'CREATE INDEX legacy_settlement_intent_payer_due ON public.legacy_settlement_intent USING btree (shard, payer_network_id, next_attempt_time, contract_id) WHERE (payer_network_id IS NOT NULL)', false)
+ FROM (VALUES ('public.legacy_settlement_intent_payer_due')) AS expected(name)
+ LEFT JOIN pg_class AS index_relation ON index_relation.oid=to_regclass(expected.name)
+ LEFT JOIN pg_index AS index_state ON index_state.indexrelid=index_relation.oid`
+
+// Each bounded task entry validates this one index outside financial locks.
+// Unlike the optional old scheduler, a concurrent cache refresh cannot be
+// mistaken for missing schema and send a healthy payer task into error backoff.
+func legacySettlementPayerDueIndexReady(ctx context.Context) (ready bool) {
+	bounded, cancel := context.WithTimeout(ctx, legacySettlementPayerIndexBudget)
+	defer cancel()
+	server.HandleError(func() {
+		server.Db(bounded, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(bounded, legacySettlementPayerDueIndexSql).Scan(&ready))
+		}, server.OptNoRetry())
+	}, func(error) { ready = false })
+	return
+}
+
 // Local resource reads and the catalog borrow/query share a nonretrying budget.
 // A malformed, oversized, unavailable or canceled resource takes the same safe
 // scheduling fallback; no new financial decision is made here.

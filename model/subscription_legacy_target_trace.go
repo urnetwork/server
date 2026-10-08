@@ -176,7 +176,7 @@ func (self *legacyTargetTraceRuntime) begin(shard int, after *LegacySettlementCu
 	}
 	plan := func() *legacyTargetTracePlan { self.stateLock.Lock(); defer self.stateLock.Unlock(); return self.plan }()
 	now := time.Now()
-	if plan == nil || shard != plan.Shard || now.Before(plan.Starts) || !now.Before(plan.Expires) {
+	if plan == nil || shard != plan.Shard && !(shard == -1 && (origin == "payer_page" || origin == "payer_turn")) || now.Before(plan.Starts) || !now.Before(plan.Expires) {
 		return nil
 	}
 	if explicit != nil && legacyTargetTraceDigest(plan.Capture, *explicit) != plan.TargetDigest {
@@ -284,7 +284,7 @@ func (self *legacyTargetTrace) selectTarget(ctx context.Context, id server.Id, h
 	if head {
 		lane = "head"
 	}
-	if self.result.Origin != "automatic_page" {
+	if self.result.Origin != "automatic_page" && self.result.Origin != "payer_page" && self.result.Origin != "payer_turn" {
 		lane = "explicit_owner"
 	}
 	self.record(ordinal, "selected", lane, 0)

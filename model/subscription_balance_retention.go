@@ -87,6 +87,11 @@ func removeCompletedTransferBalanceBatch(ctx context.Context, candidates []serve
 	var deletedIds []server.Id
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		deletedIds = nil
+		admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, candidates)
+		server.Raise(err)
+		if !admitted {
+			return
+		}
 		var lockedIds []server.Id
 		rows, err := tx.Query(ctx, completedTransferBalanceLockSql, candidates, minTime.UTC())
 		server.WithPgResult(rows, err, func() {
@@ -113,6 +118,6 @@ func removeCompletedTransferBalanceBatch(ctx context.Context, candidates []serve
 				deletedIds = append(deletedIds, id)
 			}
 		})
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 	refreshNetEscrow(ctx, deletedIds)
 }

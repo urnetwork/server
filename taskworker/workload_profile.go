@@ -141,6 +141,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.ReconcileNetEscrow), schedule: work.ScheduleReconcileNetEscrow},
 		{target: task.NewTaskTarget(work.FlushTransferDebits), schedule: work.ScheduleFlushTransferDebits},
 		{target: task.NewTaskTarget(work.FlushLegacySettlements), schedule: work.ScheduleFlushLegacySettlements},
+		{target: model.NewLegacyPayerSettlementTaskTarget()},
 		{target: task.NewTaskTarget(work.DbMaintenance), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
 			work.ScheduleDbMaintenance(clientSession, tx, 0)
 		}},
