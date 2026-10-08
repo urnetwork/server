@@ -5200,6 +5200,39 @@ contention boundary and its eventual settlement control.
 Probe: `legacy-settlements`
 Classes: `legacy-settlement-pending`, `legacy-settlement-worker-missing`.
 
+Payer-index readiness errors (2026-10-08): one bounded native capture on the
+selected edge1 Taskworker g1/g2 processes matched both container config digests
+and version labels to sealed R43 (`61338518`). The units were active/running,
+with zero recorded restarts and unchanged native identities between
+12:13:10.430 and 12:13:11.338 UTC. This is two-process image evidence; native
+executable bytes and fleet adoption were not measured.
+
+The 12:11:10.430–12:13:10.430 UTC journal window contained five matching
+structured records per block. Four per block were retained. Five were direct
+context-deadline errors at `db.go:659`: acquisition failed before the readiness
+callback. Three were joined timeout/context-deadline errors at `db.go:738`,
+after borrowing into the catalog callback. The latter identifies the client
+callback, not successful statement execution by PostgreSQL. Neither class
+contains a SQLSTATE. Both sample caps were hit; neither line cap was hit.
+Journal emission clocks are not original application event clocks.
+
+The source gives resource reading, acquisition and catalog lookup one maximum
+250ms context without retry; an earlier parent deadline can shorten it. The
+readiness handler catches both error classes. Its five-second cache publishes
+false, and the enclosing shard page selects chronological processing with the
+existing budget, post, cursor and financial guards. This source path does not
+prove that the resulting page completed or paid out. Missing or invalid indexes
+ordinarily produce false readiness without an error, so the captured deadlines
+justify no relaxation of catalog readiness checks.
+
+Pool occupancy, queue wait, connection construction, exact backend/lock
+ownership and CPU cause were not captured. Do not classify these recovered
+errors as Taskworker crashes, attribute them to the unfinished index migration,
+or extrapolate their sample counts into a settlement failure rate. The bounded
+replay is `current-taskworker-index-reduction-v1.json`, SHA256
+`37f82ebe337d10d0006c7e5a7117b0a4ce44ce800b0897c46c93da1263bf5431`, in
+`/home/by/urnetwork/temp/main-health-r1-20261008-v1`; original errors remain private.
+
 Checkpoint replay qualifier (2026-10-03): native `ControlSync` can deliver the
 same incremental checkpoint as a fresh operation after an application commit
 and lost transfer ACK. A real-controller/PostgreSQL control reproduces a final
