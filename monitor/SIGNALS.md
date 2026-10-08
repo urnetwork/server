@@ -3663,11 +3663,11 @@ retain precedence. Parent cancellation remains watcher lifecycle rather than
 an SSH failure, including cancellation while waiting for a shared command slot;
 the per-command deadline retains its timeout classification.
 
-Every monitor SSH command is noninteractive, identity-confined, and pinned to
-the operator-provisioned trust state: `BatchMode=yes`, `IdentitiesOnly=yes`,
+The monitor's built-in SSH defaults are noninteractive, identity-confined, and
+pinned to operator-provisioned trust state: `BatchMode=yes`, `IdentitiesOnly=yes`,
 `StrictHostKeyChecking=yes`, and `UpdateHostKeys=no`. The transport uses only
 the selected inventory identity paths and never accepts a new host key or
-rewrites trust state while observing production. An unknown or changed host
+rewrites trust state under that policy. An unknown or changed host
 key, or an unusable selected identity, is a `cannot-observe` result. Legitimate
 host-key rotation is operator-owned and must be preprovisioned in the
 monitor's known-hosts state before observation resumes.
@@ -3765,6 +3765,42 @@ the intended route owner, each failed target's path, or durable log loss.
 The later 23:33–23:43Z revalidation changed the fixed failure-class mix;
 §1.5 records that negative control separately rather than carrying this
 shared-overlay candidate forward as its established cause.
+
+**2026-10-08 local trust discriminator:** ten retained standing Alerts covered
+five inventory targets at 13:17:32Z (`mimir-index`) and 13:24:26Z
+(`warpctl-provenance`). They retained SSH exit 255 without stderr-stage evidence.
+Later local inspection of the actual watcher PATH wrapper and `ssh -G` found
+effective strict checking and a selected trust file with zero matching keys
+for exactly those five destinations; a sixth control destination had one.
+The effective configuration provided no alternative matching trust source.
+This establishes a current local trust prerequisite failure. It does not prove
+that trust caused every historical 255 or exclude simultaneous remote failures.
+Later unicast tunnel routes, advancing local counters, and a successful focused
+read to another target do not resolve those earlier transport outcomes.
+
+The operator had explicitly authorized ignoring host-key checks for this run.
+The reviewed local wrapper correction honors that exception with
+`StrictHostKeyChecking=no` and `UserKnownHostsFile=/dev/null`, preserving
+inventory target and client identity selection, `BatchMode=yes`,
+`IdentitiesOnly=yes`, `UpdateHostKeys=no`, and the existing shared admission.
+Local configuration controls verify that these first wrapper option values
+take precedence over later built-in defaults. Synthetic controls retain
+wrong-target, unknown-option, unqualified-trust-path, and native-generation
+refusals; the atomic replacement refuses a changed preimage or symlink.
+This policy does not authenticate the server's host key. Record the explicit
+operator authority and exact wrapper generation; do not describe a connection
+under it as trusted-key authentication. Existing SSH children are not signaled,
+and an applied wrapper affects future children without restarting the watcher.
+The local replacement completed at 13:58:22Z; the bounded post-apply read
+verified the new wrapper, unchanged watcher generation, and original trust-file
+hash. No trust file or private key was rewritten by the correction.
+
+FALSE POSITIVE QUALIFIER: the confirmed local strict-trust defect can make
+healthy remote services unobservable; neither exit 255 nor a failed local
+preflight proves a production fault. FALSE NEGATIVE QUALIFIER: a passing local
+policy/audit control or an applied wrapper proves no remote recovery. Require
+fresh concrete results from every affected standing target; retain gaps and
+the tail reconciliation window above until their own evidence closes them.
 
 ---
 
