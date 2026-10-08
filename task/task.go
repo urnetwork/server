@@ -1005,30 +1005,55 @@ func KickTasks(ctx context.Context, runOnceKey string) (kickedCount int64) {
 	return
 }
 
-// removes finished tasks older than `minTime` where the post was successfully
-// run. Tasks whose post permanently errored are kept longer for debugging but
-// still removed after `postErrorMinTime`, so they cannot strand forever.
+// Remove aged finished owners in bounded, independently admitted groups. An
+// old failed Post can still run, so age never substitutes for its finished-key
+// owner. Busy groups/rows remain for a later sweep without blocking other groups.
 func RemoveFinishedTasks(ctx context.Context, minTime time.Time, postErrorMinTime time.Time) (removeCount int64) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM finished_task
-				WHERE
-					(
-						run_end_time < $1 AND
-						(post_error IS NULL or post_completed)
-					) OR
-					run_end_time < $2
-			`,
-			minTime,
-			postErrorMinTime,
-		))
-
-		removeCount = tag.RowsAffected()
-	})
-
-	return
+	var afterTime *time.Time
+	var afterId server.Id
+	for {
+		server.Raise(ctx.Err())
+		ids := make([]server.Id, 0, taskCompletionBatchLimit)
+		var removed int64
+		server.Tx(ctx, func(tx server.PgTx) {
+			rows, err := tx.Query(ctx, `SELECT task_id,run_end_time FROM finished_task
+                WHERE run_end_time < GREATEST($1::timestamp,$2::timestamp)
+                  AND ((run_end_time < $1 AND (post_error IS NULL OR post_completed)) OR run_end_time < $2)
+                  AND ($3::timestamp IS NULL OR (run_end_time,task_id) > ($3,$4::uuid))
+                ORDER BY run_end_time,task_id LIMIT $5`, minTime, postErrorMinTime, afterTime, afterId, taskCompletionBatchLimit)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var id server.Id
+					var endTime time.Time
+					server.Raise(rows.Scan(&id, &endTime))
+					ids = append(ids, id)
+					afterTime, afterId = &endTime, id
+				}
+			})
+			if len(ids) == 0 {
+				return
+			}
+			keys := make([]server.PgOwnershipKey, len(ids))
+			for index, id := range ids {
+				keys[index] = taskFinishedOwnershipKey(id)
+			}
+			admitted, err := server.TryTxOwnership(ctx, tx, keys)
+			server.Raise(err)
+			if !admitted {
+				return
+			}
+			tag := server.RaisePgResult(tx.Exec(ctx, `WITH removable AS (
+                SELECT task_id FROM finished_task WHERE task_id=ANY($1::uuid[])
+                  AND ((run_end_time < $2 AND (post_error IS NULL OR post_completed)) OR run_end_time < $3)
+                ORDER BY task_id FOR UPDATE SKIP LOCKED
+                ) DELETE FROM finished_task USING removable WHERE finished_task.task_id=removable.task_id`, ids, minTime, postErrorMinTime))
+			removed = tag.RowsAffected()
+		}, server.TxReadCommitted, server.OptNoRetry())
+		removeCount += removed
+		if len(ids) < taskCompletionBatchLimit {
+			return
+		}
+	}
 }
 
 type Task struct {
@@ -1722,7 +1747,7 @@ func (self *TaskWorker) RunPost(
 		// The finished_task row is gone, and it is never coming back:
 		// RunPost is scheduled in the same tx that writes the row, so the
 		// only way to observe its absence is `RemoveFinishedTasks` having
-		// reaped it (which it does unconditionally past postErrorMinTime, so
+		// reaped it (which remains eligible past postErrorMinTime, so
 		// a repeatedly-failing post "cannot strand forever"). Erroring here
 		// rescheduled the orphan against a row that will never return, so the
 		// reap traded a stranded finished_task for a pending_task that

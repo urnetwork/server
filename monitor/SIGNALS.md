@@ -32473,8 +32473,13 @@ exact `FOR UPDATE SKIP LOCKED` eligibility/identity recheck. Startup resource an
 backend-PID checks precede session execution locks. Administrative exact-id
 removal/release and exact-key kicks use the same queue owner. Removed-function
 startup cleanup is confined to deliberately absent targets; it does not cover
-live settlement functions. Finished retention applies only to its existing age
-predicate, independently of fresh close-path owners.
+live settlement functions. Finished retention admits at most 64 exact finished
+keys before its row locks, rechecks the existing age predicate, and skips busy
+groups or rows for a later sweep. Age alone does not exclude a live Post retry.
+
+Ready completion batches must have one ownership mode. A mixed owned/generic
+group falls back before opening a transaction, preserving each target's original
+backend and isolation policy. Homogeneous owned groups retain their batched move.
 
 `urnetwork_task_timestamp_lease_refresh_skipped_total` counts hints not refreshed
 because queue ownership or a row was busy, or the exact claim epoch no longer

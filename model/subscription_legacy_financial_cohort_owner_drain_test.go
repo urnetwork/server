@@ -76,7 +76,7 @@ func legacyFinancialDrainOwners(t testing.TB, ctx context.Context, expected int,
 		settings.ClaimRegisteredTargetsOnly = true
 		worker := task.NewTaskWorker(ctx, settings)
 		defer worker.Close()
-		worker.AddTargets(NewLegacyProviderTotalsTaskTarget(), task.NewTaskTargetWithPost(ApplyLegacyNetEscrowMirror, ApplyLegacyNetEscrowMirrorPost))
+		worker.AddTargets(NewLegacyProviderTotalsTaskTarget(), NewLegacyNetEscrowMirrorTaskTarget())
 		finishedIds := map[server.Id]bool{}
 		for state.Pending > 0 {
 			if result.Claims >= 2*expected+8 {

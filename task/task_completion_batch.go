@@ -20,6 +20,7 @@ type TaskCompletionBatchTarget interface {
 }
 
 var errTaskCompletionBatchOwnership = errors.New("task completion batch ownership missing")
+var errTaskCompletionBatchMode = errors.New("task completion batch ownership modes differ")
 
 // Only observed successful results from explicitly registered owners qualify.
 func (self *TaskWorker) canBatchTaskCompletion(r *taskExecutionResult) bool {
@@ -101,7 +102,7 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 	seen := map[server.Id]bool{}
 	keys := make([]server.PgOwnershipKey, 0, len(results))
 	owned := false
-	for _, result := range results {
+	for index, result := range results {
 		if !self.canBatchTaskCompletion(result) || seen[result.task.TaskId] {
 			return false, errors.New("invalid task completion batch member")
 		}
@@ -110,11 +111,16 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 		if err != nil {
 			return false, err
 		}
-		owned = owned || memberOwned
+		if index == 0 {
+			owned = memberOwned
+		} else if memberOwned != owned {
+			// A generic target keeps its original backend/isolation policy.
+			// No transaction has started, so both collectors can finish each
+			// member independently through their existing safe fallback.
+			return true, errTaskCompletionBatchMode
+		}
 		if memberOwned {
 			keys = append(keys, memberKeys...)
-		} else {
-			keys = append(keys, taskQueueOwnershipKey(result.task.TaskId, result.task.RunOnceKey))
 		}
 		ids = append(ids, result.task.TaskId)
 		starts, ends = append(starts, result.runStartTime), append(ends, result.runEndTime)
