@@ -834,6 +834,21 @@ formatting only; native controls remain queued on the current qualified graph.
 It samples one connection per provider, preserves refused rows in the original
 sample denominator, and cannot establish every connection's classification or
 an operator-wide error rate.
+
+A further source review found a possible mixed-family interaction. The
+reliability fold combines ARIN risk and nonquality flags across connections
+before separating proven address families, and the live Quality guard requires
+all live connections to be clean without a family predicate. Consequently, an
+IPv6 transport connection with unknown or withheld ARIN evidence can exclude
+a provider whose IPv4 connection is clean. This is a conditional source
+mechanism, not a measured cause among the 2,089 providers. A transport address
+also does not establish IPv6 provider service: legacy family intent still maps
+to IPv4 proof. The diagnostic successor reports only the closed connection
+address family (`ipv4` or `ipv6`), normalizes IPv4-mapped addresses and keeps
+owner/fact checks; it neither exports addresses nor changes admission policy.
+One selected IPv6 refusal does not prove that a clean IPv4 sibling exists or
+that the refusal is a rollout defect. Those questions remain evidence gaps.
+
 The selector limits each indexed connected/client read to 33 rows before
 sorting. A 33-row sentinel refuses that provider; smaller sets retain the
 lowest eligible connection deterministically. Source review `a707bf09`
