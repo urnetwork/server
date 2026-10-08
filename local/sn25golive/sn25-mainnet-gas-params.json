@@ -1,0 +1,34 @@
+{
+  "schema": "urnetwork-operator-gas-policy-v1",
+  "profile": "mainnet",
+  "chain_id": 964,
+  "genesis_hash": "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+  "no_id": 1,
+  "coordinator": "0xc18925925e2b7bb9059b7d696b8c92762ae86406",
+  "policy_hash": "0x6b188830b47e3b7dbfafc2839d7e1f460125115c9fbded053fa46293c79130a2",
+  "accounts": [
+    {
+      "role": "deposit",
+      "address": "0x672b0dd503c5066ab2e3fb41b84fc818e646c21b",
+      "initial_history_sha256": "cf8559f53ee3434bb255a876dc55606cb97a3f91a36bfa8f57407cf0f8e0927c"
+    },
+    {
+      "role": "root",
+      "address": "0xe963314caf8002f23afbf92e67daf9edad37d2a3",
+      "initial_history_sha256": "cf8559f53ee3434bb255a876dc55606cb97a3f91a36bfa8f57407cf0f8e0927c"
+    }
+  ],
+  "historical_accounts": null,
+  "revision": 0,
+  "previous_policy_sha256": "",
+  "valid_from_unix": 1791417600,
+  "valid_until_unix": 1822953600,
+  "maximum_gas": 1000000,
+  "maximum_fee_per_gas_wei": "30000000000",
+  "maximum_tip_per_gas_wei": "1000000000",
+  "maximum_intent_liability_wei": "50000000000000000",
+  "maximum_lifetime_liability_wei": "10000000000000000000",
+  "maximum_intent_attempts": 3,
+  "maximum_lifetime_attempts": 10000,
+  "signature": ""
+}
