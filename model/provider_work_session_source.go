@@ -117,7 +117,7 @@ func providerWorkSessionSourceFromBytes(raw []byte) (*ProviderWorkSessionSource,
 // window. Expired producer configuration can never mint a fresh original.
 func (self *ProviderWorkSessionSource) sign(ctx context.Context, value protocol.ProviderWorkReceipt, at int64) (protocol.ProviderWorkReceipt, []byte, [32]byte, error) {
 	if self == nil || at < self.authority.FromUnixMicro || at >= self.authority.ThroughUnixMicro {
-		return value, nil, [32]byte{}, errors.New("provider work source is outside its original authority window")
+		return value, nil, [32]byte{}, errProviderWorkEvidenceUnavailable
 	}
 	value.DomainHash = self.authority.DomainHash
 	value.SourceId = self.authority.SourceId
