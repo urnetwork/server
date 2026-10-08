@@ -26,6 +26,10 @@ type legacyProviderTotalsTaskTarget struct {
 	task.Target
 }
 
+// This target's exact credits and applied markers commit during Run. It has no
+// post or continuation; completed owners may share only their durable handback.
+func (self *legacyProviderTotalsTaskTarget) TaskCompletionBatchEnabled() bool { return true }
+
 // Single-provider allocations can share a row update without coupling unrelated
 // providers. Malformed, applied and multi-provider tasks retain ordinary execution.
 func (self *legacyProviderTotalsTaskTarget) PrepareTaskBatch(tasks []*task.Task) task.Target {

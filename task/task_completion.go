@@ -1,5 +1,5 @@
-// Each returned task commits its own completion and continuation. One evaluator
-// finalizes sequentially, retaining its batch's advisory ownership until join.
+// Ordinary returned tasks commit their own completion and continuation. Explicit
+// no-post opt-ins may share handback; advisory ownership always remains until join.
 package task
 
 import (

@@ -3044,137 +3044,26 @@ func contractParticipantsWithUsageOriginInTx(
 
 // Reuse only the locked contract's header. Shared stream membership is not
 // protected by this contract's lock, so each caller still reads fresh rows.
-func contractParticipantsFromOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, owner contractParticipantOwner, usageOriginIsSource *bool) (participants []ContractParticipant, originNetworkId server.Id, returnErr error) {
-	sourceNetworkId, sourceId := owner.sourceNetworkId, owner.sourceId
-	destinationNetworkId, destinationId := owner.destinationNetworkId, owner.destinationId
-	payerNetworkId, companionContractId, streamId := owner.payerNetworkId, owner.companionContractId, owner.streamId
-	var result pgx.Rows
-	var err error
-
-	// Plain contracts originate at source; companion contracts reverse the
-	// payer and originate at destination. payer_network_id is authoritative for
-	// eligibility and also disambiguates direction whenever the endpoints are
-	// in different networks. companion_contract_id handles the same-network
-	// case, where comparing endpoint network ids cannot identify the payer.
-	originIsSource := companionContractId == nil
-	originNetworkId = sourceNetworkId
-	if payerNetworkId != nil {
-		originNetworkId = *payerNetworkId
-		if sourceNetworkId != destinationNetworkId {
-			switch *payerNetworkId {
-			case sourceNetworkId:
-				originIsSource = true
-			case destinationNetworkId:
-				originIsSource = false
-			default:
-				returnErr = fmt.Errorf(
-					"Contract payer network %s is not an endpoint network: %s",
-					payerNetworkId.String(),
-					contractId.String(),
-				)
-				return
-			}
-		}
-	} else if !originIsSource {
-		originNetworkId = destinationNetworkId
-	}
-
-	if usageOriginIsSource != nil {
-		originIsSource = *usageOriginIsSource
-	}
-	originId := sourceId
-	egress := ContractParticipant{ClientId: destinationId, NetworkId: destinationNetworkId}
-	if !originIsSource {
-		originId = destinationId
-		egress = ContractParticipant{ClientId: sourceId, NetworkId: sourceNetworkId}
-	}
-
-	participantsByClientId := map[server.Id]ContractParticipant{}
-	// A client appearing in several roles is one provider only when its
-	// retained network agrees. Source order cannot choose its payout owner.
-	addParticipant := func(participant ContractParticipant) error {
-		if participant.ClientId == originId {
-			return nil
-		}
-		if prior, exists := participantsByClientId[participant.ClientId]; exists {
-			if prior.NetworkId != participant.NetworkId {
-				return fmt.Errorf("contract provider %s has conflicting retained networks: %s", participant.ClientId, contractId)
-			}
-			return nil
-		}
-		participantsByClientId[participant.ClientId] = participant
-		return nil
-	}
-	if err := addParticipant(egress); err != nil {
-		returnErr = err
-		return
-	}
-	if streamId != nil {
-		result, err = tx.Query(
-			ctx,
-			`
-				SELECT
-					contract_participant.client_id,
-					contract_participant.network_id
-				FROM transfer_contract
-				INNER JOIN contract_participant ON
-					contract_participant.stream_id = transfer_contract.stream_id
-				WHERE transfer_contract.contract_id = $1
-			`,
-			contractId,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
+func contractParticipantsFromOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, owner contractParticipantOwner, usageOriginIsSource *bool) ([]ContractParticipant, server.Id, error) {
+	retained := []ContractParticipant{}
+	read := func(query string) {
+		rows, err := tx.Query(ctx, query, contractId)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
 				var participant ContractParticipant
-				server.Raise(result.Scan(&participant.ClientId, &participant.NetworkId))
-				if err := addParticipant(participant); err != nil {
-					returnErr = err
-					return
-				}
+				server.Raise(rows.Scan(&participant.ClientId, &participant.NetworkId))
+				retained = append(retained, participant)
 			}
 		})
-		if returnErr != nil {
-			return
-		}
 	}
-
-	// The extender parties of the contract are hops like any other
-	// (connect/EXTENDER.md J3), so they join the same map before the split:
-	// keying by client id counts an extender whose provider client is already
-	// a participant once, and an extender on the payer network keeps its even
-	// share out of the payout through the same eligibility rule.
-	result, err = tx.Query(
-		ctx,
-		`
-			SELECT
-				client_id,
-				network_id
-			FROM contract_extender
-			WHERE contract_id = $1
-		`,
-		contractId,
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			var participant ContractParticipant
-			server.Raise(result.Scan(&participant.ClientId, &participant.NetworkId))
-			if err := addParticipant(participant); err != nil {
-				returnErr = err
-				return
-			}
-		}
-	})
-	if returnErr != nil {
-		return
+	if owner.streamId != nil {
+		read(`SELECT contract_participant.client_id,contract_participant.network_id
+            FROM transfer_contract INNER JOIN contract_participant ON
+                contract_participant.stream_id=transfer_contract.stream_id
+            WHERE transfer_contract.contract_id=$1`)
 	}
-
-	for _, participant := range participantsByClientId {
-		participants = append(participants, participant)
-	}
-	slices.SortFunc(participants, func(a ContractParticipant, b ContractParticipant) int {
-		return a.ClientId.Cmp(b.ClientId)
-	})
-	return
+	read(`SELECT client_id,network_id FROM contract_extender WHERE contract_id=$1`)
+	return contractParticipantsFromRows(contractId, owner, usageOriginIsSource, retained)
 }
 
 // evenContractPayoutShare partitions a non-negative integer exactly. Stable
@@ -3393,61 +3282,8 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 		return nil, false, err
 	}
 
-	switch outcome {
-	case ContractOutcomeSettled:
-		var partyByteCounts [2]ByteCount
-		partyCount := 0
-		checkpointCount := 0
-		for _, report := range settlementOwner.reports {
-			// Billing counts a checkpoint's final contribution. The independent
-			// usage guard below still requires its original completed reports.
-			if report.checkpoint {
-				checkpointCount++
-			}
-			if partyCount < len(partyByteCounts) {
-				partyByteCounts[partyCount] = report.byteCount
-			}
-			if report.party == ContractPartyDestination {
-				clockTransferByteCount = report.byteCount
-			}
-			partyCount++
-		}
-		if partyCount != 2 {
-			returnErr = fmt.Errorf("Must have 2 parties to settle contract (found %d).", partyCount)
-			return
-		}
-		// Defensive: refuse to settle if both parties are checkpoint.
-		// settleContract shouldn't route here; flag the logic bug rather than settle.
-		if checkpointCount == 2 {
-			returnErr = fmt.Errorf("Cannot settle contract with both parties checkpoint.")
-			return
-		}
-		usedTransferByteCount, returnErr = meanContractByteCount(partyByteCounts[0], partyByteCounts[1])
-		if returnErr != nil {
-			return
-		}
-	case ContractOutcomeDisputeResolvedToSource, ContractOutcomeDisputeResolvedToDestination:
-		var party ContractParty
-		switch outcome {
-		case ContractOutcomeDisputeResolvedToSource:
-			party = ContractPartySource
-		default:
-			party = ContractPartyDestination
-		}
-		for _, report := range settlementOwner.reports {
-			if report.party == party {
-				usedTransferByteCount = report.byteCount
-			}
-			if report.party == ContractPartyDestination {
-				clockTransferByteCount = report.byteCount
-			}
-		}
-	default:
-		returnErr = fmt.Errorf("Unknown contract outcome: %s", outcome)
-		return
-	}
-	if usedTransferByteCount < 0 || clockTransferByteCount < 0 {
-		returnErr = fmt.Errorf("negative contract close byte count")
+	usedTransferByteCount, clockTransferByteCount, returnErr = contractSettlementReportAmounts(settlementOwner.reports, outcome)
+	if returnErr != nil {
 		return
 	}
 
@@ -3469,56 +3305,16 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 		contractId,
 	)
 
-	// balance id -> settled byte count, return byte count, gross payout. The
-	// settled count is what the payer consumed; it remains independent of how
-	// many participant shares are eligible for payout.
-	sweepPayouts := map[server.Id]sweepPayout{}
-	netSettledByteCount := ByteCount(0)
-
+	escrows := []contractSettlementEscrow{}
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
-			var balanceId server.Id
-			var escrowBalanceByteCount ByteCount
-			var startBalanceByteCount ByteCount
-			var netRevenue NanoCents
-			server.Raise(result.Scan(
-				&balanceId,
-				&escrowBalanceByteCount,
-				&startBalanceByteCount,
-				&netRevenue,
-			))
-			if escrowBalanceByteCount < 0 {
-				returnErr = fmt.Errorf("negative escrow byte count")
-				return
-			}
-
-			payoutByteCount := min(usedTransferByteCount-netSettledByteCount, escrowBalanceByteCount)
-			returnByteCount := escrowBalanceByteCount - payoutByteCount
-			netSettledByteCount += payoutByteCount
-			payout := NanoCents(math.Round(
-				ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
-			))
-
-			sweepPayouts[balanceId] = sweepPayout{
-				escrowBalanceByteCount: escrowBalanceByteCount,
-				payoutByteCount:        payoutByteCount,
-				returnByteCount:        returnByteCount,
-				payout:                 payout,
-			}
-			// fmt.Printf("SETTLE %s %s: payout %d (%d nanocents) return %d\n", contractId.String(), balanceId.String(), payoutByteCount, payout, returnByteCount)
+			var escrow contractSettlementEscrow
+			server.Raise(result.Scan(&escrow.balanceId, &escrow.amount, &escrow.start, &escrow.revenue))
+			escrows = append(escrows, escrow)
 		}
 	})
+	sweepPayouts, returnErr := contractSettlementSweepPayouts(usedTransferByteCount, escrows)
 	if returnErr != nil {
-		return
-	}
-
-	// if len(sweepPayouts) == 0 {
-	// 	returnErr = fmt.Errorf("Invalid contract.")
-	// 	return
-	// }
-
-	if netSettledByteCount < usedTransferByteCount {
-		returnErr = errContractInsufficientEscrow
 		return
 	}
 

@@ -21,6 +21,8 @@ type LegacySettlementPhaseDuration struct {
 // outcomes. The callback families can overlap; their sum is not page latency.
 // ColdCensus is a subset of Mirror; callback families are within JoinedPosts.
 // Selection and Financial include pool acquisition and transaction completion.
+// Their counts describe calls: bounded selection and financial cohorts can
+// serve several contracts. Cohort result counters retain their distinct units.
 // An interrupted final attempt can be timed without entering the Visited count;
 // Page callbacks are coalesced: JoinedPosts and callback family counts describe
 // executed batches, not settled contracts. Single-contract callers still time
