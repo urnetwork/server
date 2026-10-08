@@ -435,9 +435,11 @@ func resolveSubscriberOriginEvidence(ctx context.Context, routes map[netip.Prefi
 		route.rpki = authorizations.routeValidity(prefix, route)
 		if covering, ok := coveringSubscriberOrigin(routes, prefix); ok {
 			parent := routes[covering]
-			if slices.Equal(parent.asns(), route.asns()) || sameReviewedOperators(parent, route, byASN) {
+			sameOrigins := slices.Equal(parent.asns(), route.asns())
+			if sameOrigins || sameReviewedOperators(parent, route, byASN) {
 				route.visibility = max(route.visibility, parent.visibility)
-				if route.rpki == "invalid" && (parent.rpki == "valid" || parent.rpki == "valid-aggregate") {
+				// Reviewed siblings share visibility, not another ASN's authorization.
+				if sameOrigins && route.rpki == "invalid" && (parent.rpki == "valid" || parent.rpki == "valid-aggregate") {
 					route.rpki = "valid-aggregate"
 				}
 			}
