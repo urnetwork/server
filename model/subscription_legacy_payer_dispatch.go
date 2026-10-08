@@ -33,17 +33,29 @@ type LegacySettlementDispatchResult struct {
 // in the task Post; a crash before that handoff simply repeats discovery.
 func DispatchLegacySettlementPayers(ctx context.Context, shard int, after *LegacySettlementCursor,
 	payerAfter *LegacySettlementPayerCursor) (result LegacySettlementDispatchResult, returnErr error) {
+	result, _, returnErr = DispatchLegacySettlementPayersWithReadiness(ctx, shard, after, payerAfter)
+	return
+}
+
+// Carry readiness through the task result, including the financial fallback.
+// Its existing 250ms budget includes the cache check or one catalog probe.
+func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int, after *LegacySettlementCursor,
+	payerAfter *LegacySettlementPayerCursor,
+) (result LegacySettlementDispatchResult, readiness *LegacySettlementPayerIndexReadiness, returnErr error) {
 	result.Private = true
 	if shard < 0 || shard >= LegacySettlementShardCount {
-		return result, fmt.Errorf("invalid legacy settlement dispatch shard")
+		return result, nil, fmt.Errorf("invalid legacy settlement dispatch shard")
 	}
-	if !legacySettlementPayerDueIndexReady(ctx) {
-		return result, ErrLegacySettlementPayerIndexUnavailable
+	observation := legacySettlementPayerDueIndexObservation(ctx)
+	readiness = &observation
+	if observation.Outcome != "ready" {
+		return result, readiness, ErrLegacySettlementPayerIndexUnavailable
 	}
 	bounded, cancel := context.WithTimeoutCause(ctx, 5*time.Second, errLegacySettlementDispatchBudget)
 	defer cancel()
-	return dispatchLegacySettlementPayersPage(ctx, bounded, shard, after, payerAfter,
+	result, returnErr = dispatchLegacySettlementPayersPage(ctx, bounded, shard, after, payerAfter,
 		nextLegacySettlementPayer, registerLegacySettlementPayerDispatchPage)
+	return
 }
 
 // A valid missing-key index gives registration its own finite progress lane.
@@ -51,11 +63,18 @@ func DispatchLegacySettlementPayers(ctx context.Context, shard int, after *Legac
 // work behind that pass's fixed cutoff. An unavailable index keeps the original
 // chronological fallback; both paths share the caller's registration budget.
 func registerLegacySettlementPayerDispatchPage(ctx context.Context, shard int, after *LegacySettlementCursor) (*LegacySettlementCursor, int) {
-	bounded, cancel := context.WithTimeout(ctx, legacySettlementPayerIndexBudget)
-	ready, err := readLegacySettlementPayerIndexes(bounded)
-	ready = ready && err == nil && bounded.Err() == nil
-	cancel()
-	if ready {
+	return registerLegacySettlementPayerDispatchPageWithReadiness(ctx, shard, after,
+		cachedLegacySettlementPayerIndexesReady, readLegacySettlementPayerIndexes)
+}
+
+// Registration reuses the same full-index proof as dispatch; a cache miss keeps
+// its fresh bounded catalog check. Neither path publishes or extends the proof.
+// Invocation-local readers let controls force a transient refusal exactly.
+func registerLegacySettlementPayerDispatchPageWithReadiness(ctx context.Context, shard int, after *LegacySettlementCursor,
+	cached func(context.Context) bool, read func(context.Context) (bool, error),
+) (*LegacySettlementCursor, int) {
+	readiness := observeLegacySettlementPayerIndexWithCache(ctx, cached, read, time.Now)
+	if readiness.Outcome == "ready" {
 		return after, registerLegacySettlementPayers(ctx, shard)
 	}
 	return registerLegacySettlementPayerPage(ctx, shard, after)
