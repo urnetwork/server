@@ -147,7 +147,7 @@ func inspectContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId s
 		state.usageUnverifiedRetained = writeProof && err == nil
 		return state, err
 	}
-	if !contractExpirationDue(expirationTime, lastReport, cutoff, server.NowUtc()) {
+	if !contractExpirationDue(expirationTime, created, lastReport, cutoff, server.NowUtc()) {
 		return nil, nil
 	}
 	byteCount, err := contractExpiryCompletedUsage(proof)

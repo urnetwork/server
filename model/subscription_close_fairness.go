@@ -42,11 +42,14 @@ func ForceCloseOpenContractIdsFairPage(ctx context.Context, minTime time.Time, m
 	}
 	return forceCloseContractPagesBudgeted(ctx, maxCount, after, forceClosePageBudget, forceCloseRawSubpageSize, time.Now,
 		func(size int, cursor *ContractExpirySweepCursor) (int64, *ContractExpirySweepCursor, error) {
-			// Raw admission includes recent legacy rows without a deadline.
-			// The shared selector and locked owner still apply minTime to
-			// quiet-period eligibility for contracts with explicit deadlines.
+			// Admit both quiet candidates and missing deadlines that reached
+			// their maximum lifetime, even with an older retained quiet cutoff.
 			now := server.NowUtc()
-			return forceCloseContractExpiryFreshPage(now, now, cursor,
+			scanBefore := minTime
+			if hardBefore := now.Add(-DefaultContractExpiration); scanBefore.Before(hardBefore) {
+				scanBefore = hardBefore
+			}
+			return forceCloseContractExpiryFreshPage(scanBefore, now, cursor,
 				func(position *ContractExpiryCursor) (int64, *ContractExpiryCursor, error) {
 					return ForceCloseOpenContractIdsPage(ctx, minTime, size, parallel, blockSize, blockIndex, position)
 				})

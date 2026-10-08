@@ -580,13 +580,18 @@ creation extends an existing pair or creates fresh membership after a miss.
 The prior control receipt and local source-pass benchmark are historical or
 explicit-initialization evidence, not an active periodic-readiness gate.
 
-The signed 60-minute lifespan does not retroactively expire legacy NULL contracts.
-Their quiet-period expiry can be renewed by a checkpoint. Removing the packet
-fallback does not prove those contracts all have Redis evidence: retained legacy
-contracts whose keys expire can fail closed. Record old-writer retirement and
-actual publication/missing/error observations; neither waiting 60 minutes nor a
-healthy sample establishes complete legacy coverage. Tests prove missing-key
-refusal and fresh-creation recovery without silently backfilling old members.
+The stored/signed deadline and the Redis membership score remain separate from
+the cleanup policy for NULL deadlines. Canonical `db179741` adds a cleanup fallback
+of `create_time + 60 minutes`: ordinary inactivity may retire a row earlier, but
+a checkpoint cannot postpone that fallback. It does not write a stored deadline,
+change the signed client contract, or replace a legacy Redis infinity score.
+At its 2026-10-08 documentation update, deployment remains pending; §2.6 records the
+fresh-NULL evidence that rules out immediate retirement of every NULL row.
+Packet reads remain Redis-only, with no PostgreSQL fallback. Missing projections
+fail closed, and the cleanup change does not establish complete legacy Redis
+coverage. Record exact writer adoption and actual publication/missing/error
+observations; neither waiting 60 minutes nor a healthy sample proves that every
+legacy member has valid evidence.
 
 ### 1.2 Task canaries — the cheapest end-to-end redis probes
 Probe: `task-canaries`
@@ -6283,9 +6288,66 @@ Legacy ledger, Redis admission and no-escrow creation all persist a database-clo
 deadline of 60 minutes and return that exact value for the provider-signed
 contract. Checkpoints do not update it. Both open/disputed selection and the
 locked proof owner accept a due absolute deadline independently of recent
-reports. A NULL deadline is a separate compatibility cohort: its current quiet
-cutoff is 12 minutes, not an inferred 60-minute deadline. Retained expiry proofs
-and pending legacy settlement intents remain owned by their existing continuations.
+reports. Canonical `db179741` gives NULL rows a cleanup fallback at
+`create_time + 60 minutes`, while retaining the 12-minute inactivity policy for
+earlier quiet closes. Both bounded selectors and the locked proof owner apply
+that same fallback; recent checkpoints cannot extend it. The fair raw horizon
+admits due fallback rows even when a retained inactivity cutoff is older.
+Explicit expiration values override this fallback. Retained expiry proofs and
+pending legacy settlement intents remain owned by their existing continuations.
+This is a cleanup predicate, not a stored-deadline backfill or a change to signed
+client deadlines and Redis infinity membership (§1.1).
+
+At 2026-10-08 21:50:43.128 UTC, a bounded Main read found the youngest contract
+with NULL expiration was only 0.618177 seconds old. NULL therefore does not imply
+an old cohort that can all retire immediately. All three inspected current
+creation owners compute an explicit database-clock expiration, so this
+observation does not identify the writer of that fresh row. Preserve its exact
+private write/executor provenance before attributing the missing deadline; row
+age, current checkout code and fleet artifact identity alone cannot do so.
+The immediate-NULL candidate `bf430323` is unsafe for this observed cohort and
+its prepared R53 image remains held. The age-based replacement `2f1efad` and its
+startup fixture correction `99f3dca` are merged in canonical
+`db17974144f6812e0be35be8cce6019ae60f379d`. Native qualification reproduced both
+baseline failures, then passed the focused model controls in 35.763 seconds
+(receipt SHA-256 `168993abb29a8a11cc33de6c5068137b523dfd5c2afedc0f5ce151041db7d88f`)
+and both Taskworker startup profiles in 10.464 seconds
+(receipt SHA-256 `aa13c851a81e92eeeb59690e736ffd90691eab6cfab5f91d77ae535764b17432`).
+Deployment remains pending at this documentation update. These local controls
+and the source merge do not identify the fresh NULL writer or prove Main cleanup.
+
+The writer discriminator is the executed INSERT, not the age bucket. Current
+`createTransferEscrowInTx`, `createRedisTransferEscrowInTx`, and
+`createContractNoEscrowInTx` all derive expiration from one materialized database
+creation clock and the constant lifetime; none accepts a nullable deadline.
+The inspected production tree has no later NULL assignment or trigger that
+clears it. Migration 790 deliberately left the column nullable without a default,
+however, and retained pre-expiration source `de68468d` omits the column in all
+three INSERTs. An overlapping older process or another writer is therefore a
+source-supported possibility, even when every selected current service has the
+new image. It is not an attribution. Positive-byte public admission already used
+Redis in `de68468d`; a fresh positive-byte non-Redis escrow needs an older admission
+owner or another write path, not merely any revision before expiration was added.
+
+Current Taskworker probes and hosted proxies inject local credential and control
+owners. Their supplied local authority never falls back to public HTTP, so their
+configured API URL alone cannot redirect contract creation to an older API.
+The standalone egress-prober command supplies no local authority and does use its
+configured HTTP API; an older serving or draining process is another distinct
+candidate. Preserve the exact private row/write provenance and join an observed
+statement to its executing process and artifact before choosing between these
+routes. Current fleet selection, anonymous SQL samples, client ancestry, and a
+matching source literal do not provide that join. Keep identifiers and credentials
+in the restricted evidence, and use bounded retained evidence before requesting
+another production read.
+
+Canonical `9bc8a7e` separately applies the same NULL fallback to companion-origin
+selection, prober reservation sizing, the post-lock origin check, and escrow
+reuse. Independent native controls reproduced four stale-origin failures and
+passed five selected tests after the fix (receipt SHA-256
+`c09062b2a1d22ca9fe25dfdc1b223a939d7b17160daaa40c660fdaba2370f20a`).
+This follow-up does not identify a writer, backfill stored deadlines, or establish
+deployment beyond the frozen `db179741` R54 source.
 
 Startup uses one RunOnce key for this coordinator, preserving an existing
 cursor instead of inserting one task per contract. Its ordinary Post persists

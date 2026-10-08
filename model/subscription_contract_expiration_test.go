@@ -10,8 +10,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Equality belongs to expiry. NULL deadlines are immediately due, while
-// explicit future deadlines retain the ordinary quiet-period policy.
+// Equality belongs to expiry. Missing deadlines use the creation clock plus
+// 60 minutes; explicit deadlines and early quiet closes retain their policy.
 func TestContractExpirationExactDeadline(t *testing.T) {
 	now := time.UnixMilli(2_000_000_000_000).UTC()
 	cutoff := now.Add(-5 * time.Minute)
@@ -19,17 +19,22 @@ func TestContractExpirationExactDeadline(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		expiration *time.Time
+		created    time.Time
 		lastReport time.Time
 		want       bool
 	}{
 		{name: "before deadline", expiration: &future, lastReport: now},
 		{name: "exact deadline", expiration: &now, lastReport: now, want: true},
 		{name: "after deadline", expiration: &past, lastReport: now, want: true},
-		{name: "legacy active", lastReport: now, want: true},
-		{name: "legacy quiet", lastReport: cutoff, want: true},
+		{name: "legacy fresh", created: now, lastReport: now},
+		{name: "legacy before deadline", created: now.Add(-60*time.Minute + time.Nanosecond), lastReport: now},
+		{name: "legacy exact deadline", created: now.Add(-60 * time.Minute), lastReport: now, want: true},
+		{name: "legacy after deadline", created: now.Add(-61 * time.Minute), lastReport: now, want: true},
+		{name: "legacy quiet", created: now.Add(-10 * time.Minute), lastReport: cutoff, want: true},
+		{name: "explicit deadline overrides legacy age", expiration: &future, created: now.Add(-2 * time.Hour), lastReport: now},
 		{name: "early quiet close", expiration: &future, lastReport: cutoff, want: true},
 	} {
-		if got := contractExpirationDue(test.expiration, test.lastReport, cutoff, now); got != test.want {
+		if got := contractExpirationDue(test.expiration, test.created, test.lastReport, cutoff, now); got != test.want {
 			t.Errorf("%s: due=%t want=%t", test.name, got, test.want)
 		}
 	}
@@ -245,10 +250,24 @@ func TestContractExpirationCompanionRechecksAfterClientWait(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(WithProviderWorkSessionSource(t.Context(), nil), 30*time.Second)
 		defer cancel()
-		for _, redisAdmission := range []bool{true, false} {
+		for _, test := range []struct {
+			redisAdmission bool
+			nullDeadline   bool
+		}{
+			{redisAdmission: true},
+			{redisAdmission: false},
+			{redisAdmission: true, nullDeadline: true},
+			{redisAdmission: false, nullDeadline: true},
+		} {
 			func() {
+				redisAdmission := test.redisAdmission
 				f := newNetEscrowOrderingTestFixture(t, ctx)
 				origin := createRedisAdmissionTest(ctx, f, 100)
+				if test.nullDeadline {
+					server.Tx(ctx, func(tx server.PgTx) {
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=NULL WHERE contract_id=$1`, origin.ContractId))
+					})
+				}
 				conn := acquireContractLifecycleTestConnection(t, ctx)
 				defer conn.Release()
 				held, err := conn.Begin(ctx)
@@ -285,7 +304,11 @@ func TestContractExpirationCompanionRechecksAfterClientWait(t *testing.T) {
 				if redisAdmission && Testing_NetEscrowByteCount(ctx, f.balanceId) != 200 {
 					t.Fatal("client barrier preceded the child's actual Redis reservation")
 				}
-				server.RaisePgResult(held.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, origin.ContractId, server.NowUtc().Add(-time.Minute)))
+				if test.nullDeadline {
+					server.RaisePgResult(held.Exec(ctx, `UPDATE transfer_contract SET create_time=$2 WHERE contract_id=$1`, origin.ContractId, server.NowUtc().Add(-61*time.Minute)))
+				} else {
+					server.RaisePgResult(held.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, origin.ContractId, server.NowUtc().Add(-time.Minute)))
+				}
 				server.Raise(held.Commit(ctx))
 				select {
 				case err = <-done:
@@ -293,7 +316,7 @@ func TestContractExpirationCompanionRechecksAfterClientWait(t *testing.T) {
 					t.Fatal("creator failed to leave the explicit lock barrier", ctx.Err())
 				}
 				if !errors.Is(err, ErrMissingCompanionOrigin) {
-					t.Fatalf("redis=%t stale origin result: %v", redisAdmission, err)
+					t.Fatalf("redis=%t null=%t stale origin result: %v", redisAdmission, test.nullDeadline, err)
 				}
 				if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 100 {
 					t.Fatalf("refused child's reservation was retained: %d", got)

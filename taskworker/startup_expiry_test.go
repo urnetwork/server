@@ -85,8 +85,10 @@ func testTaskworkerStartupExpiresContracts(t *testing.T, profile WorkloadProfile
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,expiration_time=$3
 				WHERE contract_id=ANY($1)`, expiredIds, deadline.Add(-model.DefaultContractExpiration), deadline))
+			// A fresh NULL neighbor stays within the fallback lifetime. Old
+			// NULL checkpoints now retire at creation plus 60 minutes too.
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,expiration_time=NULL
-				WHERE contract_id=$1`, legacyNullId, now.Add(-24*time.Hour)))
+				WHERE contract_id=$1`, legacyNullId, now.Add(-time.Minute)))
 			// Cold historical reservations must reach Redis through their queued
 			// mirror owner; the bounded financial post only publishes warm state.
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, balanceId))

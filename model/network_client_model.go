@@ -3084,18 +3084,21 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	// references the device.
 	var reapedClientIds []server.Id
 	var reapedDeviceIds []server.Id
-	collectReaped := func(rows server.PgResult, err error) {
+	// Keep returned identities local to an attempt. MaintenanceTx may rerun
+	// after DELETE RETURNING was read but its transaction did not commit.
+	collectReaped := func(rows server.PgResult, err error) (clientIds []server.Id, deviceIds []server.Id) {
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var clientId server.Id
 				var deviceId *server.Id
 				server.Raise(rows.Scan(&clientId, &deviceId))
-				reapedClientIds = append(reapedClientIds, clientId)
+				clientIds = append(clientIds, clientId)
 				if deviceId != nil {
-					reapedDeviceIds = append(reapedDeviceIds, *deviceId)
+					deviceIds = append(deviceIds, *deviceId)
 				}
 			}
 		})
+		return
 	}
 
 	// inactive clients reap `NetworkClientReapAfterDeactivate` after their
@@ -3106,8 +3109,9 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	// first) instead of a full scan of the active = false band
 	reapInactiveBatchCount := 10000
 	for {
-		before := len(reapedClientIds)
+		var batchClientIds, batchDeviceIds []server.Id
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			batchClientIds, batchDeviceIds = nil, nil
 			rows, err := tx.Query(
 				ctx,
 				`
@@ -3124,9 +3128,12 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 				minClientTime.UTC(),
 				reapInactiveBatchCount,
 			)
-			collectReaped(rows, err)
+			batchClientIds, batchDeviceIds = collectReaped(rows, err)
 		}, server.TxReadCommitted)
-		if len(reapedClientIds)-before < reapInactiveBatchCount {
+		// Only the successful attempt owns downstream cleanup.
+		reapedClientIds = append(reapedClientIds, batchClientIds...)
+		reapedDeviceIds = append(reapedDeviceIds, batchDeviceIds...)
+		if len(batchClientIds) < reapInactiveBatchCount {
 			break
 		}
 	}
@@ -3195,8 +3202,9 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	// bounded batches (see the inactive reap above); driven by the
 	// network_client_child_reap_auth_time partial index, oldest auth_time first
 	for {
-		before := len(reapedClientIds)
+		var batchClientIds, batchDeviceIds []server.Id
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			batchClientIds, batchDeviceIds = nil, nil
 			rows, err := tx.Query(
 				ctx,
 				`
@@ -3218,9 +3226,11 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 				minClientTime.UTC(),
 				reapChildBatchCount,
 			)
-			collectReaped(rows, err)
+			batchClientIds, batchDeviceIds = collectReaped(rows, err)
 		}, server.TxReadCommitted)
-		if len(reapedClientIds)-before < reapChildBatchCount {
+		reapedClientIds = append(reapedClientIds, batchClientIds...)
+		reapedDeviceIds = append(reapedDeviceIds, batchDeviceIds...)
+		if len(batchClientIds) < reapChildBatchCount {
 			break
 		}
 	}
