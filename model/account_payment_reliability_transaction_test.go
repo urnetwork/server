@@ -136,7 +136,7 @@ func TestPaymentPlanReliabilityRollsBackWithAllocation(t *testing.T) {
 		f, _, _ := paymentReliabilityTransactionFixture(t, ctx)
 		rollbackErr := errors.New("synthetic payout allocation rollback")
 		var attempted *PaymentPlan
-		err := server.HandleError(func() {
+		panicValue := server.HandleError(func() {
 			_, planErr := createPaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0, false, func(tx server.PgTx, plan *PaymentPlan) {
 				attempted = plan
 				var score float64
@@ -148,8 +148,9 @@ func TestPaymentPlanReliabilityRollsBackWithAllocation(t *testing.T) {
 			})
 			server.Raise(planErr)
 		})
-		if !errors.Is(err, rollbackErr) || attempted == nil {
-			t.Fatal("fixture did not reach the allocation rollback", err)
+		err, ok := panicValue.(error)
+		if !ok || !errors.Is(err, rollbackErr) || attempted == nil {
+			t.Fatal("fixture did not reach the allocation rollback", panicValue)
 		}
 		requirePaymentReliabilityRollback(t, ctx, f.network, attempted.PaymentPlanId)
 	})
