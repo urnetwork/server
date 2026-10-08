@@ -3,6 +3,7 @@ package work
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -96,9 +97,23 @@ func (self closeRetryFixture) requireAccounting(t testing.TB, ctx context.Contex
 	if close, closed := model.GetContractClose(ctx, self.originId); !closed || close.Outcome != model.ContractOutcomeSettled {
 		t.Fatal("unrelated origin sibling failed to finalize")
 	}
-	if model.Testing_NetEscrowByteCount(ctx, self.balanceId) != self.grant {
-		t.Fatal("the completed sibling changed the disputed companion reservation")
+	if reserved := model.Testing_NetEscrowByteCount(ctx, self.balanceId); reserved != self.grant {
+		t.Fatal("the completed sibling changed the disputed companion reservation", reserved, self.grant)
 	}
+}
+
+// Observe the actual target's typed failure without replacing its evaluator,
+// financial work, retry wrapper or transactional completion behavior.
+type closeRetryObservedTarget struct {
+	task.Target
+	observed chan error
+}
+
+// Every evaluator call below consumes one result after the real target joins.
+func (self *closeRetryObservedTarget) Run(ctx context.Context, queued *task.Task) (any, func(server.PgTx) ([]server.PostFunction, error), error) {
+	result, post, err := self.Target.Run(ctx, queued)
+	self.observed <- err
+	return result, post, err
 }
 
 // At error count16 the old evaluator adds30–90min despite completed siblings.
@@ -116,30 +131,53 @@ func TestCloseExpiredVerifiedQuarantineKeepsTaskAndIdleCadence(t *testing.T) {
 // Both paths drive the real target/evaluator and persisted retry timestamps;
 // no wall-clock waiting or injected retry wrapper supplies the expected result.
 func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, quarantineOrigin bool) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		oldBase, oldCap := task.RescheduleTimeout, task.RescheduleBackoffMaxTimeout
 		task.RescheduleTimeout, task.RescheduleBackoffMaxTimeout = 2*time.Second, time.Hour
 		t.Cleanup(func() { task.RescheduleTimeout, task.RescheduleBackoffMaxTimeout = oldBase, oldCap })
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(model.WithProviderWorkSessionSource(t.Context(), nil), time.Minute)
+		defer cancel()
 		fixture := newCloseRetryFixture(t, ctx)
+		var quarantineId, quarantineBalanceId server.Id
 		if quarantineOrigin {
-			var sourceId, destinationId server.Id
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT source_id,destination_id FROM transfer_contract WHERE contract_id=$1`, fixture.originId).Scan(&sourceId, &destinationId))
-			})
-			if model.CloseContract(ctx, fixture.originId, sourceId, 2*fixture.grant, true) != nil ||
-				model.CloseContract(ctx, fixture.originId, destinationId, 2*fixture.grant, true) != nil {
+			// Two failed contracts on one grant can correctly add an ownership-
+			// busy operational error. Give this accounting-only quarantine its
+			// own grant so the real target can attest the complete typed failure.
+			payerNetworkId, providerNetworkId := server.NewId(), server.NewId()
+			sourceId, destinationId := server.NewId(), server.NewId()
+			for _, client := range []struct{ networkId, clientId server.Id }{
+				{networkId: payerNetworkId, clientId: sourceId},
+				{networkId: providerNetworkId, clientId: destinationId},
+			} {
+				model.Testing_CreateNetwork(ctx, client.networkId, "synthetic-close-quarantine-"+client.networkId.String(), server.NewId())
+				model.Testing_CreateDevice(ctx, client.networkId, server.NewId(), client.clientId, "synthetic-quarantine-client", "synthetic")
+			}
+			model.AddBasicTransferBalance(ctx, payerNetworkId, 8*fixture.grant, server.NowUtc(), server.NowUtc().Add(24*time.Hour))
+			balances := model.GetActiveTransferBalances(ctx, payerNetworkId)
+			if len(balances) != 1 {
+				t.Fatal("quarantine fixture lost its independent grant")
+			}
+			quarantineBalanceId = balances[0].BalanceId
+			var err error
+			quarantineId, _, err = model.CreateContract(ctx, payerNetworkId, sourceId, providerNetworkId, destinationId, fixture.grant)
+			server.Raise(err)
+			if model.CloseContract(ctx, quarantineId, sourceId, 2*fixture.grant, true) != nil ||
+				model.CloseContract(ctx, quarantineId, destinationId, 2*fixture.grant, true) != nil {
 				t.Fatal("synthetic over-grant checkpoint pair failed")
 			}
 			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2 WHERE contract_id=$1`,
+					quarantineId, time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)))
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET close_time=$2 WHERE contract_id=$1`,
-					fixture.originId, time.Date(2020, time.January, 1, 0, 1, 0, 0, time.UTC)))
+					quarantineId, time.Date(2020, time.January, 1, 0, 1, 0, 0, time.UTC)))
 			})
 		}
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 		defer clientSession.Cancel()
 		server.Tx(ctx, func(tx server.PgTx) { ScheduleCloseExpiredContracts(clientSession, tx, 0, false) })
-		target := task.NewTaskTargetWithPost(CloseExpiredContracts, CloseExpiredContractsPost)
+		target := &closeRetryObservedTarget{Target: task.NewTaskTargetWithPost(CloseExpiredContracts, CloseExpiredContractsPost), observed: make(chan error, 1)}
 		var taskId server.Id
 		var scheduledMetadata string
 		server.Db(ctx, func(conn server.PgConn) {
@@ -159,7 +197,10 @@ func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, qu
 				}
 			})
 		})
-		worker := task.NewTaskWorkerWithDefaults(ctx)
+		settings := task.DefaultTaskWorkerSettings()
+		settings.ClaimRegisteredTargetsOnly = true
+		worker := task.NewTaskWorker(ctx, settings)
+		defer worker.Close()
 		worker.AddTargets(target)
 		for pass := 0; pass < 2; pass++ {
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -170,6 +211,25 @@ func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, qu
 			finished, rescheduled, posts, err := worker.EvalTasks(1)
 			if err != nil || len(finished) != 0 || len(posts) != 0 || len(rescheduled) != 1 || rescheduled[0] != taskId {
 				t.Fatal("partial accounting failure was lost, finished, or replaced")
+			}
+			var accounting *model.ForceCloseAccountingError
+			var targetErr error
+			select {
+			case targetErr = <-target.observed:
+			default:
+				t.Fatal("retry did not retain the actual target failure")
+			}
+			verified, quarantined := int64(0), int64(0)
+			if pass == 0 {
+				verified = 1
+				if quarantineOrigin {
+					verified++
+					quarantined = 1
+				}
+			}
+			if !errors.As(targetErr, &accounting) || accounting.VerifiedCloseCount() != verified ||
+				accounting.AccountingRejectionCount() != 1 || accounting.QuarantinedAccountingRejectionCount() != quarantined {
+				t.Fatal("idle retry lacks completed accounting-only authority", targetErr)
 			}
 			server.Db(ctx, func(conn server.PgConn) {
 				rows, err := conn.Query(ctx, `
@@ -202,16 +262,52 @@ func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, qu
 					}
 				})
 			})
+			// A terminal Redis contract retains its reservation until the debit
+			// owner acknowledges release. Observe that custody, then join it.
+			server.Db(ctx, func(conn server.PgConn) {
+				var pending int
+				var bytes model.ByteCount
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*),COALESCE(sum(debit_byte_count),0)
+					FROM transfer_debit_journal WHERE balance_id=$1 AND contract_id=$2`, fixture.balanceId, fixture.originId).Scan(&pending, &bytes))
+				wantPending := 0
+				if pass == 0 {
+					wantPending = 1
+				}
+				if pending != wantPending || bytes != 0 {
+					t.Fatal("reportless sibling lost its exact zero-byte debit owner", pending, bytes)
+				}
+			})
+			debits, err := model.FlushTransferDebits(ctx, int(fixture.balanceId[15])%model.TransferDebitShardCount, nil, 1)
+			if err != nil || debits.Failed != 0 {
+				t.Fatal("reportless sibling debit did not join", debits, err)
+			}
 			fixture.requireAccounting(t, ctx)
+			server.Db(ctx, func(conn server.PgConn) {
+				var credit model.ByteCount
+				server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1`, fixture.balanceId).Scan(&credit))
+				if credit != 8*fixture.grant {
+					t.Fatal("reportless sibling or rejected dispute debited the payer", credit)
+				}
+			})
 			if quarantineOrigin {
 				server.Db(ctx, func(conn server.PgConn) {
-					var settled bool
-					var payout int64
-					server.Raise(conn.QueryRow(ctx, `SELECT settled,coalesce(payout_byte_count,0) FROM transfer_escrow WHERE contract_id=$1`, fixture.originId).Scan(&settled, &payout))
-					if settled || payout != 0 {
-						t.Error("verified quarantine gained financial settlement authority")
+					var terminal, settled bool
+					var payout, credit, reports model.ByteCount
+					var reportCount, journalCount int
+					server.Raise(conn.QueryRow(ctx, `SELECT c.outcome=$2 AND NOT c.dispute,e.settled,COALESCE(e.payout_byte_count,0),b.balance_byte_count,
+						(SELECT count(*) FROM contract_close WHERE contract_id=c.contract_id),
+						(SELECT sum(used_transfer_byte_count) FROM contract_close WHERE contract_id=c.contract_id),
+						(SELECT count(*) FROM transfer_debit_journal WHERE contract_id=c.contract_id)
+						FROM transfer_contract c JOIN transfer_escrow e USING(contract_id)
+						JOIN transfer_balance b USING(balance_id) WHERE c.contract_id=$1`, quarantineId, model.ContractOutcomeSettled).Scan(
+						&terminal, &settled, &payout, &credit, &reportCount, &reports, &journalCount))
+					if !terminal || settled || payout != 0 || credit != 8*fixture.grant || reportCount != 2 || reports != 4*fixture.grant || journalCount != 0 {
+						t.Error("verified quarantine gained financial settlement authority or changed original reports", terminal, settled, payout, credit, reportCount, reports, journalCount)
 					}
 				})
+				if reserved := model.Testing_NetEscrowByteCount(ctx, quarantineBalanceId); reserved != 0 {
+					t.Fatal("verified quarantine retained its released reservation", reserved)
+				}
 			}
 			if len(task.GetFinishedTasks(ctx, taskId)) != 0 {
 				t.Fatal("failed batch was falsely recorded as a successful task")
