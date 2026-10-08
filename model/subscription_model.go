@@ -5298,12 +5298,13 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					DELETE FROM transfer_contract
 					USING candidate
 					WHERE transfer_contract.contract_id = candidate.contract_id
-					RETURNING transfer_contract.contract_id, source_id, destination_id
+					RETURNING transfer_contract.contract_id, source_id, destination_id,
+						outcome IS NULL AS unresolved
 				)
-				SELECT (SELECT COUNT(*) FROM due), contract_id, source_id, destination_id
+				SELECT (SELECT COUNT(*) FROM due), contract_id, source_id, destination_id, unresolved
 				FROM deleted_contract
 				UNION ALL
-				SELECT (SELECT COUNT(*) FROM due), NULL, NULL, NULL
+				SELECT (SELECT COUNT(*) FROM due), NULL, NULL, NULL, false
 				WHERE NOT EXISTS (SELECT 1 FROM deleted_contract)
 				`,
 				minTime.UTC(),
@@ -5314,8 +5315,14 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
 					var contractId, sourceId, destinationId *server.Id
-					server.Raise(result.Scan(&processedCount, &contractId, &sourceId, &destinationId))
+					var unresolved bool
+					server.Raise(result.Scan(&processedCount, &contractId, &sourceId, &destinationId, &unresolved))
 					if contractId != nil {
+						// Deleting unresolved custody is its terminal lifecycle event.
+						// Read the deleted version so a concurrent outcome wins once.
+						if unresolved {
+							server.AddTxCommitCount(tx, &contractClosedCounter, 1)
+						}
 						contractHoleEventInTx(ctx, tx, *contractId, *sourceId, *destinationId, "remove")
 					}
 				}

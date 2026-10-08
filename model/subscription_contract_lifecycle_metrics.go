@@ -8,7 +8,9 @@ import (
 
 // Process-local counters count acknowledged commits, including zero-byte and
 // no-escrow contracts. Reuse, rollback and terminal replay add no event. A close
-// includes quarantine; it does not assert that Redis debit rows already applied.
+// includes quarantine and deletion of an unresolved contract; deleting an
+// existing terminal outcome cannot close it again. These are not crash-durable
+// history and do not assert that Redis debit rows already applied.
 var contractOpenedCounter server.TxCommitCounter
 var contractClosedCounter server.TxCommitCounter
 
@@ -19,7 +21,7 @@ var contractOpenedMetric = prometheus.NewCounterFunc(prometheus.CounterOpts{
 
 var contractClosedMetric = prometheus.NewCounterFunc(prometheus.CounterOpts{
 	Name: "urnetwork_contract_closed_total",
-	Help: "First contract outcome transitions observed after a successful transaction commit reply, including malformed quarantine. This is terminal closure, not completion of asynchronous financial projections.",
+	Help: "First terminal contract transitions observed after a successful transaction commit reply, including malformed quarantine and deletion without a prior outcome. This is terminal closure, not completion of asynchronous financial projections.",
 }, func() float64 { return float64(contractClosedCounter.ConfirmedCount()) })
 
 func init() {
