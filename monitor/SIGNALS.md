@@ -5956,6 +5956,34 @@ selection or post ownership is descriptive until work and timing boundaries are
 matched. All pages ending near the page deadline can still do very different
 amounts of committed work.
 
+**Bounded whole-result timing capture (2026-10-08):** bind an existing Taskworker
+container to its exact native PID/start/boot, container identity and image, then
+require that same generation before and after the read. A single-container
+diagnostic may request a fixed trailing 300-second interval with 512 tail lines,
+262,144 combined log bytes, a 10-second collector budget, 131,072 private output
+bytes and at most eight whole source-qualified payer results. Selected raw lines,
+task IDs and cursor identities stay private; publish only validated counts,
+phase timings and coverage. The possible generation interval is no longer than
+`min(300 seconds, capture end - container start)`. A tail cap, malformed result
+or young generation prevents a whole-window execution census. Empty retained
+results do not prove no work, and these logs do not bind a particular payer or
+contract or measure task claim/finalization latency.
+
+The first such capture stopped at `native_before` with
+`bounded_reader_unavailable`: native continuity and timings were unavailable,
+although the owned SSH transport joined and released its shared reservation.
+That generic failure does not establish a changed container or application
+failure. Source review found a separate timestamp compatibility defect:
+Docker and Go can emit RFC3339Nano fractions that Python 3.10's direct
+`fromisoformat` rejects. Parse whole seconds, the bounded fractional digits and
+the timezone explicitly, preserving exact identity checks and their existing
+start-time tolerance. Cover zero through nine fractional digits, timezone and
+malformed-input cases, private/public projection, and changed-generation refusal.
+Passing those controls establishes parser behavior, not the unretained exception
+from the first capture. Keep the consumed failure and require a fresh reviewed
+packet for any corrected capture; local newer-Python tests do not certify an
+actual Python 3.10 execution or Main recovery.
+
 The targeted trace is a finite diagnostic, not a high-cardinality metric or a new
 financial path. A private target digest, capture label, expiry and page/event caps
 are loaded outside financial/admission locks. The invocation uses an opaque local
