@@ -368,7 +368,7 @@ func TestingLegacyPayerPipeline(t *testing.T, counts []int, shard task.Target,
 		protocol, closeProtocol := legacyFinancialRunProtocolBind(t, ctx)
 		defer closeProtocol()
 		provider := NewLegacyProviderTotalsTaskTarget()
-		mirror := task.NewTaskTargetWithPost(ApplyLegacyNetEscrowMirror, ApplyLegacyNetEscrowMirrorPost)
+		mirror := legacyPayerPipelineMirrorTarget()
 		outputNames := []string{provider.TargetFunctionName(), mirror.TargetFunctionName()}
 		settings := task.DefaultTaskWorkerSettings()
 		settings.ClaimRegisteredTargetsOnly = true
