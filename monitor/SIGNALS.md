@@ -6341,6 +6341,55 @@ matching source literal do not provide that join. Keep identifiers and credentia
 in the restricted evidence, and use bounded retained evidence before requesting
 another production read.
 
+The source audit at `d1f944dbf` found exactly those three production INSERT owners.
+Other contract writes change stream association, terminal usage/outcome,
+dispute/close state or retention time; retention archives terminal proof before
+deleting and does not reinsert the contract. No production COPY, backfill or
+dynamic SQL helper in the inspected tree supplies another contract INSERT or
+clears expiration. The usage guard returns the deadline unchanged, and the
+reservation revision triggers run after the statement. `BatchInTx` forwards the
+queued INSERT, and each current creator scans its returned deadline into a
+nonnullable `time.Time`. These source boundaries do not attest the live trigger
+bodies, an external writer or a modified executable.
+
+The positive-byte non-Redis discriminator is narrower than the expiration
+rollout. Retained `52e2a1353`, immediately before Redis admission commit
+`b3e96e42e`, admits ordinary positive-byte contracts through the legacy ledger
+INSERT without expiration. `b3e96e42e` first adds a policy-gated Redis path;
+migration 755 creates its `enabled=false` singleton. That generation can take
+the same legacy path only after its request successfully reads a false policy.
+`75b409734` removes the read and makes positive-byte public admission
+unconditional; pre-expiration `de68468d` already contains that change.
+Expiration is added in `695f8ed8a`, with the precise materialized creation clock
+preserved by `1279af4d8`. This identifies compatible source shapes, not a running
+writer, and dates or source ancestry alone cannot identify a modified artifact.
+
+Join the policy-gated candidate to the schema that existed at its request's
+policy read. A missing `enabled` column/table, missing singleton or query failure
+raises before its contract transaction; there is no legacy fallback on read
+failure. A request that successfully read false before a column drop could
+already be waiting downstream, so a later schema snapshot alone does not exclude
+it. Current source still describes migration 755's original shape; the separate
+operator column removal requires its own retained runtime evidence. The smallest
+remaining writer discriminator is one exact contract INSERT bound to its backend
+session and executing process/artifact, including draining processes; if that
+artifact has the policy gate, retain the same request's successful policy result
+or its ordered schema-removal evidence. Pooler client labels and statement-family
+matches are not that binding.
+
+Healthy source controls cover all creation owners and the signed deadline
+(`TestContractExpirationDefaultAcrossCreationPaths`,
+`TestCreateContractSignsPersistedExpiration`), rolling omission
+(`TestContractExpirationMigrationPreservesLegacyWriters`), and public Redis
+creation after the policy column is removed
+(`TestRedisAdmissionCreatesAfterEnabledColumnRemoval`). This audit did not rerun
+those native controls. A fresh zero-byte legacy anchor is not evidence of a
+positive-byte admission bypass, and a retained escrow marker alone is not exact
+write provenance. Conversely, current source, healthy new samples or selected
+fleet convergence cannot exclude an overlapping older writer. Keep missing
+request/process/schema joins unknown and retain the age-based NULL cleanup;
+none of these source controls justifies immediate retirement of every NULL row.
+
 Canonical `9bc8a7e` separately applies the same NULL fallback to companion-origin
 selection, prober reservation sizing, the post-lock origin check, and escrow
 reuse. Independent native controls reproduced four stale-origin failures and
