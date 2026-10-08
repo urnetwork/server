@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -214,7 +215,7 @@ func TestTaskRunCohortClaimKeepsFutureMembershipUnowned(t *testing.T) {
 func TestTaskRunCohortExecutionSharesDeadlineAndCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	worker := NewTaskWorkerWithDefaults(ctx)
+	worker := NewTaskWorkerWithDefaults(t.Context())
 	defer worker.Close()
 	var deadlines []time.Time
 	var ids []server.Id
@@ -384,6 +385,96 @@ func TestTaskRunCohortCompletionLostReplyDoesNotReplay(t *testing.T) {
 				server.RaisePgResult(probe.Exec(ctx, `SELECT pg_advisory_unlock($1)`, taskAdvisoryLockKey(id)))
 				t.Fatal("an unacknowledged member lost its exact session owner")
 			}
+		}
+	})
+}
+
+// The cohort crosses the old32-row temp-table boundary after a real claim
+// commit. A committed deletion and current isolation are visible in the read.
+func TestTaskRunCohortPostCommitReadKeepsFreshCommittedMembers(t *testing.T) {
+	runOnceGenerationEnv(t, func(t testing.TB, ctx context.Context) {
+		owner := session.NewLocalClientSession(ctx, "", nil)
+		defer owner.Cancel()
+		ids := taskRunCohortTestSchedule(owner, server.NewId(), 64)
+		worker := NewTaskWorkerWithDefaults(ctx)
+		defer worker.Close()
+		worker.AddTargets(&taskRunCohortTestTarget{Target: NewTaskTarget(taskClaimGroupTestCall)})
+		worker.claimAfterCommit = func(*taskClaimGuard) {
+			RemovePendingTask(ctx, ids[0])
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE pending_task RENAME TO pending_task_read_fixture;
+					CREATE VIEW pending_task AS SELECT (jsonb_populate_record(NULL::pending_task_read_fixture,
+						to_jsonb(p) || jsonb_build_object('reschedule_error',current_setting('transaction_isolation')))).*
+					FROM pending_task_read_fixture p`))
+			}, server.TxReadCommitted, server.OptNoRetry())
+		}
+		claimed, guard, _, err := worker.takeTasksWithGuard(ctx, 1, nil, taskClaimOptions{runCohorts: true})
+		if guard != nil {
+			defer guard.release()
+		}
+		if err != nil || len(claimed) != 63 || guard == nil || guard.taskIds[ids[0]] || claimed[ids[0]] != nil {
+			t.Fatal("large acknowledged claim retained a deleted member", len(claimed), err)
+		}
+		for _, queued := range claimed {
+			if queued.RescheduleError != "read committed" || queued.ClaimGeneration != 1 || queued.runCohort == nil {
+				t.Fatal("cohort read changed isolation, exact generation or membership", queued.RescheduleError, queued.ClaimGeneration)
+			}
+		}
+		probe, err := server.AcquireMaintenanceDbConn(ctx)
+		server.Raise(err)
+		defer probe.Release()
+		var acquired bool
+		server.Raise(probe.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, taskAdvisoryLockKey(ids[0])).Scan(&acquired))
+		if acquired {
+			server.RaisePgResult(probe.Exec(ctx, `SELECT pg_advisory_unlock($1)`, taskAdvisoryLockKey(ids[0])))
+		}
+		if !acquired {
+			t.Fatal("deleted cohort member retained its exact execution owner")
+		}
+	})
+}
+
+// The native statement really raises serialization failure. A successful
+// implicit replay would increment the nontransactional sequence and hide it.
+func TestTaskRunCohortPostCommitReadDoesNotReplayFailedStatement(t *testing.T) {
+	runOnceGenerationEnv(t, func(t testing.TB, ctx context.Context) {
+		owner := session.NewLocalClientSession(ctx, "", nil)
+		defer owner.Cancel()
+		taskRunCohortTestSchedule(owner, server.NewId(), 64)
+		worker := NewTaskWorkerWithDefaults(ctx)
+		defer worker.Close()
+		worker.AddTargets(&taskRunCohortTestTarget{Target: NewTaskTarget(taskClaimGroupTestCall)})
+		worker.claimAfterCommit = func(*taskClaimGuard) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `CREATE SEQUENCE task_cohort_read_attempt;
+					CREATE FUNCTION task_cohort_read_fail_once(value text) RETURNS text LANGUAGE plpgsql VOLATILE AS $$
+					BEGIN
+						IF nextval('task_cohort_read_attempt')=1 THEN
+							RAISE EXCEPTION 'synthetic cohort read failure' USING ERRCODE='40001';
+						END IF;
+						RETURN value;
+					END $$;
+					ALTER TABLE pending_task RENAME TO pending_task_read_fixture;
+					CREATE VIEW pending_task AS SELECT (jsonb_populate_record(NULL::pending_task_read_fixture,
+						to_jsonb(p) || jsonb_build_object('function_name',task_cohort_read_fail_once(p.function_name)))).*
+					FROM pending_task_read_fixture p`))
+			}, server.TxReadCommitted, server.OptNoRetry())
+		}
+		recovered := server.HandleError(func() {
+			_, guard, _, err := worker.takeTasksWithGuard(ctx, 1, nil, taskClaimOptions{runCohorts: true})
+			if guard != nil {
+				defer guard.release()
+			}
+			server.Raise(err)
+		})
+		cause, _ := recovered.(error)
+		var pgErr *pgconn.PgError
+		var attempts int64
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT last_value FROM task_cohort_read_attempt`).Scan(&attempts))
+		}, server.OptNoRetry())
+		if !errors.As(cause, &pgErr) || pgErr.Code != "40001" || attempts != 1 {
+			t.Fatal("failed large cohort read was hidden or automatically replayed", recovered, attempts)
 		}
 	})
 }

@@ -587,6 +587,13 @@ func ScheduleTaskIfAbsent[T any, R any](
 }
 
 func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
+	return getTasks(ctx, false, taskIds...)
+}
+
+// A bounded, acknowledged Run claim reads its exact members with one fresh
+// statement and no automatic retry, including cohorts above the legacy32 cutoff.
+// Other large callers retain their existing transaction-local table policy.
+func getTasks(ctx context.Context, exactClaim bool, taskIds ...server.Id) map[server.Id]*Task {
 	if len(taskIds) == 0 {
 		return map[server.Id]*Task{}
 	}
@@ -619,7 +626,9 @@ func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 		var result server.PgResult
 		var err error
 
-		if len(taskIds) < 32 {
+		if exactClaim {
+			result, err = query.Query(ctx, selectSql+` WHERE task_id=ANY($1::uuid[])`, taskIds)
+		} else if len(taskIds) < 32 {
 			// `task_id IN (...)` is more efficient than a temp table for small lists
 
 			taskIdParams := []string{}
@@ -686,7 +695,7 @@ func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 			}
 		})
 	}
-	if len(taskIds) < 32 {
+	if exactClaim || len(taskIds) < 32 {
 		// One exact-ID statement needs no transaction wrapper. Claims still
 		// read after COMMIT so concurrent deletion and producer wakes remain
 		// visible; an uncertain read is returned without an automatic replay.
@@ -2279,7 +2288,7 @@ claimCandidates:
 		readCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		defer cancel()
 	}
-	claimedTasks = GetTasks(readCtx, taskIds...)
+	claimedTasks = getTasks(readCtx, options.runCohorts, taskIds...)
 	for _, taskId := range taskIds {
 		if queued := claimedTasks[taskId]; queued != nil {
 			// A producer may commit between claim and this exact-ID read. Its
