@@ -5497,6 +5497,33 @@ lower bounds, not per-call latency, CPU, distinct providers or observed lock
 chains; same-provider batch opportunities require their own source-qualified
 evidence. The controls do not establish Main throughput or account recovery.
 
+Provider-total failure phases (2026-10-07): the singleton and elected batch
+reader now render a fixed phase with a validated SQLSTATE, for example
+`legacy provider totals phase=account_write failed (SQLSTATE 55P03)`.
+`pending_read` identifies the owning-task read/lock statement; `account_write`
+identifies the account upsert; `applied_marker` identifies its durable marker
+write. `allocation` covers payload or amount validation, `batch_wait` a waiting
+follower, and `transaction_start`, `configure`, `body` and `commit` retain the
+remaining transaction boundaries. A missing or ambiguous inner attribution
+does not acquire a more specific phase. A commit failure remains unacknowledged;
+its phase does not prove rollback or authorize replay without the durable marker.
+
+The wrapper preserves the original typed PostgreSQL and context causes for
+`errors.As` and `errors.Is`. Its rendered error type changes, so a discriminator
+must not require the old `*pgconn.PgError` text prefix to recognize SQLSTATE.
+Rendered phase errors contain no underlying error text, raw SQL, task IDs or
+network IDs. Existing statement/lock deadlines, no-retry transaction ownership,
+accounting order and per-task recovery remain unchanged.
+
+A phase identifies the failed operation, not its blocker, provider or lock
+residence. The retained three provider-total `55P03` recoveries predate this
+attribution; their outer singleton/batch frames cannot distinguish these
+statements. Real held-task and held-account controls now separate the phases;
+marker and deferred-commit refusal, cancellation and lost owner-return reply
+controls preserve exact rollback/recovery authority. Join future source-qualified
+phase evidence to an independently bounded lock observation before attributing
+contention. This diagnostic adds no projection-age probe or throughput result.
+
 Redis-mode payout ownership (2026-10-06): the final outcome, asynchronous payer
 debit journal, exact provider sweeps and per-contract total-projection task now
 commit together. Losing every post-commit callback cannot lose earned payout
