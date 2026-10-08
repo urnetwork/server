@@ -1592,7 +1592,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					}
 					// glog.Errorf("[t]read err = %s\n", err)
 					if connectionId := announce.ConnectionId(); connectionId != nil {
-						model.ClientError(handleCtx, *networkId, clientId, *connectionId, "read", err)
+						model.ClientError(handleCtx, byJwt.NetworkId, clientId, *connectionId, "read", err)
 					}
 					return
 				}
@@ -1670,7 +1670,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				// A WebSocket deadline or partial write is terminal; the Transfer
 				// sequence retries each logical message over a replacement route.
 				if connectionId := announce.ConnectionId(); connectionId != nil {
-					model.ClientError(handleCtx, *networkId, clientId, *connectionId, "write", err)
+					model.ClientError(handleCtx, byJwt.NetworkId, clientId, *connectionId, "write", err)
 				}
 			}
 			write := func(message []byte, returnToPool bool) error {
