@@ -65,6 +65,42 @@ func TestCompanionOriginWaitSharedMissesRetainFallbackAndFinalRead(t *testing.T)
 	})
 }
 
+func TestCompanionOriginWaitSharedMissCrossingDeadlineGetsOwnFinalRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		changes := connect.NewMonitorValue(uint64(0))
+		updates := func() <-chan struct{} { _, update := changes.Get(); return update }
+		go func() {
+			time.Sleep(2975 * time.Millisecond)
+			changes.Update(func(version uint64) uint64 { return version + 1 })
+		}()
+		forced := 0
+		shared := testCompanionOriginLookup(func(_ context.Context, force bool, create func() (*model.TransferEscrow, error)) (*model.TransferEscrow, error) {
+			if force {
+				forced++
+				return create()
+			}
+			if time.Since(start) == 2975*time.Millisecond {
+				// A recent shared snapshot misses an origin that commits at
+				// our deadline, and the other read returns 25ms afterward.
+				time.Sleep(50 * time.Millisecond)
+				return nil, model.ErrMissingCompanionOrigin
+			}
+			return create()
+		})
+		want := &model.TransferEscrow{}
+		got, err := waitForCompanionOrigin(t.Context(), shared, func() (*model.TransferEscrow, error) {
+			if time.Since(start) < 3*time.Second {
+				return nil, model.ErrMissingCompanionOrigin
+			}
+			return want, nil
+		}, updates)
+		if got != want || err != nil || forced != 1 || time.Since(start) != 3025*time.Millisecond {
+			t.Fatalf("crossing shared miss replaced final read: got=%v err=%v forced=%d elapsed=%v", got, err, forced, time.Since(start))
+		}
+	})
+}
+
 func TestCompanionOriginWaitBoundsMissingLookupCount(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()

@@ -89,7 +89,9 @@ func waitForCompanionOrigin(
 		// subscription acknowledgement during that read remains observable.
 		lastLookup = time.Now()
 		attempts++
+		queried := false
 		create := func() (*model.TransferEscrow, error) {
+			queried = true
 			lookups++
 			companionOriginLookupCounter.WithLabelValues(source).Inc()
 			return createEscrow()
@@ -100,6 +102,12 @@ func waitForCompanionOrigin(
 			escrow, err = create()
 		} else {
 			escrow, err = shared.Lookup(ctx, !lastLookup.Before(deadline), create)
+		}
+		// Another request's read may finish across our deadline. Its absence
+		// cannot replace our final snapshot; committed successes stay one-shot.
+		if !queried && errors.Is(err, model.ErrMissingCompanionOrigin) && !time.Now().Before(deadline) {
+			source = "deadline"
+			escrow, err = shared.Lookup(ctx, true, create)
 		}
 		if !errors.Is(err, model.ErrMissingCompanionOrigin) {
 			return escrow, err

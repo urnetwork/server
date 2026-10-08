@@ -72,13 +72,21 @@ func (self *ContractOriginWatch) Lookup(ctx context.Context, force bool, create 
 		return nil, ErrMissingCompanionOrigin
 	}
 	if shared != nil {
+		completed := false
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-shared.done:
+			completed = true
+		case <-time.After(time.Until(shared.validUntil)):
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		// An in-flight read cannot hold a follower past the hint's original
+		// freshness bound. The follower owns any source work after that point.
+		if !completed {
+			return create()
 		}
 		func() {
 			state.stateLock.Lock()

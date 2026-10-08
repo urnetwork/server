@@ -25,18 +25,18 @@ func testContractOriginLookupWatch(ctx context.Context) *ContractOriginWatch {
 	}
 }
 
-func TestContractOriginLookupCoalescesMissingSqlWork(t *testing.T) {
+func TestContractOriginLookupCoalescesMissingWork(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const requests = 64
-		readCounts := []int64{}
+		lookupCounts := []int64{}
 		for _, watch := range []*ContractOriginWatch{nil, testContractOriginLookupWatch(t.Context())} {
-			var reads atomic.Int64
+			var lookups atomic.Int64
 			release := make(chan struct{})
 			results := make(chan error, requests)
 			for range requests {
 				go func() {
 					_, err := watch.Lookup(t.Context(), false, func() (*TransferEscrow, error) {
-						reads.Add(2)
+						lookups.Add(1)
 						<-release
 						return nil, ErrMissingCompanionOrigin
 					})
@@ -50,12 +50,12 @@ func TestContractOriginLookupCoalescesMissingSqlWork(t *testing.T) {
 					t.Fatalf("missing result changed: %v", err)
 				}
 			}
-			readCounts = append(readCounts, reads.Load())
+			lookupCounts = append(lookupCounts, lookups.Load())
 		}
-		if readCounts[0] != 2*requests || readCounts[1] != 2 {
-			t.Fatalf("missing SQL reads before/after = %v, want [128 2]", readCounts)
+		if lookupCounts[0] != requests || lookupCounts[1] != 1 {
+			t.Fatalf("missing lookup callbacks before/after = %v, want [64 1]", lookupCounts)
 		}
-		t.Logf("64 concurrent same-pair missing requests: source SQL reads %d -> %d", readCounts[0], readCounts[1])
+		t.Logf("64 concurrent same-pair missing requests: callback attempts %d -> %d; source-derived two-read count %d -> %d", lookupCounts[0], lookupCounts[1], 2*lookupCounts[0], 2*lookupCounts[1])
 	})
 }
 
@@ -92,6 +92,28 @@ func TestContractOriginLookupSuccessesCreateIndependently(t *testing.T) {
 		if calls.Load() != requests {
 			t.Fatalf("successful create calls = %d, want %d", calls.Load(), requests)
 		}
+	})
+}
+
+func TestContractOriginLookupSlowLeaderDoesNotRetainFollower(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		watch := testContractOriginLookupWatch(t.Context())
+		start := time.Now()
+		finished := make(chan struct{})
+		go func() {
+			defer close(finished)
+			_, _ = watch.Lookup(t.Context(), false, func() (*TransferEscrow, error) {
+				time.Sleep(time.Second)
+				return nil, ErrMissingCompanionOrigin
+			})
+		}()
+		synctest.Wait()
+		want := &TransferEscrow{}
+		got, err := watch.Lookup(t.Context(), false, func() (*TransferEscrow, error) { return want, nil })
+		if got != want || err != nil || time.Since(start) != 100*time.Millisecond {
+			t.Fatalf("slow leader retained independent follower: got=%v err=%v elapsed=%v", got, err, time.Since(start))
+		}
+		<-finished
 	})
 }
 
