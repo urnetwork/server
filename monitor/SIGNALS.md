@@ -580,13 +580,18 @@ creation extends an existing pair or creates fresh membership after a miss.
 The prior control receipt and local source-pass benchmark are historical or
 explicit-initialization evidence, not an active periodic-readiness gate.
 
-The signed 60-minute lifespan does not retroactively expire legacy NULL contracts.
-Their quiet-period expiry can be renewed by a checkpoint. Removing the packet
-fallback does not prove those contracts all have Redis evidence: retained legacy
-contracts whose keys expire can fail closed. Record old-writer retirement and
-actual publication/missing/error observations; neither waiting 60 minutes nor a
-healthy sample establishes complete legacy coverage. Tests prove missing-key
-refusal and fresh-creation recovery without silently backfilling old members.
+The stored/signed deadline and the Redis membership score remain separate from
+the cleanup policy for NULL deadlines. Candidate `2f1efad` adds a cleanup fallback
+of `create_time + 60 minutes`: ordinary inactivity may retire a row earlier, but
+a checkpoint cannot postpone that fallback. It does not write a stored deadline,
+change the signed client contract, or replace a legacy Redis infinity score.
+At its 2026-10-08 source freeze, deployment remains pending; §2.6 records the
+fresh-NULL evidence that rules out immediate retirement of every NULL row.
+Packet reads remain Redis-only, with no PostgreSQL fallback. Missing projections
+fail closed, and the cleanup change does not establish complete legacy Redis
+coverage. Record exact writer adoption and actual publication/missing/error
+observations; neither waiting 60 minutes nor a healthy sample proves that every
+legacy member has valid evidence.
 
 ### 1.2 Task canaries — the cheapest end-to-end redis probes
 Probe: `task-canaries`
@@ -6283,9 +6288,26 @@ Legacy ledger, Redis admission and no-escrow creation all persist a database-clo
 deadline of 60 minutes and return that exact value for the provider-signed
 contract. Checkpoints do not update it. Both open/disputed selection and the
 locked proof owner accept a due absolute deadline independently of recent
-reports. A NULL deadline is a separate compatibility cohort: its current quiet
-cutoff is 12 minutes, not an inferred 60-minute deadline. Retained expiry proofs
-and pending legacy settlement intents remain owned by their existing continuations.
+reports. Candidate `2f1efad` gives NULL rows a cleanup fallback at
+`create_time + 60 minutes`, while retaining the 12-minute inactivity policy for
+earlier quiet closes. Both bounded selectors and the locked proof owner apply
+that same fallback; recent checkpoints cannot extend it. The fair raw horizon
+admits due fallback rows even when a retained inactivity cutoff is older.
+Explicit expiration values override this fallback. Retained expiry proofs and
+pending legacy settlement intents remain owned by their existing continuations.
+This is a cleanup predicate, not a stored-deadline backfill or a change to signed
+client deadlines and Redis infinity membership (§1.1).
+
+At 2026-10-08 21:50:43.128 UTC, a bounded Main read found the youngest contract
+with NULL expiration was only 0.618177 seconds old. NULL therefore does not imply
+an old cohort that can all retire immediately. All three inspected current
+creation owners compute an explicit database-clock expiration, so this
+observation does not identify the writer of that fresh row. Preserve its exact
+private write/executor provenance before attributing the missing deadline; row
+age, current checkout code and fleet artifact identity alone cannot do so.
+The immediate-NULL candidate `bf430323` is unsafe for this observed cohort and
+its prepared R53 image remains held. The age-based replacement `2f1efad` is
+pending native qualification and deployment at this documentation freeze.
 
 Startup uses one RunOnce key for this coordinator, preserving an existing
 cursor instead of inserting one task per contract. Its ordinary Post persists
