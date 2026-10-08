@@ -8,27 +8,25 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
-	"github.com/urnetwork/server/model"
 )
 
 type connectAuthFinalReadTestKey struct{}
 
-// Both handshake carriers use the same live authorization and instance checks.
-// The private context hook gives native tests a precise last-read barrier.
+// Parse the instance without publishing an admission, then perform the full
+// live authorization at the final read boundary. That query already binds the
+// active client, device and network to the current administrator and credential
+// epoch; a second weaker membership query would add no authority. Preserve
+// credential-error precedence when the instance is malformed too.
 func connectClientAuthentication(ctx context.Context, byJwt *jwt.ByJwt, instanceBytes []byte) (server.Id, int, error) {
-	if err := jwt.ValidateByJwtState(ctx, byJwt, true); err != nil {
-		return server.Id{}, http.StatusUnauthorized, err
-	}
-	instanceId, err := server.IdFromBytes(instanceBytes)
-	if err != nil {
-		return server.Id{}, http.StatusBadRequest, err
-	}
+	instanceId, instanceErr := server.IdFromBytes(instanceBytes)
 	if before, ok := ctx.Value(connectAuthFinalReadTestKey{}).(func()); ok {
 		before()
 	}
-	networkId := model.GetNetworkClientNetwork(ctx, *byJwt.ClientId)
-	if networkId == nil || *networkId != byJwt.NetworkId {
-		return server.Id{}, http.StatusForbidden, errors.New("Client id is not part of network.")
+	if err := jwt.ValidateByJwtState(ctx, byJwt, true); err != nil {
+		return server.Id{}, http.StatusUnauthorized, err
+	}
+	if instanceErr != nil {
+		return server.Id{}, http.StatusBadRequest, instanceErr
 	}
 	return instanceId, 0, nil
 }

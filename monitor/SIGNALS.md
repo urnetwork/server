@@ -2449,6 +2449,30 @@ The 2026-09-16 SQLSTATE 25006 incident exposed the previous empty owner and
 body without retaining it. Ownership identifies a call and recovery boundary,
 not proof of a process crash or failed primary operation (§4).
 
+The October 8 standing Connect observation at 09:47:48Z retained a 129/min
+aggregate and fixed owner buckets for `DisconnectNetworkClient` (93/min),
+`ConnectNetworkClientWithIpFamily` (31/min), and `GetNetworkClientNetwork`
+(5/min). The aggregate and owners overlap. Every retained sample reported
+unknown error type and SQLSTATE, with no application event clock; concurrent
+dropped/pre-cursor tail warnings prevent completeness or exact onset claims.
+These are recovered diagnostic boundaries, not native process-death evidence.
+The admission/retirement owners match the separate lifecycle source audit in
+§5.8, but that does not prove the panic cause or every query-group caller.
+
+Both frozen H1 and H3 handshake paths also performed a weaker network-membership
+lookup after a full live JWT-state lookup. The correction keeps one full check
+at the final read boundary, after parsing the instance without publishing it.
+The existing query still requires the active client, matching network/device,
+current network administrator and credential epoch; it grants no cached
+authority. Invalid credentials retain precedence over malformed-instance
+errors, and signature/audience checks, deadlines, error classification and
+transport ownership remain. Native controls count actual acquisitions and
+live-state queries, change client activity, device, administrator or credential
+epoch at the former last-read boundary, and preserve deletion refusal. Require
+the real H1/header/frame/H1+ and QUIC admission controls as well. One fewer
+handshake acquisition/query and stronger final-state validation do not identify
+the retained unknown panic or establish Main pool/CPU/route recovery.
+
 On 2026-09-23 a bounded Taskworker stack control identified this trimpath
 attribution gap at `server/model.ForceCloseOpenContractIds`. The exact escrow
 insufficiency error at its dispute-settlement raise is a recovered accounting
