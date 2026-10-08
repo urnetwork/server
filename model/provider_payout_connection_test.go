@@ -29,7 +29,7 @@ type providerPayoutConnectionCounts struct {
 	payoutReads       int
 }
 
-// The tripwire cancels a forbidden acquisition immediately, so the single-slot
+// The tripwire rejects a forbidden acquisition immediately, so the single-slot
 // regression fails from the ownership violation rather than a timeout or sleep.
 type providerPayoutConnectionObserver struct {
 	stateLock sync.Mutex
@@ -43,9 +43,7 @@ func (self *providerPayoutConnectionObserver) TraceAcquireStart(ctx context.Cont
 	self.counts.acquires++
 	if self.counts.held != 0 {
 		self.counts.nestedAcquires++
-		blocked, cancel := context.WithCancelCause(ctx)
-		cancel(errors.New("synthetic provider stats nested PostgreSQL acquisition"))
-		return blocked
+		panic(errors.New("synthetic provider stats nested PostgreSQL acquisition"))
 	}
 	return ctx
 }
@@ -57,7 +55,7 @@ func (self *providerPayoutConnectionObserver) TraceAcquireEnd(_ context.Context,
 	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	self.counts.ownerPid = data.Conn.Conn().PgConn().PID()
+	self.counts.ownerPid = data.Conn.PgConn().PID()
 	self.counts.held++
 	self.counts.peakHeld = max(self.counts.peakHeld, self.counts.held)
 }
