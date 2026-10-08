@@ -593,7 +593,7 @@ func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 
 	tasks := map[server.Id]*Task{}
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	read := func(query server.PgCanQuery) {
 		selectSql := `
     		SELECT
 		    	pending_task.task_id,
@@ -632,7 +632,7 @@ func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 				taskIdValues = append(taskIdValues, taskId)
 			}
 
-			result, err = tx.Query(
+			result, err = query.Query(
 				ctx,
 				selectSql+`
 				    WHERE task_id IN (`+strings.Join(taskIdParams, ",")+`)
@@ -640,9 +640,7 @@ func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 				taskIdValues...,
 			)
 		} else {
-			server.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
-
-			result, err = tx.Query(
+			result, err = query.Query(
 				ctx,
 				selectSql+`
 				    INNER JOIN temp_task_ids ON temp_task_ids.task_id = pending_task.task_id
@@ -687,7 +685,19 @@ func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 				tasks[task.TaskId] = task
 			}
 		})
-	})
+	}
+	if len(taskIds) < 32 {
+		// One exact-ID statement needs no transaction wrapper. Claims still
+		// read after COMMIT so concurrent deletion and producer wakes remain
+		// visible; an uncertain read is returned without an automatic replay.
+		server.Db(ctx, func(conn server.PgConn) { read(conn) }, server.OptNoRetry())
+	} else {
+		// Large reads retain their transaction-local ID table and one snapshot.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
+			read(tx)
+		})
+	}
 
 	return tasks
 }
