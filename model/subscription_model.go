@@ -1285,7 +1285,7 @@ func finishForceCloseContract(closeErr error, quarantine func() error, cleanup f
 	// scheduling refusal cannot authorize the malformed no-payout transition,
 	// even if that owner has already released before the next branch runs.
 	ownershipBusy := isOnlyContractError(closeErr, errTransferBalanceOwnershipBusy)
-	if closeErr != nil && !alreadySettled && !ownershipBusy {
+	if closeErr != nil && !alreadySettled && !ownershipBusy && !isForceCloseOperationalError(closeErr) {
 		closeErr = errors.Join(closeErr, quarantine())
 	}
 
