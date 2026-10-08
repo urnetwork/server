@@ -325,7 +325,7 @@ func TestTryTxOwnershipRefusalAndAcknowledgedEndUseActualTransaction(t *testing.
 			if ok {
 				panic(errors.New("transaction bypassed the session owner"))
 			}
-		}, OptNoRetry())
+		}, TxReadCommitted, OptNoRetry())
 		if !slices.Equal(events, []PgOwnershipEventKind{PgOwnershipRefused}) {
 			t.Fatal("refused transaction invented an admitted interval", events)
 		}
@@ -338,7 +338,7 @@ func TestTryTxOwnershipRefusalAndAcknowledgedEndUseActualTransaction(t *testing.
 				panic(errors.New("fresh transaction was not admitted"))
 			}
 			RaisePgResult(tx.Exec(ctx, `INSERT INTO owned_tx_effect VALUES(1,37)`))
-		}, OptNoRetry())
+		}, TxReadCommitted, OptNoRetry())
 		if !slices.Equal(events, []PgOwnershipEventKind{PgOwnershipAdmitted, PgOwnershipReleased}) {
 			t.Fatal("acknowledged transaction ownership lifetime changed", events)
 		}
@@ -352,7 +352,7 @@ func TestTryTxOwnershipRefusalAndAcknowledgedEndUseActualTransaction(t *testing.
 					panic(errors.New("rollback owner was not admitted"))
 				}
 				panic(failure)
-			}, OptNoRetry())
+			}, TxReadCommitted, OptNoRetry())
 		})
 		if got != failure || !slices.Equal(events, []PgOwnershipEventKind{PgOwnershipAdmitted, PgOwnershipReleased}) {
 			t.Fatal("rollback lost actual ownership cleanup", got, events)
@@ -397,7 +397,7 @@ func TestTxOwnershipSubsetKeepsOuterAuthorityAcrossSavepoint(t *testing.T) {
 			}
 			Raise(savepoint.Rollback(ctx))
 			RaisePgResult(tx.Exec(ctx, `INSERT INTO owned_tx_effect VALUES(1,37)`))
-		}, OptNoRetry())
+		}, TxReadCommitted, OptNoRetry())
 		if TxOwnsKeys(retired, keys) || !slices.Equal(events, []PgOwnershipEventKind{PgOwnershipAdmitted, PgOwnershipReleased}) {
 			t.Fatal("transaction handback retained authority or duplicated observations", events)
 		}

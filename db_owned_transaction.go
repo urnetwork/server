@@ -246,9 +246,10 @@ func (self pgOwnershipResource) validate(conn PgConn) error {
 // for a caller that already owns BEGIN; a false result requires ending that
 // attempt before any shared-resource row lock/write. Private intent locks may
 // precede admission. Partial keys live until that transaction ends. The helper
-// requires a server transaction with OptNoRetry and one complete key-set probe
-// before any savepoint. An already-admitted subset returns true without a new
-// query or ownership interval; fresh additional keys fail closed.
+// requires a read-committed server transaction with OptNoRetry and one complete
+// key-set probe before any savepoint. A repeatable-read snapshot can predate a
+// prior owner's commit even when its advisory key is now free. An admitted
+// subset returns true without a new query or interval; extra keys fail closed.
 func TryTxOwnership(ctx context.Context, tx PgTx, keys []PgOwnershipKey) (bool, error) {
 	keys = normalizePgOwnershipKeys(keys)
 	if len(keys) == 0 {
@@ -259,7 +260,7 @@ func TryTxOwnership(ctx context.Context, tx PgTx, keys []PgOwnershipKey) (bool, 
 	}
 	owner, ok := tx.(*postCommitPgTx)
 	if !ok || !owner.ownershipAllowed || owner.ownership != nil {
-		return false, errors.New("transaction ownership requires a fresh no-retry server transaction")
+		return false, errors.New("transaction ownership requires a fresh read-committed no-retry server transaction")
 	}
 	observation, _ := ctx.Value(pgOwnershipObservationKey{}).(*PgOwnershipObservation)
 	owner.ownership = &pgTransactionOwnership{keys: keys, observation: observation}

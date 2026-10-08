@@ -837,7 +837,8 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				panic(err)
 			}
 			tx := &postCommitPgTx{PgTx: rawTx,
-				ownershipAllowed: !retryOptions.rerunOnCommitError && !retryOptions.rerunOnTransientError && !retryOptions.rerunOnConnectionError}
+				ownershipAllowed: txOptions.IsoLevel == pgx.ReadCommitted &&
+					!retryOptions.rerunOnCommitError && !retryOptions.rerunOnTransientError && !retryOptions.rerunOnConnectionError}
 			// if debugOptions.txCommitSeparately {
 			// 	tx = newDebugTx(tx, conn, txOptions)
 			// }
