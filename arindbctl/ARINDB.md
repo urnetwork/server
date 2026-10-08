@@ -926,6 +926,78 @@ reader's identity. State/province/country top-30 completeness remains open:
 availability and service-presence sources do not supply comparable subscriber
 rankings or attribute the sampled Main providers to these operators.
 
+The separate October 8 Canada packet proposes thirteen exact subscriber ASNs
+on the tracked `5bbba6ad` baseline. Its retained ARIN records identify each
+ASN's current registrant; primary operator or regulator sources establish
+subscriber service and, where needed, the legal-name/brand relationship:
+
+| Reviewed operator group | Exact ASN additions | Limited regional evidence |
+| --- | --- | --- |
+| Bell Canada | 855, 7122 | Atlantic business Internet terms; Winnipeg evidence remains dated 2021 |
+| Cogeco Connexion | 11290 | Eligible addresses in Ontario and Quebec |
+| Eastlink | 11260 | Named New Brunswick communities, St. John's and Irricana, Alberta |
+| TekSavvy | 5645 | Conditional home Internet in all ten provinces; no territory inference |
+| Northwestel | 22573 | Business Internet in all three territories and northern British Columbia |
+| Xplore | 22995 | Canadian residential fibre, fixed wireless and satellite; no admin1 projection |
+| Beanfield | 21949 | Eligible residential buildings in Ontario, Quebec and British Columbia |
+| Execulink | 7794 | Southwestern Ontario and qualified named communities |
+| Access Communications | 21804 | Rural Saskatchewan, subject to address/site qualification |
+| Tbaytel | 32277 | Northern Ontario; the Terrace Bay activation remains dated 2023 |
+| Valley Fiber | 396420 | Manitoba residential fibre with approximate coverage and address checks |
+| Sogetel | 4540 | Five named administrative regions within Quebec |
+
+Ten groups are new; Bell retains AS577 and Cogeco retains AS7992. Candidate
+`c95cfe5b` contains 5,232 subscriber groups, six negative groups and 5,508 unique
+subscriber ASNs across the same 160 countries. Canada context grows from six
+groups/seven ASNs to sixteen groups/twenty ASNs. These are proposed catalog
+counts, not measured provider coverage or Quality gains. All unowned stanza
+bytes, existing negative groups, feed pins and policy controls are preserved.
+
+The review records mixed hosting, colocation or cloud products for Bell,
+Eastlink, TekSavvy, Beanfield, Execulink and Sogetel. These products preserve
+the need for an applicable use discriminator; they neither approve hosting
+prefixes nor justify rejecting an entire subscriber operator. Ordinary
+subscriber resale remains eligible. Registry ambiguity, an unknown competing
+origin, independent exclusions/risk, weak origin visibility and invalid RPKI
+continue to follow the existing classifier policy. The URL success gate stays
+at least 0.8. This is a demonstrated catalog omission, not evidence that those
+independent gates are too strict or that any current Main provider will pass.
+
+The regional inventory has partial subscriber-service presence for all thirteen
+Canadian provinces and territories. TekSavvy's dedicated Saskatchewan page
+supplies conditional service evidence beyond its general nine-province fibre
+sentence; the generic address form does not establish service in the three
+territories. Northwestel's general operating area includes High Level, Alberta,
+but that alone is not counted as retail Internet service. Marketing footprint,
+historical rollout, homes passed and subscriber count remain distinct. No
+regional top-30 completeness, subscriber ranking or route geography is inferred.
+Of the retained September 30 APNIC Canada priority queue, eight ASNs are already
+reviewed subscribers, eleven are proposed here, one retains an explicit negative
+and ten remain unreviewed. Beanfield and Northwestel are additional candidates
+outside that queue. Starlink is already globally reviewed; the absence of CA
+context does not require another group while optional country withholding is
+disabled. Popularity and corporate affiliation alone never approve an ASN.
+
+Research, the exact config patch, source receipts and qualification inputs are
+retained under `artifacts/arin-ca-regional-research-20261008-v1`, frozen by
+`research-freeze.json` (`6cb20a1d`). Eastlink and Valley Fiber's unavailable raw
+HTTP requests are preserved as failures; separately retained official-page/PDF
+web-tool text projections are labelled as projections. Their hashes do not
+claim raw page/PDF identity. Nine data-only composition controls passed,
+including refusal of changed negatives, refreshed feed clocks, removed prior
+ASNs and unreviewed ASN/country additions. Independent source review and four
+native qualification tests are separate gates. Independent composition review
+`239ee059` verified all 176 frozen files and preservation controls; semantic
+subscriber-source review `a4b250db` accepted all thirteen registry-to-service
+judgments with the recorded mixed-use and projection limitations. Four native
+qualification tests remain pending. Those tests cover strict catalog
+parsing, exact identities, base-state/risk preservation, unknown origins,
+visibility/RPKI withholding and six explicit negative-use classes. They open
+no evidence feed, MMDB or database. Source composition has not refreshed the
+expired evidence bundle or constructed, published or adopted a new resource.
+Current census coverage and actual provider impact remain unknown until the
+separate Root-owned observation and artifact gates succeed.
+
 The twelve-ASN augmentation has a separately qualified reuse executor
 (`db1631d8`) and full/native/mapped readback preparation (`1a6c7beb`). It keeps
 the validated registration base, all 38 original feed bytes and observation
