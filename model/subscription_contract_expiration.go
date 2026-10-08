@@ -22,10 +22,10 @@ func GetContractExpirationTime(ctx context.Context, contractId server.Id) (expir
 	return
 }
 
-// The quiet cutoff still governs legacy rows. A recent checkpoint cannot
-// withdraw a candidate once its absolute deadline has arrived.
+// Legacy rows without an explicit deadline are due immediately. A recent
+// checkpoint cannot defer them or an arrived immutable deadline.
 func contractExpirationDue(expirationTime *time.Time, lastReport, cutoff, now time.Time) bool {
-	return !lastReport.After(cutoff) || (expirationTime != nil && !now.Before(*expirationTime))
+	return expirationTime == nil || !lastReport.After(cutoff) || !now.Before(*expirationTime)
 }
 
 // Origin selection precedes funding/client lock waits. Recheck its immutable

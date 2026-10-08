@@ -16,7 +16,8 @@ import (
 )
 
 // The first real 256-row dispute page contains one underfunded refusal and
-// active legacy peers. A healthy absolute-deadline expiry is the next row.
+// active peers with explicit future deadlines. A healthy absolute-deadline
+// expiry is the next row.
 // Observe the ordinary evaluator's durable retry before admitting its next run.
 func TestCloseExpiredAccountingContinuationKeepsDueTailPrompt(t *testing.T) {
 	env := server.DefaultTestEnv()
@@ -42,13 +43,13 @@ func TestCloseExpiredAccountingContinuationKeepsDueTailPrompt(t *testing.T) {
 		slices.SortFunc(protectedIds, server.Id.Cmp)
 		protectedTime := time.Date(2020, time.January, 1, 0, 1, 0, 0, time.UTC)
 		server.Tx(ctx, func(tx server.PgTx) {
-			// NULL peers remain governed by the quiet period, independently of
+			// Explicit future deadlines retain the quiet period, independently of
 			// the healthy tail's immutable deadline and fresh delivered reports.
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
 				(contract_id,source_network_id,source_id,destination_network_id,destination_id,payer_network_id,
 				transfer_byte_count,usage_origin_is_source,create_time,expiration_time,dispute)
-				SELECT id,$2,$3,$4,$5,$2,100,true,$6,NULL,true FROM unnest($1::uuid[]) row(id)`,
-				protectedIds, sourceNetworkId, sourceId, destinationNetworkId, destinationId, protectedTime))
+				SELECT id,$2,$3,$4,$5,$2,100,true,$6,$7,true FROM unnest($1::uuid[]) row(id)`,
+				protectedIds, sourceNetworkId, sourceId, destinationNetworkId, destinationId, protectedTime, server.NowUtc().Add(time.Hour)))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,close_time,checkpoint)
 				SELECT id,party,17,$2,true FROM unnest($1::uuid[]) row(id)
 				CROSS JOIN (VALUES ('source'),('destination')) parties(party)`, protectedIds, server.NowUtc()))
@@ -117,7 +118,7 @@ func TestCloseExpiredAccountingContinuationKeepsDueTailPrompt(t *testing.T) {
 			server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1`, fixture.balanceId).Scan(&credit))
 			server.Raise(conn.QueryRow(ctx, `SELECT payout_byte_count FROM transfer_escrow WHERE contract_id=$1 AND balance_id=$2`, healthy.ContractId, fixture.balanceId).Scan(&payout))
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1)
-				AND outcome IS NULL AND dispute AND NOT usage_unverified AND expiration_time IS NULL`, protectedIds).Scan(&protected))
+				AND outcome IS NULL AND dispute AND NOT usage_unverified AND expiration_time > statement_timestamp()`, protectedIds).Scan(&protected))
 			if credit != 8*fixture.grant-17 || payout != 17 || protected != len(protectedIds) {
 				t.Fatal("healthy continuation changed a protected peer or exact delivered debit", credit, payout, protected)
 			}
