@@ -34,11 +34,19 @@ func providerQueueTestFinalize(t testing.TB, ctx context.Context, original map[s
 		ids = append(ids, id)
 	}
 	providerTotalsBatchDue(ctx, ids)
+	if len(ids) == legacyProviderTotalsBatchLimit {
+		providerReplayCapacitySnapshot(t, ctx, "before_exact64")
+	}
 	worker := accountOwnershipTestWorker(ctx)
 	defer worker.Close()
 	finished, retried, posts, err := worker.EvalTasks(len(ids))
+	if len(ids) == legacyProviderTotalsBatchLimit {
+		providerReplayCapacitySnapshot(t, ctx, "after_exact64")
+		t.Logf("provider replay exact64 finished=%d retried=%d posts=%d err=%v", len(finished), len(retried), len(posts), err)
+	}
 	if err != nil || len(finished) != len(ids) || len(retried)+len(posts) != 0 {
-		t.Fatal("provider queue owners did not durably finalize", err)
+		t.Fatalf("provider queue owners did not durably finalize: expected=%d finished=%d retried=%d posts=%d err=%v",
+			len(ids), len(finished), len(retried), len(posts), err)
 	}
 	accountOwnershipRequireFinished(t, ctx, original)
 }
@@ -176,7 +184,31 @@ func providerQueueTestHeldWriter(t *testing.T, count int) {
 		if reruns.Load() != 0 {
 			t.Fatal("provider queue admission replayed a business transaction")
 		}
-		providerQueueTestFinalize(t, ctx, original)
+		var replayAdmissions atomic.Int32
+		var stateLock sync.Mutex
+		var admittedPools map[string]float64
+		accountKey := server.NewPgOwnershipKey("account_balance", networkId)
+		replayCtx := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+			if event.Kind == server.PgOwnershipAdmitted && slices.Contains(event.Keys, accountKey) {
+				replayAdmissions.Add(1)
+				pool, err := providerReplayPoolSnapshot()
+				server.Raise(err)
+				stateLock.Lock()
+				admittedPools = pool
+				stateLock.Unlock()
+			}
+		})
+		providerQueueTestFinalize(t, replayCtx, original)
+		if replayAdmissions.Load() != 1 {
+			t.Fatal("committed provider cohort fanned out into separate replay owners", replayAdmissions.Load())
+		}
+		stateLock.Lock()
+		pool := admittedPools
+		stateLock.Unlock()
+		if pool["default/acquired"] != 0 || pool["maintenance/acquired"] != 2 {
+			t.Fatal("provider replay retained a reader or opened another callback checkout", pool)
+		}
+		t.Logf("provider replay admitted_account_owners=%d admission_pool_sample=%v", replayAdmissions.Load(), pool)
 		server.Db(ctx, func(conn server.PgConn) {
 			var exact bool
 			server.Raise(conn.QueryRow(ctx, `SELECT provided_byte_count=$2 AND provided_net_revenue_nano_cents=$3

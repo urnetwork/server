@@ -55,12 +55,13 @@ func (self *legacyProviderTotalsTaskTarget) TaskClaimGroupIds(argsJson string) (
 }
 
 // Single-provider allocations can share a row update without coupling unrelated
-// providers. Malformed, applied and multi-provider tasks retain ordinary execution.
+// providers. Applied members share the same durable replay read; malformed and
+// multi-provider tasks retain ordinary execution.
 func (self *legacyProviderTotalsTaskTarget) PrepareTaskBatch(tasks []*task.Task) task.Target {
 	networkIdTasks := map[server.Id][]*task.Task{}
 	for _, queued := range tasks {
 		payload, err := decodeLegacyProviderTotals(queued.ArgsJson)
-		if err == nil && !payload.Applied && len(payload.Totals) == 1 {
+		if err == nil && len(payload.Totals) == 1 {
 			networkId := payload.Totals[0].NetworkId
 			networkIdTasks[networkId] = append(networkIdTasks[networkId], queued)
 		}
