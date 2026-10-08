@@ -806,8 +806,9 @@ Same-ASN max-length and independently authorized-sibling controls remain
 healthy. These pure tests used the qualified Core60/text41 dependency profile,
 which differs from canonical by an indirect requirement; they are not a full
 release-build gate. This is an over-admission correction, not an explanation
-for the low Quality count. It has not been merged, rebuilt into an artifact or
-deployed, and no affected Main provider or prefix population has been measured.
+for the low Quality count. The source correction still requires a rebuilt and
+validated artifact and adoption; no affected Main provider or prefix population
+has been measured.
 
 The next cause discriminator is an isolated source candidate, not deployed
 diagnostic evidence. It caps requests at 64 exact connection keys and reuses
