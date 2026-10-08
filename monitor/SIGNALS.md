@@ -20676,6 +20676,32 @@ resident worker, lock ownership, candidate readiness, front route and current
 container state before choosing a cause. This qualifier changes no deployment
 semantics and authorizes no forced restart or retirement.
 
+The 2026-10-08 R44 Connect attempt provides a timeout counterexample at one
+native owner. All five desired-version updates returned, but the workstation
+poll ended with exit 2 at 14:33:46Z after 838 R45 and 256 R44 HTTP responses
+plus six request failures. Those response counts are not process counts.
+The separately joined edge-1 read at 15:22:30Z found exactly one running R44
+container in each of beta/g1/g2/g3/g4, matched by Docker CONFIG digest and
+exact or sanitized release version, with no R45 or unknown container in that
+selected running scope. All five Warp workers were stable, active, and at zero
+systemd restarts; their executable hash matched source `7b2fd611`. The shared
+host-drain lease was unowned and no owned stop child remained at that clock.
+
+The retained current-worker, expected-version success markers have journal
+clocks 14:31:37–14:33:26Z, before the workstation timeout. This host's later
+native state therefore cannot identify the fleet timeout cause. Both journal
+caps were reached (32 error and 16 phase records); the errors contained six
+conntrack classifications and 26 unclassified records, and no qualifying
+private expected-version readiness/deploy error was retained. Missing such a
+line is not a readiness result. The native state, journal clocks, and earlier
+routed responses remain separate observations. Other hosts, current redirects,
+listener health, stopped failed candidates, and fleet predecessor retirement
+remain unproved. Reuse the exact remaining owner/route boundary before choosing
+a repair; neither the timeout nor this one-host result justifies a restart.
+Evidence: `connect-v44-native-preparation-v1/native-actual-reduction-v1.json`
+(`cd51ac4d`) and independently replayed `sol-independent-native-actual-GO.json`
+(`de583560`), with the transport's terminal join and shared reservation release.
+
 ### 8.12 Fleet service artifact provenance
 Probe: `provenance`
 
