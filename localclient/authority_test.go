@@ -214,20 +214,73 @@ func TestAuthorityRealContractAccountingAndPublicKeyReads(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		var balanceId server.Id
+		var initialCredit, reserved int64
+		server.Db(ctx, func(c server.PgConn) {
+			var marked bool
+			var escrowRows int
+			server.Raise(c.QueryRow(ctx, `SELECT escrow.balance_id,balance.balance_byte_count,
+ escrow.balance_byte_count,escrow.redis_reserved,
+ (SELECT count(*) FROM transfer_escrow WHERE contract_id=$1)
+ FROM transfer_escrow AS escrow JOIN transfer_balance AS balance USING(balance_id)
+ WHERE escrow.contract_id=$1`, id).Scan(&balanceId, &initialCredit, &reserved, &marked, &escrowRows))
+			if escrowRows != 1 || !marked || reserved != int64(stored.TransferByteCount) || reserved < 1024 {
+				t.Fatal("local contract did not retain its exact Redis-backed grant")
+			}
+		})
 		if reply = authorityTestSend(ctx, oob, &protocol.CloseContract{ContractId: stored.ContractId, AckedByteCount: 1024}); reply.err != nil {
 			t.Fatal(reply.err)
 		}
 		if err = model.CloseContract(ctx, id, provider, 1024, false); err != nil {
 			t.Fatal(err)
 		}
-		var settled bool
-		var payout int64
+		// Foreground close commits usage and a durable debit. The production
+		// debit worker publishes escrow metadata and releases the reservation.
+		// An immediate metadata read is not a completed accounting boundary.
 		server.Db(ctx, func(c server.PgConn) {
-			server.Raise(c.QueryRow(ctx, `SELECT bool_and(settled),sum(payout_byte_count) FROM transfer_escrow WHERE contract_id=$1`, id).Scan(&settled, &payout))
+			var debit, credit int64
+			var applied bool
+			server.Raise(c.QueryRow(ctx, `SELECT debit_byte_count,applied,
+ (SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2)
+ FROM transfer_debit_journal WHERE contract_id=$1 AND balance_id=$2`, id, balanceId).Scan(&debit, &applied, &credit))
+			if debit != 1024 || applied || credit != initialCredit {
+				t.Fatal("foreground close lost its unapplied exact debit")
+			}
 		})
-		if !settled || payout != 1024 {
-			t.Fatal("local contract usage did not settle exactly")
+		if got := model.Testing_NetEscrowByteCount(ctx, balanceId); int64(got) != reserved {
+			t.Fatal("foreground close released its reservation before debit", got)
 		}
+		shard := int(balanceId[15]) % model.TransferDebitShardCount
+		flushed, err := model.FlushTransferDebits(ctx, shard, nil, 1)
+		if err != nil || flushed.Applied != 1 || flushed.Released != 1 || flushed.Balances != 1 || flushed.Busy != 0 || flushed.Failed != 0 {
+			t.Fatal("actual debit worker did not settle and release exactly once", flushed, err)
+		}
+		checkAccounting := func() {
+			server.Db(ctx, func(c server.PgConn) {
+				var settled, terminal bool
+				var payout, credit, providerPayout, reports int64
+				var pending int
+				server.Raise(c.QueryRow(ctx, `SELECT bool_and(settled),sum(payout_byte_count) FROM transfer_escrow WHERE contract_id=$1`, id).Scan(&settled, &payout))
+				server.Raise(c.QueryRow(ctx, `SELECT
+ (SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2),
+ (SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE contract_id=$1 AND network_id=$3),
+ (SELECT count(*) FROM transfer_debit_journal WHERE contract_id=$1),
+ (SELECT sum(used_transfer_byte_count) FROM contract_close WHERE contract_id=$1),
+ outcome='settled' FROM transfer_contract WHERE contract_id=$1`, id, balanceId, providerNetwork).Scan(&credit, &providerPayout, &pending, &reports, &terminal))
+				if !settled || payout != 1024 || credit != initialCredit-1024 || providerPayout != 1024 || pending != 0 || reports != 2048 || !terminal {
+					t.Fatal("local contract lost exact payer/provider accounting and drain")
+				}
+			})
+			if got := model.Testing_NetEscrowByteCount(ctx, balanceId); got != 0 {
+				t.Fatal("completed debit retained a reservation", got)
+			}
+		}
+		checkAccounting()
+		flushed, err = model.FlushTransferDebits(ctx, shard, nil, 1)
+		if err != nil || flushed.Applied != 0 || flushed.Released != 0 || flushed.Balances != 0 || flushed.Busy != 0 || flushed.Failed != 0 {
+			t.Fatal("debit worker replay repeated financial work", flushed, err)
+		}
+		checkAccounting()
 		public := bytes.Repeat([]byte{7}, 32)
 		model.SetClientPublicKey(ctx, provider, public)
 		raw, err := owner.Get(ctx, owner.apiUrl+"/key/"+provider.String(), "")
