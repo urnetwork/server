@@ -63,11 +63,8 @@ func TestLegacyProviderTotalsOversizedGroupsKeepOrdinaryAccounting(t *testing.T)
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
 		providerTotalsBatchWriteCounter(t, ctx)
 		networkIds := []server.Id{server.NewId(), server.NewId(), server.NewId(), server.NewId()}
-		var multiId server.Id
-		server.Tx(ctx, func(tx server.PgTx) {
-			multiId = queueLegacyProviderTotalsInTx(ctx, tx, server.NewId(), map[server.Id]*contractPayout{
-				networkIds[0]: {payoutByteCount: 31, payout: 43}, networkIds[1]: {payoutByteCount: 31, payout: 43}, networkIds[2]: {payoutByteCount: 31, payout: 43},
-			})
+		multiId := providerTotalsTestPublish(ctx, server.NewId(), map[server.Id]*contractPayout{
+			networkIds[0]: {payoutByteCount: 31, payout: 43}, networkIds[1]: {payoutByteCount: 31, payout: 43}, networkIds[2]: {payoutByteCount: 31, payout: 43},
 		})
 		healthyId := providerTotalsTestTask(ctx, server.NewId(), networkIds[3])
 		ids := []server.Id{multiId, healthyId}

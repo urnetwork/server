@@ -25,6 +25,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 type ByteCount = int64
@@ -2907,7 +2908,7 @@ func SettleEscrow(ctx context.Context, contractId server.Id, outcome ContractOut
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		posts, _, returnErr = settleEscrowForegroundInTx(ctx, tx, contractId, outcome)
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if returnErr != nil {
 		return
@@ -3252,9 +3253,19 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	var result pgx.Rows
 	var err error
 	if asyncDebit {
+		// Native close writes no shared grant. Its immutable provider owner
+		// still needs queue admission before publishing the outcome and debt.
+		admitted, ownershipErr := server.TryTxOwnership(ctx, tx,
+			[]server.PgOwnershipKey{task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))})
+		if ownershipErr != nil {
+			return nil, false, ownershipErr
+		}
+		if !admitted {
+			return nil, false, errTransferBalanceOwnershipBusy
+		}
 		result, err = tx.Query(ctx, `SELECT balance_id FROM transfer_escrow WHERE contract_id=$1 ORDER BY balance_id`, contractId)
 	} else {
-		admitted, ownershipErr := tryContractTransferBalanceOwnershipInTx(ctx, tx, []server.Id{contractId})
+		admitted, ownershipErr := tryLegacyFinancialOwnershipInTx(ctx, tx, []server.Id{contractId})
 		if ownershipErr != nil {
 			return nil, false, ownershipErr
 		}

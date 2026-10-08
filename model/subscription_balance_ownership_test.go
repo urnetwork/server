@@ -201,11 +201,16 @@ func TestTransferBalanceOwnerCoversNativeLegacyAdmissionAndCache(t *testing.T) {
 // observations in each caller prove exclusion; cleanup always joins its end.
 func holdTransferBalanceTestOwner(t testing.TB, ctx context.Context, ids []server.Id) func() {
 	t.Helper()
+	return holdFinancialTestOwner(t, ctx, transferBalanceOwnershipKeys(ids))
+}
+
+func holdFinancialTestOwner(t testing.TB, ctx context.Context, keys []server.PgOwnershipKey) func() {
+	t.Helper()
 	ready, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
 		done <- server.HandleError(func() {
-			server.OwnedTx(ctx, transferBalanceOwnershipKeys(ids), func(tx server.PgTx) {
+			server.OwnedTx(ctx, keys, func(tx server.PgTx) {
 				close(ready)
 				select {
 				case <-release:
@@ -215,15 +220,8 @@ func holdTransferBalanceTestOwner(t testing.TB, ctx context.Context, ids []serve
 			}, server.TxReadCommitted, server.OptNoRetry())
 		})
 	}()
-	select {
-	case <-ready:
-	case err := <-done:
-		t.Fatal("balance ownership fixture never entered its transaction", err)
-	case <-ctx.Done():
-		t.Fatal("balance ownership fixture admission expired", ctx.Err())
-	}
 	var once sync.Once
-	return func() {
+	finish := func() {
 		once.Do(func() {
 			close(release)
 			select {
@@ -236,6 +234,80 @@ func holdTransferBalanceTestOwner(t testing.TB, ctx context.Context, ids []serve
 			}
 		})
 	}
+	t.Cleanup(finish)
+	select {
+	case <-ready:
+	case err := <-done:
+		once.Do(func() { close(release) })
+		t.Fatal("balance ownership fixture never entered its transaction", err)
+	case <-ctx.Done():
+		t.Fatal("balance ownership fixture admission expired", ctx.Err())
+	}
+	return finish
+}
+
+// A same-key pending-task finisher must exclude financial publication before
+// debit/outcome SQL. Both required provider and coalesced mirror keys count.
+func TestLegacyFinancialOwnerDefersHeldPublicationKeys(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		var reruns atomic.Int32
+		ctx = server.Testing_WithTxRerunHook(ctx, func() { reruns.Add(1) })
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		first := newLegacyPayerTestIntent(t, ctx, f, server.NewId(), 100, 11)
+		second := newLegacyPayerTestIntent(t, ctx, f, server.NewId(), 100, 11)
+		keys := []server.PgOwnershipKey{
+			task.RunOnceOwnershipKey(task.RunOnce("legacy_net_escrow_mirror", f.balanceId)),
+			task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", first)),
+		}
+		for _, key := range keys {
+			release := holdFinancialTestOwner(t, ctx, []server.PgOwnershipKey{key})
+			var refused atomic.Int32
+			observed := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+				if event.Kind == server.PgOwnershipRefused && slices.Contains(event.Keys, key) {
+					refused.Add(1)
+				}
+			})
+			attempts, err := flushLegacySettlementCohort(observed, []server.Id{first, second})
+			if err != nil || len(attempts) != 2 || refused.Load() != 1 {
+				t.Fatal("cohort omitted a required publication owner", attempts, refused.Load(), err)
+			}
+			for _, attempt := range attempts {
+				if attempt.completed || !attempt.busy || attempt.fallback || attempt.busyGate != legacySettlementBusyAdmission {
+					t.Fatal("queue refusal entered or replayed a financial transition", attempt)
+				}
+			}
+			complete, busy, gate, err := flushLegacySettlement(observed, first)
+			if err != nil || complete || !busy || gate != legacySettlementBusyAdmission || refused.Load() != 2 {
+				t.Fatal("single owner omitted a required publication key", complete, busy, gate, refused.Load(), err)
+			}
+			requireLegacySettlementTestState(t, ctx, f, first, true, false, 1000, 200)
+			release()
+		}
+		attempts, err := flushLegacySettlementCohort(ctx, []server.Id{first, second})
+		if err != nil || len(attempts) != 2 || !attempts[0].completed || !attempts[1].completed {
+			t.Fatal("retained finance did not resume after publication ownership", attempts, err)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var exact bool
+			server.Raise(conn.QueryRow(ctx, `SELECT
+ (SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1)=978
+ AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=ANY($2))
+ AND (SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE contract_id=ANY($2))=22
+ AND (SELECT count(*) FROM pending_task WHERE run_once_key=ANY($3))=3`,
+				f.balanceId, []server.Id{first, second}, []string{
+					task.RunOnce("legacy_provider_totals", first).String(),
+					task.RunOnce("legacy_provider_totals", second).String(),
+					task.RunOnce("legacy_net_escrow_mirror", f.balanceId).String(),
+				}).Scan(&exact))
+			if !exact || reruns.Load() != 0 {
+				t.Fatal("queue admission lost durable outputs or repeated a financial transaction", reruns.Load())
+			}
+		})
+	})
 }
 
 // An absent grant still has a revision row touched by the outcome trigger.

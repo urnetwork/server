@@ -23,9 +23,10 @@ func scheduleFlushTransferDebits(clientSession *session.ClientSession, tx server
 		next = server.NowUtc()
 	}
 	task.ScheduleTaskInTx(tx, FlushTransferDebits, &FlushTransferDebitsArgs{Shard: shard, AfterBalanceId: after}, clientSession,
-		task.RunOnce(fmt.Sprintf("flush_transfer_debits_%d", shard)), task.RunAt(next), task.MaxTime(30*time.Second))
+		task.RunOnce(fmt.Sprintf("flush_transfer_debits_%d", shard)), task.RunAt(next), task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
 }
 func ScheduleFlushTransferDebits(clientSession *session.ClientSession, tx server.PgTx) {
+	requireSettlementStartupOwnershipInTx(clientSession.Ctx, tx)
 	for shard := range model.TransferDebitShardCount {
 		scheduleFlushTransferDebits(clientSession, tx, shard, nil, false)
 	}

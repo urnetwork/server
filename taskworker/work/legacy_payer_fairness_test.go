@@ -217,7 +217,7 @@ func testLegacyPayerFairnessTaskDensePrefix(t *testing.T, holdPrefix bool) {
 			if !bytes.Equal(before, after) {
 				t.Fatal("dispatcher mutated its input cursor")
 			}
-			server.Tx(ctx, func(tx server.PgTx) {
+			withLegacyDispatcherQueueTestTx(ctx, args.Shard, result, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key='["flush_legacy_settlements_1"]'`))
 				server.Raise(FlushLegacySettlementsPost(&args, result, owner, tx))
 			})

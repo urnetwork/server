@@ -14,6 +14,14 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
+// Manual task handoffs use the same complete queue authority as the actual
+// worker finalizer. The helper never acquires keys inside a business callback.
+func withLegacyPayerQueueTestTx(ctx context.Context, payerIds []server.Id, callback func(server.PgTx)) {
+	keys, err := LegacyPayerSettlementQueueOwnershipKeys(payerIds)
+	server.Raise(err)
+	server.OwnedTx(ctx, keys, callback, server.TxReadCommitted, server.OptNoRetry())
+}
+
 // Optional registration-index repair cannot stop already indexed payer work.
 // The bounded chronological fallback also recovers a pre-migration NULL key.
 func TestLegacyPayerDispatchRecoversWithoutMissingIndexOrWake(t *testing.T) {
@@ -38,7 +46,7 @@ func TestLegacyPayerDispatchRecoversWithoutMissingIndexOrWake(t *testing.T) {
 		requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
-		server.Tx(ctx, func(tx server.PgTx) {
+		withLegacyPayerQueueTestTx(ctx, []server.Id{f.sourceNetworkId}, func(tx server.PgTx) {
 			for range 3 {
 				ScheduleLegacyPayerSettlementsInTx(owner, tx, f.sourceNetworkId, nil, server.NowUtc())
 			}
@@ -262,7 +270,7 @@ func TestLegacyPayerTaskEofRechecksAndResetsPredecessor(t *testing.T) {
 		if err != nil || result.Completed != 0 || result.Cursor != nil {
 			t.Fatal("synthetic stale forward cursor did not reach EOF", result, err)
 		}
-		server.Tx(ctx, func(tx server.PgTx) {
+		withLegacyPayerQueueTestTx(ctx, []server.Id{f.sourceNetworkId}, func(tx server.PgTx) {
 			server.Raise(ApplyLegacyPayerSettlementsPost(args, result, owner, tx))
 		})
 		var next LegacyPayerSettlementArgs
@@ -294,7 +302,7 @@ func TestLegacyPayerQueueRowIsAbsentFromForegroundClose(t *testing.T) {
 		server.RunPosts(ctx, posts...)
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
-		server.Tx(ctx, func(tx server.PgTx) {
+		withLegacyPayerQueueTestTx(ctx, []server.Id{f.sourceNetworkId}, func(tx server.PgTx) {
 			ScheduleLegacyPayerSettlementsInTx(owner, tx, f.sourceNetworkId, nil, server.NowUtc())
 		})
 		conn := acquireContractLifecycleTestConnection(t, ctx)

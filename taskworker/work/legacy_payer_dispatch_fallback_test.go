@@ -51,7 +51,7 @@ func TestLegacyPayerDispatchMissingDueIndexKeepsFinancialFallback(t *testing.T) 
 		if err != nil || result.Dispatch != nil || result.Completed != 1 || result.Failed != 0 {
 			t.Fatal("readiness failure dropped original financial service", result, err)
 		}
-		server.Tx(ctx, func(tx server.PgTx) {
+		withLegacyDispatcherQueueTestTx(ctx, shard, result, func(tx server.PgTx) {
 			server.Raise(FlushLegacySettlementsPost(args, result, owner, tx))
 			var exact bool
 			server.Raise(tx.QueryRow(ctx, `SELECT

@@ -52,7 +52,7 @@ func ScheduleLegacyPayerSettlementsInTx(clientSession *session.ClientSession, tx
 	task.ScheduleTaskInTx(tx, ApplyLegacyPayerSettlements,
 		&LegacyPayerSettlementArgs{Private: true, PayerNetworkId: payerNetworkId, Cursor: cursor},
 		clientSession, task.RunOnce("flush_legacy_payer_settlements", payerNetworkId),
-		task.RunAt(next), task.MaxTime(30*time.Second))
+		task.RunAt(next), task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
 }
 
 // Financial execution happens before the task's completion transaction takes
@@ -105,5 +105,5 @@ func maxTime(first, second time.Time) time.Time {
 
 // The registered production target is also the owner used by native drain tests.
 func NewLegacyPayerSettlementTaskTarget() task.Target {
-	return task.NewTaskTargetWithPost(ApplyLegacyPayerSettlements, ApplyLegacyPayerSettlementsPost)
+	return &legacyPayerSettlementTaskTarget{Target: task.NewTaskTargetWithPost(ApplyLegacyPayerSettlements, ApplyLegacyPayerSettlementsPost)}
 }

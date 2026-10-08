@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/task"
 )
 
 var errTransferBalanceOwnershipBusy = errors.New("transfer balance ownership is busy")
@@ -34,8 +35,37 @@ func tryTransferBalanceOwnershipInTx(ctx context.Context, tx server.PgTx, balanc
 // The complete key set is proportional to the supplied contracts' reservations;
 // no payload-size fallback is allowed to bypass the common balance owner.
 func tryContractTransferBalanceOwnershipInTx(ctx context.Context, tx server.PgTx, contractIds []server.Id) (bool, error) {
+	balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, contractIds)
+	if err != nil {
+		return false, err
+	}
+	return tryTransferBalanceOwnershipInTx(ctx, tx, balanceIds)
+}
+
+// Financial commits also publish their durable mirror and immutable provider
+// owners. Declare those keys before grant SQL; publication never grows the set.
+func legacyFinancialOwnershipKeys(contractIds, balanceIds []server.Id) []server.PgOwnershipKey {
+	keys := transferBalanceOwnershipKeys(balanceIds)
+	for _, id := range balanceIds {
+		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("legacy_net_escrow_mirror", id)))
+	}
+	for _, id := range contractIds {
+		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", id)))
+	}
+	return keys
+}
+
+func tryLegacyFinancialOwnershipInTx(ctx context.Context, tx server.PgTx, contractIds []server.Id) (bool, error) {
+	balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, contractIds)
+	if err != nil {
+		return false, err
+	}
+	return server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(contractIds, balanceIds))
+}
+
+func contractTransferBalanceIdsInTx(ctx context.Context, tx server.PgTx, contractIds []server.Id) ([]server.Id, error) {
 	if len(contractIds) == 0 {
-		return true, nil
+		return nil, nil
 	}
 	var balanceIds []server.Id
 	rows, err := tx.Query(ctx, `SELECT DISTINCT escrow.balance_id
@@ -43,19 +73,19 @@ func tryContractTransferBalanceOwnershipInTx(ctx context.Context, tx server.PgTx
  CROSS JOIN LATERAL (SELECT balance_id FROM transfer_escrow
  WHERE contract_id=requested.contract_id OFFSET 0) AS escrow ORDER BY escrow.balance_id`, contractIds)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	for rows.Next() {
 		var id server.Id
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return false, err
+			return nil, err
 		}
 		balanceIds = append(balanceIds, id)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return false, err
+		return nil, err
 	}
-	return tryTransferBalanceOwnershipInTx(ctx, tx, balanceIds)
+	return balanceIds, nil
 }

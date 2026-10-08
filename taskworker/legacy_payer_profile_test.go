@@ -54,8 +54,12 @@ func TestLegacyPayerDispatchAndDrainThroughBothProfiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer worker.Close()
-			dispatchId := task.ScheduleTask(work.FlushLegacySettlements, &work.FlushLegacySettlementsArgs{Shard: shard}, owner,
-				task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard)), task.RunAt(time.Unix(1, 0)))
+			var dispatchId server.Id
+			dispatchKey := task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard))
+			server.OwnedTx(ctx, []server.PgOwnershipKey{task.RunOnceOwnershipKey(dispatchKey)}, func(tx server.PgTx) {
+				dispatchId = task.ScheduleTaskInTx(tx, work.FlushLegacySettlements, &work.FlushLegacySettlementsArgs{Shard: shard}, owner,
+					dispatchKey, task.RunAt(time.Unix(1, 0)), task.RequireQueueOwnership(tx))
+			}, server.TxReadCommitted, server.OptNoRetry())
 			finished, retried, posts, err := worker.EvalTasks(1)
 			if err != nil || len(finished) != 1 || finished[0] != dispatchId || len(retried)+len(posts) != 0 {
 				t.Fatal("profile did not complete its real shard dispatcher", finished, retried, posts, err)

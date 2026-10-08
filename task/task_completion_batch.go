@@ -99,11 +99,23 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 	claims := make([]int64, 0, len(results))
 	successorIds := make([]server.Id, 0, len(results))
 	seen := map[server.Id]bool{}
+	keys := make([]server.PgOwnershipKey, 0, len(results))
+	owned := false
 	for _, result := range results {
 		if !self.canBatchTaskCompletion(result) || seen[result.task.TaskId] {
 			return false, errors.New("invalid task completion batch member")
 		}
 		seen[result.task.TaskId] = true
+		memberKeys, memberOwned, err := taskCompletionOwnershipKeys(self.targets[result.task.FunctionName], result.task, result.resultJson, true)
+		if err != nil {
+			return false, err
+		}
+		owned = owned || memberOwned
+		if memberOwned {
+			keys = append(keys, memberKeys...)
+		} else {
+			keys = append(keys, taskQueueOwnershipKey(result.task.TaskId, result.task.RunOnceKey))
+		}
 		ids = append(ids, result.task.TaskId)
 		starts, ends = append(starts, result.runStartTime), append(ends, result.runEndTime)
 		values = append(values, result.resultJson)
@@ -119,7 +131,7 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 	defer cancel()
 	bodyComplete := false
 	server.HandleError(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
+		finish := func(tx server.PgTx) {
 			var copied, removed, successors, expectedSuccessors, invalidGenerations int
 			server.Raise(tx.QueryRow(ctx, taskCompletionBatchSql, ids, starts, ends, values,
 				generations, successorIds, time.Time{}, claims).Scan(&copied, &removed, &successors, &expectedSuccessors, &invalidGenerations))
@@ -127,7 +139,12 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 				server.Raise(errTaskCompletionBatchOwnership)
 			}
 			bodyComplete = true
-		}, server.OptNoRetry())
+		}
+		if owned {
+			server.OwnedTx(ctx, keys, finish, server.TxReadCommitted, server.OptNoRetry())
+		} else {
+			server.Tx(ctx, finish, server.OptNoRetry())
+		}
 		if self.completionBatchCommitReturned != nil {
 			self.completionBatchCommitReturned()
 		}

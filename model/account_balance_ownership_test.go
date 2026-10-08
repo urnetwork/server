@@ -25,7 +25,10 @@ type accountOwnershipTestRun struct {
 
 func startAccountOwnershipTest(run func()) *accountOwnershipTestRun {
 	result := &accountOwnershipTestRun{done: make(chan struct{})}
-	go func() { defer close(result.done); result.err = server.HandleError(run) }()
+	go func() {
+		defer close(result.done)
+		server.HandleError(run, func(err error) { result.err = err })
+	}()
 	return result
 }
 
@@ -105,12 +108,9 @@ func TestAccountBalanceOwnerCoversProvidedAndBothPaidWriters(t *testing.T) {
 		networkIds := []server.Id{server.NewId(), server.NewId(), server.NewId(), server.NewId()}
 		hot := networkIds[0]
 		holderId := providerTotalsTestTask(ctx, server.NewId(), hot)
-		var multiId server.Id
-		server.Tx(ctx, func(tx server.PgTx) {
-			multiId = queueLegacyProviderTotalsInTx(ctx, tx, server.NewId(), map[server.Id]*contractPayout{
-				hot: {payoutByteCount: 31, payout: 43}, networkIds[1]: {payoutByteCount: 3, payout: 5}, networkIds[2]: {payoutByteCount: 7, payout: 11},
-			})
-		}, server.TxReadCommitted, server.OptNoRetry())
+		multiId := providerTotalsTestPublish(ctx, server.NewId(), map[server.Id]*contractPayout{
+			hot: {payoutByteCount: 31, payout: 43}, networkIds[1]: {payoutByteCount: 3, payout: 5}, networkIds[2]: {payoutByteCount: 7, payout: 11},
+		})
 		independentId := providerTotalsTestTask(ctx, server.NewId(), networkIds[3])
 		original := task.GetTasks(ctx, holderId, multiId, independentId)
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -160,7 +160,7 @@ func TestAccountBalanceOwnerCoversProvidedAndBothPaidWriters(t *testing.T) {
 			var once sync.Once
 			return server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
 				if !slices.Contains(event.Keys, key) {
-					panic(errors.New("account writer omitted actual account primary key"))
+					return // Queue-only finalization is a separate ownership phase.
 				}
 				if event.Kind == server.PgOwnershipWaiting {
 					once.Do(func() { waiting <- slot })
@@ -380,9 +380,10 @@ func TestAccountBalanceOwnerPaymentFailureRollsBackWithoutRetry(t *testing.T) {
 		}, server.TxReadCommitted, server.OptNoRetry())
 		var reruns atomic.Int32
 		observed := server.Testing_WithTxRerunHook(ctx, func() { reruns.Add(1) })
-		err := server.HandleError(func() {
+		var err error
+		server.HandleError(func() {
 			server.Raise(CompletePayment(observed, payment.PaymentId, "synthetic-receipt", "synthetic-hash"))
-		})
+		}, func(cause error) { err = cause })
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "40001" || reruns.Load() != 0 {
 			t.Fatal("paid refusal lost its cause or reran financial SQL", err)

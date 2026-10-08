@@ -229,7 +229,7 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 // head instead gets one whole-statement wait budget, not a budget per grant row.
 func lockLegacySettlementGrantsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, wait *legacySettlementGrantWait) (locked int, returnErr error) {
 	defer enterLegacyTargetTrace(ctx, "grant_lock")()
-	admitted, err := tryContractTransferBalanceOwnershipInTx(ctx, tx, []server.Id{contractId})
+	admitted, err := tryLegacyFinancialOwnershipInTx(ctx, tx, []server.Id{contractId})
 	if err != nil {
 		return 0, err
 	}

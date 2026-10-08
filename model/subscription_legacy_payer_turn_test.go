@@ -72,7 +72,7 @@ func TestLegacyPayerTurnDrains1024WithoutTaskHandoff(t *testing.T) {
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
 		began := server.NowUtc()
-		server.Tx(ctx, func(tx server.PgTx) {
+		withLegacyPayerQueueTestTx(ctx, []server.Id{f.sourceNetworkId}, func(tx server.PgTx) {
 			QueueLegacyPayerSettlementsInTx(owner, tx, f.sourceNetworkId)
 		})
 		settings := task.DefaultTaskWorkerSettings()
@@ -150,7 +150,7 @@ func TestLegacyPayerTurnBusyOwnerYieldsIndependentPayer(t *testing.T) {
 		server.RaisePgResult(held.Exec(ctx, `SELECT balance_id FROM transfer_balance WHERE balance_id=$1 FOR UPDATE`, hot.balanceId))
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
-		server.Tx(ctx, func(tx server.PgTx) {
+		withLegacyPayerQueueTestTx(ctx, []server.Id{hot.sourceNetworkId, other.sourceNetworkId}, func(tx server.PgTx) {
 			for _, payer := range []server.Id{hot.sourceNetworkId, other.sourceNetworkId} {
 				ScheduleLegacyPayerSettlementsInTx(owner, tx, payer, nil, time.Unix(1, 0))
 			}

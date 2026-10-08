@@ -102,12 +102,9 @@ func TestLegacyProviderTotalsClaimedBatchKeepsUnrelatedAllocationsIndependent(t 
 				taskIds = append(taskIds, providerTotalsTestTask(ctx, server.NewId(), networkId))
 			}
 		}
-		var multiTaskId server.Id
-		server.Tx(ctx, func(tx server.PgTx) {
-			multiTaskId = queueLegacyProviderTotalsInTx(ctx, tx, server.NewId(), map[server.Id]*contractPayout{
-				networkIds[2]: {payoutByteCount: 31, payout: 43},
-				networkIds[3]: {payoutByteCount: 47, payout: 59},
-			})
+		multiTaskId := providerTotalsTestPublish(ctx, server.NewId(), map[server.Id]*contractPayout{
+			networkIds[2]: {payoutByteCount: 31, payout: 43},
+			networkIds[3]: {payoutByteCount: 47, payout: 59},
 		})
 		taskIds = append(taskIds, multiTaskId)
 		badTaskId := providerTotalsTestTask(ctx, server.NewId(), networkIds[0])
@@ -296,14 +293,19 @@ func TestLegacyProviderTotalsBatchSumOverflowPreservesUnappliedOwners(t *testing
 		for _, revenueOverflow := range []bool{false, true} {
 			networkId := server.NewId()
 			taskIds := []server.Id{}
-			server.Tx(ctx, func(tx server.PgTx) {
+			contractIds := []server.Id{server.NewId(), server.NewId()}
+			keys := []server.PgOwnershipKey{
+				task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractIds[0])),
+				task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractIds[1])),
+			}
+			server.OwnedTx(ctx, keys, func(tx server.PgTx) {
 				large := &contractPayout{payoutByteCount: math.MaxInt64, payout: 1}
 				if revenueOverflow {
 					large = &contractPayout{payoutByteCount: 1, payout: math.MaxInt64}
 				}
-				taskIds = append(taskIds, queueLegacyProviderTotalsInTx(ctx, tx, server.NewId(), map[server.Id]*contractPayout{networkId: large}))
-				taskIds = append(taskIds, queueLegacyProviderTotalsInTx(ctx, tx, server.NewId(), map[server.Id]*contractPayout{networkId: {payoutByteCount: 1, payout: 1}}))
-			})
+				taskIds = append(taskIds, queueLegacyProviderTotalsInTx(ctx, tx, contractIds[0], map[server.Id]*contractPayout{networkId: large}))
+				taskIds = append(taskIds, queueLegacyProviderTotalsInTx(ctx, tx, contractIds[1], map[server.Id]*contractPayout{networkId: {payoutByteCount: 1, payout: 1}}))
+			}, server.TxReadCommitted)
 			failure := server.HandleError(func() {
 				server.Tx(ctx, func(tx server.PgTx) {
 					server.Raise(applyLegacyProviderTotalsBatchInTx(ctx, tx, taskIds, networkId))

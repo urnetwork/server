@@ -18,7 +18,7 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// Stop the first evaluator exactly after its initial row fetch. The peer must
+// Stop the first evaluator exactly after its first owned row lock. The peer must
 // finish the next due task before that first claim can advance or commit.
 func TestTaskClaimLeavesUnneededCandidatesForPeer(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -34,7 +34,7 @@ func TestTaskClaimLeavesUnneededCandidatesForPeer(t *testing.T) {
 		firstId := ScheduleTask(claimProfileAllowed, &claimProfileArgs{}, clientSession, RunAt(server.NowUtc().Add(-2*time.Hour)))
 		secondId := ScheduleTask(claimProfileAllowed, &claimProfileArgs{}, clientSession, RunAt(server.NowUtc().Add(-time.Hour)))
 		peerCompleted := false
-		first.claimCandidatesReady = func() {
+		first.claimCandidateLocked = func(server.Id) {
 			finished, retried, postRetried, err := second.EvalTasks(1)
 			if err != nil || len(finished) != 1 || finished[0] != secondId || len(retried)+len(postRetried) != 0 {
 				t.Fatalf("speculative fallback locks hid the next task from its peer: finished=%v retries=%v/%v error=%v", finished, retried, postRetried, err)

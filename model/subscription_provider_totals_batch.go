@@ -30,6 +30,12 @@ type legacyProviderTotalsTaskTarget struct {
 // post or continuation; completed owners may share only their durable handback.
 func (self *legacyProviderTotalsTaskTarget) TaskCompletionBatchEnabled() bool { return true }
 
+// Accounting commits during Run and has no transactional post. The finalizer
+// always adds the exact durable queue identity to this empty extra-key set.
+func (self *legacyProviderTotalsTaskTarget) TaskCompletionOwnershipKeys(_ *task.Task, _ string) ([]server.PgOwnershipKey, error) {
+	return nil, nil
+}
+
 // Bounded claim grouping helps one provider form a prepared batch. The complete
 // account-key owner remains mandatory during execution, including allocations
 // above this optional hint's bound and writers outside the task subsystem.
@@ -121,8 +127,13 @@ func (self *legacyProviderTotalsBatch) apply(ctx context.Context) error {
 			defer close(self.done)
 			bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			self.err = runLegacyProviderTotalsOwnedTx(bounded, []server.Id{self.networkId}, func(tx server.PgTx) error {
-				return applyLegacyProviderTotalsBatchInTx(bounded, tx, self.taskIds, self.networkId)
+			ownership, err := readLegacyProviderBatchOwnership(bounded, self.taskIds, self.networkId)
+			if err != nil {
+				self.err = err
+				return
+			}
+			self.err = runLegacyProviderTotalsOwnedTx(bounded, ownership, func(tx server.PgTx) error {
+				return applyLegacyProviderTotalsBatchWithOwnersInTx(bounded, tx, self.taskIds, self.networkId, ownership)
 			})
 		}()
 	}
@@ -137,10 +148,19 @@ func (self *legacyProviderTotalsBatch) apply(ctx context.Context) error {
 // Lock exact claimed owners in id order and re-read their durable payloads before
 // summing. The account row and every contributing marker change in this transaction.
 func applyLegacyProviderTotalsBatchInTx(ctx context.Context, tx server.PgTx, taskIds []server.Id, networkId server.Id) error {
+	return applyLegacyProviderTotalsBatchWithOwnersInTx(ctx, tx, taskIds, networkId, nil)
+}
+
+// The complete owner includes every member's stored queue identity, independently
+// of task id ordering. Revalidate it before any account or applied-marker write.
+func applyLegacyProviderTotalsBatchWithOwnersInTx(ctx context.Context, tx server.PgTx, taskIds []server.Id, networkId server.Id, ownership *legacyProviderOwnership) error {
 	if len(taskIds) < 2 || len(taskIds) > legacyProviderTotalsBatchLimit || networkId == (server.Id{}) {
 		return withLegacyProviderTotalsPhase(legacyProviderTotalsAllocation, errors.New("invalid legacy provider total batch"))
 	}
-	rows, err := tx.Query(ctx, `SELECT task_id,args_json FROM pending_task
+	if ownership != nil && !server.TxOwnsKeys(tx, ownership.keys()) {
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, errors.New("legacy provider total batch queue owners were not admitted"))
+	}
+	rows, err := tx.Query(ctx, `SELECT task_id,args_json,run_once_key FROM pending_task
         WHERE task_id=ANY($1) AND function_name=$2 ORDER BY task_id FOR UPDATE`,
 		taskIds, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName())
 	if err != nil {
@@ -153,8 +173,12 @@ func applyLegacyProviderTotalsBatchInTx(ctx context.Context, tx server.PgTx, tas
 	for rows.Next() {
 		var taskId server.Id
 		var data string
-		if err := rows.Scan(&taskId, &data); err != nil {
+		var runOnceKey *string
+		if err := rows.Scan(&taskId, &data, &runOnceKey); err != nil {
 			return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, err)
+		}
+		if err := ownership.validateQueue(tx, taskId, runOnceKey); err != nil {
+			return err
 		}
 		count++
 		payload, err := decodeLegacyProviderTotals(data)

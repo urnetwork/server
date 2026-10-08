@@ -27,7 +27,9 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 	defer finalizeCancel()
 
 	task := r.task
-	server.Tx(finalizeCtx, func(tx server.PgTx) {
+	keys, owned, err := taskCompletionOwnershipKeys(self.targets[task.FunctionName], task, r.resultJson, r.err == nil)
+	server.Raise(err)
+	finish := func(tx server.PgTx) {
 		commitPosts = nil
 		postRescheduled = false
 
@@ -106,6 +108,11 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 			RunAt(rescheduleTime),
 		)
 		taskRunOnceWakeAfterPost(finalizeCtx, tx, task.TaskId, wakeAt)
-	})
+	}
+	if owned {
+		server.OwnedTx(finalizeCtx, keys, finish, server.TxReadCommitted, server.OptNoRetry())
+	} else {
+		server.Tx(finalizeCtx, finish)
+	}
 	return
 }

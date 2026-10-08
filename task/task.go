@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
@@ -70,7 +71,19 @@ var taskTimestampLeaseRefreshErrorCounter = prometheus.NewCounter(
 	},
 )
 
+// Busy queue ownership or a nonparticipating row lock defers only the crash
+// timestamp hint. The separately pinged execution guard still fences live work.
+var taskTimestampLeaseRefreshSkippedCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "task",
+		Name:      "timestamp_lease_refresh_skipped_total",
+		Help:      "Task timestamp hints skipped because ownership was busy or the exact claim no longer matched",
+	},
+)
+
 func init() {
+	prometheus.MustRegister(taskTimestampLeaseRefreshSkippedCounter)
 	prometheus.MustRegister(orphanedRunPostCounter)
 	prometheus.MustRegister(taskTimestampLeaseRefreshErrorCounter)
 }
@@ -424,7 +437,7 @@ func prepareTask[T any, R any](
 		clientAddressPort = port
 	}
 
-	return preparedTask{
+	prepared := preparedTask{
 		taskId:            server.NewId(),
 		functionName:      taskTarget.TargetFunctionName(),
 		argsJson:          argsJson,
@@ -436,6 +449,8 @@ func prepareTask[T any, R any](
 		priority:          runPriority.Priority,
 		maxTimeSeconds:    int(runMaxTime.MaxTime / time.Second),
 	}
+	requirePreparedTaskOwnership(prepared, opts)
+	return prepared
 }
 
 func ScheduleTaskInTx[T any, R any](
@@ -445,6 +460,7 @@ func ScheduleTaskInTx[T any, R any](
 	clientSession *session.ClientSession,
 	opts ...any,
 ) (taskId server.Id) {
+	requireTaskPublicationBackend(tx, opts)
 	p := prepareTask(taskFunction, args, clientSession, opts...)
 
 	claimTime := time.Time{}
@@ -513,6 +529,7 @@ func ScheduleTaskInTxIfAbsent[T any, R any](
 	if runOnce == nil {
 		panic("ScheduleTaskInTxIfAbsent requires a non-nil runOnce key")
 	}
+	requireTaskPublicationBackend(tx, opts)
 	p := prepareTask(taskFunction, args, clientSession, append(opts, runOnce)...)
 
 	claimTime := time.Time{}
@@ -896,14 +913,15 @@ func ListFinishedTasks(ctx context.Context) []server.Id {
 
 // FIXME update pending task
 func RemovePendingTask(ctx context.Context, taskId server.Id) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	withPendingTaskQueueOwner(ctx, taskId, func(tx server.PgTx, key *string) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				DELETE FROM pending_task
-				WHERE task_id = $1
+				WHERE task_id = $1 AND run_once_key IS NOT DISTINCT FROM $2::text
 			`,
 			taskId,
+			key,
 		))
 	})
 }
@@ -939,7 +957,7 @@ func RemovePendingTasksForFunctionInTx(ctx context.Context, tx server.PgTx, func
 // STILL RUNNING re-opens the duplicate-execution window the lease exists to
 // prevent, so verify the claiming worker is really gone first.
 func ReleaseTask(ctx context.Context, taskId server.Id) (released bool) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	withPendingTaskQueueOwner(ctx, taskId, func(tx server.PgTx, key *string) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -947,10 +965,11 @@ func ReleaseTask(ctx context.Context, taskId server.Id) (released bool) {
 				SET
 					claim_time = $2,
 					release_time = $2
-				WHERE task_id = $1
+				WHERE task_id = $1 AND run_once_key IS NOT DISTINCT FROM $3::text
 			`,
 			taskId,
 			time.Time{},
+			key,
 		))
 		released = tag.RowsAffected() == 1
 	})
@@ -965,7 +984,11 @@ func KickTasks(ctx context.Context, runOnceKey string) (kickedCount int64) {
 	// the stored key is the json-encoded RunOnce key list
 	jsonKey := RunOnce(runOnceKey).String()
 	now := server.NowUtc()
-	server.Tx(ctx, func(tx server.PgTx) {
+	keys := []server.PgOwnershipKey{PendingTaskOwnershipKey(server.Id{}, &jsonKey)}
+	if runOnceKey != "" {
+		keys = append(keys, PendingTaskOwnershipKey(server.Id{}, &runOnceKey))
+	}
+	server.OwnedTx(ctx, keys, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -978,7 +1001,7 @@ func KickTasks(ctx context.Context, runOnceKey string) (kickedCount int64) {
 			jsonKey,
 		))
 		kickedCount = tag.RowsAffected()
-	})
+	}, server.TxReadCommitted, server.OptNoRetry())
 	return
 }
 
@@ -1438,6 +1461,8 @@ type TaskWorker struct {
 	// ownership: nil leaves the direct PostgreSQL path untouched.
 	claimBeforeQuery       func(server.PgTx) error
 	claimCandidatesReady   func()
+	claimQueueAdmission    func(server.Id, bool)
+	claimCandidateLocked   func(server.Id)
 	claimBeforeCommit      func(*taskClaimGuard) error
 	claimAfterCommit       func(*taskClaimGuard)
 	taskSlotEventPublished func()
@@ -1483,7 +1508,7 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 	}
 
 	taskWorker.AddTargets(
-		NewTaskTargetWithPost(taskWorker.RunPost, taskWorker.RunPostPost),
+		&taskPostRetryTarget{Target: NewTaskTargetWithPost(taskWorker.RunPost, taskWorker.RunPostPost)},
 	)
 
 	return taskWorker
@@ -1720,16 +1745,35 @@ func (self *TaskWorker) RunPost(
 	}()
 
 	// update legacy function names
+	storedFunctionName := finishedTask.FunctionName
 	finishedTask.FunctionName = updateFunctionName(finishedTask.FunctionName)
 
 	if target, ok := self.targets[finishedTask.FunctionName]; ok {
 		var commitPosts []server.PostFunction
-		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		queued := &Task{TaskId: finishedTask.TaskId, FunctionName: finishedTask.FunctionName,
+			ArgsJson: finishedTask.ArgsJson, RunOnceKey: finishedTask.RunOnceKey}
+		keys, owned, err := taskCompletionOwnershipKeys(target, queued, finishedTask.ResultJson, true)
+		if err != nil {
+			return nil, err
+		}
+		run := func(tx server.PgTx) {
 			// a rerun callback starts over: neither the outcome nor the work
 			// of a rolled-back attempt may outlive it
 			commitPosts = nil
 			runPostResult = nil
 			returnErr = nil
+			if owned {
+				present, err := validateFinishedTaskPostOwner(clientSession.Ctx, tx, finishedTask, storedFunctionName)
+				if err != nil {
+					returnErr = err
+					return
+				}
+				if !present {
+					orphanedRunPostCounter.Inc()
+					runPostResult = &RunPostResult{}
+					return
+				}
+			}
 			if posts, err := target.RunPost(clientSession.Ctx, finishedTask, tx); err == nil {
 				commitPosts = posts
 				runPostResult = &RunPostResult{}
@@ -1738,7 +1782,12 @@ func (self *TaskWorker) RunPost(
 				returnErr = err
 				return
 			}
-		})
+		}
+		if owned {
+			server.OwnedTx(clientSession.Ctx, keys, run, server.TxReadCommitted, server.OptNoRetry())
+		} else {
+			server.Tx(clientSession.Ctx, run)
+		}
 		// the post's transaction committed
 		server.RunPosts(clientSession.Ctx, commitPosts...)
 		return
@@ -1817,7 +1866,7 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		}
 	}()
 
-	tx, err := guard.conn.Begin(ctx)
+	tx, err := guard.conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: server.TxReadCommitted})
 	if err != nil {
 		return nil, guard, false, err
 	}
@@ -1826,6 +1875,9 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		_ = tx.Rollback(rollbackCtx)
 		rollbackCancel()
 	}()
+	if err := server.ValidatePgTaskClaimTransaction(ctx, guard.conn, tx); err != nil {
+		return nil, guard, false, err
+	}
 	if self.claimBeforeQuery != nil {
 		if err := self.claimBeforeQuery(tx); err != nil {
 			return nil, guard, false, err
@@ -1844,12 +1896,13 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		functionName string
 		priority     taskPriority
 		argsJson     string
+		runOnceKey   *string
 	}
 
 	nowBlock := server.NowUtc().Unix() / BlockSizeSeconds
 	candidateLimit := n + 64
 	includeGroupArgs := self.hasTaskClaimGroups()
-	query, queryArgs := self.claimCandidatesQuery(nowBlock, candidateLimit, includeGroupArgs)
+	query, queryArgs := self.claimOwnershipCandidatesQuery(nowBlock, candidateLimit, includeGroupArgs)
 	// Keep the queue name visible in FETCH for the existing query monitors.
 	_, err = tx.Exec(
 		ctx,
@@ -1866,8 +1919,8 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	for candidateCount := 0; len(taskIds) < n && candidateCount < candidateLimit; {
 		fetchCount := min(n-len(taskIds), candidateLimit-candidateCount)
 		// A forward cursor preserves one scan and snapshot across refusals.
-		// PostgreSQL locks FOR UPDATE rows only when FETCH returns them; the
-		// transaction closes this non-holdable cursor on commit or rollback.
+		// Discovery is unlocked. Queue admission precedes the exact locking
+		// recheck below; transaction end closes this non-holdable cursor.
 		result, err := tx.Query(
 			ctx,
 			fmt.Sprintf(`FETCH FORWARD %d FROM pending_task_claim_candidates`, fetchCount),
@@ -1887,6 +1940,7 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 			if includeGroupArgs {
 				columns = append(columns, &candidate.argsJson)
 			}
+			columns = append(columns, &candidate.runOnceKey)
 			if err := result.Scan(columns...); err != nil {
 				result.Close()
 				return nil, guard, false, err
@@ -1930,6 +1984,19 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 				guard.releaseAdmission(candidate.taskId)
 				continue
 			}
+			queueAdmitted, err := server.TryPgTaskClaimOwnership(ctx, tx, PendingTaskOwnershipKey(candidate.taskId, candidate.runOnceKey))
+			if err != nil {
+				return nil, guard, false, err
+			}
+			if self.claimQueueAdmission != nil {
+				self.claimQueueAdmission(candidate.taskId, queueAdmitted)
+			}
+			if !queueAdmitted {
+				if err := guard.retireTaskWithQuery(ctx, tx, candidate.taskId); err != nil {
+					return nil, guard, false, err
+				}
+				continue
+			}
 			grouped, err := self.reserveTaskClaimGroups(ctx, tx, guard, candidate.taskId, candidate.functionName, candidate.argsJson, passGroupKeys)
 			if err != nil {
 				return nil, guard, false, err
@@ -1939,6 +2006,32 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 					return nil, guard, false, err
 				}
 				continue
+			}
+			var expectedArgs *string
+			if includeGroupArgs {
+				expectedArgs = &candidate.argsJson
+			}
+			// RC observes the current lease/key after admission. Neither a stale
+			// discovery snapshot nor a nonparticipating writer can make this
+			// exact recheck wait on a business row or claim a changed identity.
+			err = tx.QueryRow(ctx, `SELECT run_priority,run_max_time_seconds
+				FROM pending_task WHERE task_id=$1 AND available_block <= $2
+				AND run_once_key IS NOT DISTINCT FROM $3::text AND function_name=$4
+				AND ($5::text IS NULL OR args_json=$5)
+				FOR UPDATE SKIP LOCKED`, candidate.taskId, nowBlock,
+				candidate.runOnceKey, candidate.functionName, expectedArgs).Scan(
+				&candidate.priority.priority, &candidate.priority.maxTimeSeconds)
+			if errors.Is(err, pgx.ErrNoRows) {
+				if err := guard.retireTaskWithQuery(ctx, tx, candidate.taskId); err != nil {
+					return nil, guard, false, err
+				}
+				continue
+			}
+			if err != nil {
+				return nil, guard, false, err
+			}
+			if self.claimCandidateLocked != nil {
+				self.claimCandidateLocked(candidate.taskId)
 			}
 			taskIds = append(taskIds, candidate.taskId)
 			taskIdPriorities[candidate.taskId] = candidate.priority
@@ -2100,31 +2193,37 @@ func refreshTaskTimestampLeases(
 	ctx context.Context,
 	tasks map[server.Id]*Task,
 ) {
+	if len(tasks) == 0 {
+		return
+	}
+	ids := make([]server.Id, 0, len(tasks))
+	claims := make([]int64, 0, len(tasks))
+	keys := make([]server.PgOwnershipKey, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.TaskId)
+		claims = append(claims, task.ClaimGeneration)
+		keys = append(keys, taskQueueOwnershipKey(task.TaskId, task.RunOnceKey))
+	}
+	refreshed := int64(0)
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			claimTime := server.NowUtc()
-			releaseTime := claimTime.Add(TaskLeaseTimeout)
-
-			for _, task := range tasks {
-				// GREATEST prevents a backwards clock adjustment from
-				// shortening an existing lease. Under a normal clock every
-				// heartbeat advances the bounded recovery deadline.
-				batch.Queue(
-					`
-						UPDATE pending_task
-						SET
-							claim_time = $2,
-							release_time = GREATEST(release_time, $3)
-						WHERE task_id = $1 AND claim_generation = $4
-					`,
-					task.TaskId,
-					claimTime,
-					releaseTime,
-					task.ClaimGeneration,
-				)
-			}
-		})
-	})
+		admitted, err := server.TryTxOwnership(ctx, tx, keys)
+		server.Raise(err)
+		if !admitted {
+			return
+		}
+		claimTime := server.NowUtc()
+		releaseTime := claimTime.Add(TaskLeaseTimeout)
+		tag := server.RaisePgResult(tx.Exec(ctx, `WITH owned AS MATERIALIZED (
+			SELECT pending_task.task_id FROM pending_task
+			JOIN unnest($1::uuid[],$4::bigint[]) AS expected(task_id,claim_generation)
+			USING(task_id,claim_generation)
+			ORDER BY pending_task.task_id FOR UPDATE OF pending_task SKIP LOCKED
+		)
+		UPDATE pending_task SET claim_time=$2,release_time=GREATEST(release_time,$3)
+		FROM owned WHERE pending_task.task_id=owned.task_id`, ids, claimTime, releaseTime, claims))
+		refreshed = tag.RowsAffected()
+	}, server.TxReadCommitted, server.OptNoRetry())
+	taskTimestampLeaseRefreshSkippedCounter.Add(float64(int64(len(tasks)) - refreshed))
 }
 
 // tryRefreshTaskTimestampLeases converts only the pooled timestamp-refresh

@@ -31,7 +31,7 @@ func TestLegacyPayerCollectionWindowKeepsEarliestInitialDeadline(t *testing.T) {
 			key := task.RunOnce("flush_legacy_payer_settlements", payer).String()
 			var first time.Time
 			before := server.NowUtc()
-			server.Tx(ctx, func(tx server.PgTx) {
+			withLegacyPayerQueueTestTx(ctx, []server.Id{payer}, func(tx server.PgTx) {
 				QueueLegacyPayerSettlementsInTx(owner, tx, payer)
 				server.Raise(tx.QueryRow(ctx, `SELECT run_at FROM pending_task WHERE run_once_key=$1`, key).Scan(&first))
 			})
@@ -39,7 +39,7 @@ func TestLegacyPayerCollectionWindowKeepsEarliestInitialDeadline(t *testing.T) {
 			if first.Before(before.Add(scenario.window-time.Millisecond)) || first.After(after.Add(scenario.window+time.Millisecond)) {
 				t.Fatal("initial owner did not retain its collection window", scenario.window, first.Sub(before))
 			}
-			server.Tx(ctx, func(tx server.PgTx) {
+			withLegacyPayerQueueTestTx(ctx, []server.Id{payer}, func(tx server.PgTx) {
 				for range 3 {
 					QueueLegacyPayerSettlementsInTx(owner, tx, payer)
 				}
@@ -53,7 +53,7 @@ func TestLegacyPayerCollectionWindowKeepsEarliestInitialDeadline(t *testing.T) {
 			readyPayer := server.NewId()
 			readyAt := server.NowUtc().Add(-time.Minute)
 			cursor := &LegacySettlementCursor{NextAttemptTime: readyAt, ContractId: server.NewId(), PassEndTime: server.NowUtc()}
-			server.Tx(ctx, func(tx server.PgTx) {
+			withLegacyPayerQueueTestTx(ctx, []server.Id{readyPayer}, func(tx server.PgTx) {
 				ScheduleLegacyPayerSettlementsInTx(owner, tx, readyPayer, cursor, readyAt)
 				QueueLegacyPayerSettlementsInTx(owner, tx, readyPayer)
 				var due time.Time
@@ -116,7 +116,7 @@ func testLegacyPayerNewArrivalCollectionWindow(t *testing.T, stopAfterPage bool)
 			t.Fatal("new-arrival fixture did not cross the completed pass boundary")
 		}
 		before := server.NowUtc()
-		server.Tx(ctx, func(tx server.PgTx) {
+		withLegacyPayerQueueTestTx(ctx, []server.Id{f.sourceNetworkId}, func(tx server.PgTx) {
 			server.Raise(ApplyLegacyPayerSettlementsPost(args, result, owner, tx))
 		})
 		after := server.NowUtc()
@@ -148,7 +148,7 @@ func TestLegacyPayerPostPreservesReadyAndAccountingDeadlines(t *testing.T) {
 		defer owner.Cancel()
 		args := &LegacyPayerSettlementArgs{Private: true, PayerNetworkId: f.sourceNetworkId}
 		before := server.NowUtc()
-		server.Tx(ctx, func(tx server.PgTx) {
+		withLegacyPayerQueueTestTx(ctx, []server.Id{f.sourceNetworkId}, func(tx server.PgTx) {
 			server.Raise(ApplyLegacyPayerSettlementsPost(args, &LegacyPayerSettlementResult{
 				LegacySettlementFlushResult: LegacySettlementFlushResult{More: true, Completed: 256, PassEndTime: before},
 				Pages:                       1,
@@ -162,7 +162,7 @@ func TestLegacyPayerPostPreservesReadyAndAccountingDeadlines(t *testing.T) {
 				t.Fatal("already-ready prefix received another collection delay", due.Sub(before))
 			}
 		})
-		server.Tx(ctx, func(tx server.PgTx) {
+		withLegacyPayerQueueTestTx(ctx, []server.Id{f.sourceNetworkId}, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key=$1`, task.RunOnce("flush_legacy_payer_settlements", f.sourceNetworkId).String()))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET used_transfer_byte_count=101 WHERE contract_id=$1`, id))
 		})
@@ -170,7 +170,7 @@ func TestLegacyPayerPostPreservesReadyAndAccountingDeadlines(t *testing.T) {
 		if err != nil || result.Failed != 1 || result.Completed != 0 || result.Pages != 1 {
 			t.Fatal("actual underfunded payer did not stop its admitted turn", result, err)
 		}
-		server.Tx(ctx, func(tx server.PgTx) {
+		withLegacyPayerQueueTestTx(ctx, []server.Id{f.sourceNetworkId}, func(tx server.PgTx) {
 			var retryAt time.Time
 			server.Raise(tx.QueryRow(ctx, `SELECT next_attempt_time FROM legacy_settlement_intent WHERE contract_id=$1`, id).Scan(&retryAt))
 			server.Raise(ApplyLegacyPayerSettlementsPost(args, result, owner, tx))

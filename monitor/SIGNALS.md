@@ -32454,3 +32454,43 @@ generation marker: provider and evidence changes can appear on the next source
 refresh. Different worker policies can each refresh their own key during a
 mixed rollout. Verify actual worker adoption and later source completions before
 claiming runtime scan reduction; a deployment result alone is insufficient.
+
+
+## Queue ownership for settlement publication
+
+The prospective close-path protocol uses the complete stored `run_once_key`
+for pending ownership, or the exact task id for a non-deduplicated task. Required
+financial publications declare their queue keys with their financial keys before
+shared mutations. A refused attempt retains its durable input; publication is
+never silently omitted after money changes. Target completion declarations add
+all post-publication keys before the finishing transaction starts. Existing
+RunOnce generation/claim fences and the minimum of explicit requests after the
+active claim remain unchanged, including explicit transactional Post requests.
+
+Claims discover a bounded candidate prefix without row locks, then probe its
+canonical queue key on the same direct read-committed transaction before an
+exact `FOR UPDATE SKIP LOCKED` eligibility/identity recheck. Startup resource and
+backend-PID checks precede session execution locks. Administrative exact-id
+removal/release and exact-key kicks use the same queue owner. Removed-function
+startup cleanup is confined to deliberately absent targets; it does not cover
+live settlement functions. Finished retention applies only to its existing age
+predicate, independently of fresh close-path owners.
+
+`urnetwork_task_timestamp_lease_refresh_skipped_total` counts hints not refreshed
+because queue ownership or a row was busy, or the exact claim epoch no longer
+matched. A skip alone is not a lost task: the separately pinged session execution
+guard remains authoritative. Combine it with guard/session failures, pending
+age, and later successful handbacks. Heartbeats use nonblocking admission and
+exact-epoch row skipping; they must not wait behind their own task's financial
+marker transaction. Uncertain transaction replies retain existing no-replay and
+join/guard handback rules.
+
+This catalog entry is a source contract, not an observed zero-contention claim.
+Release requires every supported producer, target registration, account/grant
+writer, and worker generation to use the same keys and actual backend route.
+Old writers and unopted generic targets retain their former behavior. Verify
+complete financial/output custody, joined Run shutdown, wire SQL errors, actual
+transaction reruns/fallbacks, and full-work performance on the composed workload;
+lock-wait sampling or a quiet admission counter alone cannot certify exclusion.
+The direct maintenance pool must retain capacity beyond live execution guards
+for same-backend business owners; no pool or execution limit is raised here.

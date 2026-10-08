@@ -8,9 +8,24 @@ import "fmt"
 // Retain the complete existing eligibility boundary, including versioned
 // aliases and scoped post retries, before the ordered fallback limit.
 func (self *TaskWorker) claimCandidatesQuery(nowBlock int64, candidateLimit int, includeGroupArgs ...bool) (string, []any) {
+	return self.taskCandidatesQuery(nowBlock, candidateLimit, false, includeGroupArgs...)
+}
+
+// Discovery takes no row lock. The live claimer admits each exact queue key
+// before revalidating and locking that candidate on the same transaction.
+func (self *TaskWorker) claimOwnershipCandidatesQuery(nowBlock int64, candidateLimit int, includeGroupArgs bool) (string, []any) {
+	return self.taskCandidatesQuery(nowBlock, candidateLimit, true, includeGroupArgs)
+}
+
+func (self *TaskWorker) taskCandidatesQuery(nowBlock int64, candidateLimit int, ownershipFirst bool, includeGroupArgs ...bool) (string, []any) {
 	groupArgsColumn := ""
 	if len(includeGroupArgs) != 0 && includeGroupArgs[0] {
 		groupArgsColumn = ", args_json"
+	}
+	rowLock := "FOR UPDATE SKIP LOCKED"
+	if ownershipFirst {
+		groupArgsColumn += ", run_once_key"
+		rowLock = ""
 	}
 	claimPredicate := ""
 	queryArgs := []any{nowBlock, candidateLimit}
@@ -57,6 +72,6 @@ func (self *TaskWorker) claimCandidatesQuery(nowBlock int64, candidateLimit int,
 		` + claimPredicate + `
 			ORDER BY available_block, run_priority DESC, run_max_time_seconds DESC
 			LIMIT $2
-			FOR UPDATE SKIP LOCKED
+			` + rowLock + `
 		`, queryArgs
 }
