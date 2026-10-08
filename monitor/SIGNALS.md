@@ -3719,6 +3719,37 @@ about remote reachability or application output. These are capture runbook
 requirements, not an additional automatic probe or a reason to weaken the
 existing identity and admission checks.
 
+The 2026-10-08 pending-contract actor read stopped before contact at
+18:06:35Z with `ssh_scan / unrelated_ssh`; Connect edge-4 had the same local
+refusal at 17:45:48Z. Neither retained the offending process generation.
+Their incomplete scans and null capacity counts prove neither zero SSH use
+nor a scanner defect, remote failure, or database/query result. A later local
+process census cannot identify either historical offender.
+
+The shared admission successor attaches a bounded private identity witness
+after the unchanged unrelated-SSH refusal: the rejected PID, parent, start
+ticks, command name and state, boot identity, a cgroup digest, and at most
+three ancestors. A strict 32-hex `INVOCATION_ID`, when available, is labeled
+as inherited environment metadata, not proof of current systemd ownership.
+No argv, endpoint, raw cgroup, or other environment value is retained. The
+supplement is exclusive mode 0600, capped at 8 KiB, four process records and
+250 ms within the existing audit deadline. Public output carries only finite
+availability/status, digest, byte count and record count.
+
+Disappearance, PID reuse, missing permissions, and incomplete ancestry remain
+explicit in that private witness; none changes the original refusal or makes
+an incomplete population count complete. A proved exited watcher child keeps
+its existing narrow exclusion. A live unrelated Git/SSH process remains a
+refusal even when apparent capacity remains. The diagnostic cannot authorize
+killing an overlapping owner, ignoring all SSH, or reusing a consumed reader.
+Join the actual overlapping owner and require a fresh complete admission
+before a separately qualified fresh read. Source controls cover the existing
+healthy watcher, exact dead-child proof, process disappearance, PID reuse,
+private persistence and unchanged global/per-host limits. Evidence:
+`ssh-admission-identity-v1/source-manifest.json` (`177752c6`) and independent
+source gate `sol-independent-source-GO.json` (`2cc6ec87`); the original refusal
+evidence remains unchanged and its offending identity remains unknown.
+
 ACTION: first distinguish SSH transport/authentication from the remote
 command's status. Before attributing a local overlay failure, correlate
 contemporaneous failures across independent inventory targets with bounded
