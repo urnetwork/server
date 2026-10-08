@@ -148,6 +148,8 @@ func main() {
 		err = runCapturePrepare(os.Stdout, os.Args[2:])
 	} else if len(os.Args) > 1 && os.Args[1] == "capture-current" {
 		err = runCaptureCurrent(os.Stdout, os.Args[2:])
+	} else if len(os.Args) > 1 && os.Args[1] == "current-cause" {
+		err = runCurrentCause(os.Stdout, os.Args[2:])
 	} else if len(os.Args) > 1 && os.Args[1] == "capture-bridge" {
 		err = runCaptureBridge(os.Stdin, os.Stdout, os.Args[2:])
 	} else {

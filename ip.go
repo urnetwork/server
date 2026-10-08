@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	// "sync"
 	"math"
@@ -660,6 +661,10 @@ func DistanceKm(
 	return km
 }
 
+// Published only after the serving reader is opened and its schema accepted.
+// Bounded diagnostics load this reference without triggering initialization.
+var arinServingReader atomic.Pointer[mmdb.Reader]
+
 var arinDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
 	path, err := Config.ResourcePath("arindb/arin.mmdb")
 	if err != nil {
@@ -675,6 +680,7 @@ var arinDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
 		panic(fmt.Errorf("expected ARIN database, got %q", db.Metadata.DatabaseType))
 	}
 
+	arinServingReader.Store(db)
 	return db, schemaType(db.Metadata.DatabaseType)
 })
 

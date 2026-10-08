@@ -17,6 +17,17 @@ type ArinShadowHandlerInventory struct {
 	Resources           server.ArinShadowResourcePins `json:"resources"`
 }
 
+// Current-cause inventory is a separate bounded method. It observes registry
+// membership and the already-published serving-reader epoch without opening
+// the legacy capture recorder or advertising whole-file hash identity.
+type ArinCurrentCauseHandlerInventory struct {
+	Handlers            []server.Id `json:"handlers"`
+	TrackedConnections  int         `json:"tracked_connections"`
+	OverflowConnections int         `json:"overflow_connections"`
+	Complete            bool        `json:"complete"`
+	ReaderEpoch         int64       `json:"reader_epoch"`
+}
+
 func startArinShadowCaptureRuntime(ctx context.Context) (*server.ArinShadowRuntime, error) {
 	config, err := server.LoadArinShadowRuntimeConfig()
 	if err != nil || config == nil {
@@ -67,6 +78,36 @@ func newArinShadowConnectRPC(lifetime context.Context, config *server.ArinShadow
 			}
 		}
 		switch method {
+		case server.ArinCurrentCauseInventoryMethod:
+			var empty struct{}
+			if closed || server.DecodeArinShadowRPC(input, &empty) != nil {
+				return nil, server.ErrArinShadowInput
+			}
+			r := currentArinShadowOwners
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			result := ArinCurrentCauseHandlerInventory{Handlers: []server.Id{}, TrackedConnections: len(r.entries), OverflowConnections: r.overflow,
+				Complete: len(r.handlers) <= 256 && r.overflow == 0, ReaderEpoch: server.CurrentArinCauseReaderEpoch()}
+			if len(r.handlers) <= 256 {
+				for handler := range r.handlers {
+					result.Handlers = append(result.Handlers, handler)
+				}
+			}
+			slices.SortFunc(result.Handlers, func(a, b server.Id) int {
+				if a.Less(b) {
+					return -1
+				}
+				if b.Less(a) {
+					return 1
+				}
+				return 0
+			})
+			return result, nil
+		case server.ArinCurrentCauseMethod:
+			if closed {
+				return nil, server.ErrArinShadowInput
+			}
+			return server.ArinCurrentCauseRPC(ctx, input, owners, model.ReadArinShadowCaptureFacts)
 		case "capture":
 			return recorder.CaptureRPC(ctx, input, owners, model.ReadArinShadowCaptureFacts)
 		case "inventory":
