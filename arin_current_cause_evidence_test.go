@@ -2,10 +2,12 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/netip"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/maxmind/mmdbwriter/mmdbtype"
 	mmdb "github.com/oschwald/maxminddb-golang/v2"
@@ -122,5 +124,76 @@ func TestArinCurrentCauseMixedOriginsAreNotCollapsed(t *testing.T) {
 	got, err := decodeCurrentCauseEvidence(t, r)
 	if err != nil || got.State != "ambiguous" || got.Origin.UseState != "ambiguous" || !slices.Equal(got.Origin.ASNs, []uint32{12345, 23457}) || got.OriginRPKIValidity != "not-found" {
 		t.Fatal("mixed origins collapsed or inferred clean", got, err)
+	}
+}
+
+func TestArinCurrentCauseAddressFamiliesPreserveClassification(t *testing.T) {
+	r := currentCauseEvidenceRecord()
+	r["origin_use_state"] = mmdbtype.String("withheld")
+	r["origin_withheld_reason"] = mmdbtype.String("rpki-invalid-origin")
+	r["origin_rpki_validity"] = mmdbtype.String("invalid")
+	db, err := mmdb.OpenBytes(testExceptionDatabase(t, string(schemaTypeArinDb), map[string]mmdbtype.Map{
+		"192.0.2.0/24": r, "2001:db8::/32": r,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	reply := ArinCurrentCauseReply{ExpectedEpoch: db.Metadata.BuildTime().Unix()}
+	for _, sample := range []struct{ address, family string }{
+		{"192.0.2.42", "ipv4"}, {"::ffff:192.0.2.42", "ipv4"}, {"2001:db8::42", "ipv6"},
+	} {
+		cause, err := currentArinCauseFromDatabase(db, netip.MustParseAddr(sample.address))
+		if err != nil || cause.AddressFamily != sample.family || cause.State != "unknown" || !cause.NonQuality || cause.Verified || cause.Risk ||
+			cause.OriginWithheldReason != "rpki-invalid-origin" || cause.OriginRPKIValidity != "invalid" {
+			t.Fatal("address family changed classifier state or origin evidence", sample.family, cause, err)
+		}
+		reply.Rows = append(reply.Rows, ArinCurrentCauseRow{ConnectionId: NewId(), Reason: "qualified", Cause: cause})
+	}
+	report, err := AggregateArinCurrentCauses(reply)
+	if err != nil || report.RequestedConnections != 3 || report.QualifiedConnections != 3 || len(report.Causes) != 2 {
+		t.Fatal("family partition was lost", report, err)
+	}
+	counts := map[string]int{}
+	for _, row := range report.Causes {
+		counts[row.Cause.AddressFamily] += row.Connections
+	}
+	if counts["ipv4"] != 2 || counts["ipv6"] != 1 {
+		t.Fatal("mapped IPv4 or IPv6 family was misreported", counts)
+	}
+	encoded, _ := json.Marshal(report)
+	for _, private := range []string{"192.0.2.42", "2001:db8::42", "connection_id", "client_id", "handler_id"} {
+		if bytes.Contains(encoded, []byte(private)) {
+			t.Fatal("address-family diagnostic leaked private data")
+		}
+	}
+	for _, address := range []netip.Addr{{}, netip.MustParseAddr("0.0.0.0"), netip.MustParseAddr("::"),
+		netip.MustParseAddr("::ffff:0.0.0.0"), netip.MustParseAddr("fe80::1%fixture"),
+		netip.MustParseAddr("::ffff:192.0.2.42%fixture")} {
+		if _, err := currentArinCauseFromDatabase(db, address); err == nil {
+			t.Fatal("unsupported connection address accepted")
+		}
+	}
+}
+
+func TestArinCurrentCauseAddressFamilyCannotMismatchOwner(t *testing.T) {
+	request, owner, fact, cause, now := currentCauseFixture(t)
+	for _, family := range []string{"", "v4", "unknown", "192.0.2.42"} {
+		cause.AddressFamily = family
+		if validArinCurrentCause(*cause) {
+			t.Fatal("unclosed address family accepted")
+		}
+	}
+	cause.AddressFamily = "ipv6"
+	owners := func(context.Context, []Id) ([]ArinShadowCaptureTarget, error) {
+		return []ArinShadowCaptureTarget{{request.Connections[0], owner}}, nil
+	}
+	facts := func(context.Context, []Id) ([]ArinShadowCaptureFacts, error) {
+		return []ArinShadowCaptureFacts{fact}, nil
+	}
+	lookup := func(netip.Addr) (*ArinCurrentCause, error) { return cause, nil }
+	reply, err := readCurrentArinCauses(t.Context(), request, owners, facts, lookup, func() time.Time { return now })
+	if err != nil || len(reply.Rows) != 1 || reply.Rows[0].Reason != "lookup_unavailable" || reply.Rows[0].Cause != nil {
+		t.Fatal("cause from a different address family was qualified", reply, err)
 	}
 }

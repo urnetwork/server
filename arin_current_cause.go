@@ -20,6 +20,8 @@ const ArinCurrentCauseMethod = "current_cause_v1"
 const ArinCurrentCauseInventoryMethod = "current_cause_inventory_v1"
 
 type ArinCurrentCause struct {
+	// The observed connection address family does not establish egress-family intent.
+	AddressFamily            string                 `json:"address_family"`
 	DatabaseBuildEpoch       int64                  `json:"database_build_epoch"`
 	State                    string                 `json:"state"`
 	Risk                     bool                   `json:"risk"`
@@ -218,6 +220,9 @@ func validArinCurrentCauseRequest(request ArinCurrentCauseRequest, now time.Time
 }
 
 func validArinCurrentCause(c ArinCurrentCause) bool {
+	if c.AddressFamily != "ipv4" && c.AddressFamily != "ipv6" {
+		return false
+	}
 	if len(c.NetworkRiskCategories) > 5 || c.OtherNetworkRiskEvidence > 64 ||
 		c.ProxyRisk != (len(c.NetworkRiskCategories) > 0) ||
 		c.OriginVisibilityKnown != (c.OriginVisibilityPeers > 0) ||
@@ -262,8 +267,23 @@ func lookupCurrentArinCause(address netip.Addr) (*ArinCurrentCause, error) {
 	return currentArinCauseFromDatabase(db, address)
 }
 
+func currentArinCauseAddressFamily(address netip.Addr) string {
+	if !address.IsValid() || address.Zone() != "" {
+		return ""
+	}
+	address = address.Unmap()
+	if address.IsUnspecified() {
+		return ""
+	}
+	if address.Is4() {
+		return "ipv4"
+	}
+	return "ipv6"
+}
+
 func currentArinCauseFromDatabase(db *mmdb.Reader, address netip.Addr) (*ArinCurrentCause, error) {
-	if db == nil || !address.IsValid() || address.IsUnspecified() || address.Zone() != "" {
+	family := currentArinCauseAddressFamily(address)
+	if db == nil || family == "" {
 		return nil, ErrArinShadowInput
 	}
 	result := db.Lookup(address.Unmap())
@@ -295,7 +315,7 @@ func currentArinCauseFromDatabase(db *mmdb.Reader, address netip.Addr) (*ArinCur
 			return nil, ErrArinShadowInput
 		}
 	}
-	cause := &ArinCurrentCause{DatabaseBuildEpoch: info.DatabaseBuildEpoch, State: info.QualityState,
+	cause := &ArinCurrentCause{AddressFamily: family, DatabaseBuildEpoch: info.DatabaseBuildEpoch, State: info.QualityState,
 		Risk: info.Risk, NonQuality: info.NonQuality, Verified: info.QualityVerified(),
 		RegistrationAttribution: "unavailable", OriginAttribution: "absent",
 		NetworkRiskCategories: []string{}, HostingPrefixEvidence: len(extra.HostingPrefixSourceIDs) > 0}
@@ -394,7 +414,7 @@ func readCurrentArinCauses(ctx context.Context, request ArinCurrentCauseRequest,
 						if fact.Actual.Epoch == request.ExpectedEpoch {
 							row.Reason = "lookup_unavailable"
 							cause, lookupErr := lookup(before[i].Address.Unmap())
-							if lookupErr == nil && cause != nil && validArinCurrentCause(*cause) {
+							if lookupErr == nil && cause != nil && validArinCurrentCause(*cause) && cause.AddressFamily == currentArinCauseAddressFamily(before[i].Address) {
 								row.Reason = "active_mismatch"
 								if cause.DatabaseBuildEpoch == request.ExpectedEpoch && cause.Risk == fact.Actual.Risk && cause.NonQuality == fact.Actual.NonQuality && cause.Verified == fact.Actual.Verified {
 									row.ClientId, row.HandlerId = fact.ClientId, fact.HandlerId

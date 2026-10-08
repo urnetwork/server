@@ -130,7 +130,7 @@ func TestCurrentCauseCallerAuthenticatedCausesAndUnknownOwners(t *testing.T) {
 								return nil, invalid
 							}
 							now := server.NowUtc()
-							cause := &server.ArinCurrentCause{DatabaseBuildEpoch: input.ExpectedEpoch, State: "unknown", NonQuality: true, RegistrationAttribution: "unavailable", OriginAttribution: "absent"}
+							cause := &server.ArinCurrentCause{AddressFamily: "ipv4", DatabaseBuildEpoch: input.ExpectedEpoch, State: "unknown", NonQuality: true, RegistrationAttribution: "unavailable", OriginAttribution: "absent"}
 							return server.ArinCurrentCauseReply{ExpectedEpoch: input.ExpectedEpoch, LookupNotBefore: input.LookupNotBefore,
 								Rows: []server.ArinCurrentCauseRow{{ConnectionId: first.ConnectionId, ClientId: first.ClientId, HandlerId: first.HandlerId,
 									ActualAt: now.Add(-time.Second), ObservedAt: now, CapturedAt: now, Reason: "qualified", Cause: cause}}}, nil

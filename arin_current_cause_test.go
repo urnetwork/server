@@ -29,7 +29,7 @@ func currentCauseFixture(t *testing.T) (ArinCurrentCauseRequest, *currentCauseOw
 	owner := &currentCauseOwner{ArinShadowOwnerSnapshot{ConnectionId: request.Connections[0], ClientId: NewId(), HandlerId: NewId(), Address: netip.MustParseAddr("192.0.2.42"), At: now}, true}
 	fact := ArinShadowCaptureFacts{ConnectionId: request.Connections[0], ClientId: owner.snapshot.ClientId, HandlerId: owner.snapshot.HandlerId, ObservedAt: now, Connected: true, Present: true,
 		Actual: ArinShadowActiveFacts{Epoch: request.ExpectedEpoch, At: now.Add(-time.Minute), NonQuality: true}}
-	cause := &ArinCurrentCause{DatabaseBuildEpoch: request.ExpectedEpoch, State: "unknown", NonQuality: true, RegistrationAttribution: "unavailable", OriginAttribution: "present",
+	cause := &ArinCurrentCause{AddressFamily: "ipv4", DatabaseBuildEpoch: request.ExpectedEpoch, State: "unknown", NonQuality: true, RegistrationAttribution: "unavailable", OriginAttribution: "present",
 		Origin: ArinShadowOrigin{ASNs: []uint32{12345}, UseState: "withheld"}, OriginWithheldReason: "insufficient-origin-visibility"}
 	return request, owner, fact, cause, now
 }
