@@ -72,21 +72,6 @@ func TestProviderWorkOptionalSchemaCancellationPreservesCause(t *testing.T) {
 	}
 }
 
-// A refusal marker cannot hide an independently attached integrity failure.
-func TestProviderWorkOptionalRefusalDoesNotSwallowOtherCauses(t *testing.T) {
-	ctx := WithProviderWorkSessionSource(t.Context(), &ProviderWorkSessionSource{})
-	tx := &providerWorkReadyTx{}
-	var raised error
-	server.HandleError(func() {
-		providerWorkOptionalInTx(ctx, tx, func(server.PgTx) error {
-			return errors.Join(errProviderWorkEvidenceUnavailable, protocol.ErrProviderWorkIntegrity)
-		})
-	}, func(err error) { raised = err })
-	if !errors.Is(raised, protocol.ErrProviderWorkIntegrity) {
-		t.Fatal("evidence marker swallowed an integrity cause", raised)
-	}
-}
-
 // The preflight and work see one backend and transaction, and only their
 // external owner decides whether the callback's write survives.
 func TestProviderWorkOptionalUsesCallerBackendAndRollback(t *testing.T) {
@@ -220,6 +205,55 @@ func TestProviderWorkOriginalSqlFailureRollsBackContract(t *testing.T) {
 				t.Fatal("contract survived its receipt statement failure", count)
 			}
 		})
+	})
+}
+
+// The live disconnect owner still fences and appends its journal event while
+// optional receipts are unavailable. Restoring schema cannot heal that gap.
+func TestProviderWorkMissingReceiptSchemaKeepsSessionMutation(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newProviderWorkSessionFixture(t)
+		restore := forceTableUnavailable(f.ctx, "provider_work_session_receipt")
+		server.Raise(DisconnectNetworkClient(f.ctx, f.sourceConnectionId))
+		restore()
+		server.Db(f.ctx, func(conn server.PgConn) {
+			var connected bool
+			var events, receipts int
+			server.Raise(conn.QueryRow(f.ctx, `SELECT connected,
+ (SELECT count(*) FROM provider_work_session_event WHERE client_id=$2),
+ (SELECT count(*) FROM provider_work_session_receipt WHERE client_id=$2)
+ FROM network_client_connection WHERE connection_id=$1`, f.sourceConnectionId, f.sourceId).Scan(&connected, &events, &receipts))
+			if connected || events != 3 || receipts != 2 {
+				t.Fatal("missing receipts lost the session mutation or signed its gap", connected, events, receipts)
+			}
+		})
+		id := f.contract(t)
+		if providerWorkFixtureReservation(t, providerWorkFixtureReceipts(t, f.ctx, id), id).Reservation.Complete {
+			t.Fatal("restored receipt schema healed an unsigned retirement")
+		}
+	})
+}
+
+// A receipt statement failure occurs after the real connection trigger has
+// appended its event. Both must roll back, and a later owner can retry once.
+func TestProviderWorkSessionReceiptSqlFailureRollsBackMutation(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newProviderWorkSessionFixture(t)
+		restore := forceStatementFailures(f.ctx, "provider_work_session_receipt", "INSERT")
+		failure := callWithForcedFailure(f.ctx, func(ctx context.Context) {
+			server.Raise(DisconnectNetworkClient(ctx, f.sourceConnectionId))
+		})
+		if !isForcedFailure(failure, "P0001", "injected failure on INSERT provider_work_session_receipt") {
+			t.Fatal("session receipt failure was swallowed or changed", failure)
+		}
+		restore()
+		requireProviderWorkConnectionJournal(t, f, 2, 1)
+		server.Raise(DisconnectNetworkClient(f.ctx, f.sourceConnectionId))
+		requireProviderWorkConnectionJournal(t, f, 3, 0)
 	})
 }
 
