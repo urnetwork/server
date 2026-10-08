@@ -1996,22 +1996,15 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 			}
 			guard.taskIds[candidate.taskId] = true
 			lockKey := taskAdvisoryLockKey(candidate.taskId)
-			var acquired bool
-			if err := tx.QueryRow(
-				ctx,
-				`SELECT pg_try_advisory_lock($1)`,
-				lockKey,
-			).Scan(&acquired); err != nil {
+			acquired, queueAdmitted, err := server.TryPgTaskClaimSessionAndQueueOwnership(
+				ctx, tx, lockKey, PendingTaskOwnershipKey(candidate.taskId, candidate.runOnceKey))
+			if err != nil {
 				return nil, guard, false, err
 			}
 			if !acquired {
 				delete(guard.taskIds, candidate.taskId)
 				guard.releaseAdmission(candidate.taskId)
 				continue
-			}
-			queueAdmitted, err := server.TryPgTaskClaimOwnership(ctx, tx, PendingTaskOwnershipKey(candidate.taskId, candidate.runOnceKey))
-			if err != nil {
-				return nil, guard, false, err
 			}
 			if self.claimQueueAdmission != nil {
 				self.claimQueueAdmission(candidate.taskId, queueAdmitted)

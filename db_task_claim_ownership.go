@@ -49,3 +49,31 @@ func TryPgTaskClaimOwnership(ctx context.Context, rawTx PgTx, key PgOwnershipKey
 	}
 	return acquired, nil
 }
+
+// The task session guard and its short queue admission share one backend and
+// one wire exchange. A refused session must not acquire the queue key. Keep
+// the session attempt materialized so one release retires exactly one lock,
+// and preserve the raw transaction's queue ownership until its actual end.
+func TryPgTaskClaimSessionAndQueueOwnership(ctx context.Context, rawTx PgTx, sessionKey int64, key PgOwnershipKey) (sessionAcquired, queueAcquired bool, err error) {
+	if _, wrapped := rawTx.(*postCommitPgTx); wrapped {
+		return false, false, errors.New("task claim ownership requires its raw transaction")
+	}
+	var isolation string
+	var backendPid uint32
+	err = rawTx.QueryRow(ctx, `WITH task_claim_session AS MATERIALIZED (
+        SELECT current_setting('transaction_isolation') AS isolation,pg_backend_pid() AS backend_pid,
+            CASE WHEN current_setting('transaction_isolation')='read committed' AND pg_backend_pid()=$4
+            THEN pg_try_advisory_lock($1::bigint) ELSE false END AS session_acquired
+    )
+    SELECT isolation,backend_pid,session_acquired,
+        CASE WHEN session_acquired THEN pg_try_advisory_xact_lock($2::integer,$3::integer) ELSE false END
+    FROM task_claim_session`, sessionKey, key.first, key.second, rawTx.Conn().PgConn().PID()).Scan(
+		&isolation, &backendPid, &sessionAcquired, &queueAcquired)
+	if err != nil {
+		return false, false, err
+	}
+	if isolation != "read committed" || backendPid != rawTx.Conn().PgConn().PID() {
+		return false, false, errors.New("task claim ownership requires its direct read-committed backend")
+	}
+	return sessionAcquired, queueAcquired, nil
+}
