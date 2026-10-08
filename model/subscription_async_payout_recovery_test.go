@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,8 +57,15 @@ func asyncPayoutRecoveryProject(t testing.TB, ctx context.Context, contractId se
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE function_name=$2 AND args_json::jsonb->>'contract_id'=$1::text`, contractId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(&taskId))
 	})
+	target := task.NewTaskTarget(ApplyLegacyProviderTotals)
+	stale := task.GetTasks(ctx, taskId)[taskId]
+	if stale == nil {
+		t.Fatal("durable provider owner disappeared before recovery")
+	}
 	for range 2 {
-		server.Tx(ctx, func(tx server.PgTx) { server.Raise(applyLegacyProviderTotalsInTx(ctx, tx, taskId)) })
+		if _, _, err := target.RunSpecific(ctx, stale); err != nil {
+			t.Fatal("actual provider owner or stale replay failed", err)
+		}
 	}
 	return taskId
 }
@@ -69,21 +77,64 @@ func TestRedisSettlementCrashRetainsEarnedPayoutAndProjection(t *testing.T) {
 		contract := createRedisAdmissionTest(ctx, f, 64)
 		_ = createRedisAdmissionTest(ctx, f, 37)
 		asyncPayoutRecoveryReports(ctx, contract.ContractId, 11)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
-		defer tx.Rollback(context.Background())
-		posts, closed, err := settleEscrowForegroundInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
-		server.Raise(err)
-		if !closed || len(posts) == 0 {
-			t.Fatal("foreground owner did not reach the callback boundary")
+		// The test releases the real owner's commit only after a second
+		// connection witnesses invisibility. The fresh server transaction
+		// retains its admission guard, commit observations and no-retry policy.
+		commitCtx, cancelCommit := context.WithCancel(ctx)
+		ready := make(chan []func() any, 1)
+		commitRelease := make(chan struct{})
+		done := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(commitRelease) }) }
+		var recovered any
+		var postCalls, reruns atomic.Int32
+		timing := &server.DbTiming{}
+		commitCtx = server.Testing_WithTxRerunHook(commitCtx, func() { reruns.Add(1) })
+		go func() {
+			defer close(done)
+			recovered = server.HandleError(func() {
+				server.Tx(commitCtx, func(tx server.PgTx) {
+					posts, closed, err := settleEscrowForegroundInTx(commitCtx, tx, contract.ContractId, ContractOutcomeSettled)
+					server.Raise(err)
+					if !closed || len(posts) == 0 {
+						server.Raise(errors.New("foreground owner did not reach the callback boundary"))
+					}
+					for index, post := range posts {
+						posts[index] = func() any { postCalls.Add(1); return post() }
+					}
+					ready <- posts
+					select {
+					case <-commitRelease:
+					case <-commitCtx.Done():
+						server.Raise(commitCtx.Err())
+					}
+					server.Raise(commitCtx.Err())
+				}, server.TxReadCommitted, server.OptNoRetry(), timing)
+			})
+		}()
+		defer func() { cancelCommit(); release(); <-done }()
+		var posts []func() any
+		select {
+		case posts = <-ready:
+		case <-done:
+			t.Fatal("foreground owner failed before the commit barrier", recovered)
+		case <-ctx.Done():
+			t.Fatal("foreground owner did not reach the commit barrier", ctx.Err())
 		}
 		terminal, journals, sweeps, owners, _, _ := asyncPayoutRecoveryState(t, ctx, contract.ContractId)
-		if terminal || journals+sweeps+owners != 0 {
+		if terminal || journals+sweeps+owners != 0 || postCalls.Load() != 0 {
 			t.Fatal("uncommitted settlement escaped the transaction")
 		}
-		server.Raise(tx.Commit(ctx))
+		release()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			t.Fatal("released settlement commit did not join", ctx.Err())
+		}
+		if recovered != nil || timing.Phases[server.DbTimingCommit].Count != 1 ||
+			timing.Phases[server.DbTimingRollback].Count != 0 || reruns.Load() != 0 || postCalls.Load() != 0 {
+			t.Fatal("commit barrier failed, retried, or dispatched withheld callbacks", recovered, timing, reruns.Load(), postCalls.Load())
+		}
 		// Simulate process loss after commit by handing no callback to recovery.
 		terminal, journals, sweeps, owners, earned, revenue := asyncPayoutRecoveryState(t, ctx, contract.ContractId)
 		if !terminal || journals != 1 || sweeps != 1 || owners != 1 || earned != 11 || revenue != 11 {
@@ -99,7 +150,7 @@ func TestRedisSettlementCrashRetainsEarnedPayoutAndProjection(t *testing.T) {
 			if again || len(retryPosts) != 0 {
 				t.Fatal("lost commit reply allocated a second settlement")
 			}
-		})
+		}, server.TxReadCommitted, server.OptNoRetry())
 		taskId := asyncPayoutRecoveryProject(t, ctx, contract.ContractId)
 		requireProviderTotalsTestState(t, ctx, taskId, f.destinationNetworkId, true, 11, 11)
 		for range 2 {
@@ -118,9 +169,15 @@ func TestRedisSettlementCrashRetainsEarnedPayoutAndProjection(t *testing.T) {
 		if credit != 989 || pending+applied != 0 || !settled || consumption != 11 || Testing_NetEscrowByteCount(ctx, f.balanceId) != 37 {
 			t.Fatal("restart lost consumption, metadata, or the healthy reservation")
 		}
+		if postCalls.Load() != 0 {
+			t.Fatal("recovery depended on a withheld settlement callback")
+		}
 		// A delayed callback from another admitted invocation is also harmless.
 		server.RunPosts(ctx, posts...)
 		server.RunPosts(ctx, posts...)
+		if postCalls.Load() != int32(2*len(posts)) {
+			t.Fatal("late callback replay did not execute both exact deliveries")
+		}
 		requireProviderTotalsTestState(t, ctx, taskId, f.destinationNetworkId, true, 11, 11)
 		terminal, journals, sweeps, owners, earned, revenue = asyncPayoutRecoveryState(t, ctx, contract.ContractId)
 		if !terminal || journals != 0 || sweeps != 1 || owners != 1 || earned != 11 || revenue != 11 || Testing_NetEscrowByteCount(ctx, f.balanceId) != 37 {
