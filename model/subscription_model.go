@@ -4253,7 +4253,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 					if fresh != nil {
 						openContract = fresh
 						closeErr = runForceClose(func() error {
-							return continueContractExpiry(ctx, tag, openContract, nil)
+							return continueContractExpiry(forceCloseContinuationContext(ctx, openContract.contractId), tag, openContract, nil)
 						})
 					}
 					var quarantineErr, cleanupErr error
