@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server"
 )
@@ -105,6 +106,9 @@ func providerWorkAttachStreamInTx(ctx context.Context, tx server.PgTx, contractI
 	providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
 		var raw []byte
 		if err := optional.QueryRow(ctx, `SELECT original FROM provider_work_stream_original WHERE stream_id=$1`, streamId).Scan(&raw); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errProviderWorkEvidenceUnavailable
+			}
 			return err
 		}
 		original, err := protocol.DecodeProviderWorkReceipt(ctx, raw)
@@ -137,7 +141,9 @@ func providerWorkAttachStreamInTx(ctx context.Context, tx server.PgTx, contractI
 			return err
 		}
 		if !matches || len(members) != 0 {
-			return errors.New("provider work current stream parties differ from the original cohort")
+			// Directory identity can change between Redis birth and SQL
+			// attachment. That cut has no original proof of current parties.
+			return errProviderWorkEvidenceUnavailable
 		}
 		_, err = optional.Exec(ctx, `INSERT INTO provider_work_stream_contract(contract_id,stream_id)
    SELECT $1,stream_id FROM provider_work_stream_original WHERE stream_id=$2
@@ -159,14 +165,20 @@ func providerWorkRetainOutcomeInTx(ctx context.Context, tx server.PgTx, contract
    LEFT JOIN provider_work_stream_contract a USING(contract_id)
    LEFT JOIN provider_work_stream_original s ON s.stream_id=a.stream_id
    WHERE c.contract_id=$1`, contractId).Scan(&reservationHash, &reservationRaw, &streamId, &streamHash, &capacity); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errProviderWorkEvidenceUnavailable
+			}
 			return err
 		}
 		reservation, err := protocol.DecodeProviderWorkReceipt(ctx, reservationRaw)
-		if err != nil || reservation.Reservation == nil || reservation.Reservation.RequestFrameHash == nil || reservation.Reservation.UsageOriginIsSource == nil {
-			return errors.Join(errors.New("provider work original request or direction is absent"), err)
+		if err != nil || reservation.Reservation == nil {
+			return errors.Join(errors.New("provider work original reservation is invalid"), err)
+		}
+		if reservation.Reservation.RequestFrameHash == nil || reservation.Reservation.UsageOriginIsSource == nil || streamId != nil && len(streamHash) == 0 {
+			return errProviderWorkEvidenceUnavailable
 		}
 		if len(reservationHash) != 32 || capacity < 0 || streamId != nil && len(streamHash) != 32 {
-			return errors.New("provider work original reservation or stream is absent")
+			return errors.New("provider work original reservation or stream is invalid")
 		}
 		copy(body.ReservationHash[:], reservationHash)
 		copy(body.StreamHash[:], streamHash)

@@ -1,13 +1,7 @@
 package model
 
-// A provider work savepoint that cannot be created raises, like any other
-// failed statement: the transaction is aborted, its context canceled or its
-// connection lost, so neither the optional work nor the caller's can go on.
-// providerWorkOptionalSchemaInTx used to return false for it, the answer for
-// an absent optional schema, and the caller went on: in an aborted
-// transaction its commit then rolled back, and with a canceled context it
-// committed without the optional work. Each call runs under
-// forcedFailureCallTimeout (see forced_statement_failure_test.go).
+// A catalog preflight cannot be skipped when its owning transaction is
+// already aborted or canceled. Preserve the original failure immediately.
 
 import (
 	"context"
@@ -20,9 +14,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Each case makes the savepoint fail in the caller's transaction, which must
+// Each case makes the preflight fail in the caller's transaction, which must
 // raise rather than return to the caller.
-func TestProviderWorkOptionalSchemaRaisesFailedSavepoint(t *testing.T) {
+func TestProviderWorkOptionalSchemaRaisesFailedPreflight(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -49,7 +43,7 @@ func TestProviderWorkOptionalSchemaRaisesFailedSavepoint(t *testing.T) {
 
 		for _, c := range []struct {
 			name string
-			// fails the savepoint the call makes in the transaction, and
+			// fails the preflight the call makes in the transaction, and
 			// returns the context of the call
 			prepare func(callCtx context.Context, tx server.PgTx) context.Context
 			raised  func(panicErr error) bool
@@ -66,7 +60,7 @@ func TestProviderWorkOptionalSchemaRaisesFailedSavepoint(t *testing.T) {
 				raised: func(panicErr error) bool {
 					return hasPgCode(panicErr, "25P02") && hasPgCode(panicErr, "22012")
 				},
-				want: "the refused savepoint (25P02) carrying the dropped division by zero (22012)",
+				want: "the refused preflight (25P02) carrying the dropped division by zero (22012)",
 			},
 			{
 				name: "canceled context",
@@ -85,8 +79,8 @@ func TestProviderWorkOptionalSchemaRaisesFailedSavepoint(t *testing.T) {
 			panicValue := callWithForcedFailure(ctx, func(callCtx context.Context) {
 				server.Tx(callCtx, func(tx server.PgTx) {
 					returned = false
-					savepointCtx := c.prepare(callCtx, tx)
-					providerWorkOptionalSchemaInTx(savepointCtx, tx, func(optional server.PgTx) error {
+					preflightCtx := c.prepare(callCtx, tx)
+					providerWorkOptionalSchemaInTx(preflightCtx, tx, func(optional server.PgTx) error {
 						return nil
 					})
 					returned = true
@@ -95,11 +89,11 @@ func TestProviderWorkOptionalSchemaRaisesFailedSavepoint(t *testing.T) {
 			panicErr, _ := panicValue.(error)
 			switch {
 			case returned:
-				t.Errorf("%s: returned after its savepoint failed (then %v), want the failure raised", c.name, panicValue)
+				t.Errorf("%s: returned after its preflight failed (then %v), want the failure raised", c.name, panicValue)
 			case !c.raised(panicErr):
 				t.Errorf("%s: ended with %v, want %s", c.name, panicValue, c.want)
 			case errors.Is(panicErr, pgx.ErrTxCommitRollback):
-				t.Errorf("%s: ended in a commit that rolled back (%v), want the savepoint's failure raised", c.name, panicValue)
+				t.Errorf("%s: ended in a commit that rolled back (%v), want the preflight's failure raised", c.name, panicValue)
 			}
 		}
 	})

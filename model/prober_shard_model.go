@@ -393,10 +393,7 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			}
 			// Registry precedes the compatibility bridge; grants and client
 			// teardown follow it, matching normal authenticated admission.
-			providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) error {
-				_, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`)
-				return err
-			})
+			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`))
 			// Settlement takes a contract lock before the balance lock. This read
 			// never locks contracts while holding a balance: its post-lock snapshot
 			// either sees a completed debit or retains the open/unsettled debt.

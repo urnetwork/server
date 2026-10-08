@@ -403,15 +403,13 @@ func providerWorkSessionFundingOriginals(t *testing.T, redis bool) {
 					t.Fatal(err)
 				}
 			} else {
-				var posts []func() any
-				server.Tx(f.ctx, func(tx server.PgTx) {
-					var err error
-					escrow, posts, err = createTransferEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 121, nil)
-					if err != nil {
-						t.Fatal(err)
-					}
-				})
-				server.RunPosts(f.ctx, posts...)
+				// The legacy entry owns fresh read-committed, no-retry
+				// admission and releases its transaction before running posts.
+				var err error
+				escrow, err = createTransferEscrow(f.requestContext(t, nil), f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			free := f.contract(t)
 			contractIds := []server.Id{escrow.ContractId, free}

@@ -2875,9 +2875,9 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		var originalClientId *server.Id
-		providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) error {
-			return optional.QueryRow(ctx, `SELECT client_id FROM network_client_connection WHERE connection_id=$1`, connectionId).Scan(&originalClientId)
-		})
+		if err := tx.QueryRow(ctx, `SELECT client_id FROM network_client_connection WHERE connection_id=$1`, connectionId).Scan(&originalClientId); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			server.Raise(err)
+		}
 		if originalClientId != nil {
 			providerWorkLockCurrentSessionMutationInTx(ctx, tx, *originalClientId)
 		}

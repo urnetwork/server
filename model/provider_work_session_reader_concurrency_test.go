@@ -48,8 +48,13 @@ func TestProviderWorkSessionContractReadersPreserveOriginals(t *testing.T) {
 				server.Raise(err)
 				defer rollbackCloseReportTestTransaction(ctx, writer)
 				server.RaisePgResult(writer.Exec(ctx, "SET LOCAL lock_timeout='250ms'"))
-				if providerWorkLockSessionMutationInTx(ctx, writer, f.destinationId) {
-					t.Fatal("current session writer bypassed a contract reader")
+				var fenceErr error
+				server.HandleError(func() {
+					providerWorkLockSessionMutationInTx(ctx, writer, f.destinationId)
+				}, func(err error) { fenceErr = err })
+				var fencePgErr *pgconn.PgError
+				if !errors.As(fenceErr, &fencePgErr) || fencePgErr.Code != "55P03" {
+					t.Fatal("current session writer did not fail at the held endpoint fence", fenceErr)
 				}
 				server.Raise(writer.Rollback(ctx))
 

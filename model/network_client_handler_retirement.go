@@ -5,10 +5,8 @@ package model
 
 import (
 	"context"
-	"errors"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
@@ -101,14 +99,11 @@ func retireNetworkClientHandlerPage(ctx context.Context, clientId server.Id, con
 	}, server.TxReadCommitted, server.OptNoRetry())
 }
 
-// The caller owns the bounded page and the no-retry transaction. Only a
-// missing head table permits pre-journal compatibility after savepoint rollback.
+// The caller owns the bounded page and the no-retry transaction. Only an
+// absent journal permits pre-journal compatibility before any journal query.
 func retireNetworkClientHandlerPageInTx(ctx context.Context, tx server.PgTx, clientId server.Id, connectionIds []server.Id, disconnectTime time.Time) {
 	busy := false
-	stage := "bridge"
-	var fenceErr error
-	fenced := providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) (returnErr error) {
-		defer func() { fenceErr = returnErr }()
+	providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) error {
 		var acquired bool
 		if err := optional.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(-776::bigint)`).Scan(&acquired); err != nil {
 			return err
@@ -117,7 +112,6 @@ func retireNetworkClientHandlerPageInTx(ctx context.Context, tx server.PgTx, cli
 			busy = true
 			return nil
 		}
-		stage = "endpoint"
 		if err := optional.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(776,('x'||substr(md5($1::uuid::text),1,8))::bit(32)::int)`, clientId).Scan(&acquired); err != nil {
 			return err
 		}
@@ -125,7 +119,6 @@ func retireNetworkClientHandlerPageInTx(ctx context.Context, tx server.PgTx, cli
 			busy = true
 			return nil
 		}
-		stage = "head"
 		if err := optional.QueryRow(ctx, `WITH owned AS (
 		 SELECT client_id FROM provider_work_session_head WHERE client_id=$1 FOR UPDATE SKIP LOCKED)
 		 SELECT EXISTS(SELECT 1 FROM provider_work_session_head WHERE client_id=$1)
@@ -135,19 +128,9 @@ func retireNetworkClientHandlerPageInTx(ctx context.Context, tx server.PgTx, cli
 		if busy {
 			return nil
 		}
-		stage = "cooperating"
 		_, err := optional.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)
 		return err
 	})
-	if !fenced {
-		var pgErr *pgconn.PgError
-		if stage != "head" || !errors.As(fenceErr, &pgErr) || pgErr.Code != "42P01" {
-			if fenceErr == nil {
-				fenceErr = errors.New("handler retirement fence is unavailable")
-			}
-			server.Raise(fenceErr)
-		}
-	}
 	if busy {
 		return
 	}

@@ -302,22 +302,13 @@ func TestHandlerRetirementFailureAndCancellationLeaveNoPartialJournal(t *testing
 	})
 }
 
-// The real savepoint sees a native non-schema SQL error at the head stage.
-// Its rollback must not be mistaken for permission to retire without a fence.
+// The caller sees a native non-schema SQL error at the head stage.
+// That error cannot become permission to retire without a fence.
 type handlerRetirementFaultTx struct {
 	server.PgTx
 }
 
-// Preserve the wrapper when the production owner opens its optional savepoint.
-func (self *handlerRetirementFaultTx) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := self.PgTx.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &handlerRetirementFaultTx{PgTx: tx}, nil
-}
-
-// All other SQL is real and unchanged; division by zero aborts this savepoint.
+// All other SQL is real and unchanged; division by zero aborts the owner.
 func (self *handlerRetirementFaultTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
 	if strings.Contains(query, "WITH owned AS (") {
 		return self.PgTx.QueryRow(ctx, `SELECT 1/0`)
