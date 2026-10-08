@@ -124,7 +124,8 @@ func TestContractLifecycleCountersConcurrentCloseCommitsOnce(t *testing.T) {
 				}
 				reportId := server.NewId()
 				rollbackErr := errors.New("synthetic concurrent close rollback")
-				ownerErr := server.HandleError(func() {
+				var ownerErr error
+				server.HandleError(func() {
 					server.Tx(ctx, func(tx server.PgTx) {
 						applied, terminalReplay, err := applyContractCloseReportInTx(ctx, tx, id, fixture.destinationId, 11, false, &reportId)
 						if err != nil || !applied || terminalReplay {
@@ -138,11 +139,11 @@ func TestContractLifecycleCountersConcurrentCloseCommitsOnce(t *testing.T) {
 						duplicateDone = make(chan result, 1)
 						go func() {
 							got := result{}
-							got.err = server.HandleError(func() {
+							server.HandleError(func() {
 								var err error
 								got.applied, err = CloseContractReport(ctx, id, fixture.destinationId, 11, false, reportId)
 								server.Raise(err)
-							})
+							}, func(err error) { got.err = err })
 							duplicateDone <- got
 						}()
 						requireContractLifecycleBlockedBy(t, ctx, tx, contractLifecycleTestBackendPid(t, ctx, tx))
@@ -150,7 +151,7 @@ func TestContractLifecycleCountersConcurrentCloseCommitsOnce(t *testing.T) {
 							server.Raise(rollbackErr)
 						}
 					}, server.TxReadCommitted, server.OptNoRetry())
-				})
+				}, func(err error) { ownerErr = err })
 				if (rollback && !errors.Is(ownerErr, rollbackErr)) || (!rollback && ownerErr != nil) {
 					t.Fatal("unexpected first outcome disposition", ownerErr)
 				}
