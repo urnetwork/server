@@ -38,11 +38,11 @@ func closeExpiredContractsFull(closeCount int64) bool {
 	return int64(closeExpiredContractsMaxCount/(4*DefaultCloseExpiredContractsBlockSize)) <= closeCount
 }
 
-// A rejected dispute does not count as progress. Keep the existing full/idle
-// cadence bands without accelerating an empty or only-rejected batch.
-func closeExpiredContractsRetryDelay(verifiedCloseCount int64, randomUnit float64) time.Duration {
+// A rejected dispute does not count as a close. An acknowledged raw cursor
+// still advances toward other due rows; only a completed pass may idle.
+func closeExpiredContractsRetryDelay(verifiedCloseCount int64, hasMore bool, randomUnit float64) time.Duration {
 	randomUnit = max(0, min(randomUnit, math.Nextafter(1, 0)))
-	if closeExpiredContractsFull(verifiedCloseCount) {
+	if hasMore || closeExpiredContractsFull(verifiedCloseCount) {
 		return 2*time.Second + time.Duration(randomUnit*float64(2*time.Second))
 	}
 	return time.Minute + time.Duration(randomUnit*float64(4*time.Minute))
@@ -168,8 +168,9 @@ func closeExpiredContractsPageResult(ctx context.Context, args *CloseExpiredCont
 		0 <= accounting.QuarantinedAccountingRejectionCount() && accounting.QuarantinedAccountingRejectionCount() <= accounting.VerifiedCloseCount() &&
 		0 < accounting.AccountingRejectionCount()+accounting.QuarantinedAccountingRejectionCount() &&
 		accounting.VerifiedCloseCount()+accounting.AccountingRejectionCount() == c {
-		full = closeExpiredContractsFull(accounting.VerifiedCloseCount())
-		delay := closeExpiredContractsRetryDelay(accounting.VerifiedCloseCount(), mathrand.Float64())
+		hasMore := next != nil || args.Sweep != nil
+		full = hasMore || closeExpiredContractsFull(accounting.VerifiedCloseCount())
+		delay := closeExpiredContractsRetryDelay(accounting.VerifiedCloseCount(), hasMore, mathrand.Float64())
 		err = task.WithRetryDelayAndArgs(err, delay, &CloseExpiredContractsArgs{
 			BlockSize: args.BlockSize, BlockIndex: args.BlockIndex, Cursor: next, Sweep: args.Sweep,
 		})

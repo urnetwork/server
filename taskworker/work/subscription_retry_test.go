@@ -225,7 +225,7 @@ func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, qu
 func TestCloseExpiredAccountingRetryCadenceUsesVerifiedProgress(t *testing.T) {
 	for _, verified := range []int64{0, 1, 6249, 6250, 24999, 25000, 50000} {
 		for _, unit := range []float64{0, 0.5, 1} {
-			delay := closeExpiredContractsRetryDelay(verified, unit)
+			delay := closeExpiredContractsRetryDelay(verified, false, unit)
 			low, high := time.Minute, 5*time.Minute
 			if 6250 <= verified {
 				low, high = 2*time.Second, 4*time.Second
