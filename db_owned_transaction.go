@@ -213,13 +213,23 @@ func requirePgOwnershipResource() pgOwnershipResource {
 	if err != nil {
 		panic(errors.New("database ownership requires an explicit direct maintenance resource"))
 	}
-	values, err := resource.ParseE()
-	if err != nil {
-		panic(errors.New("invalid database ownership maintenance resource"))
+	// Pool construction resolves singleton lists and environment templates.
+	// Validate that same authority without exposing parser input on failure.
+	defer func() {
+		if recover() != nil {
+			panic(errors.New("invalid database ownership maintenance resource"))
+		}
+	}()
+	value := func(name string) string {
+		values := resource.String(name)
+		if len(values) != 1 {
+			panic(errors.New("invalid database ownership maintenance resource"))
+		}
+		return values[0]
 	}
-	authority, _ := values["authority"].(string)
-	database, _ := values["db"].(string)
-	user, _ := values["user"].(string)
+	authority := value("authority")
+	database := value("db")
+	user := value("user")
 	parsed, err := url.Parse("postgres://" + authority)
 	if err != nil || parsed.Hostname() == "" || parsed.User != nil || database == "" || user == "" {
 		panic(errors.New("invalid database ownership maintenance resource"))

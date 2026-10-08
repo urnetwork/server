@@ -32955,6 +32955,28 @@ live settlement functions. Finished retention admits at most 64 exact finished
 keys before its row locks, rechecks the existing age predicate, and skips busy
 groups or rows for a later sweep. Age alone does not exclude a live Post retry.
 
+The 2026-10-08 bounded private R44 readiness capture reported taskworker
+initialization failure `invalid database ownership maintenance resource`.
+The final accounting-task initializer enters the explicit session owner before
+runtime construction. Its original validator read raw YAML fields, whereas the
+maintenance pool resolves `SimpleResource.String` values, including singleton
+lists and `{{ env:... }}` templates. Source controls reproduce rejection of both
+supported forms. The corrected validator uses the same string normalization,
+requires one value per field, and preserves the explicit resource, checked-out
+host/port/database/user equality, backend identity and sanitized failure gates.
+
+A protected local Main deployment-resource observation found a scalar
+`authority` containing an environment template; `db` and `user` were scalars
+without templates. That shape supplies the source discriminator without
+recording credentials or resolved values. Equivalence to the running host's
+mounted resource remains unproved until a separate deployment-provenance join.
+The generic refusal alone does not identify which field or parsing check failed.
+The earlier `startup dependency checks pending` body is the initial readiness
+latch and cannot establish a database lock wait. Parser controls and the real
+both-profile startup regression retain one immediately due expiry sweep plus
+both accounting shard families after repeated initialization. The existing
+60-minute immutable deadline and NULL-deadline quiet-period policy are unchanged.
+
 Ready completion batches must have one ownership mode. A mixed owned/generic
 group falls back before opening a transaction, preserving each target's original
 backend and isolation policy. Homogeneous owned groups retain their batched move.
