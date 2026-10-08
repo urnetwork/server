@@ -1084,6 +1084,7 @@ type Task struct {
 	ReleaseTime          time.Time
 	RescheduleError      string
 	RescheduleErrorCount int
+	runCohort            *taskRunCohort
 }
 
 func (self *Task) ClientSession(ctx context.Context) (*session.ClientSession, error) {
@@ -1870,6 +1871,7 @@ type taskClaimOptions struct {
 	ordinaryOnly        bool
 	detachCommittedRead bool
 	poll                *taskClaimPoll
+	runCohorts          bool
 }
 
 // Claim at most n free slots. Only the Run collector touches a reused guard.
@@ -1965,9 +1967,21 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	taskIds := []server.Id{}
 	taskIdPriorities := map[server.Id]taskPriority{}
 	passGroupKeys := map[taskClaimGroupKey]bool{}
+	cohorts := map[taskRunCohortKey]*taskRunCohort{}
+	taskCohorts := map[server.Id]*taskRunCohort{}
+	claimedSlots := 0
+	cohortCapacity := func() int {
+		capacity := 0
+		for _, cohort := range cohorts {
+			capacity = max(capacity, cohort.limit-cohort.count)
+		}
+		return capacity
+	}
 claimCandidates:
-	for candidateCount := 0; len(taskIds) < n && candidateCount < candidateLimit; {
-		fetchCount := min(n-len(taskIds), candidateLimit-candidateCount)
+	for candidateCount := 0; (claimedSlots < n || cohortCapacity() > 0) && candidateCount < candidateLimit; {
+		// An explicit cohort may fill its remaining member capacity in this
+		// same ordered cursor. The original n+64 candidate ceiling remains.
+		fetchCount := min(max(n-claimedSlots, cohortCapacity()), candidateLimit-candidateCount)
 		// A forward cursor preserves one scan and snapshot across refusals.
 		// Discovery is unlocked. Queue admission precedes the exact locking
 		// recheck below; transaction end closes this non-holdable cursor.
@@ -2019,6 +2033,27 @@ claimCandidates:
 			// let this same Run start a second execution of its live task.
 			if guard.taskIds[candidate.taskId] {
 				continue
+			}
+			var cohort *taskRunCohort
+			if options.runCohorts {
+				key, limit, err := self.claimRunCohort(candidate.functionName, candidate.argsJson,
+					candidate.priority.priority, candidate.priority.maxTimeSeconds)
+				if err != nil {
+					return nil, guard, false, err
+				}
+				if limit != 0 {
+					cohort = cohorts[key]
+					if cohort == nil {
+						cohort = &taskRunCohort{key: key, limit: limit}
+					} else if cohort.limit != limit || cohort.count >= cohort.limit {
+						continue
+					}
+				}
+			}
+			if claimedSlots >= n && (cohort == nil || cohort.count == 0) {
+				// Never skip an earlier ordinary candidate to expand a later
+				// cohort, and never take an owner for an unneeded new slot.
+				break claimCandidates
 			}
 			reservation, admitted := self.reserveTaskClaim(candidate.functionName)
 			if !admitted {
@@ -2083,11 +2118,33 @@ claimCandidates:
 			if err != nil {
 				return nil, guard, false, err
 			}
+			if cohort != nil && (candidate.priority.priority != DefaultPriority || DefaultMaxTime < time.Duration(candidate.priority.maxTimeSeconds)*time.Second) {
+				// The locked recheck is authoritative if an external writer
+				// changed isolation after discovery. It cannot borrow a spare
+				// cohort position for another physical execution owner.
+				cohort = nil
+				if claimedSlots >= n {
+					if err := guard.retireTaskWithQuery(ctx, tx, candidate.taskId); err != nil {
+						return nil, guard, false, err
+					}
+					break claimCandidates
+				}
+			}
 			if self.claimCandidateLocked != nil {
 				self.claimCandidateLocked(candidate.taskId)
 			}
 			taskIds = append(taskIds, candidate.taskId)
 			taskIdPriorities[candidate.taskId] = candidate.priority
+			if cohort == nil {
+				claimedSlots++
+			} else {
+				if cohort.count == 0 {
+					claimedSlots++
+					cohorts[cohort.key] = cohort
+				}
+				cohort.count++
+				taskCohorts[candidate.taskId] = cohort
+			}
 		}
 		if len(candidates) < fetchCount {
 			break
@@ -2115,7 +2172,11 @@ claimCandidates:
 	// acquired speculatively but excluded by this existing batching rule.
 	selectedCount := 0
 	selectedIsolated := false
-	for k := min(n, len(taskIds)); selectedCount < k; {
+	selectionLimit := min(n, len(taskIds))
+	if options.runCohorts {
+		selectionLimit = len(taskIds)
+	}
+	for k := selectionLimit; selectedCount < k; {
 		priority := taskIdPriorities[taskIds[selectedCount]]
 		selectedCount += 1
 		if DefaultPriority < priority.priority {
@@ -2225,6 +2286,7 @@ claimCandidates:
 			// generation belongs to a successor, not this already-owned run.
 			queued.RunOnceGeneration = claimedWakeGenerations[taskId]
 			queued.ClaimGeneration = claimedGenerations[taskId]
+			queued.runCohort = taskCohorts[taskId]
 		} else {
 			// A deleted row has no execution to retire its owner. Continuous
 			// refill must not accumulate such absent claims beside a live task.

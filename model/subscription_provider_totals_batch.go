@@ -47,6 +47,17 @@ func (self *legacyProviderTotalsTaskTarget) Run(ctx context.Context, queued *tas
 // post or continuation; completed owners may share only their durable handback.
 func (self *legacyProviderTotalsTaskTarget) TaskCompletionBatchEnabled() bool { return true }
 
+// One Run slot can own a bounded same-provider allocation cohort. Existing
+// durable identities remain independent replay markers; no extra goroutine or
+// prospective accounting authority is created for any member.
+func (self *legacyProviderTotalsTaskTarget) TaskRunCohort(argsJson string) (server.Id, int) {
+	payload, err := decodeLegacyProviderTotals(argsJson)
+	if err != nil || payload.Applied || len(payload.Totals) != 1 {
+		return server.Id{}, 0
+	}
+	return payload.Totals[0].NetworkId, legacyProviderTotalsBatchLimit
+}
+
 // Accounting commits during Run and has no transactional post. The finalizer
 // always adds the exact durable queue identity to this empty extra-key set.
 func (self *legacyProviderTotalsTaskTarget) TaskCompletionOwnershipKeys(_ *task.Task, _ string) ([]server.PgOwnershipKey, error) {

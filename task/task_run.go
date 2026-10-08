@@ -14,8 +14,9 @@ import (
 // A slot sends one function result, then (only when it has external commit
 // work) one retirement. At most BatchSize slots can retain such work at once.
 type taskSlotEvent struct {
-	taskId server.Id
-	result *taskExecutionResult
+	taskId        server.Id
+	result        *taskExecutionResult
+	cohortResults []*taskExecutionResult
 }
 
 // Retire one exact owner, keeping all live sibling locks on the same session.
@@ -28,7 +29,7 @@ func (self *taskClaimGuard) retireTask(ctx context.Context, taskId server.Id) er
 // includes finalization and committed posts, not only the task function. All
 // claim, unlock, and heartbeat calls on the direct session are serialized here.
 func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, returnErr error) {
-	tasks, guard, _, err := self.takeTasksWithGuard(self.runCtx, n, nil, taskClaimOptions{detachCommittedRead: true, poll: poll})
+	tasks, guard, _, err := self.takeTasksWithGuard(self.runCtx, n, nil, taskClaimOptions{detachCommittedRead: true, poll: poll, runCohorts: true})
 	if err != nil {
 		return false, err
 	}
@@ -45,6 +46,8 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 	evalCtx, evalCancel := context.WithCancel(context.WithoutCancel(self.ctx))
 	defer evalCancel()
 	active := map[server.Id]*Task{}
+	activeSlots := map[server.Id]*taskRunSlot{}
+	taskSlots := map[server.Id]*taskRunSlot{}
 	heartbeatTasks := map[server.Id]*Task{}
 	events := make(chan taskSlotEvent, n)
 	publishEvent := func(event taskSlotEvent) {
@@ -79,14 +82,61 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 		for _, task := range claimed {
 			task.FunctionName = updateFunctionName(task.FunctionName)
 		}
-		targets := self.prepareTaskBatchTargets(claimed)
+		slots := taskRunSlots(claimed)
+		ordinary := map[server.Id]*Task{}
+		for _, slot := range slots {
+			if len(slot.tasks) == 1 {
+				ordinary[slot.id] = slot.tasks[0]
+			}
+		}
+		ordinaryTargets := self.prepareTaskBatchTargets(ordinary)
 		reservations := guard.retainExecutionAdmissions(claimed)
 		defer reservations.releaseUnlaunched()
-		for taskId, task := range claimed {
-			active[taskId] = task
-			heartbeatTasks[taskId] = task
-			reservation := reservations.take(taskId)
+		for _, slot := range slots {
+			targets := ordinaryTargets
+			if len(slot.tasks) > 1 {
+				members := make(map[server.Id]*Task, len(slot.tasks))
+				for _, queued := range slot.tasks {
+					members[queued.TaskId] = queued
+				}
+				// Preparation may not couple another physical slot to this
+				// owner's deadline, account transaction or result publication.
+				targets = self.prepareTaskBatchTargets(members)
+			}
+			if len(activeSlots) >= n {
+				panic("Run claim exceeded its physical execution slots")
+			}
+			activeSlots[slot.id] = slot
+			admissions := taskExecutionAdmissions{}
+			for _, queued := range slot.tasks {
+				active[queued.TaskId] = queued
+				heartbeatTasks[queued.TaskId] = queued
+				taskSlots[queued.TaskId] = slot
+				admissions[queued.TaskId] = reservations.take(queued.TaskId)
+			}
 			go func() {
+				defer admissions.releaseUnlaunched()
+				if len(slot.tasks) > 1 {
+					var results []*taskExecutionResult
+					failure := server.HandleError(func() {
+						results = self.executeTaskRunCohort(evalCtx, slot, targets, admissions)
+					})
+					if len(results) != len(slot.tasks) {
+						// No partial event may strand a member or publish success
+						// for an invocation whose ordinary owner did not return.
+						cause := errors.New("Run cohort execution did not join every member")
+						if err, ok := failure.(error); ok {
+							cause = errors.Join(cause, err)
+						}
+						results = make([]*taskExecutionResult, 0, len(slot.tasks))
+						for _, queued := range slot.tasks {
+							results = append(results, &taskExecutionResult{task: queued, err: cause})
+						}
+					}
+					publishEvent(taskSlotEvent{taskId: slot.id, cohortResults: results})
+					return
+				}
+				task := slot.tasks[0]
 				var result *taskExecutionResult
 				server.HandleError(func() {
 					result = self.executeTask(evalCtx, task, targets[task.FunctionName])
@@ -96,19 +146,32 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				}
 				// The guard's reservation remains until durable handback and
 				// every committed post retires, even after execution unwinds.
-				if reservation != nil {
+				if reservation := admissions[task.TaskId]; reservation != nil {
 					reservation.release()
+					delete(admissions, task.TaskId)
 				}
-				publishEvent(taskSlotEvent{taskId: taskId, result: result})
+				publishEvent(taskSlotEvent{taskId: task.TaskId, result: result})
 			}()
+		}
+	}
+	removeActive := func(taskId server.Id) {
+		if active[taskId] == nil {
+			return
+		}
+		delete(active, taskId)
+		slot := taskSlots[taskId]
+		delete(taskSlots, taskId)
+		slot.remaining--
+		if slot.remaining == 0 {
+			delete(activeSlots, slot.id)
 		}
 	}
 	retire := func(taskId server.Id) {
 		// Keep the exact lock and reservation until the next claim. If all
 		// ready slots retire, ordinary cohort release can unlock them once.
-		// No further event can arrive for this slot, and at most n can retire
-		// before a flush because no new functions launch during collection.
-		delete(active, taskId)
+		// No further event can arrive for this member. At most n slots, each
+		// containing at most 64 members, retire before the next bounded flush.
+		removeActive(taskId)
 		retiredIds = append(retiredIds, taskId)
 		refill = true
 	}
@@ -122,7 +185,53 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 		}
 		retiredIds = retiredIds[:0]
 	}
+	handleCohortEvent := func(event taskSlotEvent) {
+		slot := activeSlots[event.taskId]
+		if slot == nil {
+			panic("Run cohort result lost its physical slot")
+		}
+		retained := true
+		defer func() {
+			if retained {
+				// Every function already joined. An ambiguous/fatal handback
+				// retains all keys and heartbeats until the other slots join.
+				for _, queued := range slot.tasks {
+					removeActive(queued.TaskId)
+				}
+			}
+		}()
+		if len(event.cohortResults) != len(slot.tasks) {
+			panic("Run cohort result lost a durable member")
+		}
+		for index, result := range event.cohortResults {
+			if result == nil || result.task != slot.tasks[index] {
+				panic("Run cohort result changed its exact member")
+			}
+			logTaskExecutionResult(result)
+		}
+		if err := self.finalizeTaskRunCohort(event.cohortResults); err != nil {
+			if firstPanic == nil {
+				firstPanic = err
+			}
+			stopped = true
+			return
+		}
+		for _, result := range event.cohortResults {
+			delete(heartbeatTasks, result.task.TaskId)
+			retire(result.task.TaskId)
+			outcome := "succeeded"
+			if result.err != nil {
+				outcome = "rescheduled"
+			}
+			taskFinalizationsTotal.WithLabelValues(outcome).Inc()
+		}
+		retained = false
+	}
 	handleSingleEvent := func(event taskSlotEvent) {
+		if event.cohortResults != nil {
+			handleCohortEvent(event)
+			return
+		}
 		if event.result == nil {
 			retire(event.taskId)
 			return
@@ -148,7 +257,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 		if failed {
 			// Keep ambiguous/failed ownership and its heartbeat until every
 			// other slot joins; never replay a possibly committed finalization.
-			delete(active, event.taskId)
+			removeActive(event.taskId)
 			return
 		}
 		// Transfer committed work before any later collector operation can
@@ -207,7 +316,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 					// not replay their possibly committed handback or await a
 					// second event. Their guards remain owned through sibling join.
 					for _, r := range ready {
-						delete(active, r.task.TaskId)
+						removeActive(r.task.TaskId)
 					}
 				}
 				panic(recovered)
@@ -255,7 +364,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 			}
 			stopped = true
 			for _, r := range ready {
-				delete(active, r.task.TaskId)
+				removeActive(r.task.TaskId)
 			}
 			glog.Infof("[taskworker]task completion batch remains unacknowledged: %v\n", err)
 			return len(ready)
@@ -296,7 +405,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				handleSingleEvent(event)
 				continue
 			}
-			free := n - len(active)
+			free := n - len(activeSlots)
 			if !stopped && free > 0 && (refill || !self.heartbeatNow().Before(nextPoll)) {
 				// Combine already-ready retirements into the next bounded claim.
 				// Never wait for another result. With no launches during this
@@ -318,7 +427,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 					timeout = DefaultTaskFinalizeTimeout
 				}
 				claimCtx, cancel := context.WithTimeout(self.runCtx, timeout)
-				claimed, _, needsIsolation, err := self.takeTasksWithGuard(claimCtx, free, guard, taskClaimOptions{ordinaryOnly: true, detachCommittedRead: true, poll: poll})
+				claimed, _, needsIsolation, err := self.takeTasksWithGuard(claimCtx, free, guard, taskClaimOptions{ordinaryOnly: true, detachCommittedRead: true, poll: poll, runCohorts: true})
 				cancel()
 				if err != nil {
 					claimErr = err
