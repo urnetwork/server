@@ -29,11 +29,6 @@ type PaymentPlanner struct {
 	ctx                          context.Context
 	subsidyConfig                *SubsidyConfig
 
-	// dryRun mirrors the plan's dry-run mode. It selects where the reliability
-	// recompute runs: in its own committed transaction for a real plan, or
-	// inside the plan tx (so it rolls back with everything else) for a dry run.
-	dryRun bool
-
 	// when > 0, bound this plan to at most maxDuration of the oldest unpaid
 	// sweeps so a large backlog is drained in bounded slices instead of one
 	// oversized plan. 0 means unbounded (all unpaid sweeps).
@@ -152,7 +147,10 @@ func createPaymentPlan(
 	networkReferrals := GetNetworkReferralsMap(ctx)
 	seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	// Reliability aggregation already occupies the plan's advisory-lock window.
+	// One maintenance owner retains its direct-postgres budget without holding
+	// an idle primary connection or committing scores before allocation succeeds.
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		configurePaymentPlanTransaction(ctx, tx)
 		// ReadCommitted takes the sweep/frontier snapshot only after the prior
 		// planner commits. A process-local lock cannot serialize CLI and workers.
@@ -174,7 +172,6 @@ func createPaymentPlan(
 		planner := &PaymentPlanner{
 			ctx:                    ctx,
 			subsidyConfig:          subsidyConfig,
-			dryRun:                 dryRun,
 			maxDuration:            maxDuration,
 			transition:             transition,
 			inspectUnresolved:      refreshReliabilityInputs,
@@ -246,13 +243,6 @@ func createPaymentPlan(
 	return
 }
 
-// configurePaymentPlanTransaction preserves the outer plan transaction while
-// calculateReliabilityPayoutInTx runs its deliberately separate maintenance
-// transaction. Production sets idle_in_transaction_session_timeout=5min; the
-// reliability recompute can exceed that, during which the outer transaction is
-// intentionally idle. PostgreSQL then closes the outer connection and the
-// otherwise successful bounded plan fails later with pgconn "conn closed".
-//
 // PostgreSQL 18.4 also has a read-stream lookahead bug that can pin every local
 // buffer while the planner scans a temporary relation, producing SQLSTATE
 // 53000 "no empty local buffer available" when effective_io_concurrency is
@@ -260,15 +250,13 @@ func createPaymentPlan(
 // keep this transaction below the affected lookahead range without reducing
 // I/O concurrency for unrelated sessions.
 //
-// This override is LOCAL to this one transaction. The task itself remains
-// bounded by its MaxTime and each committed plan is bounded by maxDuration, so
-// the global protection remains in force for every other application session.
+// This override is local to the plan. Its idle timeout needs no override now
+// that reliability work runs on the same connection instead of a nested owner.
 type paymentPlanTransactionConfigurer interface {
 	Exec(context.Context, string, ...any) (server.PgTag, error)
 }
 
 func configurePaymentPlanTransaction(ctx context.Context, tx paymentPlanTransactionConfigurer) {
-	server.RaisePgResult(tx.Exec(ctx, `SET LOCAL idle_in_transaction_session_timeout = 0`))
 	server.RaisePgResult(tx.Exec(ctx, `SET LOCAL effective_io_concurrency = 32`))
 }
 
@@ -825,9 +813,7 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	/**
 	 * reliability payout
 	 */
-	// a real plan recomputes reliability scores in its own committed tx (see
-	// calculateReliabilityPayoutInTx); a dry run keeps it inside this tx so it
-	// rolls back with the rest of the plan.
+	// Refresh and allocate the selected window on the same transaction owner.
 	reliabilityEnd := subsidyEndTime
 	if self.transition != nil && !reliabilityEnd.Before(self.transition.Cutoff) {
 		reliabilityEnd = self.transition.Cutoff.Add(-time.Nanosecond)
@@ -838,7 +824,6 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		subsidyStartTime,
 		reliabilityEnd,
 		subsidyScale,
-		!self.dryRun,
 	)
 	self.networkReliabilitySubsidies = networkReliabilitySubsidies
 

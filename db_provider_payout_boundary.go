@@ -282,36 +282,51 @@ func RequireProviderPayoutBoundary(ctx context.Context, policy *ProviderPayoutTr
 		return nil, errors.Join(ErrProviderEarningBoundaryUnavailable, err)
 	}
 	Db(ctx, func(conn PgConn) {
-		present, err := requireProviderPayoutBoundarySchema(ctx, conn, policy != nil)
-		if err != nil || !present {
-			returnErr = err
-			return
-		}
-		binding, returnErr = readProviderPayoutBoundary(ctx, conn)
-		if returnErr != nil {
-			return
-		}
-		if binding == nil {
-			if policy != nil {
-				returnErr = ErrProviderEarningBoundaryUnprepared
-			}
-			return
-		}
-		if policy == nil {
-			returnErr = ErrProviderEarningBoundaryMismatch
-			return
-		}
-		identity, digest, err := providerPayoutEarningIdentity(policy)
-		if err != nil {
-			returnErr = err
-			return
-		}
-		if binding.earningIdentity != identity || binding.IdentitySha256 != digest {
-			returnErr = ErrProviderEarningBoundaryMismatch
-		}
+		binding, returnErr = requireProviderPayoutBoundary(ctx, conn, policy)
 	})
 	if returnErr != nil {
 		return nil, returnErr
+	}
+	return binding, nil
+}
+
+// Observe immutable earning authority without borrowing another connection.
+func RequireProviderPayoutBoundaryInTx(ctx context.Context, tx PgTx, policy *ProviderPayoutTransition) (binding *ProviderEarningBoundary, returnErr error) {
+	defer recoverProviderBoundaryObservation(ctx, &returnErr)
+	return requireProviderPayoutBoundary(ctx, tx, policy)
+}
+
+// Shared validation preserves the standalone and transaction-local refusal rules.
+func requireProviderPayoutBoundary(ctx context.Context, query providerBoundaryQuery, policy *ProviderPayoutTransition) (*ProviderEarningBoundary, error) {
+	if ctx == nil {
+		return nil, errors.New("provider earning boundary requires context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(ErrProviderEarningBoundaryUnavailable, err)
+	}
+	present, err := requireProviderPayoutBoundarySchema(ctx, query, policy != nil)
+	if err != nil || !present {
+		return nil, err
+	}
+	binding, err := readProviderPayoutBoundary(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if binding == nil {
+		if policy != nil {
+			return nil, ErrProviderEarningBoundaryUnprepared
+		}
+		return nil, nil
+	}
+	if policy == nil {
+		return nil, ErrProviderEarningBoundaryMismatch
+	}
+	identity, digest, err := providerPayoutEarningIdentity(policy)
+	if err != nil {
+		return nil, err
+	}
+	if binding.earningIdentity != identity || binding.IdentitySha256 != digest {
+		return nil, ErrProviderEarningBoundaryMismatch
 	}
 	return binding, nil
 }
@@ -324,6 +339,18 @@ func LoadProviderPayoutEarningPolicy(ctx context.Context) (*ProviderPayoutTransi
 		return nil, err
 	}
 	if _, err := RequireProviderPayoutBoundary(ctx, policy); err != nil {
+		return nil, err
+	}
+	return policy, nil
+}
+
+// Allocators inside a transaction validate the boundary on their existing owner.
+func LoadProviderPayoutEarningPolicyInTx(ctx context.Context, tx PgTx) (*ProviderPayoutTransition, error) {
+	policy, err := LoadProviderPayoutTransition(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := RequireProviderPayoutBoundaryInTx(ctx, tx, policy); err != nil {
 		return nil, err
 	}
 	return policy, nil

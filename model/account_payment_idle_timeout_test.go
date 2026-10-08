@@ -3,7 +3,6 @@ package model
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -12,24 +11,18 @@ type recordingPaymentPlanTransaction struct {
 	statements []string
 }
 
-func (r *recordingPaymentPlanTransaction) Exec(_ context.Context, sql string, _ ...any) (server.PgTag, error) {
-	r.statements = append(r.statements, sql)
+func (self *recordingPaymentPlanTransaction) Exec(_ context.Context, sql string, _ ...any) (server.PgTag, error) {
+	self.statements = append(self.statements, sql)
 	return server.PgTag{}, nil
 }
 
-// TestPaymentPlanConfiguresOnlyItsLocalTransactionGuards is the deterministic
-// regression for Payout repeatedly failing after the nested reliability work
-// either exceeded production's idle-in-transaction timeout or triggered
-// PostgreSQL 18.4's high-concurrency temporary-relation local-buffer bug. Both
-// overrides must use SET LOCAL so they cannot weaken or throttle later
-// sessions. Keep this assertion independent of the optional local database
-// integration environment.
+// Retain the temporary-relation buffer guard without disabling idle protection.
+// Reliability now runs on this owner and cannot leave an outer transaction idle.
 func TestPaymentPlanConfiguresOnlyItsLocalTransactionGuards(t *testing.T) {
 	ctx := context.Background()
 	recorder := &recordingPaymentPlanTransaction{}
 	configurePaymentPlanTransaction(ctx, recorder)
 	wantStatements := []string{
-		"SET LOCAL idle_in_transaction_session_timeout = 0",
 		"SET LOCAL effective_io_concurrency = 32",
 	}
 	if len(recorder.statements) != len(wantStatements) {
@@ -70,20 +63,17 @@ func TestPaymentPlanTransactionGuardsAreLocal(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer tx.Rollback(ctx)
-			// Start with a deliberately tiny transaction-local timeout, then
-			// configure the payment plan and leave the transaction idle long
-			// enough that PostgreSQL would close it without the override.
-			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL idle_in_transaction_session_timeout = '25ms'`))
+			// The plan's buffer workaround must preserve configured idle safety.
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL idle_in_transaction_session_timeout = '7s'`))
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL effective_io_concurrency = 200`))
 			configurePaymentPlanTransaction(ctx, tx)
 
-			if setting := readSetting(tx, "idle_in_transaction_session_timeout"); setting != "0" {
-				t.Fatalf("transaction idle timeout = %q, want 0", setting)
+			if setting := readSetting(tx, "idle_in_transaction_session_timeout"); setting != "7s" {
+				t.Fatalf("transaction idle timeout = %q, want inherited 7s", setting)
 			}
 			if setting := readSetting(tx, "effective_io_concurrency"); setting != "32" {
 				t.Fatalf("transaction effective_io_concurrency = %q, want 32", setting)
 			}
-			time.Sleep(100 * time.Millisecond)
 			server.RaisePgResult(tx.Exec(ctx, `SELECT 1`))
 			if err := tx.Commit(ctx); err != nil {
 				t.Fatal(err)

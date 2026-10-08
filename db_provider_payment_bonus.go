@@ -92,6 +92,23 @@ func RequireProviderPayoutSchema(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	var returnErr error
+	Db(ctx, func(conn PgConn) {
+		returnErr = requireProviderPayoutSchema(ctx, conn)
+	})
+	return returnErr
+}
+
+// Validate capability using the allocation's own connection and snapshot.
+func RequireProviderPayoutSchemaInTx(ctx context.Context, tx PgTx) error {
+	return requireProviderPayoutSchema(ctx, tx)
+}
+
+// The consumed migration and both guard bodies must match on this owner.
+func requireProviderPayoutSchema(ctx context.Context, query providerBoundaryQuery) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var migrationIndex = -1
 	for index, migration := range migrations {
 		if sql, ok := migration.(*SqlMigration); ok && sql.sql == providerPaymentBonusSchemaSql {
@@ -113,9 +130,7 @@ func RequireProviderPayoutSchema(ctx context.Context) error {
 		return errors.New("provider payout schema guard encoding invalid")
 	}
 	var ready bool
-	var queryErr error
-	Db(ctx, func(conn PgConn) {
-		queryErr = conn.QueryRow(ctx, `SELECT
+	queryErr := query.QueryRow(ctx, `SELECT
 		EXISTS (SELECT 1 FROM migration_catalog WHERE migration_index=$1 AND identity_sha256=$2)
 		AND to_regclass('public.account_payment_bonus') IS NOT NULL
 		AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='account_payment'::regclass AND attname='bonus_payout_nano_cents' AND atttypid='bigint'::regtype AND attnotnull AND NOT attisdropped)
@@ -124,7 +139,6 @@ func RequireProviderPayoutSchema(ctx context.Context) error {
 			AND t.tgname='account_payment_bonus_guard' AND t.tgenabled IN ('O','A') AND t.tgtype=31 AND t.tgqual IS NULL AND p.prosrc=$3)
 		AND EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid='account_payment'::regclass
 			AND t.tgname='account_payment_submission_basis_guard' AND t.tgenabled IN ('O','A') AND t.tgtype=19 AND t.tgqual IS NULL AND p.prosrc=$4)`, migrationIndex, identity, bodies[1], bodies[3]).Scan(&ready)
-	})
 	if queryErr != nil {
 		return errors.Join(errors.New("provider payout schema capability unavailable"), queryErr)
 	}

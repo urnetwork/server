@@ -482,9 +482,6 @@ func calculateReliabilityPayout(
 			subsidyStartTime,
 			now,
 			subsidyScale,
-			// this standalone path already runs in its own committed tx, so keep
-			// the recompute inline rather than opening a nested maintenance tx
-			false,
 		)
 	})
 	return
@@ -500,7 +497,6 @@ func calculateReliabilityPayoutInTx(
 	subsidyStartTime time.Time,
 	subsidyEndTime time.Time,
 	subsidyScale float64,
-	persist bool,
 ) map[server.Id]NetworkReliabilitySubsidy {
 
 	networkReliabilitySubsidies := map[server.Id]NetworkReliabilitySubsidy{}
@@ -514,26 +510,14 @@ func calculateReliabilityPayoutInTx(
 	// the commit) proportional to the slice being paid.
 	// note `complete=false` is used here since dependencies are computed outside of the tx at the top of the plan function
 	//
-	// The recompute is a global DELETE + windowed-aggregation INSERT — the
-	// single longest-running statement in a plan. For a real (committed) plan,
-	// run it in its own committed transaction (UpdateNetworkReliabilityScores
-	// uses server.MaintenanceTx) rather than inside the plan tx: it does not need
-	// to be atomic with the payout writes, and pulling it out keeps the heavy
-	// aggregation off the plan tx's connection and out of its rollback scope, so
-	// a slow recompute no longer stretches (or, on a socket timeout, kills) the
-	// plan transaction. The plan tx is ReadCommitted, so the read below sees the
-	// just-committed scores. For a dry run the recompute must stay inside the
-	// plan tx so it is rolled back with the rest of the plan and nothing is
-	// persisted.
-	if persist {
-		UpdateNetworkReliabilityScores(ctx, subsidyStartTime, subsidyEndTime, false)
-	} else {
-		UpdateNetworkReliabilityScoresInTx(tx, ctx, subsidyStartTime, subsidyEndTime, false)
-	}
+	// The planner owns one maintenance transaction, including this aggregation.
+	// Its advisory lock already spans the refresh; the same bounded statement
+	// now uses one connection and rolls back with failed or preview allocations.
+	UpdateNetworkReliabilityScoresInTx(tx, ctx, subsidyStartTime, subsidyEndTime, false)
 
 	// get reliability scores
 	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
-	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
+	transition, err := server.LoadProviderPayoutEarningPolicyInTx(ctx, tx)
 	server.Raise(err)
 	if transition != nil {
 		// A no-coverage recompute deliberately retains cached scores. They are
