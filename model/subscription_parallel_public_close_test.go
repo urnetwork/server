@@ -562,10 +562,10 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 				t.Fatal("worker retired before held-owner progress proof", runErr)
 			case <-progressPoll:
 				if invokedAll && hotNativeAck > 0 {
-					func() {
+					heldState = parallelPublicCloseObserveHeldFrontier(heldState, func() parallelPublicCloseState {
 						defer diagnostics.query("held_frontier_snapshot")()
-						heldState = parallelPublicCloseSnapshot(ctx, observer, fixture, recurring)
-					}()
+						return parallelPublicCloseSnapshot(ctx, observer, fixture, recurring)
+					})
 					if heldState.Independent > 0 && diagnostics.independentObserved.CompareAndSwap(false, true) {
 						recordEvent("first_independent_full_output_snapshot")
 					}
@@ -772,7 +772,7 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 			"native_owner_resource": nativeOwnerResource, "common_ownership": ownership.snapshot(),
 			"same_backend_common_key_first_witness": firstCommonKeyHeld, "same_backend_common_key_second_witness": secondCommonKeyHeld,
 			"exclusion_window_closed_while_backend_held": closedWhileHeld, "pre_custody_metadata_release_evidence": legacyMetadataWhileHeld,
-			"scope": "public closes plus actual registered worker outputs; artificial held-owner correctness fixture, not production capacity; complete intervals include configured collection, eligibility/polling, posts, Drain and Run join; invocation latency is separate; exclusion covers the positively held hot-grant window ending before Release, not delayed COMMIT/Released ordering; all-writer source coverage and account/payment/task conflict controls remain required"})
+			"scope": "public closes plus actual registered worker outputs; artificial held-owner correctness fixture, not production capacity; held_state retains the first committed independent output snapshot, while contender and second owner/key witnesses remain separate; complete intervals include configured collection, eligibility/polling, posts, Drain and Run join; invocation latency is separate; exclusion covers the positively held hot-grant window ending before Release, not delayed COMMIT/Released ordering; all-writer source coverage and account/payment/task conflict controls remain required"})
 		server.Raise(err)
 		t.Logf("parallel_public_close_owner_control=%s", raw)
 		// Preserve all complete finance and replay evidence before the causal
