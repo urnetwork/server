@@ -253,7 +253,7 @@ func TestTaskRunCohortDrainHandsBackEveryMemberOnce(t *testing.T) {
 		ids := taskRunCohortTestSchedule(owner, server.NewId(), 64)
 		var handbacks atomic.Int64
 		workerCtx := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
-			if event.Kind == server.PgOwnershipAdmitted && !event.TransactionScoped && len(event.Keys) == len(ids) {
+			if event.Kind == server.PgOwnershipAdmitted && !event.TransactionScoped && len(event.Keys) == 2*len(ids) {
 				handbacks.Add(1)
 			}
 		})
@@ -350,7 +350,7 @@ func TestTaskRunCohortCompletionLostReplyDoesNotReplay(t *testing.T) {
 		ids := taskRunCohortTestSchedule(owner, server.NewId(), 4)
 		var handbacks atomic.Int64
 		workerCtx := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
-			if event.Kind == server.PgOwnershipAdmitted && !event.TransactionScoped && len(event.Keys) == len(ids) {
+			if event.Kind == server.PgOwnershipAdmitted && !event.TransactionScoped && len(event.Keys) == 2*len(ids) {
 				handbacks.Add(1)
 			}
 		})

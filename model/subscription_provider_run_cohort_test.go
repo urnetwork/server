@@ -55,6 +55,7 @@ func runProviderSlotCohort(t *testing.T, count int) {
 		keys := map[server.PgOwnershipKey]bool{}
 		for _, queued := range originals {
 			keys[task.PendingTaskOwnershipKey(queued.TaskId, &queued.RunOnceKey)] = true
+			keys[server.NewPgOwnershipKey("finished_task/task_id", queued.TaskId)] = true
 		}
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
@@ -114,11 +115,11 @@ func runProviderSlotCohort(t *testing.T, count int) {
 			}
 			completionLock.Lock()
 			defer completionLock.Unlock()
-			completionSizes = append(completionSizes, len(event.Keys))
+			completionSizes = append(completionSizes, len(event.Keys)/2)
 			for _, key := range event.Keys {
 				completedKeys[key] = true
 			}
-			if len(completedKeys) == count {
+			if len(completedKeys) == 2*count {
 				select {
 				case <-completed:
 				default:

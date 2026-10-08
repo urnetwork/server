@@ -112,7 +112,9 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				active[queued.TaskId] = queued
 				heartbeatTasks[queued.TaskId] = queued
 				taskSlots[queued.TaskId] = slot
-				admissions[queued.TaskId] = reservations.take(queued.TaskId)
+				if reservation := reservations.take(queued.TaskId); reservation != nil {
+					admissions[queued.TaskId] = reservation
+				}
 			}
 			go func() {
 				defer admissions.releaseUnlaunched()

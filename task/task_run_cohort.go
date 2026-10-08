@@ -46,8 +46,9 @@ func (self *TaskWorker) claimRunCohort(functionName, argsJson string, priority, 
 	}
 	_, grouped := target.(TaskClaimGroupTarget)
 	_, prepared := target.(TaskBatchPreparer)
+	_, owned := target.(TaskCompletionOwnershipTarget)
 	completed, completion := target.(TaskCompletionBatchTarget)
-	if !grouped || !prepared || !completion || !completed.TaskCompletionBatchEnabled() {
+	if !grouped || !prepared || !owned || !completion || !completed.TaskCompletionBatchEnabled() {
 		return taskRunCohortKey{}, 0, errors.New("Run cohort requires grouped preparation and batched completion")
 	}
 	id, limit := cohort.TaskRunCohort(argsJson)
