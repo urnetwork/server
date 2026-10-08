@@ -171,7 +171,7 @@ func (scope *contractExpiryRepairScope) checkInTx(ctx context.Context, tx server
 // The repair adds only custody admission and execution bounds to the same owners.
 func contractExpiryContinuationTx(ctx context.Context, contractId server.Id, scope *contractExpiryRepairScope, callback func(server.PgTx)) {
 	if scope == nil {
-		server.Tx(ctx, callback, server.TxReadCommitted)
+		server.Tx(ctx, callback, server.TxReadCommitted, server.OptNoRetry())
 		return
 	}
 	if scope.beforeTxForTest != nil {

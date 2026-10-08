@@ -368,13 +368,9 @@ func TestProberShardDrainOrdersAgainstRealContractAdmission(t *testing.T) {
 				defer cancel()
 				owner := shardTestOwner(t, ctx, shardTestKey(0))
 				peer := newEscrowSelectionTestClients(t, ctx)
-				conn := acquireContractLifecycleTestConnection(t, ctx)
-				defer conn.Release()
-				tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer tx.Rollback(context.Background())
+				tx, finish := beginRareGrantTestTx(t, ctx)
+				defer finish(false)
+				var err error
 				pid := contractLifecycleTestBackendPid(t, ctx, tx)
 				if admissionFirst {
 					_, _, err = createTransferEscrowInTx(ctx, tx, owner.NetworkId, owner.ClientId, peer.providerNetworkId, peer.providerId, owner.NetworkId, 1024, nil)
@@ -398,9 +394,9 @@ func TestProberShardDrainOrdersAgainstRealContractAdmission(t *testing.T) {
 						done <- err
 					}
 				}()
-				defer func() { tx.Rollback(context.Background()); cancel(); <-finished }()
+				defer func() { finish(false); cancel(); <-finished }()
 				requireContractLifecycleBlockedBy(t, ctx, tx, pid)
-				if err := tx.Commit(ctx); err != nil {
+				if err := finish(true); err != nil {
 					t.Fatal(err)
 				}
 				err = <-done

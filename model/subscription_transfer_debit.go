@@ -178,15 +178,16 @@ func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *serv
 	return
 }
 
-// Only this worker takes a shared grant lock. SKIP LOCKED keeps a busy grant
-// from occupying the worker; unrelated balances advance via the durable cursor.
+// Common same-backend admission precedes shared grant SQL. SKIP LOCKED retains
+// the compatibility guard against older writers that lack that ownership.
+// Admission waits outside business transactions and releases its pool checkout.
 // No Redis I/O occurs while PostgreSQL rows are locked. An ambiguous SQL commit
 // is safe: a retry observes applied=true before attempting another debit.
 func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (appliedCount, releasedCount int, busy bool, returnErr error) {
 	var records []transferDebit
 	committed := false
 	server.HandleError(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
+		server.OwnedTx(ctx, transferBalanceOwnershipKeys([]server.Id{balanceId}), func(tx server.PgTx) {
 			records = nil
 			appliedCount = 0
 			busy = false
@@ -271,7 +272,10 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 		for _, record := range records {
 			ids = append(ids, record.contractId)
 		}
-		server.Tx(ctx, func(tx server.PgTx) {
+		// Another admitted debit pass may observe these applied rows while
+		// Redis release runs. Their final deletion shares the balance owner
+		// too, so it cannot wait on that pass's journal locks.
+		server.OwnedTx(ctx, transferBalanceOwnershipKeys([]server.Id{balanceId}), func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_debit_journal WHERE balance_id=$1 AND contract_id=ANY($2) AND applied`, balanceId, ids))
 			releasedCount = int(tag.RowsAffected())
 		}, server.TxReadCommitted, server.OptNoRetry())

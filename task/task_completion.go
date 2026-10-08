@@ -1,5 +1,5 @@
-// Each returned task commits its own completion and continuation. One evaluator
-// finalizes sequentially, retaining its batch's advisory ownership until join.
+// Ordinary returned tasks commit their own completion and continuation. Explicit
+// no-post opt-ins may share handback; advisory ownership always remains until join.
 package task
 
 import (
@@ -27,7 +27,9 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 	defer finalizeCancel()
 
 	task := r.task
-	server.Tx(finalizeCtx, func(tx server.PgTx) {
+	keys, owned, err := taskCompletionOwnershipKeys(self.targets[task.FunctionName], task, r.resultJson, r.err == nil)
+	server.Raise(err)
+	finish := func(tx server.PgTx) {
 		commitPosts = nil
 		postRescheduled = false
 
@@ -45,7 +47,7 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 			if self.ctx.Err() == nil && self.drainCtx.Err() == nil {
 				retryArgsJson = taskRetryArgsJson(r.err)
 			}
-			server.RaisePgResult(tx.Exec(
+			tag := server.RaisePgResult(tx.Exec(
 				finalizeCtx,
 				`
 					UPDATE pending_task
@@ -55,7 +57,7 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 						args_json = COALESCE($6, pending_task.args_json),
 						run_at = $3,
 						release_time = $4
-					WHERE task_id = $1
+					WHERE task_id = $1 AND claim_generation = $7
 				`,
 				task.TaskId,
 				r.err.Error(),
@@ -63,60 +65,20 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 				now,
 				errorCountDelta,
 				retryArgsJson,
+				task.ClaimGeneration,
 			))
+			if tag.RowsAffected() != 1 {
+				server.Raise(errTaskClaimOwnership)
+			}
 			return
 		}
 
-		server.BatchInTx(finalizeCtx, tx, func(batch server.PgBatch) {
-			batch.Queue(
-				`
-					INSERT INTO finished_task (
-						task_id,
-						function_name,
-						args_json,
-						client_address,
-						client_address_hash,
-						client_address_port,
-						client_by_jwt_json,
-						run_at,
-						run_once_key,
-						run_priority,
-						run_max_time_seconds,
-						run_start_time,
-						run_end_time,
-						reschedule_error,
-						result_json
-					)
-					SELECT
-						task_id,
-						function_name,
-						args_json,
-						client_address,
-						client_address_hash,
-						client_address_port,
-						client_by_jwt_json,
-						run_at,
-						run_once_key,
-						run_priority,
-						run_max_time_seconds,
-						$2 AS run_start_time,
-						$3 AS run_end_time,
-						reschedule_error,
-						$4 AS result_json
-					FROM pending_task
-					WHERE task_id = $1
-				`,
-				task.TaskId,
-				r.runStartTime,
-				r.runEndTime,
-				r.resultJson,
-			)
-			batch.Queue(`DELETE FROM pending_task WHERE task_id = $1`, task.TaskId)
-		})
+		wakeAt := finishTaskOwnerInTx(finalizeCtx, tx, r)
 
 		posts, err := r.runPost(tx)
 		if err == nil {
 			commitPosts = posts
+			taskRunOnceWakeAfterPost(finalizeCtx, tx, task.TaskId, wakeAt)
 			return
 		}
 		postRescheduled = true
@@ -145,6 +107,12 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 			clientSession,
 			RunAt(rescheduleTime),
 		)
-	})
+		taskRunOnceWakeAfterPost(finalizeCtx, tx, task.TaskId, wakeAt)
+	}
+	if owned {
+		server.OwnedTx(finalizeCtx, keys, finish, server.TxReadCommitted, server.OptNoRetry())
+	} else {
+		server.Tx(finalizeCtx, finish)
+	}
 	return
 }

@@ -5195,6 +5195,29 @@ The current 256-visit and payer-turn profiles below supersede the historical
 page/count limits; consumers must bind the exact producer before interpreting
 either profile.
 
+Payer task collection and turn policy (2026-10-08 candidate): initial dispatcher
+publication requests a run thirty seconds later. Tests opt their scheduling and
+worker contexts into five seconds; they retain that real wait in latency and
+throughput denominators. Repeated initial requests preserve the earliest
+deadline rather than restarting collection. RunOnce requests arriving after an
+owner becomes active define the next run by their earliest requested time;
+the old active deadline is not a new request. An explicit immediate Post
+continuation is also a request, so the payer Post distinguishes unfinished work
+inside its fixed database pass from arrivals afterward. New-pass work requests
+another collection window; existing accounting cooldowns remain later bounds.
+
+One admitted payer task can execute several healthy 256-visit pages under one
+fixed fifteen-second context. Each financial transaction still covers at most
+eight contracts. Each page joins its own bounded projection batch before the
+next page starts. EOF, a busy page, an accounting refusal or the owned budget
+yields to durable continuation; parent cancellation and unrelated failures
+remain errors. The result's `pages` and retained `pass_end_time` separate this
+profile from a single page. Its timing fields cover the full admitted turn, and
+`payer_turn` traces need their own source-qualified consumer profile. Detached
+transaction cleanup and joined projection deadlines mean the context is not a
+hard end-to-end wall-time guarantee. This candidate policy alone does not prove
+zero contention, all-writer ownership, fleet rollout or a throughput target.
+
 Legacy mirror ownership (2026-10-06): each inline settlement also touches one
 immutable `ApplyLegacyNetEscrowMirror` pending task per affected balance in its
 financial transaction. Repeated closes share that owner. The foreground mirror
@@ -19402,6 +19425,53 @@ qualifier: matching schema does not prove payer fairness, worker visits,
 financial eligibility or settlement. Those need their own fresh outcome and
 cursor observations; a failed catalog read remains unknown.
 
+Version 796 adds `pending_task.run_once_generation` and `claim_generation` as
+ordinary `bigint NOT NULL DEFAULT 0` columns, and `run_once_wake_at` as a nullable
+timestamp without a default. The catalog probe checks each type, nullability,
+constant default and absence of generated/identity behavior. Missing columns
+are pending before 796 and schema drift after it; an unavailable catalog read
+remains unknown. The migration sets a local five-second lock timeout before
+the additive ALTER. Constant defaults avoid a row backfill, but the ALTER still
+needs an AccessExclusive lock. A refused lock admission must be retried as a
+separate bounded migration attempt; the concurrent-index repair's longer lock
+timeout must not be reused for this operation.
+
+With compatible writers and workers, a RunOnce schedule coalesces with an
+unclaimed owner. Each claim captures its wake generation in the lease UPDATE;
+a later same-key schedule records the earliest requested wake time. Successful
+completion atomically retires that exact claim and retains one new successor
+when the generation changed. Transactional Post runs before the automatic
+handoff, so a Post-created successor keeps its own cursor and arguments while
+the earlier requested deadline is retained. Multiple requests before the next
+claim coalesce. IfAbsent and required immutable allocations still refuse
+duplicates without requesting a rerun. Execution failure retains the original
+owner and its existing retry policy; a later claim absorbs its pending work.
+Ordinary and opted-in batch completion both fence the exact claim generation.
+Heartbeats do not advance that generation, and a stale heartbeat, success or
+retry cannot modify a newer claim.
+
+Schema compatibility is weaker than the new guarantee. Old writers do not
+record wake generations and old finishers can discard them. Deploy the schema
+before the new runtime, upgrade every scheduling entry point, and drain and
+retire old task owners before claiming the handshake across the fleet. The new
+runtime requires the full appended schema head. During a mixed payer-target
+rollout, an old worker can also claim an unrecognized new target and retain it
+under error backoff. An additive schema or one upgraded block does not prove
+fleet-wide payer serialization. Rollback binaries remain schema-compatible,
+but lose the guarantee; durable payer intents still need their independent
+dispatcher/reconciliation authority.
+
+The successor becomes visible after the task function and transactional Post
+commit. Existing external Post callbacks may still be retiring under the old
+exact task-ID guard. RunOnce is coalesced scheduling, not an exactly-once
+external-effect contract or a key-wide lock across such callbacks. Payer
+financial work must finish before its function returns. The native causal
+baseline controls force an independent producer commit after the last empty
+read and before handback; both ordinary and batch finalizers lose that wake.
+That establishes a local scheduler mechanism, not a measured customer delay
+or a throughput gain. Candidate correctness and full-work measurements retain
+their own exact source/native gates.
+
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
 nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp
@@ -32610,3 +32680,48 @@ generation marker: provider and evidence changes can appear on the next source
 refresh. Different worker policies can each refresh their own key during a
 mixed rollout. Verify actual worker adoption and later source completions before
 claiming runtime scan reduction; a deployment result alone is insufficient.
+
+
+## Queue ownership for settlement publication
+
+The prospective close-path protocol uses the complete stored `run_once_key`
+for pending ownership, or the exact task id for a non-deduplicated task. Required
+financial publications declare their queue keys with their financial keys before
+shared mutations. A refused attempt retains its durable input; publication is
+never silently omitted after money changes. Target completion declarations add
+all post-publication keys before the finishing transaction starts. Existing
+RunOnce generation/claim fences and the minimum of explicit requests after the
+active claim remain unchanged, including explicit transactional Post requests.
+
+Claims discover a bounded candidate prefix without row locks, then probe its
+canonical queue key on the same direct read-committed transaction before an
+exact `FOR UPDATE SKIP LOCKED` eligibility/identity recheck. Startup resource and
+backend-PID checks precede session execution locks. Administrative exact-id
+removal/release and exact-key kicks use the same queue owner. Removed-function
+startup cleanup is confined to deliberately absent targets; it does not cover
+live settlement functions. Finished retention admits at most 64 exact finished
+keys before its row locks, rechecks the existing age predicate, and skips busy
+groups or rows for a later sweep. Age alone does not exclude a live Post retry.
+
+Ready completion batches must have one ownership mode. A mixed owned/generic
+group falls back before opening a transaction, preserving each target's original
+backend and isolation policy. Homogeneous owned groups retain their batched move.
+
+`urnetwork_task_timestamp_lease_refresh_skipped_total` counts hints not refreshed
+because queue ownership or a row was busy, or the exact claim epoch no longer
+matched. A skip alone is not a lost task: the separately pinged session execution
+guard remains authoritative. Combine it with guard/session failures, pending
+age, and later successful handbacks. Heartbeats use nonblocking admission and
+exact-epoch row skipping; they must not wait behind their own task's financial
+marker transaction. Uncertain transaction replies retain existing no-replay and
+join/guard handback rules.
+
+This catalog entry is a source contract, not an observed zero-contention claim.
+Release requires every supported producer, target registration, account/grant
+writer, and worker generation to use the same keys and actual backend route.
+Old writers and unopted generic targets retain their former behavior. Verify
+complete financial/output custody, joined Run shutdown, wire SQL errors, actual
+transaction reruns/fallbacks, and full-work performance on the composed workload;
+lock-wait sampling or a quiet admission counter alone cannot certify exclusion.
+The direct maintenance pool must retain capacity beyond live execution guards
+for same-backend business owners; no pool or execution limit is raised here.

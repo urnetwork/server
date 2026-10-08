@@ -132,11 +132,8 @@ func TestProberShardDrainFirstRejectsBeforeGrantRead(t *testing.T) {
 		defer cancel()
 		owner := shardTestOwner(t, ctx, shardTestKey(0))
 		peer := newEscrowSelectionTestClients(t, ctx)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		held, err := conn.Begin(ctx)
-		server.Raise(err)
-		defer held.Rollback(context.Background())
+		held, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		server.RaisePgResult(held.Exec(ctx, `SELECT 1 FROM prober_shard_run WHERE network_id=$1 FOR UPDATE`, owner.NetworkId))
 		server.Raise(drainProberShardInTx(ctx, held, owner))
 		var priorRevision int64
@@ -151,7 +148,7 @@ func TestProberShardDrainFirstRejectsBeforeGrantRead(t *testing.T) {
 		if prematureGrant {
 			t.Fatal("drain-first admission reached the financial table before registry ownership")
 		}
-		server.Raise(held.Commit(ctx))
+		server.Raise(finish(true))
 		got := <-result
 		if got.err == nil || got.escrow != nil || got.posts != 0 || got.balanceReads != 0 {
 			t.Fatalf("drain-first admission crossed ownership: %+v", got)

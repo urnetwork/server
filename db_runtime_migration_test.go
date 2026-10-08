@@ -20,7 +20,7 @@ func TestMinimumRuntimeMigrationVersionExactPayerTail(t *testing.T) {
 }
 
 func TestMinimumRuntimeMigrationVersionRetainsUnknownHead(t *testing.T) {
-	for _, count := range []int{0, 790, 791, 792, 794, 795} {
+	for _, count := range []int{0, 790, 791, 792, 794, 795, 796} {
 		t.Run(strconv.Itoa(count), func(t *testing.T) {
 			calls := 0
 			got := minimumRuntimeMigrationVersion(count, func(int) (string, error) {

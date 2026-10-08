@@ -79,8 +79,6 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
-		work.ScheduleFlushTransferDebits(clientSession, tx)
-		work.ScheduleFlushLegacySettlements(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
@@ -141,6 +139,7 @@ func initTaskSchedule(ctx context.Context) {
 			glog.Infof("[taskworker]reaped %d pending provider egress probe tasks while probing is disabled\n", removedCount)
 		}
 	}, server.TxReadCommitted)
+	work.ScheduleSettlementAccountingTasks(ctx)
 }
 
 // InitTaskWorker preserves the historical exact Go signature, including
@@ -244,7 +243,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanNetworkClientDataPost,
 		),
 		model.NewLegacyProviderTotalsTaskTarget(),
-		task.NewTaskTargetWithPost(model.ApplyLegacyNetEscrowMirror, model.ApplyLegacyNetEscrowMirrorPost),
+		model.NewLegacyNetEscrowMirrorTaskTarget(),
 		task.NewTaskTargetWithPost(
 			model.RemoveNetworkClientsTask,
 			model.RemoveNetworkClientsTaskPost,
@@ -300,8 +299,9 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveCompletedContracts,
 			work.RemoveCompletedContractsPost,
 		),
-		task.NewTaskTargetWithPost(work.FlushTransferDebits, work.FlushTransferDebitsPost),
-		task.NewTaskTargetWithPost(work.FlushLegacySettlements, work.FlushLegacySettlementsPost),
+		work.NewTransferDebitTaskTarget(),
+		work.NewLegacySettlementDispatcherTaskTarget(),
+		model.NewLegacyPayerSettlementTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.ReconcileNetEscrow,
 			work.ReconcileNetEscrowPost,

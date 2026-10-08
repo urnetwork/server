@@ -22,7 +22,7 @@ func TestLegacySettlementTaskPartitionsAndBoundedContinuation(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			ScheduleFlushLegacySettlements(owner, tx)
 			ScheduleFlushLegacySettlements(owner, tx)
-		})
+		}, server.TxReadCommitted, server.OptNoRetry())
 		seen := map[int]bool{}
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, `SELECT args_json,run_at,run_max_time_seconds FROM pending_task WHERE run_once_key LIKE '["flush_legacy_settlements_%'`)
@@ -50,14 +50,18 @@ func TestLegacySettlementTaskPartitionsAndBoundedContinuation(t *testing.T) {
 			released, failed int
 			immediate        bool
 		}{
-			{"progress", true, 512, 0, true}, {"busy", true, 0, 0, false}, {"partial_failure", true, 512, 1, false}, {"caught_up", false, 3, 0, false},
+			{name: "progress", more: true, released: 512, immediate: true},
+			{name: "busy", more: true},
+			{name: "partial_failure", more: true, released: 512, failed: 1},
+			{name: "caught_up", released: 3},
 		} {
 			cursor := model.LegacySettlementCursor{NextAttemptTime: server.NowUtc(), ContractId: server.NewId(), PassEndTime: server.NowUtc(),
 				HeadAfter: &model.LegacySettlementPosition{NextAttemptTime: server.NowUtc().Add(-time.Hour), ContractId: server.NewId()}}
 			before := server.NowUtc()
-			server.Tx(ctx, func(tx server.PgTx) {
+			result := &FlushLegacySettlementsResult{LegacySettlementShardResult: model.LegacySettlementShardResult{LegacySettlementFlushResult: model.LegacySettlementFlushResult{Cursor: &cursor, More: test.more, Completed: test.released, Failed: test.failed}}}
+			withLegacyDispatcherQueueTestTx(ctx, 3, result, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key='["flush_legacy_settlements_3"]'`))
-				server.Raise(FlushLegacySettlementsPost(&FlushLegacySettlementsArgs{Shard: 3}, &FlushLegacySettlementsResult{LegacySettlementShardResult: model.LegacySettlementShardResult{LegacySettlementFlushResult: model.LegacySettlementFlushResult{Cursor: &cursor, More: test.more, Completed: test.released, Failed: test.failed}}}, owner, tx))
+				server.Raise(FlushLegacySettlementsPost(&FlushLegacySettlementsArgs{Shard: 3}, result, owner, tx))
 			})
 			server.Db(ctx, func(conn server.PgConn) {
 				var data []byte

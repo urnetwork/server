@@ -25,6 +25,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 type ByteCount = int64
@@ -1280,7 +1281,11 @@ func finishForceCloseDisputeSettlement(ctx context.Context, settleErr error, ver
 
 func finishForceCloseContract(closeErr error, quarantine func() error, cleanup func() error) error {
 	alreadySettled := isOnlyContractAlreadySettled(closeErr)
-	if closeErr != nil && !alreadySettled {
+	// A busy financial/publication owner retains the original settlement. Its
+	// scheduling refusal cannot authorize the malformed no-payout transition,
+	// even if that owner has already released before the next branch runs.
+	ownershipBusy := isOnlyContractError(closeErr, errTransferBalanceOwnershipBusy)
+	if closeErr != nil && !alreadySettled && !ownershipBusy {
 		closeErr = errors.Join(closeErr, quarantine())
 	}
 
@@ -2613,7 +2618,7 @@ func closeContractReport(
 	terminalReplay := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		applied, terminalReplay, returnErr = applyContractCloseReportInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId)
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if terminalReplay {
 		return
@@ -2907,7 +2912,7 @@ func SettleEscrow(ctx context.Context, contractId server.Id, outcome ContractOut
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		posts, _, returnErr = settleEscrowForegroundInTx(ctx, tx, contractId, outcome)
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if returnErr != nil {
 		return
@@ -3044,137 +3049,26 @@ func contractParticipantsWithUsageOriginInTx(
 
 // Reuse only the locked contract's header. Shared stream membership is not
 // protected by this contract's lock, so each caller still reads fresh rows.
-func contractParticipantsFromOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, owner contractParticipantOwner, usageOriginIsSource *bool) (participants []ContractParticipant, originNetworkId server.Id, returnErr error) {
-	sourceNetworkId, sourceId := owner.sourceNetworkId, owner.sourceId
-	destinationNetworkId, destinationId := owner.destinationNetworkId, owner.destinationId
-	payerNetworkId, companionContractId, streamId := owner.payerNetworkId, owner.companionContractId, owner.streamId
-	var result pgx.Rows
-	var err error
-
-	// Plain contracts originate at source; companion contracts reverse the
-	// payer and originate at destination. payer_network_id is authoritative for
-	// eligibility and also disambiguates direction whenever the endpoints are
-	// in different networks. companion_contract_id handles the same-network
-	// case, where comparing endpoint network ids cannot identify the payer.
-	originIsSource := companionContractId == nil
-	originNetworkId = sourceNetworkId
-	if payerNetworkId != nil {
-		originNetworkId = *payerNetworkId
-		if sourceNetworkId != destinationNetworkId {
-			switch *payerNetworkId {
-			case sourceNetworkId:
-				originIsSource = true
-			case destinationNetworkId:
-				originIsSource = false
-			default:
-				returnErr = fmt.Errorf(
-					"Contract payer network %s is not an endpoint network: %s",
-					payerNetworkId.String(),
-					contractId.String(),
-				)
-				return
-			}
-		}
-	} else if !originIsSource {
-		originNetworkId = destinationNetworkId
-	}
-
-	if usageOriginIsSource != nil {
-		originIsSource = *usageOriginIsSource
-	}
-	originId := sourceId
-	egress := ContractParticipant{ClientId: destinationId, NetworkId: destinationNetworkId}
-	if !originIsSource {
-		originId = destinationId
-		egress = ContractParticipant{ClientId: sourceId, NetworkId: sourceNetworkId}
-	}
-
-	participantsByClientId := map[server.Id]ContractParticipant{}
-	// A client appearing in several roles is one provider only when its
-	// retained network agrees. Source order cannot choose its payout owner.
-	addParticipant := func(participant ContractParticipant) error {
-		if participant.ClientId == originId {
-			return nil
-		}
-		if prior, exists := participantsByClientId[participant.ClientId]; exists {
-			if prior.NetworkId != participant.NetworkId {
-				return fmt.Errorf("contract provider %s has conflicting retained networks: %s", participant.ClientId, contractId)
-			}
-			return nil
-		}
-		participantsByClientId[participant.ClientId] = participant
-		return nil
-	}
-	if err := addParticipant(egress); err != nil {
-		returnErr = err
-		return
-	}
-	if streamId != nil {
-		result, err = tx.Query(
-			ctx,
-			`
-				SELECT
-					contract_participant.client_id,
-					contract_participant.network_id
-				FROM transfer_contract
-				INNER JOIN contract_participant ON
-					contract_participant.stream_id = transfer_contract.stream_id
-				WHERE transfer_contract.contract_id = $1
-			`,
-			contractId,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
+func contractParticipantsFromOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, owner contractParticipantOwner, usageOriginIsSource *bool) ([]ContractParticipant, server.Id, error) {
+	retained := []ContractParticipant{}
+	read := func(query string) {
+		rows, err := tx.Query(ctx, query, contractId)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
 				var participant ContractParticipant
-				server.Raise(result.Scan(&participant.ClientId, &participant.NetworkId))
-				if err := addParticipant(participant); err != nil {
-					returnErr = err
-					return
-				}
+				server.Raise(rows.Scan(&participant.ClientId, &participant.NetworkId))
+				retained = append(retained, participant)
 			}
 		})
-		if returnErr != nil {
-			return
-		}
 	}
-
-	// The extender parties of the contract are hops like any other
-	// (connect/EXTENDER.md J3), so they join the same map before the split:
-	// keying by client id counts an extender whose provider client is already
-	// a participant once, and an extender on the payer network keeps its even
-	// share out of the payout through the same eligibility rule.
-	result, err = tx.Query(
-		ctx,
-		`
-			SELECT
-				client_id,
-				network_id
-			FROM contract_extender
-			WHERE contract_id = $1
-		`,
-		contractId,
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			var participant ContractParticipant
-			server.Raise(result.Scan(&participant.ClientId, &participant.NetworkId))
-			if err := addParticipant(participant); err != nil {
-				returnErr = err
-				return
-			}
-		}
-	})
-	if returnErr != nil {
-		return
+	if owner.streamId != nil {
+		read(`SELECT contract_participant.client_id,contract_participant.network_id
+            FROM transfer_contract INNER JOIN contract_participant ON
+                contract_participant.stream_id=transfer_contract.stream_id
+            WHERE transfer_contract.contract_id=$1`)
 	}
-
-	for _, participant := range participantsByClientId {
-		participants = append(participants, participant)
-	}
-	slices.SortFunc(participants, func(a ContractParticipant, b ContractParticipant) int {
-		return a.ClientId.Cmp(b.ClientId)
-	})
-	return
+	read(`SELECT client_id,network_id FROM contract_extender WHERE contract_id=$1`)
+	return contractParticipantsFromRows(contractId, owner, usageOriginIsSource, retained)
 }
 
 // evenContractPayoutShare partitions a non-negative integer exactly. Stable
@@ -3339,21 +3233,16 @@ func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId 
 	return settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, contractId, outcome, nil)
 }
 
-// Scoped Redis expiry already commits the debit worker's recovery authority.
-// It leaves metadata and reservation release to that owner, preserving clock
-// posts: the clock's startup aggregate backfill is not a per-contract retry.
-func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, scope *contractExpiryRepairScope) ([]func() any, bool, error) {
-	return settleEscrowWithProjectionOptionsInTx(ctx, tx, contractId, outcome, true, false, scope != nil && scope.redis != nil)
+// Ordinary and scoped closes use the same durable debit owner. The caller's
+// expiry transaction already enforces its scope before this continuation.
+func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, _ *contractExpiryRepairScope) ([]func() any, bool, error) {
+	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, true, false)
 }
 
 // Current Redis contracts append independent consumption records. Legacy
 // callers queue an intent without releasing their reservation; the worker uses
 // the original atomic debit/outcome path and commits exact earnings plus durable total-projection ownership.
 func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
-	return settleEscrowWithProjectionOptionsInTx(ctx, tx, contractId, outcome, deferLegacy, inlineFinancial, false)
-}
-
-func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial, deferRedisDebitPosts bool) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
@@ -3362,15 +3251,31 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 	var asyncDebit, hasEscrow bool
 	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(bool_and(redis_reserved),false),count(*)>0
         FROM transfer_escrow WHERE contract_id=$1`, contractId).Scan(&asyncDebit, &hasEscrow))
-	deferRedisDebitPosts = deferRedisDebitPosts && asyncDebit
 	if deferLegacy && hasEscrow && !asyncDebit {
 		return nil, false, queueLegacySettlementInTx(ctx, tx, contractId, outcome, false)
 	}
 	var result pgx.Rows
 	var err error
 	if asyncDebit {
+		// Native close writes no shared grant. Its immutable provider owner
+		// still needs queue admission before publishing the outcome and debt.
+		admitted, ownershipErr := server.TryTxOwnership(ctx, tx,
+			[]server.PgOwnershipKey{task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))})
+		if ownershipErr != nil {
+			return nil, false, ownershipErr
+		}
+		if !admitted {
+			return nil, false, errTransferBalanceOwnershipBusy
+		}
 		result, err = tx.Query(ctx, `SELECT balance_id FROM transfer_escrow WHERE contract_id=$1 ORDER BY balance_id`, contractId)
 	} else {
+		admitted, ownershipErr := tryLegacyFinancialOwnershipInTx(ctx, tx, []server.Id{contractId})
+		if ownershipErr != nil {
+			return nil, false, ownershipErr
+		}
+		if !admitted {
+			return nil, false, errTransferBalanceOwnershipBusy
+		}
 		result, err = tx.Query(ctx, `
 			SELECT transfer_balance.balance_id
 			FROM transfer_balance INNER JOIN transfer_escrow USING (balance_id)
@@ -3393,61 +3298,8 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 		return nil, false, err
 	}
 
-	switch outcome {
-	case ContractOutcomeSettled:
-		var partyByteCounts [2]ByteCount
-		partyCount := 0
-		checkpointCount := 0
-		for _, report := range settlementOwner.reports {
-			// Billing counts a checkpoint's final contribution. The independent
-			// usage guard below still requires its original completed reports.
-			if report.checkpoint {
-				checkpointCount++
-			}
-			if partyCount < len(partyByteCounts) {
-				partyByteCounts[partyCount] = report.byteCount
-			}
-			if report.party == ContractPartyDestination {
-				clockTransferByteCount = report.byteCount
-			}
-			partyCount++
-		}
-		if partyCount != 2 {
-			returnErr = fmt.Errorf("Must have 2 parties to settle contract (found %d).", partyCount)
-			return
-		}
-		// Defensive: refuse to settle if both parties are checkpoint.
-		// settleContract shouldn't route here; flag the logic bug rather than settle.
-		if checkpointCount == 2 {
-			returnErr = fmt.Errorf("Cannot settle contract with both parties checkpoint.")
-			return
-		}
-		usedTransferByteCount, returnErr = meanContractByteCount(partyByteCounts[0], partyByteCounts[1])
-		if returnErr != nil {
-			return
-		}
-	case ContractOutcomeDisputeResolvedToSource, ContractOutcomeDisputeResolvedToDestination:
-		var party ContractParty
-		switch outcome {
-		case ContractOutcomeDisputeResolvedToSource:
-			party = ContractPartySource
-		default:
-			party = ContractPartyDestination
-		}
-		for _, report := range settlementOwner.reports {
-			if report.party == party {
-				usedTransferByteCount = report.byteCount
-			}
-			if report.party == ContractPartyDestination {
-				clockTransferByteCount = report.byteCount
-			}
-		}
-	default:
-		returnErr = fmt.Errorf("Unknown contract outcome: %s", outcome)
-		return
-	}
-	if usedTransferByteCount < 0 || clockTransferByteCount < 0 {
-		returnErr = fmt.Errorf("negative contract close byte count")
+	usedTransferByteCount, clockTransferByteCount, returnErr = contractSettlementReportAmounts(settlementOwner.reports, outcome)
+	if returnErr != nil {
 		return
 	}
 
@@ -3469,56 +3321,16 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 		contractId,
 	)
 
-	// balance id -> settled byte count, return byte count, gross payout. The
-	// settled count is what the payer consumed; it remains independent of how
-	// many participant shares are eligible for payout.
-	sweepPayouts := map[server.Id]sweepPayout{}
-	netSettledByteCount := ByteCount(0)
-
+	escrows := []contractSettlementEscrow{}
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
-			var balanceId server.Id
-			var escrowBalanceByteCount ByteCount
-			var startBalanceByteCount ByteCount
-			var netRevenue NanoCents
-			server.Raise(result.Scan(
-				&balanceId,
-				&escrowBalanceByteCount,
-				&startBalanceByteCount,
-				&netRevenue,
-			))
-			if escrowBalanceByteCount < 0 {
-				returnErr = fmt.Errorf("negative escrow byte count")
-				return
-			}
-
-			payoutByteCount := min(usedTransferByteCount-netSettledByteCount, escrowBalanceByteCount)
-			returnByteCount := escrowBalanceByteCount - payoutByteCount
-			netSettledByteCount += payoutByteCount
-			payout := NanoCents(math.Round(
-				ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
-			))
-
-			sweepPayouts[balanceId] = sweepPayout{
-				escrowBalanceByteCount: escrowBalanceByteCount,
-				payoutByteCount:        payoutByteCount,
-				returnByteCount:        returnByteCount,
-				payout:                 payout,
-			}
-			// fmt.Printf("SETTLE %s %s: payout %d (%d nanocents) return %d\n", contractId.String(), balanceId.String(), payoutByteCount, payout, returnByteCount)
+			var escrow contractSettlementEscrow
+			server.Raise(result.Scan(&escrow.balanceId, &escrow.amount, &escrow.start, &escrow.revenue))
+			escrows = append(escrows, escrow)
 		}
 	})
+	sweepPayouts, returnErr := contractSettlementSweepPayouts(usedTransferByteCount, escrows)
 	if returnErr != nil {
-		return
-	}
-
-	// if len(sweepPayouts) == 0 {
-	// 	returnErr = fmt.Errorf("Invalid contract.")
-	// 	return
-	// }
-
-	if netSettledByteCount < usedTransferByteCount {
-		returnErr = errContractInsufficientEscrow
 		return
 	}
 
@@ -3564,14 +3376,14 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 		metadataPost := func() any {
 			server.Tx(ctx, func(tx server.PgTx) {
 				settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
-			}, server.TxReadCommitted)
+			}, server.TxReadCommitted, server.OptNoRetry())
 			return nil
 		}
-		if inlineFinancial {
+		if inlineFinancial && !asyncDebit {
 			// Only the synchronous branch actually owns the grant rows. Reuse
 			// its exact reservation locks and already-advanced snapshots when
 			// they cover every metadata target; unusual sets retain fresh locks.
-			if asyncDebit || !settleEscrowOwnedMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts, positiveReservations, reservationSnapshots) {
+			if !settleEscrowOwnedMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts, positiveReservations, reservationSnapshots) {
 				settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
 			}
 			metadataPost = func() any { return nil }
@@ -3632,15 +3444,18 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 			} else {
 				posts = append(posts, metadataPost, mirrorPost)
 			}
-		} else if !deferRedisDebitPosts {
+		} else if !asyncDebit {
 			posts = append(posts, metadataPost)
 		}
 	}
 
-	if len(redisReservations) > 0 && !deferRedisDebitPosts {
+	// The durable debit worker alone updates marked escrow metadata and releases
+	// its Redis reservation after the debit commit. A foreground metadata post
+	// can race that same row; releasing earlier also duplicates its cleanup work.
+	// Retain the original reservation until the worker confirms consumption.
+	// Unusual mixed-mode reservations keep their existing reconciliation path.
+	if len(redisReservations) > 0 && !asyncDebit {
 		posts = append(posts, func() any {
-			// Read committed journal state, not captured transaction predictions.
-			// Lost posts leave the original reservation conservatively outstanding.
 			ReconcileRedisContractReservation(ctx, contractId)
 			return nil
 		})
@@ -4238,6 +4053,14 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 			// a missing or corrupt original proof grants no new credit.
 			usage, usageErr := contractUsageSnapshotInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
 			server.Raise(usageErr)
+			// Quarantine changes no debit, but the terminal transition advances
+			// every retained legacy reservation revision. Admit that complete
+			// scope after private contract custody and before the outcome write.
+			admitted, ownershipErr := tryContractTransferBalanceOwnershipInTx(ctx, tx, []server.Id{openContract.contractId})
+			server.Raise(ownershipErr)
+			if !admitted {
+				server.Raise(errTransferBalanceOwnershipBusy)
+			}
 			commandTag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -4262,7 +4085,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 				server.AddTxCommitCount(tx, &contractClosedCounter, 1)
 				contractHoleEventInTx(ctx, tx, openContract.contractId, openContract.sourceId, openContract.destinationId, "remove")
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 
 		// the quarantine settles the contract with no payout, so release its
 		// reservation back to the payer's available balance instead of leaking
@@ -5374,6 +5197,24 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 	for {
 		var processedCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			// Fix the bounded contract slice before shared balance ownership.
+			// The mutation below can only revisit these admitted identities;
+			// newly due contracts remain for the next pass.
+			var contractIds []server.Id
+			rows, err := tx.Query(ctx, `SELECT contract_id FROM transfer_contract
+ WHERE reap_time IS NOT NULL AND reap_time<$1 ORDER BY reap_time LIMIT $2`, minTime.UTC(), maxRowCount)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var id server.Id
+					server.Raise(rows.Scan(&id))
+					contractIds = append(contractIds, id)
+				}
+			})
+			admitted, err := tryContractTransferBalanceOwnershipInTx(ctx, tx, contractIds)
+			server.Raise(err)
+			if !admitted || len(contractIds) == 0 {
+				return
+			}
 			result, err := tx.Query(
 				ctx,
 				`
@@ -5384,7 +5225,8 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					FROM transfer_contract
 					WHERE
 						transfer_contract.reap_time IS NOT NULL AND
-						transfer_contract.reap_time < $1
+						transfer_contract.reap_time < $1 AND
+						transfer_contract.contract_id=ANY($4::uuid[])
 					ORDER BY transfer_contract.reap_time
 					LIMIT $3
 				), protected AS MATERIALIZED (
@@ -5469,6 +5311,7 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 				minTime.UTC(),
 				minStragglerCreateTime.UTC(),
 				maxRowCount,
+				contractIds,
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
@@ -5479,7 +5322,7 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					}
 				}
 			})
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if processedCount == 0 || budgetEnd.Before(server.NowUtc()) {
 			return
 		}
@@ -5803,8 +5646,8 @@ func sweepOrphanCursor(
 		var sliceCount, deletedCount int64
 		var targets []any
 		gotRow := false
+		ownershipRefused := false
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			// reset in case the tx is retried on a transient error
 			sliceCount = 0
 			deletedCount = 0
 			gotRow = false
@@ -5818,13 +5661,22 @@ func sweepOrphanCursor(
 				scanTargets = append(scanTargets, &deletedCount)
 			}
 			scanTargets = append(scanTargets, targets...)
-			result, err := tx.Query(ctx, query, args...)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(scanTargets...))
-					gotRow = true
+			if step.table == "transfer_escrow" {
+				var admitted bool
+				sliceCount, lockedTuples, targets, gotRow, admitted = ownedTransferEscrowOrphanPageInTx(ctx, tx, firstSlice, cursor, sliceSize)
+				if !admitted {
+					ownershipRefused = true
+					return
 				}
-			})
+			} else {
+				result, err := tx.Query(ctx, query, args...)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(scanTargets...))
+						gotRow = true
+					}
+				})
+			}
 			// WithPgResult closes the page before the fresh snapshot is taken.
 			// The acquired child locks stay held until this transaction commits.
 			if 0 < len(lockedTuples) {
@@ -5835,7 +5687,15 @@ func sweepOrphanCursor(
 				server.Raise(err)
 				deletedCount = tag.RowsAffected()
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
+		if ownershipRefused {
+			// Keep the refused page's input cursor. Durable orphan rows remain
+			// discoverable after the admitted financial owner has completed.
+			if firstSlice {
+				return removedCount, rowCount, nil, false
+			}
+			return removedCount, rowCount, cursor, false
+		}
 
 		removedCount += deletedCount
 		rowCount += int(sliceCount)

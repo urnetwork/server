@@ -45,7 +45,7 @@ func queueLegacyProviderTotalsInTx(ctx context.Context, tx server.PgTx, contract
 	owner := session.NewLocalClientSession(ctx, "", nil)
 	defer owner.Cancel()
 	scheduled, taskId := task.ScheduleTaskInTxIfAbsent(tx, ApplyLegacyProviderTotals, json.RawMessage(data), owner,
-		task.RunOnce("legacy_provider_totals", contractId), task.MaxTime(10*time.Second))
+		task.RunOnce("legacy_provider_totals", contractId), task.MaxTime(10*time.Second), task.RequireQueueOwnership(tx))
 	if !scheduled {
 		// Never merge a second allocation into an existing task's immutable
 		// arguments. The contract outcome must admit exactly one insertion.
@@ -70,8 +70,12 @@ func ApplyLegacyProviderTotals(_ json.RawMessage, clientSession *session.ClientS
 	}
 	bounded, cancel := context.WithTimeout(clientSession.Ctx, 5*time.Second)
 	defer cancel()
-	returnErr = runLegacyProviderTotalsTx(bounded, func(tx server.PgTx) error {
-		return applyLegacyProviderTotalsInTx(bounded, tx, identity.TaskId)
+	ownership, err := readLegacyProviderOwnership(bounded, identity.TaskId)
+	if err != nil {
+		return nil, err
+	}
+	returnErr = runLegacyProviderTotalsOwnedTx(bounded, ownership, func(tx server.PgTx) error {
+		return applyLegacyProviderTotalsWithOwnersInTx(bounded, tx, identity.TaskId, ownership)
 	})
 	if returnErr == nil {
 		result = &struct{}{}
@@ -80,18 +84,41 @@ func ApplyLegacyProviderTotals(_ json.RawMessage, clientSession *session.ClientS
 }
 
 func applyLegacyProviderTotalsInTx(ctx context.Context, tx server.PgTx, taskId server.Id) error {
+	return applyLegacyProviderTotalsWithOwnershipInTx(ctx, tx, taskId, nil)
+}
+
+// Preserve the direct account-only SQL seam for rollback and commit-reply tests.
+func applyLegacyProviderTotalsWithOwnershipInTx(ctx context.Context, tx server.PgTx, taskId server.Id, networkIds []server.Id) error {
+	return applyLegacyProviderTotalsWithOwnersInTx(ctx, tx, taskId, &legacyProviderOwnership{networkIds: networkIds})
+}
+
+// Production supplies the complete account and queue set before any row lock.
+// Amounts and replay status always come from the locked durable payload.
+func applyLegacyProviderTotalsWithOwnersInTx(ctx context.Context, tx server.PgTx, taskId server.Id, ownership *legacyProviderOwnership) error {
+	if ownership.taskIdRunOnceKeys != nil && !server.TxOwnsKeys(tx, ownership.keys()) {
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, errors.New("legacy provider total queue owner was not admitted"))
+	}
 	var data string
-	err := tx.QueryRow(ctx, `SELECT args_json FROM pending_task WHERE task_id=$1 AND function_name=$2 FOR UPDATE`,
-		taskId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(&data)
+	var runOnceKey *string
+	err := tx.QueryRow(ctx, `SELECT args_json,run_once_key FROM pending_task WHERE task_id=$1 AND function_name=$2 FOR UPDATE`,
+		taskId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(&data, &runOnceKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, errors.New("legacy provider total task ownership missing"))
 	}
 	if err != nil {
 		return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, err)
 	}
+	if err := ownership.validateQueue(tx, taskId, runOnceKey); err != nil {
+		return err
+	}
 	payload, err := decodeLegacyProviderTotals(data)
 	if err != nil {
 		return withLegacyProviderTotalsPhase(legacyProviderTotalsAllocation, err)
+	}
+	if ownership.networkIds != nil {
+		if err := validateLegacyProviderOwnership(payload, ownership.networkIds); err != nil {
+			return err
+		}
 	}
 	if payload.Applied {
 		return nil
@@ -136,5 +163,8 @@ func writeLegacyProviderTotalInTx(ctx context.Context, tx server.PgTx, total leg
             provided_byte_count=account_balance.provided_byte_count+EXCLUDED.provided_byte_count,
             provided_net_revenue_nano_cents=account_balance.provided_net_revenue_nano_cents+EXCLUDED.provided_net_revenue_nano_cents`,
 		total.NetworkId, total.Bytes, total.Revenue)
+	if err == nil {
+		observeAccountBalanceWriteForTest(ctx, tx, total.NetworkId)
+	}
 	return withLegacyProviderTotalsPhase(legacyProviderTotalsAccountWrite, err)
 }

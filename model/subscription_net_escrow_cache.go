@@ -131,8 +131,15 @@ func cacheCommittedNetEscrowSnapshots(ctx context.Context, pending map[server.Id
 	}
 	slices.SortFunc(ids, server.Id.Cmp)
 	server.Tx(ctx, func(tx server.PgTx) {
+		admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ids)
+		server.Raise(err)
+		if !admitted {
+			// This cache is optional. The authoritative committed read and
+			// fenced Redis publication remain valid without warming it now.
+			return
+		}
 		server.RaisePgResult(tx.Exec(ctx, netEscrowPublishAdmissionCacheSQL, netEscrowAdmissionCacheArgs(pending, ids)...))
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 }
 
 // Existing balance locks serialize admission. This cache removes historical

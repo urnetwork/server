@@ -17,10 +17,12 @@ type LegacySettlementPhaseDuration struct {
 	MaxMs     int64 `json:"max_ms"`
 }
 
-// These fields are one page's observations, not global rates or financial
+// These fields are one page or payer turn's observations, not global rates or financial
 // outcomes. The callback families can overlap; their sum is not page latency.
 // ColdCensus is a subset of Mirror; callback families are within JoinedPosts.
 // Selection and Financial include pool acquisition and transaction completion.
+// Their counts describe calls: bounded selection and financial cohorts can
+// serve several contracts. Cohort result counters retain their distinct units.
 // An interrupted final attempt can be timed without entering the Visited count;
 // Page callbacks are coalesced: JoinedPosts and callback family counts describe
 // executed batches, not settled contracts. Single-contract callers still time
@@ -56,7 +58,7 @@ type legacySettlementTimingSample struct {
 	maximum time.Duration
 }
 
-// One page owns the observer. RunPosts may call independent families in
+// One page or payer turn owns the observer. RunPosts may call independent families in
 // parallel, so only the small accumulated state shares a mutex. No I/O runs
 // under it. Other settlement callers have no observer and retain their posts.
 type legacySettlementTimingObserver struct {

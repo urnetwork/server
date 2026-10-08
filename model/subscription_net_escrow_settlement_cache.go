@@ -157,6 +157,11 @@ func settleEscrowMetadataInTx(ctx context.Context, tx server.PgTx, contractId se
 	if !terminal {
 		return
 	}
+	admitted, err := tryContractTransferBalanceOwnershipInTx(ctx, tx, []server.Id{contractId})
+	server.Raise(err)
+	if !admitted {
+		server.Raise(errTransferBalanceOwnershipBusy)
+	}
 	// Metadata advances the same revision as admission and financial settlement.
 	// Keep its read/update/publication inside their balance fence, or a harmless
 	// settled-flag update can invalidate current snapshots and force full history

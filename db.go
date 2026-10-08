@@ -599,6 +599,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 	rwOptions := OptReadOnly()
 	var timing *DbTiming
 	var readObservation *DbReadObservation
+	var ownedConnection *pgOwnedConnection
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -610,9 +611,15 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			timing = v
 		case *DbReadObservation:
 			readObservation = v
+		case *pgOwnedConnection:
+			ownedConnection = v
 			// case DbDebugOptions:
 			// 	debugOptions = v
 		}
+	}
+	if ownedConnection != nil {
+		ownedConnection.run(ctx, callback, rwOptions.readOnly)
+		return
 	}
 
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
@@ -839,7 +846,9 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 			if err != nil {
 				panic(err)
 			}
-			tx := &postCommitPgTx{PgTx: rawTx}
+			tx := &postCommitPgTx{PgTx: rawTx,
+				ownershipAllowed: txOptions.IsoLevel == pgx.ReadCommitted &&
+					!retryOptions.rerunOnCommitError && !retryOptions.rerunOnTransientError && !retryOptions.rerunOnConnectionError}
 			// if debugOptions.txCommitSeparately {
 			// 	tx = newDebugTx(tx, conn, txOptions)
 			// }

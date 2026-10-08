@@ -9727,4 +9727,6 @@ var migrations = []any{
 		CREATE INDEX network_extender_release_identity_epoch
 		ON network_extender_release (identity, epoch, extender_id)
 	`),
+	// 796: retain run-once requests that commit after an execution was claimed.
+	newSqlMigration(taskRunOnceGenerationSchemaSql),
 }

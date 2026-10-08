@@ -194,7 +194,7 @@ func ApplyProviderPaymentOutcome(ctx context.Context, expected *AccountPayment, 
 	// A missing policy observation cannot authorize releasing an allocated
 	// component. Completion/reconciliation still retains the original attempt.
 	retainComponents := policy != nil || policyErr != nil
-	server.Tx(ctx, func(tx server.PgTx) {
+	apply := func(tx server.PgTx) {
 		complete, canceled, returnErr = false, false, nil
 		if !lockProviderPaymentAttempt(ctx, tx, expected) {
 			retainProviderAttemptInTx(ctx, tx, expected, "STALE_"+status, receipt)
@@ -238,11 +238,22 @@ func ApplyProviderPaymentOutcome(ctx context.Context, expected *AccountPayment, 
 			if reviewRequired {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE account_payment SET attribution_review_required=true WHERE payment_id=$1`, expected.PaymentId))
 			}
-			server.Raise(completePaymentInTx(ctx, tx, expected.PaymentId, receipt, txHash))
+			server.Raise(completePaymentInTx(ctx, tx, expected.PaymentId, &expected.NetworkId, receipt, txHash))
 			complete = true
 		default:
 			returnErr = fmt.Errorf("processor status %q is not an admitted outcome; attempt retained", status)
 		}
-	}, server.TxReadCommitted)
+	}
+	if status == "COMPLETE" {
+		if expected.NetworkId == (server.Id{}) {
+			return false, false, ErrProviderPaymentAttemptChanged
+		}
+		// The locked attempt predicate includes this exact network identity.
+		// Stale attempts still retain their audit event inside the same body.
+		keys := append(accountBalanceOwnershipKeys([]server.Id{expected.NetworkId}), server.NewPgOwnershipKey("account_payment", expected.PaymentId))
+		server.OwnedTx(ctx, keys, apply, server.TxReadCommitted)
+	} else {
+		server.Tx(ctx, apply, server.TxReadCommitted)
+	}
 	return
 }

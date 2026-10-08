@@ -97,6 +97,8 @@ func RedeemBalanceCodeInTx(
 		return
 	}
 
+	// This id is private until the code and grant commit together. It cannot
+	// name an existing grant owner or extend a previously admitted key set.
 	balanceId := server.NewId()
 
 	now := server.NowUtc()
@@ -111,7 +113,7 @@ func RedeemBalanceCodeInTx(
 	// `cancel_time IS NULL` re-checks the void the same way: a code whose charge
 	// was refunded (ClawbackBalanceCodesForPurchaseEventInTx) concurrently with a
 	// redeem attempt either voids first (this UPDATE affects zero rows) or
-	// redeems first (the void falls into the end-the-granted-balance branch).
+	// redeems first (the refund rolls back and redelivery owns the new grant).
 	redeemTag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -462,8 +464,8 @@ func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId str
 //   - an UNREDEEMED code is voided by stamping cancel_time: the redeem and
 //     check paths exclude cancelled codes, so a refunded code can never be
 //     redeemed later. The void re-checks redeem_balance_id IS NULL at write
-//     time, so a redeem racing the void cannot slip through -- the loser of
-//     that race is re-read and handled as redeemed below.
+//     time, so a redeem racing the void cannot slip through. A newly redeemed
+//     grant aborts this attempt, including its receipt, for later redelivery.
 //   - a REDEEMED code's granted transfer_balance is ended at now (only while
 //     still active), and the balance's network is returned so the caller can
 //     refresh pro state.
@@ -472,6 +474,7 @@ func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId str
 // records an operator-visible event instead of guessing what to claw back.
 // Idempotent: a second pass finds the codes already cancelled and the
 // balances already ended, and changes nothing.
+// The caller must use OptNoRetry and let ownership refusal abort its receipt.
 func ClawbackBalanceCodesForPurchaseEventInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -491,6 +494,7 @@ func ClawbackBalanceCodesForPurchaseEventInTx(
             WHERE
                 purchase_event_id = $1 OR
                 starts_with(purchase_event_id, $1 || '/')
+            ORDER BY balance_code_id
         `,
 		stripeSessionId,
 	)
@@ -505,6 +509,17 @@ func ClawbackBalanceCodesForPurchaseEventInTx(
 		return false, 0, nil
 	}
 	found = true
+	balanceIds := []server.Id{}
+	for _, row := range codeRows {
+		if row.redeemBalanceId != nil {
+			balanceIds = append(balanceIds, *row.redeemBalanceId)
+		}
+	}
+	admitted, ownershipErr := tryTransferBalanceOwnershipInTx(ctx, tx, balanceIds)
+	server.Raise(ownershipErr)
+	if !admitted {
+		server.Raise(errTransferBalanceOwnershipBusy)
+	}
 
 	for _, row := range codeRows {
 		if row.redeemBalanceId == nil {
@@ -525,8 +540,8 @@ func ClawbackBalanceCodesForPurchaseEventInTx(
 				voidedCount += 1
 				continue
 			}
-			// either already voided (nothing more to do) or a concurrent redeem
-			// won the race -- re-read and fall through to the redeemed branch
+			// A concurrent redeem can introduce a key outside the complete set
+			// admitted above. Roll back this entire refund instead of skipping it.
 			reread, rereadErr := tx.Query(
 				ctx,
 				`SELECT redeem_balance_id FROM transfer_balance_code WHERE balance_code_id = $1`,
@@ -540,6 +555,7 @@ func ClawbackBalanceCodesForPurchaseEventInTx(
 			if row.redeemBalanceId == nil {
 				continue
 			}
+			server.Raise(errTransferBalanceOwnershipBusy)
 		}
 
 		// redeemed: end the granted balance while it is still active

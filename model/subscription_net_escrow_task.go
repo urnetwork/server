@@ -40,11 +40,9 @@ func decodeLegacyNetEscrowMirror(data []byte) (legacyNetEscrowMirrorPayload, err
 	return payload, nil
 }
 
-// ScheduleTaskInTx touches an existing RunOnce row even when its immutable
-// arguments are unchanged. That write is essential: finalization must wait for
-// this financial commit, or retry its older repeatable-read snapshot, before
-// deleting the owner and checking the source revision. DO NOTHING loses that
-// synchronization when a producer has not committed its newer revision yet.
+// Financial and completion transactions own the exact mirror queue key before
+// touching its pending row. The upsert retains generation/custody semantics;
+// financial producers predeclare this key with all their grant keys.
 func queueLegacyNetEscrowMirrorsInTx(ctx context.Context, tx server.PgTx, balanceIds []server.Id) {
 	owner := session.NewLocalClientSession(ctx, "", nil)
 	defer owner.Cancel()
@@ -54,7 +52,7 @@ func queueLegacyNetEscrowMirrorsInTx(ctx context.Context, tx server.PgTx, balanc
 		payload, err := json.Marshal(legacyNetEscrowMirrorPayload{Private: true, Version: 1, BalanceId: id})
 		server.Raise(err)
 		task.ScheduleTaskInTx(tx, ApplyLegacyNetEscrowMirror, json.RawMessage(payload), owner,
-			task.RunOnce("legacy_net_escrow_mirror", id), task.MaxTime(netEscrowMirrorTimeout))
+			task.RunOnce("legacy_net_escrow_mirror", id), task.MaxTime(netEscrowMirrorTimeout), task.RequireQueueOwnership(tx))
 	}
 }
 
@@ -105,11 +103,10 @@ func ApplyLegacyNetEscrowMirror(_ json.RawMessage, clientSession *session.Client
 	return
 }
 
-// The ordinary worker has copied and deleted the pending row in this finishing
-// transaction before invoking the post. A producer already touching that row
-// must commit first; a producer arriving after its deletion waits for this
-// transaction and then inserts a fresh owner. Only a point revision read runs
-// here. No grant lock, census or Redis call may enter this transaction.
+// Completion owns the mirror queue key before copying/deleting its pending row
+// and invoking this post. A producer is admitted on the same key before its
+// financial writes, so this exact revision check either retains the current
+// owner or publishes its successor. No grant lock, census or Redis I/O runs here.
 func ApplyLegacyNetEscrowMirrorPost(args json.RawMessage, result *LegacyNetEscrowMirrorResult, clientSession *session.ClientSession, tx server.PgTx) error {
 	payload, err := decodeLegacyNetEscrowMirror(args)
 	if err != nil {

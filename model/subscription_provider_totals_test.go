@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"slices"
 	"sync"
@@ -25,11 +26,16 @@ func providerTotalsTestEnv(t *testing.T, run func(testing.TB, context.Context)) 
 }
 
 func providerTotalsTestTask(ctx context.Context, contractId, networkId server.Id) (id server.Id) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		id = queueLegacyProviderTotalsInTx(ctx, tx, contractId, map[server.Id]*contractPayout{
-			networkId: {payoutByteCount: 17, payout: 29},
-		})
+	return providerTotalsTestPublish(ctx, contractId, map[server.Id]*contractPayout{
+		networkId: {payoutByteCount: 17, payout: 29},
 	})
+}
+
+// Fixtures enter through the same complete queue owner as financial publishers.
+func providerTotalsTestPublish(ctx context.Context, contractId server.Id, payouts map[server.Id]*contractPayout) (id server.Id) {
+	server.OwnedTx(ctx, []server.PgOwnershipKey{task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))}, func(tx server.PgTx) {
+		id = queueLegacyProviderTotalsInTx(ctx, tx, contractId, payouts)
+	}, server.TxReadCommitted)
 	return
 }
 
@@ -64,7 +70,7 @@ func finalizeProviderTotalsTestMirror(t testing.TB, ctx context.Context, owner *
 	t.Helper()
 	payload, err := decodeLegacyNetEscrowMirror([]byte(owner.ArgsJson))
 	server.Raise(err)
-	target := task.NewTaskTargetWithPost(ApplyLegacyNetEscrowMirror, ApplyLegacyNetEscrowMirrorPost)
+	target := NewLegacyNetEscrowMirrorTaskTarget()
 	if owner.FunctionName != target.TargetFunctionName() {
 		t.Fatal("expected the exact durable mirror owner")
 	}
@@ -102,18 +108,26 @@ func finalizeProviderTotalsTestMirror(t testing.TB, ctx context.Context, owner *
 func TestLegacyProviderTotalsAtomicEnqueueApplyAndReplay(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
 		networkId, contractId := server.NewId(), server.NewId()
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
-		abortedId := queueLegacyProviderTotalsInTx(ctx, tx, contractId, map[server.Id]*contractPayout{networkId: {payoutByteCount: 17, payout: 29}})
-		server.Raise(tx.Rollback(ctx))
+		var abortedId server.Id
+		abort := errors.New("synthetic provider publication rollback")
+		var err error
+		server.HandleError(func() {
+			server.OwnedTx(ctx, []server.PgOwnershipKey{task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))}, func(tx server.PgTx) {
+				abortedId = queueLegacyProviderTotalsInTx(ctx, tx, contractId, map[server.Id]*contractPayout{networkId: {payoutByteCount: 17, payout: 29}})
+				panic(abort)
+			}, server.TxReadCommitted)
+		}, func(cause error) { err = cause })
+		if !errors.Is(err, abort) || abortedId == (server.Id{}) {
+			t.Fatal("provider publication did not reach its actual rollback", err)
+		}
 		if len(task.GetTasks(ctx, abortedId)) != 0 {
 			t.Fatal("rolled-back projection became visible")
 		}
 		id := providerTotalsTestTask(ctx, contractId, networkId)
 		stale := task.GetTasks(ctx, id)[id]
-		tx, err = conn.Begin(ctx)
+		conn := acquireContractLifecycleTestConnection(t, ctx)
+		defer conn.Release()
+		tx, err := conn.Begin(ctx)
 		server.Raise(err)
 		server.Raise(applyLegacyProviderTotalsInTx(ctx, tx, id))
 		server.Raise(tx.Rollback(ctx))
@@ -215,13 +229,17 @@ func TestLegacyProviderTotalsSecondNetworkFailureRollsBackFirst(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
 		networks := []server.Id{server.NewId(), server.NewId()}
 		slices.SortFunc(networks, server.Id.Cmp)
+		contractId := server.NewId()
 		var id server.Id
-		server.Tx(ctx, func(tx server.PgTx) {
+		server.OwnedTx(ctx, []server.PgOwnershipKey{
+			task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId)),
+			server.NewPgOwnershipKey("account_balance", networks[1]),
+		}, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_balance(network_id,provided_byte_count) VALUES($1,$2)`, networks[1], int64(math.MaxInt64)))
-			id = queueLegacyProviderTotalsInTx(ctx, tx, server.NewId(), map[server.Id]*contractPayout{
+			id = queueLegacyProviderTotalsInTx(ctx, tx, contractId, map[server.Id]*contractPayout{
 				networks[0]: {payoutByteCount: 17, payout: 29}, networks[1]: {payoutByteCount: 17, payout: 29},
 			})
-		})
+		}, server.TxReadCommitted)
 		queued := task.GetTasks(ctx, id)[id]
 		target := task.NewTaskTarget(ApplyLegacyProviderTotals)
 		if _, _, err := target.RunSpecific(ctx, queued); err == nil {

@@ -82,7 +82,7 @@ func flushLegacySettlementShardPage(ctx, bounded context.Context, shard int, aft
 			// An unfinished online migration disables only payer scheduling.
 			// Reuse this page's budget and post owner; retain its dormant payer
 			// cursor without manufacturing more chronological work at eof.
-			ordered, err := flushLegacySettlementsPage(ctx, bounded, shard, after, limit, flushLegacySettlementWithGrantWait)
+			ordered, err := flushLegacySettlementsPage(ctx, bounded, shard, after, limit, flushLegacySettlementWithGrantWait, flushLegacySettlementCohort)
 			result.LegacySettlementFlushResult = ordered
 			if err != nil && ordered.Visited == 0 {
 				result.Cursor = after
@@ -170,7 +170,7 @@ func flushLegacySettlementShardPage(ctx, bounded context.Context, shard int, aft
 			}
 		}
 		fair := result.LegacySettlementFlushResult
-		ordered, err := flushLegacySettlementsPage(ctx, bounded, shard, after, limit-fair.Visited, flushLegacySettlementWithGrantWait)
+		ordered, err := flushLegacySettlementsPage(ctx, bounded, shard, after, limit-fair.Visited, flushLegacySettlementWithGrantWait, flushLegacySettlementCohort)
 		result.LegacySettlementFlushResult = ordered
 		result.Visited += fair.Visited
 		result.Completed += fair.Completed

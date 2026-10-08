@@ -49,7 +49,7 @@ func createNetEscrowOrderingTestContract(ctx context.Context, f netEscrowOrderin
 			f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId,
 			f.sourceNetworkId, bytes, nil)
 		server.Raise(err)
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 	return escrow, posts
 }
 
@@ -69,7 +69,7 @@ func settleNetEscrowOrderingTestContract(ctx context.Context, contractId server.
 		if !closed {
 			panic("test settlement did not claim the open contract")
 		}
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 	return posts
 }
 

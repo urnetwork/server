@@ -71,8 +71,8 @@ func (q *payerAdmissionQueue) acquire(ctx context.Context, payer server.Id) (fun
 	}
 }
 
-// Acquire before opening any connection, retain the turn across transaction
-// retries, and release on success, error or panic before any post-commit work.
+// Acquire before opening any connection, retain the turn through transaction
+// completion, and release on success, error or panic before post-commit work.
 // Zero-byte anchors need no financial serialization. A positive companion that
 // is subsequently clamped to zero may harmlessly take a turn before that read.
 func transferEscrowTx(ctx context.Context, payer server.Id, requested ByteCount, callback func(server.PgTx)) error {
@@ -86,6 +86,6 @@ func transferEscrowTx(ctx context.Context, payer server.Id, requested ByteCount,
 		defer release()
 	}
 	defer server.EnterContractCreationStage(ctx, server.ContractStageTransaction)()
-	server.Tx(ctx, callback, server.TxReadCommitted)
+	server.Tx(ctx, callback, server.TxReadCommitted, server.OptNoRetry())
 	return nil
 }
