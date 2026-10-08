@@ -1281,7 +1281,11 @@ func finishForceCloseDisputeSettlement(ctx context.Context, settleErr error, ver
 
 func finishForceCloseContract(closeErr error, quarantine func() error, cleanup func() error) error {
 	alreadySettled := isOnlyContractAlreadySettled(closeErr)
-	if closeErr != nil && !alreadySettled {
+	// A busy financial/publication owner retains the original settlement. Its
+	// scheduling refusal cannot authorize the malformed no-payout transition,
+	// even if that owner has already released before the next branch runs.
+	ownershipBusy := isOnlyContractError(closeErr, errTransferBalanceOwnershipBusy)
+	if closeErr != nil && !alreadySettled && !ownershipBusy {
 		closeErr = errors.Join(closeErr, quarantine())
 	}
 

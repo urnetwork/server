@@ -207,19 +207,23 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 	for id := range ownershipBalanceIdSet {
 		ownershipBalanceIds = append(ownershipBalanceIds, id)
 	}
-	ownershipAdmitted, err := server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(ownedIds, ownershipBalanceIds))
-	if err != nil {
-		return nil, nil, err
-	}
-	if !ownershipAdmitted {
-		// No shared financial statement has entered. Keep every durable
-		// intent and yield this bounded payer cohort to its current owner.
-		for _, id := range contractIds {
-			attempts = append(attempts, legacyFinancialCohortAttempt{
-				contractId: id, busy: true, busyGate: legacySettlementBusyAdmission,
-			})
+	// Without an owned financial contract there is no shared key set to
+	// admit. Preserve the individual private-row busy reasons below.
+	if len(ownedIds) > 0 {
+		ownershipAdmitted, err := server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(ownedIds, ownershipBalanceIds))
+		if err != nil {
+			return nil, nil, err
 		}
-		return attempts, nil, nil
+		if !ownershipAdmitted {
+			// No shared financial statement has entered. Keep every durable
+			// intent and yield this bounded payer cohort to its current owner.
+			for _, id := range contractIds {
+				attempts = append(attempts, legacyFinancialCohortAttempt{
+					contractId: id, busy: true, busyGate: legacySettlementBusyAdmission,
+				})
+			}
+			return attempts, nil, nil
+		}
 	}
 	balanceIds := make([]server.Id, 0, len(balanceIdSet))
 	for id := range balanceIdSet {
