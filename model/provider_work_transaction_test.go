@@ -191,7 +191,7 @@ func TestProviderWorkOriginalSqlFailureRollsBackContract(t *testing.T) {
 		defer restore()
 		failure := callWithForcedFailure(f.requestContext(t, nil), func(ctx context.Context) {
 			server.Tx(ctx, func(tx server.PgTx) {
-				_, _, err := createContractNoEscrowInTx(ctx, &providerWorkSingleOwnerTx{PgTx: tx}, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121, true)
+				_, _, err := createContractNoEscrowInTx(ctx, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121, true)
 				server.Raise(err)
 			}, server.TxReadCommitted, server.OptNoRetry())
 		})
@@ -275,11 +275,10 @@ func TestProviderWorkOwnershipAndIntegrityFailuresRollbackOwner(t *testing.T) {
 			server.HandleError(func() {
 				server.Tx(f.ctx, func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(f.ctx, `INSERT INTO provider_work_owner_probe VALUES(1)`))
-					owner := &providerWorkSingleOwnerTx{PgTx: tx}
 					if corrupt {
-						providerWorkAttachStreamInTx(f.ctx, owner, contractId, streamId)
+						providerWorkAttachStreamInTx(f.ctx, tx, contractId, streamId)
 					} else {
-						providerWorkRetainReservationInTx(f.ctx, owner, contractId)
+						providerWorkRetainReservationInTx(f.ctx, tx, contractId)
 					}
 				}, server.TxReadCommitted, server.OptNoRetry())
 			}, func(err error) { failure = err })
