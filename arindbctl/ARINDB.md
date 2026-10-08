@@ -821,17 +821,17 @@ ASN sets and the four closed withholding reasons. It does not hash or open a
 second database, refresh stored lookup clocks, export addresses, or change
 Quality policy. The existing capture protocol is kept separate. Independent
 source reviews accepted the core (`5dbd1062`) and its bounded Connect-only
-caller (`482037ee`). Go compilation, native controls, the new SQL selector and
-final publication-pair composition remain unqualified. A selected
-compatible service and explicit current diagnostic endpoint authority are
-also required before Root can execute it. The caller selects at most 32 exact
+caller (`482037ee`). The family-aware successor `c6fd08ab` then passed seventeen
+focused Go controls on the qualified c276/text41 graph (`da0e43df`), and the
+bounded selector passed all five local PG18 controls (`40c6b0a1`). Final
+publication-pair composition remains unqualified. A selected compatible service
+and explicit current diagnostic endpoint authority are also required before
+Root can execute it. The caller selects at most 32 exact
 Connect processes, retains missing or duplicate handler ownership as unknown,
 and does not require a native publisher endpoint or all-fleet retirement proof.
 Its public projection explicitly leaves publication binding unproved until the
 parent validates the unchanged source pair after capture. The October 8
-successor applies the same nine reviewed files to canonical `b3893b0a`, with
-formatting only; native controls remain queued on the current qualified graph.
-It samples one connection per provider, preserves refused rows in the original
+candidate is based on canonical `b3893b0a`. It samples one connection per provider, preserves refused rows in the original
 sample denominator, and cannot establish every connection's classification or
 an operator-wide error rate.
 
@@ -854,8 +854,10 @@ sorting. A 33-row sentinel refuses that provider; smaller sets retain the
 lowest eligible connection deterministically. Source review `a707bf09`
 accepted the three-table plan guard and disabled local fixture adapter. The
 guard requires direct indexed limit children and point handler/location reads,
-with JIT disabled and a three-second SQL deadline. Its five new local SQL
-controls remain unexecuted; earlier plan-only controls cover a different query.
+with JIT disabled and a three-second SQL deadline. Its local controls preserve
+the full 64-provider denominator, accept the 32-row boundary, reject the
+33-row overflow, and refuse missing-index and unbounded-inner-sort plans.
+These synthetic results do not qualify Main's current plan or latency.
 Unavailable owners, changed owners, stale facts and unsupported records must
 remain explicit unknowns. The policy remains: an identified residential or
 business subscriber ISP defaults clean unless additional contrary evidence
