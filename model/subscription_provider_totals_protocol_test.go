@@ -17,13 +17,14 @@ import (
 // The optional close error models a missing batch acknowledgement before commit.
 type providerProtocolTestTx struct {
 	server.PgTx
-	execs       int
-	queries     int
-	batches     int
-	statements  int
-	batchReads  int
-	batchClosed bool
-	closeErr    error
+	execs         int
+	queries       int
+	batches       int
+	statements    int
+	maxStatements int
+	batchReads    int
+	batchClosed   bool
+	closeErr      error
 }
 
 func (self *providerProtocolTestTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
@@ -44,6 +45,7 @@ func (self *providerProtocolTestTx) QueryRow(ctx context.Context, sql string, ar
 func (self *providerProtocolTestTx) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
 	self.batches++
 	self.statements += batch.Len()
+	self.maxStatements = max(self.maxStatements, batch.Len())
 	return &providerProtocolTestBatch{BatchResults: self.PgTx.SendBatch(ctx, batch), owner: self}
 }
 
@@ -74,7 +76,7 @@ func TestLegacyProviderTotalsPipelineAcknowledgesWholeProjection(t *testing.T) {
 		name      string
 		contracts int
 		providers int
-	}{{"singleton", 1, 1}, {"three_claimed", 3, 1}, {"multi_provider", 1, 3}} {
+	}{{"singleton", 1, 1}, {"three_claimed", 3, 1}, {"multi_provider", 1, 3}, {"multi_provider_above_transport_bound", 1, 65}} {
 		t.Run(shape.name, func(t *testing.T) {
 			providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
 				providerTotalsBatchWriteCounter(t, ctx)
@@ -105,8 +107,8 @@ func TestLegacyProviderTotalsPipelineAcknowledgesWholeProjection(t *testing.T) {
 							if observed.batches != 0 {
 								t.Fatal("applied replay submitted another provider credit")
 							}
-						} else if observed.batches != 1 || observed.statements != shape.providers+1 ||
-							observed.batchReads != observed.statements || !observed.batchClosed {
+						} else if observed.batches != (shape.providers+63)/64 || observed.statements != shape.providers+1 ||
+							observed.maxStatements > 65 || observed.batchReads != observed.statements || !observed.batchClosed {
 							t.Fatal("projection returned before acknowledging every credit and marker reply")
 						}
 					}, server.TxReadCommitted, server.OptNoRetry())

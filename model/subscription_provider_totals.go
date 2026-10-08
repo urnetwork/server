@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"slices"
 	"time"
@@ -70,9 +69,15 @@ func ApplyLegacyProviderTotals(_ json.RawMessage, clientSession *session.ClientS
 	}
 	bounded, cancel := context.WithTimeout(clientSession.Ctx, 5*time.Second)
 	defer cancel()
-	ownership, err := readLegacyProviderOwnership(bounded, identity.TaskId)
-	if err != nil {
-		return nil, err
+	ownership, _ := clientSession.Ctx.Value(legacyProviderTotalsOwnershipKey{}).(*legacyProviderOwnership)
+	if ownership == nil {
+		var err error
+		ownership, err = readLegacyProviderOwnership(bounded, identity.TaskId)
+		if err != nil {
+			return nil, err
+		}
+	} else if _, exists := ownership.taskIdRunOnceKeys[identity.TaskId]; !exists || len(ownership.taskIdRunOnceKeys) != 1 {
+		return nil, withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, errors.New("legacy provider total snapshot ownership missing"))
 	}
 	returnErr = runLegacyProviderTotalsOwnedTx(bounded, ownership, func(tx server.PgTx) error {
 		return applyLegacyProviderTotalsWithOwnersInTx(bounded, tx, identity.TaskId, ownership)
@@ -123,19 +128,7 @@ func applyLegacyProviderTotalsWithOwnersInTx(ctx context.Context, tx server.PgTx
 	if payload.Applied {
 		return nil
 	}
-	for _, total := range payload.Totals {
-		if err := writeLegacyProviderTotalInTx(ctx, tx, total); err != nil {
-			return err
-		}
-	}
-	tag, err := tx.Exec(ctx, `UPDATE pending_task SET args_json=jsonb_set(args_json::jsonb,'{applied}','true'::jsonb)::text WHERE task_id=$1`, taskId)
-	if err != nil {
-		return withLegacyProviderTotalsPhase(legacyProviderTotalsAppliedMarker, err)
-	}
-	if tag.RowsAffected() != 1 {
-		return withLegacyProviderTotalsPhase(legacyProviderTotalsAppliedMarker, fmt.Errorf("legacy provider total marker ownership missing"))
-	}
-	return nil
+	return writeLegacyProviderTotalsAndMarkersInTx(ctx, tx, payload.Totals, []server.Id{taskId})
 }
 
 // Decode the retained representation equally for admission hints and locked rows.
@@ -153,18 +146,4 @@ func decodeLegacyProviderTotals(data string) (payload legacyProviderTotalsPayloa
 		}
 	}
 	return payload, nil
-}
-
-// The caller owns every contributing pending row until the total and markers commit.
-func writeLegacyProviderTotalInTx(ctx context.Context, tx server.PgTx, total legacyProviderTotal) error {
-	_, err := tx.Exec(ctx, `INSERT INTO account_balance
-            (network_id,provided_byte_count,provided_net_revenue_nano_cents) VALUES($1,$2,$3)
-            ON CONFLICT(network_id) DO UPDATE SET
-            provided_byte_count=account_balance.provided_byte_count+EXCLUDED.provided_byte_count,
-            provided_net_revenue_nano_cents=account_balance.provided_net_revenue_nano_cents+EXCLUDED.provided_net_revenue_nano_cents`,
-		total.NetworkId, total.Bytes, total.Revenue)
-	if err == nil {
-		observeAccountBalanceWriteForTest(ctx, tx, total.NetworkId)
-	}
-	return withLegacyProviderTotalsPhase(legacyProviderTotalsAccountWrite, err)
 }

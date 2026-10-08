@@ -26,6 +26,23 @@ type legacyProviderTotalsTaskTarget struct {
 	task.Target
 }
 
+// Supply prospective ownership from this exact claimed task without another
+// checkout. A prepared cohort carries its complete scope separately below.
+func (self *legacyProviderTotalsTaskTarget) Run(ctx context.Context, queued *task.Task) (any, func(server.PgTx) ([]server.PostFunction, error), error) {
+	if batch, _ := ctx.Value(legacyProviderTotalsBatchKey{}).(*legacyProviderTotalsBatch); batch == nil {
+		if payload, err := decodeLegacyProviderTotals(queued.ArgsJson); err == nil {
+			networkIds := make([]server.Id, len(payload.Totals))
+			for index, total := range payload.Totals {
+				networkIds[index] = total.NetworkId
+			}
+			if ownership := snapshotLegacyProviderOwnership(networkIds, []*task.Task{queued}); ownership != nil {
+				ctx = context.WithValue(ctx, legacyProviderTotalsOwnershipKey{}, ownership)
+			}
+		}
+	}
+	return self.Target.Run(ctx, queued)
+}
+
 // This target's exact credits and applied markers commit during Run. It has no
 // post or continuation; completed owners may share only their durable handback.
 func (self *legacyProviderTotalsTaskTarget) TaskCompletionBatchEnabled() bool { return true }
@@ -73,6 +90,7 @@ func (self *legacyProviderTotalsTaskTarget) PrepareTaskBatch(tasks []*task.Task)
 			count := min(len(queued), legacyProviderTotalsBatchLimit)
 			batch := &legacyProviderTotalsBatch{
 				networkId: networkId,
+				ownership: snapshotLegacyProviderOwnership([]server.Id{networkId}, queued[:count]),
 				done:      make(chan struct{}),
 				err:       errors.New("legacy provider total batch did not complete"),
 			}
@@ -83,7 +101,7 @@ func (self *legacyProviderTotalsTaskTarget) PrepareTaskBatch(tasks []*task.Task)
 			queued = queued[count:]
 		}
 	}
-	return &legacyProviderTotalsBatchTarget{Target: self.Target, taskIdBatches: taskIdBatches}
+	return &legacyProviderTotalsBatchTarget{Target: self, taskIdBatches: taskIdBatches}
 }
 
 // The adapter only supplies shared work; each ordinary target owns its own result,
@@ -104,11 +122,15 @@ func (self *legacyProviderTotalsBatchTarget) Run(ctx context.Context, queued *ta
 // The context value is private to this target's invocation-local adapter.
 type legacyProviderTotalsBatchKey struct{}
 
+// Only the registered adapter installs an immutable, invocation-local scope.
+type legacyProviderTotalsOwnershipKey struct{}
+
 // The first invocation performs the transaction outside the once lock; all others
 // observe its committed result or their own cancellation. Closing done publishes err.
 type legacyProviderTotalsBatch struct {
 	networkId server.Id
 	taskIds   []server.Id
+	ownership *legacyProviderOwnership
 	runOnce   sync.Once
 	done      chan struct{}
 	err       error
@@ -128,10 +150,14 @@ func (self *legacyProviderTotalsBatch) apply(ctx context.Context) error {
 			defer close(self.done)
 			bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			ownership, err := readLegacyProviderBatchOwnership(bounded, self.taskIds, self.networkId)
-			if err != nil {
-				self.err = err
-				return
+			ownership := self.ownership
+			if ownership == nil {
+				var err error
+				ownership, err = readLegacyProviderBatchOwnership(bounded, self.taskIds, self.networkId)
+				if err != nil {
+					self.err = err
+					return
+				}
 			}
 			self.err = runLegacyProviderTotalsOwnedTx(bounded, ownership, func(tx server.PgTx) error {
 				return applyLegacyProviderTotalsBatchWithOwnersInTx(bounded, tx, self.taskIds, self.networkId, ownership)
@@ -210,15 +236,5 @@ func applyLegacyProviderTotalsBatchWithOwnersInTx(ctx context.Context, tx server
 	if len(unappliedTaskIds) == 0 {
 		return nil
 	}
-	if err := writeLegacyProviderTotalInTx(ctx, tx, total); err != nil {
-		return err
-	}
-	tag, err := tx.Exec(ctx, `UPDATE pending_task SET args_json=jsonb_set(args_json::jsonb,'{applied}','true'::jsonb)::text WHERE task_id=ANY($1)`, unappliedTaskIds)
-	if err != nil {
-		return withLegacyProviderTotalsPhase(legacyProviderTotalsAppliedMarker, err)
-	}
-	if tag.RowsAffected() != int64(len(unappliedTaskIds)) {
-		return withLegacyProviderTotalsPhase(legacyProviderTotalsAppliedMarker, errors.New("legacy provider total batch marker ownership missing"))
-	}
-	return nil
+	return writeLegacyProviderTotalsAndMarkersInTx(ctx, tx, []legacyProviderTotal{total}, unappliedTaskIds)
 }

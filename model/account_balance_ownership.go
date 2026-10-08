@@ -13,9 +13,9 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// A private test context can hold the real write acknowledgement before its
-// applied marker. Production has no hook; SQL limits and the financial body
-// remain unchanged. The hook must honor the invocation's finite context.
+// A private test context can hold an acknowledged account-write batch before
+// commit. Its applied markers may already be written in the same transaction.
+// The hook must honor the invocation's finite context; production has no hook.
 type accountBalanceWriteTestKey struct{}
 
 func observeAccountBalanceWriteForTest(ctx context.Context, tx server.PgTx, networkId server.Id) {
@@ -37,6 +37,28 @@ func accountBalanceOwnershipKeys(networkIds []server.Id) []server.PgOwnershipKey
 type legacyProviderOwnership struct {
 	networkIds        []server.Id
 	taskIdRunOnceKeys map[server.Id]*string
+}
+
+// Claimed tasks already retain the immutable allocation and stored nonempty
+// queue key. Copy only that prospective scope; the locked body revalidates it.
+// Empty strings are ambiguous with null in Task, so those owners still discover
+// the exact durable key before admission. No snapshot is accounting authority.
+func snapshotLegacyProviderOwnership(networkIds []server.Id, tasks []*task.Task) *legacyProviderOwnership {
+	ownership := &legacyProviderOwnership{
+		networkIds:        slices.Clone(networkIds),
+		taskIdRunOnceKeys: make(map[server.Id]*string, len(tasks)),
+	}
+	for _, queued := range tasks {
+		if queued == nil || queued.TaskId == (server.Id{}) || queued.RunOnceKey == "" {
+			return nil
+		}
+		rawKey := queued.RunOnceKey
+		ownership.taskIdRunOnceKeys[queued.TaskId] = &rawKey
+	}
+	if len(tasks) == 0 || len(ownership.taskIdRunOnceKeys) != len(tasks) {
+		return nil
+	}
+	return ownership
 }
 
 func (self *legacyProviderOwnership) keys() []server.PgOwnershipKey {
