@@ -7,11 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
 // A deferred trigger rejects the first actual INSERT commit. Its sequence is
-// nontransactional, so each backend deterministically retries exactly once.
+// nontransactional, so the next fresh no-retry transaction can commit. The
+// test retries only the proven rollback, matching the creation owner's fence.
 func TestContractLifecycleCountersCreateCommitRetry(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -43,22 +45,45 @@ func TestContractLifecycleCountersCreateCommitRetry(t *testing.T) {
 			}
 			before := readContractLifecycleCounterTestSnapshot(t)
 			var attemptedIds []server.Id
-			server.Tx(request, func(tx server.PgTx) {
-				var id server.Id
-				if backend == "no_escrow" {
-					var err error
-					id, _, err = createContractNoEscrowInTx(request, tx, fixture.sourceNetworkId, fixture.sourceId,
-						fixture.destinationNetworkId, fixture.destinationId, 100, true)
-					server.Raise(err)
-				} else {
-					contract, _, err := createTransferEscrowInTx(request, tx, fixture.sourceNetworkId, fixture.sourceId,
-						fixture.destinationNetworkId, fixture.destinationId, fixture.sourceNetworkId, 100, nil)
-					server.Raise(err)
-					id = contract.ContractId
+			for attempt := range 2 {
+				var attemptErr error
+				server.HandleError(func() {
+					server.Tx(request, func(tx server.PgTx) {
+						var id server.Id
+						if backend == "no_escrow" {
+							var err error
+							id, _, err = createContractNoEscrowInTx(request, tx, fixture.sourceNetworkId, fixture.sourceId,
+								fixture.destinationNetworkId, fixture.destinationId, 100, true)
+							server.Raise(err)
+						} else {
+							contract, _, err := createTransferEscrowInTx(request, tx, fixture.sourceNetworkId, fixture.sourceId,
+								fixture.destinationNetworkId, fixture.destinationId, fixture.sourceNetworkId, 100, nil)
+							server.Raise(err)
+							id = contract.ContractId
+						}
+						attemptedIds = append(attemptedIds, id)
+						requireContractLifecycleCounterTestDelta(t, before, 0, 0)
+					}, server.TxReadCommitted, server.OptNoRetry())
+				}, func(err error) { attemptErr = err })
+				if attempt == 0 {
+					var pgErr *pgconn.PgError
+					if len(attemptedIds) != 1 || !errors.As(attemptErr, &pgErr) || pgErr.Code != "40001" {
+						t.Fatalf("%s first commit did not reach its deferred rollback: %v", backend, attemptErr)
+					}
+					requireContractLifecycleCounterTestDelta(t, before, 0, 0)
+					server.Db(ctx, func(conn server.PgConn) {
+						var contracts, escrows int
+						server.Raise(conn.QueryRow(ctx, `SELECT
+ (SELECT count(*) FROM transfer_contract WHERE contract_id=$1),
+ (SELECT count(*) FROM transfer_escrow WHERE contract_id=$1)`, attemptedIds[0]).Scan(&contracts, &escrows))
+						if contracts != 0 || escrows != 0 {
+							t.Fatal("failed commit retained SQL custody", contracts, escrows)
+						}
+					})
+				} else if attemptErr != nil {
+					t.Fatalf("%s retry did not commit: %v", backend, attemptErr)
 				}
-				attemptedIds = append(attemptedIds, id)
-				requireContractLifecycleCounterTestDelta(t, before, 0, 0)
-			}, server.TxReadCommitted)
+			}
 			if len(attemptedIds) != 2 {
 				t.Fatalf("%s creation attempts=%d, want one failed commit and one successful commit", backend, len(attemptedIds))
 			}
