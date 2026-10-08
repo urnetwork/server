@@ -36,7 +36,7 @@ func queryProviderPayoutStats(
 	windowStart time.Time,
 	windowEnd time.Time,
 ) (map[server.Id]map[string]NanoCents, error) {
-	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
+	policy, err := server.LoadProviderPayoutEarningPolicyInConn(ctx, conn)
 	if err != nil {
 		return nil, err
 	}

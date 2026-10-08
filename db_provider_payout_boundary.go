@@ -128,6 +128,7 @@ func providerPayoutEarningIdentity(policy *ProviderPayoutTransition) (string, st
 	return string(data), hex.EncodeToString(digest[:]), nil
 }
 
+// Connections and transactions expose exactly the row query capability used here.
 type providerBoundaryQuery interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
@@ -291,13 +292,13 @@ func RequireProviderPayoutBoundary(ctx context.Context, policy *ProviderPayoutTr
 }
 
 // Observe immutable earning authority without borrowing another connection.
-func RequireProviderPayoutBoundaryInTx(ctx context.Context, tx PgTx, policy *ProviderPayoutTransition) (binding *ProviderEarningBoundary, returnErr error) {
-	defer recoverProviderBoundaryObservation(ctx, &returnErr)
+func RequireProviderPayoutBoundaryInTx(ctx context.Context, tx PgTx, policy *ProviderPayoutTransition) (*ProviderEarningBoundary, error) {
 	return requireProviderPayoutBoundary(ctx, tx, policy)
 }
 
 // Shared validation preserves the standalone and transaction-local refusal rules.
-func requireProviderPayoutBoundary(ctx context.Context, query providerBoundaryQuery, policy *ProviderPayoutTransition) (*ProviderEarningBoundary, error) {
+func requireProviderPayoutBoundary(ctx context.Context, query providerBoundaryQuery, policy *ProviderPayoutTransition) (binding *ProviderEarningBoundary, returnErr error) {
+	defer recoverProviderBoundaryObservation(ctx, &returnErr)
 	if ctx == nil {
 		return nil, errors.New("provider earning boundary requires context")
 	}
@@ -308,7 +309,7 @@ func requireProviderPayoutBoundary(ctx context.Context, query providerBoundaryQu
 	if err != nil || !present {
 		return nil, err
 	}
-	binding, err := readProviderPayoutBoundary(ctx, query)
+	binding, err = readProviderPayoutBoundary(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -346,11 +347,21 @@ func LoadProviderPayoutEarningPolicy(ctx context.Context) (*ProviderPayoutTransi
 
 // Allocators inside a transaction validate the boundary on their existing owner.
 func LoadProviderPayoutEarningPolicyInTx(ctx context.Context, tx PgTx) (*ProviderPayoutTransition, error) {
+	return loadProviderPayoutEarningPolicy(ctx, tx)
+}
+
+// Statistics validate authority on the connection already holding their pool slot.
+func LoadProviderPayoutEarningPolicyInConn(ctx context.Context, conn PgConn) (*ProviderPayoutTransition, error) {
+	return loadProviderPayoutEarningPolicy(ctx, conn)
+}
+
+// Both borrowed-owner variants retain schema and identity checks even without policy.
+func loadProviderPayoutEarningPolicy(ctx context.Context, query providerBoundaryQuery) (*ProviderPayoutTransition, error) {
 	policy, err := LoadProviderPayoutTransition(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := RequireProviderPayoutBoundaryInTx(ctx, tx, policy); err != nil {
+	if _, err := requireProviderPayoutBoundary(ctx, query, policy); err != nil {
 		return nil, err
 	}
 	return policy, nil
