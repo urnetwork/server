@@ -24,7 +24,9 @@ func QueueTaskInBatch[T any, R any](batch server.PgBatch, taskFunction TaskFunct
 	batch.Queue(queuedTaskInsertSql+` ON CONFLICT (run_once_key) DO UPDATE SET
         run_at=LEAST(pending_task.run_at,$7),
         run_priority=LEAST(pending_task.run_priority,$9),
-        run_max_time_seconds=GREATEST(pending_task.run_max_time_seconds,$10)`,
+        run_max_time_seconds=GREATEST(pending_task.run_max_time_seconds,$10),
+        run_once_generation=pending_task.run_once_generation+1,
+        run_once_wake_at=LEAST(pending_task.run_once_wake_at,$7)`,
 		prepared.taskId, prepared.functionName, prepared.argsJson, prepared.clientAddressHash,
 		prepared.clientAddressPort, prepared.byJwtJson, prepared.runAt, prepared.runOnceKey,
 		prepared.priority, prepared.maxTimeSeconds, time.Time{})

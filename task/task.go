@@ -280,7 +280,8 @@ func RunAt(at time.Time) *RunAtOption {
 	}
 }
 
-// if the key is already scheduled, a new schedule will not be created
+// Pending requests coalesce by key. A request after claim owns one successor
+// after successful handback; it does not replace the existing invocation args.
 type RunOnceOption struct {
 	Key []any
 }
@@ -469,7 +470,9 @@ func ScheduleTaskInTx[T any, R any](
 			ON CONFLICT (run_once_key) DO UPDATE SET
 				run_at = LEAST(pending_task.run_at, $7),
 				run_priority = LEAST(pending_task.run_priority, $9),
-				run_max_time_seconds = GREATEST(pending_task.run_max_time_seconds, $10)
+				run_max_time_seconds = GREATEST(pending_task.run_max_time_seconds, $10),
+				run_once_generation = pending_task.run_once_generation + 1,
+				run_once_wake_at = LEAST(pending_task.run_once_wake_at, $7)
 		`,
 		p.taskId,
 		p.functionName,
@@ -489,9 +492,9 @@ func ScheduleTaskInTx[T any, R any](
 // ScheduleTaskInTxIfAbsent is like ScheduleTaskInTx but for callers that need
 // an atomic "only schedule if not already pending under this key" guarantee,
 // instead of RunOnce's merge-on-conflict semantics. RunOnce's
-// `ON CONFLICT (run_once_key) DO UPDATE` only merges run_at/run_priority/
-// run_max_time_seconds into an existing pending row -- crucially not
-// args_json -- so if two different calls share a run_once key while the
+// `ON CONFLICT (run_once_key) DO UPDATE` merges scheduling metadata and records
+// a wake generation, while preserving the existing args_json. If two different
+// calls share a run_once key while the
 // first is still pending, scheduling both would silently drop the second
 // call's args while still reporting success. This does a single
 // `INSERT ... ON CONFLICT (run_once_key) DO NOTHING` and reports via
@@ -585,6 +588,8 @@ func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 		        pending_task.client_by_jwt_json,
 		        pending_task.run_at,
 		        pending_task.run_once_key,
+		        pending_task.run_once_generation,
+		        pending_task.claim_generation,
 		        pending_task.run_priority,
 		        pending_task.run_max_time_seconds,
 		        pending_task.claim_time,
@@ -644,6 +649,8 @@ func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 					&byJwtJson,
 					&task.RunAt,
 					&runOnceKey,
+					&task.RunOnceGeneration,
+					&task.ClaimGeneration,
 					&task.RunPriority,
 					&task.RunMaxTimeSeconds,
 					&task.ClaimTime,
@@ -1011,6 +1018,8 @@ type Task struct {
 	ClientByJwtJson      string
 	RunAt                time.Time
 	RunOnceKey           string
+	RunOnceGeneration    int64
+	ClaimGeneration      int64
 	RunPriority          int
 	RunMaxTimeSeconds    int
 	ClaimTime            time.Time
@@ -1987,25 +1996,48 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 
 	claimTime := server.NowUtc()
 	releaseTime := claimTime.Add(TaskLeaseTimeout)
+	claimedWakeGenerations := map[server.Id]int64{}
+	claimedGenerations := map[server.Id]int64{}
 	if len(taskIds) != 0 {
 		// The short timestamp bounds crash recovery; the session advisory lock
 		// above is the durable duplicate-execution guard for a live owner. All
 		// exact selected IDs already hold both row and advisory ownership, so
 		// their common lease can be published by one statement in this claim Tx.
-		if _, err := tx.Exec(
+		rows, err := tx.Query(
 			ctx,
 			`
 				UPDATE pending_task
 				SET
 					claim_time = $2,
-					release_time = $3
+					release_time = $3,
+					run_once_wake_at = NULL,
+					claim_generation = pending_task.claim_generation + 1
 				WHERE task_id = ANY($1)
+				RETURNING task_id, run_once_generation, claim_generation
 			`,
 			taskIds,
 			claimTime,
 			releaseTime,
-		); err != nil {
+		)
+		if err != nil {
 			return nil, guard, false, err
+		}
+		for rows.Next() {
+			var taskId server.Id
+			var wakeGeneration, claimGeneration int64
+			if err := rows.Scan(&taskId, &wakeGeneration, &claimGeneration); err != nil {
+				rows.Close()
+				return nil, guard, false, err
+			}
+			claimedWakeGenerations[taskId] = wakeGeneration
+			claimedGenerations[taskId] = claimGeneration
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, guard, false, err
+		}
+		if len(claimedGenerations) != len(taskIds) {
+			return nil, guard, false, errors.New("task claim generation ownership missing")
 		}
 	}
 
@@ -2042,7 +2074,12 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	}
 	claimedTasks = GetTasks(readCtx, taskIds...)
 	for _, taskId := range taskIds {
-		if claimedTasks[taskId] == nil {
+		if queued := claimedTasks[taskId]; queued != nil {
+			// A producer may commit between claim and this exact-ID read. Its
+			// generation belongs to a successor, not this already-owned run.
+			queued.RunOnceGeneration = claimedWakeGenerations[taskId]
+			queued.ClaimGeneration = claimedGenerations[taskId]
+		} else {
 			// A deleted row has no execution to retire its owner. Continuous
 			// refill must not accumulate such absent claims beside a live task.
 			if err := guard.retireTask(readCtx, taskId); err != nil {
@@ -2078,11 +2115,12 @@ func refreshTaskTimestampLeases(
 						SET
 							claim_time = $2,
 							release_time = GREATEST(release_time, $3)
-						WHERE task_id = $1
+						WHERE task_id = $1 AND claim_generation = $4
 					`,
 					task.TaskId,
 					claimTime,
 					releaseTime,
+					task.ClaimGeneration,
 				)
 			}
 		})

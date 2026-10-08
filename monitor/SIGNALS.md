@@ -19176,6 +19176,53 @@ qualifier: matching schema does not prove payer fairness, worker visits,
 financial eligibility or settlement. Those need their own fresh outcome and
 cursor observations; a failed catalog read remains unknown.
 
+Version 794 adds `pending_task.run_once_generation` and `claim_generation` as
+ordinary `bigint NOT NULL DEFAULT 0` columns, and `run_once_wake_at` as a nullable
+timestamp without a default. The catalog probe checks each type, nullability,
+constant default and absence of generated/identity behavior. Missing columns
+are pending before 794 and schema drift after it; an unavailable catalog read
+remains unknown. The migration sets a local five-second lock timeout before
+the additive ALTER. Constant defaults avoid a row backfill, but the ALTER still
+needs an AccessExclusive lock. A refused lock admission must be retried as a
+separate bounded migration attempt; the concurrent-index repair's longer lock
+timeout must not be reused for this operation.
+
+With compatible writers and workers, a RunOnce schedule coalesces with an
+unclaimed owner. Each claim captures its wake generation in the lease UPDATE;
+a later same-key schedule records the earliest requested wake time. Successful
+completion atomically retires that exact claim and retains one new successor
+when the generation changed. Transactional Post runs before the automatic
+handoff, so a Post-created successor keeps its own cursor and arguments while
+the earlier requested deadline is retained. Multiple requests before the next
+claim coalesce. IfAbsent and required immutable allocations still refuse
+duplicates without requesting a rerun. Execution failure retains the original
+owner and its existing retry policy; a later claim absorbs its pending work.
+Ordinary and opted-in batch completion both fence the exact claim generation.
+Heartbeats do not advance that generation, and a stale heartbeat, success or
+retry cannot modify a newer claim.
+
+Schema compatibility is weaker than the new guarantee. Old writers do not
+record wake generations and old finishers can discard them. Deploy the schema
+before the new runtime, upgrade every scheduling entry point, and drain and
+retire old task owners before claiming the handshake across the fleet. The new
+runtime requires the full appended schema head. During a mixed payer-target
+rollout, an old worker can also claim an unrecognized new target and retain it
+under error backoff. An additive schema or one upgraded block does not prove
+fleet-wide payer serialization. Rollback binaries remain schema-compatible,
+but lose the guarantee; durable payer intents still need their independent
+dispatcher/reconciliation authority.
+
+The successor becomes visible after the task function and transactional Post
+commit. Existing external Post callbacks may still be retiring under the old
+exact task-ID guard. RunOnce is coalesced scheduling, not an exactly-once
+external-effect contract or a key-wide lock across such callbacks. Payer
+financial work must finish before its function returns. The native causal
+baseline controls force an independent producer commit after the last empty
+read and before handback; both ordinary and batch finalizers lose that wake.
+That establishes a local scheduler mechanism, not a measured customer delay
+or a throughput gain. Candidate correctness and full-work measurements retain
+their own exact source/native gates.
+
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
 nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp

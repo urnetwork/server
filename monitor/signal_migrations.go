@@ -434,6 +434,8 @@ var migrationArtifacts = append(append([]migrationArtifact{
 	name: "legacy settlement assigned-payer due index", requiredVersion: 792, rowColumn: 203,
 }, migrationArtifact{
 	name: "legacy settlement missing-payer registration index", requiredVersion: 793, rowColumn: 204,
+}, migrationArtifact{
+	name: "task run-once wake and claim generations", requiredVersion: 794, rowColumn: 205,
 })
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2193,7 +2195,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       `+contractCloseOriginalArtifactQuery+`,
 		       `+contractCloseInventoryArtifactQuery+snMainnetMigrationArtifactQueries()+`,
 		       `+contractExpirationArtifactQuery+`,
-		       `+strings.Join(legacySettlementPayerArtifactQueries, ",\n")+`
+		       `+strings.Join(legacySettlementPayerArtifactQueries, ",\n")+`,
+		       `+taskRunOnceGenerationArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

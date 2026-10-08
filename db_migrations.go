@@ -9674,4 +9674,6 @@ var migrations = []any{
 		CREATE INDEX legacy_settlement_intent_payer_missing
 		ON legacy_settlement_intent (shard, contract_id) WHERE payer_network_id IS NULL
 	`),
+	// 794: retain run-once requests that commit after an execution was claimed.
+	newSqlMigration(taskRunOnceGenerationSchemaSql),
 }

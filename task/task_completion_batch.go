@@ -34,7 +34,9 @@ func (self *TaskWorker) canBatchTaskCompletion(r *taskExecutionResult) bool {
 // DELETE RETURNING supplies the exact payload removed by this transaction; a
 // failed copy rolls the move back. The identity predicate bounds queue access.
 const taskCompletionBatchSql = `WITH removed AS (
- DELETE FROM pending_task WHERE task_id=ANY($1::uuid[]) RETURNING *
+ DELETE FROM pending_task WHERE task_id=ANY($1::uuid[])
+  AND (task_id,claim_generation) IN (SELECT * FROM unnest($1::uuid[],$8::bigint[]))
+ RETURNING *
 ), copied AS (
  INSERT INTO finished_task (
   task_id,function_name,args_json,client_address,client_address_hash,
@@ -49,8 +51,38 @@ const taskCompletionBatchSql = `WITH removed AS (
   AS observed(task_id,run_start_time,run_end_time,result_json)
  JOIN removed ON removed.task_id=observed.task_id
  RETURNING task_id
+), successors AS (
+ INSERT INTO pending_task (
+  task_id,function_name,args_json,client_address,client_address_hash,
+  client_address_port,client_by_jwt_json,run_at,run_once_key,run_priority,
+  run_max_time_seconds,claim_time,release_time)
+ SELECT observed.successor_id,removed.function_name,removed.args_json,
+  removed.client_address,removed.client_address_hash,removed.client_address_port,
+  removed.client_by_jwt_json,removed.run_once_wake_at,removed.run_once_key,
+  removed.run_priority,removed.run_max_time_seconds,$7,$7
+ FROM unnest($1::uuid[],$5::bigint[],$6::uuid[])
+  AS observed(task_id,claimed_generation,successor_id)
+ JOIN removed ON removed.task_id=observed.task_id
+ WHERE removed.run_once_key IS NOT NULL
+  AND removed.run_once_generation > observed.claimed_generation
+ ON CONFLICT (run_once_key) DO UPDATE SET
+  run_at=LEAST(pending_task.run_at,EXCLUDED.run_at),
+  run_priority=LEAST(pending_task.run_priority,EXCLUDED.run_priority),
+  run_max_time_seconds=GREATEST(pending_task.run_max_time_seconds,EXCLUDED.run_max_time_seconds)
+ RETURNING task_id
 )
-SELECT (SELECT count(*) FROM copied),(SELECT count(*) FROM removed)`
+SELECT (SELECT count(*) FROM copied),(SELECT count(*) FROM removed),
+ (SELECT count(*) FROM successors),
+ (SELECT count(*) FROM removed
+  JOIN unnest($1::uuid[],$5::bigint[]) AS observed(task_id,claimed_generation)
+   ON removed.task_id=observed.task_id
+  WHERE removed.run_once_key IS NOT NULL
+   AND removed.run_once_generation > observed.claimed_generation),
+ (SELECT count(*) FROM removed
+  JOIN unnest($1::uuid[],$5::bigint[]) AS observed(task_id,claimed_generation)
+   ON removed.task_id=observed.task_id
+  WHERE removed.run_once_key IS NOT NULL
+   AND removed.run_once_generation < observed.claimed_generation)`
 
 // The existing advisory guard remains held until the collector joins all work.
 // A known pre-commit rollback may fall back to independent owners, so one refused
@@ -63,6 +95,9 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 	ids := make([]server.Id, 0, len(results))
 	starts, ends := make([]time.Time, 0, len(results)), make([]time.Time, 0, len(results))
 	values := make([]string, 0, len(results))
+	generations := make([]int64, 0, len(results))
+	claims := make([]int64, 0, len(results))
+	successorIds := make([]server.Id, 0, len(results))
 	seen := map[server.Id]bool{}
 	for _, result := range results {
 		if !self.canBatchTaskCompletion(result) || seen[result.task.TaskId] {
@@ -72,6 +107,9 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 		ids = append(ids, result.task.TaskId)
 		starts, ends = append(starts, result.runStartTime), append(ends, result.runEndTime)
 		values = append(values, result.resultJson)
+		generations = append(generations, result.task.RunOnceGeneration)
+		claims = append(claims, result.task.ClaimGeneration)
+		successorIds = append(successorIds, server.NewId())
 	}
 	timeout := self.settings.FinalizeTimeout
 	if timeout <= 0 {
@@ -82,9 +120,10 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 	bodyComplete := false
 	server.HandleError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			var copied, removed int
-			server.Raise(tx.QueryRow(ctx, taskCompletionBatchSql, ids, starts, ends, values).Scan(&copied, &removed))
-			if copied != len(results) || removed != len(results) {
+			var copied, removed, successors, expectedSuccessors, invalidGenerations int
+			server.Raise(tx.QueryRow(ctx, taskCompletionBatchSql, ids, starts, ends, values,
+				generations, successorIds, time.Time{}, claims).Scan(&copied, &removed, &successors, &expectedSuccessors, &invalidGenerations))
+			if copied != len(results) || removed != len(results) || successors != expectedSuccessors || invalidGenerations != 0 {
 				server.Raise(errTaskCompletionBatchOwnership)
 			}
 			bodyComplete = true
