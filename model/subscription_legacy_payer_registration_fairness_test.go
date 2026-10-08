@@ -28,9 +28,9 @@ func TestLegacyPayerDispatchRegistersOutsideOldChronologicalPass(t *testing.T) {
 			ids[i] = legacyPayerTestContractId(prefix, uint32(i+1), shard)
 		}
 		now := server.NowUtc().Truncate(time.Microsecond)
-		cutoff := now.Add(-48 * time.Hour)
-		due := now.Add(-time.Hour)
-		after := &LegacySettlementCursor{NextAttemptTime: now.Add(-96 * time.Hour), ContractId: server.NewId(), PassEndTime: cutoff}
+		cutoff := now.Add(-84 * time.Hour)
+		due := now.Add(-58 * time.Hour)
+		after := &LegacySettlementCursor{NextAttemptTime: now.Add(-120 * time.Hour), ContractId: server.NewId(), PassEndTime: cutoff}
 		beforeCursor, err := json.Marshal(after)
 		server.Raise(err)
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -40,8 +40,15 @@ func TestLegacyPayerDispatchRegistersOutsideOldChronologicalPass(t *testing.T) {
 				ids, registered.sourceNetworkId, registered.sourceId, registered.destinationNetworkId, registered.destinationId))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,next_attempt_time,payer_network_id)
  SELECT id,$2,'settled',$3,$4 FROM unnest($1::uuid[]) AS pending(id)`,
-				ids, shard, now.Add(-72*time.Hour), registered.sourceNetworkId))
+				ids, shard, now.Add(-96*time.Hour), registered.sourceNetworkId))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL,next_attempt_time=$2 WHERE contract_id=$1`, missingId, due))
+			var excluded bool
+			server.Raise(tx.QueryRow(ctx, `SELECT payer_network_id IS NULL AND next_attempt_time>$2
+ AND next_attempt_time<statement_timestamp() AT TIME ZONE 'UTC'
+ FROM legacy_settlement_intent WHERE contract_id=$1`, missingId, cutoff).Scan(&excluded))
+			if !excluded {
+				t.Fatal("fixture did not exclude the due NULL payer from both discovery lanes")
+			}
 		})
 		first, err := DispatchLegacySettlementPayers(ctx, shard, after, nil)
 		if err != nil || first.RegistrationFailed || first.Registered != 1 || !first.More ||
