@@ -40,21 +40,32 @@ func NewTransferDebitTaskTarget() task.Target {
 	return &transferDebitTaskTarget{Target: task.NewTaskTargetWithPost(FlushTransferDebits, FlushTransferDebitsPost)}
 }
 
-// Both exported startup publishers can share one transaction without growing
-// an admitted set. Their per-turn Posts publish only their exact current key.
-func settlementStartupOwnershipKeys() []server.PgOwnershipKey {
-	keys := make([]server.PgOwnershipKey, 0, model.TransferDebitShardCount+model.LegacySettlementShardCount)
+// Independent debit publication owns only the keys it can write.
+func transferDebitStartupOwnershipKeys() []server.PgOwnershipKey {
+	keys := make([]server.PgOwnershipKey, 0, model.TransferDebitShardCount)
 	for shard := range model.TransferDebitShardCount {
 		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce(fmt.Sprintf("flush_transfer_debits_%d", shard))))
 	}
+	return keys
+}
+
+// Independent legacy publication must not need a live debit owner's queue key.
+func legacySettlementStartupOwnershipKeys() []server.PgOwnershipKey {
+	keys := make([]server.PgOwnershipKey, 0, model.LegacySettlementShardCount)
 	for shard := range model.LegacySettlementShardCount {
 		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard))))
 	}
 	return keys
 }
 
-func requireSettlementStartupOwnershipInTx(ctx context.Context, tx server.PgTx) {
-	admitted, err := server.TryTxOwnership(ctx, tx, settlementStartupOwnershipKeys())
+// Combined startup predeclares both families before either publisher writes.
+// The inner family checks then validate subsets without extending ownership.
+func settlementStartupOwnershipKeys() []server.PgOwnershipKey {
+	return append(transferDebitStartupOwnershipKeys(), legacySettlementStartupOwnershipKeys()...)
+}
+
+func requireSettlementStartupOwnershipInTx(ctx context.Context, tx server.PgTx, keys []server.PgOwnershipKey) {
+	admitted, err := server.TryTxOwnership(ctx, tx, keys)
 	server.Raise(err)
 	if !admitted {
 		server.Raise(fmt.Errorf("settlement startup publication ownership is busy"))

@@ -31,7 +31,7 @@ func scheduleFlushLegacySettlements(clientSession *session.ClientSession, tx ser
 		task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard)), task.RunAt(next), task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
 }
 func ScheduleFlushLegacySettlements(clientSession *session.ClientSession, tx server.PgTx) {
-	requireSettlementStartupOwnershipInTx(clientSession.Ctx, tx)
+	requireSettlementStartupOwnershipInTx(clientSession.Ctx, tx, legacySettlementStartupOwnershipKeys())
 	for shard := range model.LegacySettlementShardCount {
 		scheduleFlushLegacySettlements(clientSession, tx, shard, nil, nil, false)
 	}
