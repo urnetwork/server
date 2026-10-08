@@ -3795,6 +3795,14 @@ The local replacement completed at 13:58:22Z; the bounded post-apply read
 verified the new wrapper, unchanged watcher generation, and original trust-file
 hash. No trust file or private key was rewritten by the correction.
 
+The first retained post-change cycle still reported exit 255 for the same five
+targets: `rollout-guard` at 14:04:25Z and `journal-buffer` at 14:04:53Z.
+A 14:08Z local process snapshot confirmed the new option order in actual
+watcher SSH children for four of those targets. Thus the applied policy did
+not restore observation; the precise remaining connect, authentication, or
+remote-command stage is still unknown without private native error evidence.
+That snapshot is neither a five-target census nor a join to the earlier exits.
+
 FALSE POSITIVE QUALIFIER: the confirmed local strict-trust defect can make
 healthy remote services unobservable; neither exit 255 nor a failed local
 preflight proves a production fault. FALSE NEGATIVE QUALIFIER: a passing local
@@ -9662,6 +9670,29 @@ This is a software/provider-lifecycle or bounded operational-aging alert, not a
 hardware-capacity alert. More Proxy hosts can raise the active-client ceiling
 but cannot repair an unbootstrappable selected destination.
 
+The 2026-10-08 13:48:14Z metric sample measured 60,002.413 missing-origin
+failures/min with complete six-series detail: 98.0% of the detail had an absent
+sender role, and its source-owner partition was `other`. The dominant cohort
+remained `stream_fallback/public/active_top/active_derived`. A bounded source
+comparison of R43 (`61338518`), R45 (`2914e444`), and R44 (`81fec5bc`), using
+their exact Core60 (`60f3bd61`) or Core c276 dependency graph, found byte-identical
+contract producer, frame codec, OOB packing, API controller, resident relay,
+and local authority files. The standard producer sets the optional role pointer
+for both sequence lanes; the reviewed relays preserve the encoded frame.
+Selected/discovery exclusion and provider-return source retirement were also
+unchanged. Existing source controls distinguish the zero-valued client role
+from an absent field; this comparison ran no new native tests.
+
+FALSE POSITIVE QUALIFIER: these source facts do not identify the measured
+requester or prove artifact adoption. An absent field is not an SDK, SN, older
+client, or application identity, and `other` excludes only the durable prober
+source network. FALSE NEGATIVE QUALIFIER: source equality covers the reviewed
+paths, not every external producer or a live serialization boundary. Preserve
+the alert and obtain a bounded current caller/artifact witness joined to the
+failed request's optional field and lifecycle cohort before changing retry or
+authorization behavior. This rate is separate from §2.18 and from packet, SQL,
+CPU, and account-closure measurements.
+
 Implementation convention: SIGNALS.md §2.17 (`missing-origin`) maps to
 `signal_missing_origin.go` and `signal_missing_origin_test.go`. Synthetic tests
 cover the pre-detail-rollout high-rate frame, complete bounded sender/owner
@@ -9995,6 +10026,18 @@ customer, product, network, device, or arbitrary caller dimension.
 This is a software lifecycle-correctness signal, not a Proxy hardware-capacity
 signal. More Proxy hosts raise the active-client ceiling but do not make an
 inactive destination contractible.
+
+The 2026-10-08 13:49:35Z sample measured 68,608.149 inactive-destination
+rejections/min across both companion partitions. Complete 23-series detail
+assigned 86.6% to absent sender roles and the source-owner rate to `other`.
+The dominant cohort was a non-companion request with an absent role and
+`rejected/public/active_top/inactive_derived`. The R43/R45/R44 source comparison
+in §2.17 found the same API refusal and exact route-retirement mechanisms in
+both reviewed Connect graphs; it supplies no current producer identity or
+rollout-causality proof. These are prevented stale requests. The absence of a
+successful-inactive-contract sample in that bounded comparison leaves the
+separate success-side invariant unmeasured, and the two signals' overlapping
+five-minute rates must not be added as unique failures.
 
 Implementation convention: SIGNALS.md §2.18 (`stale-destination`) maps to
 `signal_stale_destination.go` and `signal_stale_destination_test.go`. Synthetic
