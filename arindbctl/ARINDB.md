@@ -1148,6 +1148,21 @@ inventory, distinct from URA planning regions. District-specific subscriber
 presence, subscription counts and top-30 ranks remain unknown; national
 marketing and conditional premises eligibility do not fill those gaps.
 
+A separate primary-source follow-up keeps Cloudflare AS13335 unclassified
+at the whole-operator level. Its current BYOIP and Magic Transit documentation
+explicitly covers customer-owned prefixes announced under AS13335, ISP/customer
+letters of agency and traffic returned to the customer's network; Direct
+Server Return can retain egress through that customer's ISP. The inference is
+limited: an origin ASN and corporate brand alone do not prove that every
+address is tenant compute or a forward-proxy/VPN exit. A blanket hosting or
+proxy addition could override independent subscriber-prefix evidence for
+transparent protected networks. This is a possible mechanism, not an observed
+Main classification error or permission to approve all Cloudflare space.
+Existing applicable relay-prefix, VPN and other negative/risk evidence remains
+authoritative. Exact source receipts and the explicit no-change decision are
+frozen in `artifacts/arin-sg-mixed-origin-research-20261008-v1`
+(`bc89ad16`); no catalog or classifier change follows from this finding.
+
 The twelve-ASN augmentation has a separately qualified reuse executor
 (`db1631d8`) and full/native/mapped readback preparation (`1a6c7beb`). It keeps
 the validated registration base, all 38 original feed bytes and observation
