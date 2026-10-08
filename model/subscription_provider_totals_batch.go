@@ -103,20 +103,16 @@ func (self *legacyProviderTotalsBatch) apply(ctx context.Context) error {
 			defer close(self.done)
 			bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			server.HandleError(func() {
-				server.Tx(bounded, func(tx server.PgTx) {
-					server.RaisePgResult(tx.Exec(bounded, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
-					server.Raise(applyLegacyProviderTotalsBatchInTx(bounded, tx, self.taskIds, self.networkId))
-				}, server.TxReadCommitted, server.OptNoRetry())
-				self.err = nil
-			}, func(err error) { self.err = err })
+			self.err = runLegacyProviderTotalsTx(bounded, func(tx server.PgTx) error {
+				return applyLegacyProviderTotalsBatchInTx(bounded, tx, self.taskIds, self.networkId)
+			})
 		}()
 	}
 	select {
 	case <-self.done:
 		return self.err
 	case <-ctx.Done():
-		return ctx.Err()
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsBatchWait, ctx.Err())
 	}
 }
 
@@ -124,13 +120,13 @@ func (self *legacyProviderTotalsBatch) apply(ctx context.Context) error {
 // summing. The account row and every contributing marker change in this transaction.
 func applyLegacyProviderTotalsBatchInTx(ctx context.Context, tx server.PgTx, taskIds []server.Id, networkId server.Id) error {
 	if len(taskIds) < 2 || len(taskIds) > legacyProviderTotalsBatchLimit || networkId == (server.Id{}) {
-		return errors.New("invalid legacy provider total batch")
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsAllocation, errors.New("invalid legacy provider total batch"))
 	}
 	rows, err := tx.Query(ctx, `SELECT task_id,args_json FROM pending_task
         WHERE task_id=ANY($1) AND function_name=$2 ORDER BY task_id FOR UPDATE`,
 		taskIds, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName())
 	if err != nil {
-		return err
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, err)
 	}
 	defer rows.Close()
 	total := legacyProviderTotal{NetworkId: networkId}
@@ -140,22 +136,22 @@ func applyLegacyProviderTotalsBatchInTx(ctx context.Context, tx server.PgTx, tas
 		var taskId server.Id
 		var data string
 		if err := rows.Scan(&taskId, &data); err != nil {
-			return err
+			return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, err)
 		}
 		count++
 		payload, err := decodeLegacyProviderTotals(data)
 		if err != nil {
-			return err
+			return withLegacyProviderTotalsPhase(legacyProviderTotalsAllocation, err)
 		}
 		if len(payload.Totals) != 1 || payload.Totals[0].NetworkId != networkId {
-			return errors.New("legacy provider total batch allocation changed")
+			return withLegacyProviderTotalsPhase(legacyProviderTotalsAllocation, errors.New("legacy provider total batch allocation changed"))
 		}
 		if payload.Applied {
 			continue
 		}
 		allocation := payload.Totals[0]
 		if math.MaxInt64-total.Bytes < allocation.Bytes || math.MaxInt64-total.Revenue < allocation.Revenue {
-			return errors.New("legacy provider total batch overflow")
+			return withLegacyProviderTotalsPhase(legacyProviderTotalsAllocation, errors.New("legacy provider total batch overflow"))
 		}
 		total.Bytes += allocation.Bytes
 		total.Revenue += allocation.Revenue
@@ -163,10 +159,10 @@ func applyLegacyProviderTotalsBatchInTx(ctx context.Context, tx server.PgTx, tas
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, err)
 	}
 	if count != len(taskIds) {
-		return errors.New("legacy provider total batch ownership missing")
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, errors.New("legacy provider total batch ownership missing"))
 	}
 	if len(unappliedTaskIds) == 0 {
 		return nil
@@ -176,10 +172,10 @@ func applyLegacyProviderTotalsBatchInTx(ctx context.Context, tx server.PgTx, tas
 	}
 	tag, err := tx.Exec(ctx, `UPDATE pending_task SET args_json=jsonb_set(args_json::jsonb,'{applied}','true'::jsonb)::text WHERE task_id=ANY($1)`, unappliedTaskIds)
 	if err != nil {
-		return err
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsAppliedMarker, err)
 	}
 	if tag.RowsAffected() != int64(len(unappliedTaskIds)) {
-		return errors.New("legacy provider total batch marker ownership missing")
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsAppliedMarker, errors.New("legacy provider total batch marker ownership missing"))
 	}
 	return nil
 }

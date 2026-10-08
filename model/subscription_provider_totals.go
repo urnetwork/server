@@ -70,13 +70,12 @@ func ApplyLegacyProviderTotals(_ json.RawMessage, clientSession *session.ClientS
 	}
 	bounded, cancel := context.WithTimeout(clientSession.Ctx, 5*time.Second)
 	defer cancel()
-	server.HandleError(func() {
-		server.Tx(bounded, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(bounded, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
-			server.Raise(applyLegacyProviderTotalsInTx(bounded, tx, identity.TaskId))
-		}, server.TxReadCommitted, server.OptNoRetry())
+	returnErr = runLegacyProviderTotalsTx(bounded, func(tx server.PgTx) error {
+		return applyLegacyProviderTotalsInTx(bounded, tx, identity.TaskId)
+	})
+	if returnErr == nil {
 		result = &struct{}{}
-	}, func(err error) { returnErr = err })
+	}
 	return
 }
 
@@ -85,14 +84,14 @@ func applyLegacyProviderTotalsInTx(ctx context.Context, tx server.PgTx, taskId s
 	err := tx.QueryRow(ctx, `SELECT args_json FROM pending_task WHERE task_id=$1 AND function_name=$2 FOR UPDATE`,
 		taskId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(&data)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return errors.New("legacy provider total task ownership missing")
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, errors.New("legacy provider total task ownership missing"))
 	}
 	if err != nil {
-		return err
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsPendingRead, err)
 	}
 	payload, err := decodeLegacyProviderTotals(data)
 	if err != nil {
-		return err
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsAllocation, err)
 	}
 	if payload.Applied {
 		return nil
@@ -104,10 +103,10 @@ func applyLegacyProviderTotalsInTx(ctx context.Context, tx server.PgTx, taskId s
 	}
 	tag, err := tx.Exec(ctx, `UPDATE pending_task SET args_json=jsonb_set(args_json::jsonb,'{applied}','true'::jsonb)::text WHERE task_id=$1`, taskId)
 	if err != nil {
-		return err
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsAppliedMarker, err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("legacy provider total marker ownership missing")
+		return withLegacyProviderTotalsPhase(legacyProviderTotalsAppliedMarker, fmt.Errorf("legacy provider total marker ownership missing"))
 	}
 	return nil
 }
@@ -137,5 +136,5 @@ func writeLegacyProviderTotalInTx(ctx context.Context, tx server.PgTx, total leg
             provided_byte_count=account_balance.provided_byte_count+EXCLUDED.provided_byte_count,
             provided_net_revenue_nano_cents=account_balance.provided_net_revenue_nano_cents+EXCLUDED.provided_net_revenue_nano_cents`,
 		total.NetworkId, total.Bytes, total.Revenue)
-	return err
+	return withLegacyProviderTotalsPhase(legacyProviderTotalsAccountWrite, err)
 }
