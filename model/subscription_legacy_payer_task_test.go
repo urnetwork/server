@@ -331,6 +331,8 @@ func TestLegacyPayerDispatchHeldRegistrationKeepsRegisteredService(t *testing.T)
 		ready := newNetEscrowOrderingTestFixture(t, ctx)
 		readyId := newLegacyPayerTestIntent(t, ctx, ready, legacyPayerTestContractId(server.NewId(), 1, shard), 100, 11)
 		server.Tx(ctx, func(tx server.PgTx) {
+			// Exercise the chronological fallback's existing timeout custody.
+			server.RaisePgResult(tx.Exec(ctx, `DROP INDEX legacy_settlement_intent_payer_missing`))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL WHERE contract_id=$1`, missingId))
 		})
 		conn := acquireContractLifecycleTestConnection(t, ctx)
