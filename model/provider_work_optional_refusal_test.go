@@ -23,3 +23,24 @@ func TestProviderWorkOptionalRefusalDoesNotSwallowOtherCauses(t *testing.T) {
 		t.Fatal("evidence marker swallowed an integrity cause", raised)
 	}
 }
+
+// Ordinary contract accounting accepts a self-pair, but the original-work
+// protocol has no proof for it. Refuse that proof before protocol signing.
+func TestProviderWorkSelfPairRefusesOnlyOriginal(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newProviderWorkSessionFixture(t)
+		id, err := CreateContractNoEscrow(f.ctx, f.sourceNetworkId, f.sourceId, f.sourceNetworkId, f.sourceId, 121)
+		server.Raise(err)
+		server.Db(f.ctx, func(conn server.PgConn) {
+			var contract, original bool
+			server.Raise(conn.QueryRow(f.ctx, `SELECT
+ EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1),
+ EXISTS(SELECT 1 FROM provider_work_reservation_original WHERE contract_id=$1)`, id).Scan(&contract, &original))
+			if !contract || original {
+				t.Fatal("unsupported optional proof changed self-pair accounting", contract, original)
+			}
+		})
+	})
+}
