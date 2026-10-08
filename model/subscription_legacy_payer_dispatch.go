@@ -37,8 +37,8 @@ func DispatchLegacySettlementPayers(ctx context.Context, shard int, after *Legac
 	return
 }
 
-// Carry the existing readiness observation through the task result, including
-// the financial fallback. This performs the same single 250ms probe as dispatch.
+// Carry readiness through the task result, including the financial fallback.
+// Its existing 250ms budget includes the cache check or one catalog probe.
 func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int, after *LegacySettlementCursor,
 	payerAfter *LegacySettlementPayerCursor,
 ) (result LegacySettlementDispatchResult, readiness *LegacySettlementPayerIndexReadiness, returnErr error) {
@@ -46,7 +46,7 @@ func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int,
 	if shard < 0 || shard >= LegacySettlementShardCount {
 		return result, nil, fmt.Errorf("invalid legacy settlement dispatch shard")
 	}
-	observation := observeLegacySettlementPayerDueIndex(ctx, readLegacySettlementPayerDueIndex, time.Now)
+	observation := legacySettlementPayerDueIndexObservation(ctx)
 	readiness = &observation
 	if observation.Outcome != "ready" {
 		return result, readiness, ErrLegacySettlementPayerIndexUnavailable

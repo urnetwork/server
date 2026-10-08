@@ -58,19 +58,76 @@ const legacySettlementPayerDueIndexSql = `SELECT COALESCE(
  LEFT JOIN pg_class AS index_relation ON index_relation.oid=to_regclass(expected.name)
  LEFT JOIN pg_index AS index_state ON index_state.indexrelid=index_relation.oid`
 
-// Each bounded task entry validates this one index outside financial locks.
-// Unlike the optional old scheduler, a concurrent cache refresh cannot be
-// mistaken for missing schema and send a healthy payer task into error backoff.
+// Each bounded task entry uses a live exact-resource positive observation or
+// validates this one index outside financial locks. A concurrent cache refresh
+// alone is never mistaken for missing schema: a cache miss still probes.
 // This is one bounded observation, not a persistent schema verdict. In
 // particular, a deadline or read error must not be reported as an invalid index.
 // No raw database errors, resource values or caller identities are retained.
 type LegacySettlementPayerIndexReadiness struct {
 	Outcome   string `json:"outcome"`
 	ElapsedMs int64  `json:"elapsed_ms"`
+	Cached    bool   `json:"cached,omitempty"`
 }
 
 func legacySettlementPayerDueIndexReady(ctx context.Context) bool {
-	return observeLegacySettlementPayerDueIndex(ctx, readLegacySettlementPayerDueIndex, time.Now).Outcome == "ready"
+	return legacySettlementPayerDueIndexObservation(ctx).Outcome == "ready"
+}
+
+func legacySettlementPayerDueIndexObservation(ctx context.Context) LegacySettlementPayerIndexReadiness {
+	return observeLegacySettlementPayerDueIndexWithCache(ctx,
+		cachedLegacySettlementPayerDueIndexReady, readLegacySettlementPayerDueIndex, time.Now)
+}
+
+// The existing both-index check already proves the due index's complete
+// definition. Reuse only its still-live positive observation for this exact
+// database resource. A miss does not refresh, wait for another refresher, retry
+// a query, or extend the existing five-second expiry.
+func cachedLegacySettlementPayerDueIndexReady(ctx context.Context) bool {
+	// A cold, negative or expired cache adds no resource read to the ordinary
+	// probe. Identity must still be rechecked after reading any potential hit.
+	if !legacySettlementPayerIndexes.hasReadyObservation(time.Now()) {
+		return false
+	}
+	resource, err := server.Vault.SimpleResource(server.DefaultPgVaultResourceName)
+	if err != nil {
+		return false
+	}
+	raw, err := resource.BytesBoundedE(ctx, 16*1024)
+	if err != nil {
+		return false
+	}
+	return legacySettlementPayerIndexes.readyObservation(ctx, sha256.Sum256(raw), time.Now())
+}
+
+func (self *legacySettlementPayerIndexCache) hasReadyObservation(now time.Time) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.ready && now.Before(self.expires)
+}
+
+func (self *legacySettlementPayerIndexCache) readyObservation(ctx context.Context, identity [sha256.Size]byte, now time.Time) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.identity == identity && self.ready && now.Before(self.expires)
+}
+
+func observeLegacySettlementPayerDueIndexWithCache(ctx context.Context,
+	cached func(context.Context) bool, read func(context.Context) (bool, error), now func() time.Time,
+) LegacySettlementPayerIndexReadiness {
+	usedCache := false
+	observed := observeLegacySettlementPayerDueIndex(ctx, func(bounded context.Context) (bool, error) {
+		if cached(bounded) {
+			usedCache = true
+			return true, nil
+		}
+		return read(bounded)
+	}, now)
+	observed.Cached = usedCache && observed.Outcome == "ready"
+	return observed
 }
 
 func observeLegacySettlementPayerDueIndex(ctx context.Context,

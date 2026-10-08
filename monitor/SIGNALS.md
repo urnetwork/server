@@ -33146,7 +33146,7 @@ for same-backend business owners; no pool or execution limit is raised here.
 
 `FlushLegacySettlementsResult.index_readiness` retains the outcome and elapsed
 milliseconds of the existing due-index readiness probe. The fixed outcomes are
-`ready`, `catalog_invalid`, `deadline`, `canceled`, and `read_error`. The probe
+`ready`, `catalog_invalid`, `deadline`, `canceled`, and `read_error`. The check
 keeps its 250ms context and nonretrying database policy; capturing this result
 adds no query. `catalog_invalid` describes that catalog observation, not a
 persistent schema fault. Deadlines and resource, acquisition or query failures
@@ -33160,3 +33160,14 @@ follows the existing error path and may have no finished-task result. Existing
 results without this field have unknown readiness cause. Elapsed milliseconds
 cover resource resolution, acquisition and the probe; they are not PostgreSQL
 CPU time or isolated catalog execution time.
+
+A still-live positive result from the existing both-index readiness cache may
+serve the due-index check. Its resource digest must match the current bounded
+resource read, and the original five-second expiry is never extended.
+`index_readiness.cached=true` identifies that case. Cold, negative or expired
+cache state skips the extra resource read and uses the original catalog probe.
+A concurrent refresh does not erase an unexpired observation for its exact
+resource; it also cannot make a different or expired resource ready. A miss
+does not wait for that refresh or add a database retry. This reduces exposure
+to a transient redundant probe failure while known valid schema evidence is
+available; it does not cure an uncached probe failure or prove a fleet rate.
