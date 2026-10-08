@@ -726,6 +726,89 @@ was established. The later catalog artifact remains separate work; the next
 coverage discriminator must explain current provider classification causes
 while preserving the subscriber default and explicit negative exclusions.
 
+The October 8 review separates health admission from subscriber classification.
+At 05:01:29.497849 UTC, the bounded five-key read found **213 native Quality,
+2,676 Speed and 82,820 Online** providers. Source evaluation ran 04:51:20.846568
+to 04:53:13.717149 UTC and publication occurred at 04:58:09.975518 UTC. All three
+readiness markers passed; source age was 495.781 seconds. Independent actual
+interpretation `6e6b6f33` confirms this global publication. It does not establish
+every requested target's native pages or identify the publisher process.
+
+The 05:17:50.429906 UTC successor read found **209 Quality, 2,298 Speed and
+82,267 Online**, with fresh source evaluation 05:08:35.459416–05:10:28.263866 UTC
+and publication at 05:16:41.984371 UTC. Its retained accepted-outcome projection
+confirms selected egress-health policy **one**, ratio **4/5**, and the eight-hour
+window ending 05:10:11.368974 UTC. Among the 82,267 public Online providers, **79,629
+failed the ratio, 2,298 passed and 340 had no evidence**. The passing count
+equals native Speed. The larger health-source map contains 99,060 identities,
+including identities outside public Online; it is not an additional supply
+population. Closed replay and independent actual gate `7783eaa2` bind these
+counts and their distinct denominators. This is **accepted selected-policy URL
+health**, including non-quota, manual or old-cycle outcomes. Legacy nil-evidence
+records retain policy zero and do not enter the selected policy-one ratio.
+The ratio does not attribute failures to the current scheduled URL lane or
+establish its four-hour quota.
+
+In this snapshot, accepted-ratio failure is the largest native supply limit:
+96.79% of Online providers fail it. Holding that cohort, common gates and health
+evidence fixed, changing only the subscriber nonquality decision cannot recover
+those failures. There are separately 2,089 Speed-without-Quality providers;
+their membership does not establish a classifier mistake or an operator cause.
+Among Online providers, 72,851 have at least ten accepted outcomes in the
+eight-hour denominator. This does **not** prove ten accepted runs in four
+hours, successful probes, or complete quota delivery. The ten-run/four-hour
+quota and the ratio window are different requirements. No provider, route,
+destination or failed measurement stage is attributed by these aggregates.
+
+Source review `3c2fd48d` confirms URL phase ceilings of five seconds for DNS and
+read-idle, and three seconds for TCP and TLS, within the original attempt
+deadline. Those ceilings are distinct from the default success policy's
+two-second time-to-first-byte and 100,000-bit/s throughput threshold. The
+current source allows a configured success-policy object; its effective
+runtime content/performance values were not read. Setup, contract or admission
+failure before a measurable path is not a measured URL failure. Once a path
+is measurable, accepted DNS/TCP/TLS/read/content/performance failures can count
+as negative health evidence. Independent TLS-authentication evidence and
+zero-total reports have separate rules. The ratio uses selected-policy
+accepted outcomes with `total_count=1` and measurement timestamps; it does not
+add the quota's `url_probe` requirement. Raw class-failure percentages and
+pre-submit log summaries therefore cannot replace this accepted denominator.
+
+One conditional source inconsistency remains unproven on Main: a configured
+`evidence_max_age` shorter than eight hours leaves the history aggregation at
+eight hours, while freshness and expiry use the shorter age. The default
+eight-hour setting is unaffected. No current override or native reproduction
+establishes this as the cause of the observed ratio failures. A source-aged
+publisher error or an unavailable watcher quota sample is likewise distinct
+from this successfully read global census and from a provider's measured
+quality; target-level fallback availability still requires its own evidence.
+
+The separate 05:18:54.188938–05:18:54.377716 UTC native observation found one
+stable edge1/g1 Connect owner with observed source `295d587d` and image-config
+digest `6cdd1dd1`. It still mapped the 593,608,472-byte artifact at epoch
+`1791358781`, with the same bounded tail and three adjacent manifest hashes as
+the October 7 observation. Their claims still identify seed `320b4c10`,
+refreshed catalog `59b33559`, 5,220 groups, quality policy two and the
+identified-subscriber default. Actual interpretation `0464d3b1` is scoped to
+that owner and those metadata files. The false `matches_selected_catalog_tail`
+field compares the historical October 6 artifact at epoch `1791310718`; it is
+**not a failed comparison to a freshly read current selection**. Full artifact
+bytes, current provider causes, request use and fleet adoption remain unproved.
+
+The review also found a concrete RPKI over-admission defect: an invalid child
+origin could inherit a valid aggregate's exception solely because its different
+ASN belonged to the same reviewed operator. The isolated correction retains
+same-operator visibility inheritance but requires an identical complete ASN set
+for the RPKI aggregate exception. Native causal receipt `fb25c1b6` confirms the
+old behavior, exactly two failing unauthorized-sibling regressions on the old
+source, and passing corrected regressions plus six existing control families.
+Same-ASN max-length and independently authorized-sibling controls remain
+healthy. These pure tests used the qualified Core60/text41 dependency profile,
+which differs from canonical by an indirect requirement; they are not a full
+release-build gate. This is an over-admission correction, not an explanation
+for the low Quality count. It has not been merged, rebuilt into an artifact or
+deployed, and no affected Main provider or prefix population has been measured.
+
 The next cause discriminator is an isolated source candidate, not deployed
 diagnostic evidence. It caps requests at 64 exact connection keys and reuses
 the authenticated Connect owner registry, a fresh primary-key fact read, and
