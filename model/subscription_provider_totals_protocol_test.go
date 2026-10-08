@@ -136,15 +136,16 @@ func TestLegacyProviderTotalsPipelineCloseFailureRollsBackAll(t *testing.T) {
 		networkId := server.NewId()
 		ids := []server.Id{providerTotalsTestTask(ctx, server.NewId(), networkId), providerTotalsTestTask(ctx, server.NewId(), networkId)}
 		lostReply := errors.New("synthetic provider batch reply loss")
-		err := server.HandleError(func() {
+		recovered := server.HandleError(func() {
 			server.Tx(ctx, func(tx server.PgTx) {
 				observed := &providerProtocolTestTx{PgTx: tx, closeErr: lostReply}
 				server.Raise(applyLegacyProviderTotalsBatchInTx(ctx, observed, ids, networkId))
 			}, server.TxReadCommitted, server.OptNoRetry())
 		})
+		err, typed := recovered.(error)
 		var phase *legacyProviderTotalsPhaseError
-		if !errors.Is(err, lostReply) || !errors.As(err, &phase) || phase.phase != legacyProviderTotalsAppliedMarker {
-			t.Fatal("projection committed without its complete batch reply", err)
+		if !typed || !errors.Is(err, lostReply) || !errors.As(err, &phase) || phase.phase != legacyProviderTotalsAppliedMarker {
+			t.Fatal("projection committed without its complete batch reply", recovered)
 		}
 		for _, id := range ids {
 			requireProviderTotalsTestState(t, ctx, id, networkId, false, 0, 0)
