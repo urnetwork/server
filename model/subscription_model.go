@@ -2073,13 +2073,13 @@ func createCompanionTransferEscrow(
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE
                                 (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
-                                (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
+                                COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
                             UNION ALL
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE open = false AND $3 <= close_time AND
-                                (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
+                                COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
                         ) AS eligible_probe_origins
@@ -2092,7 +2092,7 @@ func createCompanionTransferEscrow(
 							-- The CASE is equivalent to the generated open flag but
 							-- opaque to legacy false-zero open/outcome indexes.
 							(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
-                            (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
+                            COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                             source_id = $1 AND
                             destination_id = $2 AND
                             companion_contract_id IS NULL
@@ -2108,7 +2108,7 @@ func createCompanionTransferEscrow(
                         WHERE
                             open = false AND
                             $3 <= close_time AND
-                            (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
+                            COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                             source_id = $1 AND
                             destination_id = $2 AND
                             companion_contract_id IS NULL
@@ -2171,7 +2171,7 @@ func createCompanionTransferEscrow(
                                 FROM transfer_contract
                                 WHERE
                                     (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
-                                    (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
+                                    COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
                                 UNION ALL
@@ -2179,7 +2179,7 @@ func createCompanionTransferEscrow(
                                     source_network_id, destination_network_id
                                 FROM transfer_contract
                                 WHERE open = false AND $3 <= close_time AND
-                                    (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
+                                    COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
                                 -- Filter private ownership outside the pair boundary;
@@ -2202,7 +2202,7 @@ func createCompanionTransferEscrow(
 								-- Keep both generic open and outcome-null partial
 								-- indexes ineligible for this pair lookup.
 								(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
-                                (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
+                                COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
                                 companion_contract_id IS NOT NULL
@@ -2219,7 +2219,7 @@ func createCompanionTransferEscrow(
                             WHERE
                                 open = false AND
                                 $3 <= close_time AND
-                                (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
+                                COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
                                 companion_contract_id IS NOT NULL
@@ -2337,7 +2337,7 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 					-- This is equivalent to the generated-open expression but
 					-- remains opaque to false-zero legacy partial indexes.
 					(CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END) AND
-                    (transfer_contract.expiration_time IS NULL OR transfer_contract.expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
+                    COALESCE(transfer_contract.expiration_time, transfer_contract.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                     transfer_contract.source_id = $1 AND
                     transfer_contract.destination_id = $2 AND
                     transfer_contract.transfer_byte_count <= $3 AND

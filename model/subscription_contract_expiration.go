@@ -34,14 +34,15 @@ func contractExpirationDue(expirationTime *time.Time, created, lastReport, cutof
 
 // Origin selection precedes funding/client lock waits. Recheck its immutable
 // deadline after those waits, before publishing a new reverse reservation.
-// A normal early close still permits the existing origin linger window.
+// Missing deadlines use the same creation-based limit as cleanup. A normal
+// early close still permits the existing origin linger window.
 func validateCompanionContractExpirationInTx(ctx context.Context, tx server.PgTx, originContractId *server.Id) error {
 	if originContractId == nil {
 		return nil
 	}
 	var valid bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_contract
-		WHERE contract_id=$1 AND (expiration_time IS NULL OR expiration_time > clock_timestamp() AT TIME ZONE 'UTC'))`,
+		WHERE contract_id=$1 AND COALESCE(expiration_time, create_time + interval '60 minutes') > clock_timestamp() AT TIME ZONE 'UTC')`,
 		*originContractId).Scan(&valid); err != nil {
 		return err
 	}
