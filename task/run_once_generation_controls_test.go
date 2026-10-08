@@ -93,9 +93,11 @@ func TestRunOnceTransactionalPostKeepsCursorAndRequestedTime(t *testing.T) {
 		}
 		oldId := ScheduleTask(runOnceGenerationWork, &runOnceGenerationArgs{Scope: scope, Cursor: 7}, owner,
 			runOnceGenerationKey(scope), RunAt(server.NowUtc().Add(-time.Hour)))
+		before := taskLifecycleCounts()
 		worker := runOnceGenerationWorker(ctx, target)
 		defer worker.Close()
 		finished, retried, posts, err := worker.EvalTasks(1)
+		requireTaskLifecycleDelta(t, before, 1, 1, 4)
 		pending := runOnceGenerationPending(ctx, []server.Id{scope})
 		if err != nil || len(finished) != 1 || finished[0] != oldId || len(retried)+len(posts) != 0 || len(pending) != 1 {
 			t.Fatal("transactional successor and dirty wake did not coalesce", err, pending)
