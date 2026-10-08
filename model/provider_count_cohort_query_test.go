@@ -52,13 +52,6 @@ func TestProviderCountCohortExportQueriesBounded(t *testing.T) {
 	env.ApplyDbMigrations = false
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		var pgss bool
-		server.Db(ctx, func(c server.PgConn) {
-			server.Raise(c.QueryRow(ctx, `SELECT current_setting('shared_preload_libraries') LIKE '%pg_stat_statements%'`).Scan(&pgss))
-		})
-		if !pgss {
-			t.Skip("requires an isolated pg_stat_statements fixture")
-		}
 		cohortTestTables(ctx)
 		country := cohortTestId(1000000)
 		cohortTestExec(ctx, `INSERT INTO location VALUES($1,'country','Synthetic',NULL,NULL,NULL,'zz')`, country)
@@ -68,7 +61,8 @@ func TestProviderCountCohortExportQueriesBounded(t *testing.T) {
 			cohortTestExec(ctx, `INSERT INTO provide_key VALUES($1,$2)`, id, ProvideModePublic)
 			cohortTestExec(ctx, `INSERT INTO network_client_location_reliability(client_id,connected,valid,city_location_id,region_location_id,country_location_id,arin_risk) VALUES($1,true,true,$2,$2,$2,$3)`, id, country, n == 2)
 		}
-		cohortTestExec(ctx, `CREATE EXTENSION IF NOT EXISTS pg_stat_statements; SELECT pg_stat_statements_reset()`)
+		observer, closeObservation := cohortObserveQueries(t, ctx)
+		defer closeObservation()
 		CountProviderEgress(ctx)
 		if err := UpdateClientLocations(ctx, time.Hour); err != nil {
 			t.Fatal(err)
@@ -76,10 +70,11 @@ func TestProviderCountCohortExportQueriesBounded(t *testing.T) {
 		if err := UpdateClientScores(ctx, time.Hour, 2); err != nil {
 			t.Fatal(err)
 		}
-		var calls, rows, unscoped int64
-		server.Db(ctx, func(c server.PgConn) {
-			server.Raise(c.QueryRow(ctx, `SELECT coalesce(sum(calls),0)::bigint,coalesce(sum(rows),0)::bigint,coalesce(sum(calls) FILTER(WHERE query NOT LIKE '%ANY($1)%'),0)::bigint FROM pg_stat_statements WHERE query LIKE 'WITH failed_reliability%'`).Scan(&calls, &rows, &unscoped))
-		})
+		closeObservation()
+		calls, rows, unscoped, err := observer.snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
 		if calls != 3 || rows != 3 || unscoped != 0 {
 			t.Fatalf("export eligibility escaped captured cohort: calls=%d returned_rows=%d unscoped_calls=%d; want 3,3,0", calls, rows, unscoped)
 		}

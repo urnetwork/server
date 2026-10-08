@@ -77,6 +77,9 @@ type workloadResult struct {
 	ProfileEvents              []profileEventObservation `json:"profile_events,omitempty"`
 	ForwardLink                directionalLinkSnapshot   `json:"forward_link"`
 	ReverseLink                directionalLinkSnapshot   `json:"reverse_link"`
+
+	// Absent/zero retains the historical bulk-boundary interpretation.
+	LoadedProbeMeasurementVersion int `json:"loaded_probe_measurement_version,omitempty"`
 }
 
 // A deadline setter covers TCP, UDP, and QUIC stream I/O uniformly.
@@ -2045,6 +2048,10 @@ func measureWebWorkload(
 
 const minimumLatencyProbeSuccessCount = 3
 
+// Version 2 settles load-time offers against their original deadlines. An
+// absent/zero version retains the legacy bulk-completion cutoff semantics.
+const loadedLatencyProbeMeasurementVersion = 2
+
 const (
 	// A fixed offered rate makes two carrier variants carry the same interactive
 	// demand. The former closed loop issued fewer probes when a path timed out,
@@ -2138,6 +2145,7 @@ func applyLatencyProbeSamples(
 	result.LoadedProbeAttemptCount = loaded.attemptCount
 	result.LoadedProbeSuccessCount = len(loaded.latencies)
 	result.LoadedProbeFailureCount = loaded.failureCount
+	result.LoadedProbeMeasurementVersion = loadedLatencyProbeMeasurementVersion
 	result.PostLoadProbeAttemptCount = postLoad.attemptCount
 	result.PostLoadProbeSuccessCount = len(postLoad.latencies)
 	result.PostLoadProbeFailureCount = postLoad.failureCount
@@ -2357,20 +2365,56 @@ func TestLatencyProbePhaseSequencesDoNotOverlapUnderLongLoad(t *testing.T) {
 	}
 }
 
-// Tracks a fixed offered probe train independently from response timing. It is
-// owned by the workload goroutine; the reader only publishes complete replies.
+// Tracks a fixed offered probe train independently from response timing. The
+// workload goroutine owns samples and pending offers. Only complete-read
+// registrations are shared with the reader, under stateLock; their population
+// is bounded by the existing response channel plus the reader and owner slots.
 type loadedLatencyProbeState struct {
 	samples  latencyProbeSamples
 	pending  map[uint64]time.Time
 	timeout  time.Duration
 	observer latencyProbeObserver
+
+	stateLock               sync.Mutex
+	completedSequenceCounts map[uint64]int
 }
 
 func newLoadedLatencyProbeState(timeout time.Duration) *loadedLatencyProbeState {
 	return &loadedLatencyProbeState{
-		pending: map[uint64]time.Time{},
-		timeout: timeout,
+		pending:                 map[uint64]time.Time{},
+		timeout:                 timeout,
+		completedSequenceCounts: map[uint64]int{},
 	}
+}
+
+// Captures completion and ownership together before any observer or channel
+// handoff can wait. Expiry cannot erase an already timestamped complete read.
+func (self *loadedLatencyProbeState) completeRead(packet [32]byte) loadedLatencyProbeResponse {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	response := loadedLatencyProbeResponse{packet: packet, receiveTime: time.Now()}
+	self.completedSequenceCounts[binary.BigEndian.Uint64(packet[:])] += 1
+	return response
+}
+
+// Returns the reader's bounded completion ownership to the workload goroutine,
+// including malformed, duplicate, and post-boundary responses.
+func (self *loadedLatencyProbeState) releaseCompletion(sequence uint64) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if count := self.completedSequenceCounts[sequence]; 1 < count {
+		self.completedSequenceCounts[sequence] = count - 1
+	} else {
+		delete(self.completedSequenceCounts, sequence)
+	}
+}
+
+// A completed read retains its offer until the owner validates the recorded
+// completion time; this does not grant any extra time to a later network read.
+func (self *loadedLatencyProbeState) hasCompletion(sequence uint64) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return 0 < self.completedSequenceCounts[sequence]
 }
 
 // Records one offered slot whether or not the local write was accepted.
@@ -2397,6 +2441,7 @@ func (self *loadedLatencyProbeState) receive(
 	receiveTime time.Time,
 ) {
 	sequence := binary.BigEndian.Uint64(packet[:])
+	self.releaseCompletion(sequence)
 	observeLatencyProbe(self.observer, "owner-receive", sequence, receiveTime, time.Time{}, nil)
 	var expected [len(packet)]byte
 	binary.BigEndian.PutUint64(expected[:], sequence)
@@ -2413,6 +2458,14 @@ func (self *loadedLatencyProbeState) receive(
 		return
 	}
 	delete(self.pending, sequence)
+	if receiveTime.IsZero() {
+		observeLatencyProbe(self.observer, "missing-completion", sequence, receiveTime, sendTime, nil)
+		if self.samples.firstFailure == nil {
+			self.samples.firstFailure = fmt.Errorf("loaded latency probe response has no completion time")
+		}
+		self.samples.failureCount += 1
+		return
+	}
 	if receiveTime.Before(sendTime) {
 		observeLatencyProbe(self.observer, "before-offer", sequence, receiveTime, sendTime, nil)
 		if self.samples.firstFailure == nil {
@@ -2422,7 +2475,7 @@ func (self *loadedLatencyProbeState) receive(
 		return
 	}
 	latency := receiveTime.Sub(sendTime)
-	if self.timeout < latency {
+	if self.timeout <= latency {
 		observeLatencyProbe(self.observer, "late", sequence, receiveTime, sendTime, context.DeadlineExceeded)
 		self.samples.failureCount += 1
 		if self.samples.firstFailure == nil {
@@ -2437,10 +2490,14 @@ func (self *loadedLatencyProbeState) receive(
 	observeLatencyProbe(self.observer, "accepted", sequence, receiveTime, sendTime, nil)
 }
 
-// Converts every elapsed pending probe into one explicit timeout.
+// Converts elapsed offers without a retained complete read into one timeout.
+// A retained read is judged by its completion time, not its later handoff time.
 func (self *loadedLatencyProbeState) expire(currentTime time.Time) {
 	for sequence, sendTime := range self.pending {
 		if currentTime.Sub(sendTime) < self.timeout {
+			continue
+		}
+		if self.hasCompletion(sequence) {
 			continue
 		}
 		delete(self.pending, sequence)
@@ -2452,8 +2509,8 @@ func (self *loadedLatencyProbeState) expire(currentTime time.Time) {
 	}
 }
 
-// Closes the measurement boundary without letting post-load replies improve
-// the loaded phase retroactively.
+// Cancellation settles any offers still owned after the reader has joined.
+// Ordinary bulk completion instead waits for each original offer deadline.
 func (self *loadedLatencyProbeState) finish() {
 	for sequence, sendTime := range self.pending {
 		delete(self.pending, sequence)
@@ -2480,8 +2537,8 @@ type loadedLatencyProbeTestSettings struct {
 	observer                  latencyProbeObserver
 }
 
-// Offers probes at a fixed rate until the bulk goroutine exits. Multiple UDP
-// requests may be outstanding, so a timeout never suppresses later demand.
+// Offers probes only while bulk is active, then settles their original
+// deadlines without new demand. Complete reads retain their bounded handoff.
 func runLoadedLatencyProbes(
 	ctx context.Context,
 	connection net.Conn,
@@ -2504,6 +2561,8 @@ func runLoadedLatencyProbes(
 	if testSettings != nil {
 		observer = testSettings.observer
 	}
+	state := newLoadedLatencyProbeState(timeout)
+	state.observer = observer
 	responseBufferCount := 64
 	if testSettings != nil && testSettings.unbufferedResponseHandoff {
 		responseBufferCount = 0
@@ -2531,6 +2590,10 @@ func runLoadedLatencyProbes(
 				publishError(err)
 				return
 			}
+			// A concurrent deadline reset must not undo the owner's interruption.
+			if probeCtx.Err() != nil {
+				return
+			}
 			var packet [32]byte
 			_, err := io.ReadFull(connection, packet[:])
 			if err != nil {
@@ -2544,10 +2607,7 @@ func runLoadedLatencyProbes(
 				publishError(err)
 				return
 			}
-			response := loadedLatencyProbeResponse{
-				packet:      packet,
-				receiveTime: time.Now(),
-			}
+			response := state.completeRead(packet)
 			observeLatencyProbePacket(observer, "read-complete", packet[:], response.receiveTime, nil)
 			if testSettings != nil && testSettings.afterResponseReadHook != nil {
 				testSettings.afterResponseReadHook()
@@ -2558,10 +2618,16 @@ func runLoadedLatencyProbes(
 		}
 	}()
 
-	state := newLoadedLatencyProbeState(timeout)
-	state.observer = observer
 	nextSequence := startSequence
 	writeProbe := func() {
+		// A ready ticker cannot authorize a new offer after bulk completion.
+		select {
+		case <-ctx.Done():
+			return
+		case <-workloadDone:
+			return
+		default:
+		}
 		sequence := nextSequence
 		nextSequence += 1
 		var packet [32]byte
@@ -2584,14 +2650,43 @@ func runLoadedLatencyProbes(
 	writeProbe()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	tickInput := ticker.C
+	workloadInput := workloadDone
+	var offerBoundary time.Time
 
 	responsesOpen := true
 	for {
+		var expiry <-chan time.Time
+		if !offerBoundary.IsZero() {
+			state.expire(time.Now())
+			if len(state.pending) == 0 {
+				break
+			}
+			var deadline time.Time
+			for sequence, sendTime := range state.pending {
+				// A timestamped read needs only its existing handoff, not a
+				// past-deadline timer that would spin while the reader is parked.
+				if state.hasCompletion(sequence) {
+					continue
+				}
+				candidate := sendTime.Add(timeout)
+				if deadline.IsZero() || candidate.Before(deadline) {
+					deadline = candidate
+				}
+			}
+			if !deadline.IsZero() {
+				expiry = time.After(time.Until(deadline))
+			}
+		}
 		select {
 		case <-ctx.Done():
 			responsesOpen = false
-		case <-workloadDone:
-			responsesOpen = false
+		case <-workloadInput:
+			workloadInput = nil
+			tickInput = nil
+			ticker.Stop()
+			offerBoundary = time.Now()
+			observeLatencyProbe(observer, "loaded-boundary", 0, offerBoundary, time.Time{}, nil)
 		case response, ok := <-responseInput:
 			if !ok {
 				responseInput = nil
@@ -2604,9 +2699,10 @@ func runLoadedLatencyProbes(
 				continue
 			}
 			state.receive(response.packet, response.receiveTime)
-		case currentTime := <-ticker.C:
+		case currentTime := <-tickInput:
 			state.expire(currentTime)
 			writeProbe()
+		case <-expiry:
 		}
 		if !responsesOpen {
 			break
@@ -2614,11 +2710,16 @@ func runLoadedLatencyProbes(
 	}
 
 	receiveBoundary := time.Now()
-	observeLatencyProbe(observer, "loaded-boundary", 0, receiveBoundary, time.Time{}, nil)
+	if offerBoundary.IsZero() {
+		observeLatencyProbe(observer, "loaded-boundary", 0, receiveBoundary, time.Time{}, nil)
+	}
 	probeCancel()
 	_ = connection.SetReadDeadline(time.Now())
 	for response := range responses {
 		if receiveBoundary.Before(response.receiveTime) {
+			if response.err == nil {
+				state.releaseCompletion(binary.BigEndian.Uint64(response.packet[:]))
+			}
 			observeLatencyProbePacket(observer, "read-after-boundary", response.packet[:], response.receiveTime, response.err)
 			continue
 		}

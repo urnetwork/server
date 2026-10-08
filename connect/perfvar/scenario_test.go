@@ -512,6 +512,9 @@ type perfvarAggregateRecord struct {
 	ValidRunCount             int    `json:"valid_run_count"`
 	IndividualCorrect         []bool `json:"individual_run_correct"`
 	IndividualRunValid        []bool `json:"individual_run_valid"`
+
+	LoadedProbeMeasurementVersion       int    `json:"loaded_probe_measurement_version,omitempty"`
+	LoadedProbeMeasurementInvalidReason string `json:"loaded_probe_measurement_invalid_reason,omitempty"`
 }
 
 // A lookup function makes filter validation deterministic without mutating the
@@ -1443,6 +1446,9 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 	setups := make([]time.Duration, 0, len(records))
 	latencies := make([]time.Duration, 0, len(records))
 	loadedLatencies := make([]time.Duration, 0, len(records))
+	loadedProbeVersion := 0
+	loadedProbeVersionSeen := false
+	loadedProbeInvalidReason := ""
 	efficiencies := make([]float64, 0, len(records))
 	wireEfficiencies := make([]float64, 0, len(records))
 	valid := make([]bool, 0, len(records))
@@ -1482,6 +1488,25 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 			failureRunCount += 1
 		}
 		if isValid {
+			version := record.Tunneled.LoadedProbeMeasurementVersion
+			if version != 0 && version != loadedLatencyProbeMeasurementVersion {
+				loadedProbeInvalidReason = "unsupported loaded-probe measurement version"
+			}
+			if loadedProbeVersionSeen && version != loadedProbeVersion && loadedProbeInvalidReason == "" {
+				loadedProbeInvalidReason = "mixed loaded-probe measurement versions"
+			}
+			if !loadedProbeVersionSeen {
+				loadedProbeVersion = version
+				loadedProbeVersionSeen = true
+			}
+			underlay := record.Underlay
+			if underlay.LoadedProbeMeasurementVersion != 0 || underlay.LoadedProbeAttemptCount != 0 || underlay.LoadedLatency.P95 != 0 {
+				if underlay.LoadedProbeMeasurementVersion != 0 && underlay.LoadedProbeMeasurementVersion != loadedLatencyProbeMeasurementVersion {
+					loadedProbeInvalidReason = "unsupported loaded-probe measurement version"
+				} else if underlay.LoadedProbeMeasurementVersion != version && loadedProbeInvalidReason == "" {
+					loadedProbeInvalidReason = "mixed loaded-probe measurement versions"
+				}
+			}
 			goodputs = append(goodputs, record.Tunneled.GoodputGigabits)
 			durations = append(durations, record.Tunneled.Duration)
 			setups = append(setups, record.Tunneled.SetupDuration)
@@ -1495,6 +1520,10 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 	}
 	goodputWorst := float64(0)
 	durationWorst := time.Duration(0)
+	if loadedProbeInvalidReason != "" {
+		loadedLatencies = nil
+		loadedProbeVersion = 0
+	}
 	if 0 < len(goodputs) {
 		goodputWorst = slices.Min(goodputs)
 		durationWorst = slices.Max(durations)
@@ -1532,6 +1561,9 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 		ValidRunCount:             len(records) - failureRunCount - invalidRunCount,
 		IndividualCorrect:         correct,
 		IndividualRunValid:        valid,
+
+		LoadedProbeMeasurementVersion:       loadedProbeVersion,
+		LoadedProbeMeasurementInvalidReason: loadedProbeInvalidReason,
 	}
 	// Zero-valued unit fixtures retain the historical default schema.
 	if result.SchemaVersion == 0 {

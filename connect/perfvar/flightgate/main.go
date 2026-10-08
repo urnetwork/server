@@ -419,6 +419,7 @@ type runRecord struct {
 	loadedP95     float64 // ms
 	loadedSuccess float64
 	loadedAttempt float64
+	loadedVersion int
 	// counters keyed by name; provider and device are summed where the
 	// mechanism is symmetric and kept apart where the direction matters.
 	counters map[string]float64
@@ -559,7 +560,14 @@ func parseRecord(text string) (runRecord, bool) {
 		loadedP95:     num(raw, "tunneled", "loaded_latency", "p95_nanoseconds") / float64(time.Millisecond),
 		loadedSuccess: num(raw, "tunneled", "loaded_probe_success_count"),
 		loadedAttempt: num(raw, "tunneled", "loaded_probe_attempt_count"),
+		loadedVersion: int(num(raw, "tunneled", "loaded_probe_measurement_version")),
 		counters:      map[string]float64{},
+	}
+	if version := lookup(raw, "tunneled", "loaded_probe_measurement_version"); version != nil {
+		value, ok := version.(float64)
+		if !ok || (value != 0 && value != 2) {
+			record.loadedVersion = -1
+		}
 	}
 	both := func(name string, path ...string) {
 		record.counters[name] = num(raw, append([]string{"carrier", "device_" + path[0]}, path[1:]...)...) +
@@ -666,6 +674,9 @@ type cellSummary struct {
 	memMax                         float64
 	loadedP95s                     []float64
 	loadedSuccess, loadedAttempt   float64
+	loadedVersion                  int
+	loadedVersionSeen              bool
+	loadedVersionInvalid           bool
 	memAbove                       int
 	goodputs                       []float64
 	stages                         map[string]int
@@ -691,6 +702,14 @@ func summarize(records []runRecord) map[string]map[cellKey]*cellSummary {
 			cell.correct += 1
 			cell.goodputs = append(cell.goodputs, record.goodput)
 			if 0 < record.loadedAttempt {
+				if record.loadedVersion != 0 && record.loadedVersion != 2 ||
+					cell.loadedVersionSeen && cell.loadedVersion != record.loadedVersion {
+					cell.loadedVersionInvalid = true
+				}
+				if !cell.loadedVersionSeen {
+					cell.loadedVersion = record.loadedVersion
+					cell.loadedVersionSeen = true
+				}
 				cell.loadedP95s = append(cell.loadedP95s, record.loadedP95)
 				cell.loadedSuccess += record.loadedSuccess
 				cell.loadedAttempt += record.loadedAttempt
@@ -767,6 +786,8 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# flightgate readout: %s\n\n", root)
 	fmt.Fprintf(&b, "%d run records, arms: %s (control: %s)\n\n", len(records), strings.Join(arms, ", "), control)
+	fmt.Fprintln(&b, "Loaded-probe v0 (including absent version) uses the legacy bulk cutoff; v2 settles load-time offers against original deadlines. Mixed or unsupported versions are not compared.")
+	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "## Outcome per cell")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "| Cell | Arm | Runs | Correct | Failed (stage) | Harness-invalid (calibration) | Dead windows / windows | Runs with dead window | Worst window Mbit/s | Median goodput Mbit/s | Loaded p95 ms | Loaded probes delivered % | Memory p95 median MiB | Memory max MiB | Samples > 24 MiB |")
@@ -796,8 +817,12 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 			}
 			loadedP95, delivered := "–", "–"
 			if 0 < cell.loadedAttempt {
-				loadedP95 = fmt.Sprintf("%.0f", median(cell.loadedP95s))
-				delivered = fmt.Sprintf("%.1f", 100*cell.loadedSuccess/cell.loadedAttempt)
+				if cell.loadedVersionInvalid {
+					loadedP95, delivered = "incompatible versions", "incompatible versions"
+				} else {
+					loadedP95 = fmt.Sprintf("%.0f (v%d)", median(cell.loadedP95s), cell.loadedVersion)
+					delivered = fmt.Sprintf("%.1f (v%d)", 100*cell.loadedSuccess/cell.loadedAttempt, cell.loadedVersion)
+				}
 			}
 			fmt.Fprintf(&b, "| %s | %s | %d | %d | %d (%s) | %d (%d) | %d / %d | %d | %s | %s | %s | %s | %.2f | %.2f | %d |\n",
 				key, arm, cell.runs, cell.correct, cell.failed, strings.Join(stages, " "),
@@ -901,12 +926,18 @@ func loadedDelta(cell *cellSummary, base *cellSummary) string {
 	if cell.loadedAttempt == 0 || base.loadedAttempt == 0 {
 		return "–"
 	}
+	if cell.loadedVersionInvalid || base.loadedVersionInvalid || cell.loadedVersion != base.loadedVersion {
+		return "incompatible versions"
+	}
 	return fmt.Sprintf("%+.0f", median(cell.loadedP95s)-median(base.loadedP95s))
 }
 
 func deliveredDelta(cell *cellSummary, base *cellSummary) string {
 	if cell.loadedAttempt == 0 || base.loadedAttempt == 0 {
 		return "–"
+	}
+	if cell.loadedVersionInvalid || base.loadedVersionInvalid || cell.loadedVersion != base.loadedVersion {
+		return "incompatible versions"
 	}
 	return fmt.Sprintf("%+.1f", 100*cell.loadedSuccess/cell.loadedAttempt-100*base.loadedSuccess/base.loadedAttempt)
 }

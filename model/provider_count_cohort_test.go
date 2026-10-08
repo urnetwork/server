@@ -95,14 +95,8 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 		cohortTestPlanWork(ctx, t)
 		t.Log("cohort control: exact scoped facts; old TLS retained; missing history neutral; accepted policy/window preserved")
 
-		// pg_stat_statements is supplemental when the local test service enables it.
-		pgss := false
-		server.Db(ctx, func(c server.PgConn) {
-			server.Raise(c.QueryRow(ctx, `SELECT current_setting('shared_preload_libraries') LIKE '%pg_stat_statements%'`).Scan(&pgss))
-		})
-		if pgss {
-			cohortTestExec(ctx, `CREATE EXTENSION IF NOT EXISTS pg_stat_statements; SELECT pg_stat_statements_reset()`)
-		}
+		observer, closeObservation := cohortObserveQueries(t, ctx)
+		defer closeObservation()
 		settings := egressIndexSettings()
 		wantCounts := &ProviderEgressCounts{BucketIndexCounts: map[string]map[string]int64{}, ReasonCounts: map[string]int64{}, MaxIndex: settings.MaxIndex()}
 		for _, bucket := range ProviderEgressBuckets {
@@ -196,16 +190,16 @@ CREATE VIEW network_client_location_reliability AS SELECT * FROM cohort_fixture_
 			t.Fatal("native SourceMap diagnostic population changed")
 		}
 		t.Log("cohort control: both score populations; late group client checked; failure omitted; neutral/network-only/fanout/source-map preserved")
-		if pgss {
-			var calls, rows, unscoped int64
-			server.Db(ctx, func(c server.PgConn) {
-				server.Raise(c.QueryRow(ctx, `SELECT coalesce(sum(calls),0)::bigint,coalesce(sum(rows),0)::bigint,coalesce(sum(calls) FILTER(WHERE query NOT LIKE '%ANY($1)%'),0)::bigint FROM pg_stat_statements WHERE query LIKE 'WITH failed_reliability%'`).Scan(&calls, &rows, &unscoped))
-			})
-			if calls != 3 || rows > 36 || unscoped != 0 {
-				t.Fatalf("bulk filter escaped cohort: calls=%d rows=%d unscoped=%d", calls, rows, unscoped)
-			}
-			t.Logf("cohort work: background_rollups=250000 dense_exceptions_over=50000 calls=%d returned_rows=%d unscoped_calls=%d", calls, rows, unscoped)
+		closeObservation()
+		calls, rows, unscoped, observationErr := observer.snapshot()
+		if observationErr != nil {
+			t.Fatal(observationErr)
 		}
+		if calls != 3 || rows > 36 || unscoped != 0 {
+			t.Fatalf("bulk filter escaped cohort: calls=%d rows=%d unscoped=%d", calls, rows, unscoped)
+		}
+		t.Logf("cohort work: background_rollups=250000 dense_exceptions_over=50000 calls=%d returned_rows=%d unscoped_calls=%d", calls, rows, unscoped)
+
 		cohortTestExec(ctx, `ALTER TABLE provider_egress_url_security RENAME TO unavailable_url_security`)
 		refused := func() (refused bool) {
 			defer func() { refused = recover() != nil }()

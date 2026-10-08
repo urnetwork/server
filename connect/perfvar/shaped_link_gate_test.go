@@ -67,6 +67,9 @@ type perfvarShapedAggregate struct {
 	EligibleRunCount int                `json:"eligible_run_count"`
 	HeadroomRunCount int                `json:"headroom_run_count"`
 	Metrics          map[string]float64 `json:"metrics"`
+
+	LoadedProbeMeasurementVersion       int    `json:"loaded_probe_measurement_version,omitempty"`
+	LoadedProbeMeasurementInvalidReason string `json:"loaded_probe_measurement_invalid_reason,omitempty"`
 }
 
 func aggregatePerfvarShapedRuns(records []perfvarRunRecord) *perfvarShapedAggregate {
@@ -89,6 +92,8 @@ func aggregatePerfvarShapedRuns(records []perfvarRunRecord) *perfvarShapedAggreg
 		return result
 	}
 	agg := aggregatePerfvarRuns(copyRecords)
+	result.LoadedProbeMeasurementVersion = agg.LoadedProbeMeasurementVersion
+	result.LoadedProbeMeasurementInvalidReason = agg.LoadedProbeMeasurementInvalidReason
 	encoded, _ := json.Marshal(agg)
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(encoded, &fields)

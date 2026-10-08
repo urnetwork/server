@@ -137,7 +137,7 @@ func TestLatencyProbeObserverRejectsShortRead(t *testing.T) {
 	}
 }
 
-func TestLatencyProbeObserverExcludesReadAfterBulkBoundary(t *testing.T) {
+func TestLatencyProbeObserverAcceptsTimelyReadAfterBulkBoundary(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const sequence = latencyProbeLoadedStartSequence
 		readEntered := make(chan struct{})
@@ -179,94 +179,115 @@ func TestLatencyProbeObserverExcludesReadAfterBulkBoundary(t *testing.T) {
 		time.Sleep(time.Nanosecond)
 		close(releaseRead)
 		samples := <-completion
-		var boundary, discarded latencyProbeObservation
+		var boundary, accepted latencyProbeObservation
 		for _, event := range events {
 			switch event.Stage {
 			case "loaded-boundary":
 				boundary = event
-			case "read-after-boundary":
-				discarded = event
 			case "accepted":
-				t.Fatal("post-boundary read was accepted")
+				accepted = event
+			case "incomplete", "read-after-boundary":
+				t.Fatalf("timely load-time offer was discarded: %+v", event)
 			}
 		}
-		if discarded.Sequence != sequence || !boundary.SampleTime.Before(discarded.SampleTime) ||
-			samples.attemptCount != 1 || len(samples.latencies) != 0 || samples.failureCount != 1 ||
-			!errors.Is(samples.firstFailure, errLoadedLatencyProbeIncomplete) {
-			t.Fatalf("boundary=%+v discard=%+v samples=%+v", boundary, discarded, samples)
+		if accepted.Sequence != sequence || !boundary.SampleTime.Before(accepted.SampleTime) ||
+			samples.attemptCount != 1 || len(samples.latencies) != 1 || samples.failureCount != 0 ||
+			samples.latencies[0] != time.Nanosecond {
+			t.Fatalf("boundary=%+v accepted=%+v samples=%+v", boundary, accepted, samples)
 		}
 	})
 }
 
-// This characterizes the existing accounting seam; it does not weaken the
-// gate or claim it caused the PERF failure. The diagnostic must distinguish a
-// timely complete read whose handoff loses its pending identity from a packet
-// which was actually read after its deadline.
-func TestLatencyProbeObserverRevealsTimelyReadExpiredBeforeHandoff(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		const sequence = latencyProbeLoadedStartSequence
-		writeObserved := make(chan struct{})
-		readObserved := make(chan struct{})
-		releaseRead := make(chan struct{})
-		workloadDone := make(chan struct{})
-		var writeOnce sync.Once
-		var readOnce sync.Once
-		var mutex sync.Mutex
-		var events []latencyProbeObservation
-		observer := func(event latencyProbeObservation) {
-			mutex.Lock()
-			defer mutex.Unlock()
-			events = append(events, event)
-		}
-		connection := &latencyProbeScriptConn{
-			reads:          []latencyProbeScriptRead{{packet: latencyProbeTestPacket(sequence)}},
-			beforeReadHook: func() { <-writeObserved },
-			afterWriteHook: func() { writeOnce.Do(func() { close(writeObserved) }) },
-		}
-		completion := make(chan latencyProbeSamples, 1)
-		go func() {
-			completion <- runLoadedLatencyProbes(
-				t.Context(), connection, sequence, time.Second, 100*time.Millisecond, workloadDone,
-				&loadedLatencyProbeTestSettings{
-					observer: observer,
-					afterResponseReadHook: func() {
-						readOnce.Do(func() { close(readObserved) })
-						<-releaseRead
-					},
+// A timely complete read remains a success when its handoff crosses expiry
+// and the phase stops. This is a local accounting contract, not an attribution
+// of any measured campaign failure to the same interleaving.
+func TestLoadedLatencyProbeRetainsTimelyReadAcrossExpiryAndHandoff(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		unbuffered bool
+		cancel     bool
+	}{
+		{name: "buffered-workload"},
+		{name: "unbuffered-workload", unbuffered: true},
+		{name: "buffered-cancel", cancel: true},
+		{name: "unbuffered-cancel", unbuffered: true, cancel: true},
+	} {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			const sequence = latencyProbeLoadedStartSequence
+			writeObserved := make(chan struct{})
+			readObserved := make(chan struct{})
+			releaseRead := make(chan struct{})
+			workloadDone := make(chan struct{})
+			var writeOnce, readDelayOnce, readOnce sync.Once
+			var stateLock sync.Mutex
+			var events []latencyProbeObservation
+			observer := func(event latencyProbeObservation) {
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				events = append(events, event)
+			}
+			connection := &latencyProbeScriptConn{
+				reads: []latencyProbeScriptRead{{packet: latencyProbeTestPacket(sequence)}},
+				beforeReadHook: func() {
+					<-writeObserved
+					readDelayOnce.Do(func() { time.Sleep(200 * time.Millisecond) })
 				},
-			)
-		}()
-		<-readObserved
-		synctest.Wait()
-		time.Sleep(1100 * time.Millisecond)
-		synctest.Wait()
-		close(workloadDone)
-		synctest.Wait()
-		close(releaseRead)
-		samples := <-completion
-		var offered, read, expired, unmatched latencyProbeObservation
-		for _, event := range events {
-			if event.Sequence != sequence {
-				continue
+				afterWriteHook: func() { writeOnce.Do(func() { close(writeObserved) }) },
 			}
-			switch event.Stage {
-			case "offer":
-				offered = event
-			case "read-complete":
-				read = event
-			case "expired":
-				expired = event
-			case "unmatched":
-				unmatched = event
+			completion := make(chan latencyProbeSamples, 1)
+			go func() {
+				completion <- runLoadedLatencyProbes(
+					ctx, connection, sequence, time.Second, 100*time.Millisecond, workloadDone,
+					&loadedLatencyProbeTestSettings{
+						observer: observer,
+						afterResponseReadHook: func() {
+							readOnce.Do(func() { close(readObserved) })
+							<-releaseRead
+						},
+						unbufferedResponseHandoff: test.unbuffered,
+					},
+				)
+			}()
+			<-readObserved
+			synctest.Wait()
+			time.Sleep(1100 * time.Millisecond)
+			synctest.Wait()
+			if test.cancel {
+				cancel()
+			} else {
+				close(workloadDone)
 			}
-		}
-		if read.Stage == "" || expired.Stage == "" || unmatched.Stage == "" ||
-			!read.SampleTime.Before(offered.SampleTime.Add(time.Second)) ||
-			unmatched.SampleTime != read.SampleTime || unmatched.ObservedTime.Before(expired.ObservedTime) {
-			t.Fatalf("handoff evidence offer=%+v read=%+v expired=%+v unmatched=%+v", offered, read, expired, unmatched)
-		}
-		if len(samples.latencies) != 0 || samples.failureCount != samples.attemptCount {
-			t.Fatalf("instrumentation changed the existing accounting: %+v", samples)
-		}
-	})
+			synctest.Wait()
+			close(releaseRead)
+			samples := <-completion
+			var offered, read, accepted latencyProbeObservation
+			for _, event := range events {
+				if event.Sequence != sequence {
+					continue
+				}
+				switch event.Stage {
+				case "offer":
+					offered = event
+				case "read-complete":
+					read = event
+				case "accepted":
+					accepted = event
+				case "expired", "unmatched":
+					t.Fatalf("case=%s timely complete read lost its offer: %+v", test.name, event)
+				}
+			}
+			if read.Stage == "" || accepted.Stage == "" ||
+				read.SampleTime.Sub(offered.SampleTime) != 200*time.Millisecond ||
+				accepted.SampleTime != read.SampleTime ||
+				accepted.ObservedTime.Sub(read.SampleTime) < 1100*time.Millisecond {
+				t.Fatalf("case=%s handoff evidence offer=%+v read=%+v accepted=%+v", test.name, offered, read, accepted)
+			}
+			if samples.attemptCount != 14 || len(samples.latencies) != 1 ||
+				samples.latencies[0] != 200*time.Millisecond || samples.failureCount != 13 {
+				t.Fatalf("case=%s delayed handoff changed offered demand or completion accounting: %+v", test.name, samples)
+			}
+		})
+	}
 }

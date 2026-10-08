@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -164,13 +165,10 @@ func TestLoadedLatencyProbeCompletionJoinsReadResponseHandoff(t *testing.T) {
 	const sequence = latencyProbeLoadedStartSequence
 	responseRead := make(chan struct{})
 	releaseResponse := make(chan struct{})
-	readerInterrupted := make(chan struct{})
+	boundaryObserved := make(chan struct{})
 	writeObserved := make(chan struct{})
 	var responseReadOnce sync.Once
-	var readerInterruptedOnce sync.Once
 	var writeObservedOnce sync.Once
-	var deadlineStateLock sync.Mutex
-	readDeadlineCount := 0
 	connection := &latencyProbeScriptConn{
 		reads: []latencyProbeScriptRead{{packet: latencyProbeTestPacket(sequence)}},
 		beforeReadHook: func() {
@@ -178,14 +176,6 @@ func TestLoadedLatencyProbeCompletionJoinsReadResponseHandoff(t *testing.T) {
 		},
 		afterWriteHook: func() {
 			writeObservedOnce.Do(func() { close(writeObserved) })
-		},
-		setReadDeadlineHook: func(time.Time) {
-			deadlineStateLock.Lock()
-			defer deadlineStateLock.Unlock()
-			readDeadlineCount += 1
-			if readDeadlineCount == 2 {
-				readerInterruptedOnce.Do(func() { close(readerInterrupted) })
-			}
 		},
 	}
 	workloadDone := make(chan struct{})
@@ -199,6 +189,11 @@ func TestLoadedLatencyProbeCompletionJoinsReadResponseHandoff(t *testing.T) {
 			time.Hour,
 			workloadDone,
 			&loadedLatencyProbeTestSettings{
+				observer: func(event latencyProbeObservation) {
+					if event.Stage == "loaded-boundary" {
+						close(boundaryObserved)
+					}
+				},
 				afterResponseReadHook: func() {
 					responseReadOnce.Do(func() { close(responseRead) })
 					select {
@@ -217,9 +212,9 @@ func TestLoadedLatencyProbeCompletionJoinsReadResponseHandoff(t *testing.T) {
 	}
 	close(workloadDone)
 	select {
-	case <-readerInterrupted:
+	case <-boundaryObserved:
 	case <-ctx.Done():
-		t.Fatalf("wait for reader interruption: %v", ctx.Err())
+		t.Fatalf("wait for offer boundary: %v", ctx.Err())
 	}
 	close(releaseResponse)
 	select {
@@ -233,9 +228,14 @@ func TestLoadedLatencyProbeCompletionJoinsReadResponseHandoff(t *testing.T) {
 	}
 }
 
-// A response first read after the bulk boundary is drained for ownership but
-// remains an incomplete loaded probe rather than a post-load latency sample.
-func TestLoadedLatencyProbeCompletionExcludesPostBoundaryRead(t *testing.T) {
+// A response first read after original expiry is drained for ownership but
+// cannot be rescued by the completed bulk or the settlement handoff.
+func TestLoadedLatencyProbeCompletionRejectsPostDeadlineRead(t *testing.T) {
+	synctest.Test(t, testLoadedLatencyProbeCompletionRejectsPostDeadlineRead)
+}
+
+// A parked read resumes only after expiry has interrupted its deadline.
+func testLoadedLatencyProbeCompletionRejectsPostDeadlineRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	const sequence = latencyProbeLoadedStartSequence
@@ -306,7 +306,7 @@ func TestLoadedLatencyProbeCompletionExcludesPostBoundaryRead(t *testing.T) {
 	case samples := <-completion:
 		if samples.attemptCount != 1 || len(samples.latencies) != 0 ||
 			samples.failureCount != 1 ||
-			!errors.Is(samples.firstFailure, errLoadedLatencyProbeIncomplete) {
+			!errors.Is(samples.firstFailure, context.DeadlineExceeded) {
 			t.Fatalf("post-boundary response samples=%+v", samples)
 		}
 	case <-ctx.Done():

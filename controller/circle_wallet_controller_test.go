@@ -268,37 +268,46 @@ func TestWalletBalance(t *testing.T) {
 	})
 }
 
+// Historical one-dollar transfers retain the caller request id and accepted
+// challenge, with synthetic Circle responses.
 func TestWalletCircleTransferOut(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-			NetworkId:   server.NewId(),
-			NetworkName: "test",
-			UserId:      server.NewId(),
+		var submissionCount int
+		var fixture *customerTransferFixture
+		fixture = newCustomerTransferFixture(t, func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodPost || request.URL.Path != "/v1/w3s/user/transactions/transfer" {
+				return nil, fmt.Errorf("unexpected Circle request: %s %s", request.Method, request.URL.Path)
+			}
+			submissionCount++
+			return customerTransferResponse(http.StatusCreated, map[string]any{
+				"data": map[string]any{"challengeId": fixture.challenge},
+			}), nil
 		})
+		fixture.args.AmountUsdcNanoCents = model.UsdToNanoCents(1.0)
 
-		model.SetCircleUserId(
-			ctx,
-			session.ByJwt.NetworkId,
-			session.ByJwt.UserId,
-			circleUserIdWithWalletAndBalance,
-		)
-
-		result, err := WalletCircleTransferOut(
-			&WalletCircleTransferOutArgs{
-				Terms: true,
-				// BringYour USDC Polygon
-				ToAddress:           "0xB3f448b9C395F9833BE866577254799c23BBa682",
-				AmountUsdcNanoCents: model.UsdToNanoCents(1.0),
-			},
-			session,
-		)
-
-		connect.AssertEqual(t, err, nil)
+		result, err := WalletCircleTransferOut(fixture.args, fixture.owner)
+		if err != nil || result == nil {
+			t.Fatal("historical transfer did not create a challenge", err)
+		}
+		if result.RequestId == nil || *result.RequestId != *fixture.args.RequestId {
+			t.Fatal("transfer response lost the caller request id")
+		}
 		connect.AssertEqual(t, result.Error, nil)
 		connect.AssertNotEqual(t, result.UserToken, nil)
-		connect.AssertNotEqual(t, result.ChallengeId, "")
+		connect.AssertEqual(t, result.ChallengeId, fixture.challenge)
+		connect.AssertEqual(t, result.ChallengeStatus, "PENDING")
+		connect.AssertEqual(t, submissionCount, 1)
+
+		retained := fixture.retained(t)
+		if retained.ChallengeId == nil || *retained.ChallengeId != result.ChallengeId {
+			t.Fatal("accepted challenge was not retained for the caller request")
+		}
+		connect.AssertEqual(t, retained.RequestId, *result.RequestId)
+		connect.AssertEqual(t, retained.Basis.Destination, fixture.args.ToAddress)
+		connect.AssertEqual(t, retained.Basis.Amount, fixture.args.AmountUsdcNanoCents)
+		connect.AssertEqual(t, retained.ChallengeStatus, result.ChallengeStatus)
+		connect.AssertEqual(t, retained.SubmissionCount, int64(1))
+		connect.AssertEqual(t, retained.ReviewRequired, false)
 	})
 }
 
