@@ -6316,6 +6316,39 @@ and both Taskworker startup profiles in 10.464 seconds
 Deployment remains pending at this documentation update. These local controls
 and the source merge do not identify the fresh NULL writer or prove Main cleanup.
 
+The writer discriminator is the executed INSERT, not the age bucket. Current
+`createTransferEscrowInTx`, `createRedisTransferEscrowInTx`, and
+`createContractNoEscrowInTx` all derive expiration from one materialized database
+creation clock and the constant lifetime; none accepts a nullable deadline.
+The inspected production tree has no later NULL assignment or trigger that
+clears it. Migration 790 deliberately left the column nullable without a default,
+however, and retained pre-expiration source `de68468d` omits the column in all
+three INSERTs. An overlapping older process or another writer is therefore a
+source-supported possibility, even when every selected current service has the
+new image. It is not an attribution. Positive-byte public admission already used
+Redis in `de68468d`; a fresh positive-byte non-Redis escrow needs an older admission
+owner or another write path, not merely any revision before expiration was added.
+
+Current Taskworker probes and hosted proxies inject local credential and control
+owners. Their supplied local authority never falls back to public HTTP, so their
+configured API URL alone cannot redirect contract creation to an older API.
+The standalone egress-prober command supplies no local authority and does use its
+configured HTTP API; an older serving or draining process is another distinct
+candidate. Preserve the exact private row/write provenance and join an observed
+statement to its executing process and artifact before choosing between these
+routes. Current fleet selection, anonymous SQL samples, client ancestry, and a
+matching source literal do not provide that join. Keep identifiers and credentials
+in the restricted evidence, and use bounded retained evidence before requesting
+another production read.
+
+Canonical `9bc8a7e` separately applies the same NULL fallback to companion-origin
+selection, prober reservation sizing, the post-lock origin check, and escrow
+reuse. Independent native controls reproduced four stale-origin failures and
+passed five selected tests after the fix (receipt SHA-256
+`c09062b2a1d22ca9fe25dfdc1b223a939d7b17160daaa40c660fdaba2370f20a`).
+This follow-up does not identify a writer, backfill stored deadlines, or establish
+deployment beyond the frozen `db179741` R54 source.
+
 Startup uses one RunOnce key for this coordinator, preserving an existing
 cursor instead of inserting one task per contract. Its ordinary Post persists
 the next bounded scan and schedules another run; a startup request during an
