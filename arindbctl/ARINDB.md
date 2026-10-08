@@ -990,7 +990,7 @@ native qualification tests are separate gates. Independent composition review
 `239ee059` verified all 176 frozen files and preservation controls; semantic
 subscriber-source review `a4b250db` accepted all thirteen registry-to-service
 judgments with the recorded mixed-use and projection limitations. Four native
-qualification tests remain pending. Those tests cover strict catalog
+qualification tests passed in the combined Canada gate `e70099a3`. They cover strict catalog
 parsing, exact identities, base-state/risk preservation, unknown origins,
 visibility/RPKI withholding and six explicit negative-use classes. They open
 no evidence feed, MMDB or database. Source composition has not refreshed the
@@ -1057,10 +1057,16 @@ unsupported proxy risk, affiliate-ASN additions, changed prior identities and
 feed-clock relabelling. Independent composition review `57336ce6` verified
 all 132 frozen files and the preservation controls. Semantic source review
 `2b893d77` accepted the six access and four hosting identities with the recorded
-limitations. Five native tests remain pending. They add actual hosting-origin
-vetoes and unsupported-risk checks to the access-identity controls. Native qualification,
-fresh feeds, artifact construction/readbacks, publication, mapped adoption
-and the separate URL health gate remain necessary.
+limitations. The five follow-up native tests also passed in combined gate
+`e70099a3`, adding actual hosting-origin vetoes and unsupported-risk checks to
+the access-identity controls. All nine tests used the exact clean `116350e6`
+source, two CPU cores, a 2-GiB memory cap and no swap; they opened no feed,
+MMDB or database. The ARIN Go source is unchanged at the later `53675285`
+canonical observation and from the qualified `bbc8972f` builder. This extends
+catalog/schema and decision qualification without claiming that every later
+server package was tested. Canonical integration, fresh feeds, artifact
+construction/readbacks, publication, mapped adoption and the separate URL
+health gate remain necessary.
 
 The twelve-ASN augmentation has a separately qualified reuse executor
 (`db1631d8`) and full/native/mapped readback preparation (`1a6c7beb`). It keeps
