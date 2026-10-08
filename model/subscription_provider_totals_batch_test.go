@@ -50,9 +50,18 @@ func TestLegacyProviderTotalsClaimedBatchCoalescesWritesAndFinalizesOwners(t *te
 				taskIds = append(taskIds, providerTotalsTestTask(ctx, server.NewId(), networkId))
 			}
 			providerTotalsBatchDue(ctx, taskIds)
-			finished, retried, posts, err := worker.EvalTasks(count)
-			if err != nil || len(finished) != count || len(retried) != 0 || len(posts) != 0 {
-				t.Fatalf("claimed provider cohort did not finalize exactly: finished=%d retry=%d posts=%d err=%v", len(finished), len(retried), len(posts), err)
+			// Admission cannot run two prepared writers for this same provider
+			// at once. Preserve the complete65-owner oracle across64+1 claims.
+			remaining := count
+			for pass := 0; remaining > 0; pass++ {
+				if pass >= (count+legacyProviderTotalsBatchLimit-1)/legacyProviderTotalsBatchLimit {
+					t.Fatal("bounded provider admission did not finish its exact cohort")
+				}
+				finished, retried, posts, err := worker.EvalTasks(remaining)
+				if err != nil || len(finished) != min(remaining, legacyProviderTotalsBatchLimit) || len(retried) != 0 || len(posts) != 0 {
+					t.Fatalf("claimed provider cohort did not finalize exactly: finished=%d retry=%d posts=%d err=%v", len(finished), len(retried), len(posts), err)
+				}
+				remaining -= len(finished)
 			}
 			for _, id := range taskIds {
 				completed := task.GetFinishedTasks(ctx, id)[id]

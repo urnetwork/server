@@ -7,7 +7,11 @@ import "fmt"
 
 // Retain the complete existing eligibility boundary, including versioned
 // aliases and scoped post retries, before the ordered fallback limit.
-func (self *TaskWorker) claimCandidatesQuery(nowBlock int64, candidateLimit int) (string, []any) {
+func (self *TaskWorker) claimCandidatesQuery(nowBlock int64, candidateLimit int, includeGroupArgs ...bool) (string, []any) {
+	groupArgsColumn := ""
+	if len(includeGroupArgs) != 0 && includeGroupArgs[0] {
+		groupArgsColumn = ", args_json"
+	}
 	claimPredicate := ""
 	queryArgs := []any{nowBlock, candidateLimit}
 	if self.settings.ClaimRegisteredTargetsOnly {
@@ -47,7 +51,7 @@ func (self *TaskWorker) claimCandidatesQuery(nowBlock int64, candidateLimit int)
 				task_id,
 				function_name,
 				run_priority,
-				run_max_time_seconds
+				run_max_time_seconds` + groupArgsColumn + `
 			FROM pending_task
 			WHERE available_block <= $1
 		` + claimPredicate + `

@@ -132,7 +132,9 @@ type taskClaimGuard struct {
 	releaseOnce  sync.Once
 	admissionKVs map[server.Id]*taskClaimReservation
 	// Collector-owned exact identities also prevent reentrant session claims.
-	taskIds map[server.Id]bool
+	taskIds        map[server.Id]bool
+	groupKeyStates map[taskClaimGroupKey]*taskClaimGroupState
+	taskGroupKeys  map[server.Id][]taskClaimGroupKey
 }
 
 func (self *taskClaimGuard) ping(ctx context.Context) error {
@@ -1832,11 +1834,13 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		taskId       server.Id
 		functionName string
 		priority     taskPriority
+		argsJson     string
 	}
 
 	nowBlock := server.NowUtc().Unix() / BlockSizeSeconds
 	candidateLimit := n + 64
-	query, queryArgs := self.claimCandidatesQuery(nowBlock, candidateLimit)
+	includeGroupArgs := self.hasTaskClaimGroups()
+	query, queryArgs := self.claimCandidatesQuery(nowBlock, candidateLimit, includeGroupArgs)
 	// Keep the queue name visible in FETCH for the existing query monitors.
 	_, err = tx.Exec(
 		ctx,
@@ -1849,6 +1853,7 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 
 	taskIds := []server.Id{}
 	taskIdPriorities := map[server.Id]taskPriority{}
+	passGroupKeys := map[taskClaimGroupKey]bool{}
 	for candidateCount := 0; len(taskIds) < n && candidateCount < candidateLimit; {
 		fetchCount := min(n-len(taskIds), candidateLimit-candidateCount)
 		// A forward cursor preserves one scan and snapshot across refusals.
@@ -1864,12 +1869,16 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		candidates := make([]taskCandidate, 0, fetchCount)
 		for result.Next() {
 			candidate := taskCandidate{}
-			if err := result.Scan(
+			columns := []any{
 				&candidate.taskId,
 				&candidate.functionName,
 				&candidate.priority.priority,
 				&candidate.priority.maxTimeSeconds,
-			); err != nil {
+			}
+			if includeGroupArgs {
+				columns = append(columns, &candidate.argsJson)
+			}
+			if err := result.Scan(columns...); err != nil {
 				result.Close()
 				return nil, guard, false, err
 			}
@@ -1910,6 +1919,16 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 			if !acquired {
 				delete(guard.taskIds, candidate.taskId)
 				guard.releaseAdmission(candidate.taskId)
+				continue
+			}
+			grouped, err := self.reserveTaskClaimGroups(ctx, tx, guard, candidate.taskId, candidate.functionName, candidate.argsJson, passGroupKeys)
+			if err != nil {
+				return nil, guard, false, err
+			}
+			if !grouped {
+				if err := guard.retireTaskWithQuery(ctx, tx, candidate.taskId); err != nil {
+					return nil, guard, false, err
+				}
 				continue
 			}
 			taskIds = append(taskIds, candidate.taskId)
@@ -1960,19 +1979,9 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		selectedCount = 0
 	}
 	for _, taskId := range taskIds[selectedCount:] {
-		var unlocked bool
-		if err := tx.QueryRow(
-			ctx,
-			`SELECT pg_advisory_unlock($1)`,
-			taskAdvisoryLockKey(taskId),
-		).Scan(&unlocked); err != nil {
+		if err := guard.retireTaskWithQuery(ctx, tx, taskId); err != nil {
 			return nil, guard, false, err
 		}
-		if !unlocked {
-			return nil, guard, false, fmt.Errorf("task advisory lock was not held for %s", taskId)
-		}
-		delete(guard.taskIds, taskId)
-		guard.releaseAdmission(taskId)
 	}
 	taskIds = taskIds[:selectedCount]
 

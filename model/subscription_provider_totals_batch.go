@@ -30,6 +30,25 @@ type legacyProviderTotalsTaskTarget struct {
 // post or continuation; completed owners may share only their durable handback.
 func (self *legacyProviderTotalsTaskTarget) TaskCompletionBatchEnabled() bool { return true }
 
+// Claim admission serializes each provider across evaluator sessions. A single
+// provider can share one prepared accounting batch; multi-provider work takes
+// every provider exclusively, up to the fixed key bound. Larger, applied and
+// invalid payloads retain ordinary accounting/replay without new group locks.
+func (self *legacyProviderTotalsTaskTarget) TaskClaimGroupIds(argsJson string) ([]server.Id, int) {
+	payload, err := decodeLegacyProviderTotals(argsJson)
+	if err != nil || payload.Applied || len(payload.Totals) > task.TaskClaimGroupKeyLimit {
+		return nil, 0
+	}
+	ids := make([]server.Id, 0, len(payload.Totals))
+	for _, total := range payload.Totals {
+		ids = append(ids, total.NetworkId)
+	}
+	if len(ids) == 1 {
+		return ids, legacyProviderTotalsBatchLimit
+	}
+	return ids, 1
+}
+
 // Single-provider allocations can share a row update without coupling unrelated
 // providers. Malformed, applied and multi-provider tasks retain ordinary execution.
 func (self *legacyProviderTotalsTaskTarget) PrepareTaskBatch(tasks []*task.Task) task.Target {

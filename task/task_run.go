@@ -5,7 +5,6 @@ package task
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -22,16 +21,7 @@ type taskSlotEvent struct {
 // Retire one exact owner, keeping all live sibling locks on the same session.
 // A failure leaves the guard responsible for cleanup after its executions join.
 func (self *taskClaimGuard) retireTask(ctx context.Context, taskId server.Id) error {
-	var unlocked bool
-	if err := self.conn.QueryRow(ctx, `SELECT pg_advisory_unlock($1)`, taskAdvisoryLockKey(taskId)).Scan(&unlocked); err != nil {
-		return err
-	}
-	if !unlocked {
-		return fmt.Errorf("task advisory lock was not held for %s", taskId)
-	}
-	delete(self.taskIds, taskId)
-	self.releaseAdmission(taskId)
-	return nil
+	return self.retireTaskWithQuery(ctx, self.conn, taskId)
 }
 
 // Stream ordinary work through n slots until the owned cohort drains. A slot
