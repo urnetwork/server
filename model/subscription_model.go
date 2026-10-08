@@ -4049,6 +4049,14 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 			// a missing or corrupt original proof grants no new credit.
 			usage, usageErr := contractUsageSnapshotInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
 			server.Raise(usageErr)
+			// Quarantine changes no debit, but the terminal transition advances
+			// every retained legacy reservation revision. Admit that complete
+			// scope after private contract custody and before the outcome write.
+			admitted, ownershipErr := tryContractTransferBalanceOwnershipInTx(ctx, tx, []server.Id{openContract.contractId})
+			server.Raise(ownershipErr)
+			if !admitted {
+				server.Raise(errTransferBalanceOwnershipBusy)
+			}
 			commandTag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -4073,7 +4081,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 				server.AddTxCommitCount(tx, &contractClosedCounter, 1)
 				contractHoleEventInTx(ctx, tx, openContract.contractId, openContract.sourceId, openContract.destinationId, "remove")
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 
 		// the quarantine settles the contract with no payout, so release its
 		// reservation back to the payer's available balance instead of leaking
