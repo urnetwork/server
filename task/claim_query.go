@@ -24,7 +24,7 @@ func (self *TaskWorker) taskCandidatesQuery(nowBlock int64, candidateLimit int, 
 	}
 	rowLock := "FOR UPDATE SKIP LOCKED"
 	if ownershipFirst {
-		groupArgsColumn += ", run_once_key"
+		groupArgsColumn += ", run_once_key, available_block"
 		rowLock = ""
 	}
 	claimPredicate := ""

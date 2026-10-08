@@ -27,8 +27,8 @@ func (self *taskClaimGuard) retireTask(ctx context.Context, taskId server.Id) er
 // Stream ordinary work through n slots until the owned cohort drains. A slot
 // includes finalization and committed posts, not only the task function. All
 // claim, unlock, and heartbeat calls on the direct session are serialized here.
-func (self *TaskWorker) runTaskSlots(n int) (worked bool, returnErr error) {
-	tasks, guard, _, err := self.takeTasksWithGuard(self.runCtx, n, nil, taskClaimOptions{detachCommittedRead: true})
+func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, returnErr error) {
+	tasks, guard, _, err := self.takeTasksWithGuard(self.runCtx, n, nil, taskClaimOptions{detachCommittedRead: true, poll: poll})
 	if err != nil {
 		return false, err
 	}
@@ -65,7 +65,7 @@ func (self *TaskWorker) runTaskSlots(n int) (worked bool, returnErr error) {
 	refill := false
 	readyHandbacks := 0
 	retiredIds := make([]server.Id, 0, n)
-	nextPoll := self.heartbeatNow().Add(self.settings.PollTimeout)
+	nextPoll := self.heartbeatNow().Add(poll.delay(self.claimNow(), self.settings.PollTimeout))
 	nextHeartbeat := self.heartbeatNow().Add(ReleaseTimeout / 3)
 
 	boundedContext := func() (context.Context, context.CancelFunc) {
@@ -318,7 +318,7 @@ func (self *TaskWorker) runTaskSlots(n int) (worked bool, returnErr error) {
 					timeout = DefaultTaskFinalizeTimeout
 				}
 				claimCtx, cancel := context.WithTimeout(self.runCtx, timeout)
-				claimed, _, needsIsolation, err := self.takeTasksWithGuard(claimCtx, free, guard, taskClaimOptions{ordinaryOnly: true, detachCommittedRead: true})
+				claimed, _, needsIsolation, err := self.takeTasksWithGuard(claimCtx, free, guard, taskClaimOptions{ordinaryOnly: true, detachCommittedRead: true, poll: poll})
 				cancel()
 				if err != nil {
 					claimErr = err
@@ -331,13 +331,13 @@ func (self *TaskWorker) runTaskSlots(n int) (worked bool, returnErr error) {
 				} else {
 					taskPollsTotal.WithLabelValues("empty").Inc()
 				}
-				nextPoll = self.heartbeatNow().Add(self.settings.PollTimeout)
+				nextPoll = self.heartbeatNow().Add(poll.delay(self.claimNow(), self.settings.PollTimeout))
 				// Check heartbeat again after the bounded claim transaction.
 				continue
 			}
-			var poll <-chan time.Time
+			var pollTick <-chan time.Time
 			if !stopped && free > 0 {
-				poll = time.After(nextPoll.Sub(self.heartbeatNow()))
+				pollTick = self.pollAfter(nextPoll.Sub(self.heartbeatNow()))
 			}
 			select {
 			case <-runDone:
@@ -347,7 +347,7 @@ func (self *TaskWorker) runTaskSlots(n int) (worked bool, returnErr error) {
 				readyHandbacks += collectEvent(event)
 			case <-self.heartbeatAfter(nextHeartbeat.Sub(self.heartbeatNow())):
 				heartbeat()
-			case <-poll:
+			case <-pollTick:
 				refill = true
 			}
 		}

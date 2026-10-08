@@ -1484,11 +1484,12 @@ type TaskWorker struct {
 	targetMetricNames map[string]string
 	settings          *TaskWorkerSettings
 
-	// These production-boundary functions are fields so tests can trigger a
-	// heartbeat and a pooled refresh panic with explicit barriers. Every worker
-	// constructed through NewTaskWorker receives the real clock and DB write.
+	// These production boundaries let tests inspect exact eligibility alarms,
+	// heartbeats and refresh failures. Construction uses real clocks and I/O.
 	heartbeatAfter             func(time.Duration) <-chan time.Time
 	heartbeatNow               func() time.Time
+	claimNow                   func() time.Time
+	pollAfter                  func(time.Duration) <-chan time.Time
 	refreshTaskTimestampLeases func(context.Context, map[server.Id]*Task)
 	// Drain logs are best effort: a full stdout pipe must not hold shutdown.
 	drainLogf func(string, ...any)
@@ -1537,6 +1538,8 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 		settings:                   settings,
 		heartbeatAfter:             time.After,
 		heartbeatNow:               time.Now,
+		claimNow:                   server.NowUtc,
+		pollAfter:                  time.After,
 		refreshTaskTimestampLeases: refreshTaskTimestampLeases,
 		drainLogf:                  glog.Infof,
 		claimTargetCounts:          map[string]int{},
@@ -1563,7 +1566,8 @@ func (self *TaskWorker) Run() {
 		default:
 		}
 
-		worked, err := self.runTaskSlots(self.settings.BatchSize)
+		poll := &taskClaimPoll{}
+		worked, err := self.runTaskSlots(self.settings.BatchSize, poll)
 		if err != nil {
 			taskPollsTotal.WithLabelValues("error").Inc()
 			glog.Infof("[taskworker]error running tasks: %s\n", err)
@@ -1581,7 +1585,7 @@ func (self *TaskWorker) Run() {
 			select {
 			case <-self.runCtx.Done():
 				return
-			case <-time.After(self.settings.PollTimeout):
+			case <-self.pollAfter(poll.delay(self.claimNow(), self.settings.PollTimeout)):
 			}
 		} else {
 			taskPollsTotal.WithLabelValues("claimed").Inc()
@@ -1865,6 +1869,7 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, *taskClaimGuard, 
 type taskClaimOptions struct {
 	ordinaryOnly        bool
 	detachCommittedRead bool
+	poll                *taskClaimPoll
 }
 
 // Claim at most n free slots. Only the Run collector touches a reused guard.
@@ -1874,6 +1879,9 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	isolatedPending bool,
 	returnErr error,
 ) {
+	if options.poll != nil {
+		options.poll.availableAt = time.Time{}
+	}
 	if n <= 0 {
 		return map[server.Id]*Task{}, guard, false, nil
 	}
@@ -1927,17 +1935,23 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		maxTimeSeconds int
 	}
 	type taskCandidate struct {
-		taskId       server.Id
-		functionName string
-		priority     taskPriority
-		argsJson     string
-		runOnceKey   *string
+		taskId         server.Id
+		functionName   string
+		priority       taskPriority
+		argsJson       string
+		runOnceKey     *string
+		availableBlock int64
 	}
 
-	nowBlock := server.NowUtc().Unix() / BlockSizeSeconds
+	now := self.claimNow()
+	nowBlock := now.Unix() / BlockSizeSeconds
+	throughBlock := nowBlock
+	if options.poll != nil && self.settings.PollTimeout > 0 {
+		throughBlock = now.Add(self.settings.PollTimeout).Unix() / BlockSizeSeconds
+	}
 	candidateLimit := n + 64
 	includeGroupArgs := self.hasTaskClaimGroups()
-	query, queryArgs := self.claimOwnershipCandidatesQuery(nowBlock, candidateLimit, includeGroupArgs)
+	query, queryArgs := self.claimOwnershipCandidatesQuery(throughBlock, candidateLimit, includeGroupArgs)
 	// Keep the queue name visible in FETCH for the existing query monitors.
 	_, err = tx.Exec(
 		ctx,
@@ -1951,6 +1965,7 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	taskIds := []server.Id{}
 	taskIdPriorities := map[server.Id]taskPriority{}
 	passGroupKeys := map[taskClaimGroupKey]bool{}
+claimCandidates:
 	for candidateCount := 0; len(taskIds) < n && candidateCount < candidateLimit; {
 		fetchCount := min(n-len(taskIds), candidateLimit-candidateCount)
 		// A forward cursor preserves one scan and snapshot across refusals.
@@ -1975,7 +1990,7 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 			if includeGroupArgs {
 				columns = append(columns, &candidate.argsJson)
 			}
-			columns = append(columns, &candidate.runOnceKey)
+			columns = append(columns, &candidate.runOnceKey, &candidate.availableBlock)
 			if err := result.Scan(columns...); err != nil {
 				result.Close()
 				return nil, guard, false, err
@@ -1992,6 +2007,14 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		}
 		candidateCount += len(candidates)
 		for _, candidate := range candidates {
+			// The same bounded cursor can retain an eligibility wake hint.
+			// Future rows take no execution, queue, group or business owner.
+			if candidate.availableBlock > nowBlock {
+				if options.poll != nil {
+					options.poll.availableAt = time.Unix(candidate.availableBlock*BlockSizeSeconds, 0)
+				}
+				break claimCandidates
+			}
 			// Session advisory locks are reentrant: a reset timestamp must not
 			// let this same Run start a second execution of its live task.
 			if guard.taskIds[candidate.taskId] {
