@@ -23,6 +23,7 @@ func requireRunFinalStats(t *testing.T, listenerFailure bool) {
 	env.Run(t, func(t testing.TB) {
 		for key, value := range map[string]string{
 			"WARP_SERVICE": "connect", "WARP_BLOCK": "g1", "WARP_HOST": "synthetic-host",
+			"WARP_VERSION":   "2026.1.1+1",
 			"WARP_HOST_IPV4": "127.0.0.1", "WARP_HOST_IPV6": "", "WARP_PORTS": "8080:8080,5080:0",
 			"ARIN_SHADOW_CAPTURE_CONFIG": "",
 		} {
