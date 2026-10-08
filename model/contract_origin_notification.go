@@ -61,6 +61,7 @@ type contractOriginSubscription interface {
 type contractOriginPair struct {
 	version *connect.MonitorValue[uint64]
 	refs    int
+	lookup  contractOriginLookupState
 }
 
 type contractOriginBucket struct {
@@ -383,6 +384,7 @@ func (self *ContractOriginNotifications) notifyBucket(index int, key *[32]byte) 
 		}
 	}()
 	for _, pair := range pairs {
+		pair.lookup.invalidate()
 		pair.version.Update(func(version uint64) uint64 { return version + 1 })
 	}
 }
@@ -407,6 +409,7 @@ func (self *ContractOriginNotifications) Close() {
 			self.waiters = 0
 		}()
 		for _, pair := range pairs {
+			pair.lookup.invalidate()
 			pair.version.Update(func(version uint64) uint64 { return version + 1 })
 		}
 		abandoned := 0

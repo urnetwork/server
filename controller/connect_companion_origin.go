@@ -41,14 +41,22 @@ func init() {
 	prometheus.MustRegister(companionOriginLookupCounter, companionOriginWakeCounter, companionOriginLookupHistogram)
 }
 
+// A watch shares only missing reads; the controller still owns each creation
+// and forces an independent authoritative read at its own final deadline.
+type companionOriginLookup interface {
+	Lookup(context.Context, bool, func() (*model.TransferEscrow, error)) (*model.TransferEscrow, error)
+}
+
 // Only an absent origin is retryable. A successful creation is returned exactly
 // once, even if the caller's context expires during its committed transaction.
 func waitForCompanionOrigin(
 	ctx context.Context,
+	shared companionOriginLookup,
 	createEscrow func() (*model.TransferEscrow, error),
 	updates ...func() <-chan struct{},
 ) (*model.TransferEscrow, error) {
 	deadline := time.Now().Add(CompanionOriginWaitTimeout)
+	attempts := 0
 	lookups := 0
 	defer func() { companionOriginLookupHistogram.Observe(float64(lookups)) }()
 	var lastLookup time.Time
@@ -80,9 +88,19 @@ func waitForCompanionOrigin(
 		// Subscribe immediately before the authoritative read. A commit or
 		// subscription acknowledgement during that read remains observable.
 		lastLookup = time.Now()
-		lookups++
-		companionOriginLookupCounter.WithLabelValues(source).Inc()
-		escrow, err := createEscrow()
+		attempts++
+		create := func() (*model.TransferEscrow, error) {
+			lookups++
+			companionOriginLookupCounter.WithLabelValues(source).Inc()
+			return createEscrow()
+		}
+		var escrow *model.TransferEscrow
+		var err error
+		if shared == nil {
+			escrow, err = create()
+		} else {
+			escrow, err = shared.Lookup(ctx, !lastLookup.Before(deadline), create)
+		}
 		if !errors.Is(err, model.ErrMissingCompanionOrigin) {
 			return escrow, err
 		}
@@ -90,7 +108,7 @@ func waitForCompanionOrigin(
 			return nil, err
 		}
 		fallback := companionOriginFallbackTimeout
-		if lookups == 1 {
+		if attempts == 1 {
 			fallback = CompanionOriginWaitPollTimeout
 		}
 		wait := min(fallback, time.Until(deadline))

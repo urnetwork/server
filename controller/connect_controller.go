@@ -1194,7 +1194,7 @@ func newContract(
 		originWatch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 		defer originWatch.Close()
 		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
-		escrow, err := waitForCompanionOrigin(ctx, func() (*model.TransferEscrow, error) {
+		escrow, err := waitForCompanionOrigin(ctx, originWatch, func() (*model.TransferEscrow, error) {
 			return model.CreateCompanionTransferEscrow(
 				ctx,
 				sourceNetworkId,

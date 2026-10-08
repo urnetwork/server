@@ -11,15 +11,65 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server/model"
 )
+
+type testCompanionOriginLookup func(context.Context, bool, func() (*model.TransferEscrow, error)) (*model.TransferEscrow, error)
+
+func (self testCompanionOriginLookup) Lookup(ctx context.Context, force bool, create func() (*model.TransferEscrow, error)) (*model.TransferEscrow, error) {
+	return self(ctx, force, create)
+}
+
+func TestCompanionOriginWaitSharedMissesRetainFallbackAndFinalRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		var attempts []time.Duration
+		want := &model.TransferEscrow{}
+		calls := 0
+		before := 0.0
+		for _, source := range []string{"initial", "event", "fallback", "deadline"} {
+			before += testutil.ToFloat64(companionOriginLookupCounter.WithLabelValues(source))
+		}
+		shared := testCompanionOriginLookup(func(_ context.Context, force bool, create func() (*model.TransferEscrow, error)) (*model.TransferEscrow, error) {
+			attempts = append(attempts, time.Since(start))
+			if !force {
+				return nil, model.ErrMissingCompanionOrigin
+			}
+			return create()
+		})
+		got, err := waitForCompanionOrigin(t.Context(), shared, func() (*model.TransferEscrow, error) {
+			calls++
+			return want, nil
+		})
+		if got != want || err != nil || calls != 1 || time.Since(start) != 3*time.Second {
+			t.Fatalf("shared absence skipped final read: calls=%d elapsed=%v err=%v", calls, time.Since(start), err)
+		}
+		wantAttempts := []time.Duration{0, 100 * time.Millisecond, 600 * time.Millisecond, 1100 * time.Millisecond, 1600 * time.Millisecond, 2100 * time.Millisecond, 2600 * time.Millisecond, 3 * time.Second}
+		if len(attempts) != len(wantAttempts) {
+			t.Fatalf("shared attempts=%v, want %v", attempts, wantAttempts)
+		}
+		for i := range attempts {
+			if attempts[i] != wantAttempts[i] {
+				t.Fatalf("shared attempts=%v, want %v", attempts, wantAttempts)
+			}
+		}
+		after := 0.0
+		for _, source := range []string{"initial", "event", "fallback", "deadline"} {
+			after += testutil.ToFloat64(companionOriginLookupCounter.WithLabelValues(source))
+		}
+		if after-before != 1 {
+			t.Fatalf("authoritative lookup metric counted shared misses: delta=%v", after-before)
+		}
+	})
+}
 
 func TestCompanionOriginWaitBoundsMissingLookupCount(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
 		var attempts []time.Duration
-		escrow, err := waitForCompanionOrigin(context.Background(), func() (*model.TransferEscrow, error) {
+		escrow, err := waitForCompanionOrigin(context.Background(), nil, func() (*model.TransferEscrow, error) {
 			attempts = append(attempts, time.Since(start))
 			return nil, model.ErrMissingCompanionOrigin
 		})
@@ -44,7 +94,7 @@ func TestCompanionOriginWaitFindsOriginAtDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
 		want := &model.TransferEscrow{}
-		got, err := waitForCompanionOrigin(context.Background(), func() (*model.TransferEscrow, error) {
+		got, err := waitForCompanionOrigin(context.Background(), nil, func() (*model.TransferEscrow, error) {
 			if time.Since(start) < CompanionOriginWaitTimeout {
 				return nil, model.ErrMissingCompanionOrigin
 			}
@@ -68,7 +118,7 @@ func TestCompanionOriginWaitPreservesImmediateAndTerminalResults(t *testing.T) {
 		{name: "terminal failure", err: terminalErr},
 	} {
 		calls := 0
-		got, err := waitForCompanionOrigin(context.Background(), func() (*model.TransferEscrow, error) {
+		got, err := waitForCompanionOrigin(context.Background(), nil, func() (*model.TransferEscrow, error) {
 			calls++
 			return test.escrow, test.err
 		})
@@ -85,7 +135,7 @@ func TestCompanionOriginWaitCancellationDoesNotStartAnotherTransaction(t *testin
 		calls := 0
 		result := make(chan error, 1)
 		go func() {
-			_, err := waitForCompanionOrigin(ctx, func() (*model.TransferEscrow, error) {
+			_, err := waitForCompanionOrigin(ctx, nil, func() (*model.TransferEscrow, error) {
 				calls++
 				return nil, model.ErrMissingCompanionOrigin
 			})
@@ -104,7 +154,7 @@ func TestCompanionOriginWaitAlreadyCanceledDoesNotStartTransaction(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	calls := 0
-	_, err := waitForCompanionOrigin(ctx, func() (*model.TransferEscrow, error) {
+	_, err := waitForCompanionOrigin(ctx, nil, func() (*model.TransferEscrow, error) {
 		calls++
 		return nil, model.ErrMissingCompanionOrigin
 	})
@@ -118,7 +168,7 @@ func TestCompanionOriginWaitPreservesCommitDuringCancellation(t *testing.T) {
 	defer cancel()
 	want := &model.TransferEscrow{}
 	calls := 0
-	got, err := waitForCompanionOrigin(ctx, func() (*model.TransferEscrow, error) {
+	got, err := waitForCompanionOrigin(ctx, nil, func() (*model.TransferEscrow, error) {
 		calls++
 		cancel()
 		return want, nil
@@ -132,7 +182,7 @@ func TestCompanionOriginWaitSlowMissingQueryDoesNotExtendRetryWindow(t *testing.
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
 		calls := 0
-		_, err := waitForCompanionOrigin(context.Background(), func() (*model.TransferEscrow, error) {
+		_, err := waitForCompanionOrigin(context.Background(), nil, func() (*model.TransferEscrow, error) {
 			calls++
 			time.Sleep(CompanionOriginWaitTimeout)
 			return nil, model.ErrMissingCompanionOrigin
@@ -150,7 +200,7 @@ func TestCompanionOriginWaitDoesNotLoseEventDuringLookup(t *testing.T) {
 		calls := 0
 		start := time.Now()
 		want := &model.TransferEscrow{}
-		got, err := waitForCompanionOrigin(context.Background(), func() (*model.TransferEscrow, error) {
+		got, err := waitForCompanionOrigin(context.Background(), nil, func() (*model.TransferEscrow, error) {
 			calls++
 			if calls == 1 {
 				// The read's snapshot misses an origin whose commit and event
@@ -179,7 +229,7 @@ func TestCompanionOriginWaitEventPreemptsSlowFallback(t *testing.T) {
 		}()
 		calls := 0
 		want := &model.TransferEscrow{}
-		got, err := waitForCompanionOrigin(context.Background(), func() (*model.TransferEscrow, error) {
+		got, err := waitForCompanionOrigin(context.Background(), nil, func() (*model.TransferEscrow, error) {
 			calls++
 			if ready.Load() {
 				return want, nil
@@ -196,7 +246,7 @@ func TestCompanionOriginWaitMissingNotificationStillFindsOrigin(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
 		want := &model.TransferEscrow{}
-		got, err := waitForCompanionOrigin(context.Background(), func() (*model.TransferEscrow, error) {
+		got, err := waitForCompanionOrigin(context.Background(), nil, func() (*model.TransferEscrow, error) {
 			if time.Since(start) < 250*time.Millisecond {
 				return nil, model.ErrMissingCompanionOrigin
 			}
@@ -214,7 +264,7 @@ func TestCompanionOriginWaitDuplicateEventsRemainRateLimited(t *testing.T) {
 		updates := func() <-chan struct{} { _, update := changes.Get(); return update }
 		start := time.Now()
 		calls := 0
-		_, err := waitForCompanionOrigin(context.Background(), func() (*model.TransferEscrow, error) {
+		_, err := waitForCompanionOrigin(context.Background(), nil, func() (*model.TransferEscrow, error) {
 			calls++
 			changes.Update(func(version uint64) uint64 { return version + 1 })
 			return nil, model.ErrMissingCompanionOrigin

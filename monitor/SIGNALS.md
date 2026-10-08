@@ -9730,6 +9730,22 @@ rate remain independent controls. A high average can reflect legitimate
 simultaneous cold starts; require the sustained rate and successful-contract
 control before calling it a defect.
 
+Same-pair requests registered with one API/Connect notification owner now
+share only an exact missing-origin result for at most 100ms from the source
+lookup's start. They never share a successful contract, operational error, or
+cancellation. Pair events and subscription acknowledgements invalidate the
+hint, including an absence returned by a lookup that crossed that event.
+Every request retains timed fallback and an independent final authoritative
+read; notification loss or Redis restart cannot extend negative authority.
+The existing lookup counters/histogram count callbacks that actually query,
+not shared misses. State is bounded by the owner's existing live-watch budget
+and disappears with the last watch. This reduces duplicate work only where
+concurrent same-pair requests overlap on that owner. The October 8 15:04–15:05Z
+query prefixes matched both companion-discovery source statements, and the
+15:06:51Z origin-wait observation measured 312,755 timed rechecks/minute, but
+neither evidence identifies pair multiplicity or attributes PostgreSQL CPU or
+an exact LWLock subtype. Those remain separate production discriminators.
+
 `origin-notification-loss` WARNs after two one-minute cadences when the sum of
 `queue_full`, `publish_failed`, `subscription_failed`,
 `registration_declined`, and `invalid_message` exceeds one/minute. A missed
