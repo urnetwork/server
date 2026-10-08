@@ -23,9 +23,13 @@ func (self *TaskWorker) taskCandidatesQuery(nowBlock int64, candidateLimit int, 
 		groupArgsColumn = ", args_json"
 	}
 	rowLock := "FOR UPDATE SKIP LOCKED"
+	eligibilityBound := "$1"
 	if ownershipFirst {
 		groupArgsColumn += ", run_once_key, available_block"
 		rowLock = ""
+		// The cutoff is an execution parameter. Keep inequality planning from
+		// reading live histogram endpoints before this bounded cursor starts.
+		eligibilityBound = "(SELECT $1::bigint)"
 	}
 	claimPredicate := ""
 	queryArgs := []any{nowBlock, candidateLimit}
@@ -68,7 +72,7 @@ func (self *TaskWorker) taskCandidatesQuery(nowBlock int64, candidateLimit int, 
 				run_priority,
 				run_max_time_seconds` + groupArgsColumn + `
 			FROM pending_task
-			WHERE available_block <= $1
+			WHERE available_block <= ` + eligibilityBound + `
 		` + claimPredicate + `
 			ORDER BY available_block, run_priority DESC, run_max_time_seconds DESC
 			LIMIT $2

@@ -2065,8 +2065,10 @@ claimCandidates:
 			// RC observes the current lease/key after admission. Neither a stale
 			// discovery snapshot nor a nonparticipating writer can make this
 			// exact recheck wait on a business row or claim a changed identity.
+			// Evaluate the bound at execution too: planning a primary-key
+			// recheck must not probe the queue's live histogram endpoints.
 			err = tx.QueryRow(ctx, `SELECT run_priority,run_max_time_seconds
-				FROM pending_task WHERE task_id=$1 AND available_block <= $2
+				FROM pending_task WHERE task_id=$1 AND available_block <= (SELECT $2::bigint)
 				AND run_once_key IS NOT DISTINCT FROM $3::text AND function_name=$4
 				AND ($5::text IS NULL OR args_json=$5)
 				FOR UPDATE SKIP LOCKED`, candidate.taskId, nowBlock,

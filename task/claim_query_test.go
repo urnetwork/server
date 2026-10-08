@@ -291,6 +291,17 @@ func TestTaskClaimDenseSaturatedQueueWork(t *testing.T) {
 		for attempt := range 7 {
 			var beforePid, afterPid int32
 			var beforeVisits, afterVisits int64
+			var claimConn *pgx.Conn
+			var stageVisits int64
+			logStage := func(stage string) {
+				pid, visits, err := readVisits(claimConn)
+				server.Raise(err)
+				if pid != beforePid || visits < stageVisits {
+					t.Fatal("claim stage lost backend counter continuity", stage, pid, visits)
+				}
+				t.Logf("claim attempt %d stage %s: rows_visited=%d total=%d", attempt, stage, visits-stageVisits, visits-beforeVisits)
+				stageVisits = visits
+			}
 			worker.claimBeforeQuery = func(tx server.PgTx) error {
 				// Force prior pending reads before the start sample. This makes
 				// absolute-counter misuse fail without depending on pool reuse or
@@ -308,12 +319,16 @@ func TestTaskClaimDenseSaturatedQueueWork(t *testing.T) {
 				}
 				var err error
 				beforePid, beforeVisits, err = readVisits(tx.Conn())
+				claimConn, stageVisits = tx.Conn(), beforeVisits
 				if err == nil && beforeVisits < primingRows {
 					t.Fatalf("counter priming did not establish pending reads: %d", beforeVisits)
 				}
 				return err
 			}
+			worker.claimCandidatesReady = func() { logStage("cursor") }
+			worker.claimCandidateLocked = func(server.Id) { logStage("row_locked") }
 			worker.claimBeforeCommit = func(guard *taskClaimGuard) error {
+				logStage("claim_update")
 				var err error
 				afterPid, afterVisits, err = readVisits(guard.conn.Conn())
 				if err != nil {
@@ -341,6 +356,8 @@ func TestTaskClaimDenseSaturatedQueueWork(t *testing.T) {
 			t.Fatal("rolled-back measurements changed durable task claims")
 		}
 		worker.claimBeforeQuery = nil
+		worker.claimCandidatesReady = nil
+		worker.claimCandidateLocked = nil
 		worker.claimBeforeCommit = nil
 		claimed, guard, err := worker.takeTasks(batchSize)
 		if guard != nil {
