@@ -33,13 +33,11 @@ func TestLegacyPayerDueIndexUsesOnlyLiveMatchingPositiveObservation(t *testing.T
 		{name: "exact expiry", identity: identity, at: now.Add(legacySettlementPayerIndexCacheLifetime)},
 		{name: "different resource", identity: other, at: now},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			beforeExpiry := cache.expires
-			got := cache.readyObservation(t.Context(), test.identity, test.at)
-			if got != test.ready || cache.expires != beforeExpiry || checks != 1 {
-				t.Fatal("cache read changed readiness, expiry or probe count", got, test.ready, checks)
-			}
-		})
+		beforeExpiry := cache.expires
+		got := cache.readyObservation(t.Context(), test.identity, test.at)
+		if got != test.ready || cache.expires != beforeExpiry || checks != 1 {
+			t.Fatalf("%s: cache read changed readiness, expiry or probe count: got=%t want=%t checks=%d", test.name, got, test.ready, checks)
+		}
 	}
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
