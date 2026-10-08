@@ -6246,6 +6246,36 @@ coverage, but can discard the acceleration checkpoint. After every taskworker
 converges, require the exact executor artifact and consecutive persisted
 catch-up bounds/handoffs, then a bounded same-cohort terminal/reservation witness.
 
+The absolute-lifetime path uses the one `CloseExpiredContracts` coordinator,
+seeded immediately by both workload profiles after startup dependency admission.
+Legacy ledger, Redis admission and no-escrow creation all persist a database-clock
+deadline of 60 minutes and return that exact value for the provider-signed
+contract. Checkpoints do not update it. Both open/disputed selection and the
+locked proof owner accept a due absolute deadline independently of recent
+reports. A NULL deadline is a separate compatibility cohort: its current quiet
+cutoff is 12 minutes, not an inferred 60-minute deadline. Retained expiry proofs
+and pending legacy settlement intents remain owned by their existing continuations.
+
+Startup uses one RunOnce key for this coordinator, preserving an existing
+cursor instead of inserting one task per contract. Its ordinary Post persists
+the next bounded scan and schedules another run; a startup request during an
+active claim must advance that successor to the earliest explicit wake without
+replacing the Post's arguments. Native synthetic startup controls cover both
+profiles, fresh bilateral checkpoints on due legacy and Redis contracts,
+unchanged live/NULL neighbors, exact 17+17-byte debit and restart replay. Their
+cold legacy reservation projection converges only after its separately queued
+mirror task completes; a terminal close alone is not that projection's receipt.
+
+A fully classified accounting refusal with a remaining raw cursor or sweep
+needs the bounded 2–4-second continuation cadence. Selecting the 1–5-minute idle
+band from verified-close count alone parks healthy due rows behind a protected
+head even though the scan checkpoint advanced. Keep the typed failure, retry
+count, reservation and original report proof; the 1–5-minute band still applies
+after the entire pass finishes. Source and local controls do not establish Main
+adoption: require a current executor identity, its persisted continuation/wake,
+and a bounded same-cohort deadline/terminal/accounting observation before claiming
+runtime max-lifetime cleanup. Raw age or fleet image identity alone is insufficient.
+
 Also compare the complete stored failure and next due time with the attempt's
 duration. A verified underfunded dispute can leave unrelated per-contract
 commits durable while the whole task fails and backs off. The narrow §1.2 retry
