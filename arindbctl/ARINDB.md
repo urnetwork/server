@@ -998,6 +998,70 @@ expired evidence bundle or constructed, published or adopted a new resource.
 Current census coverage and actual provider impact remain unknown until the
 separate Root-owned observation and artifact gates succeed.
 
+The follow-up Canada packet reviews the ten remaining ASNs in that retained
+national priority queue. It proposes six additional subscriber ASNs and four
+hosting ASNs, each with its own exact registry record and primary service-use
+evidence:
+
+| Reviewed use | Operator group | Exact ASN additions |
+| --- | --- | --- |
+| Subscriber access | EBOX | 1403 |
+| Subscriber access | Altima Telecom | 22423, 396338 |
+| Subscriber access | OXIO | 398721 |
+| Subscriber access | Distributel Communications | 11814 |
+| Subscriber access | Primus Telecommunications Canada | 6407 |
+| Hosting | GLOBALTELEHOST / GTHost | 62563 |
+| Hosting | B2 Net Solutions / ServerMania | 55286 |
+| Hosting | Akamai / Linode cloud | 63949 |
+| Hosting | Datacamp Limited | 212238 |
+
+Cumulative candidate `cdcc4471` retains every `c95cfe5b` stanza and adds these
+nine groups. It contains 5,237 subscriber groups, ten negative groups and 5,514
+unique subscriber ASNs across 160 subscriber countries. Canada context is
+21 groups/26 ASNs. The cumulative change from tracked `5bbba6ad` is nineteen
+subscriber ASNs and four hosting ASNs. Neither proposal has produced a new
+Main resource or a measured provider gain.
+
+Current legal and support pages resolve EBOX, Altima, OXIO, Distributel and
+Primus to their subscriber brands. Separate registrants remain separate
+groups: Bell, TELUS and Cogeco relationships do not approve other ASNs or
+lend a parent group's route visibility. Primus's current support/billing
+page supplies the Primus Telecommunications Canada name and Bell division
+bridge when main-site legal pages are unavailable. Its published personal
+web-page/domain hosting caveat remains explicit. Distributel's EBOX sales link
+does not establish migration of all existing customers or routes.
+
+GTHost's legal term "Subscriber" describes customers of servers, VMs, storage
+and IP allocations. It is not subscriber-access evidence. Its terms identify
+GLOBALTELEHOST; ServerMania's own history identifies B2 Net Solutions. The
+Linode-named ASN is registered to Akamai in the exact APNIC record. RIPE's
+AS212238 organization record identifies Datacamp; the AS60068 named separately
+on Datacamp's corporate site is not added. RIR redirects and organization roles
+are retained explicitly, without treating maintainer contacts as operators.
+The four hosting additions veto clean inference without adding unsupported
+proxy, VPN, Tor or virtual-ISP risk flags.
+
+EBOX adds qualified Ontario/Quebec presence, Altima five named provinces and
+OXIO six; Primus and Distributel are not assigned provinces from general
+branding. The cumulative proposals supply use dispositions for all thirty
+ASNs in the retained September 30 Canada priority queue: twenty-five subscriber
+and five hosting identities. That queue is not a national or regional
+subscriber-market top thirty. All thirteen regional inventory rows remain
+partial, with rankings and subscription counts unknown.
+
+The follow-up is frozen under `artifacts/arin-ca-remaining-review-20261008-v1`
+by `research-freeze.json` (`c21eb1c7`). Its incremental `c95cfe5b` patch and
+cumulative `5bbba6ad` patch are both retained. Nine data-only composition
+controls passed, including refusal of hosting-to-subscriber changes,
+unsupported proxy risk, affiliate-ASN additions, changed prior identities and
+feed-clock relabelling. Independent composition review `57336ce6` verified
+all 132 frozen files and the preservation controls. Semantic source review
+`2b893d77` accepted the six access and four hosting identities with the recorded
+limitations. Five native tests remain pending. They add actual hosting-origin
+vetoes and unsupported-risk checks to the access-identity controls. Native qualification,
+fresh feeds, artifact construction/readbacks, publication, mapped adoption
+and the separate URL health gate remain necessary.
+
 The twelve-ASN augmentation has a separately qualified reuse executor
 (`db1631d8`) and full/native/mapped readback preparation (`1a6c7beb`). It keeps
 the validated registration base, all 38 original feed bytes and observation
