@@ -1416,7 +1416,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	var byJwt *jwt.ByJwt
 	var instanceId server.Id
-	var networkId *server.Id
 	authStatus := connectH1AuthenticationStatus(authCtx, func() (int, error) {
 		// Auth failures are client-driven and unbounded in rate, so they are
 		// counted in the jwt package rather than logged per occurrence.
@@ -1431,22 +1430,15 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		if byJwt.ClientId == nil {
 			return http.StatusForbidden, nil
 		}
-		if err := jwt.ValidateByJwtState(jwt.WithStateQuerySource(authCtx, jwt.StateQueryConnectH1), byJwt, true); err != nil {
+		var status int
+		instanceId, status, err = connectClientAuthentication(
+			jwt.WithStateQuerySource(authCtx, jwt.StateQueryConnectH1), byJwt, auth.InstanceId)
+		if status == http.StatusUnauthorized {
 			if glog.V(1) {
 				glog.Infof("[t]inactive auth jwt: %s\n", err)
 			}
-			return http.StatusUnauthorized, err
 		}
-		instanceId, err = server.IdFromBytes(auth.InstanceId)
-		if err != nil {
-			return http.StatusBadRequest, err
-		}
-		// Verify that the client is still part of the network.
-		networkId = model.GetNetworkClientNetwork(authCtx, *byJwt.ClientId)
-		if networkId == nil || *networkId != byJwt.NetworkId {
-			return http.StatusForbidden, nil
-		}
-		return 0, nil
+		return status, err
 	})
 	if authStatus != 0 {
 		rejectCustomAuth(authStatus)
@@ -2262,21 +2254,12 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			if byJwt.ClientId == nil {
 				return fmt.Errorf("Missing client id.")
 			}
-			if authErr = jwt.ValidateByJwtState(jwt.WithStateQuerySource(authCtx, jwt.StateQueryConnectH3), byJwt, true); authErr != nil {
-				return authErr
-			}
-
-			clientId = *byJwt.ClientId
-			instanceId, authErr = server.IdFromBytes(auth.InstanceId)
+			instanceId, _, authErr = connectClientAuthentication(
+				jwt.WithStateQuerySource(authCtx, jwt.StateQueryConnectH3), byJwt, auth.InstanceId)
 			if authErr != nil {
 				return authErr
 			}
-
-			// Verify the client is still part of the network.
-			networkId := model.GetNetworkClientNetwork(authCtx, clientId)
-			if networkId == nil || *networkId != byJwt.NetworkId {
-				return fmt.Errorf("Client id is not part of network.")
-			}
+			clientId = *byJwt.ClientId
 
 			_, ipFamilyIntent = connectionIpFamily(clientId, clientAddress, auth)
 			appVersion = auth.AppVersion
