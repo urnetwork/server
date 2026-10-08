@@ -581,11 +581,11 @@ The prior control receipt and local source-pass benchmark are historical or
 explicit-initialization evidence, not an active periodic-readiness gate.
 
 The stored/signed deadline and the Redis membership score remain separate from
-the cleanup policy for NULL deadlines. Candidate `2f1efad` adds a cleanup fallback
+the cleanup policy for NULL deadlines. Canonical `db179741` adds a cleanup fallback
 of `create_time + 60 minutes`: ordinary inactivity may retire a row earlier, but
 a checkpoint cannot postpone that fallback. It does not write a stored deadline,
 change the signed client contract, or replace a legacy Redis infinity score.
-At its 2026-10-08 source freeze, deployment remains pending; §2.6 records the
+At its 2026-10-08 documentation update, deployment remains pending; §2.6 records the
 fresh-NULL evidence that rules out immediate retirement of every NULL row.
 Packet reads remain Redis-only, with no PostgreSQL fallback. Missing projections
 fail closed, and the cleanup change does not establish complete legacy Redis
@@ -6288,7 +6288,7 @@ Legacy ledger, Redis admission and no-escrow creation all persist a database-clo
 deadline of 60 minutes and return that exact value for the provider-signed
 contract. Checkpoints do not update it. Both open/disputed selection and the
 locked proof owner accept a due absolute deadline independently of recent
-reports. Candidate `2f1efad` gives NULL rows a cleanup fallback at
+reports. Canonical `db179741` gives NULL rows a cleanup fallback at
 `create_time + 60 minutes`, while retaining the 12-minute inactivity policy for
 earlier quiet closes. Both bounded selectors and the locked proof owner apply
 that same fallback; recent checkpoints cannot extend it. The fair raw horizon
@@ -6306,8 +6306,15 @@ observation does not identify the writer of that fresh row. Preserve its exact
 private write/executor provenance before attributing the missing deadline; row
 age, current checkout code and fleet artifact identity alone cannot do so.
 The immediate-NULL candidate `bf430323` is unsafe for this observed cohort and
-its prepared R53 image remains held. The age-based replacement `2f1efad` is
-pending native qualification and deployment at this documentation freeze.
+its prepared R53 image remains held. The age-based replacement `2f1efad` and its
+startup fixture correction `99f3dca` are merged in canonical
+`db17974144f6812e0be35be8cce6019ae60f379d`. Native qualification reproduced both
+baseline failures, then passed the focused model controls in 35.763 seconds
+(receipt SHA-256 `168993abb29a8a11cc33de6c5068137b523dfd5c2afedc0f5ce151041db7d88f`)
+and both Taskworker startup profiles in 10.464 seconds
+(receipt SHA-256 `aa13c851a81e92eeeb59690e736ffd90691eab6cfab5f91d77ae535764b17432`).
+Deployment remains pending at this documentation update. These local controls
+and the source merge do not identify the fresh NULL writer or prove Main cleanup.
 
 Startup uses one RunOnce key for this coordinator, preserving an existing
 cursor instead of inserting one task per contract. Its ordinary Post persists
