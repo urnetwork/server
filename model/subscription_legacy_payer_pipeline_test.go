@@ -346,6 +346,7 @@ func TestingLegacyPayerPipeline(t *testing.T, counts []int, shard task.Target,
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 		defer cancel()
+		ctx = legacyPayerPipelineContext(ctx)
 		ctx = context.WithValue(ctx, legacyFinancialCohortCooldownKey{}, newLegacyFinancialCohortCooldown())
 		server.Db(ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pg_stat_statements`))
@@ -515,7 +516,9 @@ func TestingLegacyPayerPipeline(t *testing.T, counts []int, shard task.Target,
 		commands, dispatches := hook.snapshot()
 		sql := legacyTargetSqlDelta(t, beforeSql, afterSql)
 		out := map[string]any{"profile": os.Getenv("URN_LEGACY_FINANCIAL_COHORT_PROFILE"), "contracts": len(fixture.ids), "payer_counts": counts,
-			"provider_networks": len(fixture.providers), "provider_pattern": "75 percent shared provider,25 percent payer-specific provider", "shards": 16,
+			"configured_payer_collection_window_ns": legacyPayerPipelineCollectionWindow(ctx).Nanoseconds(),
+			"production_payer_collection_window_ns": legacyPayerPipelineCollectionWindow(context.Background()).Nanoseconds(),
+			"provider_networks":                     len(fixture.providers), "provider_pattern": "75 percent shared provider,25 percent payer-specific provider", "shards": 16,
 			"run_loops": 1, "batch_size": settings.BatchSize, "poll_timeout_ns": settings.PollTimeout.Nanoseconds(), "target_claim_limits": settings.TargetClaimLimits,
 			"retry_timeout_after_error_ns": settings.RetryTimeoutAfterError.Nanoseconds(), "observer_period_ns": period.Nanoseconds(), "observer_calls": observations,
 			"first_observed_all_financial_committed_wall_ns": financialObserved.Nanoseconds(), "full_pipeline_drain_join_wall_ns": fullWall.Nanoseconds(),

@@ -2,7 +2,9 @@
 package model
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server/task"
 )
@@ -13,6 +15,25 @@ func legacyPayerPipelineAdditionalTargets() []task.Target {
 
 func legacyPayerPipelineMirrorTarget() task.Target {
 	return NewLegacyNetEscrowMirrorTaskTarget()
+}
+
+// Keep the requested five-second test window in the measured full interval.
+// Ordinary production callers retain their thirty-second collection policy.
+func legacyPayerPipelineContext(ctx context.Context) context.Context {
+	return Testing_WithLegacyPayerSettlementCollectionWindow(ctx)
+}
+
+func legacyPayerPipelineCollectionWindow(ctx context.Context) time.Duration {
+	return legacyPayerSettlementCollectionWindow(ctx)
+}
+
+func TestLegacyPayerPipelineCollectionWindowUsesDeclaredTestDelay(t *testing.T) {
+	if got := legacyPayerPipelineCollectionWindow(legacyPayerPipelineContext(t.Context())); got != 5*time.Second {
+		t.Fatal("pipeline lost the declared test collection delay", got)
+	}
+	if got := legacyPayerPipelineCollectionWindow(t.Context()); got != 30*time.Second {
+		t.Fatal("pipeline changed the ordinary production collection delay", got)
+	}
 }
 
 // The completion interface opts the mirror into queue and finished-row ownership,
