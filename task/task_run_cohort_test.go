@@ -189,6 +189,16 @@ func TestTaskRunCohortClaimKeepsFutureMembershipUnowned(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2 WHERE task_id=$1`, ids[2], now.Add(time.Second)))
 		})
+		var availableBlock int64
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT available_block FROM pending_task WHERE task_id=$1`, ids[2]).Scan(&availableBlock))
+		}, server.OptNoRetry())
+		// Eligibility deliberately starts one full block after run_at. The
+		// integer-second fixture proves that schema offset without tolerance.
+		if availableBlock != now.Unix()+2 {
+			t.Fatal("future fixture changed the exact stored eligibility boundary", availableBlock, now.Unix()+2)
+		}
+		expectedAt := time.Unix(availableBlock*BlockSizeSeconds, 0)
 		worker := NewTaskWorkerWithDefaults(ctx)
 		defer worker.Close()
 		worker.claimNow = func() time.Time { return now }
@@ -200,8 +210,8 @@ func TestTaskRunCohortClaimKeepsFutureMembershipUnowned(t *testing.T) {
 		if guard != nil {
 			defer guard.release()
 		}
-		if err != nil || len(claimed) != 2 || len(probed) != 2 || probed[ids[2]] || !poll.availableAt.Equal(now.Add(time.Second)) {
-			t.Fatalf("future member acquired ownership or lost its alarm: claimed=%d probes=%d hint=%v err=%v", len(claimed), len(probed), poll.availableAt, err)
+		if err != nil || len(claimed) != 2 || len(probed) != 2 || probed[ids[2]] || !poll.availableAt.Equal(expectedAt) {
+			t.Fatalf("future member acquired ownership or lost its exact alarm: claimed=%d probes=%d hint_ns=%d expected_ns=%d err=%v", len(claimed), len(probed), poll.availableAt.UnixNano(), expectedAt.UnixNano(), err)
 		}
 		future := GetTasks(ctx, ids[2])[ids[2]]
 		if future == nil || future.ClaimGeneration != 0 || !future.ClaimTime.IsZero() {
