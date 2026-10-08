@@ -361,7 +361,7 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 		settings.ClaimRegisteredTargetsOnly = true
 		worker := task.NewTaskWorker(ctx, settings)
 		defer worker.Close()
-		worker.AddTargets(shard, debit, NewLegacyProviderTotalsTaskTarget(), task.NewTaskTargetWithPost(ApplyLegacyNetEscrowMirror, ApplyLegacyNetEscrowMirrorPost))
+		worker.AddTargets(shard, debit, NewLegacyProviderTotalsTaskTarget(), NewLegacyNetEscrowMirrorTaskTarget())
 		worker.AddTargets(legacyPayerPipelineAdditionalTargets()...)
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()

@@ -34,6 +34,7 @@ func TestSettlementTaskFactoriesDeclareActualQueueScope(t *testing.T) {
 		{actual: NewTransferDebitTaskTarget(), plain: task.NewTaskTarget(FlushTransferDebits)},
 		{actual: model.NewLegacyPayerSettlementTaskTarget(), plain: task.NewTaskTarget(model.ApplyLegacyPayerSettlements)},
 		{actual: model.NewLegacyNetEscrowMirrorTaskTarget(), plain: task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror)},
+		{actual: model.NewLegacyProviderTotalsTaskTarget(), plain: task.NewTaskTarget(model.ApplyLegacyProviderTotals)},
 	} {
 		if pair.actual.TargetFunctionName() != pair.plain.TargetFunctionName() {
 			t.Fatal("ownership wrapper changed the durable task function")

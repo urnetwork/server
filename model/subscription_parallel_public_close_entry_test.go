@@ -7,7 +7,6 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
 
@@ -17,8 +16,8 @@ func TestParallelPublicClose64Payers(t *testing.T) {
 		counts[index] = 32
 	}
 	model.TestingParallelPublicCloseSharedPayers(t, counts,
-		task.NewTaskTargetWithPost(work.FlushLegacySettlements, work.FlushLegacySettlementsPost),
-		task.NewTaskTargetWithPost(work.FlushTransferDebits, work.FlushTransferDebitsPost),
+		work.NewLegacySettlementDispatcherTaskTarget(),
+		work.NewTransferDebitTaskTarget(),
 		work.ScheduleFlushLegacySettlements, work.ScheduleFlushTransferDebits, server.MaintenancePgVaultResourceName)
 }
 
@@ -28,7 +27,7 @@ func TestParallelPublicClose8Payers(t *testing.T) {
 		counts[index] = 256
 	}
 	model.TestingParallelPublicCloseSharedPayers(t, counts,
-		task.NewTaskTargetWithPost(work.FlushLegacySettlements, work.FlushLegacySettlementsPost),
-		task.NewTaskTargetWithPost(work.FlushTransferDebits, work.FlushTransferDebitsPost),
+		work.NewLegacySettlementDispatcherTaskTarget(),
+		work.NewTransferDebitTaskTarget(),
 		work.ScheduleFlushLegacySettlements, work.ScheduleFlushTransferDebits, server.MaintenancePgVaultResourceName)
 }
