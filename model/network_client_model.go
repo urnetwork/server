@@ -523,16 +523,26 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 		var proxyDeviceConfigJson []byte
 		var proxyClient *ProxyClient
 
-		// A client JWT is durable, so entitlement must come from the source of
-		// truth. Resolve it before opening the write transaction: IsProFresh
-		// performs its own PostgreSQL read and Redis cache refresh.
-		isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
-
 		var registrationTxOptions []any
 		if registration != nil {
 			// The first statement waits for the network's allocation lock.
 			// Its following lookup must see the preceding owner's commit.
 			registrationTxOptions = []any{server.TxReadCommitted}
+		}
+		// Hosted mint needs a fresh entitlement before its later live-parent
+		// snapshot, but neither a separate pool borrower nor a TTL authority.
+		// Read on the transaction's owned connection before BEGIN, and keep
+		// cache publication outside the database connection's lifetime.
+		var isPro bool
+		var mintEntitlement proEntitlement
+		if validateParent {
+			registrationTxOptions = append(registrationTxOptions, server.TxReadBeforeBegin(func(conn server.PgCanQuery) {
+				mintEntitlement = loadProNetworkWithConn(session.Ctx, conn, session.ByJwt.NetworkId)
+				observeProNetworkLoaded(session.ByJwt.NetworkId)
+				isPro = mintEntitlement.pro
+			}))
+		} else {
+			isPro = IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
 		}
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			// reset in case the tx is retried on a transient error: only the
@@ -829,6 +839,14 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 				}
 			}
 		}, registrationTxOptions...)
+
+		if validateParent && authClientError == nil && authClientResult != nil && authClientResult.Error == nil {
+			// Optional cache refresh cannot turn a committed identity into a
+			// failed mint. Version ordering still rejects older publications.
+			server.HandleError(func() {
+				storeProNetwork(session.Ctx, session.ByJwt.NetworkId, mintEntitlement)
+			})
+		}
 
 		// only redis is written after the commit. The identity cache, the proxy
 		// device config mirror and the proxy hosts' wakeup are caches and a

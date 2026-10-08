@@ -28568,6 +28568,43 @@ source pins and current processes before comparing those metrics. Successful
 local control does not establish usable provider DNS/TLS/URL traffic, and a
 local contract failure remains unmeasured provider health.
 
+The 2026-10-08 08:27Z bounded Main discriminator found current recovered
+operational failures on Crisp Proxy g1/g2. Both selected worker/container
+generations were stable across the read, with active/running workers and zero
+worker restarts; the observed image reference and registry version matched
+the sealed R40 release. This is process continuity through that observation,
+not successful hosted setup or a whole-fleet health result. The window was
+08:25:37–08:27:37Z, but both 16-line and four-retained-sample bounds were hit.
+The eight retained journal emissions span only 08:27:36.940–08:27:37.128Z;
+their original application clocks are unavailable. A journal clock is not an
+application clock, and this capped window is not a census or an event rate.
+
+All eight retained errors were `*errors.joinError` containing a context
+deadline, without a SQLSTATE. Seven came from hosted child-client mint's fresh
+Pro entitlement read before its subsequent registration transaction: five
+ended at R40 `dbWithPool`'s failed Acquire/context-done branch (`db.go:640`),
+before that final attempt's callback, and two at its borrowed read callback's
+timeout/context-done branch (`db.go:722`). The eighth reached the same borrowed
+read boundary during live JWT-state validation in hosted provider discovery.
+`dbContextDoneCause` retains the physical failure and caller stop together;
+the joined type does not identify a PostgreSQL backend rejection. A recovered
+`Unexpected error` here is not a crash witness. Standing samples whose fixed
+owner remains `unknown` must retain that qualifier; the exact R40 source and
+native-generation join qualifies only these private bounded samples.
+
+The confirmed source boundary is hosted setup's database dependency. Neither
+these eight samples nor R38/R40 source parity assigns pool occupancy,
+construction/cleanup contention, database CPU, packet failure, an ordinary
+application SDK caller, or the separate contract-rejection counters. Preserve
+fresh entitlement and live credential/parent checks when reducing duplicate
+setup acquisitions; validate revocation, credential rotation, transaction
+retry, distinct child identities, and cancellation before claiming a repair.
+The immutable actual reduction is
+`current-proxy-panic-reduction-v1.json` SHA-256
+`189bdca6589e941810f3c459984e83d976a65dc7d024bad2f0d53ae9ca951682`,
+with independent actual GO SHA-256
+`f9887fdde33c76f0da98e59b19246a1afefa9efe872f9cbd9663bcde824342b1`.
+
 ---
 
 ## 15. E2E encryption (post-quantum) signals — E2EPQ1
