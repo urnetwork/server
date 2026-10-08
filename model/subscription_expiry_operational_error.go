@@ -13,33 +13,37 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Only concrete causes grant this exception; matching error text or a custom
-// Is/As method cannot change the quarantine policy. A known operational cause
-// in a join still prevents irreversible fallback, while every cause is returned
-// to the caller. This neither retries a transaction nor declares it rolled back:
-// lost transport replies also cover uncertain commits owned by durable state.
-func isForceCloseOperationalError(err error) bool {
-	for _, cause := range server.InspectErrorCauses(err).Nodes {
+// Irreversible fallback requires complete cause inspection. Incomplete graphs
+// may hide an operational cause and retain ordinary failure without quarantine.
+// Concrete causes, not text or custom Is/As, decide the operational exception.
+// This neither retries a transaction nor declares it rolled back: lost replies
+// include uncertain commits owned by durable state. Every cause is returned.
+func forceCloseErrorAllowsQuarantine(err error) bool {
+	causes := server.InspectErrorCauses(err)
+	if !causes.Complete || causes.NilBranches != 0 {
+		return false
+	}
+	for _, cause := range causes.Nodes {
 		switch cause.Err {
 		case context.Canceled, context.DeadlineExceeded, server.DbContextDoneError,
 			pgx.ErrTxClosed, pgx.ErrTxCommitRollback,
 			pgconn.ErrConnClosed, io.EOF, io.ErrUnexpectedEOF, net.ErrClosed,
 			syscall.ECONNRESET, syscall.ECONNABORTED, syscall.ECONNREFUSED,
 			syscall.EPIPE, syscall.ETIMEDOUT, syscall.ENETUNREACH, syscall.EHOSTUNREACH:
-			return true
+			return false
 		}
 		switch value := cause.Err.(type) {
 		case *net.OpError:
 			if value != nil {
-				return true
+				return false
 			}
 		case *net.DNSError:
 			if value != nil {
-				return true
+				return false
 			}
 		case *pgconn.ConnectError:
 			if value != nil {
-				return true
+				return false
 			}
 		case *pgconn.PgError:
 			if value == nil {
@@ -52,10 +56,10 @@ func isForceCloseOperationalError(err error) bool {
 			if len(value.Code) == 5 {
 				switch value.Code[:2] {
 				case "08", "25", "40", "53", "54", "55", "57", "58", "XX":
-					return true
+					return false
 				}
 			}
 		}
 	}
-	return false
+	return true
 }

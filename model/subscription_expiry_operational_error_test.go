@@ -125,3 +125,80 @@ func TestForceCloseMalformedFailuresRetainQuarantine(t *testing.T) {
 		}
 	}
 }
+
+type forceCloseCauseCycle struct{}
+
+func (self *forceCloseCauseCycle) Error() string { return "synthetic cyclic cause" }
+func (self *forceCloseCauseCycle) Unwrap() error { return self }
+
+type forceCloseCauseBranches struct{ causes []error }
+
+func (*forceCloseCauseBranches) Error() string        { return "synthetic cause branches" }
+func (self *forceCloseCauseBranches) Unwrap() []error { return self.causes }
+
+func forceCloseDeepCause(cause error, depth int) error {
+	for range depth {
+		cause = fmt.Errorf("synthetic wrapper: %w", cause)
+	}
+	return cause
+}
+
+// An unseen cause never donates permission for an irreversible fallback. A
+// bounded scan must also protect later accounting classifiers from cycles.
+func TestForceCloseIncompleteCauseGraphNeverQuarantines(t *testing.T) {
+	wide := make([]error, 128)
+	for index := range wide {
+		wide[index] = errors.New("synthetic ordinary failure")
+	}
+	wide = append(wide, context.DeadlineExceeded)
+	var typedNil *forceCloseCauseBranches
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"deep-deadline", forceCloseDeepCause(context.DeadlineExceeded, 33)},
+		{"deep-malformed", forceCloseDeepCause(&pgconn.PgError{Code: "P0001"}, 33)},
+		{"wide-hidden-deadline", errors.Join(wide...)},
+		{"cycle", &forceCloseCauseCycle{}},
+		{"empty", &forceCloseCauseBranches{}},
+		{"nil-branch", &forceCloseCauseBranches{causes: []error{errContractInsufficientEscrow, nil}}},
+		{"typed-nil", typedNil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			quarantines, cleanups := 0, 0
+			cleanupFailure := errors.New("independent verification failure")
+			got := finishForceCloseContract(tc.err, func() error {
+				quarantines++
+				return nil
+			}, func() error {
+				cleanups++
+				return cleanupFailure
+			})
+			// errors.Is itself is unbounded on a cycle. Inspect the returned
+			// root join's actual children to prove both phases were preserved.
+			joined, ok := got.(interface{ Unwrap() []error })
+			if !ok || len(joined.Unwrap()) != 2 || joined.Unwrap()[0] != tc.err || joined.Unwrap()[1] != cleanupFailure ||
+				quarantines != 0 || cleanups != 1 {
+				t.Fatal("incomplete cause graph changed custody or lost phase errors", quarantines, cleanups)
+			}
+			if isForceCloseAccountingRejection(tc.err, nil, &forceCloseNonfinalError{disputed: true}) ||
+				isForceCloseQuarantinedAccountingRejection(tc.err, true, nil, nil) || isOnlyContractAlreadySettled(tc.err) {
+				t.Fatal("incomplete graph gained terminal or accounting authority")
+			}
+		})
+	}
+}
+
+func TestForceCloseSentinelAuthorityRequiresCompleteSingleCause(t *testing.T) {
+	for _, expected := range []error{errContractAlreadySettled, errContractInsufficientEscrow, errTransferBalanceOwnershipBusy} {
+		if !isOnlyContractError(expected, expected) || !isOnlyContractError(forceCloseDeepCause(expected, 32), expected) {
+			t.Fatal("complete exact sentinel lost single-cause authority")
+		}
+		for _, cause := range []error{forceCloseDeepCause(expected, 33), errors.Join(expected),
+			&forceCloseCauseCycle{}, &forceCloseCauseBranches{causes: []error{expected, nil}}, &forceCloseOperationalSpoof{}} {
+			if isOnlyContractError(cause, expected) {
+				t.Fatal("incomplete, multiple, or spoofed cause gained exact sentinel authority")
+			}
+		}
+	}
+}

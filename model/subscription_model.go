@@ -1201,22 +1201,20 @@ func (self *ForceCloseAccountingError) QuarantinedAccountingRejectionCount() int
 	return self.quarantinedAccountingRejectionCount
 }
 
-// Single-cause wrappers preserve identity; multi-errors never grant authority.
+// Only a complete, bounded single-cause chain preserves sentinel authority.
+// Truncated, cyclic, nil, and multi-error graphs cannot authorize an outcome.
 func isOnlyContractError(err error, expected error) bool {
-	for err != nil {
-		if err == expected {
-			return true
-		}
-		// errors.Join and other multi-errors may contain the expected sentinel
-		// alongside a real failure. They must remain fail-closed.
-		if _, ok := err.(interface{ Unwrap() []error }); ok {
+	causes := server.InspectErrorCauses(err)
+	if !causes.Complete || causes.NilBranches != 0 {
+		return false
+	}
+	for _, cause := range causes.Nodes {
+		if _, multiple := cause.Err.(interface{ Unwrap() []error }); multiple {
 			return false
 		}
-		unwrapper, ok := err.(interface{ Unwrap() error })
-		if !ok {
-			return false
+		if cause.Leaf {
+			return cause.Err == expected
 		}
-		err = unwrapper.Unwrap()
 	}
 	return false
 }
@@ -1285,7 +1283,7 @@ func finishForceCloseContract(closeErr error, quarantine func() error, cleanup f
 	// scheduling refusal cannot authorize the malformed no-payout transition,
 	// even if that owner has already released before the next branch runs.
 	ownershipBusy := isOnlyContractError(closeErr, errTransferBalanceOwnershipBusy)
-	if closeErr != nil && !alreadySettled && !ownershipBusy && !isForceCloseOperationalError(closeErr) {
+	if closeErr != nil && !alreadySettled && !ownershipBusy && forceCloseErrorAllowsQuarantine(closeErr) {
 		closeErr = errors.Join(closeErr, quarantine())
 	}
 
