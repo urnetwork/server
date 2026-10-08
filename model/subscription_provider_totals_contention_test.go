@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/task"
@@ -95,14 +96,17 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 		var pid int
 		select {
 		case pid = <-projectionPid:
-		case <-projectionDone:
+		case failure := <-projectionDone:
 			joined = true
-			t.Fatal("projection ended before publishing its backend")
+			t.Fatal("projection ended before publishing its backend", failure)
 		case <-ctx.Done():
 			t.Fatal("projection did not publish its backend")
 		}
 		select {
 		case <-entered:
+		case failure := <-projectionDone:
+			joined = true
+			t.Fatal("projection ended before its provider write was observed", failure)
 		case <-ctx.Done():
 			t.Fatal("projection did not reach provider update")
 		}
@@ -119,6 +123,9 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 			}
 			select {
 			case <-tick.C:
+			case failure := <-projectionDone:
+				joined = true
+				t.Fatal("projection ended before its exact provider blocking edge was observed", failure)
 			case <-ctx.Done():
 				t.Fatal("exact projection blocking edge was not observed")
 			}
@@ -261,16 +268,33 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 	})
 }
 
+// The signal covers either transport but is only a submission observation.
+// The fixture separately requires the exact live PostgreSQL blocker edge.
 type providerTotalContentionTx struct {
 	server.PgTx
 	beforeProvider func()
 }
 
-func (self *providerTotalContentionTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+// Signal once for a matching provider statement before delegating unchanged.
+func (self *providerTotalContentionTx) observeProvider(sql string) {
 	if self.beforeProvider != nil && strings.Contains(sql, "INSERT INTO account_balance") {
 		before := self.beforeProvider
 		self.beforeProvider = nil
 		before()
 	}
+}
+
+// Ordinary controls retain the same observation before their direct write.
+func (self *providerTotalContentionTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	self.observeProvider(sql)
 	return self.PgTx.Exec(ctx, sql, args...)
+}
+
+// Pipelining keeps the provider write in the batch; an Exec-only wrapper cannot
+// see it. Inspect supplied statements without consuming or changing any reply.
+func (self *providerTotalContentionTx) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
+	for _, query := range batch.QueuedQueries {
+		self.observeProvider(query.SQL)
+	}
+	return self.PgTx.SendBatch(ctx, batch)
 }
