@@ -215,9 +215,9 @@ func TestProviderWorkConnectionCanceledWaitLeavesNoJournal(t *testing.T) {
 	})
 }
 
-// Handler cleanup shares the mutation fence and must re-read the head after
-// the wait while still rechecking the live-handler predicate before retirement.
-func TestProviderWorkHandlerRetirementWaitUsesCurrentHead(t *testing.T) {
+// Maintenance defers an owned endpoint, then reads its committed current head
+// on the next pass while retaining the live-handler eligibility check.
+func TestProviderWorkHandlerRetirementDefersBusyHead(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -262,16 +262,17 @@ func TestProviderWorkHandlerRetirementWaitUsesCurrentHead(t *testing.T) {
 				t.Error("handler retirement did not join canceled cleanup")
 			}
 		}()
-		requireProviderWorkConnectionWaiters(t, ctx, holder, f.sourceId, 1)
+		awaitHandlerRetirementWithoutWait(t, ctx, holder, result)
+		if !GetNetworkClientConnectionStatus(ctx, orphanId).Connected {
+			t.Fatal("busy endpoint was retired without its fence")
+		}
 		server.Raise(holder.Commit(ctx))
 		select {
 		case <-joined:
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
-		if err := <-result; err != nil {
-			t.Fatal(err)
-		}
+		CloseExpiredNetworkClientHandlers(workerCtx, server.NowUtc().Add(-time.Hour))
 		if got := reruns.Load(); got != 0 {
 			t.Fatalf("handler endpoint wait caused %d avoidable snapshot retries", got)
 		}
