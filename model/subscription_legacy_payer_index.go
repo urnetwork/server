@@ -4,6 +4,7 @@ package model
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"sync"
 	"time"
 
@@ -60,14 +61,47 @@ const legacySettlementPayerDueIndexSql = `SELECT COALESCE(
 // Each bounded task entry validates this one index outside financial locks.
 // Unlike the optional old scheduler, a concurrent cache refresh cannot be
 // mistaken for missing schema and send a healthy payer task into error backoff.
-func legacySettlementPayerDueIndexReady(ctx context.Context) (ready bool) {
+// This is one bounded observation, not a persistent schema verdict. In
+// particular, a deadline or read error must not be reported as an invalid index.
+// No raw database errors, resource values or caller identities are retained.
+type LegacySettlementPayerIndexReadiness struct {
+	Outcome   string `json:"outcome"`
+	ElapsedMs int64  `json:"elapsed_ms"`
+}
+
+func legacySettlementPayerDueIndexReady(ctx context.Context) bool {
+	return observeLegacySettlementPayerDueIndex(ctx, readLegacySettlementPayerDueIndex, time.Now).Outcome == "ready"
+}
+
+func observeLegacySettlementPayerDueIndex(ctx context.Context,
+	read func(context.Context) (bool, error), now func() time.Time,
+) (observation LegacySettlementPayerIndexReadiness) {
+	started := now()
 	bounded, cancel := context.WithTimeout(ctx, legacySettlementPayerIndexBudget)
 	defer cancel()
+	ready, err := read(bounded)
+	observation.ElapsedMs = max(time.Duration(0), now().Sub(started)).Milliseconds()
+	switch {
+	case errors.Is(bounded.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded):
+		observation.Outcome = "deadline"
+	case errors.Is(bounded.Err(), context.Canceled) || errors.Is(err, context.Canceled):
+		observation.Outcome = "canceled"
+	case err != nil:
+		observation.Outcome = "read_error"
+	case !ready:
+		observation.Outcome = "catalog_invalid"
+	default:
+		observation.Outcome = "ready"
+	}
+	return
+}
+
+func readLegacySettlementPayerDueIndex(ctx context.Context) (ready bool, resultErr error) {
 	server.HandleError(func() {
-		server.Db(bounded, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(bounded, legacySettlementPayerDueIndexSql).Scan(&ready))
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, legacySettlementPayerDueIndexSql).Scan(&ready))
 		}, server.OptNoRetry())
-	}, func(error) { ready = false })
+	}, func(err error) { ready, resultErr = false, err })
 	return
 }
 

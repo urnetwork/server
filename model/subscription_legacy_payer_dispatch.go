@@ -33,17 +33,29 @@ type LegacySettlementDispatchResult struct {
 // in the task Post; a crash before that handoff simply repeats discovery.
 func DispatchLegacySettlementPayers(ctx context.Context, shard int, after *LegacySettlementCursor,
 	payerAfter *LegacySettlementPayerCursor) (result LegacySettlementDispatchResult, returnErr error) {
+	result, _, returnErr = DispatchLegacySettlementPayersWithReadiness(ctx, shard, after, payerAfter)
+	return
+}
+
+// Carry the existing readiness observation through the task result, including
+// the financial fallback. This performs the same single 250ms probe as dispatch.
+func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int, after *LegacySettlementCursor,
+	payerAfter *LegacySettlementPayerCursor,
+) (result LegacySettlementDispatchResult, readiness *LegacySettlementPayerIndexReadiness, returnErr error) {
 	result.Private = true
 	if shard < 0 || shard >= LegacySettlementShardCount {
-		return result, fmt.Errorf("invalid legacy settlement dispatch shard")
+		return result, nil, fmt.Errorf("invalid legacy settlement dispatch shard")
 	}
-	if !legacySettlementPayerDueIndexReady(ctx) {
-		return result, ErrLegacySettlementPayerIndexUnavailable
+	observation := observeLegacySettlementPayerDueIndex(ctx, readLegacySettlementPayerDueIndex, time.Now)
+	readiness = &observation
+	if observation.Outcome != "ready" {
+		return result, readiness, ErrLegacySettlementPayerIndexUnavailable
 	}
 	bounded, cancel := context.WithTimeoutCause(ctx, 5*time.Second, errLegacySettlementDispatchBudget)
 	defer cancel()
-	return dispatchLegacySettlementPayersPage(ctx, bounded, shard, after, payerAfter,
+	result, returnErr = dispatchLegacySettlementPayersPage(ctx, bounded, shard, after, payerAfter,
 		nextLegacySettlementPayer, registerLegacySettlementPayerDispatchPage)
+	return
 }
 
 // A valid missing-key index gives registration its own finite progress lane.
