@@ -4058,6 +4058,19 @@ Removing a redundant statement and stronger row lock is not evidence that all
 admission/write pressure has cleared. Require post-change, source-qualified
 observations and successful traffic; a quieter capped sample cannot clear it.
 
+A separate source audit found a probe transport admission deadline gap: the
+registry check could project its clock before waiting for that row, or pass
+before a later endpoint wait crossed the deadline. The connection owner now
+retains the registry-first lock order, carries the locked deadline, and reads
+the database clock after each of those waits before creating a connection or
+session evidence. Ordinary networks have no shard deadline and add no clock
+query. Deterministic controls hold the actual registry or endpoint until that
+database deadline passes, then require the normal retired-shard refusal and
+zero connection/head/event/original rows. Keep cancellation and SQL/decode
+failures distinct from this policy refusal; those failures must unwind Tx.
+This source defect does not establish that a sampled Main waiter expired or
+that every other client provisioning wait has the same deadline boundary.
+
 FALSE-POSITIVE QUALIFIERS: useful bulk work or maintenance may explain a band.
 Backend-samples are neither distinct requests, continuous waits, CPU time nor
 per-query CPU shares. Execution wall time includes waits. Confirm successful

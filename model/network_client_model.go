@@ -2750,13 +2750,24 @@ func ConnectNetworkClientWithIpFamily(
 	connectTime := server.NowUtc()
 	server.Tx(ctx, func(tx server.PgTx) {
 		err = nil
+		var admissionDeadline *time.Time
 		for _, networkId := range authenticatedNetworkIds {
-			if err = lockProberShardClientAdmissionInTx(ctx, tx, networkId); err != nil {
+			var deadline *time.Time
+			if deadline, err = lockProberShardClientAdmissionDeadlineInTx(ctx, tx, networkId); err != nil {
 				return
+			}
+			if deadline != nil && (admissionDeadline == nil || deadline.Before(*admissionDeadline)) {
+				admissionDeadline = deadline
 			}
 		}
 		connectionId = server.NewId()
 		providerWorkLockCurrentSessionMutationInTx(ctx, tx, clientId)
+		// The registry fence prevents teardown, but its deadline can pass while
+		// an existing connection owner holds the endpoint. Refuse before any
+		// genesis, connection or original evidence write in this transaction.
+		if err = validateProberShardAdmissionDeadlineInTx(ctx, tx, admissionDeadline); err != nil {
+			return
+		}
 		providerWorkSessionGenesisInTx(ctx, tx, clientId)
 
 		host, _ := server.Host()
