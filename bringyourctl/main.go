@@ -67,6 +67,7 @@ Usage:
     bringyourctl locations add-default [-a]
     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
     bringyourctl network remove --network_id=<network_id> --user_id=<user_id>
+    bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
     bringyourctl balance-code create --duration=<duration> --balance=<balance> --cost=<usd> --email=<email> [--count=<count>]
     bringyourctl balance-code check --secret=<secret>
     bringyourctl send network-welcome --user_auth=<user_auth>
@@ -140,6 +141,8 @@ Options:
     --network_id=<network_id>
     --user_id=<user_id>
     --secret=<secret>
+    --set=<limit>  Set the network's Embed plan top-level client limit (the default is 100).
+    --clear        Return the network to the default top-level client limit.
 
     --private-stdin  Read the bounded private expiry request from stdin.
     --apply          Apply the scoped expiry request; omission is a read-only preview.
@@ -235,6 +238,8 @@ Options:
 			networkFind(opts)
 		} else if remove, _ := opts.Bool("remove"); remove {
 			networkRemove(opts)
+		} else if clientLimit, _ := opts.Bool("client-limit"); clientLimit {
+			networkClientLimit(opts)
 		}
 	} else if network, _ := opts.Bool("balance-code"); network {
 		if create, _ := opts.Bool("create"); create {
@@ -1053,6 +1058,40 @@ func networkRemove(opts docopt.Opts) {
 		os.Exit(1)
 	}
 	fmt.Printf("network %s removed\n", networkId)
+}
+
+// networkClientLimit shows, sets or clears the Embed plan top-level client
+// limit of a network (model/network_client_limit_model.go), then prints the
+// effective limit.
+func networkClientLimit(opts docopt.Opts) {
+	ctx := context.Background()
+
+	networkIdStr, _ := opts.String("--network_id")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+
+	if setStr, _ := opts.String("--set"); setStr != "" {
+		limit, err := strconv.Atoi(setStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid --set: %s\n", err)
+			os.Exit(1)
+		}
+		if err := model.SetNetworkTopLevelClientLimit(ctx, networkId, limit); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	} else if clear, _ := opts.Bool("--clear"); clear {
+		model.ClearNetworkTopLevelClientLimit(ctx, networkId)
+	}
+
+	limit := model.GetNetworkTopLevelClientLimit(ctx, networkId)
+	source := "default"
+	if limit.Override {
+		source = "Embed plan"
+	}
+	fmt.Printf("network %s top-level client limit %d (%s)\n", networkId, limit.Limit, source)
 }
 
 func balanceCodeCreate(opts docopt.Opts) {

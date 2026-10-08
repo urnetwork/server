@@ -204,6 +204,16 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// reliability
 		router.NewRoute("GET", "/network/reliability", handlers.GetNetworkReliability),
 
+		// per-client data caps for embedded clients (EMBED1.md): set and list
+		// with the network's root token or an API key; read one with either, or
+		// with the client's own token
+		router.NewRoute("POST", "/network/client-data-cap", handlers.NetworkClientDataCapSet),
+		router.NewRoute("GET", "/network/client-data-cap", handlers.NetworkClientDataCapGet),
+		router.NewRoute("GET", "/network/client-data-caps", handlers.NetworkClientDataCapsList),
+
+		// the public Services contact form (EMBED1.md)
+		router.NewRoute("POST", "/services/contact-sales", handlers.ServicesContactSales),
+
 		router.NewRoute("POST", "/preferences/set-preferences", handlers.AccountPreferencesSet),
 		router.NewRoute("GET", "/preferences", handlers.AccountPreferencesGet),
 		router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
