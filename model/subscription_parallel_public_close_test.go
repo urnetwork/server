@@ -329,15 +329,30 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 		// context: five seconds instead of thirty. The same context reaches
 		// every actual scheduler and the Run worker; elapsed time includes it.
 		ctx = Testing_WithLegacyPayerSettlementCollectionWindow(ctx)
+		diagnostics := newParallelPublicCloseDiagnostics(t)
+		diagnostics.event("fixture_seed_started", -1)
 		fixture := parallelPublicCloseSeed(t, ctx, counts)
+		diagnostics.event("fixture_seed_completed", -1)
 		if len(fixture.finance.ids) != parallelPublicCloseCount+1 {
 			t.Fatal("parallel-close requires2048 simultaneous peers plus one actual native anchor")
 		}
 		retries := &parallelCloseRetryObservation{}
 		ctx = retries.context(ctx)
 		ownership := newParallelCloseCommonOwnership(fixture)
-		ctx = server.Testing_WithPgOwnershipObservation(ctx, ownership.observe)
-		barrier, closeBarrier := newNativeDebitOwnerBarrierOnResource(t, ctx, fixture.payers[0].balanceId, nativeOwnerResource, ownership.backendEnd)
+		ctx = server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+			ownership.observe(event)
+			if event.Kind == server.PgOwnershipAdmitted {
+				for _, key := range event.Keys {
+					if key == ownership.hot && diagnostics.hotOwnerAdmitted.CompareAndSwap(false, true) {
+						diagnostics.event("first_hot_grant_owner_admitted", -1)
+					}
+				}
+			}
+		})
+		barrier, closeBarrier := newNativeDebitOwnerBarrierOnResource(t, ctx, fixture.payers[0].balanceId, nativeOwnerResource, func() {
+			ownership.backendEnd()
+			diagnostics.backendEnd()
+		})
 		defer closeBarrier()
 		// The outer two-route observer records every error, including owner
 		// rollback or timeout. Only the explicitly selected inner route pauses.
@@ -355,7 +370,11 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 		// call latency is recorded independently below, starting at invocation.
 		pipelineStarted := time.Now()
 		events := map[string]int64{}
-		recordEvent := func(name string) { events[name] = time.Since(pipelineStarted).Nanoseconds() }
+		recordEvent := func(name string) {
+			events[name] = time.Since(pipelineStarted).Nanoseconds()
+			diagnostics.event(name, events[name])
+		}
+		recordEvent("pipeline_started")
 		settings := task.DefaultTaskWorkerSettings()
 		settings.ClaimRegisteredTargetsOnly = true
 		worker := task.NewTaskWorker(ctx, settings)
@@ -365,20 +384,47 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
 		anchor := len(fixture.finance.ids) - 1
+		recordEvent("anchor_close_invoked")
 		server.Raise(CloseContract(ctx, fixture.finance.ids[anchor], fixture.finance.providers[fixture.finance.providerIndexes[anchor]].destinationId, 3, false))
 		recordEvent("anchor_close_return_observed")
+		recordEvent("native_debit_schedule_invoked")
 		server.Tx(ctx, func(tx server.PgTx) { scheduleDebit(owner, tx) }, server.TxReadCommitted, server.OptNoRetry())
 		recordEvent("native_debit_schedule_committed")
 		done := make(chan struct{})
 		var runErr error
-		go func() { defer close(done); server.HandleError(worker.Run, func(err error) { runErr = err }) }()
+		go func() {
+			defer close(done)
+			diagnostics.event("actual_worker_run_entered", -1)
+			server.HandleError(worker.Run, func(err error) { runErr = err })
+			diagnostics.event("actual_worker_run_returned", -1)
+		}()
 		var callers sync.WaitGroup
 		var callersReady sync.WaitGroup
 		start := make(chan struct{})
 		var startOnce sync.Once
 		startCallers := func() { startOnce.Do(func() { close(start) }) }
 		stopped := false
+		controlComplete := false
+		roles := []string{"legacy_dispatch", "native_debit", "payer", "provider", "mirror", "run_post"}
+		functions := []string{shard.TargetFunctionName(), debit.TargetFunctionName(),
+			NewLegacyPayerSettlementTaskTarget().TargetFunctionName(),
+			NewLegacyProviderTotalsTaskTarget().TargetFunctionName(), NewLegacyNetEscrowMirrorTaskTarget().TargetFunctionName(),
+			task.NewTaskTarget(worker.RunPost).TargetFunctionName()}
+		observeCurrent := func(name string) {
+			diagnostics.log(name, map[string]any{"holder_commits": barrier.commits.Load(),
+				"holder_rollbacks": barrier.rollbacks.Load(), "holder_lost": barrier.lost.Load(),
+				"holder_release_requested": barrier.released.Load(), "wire": protocol.snapshot(),
+				"ownership": ownership.snapshot(), "actual_tx_reruns": retries.callbacks.Load(),
+				"counters": diagnostics.counters(beforeCounters), "financial_custody": contractClosedCounter.Snapshot(),
+				"test_parent_context_done":  ctx.Err() != nil,
+				"native_page_budget_ns":     (15 * time.Second).Nanoseconds(),
+				"native_page_context_cause": "not exposed by the unchanged target API; terminal observation does not identify its initiator"})
+		}
 		defer func() {
+			if !controlComplete {
+				observeCurrent("before_failure_cleanup")
+				diagnostics.taskSnapshot(ctx, observer, roles, functions)
+			}
 			barrier.Release()
 			if !stopped {
 				cancel()
@@ -402,6 +448,7 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 				}
 			}
 		}()
+		recordEvent("waiting_for_native_owner")
 		var pid int32
 		select {
 		case pid = <-barrier.held:
@@ -410,12 +457,17 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 		case <-ctx.Done():
 			t.Fatal("actual native owner never acquired its grant", ctx.Err())
 		}
-		parallelPublicCloseRequireHeldOwner(t, ctx, observer, pid)
+		recordEvent("native_owner_ready_t_barrier_observed")
+		func() {
+			defer diagnostics.query("first_owner_witness")()
+			parallelPublicCloseRequireHeldOwner(t, ctx, observer, pid)
+		}()
 		firstCommonKeyHeld := parallelPublicCloseCommonKeyHeld(ctx, observer, pid, "transfer_balance", fixture.payers[0].balanceId)
 		ownership.beginHeldWindow(uint32(pid))
 		recordEvent("native_debit_owner_held_witness")
 		// The real recovery owner is scheduled before the public burst. Its
 		// default delays and all actual work remain unchanged.
+		recordEvent("legacy_dispatch_schedule_invoked_while_held")
 		server.Tx(ctx, func(tx server.PgTx) { scheduleShard(owner, tx) }, server.TxReadCommitted, server.OptNoRetry())
 		recordEvent("legacy_dispatch_schedule_committed")
 		type closeReply struct {
@@ -448,12 +500,18 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 					}
 				}
 				invocationNs[index] = time.Since(burstStart).Nanoseconds()
+				if diagnostics.invocations.Add(1) == parallelPublicCloseCount {
+					diagnostics.event("all_public_call_functions_entered", -1)
+				}
 				invoked.Done()
 				var err error
 				server.HandleError(func() {
 					server.Raise(CloseContract(ctx, fixture.finance.ids[index], fixture.finance.providers[fixture.finance.providerIndexes[index]].destinationId, 3, false))
 				}, func(caught error) { err = caught })
 				returnNs[index] = time.Since(burstStart).Nanoseconds()
+				if diagnostics.returns.Add(1) == parallelPublicCloseCount {
+					diagnostics.event("all_public_call_functions_returned", -1)
+				}
 				replies <- closeReply{index: index, err: err}
 			}()
 		}
@@ -467,6 +525,7 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 		recordEvent("all_public_callers_ready")
 		burstStart = time.Now()
 		events["public_burst_start"] = burstStart.Sub(pipelineStarted).Nanoseconds()
+		diagnostics.event("public_burst_start", events["public_burst_start"])
 		startCallers()
 		allInvoked := make(chan struct{})
 		go func() { invoked.Wait(); close(allInvoked) }()
@@ -478,6 +537,7 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 			}
 			acknowledged[reply.index] = true
 			ackCount++
+			diagnostics.acknowledge(fixture.native[reply.index] && fixture.payerSlot[reply.index] == 0)
 			if fixture.native[reply.index] && fixture.payerSlot[reply.index] == 0 {
 				hotNativeAck++
 			}
@@ -502,14 +562,27 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 				t.Fatal("worker retired before held-owner progress proof", runErr)
 			case <-progressPoll:
 				if invokedAll && hotNativeAck > 0 {
-					heldState = parallelPublicCloseSnapshot(ctx, observer, fixture, recurring)
+					func() {
+						defer diagnostics.query("held_frontier_snapshot")()
+						heldState = parallelPublicCloseSnapshot(ctx, observer, fixture, recurring)
+					}()
+					if heldState.Independent > 0 && diagnostics.independentObserved.CompareAndSwap(false, true) {
+						recordEvent("first_independent_full_output_snapshot")
+					}
+					if diagnostics.backendEndObserved.Load() && !diagnostics.taskSnapshotCaptured {
+						observeCurrent("first_safe_observer_point_after_native_backend_end")
+						diagnostics.taskSnapshot(ctx, observer, roles, functions)
+					}
 					// The candidate waits for an actual common-key contender.
 					// An explicitly pre-custody RED can instead positively expose
 					// the forbidden foreground metadata write, then finish the
 					// same accounting/replay oracles before its final verdict.
 					// This alternate does not qualify custody-fixed/no-owner code.
 					if !ownership.observedContender() && !legacyMetadataWhileHeld {
-						legacyMetadataWhileHeld = parallelPublicCloseHeldNativeMetadataObserved(ctx, observer, fixture, acknowledged)
+						func() {
+							defer diagnostics.query("held_native_metadata_probe")()
+							legacyMetadataWhileHeld = parallelPublicCloseHeldNativeMetadataObserved(ctx, observer, fixture, acknowledged)
+						}()
 					}
 					progressReady = heldState.Independent > 0 && (ownership.observedContender() || legacyMetadataWhileHeld)
 				}
@@ -517,8 +590,15 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 			}
 		}
 		recordEvent("independent_completed_output_observed_while_held")
-		heldNative := parallelPublicCloseHeldNativeSnapshot(ctx, observer, fixture, acknowledged)
-		parallelPublicCloseRequireHeldOwner(t, ctx, observer, pid)
+		var heldNative parallelPublicCloseHeldNativeState
+		func() {
+			defer diagnostics.query("held_native_snapshot")()
+			heldNative = parallelPublicCloseHeldNativeSnapshot(ctx, observer, fixture, acknowledged)
+		}()
+		func() {
+			defer diagnostics.query("second_owner_witness")()
+			parallelPublicCloseRequireHeldOwner(t, ctx, observer, pid)
+		}()
 		secondCommonKeyHeld := parallelPublicCloseCommonKeyHeld(ctx, observer, pid, "transfer_balance", fixture.payers[0].balanceId)
 		closedWhileHeld := ownership.closeHeldWindow()
 		recordEvent("holder_release_requested_after_second_witness")
@@ -724,6 +804,7 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 				}
 			}
 		}
+		controlComplete = true
 	})
 }
 
