@@ -29,18 +29,20 @@ func TestContractLifecycleCountersRetentionClosesOnlyDeletedUnresolved(t *testin
 				fixture.destinationNetworkId, fixture.destinationId, 0)
 			server.Raise(err)
 		}
-		SetContractDispute(ctx, ids[1], true)
-		server.Raise(CloseContract(ctx, ids[2], fixture.sourceId, 0, false))
-		server.Raise(CloseContract(ctx, ids[3], fixture.sourceId, 0, false))
-		server.Raise(CloseContract(ctx, ids[3], fixture.destinationId, 0, false))
-		requireContractLifecycleCounterTestDelta(t, before, 5, 1)
 		now := server.NowUtc()
 		old := now.Add(-400 * 24 * time.Hour)
+		// Seed historical retention before settlement makes its actual outcome
+		// and close time immutable. The terminal owner keeps its own clock.
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract
  SET create_time=$2,close_time=$2,reap_time=$2 WHERE contract_id=ANY($1)`, ids[:4], old))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET reap_time=$2 WHERE contract_id=$1`, ids[4], old))
 		})
+		SetContractDispute(ctx, ids[1], true)
+		server.Raise(CloseContract(ctx, ids[2], fixture.sourceId, 0, false))
+		server.Raise(CloseContract(ctx, ids[3], fixture.sourceId, 0, false))
+		server.Raise(CloseContract(ctx, ids[3], fixture.destinationId, 0, false))
+		requireContractLifecycleCounterTestDelta(t, before, 5, 1)
 		removeDueContractBatches(ctx, now, now.Add(-StragglerContractExpiration), 2)
 		server.Db(ctx, func(conn server.PgConn) {
 			var remaining, protected, reports, escrows, sweeps int
