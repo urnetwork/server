@@ -1033,9 +1033,22 @@ func (self *debugTx) Exec(ctx context.Context, sql string, arguments ...any) (co
 // }
 */
 
+// Preserve an existing failure while closing its rows. After a successful
+// callback, Close must finish before Err is checked: draining a final reply
+// can produce the first error after the callback has consumed its last row.
 func WithPgResult(r PgResult, err error, callback any) {
+	closed := false
+	defer func() {
+		if !closed && r != nil {
+			// This path unwinds an earlier error, callback panic or Goexit.
+			// Cleanup must not replace that primary outcome with its panic.
+			func() {
+				defer func() { _ = recover() }()
+				r.Close()
+			}()
+		}
+	}()
 	Raise(err)
-	defer r.Close()
 	switch v := callback.(type) {
 	case func():
 		v()
@@ -1044,6 +1057,9 @@ func WithPgResult(r PgResult, err error, callback any) {
 	default:
 		panic(errors.New(fmt.Sprintf("Unknown callback: %s", callback)))
 	}
+	Raise(r.Err())
+	closed = true
+	r.Close()
 	Raise(r.Err())
 }
 
