@@ -445,7 +445,7 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			})
 			slices.SortFunc(clients, func(a, b server.Id) int { return a.Cmp(b) })
 			clients = slices.Compact(clients)
-			providerWorkLockSessionMutationInTx(ctx, tx, clients...)
+			providerWorkLockCurrentSessionMutationInTx(ctx, tx, clients...)
 			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM network_client_connection WHERE client_id=ANY($1) AND connected)`, clients).Scan(&blocked))
 			if blocked {
 				return

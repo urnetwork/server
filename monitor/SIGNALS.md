@@ -4024,6 +4024,40 @@ not native identity; `other`/`unset` and truncated text remain unattributed.
 Private query tokens are receipt-local ordinals, not reusable fingerprints or
 recoverable SQL. Other reservation-I/O and close-family groups remain separate.
 
+GOTCHA — connection lifecycle ownership can retain unnecessary head locks.
+The October 8 receipt `5e55d806` retained 12 source snapshots at
+09:08:40.392–09:09:02.930Z. Its private representatives match the frozen R40
+session-head mutation guard, endpoint advisory fence, connection retirement
+UPDATE and connection admission INSERT. The leading head-guard group had
+2,565 backend-samples, peak 272, with `LWLock:other`; the advisory group had
+1,060 backend-samples, peak 138, with `Lock:other`. Fifteen retained final
+waiter edges led from the endpoint advisory fence to those lifecycle owners.
+This is exact retained statement-shape evidence with non-NULL query-ID mapping,
+not a native caller join or proof that every group member used the same bytes.
+Declared Connect source tags do not prove deployed source parity. The other
+retained edge was daily-partition maintenance waiting behind a declared
+backup COPY; it does not establish backup failure or payer-index recovery.
+
+The source correction omits only the preliminary head `FOR UPDATE` for the
+explicit READ COMMITTED connection admission, retirement and shard-reap
+owners. These owners take a fresh snapshot after the endpoint wait; their
+trigger still advances the sequence and captures the event. The shared rolling
+compatibility bridge, sorted exclusive endpoint fences, mandatory unsigned
+events, signed original custody and registry-before-endpoint authorization
+order remain. Generic repeatable-read mutation and contract-read head guards
+still reject stale snapshots. The deterministic native boundary holds a head
+`FOR KEY SHARE` while overlapping real admissions and retirements must finish
+with exact journal/original counts and a signed reservation cut; the old
+repeatable-read snapshot must still receive `40001`. Preserve legacy writer,
+rollback, cancellation, missing-schema and unsigned-capture controls.
+
+The observed window omitted 182 public and 768 private group-samples, and
+selected only the oldest 16 of 139 final lock waiters. `LWLock:other` does not
+identify the lock-manager, buffer or WAL subevent, CPU use, or full pool demand.
+Removing a redundant statement and stronger row lock is not evidence that all
+admission/write pressure has cleared. Require post-change, source-qualified
+observations and successful traffic; a quieter capped sample cannot clear it.
+
 FALSE-POSITIVE QUALIFIERS: useful bulk work or maintenance may explain a band.
 Backend-samples are neither distinct requests, continuous waits, CPU time nor
 per-query CPU shares. Execution wall time includes waits. Confirm successful

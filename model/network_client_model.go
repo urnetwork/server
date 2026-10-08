@@ -2756,7 +2756,7 @@ func ConnectNetworkClientWithIpFamily(
 			}
 		}
 		connectionId = server.NewId()
-		providerWorkLockSessionMutationInTx(ctx, tx, clientId)
+		providerWorkLockCurrentSessionMutationInTx(ctx, tx, clientId)
 		providerWorkSessionGenesisInTx(ctx, tx, clientId)
 
 		host, _ := server.Host()
@@ -2868,7 +2868,7 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 			return optional.QueryRow(ctx, `SELECT client_id FROM network_client_connection WHERE connection_id=$1`, connectionId).Scan(&originalClientId)
 		})
 		if originalClientId != nil {
-			providerWorkLockSessionMutationInTx(ctx, tx, *originalClientId)
+			providerWorkLockCurrentSessionMutationInTx(ctx, tx, *originalClientId)
 		}
 		disconnectTime := server.NowUtc()
 		tag, err := tx.Exec(
