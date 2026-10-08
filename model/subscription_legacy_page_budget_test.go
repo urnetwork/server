@@ -164,19 +164,33 @@ func TestLegacySettlementParentCancellationKeepsPartialPageError(t *testing.T) {
 		defer held.Rollback(context.Background())
 		server.RaisePgResult(held.Exec(ctx, `SELECT pg_advisory_xact_lock(731019)`))
 		blocker := contractLifecycleTestBackendPid(t, ctx, held)
+		// Resume before the first row so its existing individual forward
+		// turn commits before the second row enters the cancellation barrier.
+		after := &LegacySettlementCursor{ContractId: firstID, NextAttemptTime: oldest.Add(-time.Second), PassEndTime: server.NowUtc()}
 		parent, cancelParent := context.WithCancel(ctx)
 		defer cancelParent()
 		type outcome struct {
 			result LegacySettlementFlushResult
 			err    error
 		}
-		done := make(chan outcome, 1)
+		done, joined := make(chan outcome, 1), make(chan struct{})
+		defer func() { cancelParent(); held.Rollback(context.Background()); <-joined }()
 		shard := int(firstID[15]) % LegacySettlementShardCount
 		go func() {
-			result, err := FlushLegacySettlements(parent, shard, nil, 256)
-			done <- outcome{result, err}
+			defer close(joined)
+			result, err := FlushLegacySettlements(parent, shard, after, 256)
+			done <- outcome{result: result, err: err}
 		}()
 		requireContractLifecycleBlockedBy(t, ctx, held, blocker)
+		var firstCommitted, secondPending bool
+		server.Raise(held.QueryRow(ctx, `SELECT
+		 COALESCE((SELECT outcome='settled' FROM transfer_contract WHERE contract_id=$1),false)
+		  AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
+		 COALESCE((SELECT outcome IS NULL FROM transfer_contract WHERE contract_id=$2),false)
+		  AND EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$2)`, firstID, secondID).Scan(&firstCommitted, &secondPending))
+		if !firstCommitted || !secondPending {
+			t.Fatal("parent cancellation barrier did not follow a committed first owner", firstCommitted, secondPending)
+		}
 		cancelParent()
 		var canceled outcome
 		select {
