@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/startifact"
@@ -114,9 +115,9 @@ func installCloseHistoryReadFunction(t testing.TB, functionBody string) func() {
 	return restore
 }
 
-// A real PostgreSQL read error aborts its savepoint, not the admitted byte
-// increment. Recovery cannot backfill evidence into the first original report.
-func TestContractCloseOriginalSqlReadFailureKeepsOriginalAndRetry(t *testing.T) {
+// Unexpected SQL failure aborts the caller; it cannot masquerade as missing
+// optional schema. Recovery admits the exact original only after a healthy read.
+func TestContractCloseOriginalUnexpectedSqlReadFailureRollsBackAndRecovers(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -125,20 +126,43 @@ func TestContractCloseOriginalSqlReadFailureKeepsOriginalAndRetry(t *testing.T) 
 		report := signCloseReportOriginal(t, f.report(), domain, key)
 		restore := installCloseHistoryReadFunction(t, `BEGIN RAISE EXCEPTION 'synthetic optional history read unavailable'; END`)
 		defer restore()
+		var sqlErr *pgconn.PgError
+		if applied, err := CloseContractWithReport(f.ctx, report); applied || !errors.As(err, &sqlErr) || sqlErr.Code != "P0001" {
+			t.Fatal("unexpected history SQL failure became an accepted close", applied, err)
+		}
+		assertCloseReportCounts(t, f.ctx, f.contractId, 0, 0)
+		server.Tx(f.ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(f.ctx, `CREATE TABLE synthetic_close_history_owner(value integer)`))
+		})
+		var ownerErr error
+		server.HandleError(func() {
+			server.Tx(f.ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(f.ctx, `INSERT INTO synthetic_close_history_owner(value) VALUES(1)`))
+				_, err := closeContractReportInTx(f.ctx, tx, report)
+				server.Raise(err)
+			}, server.TxReadCommitted, server.OptNoRetry())
+		}, func(err error) { ownerErr = err })
+		if !errors.As(ownerErr, &sqlErr) || sqlErr.Code != "P0001" {
+			t.Fatal("caller transaction lost the history failure", ownerErr)
+		}
+		server.Db(f.ctx, func(conn server.PgConn) {
+			var writes int
+			server.Raise(conn.QueryRow(f.ctx, `SELECT count(*) FROM synthetic_close_history_owner`).Scan(&writes))
+			if writes != 0 {
+				t.Fatal("history failure committed an earlier caller write")
+			}
+		})
+		assertCloseReportCounts(t, f.ctx, f.contractId, 0, 0)
+		restore()
 		if applied, err := CloseContractWithReport(f.ctx, report); err != nil || !applied {
-			t.Fatal("optional SQL read error poisoned the accounting transaction", applied, err)
+			t.Fatal("healthy retry did not admit the rolled-back original", applied, err)
+		}
+		if applied, err := CloseContractWithReport(f.ctx, report); err != nil || applied {
+			t.Fatal("healthy exact retry repeated original work", applied, err)
 		}
 		original, registration := retainedCloseOriginal(t, report)
-		if !bytes.Equal(original, report.OriginalReport) || len(registration) != 0 || retainedCloseKeyIssue(t, report) != originalCloseKeyUnavailable {
-			t.Fatal("optional SQL refusal lost original bytes or acquired registration")
-		}
-		restore()
-		if applied, err := CloseContractWithReport(f.ctx, report); err != nil || applied {
-			t.Fatal("recovered optional history repeated original work", applied, err)
-		}
-		_, registration = retainedCloseOriginal(t, report)
-		if len(registration) != 0 || retainedCloseKeyIssue(t, report) != originalCloseKeyUnavailable {
-			t.Fatal("later history was backfilled as original registration")
+		if !bytes.Equal(original, report.OriginalReport) || !bytes.Equal(registration, record.RegistrationBytes) || retainedCloseKeyIssue(t, report) != "" {
+			t.Fatal("healthy admission lost original bytes or matching registration")
 		}
 		sibling := signCloseReportOriginal(t, f.report(), domain, key)
 		if applied, err := CloseContractWithReport(f.ctx, sibling); err != nil || !applied {
