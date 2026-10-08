@@ -731,10 +731,13 @@ FROM failures GROUP BY task;
   freshly verified still nonfinal or an exact escrow rejection whose existing
   no-payout quarantine this attempt successfully claimed, fully posted, and
   independently terminal-verified/stream-cleaned, may the owning target request an explicit
-  retry delay on that same pending task. At least 6,250 verified siblings selects
-  a 2–4 second retry; fewer, including zero, retains the existing 1–5 minute idle
-  cadence. Selected candidates and unresolved rejected rows do not count as
-  terminal progress. Verified no-payout quarantines do count as terminal progress
+  retry delay on that same pending task. An acknowledged raw cursor or sweep
+  continuation selects a 2–4 second retry so healthy due rows beyond the completed
+  page can run. Once the pass finishes, at least 6,250 verified siblings also
+  selects 2–4 seconds; fewer, including zero, retains the existing 1–5 minute idle
+  cadence. A scan continuation is bounded remaining work, not a terminal close.
+  Selected candidates and unresolved rejected rows do not count as terminal
+  progress. Verified no-payout quarantines do count as terminal progress
   but have their own `quarantined_accounting` count; they are never reported as
   successful financial settlements. A dispute created during checkpoint finalization gets only one
   additional fresh state read after the exact typed escrow guard; healthy
