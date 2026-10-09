@@ -12,7 +12,7 @@ import (
 // A refusal marker cannot hide an independently attached integrity failure.
 func TestProviderWorkOptionalRefusalDoesNotSwallowOtherCauses(t *testing.T) {
 	ctx := WithProviderWorkSessionSource(t.Context(), &ProviderWorkSessionSource{})
-	tx := &providerWorkReadyTx{}
+	tx := &providerWorkSingleOwnerTx{}
 	var raised error
 	server.HandleError(func() {
 		providerWorkOptionalInTx(ctx, tx, func(server.PgTx) error {

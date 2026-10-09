@@ -98,9 +98,7 @@ func TestHandlerRetirementDoesNotConvoyAcrossEndpoints(t *testing.T) {
 		holder, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 		server.Raise(err)
 		defer rollbackCloseReportTestTransaction(ctx, holder)
-		if !providerWorkLockSessionMutationInTx(ctx, holder, f.destinationId) {
-			t.Fatal("synthetic last endpoint fence unavailable")
-		}
+		providerWorkLockSessionMutationInTx(ctx, holder, f.destinationId)
 		var reruns atomic.Int64
 		workerCtx, stop := context.WithCancel(server.Testing_WithTxRerunHook(ctx, func() { reruns.Add(1) }))
 		result := make(chan error, 1)
@@ -214,10 +212,14 @@ func TestHandlerRetirementBoundsPerEndpointJournal(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_client_handler WHERE handler_id=$1`, handlerId))
 		})
+		observer, closeObservation := providerWorkObserveRuntimeQueries(t, ctx)
+		defer closeObservation()
 		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc().Add(-time.Hour))
 		requireProviderWorkConnectionJournal(t, f, 2+count+64, 2)
 		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc().Add(-time.Hour))
 		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc().Add(-time.Hour))
+		closeObservation()
+		observer.requireNoCatalog(t, "pg_try_advisory_xact_lock", "for update skip locked", "insert into provider_work_session_receipt")
 		requireProviderWorkConnectionJournal(t, f, 2+2*count, 1)
 	})
 }

@@ -1,7 +1,7 @@
 package model
 
-// A catalog preflight cannot be skipped when its owning transaction is
-// already aborted or canceled. Preserve the original failure immediately.
+// Required endpoint work raises an aborted or canceled owner's original
+// failure before another statement or a commit can replace its cause.
 
 import (
 	"context"
@@ -14,9 +14,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Each case makes the preflight fail in the caller's transaction, which must
+// Each case makes the actual fence fail in the caller's transaction, which must
 // raise rather than return to the caller.
-func TestProviderWorkOptionalSchemaRaisesFailedPreflight(t *testing.T) {
+func TestProviderWorkSessionMutationRaisesOwnerFailure(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -43,7 +43,7 @@ func TestProviderWorkOptionalSchemaRaisesFailedPreflight(t *testing.T) {
 
 		for _, c := range []struct {
 			name string
-			// fails the preflight the call makes in the transaction, and
+			// fails the fence the call makes in the transaction, and
 			// returns the context of the call
 			prepare func(callCtx context.Context, tx server.PgTx) context.Context
 			raised  func(panicErr error) bool
@@ -60,7 +60,7 @@ func TestProviderWorkOptionalSchemaRaisesFailedPreflight(t *testing.T) {
 				raised: func(panicErr error) bool {
 					return hasPgCode(panicErr, "25P02") && hasPgCode(panicErr, "22012")
 				},
-				want: "the refused preflight (25P02) carrying the dropped division by zero (22012)",
+				want: "the refused fence (25P02) carrying the dropped division by zero (22012)",
 			},
 			{
 				name: "canceled context",
@@ -79,21 +79,19 @@ func TestProviderWorkOptionalSchemaRaisesFailedPreflight(t *testing.T) {
 			panicValue := callWithForcedFailure(ctx, func(callCtx context.Context) {
 				server.Tx(callCtx, func(tx server.PgTx) {
 					returned = false
-					preflightCtx := c.prepare(callCtx, tx)
-					providerWorkOptionalSchemaInTx(preflightCtx, tx, func(optional server.PgTx) error {
-						return nil
-					})
+					fenceCtx := c.prepare(callCtx, tx)
+					providerWorkLockCurrentSessionMutationInTx(fenceCtx, tx, server.NewId())
 					returned = true
-				})
+				}, server.OptNoRetry())
 			})
 			panicErr, _ := panicValue.(error)
 			switch {
 			case returned:
-				t.Errorf("%s: returned after its preflight failed (then %v), want the failure raised", c.name, panicValue)
+				t.Errorf("%s: returned after its fence failed (then %v), want the failure raised", c.name, panicValue)
 			case !c.raised(panicErr):
 				t.Errorf("%s: ended with %v, want %s", c.name, panicValue, c.want)
 			case errors.Is(panicErr, pgx.ErrTxCommitRollback):
-				t.Errorf("%s: ended in a commit that rolled back (%v), want the preflight's failure raised", c.name, panicValue)
+				t.Errorf("%s: ended in a commit that rolled back (%v), want the fence's failure raised", c.name, panicValue)
 			}
 		}
 	})
