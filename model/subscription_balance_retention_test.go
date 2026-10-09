@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 )
 
@@ -70,6 +71,51 @@ func TestCompletedTransferBalanceRetentionPreservesDebtAndLegacy(t *testing.T) {
 		for _, balanceId := range retained {
 			preserved[balanceId] = readPayoutDebitTestState(t, ctx, balanceId)
 		}
+		beforeDebit := readPayoutDebitTestState(t, ctx, finished.balanceId)
+		// Current Redis-funded settlement commits its outcome and journal first.
+		// The debit worker owns both escrow metadata and the original reservation
+		// release. A 300-byte debit must still retain the entire 600-byte token.
+		if beforeDebit.initial != 1000 || beforeDebit.credit != 1000 || beforeDebit.pending != 1 || beforeDebit.pendingBytes != 300 || beforeDebit.applied != 0 ||
+			beforeDebit.escrows != 1 || beforeDebit.settledEscrows != 0 || beforeDebit.settled != 0 || beforeDebit.anchors != 0 || beforeDebit.invalid != 1 ||
+			beforeDebit.legacy != 0 || beforeDebit.reserved != 600 || beforeDebit.inWindow {
+			t.Fatal("retention fixture lacks the exact pre-worker debit and full original reservation")
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var pendingMetadata bool
+			server.Raise(conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow
+				WHERE contract_id=$1 AND balance_id=$2 AND redis_reserved AND NOT settled
+				AND balance_byte_count=600 AND payout_byte_count IS NULL AND settle_time IS NULL
+				AND EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1
+					AND balance_id=$2 AND debit_byte_count=300 AND NOT applied))`, escrow.ContractId, finished.balanceId).Scan(&pendingMetadata))
+			if !pendingMetadata {
+				t.Fatal("pre-worker escrow lacks its exact pending metadata shape")
+			}
+		})
+		sweeps := readPayoutDebitTestSweeps(t, ctx, finished.balanceId)
+		if len(sweeps) != 1 || sweeps[0].contractId != escrow.ContractId || sweeps[0].bytes != 300 {
+			t.Fatal("terminal contract lacks its exact committed provider allocation")
+		}
+		accounts := map[server.Id]contractPayoutTestAmount{
+			finished.sourceNetworkId: contractPayoutTestAccountAmount(t, ctx, finished.sourceNetworkId),
+		}
+		for _, sweep := range sweeps {
+			accounts[sweep.networkId] = contractPayoutTestAccountAmount(t, ctx, sweep.networkId)
+		}
+		checkUntouched := func() {
+			for balanceId, before := range preserved {
+				if after := readPayoutDebitTestState(t, ctx, balanceId); after != before {
+					t.Fatal("targeted retention/debit changed an unrelated retained obligation")
+				}
+			}
+			if after := readPayoutDebitTestSweeps(t, ctx, finished.balanceId); !slices.Equal(sweeps, after) {
+				t.Fatal("retention/debit changed the committed provider allocation")
+			}
+			for networkId, amount := range accounts {
+				if after := contractPayoutTestAccountAmount(t, ctx, networkId); after != amount {
+					t.Fatal("retention/debit changed a payer or provider account")
+				}
+			}
+		}
 		removeCompletedTransferBalanceBatches(ctx, server.NowUtc().Add(-7*24*time.Hour))
 		check := func(wantGone bool) {
 			server.Db(ctx, func(conn server.PgConn) {
@@ -90,14 +136,52 @@ func TestCompletedTransferBalanceRetentionPreservesDebtAndLegacy(t *testing.T) {
 		// A terminal contract still owes its unapplied debit. The first expiry
 		// pass must keep its original balance and must not create a tombstone.
 		check(false)
-		assertPayoutDebitTestConsumptionAndDrain(t, ctx, finished.balanceId, 1000, 300)
-		for balanceId, before := range preserved {
-			if after := readPayoutDebitTestState(t, ctx, balanceId); after != before {
-				t.Fatalf("targeted public debit changed unrelated retained obligation %s: before=%+v after=%+v", balanceId, before, after)
-			}
+		if after := readPayoutDebitTestState(t, ctx, finished.balanceId); after != beforeDebit {
+			t.Fatal("retention changed the pending debit before its worker ran")
 		}
+		checkUntouched()
+		if available := GetActiveTransferBalanceByteCount(ctx, finished.sourceNetworkId); available != 0 {
+			t.Fatalf("expired pending credit became spendable: got=%d", available)
+		}
+		// The public one-balance page seeks immediately before this exact UUID,
+		// so another retained grant cannot accidentally be drained by the test.
+		previous := finished.balanceId
+		for index := len(previous) - 1; ; index-- {
+			if index < 0 {
+				t.Fatal("synthetic balance has no preceding UUID")
+			}
+			if previous[index] != 0 {
+				previous[index]--
+				break
+			}
+			previous[index] = 255
+		}
+		result, err := FlushTransferDebits(ctx, transferDebitShard(finished.balanceId), &previous, 1)
+		if err != nil || result.Failed != 0 || result.Busy != 0 || result.Balances != 1 || result.Applied != 1 || result.Released != 1 || !result.More ||
+			result.LastBalanceId == nil || *result.LastBalanceId != finished.balanceId {
+			t.Fatalf("public debit page did not finish the exact retained grant: error_type=%T balances=%d applied=%d released=%d busy=%d failed=%d", err, result.Balances, result.Applied, result.Released, result.Busy, result.Failed)
+		}
+		afterDebit := readPayoutDebitTestState(t, ctx, finished.balanceId)
+		if afterDebit.initial != 1000 || afterDebit.credit != 700 || afterDebit.pending != 0 || afterDebit.pendingBytes != 0 || afterDebit.applied != 0 ||
+			afterDebit.escrows != 1 || afterDebit.settledEscrows != 1 || afterDebit.settled != 300 || afterDebit.invalid != 0 || afterDebit.anchors != 0 ||
+			afterDebit.legacy != 0 || afterDebit.reserved != 0 || afterDebit.inWindow {
+			t.Fatal("public debit did not conserve 300 consumed bytes, 700 remaining bytes, settled metadata and full token release")
+		}
+		if available := GetActiveTransferBalanceByteCount(ctx, finished.sourceNetworkId); available != 0 {
+			t.Fatalf("public debit made expired remaining credit spendable: got=%d", available)
+		}
+		checkUntouched()
+		applied, released, busy, err := flushTransferDebitBalance(ctx, finished.balanceId)
+		if err != nil || applied != 0 || released != 0 || busy {
+			t.Fatalf("empty exact debit replay changed the journal: error_type=%T applied=%d released=%d busy=%t", err, applied, released, busy)
+		}
+		if replayed := readPayoutDebitTestState(t, ctx, finished.balanceId); replayed != afterDebit {
+			t.Fatal("empty debit replay changed settled credit or escrow metadata")
+		}
+		checkUntouched()
 		removeCompletedTransferBalanceBatches(ctx, server.NowUtc().Add(-7*24*time.Hour))
 		check(true)
+		checkUntouched()
 	})
 }
 
@@ -136,35 +220,100 @@ func TestCompletedTransferBalanceRetentionConcurrentReservations(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
+		// Each actor owns a current server transaction on its own goroutine.
+		// The main actor holds no PostgreSQL connection while running retention
+		// or a separate creator. Both normal and failing paths join the owner.
+		startHolder := func(run func(context.Context, server.PgTx, func())) (finish func(), abort func()) {
+			heldCtx, stop := context.WithCancel(ctx)
+			ready, proceed, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var recovered any
+			go func() {
+				defer close(done)
+				recovered = server.HandleError(func() {
+					server.Tx(heldCtx, func(tx server.PgTx) {
+						run(heldCtx, tx, func() {
+							close(ready)
+							select {
+							case <-proceed:
+							case <-heldCtx.Done():
+								server.Raise(heldCtx.Err())
+							}
+						})
+					}, server.TxReadCommitted, server.OptNoRetry())
+				})
+			}()
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(proceed) }) }
+			abort = func() {
+				stop()
+				release()
+				<-done
+			}
+			select {
+			case <-ready:
+			case <-done:
+				abort()
+				t.Fatalf("independent holder failed before its barrier: panic_type=%T", recovered)
+			case <-ctx.Done():
+				abort()
+				t.Fatal("independent holder did not reach its barrier before the fixture deadline")
+			}
+			finish = func() {
+				release()
+				<-done
+				if recovered != nil {
+					t.Fatalf("independent holder failed after its barrier: panic_type=%T", recovered)
+				}
+			}
+			return
+		}
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		held, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-		server.Raise(err)
-		defer held.Rollback(context.Background())
-		_, _, err = createTransferEscrowInTx(ctx, held, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 600, nil)
-		server.Raise(err)
+		var admitted *TransferEscrow
+		var posts []func() any
+		finishPositive, abortPositive := startHolder(func(heldCtx context.Context, held server.PgTx, wait func()) {
+			var err error
+			admitted, posts, err = createTransferEscrowInTx(heldCtx, held, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 600, nil)
+			server.Raise(err)
+			wait()
+		})
+		defer abortPositive()
 		// A caller-supplied future cutoff deliberately overlaps live admission.
 		// The row is locked by real admission, so retention must skip it promptly.
 		cutoff := server.NowUtc().Add(48 * time.Hour)
 		fast, stop := context.WithTimeout(ctx, 3*time.Second)
+		defer stop()
 		removeCompletedTransferBalanceBatches(fast, cutoff)
 		stop()
-		server.Raise(held.Commit(ctx))
+		finishPositive()
+		server.RunPosts(ctx, posts...)
 		removeCompletedTransferBalanceBatches(ctx, cutoff)
 		server.Db(ctx, func(c server.PgConn) {
-			var exists bool
-			server.Raise(c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_balance WHERE balance_id=$1)`, f.balanceId).Scan(&exists))
-			if !exists {
-				t.Fatal("retention erased a concurrently committed positive reservation")
+			var exists, reserved bool
+			server.Raise(c.QueryRow(ctx, `SELECT
+				EXISTS(SELECT 1 FROM transfer_balance WHERE balance_id=$1 AND balance_byte_count=1000),
+				EXISTS(SELECT 1 FROM transfer_escrow WHERE balance_id=$1 AND contract_id=$2 AND balance_byte_count=600 AND NOT settled)`, f.balanceId, admitted.ContractId).Scan(&exists, &reserved))
+			if !exists || !reserved {
+				t.Fatal("retention erased a concurrently committed balance or its exact positive reservation")
 			}
 		})
+		if reserved := Testing_NetEscrowByteCount(ctx, f.balanceId); reserved != 600 {
+			t.Fatalf("positive admission post lost its committed reservation: got=%d", reserved)
+		}
 
 		zero := newNetEscrowOrderingTestFixture(t, ctx)
-		locked, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-		server.Raise(err)
-		defer locked.Rollback(context.Background())
-		server.RaisePgResult(locked.Exec(ctx, `SELECT balance_id FROM transfer_balance WHERE balance_id=$1 FOR UPDATE`, zero.balanceId))
+		var deletedZero bool
+		finishZero, abortZero := startHolder(func(heldCtx context.Context, locked server.PgTx, wait func()) {
+			owned, err := tryTransferBalanceOwnershipInTx(heldCtx, locked, []server.Id{zero.balanceId})
+			server.Raise(err)
+			if !owned {
+				panic("independent zero-anchor holder did not acquire balance ownership")
+			}
+			server.RaisePgResult(locked.Exec(heldCtx, `SELECT balance_id FROM transfer_balance WHERE balance_id=$1 FOR UPDATE`, zero.balanceId))
+			wait()
+			rows, err := locked.Query(heldCtx, completedTransferBalanceDeleteSql, []server.Id{zero.balanceId})
+			server.WithPgResult(rows, err, func() { deletedZero = rows.Next() })
+		})
+		defer abortZero()
 		// Zero-byte admission does not take a financial lock. Commit an actual
 		// anchor after the locking snapshot; the separate delete must see it.
 		anchor, err := CreateTransferEscrow(ctx, zero.sourceNetworkId, zero.sourceId, zero.destinationNetworkId, zero.destinationId, 0)
@@ -172,13 +321,10 @@ func TestCompletedTransferBalanceRetentionConcurrentReservations(t *testing.T) {
 		if len(anchor.Balances) != 1 {
 			t.Fatal("concurrent zero-byte contract has no test anchor")
 		}
-		rows, err := locked.Query(ctx, completedTransferBalanceDeleteSql, []server.Id{zero.balanceId})
-		server.WithPgResult(rows, err, func() {
-			if rows.Next() {
-				t.Fatal("post-lock deletion snapshot missed a committed zero-byte anchor")
-			}
-		})
-		server.Raise(locked.Commit(ctx))
+		finishZero()
+		if deletedZero {
+			t.Fatal("post-lock deletion snapshot missed a committed zero-byte anchor")
+		}
 
 		// Discovery is unlocked. A refreshed end time must be checked again
 		// under the batch lock instead of trusting the old expiry observation.

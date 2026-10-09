@@ -1,7 +1,11 @@
 package model
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"io"
+	"os"
 	"slices"
 	"time"
 
@@ -9,6 +13,13 @@ import (
 )
 
 const completedTransferBalanceBatchSize = 256
+
+// Discovery keeps at most 16,777,216 raw UUIDs in an anonymous local file.
+// An oversized cohort refuses before deletion; it needs an explicit budget
+// revision or indexed pagination, not a restart at the same retained page.
+const completedTransferBalanceSpoolByteLimit int64 = 256 << 20
+
+var errCompletedTransferBalanceSpoolCapacity = errors.New("completed transfer balance discovery exceeds its spool byte limit")
 
 // Discover the same indexed expiry set as the old retention delete, once.
 // The existing index has only end_time: UUID keyset pages would repeatedly
@@ -53,30 +64,73 @@ const completedTransferBalanceDeleteSql = `
 // has not finished. The old shared probe account is retained for separately
 // fenced cleanup: it has no durable shard lifecycle that closes admission.
 func removeCompletedTransferBalanceBatches(ctx context.Context, minTime time.Time) {
-	// Stream the expiry range once; retain only one UUID batch in memory.
-	// The reader holds no row locks. A second maintenance connection executes
-	// short transactions, and their fresh snapshots recheck every candidate.
+	removeCompletedTransferBalanceBatchesWithByteLimit(ctx, minTime, completedTransferBalanceSpoolByteLimit)
+}
+
+func removeCompletedTransferBalanceBatchesWithByteLimit(ctx context.Context, minTime time.Time, byteLimit int64) {
+	if byteLimit <= 0 || completedTransferBalanceSpoolByteLimit < byteLimit {
+		panic("invalid completed transfer balance spool byte limit")
+	}
+	server.Raise(ctx.Err())
+	spool, err := os.CreateTemp("", "urnetwork-balance-retention-*")
+	server.Raise(err)
+	defer func() {
+		_ = spool.Close()
+		_ = os.Remove(spool.Name())
+	}()
+	// Unlink while open: cancellation, panic and process exit cannot leave a
+	// named file of balance IDs. CreateTemp already restricts access to 0600.
+	server.Raise(os.Remove(spool.Name()))
+	writer := bufio.NewWriterSize(spool, completedTransferBalanceBatchSize*len(server.Id{}))
+	var written int64
+	// Keep the one indexed discovery pass and its snapshot, but fully drain
+	// and release its connection before any transaction or mirror refresh.
 	server.MaintenanceDb(ctx, func(conn server.PgConn) {
+		// A safe connection retry must replace, not append to, a partial pass.
+		writer.Reset(spool)
+		server.Raise(spool.Truncate(0))
+		_, err := spool.Seek(0, io.SeekStart)
+		server.Raise(err)
+		written = 0
 		rows, err := conn.Query(ctx, completedTransferBalanceCandidatesSql, minTime.UTC())
 		server.WithPgResult(rows, err, func() {
-			batch := make([]server.Id, 0, completedTransferBalanceBatchSize)
-			flush := func() {
-				if len(batch) > 0 {
-					removeCompletedTransferBalanceBatch(ctx, batch, minTime)
-					batch = batch[:0]
-				}
-			}
 			for rows.Next() {
+				server.Raise(ctx.Err())
 				var id server.Id
 				server.Raise(rows.Scan(&id))
-				batch = append(batch, id)
-				if len(batch) == completedTransferBalanceBatchSize {
-					flush()
+				if byteLimit-written < int64(len(id)) {
+					panic(errCompletedTransferBalanceSpoolCapacity)
 				}
+				n, err := writer.Write(id[:])
+				server.Raise(err)
+				if n != len(id) {
+					panic(io.ErrShortWrite)
+				}
+				written += int64(n)
 			}
-			flush()
 		})
 	})
+	server.Raise(writer.Flush())
+	server.Raise(ctx.Err())
+	_, err = spool.Seek(0, io.SeekStart)
+	server.Raise(err)
+	reader := bufio.NewReaderSize(spool, completedTransferBalanceBatchSize*len(server.Id{}))
+	batch := make([]server.Id, 0, completedTransferBalanceBatchSize)
+	for read := int64(0); read < written; read += int64(len(server.Id{})) {
+		server.Raise(ctx.Err())
+		var id server.Id
+		_, err := io.ReadFull(reader, id[:])
+		server.Raise(err)
+		batch = append(batch, id)
+		if len(batch) == completedTransferBalanceBatchSize {
+			removeCompletedTransferBalanceBatch(ctx, batch, minTime)
+			batch = batch[:0]
+		}
+	}
+	if len(batch) > 0 {
+		server.Raise(ctx.Err())
+		removeCompletedTransferBalanceBatch(ctx, batch, minTime)
+	}
 }
 
 func removeCompletedTransferBalanceBatch(ctx context.Context, candidates []server.Id, minTime time.Time) {
