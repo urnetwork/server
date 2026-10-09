@@ -13296,8 +13296,9 @@ The opt-in API instrumentation adds only fixed cells:
 
 Trusted JWT-state work is separately exposed by
 `urnetwork_jwt_state_queries_total{caller,operation,credential,outcome}` at
-the shared query boundary of `jwt.ValidateByJwtState` and
-`jwt.ValidateByJwtStateInTx`. It has 252 initialized cells: 21 server-selected
+the shared query boundary of `jwt.ValidateByJwtState`,
+`jwt.ValidateByJwtStateForParent` and `jwt.ValidateByJwtStateInTx`. It has
+252 initialized cells: 21 server-selected
 caller/operation pairs, `account|client` statement shapes, and
 `query_error|state_valid|no_active_row|credential_rotated|canceled|deadline`.
 The caller/operation pairs are:
@@ -13332,17 +13333,36 @@ or deadline only when that attempt's context supplies the corresponding error;
 other query failures remain `query_error`.
 
 The multiplicity control is per authenticated operation, not per frame or
-unique credential. A hosted child control pack currently makes one ownership
-query and one JWT-state query, even when it contains 16 frames; its frames use
+unique credential. A hosted child control pack makes one combined durable
+parent-ownership and JWT-state query, even when it contains 16 frames; its frames use
 the existing `http` wrapper label. Direct prober control makes one JWT-state
 query per pack and uses `internal` frames. Verified resident in-band control
 uses that same `internal` label but does not revalidate JWT state per pack.
 Durable control frames can perform their own model work. The raw hosted mint
 wrapper currently validates twice; the typed SDK mint validates once. An
-inactive hosted child can stop at the ownership query before JWT validation;
+inactive or foreign-parent hosted child reaches the combined state query and
+counts as `no_active_row`; signature, audience, account and parent-only refusals
+still stop before that query. Earlier executables perform a separate ownership
+query, so source-qualified generations are required for both the acquisition
+multiplicity and refusal comparison. An
 an externally revoked prober child retained in its owner's registry reaches
 the state check until that owner removes its membership. Keep these distinct
 when examining retry pressure; neither query count proves new-client churn.
+
+The combined hosted read keeps the child primary-key lookup, active flag,
+network/account/device checks and credential-rotation verdict. It checks the
+durable `source_client_id` in that same snapshot and adds no cache, lock,
+deadline extension or nested connection. Removing the redundant borrow does
+not establish the cause of a production acquisition deadline: a failed acquire
+can precede SQL because of a depleted request budget, occupied pool capacity,
+connection construction or idle-connection validation. Pool gauges sampled at
+either end do not identify the whole wait. The driver's cumulative acquire
+duration and acquired count cover successful underlying Puddle resource
+admissions, including admissions followed by failed pgx idle validation. The
+duration excludes canceled waits and idle validation; neither counter proves a
+wrapper callback entered or that failed acquisition was short. Authentication
+and earlier frames share the original
+hosted request deadline, and authentication precedes contract-stage timing.
 
 Hosted typed mint now uses two pool acquisitions in the successful path without
 retries: the existing fresh entitlement read, followed by the child-creation

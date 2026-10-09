@@ -1942,6 +1942,8 @@ func CreateTransferEscrow(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	// Keep one authority, including absence, across admission recovery reruns.
+	ctx = providerWorkSessionContext(ctx)
 	return runRedisContractAdmission(ctx, func(ctx context.Context) (*TransferEscrow, error) {
 		return createTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount)
 	})
@@ -1957,6 +1959,8 @@ func createTransferEscrow(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	// Direct owners also resolve optional file and key work before acquiring pg.
+	ctx = providerWorkSessionContext(ctx)
 	var posts []func() any
 
 	if err := transferEscrowTx(ctx, sourceNetworkId, contractTransferByteCount, func(tx server.PgTx) {
@@ -2042,6 +2046,8 @@ func CreateCompanionTransferEscrow(
 	contractTransferByteCount ByteCount,
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	// Recovery reruns and payer handoffs retain the operation's pinned source.
+	ctx = providerWorkSessionContext(ctx)
 	return runRedisContractAdmission(ctx, func(ctx context.Context) (*TransferEscrow, error) {
 		return createCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount, originContractTimeout)
 	})
@@ -2058,6 +2064,8 @@ func createCompanionTransferEscrow(
 	contractTransferByteCount ByteCount,
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	// Direct callers must not load or verify an optional file while holding pg.
+	ctx = providerWorkSessionContext(ctx)
 	var posts []func() any
 	payerNetworkId := destinationNetworkId
 	requestedBytes := contractTransferByteCount
@@ -2488,6 +2496,8 @@ func CreateContractNoEscrowWithExpiration(
 	contractTransferByteCount ByteCount,
 	usageOriginIsSource bool,
 ) (contractId server.Id, expirationTime time.Time, returnErr error) {
+	// Pin before acquisition so transaction retries reuse even an absent source.
+	ctx = providerWorkSessionContext(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	server.Tx(ctx, func(tx server.PgTx) {
 		contractId, expirationTime, returnErr = createContractNoEscrowInTx(

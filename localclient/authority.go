@@ -74,11 +74,16 @@ func (self *Authority) token() string {
 }
 
 func (self *Authority) authenticate(ctx context.Context, token string, parentOnly bool) (*session.ClientSession, error) {
-	claims, err := self.parseOwnedClaims(ctx, token, parentOnly)
+	claims, err := self.parseClaimsPreflight(ctx, token, parentOnly)
 	if err != nil {
 		return nil, err
 	}
-	if err = jwt.ValidateByJwtState(ctx, claims, true); err != nil {
+	if *claims.ClientId == self.clientId {
+		err = jwt.ValidateByJwtState(ctx, claims, true)
+	} else {
+		err = jwt.ValidateByJwtStateForParent(ctx, claims, self.clientId)
+	}
+	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -87,9 +92,10 @@ func (self *Authority) authenticate(ctx context.Context, token string, parentOnl
 	return self.newSession(ctx, claims), nil
 }
 
-// Signature, audience and owner binding are local preflight. A successful
-// result still requires live-state validation at the operation's DB boundary.
-func (self *Authority) parseOwnedClaims(ctx context.Context, token string, parentOnly bool) (*jwt.ByJwt, error) {
+// Signature, audience and owning account/parent binding are local preflight.
+// Child source ownership and live state are checked together by authenticate;
+// parent-only mint instead validates live state in its writing transaction.
+func (self *Authority) parseClaimsPreflight(ctx context.Context, token string, parentOnly bool) (*jwt.ByJwt, error) {
 	if self.closed.Load() {
 		return nil, context.Canceled
 	}
@@ -110,7 +116,7 @@ func (self *Authority) parseOwnedClaims(ctx context.Context, token string, paren
 		if *claims.DeviceId != self.deviceId {
 			return nil, &connect.HttpStatusError{StatusCode: http.StatusUnauthorized}
 		}
-	} else if parentOnly || !self.ownsChild(ctx, *claims.ClientId) {
+	} else if parentOnly {
 		return nil, &connect.HttpStatusError{StatusCode: http.StatusUnauthorized}
 	}
 	return claims, nil
@@ -154,7 +160,7 @@ func (self *Authority) AuthNetworkClient(ctx context.Context, args *connect.Auth
 		if args == nil || args.ClientId != nil || args.SourceClientId == nil || server.Id(*args.SourceClientId) != self.clientId {
 			return nil, errors.New("local mint requires its owning parent")
 		}
-		claims, err := self.parseOwnedClaims(ctx, self.token(), true)
+		claims, err := self.parseClaimsPreflight(ctx, self.token(), true)
 		if err != nil {
 			return nil, err
 		}

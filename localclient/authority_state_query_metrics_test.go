@@ -144,8 +144,8 @@ func TestAuthorityStateQueryMetricActualOperations(t *testing.T) {
 			t.Fatal("hosted control queries counted frames or distinct clients instead of requests")
 		}
 		if authorityObservedCounter(t, "urnetwork_jwt_state_queries_total", nil) != allQueriesBefore+requests ||
-			authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) != acquiresBefore+2*requests {
-			t.Fatal("hosted control must preserve one ownership query and one JWT query per pack")
+			authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) != acquiresBefore+requests {
+			t.Fatal("hosted control must combine durable ownership and live JWT state in one query per pack")
 		}
 		if authorityObservedCounter(t, "urnetwork_connect_control_frames_total", httpLabels) != httpBefore+float64(requests*len(frames)) ||
 			authorityObservedCounter(t, "urnetwork_connect_control_frames_total", internalLabels) != internalBefore || apiCalls.Load() != 0 {
@@ -162,11 +162,11 @@ func TestAuthorityStateQueryMetricActualOperations(t *testing.T) {
 		acquiresBefore = authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels)
 		_, err = owner.ConnectControl(ctx, child.ByClientJwt, args)
 		authorityTestUnauthorized(t, err)
-		if authorityStateQueryMetric(t, "hosted", "control", "client", "no_active_row") != before {
-			t.Fatal("hosted ownership refusal was mislabeled as a JWT query")
+		if authorityStateQueryMetric(t, "hosted", "control", "client", "no_active_row") != before+1 {
+			t.Fatal("combined hosted ownership and live-state refusal was not observed")
 		}
 		if authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) != acquiresBefore+1 {
-			t.Fatal("retired hosted child must stop after the ownership query")
+			t.Fatal("retired hosted child must stop after the combined state query")
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_user SET credential_change_time=$2 WHERE user_id=$1`, parent.UserId, server.NowUtc().Add(time.Minute)))

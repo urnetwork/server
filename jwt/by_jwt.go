@@ -588,7 +588,19 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (
 		return err
 	}
 	server.Db(ctx, func(conn server.PgConn) {
-		returnErr = validateByJwtStateQuery(ctx, conn, byJwt)
+		returnErr = validateByJwtStateQuery(ctx, conn, byJwt, nil)
+	})
+	return
+}
+
+// Checks durable child ownership and live credentials in one primary-key read.
+// The caller still authenticates the token and binds its owning account first.
+func ValidateByJwtStateForParent(ctx context.Context, byJwt *ByJwt, parentClientId server.Id) (returnErr error) {
+	if err := validateByJwtStateIdentity(byJwt, true); err != nil {
+		return err
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		returnErr = validateByJwtStateQuery(ctx, conn, byJwt, &parentClientId)
 	})
 	return
 }
@@ -599,7 +611,7 @@ func ValidateByJwtStateInTx(ctx context.Context, tx server.PgTx, byJwt *ByJwt, r
 	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
 		return err
 	}
-	return validateByJwtStateQuery(ctx, tx, byJwt)
+	return validateByJwtStateQuery(ctx, tx, byJwt, nil)
 }
 
 // Refuses incomplete identities before a standalone caller acquires a pool slot.
@@ -617,7 +629,7 @@ func validateByJwtStateIdentity(byJwt *ByJwt, requireClient bool) error {
 
 // One entered SQL query owns one observation, through a connection or a
 // transaction. Operational failures still unwind to the owning DB boundary.
-func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt) error {
+func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt, parentClientId *server.Id) error {
 	valid := false
 	var credentialChangeTime time.Time
 	func() {
@@ -656,8 +668,9 @@ func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt 
 				network_client.active = true
 			WHERE
 				network_user.user_id = $1 AND
-				($4::uuid IS NULL OR network_client.device_id = $4)
-		`, byJwt.UserId, byJwt.NetworkId, *byJwt.ClientId, byJwt.DeviceId)
+				($4::uuid IS NULL OR network_client.device_id = $4) AND
+				($5::uuid IS NULL OR network_client.source_client_id = $5)
+		`, byJwt.UserId, byJwt.NetworkId, *byJwt.ClientId, byJwt.DeviceId, parentClientId)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&credentialChangeTime))
