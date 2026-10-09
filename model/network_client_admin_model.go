@@ -14,10 +14,12 @@ import (
 // NetworkRefusesClientAdmin reports whether the network's client tokens are
 // refused on every admin route, including the ones the URnetwork apps call
 // with their client token today. An Embed network hands its client tokens to
-// a third party's users, so none of them may administer it: the network is
-// Embed-enabled, or it has the Embed plan's client allowance.
+// a third party's users, so none of them may administer it: Embed was ever
+// enabled for the network, or it has the Embed plan's client allowance. A
+// disable does not re-open the routes: the tokens handed out while Embed was
+// on are still valid, and a disable keeps the network's Embed row.
 func NetworkRefusesClientAdmin(ctx context.Context, networkId server.Id) bool {
-	if NetworkEmbedEnabled(ctx, networkId) {
+	if NetworkEmbedEverEnabled(ctx, networkId) {
 		return true
 	}
 	_, embedPlan := networkClientLimitOverride(ctx, networkId)

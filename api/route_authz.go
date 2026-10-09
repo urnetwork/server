@@ -31,6 +31,15 @@ const (
 	// a client token is accepted, and the model limits it to its own client and
 	// the clients it created
 	routeAccessOwnClient
+	// the provider payout of the caller's own client: its subnet wallet
+	// mapping, the mapping's consent, the wallet read and its fleet binding.
+	// The provider apps call these with their client token, and the model
+	// limits the writes to its own client. A client token of a network that hands its tokens to a third
+	// party (the Embed plan) is refused: what the network's clients provide is
+	// the network's to be paid for, not its users' (AUTHZ1.md, decision 3).
+	// Unlike the app admin routes, these stay open to an ordinary network's
+	// client tokens
+	routeAccessOwnClientPayout
 	// network or account administration that the URnetwork apps call with
 	// their client token today. A client token of a network that hands its
 	// tokens to a third party (the Embed plan) is refused; for every other
@@ -215,8 +224,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /verify/proofs":                            routeAccessPublic,
 	"POST /verify/original":                         routeAccessPublic,
 	"POST /verify/original/close":                   routeAccessPublic,
-	"POST /sn/wallet":                               routeAccessOwnClient, // provider coldkey mapping
-	"POST /sn/wallet/consent":                       routeAccessOwnClient, // per-client wallet consent
+	"POST /sn/wallet":                               routeAccessOwnClientPayout, // provider coldkey mapping
+	"POST /sn/wallet/consent":                       routeAccessOwnClientPayout, // per-client wallet consent
 	"POST /sn/wallet/consent/history":               routeAccessPublic,
 	"POST /sn/wallet/network-consent":               routeAccessNetwork, // network-wide payout wallet consent
 	"POST /sn/wallet/network-consent/history":       routeAccessPublic,
@@ -224,10 +233,10 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /sn/wallet/hotkey-consent/history":        routeAccessPublic,
 	"POST /sn/wallet/hotkey-delegation":             routeAccessNetwork, // hotkey delegation
 	"POST /sn/wallet/hotkey-delegation/history":     routeAccessPublic,
-	"GET /sn/wallet":                                routeAccessOwnClient, // wallet read
+	"GET /sn/wallet":                                routeAccessOwnClientPayout, // wallet read
 	"POST /sn/wallet/validate":                      routeAccessPublic,
 	"GET /sn/head":                                  routeAccessClient,
-	"POST /sn/head/binding":                         routeAccessOwnClient, // binds the caller's head
+	"POST /sn/head/binding":                         routeAccessOwnClientPayout, // binds the caller's head
 	"GET /sn/pool/claim":                            routeAccessClient,
 	"GET /sn/epoch":                                 routeAccessPublic,
 	"GET /sn/artifact":                              routeAccessPublic,
@@ -289,21 +298,22 @@ func routeAccessFor(route *router.Route) routeAccess {
 }
 
 // networkRefusesClientAdmin decides whether a network's client tokens are
-// refused on the app admin routes too. Tests replace it.
+// refused on the app admin and own client payout routes too. Tests replace it.
 var networkRefusesClientAdmin = model.NetworkRefusesClientAdmin
 
 func refuseClientAdmin(ctx context.Context, byJwt *jwt.ByJwt) bool {
 	return networkRefusesClientAdmin(ctx, byJwt.NetworkId)
 }
 
-// applyRouteAccess puts the client token gate in front of every admin route.
+// applyRouteAccess puts the client token gate in front of every admin route and
+// every own client payout route.
 func applyRouteAccess(routes []*router.Route) []*router.Route {
 	applied := make([]*router.Route, 0, len(routes))
 	for _, route := range routes {
 		switch routeAccessFor(route) {
 		case routeAccessNetwork:
 			route = router.RefuseClientCredentials(route, router.RefuseEveryClientCredential)
-		case routeAccessAppAdmin:
+		case routeAccessAppAdmin, routeAccessOwnClientPayout:
 			route = router.RefuseClientCredentials(route, refuseClientAdmin)
 		}
 		applied = append(applied, route)

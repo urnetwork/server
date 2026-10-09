@@ -273,8 +273,18 @@ Embed plans are sold with vetting and a contract. The team then enables Embed
 network by network, and the flag gates the Embed APIs
 (`model/network_embed_model.go`).
 
-- Storage: `network_embed (network_id PK, enable_time)`. A row means the network
-  is Embed-enabled; `enable_time` is the first enable.
+- Storage: `network_embed (network_id PK, enable_time, disable_time)`. A row
+  without a `disable_time` means the network is Embed-enabled; `enable_time` is
+  the first enable. A disable sets `disable_time` and keeps the row (migration
+  802), so the network stays known as one that was Embed-enabled.
+- Two meanings, read together in one query and cached together:
+  - **enabled now** (`NetworkEmbedEnabled`: a row with no `disable_time`). The
+    Embed APIs below and `GET /network/embed`'s `enabled` follow it.
+  - **ever enabled** (`NetworkEmbedEverEnabled`: a row exists). The client
+    token gate follows it (`NetworkRefusesClientAdmin`, AUTHZ1.md): the client
+    tokens the network handed to a third party's users outlive a disable, so a
+    disable never re-opens the admin routes, or a client's own payout routes,
+    to them.
 - Gating: `POST` and `GET /network/client-data-cap` (the client-token read
   included), `GET /network/client-data-caps`, and `POST` and
   `GET /network/client-acl-group` (the client-token read included) refuse every
@@ -288,8 +298,10 @@ network by network, and the flag gates the Embed APIs
   rollup and peer isolation read their own tables, never the flag. A disable
   only closes the APIs, so the customer can no longer read or change them.
 - `GET /network/embed` takes a network credential only, the root JWT or an API
-  key. A client token is refused with 200 and `error.message`. The route itself
-  is not gated: a network without Embed reads `enabled: false`.
+  key. A client token is refused with 200 and `error.message` (and, since the
+  authz gate, with the router's 403 first). The route itself is not gated: a
+  network without Embed, or with Embed disabled, reads `enabled: false`. The
+  was-enabled state is not served.
 
   ```json
   {"enabled": true, "client_limit": 5000, "active_client_count": 1234}
@@ -303,22 +315,27 @@ network by network, and the flag gates the Embed APIs
   it is exact for any allowance. Both values are read from the db, not the
   caches.
 - Cache: every gated call reads the flag through a per-process cache (30 s ttl,
-  bounded at 8,192 networks), like the allowance. Enable and disable refresh both
-  caches in the process that runs them; other processes see a change within the
-  ttl.
+  bounded at 8,192 networks), like the allowance. The entry holds both
+  meanings from one read. Enable and disable refresh both caches in the
+  process that runs them; other processes see a change within the ttl. "Ever
+  enabled" never goes from true to false, since no code path deletes the row.
 - Ops: `bringyourctl network embed --network_id=<id> [--enable [--client-limit=<n>] | --disable]`.
-  - `--enable` writes the row. It is idempotent and keeps the first enable time.
-    With `--client-limit` it also sets the allowance
-    (`network_top_level_client_limit`, 1 ≤ n ≤ 10,000,000) in the same
-    transaction.
-  - `--disable` deletes the row and the allowance override, which returns the
-    network to the default limits.
+  - `--enable` writes the row, or clears its `disable_time`. It is idempotent
+    and keeps the first enable time. With `--client-limit` it also sets the
+    allowance (`network_top_level_client_limit`, 1 ≤ n ≤ 10,000,000) in the
+    same transaction.
+  - `--disable` sets `disable_time` (a second disable keeps the first) and
+    deletes the allowance override, which returns the network to the default
+    limits. A network that was never enabled gets no row.
   - Every form then prints the state, e.g. `network <id> embed enabled, client
-    limit 5000, 12 active clients`. Unknown networks are refused.
+    limit 5000, 12 active clients`, `embed disabled (was enabled), ...` or
+    `embed not enabled, ...`. Unknown networks are refused.
   - `bringyourctl network client-limit` stays, for changing the allowance alone.
 - Rollout: 801 must be applied before a binary that reads it serves. A network
   already using the data-cap or ACL-group APIs needs `--enable` when that binary
-  ships, or its calls are refused.
+  ships, or its calls are refused. 802 likewise must be applied before a binary
+  that reads `disable_time` serves. A network disabled before 802 has no row,
+  so it is not remembered; re-enabling and disabling it records it.
 
 ## Migrations (appended after 796)
 
@@ -329,10 +346,12 @@ network by network, and the flag gates the Embed APIs
 | 799 | `services_lead` |
 | 800 | `network_client_acl_group` |
 | 801 | `network_embed` |
+| 802 | `network_embed.disable_time` (nullable) |
 
-All five are new tables: nothing is rewritten. Each must exist before a binary
-that reads it serves (the peer profile and the peer valve query 800; the gated
-routes query 801).
+797 to 801 are new tables and 802 adds a nullable column: nothing is
+rewritten. Each must exist before a binary that reads it serves (the peer
+profile and the peer valve query 800; the gated routes query 801; the gated
+routes and the client token gate read 802).
 
 ## Observability
 
@@ -404,6 +423,14 @@ Every changed file has tests; the coverage table is in the branch's final report
     `TestNetworkEmbedDisableKeepsEnforcement`, and `TestNetworkEmbedCommand`
     (bringyourctl). The data-cap and ACL-group tests enable Embed through
     `newDataCapTestNetwork`.
+  - Was-enabled (AUTHZ1.md decision 2): the enable, disable, re-enable cycles in
+    `TestNetworkEmbedEnableDisable`, `TestNetworkEmbedCache` (both meanings,
+    stale and reloaded) and `TestNetworkEmbedCommand` (`disabled (was
+    enabled)`), and `TestNetworkRefusesClientAdminFollowsEmbed`. In `api`:
+    `TestRealClientTokenOfADisabledEmbedNetworkIsStillRefused`. Pure:
+    `TestNetworkEmbedStateMeaningsThroughEnableDisableReenable`,
+    `TestNetworkRefusesClientAdminUsesEverEnabledOrTheAllowance`,
+    `TestNetworkEmbedJsonOmitsEverEnabled`, `TestNetworkEmbedStatusLine`.
 - Integration, `server/connect` (after merge, under the owner rule):
   `TestExchangeAclGroupIsolatesAPeer`, `TestExchangeDataCapPausesStopsAndResumesTraffic`
   (both enable Embed first), `TestConnectEmbedPlanAllowanceLiftsTheConcurrentLimit`.

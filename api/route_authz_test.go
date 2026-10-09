@@ -77,13 +77,26 @@ func TestAnUnclassifiedRouteFailsTheGuardAndRefusesClientTokens(t *testing.T) {
 	}
 }
 
-// Exactly the admin routes carry the client token gate.
+// routeAccessGated reports whether a class carries the client token gate: the
+// network-only routes refuse every client token, and the app admin and own
+// client payout routes refuse an Embed network's.
+func routeAccessGated(access routeAccess) bool {
+	switch access {
+	case routeAccessNetwork, routeAccessAppAdmin, routeAccessOwnClientPayout:
+		return true
+	default:
+		return false
+	}
+}
+
+// Exactly the admin routes and the own client payout routes carry the client
+// token gate.
 func TestOnlyAdminRoutesCarryTheGate(t *testing.T) {
 	for _, route := range Routes() {
 		access := routeAccessFor(route)
-		admin := access == routeAccessNetwork || access == routeAccessAppAdmin
-		if route.RefusesClientCredentials() != admin {
-			t.Fatalf("%s (access %d): gate = %t, want %t", routeAccessKey(route), access, route.RefusesClientCredentials(), admin)
+		gated := routeAccessGated(access)
+		if route.RefusesClientCredentials() != gated {
+			t.Fatalf("%s (access %d): gate = %t, want %t", routeAccessKey(route), access, route.RefusesClientCredentials(), gated)
 		}
 	}
 }
@@ -134,8 +147,9 @@ func setNetworkRefusesClientAdmin(t *testing.T, refuses func(ctx context.Context
 }
 
 // Through the router the API serves, every network-only route answers a
-// client token with 403 before its handler, and so does every app admin route
-// for a network whose client tokens are refused (the Embed plan).
+// client token with 403 before its handler, and so does every app admin and
+// own client payout route for a network whose client tokens are refused (the
+// Embed plan).
 func TestAdminRoutesRefuseAClientTokenThroughTheRouter(t *testing.T) {
 	tokens := newRouteAccessTokens()
 	refusedNetworks := map[server.Id]bool{}
@@ -151,7 +165,7 @@ func TestAdminRoutesRefuseAClientTokenThroughTheRouter(t *testing.T) {
 	adminCount := 0
 	for _, route := range Routes() {
 		access := routeAccessFor(route)
-		if access != routeAccessNetwork && access != routeAccessAppAdmin {
+		if !routeAccessGated(access) {
 			continue
 		}
 		adminCount += 1
@@ -168,7 +182,7 @@ func TestAdminRoutesRefuseAClientTokenThroughTheRouter(t *testing.T) {
 	}
 }
 
-// Every admin route serves the network credential, a root token or an API
+// Every gated route serves the network credential, a root token or an API
 // key, and a request with no credential, exactly as before: the gate passes
 // them to the handler, whose authentication decides.
 func TestAdminRoutesServeTheNetworkCredential(t *testing.T) {
@@ -179,7 +193,7 @@ func TestAdminRoutesServeTheNetworkCredential(t *testing.T) {
 
 	for _, route := range Routes() {
 		access := routeAccessFor(route)
-		if access != routeAccessNetwork && access != routeAccessAppAdmin {
+		if !routeAccessGated(access) {
 			continue
 		}
 		reached := false
@@ -209,8 +223,9 @@ func TestAdminRoutesServeTheNetworkCredential(t *testing.T) {
 }
 
 // The app admin routes keep serving the URnetwork apps' client tokens on a
-// network that does not refuse them, while the network-only routes refuse
-// every client token.
+// network that does not refuse them, and the own client payout routes keep
+// serving the provider apps', while the network-only routes refuse every
+// client token.
 func TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork(t *testing.T) {
 	tokens := newRouteAccessTokens()
 	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
@@ -219,7 +234,7 @@ func TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork(t *testing.T) {
 
 	for _, route := range Routes() {
 		access := routeAccessFor(route)
-		if access != routeAccessNetwork && access != routeAccessAppAdmin {
+		if !routeAccessGated(access) {
 			continue
 		}
 		reached := false
@@ -231,7 +246,7 @@ func TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork(t *testing.T) {
 		w := serveRouteAccess(router.NewRouter(ctx, []*router.Route{stubbed}), route.Method(), routeAccessTestPath(route.Pattern()), "Bearer "+tokens.clientToken)
 		cancel()
 		switch access {
-		case routeAccessAppAdmin:
+		case routeAccessAppAdmin, routeAccessOwnClientPayout:
 			if !reached || w.Code != http.StatusOK {
 				t.Fatalf("%s: client token status = %d, handler ran = %t; want the handler", routeAccessKey(route), w.Code, reached)
 			}
@@ -249,7 +264,7 @@ func TestNonAdminRoutesServeAClientToken(t *testing.T) {
 	tokens := newRouteAccessTokens()
 	for _, route := range Routes() {
 		access := routeAccessFor(route)
-		if access == routeAccessNetwork || access == routeAccessAppAdmin {
+		if routeAccessGated(access) {
 			continue
 		}
 		reached := false
@@ -289,5 +304,145 @@ func TestCredentialMintingRoutesAreAdminRoutes(t *testing.T) {
 		if got := routeAccessByRoute[key]; got != want {
 			t.Fatalf("%s access = %d, want %d", key, got, want)
 		}
+	}
+}
+
+// The provider payout of a client's own client, its subnet wallet mapping, the
+// mapping's consent, the wallet read and its fleet binding, is refused to the
+// client token of an Embed network and served to an ordinary network's, which
+// the provider apps send (AUTHZ1.md, decision 3). The network-wide payout
+// routes stay network only, and the network credential reaches every one.
+func TestOwnClientPayoutRoutesRefuseOnlyAnEmbedNetworksClientToken(t *testing.T) {
+	payoutRoutes := []string{
+		"POST /sn/wallet",
+		"POST /sn/wallet/consent",
+		"GET /sn/wallet",
+		"POST /sn/head/binding",
+	}
+	for key, access := range routeAccessByRoute {
+		if (access == routeAccessOwnClientPayout) != slices.Contains(payoutRoutes, key) {
+			t.Fatalf("%s access = %d; the own client payout routes are %v", key, access, payoutRoutes)
+		}
+	}
+	for _, key := range []string{
+		"POST /sn/wallet/network-consent",
+		"POST /sn/wallet/hotkey-consent",
+		"POST /sn/wallet/hotkey-delegation",
+		"POST /account/payout-wallet",
+	} {
+		if access := routeAccessByRoute[key]; access != routeAccessNetwork && access != routeAccessAppAdmin {
+			t.Fatalf("%s access = %d, want an admin class", key, access)
+		}
+	}
+
+	tokens := newRouteAccessTokens()
+	embedNetworks := map[server.Id]bool{}
+	askedNetworks := map[server.Id]bool{}
+	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
+		askedNetworks[networkId] = true
+		return embedNetworks[networkId]
+	})
+
+	served := 0
+	for _, route := range Routes() {
+		if routeAccessFor(route) != routeAccessOwnClientPayout {
+			continue
+		}
+		served += 1
+		reached := false
+		stubbed := router.Testing_WithHandler(route, func(w http.ResponseWriter, r *http.Request) {
+			reached = true
+			w.WriteHeader(http.StatusOK)
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		routeRouter := router.NewRouter(ctx, []*router.Route{stubbed})
+		path := routeAccessTestPath(route.Pattern())
+
+		// an ordinary network: the provider app's client token reaches the handler
+		embedNetworks[tokens.networkId] = false
+		reached = false
+		if w := serveRouteAccess(routeRouter, route.Method(), path, "Bearer "+tokens.clientToken); !reached || w.Code != http.StatusOK {
+			t.Fatalf("%s: client token of an ordinary network status = %d, handler ran = %t; want the handler", routeAccessKey(route), w.Code, reached)
+		}
+
+		// an Embed network: 403 before the handler, whose credential still works
+		embedNetworks[tokens.networkId] = true
+		reached = false
+		w := serveRouteAccess(routeRouter, route.Method(), path, "Bearer "+tokens.clientToken)
+		if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.ClientCredentialRefusedMessage {
+			t.Fatalf("%s: client token of an Embed network status = %d body = %q, handler ran = %t; want 403 refused", routeAccessKey(route), w.Code, w.Body.String(), reached)
+		}
+		for name, authorization := range map[string]string{
+			"root token": "Bearer " + tokens.networkToken,
+			"api key":    "Bearer " + tokens.apiKey,
+		} {
+			reached = false
+			if w := serveRouteAccess(routeRouter, route.Method(), path, authorization); !reached || w.Code != http.StatusOK {
+				t.Fatalf("%s: %s of an Embed network status = %d, handler ran = %t; want the handler", routeAccessKey(route), name, w.Code, reached)
+			}
+		}
+		cancel()
+	}
+	if served != len(payoutRoutes) {
+		t.Fatalf("served %d own client payout routes, want %d", served, len(payoutRoutes))
+	}
+	if !askedNetworks[tokens.networkId] {
+		t.Fatal("the payout refusal was not asked about the token's network")
+	}
+}
+
+// The spec (connect/api/bringyour.yml) documents the gate's 403 on exactly the
+// gated routes, with the shared response of the route's class:
+// ClientJwtRefused on the network-only routes, EmbedClientJwtRefused on the
+// app admin and own client payout routes. A route that changes class fails
+// here until its documented 403 changes with it. Both shared responses carry
+// the gate's message.
+func TestSpecDocumentsTheClientTokenRefusal(t *testing.T) {
+	spec := loadSpec(t)
+	const clientJwtRefused = "#/components/responses/ClientJwtRefused"
+	const embedClientJwtRefused = "#/components/responses/EmbedClientJwtRefused"
+
+	sharedResponses := asMap(asMap(spec.root["components"])["responses"])
+	for _, ref := range []string{clientJwtRefused, embedClientJwtRefused} {
+		name := ref[strings.LastIndex(ref, "/")+1:]
+		example, _ := asMap(asMap(asMap(sharedResponses[name])["content"])["text/plain"])["example"].(string)
+		if example != router.ClientCredentialRefusedMessage {
+			t.Fatalf("%s example = %q, want the gate's message %q", name, example, router.ClientCredentialRefusedMessage)
+		}
+	}
+
+	specOperations := map[string]map[string]any{}
+	for path, methods := range spec.paths {
+		for method, operation := range asMap(methods) {
+			specOperations[strings.ToUpper(method)+" "+normalizePath(path)] = asMap(operation)
+		}
+	}
+	documentedCount := 0
+	for _, route := range Routes() {
+		access := routeAccessFor(route)
+		want := ""
+		switch access {
+		case routeAccessNetwork:
+			want = clientJwtRefused
+		case routeAccessAppAdmin, routeAccessOwnClientPayout:
+			want = embedClientJwtRefused
+		}
+		operation := specOperations[route.Method()+" "+normalizePath(route.Pattern())]
+		if operation == nil {
+			if want != "" {
+				t.Errorf("%s (access %d) is gated and not in the spec", routeAccessKey(route), access)
+			}
+			continue
+		}
+		ref, _ := asMap(asMap(operation["responses"])["403"])["$ref"].(string)
+		if ref != want {
+			t.Errorf("%s (access %d): the spec's 403 is %q, want %q", routeAccessKey(route), access, ref, want)
+		}
+		if want != "" {
+			documentedCount += 1
+		}
+	}
+	if documentedCount == 0 {
+		t.Fatal("no gated route documents the refusal")
 	}
 }

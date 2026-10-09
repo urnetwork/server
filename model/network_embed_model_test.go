@@ -62,6 +62,20 @@ func readNetworkEmbedEnableTime(ctx context.Context, networkId server.Id) (enabl
 	return
 }
 
+// readNetworkEmbedDisableTime reads the network's disable time: nil without a
+// row, or while the network is enabled.
+func readNetworkEmbedDisableTime(ctx context.Context, networkId server.Id) (disableTime *time.Time) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `SELECT disable_time FROM network_embed WHERE network_id = $1`, networkId)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&disableTime))
+			}
+		})
+	})
+	return
+}
+
 // A network that is not Embed-enabled is refused on every gated route — for
 // the root token, an API key and a client token — and nothing is written.
 // Enabling opens the routes; disabling closes them again.
@@ -114,6 +128,14 @@ func TestNetworkEmbedGatesTheEmbedApis(t *testing.T) {
 		for _, refusedSession := range sessions {
 			assertEmbedApisRefused(t, refusedSession, clientId)
 		}
+
+		// enabling again opens them, with the cap and group stored before
+		connect.AssertEqual(t, EnableNetworkEmbed(ctx, network.networkId, nil), nil)
+		getResult, err = GetClientDataCap(&GetClientDataCapArgs{ClientId: clientId.String()}, network.rootSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, getResult.Error, (*ClientDataCapError)(nil))
+		connect.AssertEqual(t, *getResult.MonthlyByteLimit, ByteCount(1001))
+		connect.AssertEqual(t, getAclGroup(t, clientSession, "").AclGroup, NetworkClientAclGroupIsolated)
 	})
 }
 
@@ -176,6 +198,7 @@ func TestGetNetworkEmbedStatus(t *testing.T) {
 		connect.AssertEqual(t, EnableNetworkEmbed(ctx, network.networkId, &allowance), nil)
 		connect.AssertEqual(t, status(network.apiKeySession).NetworkEmbed, &NetworkEmbed{
 			Enabled:           true,
+			EverEnabled:       true,
 			ClientLimit:       3,
 			ActiveClientCount: 3,
 		})
@@ -188,6 +211,7 @@ func TestGetNetworkEmbedStatus(t *testing.T) {
 		connect.AssertEqual(t, provision().Error, (*AuthNetworkClientError)(nil))
 		connect.AssertEqual(t, status(network.rootSession).NetworkEmbed, &NetworkEmbed{
 			Enabled:           true,
+			EverEnabled:       true,
 			ClientLimit:       4,
 			ActiveClientCount: 4,
 		})
@@ -211,19 +235,23 @@ func TestGetNetworkEmbedStatus(t *testing.T) {
 		connect.AssertEqual(t, SetNetworkTopLevelClientLimit(ctx, network.networkId, 250), nil)
 		connect.AssertEqual(t, status(network.rootSession).ClientLimit, 250)
 
-		// disabled: the default allowance again
+		// disabled: enabled=false and the default allowance again, while the
+		// network stays known as one that was enabled (not served)
 		connect.AssertEqual(t, DisableNetworkEmbed(ctx, network.networkId), nil)
 		connect.AssertEqual(t, status(network.rootSession).NetworkEmbed, &NetworkEmbed{
 			Enabled:           false,
+			EverEnabled:       true,
 			ClientLimit:       LimitTopLevelClientIdsPerNetwork,
 			ActiveClientCount: 4,
 		})
 	})
 }
 
-// Enable and disable: unknown networks and invalid limits are refused, enable
-// is idempotent and keeps its first time, and the allowance is set with the
-// flag and cleared with it.
+// Enable, disable and enable again: unknown networks and invalid limits are
+// refused, enable is idempotent and keeps its first time, and the allowance is
+// set with the flag and cleared with it. A disable keeps the row with its
+// disable time, so the network stays ever-enabled and its client tokens stay
+// refused on the admin routes; enabling again clears the disable time.
 func TestNetworkEmbedEnableDisable(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -263,22 +291,74 @@ func TestNetworkEmbedEnableDisable(t *testing.T) {
 		connect.AssertEqual(t, clientLimit.Override, true)
 		connect.AssertEqual(t, networkConcurrentClientLimit(ctx, network.networkId), 5000)
 
-		// disable removes the flag and the allowance override
+		connect.AssertEqual(t, readNetworkEmbedDisableTime(ctx, network.networkId), (*time.Time)(nil))
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), true)
+
+		// disable clears the flag and the allowance override, and keeps the row:
+		// the first enable time and the disable time
 		connect.AssertEqual(t, DisableNetworkEmbed(ctx, network.networkId), nil)
 		connect.AssertEqual(t, NetworkEmbedEnabled(ctx, network.networkId), false)
-		connect.AssertEqual(t, readNetworkEmbedEnableTime(ctx, network.networkId).IsZero(), true)
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), true)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, network.networkId), true)
+		if again := readNetworkEmbedEnableTime(ctx, network.networkId); !again.Equal(enableTime) {
+			t.Fatalf("enable time moved from %s to %s", enableTime, again)
+		}
+		disableTime := readNetworkEmbedDisableTime(ctx, network.networkId)
+		if disableTime == nil || disableTime.Before(enableTime) {
+			t.Fatalf("disable time = %v after enable time %s", disableTime, enableTime)
+		}
 		connect.AssertEqual(t, GetNetworkTopLevelClientLimit(ctx, network.networkId).Override, false)
 		_, override := networkClientLimitOverride(ctx, network.networkId)
 		connect.AssertEqual(t, override, false)
-		// disabling a disabled network succeeds
+		connect.AssertEqual(t, GetNetworkEmbed(ctx, network.networkId), &NetworkEmbed{
+			Enabled:     false,
+			EverEnabled: true,
+			ClientLimit: LimitTopLevelClientIdsPerNetwork,
+		})
+
+		// disabling a disabled network succeeds and keeps its first disable time
 		connect.AssertEqual(t, DisableNetworkEmbed(ctx, network.networkId), nil)
+		if again := readNetworkEmbedDisableTime(ctx, network.networkId); again == nil || !again.Equal(*disableTime) {
+			t.Fatalf("disable time moved from %s to %v", disableTime, again)
+		}
+
+		// enabling again clears the disable time and keeps the first enable time
+		connect.AssertEqual(t, EnableNetworkEmbed(ctx, network.networkId, nil), nil)
+		connect.AssertEqual(t, NetworkEmbedEnabled(ctx, network.networkId), true)
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), true)
+		connect.AssertEqual(t, readNetworkEmbedDisableTime(ctx, network.networkId), (*time.Time)(nil))
+		if again := readNetworkEmbedEnableTime(ctx, network.networkId); !again.Equal(enableTime) {
+			t.Fatalf("enable time moved from %s to %s", enableTime, again)
+		}
+		connect.AssertEqual(t, GetNetworkEmbed(ctx, network.networkId), &NetworkEmbed{
+			Enabled:     true,
+			EverEnabled: true,
+			ClientLimit: LimitTopLevelClientIdsPerNetwork,
+		})
+
+		// and disabling again sets a new disable time
+		connect.AssertEqual(t, DisableNetworkEmbed(ctx, network.networkId), nil)
+		connect.AssertEqual(t, NetworkEmbedEnabled(ctx, network.networkId), false)
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), true)
+		if again := readNetworkEmbedDisableTime(ctx, network.networkId); again == nil || again.Before(*disableTime) {
+			t.Fatalf("second disable time = %v, before the first %s", again, disableTime)
+		}
+
+		// a disable of a network that was never enabled writes no row
+		neverNetwork := newDataCapTestNetworkWithoutEmbed(ctx, "never")
+		connect.AssertEqual(t, DisableNetworkEmbed(ctx, neverNetwork.networkId), nil)
+		connect.AssertEqual(t, readNetworkEmbedEnableTime(ctx, neverNetwork.networkId).IsZero(), true)
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, neverNetwork.networkId), false)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, neverNetwork.networkId), false)
 	})
 }
 
-// The flag is cached per process. A row written outside this process (ops on
-// another host) is seen once the entry expires, or at once with a cleared
-// cache; Enable and Disable refresh this process at once. GET /network/embed
-// reads the db.
+// The state is cached per process, both meanings from one read. A row written
+// outside this process (ops on another host) is seen once the entry expires,
+// or at once with a cleared cache; Enable and Disable refresh this process at
+// once. GET /network/embed reads the db. Through a disable the ever-enabled
+// answer stays true: in the stale entry, after a reload and after a local
+// disable.
 func TestNetworkEmbedCache(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -288,6 +368,7 @@ func TestNetworkEmbedCache(t *testing.T) {
 		network := newDataCapTestNetworkWithoutEmbed(ctx, "embed")
 		clientId := network.provisionClient(t, "user:alice", nil)
 		connect.AssertEqual(t, NetworkEmbedEnabled(ctx, network.networkId), false)
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), false)
 
 		// another host enables directly: this process keeps its cached refusal,
 		// on the gated routes too
@@ -300,35 +381,62 @@ func TestNetworkEmbedCache(t *testing.T) {
 			))
 		})
 		connect.AssertEqual(t, NetworkEmbedEnabled(ctx, network.networkId), false)
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), false)
 		connect.AssertEqual(t, getAclGroup(t, network.rootSession, clientId.String()).Error.Message, NetworkEmbedNotEnabledMessage)
 		connect.AssertEqual(t, GetNetworkEmbed(ctx, network.networkId).Enabled, true)
 
-		// an expired entry reloads
-		networkEmbedLocal.Put(network.networkId, networkEmbedLocalEntry{enabled: false, expiry: server.NowUtc()})
+		// an expired entry reloads both meanings
+		networkEmbedLocal.Put(network.networkId, networkEmbedLocalEntry{enabled: false, everEnabled: false, expiry: server.NowUtc()})
 		connect.AssertEqual(t, NetworkEmbedEnabled(ctx, network.networkId), true)
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), true)
 		connect.AssertEqual(t, getAclGroup(t, network.rootSession, clientId.String()).AclGroup, NetworkClientAclGroupDefault)
 		// and is cached for the ttl
 		now := server.NowUtc()
 		entry, ok := networkEmbedLocal.Get(network.networkId, now)
 		connect.AssertEqual(t, ok, true)
 		connect.AssertEqual(t, entry.enabled, true)
+		connect.AssertEqual(t, entry.everEnabled, true)
 		if !now.Before(entry.expiry) || now.Add(networkEmbedLocalCacheTtl).Before(entry.expiry) {
 			t.Fatalf("expiry %s is not within the ttl of %s", entry.expiry, now)
 		}
 
-		// another host disables directly: a cleared cache sees it at once
+		// another host disables directly: this process keeps its stale entry,
+		// and a cleared cache sees the disable at once, while the network stays
+		// ever-enabled and its client tokens refused throughout
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_embed WHERE network_id = $1`, network.networkId))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_embed SET disable_time = $2 WHERE network_id = $1`,
+				network.networkId,
+				server.NowUtc(),
+			))
 		})
 		connect.AssertEqual(t, NetworkEmbedEnabled(ctx, network.networkId), true)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, network.networkId), true)
 		Testing_ClearNetworkEmbedCache()
 		connect.AssertEqual(t, NetworkEmbedEnabled(ctx, network.networkId), false)
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), true)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, network.networkId), true)
+		connect.AssertEqual(t, getAclGroup(t, network.rootSession, clientId.String()).Error.Message, NetworkEmbedNotEnabledMessage)
+		entry, ok = networkEmbedLocal.Get(network.networkId, server.NowUtc())
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, entry.enabled, false)
+		connect.AssertEqual(t, entry.everEnabled, true)
 
 		// Enable and Disable refresh this process at once
 		connect.AssertEqual(t, EnableNetworkEmbed(ctx, network.networkId, nil), nil)
 		connect.AssertEqual(t, NetworkEmbedEnabled(ctx, network.networkId), true)
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), true)
 		connect.AssertEqual(t, DisableNetworkEmbed(ctx, network.networkId), nil)
 		connect.AssertEqual(t, NetworkEmbedEnabled(ctx, network.networkId), false)
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), true)
+
+		// only deleting the row, which no code path does, forgets the network
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_embed WHERE network_id = $1`, network.networkId))
+		})
+		Testing_ClearNetworkEmbedCache()
+		connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, network.networkId), false)
 	})
 }
 
