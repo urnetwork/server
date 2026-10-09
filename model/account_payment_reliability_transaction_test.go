@@ -37,6 +37,9 @@ func (self *paymentReliabilityTransactionObserver) TraceQueryStart(ctx context.C
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	sql := strings.TrimSpace(data.SQL)
+	if strings.Contains(sql, "migration_catalog") || strings.Contains(sql, "pg_trigger") || strings.Contains(sql, "pg_attribute") || strings.Contains(sql, "to_regclass") {
+		self.schemaChecks++
+	}
 	if strings.Contains(sql, "pg_advisory_xact_lock") && len(data.Args) == 1 && data.Args[0] == paymentPlanLockKey {
 		self.ownerPid = conn.PgConn().PID()
 		self.active = true
@@ -47,9 +50,6 @@ func (self *paymentReliabilityTransactionObserver) TraceQueryStart(ctx context.C
 	self.statements++
 	if conn.PgConn().PID() != self.ownerPid {
 		self.foreignStatements++
-	}
-	if strings.Contains(sql, "migration_catalog") || strings.Contains(sql, "pg_trigger") || strings.Contains(sql, "pg_attribute") || strings.Contains(sql, "to_regclass") {
-		self.schemaChecks++
 	}
 	if strings.HasPrefix(sql, "SELECT earning_identity, identity_sha256, initial_config_sha256, prepared_at FROM provider_payout_boundary") {
 		self.boundaryChecks++
