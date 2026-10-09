@@ -162,14 +162,13 @@ func TestReliabilityRunningRecomputeCadence(t *testing.T) {
 		lastRecomputeBlock:                      2000,
 		degradedClassificationVersion:           reliabilityDegradedClassificationVersion,
 		degradedClassificationWriteTokenPresent: true,
-		degradedClassificationGuardPresent:      true,
 	}
 	legacyClassification := base
 	legacyClassification.degradedClassificationVersion = 0
 	missingWriterToken := base
 	missingWriterToken.degradedClassificationWriteTokenPresent = false
-	missingWriterGuard := base
-	missingWriterGuard.degradedClassificationGuardPresent = false
+	// Trigger installation is a migration/audit prerequisite. Runtime repair
+	// still requires the durable version and token from every supported writer.
 	tests := []struct {
 		name                    string
 		prev                    reliabilityRunningWindow
@@ -182,7 +181,6 @@ func TestReliabilityRunningRecomputeCadence(t *testing.T) {
 		{name: "missing state ignores maintenance", prev: reliabilityRunningWindow{}, newMin: 1001, newMax: 2001, recompute: true},
 		{name: "classification upgrade ignores maintenance", prev: legacyClassification, newMin: 1001, newMax: 2001, recompute: true},
 		{name: "missing writer token ignores maintenance", prev: missingWriterToken, newMin: 1001, newMax: 2001, recompute: true},
-		{name: "missing writer guard ignores maintenance", prev: missingWriterGuard, newMin: 1001, newMax: 2001, recompute: true},
 		{name: "one cycle rolls", prev: base, newMin: 1030, newMax: 2030, periodicReanchorAllowed: true},
 		{name: "just below cadence rolls", prev: base, newMin: 1000 + ReliabilityRunningRecomputeBlocks - 1, newMax: 2000 + ReliabilityRunningRecomputeBlocks - 1, periodicReanchorAllowed: true},
 		{name: "cadence boundary reanchors when quiet", prev: base, newMin: 1000 + ReliabilityRunningRecomputeBlocks, newMax: 2000 + ReliabilityRunningRecomputeBlocks, periodicReanchorAllowed: true, recompute: true},
@@ -238,7 +236,7 @@ func TestReliabilityRunningReanchorDefersForBackupWithoutSuppressingRepair(t *te
 	base := reliabilityRunningWindow{
 		exists: true, minBlockNumber: 1000, maxBlockNumber: 2000, lastRecomputeBlock: 2000,
 		degradedClassificationVersion:           reliabilityDegradedClassificationVersion,
-		degradedClassificationWriteTokenPresent: true, degradedClassificationGuardPresent: true,
+		degradedClassificationWriteTokenPresent: true,
 	}
 	newMin, newMax := base.minBlockNumber+ReliabilityRunningRecomputeBlocks, base.maxBlockNumber+ReliabilityRunningRecomputeBlocks
 	if recompute, deferred := reliabilityRunningNeedsRecompute(base, newMin, newMax, allowed); recompute || !deferred {
@@ -251,7 +249,6 @@ func TestReliabilityRunningReanchorDefersForBackupWithoutSuppressingRepair(t *te
 		{"bootstrap", func(w *reliabilityRunningWindow) { w.exists = false }},
 		{"classification", func(w *reliabilityRunningWindow) { w.degradedClassificationVersion = 0 }},
 		{"writer token", func(w *reliabilityRunningWindow) { w.degradedClassificationWriteTokenPresent = false }},
-		{"writer guard", func(w *reliabilityRunningWindow) { w.degradedClassificationGuardPresent = false }},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
 			prev := base
@@ -297,7 +294,6 @@ func TestReliabilityRunningVersionGuardDetectsLegacyWriter(t *testing.T) {
 		currentToken := testingReadRunningWindowWriteToken(ctx, lookbackIndex)
 		if current.degradedClassificationVersion != reliabilityDegradedClassificationVersion ||
 			!current.degradedClassificationWriteTokenPresent ||
-			!current.degradedClassificationGuardPresent ||
 			currentToken == "" {
 			t.Fatalf("current writer did not publish guarded version: window=%+v token_present=%t", current, currentToken != "")
 		}
@@ -325,8 +321,8 @@ func TestReliabilityRunningVersionGuardDetectsLegacyWriter(t *testing.T) {
 		if legacy.degradedClassificationVersion != 0 {
 			t.Fatalf("legacy write retained trusted classification version: %+v", legacy)
 		}
-		if !legacy.degradedClassificationWriteTokenPresent || !legacy.degradedClassificationGuardPresent {
-			t.Fatalf("legacy write removed guard evidence instead of revoking version: %+v", legacy)
+		if !legacy.degradedClassificationWriteTokenPresent {
+			t.Fatalf("legacy write removed the prior token instead of revoking version: %+v", legacy)
 		}
 		if legacyToken != currentToken {
 			t.Fatalf("legacy write unexpectedly rotated token: before=%q after=%q", currentToken, legacyToken)
@@ -355,7 +351,6 @@ func TestReliabilityRunningVersionGuardDetectsLegacyWriter(t *testing.T) {
 		recoveredToken := testingReadRunningWindowWriteToken(ctx, lookbackIndex)
 		if recovered.degradedClassificationVersion != reliabilityDegradedClassificationVersion ||
 			!recovered.degradedClassificationWriteTokenPresent ||
-			!recovered.degradedClassificationGuardPresent ||
 			recoveredToken == "" || recoveredToken == currentToken {
 			t.Fatalf(
 				"current rewrite did not restore guarded generation: window=%+v token_present=%t token_rotated=%t",

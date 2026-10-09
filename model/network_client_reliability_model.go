@@ -1140,10 +1140,8 @@ type reliabilityRunningWindow struct {
 	lastRecomputeBlock                      int64
 	degradedClassificationVersion           int
 	degradedClassificationWriteTokenPresent bool
-	degradedClassificationGuardPresent      bool
 	observationVersion                      int
 	observationWriteTokenPresent            bool
-	observationGuardPresent                 bool
 	exists                                  bool
 }
 
@@ -1151,7 +1149,7 @@ const reliabilityObservationVersion = 1
 
 func reliabilityRunningObservationCurrent(window reliabilityRunningWindow) bool {
 	return window.observationVersion == reliabilityObservationVersion &&
-		window.observationWriteTokenPresent && window.observationGuardPresent
+		window.observationWriteTokenPresent
 }
 
 func reliabilityRunningNeedsRecompute(
@@ -1160,14 +1158,12 @@ func reliabilityRunningNeedsRecompute(
 	newMax int64,
 	periodicReanchorAllowed bool,
 ) (recompute bool, deferred bool) {
-	// Bootstrap, a classification-generation transition (version, token, or
-	// database guard), and backwards movement cannot be represented as an
-	// entering / leaving delta, so maintenance pressure must never suppress
-	// these repairs.
+	// Bootstrap, a classification-generation transition (version or token),
+	// and backwards movement cannot be represented as an entering / leaving
+	// delta, so maintenance pressure must never suppress these repairs.
 	if !prev.exists ||
 		prev.degradedClassificationVersion != reliabilityDegradedClassificationVersion ||
 		!prev.degradedClassificationWriteTokenPresent ||
-		!prev.degradedClassificationGuardPresent ||
 		newMax < prev.maxBlockNumber ||
 		newMin < prev.minBlockNumber {
 		return true, false
@@ -1234,6 +1230,9 @@ func reliabilityRunningReanchorAllowedForMaintenance(establishedVacuum bool, ind
 	return !establishedVacuum && !indexBuild && !logicalBackup
 }
 
+// Migrations 603 and 740 install the required legacy-writer invalidation
+// triggers. Migration/audit owners verify them; lookbacks read only the durable
+// versions and write tokens those triggers maintain in the caller's snapshot.
 func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackIndex int) (w reliabilityRunningWindow) {
 	result, err := tx.Query(
 		ctx,
@@ -1244,26 +1243,8 @@ func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackI
 			last_recompute_block,
 			degraded_classification_version,
 			degraded_classification_write_token IS NOT NULL,
-			EXISTS (
-				SELECT 1
-				FROM pg_trigger t
-				JOIN pg_proc p ON p.oid = t.tgfoid
-				WHERE
-					t.tgrelid = 'client_reliability_running_window'::regclass AND
-					t.tgname = 'client_reliability_running_window_classification_guard' AND
-					p.proname = 'client_reliability_running_window_classification_guard' AND
-					t.tgenabled IN ('O', 'A') AND
-					NOT t.tgisinternal
-			),
 			observation_version,
-			observation_write_token IS NOT NULL,
-			EXISTS (
-				SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
-				WHERE t.tgrelid='client_reliability_running_window'::regclass
-				AND t.tgname='client_reliability_running_window_observation_guard'
-				AND p.proname='client_reliability_running_window_observation_guard'
-				AND t.tgenabled IN ('O','A') AND NOT t.tgisinternal
-			)
+			observation_write_token IS NOT NULL
 		FROM client_reliability_running_window
 		WHERE lookback_index = $1
 		`,
@@ -1277,10 +1258,8 @@ func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackI
 				&w.lastRecomputeBlock,
 				&w.degradedClassificationVersion,
 				&w.degradedClassificationWriteTokenPresent,
-				&w.degradedClassificationGuardPresent,
 				&w.observationVersion,
 				&w.observationWriteTokenPresent,
-				&w.observationGuardPresent,
 			))
 			w.exists = true
 		}
