@@ -1064,9 +1064,135 @@ source, two CPU cores, a 2-GiB memory cap and no swap; they opened no feed,
 MMDB or database. The ARIN Go source is unchanged at the later `53675285`
 canonical observation and from the qualified `bbc8972f` builder. This extends
 catalog/schema and decision qualification without claiming that every later
-server package was tested. Canonical integration, fresh feeds, artifact
-construction/readbacks, publication, mapped adoption and the separate URL
-health gate remain necessary.
+server package was tested. Fresh feeds, artifact construction/readbacks,
+publication, mapped adoption and the separate URL health gate remain necessary.
+
+Root merged the Canada catalog into Config `07d0f94b` and its documentation
+into Server `84a43192`. A later clean Server `9bc8a7e5` observation still has
+the same 41 ARIN Go postimages as the native `116350e6` and compiled `bbc8972f`
+sources; the complete later server graph is outside that equivalence claim.
+The canonical catalog is byte-exact `cdcc4471`. Disabled preparation
+`artifacts/arin-canada-resource-preparation-20261008-v2` binds those source
+gates, the nine native controls and the current Config lineage. It preserves
+the incoming `713a53d` changes to `main/sn.yml` and
+`main/operator-gas-authority.yml`; ARIN work does not attest their financial
+activation or authorize restoring the earlier Config parent. The normal
+strict 38-source refresh, bounded 12-GiB augmentation and exact final-artifact
+readbacks remain unexecuted in this preparation. Neither integration nor its
+disabled build plan establishes current reader adoption or provider gains.
+
+The next country research packet reviews Singapore. The latest retained
+October 6 06:03 country-tagged sample contains 207 complete, consistent
+non-Quality classifications: 192 carry a stored US tag and three an SG tag,
+the largest non-US count. Those booleans do not identify an ASN, registrant,
+unknown origin or explicit exclusion. The later census/lifecycle lane has
+collected no newer country/ASN cause bins. Singapore is therefore a bounded
+research priority, not a measured missing-subscriber or Quality-gain finding;
+the dominant US count remains unexplained at the operator level.
+
+The separate proposal adds six exact subscriber ASNs and four hosting ASNs
+to merged `cdcc4471`, using current RIR records and primary operator/regulator
+evidence:
+
+| Reviewed use | Operator group | Exact ASN additions |
+| --- | --- | --- |
+| Subscriber access | Singtel Mobile | 45143 |
+| Subscriber access | SingNet | 3758 |
+| Subscriber access | SIMBA Telecom | 4817 |
+| Subscriber access | MyRepublic | 56300 |
+| Subscriber access | ViewQwest | 18106 |
+| Subscriber access | Whiz Communications | 135600 |
+| Hosting | FDCservers.net | 30058 |
+| Hosting | Zenlayer | 62610, 21859 |
+| Hosting | Contabo Asia | 141995 |
+
+APNIC still names Singapore Telecom Mobile for AS45143. Singtel's business
+transfer announcement and IMDA's spectrum instrument independently bridge it
+to Singtel Mobile Singapore effective October 1, 2010; current mobile terms
+identify the successor's subscriber service. AS56300 retains MYREPUBLIC
+LIMITED. The operative IMDA licence explicitly transfers that licence to
+MyRepublic Broadband on November 30, 2021. This is business/licence continuity,
+not an assumed corporate rename. Current fixed-access terms and support
+establish its subscriber service independently of StarHub ownership. The
+October 8, 2026 mobile-acquisition announcement remains conditional and does
+not prove completion, ASN migration or shared origin visibility.
+
+SingNet's current GOMO contract, SIMBA's mobile/fibre contracts, ViewQwest's
+residential terms and WhizComms' fibre-ready-premises contract supply direct
+access-service evidence. Their parent or affiliated ASNs are not imported.
+Ordinary broadband resale does not itself establish virtual-ISP risk.
+FDCservers and Zenlayer's server/cloud/transit offerings remain explicit
+non-subscriber uses. Contabo Asia has its own exact APNIC identity, corporate
+operational-domain bridge and official Singapore server products; the
+operator-maintained directory is supplementary context only. None of these
+hosting judgments invents proxy, VPN, Tor or virtual-ISP risk flags.
+
+Candidate `8adadba2` contains 5,243 subscriber groups, thirteen negative groups
+and 5,520 unique subscriber ASNs across the same 160 countries. Singapore
+context grows from three groups/five ASNs to nine groups/eleven ASNs. Every
+prior operator stanza, all ten prior negative groups and the complete
+feed/policy header remain byte-exact. Twelve data-only composition controls
+pass, including refusal of changed negatives, affiliate ASN additions,
+borrowed parent identities, changed country context and relabelled clocks.
+Empty HTTP-success bodies and a legal URL redirected to unrelated HTML remain
+unusable source evidence. The packet is frozen under
+`artifacts/arin-sg-priority-research-20261008-v1` by `research-freeze.json`
+(`a1a6ea27`). Independent semantic/composition review passed (`b20cdd57`),
+followed by all five pure native parser/decision controls (`3bad67ef`) on
+clean Server `116350e6`. Root merged the exact catalog into Config
+`6a0b12b5`. These source and native gates do not include feeds, an augmented
+resource, reader adoption or provider outcomes.
+
+The merged Canada/Singapore resource successor is frozen under
+`artifacts/arin-ca-sg-resource-preparation-20261008-v1`: handoff `2c4f14cc`,
+disabled build plan `bee5637e` and preparation freeze `078ff4bf`. It supersedes
+the Canada-only `cdcc4471` plan. Clean observations bind Config `6a0b12b5`,
+catalog `8adadba2` and Server `30a56d9a`; all 41 ARIN Go files match the
+qualified builder/native source. The incoming `713a53d` SN and operator-gas
+authority files remain byte-exact, and all eleven audited SN consumers match
+their reviewed source. Their financial readiness remains a separate gate.
+
+The plan requires 38 fresh strict evidence sources, preserves all thirteen
+negative groups and dispositions 37 subscriber plus eight hosting ASNs in
+the actual output. It retains the October 6 registration base with its real
+clock, then requires full/native/mapped, RPKI, policy and independent audit
+readbacks. The qualified historical CLI's actual Go 1.27.1/module graph is
+distinct from the pending security successor; no current scanner result or
+final successor graph is invented. Root must bind the chosen builder and
+exclusive resource window before execution.
+
+Separate disabled publication and measurement plans preserve the complete
+currently selected Config inventory, private hash-only profile provenance,
+GeoLite/places and current SN authority. They use the normal scanner-gated
+Config packager, exact image/version selection and explicit restart scope.
+Actual reader generations, fresh connection lookups, rollup/publication
+clocks and a coherent census must precede any current Quality-gain claim.
+URL success of at least 0.8 and the mature four-hour quota remain separate.
+No resource build, publication, Main capture or Quality gain follows from
+this preparation.
+
+The proposal dispositions the retained Singapore national APNIC queue as ten
+subscriber, eight explicitly negative and twelve unreviewed ASNs. Those
+estimated-user entries are not subscriber counts or market ranks. The five
+Community Development Council districts have a current official geographic
+inventory, distinct from URA planning regions. District-specific subscriber
+presence, subscription counts and top-30 ranks remain unknown; national
+marketing and conditional premises eligibility do not fill those gaps.
+
+A separate primary-source follow-up keeps Cloudflare AS13335 unclassified
+at the whole-operator level. Its current BYOIP and Magic Transit documentation
+explicitly covers customer-owned prefixes announced under AS13335, ISP/customer
+letters of agency and traffic returned to the customer's network; Direct
+Server Return can retain egress through that customer's ISP. The inference is
+limited: an origin ASN and corporate brand alone do not prove that every
+address is tenant compute or a forward-proxy/VPN exit. A blanket hosting or
+proxy addition could override independent subscriber-prefix evidence for
+transparent protected networks. This is a possible mechanism, not an observed
+Main classification error or permission to approve all Cloudflare space.
+Existing applicable relay-prefix, VPN and other negative/risk evidence remains
+authoritative. Exact source receipts and the explicit no-change decision are
+frozen in `artifacts/arin-sg-mixed-origin-research-20261008-v1`
+(`bc89ad16`); no catalog or classifier change follows from this finding.
 
 The twelve-ASN augmentation has a separately qualified reuse executor
 (`db1631d8`) and full/native/mapped readback preparation (`1a6c7beb`). It keeps

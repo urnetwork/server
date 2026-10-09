@@ -2153,6 +2153,56 @@ Require same-source, matched workload and committed-outcome counts alongside
 phase times, query/lock evidence and an independent CPU interval. More visits,
 lower query counts or lower post time with less completed work is not recovery.
 
+**2026-10-09 current native CPU attribution limit.** Root's one-use capture
+completed at 01:25:11Z with source observation 01:25:08.170687Z. Four bounded
+process brackets retained 65.99 CPU seconds from stable native counters;
+only 4.67 seconds also had one enclosed, unchanged backend/query activity
+generation. The remaining 61.32 seconds (92.923% of observed cohort ticks)
+stay unassigned: 57.60 seconds crossed changed, idle, missing or zero query
+identity and 3.72 seconds lacked a qualified enclosing SQL interval. These
+are measured unknown CPU, not discarded wait samples. Native endpoint loss
+has no invented CPU value. The separate service-cgroup window measured
+218.248706 CPU seconds over 2.959886 seconds on 96 logical CPUs; its timing
+differs and it is not the denominator for the process brackets.
+
+The four captured CPU-leading identities match exact complete source literals:
+`task.loadTaskQueueMetricsSnapshot`'s queue aggregate at 1.68 CPU seconds
+(1.50-second conservative lower bound), `RemoveDisconnectedNetworkClients`'s
+four-table connection cascade DELETE at 0.69 seconds,
+`completedTransferBalanceDeleteSql` at 0.61 seconds, and
+`providerStatsClientsSQL` at 0.56 seconds. Their sum is 3.54 seconds; a further
+1.13 seconds has stable statement identity without this complete-catalog source
+binding. These ranks describe the qualified subset, not PostgreSQL's dominant
+CPU source. The final metadata query returned four complete catalog texts
+without row overflow and did not rank cumulative execution wall time.
+The offline source map `f92409ad` joins current postmaster/database identity,
+query identity, complete activity fingerprints and catalog text; its four
+original literals match source `3220c72c`. Literal equality and static callers
+do not establish the runtime caller, executable adoption, account or parameter
+cardinality. Full SQL stays private, and source owners, roles and top-level
+contexts remain distinct.
+
+The source now samples a bounded direct PostgreSQL cgroup cohort rather than
+only active SQL rows. It preserves CPU for changing/idle work, validates native
+PID namespace/start and SQL postmaster ownership, and requires unchanged
+backend/query start, query ID, text digest and state-change clocks. Statement-
+associated CPU can include Bind, snapshot acquisition and planning; it does
+not prove executor-only CPU or business-table access. Exact wait endpoints
+are context, not CPU counters or wait residence. Four short intervals, at most
+1,024 direct processes per endpoint, missing/new processes and two-tick
+quantization per process interval constrain interpretation. This attempt had
+no omitted query groups; that does not remove its changing-query blind spot.
+
+Source/native controls and the composed shared-slot/transport controls passed.
+The actual receipt proves joined transport and released reservation; the
+independent actual gate is `58f25814` (count-corrected v2; v1 retained) and
+reduction is `6eeda12d` under
+`temp/main-health-r1-20261008-v1/pg-cpu-current-brackets-v1/`. This is a complete
+bounded diagnostic, not a whole-cluster CPU attribution or recovery verdict.
+An unchanged repeat is not a remedy for this measured attribution gap. Keep
+the CPU incident open until a separately qualified observation identifies the
+unassigned work; do not relabel historical wait leaders as current CPU owners.
+
 ### 1.3d Empty transfer-escrow write amplification
 Probe: `escrow-amplification`
 
@@ -6340,6 +6390,55 @@ routes. Current fleet selection, anonymous SQL samples, client ancestry, and a
 matching source literal do not provide that join. Keep identifiers and credentials
 in the restricted evidence, and use bounded retained evidence before requesting
 another production read.
+
+The source audit at `d1f944dbf` found exactly those three production INSERT owners.
+Other contract writes change stream association, terminal usage/outcome,
+dispute/close state or retention time; retention archives terminal proof before
+deleting and does not reinsert the contract. No production COPY, backfill or
+dynamic SQL helper in the inspected tree supplies another contract INSERT or
+clears expiration. The usage guard returns the deadline unchanged, and the
+reservation revision triggers run after the statement. `BatchInTx` forwards the
+queued INSERT, and each current creator scans its returned deadline into a
+nonnullable `time.Time`. These source boundaries do not attest the live trigger
+bodies, an external writer or a modified executable.
+
+The positive-byte non-Redis discriminator is narrower than the expiration
+rollout. Retained `52e2a1353`, immediately before Redis admission commit
+`b3e96e42e`, admits ordinary positive-byte contracts through the legacy ledger
+INSERT without expiration. `b3e96e42e` first adds a policy-gated Redis path;
+migration 755 creates its `enabled=false` singleton. That generation can take
+the same legacy path only after its request successfully reads a false policy.
+`75b409734` removes the read and makes positive-byte public admission
+unconditional; pre-expiration `de68468d` already contains that change.
+Expiration is added in `695f8ed8a`, with the precise materialized creation clock
+preserved by `1279af4d8`. This identifies compatible source shapes, not a running
+writer, and dates or source ancestry alone cannot identify a modified artifact.
+
+Join the policy-gated candidate to the schema that existed at its request's
+policy read. A missing `enabled` column/table, missing singleton or query failure
+raises before its contract transaction; there is no legacy fallback on read
+failure. A request that successfully read false before a column drop could
+already be waiting downstream, so a later schema snapshot alone does not exclude
+it. Current source still describes migration 755's original shape; the separate
+operator column removal requires its own retained runtime evidence. The smallest
+remaining writer discriminator is one exact contract INSERT bound to its backend
+session and executing process/artifact, including draining processes; if that
+artifact has the policy gate, retain the same request's successful policy result
+or its ordered schema-removal evidence. Pooler client labels and statement-family
+matches are not that binding.
+
+Healthy source controls cover all creation owners and the signed deadline
+(`TestContractExpirationDefaultAcrossCreationPaths`,
+`TestCreateContractSignsPersistedExpiration`), rolling omission
+(`TestContractExpirationMigrationPreservesLegacyWriters`), and public Redis
+creation after the policy column is removed
+(`TestRedisAdmissionCreatesAfterEnabledColumnRemoval`). This audit did not rerun
+those native controls. A fresh zero-byte legacy anchor is not evidence of a
+positive-byte admission bypass, and a retained escrow marker alone is not exact
+write provenance. Conversely, current source, healthy new samples or selected
+fleet convergence cannot exclude an overlapping older writer. Keep missing
+request/process/schema joins unknown and retain the age-based NULL cleanup;
+none of these source controls justifies immediate retirement of every NULL row.
 
 Canonical `9bc8a7e` separately applies the same NULL fallback to companion-origin
 selection, prober reservation sizing, the post-lock origin check, and escrow
@@ -33235,13 +33334,63 @@ to a transient redundant probe failure while known valid schema evidence is
 available; it does not cure an uncached probe failure or prove a fleet rate.
 
 Optional compatibility registration shares that exact full-index positive
-observation before its own catalog check. A miss still uses the original fresh
-both-index check within the same 250ms context, then retains the chronological
-fallback on refusal. The cache path neither refreshes nor publishes readiness.
-The task's `index_readiness` still describes dispatch entry only; it does not
-measure the registration branch or prove that a particular missing payer was
-registered. Registration's independent missing-key index and unchanged
-chronological cursor remain authoritative.
+observation before its own catalog check. A miss uses the existing cache loader
+for the both-index check within the same 250ms context, then retains the
+chronological fallback on refusal. A fresh successful full check now publishes
+its exact-resource proof with the original five-second expiry measured from
+loader admission. Reusing proof never extends it; a due-only read cannot publish
+full-index authority. A successful fresh full check also rechecks its bounded
+resource digest before publishing; a changed or unreadable resource refuses the
+proof within the same context, without a second catalog query.
+Concurrent refresh, negative state and late/canceled reads
+retain the loader's existing refusal policy without another query or retry.
+
+The prior modern dispatcher path only consumed the cache: its fresh registration
+checks did not publish, and only the fallback financial lane could warm it. A
+cold modern worker could therefore keep probing despite successful full checks.
+Controls start cold, run due-only and full registration readiness in order, then
+verify cache reuse, exact expiry, resource identity and concurrent refusal. This
+source correction does not attribute an observed fleet failure rate to readiness
+or establish recovered financial throughput. The task's `index_readiness` still
+describes dispatch entry only; it does not measure the registration branch or
+prove that a particular missing payer was registered. Registration's independent
+missing-key index and unchanged chronological cursor remain authoritative.
+
+### Payer readiness and terminal execution error counters
+
+`urnetwork_legacy_payer_index_readiness_total` records the already completed
+due-index observation at the `dispatcher` or `payer` entry. Its fixed outcomes
+are `ready`, `catalog_invalid`, `deadline`, `canceled`, `read_error`, and the
+defensive `unknown`; `cached=true` applies only to a ready cached observation.
+The metric adds no resource read, SQL, retry, or financial action. Its existing
+250ms budget still includes resource resolution, acquisition and catalog work.
+Count or rate matched process generations before aggregating. Non-ready payer
+observations can identify a scheduling refusal population; they do not identify
+the failed resource, assert a persistent invalid index, or measure commits.
+Dispatcher refusal can use the existing fallback and need not fail its task.
+
+`urnetwork_taskworker_execution_errors_total` uses the existing execution
+terminal site and the same finite registered-task/attribution labels as
+`executions_total`. It counts each nonnil execution error once, including
+`drained` and `target_not_found`, before the result reaches the collector. Its
+sum therefore corresponds to all errored terminal outcomes, not only `failed`.
+No task id, arguments, raw error, SQLSTATE value or other dynamic cause becomes
+a label. Typed causes distinguish cancellation/deadline, the retained database
+context marker, fixed PostgreSQL lock/cancellation/serialization/deadlock/
+capacity/connection classes and other PostgreSQL errors. Differing typed leaves
+are `mixed`; malformed or incomplete bounded cause graphs are `unknown`.
+Other ordinary errors are `other`, including errors whose original cause was
+already converted to diagnostic text. Matching error text alone never supplies
+a typed cause, and a cancellation label does not identify its resource or stage.
+
+These counters are process-local execution observations. A business rollback
+still leaves its returned function error counted; an acknowledged financial
+commit followed by a later function error can also be counted. Task claim,
+completion transactions, Post retries and downstream accounting remain separate.
+The existing Info execution-error log is unconditional, while successful result
+logs require verbosity one. Collector delivery or a capped log tail can conceal
+those lines despite a terminal counter. Neither telemetry addition attributes
+the earlier R54 failure rate or certifies recovered payer throughput.
 
 
 ### Task submission, completion and RunOnce conflict counters

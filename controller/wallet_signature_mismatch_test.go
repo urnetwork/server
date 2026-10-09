@@ -237,7 +237,11 @@ func TestSnWalletMappingConsentSignatureMismatchIsCoded(t *testing.T) {
 		{name: "the entered coldkey", message: message, coldkey: typedColdkey, signature: typedSign(message)},
 		{name: "a consent naming another coldkey", message: consent(otherColdkey), coldkey: typedColdkey, signature: typedSign(consent(otherColdkey))},
 		{name: "not a consent", message: protocol.WalletMappingConsentPrefix + "{}", coldkey: typedColdkey, signature: otherSign(protocol.WalletMappingConsentPrefix + "{}")},
-		{name: "64 bytes that are no signature", message: message, coldkey: typedColdkey, signature: "0x" + strings.Repeat("00", 64)},
+		// no schnorrkel marker: well formed ed25519 bytes that decode and do
+		// not verify, so they are a mismatch like any other wrong signature
+		{name: "64 bytes that are no signature", message: message, coldkey: typedColdkey, signature: "0x" + strings.Repeat("00", 64), wantMismatch: true},
+		// the sr25519 marker on bytes that are no schnorrkel signature: undecodable
+		{name: "64 marked bytes that are no signature", message: message, coldkey: typedColdkey, signature: "0x" + strings.Repeat("ff", 64)},
 	}
 	for _, test := range cases {
 		mismatch := snWalletMappingSignatureMismatch(test.message, test.coldkey, typedAddress, test.signature)

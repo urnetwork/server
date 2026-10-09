@@ -47,6 +47,7 @@ func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int,
 		return result, nil, fmt.Errorf("invalid legacy settlement dispatch shard")
 	}
 	observation := legacySettlementPayerDueIndexObservation(ctx)
+	recordLegacyPayerReadiness(legacyPayerReadinessCounter, "dispatcher", observation)
 	readiness = &observation
 	if observation.Outcome != "ready" {
 		return result, readiness, ErrLegacySettlementPayerIndexUnavailable
@@ -64,12 +65,12 @@ func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int,
 // chronological fallback; both paths share the caller's registration budget.
 func registerLegacySettlementPayerDispatchPage(ctx context.Context, shard int, after *LegacySettlementCursor) (*LegacySettlementCursor, int) {
 	return registerLegacySettlementPayerDispatchPageWithReadiness(ctx, shard, after,
-		cachedLegacySettlementPayerIndexesReady, readLegacySettlementPayerIndexes)
+		cachedLegacySettlementPayerIndexesReady, readLegacySettlementPayerIndexesWithCache)
 }
 
-// Registration reuses the same full-index proof as dispatch; a cache miss keeps
-// its fresh bounded catalog check. Neither path publishes or extends the proof.
-// Invocation-local readers let controls force a transient refusal exactly.
+// Registration reuses the same full-index proof as dispatch. A cache miss uses
+// the existing loader's bounded full check and publishes from its original
+// admission time. Invocation-local readers can force a transient refusal.
 func registerLegacySettlementPayerDispatchPageWithReadiness(ctx context.Context, shard int, after *LegacySettlementCursor,
 	cached func(context.Context) bool, read func(context.Context) (bool, error),
 ) (*LegacySettlementCursor, int) {
