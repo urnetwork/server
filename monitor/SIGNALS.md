@@ -2101,8 +2101,10 @@ score publication revisited the same bounds and issued three running-table
 statements (four statement-trigger events) plus a token rewrite. A 100,000-row
 local control now performs none
 of those writes for a trusted unchanged checkpoint. Classification/observation
-versions, token presence, database guards, backward movement and required
-periodic repair are evaluated before skipping. Advancing windows and repair
+versions, token presence, backward movement and required periodic repair are
+evaluated before skipping. Trigger installation and enabled state belong to
+the migration/audit prerequisites described in §2.15 and §2.15a; ordinary
+lookbacks do not repeat those static catalog checks. Advancing windows and repair
 continue to run; interrupted checkpoint resume and rolling equivalence controls
 retain their existing results.
 
@@ -9529,6 +9531,15 @@ version 0. The next current Taskworker must re-anchor it before version 1 can be
 trusted again. This also makes an accidental future rollback fail safe. Apply
 both migrations through head 603 before deploying the new Taskworkers, converge
 the whole Taskworker fleet, and never update the version or token manually.
+
+The running-window reader uses those persisted versions and write tokens
+without querying trigger catalogs on every lookback. Migrations 603 and 740
+and the existing migration/reliability-drift monitors own installed, enabled
+classification and observation guards. Missing or disabled guards require
+schema repair through that ownership; ordinary writers do not discover or
+repair their installation. Bootstrap, legacy versions, missing tokens,
+backwards bounds and expired windows still force re-anchoring before reuse,
+including during optional maintenance deferral.
 
 2026-09-02 production root-cause evidence:
 
