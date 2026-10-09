@@ -156,6 +156,7 @@ var taskExecutionMaximum = newTaskExecutionMaxCollector()
 func init() {
 	prometheus.MustRegister(
 		taskExecutionsTotal,
+		taskExecutionErrorsTotal,
 		taskExecutionSeconds,
 		taskExecutionInflight,
 		taskExecutionBytesTotal,
@@ -295,6 +296,9 @@ func taskMetricOutcome(err error) string {
 func recordTaskExecution(taskName string, attribution string, argsBytes int, resultBytes int, duration time.Duration, err error) {
 	outcome := taskMetricOutcome(err)
 	taskExecutionsTotal.WithLabelValues(taskName, attribution, outcome).Inc()
+	if err != nil {
+		taskExecutionErrorsTotal.WithLabelValues(taskName, attribution, taskExecutionErrorCause(err)).Inc()
+	}
 	taskExecutionSeconds.WithLabelValues(taskName, attribution).Observe(duration.Seconds())
 	taskExecutionBytesTotal.WithLabelValues(taskName, "args").Add(float64(argsBytes))
 	if 0 < resultBytes {
