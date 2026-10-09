@@ -141,6 +141,11 @@ func inspectContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId s
 		return nil, err
 	}
 	if unverified {
+		// Continuation may finalize or fill valid partial reports. Retaining an
+		// earlier proof does not authorize negative or unknown current reports.
+		if _, err := contractExpiryCompletedUsage(proof); err != nil {
+			return nil, err
+		}
 		// The earlier expiry already owned retirement. Synthetic close times
 		// cannot postpone its durable continuation by another quiet period.
 		_, err := retainedContractExpiryUsage(retained)

@@ -123,7 +123,7 @@ func drainLegacySettlementInTx(ctx context.Context, tx server.PgTx, id, payer se
 	if err := checkLegacySettlementDrainInTx(ctx, tx, id, payer, true); err != nil {
 		return nil, false, false, legacySettlementBusyNone, err
 	}
-	return flushLegacySettlementInTx(ctx, tx, id)
+	return flushLegacySettlementWithExpiryPolicyInTx(ctx, tx, id, nil, false)
 }
 
 func legacySettlementDrainErrorStatus(err error) string {

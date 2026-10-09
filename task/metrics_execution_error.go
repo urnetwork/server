@@ -30,7 +30,7 @@ func taskExecutionErrorCause(err error) (cause string) {
 	if err == nil {
 		return "none"
 	}
-	inspection := server.InspectErrorCauses(err)
+	inspection := server.InspectErrorCauseBatch(err)
 	if !inspection.Complete || inspection.NilBranches != 0 {
 		return "unknown"
 	}

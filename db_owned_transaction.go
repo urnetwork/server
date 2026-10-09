@@ -261,6 +261,19 @@ func (self pgOwnershipResource) validate(conn PgConn) error {
 // prior owner's commit even when its advisory key is now free. An admitted
 // subset returns true without a new query or interval; extra keys fail closed.
 func TryTxOwnership(ctx context.Context, tx PgTx, keys []PgOwnershipKey) (bool, error) {
+	return tryTxOwnership(ctx, tx, keys, false)
+}
+
+// The bounded cohort uses one unnamed extended-protocol admission exchange.
+// Its integer arrays need no server-side prepare to establish argument types;
+// the returned rows also identify the actual transaction-pinned backend.
+func TryTxOwnershipExec(ctx context.Context, tx PgTx, keys []PgOwnershipKey) (bool, error) {
+	return tryTxOwnership(ctx, tx, keys, true)
+}
+
+// Execution mode changes protocol preparation only. Admission, ownership
+// events and the real transaction's commit/rollback custody stay shared.
+func tryTxOwnership(ctx context.Context, tx PgTx, keys []PgOwnershipKey, exec bool) (bool, error) {
 	keys = normalizePgOwnershipKeys(keys)
 	if len(keys) == 0 {
 		return false, errors.New("database ownership requires at least one key")
@@ -274,14 +287,18 @@ func TryTxOwnership(ctx context.Context, tx PgTx, keys []PgOwnershipKey) (bool, 
 	}
 	observation, _ := ctx.Value(pgOwnershipObservationKey{}).(*PgOwnershipObservation)
 	owner.ownership = &pgTransactionOwnership{keys: keys, observation: observation}
-	admitted, err := tryPgOwnershipKeys(ctx, tx, keys, true, 0)
+	admitted, backendPid, err := tryPgOwnershipKeyReplies(ctx, tx, keys, true, 0, exec)
 	if err != nil {
 		return false, err
 	}
-	// Query on the same transaction route; a transaction pooler pins that
-	// backend until the enclosing commit/rollback. Its startup PID may differ.
-	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&owner.ownership.backendPid); err != nil {
-		return false, err
+	if exec {
+		owner.ownership.backendPid = backendPid
+	} else {
+		// Keep the existing callers' route observation. The bounded cohort
+		// already validated this actual PID in every admission reply above.
+		if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&owner.ownership.backendPid); err != nil {
+			return false, err
+		}
 	}
 	owner.ownership.admitted = admitted
 	if admitted {
@@ -370,23 +387,34 @@ func (self *pgTransactionOwnership) observe(kind PgOwnershipEventKind) {
 // comes from a supplied array; no advisory function runs on a queue scan or an
 // expression whose LIMIT could be evaluated after acquiring additional locks.
 func tryPgOwnershipKeys(ctx context.Context, query PgCanQuery, keys []PgOwnershipKey, transactional bool, backendPid uint32) (bool, error) {
+	admitted, _, err := tryPgOwnershipKeyReplies(ctx, query, keys, transactional, backendPid, false)
+	return admitted, err
+}
+
+// The direct execution variant retains a nonzero backend identity from every
+// row and chunk. No startup PID or earlier pooled connection supplies proof.
+func tryPgOwnershipKeyReplies(ctx context.Context, query PgCanQuery, keys []PgOwnershipKey, transactional bool, backendPid uint32, exec bool) (bool, uint32, error) {
 	function := "pg_try_advisory_lock"
 	if transactional {
 		function = "pg_try_advisory_xact_lock"
 	}
 	for offset := 0; offset < len(keys); offset += pgOwnershipQueryLimit {
 		if err := ctx.Err(); err != nil {
-			return false, err
+			return false, backendPid, err
 		}
 		page := keys[offset:min(offset+pgOwnershipQueryLimit, len(keys))]
 		firsts, seconds := make([]int32, len(page)), make([]int32, len(page))
 		for index, key := range page {
 			firsts[index], seconds[index] = key.first, key.second
 		}
+		args := []any{firsts, seconds}
+		if exec {
+			args = append([]any{pgx.QueryExecModeExec}, args...)
+		}
 		rows, err := query.Query(ctx, `SELECT pg_backend_pid(),`+function+`(owner.first,owner.second)
-			FROM unnest($1::integer[],$2::integer[]) AS owner(first,second)`, firsts, seconds)
+			FROM unnest($1::integer[],$2::integer[]) AS owner(first,second)`, args...)
 		if err != nil {
-			return false, err
+			return false, backendPid, err
 		}
 		admitted, count := true, 0
 		for rows.Next() {
@@ -394,27 +422,34 @@ func tryPgOwnershipKeys(ctx context.Context, query PgCanQuery, keys []PgOwnershi
 			var observedBackendPid uint32
 			if err := rows.Scan(&observedBackendPid, &acquired); err != nil {
 				rows.Close()
-				return false, err
+				return false, backendPid, err
+			}
+			if exec && observedBackendPid == 0 {
+				rows.Close()
+				return false, backendPid, errors.New("database ownership reply has no backend identity")
+			}
+			if exec && backendPid == 0 {
+				backendPid = observedBackendPid
 			}
 			if backendPid != 0 && observedBackendPid != backendPid {
 				rows.Close()
-				return false, errors.New("database ownership requires a direct backend session")
+				return false, backendPid, errors.New("database ownership requires a direct backend session")
 			}
 			admitted = admitted && acquired
 			count++
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return false, err
+			return false, backendPid, err
 		}
 		if count != len(page) {
-			return false, errors.New("database ownership reply count mismatch")
+			return false, backendPid, errors.New("database ownership reply count mismatch")
 		}
 		if !admitted {
-			return false, nil
+			return false, backendPid, nil
 		}
 	}
-	return true, nil
+	return true, backendPid, nil
 }
 
 // Called exactly once by dbWithPool instead of acquiring a second connection.

@@ -32,7 +32,28 @@ func (self *ForceCloseVisitError) CanCheckpoint() bool {
 	if self == nil || !self.complete || self.attemptedCloseCount < 0 || self.cause == nil {
 		return false
 	}
+	if batch, ok := self.cause.(*server.ErrorCauseBatch); ok {
+		return forceCloseVisitBatchComplete(batch)
+	}
 	return forceCloseVisitCauseComplete(self.cause)
+}
+
+// The assembler supplied every failed row only after all visits joined. Keep
+// each row's original bounded guard instead of re-inspecting their wide join.
+func forceCloseVisitBatchComplete(batch *server.ErrorCauseBatch) bool {
+	if batch == nil {
+		return false
+	}
+	causes := batch.Unwrap()
+	if len(causes) == 0 || 2*forceCloseRawSubpageSize < len(causes) {
+		return false
+	}
+	for _, cause := range causes {
+		if !forceCloseVisitCauseComplete(cause) {
+			return false
+		}
+	}
+	return true
 }
 
 // Inspect concrete causes with a finite bound. Custom Is/As methods cannot
@@ -48,6 +69,9 @@ func forceCloseVisitCauseComplete(err error) (complete bool) {
 		return false
 	}
 	for _, cause := range causes.Nodes {
+		if _, nested := cause.Err.(*server.ErrorCauseBatch); nested {
+			return false
+		}
 		if _, interrupted := cause.Err.(runtime.Error); interrupted {
 			return false
 		}

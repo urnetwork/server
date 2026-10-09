@@ -73,10 +73,11 @@ type LegacySettlementFlushResult struct {
 	PassEndTime time.Time `json:"pass_end_time,omitzero"`
 	// Cohort input selection is not proof of a financial visit. Completed
 	// counts are confirmed per-contract outcomes; attempts include rollback.
-	FinancialCohortAttempts  int `json:"financial_cohort_attempts"`
-	FinancialCohortSelected  int `json:"financial_cohort_selected"`
-	FinancialCohortCompleted int `json:"financial_cohort_completed"`
-	FinancialCohortFallbacks int `json:"financial_cohort_fallbacks"`
+	FinancialCohortAttempts       int `json:"financial_cohort_attempts"`
+	FinancialCohortSelected       int `json:"financial_cohort_selected"`
+	FinancialCohortCompleted      int `json:"financial_cohort_completed"`
+	FinancialCohortFallbacks      int `json:"financial_cohort_fallbacks"`
+	FinancialCohortWriteRollbacks int `json:"financial_cohort_write_rollbacks"`
 
 	// Head outcomes are included in the total counts, not extra visits.
 	HeadVisited    int `json:"head_visited"`
@@ -110,18 +111,23 @@ func queueLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 		return fmt.Errorf("unknown legacy settlement outcome")
 	}
 	var open bool
-	var payerNetworkId server.Id
-	server.Raise(tx.QueryRow(ctx, `SELECT outcome IS NULL,COALESCE(payer_network_id,
-      CASE WHEN companion_contract_id IS NULL THEN source_network_id ELSE destination_network_id END)
-      FROM transfer_contract WHERE contract_id=$1`, contractId).Scan(&open, &payerNetworkId))
+	server.Raise(tx.QueryRow(ctx, `SELECT outcome IS NULL FROM transfer_contract WHERE contract_id=$1`, contractId).Scan(&open))
 	if !open {
 		return nil
 	}
-	tag := server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,clear_dispute,payer_network_id)
-      VALUES($1,$2,$3,$4,$5) ON CONFLICT (contract_id) DO UPDATE
+	owner, sourceId, err := readContractCloseOwnerInConn(ctx, tx, contractId)
+	if err != nil {
+		return err
+	}
+	var payerNetworkId *server.Id
+	if owner.Kind == ContractCloseOwnerPayerNetwork {
+		payerNetworkId = &owner.Id
+	}
+	tag := server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,clear_dispute,payer_network_id,source_client_id)
+      VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (contract_id) DO UPDATE
       SET clear_dispute=legacy_settlement_intent.clear_dispute OR EXCLUDED.clear_dispute,
-      payer_network_id=COALESCE(legacy_settlement_intent.payer_network_id,EXCLUDED.payer_network_id)
-      WHERE legacy_settlement_intent.outcome=EXCLUDED.outcome`, contractId, int(contractId[15])%LegacySettlementShardCount, outcome, clearDispute, payerNetworkId))
+      payer_network_id=EXCLUDED.payer_network_id,source_client_id=EXCLUDED.source_client_id
+      WHERE legacy_settlement_intent.outcome=EXCLUDED.outcome`, contractId, int(contractId[15])%LegacySettlementShardCount, outcome, clearDispute, payerNetworkId, sourceId))
 	if tag.RowsAffected() != 1 {
 		return fmt.Errorf("legacy settlement intent outcome conflicts")
 	}
@@ -149,6 +155,12 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 // A nonnil wait is reserved for an allocated head grant preflight. All other
 // ownership gates and the financial transaction retain their existing behavior.
 func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx, contractId server.Id, wait *legacySettlementGrantWait) (posts []func() any, completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
+	return flushLegacySettlementWithExpiryPolicyInTx(ctx, tx, contractId, wait, true)
+}
+
+// Ordinary workers own overdue usage exclusion for their existing intents.
+// Explicit settlement drains retain their policy of never preparing expiry.
+func flushLegacySettlementWithExpiryPolicyInTx(ctx context.Context, tx server.PgTx, contractId server.Id, wait *legacySettlementGrantWait, prepareExpiry bool) (posts []func() any, completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
 	defer enterLegacyTargetTrace(ctx, "financial_body")()
 	var outcome ContractOutcome
 	var clearDispute bool
@@ -165,13 +177,27 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 	if !found {
 		return nil, false, true, legacySettlementBusyIntent, nil
 	}
-	var terminal bool
+	var terminal, hasEscrow, needsExpiryContinuation bool
+	var sourceId server.Id
+	var payerNetworkId *server.Id
 	found = false
 	traceLegacySettlement(ctx, "contract_lock", "entered")
-	rows, err = tx.Query(ctx, `SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1 FOR UPDATE SKIP LOCKED`, contractId)
+	rows, err = tx.Query(ctx, `SELECT outcome IS NOT NULL,EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),source_id,payer_network_id,
+        (usage_origin_is_source IS NULL AND NOT usage_unverified) OR
+        CASE $2::varchar
+            WHEN 'settled' THEN
+                NOT EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party='source' AND NOT checkpoint)
+                OR NOT EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party='destination' AND NOT checkpoint)
+            WHEN 'dispute_resolved_to_source' THEN
+                NOT EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party='source' AND NOT checkpoint)
+            WHEN 'dispute_resolved_to_destination' THEN
+                NOT EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party='destination' AND NOT checkpoint)
+            ELSE false
+        END
+        FROM transfer_contract WHERE contract_id=$1 FOR UPDATE SKIP LOCKED`, contractId, outcome)
 	server.WithPgResult(rows, err, func() {
 		if rows.Next() {
-			server.Raise(rows.Scan(&terminal))
+			server.Raise(rows.Scan(&terminal, &hasEscrow, &sourceId, &payerNetworkId, &needsExpiryContinuation))
 			found = true
 		}
 	})
@@ -183,6 +209,19 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 		// The schema guard makes this impossible for ordinary writers. Do
 		// not guess whether an external repair completed required payouts.
 		return nil, false, false, legacySettlementBusyNone, fmt.Errorf("legacy settlement intent has a terminal contract")
+	}
+	closeOwner, admitted, err := validateLegacyCloseOwnerHeaderInTx(ctx, tx, contractId, sourceId, payerNetworkId, &hasEscrow)
+	if err != nil || !admitted {
+		return nil, false, err == nil, legacySettlementBusyAdmission, err
+	}
+	if !hasEscrow {
+		if needsExpiryContinuation && prepareExpiry {
+			if err := prepareLegacySettlementExpiryUsageInTx(ctx, tx, contractId, outcome, closeOwner); err != nil {
+				return nil, false, false, legacySettlementBusyNone, err
+			}
+		}
+		posts, completed, err := settleLegacyContractWithoutEscrowInTx(ctx, tx, contractId, outcome, clearDispute)
+		return posts, completed, false, legacySettlementBusyNone, err
 	}
 	{
 		var expected int
@@ -202,6 +241,11 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 			// unused legacy grant must not become a new accounting refusal.
 			return nil, false, true, legacySettlementBusyGrantSet, nil
 		}
+		if needsExpiryContinuation && prepareExpiry {
+			if err := prepareLegacySettlementExpiryUsageInTx(ctx, tx, contractId, outcome, closeOwner); err != nil {
+				return nil, false, false, legacySettlementBusyNone, err
+			}
+		}
 
 		if clearDispute {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET dispute=false,close_time=clock_timestamp() AT TIME ZONE 'UTC' WHERE contract_id=$1`, contractId))
@@ -210,7 +254,7 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 		// outcome guard. Every failure restores the intent with the finances.
 		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM legacy_settlement_intent WHERE contract_id=$1`, contractId))
 		traceLegacySettlement(ctx, "accounting", "entered")
-		posts, completed, returnErr = settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, false, true)
+		posts, completed, returnErr = settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, false, true, closeOwner)
 		traceLegacySettlement(ctx, "accounting", legacyTargetTraceCause(returnErr))
 		if returnErr != nil {
 			return
@@ -222,6 +266,46 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 	// Only best-effort projections with separate recovery/expiry remain after commit.
 	posts = append(posts, legacySettlementStreamPost(ctx, contractId))
 	return posts, true, false, legacySettlementBusyNone, nil
+}
+
+// Expiry discovery yields to this intent. Its validated owner retains the
+// original proof before completing the shared report policy in this transaction.
+// Only the accepted outcome and the existing financial owner can settle money.
+func prepareLegacySettlementExpiryUsageInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, closeOwner ContractCloseOwner) error {
+	owner, err := readContractSettlementOwnerInTx(ctx, tx, contractId, closeOwner)
+	if err != nil {
+		return err
+	}
+	closes := map[ContractParty]contractUsageClose{}
+	for _, report := range owner.reports {
+		closes[report.party] = contractUsageClose{ByteCount: report.byteCount, Checkpoint: report.checkpoint}
+	}
+	if _, err := contractExpiryCompletedUsage(&contractUsageExpiry{Capacity: owner.capacity, Reports: closes}); err != nil {
+		return err
+	}
+	// An adjudicated outcome needs its selected party's original report.
+	// Expiry may finalize that checkpoint, but cannot invent its authority.
+	switch outcome {
+	case ContractOutcomeSettled:
+	case ContractOutcomeDisputeResolvedToSource:
+		if _, ok := closes[ContractPartySource]; !ok {
+			return fmt.Errorf("adjudicated expiry lacks its source report")
+		}
+	case ContractOutcomeDisputeResolvedToDestination:
+		if _, ok := closes[ContractPartyDestination]; !ok {
+			return fmt.Errorf("adjudicated expiry lacks its destination report")
+		}
+	default:
+		return fmt.Errorf("unknown legacy expiry outcome")
+	}
+	fresh, err := prepareContractExpiryInTx(ctx, tx, contractId, server.NowUtc().Add(-5*time.Minute))
+	if err != nil {
+		return err
+	}
+	if fresh == nil {
+		return fmt.Errorf("legacy contract requires expiry before report or usage continuation")
+	}
+	return continueContractExpiryReportsInTx(ctx, tx, fresh, outcome)
 }
 
 // Choose the ownership mode before locking any grant. Retrying a partial
@@ -317,7 +401,18 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 			}()
 			dbTiming, finishDatabaseTrace := legacyTargetTraceDatabase(ctx)
 			defer finishDatabaseTrace()
+			diagnosticKind := "unscoped_singleton"
+			if scope, ok := ctx.Value(legacySettlementCloseScopeKey{}).(ContractCloseOwner); ok {
+				if scope.Kind == ContractCloseOwnerPayerNetwork {
+					diagnosticKind = "payer_singleton"
+				} else {
+					diagnosticKind = "source_singleton"
+				}
+			}
+			diagnostic := newLegacyFinancialDiagnostic(ctx, diagnosticKind)
+			defer diagnostic.finish()
 			server.Tx(ctx, func(tx server.PgTx) {
+				diagnostic.bind(tx)
 				// Register before projections so token cleanup joins the first
 				// post group after PG release, even when another post is held.
 				if admission != nil && admission.owner != nil {
@@ -414,7 +509,9 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 		var selected []*LegacySettlementCursor
 		var financialAttempts []legacyFinancialCohortAttempt
 		cooldown := legacyFinancialCohortCooldownFor(ctx)
-		cohortEnabled := len(cohort) > 0 && cooldown.ready(shard)
+		owner, scoped := bounded.Value(legacySettlementCloseScopeKey{}).(ContractCloseOwner)
+		sourceBatch := scoped && owner.Kind == ContractCloseOwnerSourceClient
+		cohortEnabled := len(cohort) > 0 && (sourceBatch || cooldown.ready(shard))
 		for remaining := limit; remaining > 0; {
 			visitHead := headRemaining > 0 && forwardUntilHead == 0
 			var next *LegacySettlementCursor
@@ -470,9 +567,9 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 							}
 						}
 						query = strings.Replace(query, "LIMIT 1", fmt.Sprintf("LIMIT %d", lookupLimit), 1)
-						if payer, ok := bounded.Value(legacySettlementPayerScopeKey{}).(server.Id); ok {
-							query = legacySettlementPayerSelectionSql(query, lookupLimit)
-							args[0] = payer
+						if owner, ok := bounded.Value(legacySettlementCloseScopeKey{}).(ContractCloseOwner); ok {
+							query = legacySettlementCloseSelectionSql(query, lookupLimit, owner.Kind)
+							args[0] = owner.Id
 						}
 						rows, err := conn.Query(bounded, query, args...)
 						server.WithPgResult(rows, err, func() {
@@ -525,16 +622,21 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 				for index, value := range selected {
 					ids[index] = value.ContractId
 				}
-				result.FinancialCohortAttempts++
-				result.FinancialCohortSelected += len(ids)
+				if !sourceBatch {
+					result.FinancialCohortAttempts++
+					result.FinancialCohortSelected += len(ids)
+				}
 				financialAttempts, err = cohort[0](bounded, ids)
-				if err == nil {
+				if err == nil && !sourceBatch {
 					for _, attempt := range financialAttempts {
 						if attempt.completed {
 							result.FinancialCohortCompleted++
 						}
 						if attempt.fallback {
 							result.FinancialCohortFallbacks++
+						}
+						if attempt.financialWriteRollback {
+							result.FinancialCohortWriteRollbacks++
 						}
 					}
 				}
@@ -555,7 +657,7 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 					// The cohort has returned after commit or a joined rollback.
 					// Only this explicitly unchanged row enters the old owner.
 					cohortEnabled = false
-					if attempt.deadlineFallback && bounded.Err() == nil {
+					if attempt.deadlineFallback && bounded.Err() == nil && !sourceBatch {
 						// Keep ordinary settlement across continuation and nil-EOF
 						// pages until this shard's bounded local hint expires.
 						cooldown.deferProbe(shard)

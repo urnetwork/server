@@ -170,7 +170,7 @@ type taskRetryCauses struct {
 
 // Shared with the metric path so it cannot re-enter an unbounded error graph.
 func inspectTaskRetryCauses(err error) taskRetryCauses {
-	inspection := server.InspectErrorCauses(err)
+	inspection := server.InspectErrorCauseBatch(err)
 	result := taskRetryCauses{complete: err == nil || inspection.Complete}
 	for _, node := range inspection.Nodes {
 		result.drained = result.drained || node.Err == ErrDrained

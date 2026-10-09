@@ -15,6 +15,7 @@ import (
 type LegacyPayerSettlementArgs struct {
 	Private        bool                    `json:"_private_task_arguments"`
 	PayerNetworkId server.Id               `json:"payer_network_id"`
+	Owner          *ContractCloseOwner     `json:"owner,omitempty"`
 	Cursor         *LegacySettlementCursor `json:"cursor,omitempty"`
 }
 
@@ -41,7 +42,12 @@ func legacyPayerSettlementCollectionWindow(ctx context.Context) time.Duration {
 // Initial discovery collects a bounded burst. RunOnce keeps the earliest
 // requested deadline, so another discovery never restarts this window.
 func QueueLegacyPayerSettlementsInTx(clientSession *session.ClientSession, tx server.PgTx, payerNetworkId server.Id) {
-	ScheduleLegacyPayerSettlementsInTx(clientSession, tx, payerNetworkId, nil,
+	QueueLegacyCloseSettlementsInTx(clientSession, tx, ContractCloseOwner{Kind: ContractCloseOwnerPayerNetwork, Id: payerNetworkId})
+}
+
+// The identity namespace is retained in task arguments and the RunOnce key.
+func QueueLegacyCloseSettlementsInTx(clientSession *session.ClientSession, tx server.PgTx, owner ContractCloseOwner) {
+	ScheduleLegacyCloseSettlementsInTx(clientSession, tx, owner, nil,
 		server.NowUtc().Add(legacyPayerSettlementCollectionWindow(clientSession.Ctx)))
 }
 
@@ -49,10 +55,24 @@ func QueueLegacyPayerSettlementsInTx(clientSession *session.ClientSession, tx se
 // A conflict keeps the existing turn's cursor; its own Post owns continuation.
 func ScheduleLegacyPayerSettlementsInTx(clientSession *session.ClientSession, tx server.PgTx,
 	payerNetworkId server.Id, cursor *LegacySettlementCursor, next time.Time) {
-	task.ScheduleTaskInTx(tx, ApplyLegacyPayerSettlements,
-		&LegacyPayerSettlementArgs{Private: true, PayerNetworkId: payerNetworkId, Cursor: cursor},
-		clientSession, task.RunOnce("flush_legacy_payer_settlements", payerNetworkId),
-		task.RunAt(next), task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
+	ScheduleLegacyCloseSettlementsInTx(clientSession, tx, ContractCloseOwner{Kind: ContractCloseOwnerPayerNetwork, Id: payerNetworkId}, cursor, next)
+}
+
+func ScheduleLegacyCloseSettlementsInTx(clientSession *session.ClientSession, tx server.PgTx,
+	owner ContractCloseOwner, cursor *LegacySettlementCursor, next time.Time) {
+	if !owner.valid() {
+		server.Raise(fmt.Errorf("invalid legacy close task scope"))
+	}
+	args := &LegacyPayerSettlementArgs{Private: true, Owner: &owner, Cursor: cursor}
+	if owner.Kind == ContractCloseOwnerPayerNetwork {
+		args.PayerNetworkId = owner.Id
+	}
+	apply := ApplyLegacyPayerSettlements
+	if owner.Kind == ContractCloseOwnerSourceClient {
+		apply = ApplyLegacySourceSettlements
+	}
+	task.ScheduleTaskInTx(tx, apply, args,
+		clientSession, owner.runOnce(), task.RunAt(next), task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
 }
 
 // Financial execution happens before the task's completion transaction takes
@@ -60,10 +80,11 @@ func ScheduleLegacyPayerSettlementsInTx(clientSession *session.ClientSession, tx
 // row-level financial guards remain valid against rolling older shard workers.
 func ApplyLegacyPayerSettlements(args *LegacyPayerSettlementArgs,
 	clientSession *session.ClientSession) (*LegacyPayerSettlementResult, error) {
-	if args == nil || !args.Private || args.PayerNetworkId == (server.Id{}) {
-		return nil, fmt.Errorf("invalid legacy payer task scope")
+	owner, err := legacyCloseTaskOwner(args)
+	if err != nil {
+		return nil, err
 	}
-	result, err := runLegacyPayerSettlementPages(clientSession.Ctx, args.PayerNetworkId,
+	result, err := runLegacyCloseSettlementPages(clientSession.Ctx, owner,
 		args.Cursor, LegacySettlementPageLimit, true)
 	return &result, err
 }
@@ -74,10 +95,11 @@ func ApplyLegacyPayerSettlements(args *LegacyPayerSettlementArgs,
 // dispatcher. No grant, history census or Redis operation enters this handoff.
 func ApplyLegacyPayerSettlementsPost(args *LegacyPayerSettlementArgs,
 	result *LegacyPayerSettlementResult, clientSession *session.ClientSession, tx server.PgTx) error {
-	if args == nil || !args.Private || args.PayerNetworkId == (server.Id{}) || result == nil {
-		return fmt.Errorf("invalid legacy payer task completion")
+	owner, err := legacyCloseTaskOwner(args)
+	if err != nil || result == nil {
+		return fmt.Errorf("invalid legacy close task completion")
 	}
-	next, err := NextLegacySettlementPayerAttemptInTx(clientSession.Ctx, tx, args.PayerNetworkId)
+	next, err := nextLegacyCloseOwnerAttemptInTx(clientSession.Ctx, tx, owner)
 	if err != nil || next == nil {
 		return err
 	}
@@ -92,7 +114,7 @@ func ApplyLegacyPayerSettlementsPost(args *LegacyPayerSettlementArgs,
 	} else if result.More && result.Failed == 0 && result.Completed > 0 {
 		runAt = maxTime(*next, now)
 	}
-	ScheduleLegacyPayerSettlementsInTx(clientSession, tx, args.PayerNetworkId, nextCursor, runAt)
+	ScheduleLegacyCloseSettlementsInTx(clientSession, tx, owner, nextCursor, runAt)
 	return nil
 }
 
@@ -106,4 +128,46 @@ func maxTime(first, second time.Time) time.Time {
 // The registered production target is also the owner used by native drain tests.
 func NewLegacyPayerSettlementTaskTarget() task.Target {
 	return &legacyPayerSettlementTaskTarget{Target: task.NewTaskTargetWithPost(ApplyLegacyPayerSettlements, ApplyLegacyPayerSettlementsPost)}
+}
+
+// Old queued payer arguments keep their original identity. New arguments must
+// never claim both a source owner and a financial payer alias.
+func legacyCloseTaskOwner(args *LegacyPayerSettlementArgs) (ContractCloseOwner, error) {
+	if args == nil || !args.Private {
+		return ContractCloseOwner{}, fmt.Errorf("invalid legacy close task scope")
+	}
+	owner := ContractCloseOwner{Kind: ContractCloseOwnerPayerNetwork, Id: args.PayerNetworkId}
+	if args.Owner != nil {
+		owner = *args.Owner
+		if args.PayerNetworkId != (server.Id{}) && (owner.Kind != ContractCloseOwnerPayerNetwork || owner.Id != args.PayerNetworkId) {
+			return ContractCloseOwner{}, fmt.Errorf("conflicting legacy close task scope")
+		}
+	}
+	if !owner.valid() {
+		return ContractCloseOwner{}, fmt.Errorf("invalid legacy close task scope")
+	}
+	return owner, nil
+}
+
+// A distinct function name keeps a source task out of the older payer decoder.
+// Source publishing starts only after workers register this target.
+func ApplyLegacySourceSettlements(args *LegacyPayerSettlementArgs, clientSession *session.ClientSession) (*LegacyPayerSettlementResult, error) {
+	owner, err := legacyCloseTaskOwner(args)
+	if err != nil || owner.Kind != ContractCloseOwnerSourceClient {
+		return nil, fmt.Errorf("invalid legacy source task scope")
+	}
+	return ApplyLegacyPayerSettlements(args, clientSession)
+}
+
+func ApplyLegacySourceSettlementsPost(args *LegacyPayerSettlementArgs, result *LegacyPayerSettlementResult,
+	clientSession *session.ClientSession, tx server.PgTx) error {
+	owner, err := legacyCloseTaskOwner(args)
+	if err != nil || owner.Kind != ContractCloseOwnerSourceClient {
+		return fmt.Errorf("invalid legacy source task completion")
+	}
+	return ApplyLegacyPayerSettlementsPost(args, result, clientSession, tx)
+}
+
+func NewLegacySourceSettlementTaskTarget() task.Target {
+	return &legacyPayerSettlementTaskTarget{Target: task.NewTaskTargetWithPost(ApplyLegacySourceSettlements, ApplyLegacySourceSettlementsPost)}
 }
