@@ -2165,15 +2165,22 @@ has no invented CPU value. The separate service-cgroup window measured
 218.248706 CPU seconds over 2.959886 seconds on 96 logical CPUs; its timing
 differs and it is not the denominator for the process brackets.
 
-The strongest retained stable query family was pending-task access at 1.68
-CPU seconds (1.50-second conservative lower bound), followed by other/escrow/
-other families at 0.69/0.61/0.56 seconds. These ranks describe the qualified
-subset, not PostgreSQL's dominant CPU source. The final metadata query selected
-the four measured CPU-leading retained identities, returning four complete
-catalog texts without row overflow. It did not rank cumulative execution wall
-time. Full SQL remains private; an exact source match still needs current
-postmaster/database identity, compatible activity text and complete catalog
-text. Multiple source owners, roles or top-level contexts must remain distinct.
+The four captured CPU-leading identities match exact complete source literals:
+`task.loadTaskQueueMetricsSnapshot`'s queue aggregate at 1.68 CPU seconds
+(1.50-second conservative lower bound), `RemoveDisconnectedNetworkClients`'s
+four-table connection cascade DELETE at 0.69 seconds,
+`completedTransferBalanceDeleteSql` at 0.61 seconds, and
+`providerStatsClientsSQL` at 0.56 seconds. Their sum is 3.54 seconds; a further
+1.13 seconds has stable statement identity without this complete-catalog source
+binding. These ranks describe the qualified subset, not PostgreSQL's dominant
+CPU source. The final metadata query returned four complete catalog texts
+without row overflow and did not rank cumulative execution wall time.
+The offline source map `f92409ad` joins current postmaster/database identity,
+query identity, complete activity fingerprints and catalog text; its four
+original literals match source `3220c72c`. Literal equality and static callers
+do not establish the runtime caller, executable adoption, account or parameter
+cardinality. Full SQL stays private, and source owners, roles and top-level
+contexts remain distinct.
 
 The source now samples a bounded direct PostgreSQL cgroup cohort rather than
 only active SQL rows. It preserves CPU for changing/idle work, validates native
@@ -2188,7 +2195,8 @@ no omitted query groups; that does not remove its changing-query blind spot.
 
 Source/native controls and the composed shared-slot/transport controls passed.
 The actual receipt proves joined transport and released reservation; the
-independent actual gate is `c78b6677` and reduction is `6eeda12d` under
+independent actual gate is `58f25814` (count-corrected v2; v1 retained) and
+reduction is `6eeda12d` under
 `temp/main-health-r1-20261008-v1/pg-cpu-current-brackets-v1/`. This is a complete
 bounded diagnostic, not a whole-cluster CPU attribution or recovery verdict.
 An unchanged repeat is not a remedy for this measured attribution gap. Keep
