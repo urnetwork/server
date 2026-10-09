@@ -33,8 +33,9 @@ import (
 	"github.com/urnetwork/proxy"
 )
 
-func main() {
-	usage := `BringYour control.
+// bringyourctlUsage is the docopt usage text, at package level so tests can
+// parse a command line without running main.
+const bringyourctlUsage = `BringYour control.
 
 Usage:
     bringyourctl sn-transition-status
@@ -157,6 +158,9 @@ Options:
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
     --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, or solana.
     -c --count=<count>	Number to process [default: 1000].`
+
+func main() {
+	usage := bringyourctlUsage
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
