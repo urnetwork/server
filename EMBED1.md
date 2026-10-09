@@ -1,6 +1,6 @@
 # EMBED1: server support for embedding URnetwork
 
-Status: implemented on `feat/embed-business`; migrations 797–799 **not applied**
+Status: implemented on `feat/embed-business`; migrations 797–800 **not applied**
 (owner rule: merge to main, pull and push before any migration, including DB test
 suites). Companion work: the ur.io Embed guide and Services page (mmm), the embed
 examples and `EMBED_CONTRACT.md` (examples repo), and the OpenAPI entries in
@@ -8,36 +8,53 @@ examples and `EMBED_CONTRACT.md` (examples repo), and the OpenAPI entries in
 
 A customer embeds the SDK in its own app. Its backend holds the network's root
 token (or an API key), authenticates its own users, and provisions **one
-top-level client per running installation** with `POST /network/auth-client`. Three
+top-level client per running installation** with `POST /network/auth-client`. Four
 server features support that:
 
-1. **The Embed plan limit**: a per-network override of the 100 active top-level
-   client cap.
+1. **The Embed plan client allowance**: a per-network override of both client
+   limits, the 100 active top-level client cap and the tier's concurrent
+   connection limit.
 2. **Per-client data caps and usage**: per installation, monthly and/or
    running-total caps, plus monthly usage for every top-level client.
 3. **Services contact sales**: a public lead form that stores each lead and
    posts it to Slack.
+4. **ACL groups**: a per-client group, `default` or `isolated`; an isolated
+   client is kept out of the network's peer list.
 
-## 1. The Embed plan limit
+## 1. The Embed plan client allowance
 
-`LimitTopLevelClientIdsPerNetwork` (100) caps **active top-level clients** per
-network: one per running installation. A client idle for 30 days
-(`TopLevelClientIdleExpiration`) is deactivated and stops counting; provider
-installs (`provide_intent`) and child clients (`source_client_id`) never count.
-The cap is enforced only while pro.yml `enforce_concurrent_clients` is on.
+Two limits apply to a network's top-level clients, and both are enforced only
+while pro.yml `enforce_concurrent_clients` is on:
 
-An Embed plan raises the cap for one network:
+- The **top-level client limit**: `LimitTopLevelClientIdsPerNetwork` (100) caps
+  **active top-level clients**, one per running installation. A client idle for
+  30 days (`TopLevelClientIdleExpiration`) is deactivated and stops counting;
+  provider installs (`provide_intent`) and child clients (`source_client_id`)
+  never count. A refusal is `error.client_limit_exceeded`.
+- The **concurrent connection limit**: the tier's pro.yml `concurrent_clients`
+  caps connected top-level clients, at creation (`NetworkConcurrentClientsExceeded`,
+  `error.upgrade_required`) and at connection activation (`CanConnectNetworkPeer`,
+  the client limit exceeded kick).
+
+An Embed plan sets the network's client allowance — the top-level client limit
+and the concurrent connection limit:
 
 - Storage: `network_top_level_client_limit (network_id PK, top_level_client_limit,
-  update_time)`. No row means the default 100.
+  update_time)`. No row means the defaults: 100 and the tier's limit.
 - Enforcement: the `AuthNetworkClient` create cap reads the network's limit in the
   provisioning transaction (`networkTopLevelClientLimitInTx`) and counts with
-  `LIMIT limit+1`. Nothing else changes.
+  `LIMIT limit+1`. The concurrent gates and the provider intent's normal client
+  limit read it through `networkConcurrentClientLimit`, which uses the row when
+  there is one and the tier otherwise. Every gate stays behind the rollout switch.
+- Cache: the concurrent gates read the override on every connection activation
+  while enforcement is on, so each process caches it for 30 seconds (bounded at
+  8,192 networks). Set and clear refresh the process that runs them at once;
+  other processes pick a change up within the ttl.
 - The peer valve (`model/peer_model.go`) keeps the constant: a network past 100
   recently active top-level clients has its peer list off, so a large embedded
   network's users stay invisible to each other.
 - Ops: `bringyourctl network client-limit --network_id=<id> [--set=<n> | --clear]`
-  prints the effective limit and whether it comes from an Embed plan
+  prints the effective allowance and whether it comes from an Embed plan
   (1 ≤ n ≤ 10,000,000; unknown networks are refused).
 
 ## 2. Per-client data caps and usage
@@ -191,6 +208,58 @@ refusal is the ordinary `Insufficient balance (0).`, which the client sees as
   - The webhook URL is never logged: a transport error is unwrapped from
     `*url.Error`, whose text includes the URL.
 
+## 4. ACL groups
+
+A top-level client is in the `default` group unless its network's root
+credential (the root JWT or an API key) puts it in `isolated`. Only a non-default
+group is stored, in `network_client_acl_group (client_id PK, network_id,
+acl_group, update_time)`; no row means `default`.
+
+### API
+
+- `POST /network/client-acl-group` — the root credential only (a client token is
+  refused), for a top-level client of the caller's network. Body
+  `{"client_id","acl_group":"default"|"isolated"}` → `{"client_id","acl_group"}`.
+  Refusals answer 200 with `error.message`: an unknown or foreign client is "Client
+  not found in this network.", a child client "ACL groups apply to top-level
+  clients.".
+- `GET /network/client-acl-group?client_id=` — the root credential reads any
+  top-level client of its network; a client token reads its own (a child client's
+  token reads its top-level client's).
+
+### Semantics
+
+An isolated client:
+
+- never appears in the network's peer list: `GET /network/peers`, the peer
+  listener's full reads and its key-event deltas;
+- receives no peer list: its resident runs no peer listener, and its own
+  `GET /network/peers` is empty;
+- does not count toward the peer valve (`NetworkPeersEnabled`), like a provider
+  install, so a network of isolated installations keeps peer registration (and
+  with it the connected count) on;
+- still counts toward the top-level client limit and the concurrent connection
+  limit.
+
+### Implementation
+
+- `GetNetworkPeerProfile` resolves `NetworkPeerCategoryIsolated` (proxy and
+  provider categories take precedence). The resident registers an isolated client
+  in the counted proxy zset (`AddNetworkIsolatedPeer` at announce and as the
+  heartbeat, `RemoveNetworkIsolatedPeer` on close) and starts no listener.
+- A change takes effect promptly. After the change commits,
+  `applyNetworkClientAclGroupChange` drops the network's valve cache entry and
+  moves the registration. Isolating runs `isolateNetworkPeer`, one Lua
+  transition that removes the meta, member key, connected entry and any
+  disconnect marker (no marker, so the client is not reported as recently
+  disconnected), advances the mutation fence, bumps the version, and moves a
+  connected client to the proxy zset with its remaining ttl. Returning to
+  default removes it from the proxy zset. Either way the client's resident record
+  is retired, so its poll closes it and the next connection registers with the
+  new group.
+- The heartbeat's re-add path re-lists only a client still in the default group,
+  so a heartbeat racing an isolation cannot list the client again.
+
 ## Migrations (appended after 796)
 
 | # | Change |
@@ -198,9 +267,10 @@ refusal is the ordinary `Insufficient balance (0).`, which the client sees as
 | 797 | `network_top_level_client_limit` |
 | 798 | `network_client_data_cap` (+ partial indexes for the capped snapshot and the list), `network_client_data_usage`, `network_client_data_usage_drain`, `network_client_data_usage_rollup` |
 | 799 | `services_lead` |
+| 800 | `network_client_acl_group` |
 
-All three are new tables: nothing is rewritten. Each must exist before a binary
-that reads it serves.
+All four are new tables: nothing is rewritten. Each must exist before a binary
+that reads it serves (the peer profile and the peer valve query 800).
 
 ## Observability
 
@@ -216,6 +286,8 @@ default level, with the lead id only.
 
 ## Test plan
 
+Every changed file has tests; the coverage table is in the branch's final report.
+
 - Pure (run on the branch):
   - `model/network_client_data_cap_unit_test.go`: merge JSON, limits, periods,
     cursor/limit parsing, capped reasons, the drain block window, field parsing,
@@ -224,7 +296,22 @@ default level, with the lead id only.
   - `model/services_lead_unit_test.go`: validation, Slack escaping and text,
     config parsing, and the notifier against `httptest` (retry, 429 retry, 4xx
     stop, give up, cancel, URL-free errors).
-  - `api/spec_conformance_test.go`, with registry entries for the four routes.
+  - `model/services_lead_config_unit_test.go`: the sales.yml reload window, the
+    absent/empty/non-https configs, the unconfigured path posting nothing, an
+    unclassifiable address passing the limiter, the limiter settings, URL-free
+    post errors.
+  - `model/network_client_limit_unit_test.go`: the override cache and its bound,
+    the folded enforcement switch, the override driving the concurrent and
+    provider intent limits.
+  - `model/network_client_acl_group_unit_test.go`: group parsing, the category
+    precedence, the refusals before any query, the valve cache `Remove`.
+  - `api/handlers/embed_handlers_test.go`: 401 without a token on each
+    authenticated route, the malformed contact body (400), the 429 mapping, the
+    wire field names.
+  - `bringyourctl/network_client_limit_test.go`: the usage forms and the help text.
+  - `taskworker/network_client_data_usage_registration_test.go`: the rollup
+    registered in both workload profiles.
+  - `api/spec_conformance_test.go`, with registry entries for the six routes.
 - DB-backed (after merge, under the owner rule):
   - `TestSetClientDataCapMergeSemantics` (root JWT and API key),
     `TestGetClientDataCapAuth`, `TestListClientDataCapsPaging`,
@@ -232,6 +319,18 @@ default level, with the lead id only.
     child attribution, reset period, markers → admission),
     `TestNetworkTopLevelClientLimitOverride`, `TestServicesContactSales`
     (store, honeypot, validation, 429).
+  - `TestNetworkClientAllowanceAppliesToTheConcurrentLimit`,
+    `TestNetworkClientLimitOverrideCache`, `TestNetworkTopLevelClientLimitInTx`.
+  - `TestNetworkClientAclGroupAuth`, `TestNetworkClientAclGroupPeerExclusion`,
+    `TestIsolateNetworkPeerMovesTheRegistration`,
+    `TestNetworkPeersEnabledExcludesIsolatedClients`.
+  - `TestSettlementMetersThePayingClient`, `TestClientDataCapForeignNetworkIsNotFound`.
+  - `TestServicesContactSalesGlobalRateLimit`, `TestServicesContactSalesPostsTheLeadToSlack`.
+  - `TestNetworkClientLimitCommand` (bringyourctl), `TestRollupClientDataUsageScheduleArmsOneOwner`
+    (taskworker).
+- Integration, `server/connect` (after merge, under the owner rule):
+  `TestExchangeAclGroupIsolatesAPeer`, `TestExchangeDataCapPausesStopsAndResumesTraffic`,
+  `TestConnectEmbedPlanAllowanceLiftsTheConcurrentLimit`.
   - The existing settlement participant matrices exercise the `contractOrigin`
     extraction: `TestContractPayoutParticipantMatrix`,
     `TestCompanionContractPayoutParticipantsJoinByStreamId`,
@@ -240,6 +339,14 @@ default level, with the lead id only.
     `TestCompanionContractExtenderPayoutPaysTheReversedParties`.
 
 ## Follow-ups
+
+- An isolated client's SDK keeps the last peer list it received before the
+  isolation; the server sends it nothing afterward. An explicit empty update on
+  isolation would clear it, at the cost of a resident change.
+- A network over the peer valve registers no peers at all, so its connected
+  count, and with it the concurrent gate, sees none of its clients (this
+  predates the branch). Isolated installations do not count toward the valve, so
+  isolating an embedded fleet keeps registration and counting on.
 
 - A cap row for a client the inactive reap deletes lingers. The list hides it
   (inner join), and a capped one in the snapshot is harmless (the client makes no
