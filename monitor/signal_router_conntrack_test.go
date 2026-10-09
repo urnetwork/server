@@ -153,6 +153,49 @@ func TestRouterConntrackOperatorCapacityChangeDoesNotProveRecovery(t *testing.T)
 	}
 }
 
+func TestRouterConntrackCounterGapRequiresFreshPair(t *testing.T) {
+	now := time.Date(2026, 10, 9, 23, 3, 19, 0, time.UTC)
+	source := newSyntheticRouterSource()
+	settings := syntheticRouterSettings(source, &now)
+	signal := NewRouterConntrackSignal()
+	for index, body := range []string{
+		syntheticRouterConntrack,
+		"--count--\n100\n--max--\n1000\n--hash--\n256\n--stat--\nunavailable",
+		strings.Replace(syntheticRouterConntrack, "00000001 00000000 00000000", "00000001 00000003 00000000", 1),
+		strings.Replace(syntheticRouterConntrack, "00000001 00000000 00000000", "00000001 00000003 00000000", 1),
+	} {
+		source.body = body
+		alerts, err := signal.Run(context.Background(), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index < 3 {
+			requireAlertClass(t, alerts, "cannot-observe")
+		} else if len(alerts) != 0 {
+			t.Fatal("fresh complete zero-delta pair did not restore counter observation")
+		}
+		for _, alert := range alerts {
+			if alert.Class == "router-conntrack-drops" {
+				t.Fatal("a counter delta bridged an unavailable observation")
+			}
+		}
+		now = now.Add(time.Second)
+	}
+}
+
+func TestRouterConntrackKernelEvidenceCannotRescueInvalidCapacity(t *testing.T) {
+	now := time.Date(2026, 10, 9, 23, 3, 19, 0, time.UTC)
+	source := newSyntheticRouterSource()
+	source.body = "--count--\n262144\n--max--\n0\n--hash--\n32768\n--stat--\nunavailable" + syntheticRouterKernelTableFull("1800", "1", "900")
+	alerts, err := NewRouterConntrackSignal().Run(context.Background(), syntheticRouterSettings(source, &now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].Class != "cannot-observe" {
+		t.Fatal("kernel evidence bypassed required live capacity validity")
+	}
+}
+
 func TestRouterConntrackCorroboratedDropsAndAppliedCapacity(t *testing.T) {
 	now := time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC)
 	source := newSyntheticRouterSource()

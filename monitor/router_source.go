@@ -382,12 +382,40 @@ func routerCaptureCommand(name, kind string) string {
 	case "neighbors":
 		body = "ip -s neigh show nud all"
 	case "conntrack":
-		body = "printf '%s\\n' '--count--'\ncat /proc/sys/net/netfilter/nf_conntrack_count\nprintf '%s\\n' '--max--'\ncat /proc/sys/net/netfilter/nf_conntrack_max\nprintf '%s\\n' '--hash--'\ncat /sys/module/nf_conntrack/parameters/hashsize\nprintf '%s\\n' '--stat--'\ncat /proc/net/stat/nf_conntrack"
+		body = `printf '%s\n' '--count--'
+cat /proc/sys/net/netfilter/nf_conntrack_count
+printf '%s\n' '--max--'
+cat /proc/sys/net/netfilter/nf_conntrack_max
+printf '%s\n' '--hash--'
+cat /sys/module/nf_conntrack/parameters/hashsize
+printf '%s\n' '--stat--'
+if router_stat=$(cat /proc/net/stat/nf_conntrack 2>/dev/null); then
+  printf '%s\n' "$router_stat"
+else
+  printf '%s\n' unavailable
+fi
+printf '%s\n' '--kernel-table-full--'
+if router_kernel=$(dmesg -s 262144 2>/dev/null) && [ "${#router_kernel}" -le 262144 ] && router_uptime=$(cat /proc/uptime 2>/dev/null) && router_kernel_summary=$(printf '%s\n' "$router_kernel" | awk '
+  /^\[[[:space:]]*[0-9]+(\.[0-9]+)?\][[:space:]]+nf_conntrack: (nf_conntrack: )?table full, dropping packet[.]?$/ {
+    stamp = $0
+    sub(/^\[[[:space:]]*/, "", stamp)
+    sub(/\].*$/, "", stamp)
+    if (stamp + 0 > latest) latest = stamp + 0
+    count++
+  }
+  END { printf "retained_messages=%d\nlatest_uptime_seconds=%.6f\n", count, latest }
+'); then
+  printf 'uptime_seconds=%s\n' "${router_uptime%% *}"
+  printf '%s\n' "$router_kernel_summary"
+else
+  printf '%s\n' unavailable
+fi`
 	default:
 		return ""
 	}
-	// The local pipe cap, native exit status, strict sections and final marker
-	// all must succeed; a syntactically valid prefix is not a complete capture.
+	// Required reads, the local pipe cap, native exit status and final marker
+	// must succeed. Optional reads explicitly retain their availability state;
+	// a syntactically valid prefix is not a complete capture.
 	return "set -eu\nexport LC_ALL=C\nrouter_name=$(hostname -s)\n[ \"$router_name\" = '" + name + "' ] || exit 21\nrouter_boot=$(cat /proc/sys/kernel/random/boot_id)\nprintf 'URN_ROUTER_V1\\nhostname=%s\\nboot=%s\\n--body--\\n' \"$router_name\" \"$router_boot\"\n" + body + "\nrouter_after_name=$(hostname -s)\nrouter_after_boot=$(cat /proc/sys/kernel/random/boot_id)\n[ \"$router_name\" = \"$router_after_name\" ] && [ \"$router_boot\" = \"$router_after_boot\" ] || exit 22\nprintf '\\n--after--\\nhostname=%s\\nboot=%s\\nURN_ROUTER_END\\n' \"$router_after_name\" \"$router_after_boot\""
 }
 
