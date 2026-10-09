@@ -409,6 +409,10 @@ type servicesLeadNotifier struct {
 	sleep       func(context.Context, time.Duration) bool
 }
 
+// servicesLeadNotifierFactory builds the notifier notifyServicesLead posts
+// with. Tests replace it to reach a local webhook.
+var servicesLeadNotifierFactory = newServicesLeadNotifier
+
 func newServicesLeadNotifier() *servicesLeadNotifier {
 	return &servicesLeadNotifier{
 		httpClient:  server.NewHttpClient(servicesLeadSlackAttemptTimeout),
@@ -460,7 +464,7 @@ func notifyServicesLead(lead *servicesLead) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	if err := newServicesLeadNotifier().Notify(ctx, webhookUrl, servicesLeadSlackText(lead)); err != nil {
+	if err := servicesLeadNotifierFactory().Notify(ctx, webhookUrl, servicesLeadSlackText(lead)); err != nil {
 		servicesLeadNotifyResults.WithLabelValues("error").Inc()
 		// an ops problem, not the prospect's: logged without the url or the lead
 		glog.Infof("[sl]services lead %s slack notify failed: %s\n", lead.leadId, err)
