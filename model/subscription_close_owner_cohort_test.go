@@ -20,10 +20,16 @@ func TestContractCloseOwnerFreePageDoesNotEnterFinancialCohort(t *testing.T) {
 			ids[index] = server.NewId()
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
+			// Match an ordinary free close: retain service direction and both
+			// original final reports so settlement can freeze immutable usage.
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
- (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count)
- SELECT id,$2,$3,$4,$5,0 FROM unnest($1::uuid[]) AS requested(id)`,
+ (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,usage_origin_is_source)
+ SELECT id,$2,$3,$4,$5,0,true FROM unnest($1::uuid[]) AS requested(id)`,
 				ids, server.NewId(), owner.Id, server.NewId(), server.NewId()))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close
+ (contract_id,party,used_transfer_byte_count,checkpoint)
+ SELECT id,party,0,false FROM unnest($1::uuid[]) AS requested(id)
+ CROSS JOIN (VALUES ('source'),('destination')) AS reports(party)`, ids))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent
  (contract_id,shard,outcome,next_attempt_time)
  SELECT id,get_byte(uuid_send(id),15)%16,'settled',timestamp '2010-01-01'
@@ -42,13 +48,16 @@ func TestContractCloseOwnerFreePageDoesNotEnterFinancialCohort(t *testing.T) {
 		server.Db(ctx, func(conn server.PgConn) {
 			var exact bool
 			server.Raise(conn.QueryRow(ctx, `SELECT
- (SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1::uuid[]) AND outcome='settled')=$2
+ (SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1::uuid[]) AND outcome='settled'
+  AND close_time IS NOT NULL AND provider_usage->>'version'='1' AND provider_usage->>'byte_count'='0')=$2
+ AND (SELECT count(*) FROM contract_close WHERE contract_id=ANY($1::uuid[])
+  AND NOT checkpoint AND used_transfer_byte_count=0)=2*$2
  AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=ANY($1::uuid[]))
  AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=ANY($1::uuid[]))
  AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=ANY($1::uuid[]))
  AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=ANY($1::uuid[]))`, ids, len(ids)).Scan(&exact))
 			if !exact {
-				t.Fatal("free source lost an outcome or created financial records")
+				t.Fatal("free source lost an outcome, immutable usage or original reports, or created financial records")
 			}
 		}, server.OptNoRetry())
 		replay, err := runLegacyCloseSettlementPages(ctx, owner, nil, LegacySettlementPageLimit, true)
