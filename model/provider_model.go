@@ -140,8 +140,9 @@ func statsProviders(
 	providers := []*ProviderStats{}
 	var returnErr error
 
-	// stats read: tolerates replica delay
-	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
+	// Payout authority and metrics share one primary owner. Replica lag must
+	// not make a retained earning boundary look absent when policy is removed.
+	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		// enumerate the network's active top-level provider clients
 		order := []server.Id{}
 		result, err := conn.Query(
@@ -338,8 +339,8 @@ func StatsProvider(
 
 	found := false
 	var returnErr error
-	// stats read: tolerates replica delay
-	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
+	// Keep payout-boundary authority on the same primary owner as its metrics.
+	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		// ownership: the client must belong to the caller's network
 		result, err := conn.Query(
 			clientSession.Ctx,
@@ -559,8 +560,8 @@ func StatsProvidersOverview(
 	clients := gapFilledIntDays(days)
 	var returnErr error
 
-	// stats read: tolerates replica delay
-	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
+	// Keep payout-boundary authority on the same primary owner as its metrics.
+	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		// enumerate the network's active top-level provider clients
 		providerIds := []server.Id{}
 		result, err := conn.Query(
