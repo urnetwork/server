@@ -284,14 +284,7 @@ func TestRollupClientDataUsage(t *testing.T) {
 		childId := network.provisionClient(t, "user:alice:window", &clientId)
 		uncappedClientId := network.provisionClient(t, "user:bob", nil)
 		setDataCapJson(t, network.apiKeySession, `{"client_id":"`+clientId.String()+`","total_byte_limit":1000,"monthly_byte_limit":50000}`)
-
-		// a closed block well inside the hash ttl
-		usageTime := server.NowUtc().Add(-5 * ClientDataUsageBlockDuration)
-		monthStart := clientDataCapMonthStart(usageTime)
-		RecordClientDataUsage(ctx, clientId, 600, usageTime)
-		RecordClientDataUsage(ctx, childId, 500, usageTime)
-		RecordClientDataUsage(ctx, uncappedClientId, 70, usageTime)
-		RollupClientDataUsage(ctx, server.NowUtc())
+		capTime := server.NowUtc()
 
 		readUsage := func(clientId server.Id, monthStart time.Time) (usedByteCount ByteCount) {
 			server.Db(ctx, func(conn server.PgConn) {
@@ -306,9 +299,30 @@ func TestRollupClientDataUsage(t *testing.T) {
 			return
 		}
 
+		// a closed block that started before the first cap request counts for
+		// the month but not for the running total, which starts at that request
+		preCapTime := capTime.Add(-5 * ClientDataUsageBlockDuration)
+		RecordClientDataUsage(ctx, clientId, 200, preCapTime)
+		RollupClientDataUsage(ctx, server.NowUtc())
+		connect.AssertEqual(t, readUsage(clientId, clientDataCapMonthStart(preCapTime)), ByteCount(200))
+		connect.AssertEqual(t, readRow(clientId).totalUsedByteCount, ByteCount(0))
+
+		// a block that starts after the cap request, rolled up once it has closed
+		usageTime := capTime.Add(ClientDataUsageBlockDuration)
+		monthStart := clientDataCapMonthStart(usageTime)
+		RecordClientDataUsage(ctx, clientId, 600, usageTime)
+		RecordClientDataUsage(ctx, childId, 500, usageTime)
+		RecordClientDataUsage(ctx, uncappedClientId, 70, usageTime)
+		RollupClientDataUsage(ctx, usageTime.Add(3*ClientDataUsageBlockDuration))
+
+		monthUsage := ByteCount(1100)
+		if clientDataCapMonthStart(preCapTime).Equal(monthStart) {
+			monthUsage += 200
+		}
+
 		// the child's bytes count for its top-level client; clients without a
 		// cap are metered too
-		connect.AssertEqual(t, readUsage(clientId, monthStart), ByteCount(1100))
+		connect.AssertEqual(t, readUsage(clientId, monthStart), monthUsage)
 		connect.AssertEqual(t, readUsage(childId, monthStart), ByteCount(0))
 		connect.AssertEqual(t, readUsage(uncappedClientId, monthStart), ByteCount(70))
 		row := readRow(clientId)
@@ -327,7 +341,7 @@ func TestRollupClientDataUsage(t *testing.T) {
 		blockNumber := clientDataUsageBlockNumber(usageTime)
 		RecordClientDataUsage(ctx, clientId, 600, usageTime)
 		drainClientDataUsageShard(ctx, blockNumber, clientDataUsageShard(clientId))
-		connect.AssertEqual(t, readUsage(clientId, monthStart), ByteCount(1100))
+		connect.AssertEqual(t, readUsage(clientId, monthStart), monthUsage)
 		connect.AssertEqual(t, readRow(clientId).totalUsedByteCount, ByteCount(1100))
 
 		// after a reset, a block that started before it counts for the month

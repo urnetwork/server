@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -31,11 +32,21 @@ func TestServicesContactSalesGlobalRateLimit(t *testing.T) {
 		defer server.Vault.PushSimpleResource(servicesSalesVaultResource, []byte("slack_webhook_url: \"\"\n"))()
 		servicesSalesConfigCache.Store(nil)
 
+		// every address must have its own per-address budget, so only the
+		// global limit can refuse them
+		buckets := map[[32]byte]bool{}
+		for i := range servicesLeadGlobalAttemptsPerMinute {
+			clientIp, _, err := server.SplitClientAddress(servicesLeadTestAddress(i))
+			connect.AssertEqual(t, err, nil)
+			buckets[server.ClientIpHashForAddr(netip.MustParseAddr(clientIp))] = true
+		}
+		connect.AssertEqual(t, len(buckets), servicesLeadGlobalAttemptsPerMinute)
+
 		honeypot := validServicesContactSalesArgs()
 		honeypot.Website = "https://spam.example"
 		for i := range servicesLeadGlobalAttemptsPerMinute {
 			clientSession := session.Testing_CreateClientSession(ctx, nil)
-			clientSession.ClientAddress = fmt.Sprintf("198.18.%d.%d:40000", i/250, 1+i%250)
+			clientSession.ClientAddress = servicesLeadTestAddress(i)
 			result, err := ServicesContactSales(honeypot, clientSession)
 			connect.AssertEqual(t, err, nil)
 			connect.AssertNotEqual(t, result.RequestId, (*server.Id)(nil))
@@ -50,6 +61,13 @@ func TestServicesContactSalesGlobalRateLimit(t *testing.T) {
 			t.Fatalf("expected the global 429, got %v", err)
 		}
 	})
+}
+
+// servicesLeadTestAddress returns the i-th of many client addresses that the
+// rate limiter keeps apart. Client ip hashes bucket ipv4 by /29, so consecutive
+// addresses would share one per-address budget; these land in distinct /29s.
+func servicesLeadTestAddress(i int) string {
+	return fmt.Sprintf("198.18.%d.%d:40000", i/32, 8*(i%32)+1)
 }
 
 // With a webhook configured, a stored lead is posted once, with every
