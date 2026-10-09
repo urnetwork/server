@@ -37,10 +37,11 @@ func TestPayoutDebitPublicCompanionPreservesTwoLiveZeroAnchors(t *testing.T) {
 			}
 		}
 		before := readPayoutDebitTestState(t, ctx, f.balanceId)
-		if before.anchors != 2 || before.anchorRows != original.anchorRows || before.settledEscrows != 1 || before.escrows != 3 {
+		if before.anchors != 2 || before.anchorRows != original.anchorRows || before.settledEscrows != 0 || before.invalid != 1 || before.escrows != 3 {
 			t.Fatalf("companion settlement changed its live forward anchors: before=%+v after=%+v", original, before)
 		}
-		assertPayoutDebitTestConsumptionAndDrain(t, ctx, f.balanceId, 1000, 121)
+		assertCurrentPayoutDebitTestConsumptionAndDrain(t, ctx, f.balanceId, 1000,
+			map[server.Id]currentPayoutDebitTestAmount{companion.ContractId: {reserved: 121, consumed: 121}})
 	})
 }
 
@@ -74,7 +75,7 @@ func TestPayoutDebitPublicZeroUseCompanionStillAcknowledgesJournal(t *testing.T)
 			}
 		}
 		before := readPayoutDebitTestState(t, ctx, f.balanceId)
-		if before.anchors != 1 || before.settledEscrows != 1 || before.pending != 1 || before.pendingBytes != 0 || before.reserved != 0 || before.invalid != 0 {
+		if before.anchors != 1 || before.settledEscrows != 0 || before.pending != 1 || before.pendingBytes != 0 || before.reserved != 17 || before.invalid != 1 {
 			t.Fatalf("zero-use settlement was confused with an unconsumed anchor: %+v", before)
 		}
 		server.Redis(ctx, func(client server.RedisClient) {
@@ -82,11 +83,12 @@ func TestPayoutDebitPublicZeroUseCompanionStillAcknowledgesJournal(t *testing.T)
 			server.Raise(err)
 			expiry, err := client.ZScore(ctx, keys[2], companion.ContractId.String()).Result()
 			server.Raise(err)
-			if amount != 0 || expiry != originalExpiry {
+			if amount != 17 || expiry != originalExpiry {
 				t.Fatal("zero debit did not retain its original request acknowledgment", amount, expiry, originalExpiry)
 			}
 		})
-		assertPayoutDebitTestConsumptionAndDrain(t, ctx, f.balanceId, 1000, 0)
+		assertCurrentPayoutDebitTestConsumptionAndDrain(t, ctx, f.balanceId, 1000,
+			map[server.Id]currentPayoutDebitTestAmount{companion.ContractId: {reserved: 17, consumed: 0}})
 		server.Redis(ctx, func(client server.RedisClient) {
 			if err := client.HGet(ctx, keys[1], companion.ContractId.String()).Err(); err != server.RedisNil {
 				t.Fatal("acknowledged zero debit retained its request token", err)

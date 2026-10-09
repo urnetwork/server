@@ -2082,13 +2082,17 @@ func createCompanionTransferEscrow(
 		// with null companion_contract_id
 		// there can be many companion contracts for an original contract
 
+		// Only the clamped request is consumed below. If the chosen anchor
+		// already covers it, a larger prober maximum cannot change admission.
+		// Keep the full eligible maximum for every request above that anchor.
 		leavePlainOriginRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionPlainOrigin)
 		defer leavePlainOriginRead()
 		result, err := tx.Query(
 			ctx,
 			`
                 SELECT contract_id,
-                    CASE WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
+                    CASE WHEN transfer_byte_count >= $5::bigint THEN NULL
+                    WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
                         UNION ALL SELECT 1 FROM prober_shard_run WHERE network_id = $4)
                     THEN GREATEST(transfer_byte_count, (
                         SELECT max(transfer_byte_count)
@@ -2153,6 +2157,7 @@ func createCompanionTransferEscrow(
 			sourceId,
 			server.NowUtc().Add(-originContractTimeout),
 			destinationNetworkId,
+			requestedBytes,
 		)
 		var companionContractId *server.Id
 		var proberReservationByteCount *ByteCount
@@ -2187,7 +2192,8 @@ func createCompanionTransferEscrow(
 				ctx,
 				`
                     SELECT contract_id,
-                        CASE WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
+                        CASE WHEN transfer_byte_count >= $7::bigint THEN NULL
+                        WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
                             UNION ALL SELECT 1 FROM prober_shard_run WHERE network_id = $4)
                         THEN GREATEST(transfer_byte_count, (
                             SELECT max(transfer_byte_count)
@@ -2263,6 +2269,7 @@ func createCompanionTransferEscrow(
 				payerNetworkId,
 				sourceNetworkId,
 				destinationNetworkId,
+				requestedBytes,
 			)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
