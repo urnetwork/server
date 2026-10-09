@@ -94,6 +94,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /auth/verify":                             routeAccessPublic,
 	"POST /auth/wallet-challenge":                   routeAccessPublic,
 	"GET /auth/refresh":                             routeAccessClient,
+	"POST /auth/network-refresh":                    routeAccessNetwork, // renews the network credential: a client token must never obtain one (3b48aa3d made /auth/refresh client only for that reason)
 	"POST /auth/verify-send":                        routeAccessPublic,
 	"POST /auth/password-reset":                     routeAccessPublic,
 	"POST /auth/password-set":                       routeAccessPublic,

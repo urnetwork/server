@@ -297,6 +297,7 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"GET /account/api-keys":                 {path: "/account/api-keys"},
 		"POST /oauth/authorize":                 {path: "/oauth/authorize", body: oauthRequest},
 		"POST /oauth/consent":                   {path: "/oauth/consent", body: oauthRequest},
+		"POST /auth/network-refresh":            {path: "/auth/network-refresh"},
 		// app admin
 		"POST /auth/network-delete":               {path: "/auth/network-delete"},
 		"POST /auth/code-create":                  {path: "/auth/code-create", body: map[string]any{"uses": 1, "duration_minutes": 60}},

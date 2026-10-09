@@ -128,6 +128,10 @@ func AuthRefreshToken(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.RefreshToken, w, r)
 }
 
+func AuthNetworkRefreshToken(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.NetworkRefreshToken, w, r)
+}
+
 func AuthAdd(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.AddAuth, w, r)
 }

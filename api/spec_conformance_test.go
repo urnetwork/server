@@ -73,6 +73,7 @@ func registry() []specEndpoint {
 		{"POST", "/auth/login-with-password", rt(model.AuthLoginWithPasswordArgs{}), rt(model.AuthLoginWithPasswordResult{})},
 		{"POST", "/auth/verify", rt(model.AuthVerifyArgs{}), rt(model.AuthVerifyResult{})},
 		{"GET", "/auth/refresh", nil, rt(controller.RefreshTokenResult{})},
+		{"POST", "/auth/network-refresh", nil, rt(controller.NetworkRefreshTokenResult{})},
 		{"POST", "/auth/verify-send", rt(controller.AuthVerifySendArgs{}), rt(controller.AuthVerifySendResult{})},
 		{"POST", "/auth/password-reset", rt(controller.AuthPasswordResetArgs{}), rt(controller.AuthPasswordResetResult{})},
 		{"POST", "/auth/password-set", rt(model.AuthPasswordSetArgs{}), rt(controller.AuthPasswordSetResult{})},

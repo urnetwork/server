@@ -97,6 +97,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/auth/verify", handlers.AuthVerify),
 		router.NewRoute("POST", "/auth/wallet-challenge", handlers.AuthWalletChallenge),
 		router.NewRoute("GET", "/auth/refresh", handlers.AuthRefreshToken),
+		router.NewRoute("POST", "/auth/network-refresh", handlers.AuthNetworkRefreshToken),
 		router.NewRoute("POST", "/auth/verify-send", handlers.AuthVerifySend),
 		router.NewRoute("POST", "/auth/password-reset", handlers.AuthPasswordReset),
 		router.NewRoute("POST", "/auth/password-set", handlers.AuthPasswordSet),
