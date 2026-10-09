@@ -33202,13 +33202,24 @@ to a transient redundant probe failure while known valid schema evidence is
 available; it does not cure an uncached probe failure or prove a fleet rate.
 
 Optional compatibility registration shares that exact full-index positive
-observation before its own catalog check. A miss still uses the original fresh
-both-index check within the same 250ms context, then retains the chronological
-fallback on refusal. The cache path neither refreshes nor publishes readiness.
-The task's `index_readiness` still describes dispatch entry only; it does not
-measure the registration branch or prove that a particular missing payer was
-registered. Registration's independent missing-key index and unchanged
-chronological cursor remain authoritative.
+observation before its own catalog check. A miss uses the existing cache loader
+for the both-index check within the same 250ms context, then retains the
+chronological fallback on refusal. A fresh successful full check now publishes
+its exact-resource proof with the original five-second expiry measured from
+loader admission. Reusing proof never extends it; a due-only read cannot publish
+full-index authority. Concurrent refresh, negative state and late/canceled reads
+retain the loader's existing refusal policy without another query or retry.
+
+The prior modern dispatcher path only consumed the cache: its fresh registration
+checks did not publish, and only the fallback financial lane could warm it. A
+cold modern worker could therefore keep probing despite successful full checks.
+Controls start cold, run due-only and full registration readiness in order, then
+verify cache reuse, exact expiry, resource identity and concurrent refusal. This
+source correction does not attribute an observed fleet failure rate to readiness
+or establish recovered financial throughput. The task's `index_readiness` still
+describes dispatch entry only; it does not measure the registration branch or
+prove that a particular missing payer was registered. Registration's independent
+missing-key index and unchanged chronological cursor remain authoritative.
 
 
 ### Task submission, completion and RunOnce conflict counters

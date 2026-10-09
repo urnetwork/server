@@ -168,15 +168,8 @@ func readLegacySettlementPayerDueIndex(ctx context.Context) (ready bool, resultE
 func legacySettlementPayerIndexesReady(ctx context.Context) bool {
 	bounded, cancel := context.WithTimeout(ctx, legacySettlementPayerIndexBudget)
 	defer cancel()
-	resource, err := server.Vault.SimpleResource(server.DefaultPgVaultResourceName)
-	if err != nil {
-		return false
-	}
-	raw, err := resource.BytesBoundedE(bounded, 16*1024)
-	if err != nil {
-		return false
-	}
-	return legacySettlementPayerIndexes.load(bounded, sha256.Sum256(raw), time.Now, readLegacySettlementPayerIndexes)
+	ready, _ := readLegacySettlementPayerIndexesWithCache(bounded)
+	return ready
 }
 
 // Every refresh owns its context; neither pool waiting nor an unavailable
@@ -209,8 +202,13 @@ func readLegacySettlementPayerIndexesWithCache(ctx context.Context) (bool, error
 // from a cold cache without changing process state or manually seeding proof.
 func readLegacySettlementPayerIndexesForCache(ctx context.Context, cache *legacySettlementPayerIndexCache,
 	identity [sha256.Size]byte, now func() time.Time, read func(context.Context) (bool, error),
-) (bool, error) {
-	return read(ctx)
+) (ready bool, resultErr error) {
+	ready = cache.load(ctx, identity, now, func(ctx context.Context) (bool, error) {
+		var fullReady bool
+		fullReady, resultErr = read(ctx)
+		return fullReady, resultErr
+	})
+	return
 }
 
 // Publish only after the bounded check returns. Error, cancellation or an

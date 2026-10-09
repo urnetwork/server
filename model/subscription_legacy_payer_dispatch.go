@@ -67,9 +67,9 @@ func registerLegacySettlementPayerDispatchPage(ctx context.Context, shard int, a
 		cachedLegacySettlementPayerIndexesReady, readLegacySettlementPayerIndexesWithCache)
 }
 
-// Registration reuses the same full-index proof as dispatch; a cache miss keeps
-// its fresh bounded catalog check. Neither path publishes or extends the proof.
-// Invocation-local readers let controls force a transient refusal exactly.
+// Registration reuses the same full-index proof as dispatch. A cache miss uses
+// the existing loader's bounded full check and publishes from its original
+// admission time. Invocation-local readers can force a transient refusal.
 func registerLegacySettlementPayerDispatchPageWithReadiness(ctx context.Context, shard int, after *LegacySettlementCursor,
 	cached func(context.Context) bool, read func(context.Context) (bool, error),
 ) (*LegacySettlementCursor, int) {
