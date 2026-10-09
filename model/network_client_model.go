@@ -335,6 +335,28 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 // entry points keep their existing caller-owned authentication boundary.
 func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session *session.ClientSession, registration *networkClientRegistrationOwner, validateParent bool) (authClientResult *AuthNetworkClientResult, authClientError error) {
 	if authClient.ClientId == nil {
+		// a client token creates only children of its own client (AUTHZ1.md).
+		// A top-level client needs the network credential, and another
+		// client's id answers as a client that does not exist
+		if callerClientId := session.ByJwt.ClientId; callerClientId != nil {
+			if authClient.SourceClientId == nil {
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: "A client token cannot create a top-level client.",
+					},
+				}
+				return
+			}
+			if *authClient.SourceClientId != *callerClientId {
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: "Client does not exist.",
+					},
+				}
+				return
+			}
+		}
+
 		roles, principal, message := validateClientIdentityArgs(authClient.Roles, authClient.Principal, session)
 		if message != "" {
 			authClientResult = &AuthNetworkClientResult{
@@ -897,7 +919,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			}
 			// the client and its device are checked before either is written,
 			// so a refusal writes nothing. The client row is still locked
-			// before the device row.
+			// before the device row. A client token reissues only its own
+			// token and its children's (AUTHZ1.md); any other client answers
+			// as a client that does not exist
 			clientFound := false
 			var deviceId *server.Id
 			result, err := tx.Query(
@@ -907,11 +931,17 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 					WHERE
 						client_id = $1 AND
 						network_id = $2 AND
-						active = true
+						active = true AND
+						(
+							$3::uuid IS NULL OR
+							client_id = $3 OR
+							source_client_id = $3
+						)
 					FOR NO KEY UPDATE
 				`,
 				authClient.ClientId,
 				session.ByJwt.NetworkId,
+				session.ByJwt.ClientId,
 			)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
@@ -1065,12 +1095,26 @@ func RemoveNetworkClient(
 
 	// important: must check `network_id = session network_id`
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		rowCount, err := deactivateNetworkClientsInTx(
-			session.Ctx,
-			tx,
-			[]server.Id{removeClient.ClientId},
-			session.ByJwt.NetworkId,
-		)
+		var rowCount int64
+		var err error
+		if callerClientId := session.ByJwt.ClientId; callerClientId != nil {
+			// a client token removes only its own client and its children
+			// (AUTHZ1.md); any other client answers as one that does not exist
+			rowCount, err = deactivateOwnedNetworkClientInTx(
+				session.Ctx,
+				tx,
+				removeClient.ClientId,
+				session.ByJwt.NetworkId,
+				*callerClientId,
+			)
+		} else {
+			rowCount, err = deactivateNetworkClientsInTx(
+				session.Ctx,
+				tx,
+				[]server.Id{removeClient.ClientId},
+				session.ByJwt.NetworkId,
+			)
+		}
 		server.Raise(err)
 		if rowCount != 1 {
 			removeClientResult = &RemoveNetworkClientResult{
@@ -1176,6 +1220,41 @@ func deactivateNetworkClientsInTx(
 		return 0, nil
 	}
 	return deactivateLockedNetworkClientsInTx(ctx, tx, lockedClientIds, networkId)
+}
+
+// deactivateOwnedNetworkClientInTx deactivates the client only when it is the
+// owner client itself or a child the owner created, and returns the rows
+// deactivated (0 when the client is not the owner's).
+func deactivateOwnedNetworkClientInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	clientId server.Id,
+	networkId server.Id,
+	ownerClientId server.Id,
+) (int64, error) {
+	var lockedClientId server.Id
+	err := tx.QueryRow(
+		ctx,
+		`
+			SELECT client_id
+			FROM network_client
+			WHERE
+				client_id = $1 AND
+				network_id = $2 AND
+				(client_id = $3 OR source_client_id = $3)
+			FOR UPDATE
+		`,
+		clientId,
+		networkId,
+		ownerClientId,
+	).Scan(&lockedClientId)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return deactivateLockedNetworkClientsInTx(ctx, tx, []server.Id{lockedClientId}, networkId)
 }
 
 // The caller must hold FOR UPDATE on every client in this exact owned set.
@@ -3978,6 +4057,8 @@ func DeviceSetName(
 	clientSession *session.ClientSession,
 ) (setNameResult *DeviceSetNameResult, returnErr error) {
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		// a client token renames only its own client's device (AUTHZ1.md);
+		// any other device answers as one that does not exist
 		tag := server.RaisePgResult(tx.Exec(
 			clientSession.Ctx,
 			`
@@ -3985,11 +4066,22 @@ func DeviceSetName(
 					device_name = $2
 				WHERE
 					device_id = $1 AND
-					network_id = $3
+					network_id = $3 AND
+					(
+						$4::uuid IS NULL OR
+						device_id IN (
+							SELECT device_id
+							FROM network_client
+							WHERE
+								client_id = $4 AND
+								network_id = $3
+						)
+					)
 			`,
 			setName.DeviceId,
 			setName.DeviceName,
 			clientSession.ByJwt.NetworkId,
+			clientSession.ByJwt.ClientId,
 		))
 		if tag.RowsAffected() != 1 {
 			setNameResult = &DeviceSetNameResult{

@@ -686,6 +686,17 @@ func ParseByJwtUnverified(ctx context.Context, jwtStr string) (*ByJwt, error) {
 	return byJwt, nil
 }
 
+// ByJwtNamesClientUnverified reports whether the token's claims, read without
+// verifying the signature and without any lookup, name a client. It never
+// authenticates: a caller verifies the token before relying on its claims.
+func ByJwtNamesClientUnverified(jwtStr string) bool {
+	byJwt := &ByJwt{}
+	if _, _, err := gojwt.NewParser().ParseUnverified(jwtStr, byJwt); err != nil {
+		return false
+	}
+	return byJwt.ClientId != nil
+}
+
 // func (self *ByJwt) Sign() string {
 // 	claimsJson, err := json.Marshal(self)
 // 	if err != nil {

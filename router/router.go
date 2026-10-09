@@ -33,6 +33,9 @@ type Route struct {
 	// the body policy of a route that streams its body on every front, lb or
 	// not (NewStreamingRoute); nil streams only on the lb's mark
 	streaming *StreamingBody
+	// set by RefuseClientCredentials: decides which client tokens the route
+	// refuses before its handler runs; nil refuses none
+	clientCredentialRefusal ClientCredentialRefusal
 }
 
 func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {
