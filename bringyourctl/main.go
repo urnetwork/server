@@ -141,8 +141,10 @@ Options:
     --network_id=<network_id>
     --user_id=<user_id>
     --secret=<secret>
-    --set=<limit>  Set the network's Embed plan top-level client limit (the default is 100).
-    --clear        Return the network to the default top-level client limit.
+    --set=<limit>  Set the network's Embed plan client allowance: the top-level
+                   client limit and the concurrent connection limit (the defaults
+                   are 100 and the tier's concurrent_clients).
+    --clear        Return the network to the default limits.
 
     --private-stdin  Read the bounded private expiry request from stdin.
     --apply          Apply the scoped expiry request; omission is a read-only preview.
@@ -1060,9 +1062,10 @@ func networkRemove(opts docopt.Opts) {
 	fmt.Printf("network %s removed\n", networkId)
 }
 
-// networkClientLimit shows, sets or clears the Embed plan top-level client
-// limit of a network (model/network_client_limit_model.go), then prints the
-// effective limit.
+// networkClientLimit shows, sets or clears the Embed plan client allowance of a
+// network (model/network_client_limit_model.go): an Embed plan sets the
+// network's client allowance — the top-level client limit and the concurrent
+// connection limit. It then prints the effective allowance.
 func networkClientLimit(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -1087,11 +1090,11 @@ func networkClientLimit(opts docopt.Opts) {
 	}
 
 	limit := model.GetNetworkTopLevelClientLimit(ctx, networkId)
-	source := "default"
 	if limit.Override {
-		source = "Embed plan"
+		fmt.Printf("network %s client allowance %d (Embed plan: top-level client limit and concurrent connection limit)\n", networkId, limit.Limit)
+	} else {
+		fmt.Printf("network %s top-level client limit %d (default; concurrent connections follow the tier)\n", networkId, limit.Limit)
 	}
-	fmt.Printf("network %s top-level client limit %d (%s)\n", networkId, limit.Limit, source)
 }
 
 func balanceCodeCreate(opts docopt.Opts) {

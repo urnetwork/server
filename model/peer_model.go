@@ -1213,6 +1213,8 @@ func isNetworkPeerConnected(ctx context.Context, networkId server.Id, clientId s
 
 // NetworkConcurrentClientsExceeded reports whether a network already has its plan's
 // full complement of connected top-level clients, i.e. there is no room for another.
+// The limit is the network's Embed plan allowance when it has one
+// (network_client_limit_model.go), otherwise its tier's concurrent_clients.
 //
 // While enforcement is dark this returns false IMMEDIATELY, with no redis and no db
 // lookup, so shipping the gate costs nothing on the auth hot path -- the cost only
@@ -1225,14 +1227,15 @@ func NetworkConcurrentClientsExceeded(ctx context.Context, networkId server.Id) 
 		return false
 	}
 
-	pro := IsProNetwork(ctx, networkId)
+	limit := networkConcurrentClientLimit(ctx, networkId)
 	connectedCount := GetNetworkEnforceableConnectedCount(ctx, networkId)
-	return Pro().ConcurrentClientsExceeded(pro, connectedCount)
+	return concurrentClientLimitExceeded(limit, connectedCount)
 }
 
 // CanConnectNetworkPeer reports whether `clientId` may become a connected
-// top-level client of its network without exceeding the network's plan limit on
-// concurrent connected clients (pro.yml concurrent_clients).
+// top-level client of its network without exceeding the network's limit on
+// concurrent connected clients: its Embed plan allowance when it has one,
+// otherwise its tier's pro.yml concurrent_clients.
 //
 // It is always true when:
 //   - enforcement is dark (pro.yml enforce_concurrent_clients = false);
@@ -1266,9 +1269,9 @@ func CanConnectNetworkPeer(ctx context.Context, clientId server.Id, provideInten
 		return true
 	}
 
-	pro := IsPro(ctx, &networkId)
+	limit := networkConcurrentClientLimit(ctx, networkId)
 	connectedCount := GetNetworkEnforceableConnectedCount(ctx, networkId)
-	return !Pro().ConcurrentClientsExceeded(pro, connectedCount)
+	return !concurrentClientLimitExceeded(limit, connectedCount)
 }
 
 // Updates the provide modes of a registered peer and publishes an updated
