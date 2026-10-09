@@ -6689,8 +6689,7 @@ func FindProviders2(
 				if needed <= 0 || len(pending) == 0 || validation.unavailable != nil {
 					return nil
 				}
-				// Query batches stay bounded even for unusually large requests.
-				ids := selectProviders(pending, mode, min(needed, 256))
+				ids := selectProviders(pending, mode, providerQualityValidationDraw(needed, findProviders2.ForceMinimum))
 				if err := readQuality(ids, findProviders2.ForceMinimum); err != nil {
 					return err
 				}

@@ -196,3 +196,71 @@ func TestFindProviders2QualityUnavailablePreservesOnlineAndStrictPolicy(t *testi
 		}, server.OptNoRetry())
 	})
 }
+
+// The SN25 validator's seed request (best_available, count 8, its own client
+// excluded, Quality, force_minimum) draws from the forced pool, which carries
+// no minimums, so current subscriber facts refuse most of it. Needed-sized
+// draws made that one request dozens of sequential primary reads inside its
+// single validation budget; a forced request has no fallback, so production
+// answered 500. Full-batch draws read the pool in bounded round trips and
+// still return only members whose current facts were validated.
+func TestFindProviders2ForcedQualitySparsePoolValidatesInFullBatches(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
+		previous := providerSubscriberNegativeCache
+		providerSubscriberNegativeCache = newSubscriberNegativeCache(subscriberNegativeCapacity, time.Now)
+		providerSubscriberNegativeCache.observe = observeSubscriberEligibilityEvent
+		t.Cleanup(func() { providerSubscriberNegativeCache = previous })
+		ctx := t.Context()
+		egressTestCity(ctx, "Forced Sparse City", "Forced Sparse Region", "United States", "us")
+		resetCountryCodeLocationIds()
+		location := countryCodeLocationIds()["us"]
+		if location == (server.Id{}) {
+			t.Fatal("fixture requires the real US best-available target")
+		}
+		const loaded, admittedCount = 1000, 10
+		scores := []*ClientScore{}
+		admitted := map[server.Id]bool{}
+		refused := []server.Id{}
+		for i := range loaded {
+			// online, but passing no native minimum: only a forced pool holds it
+			score := onlineBackfillScore(true, 1)
+			scores = append(scores, score)
+			if i < admittedCount {
+				admitted[score.ClientId] = true
+			} else {
+				refused = append(refused, score.ClientId)
+			}
+		}
+		writeOnlineBackfillSample(ctx, t, location, RankModeQuality, true, scores)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, "UPDATE network_client_location SET arin_quality_verified=false WHERE client_id=ANY($1)", refused))
+		})
+
+		self := server.NewId()
+		beforeBatches := testutil.ToFloat64(subscriberEligibilityEventCounters["sql_batch"])
+		clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "forced-sparse", false, false))
+		result, err := FindProviders2(&FindProviders2Args{
+			Specs:            []*ProviderSpec{{BestAvailable: true}},
+			Count:            8,
+			ExcludeClientIds: []server.Id{self},
+			RankMode:         RankModeQuality,
+			ForceMinimum:     true,
+		}, clientSession)
+		if err != nil || result == nil {
+			t.Fatalf("forced Quality seed request failed: result=%v err=%v", result, err)
+		}
+		if len(result.Providers) != admittedCount {
+			t.Fatalf("forced Quality returned %d providers, want the %d validated members", len(result.Providers), admittedCount)
+		}
+		for _, provider := range result.Providers {
+			if !admitted[provider.ClientId] {
+				t.Fatal("forced Quality returned a member current subscriber facts refuse")
+			}
+		}
+		batches := testutil.ToFloat64(subscriberEligibilityEventCounters["sql_batch"]) - beforeBatches
+		if want := float64((loaded + providerQualityValidationBatchSize - 1) / providerQualityValidationBatchSize); batches != want {
+			t.Fatalf("forced sparse pool used %g subscriber round trips, want %g full batches", batches, want)
+		}
+	})
+}
