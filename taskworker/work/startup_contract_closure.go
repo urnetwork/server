@@ -13,7 +13,8 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-const startupContractClosurePageSize = 256
+const startupContractClosurePageSize = 10000
+const startupContractClosurePublicationSize = 256
 
 // One timestamp caps every page in this startup pass; the cursor is only a PK.
 type ScheduleOpenContractClosuresArgs struct {
@@ -49,11 +50,11 @@ func ScheduleOpenContractClosures(args *ScheduleOpenContractClosuresArgs, client
 	result := &ScheduleOpenContractClosuresResult{}
 	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		query := `SELECT contract_id,expiration_time FROM transfer_contract
-			WHERE outcome IS NULL ORDER BY contract_id LIMIT $1`
-		params := []any{startupContractClosurePageSize}
+			WHERE outcome IS NULL ORDER BY contract_id LIMIT 10000`
+		var params []any
 		if args.After != nil {
 			query = `SELECT contract_id,expiration_time FROM transfer_contract
-				WHERE outcome IS NULL AND contract_id>$2 ORDER BY contract_id LIMIT $1`
+				WHERE outcome IS NULL AND contract_id>$1 ORDER BY contract_id LIMIT 10000`
 			params = append(params, *args.After)
 		}
 		rows, err := conn.Query(clientSession.Ctx, query, params...)
@@ -70,6 +71,26 @@ func ScheduleOpenContractClosures(args *ScheduleOpenContractClosuresArgs, client
 			}
 		})
 	})
+	// Release the discovery connection before queue ownership. Each chunk
+	// commits through the ordinary coalescing writer; a failed page retries
+	// these stable keys before it can advance its durable scan cursor.
+	for offset := 0; offset < len(result.Contracts); offset += startupContractClosurePublicationSize {
+		contracts := result.Contracts[offset:min(offset+startupContractClosurePublicationSize, len(result.Contracts))]
+		keys := make([]server.PgOwnershipKey, 0, len(contracts))
+		for _, contract := range contracts {
+			keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("close_scheduled_contract", contract.ContractId)))
+		}
+		server.OwnedTx(clientSession.Ctx, keys, func(tx server.PgTx) {
+			server.BatchInTx(clientSession.Ctx, tx, func(batch server.PgBatch) {
+				for _, contract := range contracts {
+					args := &CloseScheduledContractArgs{Private: true, ScheduledContractClose: contract}
+					task.QueueTaskInBatch(tx, batch, CloseScheduledContract, args, clientSession,
+						task.RunOnce("close_scheduled_contract", contract.ContractId), task.RunAt(contract.Deadline),
+						task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
+				}
+			})
+		}, server.TxReadCommitted, server.OptNoRetry())
+	}
 	if len(result.Contracts) == startupContractClosurePageSize {
 		last := result.Contracts[len(result.Contracts)-1].ContractId
 		result.After = &last
@@ -77,12 +98,10 @@ func ScheduleOpenContractClosures(args *ScheduleOpenContractClosuresArgs, client
 	return result, nil
 }
 
-// Child publication and the next PK page commit with this page's completion.
+// All child chunks committed during Run. Only successful completion advances
+// the existing startup RunOnce key; failures retain the same page for retry.
 func ScheduleOpenContractClosuresPost(args *ScheduleOpenContractClosuresArgs, result *ScheduleOpenContractClosuresResult,
 	clientSession *session.ClientSession, tx server.PgTx) error {
-	for _, contract := range result.Contracts {
-		scheduleContractClose(clientSession, tx, &CloseScheduledContractArgs{Private: true, ScheduledContractClose: contract})
-	}
 	if result.After != nil {
 		scheduleOpenContractClosuresPage(clientSession, tx, &ScheduleOpenContractClosuresArgs{StartedAt: args.StartedAt, After: result.After})
 	}
@@ -91,16 +110,10 @@ func ScheduleOpenContractClosuresPost(args *ScheduleOpenContractClosuresArgs, re
 
 type startupContractClosureTarget struct{ task.Target }
 
-func (self *startupContractClosureTarget) TaskCompletionOwnershipKeys(_ *task.Task, raw string) ([]server.PgOwnershipKey, error) {
-	var result ScheduleOpenContractClosuresResult
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return nil, err
-	}
-	keys := make([]server.PgOwnershipKey, 0, len(result.Contracts))
-	for _, contract := range result.Contracts {
-		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("close_scheduled_contract", contract.ContractId)))
-	}
-	return keys, nil
+// Keep the scanner's pending and finished owners during success and retry.
+// Child publication already committed under its separate bounded queue owners.
+func (self *startupContractClosureTarget) TaskCompletionOwnershipKeys(_ *task.Task, _ string) ([]server.PgOwnershipKey, error) {
+	return nil, nil
 }
 
 func NewStartupContractClosureTaskTarget() task.Target {
