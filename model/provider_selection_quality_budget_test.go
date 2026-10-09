@@ -239,7 +239,7 @@ func TestFindProviders2ForcedQualitySparsePoolValidatesInFullBatches(t *testing.
 
 		self := server.NewId()
 		beforeBatches := testutil.ToFloat64(subscriberEligibilityEventCounters["sql_batch"])
-		clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "forced-sparse", false, false))
+		clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "forced-sparse", false, false))
 		result, err := FindProviders2(&FindProviders2Args{
 			Specs:            []*ProviderSpec{{BestAvailable: true}},
 			Count:            8,
