@@ -33207,7 +33207,10 @@ for the both-index check within the same 250ms context, then retains the
 chronological fallback on refusal. A fresh successful full check now publishes
 its exact-resource proof with the original five-second expiry measured from
 loader admission. Reusing proof never extends it; a due-only read cannot publish
-full-index authority. Concurrent refresh, negative state and late/canceled reads
+full-index authority. A successful fresh full check also rechecks its bounded
+resource digest before publishing; a changed or unreadable resource refuses the
+proof within the same context, without a second catalog query.
+Concurrent refresh, negative state and late/canceled reads
 retain the loader's existing refusal policy without another query or retry.
 
 The prior modern dispatcher path only consumed the cache: its fresh registration

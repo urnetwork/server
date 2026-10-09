@@ -186,27 +186,40 @@ func readLegacySettlementPayerIndexes(ctx context.Context) (ready bool, resultEr
 // Registration already validates both complete definitions. Bind that read to
 // its exact bounded resource so subsequent due checks can reuse the same proof.
 func readLegacySettlementPayerIndexesWithCache(ctx context.Context) (bool, error) {
-	resource, err := server.Vault.SimpleResource(server.DefaultPgVaultResourceName)
-	if err != nil {
-		return false, err
-	}
-	raw, err := resource.BytesBoundedE(ctx, 16*1024)
-	if err != nil {
-		return false, err
-	}
 	return readLegacySettlementPayerIndexesForCache(ctx, &legacySettlementPayerIndexes,
-		sha256.Sum256(raw), time.Now, readLegacySettlementPayerIndexes)
+		func(ctx context.Context) ([sha256.Size]byte, error) {
+			resource, err := server.Vault.SimpleResource(server.DefaultPgVaultResourceName)
+			if err != nil {
+				return [sha256.Size]byte{}, err
+			}
+			raw, err := resource.BytesBoundedE(ctx, 16*1024)
+			return sha256.Sum256(raw), err
+		}, time.Now, readLegacySettlementPayerIndexes)
 }
 
 // Invocation-local catalog and clock seams exercise the production publisher
 // from a cold cache without changing process state or manually seeding proof.
 func readLegacySettlementPayerIndexesForCache(ctx context.Context, cache *legacySettlementPayerIndexCache,
-	identity [sha256.Size]byte, now func() time.Time, read func(context.Context) (bool, error),
+	resourceIdentity func(context.Context) ([sha256.Size]byte, error), now func() time.Time, read func(context.Context) (bool, error),
 ) (ready bool, resultErr error) {
+	identity, err := resourceIdentity(ctx)
+	if err != nil {
+		return false, err
+	}
 	ready = cache.load(ctx, identity, now, func(ctx context.Context) (bool, error) {
 		var fullReady bool
 		fullReady, resultErr = read(ctx)
-		return fullReady, resultErr
+		if !fullReady || resultErr != nil {
+			return false, resultErr
+		}
+		// The catalog and resource read share this same original context.
+		// A changed resource cannot inherit the prior query's positive proof.
+		var observedIdentity [sha256.Size]byte
+		observedIdentity, resultErr = resourceIdentity(ctx)
+		if resultErr == nil && observedIdentity != identity {
+			resultErr = errors.New("legacy payer index resource changed during validation")
+		}
+		return resultErr == nil, resultErr
 	})
 	return
 }
