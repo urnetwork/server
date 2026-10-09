@@ -22,22 +22,21 @@ func withLegacyPayerQueueTestTx(ctx context.Context, payerIds []server.Id, callb
 	server.OwnedTx(ctx, keys, callback, server.TxReadCommitted, server.OptNoRetry())
 }
 
-// Optional registration-index repair cannot stop already indexed payer work.
-// The bounded chronological fallback also recovers a pre-migration NULL key.
-func TestLegacyPayerDispatchRecoversWithoutMissingIndexOrWake(t *testing.T) {
+// A durable NULL key is registered without a foreground wake, and the
+// recurring discovery task hands it to the ordinary payer owner.
+func TestLegacyPayerDispatchRecoversWithoutWake(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f, id := legacySettlementTestIntent(t, ctx)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `DROP INDEX legacy_settlement_intent_payer_missing`))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL WHERE contract_id=$1`, id))
 		})
 		// No close callback or wake is delivered. The durable intent is enough.
 		result, err := DispatchLegacySettlementPayers(ctx, int(id[15])%16, nil, nil)
 		if err != nil || result.RegistrationFailed || result.Registered != 1 || len(result.PayerNetworkIds) != 0 || !result.More {
-			t.Fatal("durable discovery lost an intent while optional index was absent", result, err)
+			t.Fatal("durable discovery lost an intent without a foreground wake", result, err)
 		}
 		result, err = DispatchLegacySettlementPayers(ctx, int(id[15])%16, result.Cursor, result.PayerCursor)
 		if err != nil || len(result.PayerNetworkIds) != 1 || result.PayerNetworkIds[0] != f.sourceNetworkId {
@@ -81,9 +80,8 @@ func TestLegacyPayerDispatchRecoversWithoutMissingIndexOrWake(t *testing.T) {
 	})
 }
 
-// A full compatibility prefix commits as one protocol batch and resumes from
-// its confirmed chronological cursor. The bound includes already registered
-// rows; it cannot widen into an unbounded NULL scan when that index is absent.
+// Missing-key registration commits at most one fixed batch. A second dispatch
+// registers the remainder without changing the financial traversal cursor.
 func TestLegacyPayerDispatchRegistersFullBoundedNullPrefix(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -98,7 +96,6 @@ func TestLegacyPayerDispatchRegistersFullBoundedNullPrefix(t *testing.T) {
 		}
 		oldest := server.NowUtc().Add(-time.Minute)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `DROP INDEX legacy_settlement_intent_payer_missing`))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
  (contract_id,source_network_id,source_id,destination_network_id,destination_id,payer_network_id,transfer_byte_count,usage_origin_is_source)
  SELECT id,$2,$3,$4,$5,$2,0,true FROM unnest($1::uuid[]) AS pending(id)`,
@@ -117,13 +114,13 @@ func TestLegacyPayerDispatchRegistersFullBoundedNullPrefix(t *testing.T) {
 		})
 		first, err := DispatchLegacySettlementPayers(ctx, shard, nil, nil)
 		if err != nil || first.RegistrationFailed || first.Registered != legacySettlementPayerRegistrationLimit ||
-			first.Cursor == nil || first.Cursor.ContractId != ids[len(ids)-2] || len(first.PayerNetworkIds) != 0 || !first.More {
+			first.Cursor != nil || len(first.PayerNetworkIds) != 0 || !first.More {
 			t.Fatal("full NULL prefix did not commit its exact bounded registration", first, err)
 		}
 		second, err := DispatchLegacySettlementPayers(ctx, shard, first.Cursor, first.PayerCursor)
 		if err != nil || second.RegistrationFailed || second.Registered != 1 || second.Cursor != nil ||
 			len(second.PayerNetworkIds) != 1 || second.PayerNetworkIds[0] != f.sourceNetworkId || !second.More {
-			t.Fatal("registration cursor did not preserve the final NULL intent", second, err)
+			t.Fatal("bounded registration did not preserve the final NULL intent", second, err)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var registered, untouched int
@@ -169,7 +166,7 @@ func TestLegacyPayerDispatchBudgetRetainsPrefixButParentCancellationFails(t *tes
 						server.Raise(callCtx.Err())
 					}
 					return nextLegacySettlementPayer(callCtx, callShard, cursor)
-				}, registerLegacySettlementPayerPage)
+				}, registerLegacySettlementPayerDispatchPage)
 			parentCancel()
 			stop(nil)
 			if result.Probes != 1 || len(result.PayerNetworkIds) != 1 || result.PayerNetworkIds[0] != payers[0] ||
@@ -319,8 +316,8 @@ func TestLegacyPayerQueueRowIsAbsentFromForegroundClose(t *testing.T) {
 	})
 }
 
-// Failed compatibility registration is optional scheduling work. Its rollback
-// retains the old cursor and cannot consume the registered payer's service turn.
+// A held missing intent is skipped by bounded registration and cannot consume
+// the independently registered payer's service turn. Release restores discovery.
 func TestLegacyPayerDispatchHeldRegistrationKeepsRegisteredService(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -331,8 +328,6 @@ func TestLegacyPayerDispatchHeldRegistrationKeepsRegisteredService(t *testing.T)
 		ready := newNetEscrowOrderingTestFixture(t, ctx)
 		readyId := newLegacyPayerTestIntent(t, ctx, ready, legacyPayerTestContractId(server.NewId(), 1, shard), 100, 11)
 		server.Tx(ctx, func(tx server.PgTx) {
-			// Exercise the chronological fallback's existing timeout custody.
-			server.RaisePgResult(tx.Exec(ctx, `DROP INDEX legacy_settlement_intent_payer_missing`))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL WHERE contract_id=$1`, missingId))
 		})
 		conn := acquireContractLifecycleTestConnection(t, ctx)
@@ -342,8 +337,8 @@ func TestLegacyPayerDispatchHeldRegistrationKeepsRegisteredService(t *testing.T)
 		defer held.Rollback(context.Background())
 		server.RaisePgResult(held.Exec(ctx, `SELECT contract_id FROM legacy_settlement_intent WHERE contract_id=$1 FOR UPDATE`, missingId))
 		result, err := DispatchLegacySettlementPayers(ctx, shard, nil, nil)
-		if err != nil || !result.RegistrationFailed || result.Cursor != nil || result.Registered != 0 || len(result.PayerNetworkIds) != 1 || result.PayerNetworkIds[0] != ready.sourceNetworkId {
-			t.Fatal("failed registration parked independently registered work", result, err)
+		if err != nil || result.RegistrationFailed || result.Cursor != nil || result.Registered != 0 || len(result.PayerNetworkIds) != 1 || result.PayerNetworkIds[0] != ready.sourceNetworkId {
+			t.Fatal("held registration parked independently registered work", result, err)
 		}
 		requireLegacySettlementTestState(t, ctx, missing, missingId, true, false, 1000, 100)
 		requireLegacySettlementTestState(t, ctx, ready, readyId, true, false, 1000, 100)
