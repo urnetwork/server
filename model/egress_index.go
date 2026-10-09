@@ -550,7 +550,7 @@ func providerHardExclusionsSql() string {
 			FROM provider_egress_health WHERE client_id = ANY($1)
 		), provider_egress_url_security AS MATERIALIZED (
 			SELECT client_id, tls_failure
-			FROM provider_egress_url_security WHERE client_id = ANY($1)
+			FROM provider_egress_url_security WHERE client_id = ANY($1) AND tls_failure
 		)
 		SELECT client_id
 		FROM network_client_location_reliability AS provider_location

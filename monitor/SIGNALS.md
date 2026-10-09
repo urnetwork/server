@@ -4476,6 +4476,27 @@ backend errors cannot become an empty allowed set. Verify running reader and
 writer ancestry, task completion, renewed coverage/TTL and bounded fallback
 work under comparable successful requests before claiming recovery.
 
+The October 9 incident has a second discriminator: a retained 979-byte Main
+query prefix matched the candidate-materialized hard-exclusion SQL. It does
+not match `providerSubscriberExclusionsSql`, whose inputs are candidate,
+connection, handler and location facts, with no URL-security table. Keep the
+truncated query-family match separate from the external subscriber-query count;
+it does not establish the reported onset, current fleet activity or fix adoption.
+Disabling subscriber Quality policy does not disable the common TLS quarantine.
+
+Existing indexes and a 256-candidate cap do not bound each candidate's URL
+history. The `MATERIALIZED` security input can read every clean URL before its
+consumers apply `tls_failure`. Apply that same predicate inside the input to use
+the existing `provider_egress_url_security_unresolved` partial index and preserve
+all unresolved TLS refusals. The regression must include 93 clean URLs per
+provider, exact refusal identities and actual examined URL rows under custom
+and generic plans; the earlier three-URL fixture missed this amplification.
+Missing or uncovered v3 cohort entries repeat primary read-through without
+filling that cache, so a valid partial publication can still sustain this work.
+Native plan improvements alone do not establish Main recovery: retain the
+current reader/writer generation, checked coverage, TTL and independent CPU/wait
+evidence above.
+
 The October 6 07:46Z non-executing plan showed why the sparse-index repair was
 insufficient: the unscoped query still estimated 54.4 million output rows,
 including 52.8 million ARIN exceptions, with all six inspected indexes valid
