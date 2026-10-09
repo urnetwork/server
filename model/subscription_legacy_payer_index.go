@@ -75,8 +75,8 @@ func legacySettlementPayerDueIndexReady(ctx context.Context) bool {
 }
 
 func legacySettlementPayerDueIndexObservation(ctx context.Context) LegacySettlementPayerIndexReadiness {
-	return observeLegacySettlementPayerIndexWithCache(ctx,
-		cachedLegacySettlementPayerIndexesReady, readLegacySettlementPayerDueIndex, time.Now)
+	return observeLegacySettlementPayerDueIndexWithProof(ctx, &legacySettlementPayerIndexes,
+		&legacySettlementPayerDueIndexes, legacySettlementPayerIndexResourceIdentity, time.Now, readLegacySettlementPayerDueIndex)
 }
 
 // The existing both-index check proves both complete definitions. Reuse only
