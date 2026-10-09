@@ -22,6 +22,8 @@ func TestSessionStateQuerySourceUsesBoundedRouteClasses(t *testing.T) {
 		{"POST", "/network/find-providers2", jwt.StateQueryApiDiscovery},
 		{"GET", "/network/provider-locations", jwt.StateQueryApiDiscovery},
 		{"GET", "/auth/refresh", jwt.StateQueryApiRefresh},
+		{"POST", "/auth/network-refresh", jwt.StateQueryApiRefresh},
+		{"GET", "/auth/network-refresh", jwt.StateQueryApiOther},
 		{"GET", "/connect/control", jwt.StateQueryApiOther},
 		{"POST", "/connect/control/extra-synthetic-identity", jwt.StateQueryApiOther},
 		{"GET", "/key/synthetic-identity", jwt.StateQueryApiOther},

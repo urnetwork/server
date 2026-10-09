@@ -40,6 +40,12 @@ type ClientSession struct {
 	clientAddressHashPort int
 	Header                map[string][]string
 	ByJwt                 *jwt.ByJwt
+	// ApiKeyAuthenticated is true when the request authenticated with an API
+	// key (urn_…) rather than a signed token. ByJwt is then the network
+	// identity the key stands for, built for this request only: the caller
+	// holds the key, not a token, so no route may sign ByJwt back to it as one.
+	// Only authenticate sets it; a session built any other way never has it.
+	ApiKeyAuthenticated bool
 }
 
 // Resolves the ingress-owned client address before exposing request state.
@@ -174,6 +180,8 @@ func NewLocalClientSessionWithAddressHash(ctx context.Context, clientAddressHash
 
 // Sets authentication claims or returns an authentication error.
 func (self *ClientSession) authenticate(ctx context.Context, req *http.Request) error {
+	// only a resolved API key sets it, below
+	self.ApiKeyAuthenticated = false
 	if auth := req.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, authBearerPrefix) {
 			authStr := auth[len(authBearerPrefix):]
@@ -199,6 +207,7 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request) 
 					false,
 					false, // pro mode - for api keys we don't need to thread this for now
 				)
+				self.ApiKeyAuthenticated = true
 				if glog.V(2) {
 					glog.Infof("[session]authed via api key as (%s %s)\n", network.NetworkName, network.NetworkId)
 				}
@@ -259,7 +268,8 @@ func (self *ClientSession) ClientAddressHashPort() (clientAddressHash [32]byte, 
 	return
 }
 
-// Returns a session view with updated authentication claims.
+// Returns a session view with updated authentication claims. The view does not
+// carry ApiKeyAuthenticated: byJwt replaces the identity the key stood for.
 func (self *ClientSession) WithByJwt(byJwt *jwt.ByJwt) *ClientSession {
 	return &ClientSession{
 		Ctx:                   self.Ctx,

@@ -4,9 +4,14 @@ import (
 	// "context"
 	"errors"
 	"fmt"
+	"net/http"
+	"slices"
 	"strings"
 	// "time"
 	"sync"
+	"sync/atomic"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
 
@@ -536,6 +541,26 @@ type RefreshTokenResult struct {
 	Error *RefreshTokenError `json:"error,omitempty"`
 }
 
+// refreshMintHook runs after the router's state check and before a refresh
+// mints its token. Tests land a credential change in that gap with it.
+var refreshMintHook atomic.Pointer[func(*session.ClientSession)]
+
+// Testing_SetRefreshMintHook runs hook between the router's state check and the
+// mint of /auth/refresh and /auth/network-refresh. It returns the function that
+// restores the previous hook.
+func Testing_SetRefreshMintHook(hook func(*session.ClientSession)) func() {
+	previous := refreshMintHook.Swap(&hook)
+	return func() {
+		refreshMintHook.Store(previous)
+	}
+}
+
+func runRefreshMintHook(session *session.ClientSession) {
+	if hook := refreshMintHook.Load(); hook != nil && *hook != nil {
+		(*hook)(session)
+	}
+}
+
 func RefreshToken(session *session.ClientSession) (*RefreshTokenResult, error) {
 	networkId := session.ByJwt.NetworkId
 
@@ -605,16 +630,124 @@ func RefreshToken(session *session.ClientSession) (*RefreshTokenResult, error) {
 		})
 	})
 
-	byJwt := jwt.NewByJwt(
+	// The refreshed token keeps the presented token's create time, as every
+	// derived credential keeps its root's (AuthCodeCreate, AuthNetworkClient).
+	// A password reset expires the tokens created before it
+	// (credential_change_time), and stamps its transaction's start, so a reset
+	// that commits after the router's state check can still be stamped before
+	// this mint. A fresh create time would outlive that reset; the presented
+	// token's expires with it.
+	runRefreshMintHook(session)
+	byJwt := jwt.NewByJwtWithCreateTime(
 		networkId,
 		session.ByJwt.UserId,
 		networkName,
+		session.ByJwt.CreateTime,
 		false,
 		isPro,
 	)
 
 	return &RefreshTokenResult{
 		ByJwt: byJwt.Client(*session.ByJwt.DeviceId, *session.ByJwt.ClientId).Sign(),
+	}, nil
+}
+
+/**
+ * Refresh a network JWT
+ */
+
+// The network token is the network's sign-in token: a by_jwt with no client.
+// It lives 30 days like every token, and /auth/refresh renews only client
+// tokens, so a network token renews here. The route is network only
+// (api/route_authz.go): the router refuses a client token before this runs,
+// because a client token must never obtain a network token. That is why
+// /auth/refresh became client only (3b48aa3d).
+
+type NetworkRefreshTokenResult = RefreshTokenResult
+
+// the bounded outcomes of a network token refresh
+const (
+	networkRefreshRenewed       = "renewed"
+	networkRefreshRefusedClient = "refused_client"
+	networkRefreshRefusedApiKey = "refused_api_key"
+	networkRefreshStateInvalid  = "state_invalid"
+)
+
+var networkRefreshCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "auth",
+		Name:      "network_refreshes_total",
+		Help:      "Network token refreshes (POST /auth/network-refresh) by bounded outcome",
+	},
+	[]string{"outcome"},
+)
+
+func init() {
+	for _, outcome := range []string{
+		networkRefreshRenewed,
+		networkRefreshRefusedClient,
+		networkRefreshRefusedApiKey,
+		networkRefreshStateInvalid,
+	} {
+		networkRefreshCounter.WithLabelValues(outcome)
+	}
+	prometheus.MustRegister(networkRefreshCounter)
+}
+
+func NetworkRefreshToken(session *session.ClientSession) (*NetworkRefreshTokenResult, error) {
+	if session.ByJwt.ClientId != nil || session.ByJwt.DeviceId != nil {
+		// the router refuses a client token first. This keeps the handler from
+		// minting a network token for one whatever routes to it.
+		networkRefreshCounter.WithLabelValues(networkRefreshRefusedClient).Inc()
+		return &NetworkRefreshTokenResult{
+			Error: &RefreshTokenError{
+				Message: "A client token is not refreshed as a network token. Refresh it with /auth/refresh.",
+			},
+		}, nil
+	}
+	if session.ApiKeyAuthenticated {
+		// An API key does not expire. Its session holds the network identity
+		// the key stands for, and signing that would turn a key that can be
+		// removed into a token that outlives the removal.
+		networkRefreshCounter.WithLabelValues(networkRefreshRefusedApiKey).Inc()
+		return &NetworkRefreshTokenResult{
+			Error: &RefreshTokenError{
+				Message: "An API key does not expire and is not refreshed.",
+			},
+		}, nil
+	}
+
+	networkId := session.ByJwt.NetworkId
+	// the current name, not the one in the presented token, so a rename shows
+	// on the next refresh
+	network := model.GetNetwork(session)
+	if network == nil || network.AdminUserId == nil || *network.AdminUserId != session.ByJwt.UserId {
+		// the network was removed, or changed admin, after the router's state
+		// check
+		networkRefreshCounter.WithLabelValues(networkRefreshStateInvalid).Inc()
+		return nil, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+	}
+	isPro := model.IsProFresh(session.Ctx, &networkId)
+
+	// keeps the presented token's create time, for the reason RefreshToken
+	// does: the password reset that expires the presented token expires the
+	// refreshed one too, whenever the reset commits
+	runRefreshMintHook(session)
+	byJwt := jwt.NewByJwtWithCreateTime(
+		networkId,
+		session.ByJwt.UserId,
+		network.NetworkName,
+		session.ByJwt.CreateTime,
+		session.ByJwt.GuestMode,
+		isPro,
+	)
+	byJwt.Roles = slices.Clone(session.ByJwt.Roles)
+	byJwt.Principal = session.ByJwt.Principal
+
+	networkRefreshCounter.WithLabelValues(networkRefreshRenewed).Inc()
+	return &NetworkRefreshTokenResult{
+		ByJwt: byJwt.Sign(),
 	}, nil
 }
 

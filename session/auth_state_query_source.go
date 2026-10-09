@@ -20,7 +20,7 @@ func sessionStateQuerySource(req *http.Request) jwt.StateQuerySource {
 			return jwt.StateQueryApiRetire
 		case "POST /network/find-providers2", "POST /network/find-provider-locations", "POST /network/find-locations", "GET /network/provider-locations":
 			return jwt.StateQueryApiDiscovery
-		case "GET /auth/refresh":
+		case "GET /auth/refresh", "POST /auth/network-refresh":
 			return jwt.StateQueryApiRefresh
 		}
 	}

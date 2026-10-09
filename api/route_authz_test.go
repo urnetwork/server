@@ -289,6 +289,7 @@ func TestNonAdminRoutesServeAClientToken(t *testing.T) {
 func TestCredentialMintingRoutesAreAdminRoutes(t *testing.T) {
 	for key, want := range map[string]routeAccess{
 		"POST /account/api-key":            routeAccessNetwork,
+		"POST /auth/network-refresh":       routeAccessNetwork,
 		"POST /oauth/authorize":            routeAccessNetwork,
 		"POST /device/add":                 routeAccessNetwork,
 		"POST /network/remove-clients":     routeAccessNetwork,

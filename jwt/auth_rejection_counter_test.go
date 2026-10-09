@@ -23,8 +23,8 @@ func rejectionCount(cause AuthRejectionCause) float64 {
 	return testutil.ToFloat64(authRejectionCounter.WithLabelValues(string(cause)))
 }
 
-func legacyAcceptCount(cause AuthLegacyAcceptCause) float64 {
-	return testutil.ToFloat64(authLegacyAcceptCounter.WithLabelValues(string(cause)))
+func legacyAcceptCount(cause AuthLegacyAcceptCause, kind AuthCredentialKind) float64 {
+	return testutil.ToFloat64(authLegacyAcceptCounter.WithLabelValues(string(cause), string(kind)))
 }
 
 // TestAuthRejectionCountersByCause walks every rejection path and asserts the
@@ -187,30 +187,69 @@ func TestAuthLegacyAcceptCounters(t *testing.T) {
 		popExpired := Testing_SetRejectExpired(false)
 		defer popExpired()
 
-		beforeMissing := legacyAcceptCount(AuthLegacyMissingExpiration)
-		legacy := &ByJwt{
-			NetworkId:   server.NewId(),
-			UserId:      server.NewId(),
-			NetworkName: "test",
-			CreateTime:  server.CodecTime(server.NowUtc()),
+		// counts every cause and kind cell, so a test can require that exactly
+		// one of them moved
+		type legacyAcceptCell struct {
+			cause AuthLegacyAcceptCause
+			kind  AuthCredentialKind
 		}
-		_, err := ParseByJwt(ctx, legacy.Sign())
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, legacyAcceptCount(AuthLegacyMissingExpiration), beforeMissing+1)
+		cells := func() map[legacyAcceptCell]float64 {
+			counts := map[legacyAcceptCell]float64{}
+			for _, cause := range []AuthLegacyAcceptCause{AuthLegacyMissingExpiration, AuthLegacyExpired} {
+				for _, kind := range []AuthCredentialKind{AuthCredentialNetwork, AuthCredentialClient} {
+					counts[legacyAcceptCell{cause, kind}] = legacyAcceptCount(cause, kind)
+				}
+			}
+			return counts
+		}
+		// parses the token and requires that only the cell moved, by one; a
+		// zero cell requires that none moved
+		requireAccepted := func(name string, signed string, moved legacyAcceptCell) {
+			before := cells()
+			_, err := ParseByJwt(ctx, signed)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			after := cells()
+			for cell, count := range before {
+				want := count
+				if cell == moved {
+					want += 1
+				}
+				if after[cell] != want {
+					t.Fatalf("%s: legacy accepts %s/%s = %v, want %v", name, cell.cause, cell.kind, after[cell], want)
+				}
+			}
+		}
+		clientOf := func(byJwt *ByJwt) *ByJwt {
+			clientId := server.NewId()
+			deviceId := server.NewId()
+			byJwt.ClientId = &clientId
+			byJwt.DeviceId = &deviceId
+			return byJwt
+		}
 
-		beforeExpired := legacyAcceptCount(AuthLegacyExpired)
-		expired := NewByJwt(server.NewId(), server.NewId(), "test", false, false)
-		expired.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-time.Hour))
-		_, err = ParseByJwt(ctx, expired.Sign())
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, legacyAcceptCount(AuthLegacyExpired), beforeExpired+1)
+		legacy := func() *ByJwt {
+			return &ByJwt{
+				NetworkId:   server.NewId(),
+				UserId:      server.NewId(),
+				NetworkName: "test",
+				CreateTime:  server.CodecTime(server.NowUtc()),
+			}
+		}
+		requireAccepted("legacy network token", legacy().Sign(), legacyAcceptCell{AuthLegacyMissingExpiration, AuthCredentialNetwork})
+		requireAccepted("legacy client token", clientOf(legacy()).Sign(), legacyAcceptCell{AuthLegacyMissingExpiration, AuthCredentialClient})
 
-		// a current credential is not counted as a legacy accept in either bucket
-		nowMissing := legacyAcceptCount(AuthLegacyMissingExpiration)
-		nowExpired := legacyAcceptCount(AuthLegacyExpired)
-		_, err = ParseByJwt(ctx, NewByJwt(server.NewId(), server.NewId(), "test", false, false).Sign())
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, legacyAcceptCount(AuthLegacyMissingExpiration), nowMissing)
-		connect.AssertEqual(t, legacyAcceptCount(AuthLegacyExpired), nowExpired)
+		expired := func() *ByJwt {
+			byJwt := NewByJwt(server.NewId(), server.NewId(), "test", false, false)
+			byJwt.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-time.Hour))
+			return byJwt
+		}
+		requireAccepted("expired network token", expired().Sign(), legacyAcceptCell{AuthLegacyExpired, AuthCredentialNetwork})
+		requireAccepted("expired client token", clientOf(expired()).Sign(), legacyAcceptCell{AuthLegacyExpired, AuthCredentialClient})
+
+		// a current credential is not counted as a legacy accept in any cell
+		requireAccepted("current network token", NewByJwt(server.NewId(), server.NewId(), "test", false, false).Sign(), legacyAcceptCell{})
+		requireAccepted("current client token", NewByJwt(server.NewId(), server.NewId(), "test", false, false).Client(server.NewId(), server.NewId()).Sign(), legacyAcceptCell{})
 	})
 }

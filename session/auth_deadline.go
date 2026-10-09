@@ -39,6 +39,7 @@ func (self *ClientSession) Auth(req *http.Request) (returnErr error) {
 		}
 		if returnErr != nil {
 			self.ByJwt = nil
+			self.ApiKeyAuthenticated = false
 		}
 	}()
 	return self.authenticate(authCtx, req)

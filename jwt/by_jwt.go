@@ -404,6 +404,26 @@ const (
 	AuthLegacyExpired           AuthLegacyAcceptCause = "expired"
 )
 
+// AuthCredentialKind is the bounded kind of a credential a migration gate let
+// through: a network token (the network's sign-in token, with no client) or a
+// client token. A client token refreshes on its half-life, so its legacy
+// accepts fade on their own; a network token renews only at
+// POST /auth/network-refresh, so its count is the one that decides when
+// reject_expired can be flipped on.
+type AuthCredentialKind string
+
+const (
+	AuthCredentialNetwork AuthCredentialKind = "network"
+	AuthCredentialClient  AuthCredentialKind = "client"
+)
+
+func authCredentialKind(byJwt *ByJwt) AuthCredentialKind {
+	if byJwt.ClientId != nil {
+		return AuthCredentialClient
+	}
+	return AuthCredentialNetwork
+}
+
 var authRejectionCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -419,9 +439,9 @@ var authLegacyAcceptCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "auth",
 		Name:      "jwt_legacy_accepts_total",
-		Help:      "Credentials accepted only because an auth.yml migration gate is off, by cause",
+		Help:      "Credentials accepted only because an auth.yml migration gate is off, by cause and credential kind (network or client)",
 	},
-	[]string{"cause"},
+	[]string{"cause", "kind"},
 )
 
 func init() {
@@ -512,14 +532,14 @@ func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience strin
 		}
 		// gauge of remaining legacy-credential traffic, for deciding when to
 		// flip reject_missing_expiration on
-		authLegacyAcceptCounter.WithLabelValues(string(AuthLegacyMissingExpiration)).Inc()
+		authLegacyAcceptCounter.WithLabelValues(string(AuthLegacyMissingExpiration), string(authCredentialKind(byJwt))).Inc()
 	} else if now.After(byJwt.ExpiresAt.Time.Add(clockLeeway)) {
 		if rejectExpired() {
 			return nil, rejectByJwt(AuthRejectionExpired, "token is expired")
 		}
 		// gauge of stale-credential traffic, for deciding when to flip
 		// reject_expired on
-		authLegacyAcceptCounter.WithLabelValues(string(AuthLegacyExpired)).Inc()
+		authLegacyAcceptCounter.WithLabelValues(string(AuthLegacyExpired), string(authCredentialKind(byJwt))).Inc()
 	}
 	if byJwt.NotBefore != nil && now.Before(byJwt.NotBefore.Time.Add(-clockLeeway)) {
 		return nil, rejectByJwt(AuthRejectionNotYetValid, "token is not valid yet")
