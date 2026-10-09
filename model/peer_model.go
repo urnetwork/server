@@ -253,31 +253,102 @@ type networkPeersEnabledEntry struct {
 	expireTime time.Time
 }
 
-// a process-local ttl cache of the `NetworkPeersEnabled` decision per
-// network, so that resident creation does not count clients on every connect
+// Concurrent callers share one source read per network until invalidation.
+// Source reads hold no cache lock; unrelated networks and cached decisions
+// remain independent of a slow read. Only successful reads populate the ttl.
 type peersEnabledCache struct {
-	lock          sync.Mutex
-	entries       map[server.Id]networkPeersEnabledEntry
-	nextSweepTime time.Time
+	stateLock          sync.Mutex
+	entries            map[server.Id]networkPeersEnabledEntry
+	networkIdLoadDones map[server.Id]chan struct{}
+	nextSweepTime      time.Time
 }
 
+// Reads an already completed decision without starting source work.
 func (self *peersEnabledCache) Get(networkId server.Id) (enabled bool, ok bool) {
-	self.lock.Lock()
-	defer self.lock.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.getWithLock(networkId)
+}
+
+// Expiration is checked on every lookup, including followers of a source read.
+func (self *peersEnabledCache) getWithLock(networkId server.Id) (enabled bool, ok bool) {
 	entry, ok := self.entries[networkId]
 	if !ok {
 		return false, false
 	}
-	if entry.expireTime.Before(time.Now()) {
+	if !time.Now().Before(entry.expireTime) {
 		delete(self.entries, networkId)
 		return false, false
 	}
 	return entry.enabled, true
 }
 
+// Coalesces cold or expired reads without sharing a caller's cancellation.
+// A failed owner wakes followers to retry under their own contexts. Explicit
+// invalidation wakes them immediately and fences the old owner's publication.
+// The invalidated creator may return its snapshot only to its original caller.
+func (self *peersEnabledCache) GetOrLoad(ctx context.Context, networkId server.Id, read func() bool) bool {
+	for {
+		server.Raise(ctx.Err())
+		var enabled, cached, owner bool
+		var done chan struct{}
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			enabled, cached = self.getWithLock(networkId)
+			if cached {
+				return
+			}
+			done = self.networkIdLoadDones[networkId]
+			if done == nil {
+				done = make(chan struct{})
+				if self.networkIdLoadDones == nil {
+					self.networkIdLoadDones = map[server.Id]chan struct{}{}
+				}
+				self.networkIdLoadDones[networkId] = done
+				owner = true
+			}
+		}()
+		if cached {
+			return enabled
+		}
+		if !owner {
+			select {
+			case <-ctx.Done():
+				server.Raise(ctx.Err())
+			case <-done:
+			}
+			continue
+		}
+		return func() (enabled bool) {
+			completed := false
+			defer func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				if self.networkIdLoadDones[networkId] == done {
+					delete(self.networkIdLoadDones, networkId)
+					if completed {
+						self.putWithLock(networkId, enabled)
+					}
+					close(done)
+				}
+			}()
+			enabled = read()
+			completed = true
+			return
+		}()
+	}
+}
+
+// Publishes a completed decision, retaining the original five-minute ttl.
 func (self *peersEnabledCache) Put(networkId server.Id, enabled bool) {
-	self.lock.Lock()
-	defer self.lock.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.putWithLock(networkId, enabled)
+}
+
+// Sweeps only completed entries; admitted source reads retain their own owners.
+func (self *peersEnabledCache) putWithLock(networkId server.Id, enabled bool) {
 	now := time.Now()
 	// sweep expired entries at most once per ttl so the map stays bounded by
 	// the networks seen in the last ttl
@@ -295,16 +366,26 @@ func (self *peersEnabledCache) Put(networkId server.Id, enabled bool) {
 	}
 }
 
+// Fences an earlier source snapshot after a committed eligibility change.
 func (self *peersEnabledCache) Remove(networkId server.Id) {
-	self.lock.Lock()
-	defer self.lock.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	delete(self.entries, networkId)
+	if done := self.networkIdLoadDones[networkId]; done != nil {
+		delete(self.networkIdLoadDones, networkId)
+		close(done)
+	}
 }
 
+// Drops completed decisions and invalidates every in-progress generation.
 func (self *peersEnabledCache) Clear() {
-	self.lock.Lock()
-	defer self.lock.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	clear(self.entries)
+	for networkId, done := range self.networkIdLoadDones {
+		delete(self.networkIdLoadDones, networkId)
+		close(done)
+	}
 }
 
 var networkPeersEnabledCache = &peersEnabledCache{
@@ -363,17 +444,16 @@ const networkPeersRecentAuthWindow = 14 * 24 * time.Hour
 // (NetworkConcurrentClientsExceeded, CanConnectNetworkPeer, AuthNetworkClient)
 // stay separately gated by enforce_concurrent_clients, so an over-limit network
 // still connects and carries traffic exactly as before — it just polls no peer
-// list. The decision is cached per network for `networkPeersEnabledTtl`, and the
-// count scan is bounded at the limit since only the threshold matters.
+// list. Concurrent cold callers share one source read per network, then cache
+// its decision for `networkPeersEnabledTtl`. The limit bounds matching rows;
+// the source can still scan rejected rows while evaluating the filters.
 func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
-	if enabled, ok := networkPeersEnabledCache.Get(networkId); ok {
-		return enabled
-	}
-	enabled := false
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
+	return networkPeersEnabledCache.GetOrLoad(ctx, networkId, func() bool {
+		enabled := false
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
 				SELECT COUNT(*) AS recent_top_level_client_count
 				FROM (
 					SELECT 1
@@ -396,20 +476,20 @@ func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
 					LIMIT $2
 				) t
 			`,
-			networkId,
-			LimitTopLevelClientIdsPerNetwork+1,
-			server.NowUtc().Add(-networkPeersRecentAuthWindow),
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				recentTopLevelClientCount := 0
-				server.Raise(result.Scan(&recentTopLevelClientCount))
-				enabled = recentTopLevelClientCount <= LimitTopLevelClientIdsPerNetwork
-			}
+				networkId,
+				LimitTopLevelClientIdsPerNetwork+1,
+				server.NowUtc().Add(-networkPeersRecentAuthWindow),
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					recentTopLevelClientCount := 0
+					server.Raise(result.Scan(&recentTopLevelClientCount))
+					enabled = recentTopLevelClientCount <= LimitTopLevelClientIdsPerNetwork
+				}
+			})
 		})
+		return enabled
 	})
-	networkPeersEnabledCache.Put(networkId, enabled)
-	return enabled
 }
 
 // GetNetworkPeerProfile loads the network, top-level status, category, and
