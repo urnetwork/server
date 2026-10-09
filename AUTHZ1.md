@@ -419,7 +419,8 @@ shipped client that calls it with a client token (call sites); the verdict.
 | `POST /auth/login-with-password` | `handlers.AuthLoginWithPassword` → `controller.AuthLoginWithPassword` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /auth/verify` | `handlers.AuthVerify` → `controller.AuthVerify` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /auth/wallet-challenge` | `handlers.AuthWalletChallenge` → `controller.AuthWalletChallenge` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
-| `GET /auth/refresh` | `handlers.AuthRefreshToken` → `controller.AuthRefreshToken` | WrapWithInputNoAuth | required | Client | — | unchanged |
+| `GET /auth/refresh` | `handlers.AuthRefreshToken` → `controller.AuthRefreshToken` | WrapWithInputNoAuth | required | Client | — | unchanged; keeps the presented create time since `feat/network-token-refresh` (§9) |
+| `POST /auth/network-refresh` | `handlers.AuthNetworkRefreshToken` → `controller.NetworkRefreshToken` | WrapRequireAuth | — (new in `feat/network-token-refresh`) | Network only | — | new: renews a network token; a client token is refused (403), an API key is refused (§9) |
 | `POST /auth/verify-send` | `handlers.AuthVerifySend` → `controller.AuthVerifySend` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /auth/password-reset` | `handlers.AuthPasswordReset` → `controller.AuthPasswordReset` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /auth/password-set` | `handlers.AuthPasswordSet` → `controller.AuthPasswordSet` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
@@ -681,6 +682,7 @@ refuses it after an Embed disable, and its documented 403 by
 | `GET /sn/wallet` | Own client payout | `TestOwnClientPayoutRoutesRefuseOnlyAnEmbedNetworksClientToken` (Embed: 403; ordinary: served), `TestAdminRoutesRefuseAClientTokenThroughTheRouter` (Embed) | `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute`, `TestRealClientTokenOfADisabledEmbedNetworkIsStillRefused`; ordinary: `TestRealClientTokenOfAnOrdinaryNetworkKeepsItsOwnPayoutRoutes` | `TestAdminRoutesServeTheNetworkCredential`, `TestOwnClientPayoutRoutesRefuseOnlyAnEmbedNetworksClientToken` |
 | `POST /sn/head/binding` | Own client payout | `TestOwnClientPayoutRoutesRefuseOnlyAnEmbedNetworksClientToken` (Embed: 403; ordinary: served), `TestAdminRoutesRefuseAClientTokenThroughTheRouter` (Embed) | `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute`, `TestRealClientTokenOfADisabledEmbedNetworkIsStillRefused`; ordinary: `TestRealClientTokenOfAnOrdinaryNetworkKeepsItsOwnPayoutRoutes` | `TestAdminRoutesServeTheNetworkCredential`, `TestOwnClientPayoutRoutesRefuseOnlyAnEmbedNetworksClientToken` |
 | `POST /account/api-key` | Network only | `TestAdminRoutesRefuseAClientTokenThroughTheRouter`, `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` | `TestRealClientTokenIsRefusedOnEveryNetworkRoute`, `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential`, `TestNetworkCredentialAdministersTheNetwork` (root token + API key, state checked) |
+| `POST /auth/network-refresh` | Network only | `TestAdminRoutesRefuseAClientTokenThroughTheRouter`, `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork`, `TestCredentialMintingRoutesAreAdminRoutes` | `TestRealClientTokenIsRefusedOnEveryNetworkRoute`, `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute`, `TestNetworkRefreshRefusesClientTokensAndApiKeys` (router 403, handler refusal, API key refusal) | `TestAdminRoutesServeTheNetworkCredential`, `TestNetworkRefreshRenewsTheNetworkToken` (§9) |
 | `POST /account/api-key/remove` | Network only | `TestAdminRoutesRefuseAClientTokenThroughTheRouter`, `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` | `TestRealClientTokenIsRefusedOnEveryNetworkRoute`, `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential`, `TestNetworkCredentialAdministersTheNetwork` (root token + API key, state checked) |
 | `GET /account/api-keys` | Network only | `TestAdminRoutesRefuseAClientTokenThroughTheRouter`, `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` | `TestRealClientTokenIsRefusedOnEveryNetworkRoute`, `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential`, `TestNetworkCredentialAdministersTheNetwork` (root token + API key, state checked) |
 | `POST /account/payout-wallet` | App admin | `TestAdminRoutesRefuseAClientTokenThroughTheRouter` (Embed); `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` (ordinary: served) | `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential` |
@@ -697,3 +699,91 @@ refuses it after an Embed disable, and its documented 403 by
 | `GET /account/balance-codes` | App admin | `TestAdminRoutesRefuseAClientTokenThroughTheRouter` (Embed); `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` (ordinary: served) | `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential` |
 | `POST /oauth/authorize` | Network only | `TestAdminRoutesRefuseAClientTokenThroughTheRouter`, `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` | `TestRealClientTokenIsRefusedOnEveryNetworkRoute`, `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential` |
 | `POST /oauth/consent` | Network only | `TestAdminRoutesRefuseAClientTokenThroughTheRouter`, `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` | `TestRealClientTokenIsRefusedOnEveryNetworkRoute`, `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential` |
+
+## 9. Network token refresh (`feat/network-token-refresh`)
+
+**Why.** Every JWT lives 30 days. `/auth/refresh` renews only client tokens.
+3b48aa3d made it client only, because before that it handed any token,
+a client token included, a network token. So nothing renewed the network
+token (the sign-in token, a by_jwt with no client). It kept working only
+because `reject_expired` is off. Since sdk `bc72b109` the apps send the
+network token on every admin call, so turning `reject_expired` on would
+break account screens for anyone signed in more than 30 days before.
+
+**The route.** `POST /auth/network-refresh`, no body, `WrapRequireAuth`,
+returns `{by_jwt}` or `{error: {message}}`.
+- **What it mints:** a network token for the same network and user, with
+  the same guest mode, roles and principal. It carries the network's
+  current name and Pro state (`model.GetNetwork`, `model.IsProFresh`) and
+  fresh registered claims (iat, nbf, exp, jti).
+- **Network only:** the router refuses a client token with 403 before the
+  handler runs, because a client token must never obtain a network token.
+  The handler refuses one too (`refused_client`), whatever routes to it.
+- **API keys are refused** (`refused_api_key`, result error). An API key
+  does not expire. Its session holds the network identity the key stands
+  for, minted for the request. Signing that would turn a key that can be
+  removed into a token that outlives the removal: JWT revocation is only
+  `credential_change_time`.
+  - `session.ClientSession.ApiKeyAuthenticated` marks the session. Only
+    `authenticate`'s API key branch sets it.
+  - A failed authentication and `WithByJwt` clear it. A session built for
+    trusted work never has it.
+- **A stale identity gets 401** (`state_invalid`): a network that was
+  removed after the router's state check, or whose admin changed.
+
+**The create time is carried, on both refreshes.**
+- `/auth/network-refresh` and `/auth/refresh` mint with the presented
+  token's `CreateTime`. Before this, `/auth/refresh` stamped the time of the
+  mint.
+- This is the rule every derived credential already follows. `AuthCodeCreate`
+  says "this is to enable all derivative auth to be expired by expiring the
+  root", and `AuthNetworkClient` and the registration mint do the same.
+- Why a fresh stamp was a hole: a password reset stamps
+  `credential_change_time = now()`, and in Postgres that is the reset
+  transaction's start, not its commit. A refresh whose state check runs
+  before the reset commits can mint after the reset was stamped. With a
+  fresh create time, that token outlived the reset. Capturing the issue time
+  before re-validating does not close it, because the reset's stamp can
+  precede the capture, and clocks differ across hosts.
+- With the carried create time, renewal timing does not matter. If the
+  presented token is expired by a reset, so is everything minted from it.
+- Nothing else about `/auth/refresh` changed.
+
+**Gates.** An expired or legacy (no-exp, no registered claims) network token
+reaches the handler only while `reject_expired` / `reject_missing_expiration`
+allow it, because the session parse honors the gates.
+- That lets the installed base renew before a flip.
+- A renewed legacy token carries every registered claim, so the
+  `reject_missing_expiration` flip accepts it.
+- Once a gate is on, such a token gets 401 and the user signs in again.
+
+**Metrics.**
+- `urnetwork_auth_network_refreshes_total{outcome}`: `renewed`,
+  `refused_client`, `refused_api_key`, `state_invalid`.
+- `urnetwork_auth_jwt_legacy_accepts_total` gains a `kind` label (`network`
+  or `client`). A client token refreshes on its half-life, so its expired
+  accepts fade on their own. The network kind's expired count is the one
+  that decides when `reject_expired` can be flipped on.
+- The signals dashboard's "authentication decisions / s" panel charts both
+  (`TestAuthenticationPanelSplitsLegacyAcceptsByCredentialKind`).
+- `POST /auth/network-refresh` state checks count under the `api/refresh`
+  state-query source.
+
+**Tests (DB, real JWTs through the router, `api/auth_refresh_db_test.go`).**
+
+| Test | Asserts |
+|---|---|
+| `TestNetworkRefreshRenewsTheNetworkToken` | no client, same network/user, the renamed name, Pro, guest mode/roles/principal kept, presented create time, fresh iat/exp/jti, live and administers |
+| `TestNetworkRefreshRefusesClientTokensAndApiKeys` | client token 403 at the router (no counter moves) and refused in the handler; API key refused; `/auth/refresh` still refuses a network token |
+| `TestNetworkRefreshRefusesAStaleIdentity` | gone network, non-admin user: 401, `state_invalid` |
+| `TestNetworkRefreshFollowsTheExpiryGates` | expired token renews with `reject_expired` off, 401 with it on; a legacy token renews with `reject_missing_expiration` off into a token the gate accepts, 401 with it on |
+| `TestNetworkRefreshFollowsCredentialRotation` | a token from before a reset does not renew; a renewed token stops at the next reset |
+| `TestNetworkRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap`, `TestClientRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap` | **regression:** `controller.Testing_SetRefreshMintHook` lands a reset stamped between the presented create time and the mint. The refreshed token is rejected by `ValidateByJwtState` and the router, keeps the presented create time, and has a fresh iat/exp. Both fail with a fresh create time stamped at the mint ("outlived the reset") and pass with the carried one. |
+
+Also:
+- `session/client_session_api_key_test.go` covers the marker.
+- `session/auth_state_query_source_test.go` covers the state-query source.
+- `jwt/auth_rejection_counter_test.go` covers each cause and kind cell.
+- `api/route_authz_test.go` pins the class in the credential-minting guard.
+- `api/route_authz_db_test.go` has the route's request in the gated-route
+  sweep.
