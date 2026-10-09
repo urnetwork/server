@@ -70,7 +70,7 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 	// starts before the first fact query. It cannot admit a new unknown or risky
 	// connection.
 	// Candidate chunks bound both the query and result size.
-	const chunkSize = 256
+	const chunkSize = providerQualityValidationBatchSize
 	pending := make([]server.Id, 0, len(clientIds))
 	seen := make(map[server.Id]bool, len(clientIds))
 	for _, id := range clientIds {
