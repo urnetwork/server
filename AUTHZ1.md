@@ -419,7 +419,7 @@ shipped client that calls it with a client token (call sites); the verdict.
 | `POST /auth/login-with-password` | `handlers.AuthLoginWithPassword` → `controller.AuthLoginWithPassword` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /auth/verify` | `handlers.AuthVerify` → `controller.AuthVerify` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /auth/wallet-challenge` | `handlers.AuthWalletChallenge` → `controller.AuthWalletChallenge` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
-| `GET /auth/refresh` | `handlers.AuthRefreshToken` → `controller.AuthRefreshToken` | WrapWithInputNoAuth | required | Client | — | unchanged; keeps the presented create time since `feat/network-token-refresh` (§9) |
+| `GET /auth/refresh` | `handlers.AuthRefreshToken` → `controller.RefreshToken` | WrapRequireAuth | required | Client | — | unchanged; keeps the presented create time since `feat/network-token-refresh` (§9) |
 | `POST /auth/network-refresh` | `handlers.AuthNetworkRefreshToken` → `controller.NetworkRefreshToken` | WrapRequireAuth | — (new in `feat/network-token-refresh`) | Network only | — | new: renews a network token; a client token is refused (403), an API key is refused (§9) |
 | `POST /auth/verify-send` | `handlers.AuthVerifySend` → `controller.AuthVerifySend` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /auth/password-reset` | `handlers.AuthPasswordReset` → `controller.AuthPasswordReset` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
