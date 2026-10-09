@@ -486,3 +486,27 @@ func TestContractOrigin(t *testing.T) {
 		connect.AssertNotEqual(t, participants[0].ClientId, originId)
 	}
 }
+
+// The setters name a limit even when it is nil, so code that builds args
+// without JSON can clear one cap and leave the other unchanged.
+func TestSetClientDataCapArgsSetters(t *testing.T) {
+	args := &SetClientDataCapArgs{}
+	connect.AssertEqual(t, args.monthlyByteLimitSet(), false)
+	connect.AssertEqual(t, args.totalByteLimitSet(), false)
+
+	args.SetMonthlyByteLimit(nil)
+	connect.AssertEqual(t, args.monthlyByteLimitSet(), true)
+	connect.AssertEqual(t, args.MonthlyByteLimit, (*ByteCount)(nil))
+	connect.AssertEqual(t, args.totalByteLimitSet(), false)
+
+	limit := ByteCount(5_000_000_000)
+	args.SetTotalByteLimit(&limit)
+	connect.AssertEqual(t, args.totalByteLimitSet(), true)
+	connect.AssertEqual(t, *args.TotalByteLimit, limit)
+
+	// merged against a current value: a named nil clears, an unnamed nil keeps
+	current := ByteCount(10)
+	connect.AssertEqual(t, mergeClientDataCapLimit(&current, args.monthlyByteLimitSet(), args.MonthlyByteLimit), (*ByteCount)(nil))
+	untouched := &SetClientDataCapArgs{}
+	connect.AssertEqual(t, *mergeClientDataCapLimit(&current, untouched.monthlyByteLimitSet(), untouched.MonthlyByteLimit), current)
+}
