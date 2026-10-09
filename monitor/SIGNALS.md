@@ -33479,3 +33479,26 @@ transaction. Failed required batches, body rollback and retried attempts do not
 publish; an unknown commit reply remains an observation gap. Optional posts run
 after publication. Counters reset with process lifetime and are not crash-durable
 history; no IDs, task names, args or private result text become labels.
+
+### Reusing successful payer due-index observations
+
+Payer and dispatcher entry retain successful due-only catalog observations in
+a separate process-local positive cache. Its absolute five-second expiry starts
+before resource resolution and the fresh query; reuse and late completion do
+not extend it. The existing 250ms context covers resource identity checks and
+the one original catalog probe on a miss. No query, retry or refresh wait is
+added. Concurrent misses may still probe independently, while a failed reader
+cannot erase a successful proof or cache a refusal.
+
+A fresh observation is published only after the same bounded resource identity
+is rechecked successfully. Changed, unreadable, canceled or expired evidence
+cannot publish. The due cache authorizes only the complete due-index definition;
+registration still requires its separate both-index proof. A healthy full-index
+proof remains usable for due entry, but a due-only proof cannot authorize the
+optional missing-key index. Financial ownership, accounting and task completion
+remain with their existing owners.
+
+The readiness counter's existing `cached=true` includes either valid positive
+proof at due entry. A lower readiness-deadline and execution-error rate after
+deployment must be measured on the serving generations; cache publication alone
+does not certify zero errors, CPU improvement or a closure-speed multiplier.

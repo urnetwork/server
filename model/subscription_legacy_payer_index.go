@@ -32,7 +32,7 @@ const legacySettlementPayerIndexSql = `SELECT bool_and(COALESCE(
  LEFT JOIN pg_class AS index_relation ON index_relation.oid=to_regclass(expected.name)
  LEFT JOIN pg_index AS index_state ON index_state.indexrelid=index_relation.oid`
 
-// One process entry bounds memory and probe concurrency. An in-flight refresh
+// One process entry per proof bounds memory. An in-flight full-index refresh
 // never blocks other pages: they retain chronological service. The resource
 // digest isolates database configuration changes and test databases without
 // retaining credentials or creating an unbounded per-database map.
