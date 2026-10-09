@@ -77,7 +77,14 @@ func TestContractCreationTimingBoundedConcurrentCollection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expect := map[string]int{"urnetwork_contract_creation_completed_stage_seconds_total": 34, "urnetwork_contract_creation_completed_total": 10, "urnetwork_contract_creation_stage_inflight": 34, "urnetwork_contract_creation_stage_timing_enabled": 1}
+	expect := map[string]int{
+		"urnetwork_contract_creation_completed_stage_seconds_total":   38,
+		"urnetwork_contract_creation_completed_total":                 10,
+		"urnetwork_contract_creation_stage_inflight":                  38,
+		"urnetwork_contract_creation_stage_timing_enabled":            1,
+		"urnetwork_contract_creation_companion_origin_reads_total":    4,
+		"urnetwork_contract_creation_companion_origin_outcomes_total": 8,
+	}
 	for _, f := range families {
 		if len(f.Metric) != expect[f.GetName()] {
 			t.Fatal("metric cardinality changed")
@@ -111,6 +118,62 @@ func TestContractCreationTimingBoundedConcurrentCollection(t *testing.T) {
 	EnterContractCreationStage(t.Context(), ContractCreationStage(255))()
 	if m.values.counts[0][ContractCreationRejected] != 64 {
 		t.Fatal("unowned call fabricated a controller completion")
+	}
+}
+
+func TestContractCompanionOriginReadSpansAndAttempts(t *testing.T) {
+	m := newContractCreationMetrics()
+	now := time.Unix(100, 0)
+	m.now = func() time.Time { return now }
+	ctx, owner := beginContractCreationTiming(t.Context(), true, m)
+	transaction := EnterContractCreationStage(ctx, ContractStageTransaction)
+	plain := BeginContractCompanionOriginRead(ctx, ContractCompanionPlainOrigin)
+	now = now.Add(2 * time.Second)
+	plain()
+	plain() // The deferred panic guard must not count time twice.
+	fallback := BeginContractCompanionOriginRead(ctx, ContractCompanionFallbackOrigin)
+	now = now.Add(3 * time.Second)
+	fallback()
+	RecordContractCompanionOriginOutcome(ctx, ContractCompanionOriginFound)
+	transaction()
+	owner.Finish(ContractCreationReply)
+	if m.values.seconds[1][ContractStageCompanionPlainOriginRead] != 2 ||
+		m.values.seconds[1][ContractStageCompanionFallbackOriginRead] != 3 ||
+		m.values.companionReads[1] != [contractCompanionOriginPhaseCount]uint64{1, 1} ||
+		m.values.companionOutcomes[1][ContractCompanionOriginFound] != 1 ||
+		m.values.inflight != [2][contractStageCount]int64{} {
+		t.Fatal("companion read span, attempt, or owner partition changed")
+	}
+}
+
+func TestContractCompanionOriginReadPanicAndHandoff(t *testing.T) {
+	m := newContractCreationMetrics()
+	now := time.Unix(100, 0)
+	m.now = func() time.Time { return now }
+	ctx, owner := beginContractCreationTiming(t.Context(), false, m)
+	func() {
+		outcome := ContractCompanionOriginError
+		defer func() { RecordContractCompanionOriginOutcome(ctx, outcome) }()
+		defer func() {
+			if recovered := recover(); recovered != "synthetic read failure" {
+				t.Errorf("unexpected read panic: %v", recovered)
+			}
+		}()
+		leave := BeginContractCompanionOriginRead(ctx, ContractCompanionPlainOrigin)
+		defer leave()
+		now = now.Add(time.Second)
+		panic("synthetic read failure")
+	}()
+	RecordContractCompanionOriginOutcome(ctx, ContractCompanionOriginMissing)
+	RecordContractCompanionOriginOutcome(ctx, ContractCompanionOriginPayerHandoff)
+	owner.Finish(ContractCreationPanic)
+	if m.values.seconds[0][ContractStageCompanionPlainOriginRead] != 1 ||
+		m.values.companionReads[0][ContractCompanionPlainOrigin] != 1 ||
+		m.values.companionOutcomes[0][ContractCompanionOriginError] != 1 ||
+		m.values.companionOutcomes[0][ContractCompanionOriginMissing] != 1 ||
+		m.values.companionOutcomes[0][ContractCompanionOriginPayerHandoff] != 1 ||
+		m.values.inflight != [2][contractStageCount]int64{} {
+		t.Fatal("panic closure or finite callback outcomes changed")
 	}
 }
 

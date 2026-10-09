@@ -2053,6 +2053,8 @@ func createCompanionTransferEscrow(
 	requestedBytes := contractTransferByteCount
 	var inheritedPayer *server.Id
 	create := func(tx server.PgTx) {
+		originOutcome := server.ContractCompanionOriginError
+		defer func() { server.RecordContractCompanionOriginOutcome(ctx, originOutcome) }()
 		// A transaction retry or payer handoff must re-read the current origin,
 		// without retaining a previous attempt's clamp, posts or outcome.
 		transferEscrow, posts, returnErr, inheritedPayer = nil, nil, nil, nil
@@ -2061,6 +2063,8 @@ func createCompanionTransferEscrow(
 		// with null companion_contract_id
 		// there can be many companion contracts for an original contract
 
+		leavePlainOriginRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionPlainOrigin)
+		defer leavePlainOriginRead()
 		result, err := tx.Query(
 			ctx,
 			`
@@ -2138,6 +2142,7 @@ func createCompanionTransferEscrow(
 				server.Raise(result.Scan(&companionContractId, &proberReservationByteCount))
 			}
 		})
+		leavePlainOriginRead()
 
 		if companionContractId == nil {
 			// Fall back to a companion contract as the origin anchor. In an
@@ -2157,6 +2162,8 @@ func createCompanionTransferEscrow(
 			// Plain origins stay preferred; the chain is bounded
 			// in practice at depth two (a reply carrier answering a return
 			// direction).
+			leaveFallbackOriginRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionFallbackOrigin)
+			defer leaveFallbackOriginRead()
 			result, err := tx.Query(
 				ctx,
 				`
@@ -2243,14 +2250,17 @@ func createCompanionTransferEscrow(
 					server.Raise(result.Scan(&companionContractId, &proberReservationByteCount, &inheritedPayer))
 				}
 			})
+			leaveFallbackOriginRead()
 		}
 
 		if companionContractId == nil {
+			originOutcome = server.ContractCompanionOriginMissing
 			returnErr = ErrMissingCompanionOrigin
 			return
 		}
 
 		if inheritedPayer != nil && payerNetworkId != *inheritedPayer {
+			originOutcome = server.ContractCompanionOriginPayerHandoff
 			// End this read-only transaction before joining the true payer's
 			// process-local queue. Never wait for another gate with a connection.
 			return
@@ -2259,7 +2269,6 @@ func createCompanionTransferEscrow(
 			returnErr = errors.New("probe companion origin payer changed")
 			return
 		}
-
 		if proberReservationByteCount != nil {
 			contractTransferByteCount = min(contractTransferByteCount, *proberReservationByteCount)
 		}
@@ -2275,6 +2284,9 @@ func createCompanionTransferEscrow(
 			contractTransferByteCount,
 			companionContractId,
 		)
+		if returnErr == nil {
+			originOutcome = server.ContractCompanionOriginFound
+		}
 	}
 	if err := transferEscrowTx(ctx, payerNetworkId, requestedBytes, create); err != nil {
 		return nil, err
