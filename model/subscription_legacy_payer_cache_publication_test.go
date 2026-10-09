@@ -29,7 +29,9 @@ func TestLegacyPayerRegistrationPublishesColdFullIndexProof(t *testing.T) {
 		return false, context.DeadlineExceeded
 	}
 	readFull := func(ctx context.Context) (bool, error) {
-		return readLegacySettlementPayerIndexesForCache(ctx, cache, identity, now, func(context.Context) (bool, error) {
+		return readLegacySettlementPayerIndexesForCache(ctx, cache, func(context.Context) ([sha256.Size]byte, error) {
+			return identity, nil
+		}, now, func(context.Context) (bool, error) {
 			fullReads++
 			if fullReads != 1 {
 				return false, context.DeadlineExceeded
@@ -74,7 +76,9 @@ func TestLegacyPayerRegistrationUnknownFullIndexCannotPublish(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		physical := errors.New("synthetic full-index read refusal")
 		reads := 0
-		ready, err := readLegacySettlementPayerIndexesForCache(ctx, cache, identity, now, func(context.Context) (bool, error) {
+		ready, err := readLegacySettlementPayerIndexesForCache(ctx, cache, func(context.Context) ([sha256.Size]byte, error) {
+			return identity, nil
+		}, now, func(context.Context) (bool, error) {
 			reads++
 			switch kind {
 			case "invalid":
@@ -115,7 +119,9 @@ func TestLegacyPayerRegistrationPublicationKeepsResourceIdentity(t *testing.T) {
 	now := func() time.Time { return instant }
 	reads := 0
 	for _, identity := range [][sha256.Size]byte{first, second} {
-		ready, err := readLegacySettlementPayerIndexesForCache(t.Context(), cache, identity, now, func(context.Context) (bool, error) {
+		ready, err := readLegacySettlementPayerIndexesForCache(t.Context(), cache, func(context.Context) ([sha256.Size]byte, error) {
+			return identity, nil
+		}, now, func(context.Context) (bool, error) {
 			reads++
 			return true, nil
 		})
@@ -149,7 +155,9 @@ func TestLegacyPayerRegistrationPublicationCoalescesConcurrentRefresh(t *testing
 	finished := make(chan result, 1)
 	go func() {
 		defer close(joined)
-		ready, err := readLegacySettlementPayerIndexesForCache(ctx, cache, identity, now, func(context.Context) (bool, error) {
+		ready, err := readLegacySettlementPayerIndexesForCache(ctx, cache, func(context.Context) ([sha256.Size]byte, error) {
+			return identity, nil
+		}, now, func(context.Context) (bool, error) {
 			close(entered)
 			select {
 			case <-release:
@@ -166,7 +174,9 @@ func TestLegacyPayerRegistrationPublicationCoalescesConcurrentRefresh(t *testing
 		t.Fatal("registration never entered the catalog barrier")
 	}
 	duplicateReads := 0
-	ready, err := readLegacySettlementPayerIndexesForCache(ctx, cache, identity, now, func(context.Context) (bool, error) {
+	ready, err := readLegacySettlementPayerIndexesForCache(ctx, cache, func(context.Context) ([sha256.Size]byte, error) {
+		return identity, nil
+	}, now, func(context.Context) (bool, error) {
 		duplicateReads++
 		return true, nil
 	})
@@ -184,5 +194,35 @@ func TestLegacyPayerRegistrationPublicationCoalescesConcurrentRefresh(t *testing
 	}
 	if !owner.ready || owner.err != nil || !cache.readyObservation(ctx, identity, now()) {
 		t.Fatal("completed registration did not publish its exact proof", owner)
+	}
+}
+
+// A resource switch or unreadable identity during the one successful catalog
+// read cannot publish proof under either the old or new resource digest.
+func TestLegacyPayerRegistrationPublicationRejectsChangedResource(t *testing.T) {
+	first := sha256.Sum256([]byte("synthetic admitted registration resource"))
+	second := sha256.Sum256([]byte("synthetic replacement registration resource"))
+	for _, kind := range []string{"changed", "unreadable"} {
+		cache := &legacySettlementPayerIndexCache{}
+		instant := time.Unix(100, 0)
+		now := func() time.Time { return instant }
+		resourceReads, catalogReads := 0, 0
+		current := first
+		physical := errors.New("synthetic unreadable registration resource")
+		ready, err := readLegacySettlementPayerIndexesForCache(t.Context(), cache, func(context.Context) ([sha256.Size]byte, error) {
+			resourceReads++
+			if resourceReads == 2 && kind == "unreadable" {
+				return [sha256.Size]byte{}, physical
+			}
+			return current, nil
+		}, now, func(context.Context) (bool, error) {
+			catalogReads++
+			current = second
+			return true, nil
+		})
+		if ready || err == nil || kind == "unreadable" && err != physical || resourceReads != 2 || catalogReads != 1 ||
+			cache.readyObservation(t.Context(), first, now()) || cache.readyObservation(t.Context(), second, now()) {
+			t.Fatal("changed resource authorized a catalog proof or caused a retry", kind, ready, err, resourceReads, catalogReads)
+		}
 	}
 }
