@@ -190,6 +190,29 @@ func readLegacySettlementPayerIndexes(ctx context.Context) (ready bool, resultEr
 	return
 }
 
+// Registration already validates both complete definitions. Bind that read to
+// its exact bounded resource so subsequent due checks can reuse the same proof.
+func readLegacySettlementPayerIndexesWithCache(ctx context.Context) (bool, error) {
+	resource, err := server.Vault.SimpleResource(server.DefaultPgVaultResourceName)
+	if err != nil {
+		return false, err
+	}
+	raw, err := resource.BytesBoundedE(ctx, 16*1024)
+	if err != nil {
+		return false, err
+	}
+	return readLegacySettlementPayerIndexesForCache(ctx, &legacySettlementPayerIndexes,
+		sha256.Sum256(raw), time.Now, readLegacySettlementPayerIndexes)
+}
+
+// Invocation-local catalog and clock seams exercise the production publisher
+// from a cold cache without changing process state or manually seeding proof.
+func readLegacySettlementPayerIndexesForCache(ctx context.Context, cache *legacySettlementPayerIndexCache,
+	identity [sha256.Size]byte, now func() time.Time, read func(context.Context) (bool, error),
+) (bool, error) {
+	return read(ctx)
+}
+
 // Publish only after the bounded check returns. Error, cancellation or an
 // expired observation caches false; expiry is measured from refresh admission,
 // never extended by a late response. Callbacks run outside the state lock.
