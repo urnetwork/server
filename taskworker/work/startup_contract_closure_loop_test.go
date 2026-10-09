@@ -179,8 +179,10 @@ func TestStartupContractClosureActiveWakeKeepsFullPass(t *testing.T) {
 		}
 		prefix := readExpiryRecoveryQueue(t, baseCtx)
 		running := prefix[key]
-		if running.id != initial.id || running.args != initial.args || len(prefix) != 1025 || running.claim != running.generation ||
-			!running.releaseTime.After(server.NowUtc()) {
+		// Claims and producer wakes have independent counters. This first
+		// claim advances once while no new startup request has arrived yet.
+		if running.id != initial.id || running.args != initial.args || len(prefix) != 1025 || running.claim == 0 ||
+			running.claim != initial.claim+1 || running.generation != initial.generation || !running.releaseTime.After(server.NowUtc()) {
 			t.Fatal("first-page barrier did not retain the actual live scanner claim")
 		}
 		for index, id := range ids {
