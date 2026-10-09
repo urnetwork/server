@@ -50,17 +50,18 @@ func TestLegacyPayerDueProofColdSuccessAvoidsLaterProbeRefusal(t *testing.T) {
 }
 
 func TestLegacyPayerDueProofRejectsUnknownAndLateObservations(t *testing.T) {
-	for _, kind := range []string{"invalid", "read_error", "deadline", "canceled", "late", "resource_error", "resource_changed"} {
+	for _, kind := range []string{"invalid", "read_error", "deadline", "canceled", "late", "resource_error", "resource_after_error", "resource_changed"} {
 		full, due := &legacySettlementPayerIndexCache{}, &legacySettlementPayerIndexCache{}
 		identity := sha256.Sum256([]byte("synthetic refused due resource"))
 		current := identity
 		instant := time.Unix(100, 0)
 		now := func() time.Time { return instant }
 		ctx, cancel := context.WithCancel(t.Context())
-		reads := 0
+		reads, resourceReads := 0, 0
 		observed := observeLegacySettlementPayerDueIndexWithProof(ctx, full, due,
 			func(context.Context) ([sha256.Size]byte, error) {
-				if kind == "resource_error" {
+				resourceReads++
+				if kind == "resource_error" || kind == "resource_after_error" && resourceReads == 2 {
 					return current, errors.New("synthetic resource refusal")
 				}
 				return current, nil
