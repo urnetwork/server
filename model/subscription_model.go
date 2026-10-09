@@ -2928,7 +2928,17 @@ func settleContractWithExpiryScope(ctx context.Context, contractId server.Id, sc
 					closed = setContractDisputeInTx(ctx, tx, contractId, true)
 				}
 			} else {
-				// nothing to settle, just close the transaction
+				// The report transaction has ended. Take the outcome owner's
+				// lock before interpreting absent escrow as a free close.
+				var currentOutcome *ContractOutcome
+				server.Raise(tx.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId).Scan(&currentOutcome))
+				if currentOutcome != nil {
+					return
+				}
+				returnErr = validateContractFreeSettlementOwnerInTx(ctx, tx, contractId)
+				if returnErr != nil {
+					return
+				}
 				closed, returnErr = claimContractOutcomeInTx(ctx, tx, contractId, ContractOutcomeSettled)
 				if closed {
 					clockTransferByteCount = destinationUsedTransferByteCount
@@ -3990,13 +4000,22 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount,
 
 func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCount, parallel, blockSize, blockIndex int,
 	after *ContractExpiryCursor,
-) (closeCount int64, next *ContractExpiryCursor, err error) {
+) (int64, *ContractExpiryCursor, error) {
+	count, next, _, err := forceCloseOpenContractIdsPage(ctx, minTime, maxCount, parallel, blockSize, blockIndex, after)
+	return count, next, err
+}
+
+// The same bounded raw rows also carry a scheduling observation. It changes no
+// eligibility or financial rule; only a complete page may publish its hint.
+func forceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCount, parallel, blockSize, blockIndex int,
+	after *ContractExpiryCursor,
+) (closeCount int64, next *ContractExpiryCursor, nextExpiration *time.Time, err error) {
 	if parallel <= 0 {
-		return 0, nil, fmt.Errorf("force close parallelism must be positive: %d", parallel)
+		return 0, nil, nil, fmt.Errorf("force close parallelism must be positive: %d", parallel)
 	}
 
 	if maxCount <= 0 {
-		return 0, nil, fmt.Errorf("force close page size must be positive: %d", maxCount)
+		return 0, nil, nil, fmt.Errorf("force close page size must be positive: %d", maxCount)
 	}
 	next = &ContractExpiryCursor{}
 	if after != nil {
@@ -4044,9 +4063,11 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 					c := &OpenContract{}
 					var created time.Time
 					var eligible bool
+					var expiration *time.Time
 					server.Raise(rows.Scan(&c.contractId, &c.sourceId, &c.destinationId, &c.dispute,
 						&c.sourceCloseTime, &c.sourceUsedTransferByteCount, &c.sourceCheckpoint,
-						&c.destinationCloseTime, &c.destinationUsedTransferByteCount, &c.destinationCheckpoint, &created, &eligible))
+						&c.destinationCloseTime, &c.destinationUsedTransferByteCount, &c.destinationCheckpoint, &created, &eligible, &expiration))
+					nextExpiration = earlierContractExpiration(nextExpiration, expiration)
 					seen++
 					next.Open = &ContractExpiryPosition{CreateTime: created, ContractId: c.contractId}
 					if eligible {
@@ -4074,7 +4095,9 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 					c := &OpenContract{dispute: true}
 					var created time.Time
 					var eligible bool
-					server.Raise(rows.Scan(&c.contractId, &c.sourceId, &c.destinationId, &created, &eligible))
+					var expiration *time.Time
+					server.Raise(rows.Scan(&c.contractId, &c.sourceId, &c.destinationId, &created, &eligible, &expiration))
+					nextExpiration = earlierContractExpiration(nextExpiration, expiration)
 					seen++
 					next.Dispute = &ContractExpiryPosition{CreateTime: created, ContractId: c.contractId}
 					if eligible {

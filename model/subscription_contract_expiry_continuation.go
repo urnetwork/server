@@ -99,31 +99,42 @@ func continueContractExpiryReportsInTx(ctx context.Context, tx server.PgTx, stat
 	return nil
 }
 
-// Canonical close-report receipts keep their existing owner. Ordinary expiry
-// follows CloseContract unchanged; the scoped adapter supplies no report ID and
-// adds its expected-payer/report-state fence around that same report owner.
+// Ordinary and scoped expiry use the public report owner without a report ID.
+// Admit any no-escrow report edit under that same contract lock; the separate
+// outcome transaction keeps normal settlement and projection ownership.
 func closeContractWithExpiryScope(ctx context.Context, scope *contractExpiryRepairScope,
 	contractId, clientId server.Id, usedTransferByteCount ByteCount, checkpoint bool,
 ) (returnErr error) {
-	if scope == nil {
-		return CloseContract(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
-	}
 	if usedTransferByteCount < 0 {
 		return errors.New("invalid used transfer byte count")
 	}
-	var terminalReplay bool
+	var terminalReplay, deferred bool
 	contractExpiryContinuationTx(ctx, contractId, scope, func(tx server.PgTx) {
+		var currentOutcome *ContractOutcome
+		server.Raise(tx.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId).Scan(&currentOutcome))
+		var hasEscrow, pending bool
+		if currentOutcome == nil {
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),
+                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, contractId).Scan(&hasEscrow, &pending))
+		}
+		if currentOutcome == nil && !hasEscrow {
+			if pending {
+				deferred = true
+				return
+			}
+			server.Raise(validateContractFreeSettlementOwnerInTx(ctx, tx, contractId))
+		}
 		_, terminalReplay, returnErr = applyContractCloseReportInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, nil)
 		server.Raise(returnErr)
 	})
-	if terminalReplay {
+	if terminalReplay || deferred {
 		return nil
 	}
 	closed, err := settleContractWithExpiryScope(ctx, contractId, scope)
 	if err != nil {
 		return err
 	}
-	if closed && scope.redis == nil {
+	if closed && (scope == nil || scope.redis == nil) {
 		RemoveFromStream(ctx, contractId)
 	}
 	return nil
@@ -158,6 +169,19 @@ func settleExpiredContractDispute(ctx context.Context, tag string, contractId se
 		}
 		_, proofErr := retainedContractExpiryUsage(retained)
 		server.Raise(proofErr)
+		var hasEscrow, legacy, pending bool
+		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),
+            EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT redis_reserved),
+            EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, contractId).Scan(&hasEscrow, &legacy, &pending))
+		if !hasEscrow && pending {
+			// A new accepted intent owns its outcome. Its worker may hold I;
+			// never wait for or delete it while ordinary expiry holds C.
+			// Cleanup observes the intent and records the usual deferred handoff.
+			return
+		}
+		if !hasEscrow {
+			server.Raise(validateContractFreeSettlementOwnerInTx(ctx, tx, contractId))
+		}
 		// Reload reports under this owner. Partial disputes need the same
 		// missing-peer billing continuation as ordinary expiry; their retained
 		// proof still records only the original reports.
@@ -167,8 +191,16 @@ func settleExpiredContractDispute(ctx context.Context, tag string, contractId se
 			panic(errors.New("disputed expiry lost retained ownership"))
 		}
 		server.Raise(continueContractExpiryReportsInTx(ctx, tx, fresh, ContractOutcomeSettled))
-		var legacy bool
-		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT redis_reserved)`, contractId).Scan(&legacy))
+		if !hasEscrow {
+			// The same source owner handles free intents and ordinary expiry.
+			// Positive reports retain their clock but require no funded payout.
+			posts, resolved, err = settleLegacyContractWithoutEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled, true)
+			server.Raise(err)
+			if !resolved {
+				panic(errors.New("contract remained non-final after force-close attempt"))
+			}
+			return
+		}
 		if legacy {
 			server.Raise(queueLegacySettlementInTx(ctx, tx, contractId, ContractOutcomeSettled, true))
 			return
@@ -231,10 +263,39 @@ func continueContractExpiry(ctx context.Context, tag string, openContract *contr
 			}
 		}
 	} else {
-		// nothing to settle, just close the transaction
+		// A report can commit before its public close resumes settlement.
+		// Recover that exact no-escrow owner even when no report edit remains.
 		var posts []func() any
 		var err error
 		contractExpiryContinuationTx(ctx, openContract.contractId, scope, func(tx server.PgTx) {
+			var currentOutcome *ContractOutcome
+			server.Raise(tx.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, openContract.contractId).Scan(&currentOutcome))
+			if currentOutcome != nil {
+				return
+			}
+			var hasEscrow, pending bool
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),
+                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, openContract.contractId).Scan(&hasEscrow, &pending))
+			if !hasEscrow {
+				if pending {
+					return
+				}
+				server.Raise(validateContractFreeSettlementOwnerInTx(ctx, tx, openContract.contractId))
+				// The proof is sticky, but reports and dispute state can change
+				// after preparation. Revalidate them under this outcome owner.
+				fresh, prepareErr := prepareContractExpiryInTx(ctx, tx, openContract.contractId, server.NowUtc())
+				if errors.Is(prepareErr, errContractAlreadySettled) {
+					return
+				}
+				server.Raise(prepareErr)
+				if fresh == nil || !fresh.usageUnverifiedRetained {
+					panic(errors.New("free expiry lost retained ownership"))
+				}
+				server.Raise(continueContractExpiryReportsInTx(ctx, tx, fresh, ContractOutcomeSettled))
+				posts, _, err = settleLegacyContractWithoutEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled, fresh.dispute)
+				server.Raise(err)
+				return
+			}
 			posts, _, err = settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled, scope)
 			if scope != nil {
 				server.Raise(err)

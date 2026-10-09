@@ -123,6 +123,9 @@ func validateLegacyCloseOwnerHeaderInTx(ctx context.Context, tx server.PgTx, con
 // the ordinary no-escrow close path even when reported bytes are positive.
 func settleLegacyContractWithoutEscrowInTx(ctx context.Context, tx server.PgTx, contractId server.Id,
 	outcome ContractOutcome, clearDispute bool) (posts []func() any, closed bool, err error) {
+	if err = validateContractFreeSettlementOwnerInTx(ctx, tx, contractId); err != nil {
+		return
+	}
 	var clockByteCount ByteCount
 	if err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT used_transfer_byte_count FROM contract_close WHERE contract_id=$1 AND party='destination'),0)`, contractId).Scan(&clockByteCount); err != nil {
 		return
