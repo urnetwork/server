@@ -64,7 +64,7 @@ func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int,
 // chronological fallback; both paths share the caller's registration budget.
 func registerLegacySettlementPayerDispatchPage(ctx context.Context, shard int, after *LegacySettlementCursor) (*LegacySettlementCursor, int) {
 	return registerLegacySettlementPayerDispatchPageWithReadiness(ctx, shard, after,
-		cachedLegacySettlementPayerIndexesReady, readLegacySettlementPayerIndexes)
+		cachedLegacySettlementPayerIndexesReady, readLegacySettlementPayerIndexesWithCache)
 }
 
 // Registration reuses the same full-index proof as dispatch; a cache miss keeps
