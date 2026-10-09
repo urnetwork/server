@@ -15,15 +15,17 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Missing rollout objects and known evidence gaps refuse only the original.
+// Only expected evidence gaps refuse the optional original. Schema and SQL
+// failures belong to the caller's transaction, as do missing ownership fences.
+var errProviderWorkEvidenceUnavailable = errors.New("provider work original evidence is unavailable")
+
+// The signer is optional; its database objects are migration prerequisites.
 // Once SQL starts, every unexpected failure belongs to the caller's transaction.
 func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(server.PgTx) error) bool {
 	if providerWorkSessionSourceFromContext(ctx) == nil {
 		return false
 	}
-	if !providerWorkOriginalSchemaReadyInTx(ctx, tx) {
-		return false
-	}
+	server.Raise(ctx.Err())
 	err := fn(tx)
 	if ctx.Err() != nil {
 		server.Raise(errors.Join(err, ctx.Err()))
@@ -35,65 +37,50 @@ func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(serve
 	return true
 }
 
-// Fences also apply to unsigned callers. Catalog readiness avoids issuing a
-// missing-table statement; an installed fence's failures must never be skipped.
-func providerWorkOptionalSchemaInTx(ctx context.Context, tx server.PgTx, fn func(server.PgTx) error) bool {
-	if !providerWorkSessionSchemaReadyInTx(ctx, tx) {
-		return false
-	}
-	server.Raise(errors.Join(fn(tx), ctx.Err()))
-	return true
-}
-
 // Lock keys, rather than UUID order, define the order because advisory hashes
 // may collide. Both request directions and connection owners use this function.
 func providerWorkLockEndpointsInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) {
 	if providerWorkSessionSourceFromContext(ctx) == nil {
 		return
 	}
-	providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) error {
-		if _, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`); err != nil {
-			return err
-		}
-		return providerWorkLockEndpointReadRowsInTx(ctx, optional, clientIds)
-	})
+	server.Raise(ctx.Err())
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`)
+	server.Raise(errors.Join(err, ctx.Err()))
+	server.Raise(errors.Join(providerWorkLockEndpointReadRowsInTx(ctx, tx, clientIds), ctx.Err()))
 }
 
 // Current writers prelock every endpoint. The shared bridge supports databases
 // that still have the original v776 functions; the repair removes its exclusive
 // holder and makes conflicting rolling writers retry before waiting on a fence.
-func providerWorkLockSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) bool {
-	return providerWorkLockSessionMutationHeadInTx(ctx, tx, true, clientIds...)
+func providerWorkLockSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) {
+	providerWorkLockSessionMutationHeadInTx(ctx, tx, true, clientIds...)
 }
 
 // READ COMMITTED connection owners take a fresh snapshot after their endpoint
 // wait. Their trigger's non-key sequence update needs no preliminary FOR UPDATE
 // on the head; the endpoint fence still orders every mutation and signed cut.
 // Repeatable-read callers must retain the generic stale-head guard above.
-func providerWorkLockCurrentSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) bool {
-	return providerWorkLockSessionMutationHeadInTx(ctx, tx, false, clientIds...)
+func providerWorkLockCurrentSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) {
+	providerWorkLockSessionMutationHeadInTx(ctx, tx, false, clientIds...)
 }
 
 // The compatibility bridge and endpoint key/order are identical for both
 // isolation modes. Only the old-snapshot guard depends on the caller's mode.
-func providerWorkLockSessionMutationHeadInTx(ctx context.Context, tx server.PgTx, lockHead bool, clientIds ...server.Id) bool {
+func providerWorkLockSessionMutationHeadInTx(ctx context.Context, tx server.PgTx, lockHead bool, clientIds ...server.Id) {
 	if len(clientIds) == 0 {
-		return false
+		return
 	}
-	return providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) error {
-		if _, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`); err != nil {
-			return err
-		}
-		if lockHead {
-			if err := providerWorkLockEndpointRowsInTx(ctx, optional, clientIds); err != nil {
-				return err
-			}
-		} else if _, err := optional.Exec(ctx, providerWorkEndpointWriteLockSQL, clientIds); err != nil {
-			return err
-		}
-		_, err := optional.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)
-		return err
-	})
+	server.Raise(ctx.Err())
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`)
+	server.Raise(errors.Join(err, ctx.Err()))
+	if lockHead {
+		err = providerWorkLockEndpointRowsInTx(ctx, tx, clientIds)
+	} else {
+		_, err = tx.Exec(ctx, providerWorkEndpointWriteLockSQL, clientIds)
+	}
+	server.Raise(errors.Join(err, ctx.Err()))
+	_, err = tx.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)
+	server.Raise(errors.Join(err, ctx.Err()))
 }
 
 var providerWorkEndpointWriteLockSQL = server.TaggedDatabaseStatement(`SELECT pg_advisory_xact_lock(776,lock_key) FROM

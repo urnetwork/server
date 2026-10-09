@@ -16,9 +16,8 @@ var ErrContractCloseOriginalIntegrity = errors.New("original close signature con
 
 // These bounded retained diagnostics never grant registered-key authority.
 const (
-	originalCloseKeyMissing     = "history_not_found"
-	originalCloseKeyCapacity    = "history_capacity"
-	originalCloseKeyUnavailable = "history_read_unavailable"
+	originalCloseKeyMissing  = "history_not_found"
+	originalCloseKeyCapacity = "history_capacity"
 )
 
 var errOriginalCloseKeyCapacity = errors.New("original close key history exceeds its finite admission bound")
@@ -51,29 +50,14 @@ func validateContractCloseOriginal(report ContractCloseReport) (*coreprotocol.Or
 
 // Key history is independently immutable. Select an exact historical key from
 // the report's own domain, never today's Redis projection or another policy.
-// Missing schema/history leaves the component unknown. Once its schema is ready,
-// any SQL error belongs to the caller's transaction and must abort that owner.
+// Migrations own the required schema. Missing history remains unknown; any SQL
+// error, including absent schema, aborts the caller's transaction.
 func originalCloseKeyRegistrationInTx(ctx context.Context, tx server.PgTx, original *coreprotocol.OriginalCloseReport) ([]byte, string, error) {
 	if original == nil {
 		return nil, "", nil
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
-	}
-	// Catalog reads can establish an incomplete rollout without issuing invalid
-	// history SQL. The actual read keeps this exact caller's snapshot and writes.
-	var ready bool
-	if err := tx.QueryRow(ctx, `SELECT count(*)=7 FROM pg_catalog.pg_attribute
- WHERE attrelid=pg_catalog.to_regclass('st_client_key_history')
- AND attnum>0 AND NOT attisdropped
- AND attname=ANY(ARRAY['client_id','generation','domain_hash','registration_hash','registration','evidence_hash','evidence'])`).Scan(&ready); err != nil {
-		return nil, "", errors.Join(ctx.Err(), fmt.Errorf("read original close key history schema: %w", err))
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, "", err
-	}
-	if !ready {
-		return nil, originalCloseKeyUnavailable, nil
 	}
 	registration, readErr := readOriginalCloseKeyRegistration(ctx, tx, original)
 	if ownerErr := ctx.Err(); ownerErr != nil {

@@ -95,9 +95,7 @@ func exerciseProviderWorkConnectionSnapshot(t testing.TB, retire, cancelWait boo
 	holder, err := holderConn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	server.Raise(err)
 	defer rollbackCloseReportTestTransaction(ctx, holder)
-	if !providerWorkLockSessionMutationInTx(ctx, holder, f.sourceId) {
-		t.Fatal("holder did not acquire the exact endpoint fence")
-	}
+	providerWorkLockSessionMutationInTx(ctx, holder, f.sourceId)
 	server.RaisePgResult(holder.Exec(ctx, `UPDATE network_client_connection SET connected=false,disconnect_time=$2 WHERE connection_id=$1`, f.sourceConnectionId, server.NowUtc()))
 	providerWorkRetainSessionEventsInTx(ctx, holder, f.sourceId)
 
@@ -236,9 +234,7 @@ func TestProviderWorkHandlerRetirementDefersBusyHead(t *testing.T) {
 		holder, err := holderConn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 		server.Raise(err)
 		defer rollbackCloseReportTestTransaction(ctx, holder)
-		if !providerWorkLockSessionMutationInTx(ctx, holder, f.sourceId) {
-			t.Fatal("holder did not acquire the cleanup endpoint fence")
-		}
+		providerWorkLockSessionMutationInTx(ctx, holder, f.sourceId)
 		server.RaisePgResult(holder.Exec(ctx, `UPDATE network_client_connection SET connected=false,disconnect_time=$2 WHERE connection_id=$1`, f.sourceConnectionId, server.NowUtc()))
 		providerWorkRetainSessionEventsInTx(ctx, holder, f.sourceId)
 		var reruns atomic.Int64

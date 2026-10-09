@@ -33,9 +33,7 @@ func exerciseProberShardConnectionDeadlineWait(t testing.TB, boundary string) {
 	case "registry":
 		server.RaisePgResult(held.Exec(ctx, `SELECT 1 FROM prober_shard_run WHERE network_id=$1 FOR UPDATE`, owner.NetworkId))
 	case "endpoint":
-		if !providerWorkLockSessionMutationInTx(ctx, held, owner.ClientId) {
-			t.Fatal("synthetic endpoint holder lost its ownership")
-		}
+		providerWorkLockSessionMutationInTx(ctx, held, owner.ClientId)
 	default:
 		t.Fatal("unknown connection admission barrier")
 	}
