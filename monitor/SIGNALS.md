@@ -6077,6 +6077,21 @@ fresh bounded point read before attributing an account failure to it. Its repair
 must retain report validation, owner/rekey and grant admission, and use the
 existing expiry policy; do not invent a direction or bypass accounting custody.
 
+The same source review found a separate known-direction gap: an accepted
+settlement intent with a checkpoint or a missing final peer also remains behind
+those expiry exclusions. A partial report is valid expiry input; ordinary
+expiry retains its original proof before finalizing checkpoints or adding a
+billing-only peer. The intent owner must use that same continuation after
+owner/grant admission, keeping proof, reports and unchanged accounting in its
+transaction. Preserve an accepted adjudication: its selected original report
+may become final, but a missing selected report cannot be supplied from the
+other party. Retained proof does not by itself authorize a batch to skip these
+report rules. Synthetic public-producer regressions compare ordinary expiry
+with existing intents after the 60-minute fallback, including exact usage,
+rollback and replay; native qualification of this broader patch is pending.
+These source findings do not attribute the six selected customer intents to
+this cause before their separately qualified exact report-state read.
+
 Measure close throughput over the complete invocation through debit/provider
 outputs, replay and worker join, including the configured collection delay.
 Fewer transactions or protocol replies are useful work measurements, not a
