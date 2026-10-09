@@ -67,6 +67,7 @@ func flushLegacySettlementCohort(ctx context.Context, contractIds []server.Id) (
 	bounded, cancel := context.WithTimeout(ctx, legacyFinancialCohortTimeout)
 	defer cancel()
 	bounded = withLegacyFinancialCohortBudget(bounded)
+	databaseTiming, observeDatabase := observeLegacyFinancialCohort(ctx)
 	finishFinancial := enterLegacySettlementTiming(ctx, legacySettlementFinancial)
 	var posts []func() any
 	traced := map[server.Id]context.Context{}
@@ -85,8 +86,9 @@ func flushLegacySettlementCohort(ctx context.Context, contractIds []server.Id) (
 			attempts, posts, err = flushLegacySettlementCohortInTx(bounded, tx, contractIds)
 			server.Raise(err)
 			bodyReturned = true
-		}, server.TxReadCommitted, server.OptNoRetry())
+		}, server.TxReadCommitted, server.OptNoRetry(), databaseTiming)
 	}, func(err error) { returnErr = err })
+	observeDatabase()
 	finishFinancial()
 	if returnErr != nil {
 		attempts = nil
@@ -133,7 +135,7 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 	if err := checkLegacyFinancialCohortBudget(ctx, "intents"); err != nil {
 		return nil, nil, err
 	}
-	rows, err := tx.Query(ctx, `SELECT owned.contract_id,owned.outcome,owned.clear_dispute
+	rows, err := queryLegacyFinancialCohort(ctx, tx, `SELECT owned.contract_id,owned.outcome,owned.clear_dispute
         FROM (SELECT unnest($1::uuid[]) AS contract_id ORDER BY contract_id OFFSET 0) AS requested
         CROSS JOIN LATERAL (SELECT contract_id,outcome,clear_dispute FROM legacy_settlement_intent
         WHERE contract_id=requested.contract_id OFFSET 0 FOR UPDATE SKIP LOCKED) AS owned`, sortedIds)
@@ -155,7 +157,7 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 		if err := checkLegacyFinancialCohortBudget(ctx, "headers"); err != nil {
 			return nil, nil, err
 		}
-		rows, err = tx.Query(ctx, `SELECT owned.contract_id,owned.source_network_id,owned.source_id,
+		rows, err = queryLegacyFinancialCohort(ctx, tx, `SELECT owned.contract_id,owned.source_network_id,owned.source_id,
             owned.destination_network_id,owned.destination_id,owned.payer_network_id,
             owned.companion_contract_id,owned.stream_id,owned.usage_origin_is_source,owned.outcome,
             owned.transfer_byte_count,owned.usage_unverified,owned.provider_usage
@@ -214,7 +216,7 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 		// Missing grants still have escrow revision ownership, but do not
 		// become financial membership. Bound each exact contract seek before
 		// its join so a dangling history cannot expand before the sentinel.
-		rows, err = tx.Query(ctx, `SELECT requested.contract_id,escrow.balance_id,balance.balance_id IS NOT NULL
+		rows, err = queryLegacyFinancialCohort(ctx, tx, `SELECT requested.contract_id,escrow.balance_id,balance.balance_id IS NOT NULL
             FROM unnest($1::uuid[]) AS requested(contract_id)
             CROSS JOIN LATERAL (SELECT balance_id FROM transfer_escrow
                 WHERE contract_id=requested.contract_id ORDER BY balance_id LIMIT $2 OFFSET 0) AS escrow
@@ -248,7 +250,7 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 		if err := checkLegacyFinancialCohortBudget(ctx, "ownership"); err != nil {
 			return nil, nil, err
 		}
-		ownershipAdmitted, err := server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(ownedIds, ownershipBalanceIds))
+		ownershipAdmitted, err := server.TryTxOwnershipExec(ctx, tx, legacyFinancialOwnershipKeys(ownedIds, ownershipBalanceIds))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -276,7 +278,7 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 		if err := checkLegacyFinancialCohortBudget(ctx, "grant_rows"); err != nil {
 			return nil, nil, err
 		}
-		rows, err = tx.Query(ctx, `SELECT owned.balance_id FROM (SELECT unnest($1::uuid[]) AS balance_id ORDER BY balance_id OFFSET 0) AS requested
+		rows, err = queryLegacyFinancialCohort(ctx, tx, `SELECT owned.balance_id FROM (SELECT unnest($1::uuid[]) AS balance_id ORDER BY balance_id OFFSET 0) AS requested
             CROSS JOIN LATERAL (SELECT balance_id FROM transfer_balance
             WHERE balance_id=requested.balance_id OFFSET 0 FOR UPDATE SKIP LOCKED) AS owned`, balanceIds)
 		server.WithPgResult(rows, err, func() {
@@ -306,7 +308,7 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 		if err := checkLegacyFinancialCohortBudget(ctx, "escrow_rows"); err != nil {
 			return nil, nil, err
 		}
-		rows, err = tx.Query(ctx, `SELECT requested.contract_id,owned.balance_id,owned.balance_byte_count,
+		rows, err = queryLegacyFinancialCohort(ctx, tx, `SELECT requested.contract_id,owned.balance_id,owned.balance_byte_count,
             owned.settled,owned.redis_reserved
             FROM unnest($1::uuid[]) AS requested(contract_id)
             CROSS JOIN LATERAL (SELECT balance_id,balance_byte_count,settled,redis_reserved

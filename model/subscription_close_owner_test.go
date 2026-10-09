@@ -773,7 +773,17 @@ func runContractCloseOwnerMixed2048(t *testing.T, healthyJitter bool) {
 		}
 		heldOwner := ContractCloseOwner{Kind: ContractCloseOwnerPayerNetwork, Id: fixtures[0].sourceNetworkId}
 		finishedOwnerKVs := map[ContractCloseOwner]bool{}
-		for _, done := range task.GetFinishedTasks(ctx, finished...) {
+		finishedTasks := task.GetFinishedTasks(ctx, finished...)
+		if jitter != nil {
+			// Retain every joined result before a failed per-owner assertion
+			// can stop validation. Failure evidence must not report a prefix.
+			for _, done := range finishedTasks {
+				var result LegacyPayerSettlementResult
+				server.Raise(json.Unmarshal([]byte(done.ResultJson), &result))
+				jitter.results = append(jitter.results, result)
+			}
+		}
+		for _, done := range finishedTasks {
 			if healthyJitter && (done.RescheduleError != "" || done.PostError != "" || !done.PostCompleted) {
 				t.Fatal("healthy close task retained a task or post error", done.RescheduleError, done.PostError, done.PostCompleted)
 			}
@@ -781,9 +791,6 @@ func runContractCloseOwnerMixed2048(t *testing.T, healthyJitter bool) {
 			var result LegacyPayerSettlementResult
 			server.Raise(json.Unmarshal([]byte(done.ArgsJson), &args))
 			server.Raise(json.Unmarshal([]byte(done.ResultJson), &result))
-			if jitter != nil {
-				jitter.results = append(jitter.results, result)
-			}
 			owner, err := legacyCloseTaskOwner(&args)
 			if err != nil || !expectedOwnerKVs[owner] || finishedOwnerKVs[owner] {
 				t.Fatal("actual worker changed or duplicated close owner", owner, err)

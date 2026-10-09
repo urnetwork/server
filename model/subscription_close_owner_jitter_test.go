@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,6 +38,8 @@ type contractCloseOwnerJitterObservation struct {
 	taskCallFailed              bool
 	accountingAndReplayVerified bool
 	results                     []LegacyPayerSettlementResult
+	stateLock                   sync.Mutex
+	cohortTimings               []legacyFinancialCohortObservation
 }
 
 // Preserve both original resource configurations and pool limits. The existing
@@ -44,6 +47,11 @@ type contractCloseOwnerJitterObservation struct {
 func newContractCloseOwnerJitterObservation(t testing.TB, ctx context.Context) (context.Context, *contractCloseOwnerJitterObservation, func()) {
 	t.Helper()
 	observation := &contractCloseOwnerJitterObservation{}
+	ctx = context.WithValue(ctx, legacyFinancialCohortObservationKey{}, func(value legacyFinancialCohortObservation) {
+		observation.stateLock.Lock()
+		observation.cohortTimings = append(observation.cohortTimings, value)
+		observation.stateLock.Unlock()
+	})
 	ctx = observation.reruns.context(ctx)
 	ctx = server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
 		switch event.Kind {
@@ -145,6 +153,9 @@ func (self *contractCloseOwnerJitterObservation) ownershipCounts() map[string]in
 func (self *contractCloseOwnerJitterObservation) report(t testing.TB) {
 	t.Helper()
 	self.protocol.enabled(false)
+	self.stateLock.Lock()
+	cohortTimings := append([]legacyFinancialCohortObservation(nil), self.cohortTimings...)
+	self.stateLock.Unlock()
 	completed, visited, busy, failed := 0, 0, 0, 0
 	cohortAttempts, cohortSelected, cohortCompleted, cohortFallbacks, cohortWriteRollbacks := 0, 0, 0, 0, 0
 	for _, result := range self.results {
@@ -180,6 +191,7 @@ func (self *contractCloseOwnerJitterObservation) report(t testing.TB) {
 		"financial_cohort_attempts": cohortAttempts, "financial_cohort_selected": cohortSelected,
 		"financial_cohort_completed": cohortCompleted, "financial_cohort_fallbacks": cohortFallbacks,
 		"financial_cohort_write_rollbacks": cohortWriteRollbacks,
+		"cohort_database_timings": cohortTimings,
 		"counter_delta":                    parallelCloseCounterDelta(t, self.beforeCounters, parallelCloseCounterSnapshot(t)),
 		"close_counter_before":             self.beforeClosed, "close_counter_after": contractClosedCounter.Snapshot(),
 		"qualifiers": []string{
