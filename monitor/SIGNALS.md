@@ -2203,8 +2203,8 @@ An unchanged repeat is not a remedy for this measured attribution gap. Keep
 the CPU incident open until a separately qualified observation identifies the
 unassigned work; do not relabel historical wait leaders as current CPU owners.
 
-**2026-10-09 bounded CPU function-profile discriminator.** The next disabled
-source uses the existing `perf` binary to sample CPU-clock leaf functions in
+**2026-10-09 bounded CPU function-profile discriminator.** The disabled
+source requires a trusted preinstalled `perf` binary to sample CPU-clock leaf functions in
 one exact PostgreSQL service cgroup at 19 Hz for five seconds. It performs no
 SQL query, stack or memory capture, installation, or profiling-policy change.
 Native unit, boot, process start, namespace, cgroup inode and postmaster
@@ -2239,6 +2239,33 @@ Source GO `b6d701d8` pins the corrected parser and 29 controls under
 Require a qualified corrected owned-local pipeline and a separately reviewed
 one-use Root carrier before any Main profile. Source and local parser success
 do not resolve the measured 92.923% unknown query-CPU share.
+
+**2026-10-09 first Main function-profile attempt, tool discovery refused.**
+The corrected owned-local pipeline passed before the Main attempt: 94 actual
+CPU-clock samples, 91 unresolved, no recorded loss or throttling, and exact
+owned-process cleanup. Its native gate `c33aaaff` and current-metadata source
+gate `94587f68` qualify the local control; they do not prove a Main tool exists
+or transfer local symbol coverage to Main.
+
+Root's one-use carrier `90f9dc7b` then contacted Main once. The private source
+observation at `2026-10-09T03:22:09.402880Z` returned
+`failure_phase=profile`, `failure_class=perf_missing_or_untrusted`, and no
+profile or retained native-identity object. Root joined exit 1; the shared
+transport reservation joined and released. Independent failure-only gate
+`21419376` and offline replay `584587f8` preserve this consumed attempt.
+
+The pinned source checks at most two fixed executable candidates. It merges
+missing files with failed regular-file, root-owner, mode, size, ELF and stable
+file-identity checks into that one refusal. Candidate count and individual
+reasons were not retained, so missing installation, wrapper/path mismatch and
+trust refusal remain indistinguishable. Control flow places this failure
+before any `perf` child or perf-data directory is created; it does not prove
+a perf permission denial, unsupported kernel event or PostgreSQL outage.
+No CPU distribution, current symbol coverage or recovery conclusion follows.
+The source-boundary report is `c00a5ae0` under
+`temp/main-health-r1-20261008-v1/pg-cpu-function-profile-v1/`. Preserve the
+failure and qualify a new discriminator before another Root contact; do not
+retry this carrier or weaken executable trust checks to obtain a profile.
 
 ### 1.3d Empty transfer-escrow write amplification
 Probe: `escrow-amplification`
