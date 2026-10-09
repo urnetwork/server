@@ -13,7 +13,7 @@ import (
 
 const testingClosePageCurrentSql = `
                 WITH bounded AS MATERIALIZED (
-                    SELECT contract_id,source_id,destination_id,dispute,create_time,usage_unverified
+                    SELECT contract_id,source_id,destination_id,dispute,create_time,usage_unverified,expiration_time
                     FROM transfer_contract
                     WHERE open AND (create_time,contract_id)>($5,$6) AND create_time <= $7
                     ORDER BY create_time,contract_id LIMIT $4
@@ -24,7 +24,9 @@ const testingClosePageCurrentSql = `
                     t.create_time,
                     NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
                     AND (t.usage_unverified OR (t.create_time <= $3
-                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $3)))
+                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $3))),
+                    CASE WHEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC'
+                        THEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') END AS next_expiration_time
                 FROM bounded t
                 LEFT JOIN contract_close source_contract_close ON source_contract_close.contract_id=t.contract_id AND source_contract_close.party=$1
                 LEFT JOIN contract_close destination_contract_close ON destination_contract_close.contract_id=t.contract_id AND destination_contract_close.party=$2
@@ -33,7 +35,7 @@ const testingClosePageCurrentSql = `
 
 const testingDisputePageCurrentSql = `
                 WITH bounded AS MATERIALIZED (
-                    SELECT contract_id,source_id,destination_id,create_time,usage_unverified
+                    SELECT contract_id,source_id,destination_id,create_time,usage_unverified,expiration_time
                     FROM transfer_contract
                     WHERE dispute AND outcome IS NULL AND (create_time,contract_id)>($3,$4) AND create_time <= $5
                     ORDER BY create_time,contract_id LIMIT $2
@@ -41,12 +43,16 @@ const testingDisputePageCurrentSql = `
                 SELECT t.contract_id,t.source_id,t.destination_id,t.create_time,
                     NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
                     AND (t.usage_unverified OR (t.create_time <= $1
-                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $1)))
+                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $1))),
+                    CASE WHEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC'
+                        THEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') END AS next_expiration_time
                 FROM bounded t ORDER BY t.create_time,t.contract_id
 			`
 
 // Keep the original SQL unwrapped for the execution plan. Only the separate
 // result-equivalence read aggregates private synthetic fixture rows into a hash.
+// Both variants include the scalar deadline hint; keep row_to_json so duplicate
+// source/destination report field names retain both values in the digest.
 func testingLoadedClosePagePlan(t testing.TB, ctx context.Context, query string, args ...any) testingUrlCompletedPlan {
 	t.Helper()
 	var plans []testingUrlCompletedPlan

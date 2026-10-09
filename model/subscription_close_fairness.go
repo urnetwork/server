@@ -37,10 +37,21 @@ type ContractExpirySweepCursor struct {
 func ForceCloseOpenContractIdsFairPage(ctx context.Context, minTime time.Time, maxCount, parallel, blockSize, blockIndex int,
 	after *ContractExpirySweepCursor,
 ) (int64, *ContractExpirySweepCursor, error) {
+	count, next, _, err := ForceCloseOpenContractIdsScheduledPage(ctx, minTime, maxCount, parallel, blockSize, blockIndex, after, nil)
+	return count, next, err
+}
+
+// Retain the earliest future expiration already read in complete raw subpages.
+// Continuations carry it through the fixed pass; no global deadline query or
+// separate scan competes with the existing bounded financial owner.
+func ForceCloseOpenContractIdsScheduledPage(ctx context.Context, minTime time.Time, maxCount, parallel, blockSize, blockIndex int,
+	after *ContractExpirySweepCursor, expiration *time.Time,
+) (int64, *ContractExpirySweepCursor, *time.Time, error) {
 	if maxCount <= 0 || parallel <= 0 {
-		return 0, nil, fmt.Errorf("invalid force close page budget")
+		return 0, nil, expiration, fmt.Errorf("invalid force close page budget")
 	}
-	return forceCloseContractPagesBudgeted(ctx, maxCount, after, forceClosePageBudget, forceCloseRawSubpageSize, time.Now,
+	nextExpiration := earlierContractExpiration(nil, expiration)
+	count, next, err := forceCloseContractPagesBudgeted(ctx, maxCount, after, forceClosePageBudget, forceCloseRawSubpageSize, time.Now,
 		func(size int, cursor *ContractExpirySweepCursor) (int64, *ContractExpirySweepCursor, error) {
 			// Admit both quiet candidates and missing deadlines that reached
 			// their maximum lifetime, even with an older retained quiet cutoff.
@@ -51,9 +62,17 @@ func ForceCloseOpenContractIdsFairPage(ctx context.Context, minTime time.Time, m
 			}
 			return forceCloseContractExpiryFreshPage(scanBefore, now, cursor,
 				func(position *ContractExpiryCursor) (int64, *ContractExpiryCursor, error) {
-					return ForceCloseOpenContractIdsPage(ctx, minTime, size, parallel, blockSize, blockIndex, position)
+					count, next, observed, err := forceCloseOpenContractIdsPage(ctx, minTime, size, parallel, blockSize, blockIndex, position)
+					if ctx.Err() == nil && forceClosePageCanAdvance(err) {
+						nextExpiration = earlierContractExpiration(nextExpiration, observed)
+					}
+					return count, next, err
 				})
 		})
+	if ctx.Err() != nil || !forceClosePageCanAdvance(err) {
+		return count, next, expiration, err
+	}
+	return count, next, nextExpiration, err
 }
 
 // Only success or a model witness for a complete page can advance. A failed

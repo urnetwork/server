@@ -25,7 +25,8 @@ func forceCloseErrorAllowsQuarantine(err error) bool {
 	}
 	for _, cause := range causes.Nodes {
 		switch cause.Err {
-		case context.Canceled, context.DeadlineExceeded, server.DbContextDoneError,
+		case errContractFreeSettlementOwner,
+			context.Canceled, context.DeadlineExceeded, server.DbContextDoneError,
 			pgx.ErrTxClosed, pgx.ErrTxCommitRollback,
 			pgconn.ErrConnClosed, io.EOF, io.ErrUnexpectedEOF, net.ErrClosed,
 			syscall.ECONNRESET, syscall.ECONNABORTED, syscall.ECONNREFUSED,
