@@ -76,7 +76,7 @@ func TestLegacySettlementEntriesDoNotReadIndexCatalog(t *testing.T) {
 		for _, fixture := range []struct {
 			value netEscrowOrderingTestFixture
 			id    server.Id
-		}{{payer, payerId}, {missing, missingId}, {financial, financialId}} {
+		}{{value: payer, id: payerId}, {value: missing, id: missingId}, {value: financial, id: financialId}} {
 			requireLegacySettlementTestState(t, ctx, fixture.value, fixture.id, false, true, 989, 0)
 			requireLegacyProviderDurability(t, ctx, fixture.value, fixture.id, 11)
 		}

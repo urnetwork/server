@@ -9,7 +9,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
@@ -38,24 +37,9 @@ type LegacySettlementDispatchResult struct {
 // in the task Post; a crash before that handoff simply repeats discovery.
 func DispatchLegacySettlementPayers(ctx context.Context, shard int, after *LegacySettlementCursor,
 	payerAfter *LegacySettlementPayerCursor) (result LegacySettlementDispatchResult, returnErr error) {
-	result, _, returnErr = DispatchLegacySettlementPayersWithReadiness(ctx, shard, after, payerAfter)
-	return
-}
-
-// Carry readiness through the task result, including the financial fallback.
-// Its existing 250ms budget includes the cache check or one catalog probe.
-func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int, after *LegacySettlementCursor,
-	payerAfter *LegacySettlementPayerCursor,
-) (result LegacySettlementDispatchResult, readiness *LegacySettlementPayerIndexReadiness, returnErr error) {
 	result.Private = true
 	if shard < 0 || shard >= LegacySettlementShardCount {
-		return result, nil, fmt.Errorf("invalid legacy settlement dispatch shard")
-	}
-	observation := legacySettlementPayerDueIndexObservation(ctx)
-	recordLegacyPayerReadiness(legacyPayerReadinessCounter, "dispatcher", observation)
-	readiness = &observation
-	if observation.Outcome != "ready" {
-		return result, readiness, ErrLegacySettlementPayerIndexUnavailable
+		return result, fmt.Errorf("invalid legacy settlement dispatch shard")
 	}
 	bounded, cancel := context.WithTimeoutCause(ctx, legacySettlementDispatchBudget, errLegacySettlementDispatchBudget)
 	defer cancel()
@@ -64,26 +48,10 @@ func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int,
 	return
 }
 
-// A valid missing-key index gives registration its own finite progress lane.
-// Rewalking a registered chronological prefix must not hold newer unregistered
-// work behind that pass's fixed cutoff. An unavailable index keeps the original
-// chronological fallback; both paths share the caller's registration budget.
+// Registration owns a fixed missing-key batch within the caller's budget.
+// Registered work enters the next bounded discovery turn.
 func registerLegacySettlementPayerDispatchPage(ctx context.Context, shard int, after *LegacySettlementCursor) (*LegacySettlementCursor, int) {
-	return registerLegacySettlementPayerDispatchPageWithReadiness(ctx, shard, after,
-		cachedLegacySettlementPayerIndexesReady, readLegacySettlementPayerIndexesWithCache)
-}
-
-// Registration reuses the same full-index proof as dispatch. A cache miss uses
-// the existing loader's bounded full check and publishes from its original
-// admission time. Invocation-local readers can force a transient refusal.
-func registerLegacySettlementPayerDispatchPageWithReadiness(ctx context.Context, shard int, after *LegacySettlementCursor,
-	cached func(context.Context) bool, read func(context.Context) (bool, error),
-) (*LegacySettlementCursor, int) {
-	readiness := observeLegacySettlementPayerIndexWithCache(ctx, cached, read, time.Now)
-	if readiness.Outcome == "ready" {
-		return after, registerLegacySettlementPayers(ctx, shard)
-	}
-	return registerLegacySettlementPayerPage(ctx, shard, after)
+	return after, registerLegacySettlementPayers(ctx, shard)
 }
 
 // Only this page owns its time budget. A completed discovery prefix can be
@@ -132,8 +100,6 @@ func dispatchLegacySettlementPayersPage(ctx, bounded context.Context, shard int,
 		// Discover registered work before optional compatibility registration:
 		// transaction cleanup can outlive its own query context. This prefix
 		// retains scheduling custody if our page deadline expires in cleanup.
-		// The chronological index also works while the NULL-payer index is
-		// being repaired. Newly registered keys enter the next bounded turn.
 		registrationCtx, registrationCancel := context.WithTimeout(bounded, legacySettlementRegistrationBudget)
 		server.HandleError(func() {
 			defer registrationCancel()
@@ -162,70 +128,5 @@ func dispatchLegacySettlementPayersPage(ctx, bounded context.Context, shard int,
 		}
 		returnErr = err
 	})
-	return
-}
-
-// At most 256 chronological due candidates are read, irrespective of NULL
-// density. Only missing keys are updated, by primary key and without financial
-// locks. The fixed cutoff/cursor survives task continuation. Future retries
-// need no owner until they become due, and normal recurring discovery revisits.
-func registerLegacySettlementPayerPage(ctx context.Context, shard int, after *LegacySettlementCursor) (next *LegacySettlementCursor, registered int) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
-		query := `SELECT next_attempt_time,contract_id,payer_network_id,
- statement_timestamp() AT TIME ZONE 'UTC' FROM legacy_settlement_intent
- WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
- ORDER BY next_attempt_time,contract_id LIMIT 256`
-		args := []any{shard}
-		if after != nil {
-			var passEnd any
-			if !after.PassEndTime.IsZero() {
-				passEnd = after.PassEndTime
-			}
-			query = `SELECT next_attempt_time,contract_id,payer_network_id,
- COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
- WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
- AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
- AND (next_attempt_time,contract_id)>($2,$3)
- ORDER BY next_attempt_time,contract_id LIMIT 256`
-			args = append(args, after.NextAttemptTime, after.ContractId, passEnd)
-		}
-		var missing []server.Id
-		count := 0
-		rows, err := tx.Query(ctx, query, args...)
-		server.WithPgResult(rows, err, func() {
-			for rows.Next() {
-				position := &LegacySettlementCursor{}
-				var payer *server.Id
-				server.Raise(rows.Scan(&position.NextAttemptTime, &position.ContractId, &payer, &position.PassEndTime))
-				next = position
-				count++
-				if payer == nil {
-					missing = append(missing, position.ContractId)
-				}
-			}
-		})
-		slices.SortFunc(missing, server.Id.Cmp)
-		if len(missing) > 0 {
-			// Preserve indexed point updates in one protocol batch. Separate
-			// round trips can exhaust the whole registration budget on a full
-			// NULL prefix even when each individual statement is inexpensive.
-			server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-				for _, id := range missing {
-					batch.Queue(`UPDATE legacy_settlement_intent AS intent
- SET payer_network_id=(SELECT COALESCE(payer_network_id,
- CASE WHEN companion_contract_id IS NULL THEN source_network_id ELSE destination_network_id END)
- FROM transfer_contract WHERE contract_id=$1)
- WHERE intent.contract_id=$1 AND intent.payer_network_id IS NULL`, id).Exec(func(tag pgconn.CommandTag) error {
-						registered += int(tag.RowsAffected())
-						return nil
-					})
-				}
-			})
-		}
-		if count < legacySettlementPayerRegistrationLimit {
-			next = nil
-		}
-	}, server.TxReadCommitted, server.OptNoRetry())
 	return
 }
