@@ -2,8 +2,6 @@
 package work
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -20,8 +18,7 @@ type FlushLegacySettlementsArgs struct {
 }
 type FlushLegacySettlementsResult struct {
 	model.LegacySettlementShardResult
-	Dispatch       *model.LegacySettlementDispatchResult      `json:"dispatch,omitempty"`
-	IndexReadiness *model.LegacySettlementPayerIndexReadiness `json:"index_readiness,omitempty"`
+	Dispatch *model.LegacySettlementDispatchResult `json:"dispatch,omitempty"`
 }
 
 func scheduleFlushLegacySettlements(clientSession *session.ClientSession, tx server.PgTx, shard int, after *model.LegacySettlementCursor, payerAfter *model.LegacySettlementPayerCursor, more bool) {
@@ -39,22 +36,8 @@ func ScheduleFlushLegacySettlements(clientSession *session.ClientSession, tx ser
 	}
 }
 func FlushLegacySettlements(args *FlushLegacySettlementsArgs, clientSession *session.ClientSession) (*FlushLegacySettlementsResult, error) {
-	return flushLegacySettlements(args, clientSession.Ctx,
-		model.DispatchLegacySettlementPayersWithReadiness, model.FlushLegacySettlementShard)
-}
-
-func flushLegacySettlements(args *FlushLegacySettlementsArgs, ctx context.Context,
-	dispatch func(context.Context, int, *model.LegacySettlementCursor, *model.LegacySettlementPayerCursor) (model.LegacySettlementDispatchResult, *model.LegacySettlementPayerIndexReadiness, error),
-	legacy func(context.Context, int, *model.LegacySettlementCursor, *model.LegacySettlementPayerCursor, int) (model.LegacySettlementShardResult, error),
-) (*FlushLegacySettlementsResult, error) {
-	result, readiness, err := dispatch(ctx, args.Shard, args.Cursor, args.PayerCursor)
-	if errors.Is(err, model.ErrLegacySettlementPayerIndexUnavailable) {
-		// Index/schema visibility is a scheduling prerequisite. Preserve the
-		// original guarded service during migration or a transient read error.
-		legacyResult, legacyErr := legacy(ctx, args.Shard, args.Cursor, args.PayerCursor, model.LegacySettlementPageLimit)
-		return &FlushLegacySettlementsResult{LegacySettlementShardResult: legacyResult, IndexReadiness: readiness}, legacyErr
-	}
-	return &FlushLegacySettlementsResult{Dispatch: &result, IndexReadiness: readiness}, err
+	result, err := model.DispatchLegacySettlementPayers(clientSession.Ctx, args.Shard, args.Cursor, args.PayerCursor)
+	return &FlushLegacySettlementsResult{Dispatch: &result}, err
 }
 func FlushLegacySettlementsPost(args *FlushLegacySettlementsArgs, result *FlushLegacySettlementsResult, clientSession *session.ClientSession, tx server.PgTx) error {
 	if result.Dispatch != nil {
