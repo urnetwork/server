@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +22,24 @@ func newStartupClosureFreeClients(ctx context.Context) (networkId, sourceId, des
 	model.Testing_CreateDevice(ctx, networkId, server.NewId(), sourceId, "synthetic-source", "synthetic")
 	model.Testing_CreateDevice(ctx, networkId, server.NewId(), destinationId, "synthetic-destination", "synthetic")
 	return
+}
+
+// Only selector volume is synthetic; the existing shape tests retain public
+// creation. Public report owners still perform the boundary's actual closes.
+func newStartupClosureScanContracts(ctx context.Context, networkId, sourceId, destinationId server.Id, count int) []server.Id {
+	ids := make([]server.Id, count)
+	for index := range ids {
+		ids[index] = server.NewId()
+	}
+	slices.SortFunc(ids, func(a, b server.Id) int { return a.Cmp(b) })
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract (
+			contract_id,source_network_id,source_id,destination_network_id,destination_id,
+			transfer_byte_count,usage_origin_is_source,create_time,expiration_time)
+			SELECT contract_id,$2,$3,$2,$4,100,true,$5,NULL FROM unnest($1::uuid[]) AS candidate(contract_id)`,
+			ids, networkId, sourceId, destinationId, server.NowUtc()))
+	})
+	return ids
 }
 
 func startupClosureWorker(ctx context.Context, targets ...task.Target) *task.TaskWorker {
@@ -145,14 +165,19 @@ func TestStartupContractClosurePagesKeepCapAndEarliestWake(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := model.WithProviderWorkSessionSource(t.Context(), nil)
 		networkId, sourceId, destinationId := newStartupClosureFreeClients(ctx)
-		ids := make([]server.Id, startupContractClosurePageSize+1)
-		for index := range ids {
-			id, err := model.CreateContractNoEscrow(ctx, networkId, sourceId, networkId, destinationId, 100)
-			server.Raise(err)
-			ids[index] = id
-		}
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=NULL WHERE contract_id=ANY($1::uuid[])`, ids))
+		ids := newStartupClosureScanContracts(ctx, networkId, sourceId, destinationId, 10001)
+		var stateLock sync.Mutex
+		maxOwnedKeys := 0
+		ownedKeys := map[server.PgOwnershipKey]bool{}
+		ctx = server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+			if event.Kind == server.PgOwnershipAdmitted {
+				stateLock.Lock()
+				maxOwnedKeys = max(maxOwnedKeys, len(event.Keys))
+				for _, key := range event.Keys {
+					ownedKeys[key] = true
+				}
+				stateLock.Unlock()
+			}
 		})
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
@@ -168,10 +193,32 @@ func TestStartupContractClosurePagesKeepCapAndEarliestWake(t *testing.T) {
 		queue := readExpiryRecoveryQueue(t, ctx)
 		second, found := queue[key]
 		var args ScheduleOpenContractClosuresArgs
-		if !found || json.Unmarshal([]byte(second.args), &args) != nil || args.After == nil || !args.StartedAt.Equal(started) {
-			t.Fatal("first PK page lost its fixed cap or continuation")
+		if !found || json.Unmarshal([]byte(second.args), &args) != nil || args.After == nil || *args.After != ids[9999] || !args.StartedAt.Equal(started) {
+			t.Fatal("first keyset page did not publish exactly 10000 ordered contracts with its fixed cap")
 		}
-		prior := queue[task.RunOnce("close_scheduled_contract", ids[0]).String()]
+		if len(queue) != 10001 {
+			t.Fatal("first keyset page did not commit exactly 10000 children and its continuation", len(queue))
+		}
+		if _, present := queue[task.RunOnce("close_scheduled_contract", ids[10000]).String()]; present {
+			t.Fatal("first keyset page crossed its 10000-row bound")
+		}
+		stateLock.Lock()
+		maxKeys := maxOwnedKeys
+		ownedScan := ownedKeys[task.RunOnceOwnershipKey(task.RunOnce("schedule_open_contract_closures"))] &&
+			ownedKeys[server.NewPgOwnershipKey("finished_task/task_id", first.id)]
+		stateLock.Unlock()
+		if maxKeys != 256 || !ownedScan {
+			t.Fatal("10000-row page lost bounded child publication or the scanner completion owners", maxKeys, ownedScan)
+		}
+		// Deterministically remove earlier rows from the open set between
+		// page reads. An increasing OFFSET would now miss the remaining row.
+		for _, id := range ids[:2] {
+			server.Raise(model.CloseContract(ctx, id, sourceId, 17, false))
+			server.Raise(model.CloseContract(ctx, id, destinationId, 17, false))
+			if _, terminal := model.GetContractClose(ctx, id); !terminal {
+				t.Fatal("public report owner did not close the first-page fixture")
+			}
+		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			scheduleOpenContractClosuresPage(owner, tx, &ScheduleOpenContractClosuresArgs{StartedAt: started.Add(10 * time.Minute)})
 		})
@@ -188,22 +235,19 @@ func TestStartupContractClosurePagesKeepCapAndEarliestWake(t *testing.T) {
 				t.Fatal("PK page omitted a contract or restarted its lifetime")
 			}
 		}
-		// A new complete scan with a later timestamp and later stored expiry
-		// collides with the child key; its earlier args and wake must survive.
+		// A later scan reaching this final row with a later timestamp and
+		// stored expiry must keep the existing child's earlier args and wake.
+		prior := queue[task.RunOnce("close_scheduled_contract", ids[10000]).String()]
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, ids[0], started.Add(4*time.Hour)))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, ids[10000], started.Add(4*time.Hour)))
 		})
-		result, err := ScheduleOpenContractClosures(&ScheduleOpenContractClosuresArgs{StartedAt: started.Add(20 * time.Minute)}, owner)
+		result, err := ScheduleOpenContractClosures(&ScheduleOpenContractClosuresArgs{StartedAt: started.Add(20 * time.Minute), After: &ids[9999]}, owner)
 		server.Raise(err)
-		keys := []server.PgOwnershipKey{}
-		for _, contract := range result.Contracts {
-			keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("close_scheduled_contract", contract.ContractId)))
-		}
-		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("schedule_open_contract_closures")))
+		keys := []server.PgOwnershipKey{task.RunOnceOwnershipKey(task.RunOnce("schedule_open_contract_closures"))}
 		server.OwnedTx(ctx, keys, func(tx server.PgTx) {
 			server.Raise(ScheduleOpenContractClosuresPost(&ScheduleOpenContractClosuresArgs{StartedAt: started.Add(20 * time.Minute)}, result, owner, tx))
 		}, server.TxReadCommitted, server.OptNoRetry())
-		after := readExpiryRecoveryQueue(t, ctx)[task.RunOnce("close_scheduled_contract", ids[0]).String()]
+		after := readExpiryRecoveryQueue(t, ctx)[task.RunOnce("close_scheduled_contract", ids[10000]).String()]
 		if after.id != prior.id || after.args != prior.args || !after.runAt.Equal(prior.runAt) {
 			t.Fatal("later startup changed an earlier contract wake or its deadline authority")
 		}
@@ -472,5 +516,76 @@ func TestScheduledContractClosureRegistersAndClosesRetainedSourceIntent(t *testi
 				t.Fatal("source continuation changed positive bytes or acquired financial custody")
 			}
 		})
+	})
+}
+
+// A refused later chunk retains earlier committed children and the same scan
+// page. Retrying coalesces those exact keys before publishing the missing tail.
+func TestStartupContractClosurePublicationRetryKeepsCommittedPrefix(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := model.WithProviderWorkSessionSource(t.Context(), nil)
+		networkId, sourceId, destinationId := newStartupClosureFreeClients(ctx)
+		ids := newStartupClosureScanContracts(ctx, networkId, sourceId, destinationId, 600)
+		owner := session.NewLocalClientSession(ctx, "", nil)
+		defer owner.Cancel()
+		started := server.NowUtc().Truncate(time.Microsecond)
+		server.Tx(ctx, func(tx server.PgTx) {
+			scheduleOpenContractClosuresPage(owner, tx, &ScheduleOpenContractClosuresArgs{StartedAt: started})
+			server.RaisePgResult(tx.Exec(ctx, `CREATE TABLE startup_close_queue_refusal (run_once_key text PRIMARY KEY)`))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO startup_close_queue_refusal VALUES($1)`, task.RunOnce("close_scheduled_contract", ids[256]).String()))
+			server.RaisePgResult(tx.Exec(ctx, `CREATE FUNCTION startup_close_queue_refuse() RETURNS trigger LANGUAGE plpgsql AS $body$
+				BEGIN
+					IF EXISTS(SELECT 1 FROM startup_close_queue_refusal WHERE run_once_key=NEW.run_once_key) THEN
+						RAISE EXCEPTION 'synthetic startup close queue refusal';
+					END IF;
+					RETURN NEW;
+				END $body$`))
+			server.RaisePgResult(tx.Exec(ctx, `CREATE TRIGGER startup_close_queue_refuse BEFORE INSERT ON pending_task
+				FOR EACH ROW EXECUTE FUNCTION startup_close_queue_refuse()`))
+		})
+		key := task.RunOnce("schedule_open_contract_closures").String()
+		initial := readExpiryRecoveryQueue(t, ctx)[key]
+		worker := startupClosureWorker(ctx, NewStartupContractClosureTaskTarget())
+		defer worker.Close()
+		makeCloseRetryTaskDue(ctx, initial.id)
+		finished, retried, posts, err := worker.EvalTasks(1)
+		if err != nil || len(finished)+len(posts) != 0 || len(retried) != 1 || retried[0] != initial.id {
+			t.Fatal("second queue chunk refusal did not retain the current scan page", finished, retried, posts, err)
+		}
+		partial := readExpiryRecoveryQueue(t, ctx)
+		current, found := partial[key]
+		if !found || current.id != initial.id || current.args != initial.args || len(partial) != 257 {
+			t.Fatal("failed page advanced its cursor or lost the committed 256-child prefix", len(partial))
+		}
+		for index, id := range ids {
+			_, found := partial[task.RunOnce("close_scheduled_contract", id).String()]
+			if found != (index < 256) {
+				t.Fatal("failed chunk changed the exact committed prefix", index)
+			}
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER startup_close_queue_refuse ON pending_task`))
+			server.RaisePgResult(tx.Exec(ctx, `DROP FUNCTION startup_close_queue_refuse()`))
+			server.RaisePgResult(tx.Exec(ctx, `DROP TABLE startup_close_queue_refusal`))
+		})
+		evalStartupClosureTask(t, ctx, worker, initial.id)
+		complete := readExpiryRecoveryQueue(t, ctx)
+		if len(complete) != 600 {
+			t.Fatal("retried page did not publish the entire bounded tail before EOF", len(complete))
+		}
+		for index, id := range ids {
+			key := task.RunOnce("close_scheduled_contract", id).String()
+			row, found := complete[key]
+			var args CloseScheduledContractArgs
+			if !found || json.Unmarshal([]byte(row.args), &args) != nil || args.ContractId != id ||
+				!args.Deadline.Equal(started.Add(model.DefaultContractExpiration)) || !row.runAt.Equal(args.Deadline) {
+				t.Fatal("retried page lost a child or changed its original deadline", index)
+			}
+			if prior, existed := partial[key]; existed && (row.id != prior.id || row.args != prior.args || !row.runAt.Equal(prior.runAt)) {
+				t.Fatal("retry replaced an already committed child or delayed its wake", index)
+			}
+		}
 	})
 }
