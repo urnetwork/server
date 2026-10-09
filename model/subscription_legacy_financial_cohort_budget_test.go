@@ -1,5 +1,5 @@
-// Cooperative admission yields only at completed protocol boundaries. Real
-// partial-write rollback is an accounting control, not healthy zero-retry work.
+// Cooperative admission refuses unwritten work at completed protocol boundaries.
+// Admitted writes finish within the hard deadline; genuine failures still roll back.
 package model
 
 import (
@@ -16,7 +16,7 @@ import (
 )
 
 // The parent deadline remains the hard limit, while an injected admission
-// clock controls only the decision to start another financial exchange.
+// clock controls only the decision to enter financial writes.
 func TestLegacyFinancialCohortBudgetPreservesParentDeadline(t *testing.T) {
 	deadline := time.Now().Add(time.Minute)
 	parent, cancelParent := context.WithDeadline(t.Context(), deadline)
@@ -43,9 +43,45 @@ func TestLegacyFinancialCohortBudgetPreservesParentDeadline(t *testing.T) {
 	}
 }
 
-// Both arms enter real transaction ownership. One advances the admission clock
-// after its reply; the other waits for the actual eight-row outcome update.
-func legacyFinancialCohortRequireBudgetHandoff(t *testing.T, afterWrite bool) {
+// A written cohort is exempt only from the soft admission boundary. Real
+// cancellation and an already-expired hard deadline still belong to its owner.
+func TestLegacyFinancialCohortWrittenBudgetPreservesHardCancellation(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(t.Context(), time.Minute)
+	defer cancelParent()
+	now := time.Now().Add(time.Hour)
+	clock := func() time.Time { return now }
+	ctx := withLegacyFinancialCohortBudget(context.WithValue(parent, legacyFinancialCohortClockKey{}, clock))
+	budget := ctx.Value(legacyFinancialCohortBudgetKey{}).(*legacyFinancialCohortBudget)
+	if err := checkLegacyFinancialCohortBudget(ctx); !errors.Is(err, errLegacyFinancialCohortBudget) {
+		t.Fatal("unwritten work bypassed its exhausted admission budget", err)
+	}
+	budget.written = true
+	if err := checkLegacyFinancialCohortBudget(ctx); err != nil {
+		t.Fatal("admitted writes were refused by the soft boundary", err)
+	}
+	cancelParent()
+	if err := checkLegacyFinancialCohortBudget(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatal("admitted writes ignored real parent cancellation", err)
+	}
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Unix(1, 0))
+	defer cancelExpired()
+	expired = withLegacyFinancialCohortBudget(expired)
+	expired.Value(legacyFinancialCohortBudgetKey{}).(*legacyFinancialCohortBudget).written = true
+	if err := checkLegacyFinancialCohortBudget(expired); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("admitted writes ignored the hard deadline", err)
+	}
+}
+
+// Both late controls advance the same clock after the real outcome UPDATE8.
+// Only an actual metadata error may roll back those acknowledged writes.
+type legacyFinancialCohortBudgetControl struct {
+	afterWrite   bool
+	failMetadata bool
+}
+
+// An ownership reply or the first eight-row update advances the admission
+// clock. No query, reply, transaction acknowledgement or hard deadline is faked.
+func legacyFinancialCohortRequireBudgetControl(t *testing.T, control legacyFinancialCohortBudgetControl) {
 	t.Helper()
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -53,10 +89,18 @@ func legacyFinancialCohortRequireBudgetHandoff(t *testing.T, afterWrite bool) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
 		fixture := legacyFinancialCohortSeed(t, ctx, legacyFinancialCohortLimit)
+		if control.failMetadata {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `CREATE FUNCTION cohort_budget_refuse_metadata() RETURNS trigger LANGUAGE plpgsql AS $$
+ BEGIN IF NEW.settled THEN RAISE EXCEPTION 'synthetic cohort budget metadata refusal'; END IF; RETURN NEW; END $$`))
+				server.RaisePgResult(tx.Exec(ctx, `CREATE TRIGGER cohort_budget_refuse_metadata BEFORE UPDATE ON transfer_escrow
+ FOR EACH ROW EXECUTE FUNCTION cohort_budget_refuse_metadata()`))
+			}, server.TxReadCommitted, server.OptNoRetry())
+		}
 		protocol, cleanup := legacyFinancialRunProtocolBind(t, ctx)
 		defer cleanup()
 		var advanced atomic.Bool
-		var outcomeUpdates atomic.Int64
+		var eightRowUpdates atomic.Int64
 		var invalidAdmission atomic.Bool
 		var events [5]atomic.Int64
 		base := time.Now()
@@ -73,18 +117,20 @@ func legacyFinancialCohortRequireBudgetHandoff(t *testing.T, afterWrite bool) {
 				if !event.TransactionScoped || event.BackendPid == 0 || !slices.Contains(event.Keys, server.NewPgOwnershipKey("transfer_balance", fixture.payer.balanceId)) {
 					invalidAdmission.Store(true)
 				}
-				if !afterWrite {
+				if !control.afterWrite {
 					advanced.Store(true)
 				}
 			}
 		})
 		retries := &parallelCloseRetryObservation{}
 		observed = retries.context(observed)
+		observed, finishPosts := withLegacySettlementPostBatch(observed)
+		defer finishPosts()
 		ordinary := protocol.proxies[server.DefaultPgVaultResourceName]
 		ordinary.commandCompleteObservation.Store(&legacyCohortCommandCompleteObservation{observe: func(tag []byte) {
 			if events[server.PgOwnershipAdmitted].Load() > 0 && bytes.Equal(tag, []byte("UPDATE 8\x00")) {
-				outcomeUpdates.Add(1)
-				if afterWrite {
+				eightRowUpdates.Add(1)
+				if control.afterWrite {
 					advanced.Store(true)
 				}
 			}
@@ -96,74 +142,115 @@ func legacyFinancialCohortRequireBudgetHandoff(t *testing.T, afterWrite bool) {
 		ordinary.commandCompleteObservation.Store(nil)
 		wire := protocol.snapshot()
 		after := contractClosedCounter.Snapshot()
-		if err != nil || ctx.Err() != nil || len(attempts) != 1 {
-			t.Fatal("cooperative rollback did not return a live-parent fallback", attempts, err, ctx.Err())
+		committed := control.afterWrite && !control.failMetadata
+		if err != nil || ctx.Err() != nil {
+			t.Fatal("budget control lost its live parent", attempts, err, ctx.Err())
 		}
-		attempt := attempts[0]
-		if attempt.contractId != fixture.ids[0] || !attempt.fallback || !attempt.deadlineFallback || attempt.completed || attempt.busy || attempt.financialWriteRollback != afterWrite {
-			t.Fatal("cooperative rollback lost exact prefix or write custody", attempt, afterWrite)
+		if committed {
+			if len(attempts) != len(fixture.ids) {
+				t.Fatal("admitted financial work lost its packed cohort", attempts)
+			}
+			for index, attempt := range attempts {
+				if attempt.contractId != fixture.ids[index] || !attempt.completed || attempt.fallback || attempt.deadlineFallback || attempt.busy || attempt.financialWriteRollback {
+					t.Fatal("soft boundary repeated admitted financial work", index, attempt)
+				}
+			}
+		} else {
+			if len(attempts) != 1 {
+				t.Fatal("rolled-back cohort lost its fallback prefix", attempts)
+			}
+			attempt := attempts[0]
+			if attempt.contractId != fixture.ids[0] || !attempt.fallback || attempt.deadlineFallback != !control.failMetadata || attempt.completed || attempt.busy || attempt.financialWriteRollback != control.failMetadata {
+				t.Fatal("rollback lost exact failure and write custody", attempt, control)
+			}
 		}
 		if !advanced.Load() || invalidAdmission.Load() || events[server.PgOwnershipAdmitted].Load() != 1 || events[server.PgOwnershipReleased].Load() != 1 ||
 			events[server.PgOwnershipWaiting].Load() != 0 || events[server.PgOwnershipRefused].Load() != 0 || events[server.PgOwnershipUncertain].Load() != 0 || retries.callbacks.Load() != 0 {
-			t.Fatal("cooperative boundary did not confirm actual ownership cleanup", advanced.Load(), invalidAdmission.Load(),
+			t.Fatal("budget control did not confirm actual ownership cleanup", advanced.Load(), invalidAdmission.Load(),
 				events[server.PgOwnershipAdmitted].Load(), events[server.PgOwnershipReleased].Load(), events[server.PgOwnershipWaiting].Load(),
 				events[server.PgOwnershipRefused].Load(), events[server.PgOwnershipUncertain].Load(), retries.callbacks.Load())
 		}
-		writes := int64(0)
-		if afterWrite {
-			writes = 1
+		var updates, commits, writeRollbacks, committedOutcomes int64
+		rollbacks := int64(1)
+		if committed {
+			updates, commits, rollbacks, committedOutcomes = 2, 1, 0, int64(len(fixture.ids))
+		} else if control.failMetadata {
+			updates, writeRollbacks = 1, 1
 		}
-		if outcomeUpdates.Load() != writes || wire[server.DefaultPgVaultResourceName]["begin_commands_observed"] != 1 ||
-			wire[server.DefaultPgVaultResourceName]["rollback_commands_observed"] != 1 || wire[server.DefaultPgVaultResourceName]["commit_commands_observed"] != 0 ||
-			wire[server.DefaultPgVaultResourceName]["transactions_with_writes_rolled_back"] != writes {
-			t.Fatal("fallback lacks its exact completed-write and rollback replies", outcomeUpdates.Load(), wire)
+		if eightRowUpdates.Load() != updates || wire[server.DefaultPgVaultResourceName]["begin_commands_observed"] != 1 ||
+			wire[server.DefaultPgVaultResourceName]["rollback_commands_observed"] != rollbacks || wire[server.DefaultPgVaultResourceName]["commit_commands_observed"] != commits ||
+			wire[server.DefaultPgVaultResourceName]["transactions_with_writes_rolled_back"] != writeRollbacks ||
+			wire[server.DefaultPgVaultResourceName]["transactions_with_writes_committed"] != commits {
+			t.Fatal("budget control lacks its exact write and transaction replies", eightRowUpdates.Load(), control, wire)
 		}
 		for route, counters := range wire {
 			for name, count := range counters {
-				if (strings.HasPrefix(name, "error_response_") || name == "connections_closed_after_begin_without_end_command" ||
-					name == "connections_closed_with_active_writes" || name == "transactions_with_writes_committed") && count != 0 {
-					t.Fatal("cooperative fallback canceled protocol work or committed writes", route, name, count)
+				if strings.HasPrefix(name, "error_response_") {
+					expected := int64(0)
+					if control.failMetadata && route == server.DefaultPgVaultResourceName && name == "error_response_other" {
+						expected = 1
+					}
+					if count != expected {
+						t.Fatal("budget control saw an unexpected PostgreSQL error", route, name, count, expected)
+					}
+				}
+				if (name == "connections_closed_after_begin_without_end_command" || name == "connections_closed_with_active_writes") && count != 0 {
+					t.Fatal("budget control lost transaction cleanup", route, name, count)
 				}
 			}
 		}
-		if !before.Stable || !after.Stable || before.Confirmed != after.Confirmed || before.Uncertain != after.Uncertain || before.Untracked != after.Untracked {
-			t.Fatal("rolled-back cohort escaped committed outcome custody", before, after)
+		if !before.Stable || !after.Stable || after.Confirmed-before.Confirmed != uint64(committedOutcomes) || before.Uncertain != after.Uncertain || before.Untracked != after.Untracked {
+			t.Fatal("budget control escaped committed outcome custody", before, after, committedOutcomes)
 		}
-		legacyFinancialCohortRequire(t, ctx, fixture, map[server.Id]bool{})
-		if legacyTargetMirrorQueueCount(ctx) != 0 {
-			t.Fatal("rolled-back cohort retained a mirror producer")
-		}
-		for _, id := range fixture.ids {
-			completed, busy, _, err := flushLegacySettlement(ctx, id)
-			if err != nil || !completed || busy {
-				t.Fatal("ordinary singleton did not recover the retained outcome", id, completed, busy, err)
+		finishPosts()
+		if !committed {
+			legacyFinancialCohortRequire(t, ctx, fixture, map[server.Id]bool{})
+			if legacyTargetMirrorQueueCount(ctx) != 0 {
+				t.Fatal("rolled-back cohort retained a mirror producer")
+			}
+			if control.failMetadata {
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER cohort_budget_refuse_metadata ON transfer_escrow`))
+				}, server.TxReadCommitted, server.OptNoRetry())
+			}
+			for _, id := range fixture.ids {
+				completed, busy, _, err := flushLegacySettlement(ctx, id)
+				if err != nil || !completed || busy {
+					t.Fatal("ordinary singleton did not recover the retained outcome", id, completed, busy, err)
+				}
 			}
 		}
 		completed := legacyFinancialCohortCompleted(fixture.ids)
 		legacyFinancialCohortRequire(t, ctx, fixture, completed)
-		if replay, err := FlushLegacyPayerSettlements(ctx, fixture.payer.sourceNetworkId, nil, legacyFinancialCohortLimit); err != nil || replay.Visited != 0 || replay.Completed != 0 || replay.More {
-			t.Fatal("singleton recovery replay repeated financial work", replay, err)
+		if replay, err := FlushLegacyPayerSettlements(ctx, fixture.payer.sourceNetworkId, nil, legacyFinancialCohortLimit); err != nil || replay.Visited != 0 || replay.Completed != 0 || replay.BusyOrGone != 0 || replay.Failed != 0 || replay.More {
+			t.Fatal("budget control replay repeated financial work", replay, err)
 		}
 		legacyFinancialCohortRequire(t, ctx, fixture, completed)
 		final := contractClosedCounter.Snapshot()
 		if !final.Stable || final.Confirmed-before.Confirmed != uint64(len(fixture.ids)) || final.Uncertain != before.Uncertain || final.Untracked != before.Untracked {
-			t.Fatal("singleton recovery lost exact per-contract commit custody", before, final)
+			t.Fatal("budget control lost exact per-contract commit custody", before, final)
 		}
-		t.Logf("cohort_budget_handoff after_outcome_write=%t actual_outcome_updates=%d financial_write_rollback=%t protocol=%v; intentional fallback control, not healthy zero-retry evidence",
-			afterWrite, outcomeUpdates.Load(), attempt.financialWriteRollback, wire)
+		t.Logf("cohort_budget_control after_outcome_write=%t metadata_failure=%t packed_committed=%t eight_row_updates=%d financial_write_rollbacks=%d protocol=%v; intentional refusal/failure arms are accounting controls",
+			control.afterWrite, control.failMetadata, committed, eightRowUpdates.Load(), writeRollbacks, wire)
 	})
 }
 
 // A real admitted key set is released by acknowledged rollback before any
 // financial mutation, with all original intents available to the singleton.
 func TestLegacyFinancialCohortBudgetHandoffAfterAdmission(t *testing.T) {
-	legacyFinancialCohortRequireBudgetHandoff(t, false)
+	legacyFinancialCohortRequireBudgetControl(t, legacyFinancialCohortBudgetControl{})
 }
 
-// An actual outcome update is rolled back, then exact accounting is recovered.
-// This intentional repeated financial work must fail the healthy retry gate.
-func TestLegacyFinancialCohortBudgetHandoffAfterOutcomeWrite(t *testing.T) {
-	legacyFinancialCohortRequireBudgetHandoff(t, true)
+// Acknowledged outcome writes spend the reserved half of the same hard budget.
+// The soft boundary cannot replace one packed commit with singleton retries.
+func TestLegacyFinancialCohortBudgetAfterOutcomeWriteCommitsPackedEight(t *testing.T) {
+	legacyFinancialCohortRequireBudgetControl(t, legacyFinancialCohortBudgetControl{afterWrite: true})
+}
+
+// A real statement failure after acknowledged outcomes still rolls back all
+// eight owners, and ordinary singletons recover their exact original accounting.
+func TestLegacyFinancialCohortBudgetMetadataFailureRetainsEveryOwner(t *testing.T) {
+	legacyFinancialCohortRequireBudgetControl(t, legacyFinancialCohortBudgetControl{afterWrite: true, failMetadata: true})
 }
 
 // Real parent cancellation after an ownership reply remains an error. It must

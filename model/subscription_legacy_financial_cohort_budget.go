@@ -1,5 +1,5 @@
-// Cohort admission ends at completed protocol boundaries, before its hard
-// timeout can cancel an in-flight response and destroy transaction ownership.
+// The soft boundary admits a financial write phase with cleanup time left.
+// Acknowledged writes finish under the original hard transaction deadline.
 package model
 
 import (
@@ -35,14 +35,15 @@ func withLegacyFinancialCohortBudget(ctx context.Context) context.Context {
 	})
 }
 
-// Reserve half the unchanged 500 ms hard budget for the admitted exchange and
-// confirmed cleanup. A slow or canceled exchange still fails normally; this
-// guard neither detaches financial work nor reports an unknown release as known.
+// Reserve half the unchanged 500 ms hard budget before the first write phase.
+// Once that phase has acknowledged writes, finish it under the same hard
+// context. A soft boundary must not roll back and repeat admitted financial work.
+// Cancellation and in-flight errors still retain their ordinary custody.
 func checkLegacyFinancialCohortBudget(ctx context.Context, stage ...string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if budget, _ := ctx.Value(legacyFinancialCohortBudgetKey{}).(*legacyFinancialCohortBudget); budget != nil && !budget.now().Before(budget.admitBefore) {
+	if budget, _ := ctx.Value(legacyFinancialCohortBudgetKey{}).(*legacyFinancialCohortBudget); budget != nil && !budget.written && !budget.now().Before(budget.admitBefore) {
 		if len(stage) > 0 {
 			return fmt.Errorf("%w before %s", errLegacyFinancialCohortBudget, stage[0])
 		}
