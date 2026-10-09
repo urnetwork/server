@@ -16733,6 +16733,38 @@ Probe: `redis-topology`
 ### 3.7 Reliability/scores pipeline load — busy vs degraded
 Probe: `reliability-pipeline`
 
+Location publication is a separate phase from running-window aggregation. A
+retained 2026-10-07 index-repair attempt had seven matching virtual-transaction
+and blocking-PID observations while a location-upsert prefix remained active:
+the final transaction age was about 727 seconds and query age about 219 seconds.
+Only the retained 512/1023-byte prefixes match `UpdateClientLocationReliabilitiesInTx`;
+the complete statement, emitting revision and caller were not captured. This
+does not attribute the separate running-window DELETE or ordinary connection
+pool waits to that backend.
+
+`UpdateClientLocationReliabilities` now commits at most 256 selected clients per
+maintenance transaction. It caps active/snapshot candidates before merging,
+caps raw disconnected rows before filtering already-known clients, and scopes
+both evidence aggregates and probe-eligibility writes to the selected clients.
+A final stable-ID cycle pass withdraws stale eligible hints outside the location
+work set. The pass fixes its clocks/policy once; it is not a fleet-wide snapshot,
+and changes behind its cursors may wait for the next pass. Explicit `InTx`
+callers retain atomic publication in their caller-owned transaction.
+
+Each page has a five-second context, statement timeout and idle-in-transaction
+timeout; the shared transaction owner retains its existing bounded commit and
+rollback cleanup. Completed pages survive a later failure, which propagates to
+the task or payment caller. A fresh attempt starts over idempotently; it does not
+claim a durable all-pass completion marker. The row cap is not a bound on one
+client's connection fanout, dead-tuple work, or equal-disconnect-time sorting:
+the old `(disconnect_time, connection_id)` index was dropped, and the declared
+replacement covers `(connected, disconnect_time)` only. Persistent page timeouts
+require bounded plan/cardinality evidence, not a larger task deadline. Native
+controls cover a held later-page write, atomic-row parity, sparse/equal-time raw
+pages, both zero-ID boundaries, whole-client fanout, server guard locality and
+failure before payment planning. Source qualification alone is not proof that
+an old Main transaction ended or an index repair completed.
+
 The reliability pipeline is the standing top redis load: announce-path
 `HINCRBY client_reliability_stats.<block>` (observed ~7,500/s on one node)
 plus block-drain and score-rebuild `HGETALL`s of those giant hashes (200–290ms
