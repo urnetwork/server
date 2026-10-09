@@ -467,7 +467,8 @@ no-escrow paths use the same unit: one contract. Reusing a contract, a checkpoin
 an accepted settlement intent, an expiry candidate, a busy attempt, rollback,
 retry or terminal replay is not another committed create/close. A malformed-row
 terminal quarantine counts as closed, so this counter is not a count of verified
-financial settlements. Deletion/retention is not a new terminal outcome.
+financial settlements. Deleting unresolved custody counts its terminal removal
+at the acknowledged commit. Retention of an already terminal row adds no close.
 
 The dashboard must sum per-process `rate(...[$__rate_interval])` across **all
 model-writing services in the selected environment**, not only Taskworker or the
