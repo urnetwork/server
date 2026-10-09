@@ -25,34 +25,44 @@ import (
 // frame contents are retained. The one-shot SET barrier has no timer: only
 // actual client closure or parent cancellation releases it.
 type legacyCohortLatencyProxy struct {
-	listener      net.Listener
-	target        string
-	ctx           context.Context
-	cancel        context.CancelFunc
-	enabled       atomic.Bool
-	delayNs       atomic.Int64
-	jitter        atomic.Bool
-	jitterCharged [5]atomic.Int64
-	jitterApplied [5]atomic.Int64
-	holdSet       atomic.Bool
-	held          atomic.Int64
-	heldClosed    atomic.Int64
-	ready         atomic.Int64
-	delayed       atomic.Int64
-	frontendBytes atomic.Int64
-	backendBytes  atomic.Int64
-	begins        atomic.Int64
-	errorLock     sync.Mutex
-	errorClasses  map[string]int64
-	commits       atomic.Int64
-	rollbacks     atomic.Int64
-	activeClosed  atomic.Int64
-	maxTxNs       atomic.Int64
-	stateLock     sync.Mutex
-	connectionKVs map[net.Conn]bool
-	accepted      chan struct{}
-	joined        sync.WaitGroup
-	closeOnce     sync.Once
+	listener                   net.Listener
+	target                     string
+	ctx                        context.Context
+	cancel                     context.CancelFunc
+	enabled                    atomic.Bool
+	delayNs                    atomic.Int64
+	jitter                     atomic.Bool
+	jitterCharged              [5]atomic.Int64
+	jitterApplied              [5]atomic.Int64
+	holdSet                    atomic.Bool
+	held                       atomic.Int64
+	heldClosed                 atomic.Int64
+	ready                      atomic.Int64
+	delayed                    atomic.Int64
+	frontendBytes              atomic.Int64
+	backendBytes               atomic.Int64
+	begins                     atomic.Int64
+	errorLock                  sync.Mutex
+	errorClasses               map[string]int64
+	commits                    atomic.Int64
+	rollbacks                  atomic.Int64
+	writeCommits               atomic.Int64
+	writeRollbacks             atomic.Int64
+	activeWritesClosed         atomic.Int64
+	activeClosed               atomic.Int64
+	commandCompleteObservation atomic.Pointer[legacyCohortCommandCompleteObservation]
+	maxTxNs                    atomic.Int64
+	stateLock                  sync.Mutex
+	connectionKVs              map[net.Conn]bool
+	accepted                   chan struct{}
+	joined                     sync.WaitGroup
+	closeOnce                  sync.Once
+}
+
+// A fixture can advance its private admission clock after an actual completed
+// statement. The callback must not retain frame data or perform blocking work.
+type legacyCohortCommandCompleteObservation struct {
+	observe func([]byte)
 }
 
 // Counts bytes read during the enabled window without retaining request data.
@@ -143,9 +153,13 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 	}()
 	defer func() { _ = client.Close(); _ = upstream.Close(); <-frontendDone }()
 	var transactionStarted time.Time
+	transactionHadWrites := false
 	defer func() {
 		if !transactionStarted.IsZero() {
 			self.activeClosed.Add(1)
+			if transactionHadWrites {
+				self.activeWritesClosed.Add(1)
+			}
 		}
 	}()
 	sawSet := false
@@ -175,8 +189,13 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 				case bytes.Equal(body, []byte("BEGIN\x00")):
 					self.begins.Add(1)
 					transactionStarted = time.Now()
+					transactionHadWrites = false
 				case bytes.Equal(body, []byte("SET\x00")):
 					sawSet = !transactionStarted.IsZero()
+				case bytes.HasPrefix(body, []byte("INSERT ")), bytes.HasPrefix(body, []byte("UPDATE ")), bytes.HasPrefix(body, []byte("DELETE ")):
+					if !transactionStarted.IsZero() {
+						transactionHadWrites = true
+					}
 				case bytes.Equal(body, []byte("COMMIT\x00")), bytes.Equal(body, []byte("ROLLBACK\x00")):
 					if !transactionStarted.IsZero() {
 						elapsed := time.Since(transactionStarted).Nanoseconds()
@@ -189,9 +208,19 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 					}
 					if bytes.Equal(body, []byte("COMMIT\x00")) {
 						self.commits.Add(1)
+						if transactionHadWrites {
+							self.writeCommits.Add(1)
+						}
 					} else {
 						self.rollbacks.Add(1)
+						if transactionHadWrites {
+							self.writeRollbacks.Add(1)
+						}
 					}
+					transactionHadWrites = false
+				}
+				if observation := self.commandCompleteObservation.Load(); observation != nil {
+					observation.observe(body)
 				}
 			}
 			if header[0] == 'Z' {
@@ -246,6 +275,9 @@ func (self *legacyCohortLatencyProxy) snapshot() map[string]int64 {
 		"ready_replies_observed":  self.ready.Load(), "ready_replies_charged_delay": self.delayed.Load(),
 		"frontend_bytes_read": self.frontendBytes.Load(), "complete_backend_frame_bytes_read": self.backendBytes.Load(),
 		"commit_commands_observed": self.commits.Load(), "rollback_commands_observed": self.rollbacks.Load(),
+		"transactions_with_writes_committed":                self.writeCommits.Load(),
+		"transactions_with_writes_rolled_back":              self.writeRollbacks.Load(),
+		"connections_closed_with_active_writes":             self.activeWritesClosed.Load(),
 		"connections_closed_after_begin_without_end_command": self.activeClosed.Load(),
 		"max_begin_to_end_command_observed_ns":               self.maxTxNs.Load(),
 		"held_financial_set_replies":                         self.held.Load(), "held_reply_client_closures": self.heldClosed.Load(),

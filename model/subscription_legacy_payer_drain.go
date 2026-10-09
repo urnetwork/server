@@ -91,6 +91,12 @@ func runLegacyCloseSettlementPages(ctx context.Context, owner ContractCloseOwner
 	bounded = context.WithValue(bounded, legacySettlementTimingKey{}, observer)
 	result, returnErr = flushLegacyCloseSettlementPages(ctx, bounded, owner, after, limit, drain,
 		func(parent, page context.Context, shard int, cursor *LegacySettlementCursor, pageLimit int) (LegacySettlementFlushResult, error) {
+			if owner.Kind == ContractCloseOwnerSourceClient {
+				// This family has no financial cohort. Its ordinary transaction
+				// still revalidates each locked header before closing or rekeying.
+				return flushLegacySettlementsPage(parent, page, shard, cursor, pageLimit,
+					flushLegacySettlementWithGrantWait)
+			}
 			return flushLegacySettlementsPage(parent, page, shard, cursor, pageLimit,
 				flushLegacySettlementWithGrantWait, flushLegacySettlementCohort)
 		})
@@ -149,6 +155,7 @@ func flushLegacyCloseSettlementPages(ctx, bounded context.Context, owner Contrac
 		result.FinancialCohortSelected += part.FinancialCohortSelected
 		result.FinancialCohortCompleted += part.FinancialCohortCompleted
 		result.FinancialCohortFallbacks += part.FinancialCohortFallbacks
+		result.FinancialCohortWriteRollbacks += part.FinancialCohortWriteRollbacks
 		result.HeadVisited += part.HeadVisited
 		result.HeadCompleted += part.HeadCompleted
 		result.HeadBusyOrGone += part.HeadBusyOrGone

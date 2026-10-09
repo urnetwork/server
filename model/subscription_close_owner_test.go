@@ -789,6 +789,18 @@ func runContractCloseOwnerMixed2048(t *testing.T, healthyJitter bool) {
 				t.Fatal("actual worker changed or duplicated close owner", owner, err)
 			}
 			finishedOwnerKVs[owner] = true
+			if owner.Kind == ContractCloseOwnerSourceClient &&
+				(result.FinancialCohortAttempts != 0 || result.FinancialCohortSelected != 0 ||
+					result.FinancialCohortCompleted != 0 || result.FinancialCohortFallbacks != 0 || result.FinancialCohortWriteRollbacks != 0) {
+				t.Fatal("free source entered an unsupported financial cohort", result)
+			}
+			if healthyJitter && owner.Kind == ContractCloseOwnerPayerNetwork &&
+				(result.FinancialCohortCompleted != contractsPerOwner ||
+					result.FinancialCohortAttempts != contractsPerOwner/legacyFinancialCohortLimit ||
+					result.FinancialCohortSelected != contractsPerOwner || result.FinancialCohortFallbacks != 0 ||
+					result.FinancialCohortWriteRollbacks != 0) {
+				t.Fatal("healthy payer work repeated or bypassed packed financial cohorts", result)
+			}
 			if !healthyJitter && owner == heldOwner {
 				if result.Completed != 0 || result.BusyOrGone == 0 || result.Failed != 0 {
 					t.Fatal("held paid balance did not produce the explicit busy control", result)

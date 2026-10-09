@@ -119,6 +119,12 @@ func (self *contractCloseOwnerJitterObservation) requireHealthy(t testing.TB) {
 		if counters["held_financial_set_replies"] != 0 || counters["connections_closed_after_begin_without_end_command"] != 0 {
 			t.Fatal("healthy jitter profile held a reply or lost an active transaction", route, counters)
 		}
+		if counters["transactions_with_writes_committed"] == 0 {
+			t.Fatal("healthy jitter profile did not observe completed write transactions", route, counters)
+		}
+		if counters["transactions_with_writes_rolled_back"] != 0 || counters["connections_closed_with_active_writes"] != 0 {
+			t.Fatal("healthy jitter profile repeated or lost a transaction that executed writes", route, counters)
+		}
 	}
 }
 
@@ -140,11 +146,17 @@ func (self *contractCloseOwnerJitterObservation) report(t testing.TB) {
 	t.Helper()
 	self.protocol.enabled(false)
 	completed, visited, busy, failed := 0, 0, 0, 0
+	cohortAttempts, cohortSelected, cohortCompleted, cohortFallbacks, cohortWriteRollbacks := 0, 0, 0, 0, 0
 	for _, result := range self.results {
 		completed += result.Completed
 		visited += result.Visited
 		busy += result.BusyOrGone
 		failed += result.Failed
+		cohortAttempts += result.FinancialCohortAttempts
+		cohortSelected += result.FinancialCohortSelected
+		cohortCompleted += result.FinancialCohortCompleted
+		cohortFallbacks += result.FinancialCohortFallbacks
+		cohortWriteRollbacks += result.FinancialCohortWriteRollbacks
 	}
 	report := map[string]any{
 		"profile":     "healthy_mixed2048_cyclic_ready_jitter",
@@ -154,6 +166,8 @@ func (self *contractCloseOwnerJitterObservation) report(t testing.TB) {
 		"equal_uuid_owner_pairs": 16, "contracts_per_owner": 64,
 		"worker_slots": 32, "worker_eval_calls": self.workerCalls, "held_grants": 0,
 		"context_budget_ns": int64(5 * time.Minute), "production_budgets_changed": false,
+		"cohort_hard_timeout_ns": int64(legacyFinancialCohortTimeout),
+		"cohort_admission_reserve_ns": int64(legacyFinancialCohortAdmissionTime),
 		"pool_limits_changed": false, "fixture_seed_in_observation_window": false,
 		"ready_jitter_sequence_ns": []int64{1000000, 2000000, 3000000, 4000000, 5000000},
 		"observation_wall_ns":      time.Since(self.started).Nanoseconds(),
@@ -163,6 +177,9 @@ func (self *contractCloseOwnerJitterObservation) report(t testing.TB) {
 		"accounting_and_replay_verified": self.accountingAndReplayVerified,
 		"transaction_callback_reruns":    self.reruns.callbacks.Load(), "ownership": self.ownershipCounts(),
 		"protocol_by_route": self.protocol.snapshot(), "close_results": self.results,
+		"financial_cohort_attempts": cohortAttempts, "financial_cohort_selected": cohortSelected,
+		"financial_cohort_completed": cohortCompleted, "financial_cohort_fallbacks": cohortFallbacks,
+		"financial_cohort_write_rollbacks": cohortWriteRollbacks,
 		"counter_delta":        parallelCloseCounterDelta(t, self.beforeCounters, parallelCloseCounterSnapshot(t)),
 		"close_counter_before": self.beforeClosed, "close_counter_after": contractClosedCounter.Snapshot(),
 		"qualifiers": []string{
@@ -170,6 +187,7 @@ func (self *contractCloseOwnerJitterObservation) report(t testing.TB) {
 			"Both ordinary and maintenance PostgreSQL resources use the same disposable database through joined proxies; original pool limits and production task/page budgets remain unchanged.",
 			"Each route repeats the deterministic 1,2,3,4,5ms sequence over observed Ready replies. Scheduler interleaving assigns replies to connections; timer overshoot and wall duration are not correctness thresholds.",
 			"Zero contention acceptance covers model BusyOrGone, failed advisory admissions, uncertain ownership, transaction reruns, task/post retries and protocol error responses. It does not measure every PostgreSQL row-lock wait or pool-queue duration.",
+			"Every healthy payer must complete exactly eight cohorts of eight without fallback. Real write-bearing rollbacks and disconnects also fail acceptance, independently of callback retry counters. The earlier admission cutoff reserves half the unchanged hard cohort budget; it never extends an I/O timeout.",
 			"Provider totals are checked as exact account plus unapplied durable payload custody. Provider-total and mirror output-target executions and their retry counts are unmeasured in this close-owner profile.",
 			"The separate held-grant test intentionally produces BusyOrGone and is not included in this healthy acceptance profile. No sustained throughput or fleet-capacity claim is made.",
 		},
