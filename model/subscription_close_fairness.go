@@ -56,8 +56,8 @@ func ForceCloseOpenContractIdsFairPage(ctx context.Context, minTime time.Time, m
 		})
 }
 
-// A page can advance only after success or a fully classified accounting
-// refusal. The shared budget wrapper rejects cancellation and all other errors.
+// Only success or a model witness for a complete page can advance. A failed
+// visit retains its database custody and returns on the next complete pass.
 func forceCloseContractExpirySweepPage(minTime, now time.Time, after *ContractExpirySweepCursor,
 	page func(*ContractExpiryCursor) (int64, *ContractExpiryCursor, error),
 ) (int64, *ContractExpirySweepCursor, error) {
@@ -94,10 +94,8 @@ func forceCloseContractExpirySweepPage(minTime, now time.Time, after *ContractEx
 		}
 	}
 	count, cursor, err := page(position)
-	if err != nil {
-		if _, ok := err.(*ForceCloseAccountingError); !ok {
-			return count, after, err
-		}
+	if !forceClosePageCanAdvance(err) {
+		return count, after, err
 	}
 	if historical {
 		next.Historical = cursor

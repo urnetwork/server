@@ -10,6 +10,7 @@ import (
 	// "encoding/hex"
 	"errors"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -4153,10 +4154,14 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 			return callErr
 		}
 		switch value := recovered.(type) {
+		case runtime.Error:
+			// A programming panic interrupts this row and worker. The outer
+			// recovery records it without granting completed-visit authority.
+			panic(value)
 		case error:
 			return value
 		default:
-			return fmt.Errorf("%v", value)
+			panic(value)
 		}
 	}
 
@@ -4243,6 +4248,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 	attempted := make([]bool, len(openContracts))
 	contractErrors := make([]error, len(openContracts))
 	contractCompleted := make([]bool, len(openContracts))
+	contractVisited := make([]bool, len(openContracts))
 	eligibilitySkipped := make([]bool, len(openContracts))
 	deferredSettlements := make([]bool, len(openContracts))
 	accountingRejections := make([]bool, len(openContracts))
@@ -4282,6 +4288,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 					if prepareErr != nil && !errors.Is(prepareErr, errContractAlreadySettled) {
 						// A failed proof read/write is not authority to quarantine.
 						contractErrors[j] = prepareErr
+						contractVisited[j] = true
 						continue
 					}
 					if fresh == nil && prepareErr == nil {
@@ -4289,6 +4296,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 						// Its eligibility check completed without a financial close;
 						// the proper owner or a later quiet pass retains retirement.
 						eligibilitySkipped[j] = true
+						contractVisited[j] = true
 						continue
 					}
 					attempted[j] = true
@@ -4321,6 +4329,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 					quarantinedAccountingRejections[j] = isForceCloseQuarantinedAccountingRejection(closeErr, quarantineClaimed, quarantineErr, cleanupErr)
 					deferredSettlements[j] = isForceCloseDeferredSettlement(closeErr, quarantineErr, cleanupErr)
 					contractCompleted[j] = true
+					contractVisited[j] = true
 				}
 			})
 			if recovered != nil {
@@ -4343,8 +4352,13 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 		}
 	}
 	accountingOnly := true
+	allVisited := true
+	pageErrors := []error{}
 	var verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount int64
 	for index, contractErr := range contractErrors {
+		if !contractVisited[index] {
+			allVisited = false
+		}
 		if eligibilitySkipped[index] {
 			// A current eligibility rejection is a completed scan visit, not
 			// a close or a reason to discard other rows' classified errors.
@@ -4369,17 +4383,22 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 			accountingOnly = false
 		}
 		if contractErr != nil {
-			err = errors.Join(err, fmt.Errorf("force close contract %s at index %d: %w", openContracts[index].contractId, index, contractErr))
+			pageErrors = append(pageErrors, fmt.Errorf("force close contract %s at index %d: %w", openContracts[index].contractId, index, contractErr))
 		}
 	}
 	for workerErr := range workerErrors {
 		accountingOnly = false
-		err = errors.Join(err, fmt.Errorf("force close worker: %w", workerErr))
+		allVisited = false
+		pageErrors = append(pageErrors, fmt.Errorf("force close worker: %w", workerErr))
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		accountingOnly = false
-		err = errors.Join(err, ctxErr)
+		allVisited = false
+		pageErrors = append(pageErrors, ctxErr)
 	}
+	// Keep causes flat so many completed visits do not manufacture an
+	// arbitrarily deep error graph. The bounded inspection still owns admission.
+	err = errors.Join(pageErrors...)
 	if accountingOnly && 0 < accountingRejectionCount+quarantinedAccountingRejectionCount {
 		err = &ForceCloseAccountingError{
 			cause:                               err,
@@ -4387,6 +4406,10 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 			accountingRejectionCount:            accountingRejectionCount,
 			quarantinedAccountingRejectionCount: quarantinedAccountingRejectionCount,
 		}
+	} else if allVisited && err != nil && forceCloseVisitCauseComplete(err) {
+		// Advancing the scan never finalizes this failed row. It remains in
+		// its original open/disputed set, or with its separate durable owner.
+		err = &ForceCloseVisitError{cause: err, attemptedCloseCount: closeCount, complete: true}
 	}
 	glog.Infof("[close-expired]page returned success=%t raw_open=%d raw_disputed=%d selected=%d terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d has_more=%t\n",
 		err == nil, rawOpen, rawDisputed, len(openContracts), verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount, next != nil)

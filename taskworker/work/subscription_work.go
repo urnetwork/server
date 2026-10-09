@@ -152,9 +152,9 @@ func closeExpiredContractsSweepPageResult(ctx context.Context, args *CloseExpire
 	return result, err
 }
 
-// Only a completed, fully classified accounting-error page may checkpoint its
-// raw scan position. End of pass resets the cursor so protected rows return on
-// the next pass; ambiguous/operational failures keep the original task args.
+// Completed accounting or row-visit failures can checkpoint their raw position
+// while remaining task failures. End of pass resets the cursor so unresolved
+// rows return. Interrupted or unattested work keeps the original task args.
 func closeExpiredContractsPageResult(ctx context.Context, args *CloseExpiredContractsArgs, c int64, next *model.ContractExpiryCursor, err error) (*CloseExpiredContractsResult, error) {
 	// The model alone can attest that every selected row completed and
 	// every failure is a verified still-reserved dispute or completed
@@ -176,6 +176,13 @@ func closeExpiredContractsPageResult(ctx context.Context, args *CloseExpiredCont
 		})
 		glog.Infof("[close-expired]completed batch terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d retry_delay_ms=%d\n",
 			accounting.VerifiedCloseCount(), accounting.AccountingRejectionCount(), accounting.QuarantinedAccountingRejectionCount(), delay.Milliseconds())
+	} else if visited, ok := err.(*model.ForceCloseVisitError); ok && ctx.Err() == nil &&
+		visited.CanCheckpoint() && visited.AttemptedCloseCount() == c {
+		// Keep operational error counts, metrics and ordinary backoff. This
+		// persists scan work only; it grants no financial completion authority.
+		err = task.WithRetryArgs(err, &CloseExpiredContractsArgs{
+			BlockSize: args.BlockSize, BlockIndex: args.BlockIndex, Cursor: next, Sweep: args.Sweep,
+		})
 	}
 	return &CloseExpiredContractsResult{
 		Full:   full,

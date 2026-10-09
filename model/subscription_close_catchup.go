@@ -40,10 +40,8 @@ func forceCloseContractExpiryCatchupPage(minTime time.Time, after *ContractExpir
 		position = &ContractExpiryCursor{ScanBefore: upper, Open: lower, Dispute: lower}
 	}
 	count, cursor, err := page(position)
-	if err != nil {
-		if _, classified := err.(*ForceCloseAccountingError); !classified {
-			return count, after, true, err
-		}
+	if !forceClosePageCanAdvance(err) {
+		return count, after, true, err
 	}
 	next.Catchup = cursor
 	next.CatchupTurn = 0

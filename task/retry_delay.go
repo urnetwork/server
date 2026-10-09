@@ -43,9 +43,27 @@ func WithRetryDelayAndArgs(err error, delay time.Duration, args any) error {
 	if !ok || !taskRetryCheckpointAllowed(hint) {
 		return hinted
 	}
+	return withTaskRetryArgs(hint, args)
+}
+
+// Checkpoints target-attested completed work while preserving ordinary error
+// backoff. A zero internal delay is deliberately not a cadence override.
+func WithRetryArgs(err error, args any) error {
+	if err == nil {
+		return nil
+	}
+	hint := &retryDelayError{cause: err}
+	if !taskRetryCheckpointAllowed(hint) {
+		return err
+	}
+	return withTaskRetryArgs(hint, args)
+}
+
+// Both checkpoint forms snapshot the same bounded argument object.
+func withTaskRetryArgs(hint *retryDelayError, args any) error {
 	data, marshalErr := json.Marshal(args)
 	if marshalErr != nil || len(data) == 0 || 4*1024 < len(data) || data[0] != '{' {
-		return hinted
+		return hint
 	}
 	argsJson := string(data)
 	return &retryDelayError{cause: hint.cause, delay: hint.delay, retryArgsJson: &argsJson}
@@ -61,7 +79,7 @@ func taskRetryCheckpointAllowed(hint *retryDelayError) bool {
 		return false
 	}
 	causes := inspectTaskRetryCauses(hint)
-	return validTaskRetryDelay(hint.delay) && causes.complete &&
+	return (hint.delay == 0 || validTaskRetryDelay(hint.delay)) && causes.complete &&
 		!causes.canceled && !causes.drained && !causes.targetMissing
 }
 
