@@ -52,7 +52,7 @@ func TestMigrationsContractCloseOwnerPublishedArtifacts(t *testing.T) {
 		if artifact == nil || artifact.rowColumn != version-597 {
 			t.Fatal("close owner has no exact deployment artifact", version)
 		}
-		for _, head := range []int{version-1, version} {
+		for _, head := range []int{version - 1, version} {
 			row := syntheticMigrationArtifactRow(head)
 			row[artifact.rowColumn] = "f"
 			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
@@ -110,7 +110,10 @@ func TestMigrationsContractCloseOwnerCatalogFaults(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		query := contractCloseOwnerCatalogTestQuery(t)
-		for _, fault := range []struct { index int; sql string }{
+		for _, fault := range []struct {
+			index int
+			sql   string
+		}{
 			{index: 0, sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN source_client_id SET NOT NULL`},
 			{index: 0, sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN source_client_id SET DEFAULT '00000000-0000-0000-0000-000000000000'::uuid`},
 			{index: 0, sql: `ALTER TABLE legacy_settlement_intent DISABLE TRIGGER legacy_settlement_intent_resolve_close_owner`},

@@ -27,7 +27,7 @@ var legacyCloseOwnerRegistrationSql = `SELECT picked.contract_id,owner.*
 // every valid owner behind the same bounded head on subsequent task turns.
 type LegacySettlementOwnerCursor struct {
 	After *server.Id `json:"after,omitempty"`
-	End server.Id `json:"end"`
+	End   server.Id  `json:"end"`
 }
 
 var legacyCloseOwnerRegistrationPageSql = strings.Replace(legacyCloseOwnerRegistrationSql,
@@ -40,8 +40,8 @@ func registerLegacyCloseOwners(ctx context.Context, shard int) int {
 
 func registerLegacyCloseOwnerPage(ctx context.Context, shard int, after *LegacySettlementOwnerCursor) (*LegacySettlementOwnerCursor, int, int) {
 	type registration struct {
-		contractId server.Id
-		sourceId server.Id
+		contractId     server.Id
+		sourceId       server.Id
 		payerNetworkId *server.Id
 	}
 	var registrations []registration
@@ -185,15 +185,15 @@ func legacyDispatchOwnerMatches(ctx context.Context, contractId server.Id, expec
 }
 
 type legacySourceOwnerDispatch struct {
-	cursor *LegacySettlementPayerCursor
-	ids []server.Id
-	probes int
-	yielded bool
-	payerDone bool
+	cursor     *LegacySettlementPayerCursor
+	ids        []server.Id
+	probes     int
+	yielded    bool
+	payerDone  bool
 	sourceDone bool
-	begin func(context.Context, int) *LegacySettlementPayerCursor
-	next func(context.Context, int, *LegacySettlementPayerCursor) (*server.Id, *LegacySettlementPosition)
-	matches func(context.Context, server.Id, ContractCloseOwner) bool
+	begin      func(context.Context, int) *LegacySettlementPayerCursor
+	next       func(context.Context, int, *LegacySettlementPayerCursor) (*server.Id, *LegacySettlementPosition)
+	matches    func(context.Context, server.Id, ContractCloseOwner) bool
 }
 
 // Invocation-local seams keep cancellation tests on the same discovery path.
@@ -252,7 +252,7 @@ func DispatchLegacySettlementCloseOwners(ctx context.Context, shard int, after *
 	// reached EOF. Restarting it independently would alternate forever when
 	// payer and source populations need different numbers of probes.
 	source := &legacySourceOwnerDispatch{
-		payerDone: payerAfter == nil && sourceAfter != nil,
+		payerDone:  payerAfter == nil && sourceAfter != nil,
 		sourceDone: sourceAfter == nil && payerAfter != nil,
 	}
 	if sourceAfter != nil {

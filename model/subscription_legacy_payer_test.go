@@ -357,7 +357,10 @@ func TestLegacySettlementPayerRegistrationTimeoutFallsBack(t *testing.T) {
 			err  error
 		}
 		done := make(chan outcome, 1)
-		go func() { page, err := FlushLegacySettlementShard(ctx, shard, nil, nil, 64); done <- outcome{page: page, err: err} }()
+		go func() {
+			page, err := FlushLegacySettlementShard(ctx, shard, nil, nil, 64)
+			done <- outcome{page: page, err: err}
+		}()
 		requireContractLifecycleBlockedBy(t, ctx, held, blocker)
 		var got outcome
 		select {

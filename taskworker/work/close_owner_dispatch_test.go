@@ -32,8 +32,8 @@ func TestLegacyCloseDispatcherPublishesIndependentSourceAndPayerOwners(t *testin
 			server.Raise(FlushLegacySettlementsPost(args, result, clientSession, tx))
 		})
 		for _, owner := range []struct {
-			kind model.ContractCloseOwnerKind
-			key *task.RunOnceOption
+			kind   model.ContractCloseOwnerKind
+			key    *task.RunOnceOption
 			target task.Target
 		}{
 			{kind: model.ContractCloseOwnerPayerNetwork, key: task.RunOnce("flush_legacy_payer_settlements", id), target: model.NewLegacyPayerSettlementTaskTarget()},

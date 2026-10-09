@@ -432,7 +432,7 @@ func TestContractCloseOwnerFreeExpiryRetainsOriginalPartialReports(t *testing.T)
 				ContractPartyDestination: {ByteCount: 11, Checkpoint: false},
 			}, usageOriginIsSource: true},
 			{name: "companion bilateral checkpoints", reports: map[ContractParty]contractUsageClose{
-				ContractPartySource: {ByteCount: 17, Checkpoint: true},
+				ContractPartySource:      {ByteCount: 17, Checkpoint: true},
 				ContractPartyDestination: {ByteCount: 11, Checkpoint: true},
 			}, usageOriginIsSource: false, wantBytes: 11},
 		}

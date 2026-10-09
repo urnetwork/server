@@ -15,7 +15,7 @@ import (
 type LegacyPayerSettlementArgs struct {
 	Private        bool                    `json:"_private_task_arguments"`
 	PayerNetworkId server.Id               `json:"payer_network_id"`
-	Owner *ContractCloseOwner `json:"owner,omitempty"`
+	Owner          *ContractCloseOwner     `json:"owner,omitempty"`
 	Cursor         *LegacySettlementCursor `json:"cursor,omitempty"`
 }
 

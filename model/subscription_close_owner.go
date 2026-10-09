@@ -24,7 +24,7 @@ var errContractCloseOwnerUnresolved = errors.New("contract close owner is unreso
 // The kind is part of the identity even when the two UUID values collide.
 type ContractCloseOwner struct {
 	Kind ContractCloseOwnerKind `json:"kind"`
-	Id server.Id `json:"id"`
+	Id   server.Id              `json:"id"`
 }
 
 func (self ContractCloseOwner) valid() bool {

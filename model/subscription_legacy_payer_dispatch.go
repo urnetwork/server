@@ -22,19 +22,19 @@ const legacySettlementDiscoveryBudget = legacySettlementDispatchBudget - legacyS
 // Identity is private task data. Cursor is a bounded compatibility-registration
 // traversal; PayerCursor controls fair service independently of contract density.
 type LegacySettlementDispatchResult struct {
-	Private            bool                         `json:"_private_task_arguments"`
-	PayerNetworkIds    []server.Id                  `json:"payer_network_ids"`
-	SourceClientIds []server.Id `json:"source_client_ids,omitempty"`
-	SourceCursor *LegacySettlementPayerCursor `json:"source_cursor,omitempty"`
-	SourceProbes int `json:"source_probes,omitempty"`
-	Cursor             *LegacySettlementCursor      `json:"cursor,omitempty"`
-	PayerCursor        *LegacySettlementPayerCursor `json:"payer_cursor,omitempty"`
-	Probes             int                          `json:"probes"`
-	Registered         int                          `json:"registered"`
-	RegistrationFailed bool                         `json:"registration_failed"`
-	RegistrationCursor *LegacySettlementOwnerCursor `json:"registration_cursor,omitempty"`
-	RegistrationUnresolved int `json:"registration_unresolved,omitempty"`
-	More               bool                         `json:"more"`
+	Private                bool                         `json:"_private_task_arguments"`
+	PayerNetworkIds        []server.Id                  `json:"payer_network_ids"`
+	SourceClientIds        []server.Id                  `json:"source_client_ids,omitempty"`
+	SourceCursor           *LegacySettlementPayerCursor `json:"source_cursor,omitempty"`
+	SourceProbes           int                          `json:"source_probes,omitempty"`
+	Cursor                 *LegacySettlementCursor      `json:"cursor,omitempty"`
+	PayerCursor            *LegacySettlementPayerCursor `json:"payer_cursor,omitempty"`
+	Probes                 int                          `json:"probes"`
+	Registered             int                          `json:"registered"`
+	RegistrationFailed     bool                         `json:"registration_failed"`
+	RegistrationCursor     *LegacySettlementOwnerCursor `json:"registration_cursor,omitempty"`
+	RegistrationUnresolved int                          `json:"registration_unresolved,omitempty"`
+	More                   bool                         `json:"more"`
 }
 
 // A fixed payer round and at most sixteen probes prevent a dense account from

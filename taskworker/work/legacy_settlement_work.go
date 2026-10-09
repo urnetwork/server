@@ -12,10 +12,10 @@ import (
 )
 
 type FlushLegacySettlementsArgs struct {
-	Shard       int                                `json:"shard"`
-	Cursor      *model.LegacySettlementCursor      `json:"cursor,omitempty"`
-	PayerCursor *model.LegacySettlementPayerCursor `json:"payer_cursor,omitempty"`
-	SourceCursor *model.LegacySettlementPayerCursor `json:"source_cursor,omitempty"`
+	Shard              int                                `json:"shard"`
+	Cursor             *model.LegacySettlementCursor      `json:"cursor,omitempty"`
+	PayerCursor        *model.LegacySettlementPayerCursor `json:"payer_cursor,omitempty"`
+	SourceCursor       *model.LegacySettlementPayerCursor `json:"source_cursor,omitempty"`
 	RegistrationCursor *model.LegacySettlementOwnerCursor `json:"registration_cursor,omitempty"`
 }
 type FlushLegacySettlementsResult struct {

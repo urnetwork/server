@@ -147,7 +147,7 @@ func (self *contractCloseOwnerJitterObservation) report(t testing.TB) {
 		failed += result.Failed
 	}
 	report := map[string]any{
-		"profile": "healthy_mixed2048_cyclic_ready_jitter",
+		"profile":     "healthy_mixed2048_cyclic_ready_jitter",
 		"test_failed": t.Failed(), "pending_contracts_before_worker": self.pendingContracts,
 		"paid_contracts": 1024, "free_contracts": 1024,
 		"payer_networks": 16, "source_clients": 16, "typed_owners": 32,
@@ -156,14 +156,14 @@ func (self *contractCloseOwnerJitterObservation) report(t testing.TB) {
 		"context_budget_ns": int64(5 * time.Minute), "production_budgets_changed": false,
 		"pool_limits_changed": false, "fixture_seed_in_observation_window": false,
 		"ready_jitter_sequence_ns": []int64{1000000, 2000000, 3000000, 4000000, 5000000},
-		"observation_wall_ns": time.Since(self.started).Nanoseconds(),
-		"completed": completed, "visited": visited, "busy_or_gone": busy, "failed": failed,
+		"observation_wall_ns":      time.Since(self.started).Nanoseconds(),
+		"completed":                completed, "visited": visited, "busy_or_gone": busy, "failed": failed,
 		"finished_close_tasks": self.finished, "task_retries": self.taskRetries,
 		"post_retries": self.postRetries, "task_call_failed": self.taskCallFailed,
 		"accounting_and_replay_verified": self.accountingAndReplayVerified,
-		"transaction_callback_reruns": self.reruns.callbacks.Load(), "ownership": self.ownershipCounts(),
+		"transaction_callback_reruns":    self.reruns.callbacks.Load(), "ownership": self.ownershipCounts(),
 		"protocol_by_route": self.protocol.snapshot(), "close_results": self.results,
-		"counter_delta": parallelCloseCounterDelta(t, self.beforeCounters, parallelCloseCounterSnapshot(t)),
+		"counter_delta":        parallelCloseCounterDelta(t, self.beforeCounters, parallelCloseCounterSnapshot(t)),
 		"close_counter_before": self.beforeClosed, "close_counter_after": contractClosedCounter.Snapshot(),
 		"qualifiers": []string{
 			"The finite window includes mixed dispatch, task publication, 32 actual close targets, joined posts, accounting assertions and empty replay; fixture creation precedes observation.",
