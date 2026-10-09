@@ -11,7 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	bip39 "github.com/tyler-smith/go-bip39"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 var ErrProberShardRetired = errors.New("probe shard execution is retired")
@@ -121,7 +121,10 @@ func ProberShardIdentity(ctx context.Context, owner *ProberShardOwner) (*ProberI
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT n.network_name FROM prober_shard_run r JOIN network n USING(network_id) JOIN network_client c ON c.client_id=r.client_id AND c.network_id=r.network_id WHERE r.task_id=$1 AND r.epoch=$2 AND r.state='active' AND clock_timestamp() AT TIME ZONE 'UTC'<r.deadline AND c.active`, owner.Key.TaskId, owner.Key.Epoch).Scan(&name))
 		})
-		token := jwt.NewByJwt(owner.NetworkId, owner.UserId, name, false, false).Client(owner.DeviceId, owner.ClientId).Sign()
+		token, mintErr := session.SignInternalProbe(ctx, session.NewByJwt(owner.NetworkId, owner.UserId, name, false, false).Client(owner.DeviceId, owner.ClientId))
+		if mintErr != nil {
+			return nil, mintErr
+		}
 		return &ProberIdentity{NetworkId: &owner.NetworkId, UserId: &owner.UserId, ClientId: &owner.ClientId, NetworkName: name, ByClientJwt: token}, nil
 	}, func(err error) (*ProberIdentity, error) {
 		if errors.Is(err, pgx.ErrNoRows) {

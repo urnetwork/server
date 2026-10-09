@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/onboarding"
 	"github.com/urnetwork/server/session"
@@ -16,7 +16,7 @@ import (
 
 func TestPostPrimaryOnboardingSessionDropsCancellationButKeepsBound(t *testing.T) {
 	parentCtx, cancelParent := context.WithCancel(context.Background())
-	clientSession := session.NewLocalClientSession(parentCtx, "", &jwt.ByJwt{
+	clientSession := session.NewLocalClientSession(parentCtx, "", &session.ByJwt{
 		NetworkId: server.NewId(),
 		UserId:    server.NewId(),
 	})
@@ -77,7 +77,7 @@ func TestRecordAuthNetworkClientOnboardingPersistsOnceAfterCallerCancellation(t 
 		}
 
 		callerCtx, cancelCaller := context.WithCancel(queryCtx)
-		clientSession := session.NewLocalClientSession(callerCtx, "", &jwt.ByJwt{
+		clientSession := session.NewLocalClientSession(callerCtx, "", &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    adminUserId,
 		})
@@ -120,7 +120,7 @@ func TestRecordAuthNetworkClientOnboardingPersistsOnceAfterCallerCancellation(t 
 		}) {
 			t.Fatal("could not create active client-context fixture")
 		}
-		contextSession := session.NewLocalClientSession(callerCtx, "", &jwt.ByJwt{
+		contextSession := session.NewLocalClientSession(callerCtx, "", &session.ByJwt{
 			NetworkId: contextNetworkId,
 			UserId:    server.NewId(),
 		})
@@ -164,7 +164,7 @@ func TestRecordDerivedAuthNetworkClientSkipsOnboarding(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		clientSession := session.NewLocalClientSession(ctx, "", &jwt.ByJwt{
+		clientSession := session.NewLocalClientSession(ctx, "", &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})
@@ -226,7 +226,7 @@ func TestAccountEnrollmentCallsitesPersistAfterCallerCancellation(t *testing.T) 
 			"synthetic-create-onboarding-"+createNetworkId.String(),
 			createUserId,
 		)
-		createSession := session.NewLocalClientSession(callerCtx, "", &jwt.ByJwt{
+		createSession := session.NewLocalClientSession(callerCtx, "", &session.ByJwt{
 			NetworkId: createNetworkId,
 			UserId:    createUserId,
 		})
@@ -259,18 +259,18 @@ func TestAccountEnrollmentCallsitesPersistAfterCallerCancellation(t *testing.T) 
 			"synthetic-verify-onboarding-"+verifyNetworkId.String(),
 			verifyUserId,
 		)
-		verifySession := session.NewLocalClientSession(callerCtx, "", &jwt.ByJwt{
+		verifySession := session.NewLocalClientSession(callerCtx, "", &session.ByJwt{
 			NetworkId: verifyNetworkId,
 			UserId:    verifyUserId,
 		})
 		defer verifySession.Cancel()
-		verifyToken := jwt.NewByJwt(
+		verifyToken := session.NewByJwt(
 			verifyNetworkId,
 			verifyUserId,
 			"synthetic-verify-onboarding",
 			false,
 			false,
-		).Sign()
+		).Testing_Sign()
 		verifyResult := &model.AuthVerifyResult{
 			Network: &model.AuthVerifyResultNetwork{ByJwt: verifyToken},
 		}
@@ -286,7 +286,7 @@ func TestAccountEnrollmentCallsitesPersistAfterCallerCancellation(t *testing.T) 
 		invalidResult := &model.AuthVerifyResult{
 			Network: &model.AuthVerifyResultNetwork{ByJwt: "synthetic-invalid-token"},
 		}
-		invalidSession := session.NewLocalClientSession(callerCtx, "", &jwt.ByJwt{
+		invalidSession := session.NewLocalClientSession(callerCtx, "", &session.ByJwt{
 			NetworkId: invalidNetworkId,
 			UserId:    server.NewId(),
 		})

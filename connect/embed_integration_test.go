@@ -12,7 +12,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -35,7 +35,7 @@ func waitForEmbedCondition(t testing.TB, ctx context.Context, what string, check
 }
 
 func embedClientSession(t testing.TB, ctx context.Context, byClientJwt string) *session.ClientSession {
-	byJwt, err := jwt.ParseByJwt(ctx, byClientJwt)
+	byJwt, err := session.ParseByJwt(ctx, byClientJwt)
 	connect.AssertEqual(t, err, nil)
 	return session.Testing_CreateClientSession(ctx, byJwt)
 }
@@ -170,7 +170,7 @@ func TestExchangeDataCapPausesStopsAndResumesTraffic(t *testing.T) {
 		providerUserId := server.NewId()
 		providerNetworkName := fmt.Sprintf("embed-provider-%s", providerNetworkId)
 		model.Testing_CreateNetwork(ctx, providerNetworkId, providerNetworkName, providerUserId)
-		providerSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false))
+		providerSession := session.Testing_CreateClientSession(ctx, session.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false))
 		providerResult, err := model.AuthNetworkClient(&model.AuthNetworkClientArgs{Description: "provider"}, providerSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, providerResult.Error, (*model.AuthNetworkClientError)(nil))
@@ -291,7 +291,7 @@ func TestConnectEmbedPlanAllowanceLiftsTheConcurrentLimit(t *testing.T) {
 		defer model.Testing_SetConcurrentClientsLimit(1, 1)()
 		defer model.Testing_ClearNetworkClientLimitCache()
 		testServer := newProviderIntentTestServer(t, ctx)
-		userSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(testServer.networkId, testServer.userId, testServer.networkName, false, false))
+		userSession := session.Testing_CreateClientSession(ctx, session.NewByJwt(testServer.networkId, testServer.userId, testServer.networkName, false, false))
 
 		// the tier's one slot is taken
 		testServer.connectOrdinaryClient()

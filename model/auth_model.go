@@ -23,9 +23,7 @@ import (
 	"github.com/urnetwork/server/session"
 
 	"github.com/gagliardetto/solana-go"
-
 	// "github.com/urnetwork/server/ulid"
-	"github.com/urnetwork/server/jwt"
 )
 
 // 4 hours
@@ -118,11 +116,11 @@ const (
 
 func AuthLogin(
 	login AuthLoginArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*AuthLoginResult, error) {
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
 
-	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, clientSession)
 	if !allow {
 		return nil, maxUserAuthAttemptsError(userAuth)
 	}
@@ -131,7 +129,7 @@ func AuthLogin(
 
 		return loginUserAuth(
 			userAuth,
-			session.Ctx,
+			clientSession.Ctx,
 		)
 
 	} else if login.AuthJwt != nil && login.AuthJwtType != nil {
@@ -161,32 +159,35 @@ func AuthLogin(
 				AuthJwtStr:        *login.AuthJwt,
 				UserAuthAttemptId: userAuthAttemptId,
 			},
-			session.Ctx,
+			clientSession.Ctx,
 		)
 	} else if login.WalletAuth != nil {
 
 		result, err := handleLoginWallet(
 			login.WalletAuth,
-			session.Ctx,
+			clientSession.Ctx,
 		)
 		// Only wallet logins that resolve to an existing user (a JWT-bearing
 		// result) count as a successful attempt -- a "new wallet user"
 		// result still requires registration, matching how the SSO branch
 		// above only marks success once it returns a Network result.
 		if err == nil && result != nil && result.Network != nil {
-			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+			SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
 		}
 		return result, err
 	} else if login.Seedphrase != nil && *login.Seedphrase != "" {
-		result, err := LoginWithSeedphrase(session.Ctx, *login.Seedphrase)
+		result, err := LoginWithSeedphrase(clientSession.Ctx, *login.Seedphrase)
 		if err != nil {
+			if errors.Is(err, session.ErrAuthUnavailable) || errors.Is(err, session.ErrSessionStoreUnavailable) {
+				return nil, err
+			}
 			return &AuthLoginResult{
 				Error: &AuthLoginResultError{
 					Message: err.Error(),
 				},
 			}, nil
 		}
-		SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+		SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
 		return &AuthLoginResult{
 			Network: &AuthLoginResultNetwork{
 				ByJwt: result.ByJwt,
@@ -341,6 +342,8 @@ type HandleLoginParsedAuthJwtArgs struct {
 
 // parsedAuthJwtLoginStore is the account storage an SSO login reads and
 // writes. Replaceable by tests; production uses the database.
+type sessionSignInKindKey struct{}
+
 type parsedAuthJwtLoginStore struct {
 	ssoAuthsByUserAuth func(ctx context.Context, userAuth string) ([]NetworkUserSsoAuth, error)
 	// the network_user_auth_password row for the user auth, if any
@@ -445,13 +448,20 @@ var parsedAuthJwtLoginDb = parsedAuthJwtLoginStore{
 			ctx,
 			&networkId,
 		)
-		return jwt.NewByJwt(
+		credential := session.NewByJwt(
 			networkId,
 			userId,
 			networkName,
 			isGuestMode,
 			isPro,
-		).Sign()
+		)
+		kind, _ := ctx.Value(sessionSignInKindKey{}).(string)
+		if kind != "apple" && kind != "google" {
+			kind = "sso"
+		}
+		signed, err := session.MintNetworkSession(ctx, credential, kind)
+		server.Raise(err)
+		return signed
 	},
 }
 
@@ -638,7 +648,7 @@ func handleLoginParsedAuthJwtWithStore(
 	// successful login
 	result := &AuthLoginResult{
 		Network: &AuthLoginResultNetwork{
-			ByJwt: store.signByJwt(ctx, networkId, *userId, networkName),
+			ByJwt: store.signByJwt(context.WithValue(ctx, sessionSignInKindKey{}, string(args.AuthJwt.AuthType)), networkId, *userId, networkName),
 		},
 	}
 	return result, nil
@@ -758,16 +768,20 @@ func handleLoginWallet(
 			&networkId,
 		)
 
-		byJwt := jwt.NewByJwt(
+		byJwt := session.NewByJwt(
 			networkId,
 			*userId,
 			networkName,
 			false,
 			pro,
 		)
+		signed, mintErr := session.MintNetworkSession(ctx, byJwt, "wallet")
+		if mintErr != nil {
+			return nil, mintErr
+		}
 		result = &AuthLoginResult{
 			Network: &AuthLoginResultNetwork{
-				ByJwt: byJwt.Sign(),
+				ByJwt: signed,
 			},
 		}
 		return
@@ -922,7 +936,7 @@ type AuthLoginWithPasswordResultError struct {
 
 func AuthLoginWithPassword(
 	loginWithPassword AuthLoginWithPasswordArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*AuthLoginWithPasswordResult, error) {
 	userAuth, _ := NormalUserAuthV1(&loginWithPassword.UserAuth)
 
@@ -935,7 +949,7 @@ func AuthLoginWithPassword(
 		return result, nil
 	}
 
-	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, clientSession)
 	if !allow {
 		return nil, maxUserAuthAttemptsError(userAuth)
 	}
@@ -947,9 +961,9 @@ func AuthLoginWithPassword(
 	var networkId server.Id
 	var networkName string
 
-	server.Db(session.Ctx, func(conn server.PgConn) {
+	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				SELECT
 					network_user_auth_password.user_id,
@@ -1000,9 +1014,9 @@ func AuthLoginWithPassword(
 		// This is intentionally narrower than password reset: it applies only to
 		// the exact fixed phone fixture and requires its vault-held password. Keep
 		// the existing salt and replace the derived hash atomically.
-		server.Db(session.Ctx, func(conn server.PgConn) {
+		server.Db(clientSession.Ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(
-				session.Ctx,
+				clientSession.Ctx,
 				`
 					UPDATE network_user_auth_password
 					SET password_hash = $1, verified = true
@@ -1021,9 +1035,9 @@ func AuthLoginWithPassword(
 		// prompt. This also repairs an unverified fixture left by a run against an
 		// older server, but only after its password has been proven.
 		if !userVerified && testAuthPolicy.BypassVerification {
-			server.Db(session.Ctx, func(conn server.PgConn) {
+			server.Db(clientSession.Ctx, func(conn server.PgConn) {
 				server.RaisePgResult(conn.Exec(
-					session.Ctx,
+					clientSession.Ctx,
 					`
 						UPDATE network_user_auth_password
 						SET verified = true
@@ -1037,17 +1051,17 @@ func AuthLoginWithPassword(
 		}
 
 		if userVerified {
-			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+			SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
 
 			isGuestMode := false
 
 			pro := IsProFresh(
-				session.Ctx,
+				clientSession.Ctx,
 				&networkId,
 			)
 
 			// success
-			byJwt := jwt.NewByJwt(
+			byJwt := session.NewByJwt(
 				networkId,
 				*userId,
 				networkName,
@@ -1055,7 +1069,11 @@ func AuthLoginWithPassword(
 				pro,
 			)
 
-			signedByJwt := byJwt.Sign()
+			signedByJwt, mintErr := session.MintNetworkSession(clientSession.Ctx, byJwt, "password")
+			if mintErr != nil {
+				return nil, mintErr
+			}
+			clientSession.WithByJwt(byJwt).ObserveAuthenticatedUse()
 			result := &AuthLoginWithPasswordResult{
 				Network: &AuthLoginWithPasswordResultNetwork{
 					ByJwt: &signedByJwt,
@@ -1109,7 +1127,7 @@ type AuthVerifyResultError struct {
 
 func AuthVerify(
 	verify AuthVerifyArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*AuthVerifyResult, error) {
 	userAuth, _ := NormalUserAuthV1(&verify.UserAuth)
 
@@ -1122,7 +1140,7 @@ func AuthVerify(
 		return result, nil
 	}
 
-	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, clientSession)
 	if !allow {
 		return nil, maxUserAuthAttemptsError(userAuth)
 	}
@@ -1134,16 +1152,16 @@ func AuthVerify(
 	var networkId server.Id
 	var networkName string
 
-	server.Db(session.Ctx, func(conn server.PgConn) {
+	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		authUserId := findUserIdByUserAuth(
-			&pgUserAuthUserIdLookup{ctx: session.Ctx, conn: conn},
+			&pgUserAuthUserIdLookup{ctx: clientSession.Ctx, conn: conn},
 			*userAuth,
 		)
 		if authUserId == nil {
 			return
 		}
 		result, err := conn.Query(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				SELECT
 					user_auth_verify.user_id,
@@ -1185,15 +1203,15 @@ func AuthVerify(
 
 	// verified
 	newAccount := false
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		// classify before marking this sign-in verified
 		newAccount = isNewAccountVerification(
-			&pgAuthVerifyAccountLookup{ctx: session.Ctx, conn: tx},
+			&pgAuthVerifyAccountLookup{ctx: clientSession.Ctx, conn: tx},
 			userId,
 		)
 
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				UPDATE network_user_auth_password
 				SET verified = true
@@ -1204,7 +1222,7 @@ func AuthVerify(
 		))
 
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				UPDATE user_auth_verify
 				SET used = true
@@ -1216,29 +1234,34 @@ func AuthVerify(
 		if newAccount {
 			// the welcome commits with the verification that completes the
 			// sign-up
-			addNetworkWelcomeInTx(session.Ctx, tx, networkId, userId, *userAuth)
+			addNetworkWelcomeInTx(clientSession.Ctx, tx, networkId, userId, *userAuth)
 		}
 	})
 
-	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+	SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
 
 	isGuestMode := false
 
 	isPro := IsProFresh(
-		session.Ctx,
+		clientSession.Ctx,
 		&networkId,
 	)
 
-	byJwt := jwt.NewByJwt(
+	byJwt := session.NewByJwt(
 		networkId,
 		userId,
 		networkName,
 		isGuestMode,
 		isPro,
 	)
+	signed, mintErr := session.MintNetworkSession(clientSession.Ctx, byJwt, "verify")
+	if mintErr != nil {
+		return nil, mintErr
+	}
+	clientSession.WithByJwt(byJwt).ObserveAuthenticatedUse()
 	result := &AuthVerifyResult{
 		Network: &AuthVerifyResultNetwork{
-			ByJwt: byJwt.Sign(),
+			ByJwt: signed,
 		},
 		NewAccount: newAccount,
 	}
@@ -1382,7 +1405,7 @@ type AuthVerifyCreateCodeError struct {
 
 func AuthVerifyCreateCode(
 	verifyCreateCode AuthVerifyCreateCodeArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*AuthVerifyCreateCodeResult, error) {
 	userAuth, _ := NormalUserAuthV1(&verifyCreateCode.UserAuth)
 
@@ -1398,16 +1421,16 @@ func AuthVerifyCreateCode(
 	// Rate-limit code sends (keyed by user_auth + client address) so an attacker
 	// cannot bomb a target's email/SMS or repeatedly invalidate their pending code.
 	// Each send intentionally consumes attempt budget (not marked success).
-	if _, allow := UserAuthAttempt(userAuth, session); !allow {
+	if _, allow := UserAuthAttempt(userAuth, clientSession); !allow {
 		return nil, maxUserAuthAttemptsError(userAuth)
 	}
 
 	created := false
 	var verifyCode string
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		userId := findUserIdByUserAuth(
-			&pgUserAuthUserIdLookup{ctx: session.Ctx, conn: tx},
+			&pgUserAuthUserIdLookup{ctx: clientSession.Ctx, conn: tx},
 			*userAuth,
 		)
 
@@ -1420,7 +1443,7 @@ func AuthVerifyCreateCode(
 		// every code send rewrote the user's entire code history (already-used
 		// rows included), which bloated the table and serialized concurrent sends
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				UPDATE user_auth_verify
 				SET used = true
@@ -1433,7 +1456,7 @@ func AuthVerifyCreateCode(
 		userAuthVerifyId := server.NewId()
 		verifyCode = createVerifyCode(verifyCreateCode.CodeType)
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				INSERT INTO user_auth_verify
 				(user_auth_verify_id, user_id, verify_code)
@@ -1470,7 +1493,7 @@ type AuthPasswordResetCreateCodeError struct {
 
 func AuthPasswordResetCreateCode(
 	resetCreateCode AuthPasswordResetCreateCodeArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*AuthPasswordResetCreateCodeResult, error) {
 	userAuth, _ := NormalUserAuthV1(&resetCreateCode.UserAuth)
 
@@ -1486,16 +1509,16 @@ func AuthPasswordResetCreateCode(
 	// Rate-limit code sends (keyed by user_auth + client address) so an attacker
 	// cannot bomb a target's email/SMS or repeatedly invalidate their pending code.
 	// Each send intentionally consumes attempt budget (not marked success).
-	if _, allow := UserAuthAttempt(userAuth, session); !allow {
+	if _, allow := UserAuthAttempt(userAuth, clientSession); !allow {
 		return nil, maxUserAuthAttemptsError(userAuth)
 	}
 
 	created := false
 	var resetCode string
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		userId := findUserIdByUserAuth(
-			&pgUserAuthUserIdLookup{ctx: session.Ctx, conn: tx},
+			&pgUserAuthUserIdLookup{ctx: clientSession.Ctx, conn: tx},
 			*userAuth,
 		)
 
@@ -1505,7 +1528,7 @@ func AuthPasswordResetCreateCode(
 
 		// delete existing codes and create a new code
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				UPDATE user_auth_reset
 				SET used = true
@@ -1518,7 +1541,7 @@ func AuthPasswordResetCreateCode(
 		userAuthResetId := server.NewId()
 		resetCode = createResetCode()
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				INSERT INTO user_auth_reset
 				(user_auth_reset_id, user_id, reset_code)
@@ -1556,9 +1579,11 @@ type AuthPasswordSetError struct {
 	Message string `json:"message"`
 }
 
+type authPasswordSetBeforeLifecycleLockKey struct{}
+
 func AuthPasswordSet(
 	passwordSet AuthPasswordSetArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*AuthPasswordSetResult, error) {
 	// apply the same password policy as adding a password auth method.
 	// This is checked before the reset code so the response does not depend on
@@ -1571,7 +1596,7 @@ func AuthPasswordSet(
 		}, nil
 	}
 
-	userAuthAttemptId, allow := UserAuthAttempt(nil, session)
+	userAuthAttemptId, allow := UserAuthAttempt(nil, clientSession)
 	if !allow {
 		// nil user auth: the reset code must not reveal which account it
 		// belongs to, so this attempt is recorded against the client address
@@ -1587,9 +1612,9 @@ func AuthPasswordSet(
 	var networkId server.Id
 	var networkName string
 
-	server.Db(session.Ctx, func(conn server.PgConn) {
+	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				SELECT
 					network_user.user_id,
@@ -1627,9 +1652,25 @@ func AuthPasswordSet(
 	passwordSalt := createPasswordSalt()
 	passwordHash := computePasswordHashV1([]byte(passwordSet.Password), passwordSalt)
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	operationId := server.NewId()
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		if hook, ok := clientSession.Ctx.Value(authPasswordSetBeforeLifecycleLockKey{}).(func()); ok {
+			hook()
+		}
+		server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, networkId, true))
+		// Include every login admitted before this exclusive lock. Sampling before
+		// the wait incorrectly spared old-password logins which won that race.
+		cutoff := server.NowUtc()
+		// Consume the reset under its row lock; concurrent reuse cannot rotate twice.
+		var unused bool
+		server.Raise(tx.QueryRow(clientSession.Ctx, `SELECT NOT used FROM user_auth_reset WHERE user_auth_reset_id=$1 FOR UPDATE`, userAuthResetId).Scan(&unused))
+		if !unused {
+			panic(errors.New("Invalid login."))
+		}
+		server.Raise(session.JournalSessionRetirementInTx(clientSession.Ctx, tx, networkId, operationId, "reset", cutoff))
+		server.RaisePgResult(tx.Exec(clientSession.Ctx, `UPDATE auth_code SET remaining_uses=0 WHERE network_id=$1 AND create_time<$2 AND active`, networkId, cutoff))
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				UPDATE network_user_auth_password
 				SET password_hash = $1, password_salt = $2
@@ -1641,7 +1682,7 @@ func AuthPasswordSet(
 		))
 
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				UPDATE user_auth_reset
 				SET used = true
@@ -1653,20 +1694,20 @@ func AuthPasswordSet(
 		// A password reset is an account-wide credential rotation. Any API or
 		// connect JWT created before this timestamp is rejected immediately.
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				UPDATE network_user
-				SET credential_change_time = now()
+				SET credential_change_time = $2
 				WHERE user_id = $1
 			`,
-			userId,
+			userId, cutoff,
 		))
 
 		// the password-changed notice commits with the change
-		addPasswordSetNoticeInTx(session.Ctx, tx, networkId, *userAuthResetId)
-	})
+		addPasswordSetNoticeInTx(clientSession.Ctx, tx, networkId, *userAuthResetId)
+	}, server.TxReadCommitted)
 
-	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+	SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
 
 	result := &AuthPasswordSetResult{
 		NetworkId: networkId,
@@ -1705,7 +1746,7 @@ type AuthCodeCreateError struct {
 
 func AuthCodeCreate(
 	codeCreate *AuthCodeCreateArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (codeCreateResult *AuthCodeCreateResult, returnErr error) {
 
 	// // todo:  the device needs to be cleaned up. There is an issue where we should keep the admin jwt in the device  and create clients on demand, or when they expire.
@@ -1723,7 +1764,7 @@ func AuthCodeCreate(
 	// 	return
 	// }
 
-	roles, principal, message := validateClientIdentityArgs(codeCreate.Roles, codeCreate.Principal, session)
+	roles, principal, message := validateClientIdentityArgs(codeCreate.Roles, codeCreate.Principal, clientSession)
 	if message != "" {
 		codeCreateResult = &AuthCodeCreateResult{
 			Error: &AuthCodeCreateError{
@@ -1733,9 +1774,18 @@ func AuthCodeCreate(
 		return
 	}
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	authCodeId := server.NewId()
+	authCodeBytes := make([]byte, 512)
+	if _, err := rand.Read(authCodeBytes); err != nil {
+		return nil, err
+	}
+	authCode := base64.URLEncoding.EncodeToString(authCodeBytes)
+
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, false))
+		server.Raise(session.ValidateByJwtStateInTx(clientSession.Ctx, tx, clientSession.ByJwt, false))
 		result, err := tx.Query(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 			SELECT COUNT(*) AS auth_code_count
 			FROM auth_code
@@ -1743,7 +1793,7 @@ func AuthCodeCreate(
 				network_id = $1 AND
 				active = true
 			`,
-			session.ByJwt.NetworkId,
+			clientSession.ByJwt.NetworkId,
 		)
 
 		authCodeCount := 0
@@ -1763,16 +1813,6 @@ func AuthCodeCreate(
 			return
 		}
 
-		authCodeId := server.NewId()
-
-		// 4096 bits
-		authCodeBytes := make([]byte, 512)
-		if _, err := rand.Read(authCodeBytes); err != nil {
-			returnErr = err
-			return
-		}
-		authCode := base64.URLEncoding.EncodeToString(authCodeBytes)
-
 		duration := DefaultAuthCodeDuration
 		if 0 < codeCreate.DurationMinutes {
 			duration = time.Duration(codeCreate.DurationMinutes*60*1000) * time.Millisecond
@@ -1790,11 +1830,24 @@ func AuthCodeCreate(
 
 		// the auth code assumes the create time of the root jwt
 		// this is to enable all derivative auth to be expired by expiring the root
-		createTime := session.ByJwt.CreateTime
-		endTime := server.NowUtc().Add(duration)
+		createTime := clientSession.ByJwt.CreateTime
+		now := server.NowUtc()
+		endTime := now.Add(duration)
+		if clientSession.ByJwt.SessionId != nil {
+			horizon, err := session.RegisterNetworkSession(clientSession.Ctx, clientSession.ByJwt, "restored", nil, false, now)
+			server.Raise(err)
+			effective := time.UnixMilli(horizon.AcceptUntil)
+			if effective.Before(endTime) {
+				endTime = effective
+				duration = endTime.Sub(now)
+			}
+			if duration <= 0 {
+				server.Raise(&session.SessionError{Code: "session_upgrade_required", Status: 409})
+			}
+		}
 
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 			INSERT INTO auth_code (
 				auth_code_id,
@@ -1805,21 +1858,23 @@ func AuthCodeCreate(
 	            end_time,
 	            uses,
 	            remaining_uses,
-	            principal
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
+	            principal,
+ origin_session_id
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9)
 			`,
 			authCodeId,
-			session.ByJwt.NetworkId,
-			session.ByJwt.UserId,
+			clientSession.ByJwt.NetworkId,
+			clientSession.ByJwt.UserId,
 			authCode,
 			createTime,
 			endTime,
 			uses,
 			principal,
+			clientSession.ByJwt.SessionId,
 		))
 
 		if 0 < len(roles) {
-			server.BatchInTx(session.Ctx, tx, func(batch server.PgBatch) {
+			server.BatchInTx(clientSession.Ctx, tx, func(batch server.PgBatch) {
 				for _, role := range roles {
 					batch.Queue(
 						`
@@ -1840,7 +1895,7 @@ func AuthCodeCreate(
 			DurationMinutes: float64(duration) / float64(time.Minute),
 			Uses:            uses,
 		}
-	})
+	}, server.TxReadCommitted)
 
 	return
 }
@@ -1958,7 +2013,8 @@ func RemoveExpiredVerifyCodes(ctx context.Context, minTime time.Time) {
 }
 
 type AuthCodeLoginArgs struct {
-	AuthCode string `json:"auth_code,omitempty"`
+	RequestId *server.Id `json:"request_id,omitempty"`
+	AuthCode  string     `json:"auth_code,omitempty"`
 }
 
 type AuthCodeLoginResult struct {
@@ -1970,178 +2026,8 @@ type AuthCodeLoginError struct {
 	Message string `json:"message,omitempty"`
 }
 
-func AuthCodeLogin(
-	codeLogin *AuthCodeLoginArgs,
-	session *session.ClientSession,
-) (codeLoginResult *AuthCodeLoginResult, returnErr error) {
-	// Resolve the network without consuming the code, then load entitlement
-	// before opening the code-consumption transaction. The transaction repeats
-	// every validity check, so expiration or a competing last-use consumer
-	// between these steps still returns an invalid-code result.
-	var entitlementNetworkId *server.Id
-	server.Db(session.Ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			session.Ctx,
-			`
-				SELECT auth_code.network_id
-				FROM auth_code
-				WHERE
-					auth_code.auth_code = $1 AND
-					auth_code.active = true AND
-					$2 < auth_code.end_time
-			`,
-			codeLogin.AuthCode,
-			server.NowUtc(),
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var networkId server.Id
-				server.Raise(result.Scan(&networkId))
-				entitlementNetworkId = &networkId
-			}
-		})
-	})
-	if entitlementNetworkId == nil {
-		return &AuthCodeLoginResult{
-			Error: &AuthCodeLoginError{Message: "Invalid auth code."},
-		}, nil
-	}
-	isPro := IsProFresh(session.Ctx, entitlementNetworkId)
-
-	var networkId server.Id
-	var userId server.Id
-	var createTime time.Time
-	var principal string
-	var networkName string
-	var roles []string
-
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
-			session.Ctx,
-			`
-				SELECT
-					auth_code.auth_code_id,
-					auth_code.network_id,
-					auth_code.user_id,
-					auth_code.create_time,
-					auth_code.remaining_uses,
-					auth_code.principal,
-					network.network_name
-
-				FROM auth_code
-
-				INNER JOIN network ON network.network_id = auth_code.network_id
-
-				WHERE
-					auth_code.auth_code = $1 AND
-					auth_code.active = true AND
-					$2 < auth_code.end_time AND
-					auth_code.network_id = $3
-			`,
-			codeLogin.AuthCode,
-			server.NowUtc(),
-			*entitlementNetworkId,
-		)
-
-		exists := false
-		var authCodeId server.Id
-		var remainingUses int
-
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				exists = true
-				result.Scan(
-					&authCodeId,
-					&networkId,
-					&userId,
-					&createTime,
-					&remainingUses,
-					&principal,
-					&networkName,
-				)
-			}
-		})
-		if !exists {
-			codeLoginResult = &AuthCodeLoginResult{
-				Error: &AuthCodeLoginError{
-					Message: "Invalid auth code.",
-				},
-			}
-			return
-		}
-
-		roles = []string{}
-		result, err = tx.Query(
-			session.Ctx,
-			`
-				SELECT role FROM auth_code_role
-				WHERE auth_code_id = $1
-				ORDER BY role
-			`,
-			authCodeId,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var role string
-				server.Raise(result.Scan(&role))
-				roles = append(roles, role)
-			}
-		})
-
-		if 1 < remainingUses {
-			server.RaisePgResult(tx.Exec(
-				session.Ctx,
-				`
-					UPDATE auth_code
-					SET remaining_uses = remaining_uses - 1
-					WHERE auth_code_id = $1
-				`,
-				authCodeId,
-			))
-		} else {
-			// this was the last use
-			// the safest approach is to just delete the auth code
-
-			server.RaisePgResult(tx.Exec(
-				session.Ctx,
-				`
-					DELETE FROM auth_code
-					WHERE auth_code_id = $1
-				`,
-				authCodeId,
-			))
-
-			server.RaisePgResult(tx.Exec(
-				session.Ctx,
-				`
-					DELETE FROM auth_code_role
-					WHERE auth_code_id = $1
-				`,
-				authCodeId,
-			))
-		}
-
-	})
-
-	if codeLoginResult != nil {
-		return
-	}
-
-	byJwt := jwt.NewByJwtWithCreateTime(
-		networkId,
-		userId,
-		networkName,
-		createTime,
-		false,
-		isPro,
-	)
-	byJwt.Roles = roles
-	byJwt.Principal = principal
-	codeLoginResult = &AuthCodeLoginResult{
-		ByJwt: byJwt.Sign(),
-	}
-
-	return
+func AuthCodeLogin(codeLogin *AuthCodeLoginArgs, clientSession *session.ClientSession) (*AuthCodeLoginResult, error) {
+	return authCodeLoginSession(codeLogin, clientSession)
 }
 
 // The network admin has null email/phone auth. Optional notifications may

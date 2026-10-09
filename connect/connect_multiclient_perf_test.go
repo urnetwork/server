@@ -56,9 +56,9 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
 	connectserver "github.com/urnetwork/server/connect"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 const (
@@ -739,8 +739,8 @@ func setupMcStack(ctx context.Context, label string) (*mcStack, func()) {
 		panic(fmt.Errorf("redeem balance code error = %s", redeemResult.Error.Message))
 	}
 
-	providerByJwt := jwt.NewByJwt(networkId, userId, networkName, false, false).Client(providerDeviceId, providerClientId).Sign()
-	deviceByJwt := jwt.NewByJwt(networkId, userId, networkName, false, false).Client(deviceDeviceId, deviceClientId).Sign()
+	providerByJwt := session.NewByJwt(networkId, userId, networkName, false, false).Client(providerDeviceId, providerClientId).Testing_Sign()
+	deviceByJwt := session.NewByJwt(networkId, userId, networkName, false, false).Client(deviceDeviceId, deviceClientId).Testing_Sign()
 
 	// ---- provider stack ------------------------------------------------------
 

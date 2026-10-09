@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
-func newConnectAuthenticationWorkClaims(ctx context.Context) *jwt.ByJwt {
+func newConnectAuthenticationWorkClaims(ctx context.Context) *session.ByJwt {
 	networkId, userId, deviceId, clientId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	networkName := "handshake-" + networkId.String()
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -20,7 +20,7 @@ func newConnectAuthenticationWorkClaims(ctx context.Context) *jwt.ByJwt {
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO device(device_id,network_id,device_name,device_spec) VALUES($1,$2,'handshake','synthetic')`, deviceId, networkId))
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client(client_id,network_id,device_id,description) VALUES($1,$2,$3,'handshake')`, clientId, networkId, deviceId))
 	})
-	return jwt.NewByJwt(networkId, userId, networkName, false, false).Client(deviceId, clientId)
+	return session.NewByJwt(networkId, userId, networkName, false, false).Client(deviceId, clientId)
 }
 
 // Measure real pool acquisitions and live-state queries through the shared
@@ -34,8 +34,8 @@ func TestConnectAuthenticationUsesOneLiveDatabaseAcquisition(t *testing.T) {
 		claims := newConnectAuthenticationWorkClaims(ctx)
 		for _, source := range []struct {
 			caller string
-			value  jwt.StateQuerySource
-		}{{caller: "connect_h1", value: jwt.StateQueryConnectH1}, {caller: "connect_h3", value: jwt.StateQueryConnectH3}} {
+			value  session.StateQuerySource
+		}{{caller: "connect_h1", value: session.StateQueryConnectH1}, {caller: "connect_h3", value: session.StateQueryConnectH3}} {
 			const count = 8
 			poolLabels := map[string]string{"pool": "default", "outcome": "acquired"}
 			acquiredBefore := connectObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels)
@@ -53,7 +53,7 @@ func TestConnectAuthenticationUsesOneLiveDatabaseAcquisition(t *testing.T) {
 					got := result{want: server.NewId()}
 					server.HandleError(func() {
 						got.id, got.status, got.err = connectClientAuthentication(
-							jwt.WithStateQuerySource(ctx, source.value), claims, got.want.Bytes())
+							session.WithStateQuerySource(ctx, source.value), claims, got.want.Bytes())
 					}, func(err error) { got.err = err })
 					results <- got
 				})
@@ -77,7 +77,7 @@ func TestConnectAuthenticationUsesOneLiveDatabaseAcquisition(t *testing.T) {
 
 // Commit a real authority change at the last-read boundary, after the former
 // early state check. A weaker membership-only read must not admit that token.
-func exerciseConnectAuthenticationLatestState(t testing.TB, source jwt.StateQuerySource) {
+func exerciseConnectAuthenticationLatestState(t testing.TB, source session.StateQuerySource) {
 	t.Helper()
 	for _, change := range []string{"inactive", "credential_rotation", "device", "administrator", "deleted"} {
 		func() {
@@ -90,7 +90,7 @@ func exerciseConnectAuthenticationLatestState(t testing.TB, source jwt.StateQuer
 			var releaseOnce sync.Once
 			unblock := func() { releaseOnce.Do(func() { close(release) }) }
 			defer unblock()
-			queryCtx := context.WithValue(jwt.WithStateQuerySource(ctx, source), connectAuthFinalReadTestKey{}, func() {
+			queryCtx := context.WithValue(session.WithStateQuerySource(ctx, source), connectAuthFinalReadTestKey{}, func() {
 				close(arrived)
 				select {
 				case <-release:
@@ -147,13 +147,13 @@ func exerciseConnectAuthenticationLatestState(t testing.TB, source jwt.StateQuer
 func TestConnectH1AuthenticationUsesLatestLiveState(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) { exerciseConnectAuthenticationLatestState(t, jwt.StateQueryConnectH1) })
+	env.Run(t, func(t testing.TB) { exerciseConnectAuthenticationLatestState(t, session.StateQueryConnectH1) })
 }
 
 func TestConnectH3AuthenticationUsesLatestLiveState(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) { exerciseConnectAuthenticationLatestState(t, jwt.StateQueryConnectH3) })
+	env.Run(t, func(t testing.TB) { exerciseConnectAuthenticationLatestState(t, session.StateQueryConnectH3) })
 }
 
 func TestConnectAuthenticationKeepsCredentialErrorBeforeMalformedInstance(t *testing.T) {

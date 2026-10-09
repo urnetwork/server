@@ -7,7 +7,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -23,7 +23,7 @@ func TestAccountPoints(t *testing.T) {
 
 		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,

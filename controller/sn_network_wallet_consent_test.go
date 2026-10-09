@@ -23,8 +23,8 @@ import (
 	"github.com/urfoundation/sn/ss58"
 	"github.com/urfoundation/sn/validator"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // A second synthetic coldkey, distinct from the fixture's provider coldkey.
@@ -43,10 +43,10 @@ func snNetworkWalletTestKey(t testing.TB, seed byte) (*schnorrkel.MiniSecretKey,
 
 // Issue through the authenticated network route, then sign the exact bytes
 // and decode them independently.
-func (self *snWalletProviderScopeFixture) networkConsent(t testing.TB, credential *jwt.ByJwt, key *schnorrkel.MiniSecretKey, address string, fromEpoch uint64) (*SnSetWalletArgs, protocol.NetworkWalletMappingStatement, [32]byte) {
+func (self *snWalletProviderScopeFixture) networkConsent(t testing.TB, credential *session.ByJwt, key *schnorrkel.MiniSecretKey, address string, fromEpoch uint64) (*SnSetWalletArgs, protocol.NetworkWalletMappingStatement, [32]byte) {
 	t.Helper()
 	args := &SnNetworkWalletMappingChallengeArgs{ColdkeySs58: address, FromEpoch: fromEpoch, ThroughEpoch: fromEpoch + 100}
-	status, raw := walletMappingControllerPost(t, self.endpoint.URL, "/sn/wallet/network-consent", credential.Sign(), args)
+	status, raw := walletMappingControllerPost(t, self.endpoint.URL, "/sn/wallet/network-consent", credential.Testing_Sign(), args)
 	var challenge SnWalletMappingChallengeResult
 	if status != http.StatusOK || json.Unmarshal(raw, &challenge) != nil || challenge.Message == "" {
 		t.Fatal("authorized network consent issuance failed", status, string(raw))
@@ -85,13 +85,13 @@ func (self *snWalletProviderScopeFixture) networkRows(t testing.TB) snNetworkWal
 }
 
 // GET /sn/wallet as the credential.
-func (self *snWalletProviderScopeFixture) getWallet(t testing.TB, credential *jwt.ByJwt) SnGetWalletResult {
+func (self *snWalletProviderScopeFixture) getWallet(t testing.TB, credential *session.ByJwt) SnGetWalletResult {
 	t.Helper()
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, self.endpoint.URL+"/sn/wallet", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer "+credential.Sign())
+	request.Header.Set("Authorization", "Bearer "+credential.Testing_Sign())
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -111,8 +111,8 @@ func TestSnNetworkWalletConsentOnlyNetworkOwnerAndNoProjection(t *testing.T) {
 		f := newSnWalletProviderScopeFixture(t)
 		key, address := snNetworkWalletTestKey(t, 151)
 		args := &SnNetworkWalletMappingChallengeArgs{ColdkeySs58: address, FromEpoch: f.scope.Epoch, ThroughEpoch: f.scope.Epoch + 100}
-		for _, credential := range []*jwt.ByJwt{f.provider, f.sibling} {
-			status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/network-consent", credential.Sign(), args)
+		for _, credential := range []*session.ByJwt{f.provider, f.sibling} {
+			status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/network-consent", credential.Testing_Sign(), args)
 			if status == http.StatusOK || strings.TrimSpace(string(raw)) != protocol.ErrWalletMappingIntegrity.Error() {
 				t.Fatal("a client session requested a network consent", status, string(raw))
 			}
@@ -129,13 +129,13 @@ func TestSnNetworkWalletConsentOnlyNetworkOwnerAndNoProjection(t *testing.T) {
 		}
 		// a client session cannot submit it, and a request naming a client is
 		// refused rather than reinterpreted
-		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.provider.Sign(), set)
+		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.provider.Testing_Sign(), set)
 		if status == http.StatusOK || strings.TrimSpace(string(raw)) != protocol.ErrWalletMappingIntegrity.Error() {
 			t.Fatal("a client session submitted a network consent", status, string(raw))
 		}
 		named := *set
 		named.ClientId = f.provider.ClientId
-		status, raw = walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Sign(), &named)
+		status, raw = walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Testing_Sign(), &named)
 		if status == http.StatusOK || strings.TrimSpace(string(raw)) != protocol.ErrWalletMappingIntegrity.Error() {
 			t.Fatal("a network consent was accepted for a named client", status, string(raw))
 		}
@@ -181,19 +181,19 @@ func TestSnNetworkWalletConsentRefusesMismatchAndForeignOwner(t *testing.T) {
 		encoded := signature.Encode()
 		mismatch := *set
 		mismatch.Signature = "0x" + hex.EncodeToString(encoded[:])
-		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Sign(), &mismatch)
+		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Testing_Sign(), &mismatch)
 		var refused SnSetWalletResult
 		if status != http.StatusOK || json.Unmarshal(raw, &refused) != nil || refused.Error == nil || refused.Error.Code != SnSetWalletErrorCodeSignatureMismatch {
 			t.Fatal("another account's signature was not the coded mismatch", status, string(raw))
 		}
 		// a session of a user who does not administer the network does not
 		// authenticate; the model refuses that owner even so
-		foreign := jwt.NewByJwt(f.owner.NetworkId, server.NewId(), "synthetic-foreign-user", false, false)
+		foreign := session.NewByJwt(f.owner.NetworkId, server.NewId(), "synthetic-foreign-user", false, false)
 		args := &SnNetworkWalletMappingChallengeArgs{ColdkeySs58: address, FromEpoch: f.scope.Epoch, ThroughEpoch: f.scope.Epoch + 100}
-		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/network-consent", foreign.Sign(), args); status == http.StatusOK {
+		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/network-consent", foreign.Testing_Sign(), args); status == http.StatusOK {
 			t.Fatal("a user who does not administer the network requested its consent", string(raw))
 		}
-		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", foreign.Sign(), set); status == http.StatusOK {
+		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", foreign.Testing_Sign(), set); status == http.StatusOK {
 			t.Fatal("a user who does not administer the network submitted its consent", string(raw))
 		}
 		cfg := stConfig()
@@ -230,7 +230,7 @@ func TestSnGetWalletShowsNetworkConsentInPrecedence(t *testing.T) {
 		networkKey, networkAddress := snNetworkWalletTestKey(t, 154)
 		set, _, _ := f.networkConsent(t, f.owner, networkKey, networkAddress, f.scope.Epoch)
 		f.accept(t, f.owner, set)
-		for _, credential := range []*jwt.ByJwt{f.owner, f.provider, f.sibling} {
+		for _, credential := range []*session.ByJwt{f.owner, f.provider, f.sibling} {
 			result := f.getWallet(t, credential)
 			if result.Wallet == nil || result.Wallet.ColdkeySs58 != networkAddress || result.Wallet.ConsentScope != SnWalletConsentScopeNetwork || result.Wallet.ClientId != nil || result.Wallet.FromEpoch != f.scope.Epoch || len(result.Wallets) != 1 {
 				t.Fatal("the network consent is not every session's effective wallet", result)
@@ -248,7 +248,7 @@ func TestSnGetWalletShowsNetworkConsentInPrecedence(t *testing.T) {
 		if len(result.Wallets) != 3 || result.Wallets[0].ConsentScope != SnWalletConsentScopeNetwork || result.Wallets[1].ConsentScope != "" || result.Wallets[1].ClientId != nil || result.Wallets[2].ConsentScope != SnWalletConsentScopeProvider {
 			t.Fatal("wallet entries lost their scopes or order", result.Wallets)
 		}
-		for _, credential := range []*jwt.ByJwt{f.owner, f.sibling} {
+		for _, credential := range []*session.ByJwt{f.owner, f.sibling} {
 			result := f.getWallet(t, credential)
 			if result.Wallet == nil || result.Wallet.ColdkeySs58 != networkAddress || result.Wallet.ConsentScope != SnWalletConsentScopeNetwork {
 				t.Fatal("a provider consent or the side copy displaced the network consent", result)
@@ -278,7 +278,7 @@ func TestStProviderWalletsForEpochNetworkPrecedence(t *testing.T) {
 		providerAccepted := f.accept(t, f.provider, providerProof)
 		// the sibling's own consent starts after the epoch
 		laterArgs := &SnWalletMappingChallengeArgs{ColdkeySs58: f.address, FromEpoch: f.scope.Epoch + 1, ThroughEpoch: f.scope.Epoch + 100}
-		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/consent", f.sibling.Sign(), laterArgs)
+		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/consent", f.sibling.Testing_Sign(), laterArgs)
 		var laterChallenge SnWalletMappingChallengeResult
 		if status != http.StatusOK || json.Unmarshal(raw, &laterChallenge) != nil {
 			t.Fatal("later sibling consent issuance failed", status, string(raw))

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -23,7 +23,7 @@ func deadlineAuthCredential(t testing.TB, ctx context.Context) string {
 	network, user, device, client := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	model.Testing_CreateNetwork(ctx, network, "auth-deadline-control", user)
 	model.Testing_CreateDevice(ctx, network, device, client, "auth-deadline-device", "test")
-	return jwt.NewByJwt(network, user, "auth-deadline-control", false, false).Client(device, client).Sign()
+	return session.NewByJwt(network, user, "auth-deadline-control", false, false).Client(device, client).Testing_Sign()
 }
 
 func deadlineAuthRequest(ctx context.Context, credential string) *http.Request {

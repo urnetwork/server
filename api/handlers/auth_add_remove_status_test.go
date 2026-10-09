@@ -20,9 +20,9 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 // Wire-level behaviour of /auth/add-auth and /auth/remove-auth.
@@ -79,8 +79,8 @@ func authedRequestRaw(
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))
 	req.RemoteAddr = statusTestClientAddress
 	req.Header.Set("Content-Type", "application/json")
-	byJwt := jwt.NewByJwt(networkId, userId, networkName, false, false)
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", byJwt.Sign()))
+	byJwt := session.NewByJwt(networkId, userId, networkName, false, false)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", byJwt.Testing_Sign()))
 	return req
 }
 

@@ -15,9 +15,9 @@ import (
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 // Both exact production routes reach authentication, not a missing route.
@@ -67,7 +67,7 @@ func TestSnClientKeyHistoryBatchProductionRouteRefusesBeforeObservationWork(t *t
 		networkId, userId, deviceId, clientId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 		model.Testing_CreateNetwork(tb.Context(), networkId, "client-key-route-"+networkId.String(), userId)
 		model.Testing_CreateDevice(tb.Context(), networkId, deviceId, clientId, "client-key-route", "test")
-		token := jwt.NewByJwt(networkId, userId, "client-key-route", false, false).Client(deviceId, clientId).Sign()
+		token := session.NewByJwt(networkId, userId, "client-key-route", false, false).Client(deviceId, clientId).Testing_Sign()
 		handler := router.NewRouter(tb.Context(), Routes())
 		for index, mode := range []string{"unsupported-write", "cancelled", "excessive-framing", "excessive-members"} {
 			cfg := &controller.StConfig{Enabled: true, ChainId: 945, ContractAddress: [20]byte{2, byte(index + 1)}, AttemptUploadBudget: model.StAttemptUploadBudget{RequestsPerHour: 1, BytesPerHour: protocol.MaxClientKeyHistoryResponseBytes, AccountRequestsPerHour: 1, AccountBytesPerHour: protocol.MaxClientKeyHistoryResponseBytes}}

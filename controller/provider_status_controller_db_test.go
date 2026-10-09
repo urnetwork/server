@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -39,7 +39,7 @@ func TestGetProviderStatusCachesRankingAndReadsAppearancesFresh(t *testing.T) {
 		}
 		// the caller is the last client by creation, not by id
 		callerClientId := clientIds[2]
-		byJwt := jwt.NewByJwt(networkId, userId, "provider-status", false, false).Client(deviceIds[2], callerClientId)
+		byJwt := session.NewByJwt(networkId, userId, "provider-status", false, false).Client(deviceIds[2], callerClientId)
 		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 
 		first, err := GetProviderStatus(clientSession)

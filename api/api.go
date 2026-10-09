@@ -182,6 +182,10 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// forward -- see model.ProviderClientVerdictQuorumMet.
 		router.NewRoute("POST", "/network/provider-verdict", handlers.ProviderClientVerdictSubmit),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
+		router.NewRoute("GET", "/network/sessions", handlers.NetworkSessions),
+		router.NewRoute("POST", "/network/revoke-session", handlers.RevokeNetworkSession),
+		router.NewRoute("POST", "/network/revoke-other-sessions", handlers.RevokeOtherNetworkSessions),
+		router.NewRoute("GET", "/network/session-operations/([^/]+)", handlers.NetworkSessionOperation),
 		router.NewRoute("GET", "/network/proxies", handlers.NetworkProxies),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),

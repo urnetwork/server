@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -26,7 +26,7 @@ func TestAuthNetworkClientFromParentRechecksAfterEntitlementRead(t *testing.T) {
 				networkId, userId, deviceId, clientId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 				Testing_CreateNetwork(ctx, networkId, "parent-mint-"+mutation, userId)
 				Testing_CreateDevice(ctx, networkId, deviceId, clientId, "original", "original")
-				claims := jwt.NewByJwt(networkId, userId, "parent-mint-"+mutation, false, false).Client(deviceId, clientId)
+				claims := session.NewByJwt(networkId, userId, "parent-mint-"+mutation, false, false).Client(deviceId, clientId)
 				clientSession := session.NewLocalClientSession(ctx, "192.0.2.1:1", claims)
 				defer clientSession.Cancel()
 				otherNetworkId, otherUserId, otherDeviceId, otherClientId := server.NewId(), server.NewId(), server.NewId(), server.NewId()

@@ -13,8 +13,8 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -49,7 +49,7 @@ func TestAuthorityControlOwnershipUsesOneLiveStateRead(t *testing.T) {
 		poolLabels := map[string]string{"pool": "default", "outcome": "acquired"}
 		for _, control := range []struct {
 			name   string
-			change func(*jwt.ByJwt)
+			change func(*session.ByJwt)
 			active bool
 			owned  bool
 			rotate bool
@@ -61,11 +61,11 @@ func TestAuthorityControlOwnershipUsesOneLiveStateRead(t *testing.T) {
 			{name: "owned after foreign", active: true, owned: true, valid: true},
 			{name: "retired", owned: true},
 			{name: "rotated", active: true, owned: true, rotate: true},
-			{name: "child device mismatch", active: true, owned: true, change: func(claims *jwt.ByJwt) { claims.DeviceId = &otherDevice }},
-			{name: "missing child device", active: true, owned: true, local: true, change: func(claims *jwt.ByJwt) { claims.DeviceId = nil }},
-			{name: "foreign account", active: true, owned: true, local: true, change: func(claims *jwt.ByJwt) { claims.UserId = server.NewId(); claims.Subject = claims.UserId.String() }},
-			{name: "foreign network", active: true, owned: true, local: true, change: func(claims *jwt.ByJwt) { claims.NetworkId = server.NewId() }},
-			{name: "wrong audience", active: true, owned: true, local: true, change: func(claims *jwt.ByJwt) { claims.Audience = []string{jwt.ByJwtAudienceConnect} }},
+			{name: "child device mismatch", active: true, owned: true, change: func(claims *session.ByJwt) { claims.DeviceId = &otherDevice }},
+			{name: "missing child device", active: true, owned: true, local: true, change: func(claims *session.ByJwt) { claims.DeviceId = nil }},
+			{name: "foreign account", active: true, owned: true, local: true, change: func(claims *session.ByJwt) { claims.UserId = server.NewId(); claims.Subject = claims.UserId.String() }},
+			{name: "foreign network", active: true, owned: true, local: true, change: func(claims *session.ByJwt) { claims.NetworkId = server.NewId() }},
+			{name: "wrong audience", active: true, owned: true, local: true, change: func(claims *session.ByJwt) { claims.Audience = []string{session.ByJwtAudienceConnect} }},
 			{name: "restored", active: true, owned: true, valid: true},
 		} {
 			source := otherClient
@@ -84,7 +84,7 @@ func TestAuthorityControlOwnershipUsesOneLiveStateRead(t *testing.T) {
 			if control.change != nil {
 				control.change(&claims)
 			}
-			token := claims.Sign()
+			token := claims.Testing_Sign()
 			before := authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels)
 			queryBefore := authorityObservedCounter(t, "urnetwork_jwt_state_queries_total", nil)
 			result, err := owner.ConnectControl(ctx, token, args)

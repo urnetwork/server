@@ -8,7 +8,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -24,7 +24,7 @@ func TestAccountApiKeys(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
 		clientId := server.NewId()
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -75,7 +75,7 @@ func TestGetAccountApiKeysReturnsScanError(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})
@@ -135,7 +135,7 @@ func TestCreateApiKeyRefusesNameTheColumnCannotStore(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		byJwt := &jwt.ByJwt{
+		byJwt := &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		}
@@ -247,7 +247,7 @@ func TestDeleteApiKeyStatementFailureSurfacesAtOnce(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		byJwt := &jwt.ByJwt{
+		byJwt := &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		}

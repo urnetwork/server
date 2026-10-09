@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -39,9 +39,9 @@ func newPayoutTransitionCohort(t testing.TB, ctx context.Context) *payoutTransit
 	f := &payoutTransitionCohort{sourceNetwork: server.NewId(), source: server.NewId(), network: server.NewId(), client: server.NewId()}
 	testingCreatePaymentClient(ctx, f.sourceNetwork, f.source)
 	testingCreatePaymentClient(ctx, f.network, f.client)
-	sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{NetworkId: f.sourceNetwork, ClientId: &f.source})
+	sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: f.sourceNetwork, ClientId: &f.source})
 	t.Cleanup(sourceSession.Cancel)
-	f.session = session.Testing_CreateClientSession(ctx, &jwt.ByJwt{NetworkId: f.network, ClientId: &f.client})
+	f.session = session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: f.network, ClientId: &f.client})
 	t.Cleanup(f.session.Cancel)
 	code, err := CreateBalanceCode(ctx, 1024*1024*1024, 365*24*time.Hour, UsdToNanoCents(100), "transition-"+server.NewId().String(), "", "")
 	if err != nil {

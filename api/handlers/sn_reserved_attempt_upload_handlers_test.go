@@ -22,8 +22,8 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // Each destination has its own real SDK session, authenticated cache, object
@@ -31,7 +31,7 @@ import (
 type snReservedAttemptEndpoint struct {
 	origin string
 	api    *sdk.Api
-	client *jwt.ByJwt
+	client *session.ByJwt
 	writer *validator.ValidatorReservedAttemptStreamV2Writer
 	reader *validator.HTTPAttemptStreamV2Reader
 	reads  atomic.Uint64
@@ -65,7 +65,7 @@ func newSnReservedAttemptEndpoint(t testing.TB, authority *snReservedAttemptAuth
 	self.origin = endpoint.URL
 	strategy := connect.NewClientStrategyWithDefaults(t.Context())
 	self.api = sdk.NewApi(t.Context(), strategy, endpoint.URL)
-	self.api.SetByJwt(client.Sign())
+	self.api.SetByJwt(client.Testing_Sign())
 	t.Cleanup(func() {
 		if err := self.api.CloseAndWait(context.Background()); err != nil {
 			t.Error(err)
@@ -131,16 +131,16 @@ func TestSnReservedAttemptUploadFloodPreservesDistinctObjectAndDualReadback(t *t
 			}
 			for range 2 {
 				_, attacker := snAttemptUploadTestIdentity(tb)
-				if status := snReservedAttemptRequest(tb, endpoint.origin, attacker.Sign(), "", "metadata", []byte("{\"flood\":1}\n")); status != http.StatusNoContent {
+				if status := snReservedAttemptRequest(tb, endpoint.origin, attacker.Testing_Sign(), "", "metadata", []byte("{\"flood\":1}\n")); status != http.StatusNoContent {
 					tb.Fatalf("ordinary flood prerequisite status%d", status)
 				}
 			}
-			if status := snReservedAttemptRequest(tb, endpoint.origin, endpoint.client.Sign(), "", "metadata", next); status != http.StatusTooManyRequests {
+			if status := snReservedAttemptRequest(tb, endpoint.origin, endpoint.client.Testing_Sign(), "", "metadata", next); status != http.StatusTooManyRequests {
 				tb.Fatalf("ordinary pool was not actually exhausted: status%d", status)
 			}
 			for range 2 {
-				refreshed := jwt.NewByJwt(endpoint.client.NetworkId, endpoint.client.UserId, "attempt-upload", false, false).Client(*endpoint.client.DeviceId, *endpoint.client.ClientId)
-				endpoint.api.SetByJwt(refreshed.Sign())
+				refreshed := session.NewByJwt(endpoint.client.NetworkId, endpoint.client.UserId, "attempt-upload", false, false).Client(*endpoint.client.DeviceId, *endpoint.client.ClientId)
+				endpoint.api.SetByJwt(refreshed.Testing_Sign())
 				if err := endpoint.writer.Write(tb.Context(), "metadata", snAttemptTestHash(prior), prior); err != nil {
 					tb.Fatalf("actual refreshed-session retry failed: %v", err)
 				}

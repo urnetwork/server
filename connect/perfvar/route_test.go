@@ -26,7 +26,7 @@ import (
 	"github.com/urnetwork/server/api"
 	connectserver "github.com/urnetwork/server/connect"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -603,7 +603,7 @@ func newRouteEnvironmentWithNetworkPeersAndHandlerSettings(
 		cancel()
 		t.Fatalf("fund route network: %v", err)
 	}
-	userSession := session.Testing_CreateClientSession(environmentCtx, jwt.NewByJwt(
+	userSession := session.Testing_CreateClientSession(environmentCtx, session.NewByJwt(
 		networkId,
 		userId,
 		fmt.Sprintf("perfvar-%s", networkId),

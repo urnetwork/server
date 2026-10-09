@@ -10,7 +10,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // Real connection facts, measured history, publication, picker reads and FP2
@@ -39,7 +39,7 @@ func TestFindProviders2FallbackUsesSelectedBucketPolicy(t *testing.T) {
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{ClientId: intercepted.clientId, MeasuredAt: server.NowUtc(), TLSAuthenticationFailure: true})
 		egressTestReliability(ctx, unreliable.clientId, 1, 0, 0)
 		egressTestPasses(ctx, t)
-		clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "bucket-policy-test", false, false))
+		clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "bucket-policy-test", false, false))
 
 		// Initial GET and blank search share the public native-or-Online filter;
 		// the legacy Quality key name must not hide a zero-Quality country.
@@ -173,7 +173,7 @@ func TestFindProviders2FallbackKeepsObservedRiskOutOfEveryTier(t *testing.T) {
 			t.Fatal("fixture must retain the older common snapshot before live risk is read")
 		}
 		find := func(mode RankMode) error {
-			clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "live-risk-fallback-test", false, false))
+			clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "live-risk-fallback-test", false, false))
 			result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &location}}, RankMode: mode, Count: 10, ForceCount: true}, clientSession)
 			wantTier := 0
 			if mode == RankModeSpeed {
@@ -261,7 +261,7 @@ func TestFindProviders2FallbackRevokesEarlierSelectedRisk(t *testing.T) {
 					if named {
 						specs = append(specs, &ProviderSpec{ClientId: &risky.ClientId})
 					}
-					clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "late-risk-fallback-test", false, false))
+					clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "late-risk-fallback-test", false, false))
 					answers, borrowed, answered := observed()
 					result, err := FindProviders2(&FindProviders2Args{Specs: specs, RankMode: RankModeSpeed, Count: 4, ForceCount: true}, clientSession)
 					if err != nil || result == nil || len(result.Providers) != 4 {

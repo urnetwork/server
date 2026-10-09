@@ -25,8 +25,8 @@ import (
 	"github.com/urfoundation/sn/ss58"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/startifact"
 )
 
@@ -81,16 +81,16 @@ func newSnClaimAuthFixture(t testing.TB) *snClaimAuthFixture {
 }
 
 // Account and provider credentials have genuine active rows behind them.
-func snClaimAuthAccount(t testing.TB) *jwt.ByJwt {
+func snClaimAuthAccount(t testing.TB) *session.ByJwt {
 	t.Helper()
 	networkId, userId := server.NewId(), server.NewId()
 	networkName := "claim-auth-" + networkId.String()
 	model.Testing_CreateNetwork(t.Context(), networkId, networkName, userId)
-	return jwt.NewByJwt(networkId, userId, networkName, false, false)
+	return session.NewByJwt(networkId, userId, networkName, false, false)
 }
 
 // More than one provider may legitimately belong to the same account.
-func snClaimAuthProvider(t testing.TB, account *jwt.ByJwt) *jwt.ByJwt {
+func snClaimAuthProvider(t testing.TB, account *session.ByJwt) *session.ByJwt {
 	t.Helper()
 	deviceId, clientId := server.NewId(), server.NewId()
 	model.Testing_CreateDevice(t.Context(), account.NetworkId, deviceId, clientId, "claim-provider", "synthetic")
@@ -98,7 +98,7 @@ func snClaimAuthProvider(t testing.TB, account *jwt.ByJwt) *jwt.ByJwt {
 }
 
 // Ordinary rows have positive, equal reliability so usage controls their shares.
-func snClaimAuthContribution(credential *jwt.ByJwt, coldkey [32]byte, usageBytes uint64) startifact.ProviderInput {
+func snClaimAuthContribution(credential *session.ByJwt, coldkey [32]byte, usageBytes uint64) startifact.ProviderInput {
 	return startifact.ProviderInput{
 		ClientID:      [16]byte(*credential.ClientId),
 		NetworkID:     [16]byte(credential.NetworkId),
@@ -111,7 +111,7 @@ func snClaimAuthContribution(credential *jwt.ByJwt, coldkey [32]byte, usageBytes
 }
 
 // The current network projection is deliberately independent of payout history.
-func snClaimAuthWallet(t testing.TB, account *jwt.ByJwt, coldkey [32]byte) string {
+func snClaimAuthWallet(t testing.TB, account *session.ByJwt, coldkey [32]byte) string {
 	t.Helper()
 	encoded, err := ss58.Encode(coldkey, ss58.BittensorPrefix)
 	if err != nil {
@@ -285,7 +285,7 @@ func TestSnPoolClaimProviderWalletsRemainDistinctAfterNetworkWalletRotation(t *t
 			snClaimAuthContribution(first, firstColdkey, 1), snClaimAuthContribution(second, secondColdkey, 3),
 		})
 		fixture.retain(tb, 0, artifact)
-		firstToken, secondToken, accountToken := first.Sign(), second.Sign(), account.Sign()
+		firstToken, secondToken, accountToken := first.Testing_Sign(), second.Testing_Sign(), account.Testing_Sign()
 		for _, currentColdkey := range [][32]byte{firstColdkey, secondColdkey, {0x53}} {
 			snClaimAuthWallet(tb, account, currentColdkey)
 			for _, value := range []struct {
@@ -314,7 +314,7 @@ func TestSnPoolClaimProviderRequiresEligibleOriginalContribution(t *testing.T) {
 		providers := []startifact.ProviderInput{snClaimAuthContribution(paid, paidColdkey, 8)}
 		type rejectedProvider struct {
 			fault      string
-			credential *jwt.ByJwt
+			credential *session.ByJwt
 		}
 		rejectedProviders := []rejectedProvider{}
 		for _, fault := range []string{"unknown", "ineligible", "head-excluded", "zero-usage", "zero-reliability", "wrong-network"} {
@@ -339,10 +339,10 @@ func TestSnPoolClaimProviderRequiresEligibleOriginalContribution(t *testing.T) {
 		}
 		artifact := fixture.build(tb, 7, providers)
 		fixture.retain(tb, 7, artifact)
-		snClaimAuthAssertClaim(tb, fixture.request(tb, paid.Sign(), url.Values{"epoch": {"7"}}), artifact, paidColdkey)
+		snClaimAuthAssertClaim(tb, fixture.request(tb, paid.Testing_Sign(), url.Values{"epoch": {"7"}}), artifact, paidColdkey)
 		for _, rejected := range rejectedProviders {
 			tb.Logf("checking original contribution refusal: %s", rejected.fault)
-			token := rejected.credential.Sign()
+			token := rejected.credential.Testing_Sign()
 			snClaimAuthAssertHeld(tb, fixture.request(tb, token, url.Values{"epoch": {"7"}}))
 			snClaimAuthAssertHeld(tb, fixture.request(tb, token, url.Values{"epoch": {"7"}, "legacy_coldkey": {originalColdkey}}))
 		}
@@ -357,7 +357,7 @@ func TestSnPoolClaimSharedColdkeyContributorsIgnoreAggregateRepresentative(t *te
 	env.Run(t, func(tb testing.TB) {
 		fixture := newSnClaimAuthFixture(tb)
 		sharedColdkey := [32]byte{0x71}
-		credentials := []*jwt.ByJwt{}
+		credentials := []*session.ByJwt{}
 		providers := []startifact.ProviderInput{}
 		for i := 0; i < 3; i++ {
 			account := snClaimAuthAccount(tb)
@@ -380,7 +380,7 @@ func TestSnPoolClaimSharedColdkeyContributorsIgnoreAggregateRepresentative(t *te
 			if credential.NetworkId == leaves[0].NetworkId {
 				tb.Fatal("claimant unexpectedly belongs to representative network")
 			}
-			snClaimAuthAssertClaim(tb, fixture.request(tb, credential.Sign(), url.Values{"epoch": {"8"}}), artifact, sharedColdkey)
+			snClaimAuthAssertClaim(tb, fixture.request(tb, credential.Testing_Sign(), url.Values{"epoch": {"8"}}), artifact, sharedColdkey)
 			otherContributors++
 		}
 		if otherContributors != 2 {
@@ -404,7 +404,7 @@ func TestSnPoolClaimProviderMissingOwnedLeafIsHeld(t *testing.T) {
 			snClaimAuthContribution(owner, ownerColdkey, 1), snClaimAuthContribution(other, otherColdkey, 1),
 		})
 		fixture.retain(tb, 9, artifact)
-		token := owner.Sign()
+		token := owner.Testing_Sign()
 		snClaimAuthAssertClaim(tb, fixture.request(tb, token, url.Values{"epoch": {"9"}}), artifact, ownerColdkey)
 		leaves := model.GetStPayoutLeaves(tb.Context(), fixture.cfg.DeploymentKey(), 9, fixture.cfg.NoId)
 		retainedLeaves := []*model.StPayoutLeaf{}
@@ -452,21 +452,21 @@ func TestSnPoolClaimLegacyRequiresExplicitOriginalColdkeyAndNetworkOnlyLeaves(t 
 			{Epoch: 10, NoId: fixture.cfg.NoId + 1, ClientId: otherProvider.ClientId, NetworkId: otherAccount.NetworkId, Coldkey: otherColdkey, ShareBps: 10_000, LeafIndex: 0},
 		})
 		query := url.Values{"epoch": {"10"}, "legacy_coldkey": {originalSelector}}
-		for _, credential := range []*jwt.ByJwt{account, otherAccount} {
-			response := fixture.request(tb, credential.Sign(), query)
+		for _, credential := range []*session.ByJwt{account, otherAccount} {
+			response := fixture.request(tb, credential.Testing_Sign(), query)
 			// Legacy claims have no immutable artifact coordinates to advertise.
 			if response.result.ArtifactHash != "" || response.result.ArtifactUri != "" {
 				tb.Fatalf("legacy read invented an original artifact: %s", response.body)
 			}
 			snClaimAuthAssertClaim(tb, response, artifact, originalColdkey)
 		}
-		snClaimAuthAssertHeld(tb, fixture.request(tb, account.Sign(), url.Values{"epoch": {"10"}, "legacy_coldkey": {rotatedSelector}}))
+		snClaimAuthAssertHeld(tb, fixture.request(tb, account.Testing_Sign(), url.Values{"epoch": {"10"}, "legacy_coldkey": {rotatedSelector}}))
 		// A current wallet that does have a leaf still cannot supply the missing
 		// selector or grant a provider credential legacy compatibility.
 		snClaimAuthWallet(tb, account, originalColdkey)
-		snClaimAuthAssertHeld(tb, fixture.request(tb, account.Sign(), url.Values{"epoch": {"10"}}))
-		snClaimAuthAssertHeld(tb, fixture.request(tb, provider.Sign(), query))
-		snClaimAuthAssertHeld(tb, fixture.request(tb, provider.Sign(), url.Values{"epoch": {"10"}}))
+		snClaimAuthAssertHeld(tb, fixture.request(tb, account.Testing_Sign(), url.Values{"epoch": {"10"}}))
+		snClaimAuthAssertHeld(tb, fixture.request(tb, provider.Testing_Sign(), query))
+		snClaimAuthAssertHeld(tb, fixture.request(tb, provider.Testing_Sign(), url.Values{"epoch": {"10"}}))
 
 		// A provider leaf anywhere in the selected pool disables compatibility,
 		// including a different coldkey from the requested network-only leaf.
@@ -476,7 +476,7 @@ func TestSnPoolClaimLegacyRequiresExplicitOriginalColdkeyAndNetworkOnlyLeaves(t 
 			}
 		}
 		model.SetStPayoutLeaves(tb.Context(), fixture.cfg.DeploymentKey(), 10, fixture.cfg.NoId, leaves)
-		snClaimAuthAssertHeld(tb, fixture.request(tb, account.Sign(), query))
+		snClaimAuthAssertHeld(tb, fixture.request(tb, account.Testing_Sign(), query))
 	})
 }
 
@@ -498,10 +498,10 @@ func TestSnPoolClaimLegacyRefusesRetainedProviderArtifact(t *testing.T) {
 			leaf.ClientId = nil
 		}
 		model.SetStPayoutLeaves(tb.Context(), fixture.cfg.DeploymentKey(), 11, fixture.cfg.NoId, leaves)
-		snClaimAuthAssertClaim(tb, fixture.request(tb, provider.Sign(), url.Values{"epoch": {"11"}}), artifact, coldkey)
+		snClaimAuthAssertClaim(tb, fixture.request(tb, provider.Testing_Sign(), url.Values{"epoch": {"11"}}), artifact, coldkey)
 		query := url.Values{"epoch": {"11"}, "legacy_coldkey": {selector}}
-		snClaimAuthAssertHeld(tb, fixture.request(tb, account.Sign(), query))
-		snClaimAuthAssertHeld(tb, fixture.request(tb, provider.Sign(), query))
+		snClaimAuthAssertHeld(tb, fixture.request(tb, account.Testing_Sign(), query))
+		snClaimAuthAssertHeld(tb, fixture.request(tb, provider.Testing_Sign(), query))
 	})
 }
 
@@ -515,7 +515,7 @@ func TestSnPoolClaimArtifactReadFailureNeverFallsBackToLegacy(t *testing.T) {
 		provider := snClaimAuthProvider(tb, account)
 		coldkey := [32]byte{0xb1}
 		selector := snClaimAuthWallet(tb, account, coldkey)
-		token := provider.Sign()
+		token := provider.Testing_Sign()
 		for i, fault := range []string{"missing", "corrupt"} {
 			epoch := uint64(20 + i)
 			artifact := fixture.build(tb, epoch, []startifact.ProviderInput{snClaimAuthContribution(provider, coldkey, 1)})
@@ -543,7 +543,7 @@ func TestSnPoolClaimArtifactReadFailureNeverFallsBackToLegacy(t *testing.T) {
 			}
 			query.Set("legacy_coldkey", selector)
 			snClaimAuthAssertHeld(tb, fixture.request(tb, token, query))
-			snClaimAuthAssertHeld(tb, fixture.request(tb, account.Sign(), query))
+			snClaimAuthAssertHeld(tb, fixture.request(tb, account.Testing_Sign(), query))
 		}
 	})
 }
@@ -558,7 +558,7 @@ func TestSnPoolClaimRejectsArtifactOutsideOriginalScope(t *testing.T) {
 		provider := snClaimAuthProvider(tb, account)
 		coldkey := [32]byte{0xc1}
 		snClaimAuthWallet(tb, account, coldkey)
-		token := provider.Sign()
+		token := provider.Testing_Sign()
 		providers := []startifact.ProviderInput{snClaimAuthContribution(provider, coldkey, 1)}
 		healthy := fixture.build(tb, 30, providers)
 		fixture.retain(tb, 30, healthy)
@@ -611,7 +611,7 @@ func TestSnPoolClaimRejectsChangedPayoutLeafRoot(t *testing.T) {
 		snClaimAuthWallet(tb, account, coldkey)
 		artifact := fixture.build(tb, 50, []startifact.ProviderInput{snClaimAuthContribution(provider, coldkey, 1)})
 		fixture.retain(tb, 50, artifact)
-		token := provider.Sign()
+		token := provider.Testing_Sign()
 		snClaimAuthAssertClaim(tb, fixture.request(tb, token, url.Values{"epoch": {"50"}}), artifact, coldkey)
 		leaves := model.GetStPayoutLeaves(tb.Context(), fixture.cfg.DeploymentKey(), 50, fixture.cfg.NoId)
 		leaves[0].ShareBps--
@@ -634,7 +634,7 @@ func TestSnPoolClaimRequiresValidActiveCredentials(t *testing.T) {
 		coldkey := [32]byte{0xe1}
 		artifact := fixture.build(tb, 60, []startifact.ProviderInput{snClaimAuthContribution(provider, coldkey, 1)})
 		fixture.retain(tb, 60, artifact)
-		token := provider.Sign()
+		token := provider.Testing_Sign()
 		query := url.Values{"epoch": {"60"}}
 		snClaimAuthAssertClaim(tb, fixture.request(tb, token, query), artifact, coldkey)
 		server.Tx(tb.Context(), func(tx server.PgTx) {

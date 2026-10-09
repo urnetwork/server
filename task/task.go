@@ -27,7 +27,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -1101,9 +1101,9 @@ type Task struct {
 }
 
 func (self *Task) ClientSession(ctx context.Context) (*session.ClientSession, error) {
-	var byJwt *jwt.ByJwt
+	var byJwt *session.ByJwt
 	if self.ClientByJwtJson != "" {
-		byJwt = &jwt.ByJwt{}
+		byJwt = &session.ByJwt{}
 		err := json.Unmarshal([]byte(self.ClientByJwtJson), byJwt)
 		if err != nil {
 			return nil, err
@@ -1154,9 +1154,9 @@ type FinishedTask struct {
 }
 
 func (self *FinishedTask) ClientSession(ctx context.Context) (*session.ClientSession, error) {
-	var byJwt *jwt.ByJwt
+	var byJwt *session.ByJwt
 	if self.ClientByJwtJson != "" {
-		byJwt = &jwt.ByJwt{}
+		byJwt = &session.ByJwt{}
 		err := json.Unmarshal([]byte(self.ClientByJwtJson), byJwt)
 		if err != nil {
 			return nil, err

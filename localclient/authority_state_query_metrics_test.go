@@ -17,7 +17,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -61,7 +61,7 @@ func authorityObservedCounter(t testing.TB, name string, want map[string]string)
 // once. This measures current behavior without silently changing authority.
 func TestAuthorityStateQueryMetricActualOperations(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(jwt.WithStateQuerySource(t.Context(), jwt.StateQueryApiControl), 30*time.Second)
+		ctx, cancel := context.WithTimeout(session.WithStateQuerySource(t.Context(), session.StateQueryApiControl), 30*time.Second)
 		defer cancel()
 		before := authorityStateQueryMetric(t, "hosted", "bootstrap", "client", "state_valid")
 		owner, parent := authorityTestOwner(t, ctx)

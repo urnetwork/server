@@ -20,7 +20,7 @@ import (
 	"github.com/urnetwork/connect/protocol"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -47,7 +47,7 @@ func newTestExtenderSession(
 	model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("extender-test-%s", networkId), userId)
 	model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "extender", "extender-test")
 
-	clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: networkId,
 		UserId:    userId,
 		DeviceId:  &deviceId,
@@ -560,7 +560,7 @@ func TestExtenderActivateValidatesArguments(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		clientSession := session.Testing_CreateClientSession(context.Background(), &jwt.ByJwt{})
+		clientSession := session.Testing_CreateClientSession(context.Background(), &session.ByJwt{})
 		clientSession.ClientAddress = "127.0.0.1:54321"
 		result, err := ExtenderActivate(c.args, clientSession)
 		if err != nil {
@@ -684,7 +684,7 @@ func TestExtenderActivateRefusesACallerItCannotAttribute(t *testing.T) {
 	}
 	cases := []struct {
 		name          string
-		byJwt         *jwt.ByJwt
+		byJwt         *session.ByJwt
 		clientAddress string
 		wantError     string
 	}{
@@ -696,19 +696,19 @@ func TestExtenderActivateRefusesACallerItCannotAttribute(t *testing.T) {
 		},
 		{
 			name:          "a jwt with no client",
-			byJwt:         &jwt.ByJwt{},
+			byJwt:         &session.ByJwt{},
 			clientAddress: "127.0.0.1:54321",
 			wantError:     "requires a client",
 		},
 		{
 			name:          "an address that is not an address",
-			byJwt:         &jwt.ByJwt{ClientId: &server.Id{}},
+			byJwt:         &session.ByJwt{ClientId: &server.Id{}},
 			clientAddress: "not-an-address.example:54321",
 			wantError:     "not readable",
 		},
 		{
 			name:          "no address at all",
-			byJwt:         &jwt.ByJwt{ClientId: &server.Id{}},
+			byJwt:         &session.ByJwt{ClientId: &server.Id{}},
 			clientAddress: "",
 			wantError:     "not readable",
 		},

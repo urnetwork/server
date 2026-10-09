@@ -21,7 +21,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -51,7 +51,7 @@ func TestLogFileShouldFail(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -63,7 +63,7 @@ func TestLogFileShouldFail(t *testing.T) {
 		networkIdB := server.NewId()
 		clientIdB := server.NewId()
 
-		userSessionB := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSessionB := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkIdB,
 			ClientId:  &clientIdB,
 		})
@@ -96,7 +96,7 @@ func TestLogFileUpload(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -149,7 +149,7 @@ func TestLogFileUpload(t *testing.T) {
 		networkIdB := server.NewId()
 		clientIdB := server.NewId()
 
-		userSessionB := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSessionB := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkIdB,
 			ClientId:  &clientIdB,
 		})
@@ -180,7 +180,7 @@ func TestLogFileUploadMaxSize(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -298,7 +298,7 @@ func TestLogFileUploadStorageIsGatedByFeedbackLogBucket(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -367,7 +367,7 @@ func TestLogFileUploadOverMaxSizeIsNotStored(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -424,7 +424,7 @@ func TestLogFileUploadStoreFailureIsReported(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})

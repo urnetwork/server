@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -26,7 +26,7 @@ func TestGuestPurchaseRefusedUntilSignInAdded(t *testing.T) {
 		userId := server.NewId()
 		model.Testing_CreateLegacyGuestNetwork(ctx, networkId, userId)
 
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId:   networkId,
 			UserId:      userId,
 			NetworkName: "g" + networkId.String(),

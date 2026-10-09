@@ -11,7 +11,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -93,7 +93,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		userIdA := server.NewId()
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", false, false),
+			session.NewByJwt(networkIdA, userIdA, "a", false, false),
 		)
 
 		networkIdB := server.NewId()
@@ -146,7 +146,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 
 		clientSessionC := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdC, userIdC, "c", false, false),
+			session.NewByJwt(networkIdC, userIdC, "c", false, false),
 		)
 
 		/*

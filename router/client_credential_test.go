@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // The client token gate (client_credential.go). Pure: tokens are signed with
@@ -26,12 +26,12 @@ func newClientCredentialGateFixture() *clientCredentialGateFixture {
 	networkId := server.NewId()
 	userId := server.NewId()
 	clientId := server.NewId()
-	network := jwt.NewByJwt(networkId, userId, "gate-test", false, false)
+	network := session.NewByJwt(networkId, userId, "gate-test", false, false)
 	return &clientCredentialGateFixture{
 		networkId:    networkId,
-		networkToken: network.Sign(),
+		networkToken: network.Testing_Sign(),
 		clientId:     clientId,
-		clientToken:  network.Client(server.NewId(), clientId).Sign(),
+		clientToken:  network.Client(server.NewId(), clientId).Testing_Sign(),
 	}
 }
 
@@ -104,7 +104,7 @@ func TestRefuseClientCredentialsGateLeavesAnUnverifiedTokenToTheHandler(t *testi
 	}
 	// the same claims under a different signature
 	forged := parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("x", 64)))
-	if !jwt.ByJwtNamesClientUnverified(forged) {
+	if !session.ByJwtNamesClientUnverified(forged) {
 		t.Fatal("the forged token's claims should name a client")
 	}
 	w, reached := serveClientCredentialGate(t, route, "/admin", "Bearer "+forged)
@@ -117,9 +117,9 @@ func TestRefuseClientCredentialsGateLeavesAnUnverifiedTokenToTheHandler(t *testi
 // decides to.
 func TestRefuseClientCredentialsGateAsksTheRefusal(t *testing.T) {
 	fixture := newClientCredentialGateFixture()
-	var seen *jwt.ByJwt
+	var seen *session.ByJwt
 	refusedNetworkId := fixture.networkId
-	route := RefuseClientCredentials(NewRoute("POST", "/admin", gateTestHandler), func(ctx context.Context, byJwt *jwt.ByJwt) bool {
+	route := RefuseClientCredentials(NewRoute("POST", "/admin", gateTestHandler), func(ctx context.Context, byJwt *session.ByJwt) bool {
 		seen = byJwt
 		return byJwt.NetworkId == refusedNetworkId
 	})

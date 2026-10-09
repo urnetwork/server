@@ -3,26 +3,24 @@ package session
 
 import (
 	"net/http"
-
-	"github.com/urnetwork/server/jwt"
 )
 
 // Exact method/path pairs select fixed operation classes. Dynamic routes and
 // unrecognized input remain API other; headers never override the caller.
-func sessionStateQuerySource(req *http.Request) jwt.StateQuerySource {
+func sessionStateQuerySource(req *http.Request) StateQuerySource {
 	if req != nil && req.URL != nil {
 		switch req.Method + " " + req.URL.Path {
 		case "POST /connect/control":
-			return jwt.StateQueryApiControl
+			return StateQueryApiControl
 		case "POST /network/auth-client", "POST /network/register-client-v1":
-			return jwt.StateQueryApiMint
+			return StateQueryApiMint
 		case "POST /network/remove-client", "POST /network/remove-clients":
-			return jwt.StateQueryApiRetire
+			return StateQueryApiRetire
 		case "POST /network/find-providers2", "POST /network/find-provider-locations", "POST /network/find-locations", "GET /network/provider-locations":
-			return jwt.StateQueryApiDiscovery
+			return StateQueryApiDiscovery
 		case "GET /auth/refresh", "POST /auth/network-refresh":
-			return jwt.StateQueryApiRefresh
+			return StateQueryApiRefresh
 		}
 	}
-	return jwt.StateQueryApiOther
+	return StateQueryApiOther
 }

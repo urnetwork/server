@@ -25,9 +25,9 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -124,7 +124,7 @@ func TestPrivateProviderLocalOobControllerParityAndPerf(t *testing.T) {
 		network, user, parent, device := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 		model.Testing_CreateNetwork(ctx, network, "local-oob-fixture", user)
 		model.Testing_CreateDevice(ctx, network, device, parent, "oob parent", "fixture")
-		parentToken := jwt.NewByJwt(network, user, "local-oob-fixture", false, false).Client(device, parent).Sign()
+		parentToken := session.NewByJwt(network, user, "local-oob-fixture", false, false).Client(device, parent).Testing_Sign()
 		credentials, err := newProviderEgressCredentials(&model.ProberIdentity{NetworkId: &network, UserId: &user, ClientId: &parent, ByClientJwt: parentToken})
 		if err != nil {
 			t.Fatal(err)
@@ -194,7 +194,7 @@ func TestPrivateProviderLocalOobControllerParityAndPerf(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			claims, err := jwt.ParseByJwtForAudience(ctx, result.ByClientJwt, jwt.ByJwtAudienceApi)
+			claims, err := session.ParseByJwtForAudience(ctx, result.ByClientJwt, session.ByJwtAudienceApi)
 			if err != nil || claims.ClientId == nil {
 				t.Fatal("minted credential invalid", err)
 			}
@@ -342,7 +342,7 @@ func TestPrivateProviderLocalOobControllerParityAndPerf(t *testing.T) {
 		// Real authorization controls on a minted child: signature, owner,
 		// cancellation, and revocation cannot become processed acknowledgments.
 		child, token := mint()
-		for _, invalid := range []string{parentToken, "invalid", jwt.NewByJwt(network, user, "local-oob-fixture", false, false).Client(device, providers[0]).Sign()} {
+		for _, invalid := range []string{parentToken, "invalid", session.NewByJwt(network, user, "local-oob-fixture", false, false).Client(device, providers[0]).Testing_Sign()} {
 			if _, err := local.ConnectControl(ctx, invalid, &connect.ConnectControlArgs{}); err == nil {
 				t.Fatal("unauthorized local control accepted")
 			}

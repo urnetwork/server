@@ -8,7 +8,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -20,7 +20,7 @@ func TestPayoutWallet(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -39,8 +39,8 @@ func TestPayoutWallet(t *testing.T) {
 			DefaultTokenType: "usdc",
 		}
 
-		walletId1 := CreateAccountWalletExternal(session, wallet1)
-		walletId2 := CreateAccountWalletExternal(session, wallet2)
+		walletId1 := CreateAccountWalletExternal(clientSession, wallet1)
+		walletId2 := CreateAccountWalletExternal(clientSession, wallet2)
 		connect.AssertNotEqual(t, walletId1, nil)
 		connect.AssertNotEqual(t, walletId2, nil)
 
@@ -60,7 +60,7 @@ func TestPayoutWallet(t *testing.T) {
 
 		connect.AssertEqual(t, payoutAccountWallet.WalletAddress, wallet2.WalletAddress)
 
-		deletePayoutWallet(*payoutWalletId, session)
+		deletePayoutWallet(*payoutWalletId, clientSession)
 		payoutWalletId = GetPayoutWalletId(ctx, networkId)
 		connect.AssertEqual(t, payoutWalletId, nil)
 
@@ -77,11 +77,11 @@ func TestSetPayoutWalletValidatesOwnership(t *testing.T) {
 		networkBId := server.NewId()
 		clientBId := server.NewId()
 
-		sessionA := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sessionA := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkAId,
 			ClientId:  &clientAId,
 		})
-		sessionB := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sessionB := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkBId,
 			ClientId:  &clientBId,
 		})
@@ -147,11 +147,11 @@ func TestGetPayoutWalletIdIgnoresStaleRows(t *testing.T) {
 		networkBId := server.NewId()
 		clientBId := server.NewId()
 
-		sessionA := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sessionA := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkAId,
 			ClientId:  &clientAId,
 		})
-		sessionB := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sessionB := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkBId,
 			ClientId:  &clientBId,
 		})
@@ -267,7 +267,7 @@ func TestRemoveWalletPromotesActivePayoutWallet(t *testing.T) {
 		newNetwork := func() (server.Id, *session.ClientSession) {
 			networkId := server.NewId()
 			clientId := server.NewId()
-			return networkId, session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			return networkId, session.Testing_CreateClientSession(ctx, &session.ByJwt{
 				NetworkId: networkId,
 				ClientId:  &clientId,
 			})

@@ -9,7 +9,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
@@ -32,7 +32,7 @@ func TestProberShardCompanionReplyControlKeepsPrivateAuthority(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		parentClaims, err := jwt.ParseByJwt(ctx, identity.ByClientJwt)
+		parentClaims, err := session.ParseByJwt(ctx, identity.ByClientJwt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -43,11 +43,11 @@ func TestProberShardCompanionReplyControlKeepsPrivateAuthority(t *testing.T) {
 		if err != nil || child == nil || child.Error != nil || child.ClientId == nil || child.ByClientJwt == nil {
 			t.Fatal("derived private credential failed", err)
 		}
-		claims, err := jwt.ParseByJwt(ctx, *child.ByClientJwt)
+		claims, err := session.ParseByJwt(ctx, *child.ByClientJwt)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if claims.NetworkId != owner.NetworkId || jwt.ValidateByJwtState(ctx, claims, true) != nil {
+		if claims.NetworkId != owner.NetworkId || session.ValidateByJwtState(ctx, claims, true) != nil {
 			t.Fatal("derived credential lost current private ownership")
 		}
 		childSession := session.Testing_CreateClientSession(ctx, claims)
@@ -131,7 +131,7 @@ func TestProberShardCompanionReplyControlKeepsPrivateAuthority(t *testing.T) {
 			}
 		})
 		server.Raise(model.DrainProberShard(ctx, owner.Key))
-		if jwt.ValidateByJwtState(ctx, claims, true) == nil {
+		if session.ValidateByJwtState(ctx, claims, true) == nil {
 			t.Fatal("retired derived credential remained valid")
 		}
 		created, err = readResult()

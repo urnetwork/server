@@ -8,7 +8,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -340,7 +340,7 @@ func TestNewClientDataCap(t *testing.T) {
 }
 
 // The routes accept the network's root token and an API key session (built by
-// session/client_session.go as jwt.NewByJwt(..., false, false): no client id,
+// session/client_session.go as session.NewByJwt(..., false, false): no client id,
 // pro mode off) as the network; a client token is not the network.
 func TestClientDataCapNetworkSession(t *testing.T) {
 	networkId := server.NewId()
@@ -349,16 +349,16 @@ func TestClientDataCapNetworkSession(t *testing.T) {
 	userId := server.NewId()
 	clientId := server.NewId()
 
-	apiKeySession := &session.ClientSession{ByJwt: jwt.NewByJwt(networkId, userId, "embed", false, false)}
+	apiKeySession := &session.ClientSession{ByJwt: session.NewByJwt(networkId, userId, "embed", false, false)}
 	connect.AssertEqual(t, clientDataCapNetworkSession(apiKeySession), true)
 
-	rootSession := &session.ClientSession{ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: userId}}
+	rootSession := &session.ClientSession{ByJwt: &session.ByJwt{NetworkId: networkId, UserId: userId}}
 	connect.AssertEqual(t, clientDataCapNetworkSession(rootSession), true)
 
-	clientSession := &session.ClientSession{ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: userId, ClientId: &clientId}}
+	clientSession := &session.ClientSession{ByJwt: &session.ByJwt{NetworkId: networkId, UserId: userId, ClientId: &clientId}}
 	connect.AssertEqual(t, clientDataCapNetworkSession(clientSession), false)
 
-	connect.AssertEqual(t, clientDataCapNetworkSession(&session.ClientSession{ByJwt: &jwt.ByJwt{}}), false)
+	connect.AssertEqual(t, clientDataCapNetworkSession(&session.ClientSession{ByJwt: &session.ByJwt{}}), false)
 	connect.AssertEqual(t, clientDataCapNetworkSession(&session.ClientSession{}), false)
 	connect.AssertEqual(t, clientDataCapNetworkSession(nil), false)
 

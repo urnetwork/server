@@ -8,7 +8,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -29,7 +29,7 @@ func TestNetworkReferral(t *testing.T) {
 		referralCodeB := model.CreateNetworkReferralCode(ctx, networkBId)
 		referralCodeC := model.CreateNetworkReferralCode(ctx, networkCId)
 
-		networkCSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		networkCSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkCId,
 		})
 
@@ -112,7 +112,7 @@ func TestSetNetworkReferralRefusesOwnCodeWithDotlessI(t *testing.T) {
 			))
 		})
 
-		networkSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		networkSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 		})
 

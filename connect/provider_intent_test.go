@@ -23,8 +23,8 @@ import (
 	"github.com/urnetwork/connect/protocol"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // Only the exact value 1 declares intent.
@@ -470,12 +470,12 @@ func newProviderIntentTestServer(t testing.TB, ctx context.Context) *providerInt
 	return testServer
 }
 
-// Creates a top-level client of the network and its signed client jwt.
+// Creates a top-level client of the network and its signed client session.
 func (self *providerIntentTestServer) createClient() (clientId server.Id, byJwt string) {
 	clientId = server.NewId()
 	deviceId := server.NewId()
 	model.Testing_CreateDevice(self.ctx, self.networkId, deviceId, clientId, "synthetic", "synthetic")
-	byJwt = jwt.NewByJwt(self.networkId, self.userId, self.networkName, false, false).Client(deviceId, clientId).Sign()
+	byJwt = session.NewByJwt(self.networkId, self.userId, self.networkName, false, false).Client(deviceId, clientId).Testing_Sign()
 	return
 }
 

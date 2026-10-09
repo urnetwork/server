@@ -29,7 +29,7 @@ import (
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/validator"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -128,17 +128,17 @@ func snHotkeyWalletConsentHashes(t testing.TB, chain []protocol.HotkeyWalletMapp
 }
 
 // POST /sn/wallet/hotkey-consent, unauthenticated for a nil credential.
-func (self *snWalletProviderScopeFixture) submitHotkeyChain(t testing.TB, credential *jwt.ByJwt, chain []protocol.HotkeyWalletMappingConsent) (int, []byte) {
+func (self *snWalletProviderScopeFixture) submitHotkeyChain(t testing.TB, credential *session.ByJwt, chain []protocol.HotkeyWalletMappingConsent) (int, []byte) {
 	t.Helper()
 	token := ""
 	if credential != nil {
-		token = credential.Sign()
+		token = credential.Testing_Sign()
 	}
 	return walletMappingControllerPost(t, self.endpoint.URL, "/sn/wallet/hotkey-consent", token, &SnHotkeyWalletMappingConsentArgs{Originals: chain})
 }
 
 // A submission the operator retains.
-func (self *snWalletProviderScopeFixture) retainHotkeyChain(t testing.TB, credential *jwt.ByJwt, chain []protocol.HotkeyWalletMappingConsent) SnHotkeyWalletMappingConsentResult {
+func (self *snWalletProviderScopeFixture) retainHotkeyChain(t testing.TB, credential *session.ByJwt, chain []protocol.HotkeyWalletMappingConsent) SnHotkeyWalletMappingConsentResult {
 	t.Helper()
 	status, raw := self.submitHotkeyChain(t, credential, chain)
 	var result SnHotkeyWalletMappingConsentResult
@@ -150,11 +150,11 @@ func (self *snWalletProviderScopeFixture) retainHotkeyChain(t testing.TB, creden
 
 // Issue a delegation of the chain's head through the authenticated route, then
 // sign the exact bytes with the hotkey and decode them independently.
-func (self *snWalletProviderScopeFixture) hotkeyDelegation(t testing.TB, credential *jwt.ByJwt, hotkey *schnorrkel.MiniSecretKey, hotkeySs58 string, chain []protocol.HotkeyWalletMappingConsent, fromEpoch uint64) (*SnSetWalletArgs, protocol.HotkeyNetworkDelegationStatement, [32]byte) {
+func (self *snWalletProviderScopeFixture) hotkeyDelegation(t testing.TB, credential *session.ByJwt, hotkey *schnorrkel.MiniSecretKey, hotkeySs58 string, chain []protocol.HotkeyWalletMappingConsent, fromEpoch uint64) (*SnSetWalletArgs, protocol.HotkeyNetworkDelegationStatement, [32]byte) {
 	t.Helper()
 	hashes := snHotkeyWalletConsentHashes(t, chain)
 	args := &SnHotkeyNetworkDelegationChallengeArgs{HotkeySs58: hotkeySs58, ConsentHeadHash: hashes[len(hashes)-1], ConsentGeneration: uint64(len(chain)), FromEpoch: fromEpoch, ThroughEpoch: fromEpoch + 100}
-	status, raw := walletMappingControllerPost(t, self.endpoint.URL, "/sn/wallet/hotkey-delegation", credential.Sign(), args)
+	status, raw := walletMappingControllerPost(t, self.endpoint.URL, "/sn/wallet/hotkey-delegation", credential.Testing_Sign(), args)
 	var challenge SnWalletMappingChallengeResult
 	if status != http.StatusOK || json.Unmarshal(raw, &challenge) != nil || challenge.Message == "" {
 		t.Fatal("authorized hotkey delegation issuance failed", status, string(raw))
@@ -216,7 +216,7 @@ func TestSnHotkeyWalletConsentRetainsChainIdempotentlyAndRefusesForks(t *testing
 		if status, _ := f.submitHotkeyChain(t, nil, first); status == http.StatusOK {
 			t.Fatal("an unauthenticated caller retained a hotkey consent chain")
 		}
-		for _, credential := range []*jwt.ByJwt{f.provider, f.sibling} {
+		for _, credential := range []*session.ByJwt{f.provider, f.sibling} {
 			if status, raw := f.submitHotkeyChain(t, credential, first); status == http.StatusOK || strings.TrimSpace(string(raw)) != protocol.ErrWalletMappingIntegrity.Error() {
 				t.Fatal("a client session retained a hotkey consent chain", status, string(raw))
 			}
@@ -306,7 +306,7 @@ func TestSnHotkeyWalletConsentBoundsNetworkHotkeysAndNewGenerations(t *testing.T
 		}
 		otherNetworkId, otherUserId := server.NewId(), server.NewId()
 		model.Testing_CreateNetwork(t.Context(), otherNetworkId, "synthetic-hotkey-bound-"+otherNetworkId.String(), otherUserId)
-		other := jwt.NewByJwt(otherNetworkId, otherUserId, "synthetic-hotkey-bound", false, false)
+		other := session.NewByJwt(otherNetworkId, otherUserId, "synthetic-hotkey-bound", false, false)
 		f.retainHotkeyChain(t, other, refused)
 		// a chain with one generation more than one submission may add
 		longKey, _ := snNetworkWalletTestKey(t, 230)
@@ -343,12 +343,12 @@ func TestSnHotkeyNetworkDelegationOnlyNetworkOwnerAndNoProjection(t *testing.T) 
 		chain := snHotkeyWalletConsentAppend(t, nil, f.rpc.domain.HotkeySubnet(), hotkey, coldkey, f.scope.Epoch, "delegated")
 		head := snHotkeyWalletConsentHashes(t, chain)[0]
 		args := &SnHotkeyNetworkDelegationChallengeArgs{HotkeySs58: hotkeySs58, ConsentHeadHash: head, ConsentGeneration: 1, FromEpoch: f.scope.Epoch, ThroughEpoch: f.scope.Epoch + 100}
-		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", f.owner.Sign(), args); !snHotkeyWalletRefused(status, raw, protocol.ErrWalletMappingUnavailable) {
+		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", f.owner.Testing_Sign(), args); !snHotkeyWalletRefused(status, raw, protocol.ErrWalletMappingUnavailable) {
 			t.Fatal("a delegation was issued before its chain was retained", status, string(raw))
 		}
 		f.retainHotkeyChain(t, f.owner, chain)
-		for _, credential := range []*jwt.ByJwt{f.provider, f.sibling} {
-			if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", credential.Sign(), args); status == http.StatusOK || strings.TrimSpace(string(raw)) != protocol.ErrWalletMappingIntegrity.Error() {
+		for _, credential := range []*session.ByJwt{f.provider, f.sibling} {
+			if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", credential.Testing_Sign(), args); status == http.StatusOK || strings.TrimSpace(string(raw)) != protocol.ErrWalletMappingIntegrity.Error() {
 				t.Fatal("a client session requested a hotkey delegation", status, string(raw))
 			}
 		}
@@ -363,7 +363,7 @@ func TestSnHotkeyNetworkDelegationOnlyNetworkOwnerAndNoProjection(t *testing.T) 
 		} {
 			other := *args
 			change(&other)
-			if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", f.owner.Sign(), &other); !snHotkeyWalletRefused(status, raw, protocol.ErrWalletMappingUnavailable) {
+			if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", f.owner.Testing_Sign(), &other); !snHotkeyWalletRefused(status, raw, protocol.ErrWalletMappingUnavailable) {
 				t.Fatal("a delegation was issued for a head that is not retained", status, string(raw))
 			}
 		}
@@ -381,10 +381,10 @@ func TestSnHotkeyNetworkDelegationOnlyNetworkOwnerAndNoProjection(t *testing.T) 
 		otherSigner := *set
 		otherSigner.ColdkeySs58 = coldkeySs58
 		for _, refused := range []struct {
-			credential *jwt.ByJwt
+			credential *session.ByJwt
 			set        *SnSetWalletArgs
 		}{{f.provider, set}, {f.owner, &named}, {f.owner, &otherSigner}} {
-			if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", refused.credential.Sign(), refused.set); !snHotkeyWalletRefused(status, raw, protocol.ErrWalletMappingIntegrity) {
+			if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", refused.credential.Testing_Sign(), refused.set); !snHotkeyWalletRefused(status, raw, protocol.ErrWalletMappingIntegrity) {
 				t.Fatal("a delegation was accepted from a client, for a client or for another signer", status, string(raw))
 			}
 		}
@@ -401,7 +401,7 @@ func TestSnHotkeyNetworkDelegationOnlyNetworkOwnerAndNoProjection(t *testing.T) 
 		resigned := *set
 		signature := snHotkeyWalletSign(t, hotkey, set.Message)
 		resigned.Signature = "0x" + hex.EncodeToString(signature[:])
-		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Sign(), &resigned); !snHotkeyWalletRefused(status, raw, protocol.ErrWalletMappingIntegrity) {
+		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Testing_Sign(), &resigned); !snHotkeyWalletRefused(status, raw, protocol.ErrWalletMappingIntegrity) {
 			t.Fatal("a second original was accepted for one challenge", status, string(raw))
 		}
 		if rows := f.hotkeyRows(t); rows != (snHotkeyWalletRows{consents: 1, submitters: 1, challenges: 1, delegations: 1}) {
@@ -438,19 +438,19 @@ func TestSnHotkeyNetworkDelegationRefusals(t *testing.T) {
 		mismatch := *set
 		other := snHotkeyWalletSign(t, coldkey, set.Message)
 		mismatch.Signature = "0x" + hex.EncodeToString(other[:])
-		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Sign(), &mismatch)
+		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Testing_Sign(), &mismatch)
 		var refused SnSetWalletResult
 		if status != http.StatusOK || json.Unmarshal(raw, &refused) != nil || refused.Error == nil || refused.Error.Code != SnSetWalletErrorCodeSignatureMismatch {
 			t.Fatal("another key's signature was not the coded mismatch", status, string(raw))
 		}
 		// a session of a user who does not administer the network does not
 		// authenticate; the model refuses that owner even so
-		foreign := jwt.NewByJwt(f.owner.NetworkId, server.NewId(), "synthetic-foreign-user", false, false)
+		foreign := session.NewByJwt(f.owner.NetworkId, server.NewId(), "synthetic-foreign-user", false, false)
 		args := &SnHotkeyNetworkDelegationChallengeArgs{HotkeySs58: hotkeySs58, ConsentHeadHash: head, ConsentGeneration: 1, FromEpoch: f.scope.Epoch, ThroughEpoch: f.scope.Epoch + 100}
-		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", foreign.Sign(), args); status == http.StatusOK {
+		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", foreign.Testing_Sign(), args); status == http.StatusOK {
 			t.Fatal("a user who does not administer the network requested its delegation", string(raw))
 		}
-		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", foreign.Sign(), set); status == http.StatusOK {
+		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", foreign.Testing_Sign(), set); status == http.StatusOK {
 			t.Fatal("a user who does not administer the network submitted its delegation", string(raw))
 		}
 		cfg := stConfig()
@@ -489,7 +489,7 @@ func TestSnHotkeyNetworkDelegationRefusals(t *testing.T) {
 		})
 		expiredSignature := snHotkeyWalletSign(t, hotkey, expiredMessage)
 		expiredSet := &SnSetWalletArgs{ColdkeySs58: hotkeySs58, Message: expiredMessage, Signature: "0x" + hex.EncodeToString(expiredSignature[:])}
-		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Sign(), expiredSet); status == http.StatusOK || !strings.Contains(string(raw), "expired") {
+		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Testing_Sign(), expiredSet); status == http.StatusOK || !strings.Contains(string(raw), "expired") {
 			t.Fatal("an expired delegation challenge was accepted", status, string(raw))
 		}
 		// no kind is accepted as another: a network consent or a delegation as
@@ -503,7 +503,7 @@ func TestSnHotkeyNetworkDelegationRefusals(t *testing.T) {
 			}
 		}
 		global := &SnSetWalletArgs{ColdkeySs58: hotkeySs58, Message: chain[0].Message, Signature: "0x" + hex.EncodeToString(chain[0].HotkeySignature[:])}
-		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Sign(), global); !snHotkeyWalletRefused(status, raw, protocol.ErrWalletMappingIntegrity) {
+		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.owner.Testing_Sign(), global); !snHotkeyWalletRefused(status, raw, protocol.ErrWalletMappingIntegrity) {
 			t.Fatal("a global hotkey consent was accepted at the accept route", status, string(raw))
 		}
 		// the delegation history never serves a network consent chain
@@ -515,11 +515,11 @@ func TestSnHotkeyNetworkDelegationRefusals(t *testing.T) {
 		// one challenge is open (the mismatch was never accepted); fifteen more
 		// fill the bound and the next is refused
 		for range 15 {
-			if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", f.owner.Sign(), args); status != http.StatusOK {
+			if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", f.owner.Testing_Sign(), args); status != http.StatusOK {
 				t.Fatal("an open challenge below the bound was refused", status, string(raw))
 			}
 		}
-		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", f.owner.Sign(), args); status == http.StatusOK || !strings.Contains(string(raw), "capacity") {
+		if status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/hotkey-delegation", f.owner.Testing_Sign(), args); status == http.StatusOK || !strings.Contains(string(raw), "capacity") {
 			t.Fatal("a seventeenth open delegation challenge was issued", status, string(raw))
 		}
 		if rows := f.hotkeyRows(t); rows.delegations != 0 || rows.challenges != 17 {
@@ -551,7 +551,7 @@ func TestSnGetWalletShowsHotkeyDelegationInPrecedence(t *testing.T) {
 		f.accept(t, f.owner, set)
 		// without a mirrored epoch the pinned head's coldkey shows
 		want := SnWallet{ColdkeySs58: secondSs58, ConsentScope: SnWalletConsentScopeHotkey, FromEpoch: f.scope.Epoch, ThroughEpoch: f.scope.Epoch + 100, HotkeySs58: hotkeySs58, ConsentHeadHash: "0x" + hex.EncodeToString(heads[1][:]), ConsentGeneration: 2, MappingHash: "0x" + hex.EncodeToString(hash[:]), MappingGeneration: 1}
-		for _, credential := range []*jwt.ByJwt{f.owner, f.provider, f.sibling} {
+		for _, credential := range []*session.ByJwt{f.owner, f.provider, f.sibling} {
 			result := f.getWallet(t, credential)
 			if result.Wallet == nil || result.Wallet.SetAtMillis == 0 || len(result.Wallets) != 1 {
 				t.Fatal("the delegation is not every session's effective wallet", result)
@@ -579,7 +579,7 @@ func TestSnGetWalletShowsHotkeyDelegationInPrecedence(t *testing.T) {
 		// side copy; both rank after the delegation
 		login, _ := f.loginProof(t, f.sibling.ClientId)
 		f.accept(t, f.sibling, login)
-		for _, credential := range []*jwt.ByJwt{f.owner, f.sibling} {
+		for _, credential := range []*session.ByJwt{f.owner, f.sibling} {
 			if result := f.getWallet(t, credential); result.Wallet == nil || result.Wallet.ConsentScope != SnWalletConsentScopeHotkey || result.Wallet.ColdkeySs58 != firstSs58 {
 				t.Fatal("a wallet without a consent displaced the delegation", result)
 			}
@@ -602,7 +602,7 @@ func TestSnGetWalletShowsHotkeyDelegationInPrecedence(t *testing.T) {
 		if len(result.Wallets) != 5 || result.Wallets[0].ConsentScope != SnWalletConsentScopeNetwork || result.Wallets[1].ConsentScope != SnWalletConsentScopeHotkey || result.Wallets[2].ConsentScope != "" || result.Wallets[2].ClientId != nil {
 			t.Fatal("the network consent, the delegation and the side copy lost their order", result.Wallets)
 		}
-		for _, credential := range []*jwt.ByJwt{f.owner, f.sibling} {
+		for _, credential := range []*session.ByJwt{f.owner, f.sibling} {
 			if result := f.getWallet(t, credential); result.Wallet == nil || result.Wallet.ConsentScope != SnWalletConsentScopeNetwork || result.Wallet.ColdkeySs58 != networkSs58 {
 				t.Fatal("the delegation displaced the network consent", result)
 			}
@@ -812,12 +812,12 @@ func TestStPayoutWalletResolutionsRecordHotkeyMode(t *testing.T) {
 // challenge, and so are a session without a JWT and an empty chain. Pure: no
 // database.
 func TestSnHotkeyWalletMappingConsentRefusesBeforeAnyRead(t *testing.T) {
-	owner := jwt.NewByJwt(server.NewId(), server.NewId(), "synthetic-hotkey-owner", false, false)
+	owner := session.NewByJwt(server.NewId(), server.NewId(), "synthetic-hotkey-owner", false, false)
 	args := &SnHotkeyWalletMappingConsentArgs{Originals: []protocol.HotkeyWalletMappingConsent{{Message: protocol.HotkeyWalletMappingConsentPrefix + "{}"}}}
 	for _, c := range []struct {
 		name    string
 		args    *SnHotkeyWalletMappingConsentArgs
-		byJwt   *jwt.ByJwt
+		byJwt   *session.ByJwt
 		refusal error
 	}{
 		{name: "client JWT", args: args, byJwt: owner.Client(server.NewId(), server.NewId()), refusal: protocol.ErrWalletMappingIntegrity},

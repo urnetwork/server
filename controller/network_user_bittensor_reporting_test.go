@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -33,7 +33,7 @@ func TestGetNetworkUserReportsBittensorWallet(t *testing.T) {
 		clientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "taoreport", userId)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -96,7 +96,7 @@ func TestGetNetworkUserReportsNoWalletWhenNoneBound(t *testing.T) {
 		clientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "nowallet", userId)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,

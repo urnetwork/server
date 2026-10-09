@@ -32,6 +32,7 @@ type safeRedisClient struct {
 	client                redis.UniversalClient
 	disableCommandRetry   bool
 	contextTimeoutEnabled bool
+	authentication        bool
 }
 
 func (self *safeRedisClient) open() redis.UniversalClient {
@@ -118,6 +119,11 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 			dialTimeout = time.Second
 			dialRetries = 1                                 // go-redis counts dial attempts, not extra retries
 			maxConnections = max(1, min(maxConnections, 8)) // per node in cluster mode
+		}
+		if self.authentication {
+			readTimeout, writeTimeout, poolTimeout, dialTimeout = 2*time.Second, 2*time.Second, 2*time.Second, 2*time.Second
+			dialRetries, maxRetries, maxRedirects = 1, -1, 2
+			maxConnections = max(16, redisConfigKeys.RequireInt("max_connections"))
 		}
 
 		dialer := NewDialer(dialTimeout)
@@ -229,6 +235,31 @@ var safeNoCommandRetryClient = &safeRedisClient{disableCommandRetry: true}
 // credential and accounting pools retain their original timeout policies.
 var safeDeadlineClient = &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true}
 
+// Authentication owns its pool and total budget; no preflight command borrows
+// authority or consumes a second round trip. Routing redirects share the context.
+var safeAuthClient = &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true, authentication: true}
+
+func RedisAuth(ctx context.Context, callback func(context.Context, RedisClient) error) (returnErr error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if err, ok := recovered.(error); ok {
+				returnErr = err
+			} else {
+				returnErr = fmt.Errorf("authentication Redis unavailable")
+			}
+		}
+		if ctx.Err() != nil {
+			returnErr = ctx.Err()
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return callback(ctx, safeAuthClient.open())
+}
+
 var redisKeyEventMergeDrops = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "urnetwork_redis_key_event_merge_drops_total",
 	Help: "Keyspace notifications dropped at the process-wide merge; each drop terminates the subscription epoch and forces a full resync",
@@ -241,7 +272,7 @@ func init() {
 	poolStat := func(f func(*redis.PoolStats) float64) func() float64 {
 		return func() float64 {
 			value := float64(0)
-			for _, pool := range []*safeRedisClient{safeClient, safeNoCommandRetryClient, safeDeadlineClient} {
+			for _, pool := range []*safeRedisClient{safeClient, safeNoCommandRetryClient, safeDeadlineClient, safeAuthClient} {
 				if client := pool.current(); client != nil {
 					value += f(client.PoolStats())
 				}
@@ -280,6 +311,7 @@ func RedisReset() {
 	safeClient.reset()
 	safeNoCommandRetryClient.reset()
 	safeDeadlineClient.reset()
+	safeAuthClient.reset()
 }
 
 // func client() redis.UniversalClient {

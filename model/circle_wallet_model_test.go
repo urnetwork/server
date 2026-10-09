@@ -6,7 +6,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -15,7 +15,7 @@ func TestCircleUC(t *testing.T) {
 		var circleUserIdWithWallet = server.RequireParseId("018c4b12-1a76-aaca-acce-72ddae03f60d")
 		ctx := context.Background()
 
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId:   server.NewId(),
 			NetworkName: "test",
 			UserId:      server.NewId(),
@@ -24,8 +24,8 @@ func TestCircleUC(t *testing.T) {
 		// set used for testing
 		SetCircleUserId(
 			ctx,
-			session.ByJwt.NetworkId,
-			session.ByJwt.UserId,
+			clientSession.ByJwt.NetworkId,
+			clientSession.ByJwt.UserId,
 			circleUserIdWithWallet,
 		)
 

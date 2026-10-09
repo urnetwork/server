@@ -99,7 +99,7 @@ func testStClientKeyRegistrationReadinessRetry(t testing.TB, failHistory bool) {
 		_, _ = w.Write(actual.Body.Bytes())
 	}))
 	strategy := connect.NewClientStrategyWithDefaults(ctx)
-	control := connect.NewApiOutOfBandControl(ctx, strategy, credential.Sign(), endpoint.URL)
+	control := connect.NewApiOutOfBandControl(ctx, strategy, credential.Testing_Sign(), endpoint.URL)
 	settings := connect.DefaultClientSettings()
 	settings.ControlPingTimeout = 0
 	settings.EncryptionSettings.Mode = connect.EncryptionModeOff

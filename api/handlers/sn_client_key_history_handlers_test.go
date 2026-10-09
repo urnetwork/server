@@ -17,8 +17,8 @@ import (
 func TestSnClientKeyObservationAuthenticatesBeforeRequestBody(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		account, client := snAttemptUploadTestIdentity(tb)
-		clientToken := client.Sign()
-		for _, token := range []string{"", "invalid", account.Sign(), clientToken} {
+		clientToken := client.Testing_Sign()
+		for _, token := range []string{"", "invalid", account.Testing_Sign(), clientToken} {
 			reads := 0
 			request := snAttemptUploadTestRequest(tb, token, "metadata", []byte("{}"))
 			request.Body = &snAttemptTestReadCloser{Reader: snAttemptTestReadFunc(func([]byte) (int, error) { reads++; return 0, io.EOF })}
@@ -46,7 +46,7 @@ func TestSnClientKeyObservationQuotaRefusesBeforeRequestBody(t *testing.T) {
 			tb.Fatal(err)
 		}
 		reads := 0
-		request := snAttemptUploadTestRequest(tb, client.Sign(), "metadata", []byte("{}"))
+		request := snAttemptUploadTestRequest(tb, client.Testing_Sign(), "metadata", []byte("{}"))
 		request.Body = &snAttemptTestReadCloser{Reader: snAttemptTestReadFunc(func([]byte) (int, error) { reads++; return 0, io.EOF })}
 		response := snAttemptUploadTestRecorder()
 		SnClientKeyObservation(response, request)

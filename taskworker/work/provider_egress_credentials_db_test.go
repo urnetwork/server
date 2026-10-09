@@ -8,7 +8,7 @@ import (
 	gojwt "github.com/golang-jwt/jwt/v5"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -30,11 +30,11 @@ func TestProviderEgressInternalCredentialsPreserveModelContract(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		parent, err := jwt.ParseByJwtForAudience(ctx, identity.ByClientJwt, jwt.ByJwtAudienceApi)
+		parent, err := session.ParseByJwtForAudience(ctx, identity.ByClientJwt, session.ByJwtAudienceApi)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer jwt.Testing_SetRejectExpired(true)()
+		defer session.Testing_SetRejectExpired(true)()
 		for _, invalid := range []string{"signature", "audience", "expired"} {
 			badIdentity := *identity
 			badClaims := *parent
@@ -43,10 +43,10 @@ func TestProviderEgressInternalCredentialsPreserveModelContract(t *testing.T) {
 				badIdentity.ByClientJwt += "synthetic-tamper"
 			case "audience":
 				badClaims.Audience = gojwt.ClaimStrings{"urnetwork:synthetic-wrong"}
-				badIdentity.ByClientJwt = badClaims.Sign()
+				badIdentity.ByClientJwt = badClaims.Testing_Sign()
 			case "expired":
 				badClaims.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-time.Hour))
-				badIdentity.ByClientJwt = badClaims.Sign()
+				badIdentity.ByClientJwt = badClaims.Testing_Sign()
 			}
 			badCredentials, err := newProviderEgressCredentials(&badIdentity)
 			if err != nil {
@@ -73,7 +73,7 @@ func TestProviderEgressInternalCredentialsPreserveModelContract(t *testing.T) {
 		if err != nil || minted == nil {
 			t.Fatalf("internal model mint failed: %v", err)
 		}
-		child, err := jwt.ParseByJwtForAudience(ctx, minted.ByClientJwt, jwt.ByJwtAudienceConnect)
+		child, err := session.ParseByJwtForAudience(ctx, minted.ByClientJwt, session.ByJwtAudienceConnect)
 		if err != nil {
 			t.Fatal("derived credential failed normal Connect signature/audience validation")
 		}
@@ -83,10 +83,10 @@ func TestProviderEgressInternalCredentialsPreserveModelContract(t *testing.T) {
 			child.ExpiresAt.Time.Sub(child.IssuedAt.Time) != parent.ExpiresAt.Time.Sub(parent.IssuedAt.Time) {
 			t.Fatal("derived identity, device, lineage, roles, or normal token lifetime changed")
 		}
-		if _, err := jwt.ParseByJwtForAudience(ctx, minted.ByClientJwt, jwt.ByJwtAudienceApi); err != nil {
+		if _, err := session.ParseByJwtForAudience(ctx, minted.ByClientJwt, session.ByJwtAudienceApi); err != nil {
 			t.Fatal("derived credential lost its ordinary API audience")
 		}
-		if err := jwt.ValidateByJwtState(ctx, child, true); err != nil {
+		if err := session.ValidateByJwtState(ctx, child, true); err != nil {
 			t.Fatal("minted child did not become a normal active network client")
 		}
 		var childSource, childNetwork, childDevice server.Id
@@ -106,10 +106,10 @@ func TestProviderEgressInternalCredentialsPreserveModelContract(t *testing.T) {
 		if _, err := credentials.RemoveNetworkClient(ctx, &connect.RemoveNetworkClientArgs{ClientId: connect.Id(*child.ClientId)}); err != nil {
 			t.Fatal(err)
 		}
-		if err := jwt.ValidateByJwtState(ctx, child, true); err == nil {
+		if err := session.ValidateByJwtState(ctx, child, true); err == nil {
 			t.Fatal("retired child credential remained valid")
 		}
-		if err := jwt.ValidateByJwtState(ctx, parent, true); err != nil {
+		if err := session.ValidateByJwtState(ctx, parent, true); err != nil {
 			t.Fatal("derived retirement revoked the durable prober parent")
 		}
 		var balanceAfter int64

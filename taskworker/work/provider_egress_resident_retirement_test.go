@@ -8,7 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -116,7 +116,7 @@ func TestProviderEgressResidentRetirementFailureAndIndependentOwners(t *testing.
 					t.Fatal("capture failed")
 				}
 				if scenario == "revoked" {
-					credentials.validate = func(context.Context, *jwt.ByJwt, bool) error { return errors.New("revoked") }
+					credentials.validate = func(context.Context, *session.ByJwt, bool) error { return errors.New("revoked") }
 				}
 				if _, err := credentials.RemoveNetworkClient(t.Context(), &connect.RemoveNetworkClientArgs{ClientId: child}); err == nil {
 					t.Fatal("failed SQL was accepted")

@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -28,7 +28,7 @@ func TestSubscriptionDetailsDbListsCancelsAndResumes(t *testing.T) {
 		userId := server.NewId()
 		clientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "managesub", userId)
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -187,7 +187,7 @@ func TestSubscriptionDetailsDbNoCustomerNoPortal(t *testing.T) {
 		userId := server.NewId()
 		clientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "managesubapple", userId)
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -252,7 +252,7 @@ func TestSubscriptionDetailsDbStripeUnreachable(t *testing.T) {
 		userId := server.NewId()
 		clientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "managesubdown", userId)
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -334,7 +334,7 @@ func TestSubscriptionDetailsDbListsAStripeRenewalStillBeingRetried(t *testing.T)
 		userId := server.NewId()
 		clientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "managesubretry", userId)
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -394,7 +394,7 @@ func TestSubscriptionCancelDbReachesAStripeRenewalStillBeingRetried(t *testing.T
 		userId := server.NewId()
 		clientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "managesubretrycancel", userId)
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -439,7 +439,7 @@ func TestSubscriptionDetailsDbListsARetriedRenewalOfAStripeCustomer(t *testing.T
 		userId := server.NewId()
 		clientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "managesubretrycus", userId)
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -494,7 +494,7 @@ func TestSubscriptionDetailsDbLeavesAnEndedStripeSubscriptionUnlisted(t *testing
 		userId := server.NewId()
 		clientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "managesubended", userId)
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,

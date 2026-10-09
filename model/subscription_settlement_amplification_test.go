@@ -12,7 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -336,7 +336,7 @@ func TestEscrowSettlementLegacyRejectionKeepsReservation(t *testing.T) {
 // Legacy worker payouts must be visible exactly once through this same API.
 func readLegacyAmplificationAccount(t testing.TB, ctx context.Context, networkId server.Id) AccountBalance {
 	t.Helper()
-	result := GetAccountBalance(&session.ClientSession{Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId}})
+	result := GetAccountBalance(&session.ClientSession{Ctx: ctx, ByJwt: &session.ByJwt{NetworkId: networkId}})
 	if result == nil || result.Error != nil || result.Balance == nil {
 		t.Fatalf("legacy fixture could not read its public account: %+v", result)
 	}

@@ -10,7 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -36,7 +36,7 @@ func controllerPayoutFixture(t testing.TB, closed time.Time, historicalGross ...
 	network, client, sourceNetwork, source := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	testingCreatePaymentClient(ctx, network, client)
 	testingCreatePaymentClient(ctx, sourceNetwork, source)
-	owner := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{NetworkId: network, ClientId: &client})
+	owner := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: network, ClientId: &client})
 	t.Cleanup(owner.Cancel)
 	wallet := model.CreateAccountWalletExternal(owner, &model.CreateAccountWalletExternalArgs{NetworkId: network, Blockchain: "MATIC", WalletAddress: "0x0000000000000000000000000000000000000012", DefaultTokenType: "USDC"})
 	if wallet == nil {

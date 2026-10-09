@@ -9,7 +9,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -143,8 +143,8 @@ func TestNetworkEmbedStateMeaningsThroughEnableDisableReenable(t *testing.T) {
 			connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), s.wantRefusesAdmin)
 
 			for _, clientSession := range []*session.ClientSession{
-				{Ctx: ctx, ByJwt: jwt.NewByJwt(networkId, userId, "embed", false, false)},
-				{Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: userId, ClientId: &clientId}},
+				{Ctx: ctx, ByJwt: session.NewByJwt(networkId, userId, "embed", false, false)},
+				{Ctx: ctx, ByJwt: &session.ByJwt{NetworkId: networkId, UserId: userId, ClientId: &clientId}},
 			} {
 				connect.AssertEqual(t, networkEmbedRefused(clientSession), s.wantApisRefused)
 				if s.wantApisRefused {
@@ -212,9 +212,9 @@ func TestNetworkEmbedRefusedBeforeAnyQuery(t *testing.T) {
 	primeNetworkEmbedCache(t, networkId, false)
 
 	sessions := map[string]*session.ClientSession{
-		"root":    {Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: userId}},
-		"api key": {Ctx: ctx, ByJwt: jwt.NewByJwt(networkId, userId, "embed", false, false)},
-		"client":  {Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: userId, ClientId: &clientId}},
+		"root":    {Ctx: ctx, ByJwt: &session.ByJwt{NetworkId: networkId, UserId: userId}},
+		"api key": {Ctx: ctx, ByJwt: session.NewByJwt(networkId, userId, "embed", false, false)},
+		"client":  {Ctx: ctx, ByJwt: &session.ByJwt{NetworkId: networkId, UserId: userId, ClientId: &clientId}},
 	}
 	negative := ByteCount(-5)
 	for name, clientSession := range sessions {
@@ -255,7 +255,7 @@ func TestNetworkEmbedRefusedBeforeAnyQuery(t *testing.T) {
 // A session without a network cannot be gated: the route's own session check
 // answers, as before.
 func TestNetworkEmbedGateLeavesSessionChecks(t *testing.T) {
-	for _, clientSession := range []*session.ClientSession{nil, {}, {ByJwt: &jwt.ByJwt{}}} {
+	for _, clientSession := range []*session.ClientSession{nil, {}, {ByJwt: &session.ByJwt{}}} {
 		connect.AssertEqual(t, networkEmbedRefused(clientSession), false)
 
 		setResult, err := SetClientDataCap(&SetClientDataCapArgs{ClientId: server.NewId()}, clientSession)
@@ -276,8 +276,8 @@ func TestGetNetworkEmbedStatusRefusesNonNetworkSessions(t *testing.T) {
 	for _, clientSession := range []*session.ClientSession{
 		nil,
 		{},
-		{ByJwt: &jwt.ByJwt{}},
-		{Ctx: context.Background(), ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: server.NewId(), ClientId: &clientId}},
+		{ByJwt: &session.ByJwt{}},
+		{Ctx: context.Background(), ByJwt: &session.ByJwt{NetworkId: networkId, UserId: server.NewId(), ClientId: &clientId}},
 	} {
 		result, err := GetNetworkEmbedStatus(clientSession)
 		connect.AssertEqual(t, err, nil)

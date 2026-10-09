@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -22,14 +22,14 @@ type authVerifyEffectsRecorder struct {
 	syncedNetwork []server.Id
 }
 
-func newAuthVerifyEffectsRecorder(byJwt *jwt.ByJwt) (*authVerifyEffectsRecorder, authVerifyEffects) {
+func newAuthVerifyEffectsRecorder(byJwt *session.ByJwt) (*authVerifyEffectsRecorder, authVerifyEffects) {
 	recorder := &authVerifyEffectsRecorder{}
 	effects := authVerifyEffects{
-		enrollOnboarding: func(result *model.AuthVerifyResult, userAuth string, clientSession *session.ClientSession) *jwt.ByJwt {
+		enrollOnboarding: func(result *model.AuthVerifyResult, userAuth string, clientSession *session.ClientSession) *session.ByJwt {
 			recorder.enrolled = append(recorder.enrolled, userAuth)
 			return byJwt
 		},
-		parseByJwt: func(clientSession *session.ClientSession, signedByJwt string) *jwt.ByJwt {
+		parseByJwt: func(clientSession *session.ClientSession, signedByJwt string) *session.ByJwt {
 			recorder.parsed = append(recorder.parsed, signedByJwt)
 			return byJwt
 		},
@@ -50,7 +50,7 @@ func authVerifyTestSession(t *testing.T) *session.ClientSession {
 // network in onboarding and syncs its product-updates preference.
 func TestCompleteAuthVerifyNewAccountGetsEnrollment(t *testing.T) {
 	networkId := server.NewId()
-	byJwt := &jwt.ByJwt{NetworkId: networkId, UserId: server.NewId()}
+	byJwt := &session.ByJwt{NetworkId: networkId, UserId: server.NewId()}
 	for _, userAuth := range []string{"new@fixture.example", "+15555550100"} {
 		recorder, effects := newAuthVerifyEffectsRecorder(byJwt)
 		completeAuthVerify(
@@ -75,7 +75,7 @@ func TestCompleteAuthVerifyNewAccountGetsEnrollment(t *testing.T) {
 // verifies it through /auth/verify. That is not a sign-up.
 func TestCompleteAuthVerifyAddedSignInGetsNoEnrollment(t *testing.T) {
 	networkId := server.NewId()
-	byJwt := &jwt.ByJwt{NetworkId: networkId, UserId: server.NewId()}
+	byJwt := &session.ByJwt{NetworkId: networkId, UserId: server.NewId()}
 	recorder, effects := newAuthVerifyEffectsRecorder(byJwt)
 	completeAuthVerify(
 		&model.AuthVerifyResult{
@@ -96,7 +96,7 @@ func TestCompleteAuthVerifyAddedSignInGetsNoEnrollment(t *testing.T) {
 }
 
 func TestCompleteAuthVerifyFailedVerificationHasNoEffects(t *testing.T) {
-	byJwt := &jwt.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()}
+	byJwt := &session.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()}
 	recorder, effects := newAuthVerifyEffectsRecorder(byJwt)
 	completeAuthVerify(
 		&model.AuthVerifyResult{

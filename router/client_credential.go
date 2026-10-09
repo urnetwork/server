@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // A client token is the by_jwt of one client (it carries a client_id). The
@@ -19,10 +19,10 @@ const ClientCredentialRefusedMessage = "A client token cannot administer the net
 
 // ClientCredentialRefusal decides whether a route refuses a verified client
 // token. It is called only for a token that names a client.
-type ClientCredentialRefusal func(ctx context.Context, byJwt *jwt.ByJwt) bool
+type ClientCredentialRefusal func(ctx context.Context, byJwt *session.ByJwt) bool
 
 // RefuseEveryClientCredential refuses every client token.
-func RefuseEveryClientCredential(ctx context.Context, byJwt *jwt.ByJwt) bool {
+func RefuseEveryClientCredential(ctx context.Context, byJwt *session.ByJwt) bool {
 	return true
 }
 
@@ -78,7 +78,7 @@ func clientCredentialGate(refusal ClientCredentialRefusal, handler http.HandlerF
 // verification here; a token that names a client is verified before it can
 // be refused. A token that fails verification is left to the handler, whose
 // authentication refuses it exactly as it would without the gate.
-func requestClientCredential(r *http.Request) *jwt.ByJwt {
+func requestClientCredential(r *http.Request) *session.ByJwt {
 	const bearerPrefix = "Bearer "
 	authorization := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authorization, bearerPrefix) {
@@ -89,10 +89,10 @@ func requestClientCredential(r *http.Request) *jwt.ByJwt {
 		// an API key authenticates as the network
 		return nil
 	}
-	if !jwt.ByJwtNamesClientUnverified(token) {
+	if !session.ByJwtNamesClientUnverified(token) {
 		return nil
 	}
-	byJwt, err := jwt.ParseByJwtForAudience(r.Context(), token, jwt.ByJwtAudienceApi)
+	byJwt, err := session.ParseByJwtForAudience(r.Context(), token, session.ByJwtAudienceApi)
 	if err != nil || byJwt.ClientId == nil {
 		return nil
 	}

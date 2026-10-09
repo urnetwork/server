@@ -23,9 +23,9 @@ import (
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
 	serverapi "github.com/urnetwork/server/api"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 type registrationSdkRequest struct {
@@ -47,7 +47,7 @@ type registrationSdkRouteFixture struct {
 	cancel     context.CancelFunc
 	endpoint   *httptest.Server
 	router     *router.Router
-	claims     *jwt.ByJwt
+	claims     *session.ByJwt
 	breakReply bool
 	committed  chan registrationSdkCommit
 	stateLock  sync.Mutex
@@ -60,7 +60,7 @@ func newRegistrationSdkRouteFixture(t testing.TB, breakReply bool) *registration
 	ctx, cancel := context.WithCancel(t.Context())
 	networkId, userId := server.NewId(), server.NewId()
 	model.Testing_CreateNetwork(ctx, networkId, "synthetic-sdk-registration", userId)
-	claims := jwt.NewByJwt(networkId, userId, "synthetic-sdk-registration", false, false)
+	claims := session.NewByJwt(networkId, userId, "synthetic-sdk-registration", false, false)
 	claims.Roles, claims.Principal = []string{"operator", "validator"}, "synthetic-registration-owner"
 	self := &registrationSdkRouteFixture{ctx: ctx, cancel: cancel, claims: claims, breakReply: breakReply, committed: make(chan registrationSdkCommit, 1)}
 	self.router = router.NewRouter(ctx, serverapi.Routes())
@@ -75,7 +75,7 @@ func (self *registrationSdkRouteFixture) close() {
 
 // A fresh SDK/strategy uses the same production HTTP path after a caller
 // restart. Explicit close joins its credential worker before server teardown.
-func (self *registrationSdkRouteFixture) client(t testing.TB, claims *jwt.ByJwt) (*sdk.Api, func()) {
+func (self *registrationSdkRouteFixture) client(t testing.TB, claims *session.ByJwt) (*sdk.Api, func()) {
 	t.Helper()
 	settings := connect.DefaultClientStrategySettings()
 	settings.EnableResilient = false
@@ -84,7 +84,7 @@ func (self *registrationSdkRouteFixture) client(t testing.TB, claims *jwt.ByJwt)
 	settings.ReconnectTimeout = time.Millisecond // Pacing only; actual completed requests prove replay.
 	strategy := connect.NewClientStrategy(self.ctx, settings)
 	client := sdk.NewApi(self.ctx, strategy, self.endpoint.URL)
-	client.SetByJwt(claims.Sign())
+	client.SetByJwt(claims.Testing_Sign())
 	var once sync.Once
 	return client, func() {
 		once.Do(func() {
@@ -166,16 +166,16 @@ func registrationSdkArgs() *sdk.RegisterNetworkClientArgs {
 	return &sdk.RegisterNetworkClientArgs{Schema: sdk.NetworkClientRegistrationSchema, RegistrationId: strings.Repeat("12", 32), ScopeSha256: strings.Repeat("34", 32), DeviceDescription: "synthetic SDK validator", DeviceSpec: "synthetic headless"}
 }
 
-func requireRegistrationSdkIdentity(t testing.TB, fixture *registrationSdkRouteFixture, result *sdk.RegisterNetworkClientResult, err error) *jwt.ByJwt {
+func requireRegistrationSdkIdentity(t testing.TB, fixture *registrationSdkRouteFixture, result *sdk.RegisterNetworkClientResult, err error) *session.ByJwt {
 	t.Helper()
 	if err != nil || result == nil || result.Error != nil || result.ClientId == nil || result.DeviceId == nil || result.ByClientJwt == "" {
 		t.Fatalf("real versioned route did not recover complete SDK identity: error=%v", err)
 	}
-	claims, err := jwt.ParseByJwt(fixture.ctx, result.ByClientJwt)
+	claims, err := session.ParseByJwt(fixture.ctx, result.ByClientJwt)
 	if err != nil {
 		t.Fatalf("actual server credential failed signature verification: %v", err)
 	}
-	if err := jwt.ValidateByJwtState(fixture.ctx, claims, false); err != nil {
+	if err := session.ValidateByJwtState(fixture.ctx, claims, false); err != nil {
 		t.Fatalf("actual server credential is not active: %v", err)
 	}
 	if claims.ClientId == nil || claims.DeviceId == nil || claims.ClientId.String() != result.ClientId.String() || claims.DeviceId.String() != result.DeviceId.String() || claims.NetworkId != fixture.claims.NetworkId || claims.UserId != fixture.claims.UserId || claims.Principal != fixture.claims.Principal || !slices.Equal(claims.Roles, fixture.claims.Roles) {
@@ -231,7 +231,7 @@ func TestSdkVersionedRegistrationRecoversLostCommittedReply(t *testing.T) {
 			}
 		}
 		closeClient()
-		refreshed := jwt.NewByJwt(fixture.claims.NetworkId, fixture.claims.UserId, fixture.claims.NetworkName, false, false)
+		refreshed := session.NewByJwt(fixture.claims.NetworkId, fixture.claims.UserId, fixture.claims.NetworkName, false, false)
 		refreshed.Roles, refreshed.Principal = slices.Clone(fixture.claims.Roles), fixture.claims.Principal
 		restarted, closeRestarted := fixture.client(t, refreshed)
 		defer closeRestarted()
@@ -270,7 +270,7 @@ func TestSdkVersionedRegistrationKeepsConflictsAndRevocation(t *testing.T) {
 			case "principal":
 				foreign := *fixture.claims
 				foreign.Principal += " changed"
-				client.SetByJwt(foreign.Sign())
+				client.SetByJwt(foreign.Testing_Sign())
 			}
 			refused, err := client.RegisterNetworkClientSyncWithContext(fixture.ctx, &changed)
 			if err != nil || refused == nil || refused.Error == nil || refused.Error.Code != "registration_conflict" || refused.ClientId != nil || refused.DeviceId != nil || refused.ByClientJwt != "" {
@@ -288,14 +288,14 @@ func TestSdkVersionedRegistrationKeepsConflictsAndRevocation(t *testing.T) {
 		if err != nil || removed == nil || removed.Error != nil {
 			t.Fatalf("actual SDK remove-client route did not revoke original identity: %v", err)
 		}
-		refreshed := jwt.NewByJwt(fixture.claims.NetworkId, fixture.claims.UserId, fixture.claims.NetworkName, false, false)
+		refreshed := session.NewByJwt(fixture.claims.NetworkId, fixture.claims.UserId, fixture.claims.NetworkName, false, false)
 		refreshed.Roles, refreshed.Principal = slices.Clone(fixture.claims.Roles), fixture.claims.Principal
-		client.SetByJwt(refreshed.Sign())
+		client.SetByJwt(refreshed.Testing_Sign())
 		refused, err := client.RegisterNetworkClientSyncWithContext(fixture.ctx, args)
 		if err != nil || refused == nil || refused.Error == nil || refused.Error.Code != "identity_unavailable" || refused.ClientId != nil || refused.DeviceId != nil || refused.ByClientJwt != "" {
 			t.Fatalf("renewed network credential revived revoked registration: %v", err)
 		}
-		if err := jwt.ValidateByJwtState(fixture.ctx, issued, false); err == nil {
+		if err := session.ValidateByJwtState(fixture.ctx, issued, false); err == nil {
 			t.Fatal("revoked server-issued client credential stayed active")
 		}
 		requireRegistrationSdkCounts(t, fixture, 0)

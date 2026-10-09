@@ -68,9 +68,9 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
 	connectserver "github.com/urnetwork/server/connect"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 const (
@@ -400,8 +400,8 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 			}
 		}
 		if !opts.controlPlaneOnly {
-			providerByJwt := jwt.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
-				Client(providerDeviceId, providerClientId).Sign()
+			providerByJwt := session.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
+				Client(providerDeviceId, providerClientId).Testing_Sign()
 
 			// The sdk's NewPlatformDeviceLocal hardcodes allowProvider=false (it's for
 			// embedded source devices that reach providers via the multi-client
@@ -639,7 +639,7 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		harness.pdUserId = pdUserId
 		harness.pdDeviceId = pdDeviceId
 		harness.pdInstanceId = proxyDeviceConfig.InstanceId
-		harness.pdByClientJwt = jwt.NewByJwt(pdNetworkId, pdUserId, pdNetworkName, false, false).Client(pdDeviceId, pdClientId).Sign()
+		harness.pdByClientJwt = session.NewByJwt(pdNetworkId, pdUserId, pdNetworkName, false, false).Client(pdDeviceId, pdClientId).Testing_Sign()
 		harness.platformUrl = platformUrl
 		harness.networkSpace = networkSpace
 		harness.deviceRpcUrl = deviceRpcUrl

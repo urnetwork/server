@@ -20,7 +20,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -50,7 +50,7 @@ func disableAllReconcileStores(t testing.TB) {
 
 func reconcileTestSession(t testing.TB, ctx context.Context) *session.ClientSession {
 	clientId := server.NewId()
-	return session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	return session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: server.NewId(),
 		ClientId:  &clientId,
 		UserId:    server.NewId(),
@@ -2126,7 +2126,7 @@ func TestPaymentReconcileGoogleRepairsMissingProMetadata(t *testing.T) {
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "reconcileplaymetadata", userId)
 		clientId := server.NewId()
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -2167,7 +2167,7 @@ func TestPaymentReconcileGoogleRepairsMissingProMetadata(t *testing.T) {
 		mismatchedUserId := server.NewId()
 		mismatchedClientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, mismatchedNetworkId, "reconcileplaymetadatamismatch", mismatchedUserId)
-		mismatchedSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		mismatchedSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: mismatchedNetworkId,
 			ClientId:  &mismatchedClientId,
 			UserId:    mismatchedUserId,
@@ -2297,7 +2297,7 @@ func TestPaymentReconcileSolanaCreditsResolvedUnfulfilled(t *testing.T) {
 		clientId := server.NewId()
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "reconcilesolana1", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -2492,7 +2492,7 @@ func TestPaymentReconcileDryRunSolanaLeavesUnfulfilled(t *testing.T) {
 		clientId := server.NewId()
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "reconciledryrunsolana1", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -2634,7 +2634,7 @@ func TestPaymentReconcileSolanaEndsVanishedPayment(t *testing.T) {
 			clientId := server.NewId()
 			userId := server.NewId()
 			model.Testing_CreateNetwork(ctx, networkId, name, userId)
-			userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 				NetworkId: networkId,
 				ClientId:  &clientId,
 				UserId:    userId,
@@ -2703,7 +2703,7 @@ func TestPaymentReconcileSolanaRepairsMissingProMetadata(t *testing.T) {
 		userId := server.NewId()
 		clientId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "reconcilesolanametadata", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,

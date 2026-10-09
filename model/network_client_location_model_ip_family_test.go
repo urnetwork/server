@@ -13,7 +13,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -71,7 +71,7 @@ func TestFindProviders2IpFamily(t *testing.T) {
 			userId := server.NewId()
 			clientSession := session.Testing_CreateClientSession(
 				ctx,
-				jwt.NewByJwt(networkId, userId, fmt.Sprintf("network%d", i), false, false),
+				session.NewByJwt(networkId, userId, fmt.Sprintf("network%d", i), false, false),
 			)
 			if callerSession == nil {
 				callerSession = clientSession

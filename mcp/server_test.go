@@ -17,7 +17,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
@@ -151,7 +151,7 @@ func connectTestClientWithToken(
 		Version: "1.0.0",
 	}, nil)
 
-	session, err := client.Connect(ctx, &mcpsdk.StreamableClientTransport{
+	clientSession, err := client.Connect(ctx, &mcpsdk.StreamableClientTransport{
 		Endpoint: serverUrl,
 		HTTPClient: &http.Client{
 			Timeout: 60 * time.Second,
@@ -165,7 +165,7 @@ func connectTestClientWithToken(
 		t.Fatalf("Failed to connect: %v", err)
 	}
 
-	return session
+	return clientSession
 }
 
 // Adds fixed headers to every outgoing request.
@@ -192,11 +192,11 @@ func TestProvidersList(t *testing.T) {
 		defer cleanup()
 
 		ctx := context.Background()
-		session := connectAuthedTestClient(t, ctx, serverURL, []string{oauth.ScopeMcpRead})
-		defer session.Close()
+		clientSession := connectAuthedTestClient(t, ctx, serverURL, []string{oauth.ScopeMcpRead})
+		defer clientSession.Close()
 
 		// ensure providerLocations is an available tool
-		toolsResult, err := session.ListTools(ctx, nil)
+		toolsResult, err := clientSession.ListTools(ctx, nil)
 		connect.AssertEqual(t, err, nil)
 
 		found := false
@@ -214,7 +214,7 @@ func TestProvidersList(t *testing.T) {
 
 		model.UpdateClientLocations(ctx, 30*time.Minute)
 
-		result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+		result, err := clientSession.CallTool(ctx, &mcpsdk.CallToolParams{
 			Name: "providerLocations",
 			// passing empty should fetch a list of available countries
 			Arguments: map[string]any{
@@ -279,7 +279,7 @@ func TestProvidersList(t *testing.T) {
 
 			clientSession := urSession.Testing_CreateClientSession(
 				ctx,
-				jwt.NewByJwt(
+				urSession.NewByJwt(
 					networkId,
 					userId,
 					fmt.Sprintf("network%d", i),
@@ -390,7 +390,7 @@ func TestProvidersList(t *testing.T) {
 
 		// call providerLocations tool. The query argument is optional now,
 		// so omit it to fetch the available countries
-		result, err = session.CallTool(ctx, &mcpsdk.CallToolParams{
+		result, err = clientSession.CallTool(ctx, &mcpsdk.CallToolParams{
 			Name:      "providerLocations",
 			Arguments: map[string]any{},
 		})
@@ -441,9 +441,9 @@ func TestStatelessTransport(t *testing.T) {
 
 		// independent clients can call without any shared server state
 		for range 2 {
-			session := connectAuthedTestClient(t, ctx, serverURL, []string{oauth.ScopeMcpRead})
+			clientSession := connectAuthedTestClient(t, ctx, serverURL, []string{oauth.ScopeMcpRead})
 
-			toolsResult, err := session.ListTools(ctx, nil)
+			toolsResult, err := clientSession.ListTools(ctx, nil)
 			connect.AssertEqual(t, err, nil)
 
 			// every tool is listed to every client, with the annotations the
@@ -457,7 +457,7 @@ func TestStatelessTransport(t *testing.T) {
 			connect.AssertEqual(t, toolNames["providerLocations"], true)
 			connect.AssertEqual(t, toolNames["fetch"], true)
 
-			session.Close()
+			clientSession.Close()
 		}
 	})
 }
@@ -476,7 +476,7 @@ func TestRejectsNonOauthCredentials(t *testing.T) {
 		userId := server.NewId()
 		networkName := fmt.Sprintf("mcpcut-%s", networkId)
 		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
-		byJwt := jwt.NewByJwt(networkId, userId, networkName, false, false).Sign()
+		byJwt := urSession.NewByJwt(networkId, userId, networkName, false, false).Testing_Sign()
 
 		refused := []string{
 			// a full platform credential, which used to work here
@@ -559,10 +559,10 @@ func TestToolScopeIsEnforced(t *testing.T) {
 
 		ctx := context.Background()
 		// read scope only: enough for the transport, not enough for fetch
-		session := connectAuthedTestClient(t, ctx, serverURL, []string{oauth.ScopeMcpRead})
-		defer session.Close()
+		clientSession := connectAuthedTestClient(t, ctx, serverURL, []string{oauth.ScopeMcpRead})
+		defer clientSession.Close()
 
-		result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+		result, err := clientSession.CallTool(ctx, &mcpsdk.CallToolParams{
 			Name: "fetch",
 			Arguments: map[string]any{
 				"url": "https://example.com/",

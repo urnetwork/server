@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	quic "github.com/quic-go/quic-go"
@@ -31,7 +32,7 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	// "github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -512,6 +513,8 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 }
 
 type ConnectHandlerSettings struct {
+	testingBeforeAuthorizationLease func(*session.ByJwt)
+	testingAfterAuthorizationLease  func(*session.ByJwt, *session.AuthorizationLease)
 	// Accepts the custom H1+ carrier (connect/H1PLUS.md) in addition to
 	// WebSocket. On by default; false opts out, and clients fall back to
 	// WebSocket.
@@ -609,6 +612,20 @@ func (self *connectHandlerWorkers) wait() {
 func finishH1ConnectHandlerWorkers(workers *connectHandlerWorkers, stop func()) {
 	stop()
 	workers.wait()
+}
+
+// Give the sole writer ownership of the authorization close before tearing
+// down its socket. A blocked peer can delay socket teardown by at most a second.
+func closeH1AuthorizationSocket(writerDone <-chan struct{}, closeSocket func()) {
+	if writerDone != nil {
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-writerDone:
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+	closeSocket()
 }
 
 // Stops H3 stream resources before joining the writer's pending batch owner
@@ -1320,7 +1337,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					ByJwt:      jwt,
 					InstanceId: instanceId.Bytes(),
 					AppVersion: headerAppVersion,
-					IpFamily:   ipFamilyIntentFromHeader(headerIpFamily),
+					ClientInfo: session.ClientInfoFromHeader(r.Header).Json(),
+					StreamLeaseVersion: func() uint32 {
+						if r.Header.Get("X-UR-StreamLeaseVersion") == "1" {
+							return 1
+						}
+						return 0
+					}(),
+					IpFamily: ipFamilyIntentFromHeader(headerIpFamily),
 				}, transportVersion
 			} else {
 				glog.Infof("[c]Bad header X-UR-InstanceId: %s\n", headerInstanceId)
@@ -1335,6 +1359,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// Transfer Close ownership only after construction succeeds: a nil
 	// concrete pointer assigned to this interface would pass its nil check.
 	var ws connect.H1MessageConn
+	var authEcho []byte
 	defer func() {
 		if ws != nil {
 			ws.Close()
@@ -1392,12 +1417,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			// echo the auth message on successful auth
-			err = echoConnectH1AuthWithDeadline(ws, min(self.settings.WriteTimeout, time.Until(authDeadline)), authFrameBytes)
-			if err != nil {
-				// server.Logger("TIMEOUT HC\n")
-				return
-			}
+			authEcho = append([]byte(nil), authFrameBytes...)
 		}
 	}
 	rejectCustomAuth := func(status int) {
@@ -1414,13 +1434,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var byJwt *jwt.ByJwt
+	var byJwt *session.ByJwt
 	var instanceId server.Id
 	authStatus := connectH1AuthenticationStatus(authCtx, func() (int, error) {
 		// Auth failures are client-driven and unbounded in rate, so they are
 		// counted in the jwt package rather than logged per occurrence.
 		var err error
-		byJwt, err = jwt.ParseByJwtForAudience(authCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
+		byJwt, err = session.ParseByJwtForAudience(authCtx, auth.ByJwt, session.ByJwtAudienceConnect)
 		if err != nil {
 			if glog.V(1) {
 				glog.Infof("[t]auth jwt err = %s\n", err)
@@ -1432,7 +1452,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 		var status int
 		instanceId, status, err = connectClientAuthentication(
-			jwt.WithStateQuerySource(authCtx, jwt.StateQueryConnectH1), byJwt, auth.InstanceId)
+			session.WithStateQuerySource(authCtx, session.StateQueryConnectH1), byJwt, auth.InstanceId)
 		if status == http.StatusUnauthorized {
 			if glog.V(1) {
 				glog.Infof("[t]inactive auth jwt: %s\n", err)
@@ -1445,6 +1465,53 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientId := *byJwt.ClientId
+	var authorizationCloseCode atomic.Int32
+	writerStarted := false
+	// Retirement can arrive just after 101, before the serving writer exists.
+	// In that interval the handler is still the sole write owner.
+	defer func() {
+		if !writerStarted && ws != nil {
+			if code := int(authorizationCloseCode.Load()); code != 0 {
+				writeConnectAuthorizationClose(ws, code)
+			}
+		}
+	}()
+	connectionId := server.NewId()
+	self.exchange.registerConnection(clientId, connectionId, handleCancel)
+	defer self.exchange.unregisterConnection(clientId, connectionId)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = session.RetireConnectionAuthority(ctx, clientId, connectionId)
+	}()
+	if self.settings.testingBeforeAuthorizationLease != nil {
+		self.settings.testingBeforeAuthorizationLease(byJwt)
+	}
+	lease, leaseErr := session.StartConnectionAuthorizationLease(handleCtx, byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
+		authorizationCloseCode.Store(int32(code))
+		handleCancel()
+	})
+	if leaseErr != nil {
+		status := http.StatusUnauthorized
+		if connectAuthDependencyUnavailable(leaseErr) {
+			status = http.StatusServiceUnavailable
+		}
+		rejectCustomAuth(status)
+		return
+	}
+	if self.settings.testingAfterAuthorizationLease != nil {
+		self.settings.testingAfterAuthorizationLease(byJwt, lease)
+	}
+	defer lease.Close()
+	if self.exchange.keyEventSubscriber != nil {
+		remove := self.exchange.keyEventSubscriber.AddSessionListener(byJwt.NetworkId, lease.Recheck, nil)
+		defer remove()
+	}
+	observation := session.NewLocalClientSession(handleCtx, clientAddress, byJwt)
+	observation.ClientInfo = session.ParseClientInfo(auth.ClientInfo, auth.AppVersion)
+	observation.ObserveAuthenticatedUse()
+	observation.Cancel()
+
 	if custom {
 		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, max(time.Nanosecond, min(self.settings.WriteTimeout, time.Until(authDeadline))))
 		connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), upgradeErr)
@@ -1459,6 +1526,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		ws = framedConn
 	}
 
+	if len(authEcho) > 0 {
+		if err := echoConnectH1AuthWithDeadline(ws, min(self.settings.WriteTimeout, time.Until(authDeadline)), authEcho); err != nil {
+			return
+		}
+	}
 	if authCtx.Err() != nil {
 		return
 	}
@@ -1473,10 +1545,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// the header, or the frame field of a first-frame auth
 	provideIntent := provideIntentFromHeader(r.Header) || auth.ProvideIntent
 	defer trackProvideIntentConnection(connectTransportH1, provideIntent)()
-
-	connectionId := server.NewId()
-	self.exchange.registerConnection(clientId, connectionId, handleCancel)
-	defer self.exchange.unregisterConnection(clientId, connectionId)
 
 	c := func() {
 		announceTimeout := time.Duration(0)
@@ -1552,13 +1620,20 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			admission,
 		)
 		var workers connectHandlerWorkers
+		writerDone := make(chan struct{})
 		defer finishH1ConnectHandlerWorkers(&workers, func() {
 			if h1RelayLineageTraceEnabled {
 				beginH1RelayLineage("edge_h1_close", clientId, connectionId, nil, 0, 0)
 			}
 			handleCancel()
 			residentTransport.Close()
-			ws.Close()
+			// The sole writer sends the typed close before the socket owner tears
+			// down reads. A blocked peer still cannot hold retirement indefinitely.
+			var authorizationWriterDone <-chan struct{}
+			if writerStarted && authorizationCloseCode.Load() != 0 {
+				authorizationWriterDone = writerDone
+			}
+			closeH1AuthorizationSocket(authorizationWriterDone, func() { _ = ws.Close() })
 		})
 		workers.start(func() {
 			defer handleCancel()
@@ -1663,8 +1738,15 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			}
 		})
 
+		writerStarted = true
 		workers.start(func() {
+			defer close(writerDone)
 			defer handleCancel()
+			defer func() {
+				if code := int(authorizationCloseCode.Load()); code != 0 {
+					writeConnectAuthorizationClose(ws, code)
+				}
+			}()
 
 			recordWriteError := func(err error) {
 				// A WebSocket deadline or partial write is terminal; the Transfer
@@ -2223,16 +2305,21 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 	framer := connect.NewFramer(self.settings.FramerSettings)
 
-	var byJwt *jwt.ByJwt
+	var byJwt *session.ByJwt
 	var clientId server.Id
 	var instanceId server.Id
 	var connectionId server.Id
 	ipFamilyIntent := 0
 	appVersion := ""
+	clientInfo := session.UnknownClientInfo()
+	var lease *session.AuthorizationLease
 	provideIntent := false
 	useH3Datagrams := false
 	connectionRegistered := false
 	defer func() {
+		if lease != nil {
+			lease.Close()
+		}
 		if connectionRegistered {
 			self.exchange.unregisterConnection(clientId, connectionId)
 		}
@@ -2243,10 +2330,10 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		time.Until(authDeadline),
 		func(auth *protocol.Auth, authFrameBytes []byte) error {
 			var authErr error
-			byJwt, authErr = jwt.ParseByJwtForAudience(
+			byJwt, authErr = session.ParseByJwtForAudience(
 				authCtx,
 				auth.ByJwt,
-				jwt.ByJwtAudienceConnect,
+				session.ByJwtAudienceConnect,
 			)
 			if authErr != nil {
 				return authErr
@@ -2255,20 +2342,35 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				return fmt.Errorf("Missing client id.")
 			}
 			instanceId, _, authErr = connectClientAuthentication(
-				jwt.WithStateQuerySource(authCtx, jwt.StateQueryConnectH3), byJwt, auth.InstanceId)
+				session.WithStateQuerySource(authCtx, session.StateQueryConnectH3), byJwt, auth.InstanceId)
 			if authErr != nil {
 				return authErr
 			}
 			clientId = *byJwt.ClientId
 
 			_, ipFamilyIntent = connectionIpFamily(clientId, clientAddress, auth)
-			appVersion = auth.AppVersion
+			clientInfo = session.ParseClientInfo(auth.ClientInfo, auth.AppVersion)
+			appVersion = clientInfo.AppVersion
 			provideIntent = auth.ProvideIntent
 
 			if authCtx.Err() != nil {
 				return authCtx.Err()
 			}
 
+			connectionId = server.NewId()
+			self.exchange.registerConnection(clientId, connectionId, handleCancel)
+			connectionRegistered = true
+			var leaseErr error
+			if self.settings.testingBeforeAuthorizationLease != nil {
+				self.settings.testingBeforeAuthorizationLease(byJwt)
+			}
+			lease, leaseErr = session.StartConnectionAuthorizationLease(handleCtx, byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
+				_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
+				handleCancel()
+			})
+			if leaseErr != nil {
+				return leaseErr
+			}
 			connectionState := conn.ConnectionState()
 			authResponse, accepted := connect.AcceptH3DatagramAuthOffer(
 				auth,
@@ -2301,9 +2403,25 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		return authCtx.Err()
 	}
 	authCancel()
-	connectionId = server.NewId()
-	self.exchange.registerConnection(clientId, connectionId, handleCancel)
-	connectionRegistered = true
+	if self.settings.testingAfterAuthorizationLease != nil {
+		self.settings.testingAfterAuthorizationLease(byJwt, lease)
+	}
+	defer lease.Close()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = session.RetireConnectionAuthority(ctx, clientId, connectionId)
+	}()
+	if self.exchange.keyEventSubscriber != nil {
+		remove := self.exchange.keyEventSubscriber.AddSessionListener(byJwt.NetworkId, lease.Recheck, nil)
+		defer remove()
+	}
+
+	observation := session.NewLocalClientSession(handleCtx, clientAddress, byJwt)
+	observation.ClientInfo = clientInfo
+	observation.ObserveAuthenticatedUse()
+	observation.Cancel()
+
 	defer trackProvideIntentConnection(connectTransportH3, provideIntent)()
 
 	// closing the connection is the signal; count it once

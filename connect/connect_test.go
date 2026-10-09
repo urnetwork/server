@@ -22,9 +22,9 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 // note large nack objects can be excessively dropped
@@ -762,7 +762,7 @@ func testConnect(
 	guestMode := false
 	isPro := false
 
-	byJwtA := jwt.NewByJwt(
+	byJwtA := session.NewByJwt(
 		networkIdA,
 		userIdA,
 		networkNameA,
@@ -771,7 +771,7 @@ func testConnect(
 	).Client(deviceIdA, clientIdA)
 
 	authA := &connect.ClientAuth{
-		ByJwt: byJwtA.Sign(),
+		ByJwt: byJwtA.Testing_Sign(),
 		// ClientId: clientIdA,
 		InstanceId: connect.Id(clientAInstanceId),
 		AppVersion: "0.0.0",
@@ -796,7 +796,7 @@ func testConnect(
 		// go transportA.Run(clientA.RouteManager())
 	}
 
-	byJwtB := jwt.NewByJwt(
+	byJwtB := session.NewByJwt(
 		networkIdB,
 		userIdB,
 		networkNameB,
@@ -805,7 +805,7 @@ func testConnect(
 	).Client(deviceIdB, clientIdB)
 
 	authB := &connect.ClientAuth{
-		ByJwt: byJwtB.Sign(),
+		ByJwt: byJwtB.Testing_Sign(),
 		// ClientId: clientIdB,
 		InstanceId: connect.Id(clientBInstanceId),
 		AppVersion: "0.0.0",
@@ -1080,7 +1080,7 @@ func testConnect(
 						clientAInstanceId = server.NewId()
 					}
 					authA = &connect.ClientAuth{
-						ByJwt: byJwtA.Sign(),
+						ByJwt: byJwtA.Testing_Sign(),
 						// ClientId: clientIdA,
 						InstanceId: connect.Id(clientAInstanceId),
 						AppVersion: "0.0.0",
@@ -1254,7 +1254,7 @@ func testConnect(
 						clientBInstanceId = server.NewId()
 					}
 					authB = &connect.ClientAuth{
-						ByJwt: byJwtB.Sign(),
+						ByJwt: byJwtB.Testing_Sign(),
 						// ClientId: clientIdB,
 						InstanceId: connect.Id(clientBInstanceId),
 						AppVersion: "0.0.0",

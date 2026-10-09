@@ -10,7 +10,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -60,7 +60,7 @@ func (self *fakeTestBalanceDrainStore) balance(networkId server.Id) model.ByteCo
 }
 
 func testBalanceDrainSession(networkId server.Id) *session.ClientSession {
-	return &session.ClientSession{Ctx: context.Background(), ByJwt: &jwt.ByJwt{NetworkId: networkId}}
+	return &session.ClientSession{Ctx: context.Background(), ByJwt: &session.ByJwt{NetworkId: networkId}}
 }
 
 func TestTestBalanceDrainArgsCannotNameANetwork(t *testing.T) {

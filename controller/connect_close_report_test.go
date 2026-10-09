@@ -11,7 +11,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
@@ -34,7 +34,7 @@ func newCloseReportControlFixture(t testing.TB) *closeReportControlFixture {
 	model.Testing_CreateNetwork(ctx, networkId, "synthetic close reports", userId)
 	model.Testing_CreateDevice(ctx, networkId, deviceId, sourceId, "synthetic source", "source")
 	model.Testing_CreateDevice(ctx, networkId, server.NewId(), destinationId, "synthetic destination", "destination")
-	clientSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(networkId, userId, "synthetic close reports", false, false).Client(deviceId, sourceId))
+	clientSession := session.Testing_CreateClientSession(ctx, session.NewByJwt(networkId, userId, "synthetic close reports", false, false).Client(deviceId, sourceId))
 	t.Cleanup(clientSession.Cancel)
 	first, err := model.CreateContractNoEscrow(ctx, networkId, sourceId, networkId, destinationId, 1000)
 	if err != nil {

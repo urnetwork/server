@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -185,11 +185,11 @@ func TestProberShardHardDeleteAndRetainedEpochFence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		claims, err := jwt.ParseByJwtForAudience(ctx, identity.ByClientJwt, jwt.ByJwtAudienceApi)
+		claims, err := session.ParseByJwtForAudience(ctx, identity.ByClientJwt, session.ByJwtAudienceApi)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = jwt.ValidateByJwtState(ctx, claims, true); err != nil {
+		if err = session.ValidateByJwtState(ctx, claims, true); err != nil {
 			t.Fatal(err)
 		}
 		if deleted, err := ReapProberShard(ctx, owner.Key); err != nil || deleted {
@@ -198,7 +198,7 @@ func TestProberShardHardDeleteAndRetainedEpochFence(t *testing.T) {
 		if err = DrainProberShard(ctx, owner.Key); err != nil {
 			t.Fatal(err)
 		}
-		if err = jwt.ValidateByJwtState(ctx, claims, true); err == nil {
+		if err = session.ValidateByJwtState(ctx, claims, true); err == nil {
 			t.Fatal("draining token stayed authorized")
 		}
 		if deleted, err := ReapProberShard(ctx, owner.Key); err != nil || !deleted {
@@ -333,7 +333,7 @@ func TestProberShardLateMintAndRefillAreRejected(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		claims, err := jwt.ParseByJwtForAudience(ctx, identity.ByClientJwt, jwt.ByJwtAudienceApi)
+		claims, err := session.ParseByJwtForAudience(ctx, identity.ByClientJwt, session.ByJwtAudienceApi)
 		if err != nil {
 			t.Fatal(err)
 		}

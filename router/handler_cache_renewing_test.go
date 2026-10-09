@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -376,8 +376,8 @@ func TestHandlerCacheRenewingNetworkInputAndSessionScope(t *testing.T) {
 		defer func() { defaultHandlerCacheStore = prior }()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		original := &session.ClientSession{Ctx: ctx, Cancel: cancel, ByJwt: &jwt.ByJwt{NetworkId: server.NewId()}}
-		other := &session.ClientSession{Ctx: ctx, Cancel: cancel, ByJwt: &jwt.ByJwt{NetworkId: server.NewId()}}
+		original := &session.ClientSession{Ctx: ctx, Cancel: cancel, ByJwt: &session.ByJwt{NetworkId: server.NewId()}}
+		other := &session.ClientSession{Ctx: ctx, Cancel: cancel, ByJwt: &session.ByJwt{NetworkId: server.NewId()}}
 		fills := 0
 		impl := CacheWithNetworkAuthInputRenewingFill(func(hours int, owned *session.ClientSession) (*handlerCacheTestResult, error) {
 			fills++

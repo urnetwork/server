@@ -25,7 +25,7 @@ import (
 
 	"github.com/urnetwork/server"
 	connectserver "github.com/urnetwork/server/connect"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -198,7 +198,7 @@ func testing_newAltEnv(ctx context.Context, t testing.TB, mutate func(*Settings)
 	userId := server.NewId()
 	networkName := fmt.Sprintf("alt-%s", networkId)
 	model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
-	userSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(
+	userSession := session.Testing_CreateClientSession(ctx, session.NewByJwt(
 		networkId,
 		userId,
 		networkName,

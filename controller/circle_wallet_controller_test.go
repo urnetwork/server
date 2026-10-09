@@ -13,7 +13,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -144,12 +144,12 @@ func TestWalletCircleInit(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId:   server.NewId(),
 			NetworkName: "test",
 			UserId:      server.NewId(),
 		})
-		result, err := WalletCircleInit(session)
+		result, err := WalletCircleInit(clientSession)
 
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, nil)
@@ -157,7 +157,7 @@ func TestWalletCircleInit(t *testing.T) {
 		connect.AssertNotEqual(t, result.ChallengeId, "")
 
 		// a second init should not create an error
-		result, err = WalletCircleInit(session)
+		result, err = WalletCircleInit(clientSession)
 
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, nil)
@@ -170,12 +170,12 @@ func TestWalletValidateAddress(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId:   server.NewId(),
 			NetworkName: "test",
 			UserId:      server.NewId(),
 		})
-		result, err := WalletCircleInit(session)
+		result, err := WalletCircleInit(clientSession)
 
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, nil)
@@ -188,7 +188,7 @@ func TestWalletValidateAddress(t *testing.T) {
 				Address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
 				Chain:   model.SOL.String(),
 			},
-			session,
+			clientSession,
 		)
 
 		connect.AssertEqual(t, err, nil)
@@ -201,7 +201,7 @@ func TestWalletValidateAddress(t *testing.T) {
 				Address: "0xB3f448b9C395F9833BE866577254799c23BBa682",
 				Chain:   model.SOL.String(),
 			},
-			session,
+			clientSession,
 		)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, validateResult.Valid, false)
@@ -212,7 +212,7 @@ func TestWalletValidateAddress(t *testing.T) {
 				Address: solanaUSDCAddress(),
 				Chain:   model.SOL.String(),
 			},
-			session,
+			clientSession,
 		)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, validateResult.Valid, false)
@@ -223,7 +223,7 @@ func TestWalletBalance(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId:   server.NewId(),
 			NetworkName: "test",
 			UserId:      server.NewId(),
@@ -231,12 +231,12 @@ func TestWalletBalance(t *testing.T) {
 
 		model.SetCircleUserId(
 			ctx,
-			session.ByJwt.NetworkId,
-			session.ByJwt.UserId,
+			clientSession.ByJwt.NetworkId,
+			clientSession.ByJwt.UserId,
 			circleUserIdWithWallet,
 		)
 
-		result, err := WalletBalance(session)
+		result, err := WalletBalance(clientSession)
 
 		connect.AssertEqual(t, err, nil)
 		connect.AssertNotEqual(t, result.WalletInfo, nil)
@@ -250,12 +250,12 @@ func TestWalletBalance(t *testing.T) {
 
 		model.SetCircleUserId(
 			ctx,
-			session.ByJwt.NetworkId,
-			session.ByJwt.UserId,
+			clientSession.ByJwt.NetworkId,
+			clientSession.ByJwt.UserId,
 			circleUserIdWithWalletAndBalance,
 		)
 
-		result, err = WalletBalance(session)
+		result, err = WalletBalance(clientSession)
 
 		connect.AssertEqual(t, err, nil)
 		connect.AssertNotEqual(t, result.WalletInfo, nil)

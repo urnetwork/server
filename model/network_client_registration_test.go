@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -26,7 +26,7 @@ func newNetworkClientRegistrationTest(t testing.TB, ctx context.Context) (*sessi
 	t.Helper()
 	networkId, userId := server.NewId(), server.NewId()
 	Testing_CreateNetwork(ctx, networkId, "synthetic-registration", userId)
-	clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{NetworkId: networkId, UserId: userId, Roles: []string{"operator", "validator"}, Principal: "synthetic-production-owner"})
+	clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: networkId, UserId: userId, Roles: []string{"operator", "validator"}, Principal: "synthetic-production-owner"})
 	request := RegisterNetworkClientArgs{Schema: NetworkClientRegistrationSchema, RegistrationId: strings.Repeat("12", 32), ScopeSha256: strings.Repeat("34", 32), Description: "synthetic validator", DeviceSpec: "synthetic headless"}
 	return clientSession, request
 }

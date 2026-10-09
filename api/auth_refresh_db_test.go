@@ -20,7 +20,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -74,13 +74,13 @@ func requireNetworkRefreshCounted(t testing.TB, outcome string, f func()) {
 // agedNetworkToken is a network token of the fixture's network issued an hour
 // ago and expiring in an hour, so a renewal's fresh lifetime claims differ
 // from its own whatever second the test runs in.
-func (self *routeAccessDbFixture) agedNetworkToken() *jwt.ByJwt {
-	byJwt := jwt.NewByJwt(self.networkId, self.userId, self.networkName, false, false)
+func (self *routeAccessDbFixture) agedNetworkToken() *session.ByJwt {
+	byJwt := session.NewByJwt(self.networkId, self.userId, self.networkName, false, false)
 	ageClaims(byJwt)
 	return byJwt
 }
 
-func ageClaims(byJwt *jwt.ByJwt) {
+func ageClaims(byJwt *session.ByJwt) {
 	issued := server.NowUtc().Add(-time.Hour)
 	byJwt.IssuedAt = gojwt.NewNumericDate(issued)
 	byJwt.NotBefore = gojwt.NewNumericDate(issued)
@@ -88,14 +88,14 @@ func ageClaims(byJwt *jwt.ByJwt) {
 }
 
 // networkRefresh renews the token and returns the renewed token, parsed.
-func (self *routeAccessDbFixture) networkRefresh(t testing.TB, presented string) *jwt.ByJwt {
+func (self *routeAccessDbFixture) networkRefresh(t testing.TB, presented string) *session.ByJwt {
 	t.Helper()
 	var result controller.NetworkRefreshTokenResult
 	self.call(t, http.MethodPost, "/auth/network-refresh", "Bearer "+presented, nil, http.StatusOK, &result)
 	if result.Error != nil || result.ByJwt == "" {
 		t.Fatalf("network refresh = %+v", result)
 	}
-	renewed, err := jwt.ParseByJwt(self.ctx, result.ByJwt)
+	renewed, err := session.ParseByJwt(self.ctx, result.ByJwt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func (self *routeAccessDbFixture) setCredentialChangeTime(t testing.TB, changeTi
 // requireFreshLifetime requires the refreshed token's registered claims to be
 // its own: issued at or after since, expiring later than the presented token,
 // with a new id.
-func requireFreshLifetime(t testing.TB, presented *jwt.ByJwt, refreshed *jwt.ByJwt, since time.Time) {
+func requireFreshLifetime(t testing.TB, presented *session.ByJwt, refreshed *session.ByJwt, since time.Time) {
 	t.Helper()
 	if refreshed.IssuedAt == nil || refreshed.IssuedAt.Time.Before(since.Truncate(time.Second)) {
 		t.Fatalf("refreshed iat = %v, want at or after %v", refreshed.IssuedAt, since)
@@ -129,8 +129,8 @@ func requireFreshLifetime(t testing.TB, presented *jwt.ByJwt, refreshed *jwt.ByJ
 	if refreshed.ID == "" || refreshed.ID == presented.ID {
 		t.Fatalf("refreshed jti = %q, presented jti = %q", refreshed.ID, presented.ID)
 	}
-	if refreshed.Issuer != jwt.ByJwtIssuer || refreshed.Subject != refreshed.UserId.String() ||
-		!slices.Contains(refreshed.Audience, jwt.ByJwtAudienceApi) || refreshed.NotBefore == nil {
+	if refreshed.Issuer != session.ByJwtIssuer || refreshed.Subject != refreshed.UserId.String() ||
+		!slices.Contains(refreshed.Audience, session.ByJwtAudienceApi) || refreshed.NotBefore == nil {
 		t.Fatalf("refreshed registered claims = %+v", refreshed.RegisteredClaims)
 	}
 }
@@ -161,9 +161,9 @@ func TestNetworkRefreshRenewsTheNetworkToken(t *testing.T) {
 		model.UpdateProNetwork(ctx, self.networkId)
 
 		since := server.NowUtc()
-		var renewed *jwt.ByJwt
+		var renewed *session.ByJwt
 		requireNetworkRefreshCounted(t, "renewed", func() {
-			renewed = self.networkRefresh(t, presented.Sign())
+			renewed = self.networkRefresh(t, presented.Testing_Sign())
 		})
 
 		if renewed.ClientId != nil || renewed.DeviceId != nil {
@@ -184,10 +184,10 @@ func TestNetworkRefreshRenewsTheNetworkToken(t *testing.T) {
 		requireFreshLifetime(t, presented, renewed, since)
 
 		// the renewed token is live and administers the network
-		if err := jwt.ValidateByJwtState(ctx, renewed, false); err != nil {
+		if err := session.ValidateByJwtState(ctx, renewed, false); err != nil {
 			t.Fatal(err)
 		}
-		self.call(t, http.MethodGet, "/network/clients", "Bearer "+renewed.Sign(), nil, http.StatusOK, nil)
+		self.call(t, http.MethodGet, "/network/clients", "Bearer "+renewed.Testing_Sign(), nil, http.StatusOK, nil)
 	})
 }
 
@@ -215,7 +215,7 @@ func TestNetworkRefreshRefusesClientTokensAndApiKeys(t *testing.T) {
 		})
 
 		// the client token, reaching the handler
-		clientByJwt, err := jwt.ParseByJwt(ctx, clientToken)
+		clientByJwt, err := session.ParseByJwt(ctx, clientToken)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -254,7 +254,7 @@ func TestNetworkRefreshRefusesAStaleIdentity(t *testing.T) {
 		defer cancel()
 		self := newRouteAccessDbFixture(t, ctx)
 
-		requireStateInvalid := func(name string, byJwt *jwt.ByJwt) {
+		requireStateInvalid := func(name string, byJwt *session.ByJwt) {
 			requireNetworkRefreshCounted(t, "state_invalid", func() {
 				staleSession := session.Testing_CreateClientSession(ctx, byJwt)
 				defer staleSession.Cancel()
@@ -264,8 +264,8 @@ func TestNetworkRefreshRefusesAStaleIdentity(t *testing.T) {
 				}
 			})
 		}
-		requireStateInvalid("no network", jwt.NewByJwt(server.NewId(), server.NewId(), "gone", false, false))
-		requireStateInvalid("not the admin", jwt.NewByJwt(self.networkId, server.NewId(), self.networkName, false, false))
+		requireStateInvalid("no network", session.NewByJwt(server.NewId(), server.NewId(), "gone", false, false))
+		requireStateInvalid("not the admin", session.NewByJwt(self.networkId, server.NewId(), self.networkName, false, false))
 	})
 }
 
@@ -284,44 +284,44 @@ func TestNetworkRefreshFollowsTheExpiryGates(t *testing.T) {
 		expired.NotBefore = expired.IssuedAt
 		expired.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-24 * time.Hour))
 
-		popExpired := jwt.Testing_SetRejectExpired(false)
+		popExpired := session.Testing_SetRejectExpired(false)
 		since := server.NowUtc()
-		renewed := self.networkRefresh(t, expired.Sign())
+		renewed := self.networkRefresh(t, expired.Testing_Sign())
 		popExpired()
 		requireFreshLifetime(t, expired, renewed, since)
 		if !renewed.CreateTime.Equal(expired.CreateTime) {
 			t.Fatalf("renewed create time = %v, want %v", renewed.CreateTime, expired.CreateTime)
 		}
 
-		popExpired = jwt.Testing_SetRejectExpired(true)
-		if w := self.serve(http.MethodPost, "/auth/network-refresh", "Bearer "+expired.Sign(), nil); w.Code != http.StatusUnauthorized {
+		popExpired = session.Testing_SetRejectExpired(true)
+		if w := self.serve(http.MethodPost, "/auth/network-refresh", "Bearer "+expired.Testing_Sign(), nil); w.Code != http.StatusUnauthorized {
 			t.Fatalf("expired token with reject_expired = %d: %s", w.Code, w.Body.String())
 		}
 		// the token renewed before the flip is current
-		self.call(t, http.MethodGet, "/network/clients", "Bearer "+renewed.Sign(), nil, http.StatusOK, nil)
+		self.call(t, http.MethodGet, "/network/clients", "Bearer "+renewed.Testing_Sign(), nil, http.StatusOK, nil)
 		popExpired()
 
-		legacy := &jwt.ByJwt{
+		legacy := &session.ByJwt{
 			NetworkId:   self.networkId,
 			UserId:      self.userId,
 			NetworkName: self.networkName,
 			CreateTime:  server.CodecTime(server.NowUtc()),
 		}
-		popMissing := jwt.Testing_SetRejectMissingExpiration(false)
+		popMissing := session.Testing_SetRejectMissingExpiration(false)
 		var result controller.NetworkRefreshTokenResult
-		self.call(t, http.MethodPost, "/auth/network-refresh", "Bearer "+legacy.Sign(), nil, http.StatusOK, &result)
+		self.call(t, http.MethodPost, "/auth/network-refresh", "Bearer "+legacy.Testing_Sign(), nil, http.StatusOK, &result)
 		popMissing()
 		if result.Error != nil || result.ByJwt == "" {
 			t.Fatalf("legacy refresh = %+v", result)
 		}
 
-		popMissing = jwt.Testing_SetRejectMissingExpiration(true)
+		popMissing = session.Testing_SetRejectMissingExpiration(true)
 		defer popMissing()
-		if w := self.serve(http.MethodPost, "/auth/network-refresh", "Bearer "+legacy.Sign(), nil); w.Code != http.StatusUnauthorized {
+		if w := self.serve(http.MethodPost, "/auth/network-refresh", "Bearer "+legacy.Testing_Sign(), nil); w.Code != http.StatusUnauthorized {
 			t.Fatalf("legacy token with reject_missing_expiration = %d: %s", w.Code, w.Body.String())
 		}
 		// the renewed legacy token carries every registered claim
-		migrated, err := jwt.ParseByJwt(ctx, result.ByJwt)
+		migrated, err := session.ParseByJwt(ctx, result.ByJwt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -346,7 +346,7 @@ func TestNetworkRefreshFollowsCredentialRotation(t *testing.T) {
 		if w := self.serve(http.MethodPost, "/auth/network-refresh", self.root(), nil); w.Code != http.StatusUnauthorized {
 			t.Fatalf("a token created before the reset = %d: %s", w.Code, w.Body.String())
 		}
-		if w := self.serve(http.MethodGet, "/network/clients", "Bearer "+renewed.Sign(), nil); w.Code != http.StatusUnauthorized {
+		if w := self.serve(http.MethodGet, "/network/clients", "Bearer "+renewed.Testing_Sign(), nil); w.Code != http.StatusUnauthorized {
 			t.Fatalf("a token renewed before the reset = %d: %s", w.Code, w.Body.String())
 		}
 	})
@@ -360,10 +360,10 @@ func TestNetworkRefreshFollowsCredentialRotation(t *testing.T) {
 func requireRefreshExpiresWithAResetInTheMintGap(
 	t testing.TB,
 	self *routeAccessDbFixture,
-	presented *jwt.ByJwt,
-	refresh func() *jwt.ByJwt,
+	presented *session.ByJwt,
+	refresh func() *session.ByJwt,
 	requireClient bool,
-) *jwt.ByJwt {
+) *session.ByJwt {
 	t.Helper()
 	hooked := false
 	popHook := controller.Testing_SetRefreshMintHook(func(*session.ClientSession) {
@@ -381,10 +381,10 @@ func requireRefreshExpiresWithAResetInTheMintGap(
 		t.Fatal("the refresh never reached its mint")
 	}
 
-	if err := jwt.ValidateByJwtState(self.ctx, refreshed, requireClient); err == nil {
+	if err := session.ValidateByJwtState(self.ctx, refreshed, requireClient); err == nil {
 		t.Fatalf("the token refreshed while the reset committed outlived the reset (create time %v, presented %v)", refreshed.CreateTime, presented.CreateTime)
 	}
-	if w := self.serve(http.MethodGet, "/network/clients", "Bearer "+refreshed.Sign(), nil); w.Code != http.StatusUnauthorized {
+	if w := self.serve(http.MethodGet, "/network/clients", "Bearer "+refreshed.Testing_Sign(), nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("the token refreshed while the reset committed = %d: %s", w.Code, w.Body.String())
 	}
 	if !refreshed.CreateTime.Equal(presented.CreateTime) {
@@ -403,8 +403,8 @@ func TestNetworkRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap(t *testing.T) 
 		self := newRouteAccessDbFixture(t, ctx)
 
 		presented := self.agedNetworkToken()
-		requireRefreshExpiresWithAResetInTheMintGap(t, self, presented, func() *jwt.ByJwt {
-			return self.networkRefresh(t, presented.Sign())
+		requireRefreshExpiresWithAResetInTheMintGap(t, self, presented, func() *session.ByJwt {
+			return self.networkRefresh(t, presented.Testing_Sign())
 		}, false)
 	})
 }
@@ -418,13 +418,13 @@ func TestClientRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap(t *testing.T) {
 		self := newRouteAccessDbFixture(t, ctx)
 
 		clientId, clientToken := self.mintClient(t, self.root(), nil)
-		minted, err := jwt.ParseByJwt(ctx, clientToken)
+		minted, err := session.ParseByJwt(ctx, clientToken)
 		if err != nil {
 			t.Fatal(err)
 		}
 		// the client token as it is after some refreshes: the root's create
 		// time, an older lifetime
-		presented := jwt.NewByJwtWithCreateTime(
+		presented := session.NewByJwtWithCreateTime(
 			self.networkId,
 			self.userId,
 			self.networkName,
@@ -434,13 +434,13 @@ func TestClientRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap(t *testing.T) {
 		).Client(*minted.DeviceId, clientId)
 		ageClaims(presented)
 
-		refreshed := requireRefreshExpiresWithAResetInTheMintGap(t, self, presented, func() *jwt.ByJwt {
+		refreshed := requireRefreshExpiresWithAResetInTheMintGap(t, self, presented, func() *session.ByJwt {
 			var result controller.RefreshTokenResult
-			self.call(t, http.MethodGet, "/auth/refresh", "Bearer "+presented.Sign(), nil, http.StatusOK, &result)
+			self.call(t, http.MethodGet, "/auth/refresh", "Bearer "+presented.Testing_Sign(), nil, http.StatusOK, &result)
 			if result.Error != nil || result.ByJwt == "" {
 				t.Fatalf("client refresh = %+v", result)
 			}
-			refreshed, err := jwt.ParseByJwt(ctx, result.ByJwt)
+			refreshed, err := session.ParseByJwt(ctx, result.ByJwt)
 			if err != nil {
 				t.Fatal(err)
 			}

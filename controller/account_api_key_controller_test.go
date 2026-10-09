@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -24,7 +24,7 @@ func TestGetApiKeysAnswersUnreadableKeyWithError(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})

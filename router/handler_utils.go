@@ -17,7 +17,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
-	// "github.com/urnetwork/server/jwt"
+	//
 )
 
 // compiled once at package load; these run on the error path of every request,
@@ -79,7 +79,7 @@ func wrap[R any](
 	req *http.Request,
 	formatters ...FormatFunction[R],
 ) {
-	session, err := session.NewClientSessionFromRequest(req)
+	clientSession, err := session.NewClientSessionFromRequest(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -91,7 +91,7 @@ func wrap[R any](
 	// }
 
 	// server.Logger().Printf("Handling %s\n", impl)
-	result, err := impl(session)
+	result, err := impl(clientSession)
 	if err != nil {
 		if !RaiseHttpError(err, w) {
 			glog.Infof("[h]impl error: %s\n", err)
@@ -100,7 +100,7 @@ func wrap[R any](
 	}
 
 	for _, formatter := range formatters {
-		if complete := formatter(session, result); complete {
+		if complete := formatter(clientSession, result); complete {
 			return
 		}
 	}
@@ -135,6 +135,9 @@ func implName[R any](impl ImplFunction[R]) string {
 // Dependency failure is not a credential rejection. Keep the sentinel through
 // the wrapper so RaiseHttpError can emit a fixed JSON response without causes.
 func authenticationHttpError(err error) error {
+	if errors.Is(err, session.ErrSessionRevoked) {
+		return &session.SessionError{Code: "session_revoked", Status: 401}
+	}
 	if errors.Is(err, session.ErrAuthUnavailable) {
 		return err
 	}
@@ -149,12 +152,12 @@ func WrapRequireAuth[R any](
 	formatters ...FormatFunction[R],
 ) {
 	wrap(
-		func(session *session.ClientSession) (R, error) {
-			if err := session.Auth(req); err != nil {
+		func(clientSession *session.ClientSession) (R, error) {
+			if err := clientSession.Auth(req); err != nil {
 				var empty R
 				return empty, authenticationHttpError(err)
 			}
-			r, err := impl(session)
+			r, err := impl(clientSession)
 			return r, tagImplError(impl, err)
 		},
 		w,
@@ -171,12 +174,12 @@ func WrapRequireClient[R any](
 	formatters ...FormatFunction[R],
 ) {
 	wrap(
-		func(session *session.ClientSession) (R, error) {
-			if err := session.Auth(req); err != nil || session.ByJwt.ClientId == nil {
+		func(clientSession *session.ClientSession) (R, error) {
+			if err := clientSession.Auth(req); err != nil || clientSession.ByJwt.ClientId == nil {
 				var empty R
 				return empty, authenticationHttpError(err)
 			}
-			r, err := impl(session)
+			r, err := impl(clientSession)
 			return r, tagImplError(impl, err)
 		},
 		w,
@@ -192,8 +195,8 @@ func WrapNoAuth[R any](
 	formatters ...FormatFunction[R],
 ) {
 	wrap(
-		func(session *session.ClientSession) (R, error) {
-			r, err := impl(session)
+		func(clientSession *session.ClientSession) (R, error) {
+			r, err := impl(clientSession)
 			return r, tagImplError(impl, err)
 		},
 		w,
@@ -210,7 +213,7 @@ func wrapWithInput[T any, R any](
 	req *http.Request,
 	formatters ...FormatFunction[R],
 ) {
-	session, err := session.NewClientSessionFromRequest(req)
+	clientSession, err := session.NewClientSessionFromRequest(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -229,7 +232,7 @@ func wrapWithInput[T any, R any](
 		req.Body = http.MaxBytesReader(w, req.Body, MaxJsonRequestBytes)
 	}
 
-	body, err := bodyFormatter(session, req)
+	body, err := bodyFormatter(clientSession, req)
 	if err != nil {
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
@@ -285,7 +288,7 @@ func wrapWithInput[T any, R any](
 	}
 
 	// server.Logger().Printf("Handling %s\n", impl)
-	result, err := impl(input, session)
+	result, err := impl(input, clientSession)
 	if err != nil {
 		custom := map[string]any{
 			"headers": server.SafeHttpHeadersForLog(req.Header),
@@ -298,7 +301,7 @@ func wrapWithInput[T any, R any](
 
 	advanceControlHttpPhase(req, controlHttpResponse)
 	for _, formatter := range formatters {
-		if complete := formatter(session, result); complete {
+		if complete := formatter(clientSession, result); complete {
 			return
 		}
 	}
@@ -331,12 +334,12 @@ func WrapWithInputBodyFormatterRequireAuth[T any, R any](
 ) {
 	wrapWithInput(
 		bodyFormatter,
-		func(arg T, session *session.ClientSession) (R, error) {
-			if err := session.Auth(req); err != nil {
+		func(arg T, clientSession *session.ClientSession) (R, error) {
+			if err := clientSession.Auth(req); err != nil {
 				var empty R
 				return empty, authenticationHttpError(err)
 			}
-			return impl(arg, session)
+			return impl(arg, clientSession)
 		},
 		w,
 		req,
@@ -370,14 +373,14 @@ func WrapWithInputBodyFormatterRequireClient[T any, R any](
 ) {
 	wrapWithInput(
 		bodyFormatter,
-		func(arg T, session *session.ClientSession) (R, error) {
+		func(arg T, clientSession *session.ClientSession) (R, error) {
 			advanceControlHttpPhase(req, controlHttpAuthenticate)
-			if err := session.Auth(req); err != nil || session.ByJwt.ClientId == nil {
+			if err := clientSession.Auth(req); err != nil || clientSession.ByJwt.ClientId == nil {
 				var empty R
 				return empty, authenticationHttpError(err)
 			}
 			advanceControlHttpPhase(req, controlHttpController)
-			return impl(arg, session)
+			return impl(arg, clientSession)
 		},
 		w,
 		req,
@@ -397,14 +400,14 @@ func WrapWithInputOptionalAuth[T any, R any](
 ) {
 	wrapWithInput(
 		RequestBodyFormatter,
-		func(arg T, session *session.ClientSession) (R, error) {
+		func(arg T, clientSession *session.ClientSession) (R, error) {
 			if req.Header.Get("Authorization") != "" {
-				if err := session.Auth(req); err != nil {
+				if err := clientSession.Auth(req); err != nil {
 					var empty R
 					return empty, authenticationHttpError(err)
 				}
 			}
-			return impl(arg, session)
+			return impl(arg, clientSession)
 		},
 		w,
 		req,
@@ -436,8 +439,8 @@ func WrapWithInputBodyFormatterNoAuth[T any, R any](
 ) {
 	wrapWithInput(
 		bodyFormatter,
-		func(arg T, session *session.ClientSession) (R, error) {
-			return impl(arg, session)
+		func(arg T, clientSession *session.ClientSession) (R, error) {
+			return impl(arg, clientSession)
 		},
 		w,
 		req,
@@ -447,6 +450,19 @@ func WrapWithInputBodyFormatterNoAuth[T any, R any](
 
 func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	if errors.Is(err, session.ErrAuthUnavailable) {
+		// Only a separately declared safe unavailable body can override the
+		// fixed dependency response. Arbitrary error causes remain private.
+		var unavailableBody interface{ HttpUnavailableResultBody() any }
+		if errors.As(err, &unavailableBody) {
+			if body, marshalErr := json.Marshal(unavailableBody.HttpUnavailableResultBody()); marshalErr == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Content-Type-Options", "nosniff")
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write(append(body, '\n'))
+				return true
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("{\"error\":\"Authentication temporarily unavailable.\"}\n"))

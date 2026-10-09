@@ -16,7 +16,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -25,7 +25,7 @@ func verifyTestSession(ctx context.Context, t testing.TB, name string) (*session
 	networkId := server.NewId()
 	userId := server.NewId()
 	model.Testing_CreateNetwork(ctx, networkId, name, userId)
-	clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: networkId,
 		UserId:    userId,
 	})
@@ -386,7 +386,7 @@ func TestVerifyAppleTransactionWrongNetworkDoesNotCredit(t *testing.T) {
 func TestVerifyAppleTransactionInvalidClaims(t *testing.T) {
 	ctx := context.Background()
 	networkId := server.NewId()
-	clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: networkId,
 		UserId:    server.NewId(),
 	})

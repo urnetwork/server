@@ -32,11 +32,11 @@ func TestWalletMappingPublicFinalizedEpochPreventsRetroactiveConsent(t *testing.
 			t.Fatal(err)
 		}
 		args := &SnWalletMappingChallengeArgs{ClientId: credential.ClientId, ColdkeySs58: address, FromEpoch: 1, ThroughEpoch: 100}
-		if status, _ := walletMappingControllerPost(t, endpoint.URL, "/sn/wallet/consent", credential.Sign(), args); status == http.StatusOK {
+		if status, _ := walletMappingControllerPost(t, endpoint.URL, "/sn/wallet/consent", credential.Testing_Sign(), args); status == http.StatusOK {
 			t.Fatal("authenticated caller backdated consent despite current finalized epoch50")
 		}
 		args.FromEpoch = 51
-		status, raw := walletMappingControllerPost(t, endpoint.URL, "/sn/wallet/consent", credential.Sign(), args)
+		status, raw := walletMappingControllerPost(t, endpoint.URL, "/sn/wallet/consent", credential.Testing_Sign(), args)
 		var challenge SnWalletMappingChallengeResult
 		if status != http.StatusOK || json.Unmarshal(raw, &challenge) != nil {
 			t.Fatal("future challenge failed", status, string(raw))
@@ -52,7 +52,7 @@ func TestWalletMappingPublicFinalizedEpochPreventsRetroactiveConsent(t *testing.
 		encoded := signature.Encode()
 		fixture.boundary = protocol.ClientKeyEffectiveBoundary{Epoch: 51, Block: 101, Hash: [32]byte{6}}
 		set := &SnSetWalletArgs{ClientId: credential.ClientId, ColdkeySs58: address, Message: challenge.Message, Signature: "0x" + hex.EncodeToString(encoded[:])}
-		status, raw = walletMappingControllerPost(t, endpoint.URL, "/sn/wallet", credential.Sign(), set)
+		status, raw = walletMappingControllerPost(t, endpoint.URL, "/sn/wallet", credential.Testing_Sign(), set)
 		var result SnSetWalletResult
 		if status == http.StatusOK && json.Unmarshal(raw, &result) == nil && result.Error == nil {
 			t.Fatal("late actual signature changed an already-earned mapping", string(raw))

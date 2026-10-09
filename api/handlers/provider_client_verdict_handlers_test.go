@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // validClientVerdictBody is a well-formed egress-dead report: the client sent
@@ -72,8 +72,8 @@ func postClientVerdict(
 	}
 	req := httptest.NewRequest(http.MethodPost, "/network/provider-verdict", bytes.NewReader(buf))
 	if reporter.networkId != (server.Id{}) {
-		byJwt := jwt.NewByJwt(reporter.networkId, reporter.userId, "test", false, false)
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", byJwt.Sign()))
+		byJwt := session.NewByJwt(reporter.networkId, reporter.userId, "test", false, false)
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", byJwt.Testing_Sign()))
 	}
 	w := httptest.NewRecorder()
 	ProviderClientVerdictSubmit(w, req)
