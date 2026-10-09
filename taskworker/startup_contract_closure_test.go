@@ -60,14 +60,14 @@ func testStartupAllOpenContractClosures(t *testing.T, profile WorkloadProfile) {
 		var runAt time.Time
 		server.Db(ctx, func(conn server.PgConn) {
 			var count int
-			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE run_once_key=$1`, task.RunOnce("schedule_open_contract_closures").String()).Scan(&count))
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE run_once_key=$1`, task.RunOnce("schedule_open_contract_closures_on_startup").String()).Scan(&count))
 			if count != 1 {
 				t.Fatal("actual startup did not seed exactly one all-open closure scan", profile, count)
 			}
-			server.Raise(conn.QueryRow(ctx, `SELECT task_id,args_json,run_at FROM pending_task WHERE run_once_key=$1`, task.RunOnce("schedule_open_contract_closures").String()).Scan(&id, &raw, &runAt))
+			server.Raise(conn.QueryRow(ctx, `SELECT task_id,args_json,run_at FROM pending_task WHERE run_once_key=$1`, task.RunOnce("schedule_open_contract_closures_on_startup").String()).Scan(&id, &raw, &runAt))
 		})
 		var args work.ScheduleOpenContractClosuresArgs
-		if json.Unmarshal([]byte(raw), &args) != nil || args.StartedAt.IsZero() || args.After != nil || runAt.After(server.NowUtc()) {
+		if json.Unmarshal([]byte(raw), &args) != nil || args.StartedAt.IsZero() || args.PageSize != 1024 || runAt.After(server.NowUtc()) {
 			t.Fatal("startup scan lost its fixed start or immediate wake")
 		}
 		registered, err := InitTaskWorkerForProfile(ctx, nil, profile)

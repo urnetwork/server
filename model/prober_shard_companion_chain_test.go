@@ -343,7 +343,7 @@ func TestProberShardCompanionReplyPlansStayEndpointScoped(t *testing.T) {
 			for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
 				server.RaisePgResult(conn.Exec(ctx, `SET plan_cache_mode=`+mode))
 				for _, payer := range []server.Id{f.peer.providerNetworkId, f.owner.NetworkId} {
-					args := fmt.Sprintf("'%s'::uuid,'%s'::uuid,now()-interval '1 hour','%s'::uuid,'%s'::uuid,'%s'::uuid", f.peer.providerId, f.owner.ClientId, payer, f.owner.NetworkId, f.peer.providerNetworkId)
+					args := fmt.Sprintf("'%s'::uuid,'%s'::uuid,now()-interval '1 hour','%s'::uuid,'%s'::uuid,'%s'::uuid,9223372036854775807::bigint", f.peer.providerId, f.owner.ClientId, payer, f.owner.NetworkId, f.peer.providerNetworkId)
 					var raw []byte
 					server.Raise(conn.QueryRow(ctx, `EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) EXECUTE shard_chain_plan(`+args+`)`).Scan(&raw))
 					var plans []map[string]any

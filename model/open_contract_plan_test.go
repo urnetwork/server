@@ -61,7 +61,21 @@ func openContractCompanionQueryOwner(file *ast.File) (*ast.FuncDecl, error) {
 	if wrapper == nil || owner == nil || owner.Body == nil {
 		return nil, fmt.Errorf("missing public companion wrapper or actual query owner")
 	}
-	call := returnedCall(wrapper.Body)
+	wrapperBody := wrapper.Body
+	if wrapperBody != nil && len(wrapperBody.List) == 2 {
+		// The public owner pins its optional work source before Redis may
+		// replay the callback. Admit only that exact context-preserving step.
+		assignment, ok := wrapperBody.List[0].(*ast.AssignStmt)
+		if !ok || assignment.Tok != token.ASSIGN || len(assignment.Lhs) != 1 || len(assignment.Rhs) != 1 || !ident(assignment.Lhs[0], "ctx") {
+			return nil, fmt.Errorf("companion wrapper has an unexpected pre-admission statement")
+		}
+		pin, ok := assignment.Rhs[0].(*ast.CallExpr)
+		if !ok || !ident(pin.Fun, "providerWorkSessionContext") || len(pin.Args) != 1 || !ident(pin.Args[0], "ctx") {
+			return nil, fmt.Errorf("companion wrapper changed its pinned caller context")
+		}
+		wrapperBody = &ast.BlockStmt{List: wrapperBody.List[1:]}
+	}
+	call := returnedCall(wrapperBody)
 	if call == nil {
 		return nil, fmt.Errorf("public companion wrapper does not return its query owner")
 	}
