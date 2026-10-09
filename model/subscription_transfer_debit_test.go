@@ -33,7 +33,7 @@ func asyncDebitTestSettle(ctx context.Context, contractId server.Id, amount Byte
 		if !closed {
 			panic("test outcome was not claimed")
 		}
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 	return
 }
 
