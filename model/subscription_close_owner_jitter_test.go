@@ -191,7 +191,7 @@ func (self *contractCloseOwnerJitterObservation) report(t testing.TB) {
 		"financial_cohort_attempts": cohortAttempts, "financial_cohort_selected": cohortSelected,
 		"financial_cohort_completed": cohortCompleted, "financial_cohort_fallbacks": cohortFallbacks,
 		"financial_cohort_write_rollbacks": cohortWriteRollbacks,
-		"cohort_database_timings": cohortTimings,
+		"cohort_database_timings":          cohortTimings,
 		"counter_delta":                    parallelCloseCounterDelta(t, self.beforeCounters, parallelCloseCounterSnapshot(t)),
 		"close_counter_before":             self.beforeClosed, "close_counter_after": contractClosedCounter.Snapshot(),
 		"qualifiers": []string{

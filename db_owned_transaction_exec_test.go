@@ -299,7 +299,7 @@ func ownershipExecTestPage(t testing.TB, sql string, arguments []any, exec bool,
 func TestTryTxOwnershipExecReplyChunksAndDefaultModeRemainExact(t *testing.T) {
 	keys := make([]PgOwnershipKey, pgOwnershipQueryLimit+3)
 	for index := range keys {
-		keys[index] = PgOwnershipKey{first: -1701, second: int32(index+1)}
+		keys[index] = PgOwnershipKey{first: -1701, second: int32(index + 1)}
 	}
 	for _, test := range []struct {
 		name    string
@@ -337,7 +337,7 @@ func TestTryTxOwnershipExecReplyChunksAndDefaultModeRemainExact(t *testing.T) {
 func TestTryTxOwnershipExecRejectsIncompleteOrChangedReplyIdentity(t *testing.T) {
 	keys := make([]PgOwnershipKey, pgOwnershipQueryLimit+1)
 	for index := range keys {
-		keys[index] = PgOwnershipKey{first: -1702, second: int32(index+1)}
+		keys[index] = PgOwnershipKey{first: -1702, second: int32(index + 1)}
 	}
 	failure := errors.New("synthetic incomplete ownership reply")
 	for _, test := range []struct {
@@ -352,7 +352,9 @@ func TestTryTxOwnershipExecRejectsIncompleteOrChangedReplyIdentity(t *testing.T)
 		{name: "zero identity after earlier page", page: 1, mutate: func(rows *ownershipExecTestRows) { rows.replies[0].backendPid = 0 }},
 		{name: "no replies", mutate: func(rows *ownershipExecTestRows) { rows.replies = nil }},
 		{name: "missing reply", mutate: func(rows *ownershipExecTestRows) { rows.replies = rows.replies[:len(rows.replies)-1] }},
-		{name: "extra reply", mutate: func(rows *ownershipExecTestRows) { rows.replies = append(rows.replies, ownershipExecTestReply{backendPid: 37, admitted: true}) }},
+		{name: "extra reply", mutate: func(rows *ownershipExecTestRows) {
+			rows.replies = append(rows.replies, ownershipExecTestReply{backendPid: 37, admitted: true})
+		}},
 		{name: "scan error", mutate: func(rows *ownershipExecTestRows) { rows.replies[0].scanErr = failure }, wantCause: failure},
 		{name: "late close error", mutate: func(rows *ownershipExecTestRows) { rows.closeErr = failure }, wantCause: failure},
 	} {

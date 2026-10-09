@@ -15,7 +15,7 @@ type legacyFinancialCohortObservationKey struct{}
 // A qualification context can retain finite acquire/transaction phases. These
 // are wall observations, not PostgreSQL execution or row-lock measurements.
 type legacyFinancialCohortObservation struct {
-	WallNs int64 `json:"wall_ns"`
+	WallNs   int64           `json:"wall_ns"`
 	Database server.DbTiming `json:"database"`
 }
 
