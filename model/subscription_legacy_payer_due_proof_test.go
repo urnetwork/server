@@ -190,3 +190,41 @@ func TestLegacyPayerDueProofConcurrentMissDoesNotWaitOrReplaceNewerProof(t *test
 		}
 	}
 }
+
+func TestLegacyPayerDueProofLateResourceCannotReplaceNewerResource(t *testing.T) {
+	full, due := &legacySettlementPayerIndexCache{}, &legacySettlementPayerIndexCache{}
+	firstIdentity := sha256.Sum256([]byte("synthetic older due resource"))
+	secondIdentity := sha256.Sum256([]byte("synthetic newer due resource"))
+	revalidated, release := make(chan struct{}), make(chan struct{})
+	firstDone := make(chan LegacySettlementPayerIndexReadiness, 1)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	go func() {
+		resourceReads, paused := 0, false
+		firstDone <- observeLegacySettlementPayerDueIndexWithProof(ctx, full, due,
+			func(context.Context) ([sha256.Size]byte, error) { resourceReads++; return firstIdentity, nil },
+			func() time.Time {
+				// Pause after A's successful revalidation, immediately before
+				// publication. B can now establish a strictly newer proof.
+				if resourceReads == 2 && !paused {
+					paused = true
+					close(revalidated)
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+				}
+				return time.Unix(100, 0)
+			}, func(context.Context) (bool, error) { return true, nil })
+	}()
+	<-revalidated
+	second := observeLegacySettlementPayerDueIndexWithProof(ctx, full, due,
+		func(context.Context) ([sha256.Size]byte, error) { return secondIdentity, nil },
+		func() time.Time { return time.Unix(101, 0) },
+		func(context.Context) (bool, error) { return true, nil })
+	close(release)
+	first := <-firstDone
+	if first.Outcome != "ready" || second.Outcome != "ready" || due.identity != secondIdentity || due.expires != time.Unix(106, 0) || full.ready {
+		t.Fatal("late old-resource validation replaced newer positive proof", first, second, due.expires)
+	}
+}

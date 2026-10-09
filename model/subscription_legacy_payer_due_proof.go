@@ -70,7 +70,7 @@ func (self *legacySettlementPayerIndexCache) publishDueProof(ctx context.Context
 	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	if ctx.Err() != nil || self.identity == identity && self.ready && expires.Before(self.expires) {
+	if ctx.Err() != nil || self.ready && expires.Before(self.expires) {
 		return
 	}
 	self.identity, self.expires, self.ready = identity, expires, true

@@ -33492,7 +33492,10 @@ cannot erase a successful proof or cache a refusal.
 
 A fresh observation is published only after the same bounded resource identity
 is rechecked successfully. Changed, unreadable, canceled or expired evidence
-cannot publish. The due cache authorizes only the complete due-index definition;
+cannot publish. A cold miss now also reads that bounded local resource before
+and after its catalog query; an unavailable identity fails closed as a readiness
+read error. An older reply cannot displace a newer resource's proof. The due
+cache authorizes only the complete due-index definition;
 registration still requires its separate both-index proof. A healthy full-index
 proof remains usable for due entry, but a due-only proof cannot authorize the
 optional missing-key index. Financial ownership, accounting and task completion
