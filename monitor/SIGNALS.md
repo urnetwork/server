@@ -2153,6 +2153,48 @@ Require same-source, matched workload and committed-outcome counts alongside
 phase times, query/lock evidence and an independent CPU interval. More visits,
 lower query counts or lower post time with less completed work is not recovery.
 
+**2026-10-09 current native CPU attribution limit.** Root's one-use capture
+completed at 01:25:11Z with source observation 01:25:08.170687Z. Four bounded
+process brackets retained 65.99 CPU seconds from stable native counters;
+only 4.67 seconds also had one enclosed, unchanged backend/query activity
+generation. The remaining 61.32 seconds (92.923% of observed cohort ticks)
+stay unassigned: 57.60 seconds crossed changed, idle, missing or zero query
+identity and 3.72 seconds lacked a qualified enclosing SQL interval. These
+are measured unknown CPU, not discarded wait samples. Native endpoint loss
+has no invented CPU value. The separate service-cgroup window measured
+218.248706 CPU seconds over 2.959886 seconds on 96 logical CPUs; its timing
+differs and it is not the denominator for the process brackets.
+
+The strongest retained stable query family was pending-task access at 1.68
+CPU seconds (1.50-second conservative lower bound), followed by other/escrow/
+other families at 0.69/0.61/0.56 seconds. These ranks describe the qualified
+subset, not PostgreSQL's dominant CPU source. The final metadata query selected
+the four measured CPU-leading retained identities, returning four complete
+catalog texts without row overflow. It did not rank cumulative execution wall
+time. Full SQL remains private; an exact source match still needs current
+postmaster/database identity, compatible activity text and complete catalog
+text. Multiple source owners, roles or top-level contexts must remain distinct.
+
+The source now samples a bounded direct PostgreSQL cgroup cohort rather than
+only active SQL rows. It preserves CPU for changing/idle work, validates native
+PID namespace/start and SQL postmaster ownership, and requires unchanged
+backend/query start, query ID, text digest and state-change clocks. Statement-
+associated CPU can include Bind, snapshot acquisition and planning; it does
+not prove executor-only CPU or business-table access. Exact wait endpoints
+are context, not CPU counters or wait residence. Four short intervals, at most
+1,024 direct processes per endpoint, missing/new processes and two-tick
+quantization per process interval constrain interpretation. This attempt had
+no omitted query groups; that does not remove its changing-query blind spot.
+
+Source/native controls and the composed shared-slot/transport controls passed.
+The actual receipt proves joined transport and released reservation; the
+independent actual gate is `c78b6677` and reduction is `6eeda12d` under
+`temp/main-health-r1-20261008-v1/pg-cpu-current-brackets-v1/`. This is a complete
+bounded diagnostic, not a whole-cluster CPU attribution or recovery verdict.
+An unchanged repeat is not a remedy for this measured attribution gap. Keep
+the CPU incident open until a separately qualified observation identifies the
+unassigned work; do not relabel historical wait leaders as current CPU owners.
+
 ### 1.3d Empty transfer-escrow write amplification
 Probe: `escrow-amplification`
 
