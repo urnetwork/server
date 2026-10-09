@@ -222,7 +222,7 @@ func TestLegacySettlementBeginLoadedPoolRequestControl(t *testing.T) {
 					started := time.Now()
 					for range workers {
 						go func() {
-							err := server.HandleError(func() {
+							value := server.HandleError(func() {
 								for range rounds {
 									options := pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite, DeferrableMode: pgx.NotDeferrable}
 									if combined {
@@ -243,7 +243,15 @@ func TestLegacySettlementBeginLoadedPoolRequestControl(t *testing.T) {
 									}()
 								}
 							})
-							done <- err
+							var workerErr error
+							if value != nil {
+								var ok bool
+								workerErr, ok = value.(error)
+								if !ok {
+									workerErr = fmt.Errorf("transaction worker panicked with %T", value)
+								}
+							}
+							done <- workerErr
 						}()
 					}
 					for range workers {
