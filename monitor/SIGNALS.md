@@ -2203,6 +2203,70 @@ An unchanged repeat is not a remedy for this measured attribution gap. Keep
 the CPU incident open until a separately qualified observation identifies the
 unassigned work; do not relabel historical wait leaders as current CPU owners.
 
+**2026-10-09 bounded CPU function-profile discriminator.** The disabled
+source requires a trusted preinstalled `perf` binary to sample CPU-clock leaf functions in
+one exact PostgreSQL service cgroup at 19 Hz for five seconds. It performs no
+SQL query, stack or memory capture, installation, or profiling-policy change.
+Native unit, boot, process start, namespace, cgroup inode and postmaster
+executable must remain stable across the capture. The monotonic record window
+must enclose all sample timestamps; the separate service CPU-counter window
+also includes profiler startup and analysis and is not its denominator.
+
+The owned local control exposed a real observer compatibility failure. Its
+privileged recording succeeded, but the first parser rejected `report_schema`:
+the installed tool appended an exact null IPC column and included a software
+dummy event for metadata. The corrected source accepts only that null column,
+allows at most one metadata dummy alongside the single measuring CPU-clock
+event, and requires every sample ID to belong to CPU-clock. Raw sample counts
+and period totals must reconcile with the complete bounded histogram; loss
+and throttle records remain explicit. This does not turn metadata into CPU.
+Independent offline replay of the preserved local capture (`8d124dd9`)
+reconciled 94 samples, of which 87 had unresolved symbols, with no recorded
+loss or throttling. It did not make a new profile or establish Main coverage.
+The earlier failure without retained child diagnostics remains cause-unknown.
+
+False-positive qualifiers: leaf symbols do not identify a SQL statement or
+business caller, and sample-period weights are not exact CPU counters or SQL
+elapsed time. Other DSO symbol resolution is not independently verified by
+the postmaster executable check. False-negative qualifiers: five seconds can
+miss brief work; unresolved symbols, loss, throttling, omitted groups and
+partial output retain unknown scope. Top-32 projection omissions remain in
+the sample and period totals. Missing tools, privilege, identity or bounded
+coverage refuse the read; there is no broader event or host fallback.
+
+Source GO `b6d701d8` pins the corrected parser and 29 controls under
+`temp/pg-contention-20261004/source-pg-cpu-function-profile-disabled-v3/`.
+Require a qualified corrected owned-local pipeline and a separately reviewed
+one-use Root carrier before any Main profile. Source and local parser success
+do not resolve the measured 92.923% unknown query-CPU share.
+
+**2026-10-09 first Main function-profile attempt, tool discovery refused.**
+The corrected owned-local pipeline passed before the Main attempt: 94 actual
+CPU-clock samples, 91 unresolved, no recorded loss or throttling, and exact
+owned-process cleanup. Its native gate `c33aaaff` and current-metadata source
+gate `94587f68` qualify the local control; they do not prove a Main tool exists
+or transfer local symbol coverage to Main.
+
+Root's one-use carrier `90f9dc7b` then contacted Main once. The private source
+observation at `2026-10-09T03:22:09.402880Z` returned
+`failure_phase=profile`, `failure_class=perf_missing_or_untrusted`, and no
+profile or retained native-identity object. Root joined exit 1; the shared
+transport reservation joined and released. Independent failure-only gate
+`21419376` and offline replay `584587f8` preserve this consumed attempt.
+
+The pinned source checks at most two fixed executable candidates. It merges
+missing files with failed regular-file, root-owner, mode, size, ELF and stable
+file-identity checks into that one refusal. Candidate count and individual
+reasons were not retained, so missing installation, wrapper/path mismatch and
+trust refusal remain indistinguishable. Control flow places this failure
+before any `perf` child or perf-data directory is created; it does not prove
+a perf permission denial, unsupported kernel event or PostgreSQL outage.
+No CPU distribution, current symbol coverage or recovery conclusion follows.
+The source-boundary report is `c00a5ae0` under
+`temp/main-health-r1-20261008-v1/pg-cpu-function-profile-v1/`. Preserve the
+failure and qualify a new discriminator before another Root contact; do not
+retry this carrier or weaken executable trust checks to obtain a profile.
+
 ### 1.3d Empty transfer-escrow write amplification
 Probe: `escrow-amplification`
 
@@ -2915,6 +2979,30 @@ withholds that signal's accumulated partial findings on error, so their absence
 is not recovery; successful bounded reads still have their existing query-cap,
 parsing, and freshness limits. This source repair does not certify every live
 observer generation or alter the standing tailer's separate shutdown policy.
+
+Native `journalctl --output=json` diagnostics have a separate producer-format
+boundary: without `--all`, fields larger than 4096 bytes become JSON `null`.
+A structured Go stack can cross that boundary while remaining inside the
+reader's own message and total-output limits. A narrow private reader that
+needs the full field must request `--all` while retaining hard row, byte,
+per-message, command-time and whole-owner caps. This does not authorize adding
+unbounded full fields to fleet log readers. Missing, null, duplicate, array or
+otherwise malformed fields remain unavailable evidence; a finite field-shape
+receipt may identify the failed schema field without publishing its contents.
+The October 9 local control reproduces the null-field failure through the
+unchanged reader, preserves a bounded large stack with `--all`, and retains
+healthy-small, oversize and malformed-field controls. The earlier production
+receipt established `journal_schema` only, so its exact failed field remains
+unknown.
+
+False-positive qualifier: this decoder failure is lost observation authority,
+not a service panic, process death or proof of a particular database failure.
+Require the selected current container's immutable image/version and native
+process identity before and after a bounded journal read; a published release
+alone does not establish adoption. False-negative qualifier: empty or capped
+samples do not establish health, full rates or absence of a failure. A recovered
+owner such as `ConnectControlFrames` may rethrow during cleanup; join the exact
+error and source frames to the pinned source before naming the original cause.
 
 Bounded Warpctl log-query failures also retain a privacy-safe terminal cause.
 The local command runner keeps stdout separate from a bounded 64 KiB stderr

@@ -114,6 +114,7 @@ func registry() []specEndpoint {
 		// per-client ACL groups (EMBED1.md)
 		{method: "POST", path: "/network/client-acl-group", argType: rt(model.SetNetworkClientAclGroupArgs{}), resultType: rt(model.NetworkClientAclGroupResult{})},
 		{method: "GET", path: "/network/client-acl-group", argType: nil, resultType: rt(model.NetworkClientAclGroupResult{})},
+		{method: "GET", path: "/network/embed", argType: nil, resultType: rt(model.NetworkEmbedResult{})},
 		// the public Services contact form (EMBED1.md)
 		{method: "POST", path: "/services/contact-sales", argType: rt(model.ServicesContactSalesArgs{}), resultType: rt(model.ServicesContactSalesResult{})},
 

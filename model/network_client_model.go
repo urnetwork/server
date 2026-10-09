@@ -616,33 +616,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent {
 					topLevelClientLimit := networkTopLevelClientLimitInTx(session.Ctx, tx, session.ByJwt.NetworkId)
 					// the scan is bounded at the limit since only the threshold matters
-					result, err := tx.Query(
-						session.Ctx,
-						`
-							SELECT COUNT(*) AS top_level_client_count
-							FROM (
-								SELECT 1
-								FROM network_client
-								WHERE
-									network_id = $1 AND
-									active = true AND
-									source_client_id IS NULL AND
-									NOT EXISTS (
-										SELECT 1 FROM network_client_provider_intent
-										WHERE network_client_provider_intent.client_id = network_client.client_id
-									)
-								LIMIT $2
-							) t
-						`,
-						session.ByJwt.NetworkId,
-						topLevelClientLimit+1,
-					)
-					topLevelClientCount := 0
-					server.WithPgResult(result, err, func() {
-						if result.Next() {
-							server.Raise(result.Scan(&topLevelClientCount))
-						}
-					})
+					topLevelClientCount := countNetworkActiveTopLevelClients(session.Ctx, tx, session.ByJwt.NetworkId, topLevelClientLimit+1)
 					if topLevelClientLimit <= topLevelClientCount {
 						authClientResult = &AuthNetworkClientResult{
 							Error: &AuthNetworkClientError{

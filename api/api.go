@@ -217,6 +217,11 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/network/client-acl-group", handlers.NetworkClientAclGroupSet),
 		router.NewRoute("GET", "/network/client-acl-group", handlers.NetworkClientAclGroupGet),
 
+		// whether the network is Embed-enabled, its client allowance and its
+		// counted clients (EMBED1.md); the data-cap and ACL-group routes above
+		// refuse a network that is not. Read with the root token or an API key
+		router.NewRoute("GET", "/network/embed", handlers.NetworkEmbedGet),
+
 		// the public Services contact form (EMBED1.md)
 		router.NewRoute("POST", "/services/contact-sales", handlers.ServicesContactSales),
 

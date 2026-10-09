@@ -69,6 +69,7 @@ Usage:
     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
     bringyourctl network remove --network_id=<network_id> --user_id=<user_id>
     bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
+    bringyourctl network embed --network_id=<network_id> [--enable [--client-limit=<limit>] | --disable]
     bringyourctl balance-code create --duration=<duration> --balance=<balance> --cost=<usd> --email=<email> [--count=<count>]
     bringyourctl balance-code check --secret=<secret>
     bringyourctl send network-welcome --user_auth=<user_auth>
@@ -146,6 +147,13 @@ Options:
                    client limit and the concurrent connection limit (the defaults
                    are 100 and the tier's concurrent_clients).
     --clear        Return the network to the default limits.
+    --enable       Enable Embed for the network, once its sales contract is
+                   signed: its data-cap and ACL-group APIs open.
+    --client-limit=<limit>  With --enable, also set the network's client
+                   allowance: the top-level client limit and the concurrent
+                   connection limit.
+    --disable      Disable Embed for the network and return it to the default
+                   limits. Caps and ACL groups already set stay enforced.
 
     --private-stdin  Read the bounded private expiry request from stdin.
     --apply          Apply the scoped expiry request; omission is a read-only preview.
@@ -246,6 +254,8 @@ func main() {
 			networkRemove(opts)
 		} else if clientLimit, _ := opts.Bool("client-limit"); clientLimit {
 			networkClientLimit(opts)
+		} else if embed, _ := opts.Bool("embed"); embed {
+			networkEmbed(opts)
 		}
 	} else if network, _ := opts.Bool("balance-code"); network {
 		if create, _ := opts.Bool("create"); create {
@@ -1099,6 +1109,54 @@ func networkClientLimit(opts docopt.Opts) {
 	} else {
 		fmt.Printf("network %s top-level client limit %d (default; concurrent connections follow the tier)\n", networkId, limit.Limit)
 	}
+}
+
+// networkEmbed enables, disables or shows Embed for a network
+// (model/network_embed_model.go). The team enables Embed once a network's sales
+// contract is signed: its data-cap and ACL-group APIs open and, with
+// --client-limit, its client allowance is set. Disabling closes the APIs and
+// returns the network to the default limits; caps and ACL groups already set
+// stay enforced. It then prints the network's Embed state.
+func networkEmbed(opts docopt.Opts) {
+	ctx := context.Background()
+
+	networkIdStr, _ := opts.String("--network_id")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+
+	if enable, _ := opts.Bool("--enable"); enable {
+		var clientLimit *int
+		if limitStr, _ := opts.String("--client-limit"); limitStr != "" {
+			limit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid --client-limit: %s\n", err)
+				os.Exit(1)
+			}
+			clientLimit = &limit
+		}
+		if err := model.EnableNetworkEmbed(ctx, networkId, clientLimit); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	} else if disable, _ := opts.Bool("--disable"); disable {
+		if err := model.DisableNetworkEmbed(ctx, networkId); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+
+	fmt.Println(networkEmbedStatusLine(networkId, model.GetNetworkEmbed(ctx, networkId)))
+}
+
+// networkEmbedStatusLine is the line `network embed` prints.
+func networkEmbedStatusLine(networkId server.Id, embed *model.NetworkEmbed) string {
+	state := "not enabled"
+	if embed.Enabled {
+		state = "enabled"
+	}
+	return fmt.Sprintf("network %s embed %s, client limit %d, %d active clients", networkId, state, embed.ClientLimit, embed.ActiveClientCount)
 }
 
 func balanceCodeCreate(opts docopt.Opts) {
