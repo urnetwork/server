@@ -4,11 +4,12 @@ Status: implemented on `feat/embed-business`; migrations 797–800 **not applied
 (owner rule: merge to main, pull and push before any migration, including DB test
 suites). Companion work: the ur.io Embed guide and Services page (mmm), the embed
 examples and `EMBED_CONTRACT.md` (examples repo), and the OpenAPI entries in
-`connect/api/bringyour.yml`.
+`connect/api/bringyour.yml`. The per-network Embed flag (§5, migration 801) is
+on `feat/embed-flag`, likewise not applied.
 
 A customer embeds the SDK in its own app. Its backend holds the network's root
 token (or an API key), authenticates its own users, and provisions **one
-top-level client per running installation** with `POST /network/auth-client`. Four
+top-level client per running installation** with `POST /network/auth-client`. Five
 server features support that:
 
 1. **The Embed plan client allowance**: a per-network override of both client
@@ -20,6 +21,9 @@ server features support that:
    posts it to Slack.
 4. **ACL groups**: a per-client group, `default` or `isolated`; an isolated
    client is kept out of the network's peer list.
+5. **Per-network Embed enablement**: the team enables Embed network by network
+   once the plan's contract is signed, and the data-cap and ACL-group APIs
+   refuse every other network.
 
 ## 1. The Embed plan client allowance
 
@@ -65,7 +69,8 @@ bytes: a settled contract's used bytes, counted for the client that paid for it.
 ### API
 
 All three routes answer 200 with `{"error":{"message"}}` for a refusal or an
-invalid argument (auth-client house style).
+invalid argument (auth-client house style). They refuse a network that is not
+Embed-enabled first (§5).
 
 | Route | Session | Purpose |
 | --- | --- | --- |
@@ -217,6 +222,8 @@ acl_group, update_time)`; no row means `default`.
 
 ### API
 
+Both routes refuse a network that is not Embed-enabled first (§5).
+
 - `POST /network/client-acl-group` — the root credential only (a client token is
   refused), for a top-level client of the caller's network. Body
   `{"client_id","acl_group":"default"|"isolated"}` → `{"client_id","acl_group"}`.
@@ -260,6 +267,59 @@ An isolated client:
 - The heartbeat's re-add path re-lists only a client still in the default group,
   so a heartbeat racing an isolation cannot list the client again.
 
+## 5. Per-network Embed enablement
+
+Embed plans are sold with vetting and a contract. The team then enables Embed
+network by network, and the flag gates the Embed APIs
+(`model/network_embed_model.go`).
+
+- Storage: `network_embed (network_id PK, enable_time)`. A row means the network
+  is Embed-enabled; `enable_time` is the first enable.
+- Gating: `POST` and `GET /network/client-data-cap` (the client-token read
+  included), `GET /network/client-data-caps`, and `POST` and
+  `GET /network/client-acl-group` (the client-token read included) refuse every
+  other network with HTTP 200 and
+  `{"error":{"message":"Embed isn't enabled for this network."}}`
+  (`NetworkEmbedNotEnabledMessage`). The check comes first in each route, before
+  its session checks, its argument checks and any other query. A session
+  without a network is left to the route's own session check.
+- Enforcement is not gated. Caps and ACL groups already stored stay enforced
+  after a disable: escrow admission (`clientDataCapEscrowError`), the usage
+  rollup and peer isolation read their own tables, never the flag. A disable
+  only closes the APIs, so the customer can no longer read or change them.
+- `GET /network/embed` takes a network credential only, the root JWT or an API
+  key. A client token is refused with 200 and `error.message`. The route itself
+  is not gated: a network without Embed reads `enabled: false`.
+
+  ```json
+  {"enabled": true, "client_limit": 5000, "active_client_count": 1234}
+  ```
+
+  `client_limit` is the effective top-level client allowance: the
+  `network_top_level_client_limit` override, or the default 100.
+  `active_client_count` is exactly what the create cap counts (active top-level
+  clients that are not provider installs). It comes from the same query,
+  `countNetworkActiveTopLevelClients`, scanned up to the largest allowance + 1, so
+  it is exact for any allowance. Both values are read from the db, not the
+  caches.
+- Cache: every gated call reads the flag through a per-process cache (30 s ttl,
+  bounded at 8,192 networks), like the allowance. Enable and disable refresh both
+  caches in the process that runs them; other processes see a change within the
+  ttl.
+- Ops: `bringyourctl network embed --network_id=<id> [--enable [--client-limit=<n>] | --disable]`.
+  - `--enable` writes the row. It is idempotent and keeps the first enable time.
+    With `--client-limit` it also sets the allowance
+    (`network_top_level_client_limit`, 1 ≤ n ≤ 10,000,000) in the same
+    transaction.
+  - `--disable` deletes the row and the allowance override, which returns the
+    network to the default limits.
+  - Every form then prints the state, e.g. `network <id> embed enabled, client
+    limit 5000, 12 active clients`. Unknown networks are refused.
+  - `bringyourctl network client-limit` stays, for changing the allowance alone.
+- Rollout: 801 must be applied before a binary that reads it serves. A network
+  already using the data-cap or ACL-group APIs needs `--enable` when that binary
+  ships, or its calls are refused.
+
 ## Migrations (appended after 796)
 
 | # | Change |
@@ -268,9 +328,11 @@ An isolated client:
 | 798 | `network_client_data_cap` (+ partial indexes for the capped snapshot and the list), `network_client_data_usage`, `network_client_data_usage_drain`, `network_client_data_usage_rollup` |
 | 799 | `services_lead` |
 | 800 | `network_client_acl_group` |
+| 801 | `network_embed` |
 
-All four are new tables: nothing is rewritten. Each must exist before a binary
-that reads it serves (the peer profile and the peer valve query 800).
+All five are new tables: nothing is rewritten. Each must exist before a binary
+that reads it serves (the peer profile and the peer valve query 800; the gated
+routes query 801).
 
 ## Observability
 
@@ -305,13 +367,21 @@ Every changed file has tests; the coverage table is in the branch's final report
     provider intent limits.
   - `model/network_client_acl_group_unit_test.go`: group parsing, the category
     precedence, the refusals before any query, the valve cache `Remove`.
+  - `model/network_embed_unit_test.go`: the flag cache, its bound and its use by
+    `NetworkEmbedEnabled`; every gated route refusing first for the root JWT, an
+    API key and a client token (valid and invalid arguments alike); a session
+    without a network left to the route's session check; `GET /network/embed`
+    refusing a client token; the allowance bounds.
   - `api/handlers/embed_handlers_test.go`: 401 without a token on each
-    authenticated route, the malformed contact body (400), the 429 mapping, the
-    wire field names.
+    authenticated route (`GET /network/embed` included), the malformed contact
+    body (400), the 429 mapping, the wire field names, the refusal text.
   - `bringyourctl/network_client_limit_test.go`: the usage forms and the help text.
+  - `bringyourctl/network_embed_test.go`: the usage forms (`--enable` and
+    `--disable` exclusive, `--client-limit` only with `--enable`), the help text,
+    the printed state.
   - `taskworker/network_client_data_usage_registration_test.go`: the rollup
     registered in both workload profiles.
-  - `api/spec_conformance_test.go`, with registry entries for the six routes.
+  - `api/spec_conformance_test.go`, with registry entries for the seven routes.
 - DB-backed (after merge, under the owner rule):
   - `TestSetClientDataCapMergeSemantics` (root JWT and API key),
     `TestGetClientDataCapAuth`, `TestListClientDataCapsPaging`,
@@ -328,9 +398,15 @@ Every changed file has tests; the coverage table is in the branch's final report
   - `TestServicesContactSalesGlobalRateLimit`, `TestServicesContactSalesPostsTheLeadToSlack`.
   - `TestNetworkClientLimitCommand` (bringyourctl), `TestRollupClientDataUsageScheduleArmsOneOwner`
     (taskworker).
+  - `TestNetworkEmbedGatesTheEmbedApis`, `TestGetNetworkEmbedStatus` (auth,
+    enabled/disabled, the count at the create cap's threshold, the allowance),
+    `TestNetworkEmbedEnableDisable`, `TestNetworkEmbedCache`,
+    `TestNetworkEmbedDisableKeepsEnforcement`, and `TestNetworkEmbedCommand`
+    (bringyourctl). The data-cap and ACL-group tests enable Embed through
+    `newDataCapTestNetwork`.
 - Integration, `server/connect` (after merge, under the owner rule):
-  `TestExchangeAclGroupIsolatesAPeer`, `TestExchangeDataCapPausesStopsAndResumesTraffic`,
-  `TestConnectEmbedPlanAllowanceLiftsTheConcurrentLimit`.
+  `TestExchangeAclGroupIsolatesAPeer`, `TestExchangeDataCapPausesStopsAndResumesTraffic`
+  (both enable Embed first), `TestConnectEmbedPlanAllowanceLiftsTheConcurrentLimit`.
   - The existing settlement participant matrices exercise the `contractOrigin`
     extraction: `TestContractPayoutParticipantMatrix`,
     `TestCompanionContractPayoutParticipantsJoinByStreamId`,
