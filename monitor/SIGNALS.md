@@ -6088,9 +6088,64 @@ may become final, but a missing selected report cannot be supplied from the
 other party. Retained proof does not by itself authorize a batch to skip these
 report rules. Synthetic public-producer regressions compare ordinary expiry
 with existing intents after the 60-minute fallback, including exact usage,
-rollback and replay; native qualification of this broader patch is pending.
+rollback and replay. All 35 focused partial-expiry, source-batch and retained-proof
+controls passed on the final candidate in local native qualification.
 These source findings do not attribute the six selected customer intents to
 this cause before their separately qualified exact report-state read.
+
+The 2026-10-09 recovery merge `d2caf053` adds a raw-page progress discriminator:
+a page can finish every selected visit and still retain its old task cursor.
+In the causal control, 128 independent proof failures exceeded the ordinary
+128-node error-inspection budget when their causes were joined across the page.
+The model could no longer attest completed visits. Fixing that boundary alone
+still pinned the page because task retry-argument validation inspected the same
+wide failure with one global budget. A separate control reproduced the failure
+with 128 independently completed accounting rejections. This is a lost scan
+checkpoint, not evidence that those rows were unvisited or financially settled.
+
+Keep the ordinary 128-node/32-edge inspection limits. The explicit completed-row
+receipt permits at most 512 original members, matching the two 256-row raw
+streams, and revalidates each member independently at the model and task
+boundaries. Nested/multiple batches, incomplete or malformed members, worker
+interruption and cancellation cannot grant cursor authority. Keep each lane's
+captured epoch and position through the budget wrapper and task arguments;
+advance only after its complete raw page joins. Completed rejected, skipped or
+delegated visits can advance even without a verified close. An interrupted page
+retains its previous checkpoint. End of pass starts a new pass so unresolved
+rows return; a moving cursor alone still does not establish shrinking debt.
+
+Progress remains a failed task when a completed row failed: preserve its task
+identity, original diagnostics, failure metrics and normal retry-count increment.
+An operational failure retains ordinary backoff; a fully classified accounting
+failure retains its existing bounded retry policy and separate verified,
+rejected and quarantined counts. No success post or financial action is granted
+by persisting a cursor. Underfunding must retain the rejected contract's reports,
+reservation, balance and liability. Ordinary expiry may first commit its valid
+original-report proof; later passes must retain that exact proof rather than
+treating this legitimate transition as an accounting mutation or rewriting it.
+
+The qualified native controls failed on the old model, on the fixed model with
+old task inspection, and on the 128-rejection accounting case. The corrected
+composition then passed 13 tests across five packages, including
+`TestCloseExpiredManyOperationalVisitsKeepFailureAndReachNextRawPage` and
+`TestCloseExpiredManyAccountingRejectionsKeepCursorCountsAndCustody`. They
+persist the failing page, reach a healthy tail on the next invocation, revisit
+the unresolved head next pass and preserve protected active rows. The accounting
+control separately preserves one verified sibling and all 128 rejected
+liabilities. These are local source/fixture qualifications, not evidence of
+live target visitation or backlog clearance.
+
+Keep the two discovery routes distinct: due contracts without an intent enter
+the ordinary expiry sweep; existing intents remain with their source/payer
+dispatcher and financial owner. `bringyourctl contracts queue-expiry` publishes
+one sweep plus 16 legacy dispatchers under the same 17 existing RunOnce keys in
+one owned transaction. It creates absent owners or coalesces an earlier wake,
+preserving saved cursors, task identity and active claim state; a wake during
+successful EOF completion survives for the successor. Its counts acknowledge
+only committed queue requests. The kickoff itself closes no contract, adds no
+future-deadline scheduling guarantee and does not override a later failed
+execution's normal backoff. Require subsequent bounded page/epoch handoffs and
+the exact accounting/projection witnesses above before claiming recovery.
 
 Measure close throughput over the complete invocation through debit/provider
 outputs, replay and worker join, including the configured collection delay.
@@ -6102,6 +6157,18 @@ unqualified even when every sampled heavyweight-lock count is zero. Retain
 LWLock/IO separately, and report unprobed blocking edges as unknown. Use the
 same observer and resource limits in compared arms; never subtract its
 overlapping query wall time to manufacture a speedup.
+
+The local 2026-10-09 2048-public-close run plus its anchor satisfied accounting
+and actual held-owner exclusion: all 2049 contracts and provider markers
+completed, with no remaining intents, journals or unsettled reservations, no
+actual transaction reruns and no wire errors. The overall test nevertheless
+failed observer coverage: 164 gaps exceeded the 50 ms limit, with a conservative
+97.0422 ms blind interval. Zero sampled SQL lock waits therefore leaves the
+zero-SQL-wait gate inconclusive. All gaps overlapped PostgreSQL CPU-throttle
+sample intervals in its one-CPU fixture; this is correlation, not exclusive
+causal attribution. Keep the accounting result and observer failure separate;
+neither missing samples nor delayed observer callbacks prove a shared-writer
+violation, and this run does not establish production capacity.
 
 The 2026-10-07 retained case demonstrates the scope boundary. The original fixed
 32-contract cohort was all closed/SETTLED with zero unsettled escrow at
