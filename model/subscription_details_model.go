@@ -7,11 +7,12 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// ActiveSubscriptionRenewal is one subscription_renewal row that is billing the
-// network right now (start_time <= now < end_time), with the store handles a
-// caller needs to ask that store about it: the Play purchase token, the Stripe
-// invoice id / App Store original transaction id / Solana payment reference in
-// transaction_id.
+// ActiveSubscriptionRenewal is one subscription_renewal row, with the store
+// handles a caller needs to ask that store about it: the Play purchase token,
+// the Stripe invoice id / App Store original transaction id / Solana payment
+// reference in transaction_id. GetActiveSubscriptionRenewals returns the rows
+// billing the network right now (start_time <= now < end_time);
+// GetLastSubscriptionRenewal returns a store's last row whatever its window.
 type ActiveSubscriptionRenewal struct {
 	Market        SubscriptionMarket
 	StartTime     time.Time
@@ -71,4 +72,60 @@ func GetActiveSubscriptionRenewals(
 		})
 	})
 	return renewals
+}
+
+// The network's renewal row for subscriptionType in market that ends last,
+// whether or not its window still covers now, or nil when the market never
+// billed the network.
+//
+// A store can go on charging after the last window it was paid for: a Stripe
+// renewal whose payment fails stays past_due and is retried for days or weeks
+// after that window and its grace have ended. No row covers now then, so
+// GetActiveSubscriptionRenewals has nothing for that store, and this row's
+// handles (the Stripe invoice id in transaction_id) are what is left to ask
+// the store about the subscription. The row is a handle, not evidence: only
+// the store's answer says the subscription still bills.
+func GetLastSubscriptionRenewal(
+	ctx context.Context,
+	networkId server.Id,
+	subscriptionType SubscriptionType,
+	market SubscriptionMarket,
+) *ActiveSubscriptionRenewal {
+	var renewal *ActiveSubscriptionRenewal
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				market,
+				start_time,
+				end_time,
+				COALESCE(purchase_token, ''),
+				COALESCE(transaction_id, '')
+			FROM subscription_renewal
+			WHERE
+				network_id = $1
+				AND subscription_type = $2
+				AND market = $3
+			ORDER BY end_time DESC, start_time DESC
+			LIMIT 1
+			`,
+			networkId,
+			subscriptionType,
+			market,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				renewal = &ActiveSubscriptionRenewal{}
+				server.Raise(result.Scan(
+					&renewal.Market,
+					&renewal.StartTime,
+					&renewal.EndTime,
+					&renewal.PurchaseToken,
+					&renewal.TransactionId,
+				))
+			}
+		})
+	})
+	return renewal
 }
