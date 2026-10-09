@@ -419,7 +419,9 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 			visitHead := headRemaining > 0 && forwardUntilHead == 0
 			var next *LegacySettlementCursor
 			lookupLimit := 1
-			if cohortEnabled && !visitHead && len(selected) == 0 {
+			// Financial fallback does not disable bounded metadata prefetch.
+			// Individual financial owners still consume each selected row.
+			if !visitHead && len(selected) == 0 {
 				lookupLimit = min(legacyFinancialCohortLimit, remaining)
 				if headRemaining > 0 {
 					lookupLimit = min(lookupLimit, forwardUntilHead)
