@@ -1494,6 +1494,49 @@ complete time-aligned discriminator. The stable control is a current state
 summary back inside its band plus a fresh, complete attribution snapshot; an
 old cached battery or later alert silence is not that control.
 
+
+The 2026-10-09 19:29Z protected current-session capture supplied a fresh
+attribution control: three native-primary frames contained 465, 348 and 391
+idle client transactions. Top groups included transaction starts and both
+companion-origin read prefixes. The oldest continuous-idle representative was
+about 9.6–10.0 seconds old and changed identity; only one selected idle backend
+retained the same backend generation, transaction/query starts, state change,
+and SQL prefix through all three frames. That companion read's reported
+command-start-to-idle interval was 0.191 ms, followed by 0.918–3.145 seconds
+idle. This is evidence about that last command and idle gap, not its group's
+query duration, execution rate, or CPU share. Generic transaction starts do
+not identify the owning application callback. The companion wait loop sleeps
+outside its transaction; its retry interval does not explain an idle holder.
+
+The sole captured blocking edge joined two endpoint-write-fence statements
+with the same source-owned Connect process tag; the blocker was idle for
+3.47 seconds after acquiring its fence. Its owning helper next sends the
+cooperating-marker statement, with no Redis call between those statements.
+This narrows the missing observation to the application/driver/pool handoff;
+it does not establish its delay cause, exact caller, payer, runtime source
+parity, or a whole-system root. Separately, active wait groups changed among
+ClientRead, BufferContent, ProcArray, WALInsert and BufferMapping. Do not
+assign those active waits to SQL retained only as another backend's idle last
+statement. Capture a bounded active SQL representative in the same frame, or
+use qualified application phase evidence, before making that attribution.
+
+Source completeness and false-negative qualifier: this read covered the
+current database, retained six idle groups plus the oldest idle and bounded
+lock edges, and omitted 31–52 smaller idle groups per frame. The active wait
+group list was complete in these frames; active SQL ownership was not. Two
+retained statement prefixes reached the catalog's 1,023-byte text limit; their
+suffixes and parameter values remain unknown. State, last SQL and wait fields
+can change on different publication boundaries even within a catalog read;
+one selected idle row also reported a lightweight-lock wait. Keep that
+inconsistency as a sampling limit, not proof that a statement kept executing
+while idle. Missing/departed, prepared, and other-database blocker identities
+remain unresolved. False-positive qualifier: rotating young idle groups and
+a sampled fence edge do not prove a transaction leak, a Redis stall, or a
+persistent lock root, and grant no cancellation authority. Retain the count
+warning and require current backend generation plus phase/transport evidence
+for action. This discriminator did not change the standing probe's cache,
+thresholds, cadence, or redaction contract.
+
 ### 1.3a PostgreSQL client-slot capacity and rejected logins
 Probe: `pg-capacity`
 
