@@ -92,6 +92,12 @@ func recoverRedisReservationInTx(ctx context.Context, tx server.PgTx, balanceId 
 	if !locked {
 		return false, errRedisReservationRequestActive
 	}
+	return recoverRedisReservationWithFenceInTx(ctx, tx, balanceId, candidate)
+}
+
+// Caller already holds this contract's v2 advisory fence in the supplied
+// transaction, and retains it through Redis release or marker acknowledgement.
+func recoverRedisReservationWithFenceInTx(ctx context.Context, tx server.PgTx, balanceId server.Id, candidate redisReservationRecoveryCandidate) (bool, error) {
 	var contract, escrow, matching, terminal, debitPending bool
 	server.Raise(tx.QueryRow(ctx, `SELECT
 		EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1),
@@ -312,7 +318,7 @@ func recoverRedisReservationRequest(ctx context.Context, balanceId, contractId s
 			return nil
 		})
 		if returnErr == nil && amount != 0 {
-			_, returnErr = recoverRedisReservationInTx(attempt, tx, balanceId, redisReservationRecoveryCandidate{contractId: contractId, amount: amount})
+			_, returnErr = recoverRedisReservationWithFenceInTx(attempt, tx, balanceId, redisReservationRecoveryCandidate{contractId: contractId, amount: amount})
 		}
 	}, server.TxReadCommitted, server.OptNoRetry())
 	return
