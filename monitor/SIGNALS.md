@@ -2997,6 +2997,24 @@ healthy-small, oversize and malformed-field controls. The earlier production
 receipt established `journal_schema` only, so its exact failed field remains
 unknown.
 
+A bounded native deployment discriminator must keep independent observation
+components separate. Record fixed failure stage, exception kind and numeric
+errno without exception text or paths. A missing optional rollout-lock file is
+an observed absence, not proof that no lease or wait exists. A thread that
+exits during `/proc` enumeration makes the child census partial; independently
+bracketed executable and lease facts can survive, but an empty partial child
+list cannot prove no drain. Worker identity or executable changes invalidate
+that worker's earlier facts. Join an exact stop-child target to the stable
+container census before calling it an old-container retirement. A source hash
+and the single stagger-setting enum are both required before applying a
+particular worker's lease-release policy; version overlap alone proves neither
+retirement failure nor duplicate workers. Any private error-message capture
+keeps its separate row, minute, byte and current-worker limits. Match the
+selected service in zero-error conntrack summaries: a Proxy `errors=0` line
+must not enter the error slice because an inherited predicate names Connect.
+Nonzero or malformed error counts remain visible. The old capped capture did
+not retain text, so this source defect does not identify its actual records. Generic unclassified text must not be silently substituted with an empty healthy result.
+
 False-positive qualifier: this decoder failure is lost observation authority,
 not a service panic, process death or proof of a particular database failure.
 Require the selected current container's immutable image/version and native
