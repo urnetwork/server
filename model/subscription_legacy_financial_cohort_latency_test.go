@@ -51,6 +51,8 @@ type legacyCohortLatencyProxy struct {
 	activeWritesClosed         atomic.Int64
 	activeClosed               atomic.Int64
 	commandCompleteObservation atomic.Pointer[legacyCohortCommandCompleteObservation]
+	diagnosticCapture          atomic.Pointer[legacyCohortProxyDiagnosticCapture]
+	diagnosticOrdinal          atomic.Uint64
 	maxTxNs                    atomic.Int64
 	stateLock                  sync.Mutex
 	connectionKVs              map[net.Conn]bool
@@ -162,6 +164,24 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 			}
 		}
 	}()
+	connectionOrdinal := self.diagnosticOrdinal.Add(1)
+	var backendPid uint32
+	var diagnostic *legacyCohortProxyDiagnosticCapture
+	var connectionDiagnostic *legacyCohortConnectionDiagnosticCapture
+	var diagnosticFrames legacyCohortDiagnosticFrames
+	var pendingDiagnostic legacyCohortReadyDiagnostic
+	observingReady := false
+	defer func() {
+		if observingReady {
+			if pendingDiagnostic.StopCause == "" {
+				pendingDiagnostic.StopCause = "forwarding_stopped"
+			}
+			connectionDiagnostic.finishReady(pendingDiagnostic)
+		}
+		if connectionDiagnostic != nil {
+			connectionDiagnostic.close()
+		}
+	}()
 	sawSet := false
 	for {
 		var header [5]byte
@@ -177,7 +197,41 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 			return
 		}
 
-		if self.enabled.Load() {
+		capture := diagnostic
+		if capture == nil {
+			capture = self.diagnosticCapture.Load()
+		}
+		var readyReceived time.Time
+		if capture != nil && header[0] == 'Z' {
+			readyReceived = time.Now()
+		}
+		// Only the process id crosses into diagnostic state. The other
+		// BackendKeyData bytes remain solely in this forwarded frame.
+		if header[0] == 'K' && len(body) == 8 {
+			backendPid = binary.BigEndian.Uint32(body[:4])
+			if connectionDiagnostic != nil {
+				connectionDiagnostic.setBackendPid(backendPid)
+			}
+		}
+		if diagnostic == nil && capture != nil {
+			diagnostic = capture
+			connectionDiagnostic = diagnostic.connection(connectionOrdinal, backendPid)
+		}
+		enabled := self.enabled.Load()
+		if diagnostic != nil {
+			diagnosticFrames.observe(header[0], body, enabled)
+			if header[0] == 'Z' {
+				if enabled {
+					value := diagnosticFrames.ready(readyReceived, body)
+					if diagnostic.beginReady(connectionDiagnostic) {
+						pendingDiagnostic, observingReady = value, true
+					}
+				} else {
+					diagnosticFrames.resetCycle()
+				}
+			}
+		}
+		if enabled {
 			self.backendBytes.Add(int64(len(header) + len(body)))
 			if header[0] == 'E' {
 				self.errorLock.Lock()
@@ -230,7 +284,13 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 					select {
 					case <-frontendDone:
 						self.heldClosed.Add(1)
+						if observingReady {
+							pendingDiagnostic.StopCause = "held_frontend_closed"
+						}
 					case <-self.ctx.Done():
+						if observingReady {
+							pendingDiagnostic.StopCause = "held_context_done"
+						}
 					}
 					return
 				}
@@ -244,26 +304,57 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 					delay = time.Duration(jitterBucket+1) * time.Millisecond
 					self.jitterCharged[jitterBucket].Add(1)
 				}
+				if observingReady {
+					pendingDiagnostic.RequestedDelayNs = int64(delay)
+				}
 				if delay > 0 {
 					self.delayed.Add(1)
+					if observingReady {
+						pendingDiagnostic.TimerStart = time.Now()
+					}
 					select {
 					case <-time.After(delay):
+						if observingReady {
+							pendingDiagnostic.TimerDone = time.Now()
+						}
 						if jitterBucket >= 0 {
 							self.jitterApplied[jitterBucket].Add(1)
 						}
 					case <-frontendDone:
+						if observingReady {
+							pendingDiagnostic.TimerDone = time.Now()
+							pendingDiagnostic.StopCause = "timer_frontend_closed"
+						}
 						return
 					case <-self.ctx.Done():
+						if observingReady {
+							pendingDiagnostic.TimerDone = time.Now()
+							pendingDiagnostic.StopCause = "timer_context_done"
+						}
 						return
 					}
 				}
 			}
 		}
 		if _, err := client.Write(header[:]); err != nil {
+			if observingReady {
+				pendingDiagnostic.ForwardDone = time.Now()
+				pendingDiagnostic.StopCause = "header_write_error"
+			}
 			return
 		}
 		if _, err := client.Write(body); err != nil {
+			if observingReady {
+				pendingDiagnostic.ForwardDone = time.Now()
+				pendingDiagnostic.StopCause = "body_write_error"
+			}
 			return
+		}
+		if observingReady {
+			pendingDiagnostic.ForwardDone = time.Now()
+			pendingDiagnostic.Forwarded = true
+			connectionDiagnostic.finishReady(pendingDiagnostic)
+			observingReady = false
 		}
 	}
 }

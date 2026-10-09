@@ -20,6 +20,7 @@ type legacyFinancialCohortBudget struct {
 	now         func() time.Time
 	admitBefore time.Time
 	written     bool
+	diagnostic *legacyFinancialDiagnostic
 }
 
 // The optional clock belongs to one fixture context. Production uses monotonic
@@ -41,13 +42,16 @@ func withLegacyFinancialCohortBudget(ctx context.Context) context.Context {
 // Cancellation and in-flight errors still retain their ordinary custody.
 func checkLegacyFinancialCohortBudget(ctx context.Context, stage ...string) error {
 	if err := ctx.Err(); err != nil {
+		observeLegacyFinancialBudgetBoundary(ctx, stage, "context_error")
 		return err
 	}
 	if budget, _ := ctx.Value(legacyFinancialCohortBudgetKey{}).(*legacyFinancialCohortBudget); budget != nil && !budget.written && !budget.now().Before(budget.admitBefore) {
+		observeLegacyFinancialBudgetBoundary(ctx, stage, "soft_refusal")
 		if len(stage) > 0 {
 			return fmt.Errorf("%w before %s", errLegacyFinancialCohortBudget, stage[0])
 		}
 		return errLegacyFinancialCohortBudget
 	}
+	observeLegacyFinancialBudgetBoundary(ctx, stage, "ready")
 	return nil
 }

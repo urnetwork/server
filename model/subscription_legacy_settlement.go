@@ -333,7 +333,14 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 			}()
 			dbTiming, finishDatabaseTrace := legacyTargetTraceDatabase(ctx)
 			defer finishDatabaseTrace()
+            diagnosticKind := "unscoped_singleton"
+            if scope, ok := ctx.Value(legacySettlementCloseScopeKey{}).(ContractCloseOwner); ok {
+                if scope.Kind == ContractCloseOwnerPayerNetwork { diagnosticKind = "payer_singleton" } else { diagnosticKind = "source_singleton" }
+            }
+            diagnostic := newLegacyFinancialDiagnostic(ctx, diagnosticKind)
+            defer diagnostic.finish()
 			server.Tx(ctx, func(tx server.PgTx) {
+                diagnostic.bind(tx)
 				// Register before projections so token cleanup joins the first
 				// post group after PG release, even when another post is held.
 				if admission != nil && admission.owner != nil {

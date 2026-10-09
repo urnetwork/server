@@ -67,6 +67,9 @@ func flushLegacySettlementCohort(ctx context.Context, contractIds []server.Id) (
 	bounded, cancel := context.WithTimeout(ctx, legacyFinancialCohortTimeout)
 	defer cancel()
 	bounded = withLegacyFinancialCohortBudget(bounded)
+	diagnostic := newLegacyFinancialDiagnostic(bounded, "cohort")
+	defer diagnostic.finish()
+	bounded.Value(legacyFinancialCohortBudgetKey{}).(*legacyFinancialCohortBudget).diagnostic = diagnostic
 	databaseTiming, observeDatabase := observeLegacyFinancialCohort(ctx)
 	finishFinancial := enterLegacySettlementTiming(ctx, legacySettlementFinancial)
 	var posts []func() any
@@ -80,6 +83,7 @@ func flushLegacySettlementCohort(ctx context.Context, contractIds []server.Id) (
 	bodyReturned := false
 	server.HandleError(func() {
 		server.Tx(bounded, func(tx server.PgTx) {
+			diagnostic.bind(tx)
 			server.Raise(checkLegacyFinancialCohortBudget(bounded, "setup"))
 			server.RaisePgResult(tx.Exec(bounded, `SET LOCAL statement_timeout='500ms'; SET LOCAL lock_timeout='250ms'`))
 			var err error
@@ -88,6 +92,7 @@ func flushLegacySettlementCohort(ctx context.Context, contractIds []server.Id) (
 			bodyReturned = true
 		}, server.TxReadCommitted, server.OptNoRetry(), databaseTiming)
 	}, func(err error) { returnErr = err })
+	diagnostic.finish()
 	observeDatabase()
 	finishFinancial()
 	if returnErr != nil {
