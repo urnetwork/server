@@ -9729,4 +9729,111 @@ var migrations = []any{
 	`),
 	// 796: retain run-once requests that commit after an execution was claimed.
 	newSqlMigration(taskRunOnceGenerationSchemaSql),
+	// 797: the Embed plan's per-network top-level client limit
+	// (model/network_client_limit_model.go, EMBED1.md). An absent row is the
+	// default LimitTopLevelClientIdsPerNetwork; ops sets a row for a network on
+	// an Embed plan with `bringyourctl network client-limit`. Only the
+	// AuthNetworkClient create cap reads it; the peer valve keeps the constant.
+	// A new table: nothing is rewritten. It must exist before a binary that
+	// reads it serves.
+	newSqlMigration(`
+		CREATE TABLE network_top_level_client_limit (
+			network_id uuid NOT NULL PRIMARY KEY,
+			top_level_client_limit integer NOT NULL,
+			update_time timestamp NOT NULL
+		)
+	`),
+	// 798: per-client data caps and usage (model/network_client_data_cap_model.go,
+	// EMBED1.md). network_client_data_cap holds a top-level client's optional
+	// monthly and running-total limits, its running total, and the capped
+	// markers the escrow admission snapshot reads through the partial indexes.
+	// network_client_data_usage is the monthly usage of every top-level client,
+	// rolled up from redis by the RollupClientDataUsage task;
+	// network_client_data_usage_drain makes each drained (block, shard) apply
+	// exactly once and network_client_data_usage_rollup bounds the drain scan.
+	// New tables: nothing is rewritten. They must exist before a binary that
+	// reads them serves.
+	newSqlMigration(`
+		CREATE TABLE network_client_data_cap (
+			client_id uuid NOT NULL PRIMARY KEY,
+			network_id uuid NOT NULL,
+			monthly_byte_limit bigint NULL,
+			total_byte_limit bigint NULL,
+			total_period_start timestamp NOT NULL,
+			total_used_byte_count bigint NOT NULL DEFAULT 0,
+			monthly_capped_period_start timestamp NULL,
+			total_capped boolean NOT NULL DEFAULT false,
+			create_time timestamp NOT NULL,
+			update_time timestamp NOT NULL
+		);
+		CREATE INDEX network_client_data_cap_network_id_client_id
+		ON network_client_data_cap (network_id, client_id)
+		WHERE monthly_byte_limit IS NOT NULL OR total_byte_limit IS NOT NULL;
+		CREATE INDEX network_client_data_cap_total_capped
+		ON network_client_data_cap (client_id) WHERE total_capped;
+		CREATE INDEX network_client_data_cap_monthly_capped
+		ON network_client_data_cap (monthly_capped_period_start)
+		WHERE monthly_capped_period_start IS NOT NULL;
+		CREATE INDEX network_client_data_cap_monthly_paused
+		ON network_client_data_cap (client_id) WHERE monthly_byte_limit = 0;
+
+		CREATE TABLE network_client_data_usage (
+			client_id uuid NOT NULL,
+			period_start timestamp NOT NULL,
+			network_id uuid NOT NULL,
+			used_byte_count bigint NOT NULL,
+			update_time timestamp NOT NULL,
+			PRIMARY KEY (client_id, period_start)
+		);
+		CREATE INDEX network_client_data_usage_period_start
+		ON network_client_data_usage (period_start);
+
+		CREATE TABLE network_client_data_usage_drain (
+			block_number bigint NOT NULL,
+			shard integer NOT NULL,
+			drain_time timestamp NOT NULL,
+			PRIMARY KEY (block_number, shard)
+		);
+		CREATE INDEX network_client_data_usage_drain_drain_time
+		ON network_client_data_usage_drain (drain_time);
+
+		CREATE TABLE network_client_data_usage_rollup (
+			singleton_id smallint NOT NULL PRIMARY KEY,
+			max_drained_block bigint NOT NULL,
+			update_time timestamp NOT NULL
+		);
+	`),
+	// 799: services contact-sales leads (model/services_lead_model.go). A new
+	// table: nothing is rewritten. It must exist before a binary that writes it
+	// serves.
+	newSqlMigration(`
+		CREATE TABLE services_lead (
+			lead_id uuid NOT NULL PRIMARY KEY,
+			create_time timestamp NOT NULL,
+			name varchar(256) NOT NULL,
+			email varchar(256) NOT NULL,
+			company varchar(256) NOT NULL,
+			monthly_active_users bigint NOT NULL,
+			monthly_data_budget_byte_count bigint NOT NULL,
+			message text NOT NULL,
+			notify_time timestamp NULL
+		);
+		CREATE INDEX services_lead_create_time ON services_lead (create_time);
+	`),
+	// 800: per-client ACL groups (model/network_client_acl_group_model.go). A
+	// row exists only for a non-default group: no row means "default". An
+	// "isolated" client never appears in the network's peer list, receives none
+	// and does not count toward the peer valve. A new table: nothing is
+	// rewritten. It must exist before a binary that reads it serves, since the
+	// peer profile and the peer valve query it.
+	newSqlMigration(`
+		CREATE TABLE network_client_acl_group (
+			client_id uuid NOT NULL PRIMARY KEY,
+			network_id uuid NOT NULL,
+			acl_group varchar(32) NOT NULL,
+			update_time timestamp NOT NULL
+		);
+		CREATE INDEX network_client_acl_group_network_id
+		ON network_client_acl_group (network_id, client_id);
+	`),
 }

@@ -1077,6 +1077,12 @@ func (self *Exchange) nominateLocalResident(
 						*resident.peerNetworkId,
 						clientId,
 					)
+				} else if resident.peerCategory == model.NetworkPeerCategoryIsolated {
+					model.RemoveNetworkIsolatedPeer(
+						cleanupCtx,
+						*resident.peerNetworkId,
+						clientId,
+					)
 				} else {
 					model.RemoveNetworkPeer(
 						cleanupCtx,
@@ -1168,13 +1174,22 @@ func (self *Exchange) refreshResidentRegistration(resident *Resident) bool {
 				model.AddNetworkProviderPeer(peerCtx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
 				return
 			}
+			if resident.peerCategory == model.NetworkPeerCategoryIsolated {
+				// an isolated client (ACL group "isolated") is counted but
+				// never a peer; the add doubles as the heartbeat
+				model.AddNetworkIsolatedPeer(peerCtx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
+				return
+			}
 			if !model.RefreshNetworkPeer(peerCtx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
 				// the registration was lost (e.g. expired while the
 				// client was disconnected, or pruned at an expiry
 				// race); re-add with a fresh profile
 				// peersEnabled is not re-checked: peerNetworkId set means
 				// the network was enabled when the resident was created
-				if _, topLevel, _, peerProfile, _ := model.GetNetworkPeerProfile(peerCtx, clientId); topLevel && peerProfile != nil {
+				// only a client still in the default ACL group is re-listed:
+				// one that was isolated since is dropped here, and its
+				// retired resident record closes this resident on its poll
+				if _, topLevel, category, peerProfile, _ := model.GetNetworkPeerProfile(peerCtx, clientId); topLevel && peerProfile != nil && category == model.NetworkPeerCategoryClient {
 					model.AddNetworkPeer(peerCtx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
 				}
 			}
@@ -4130,8 +4145,9 @@ func (self *Resident) Run() {
 
 	// only top-level client-category peers get network peer updates.
 	// The listener polls the per-network version counter and sends the
-	// complete list on any change (PEERS2.md). Proxy clients are counted but
-	// get no listener — a hosted device does not consume the peer list.
+	// complete list on any change (PEERS2.md). Proxy and isolated clients
+	// are counted but get no listener — a hosted device does not consume the
+	// peer list, and an isolated client (ACL group "isolated") receives none.
 	if self.exchange.settings.EnableNetworkPeers && self.peerNetworkId != nil && self.peerCategory == model.NetworkPeerCategoryClient {
 		networkPeerListener := model.NewNetworkPeerListener(
 			self.ctx,

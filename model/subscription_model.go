@@ -1579,6 +1579,16 @@ func createTransferEscrowInTx(
 		); err != nil {
 			return nil, nil, err
 		}
+		// a paying client at a data cap refuses the same way, on both paths
+		// (network_client_data_cap_model.go). The capped set is checked in
+		// memory, so payers in networks without a capped client add no query.
+		payerClientId := sourceId
+		if sourceNetworkId != payerNetworkId {
+			payerClientId = destinationId
+		}
+		if err := clientDataCapEscrowError(ctx, tx, payerNetworkId, payerClientId, contractTransferByteCount, server.NowUtc()); err != nil {
+			return nil, nil, err
+		}
 	}
 	if admission := redisAdmissionFromContext(ctx); admission != nil && contractTransferByteCount > 0 {
 		return createRedisTransferEscrowInTx(ctx, tx, admission, sourceNetworkId, sourceId,
@@ -3358,6 +3368,19 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	closed, returnErr = claimContractOutcomeWithUsageInTx(ctx, tx, contractId, outcome, usage)
 	if returnErr != nil || !closed {
 		return
+	}
+	// The outcome claim runs once per contract, so the paying client's billable
+	// bytes are metered once (network_client_data_cap_model.go): a redis
+	// increment after the commit, for the client billing pays from. A crash
+	// before the post under-counts; nothing re-meters a contract.
+	if hasEscrow && 0 < usedTransferByteCount {
+		if payerClientId, _, _, err := contractOrigin(contractId, settlementOwner.participants, nil); err == nil {
+			meteredByteCount := usedTransferByteCount
+			posts = append(posts, func() any {
+				RecordClientDataUsage(ctx, payerClientId, meteredByteCount, server.NowUtc())
+				return nil
+			})
+		}
 	}
 	if asyncDebit {
 		// Journal insertion and outcome claim share a commit. No provider payout

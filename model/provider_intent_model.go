@@ -659,10 +659,11 @@ func Testing_SetProviderIntentState(
 	}
 }
 
-// The normal client limit of a network's plan, whether or not it is enforced.
-// Zero or less is unlimited.
+// The normal client limit of a network's plan, whether or not it is enforced:
+// its Embed plan allowance when it has one, otherwise its tier's. Zero or less
+// is unlimited.
 func networkNormalClientLimit(ctx context.Context, networkId server.Id) int {
-	return Pro().MaxConcurrentClients(IsProNetwork(ctx, networkId))
+	return networkConcurrentClientLimit(ctx, networkId)
 }
 
 // The outcome of an intent connection's start.

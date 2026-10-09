@@ -33,8 +33,9 @@ import (
 	"github.com/urnetwork/proxy"
 )
 
-func main() {
-	usage := `BringYour control.
+// bringyourctlUsage is the docopt usage text, at package level so tests can
+// parse a command line without running main.
+const bringyourctlUsage = `BringYour control.
 
 Usage:
     bringyourctl sn-transition-status
@@ -67,6 +68,7 @@ Usage:
     bringyourctl locations add-default [-a]
     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
     bringyourctl network remove --network_id=<network_id> --user_id=<user_id>
+    bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
     bringyourctl balance-code create --duration=<duration> --balance=<balance> --cost=<usd> --email=<email> [--count=<count>]
     bringyourctl balance-code check --secret=<secret>
     bringyourctl send network-welcome --user_auth=<user_auth>
@@ -140,6 +142,10 @@ Options:
     --network_id=<network_id>
     --user_id=<user_id>
     --secret=<secret>
+    --set=<limit>  Set the network's Embed plan client allowance: the top-level
+                   client limit and the concurrent connection limit (the defaults
+                   are 100 and the tier's concurrent_clients).
+    --clear        Return the network to the default limits.
 
     --private-stdin  Read the bounded private expiry request from stdin.
     --apply          Apply the scoped expiry request; omission is a read-only preview.
@@ -152,6 +158,9 @@ Options:
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
     --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, or solana.
     -c --count=<count>	Number to process [default: 1000].`
+
+func main() {
+	usage := bringyourctlUsage
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
@@ -235,6 +244,8 @@ Options:
 			networkFind(opts)
 		} else if remove, _ := opts.Bool("remove"); remove {
 			networkRemove(opts)
+		} else if clientLimit, _ := opts.Bool("client-limit"); clientLimit {
+			networkClientLimit(opts)
 		}
 	} else if network, _ := opts.Bool("balance-code"); network {
 		if create, _ := opts.Bool("create"); create {
@@ -1053,6 +1064,41 @@ func networkRemove(opts docopt.Opts) {
 		os.Exit(1)
 	}
 	fmt.Printf("network %s removed\n", networkId)
+}
+
+// networkClientLimit shows, sets or clears the Embed plan client allowance of a
+// network (model/network_client_limit_model.go): an Embed plan sets the
+// network's client allowance — the top-level client limit and the concurrent
+// connection limit. It then prints the effective allowance.
+func networkClientLimit(opts docopt.Opts) {
+	ctx := context.Background()
+
+	networkIdStr, _ := opts.String("--network_id")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+
+	if setStr, _ := opts.String("--set"); setStr != "" {
+		limit, err := strconv.Atoi(setStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid --set: %s\n", err)
+			os.Exit(1)
+		}
+		if err := model.SetNetworkTopLevelClientLimit(ctx, networkId, limit); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	} else if clear, _ := opts.Bool("--clear"); clear {
+		model.ClearNetworkTopLevelClientLimit(ctx, networkId)
+	}
+
+	limit := model.GetNetworkTopLevelClientLimit(ctx, networkId)
+	if limit.Override {
+		fmt.Printf("network %s client allowance %d (Embed plan: top-level client limit and concurrent connection limit)\n", networkId, limit.Limit)
+	} else {
+		fmt.Printf("network %s top-level client limit %d (default; concurrent connections follow the tier)\n", networkId, limit.Limit)
+	}
 }
 
 func balanceCodeCreate(opts docopt.Opts) {

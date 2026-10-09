@@ -105,6 +105,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
 		work.ScheduleRollupClientReliabilityStats(clientSession, tx)
+		work.ScheduleRollupClientDataUsage(clientSession, tx)
 		work.ScheduleUpdateClientReliabilityScores(clientSession, tx)
 		work.ScheduleRemoveOldProvideKeyChanges(clientSession, tx)
 		work.ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
@@ -400,6 +401,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RollupClientReliabilityStats,
 			work.RollupClientReliabilityStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RollupClientDataUsage,
+			work.RollupClientDataUsagePost,
 		),
 		task.NewTaskTargetWithPost(
 			work.UpdateClientReliabilityScores,

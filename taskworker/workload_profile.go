@@ -165,6 +165,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.RollupTransferAuditEvents), schedule: work.ScheduleRollupTransferAuditEvents},
 		{target: task.NewTaskTarget(work.RemoveOldClientReliabilityStats), schedule: work.ScheduleRemoveOldClientReliabilityStats},
 		{target: task.NewTaskTarget(work.RollupClientReliabilityStats), schedule: work.ScheduleRollupClientReliabilityStats},
+		{target: task.NewTaskTarget(work.RollupClientDataUsage), schedule: work.ScheduleRollupClientDataUsage},
 		{target: task.NewTaskTarget(work.UpdateClientReliabilityScores), schedule: work.ScheduleUpdateClientReliabilityScores},
 		{target: task.NewTaskTarget(work.RemoveOldProvideKeyChanges), schedule: work.ScheduleRemoveOldProvideKeyChanges},
 		{target: task.NewTaskTarget(work.UpdateNetworkReliabilityWindow), schedule: work.ScheduleUpdateNetworkReliabilityWindow},
