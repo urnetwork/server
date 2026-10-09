@@ -26,7 +26,7 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
-	byjwt "github.com/urnetwork/server/session"
+	bysession "github.com/urnetwork/server/session"
 )
 
 // Only explicitly generated roots reach the child's environment. No inherited
