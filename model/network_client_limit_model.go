@@ -36,11 +36,11 @@ type NetworkTopLevelClientLimit struct {
 	Override bool
 }
 
-// networkTopLevelClientLimitInTx reads the limit inside the provisioning
-// transaction that enforces it.
-func networkTopLevelClientLimitInTx(ctx context.Context, tx server.PgTx, networkId server.Id) int {
-	limit := LimitTopLevelClientIdsPerNetwork
-	result, err := tx.Query(
+// readNetworkTopLevelClientLimit returns the network's top-level client limit
+// and whether it is an Embed plan override rather than the default.
+func readNetworkTopLevelClientLimit(ctx context.Context, query server.PgCanQuery, networkId server.Id) (limit int, override bool) {
+	limit = LimitTopLevelClientIdsPerNetwork
+	result, err := query.Query(
 		ctx,
 		`
 			SELECT top_level_client_limit
@@ -52,71 +52,123 @@ func networkTopLevelClientLimitInTx(ctx context.Context, tx server.PgTx, network
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
 			server.Raise(result.Scan(&limit))
+			override = true
 		}
 	})
+	return
+}
+
+// networkTopLevelClientLimitInTx reads the limit inside the provisioning
+// transaction that enforces it.
+func networkTopLevelClientLimitInTx(ctx context.Context, tx server.PgTx, networkId server.Id) int {
+	limit, _ := readNetworkTopLevelClientLimit(ctx, tx, networkId)
 	return limit
+}
+
+// countNetworkActiveTopLevelClients counts what the AuthNetworkClient create cap
+// counts: the network's active top-level clients (no source_client_id) that are
+// not provider installs. The scan stops at scanLimit rows: the create cap passes
+// its limit + 1, since only the threshold matters there, and GET /network/embed
+// passes the largest allowance + 1, so its count is exact for any allowance.
+func countNetworkActiveTopLevelClients(ctx context.Context, query server.PgCanQuery, networkId server.Id, scanLimit int) int {
+	count := 0
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT COUNT(*) AS top_level_client_count
+			FROM (
+				SELECT 1
+				FROM network_client
+				WHERE
+					network_id = $1 AND
+					active = true AND
+					source_client_id IS NULL AND
+					NOT EXISTS (
+						SELECT 1 FROM network_client_provider_intent
+						WHERE network_client_provider_intent.client_id = network_client.client_id
+					)
+				LIMIT $2
+			) t
+		`,
+		networkId,
+		scanLimit,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&count))
+		}
+	})
+	return count
 }
 
 func GetNetworkTopLevelClientLimit(ctx context.Context, networkId server.Id) *NetworkTopLevelClientLimit {
 	limit := &NetworkTopLevelClientLimit{
 		NetworkId: networkId,
-		Limit:     LimitTopLevelClientIdsPerNetwork,
 	}
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT top_level_client_limit
-				FROM network_top_level_client_limit
-				WHERE network_id = $1
-			`,
-			networkId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&limit.Limit))
-				limit.Override = true
-			}
-		})
+		limit.Limit, limit.Override = readNetworkTopLevelClientLimit(ctx, conn, networkId)
 	})
 	return limit
 }
 
+func networkTopLevelClientLimitMessage(limit int) string {
+	if limit < 1 || MaxNetworkTopLevelClientLimit < limit {
+		return fmt.Sprintf("The limit must be between 1 and %d.", MaxNetworkTopLevelClientLimit)
+	}
+	return ""
+}
+
+// networkExistsInTx reports whether the network exists.
+func networkExistsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (exists bool) {
+	result, err := tx.Query(ctx, `SELECT true FROM network WHERE network_id = $1`, networkId)
+	server.WithPgResult(result, err, func() {
+		exists = result.Next()
+	})
+	return
+}
+
+func upsertNetworkTopLevelClientLimitInTx(ctx context.Context, tx server.PgTx, networkId server.Id, limit int, now time.Time) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO network_top_level_client_limit (
+				network_id,
+				top_level_client_limit,
+				update_time
+			)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (network_id) DO UPDATE
+			SET
+				top_level_client_limit = $2,
+				update_time = $3
+		`,
+		networkId,
+		limit,
+		now,
+	))
+}
+
+func deleteNetworkTopLevelClientLimitInTx(ctx context.Context, tx server.PgTx, networkId server.Id) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`DELETE FROM network_top_level_client_limit WHERE network_id = $1`,
+		networkId,
+	))
+}
+
 // SetNetworkTopLevelClientLimit sets the Embed plan limit for a network.
 func SetNetworkTopLevelClientLimit(ctx context.Context, networkId server.Id, limit int) error {
-	if limit < 1 || MaxNetworkTopLevelClientLimit < limit {
-		return fmt.Errorf("The limit must be between 1 and %d.", MaxNetworkTopLevelClientLimit)
+	if message := networkTopLevelClientLimitMessage(limit); message != "" {
+		return errors.New(message)
 	}
 	var returnErr error
 	server.Tx(ctx, func(tx server.PgTx) {
 		returnErr = nil
-		exists := false
-		result, err := tx.Query(ctx, `SELECT true FROM network WHERE network_id = $1`, networkId)
-		server.WithPgResult(result, err, func() {
-			exists = result.Next()
-		})
-		if !exists {
+		if !networkExistsInTx(ctx, tx, networkId) {
 			returnErr = ErrNetworkNotFound
 			return
 		}
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO network_top_level_client_limit (
-					network_id,
-					top_level_client_limit,
-					update_time
-				)
-				VALUES ($1, $2, $3)
-				ON CONFLICT (network_id) DO UPDATE
-				SET
-					top_level_client_limit = $2,
-					update_time = $3
-			`,
-			networkId,
-			limit,
-			server.NowUtc(),
-		))
+		upsertNetworkTopLevelClientLimitInTx(ctx, tx, networkId, limit, server.NowUtc())
 	})
 	if returnErr == nil {
 		// this process enforces the change at once; others within the cache ttl
@@ -128,11 +180,7 @@ func SetNetworkTopLevelClientLimit(ctx context.Context, networkId server.Id, lim
 // ClearNetworkTopLevelClientLimit returns the network to the default limit.
 func ClearNetworkTopLevelClientLimit(ctx context.Context, networkId server.Id) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`DELETE FROM network_top_level_client_limit WHERE network_id = $1`,
-			networkId,
-		))
+		deleteNetworkTopLevelClientLimitInTx(ctx, tx, networkId)
 	})
 	networkClientLimitLocal.Remove(networkId)
 }

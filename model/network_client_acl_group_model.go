@@ -102,7 +102,11 @@ func GetNetworkClientAclGroupForClient(ctx context.Context, clientId server.Id) 
 // SetNetworkClientAclGroup sets a top-level client's ACL group
 // (POST /network/client-acl-group). Only a network session — the root JWT or an
 // API key — may set it, for a client of its own network.
+// Refused unless the caller's network is Embed-enabled (network_embed_model.go).
 func SetNetworkClientAclGroup(setAclGroup *SetNetworkClientAclGroupArgs, clientSession *session.ClientSession) (*NetworkClientAclGroupResult, error) {
+	if networkEmbedRefused(clientSession) {
+		return networkClientAclGroupErrorResult(NetworkEmbedNotEnabledMessage), nil
+	}
 	if !clientDataCapNetworkSession(clientSession) {
 		return networkClientAclGroupErrorResult(networkClientAclGroupSessionMessage), nil
 	}
@@ -184,7 +188,11 @@ func SetNetworkClientAclGroup(setAclGroup *SetNetworkClientAclGroupArgs, clientS
 // (GET /network/client-acl-group). A network session reads any top-level
 // client of its network; a client token reads its own (a child client's token
 // reads its top-level client's).
+// Refused unless the caller's network is Embed-enabled (network_embed_model.go).
 func GetNetworkClientAclGroup(getAclGroup *GetNetworkClientAclGroupArgs, clientSession *session.ClientSession) (*NetworkClientAclGroupResult, error) {
+	if networkEmbedRefused(clientSession) {
+		return networkClientAclGroupErrorResult(NetworkEmbedNotEnabledMessage), nil
+	}
 	if clientSession == nil || clientSession.ByJwt == nil || clientSession.ByJwt.NetworkId == (server.Id{}) {
 		return networkClientAclGroupErrorResult(networkClientAclGroupSessionMessage), nil
 	}

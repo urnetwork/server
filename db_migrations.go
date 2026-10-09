@@ -9836,4 +9836,15 @@ var migrations = []any{
 		CREATE INDEX network_client_acl_group_network_id
 		ON network_client_acl_group (network_id, client_id);
 	`),
+	// 801: per-network Embed enablement (model/network_embed_model.go). A row
+	// marks the network as Embed-enabled: ops writes it once a sales contract is
+	// signed, and the data-cap and ACL-group APIs refuse every other network. A
+	// new table: nothing is rewritten. It must exist before a binary that reads
+	// it serves, since those routes check it first.
+	newSqlMigration(`
+		CREATE TABLE network_embed (
+			network_id uuid NOT NULL PRIMARY KEY,
+			enable_time timestamp NOT NULL
+		);
+	`),
 }

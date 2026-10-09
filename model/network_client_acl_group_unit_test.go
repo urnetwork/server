@@ -48,6 +48,8 @@ func TestNetworkPeerCategory(t *testing.T) {
 func TestSetNetworkClientAclGroupRefusalsBeforeAnyQuery(t *testing.T) {
 	ctx := context.Background()
 	networkId := server.NewId()
+	// an Embed-enabled network, so these refusals reach the route's own checks
+	primeNetworkEmbedCache(t, networkId, true)
 	userId := server.NewId()
 	clientId := server.NewId()
 
@@ -87,6 +89,8 @@ func TestSetNetworkClientAclGroupRefusalsBeforeAnyQuery(t *testing.T) {
 func TestGetNetworkClientAclGroupRefusalsBeforeAnyQuery(t *testing.T) {
 	ctx := context.Background()
 	networkId := server.NewId()
+	// an Embed-enabled network, so these refusals reach the route's own checks
+	primeNetworkEmbedCache(t, networkId, true)
 	rootSession := &session.ClientSession{Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: server.NewId()}}
 
 	for _, refusedSession := range []*session.ClientSession{nil, {}, {ByJwt: &jwt.ByJwt{}}} {

@@ -19,7 +19,8 @@ import (
 
 // Full-stack integration tests for the Embed server features (EMBED1.md):
 // ACL groups, per-client data caps and the Embed plan client allowance, each
-// through a real exchange and connect handler. They need the test DB env
+// through a real exchange and connect handler. The data-cap and ACL-group APIs
+// refuse a network that is not Embed-enabled, so those tests enable it first. They need the test DB env
 // (WARP_ENV=local + postgres/redis/vault); under the owner rule they run only
 // after the branch, with its migrations, is merged to main. Skipped under -short.
 
@@ -54,6 +55,7 @@ func TestExchangeAclGroupIsolatesAPeer(t *testing.T) {
 
 		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
+		model.Testing_EnableNetworkEmbed(ctx, env.networkId)
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{Description: "installation a"})
 		clientIdB, byClientJwtB := env.authClient(&model.AuthNetworkClientArgs{Description: "installation b"})
@@ -161,6 +163,7 @@ func TestExchangeDataCapPausesStopsAndResumesTraffic(t *testing.T) {
 
 		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
+		model.Testing_EnableNetworkEmbed(ctx, env.networkId)
 
 		// a public provider in its own network
 		providerNetworkId := server.NewId()
