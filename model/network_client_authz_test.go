@@ -249,10 +249,15 @@ func TestDeviceSetNameClientTokenRenamesOnlyItsOwnDevice(t *testing.T) {
 
 // Embed is what makes a network refuse its client tokens on the app admin
 // routes: the flag, with or without a client allowance, or the allowance on
-// its own.
+// its own. A disable keeps the refusal: the client tokens the network handed
+// out while Embed was on are still valid, so the network stays refused through
+// a disable and a second enable. The allowance on its own refuses only while
+// it is set.
 func TestNetworkRefusesClientAdminFollowsEmbed(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		defer Testing_ClearNetworkClientLimitCache()
+		defer Testing_ClearNetworkEmbedCache()
 
 		networkId, _ := authClientTestNetwork(ctx, "test")
 		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), false)
@@ -260,17 +265,22 @@ func TestNetworkRefusesClientAdminFollowsEmbed(t *testing.T) {
 		connect.AssertEqual(t, EnableNetworkEmbed(ctx, networkId, nil), nil)
 		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), true)
 		connect.AssertEqual(t, DisableNetworkEmbed(ctx, networkId), nil)
-		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), false)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), true)
 
 		clientLimit := 1000
 		connect.AssertEqual(t, EnableNetworkEmbed(ctx, networkId, &clientLimit), nil)
 		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), true)
 		connect.AssertEqual(t, DisableNetworkEmbed(ctx, networkId), nil)
-		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), false)
-
-		connect.AssertEqual(t, SetNetworkTopLevelClientLimit(ctx, networkId, 1000), nil)
 		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), true)
-		ClearNetworkTopLevelClientLimit(ctx, networkId)
-		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), false)
+		// and from a reload, as another process reads it
+		Testing_ClearNetworkClientLimitCache()
+		Testing_ClearNetworkEmbedCache()
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), true)
+
+		allowanceNetworkId, _ := authClientTestNetwork(ctx, "testallowance")
+		connect.AssertEqual(t, SetNetworkTopLevelClientLimit(ctx, allowanceNetworkId, 1000), nil)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, allowanceNetworkId), true)
+		ClearNetworkTopLevelClientLimit(ctx, allowanceNetworkId)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, allowanceNetworkId), false)
 	})
 }

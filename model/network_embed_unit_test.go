@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -16,15 +17,38 @@ import (
 // so a gate that queried would fail here.
 
 // primeNetworkEmbedCache sets this process's cached flag for a network, so a
-// pure test exercises the Embed gate without a database.
+// pure test exercises the Embed gate without a database. An enabled network
+// was ever enabled too.
 func primeNetworkEmbedCache(t testing.TB, networkId server.Id, enabled bool) {
 	t.Helper()
+	primeNetworkEmbedCacheState(t, networkId, enabled, enabled)
+}
+
+// primeNetworkEmbedCacheState sets both cached meanings for a network: enabled
+// now, and ever enabled.
+func primeNetworkEmbedCacheState(t testing.TB, networkId server.Id, enabled bool, everEnabled bool) {
+	t.Helper()
 	networkEmbedLocal.Put(networkId, networkEmbedLocalEntry{
-		enabled: enabled,
-		expiry:  server.NowUtc().Add(time.Hour),
+		enabled:     enabled,
+		everEnabled: everEnabled,
+		expiry:      server.NowUtc().Add(time.Hour),
 	})
 	t.Cleanup(func() {
 		networkEmbedLocal.Remove(networkId)
+	})
+}
+
+// primeNetworkClientLimitCache sets this process's cached client allowance for
+// a network, so a pure test reads it without a database.
+func primeNetworkClientLimitCache(t testing.TB, networkId server.Id, limit int, override bool) {
+	t.Helper()
+	networkClientLimitLocal.Put(networkId, networkClientLimitLocalEntry{
+		limit:    limit,
+		override: override,
+		expiry:   server.NowUtc().Add(time.Hour),
+	})
+	t.Cleanup(func() {
+		networkClientLimitLocal.Remove(networkId)
 	})
 }
 
@@ -36,10 +60,18 @@ func TestNetworkEmbedLocalCache(t *testing.T) {
 	_, ok := cache.Get(networkId, now)
 	connect.AssertEqual(t, ok, false)
 
-	cache.Put(networkId, networkEmbedLocalEntry{enabled: true, expiry: now.Add(time.Minute)})
+	cache.Put(networkId, networkEmbedLocalEntry{enabled: true, everEnabled: true, expiry: now.Add(time.Minute)})
 	entry, ok := cache.Get(networkId, now)
 	connect.AssertEqual(t, ok, true)
 	connect.AssertEqual(t, entry.enabled, true)
+	connect.AssertEqual(t, entry.everEnabled, true)
+
+	// a disabled network that was enabled keeps both meanings apart
+	cache.Put(networkId, networkEmbedLocalEntry{enabled: false, everEnabled: true, expiry: now.Add(time.Minute)})
+	entry, ok = cache.Get(networkId, now)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, entry.enabled, false)
+	connect.AssertEqual(t, entry.everEnabled, true)
 
 	// an expired entry is a miss, and is dropped
 	_, ok = cache.Get(networkId, now.Add(time.Minute))
@@ -76,6 +108,97 @@ func TestNetworkEmbedEnabledUsesTheCache(t *testing.T) {
 	primeNetworkEmbedCache(t, disabledNetworkId, false)
 	connect.AssertEqual(t, NetworkEmbedEnabled(context.Background(), enabledNetworkId), true)
 	connect.AssertEqual(t, NetworkEmbedEnabled(context.Background(), disabledNetworkId), false)
+}
+
+// Both cached meanings through a network's Embed life, enabled, disabled and
+// enabled again, beside a network that never was: the Embed APIs follow
+// "enabled now" and the client token gate follows "ever enabled", so a disable
+// closes the APIs without re-opening the admin routes to the network's client
+// tokens. Each answer comes from the cache, without a database.
+func TestNetworkEmbedStateMeaningsThroughEnableDisableReenable(t *testing.T) {
+	ctx := context.Background()
+	userId := server.NewId()
+	clientId := server.NewId()
+	type stage struct {
+		name             string
+		enabled          bool
+		everEnabled      bool
+		wantRefusesAdmin bool
+		wantApisRefused  bool
+	}
+	for _, s := range []stage{
+		{name: "never enabled", enabled: false, everEnabled: false, wantRefusesAdmin: false, wantApisRefused: true},
+		{name: "enabled", enabled: true, everEnabled: true, wantRefusesAdmin: true, wantApisRefused: false},
+		{name: "disabled (was enabled)", enabled: false, everEnabled: true, wantRefusesAdmin: true, wantApisRefused: true},
+		{name: "enabled again", enabled: true, everEnabled: true, wantRefusesAdmin: true, wantApisRefused: false},
+	} {
+		t.Run(s.name, func(t *testing.T) {
+			networkId := server.NewId()
+			primeNetworkEmbedCacheState(t, networkId, s.enabled, s.everEnabled)
+			// the default allowance, so only the Embed state decides
+			primeNetworkClientLimitCache(t, networkId, LimitTopLevelClientIdsPerNetwork, false)
+
+			connect.AssertEqual(t, NetworkEmbedEnabled(ctx, networkId), s.enabled)
+			connect.AssertEqual(t, NetworkEmbedEverEnabled(ctx, networkId), s.everEnabled)
+			connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), s.wantRefusesAdmin)
+
+			for _, clientSession := range []*session.ClientSession{
+				{Ctx: ctx, ByJwt: jwt.NewByJwt(networkId, userId, "embed", false, false)},
+				{Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: userId, ClientId: &clientId}},
+			} {
+				connect.AssertEqual(t, networkEmbedRefused(clientSession), s.wantApisRefused)
+				if s.wantApisRefused {
+					result, err := SetClientDataCap(&SetClientDataCapArgs{ClientId: clientId}, clientSession)
+					connect.AssertEqual(t, err, nil)
+					connect.AssertEqual(t, result.Error.Message, NetworkEmbedNotEnabledMessage)
+					aclResult, err := GetNetworkClientAclGroup(&GetNetworkClientAclGroupArgs{ClientId: clientId.String()}, clientSession)
+					connect.AssertEqual(t, err, nil)
+					connect.AssertEqual(t, aclResult.Error.Message, NetworkEmbedNotEnabledMessage)
+				}
+			}
+		})
+	}
+}
+
+// The client token gate's Embed test is "ever enabled" or the Embed plan's
+// client allowance: the allowance alone refuses, and a network with neither
+// does not. An ever-enabled network is refused without reading the allowance.
+func TestNetworkRefusesClientAdminUsesEverEnabledOrTheAllowance(t *testing.T) {
+	ctx := context.Background()
+
+	allowanceNetworkId := server.NewId()
+	primeNetworkEmbedCacheState(t, allowanceNetworkId, false, false)
+	primeNetworkClientLimitCache(t, allowanceNetworkId, 5000, true)
+	connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, allowanceNetworkId), true)
+
+	ordinaryNetworkId := server.NewId()
+	primeNetworkEmbedCacheState(t, ordinaryNetworkId, false, false)
+	primeNetworkClientLimitCache(t, ordinaryNetworkId, LimitTopLevelClientIdsPerNetwork, false)
+	connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, ordinaryNetworkId), false)
+
+	// no allowance cached: reading it would need a database, so the answer
+	// comes from the Embed state alone
+	wasEnabledNetworkId := server.NewId()
+	primeNetworkEmbedCacheState(t, wasEnabledNetworkId, false, true)
+	connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, wasEnabledNetworkId), true)
+	_, cached := networkClientLimitLocal.Get(wasEnabledNetworkId, server.NowUtc())
+	connect.AssertEqual(t, cached, false)
+}
+
+// GET /network/embed serves "enabled now" and keeps the was-enabled state to
+// the ctl: the response has exactly its three documented fields.
+func TestNetworkEmbedJsonOmitsEverEnabled(t *testing.T) {
+	for _, embed := range []*NetworkEmbed{
+		{Enabled: false, EverEnabled: true, ClientLimit: 100, ActiveClientCount: 3},
+		{Enabled: false, EverEnabled: false, ClientLimit: 100, ActiveClientCount: 3},
+	} {
+		body, err := json.Marshal(&NetworkEmbedResult{NetworkEmbed: embed})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, string(body), `{"enabled":false,"client_limit":100,"active_client_count":3}`)
+	}
+	body, err := json.Marshal(&NetworkEmbedResult{NetworkEmbed: &NetworkEmbed{Enabled: true, EverEnabled: true, ClientLimit: 5000, ActiveClientCount: 12}})
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, string(body), `{"enabled":true,"client_limit":5000,"active_client_count":12}`)
 }
 
 // Every gated route refuses a network that is not Embed-enabled first: before

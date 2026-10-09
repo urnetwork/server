@@ -4,7 +4,9 @@ package api
 // client token, minted with POST /network/auth-client by the network's root
 // token or an API key exactly as an embed customer's backend mints one, is
 // refused on every admin route and changes nothing, while the network
-// credential administers the network as before (AUTHZ1.md).
+// credential administers the network as before (AUTHZ1.md). An Embed network's
+// client token is refused on its own client's payout routes too, and stays
+// refused after Embed is disabled.
 
 import (
 	"bytes"
@@ -72,6 +74,16 @@ func (self *routeAccessDbFixture) enableEmbed(t testing.TB) {
 	}
 	if !model.NetworkRefusesClientAdmin(self.ctx, self.networkId) {
 		t.Fatal("the Embed network serves its client tokens on the app admin routes")
+	}
+}
+
+// disableEmbed disables Embed for the network, as `bringyourctl network embed
+// --disable` does. The client tokens it handed out stay valid, and the network
+// stays known as one that was Embed-enabled.
+func (self *routeAccessDbFixture) disableEmbed(t testing.TB) {
+	t.Helper()
+	if err := model.DisableNetworkEmbed(self.ctx, self.networkId); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -155,6 +167,7 @@ var routeAccessNetworkTables = []string{
 	"oauth_authorization_code",
 	"oauth_consent",
 	"st_wallet",
+	"st_fleet_binding_signature",
 	"test_balance_drain",
 	"stripe_customer",
 }
@@ -167,13 +180,19 @@ var routeAccessUserTables = []string{
 	"network_user_auth_wallet",
 }
 
-// snapshot fingerprints every row of the network and its admin user in the
-// tables an admin route writes.
+// The tables an own client payout route writes, by the network's clients.
+var routeAccessClientTables = []string{
+	"wallet_mapping_challenge",
+	"wallet_mapping_consent",
+}
+
+// snapshot fingerprints every row of the network, its admin user and its
+// clients in the tables an admin or own client payout route writes.
 func (self *routeAccessDbFixture) snapshot(t testing.TB) map[string]string {
 	t.Helper()
 	fingerprints := map[string]string{}
 	server.Db(self.ctx, func(conn server.PgConn) {
-		fingerprint := func(table string, column string, id server.Id) {
+		fingerprint := func(table string, where string, id server.Id) {
 			var exists bool
 			server.Raise(conn.QueryRow(self.ctx, `SELECT to_regclass($1) IS NOT NULL`, "public."+table).Scan(&exists))
 			if !exists {
@@ -183,19 +202,22 @@ func (self *routeAccessDbFixture) snapshot(t testing.TB) map[string]string {
 			server.Raise(conn.QueryRow(
 				self.ctx,
 				fmt.Sprintf(
-					`SELECT coalesce(md5(string_agg(t::text, '|' ORDER BY t::text)), '') FROM %s t WHERE t.%s = $1`,
+					`SELECT coalesce(md5(string_agg(t::text, '|' ORDER BY t::text)), '') FROM %s t WHERE %s`,
 					table,
-					column,
+					where,
 				),
 				id,
 			).Scan(&value))
 			fingerprints[table] = value
 		}
 		for _, table := range routeAccessNetworkTables {
-			fingerprint(table, "network_id", self.networkId)
+			fingerprint(table, "t.network_id = $1", self.networkId)
 		}
 		for _, table := range routeAccessUserTables {
-			fingerprint(table, "user_id", self.userId)
+			fingerprint(table, "t.user_id = $1", self.userId)
+		}
+		for _, table := range routeAccessClientTables {
+			fingerprint(table, "t.client_id IN (SELECT client_id FROM network_client WHERE network_id = $1)", self.networkId)
 		}
 	})
 	return fingerprints
@@ -220,9 +242,10 @@ type routeAccessDbRequest struct {
 	body any
 }
 
-// routeAccessAdminRequests is a request for every admin route, aimed at the
+// routeAccessAdminRequests is a request for every gated route, aimed at the
 // victim client and the network, that would change state if the route served
-// it. A route classified admin with no request here fails the test.
+// it. A route classified admin or own client payout with no request here fails
+// the test.
 func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.Id) map[string]routeAccessDbRequest {
 	walletId := server.NewId()
 	locationId := server.NewId()
@@ -302,6 +325,11 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"POST /account/change-name":               {path: "/account/change-name", body: map[string]any{"network_name": self.networkName, "new_name": "attacker"}},
 		"POST /account/claim-name":                {path: "/account/claim-name", body: map[string]any{"network_name": self.networkName, "new_name": "attacker"}},
 		"GET /account/balance-codes":              {path: "/account/balance-codes"},
+		// own client payout
+		"POST /sn/wallet":         {path: "/sn/wallet", body: map[string]any{"client_id": victimClientId, "coldkey_ss58": "attacker"}},
+		"POST /sn/wallet/consent": {path: "/sn/wallet/consent", body: map[string]any{"client_id": victimClientId, "coldkey_ss58": "attacker"}},
+		"GET /sn/wallet":          {path: "/sn/wallet"},
+		"POST /sn/head/binding":   {path: "/sn/head/binding", body: map[string]any{"binding": map[string]any{"client_id": victimClientId}, "client_signature": "00"}},
 	}
 }
 
@@ -357,9 +385,30 @@ func TestRealClientTokenIsRefusedOnEveryNetworkRoute(t *testing.T) {
 	})
 }
 
+// routeAccessGatedClasses are the classes whose routes refuse an Embed
+// network's client tokens.
+var routeAccessGatedClasses = []routeAccess{routeAccessNetwork, routeAccessAppAdmin, routeAccessOwnClientPayout}
+
+// requireEmbedClientTokenRefused requires the client token refused on every
+// gated route, and counts them.
+func requireEmbedClientTokenRefused(t testing.TB, self *routeAccessDbFixture, clientToken string, victimClientId server.Id) {
+	t.Helper()
+	refusedCount := requireClientTokenRefused(t, self, clientToken, victimClientId, routeAccessGatedClasses...)
+	gatedCount := 0
+	for _, access := range routeAccessByRoute {
+		if slices.Contains(routeAccessGatedClasses, access) {
+			gatedCount += 1
+		}
+	}
+	if refusedCount != gatedCount {
+		t.Fatalf("refused %d gated routes, want all %d", refusedCount, gatedCount)
+	}
+}
+
 // On a network that hands its client tokens to a third party (the Embed plan),
 // a client token minted with the backend's API key is refused on every admin
-// route, the ones the URnetwork apps call included, and changes nothing.
+// route, the ones the URnetwork apps call included, and on its own client's
+// payout routes, and changes nothing.
 func TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -370,15 +419,108 @@ func TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute(t *testing.T)
 		_, clientToken := self.mintClient(t, self.key(), nil)
 		victimClientId, _ := self.mintClient(t, self.key(), nil)
 
-		refusedCount := requireClientTokenRefused(t, self, clientToken, victimClientId, routeAccessNetwork, routeAccessAppAdmin)
-		appAdminCount := 0
-		for _, access := range routeAccessByRoute {
-			if access == routeAccessNetwork || access == routeAccessAppAdmin {
-				appAdminCount += 1
-			}
+		requireEmbedClientTokenRefused(t, self, clientToken, victimClientId)
+	})
+}
+
+// A disable does not re-open the admin routes: the client tokens the network
+// handed out while Embed was on are still valid, and stay refused on every
+// gated route, changing nothing, while the Embed APIs follow the disable.
+// Enabling again keeps them refused and re-opens the APIs to the network
+// credential.
+func TestRealClientTokenOfADisabledEmbedNetworkIsStillRefused(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer model.Testing_ClearNetworkEmbedCache()
+		defer model.Testing_ClearNetworkClientLimitCache()
+		self := newRouteAccessDbFixture(t, ctx)
+		self.enableEmbed(t)
+
+		clientId, clientToken := self.mintClient(t, self.key(), nil)
+		victimClientId, _ := self.mintClient(t, self.key(), nil)
+
+		self.disableEmbed(t)
+		requireEmbedClientTokenRefused(t, self, clientToken, victimClientId)
+		// another api process, reading the database rather than this process's
+		// cache, refuses them too
+		model.Testing_ClearNetworkEmbedCache()
+		model.Testing_ClearNetworkClientLimitCache()
+		requireEmbedClientTokenRefused(t, self, clientToken, victimClientId)
+
+		// the network credential sees Embed disabled, and the Embed APIs refuse
+		var embed model.NetworkEmbedResult
+		self.call(t, http.MethodGet, "/network/embed", self.root(), nil, http.StatusOK, &embed)
+		if embed.Error != nil || embed.NetworkEmbed == nil || embed.Enabled {
+			t.Fatalf("GET /network/embed after a disable = %+v", embed)
 		}
-		if refusedCount != appAdminCount {
-			t.Fatalf("refused %d admin routes, want all %d", refusedCount, appAdminCount)
+		var capResult model.ClientDataCapResult
+		self.call(t, http.MethodPost, "/network/client-data-cap", self.key(), map[string]any{"client_id": clientId, "monthly_byte_limit": 1024}, http.StatusOK, &capResult)
+		if capResult.Error == nil || capResult.Error.Message != model.NetworkEmbedNotEnabledMessage {
+			t.Fatalf("data cap after a disable = %+v", capResult)
+		}
+
+		// enabled again: the APIs open to the network credential, and the
+		// client token stays refused
+		self.enableEmbed(t)
+		self.call(t, http.MethodGet, "/network/embed", self.root(), nil, http.StatusOK, &embed)
+		if embed.Error != nil || embed.NetworkEmbed == nil || !embed.Enabled {
+			t.Fatalf("GET /network/embed after enabling again = %+v", embed)
+		}
+		capResult = model.ClientDataCapResult{}
+		self.call(t, http.MethodPost, "/network/client-data-cap", self.key(), map[string]any{"client_id": clientId, "monthly_byte_limit": 1024}, http.StatusOK, &capResult)
+		if capResult.Error != nil {
+			t.Fatalf("data cap after enabling again = %+v", capResult.Error)
+		}
+		requireEmbedClientTokenRefused(t, self, clientToken, victimClientId)
+	})
+}
+
+// A provider app's client token on an ordinary network keeps its own client's
+// payout routes: the gate passes it to the handler, and the model limits its
+// writes to its own client. Only the network-only routes refuse it.
+func TestRealClientTokenOfAnOrdinaryNetworkKeepsItsOwnPayoutRoutes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		self := newRouteAccessDbFixture(t, ctx)
+
+		_, clientToken := self.mintClient(t, self.root(), nil)
+		victimClientId, _ := self.mintClient(t, self.root(), nil)
+		client := "Bearer " + clientToken
+		if model.NetworkRefusesClientAdmin(ctx, self.networkId) {
+			t.Fatal("an ordinary network refuses its client tokens")
+		}
+
+		requests := routeAccessAdminRequests(self, victimClientId)
+		servedCount := 0
+		for _, route := range Routes() {
+			if routeAccessFor(route) != routeAccessOwnClientPayout {
+				continue
+			}
+			key := routeAccessKey(route)
+			request := requests[key]
+			w := self.serve(route.Method(), request.path, client, request.body)
+			if w.Code == http.StatusForbidden && strings.TrimSpace(w.Body.String()) == router.ClientCredentialRefusedMessage {
+				t.Fatalf("%s: the client token of an ordinary network was refused", key)
+			}
+			servedCount += 1
+		}
+		if servedCount != 4 {
+			t.Fatalf("served %d own client payout routes, want 4", servedCount)
+		}
+
+		// the wallet read serves it, and a mapping for another client is the
+		// model's refusal
+		self.call(t, http.MethodGet, "/sn/wallet", client, nil, http.StatusOK, nil)
+		var setWallet struct {
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		self.call(t, http.MethodPost, "/sn/wallet", client, map[string]any{"client_id": victimClientId, "coldkey_ss58": "attacker"}, http.StatusOK, &setWallet)
+		if setWallet.Error == nil || setWallet.Error.Message != "Client does not match the authenticated provider." {
+			t.Fatalf("POST /sn/wallet for another client = %+v", setWallet.Error)
 		}
 	})
 }
@@ -497,6 +639,9 @@ func TestNetworkCredentialAdministersTheNetwork(t *testing.T) {
 			// the clients list and the API keys
 			self.call(t, http.MethodGet, "/network/clients", credential, nil, http.StatusOK, nil)
 			self.call(t, http.MethodGet, "/account/api-keys", credential, nil, http.StatusOK, nil)
+
+			// the payout wallets, which the network's client tokens may not read
+			self.call(t, http.MethodGet, "/sn/wallet", credential, nil, http.StatusOK, nil)
 		}
 
 		var aclGroup string
