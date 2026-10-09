@@ -1137,8 +1137,39 @@ borrowed parent identities, changed country context and relabelled clocks.
 Empty HTTP-success bodies and a legal URL redirected to unrelated HTML remain
 unusable source evidence. The packet is frozen under
 `artifacts/arin-sg-priority-research-20261008-v1` by `research-freeze.json`
-(`a1a6ea27`). Independent semantic/composition review and five prepared native
-parser/decision controls are pending; no new resource has been built.
+(`a1a6ea27`). Independent semantic/composition review passed (`b20cdd57`),
+followed by all five pure native parser/decision controls (`3bad67ef`) on
+clean Server `116350e6`. Root merged the exact catalog into Config
+`6a0b12b5`. These source and native gates do not include feeds, an augmented
+resource, reader adoption or provider outcomes.
+
+The merged Canada/Singapore resource successor is frozen under
+`artifacts/arin-ca-sg-resource-preparation-20261008-v1`: handoff `2c4f14cc`,
+disabled build plan `bee5637e` and preparation freeze `078ff4bf`. It supersedes
+the Canada-only `cdcc4471` plan. Clean observations bind Config `6a0b12b5`,
+catalog `8adadba2` and Server `30a56d9a`; all 41 ARIN Go files match the
+qualified builder/native source. The incoming `713a53d` SN and operator-gas
+authority files remain byte-exact, and all eleven audited SN consumers match
+their reviewed source. Their financial readiness remains a separate gate.
+
+The plan requires 38 fresh strict evidence sources, preserves all thirteen
+negative groups and dispositions 37 subscriber plus eight hosting ASNs in
+the actual output. It retains the October 6 registration base with its real
+clock, then requires full/native/mapped, RPKI, policy and independent audit
+readbacks. The qualified historical CLI's actual Go 1.27.1/module graph is
+distinct from the pending security successor; no current scanner result or
+final successor graph is invented. Root must bind the chosen builder and
+exclusive resource window before execution.
+
+Separate disabled publication and measurement plans preserve the complete
+currently selected Config inventory, private hash-only profile provenance,
+GeoLite/places and current SN authority. They use the normal scanner-gated
+Config packager, exact image/version selection and explicit restart scope.
+Actual reader generations, fresh connection lookups, rollup/publication
+clocks and a coherent census must precede any current Quality-gain claim.
+URL success of at least 0.8 and the mature four-hour quota remain separate.
+No resource build, publication, Main capture or Quality gain follows from
+this preparation.
 
 The proposal dispositions the retained Singapore national APNIC queue as ten
 subscriber, eight explicitly negative and twelve unreviewed ASNs. Those
