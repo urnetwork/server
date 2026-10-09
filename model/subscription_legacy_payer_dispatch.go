@@ -14,6 +14,11 @@ import (
 )
 
 var errLegacySettlementDispatchBudget = errors.New("legacy settlement dispatch budget")
+var errLegacySettlementDiscoveryBudget = errors.New("legacy settlement payer discovery budget")
+
+const legacySettlementDispatchBudget = 5 * time.Second
+const legacySettlementRegistrationBudget = 2 * time.Second
+const legacySettlementDiscoveryBudget = legacySettlementDispatchBudget - legacySettlementRegistrationBudget
 
 // Identity is private task data. Cursor is a bounded compatibility-registration
 // traversal; PayerCursor controls fair service independently of contract density.
@@ -52,7 +57,7 @@ func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int,
 	if observation.Outcome != "ready" {
 		return result, readiness, ErrLegacySettlementPayerIndexUnavailable
 	}
-	bounded, cancel := context.WithTimeoutCause(ctx, 5*time.Second, errLegacySettlementDispatchBudget)
+	bounded, cancel := context.WithTimeoutCause(ctx, legacySettlementDispatchBudget, errLegacySettlementDispatchBudget)
 	defer cancel()
 	result, returnErr = dispatchLegacySettlementPayersPage(ctx, bounded, shard, after, payerAfter,
 		nextLegacySettlementPayer, registerLegacySettlementPayerDispatchPage)
@@ -96,27 +101,40 @@ func dispatchLegacySettlementPayersPage(ctx, bounded context.Context, shard int,
 		result.PayerCursor = &cursor
 	}
 	server.HandleError(func() {
-		if result.PayerCursor == nil {
-			result.PayerCursor = beginLegacySettlementPayerRound(bounded, shard)
-		}
-		for probe := 0; probe < legacySettlementPayerProbeLimit && result.PayerCursor != nil; probe++ {
-			payer, ready := next(bounded, shard, result.PayerCursor)
-			if payer == nil {
-				result.PayerCursor = nil
-				break
+		// Reserve registration's existing allowance inside the same turn.
+		// Otherwise slow registered payers can consume every page before any
+		// missing key is enrolled. Completed discovery still precedes cleanup.
+		discovery, discoveryCancel := context.WithTimeoutCause(bounded, legacySettlementDiscoveryBudget, errLegacySettlementDiscoveryBudget)
+		var discoveryErr error
+		server.HandleError(func() {
+			defer discoveryCancel()
+			if result.PayerCursor == nil {
+				result.PayerCursor = beginLegacySettlementPayerRound(discovery, shard)
 			}
-			result.Probes++
-			if ready != nil {
-				result.PayerNetworkIds = append(result.PayerNetworkIds, *payer)
+			for probe := 0; probe < legacySettlementPayerProbeLimit && result.PayerCursor != nil; probe++ {
+				payer, ready := next(discovery, shard, result.PayerCursor)
+				if payer == nil {
+					result.PayerCursor = nil
+					break
+				}
+				result.Probes++
+				if ready != nil {
+					result.PayerNetworkIds = append(result.PayerNetworkIds, *payer)
+				}
+				result.PayerCursor.After = payer
 			}
-			result.PayerCursor.After = payer
+		}, func(err error) { discoveryErr = err })
+		discoveryYielded := discoveryErr != nil && bounded.Err() == nil &&
+			context.Cause(discovery) == errLegacySettlementDiscoveryBudget && isSettlementPageCancellation(discoveryErr)
+		if discoveryErr != nil && !discoveryYielded {
+			server.Raise(discoveryErr)
 		}
 		// Discover registered work before optional compatibility registration:
 		// transaction cleanup can outlive its own query context. This prefix
 		// retains scheduling custody if our page deadline expires in cleanup.
 		// The chronological index also works while the NULL-payer index is
 		// being repaired. Newly registered keys enter the next bounded turn.
-		registrationCtx, registrationCancel := context.WithTimeout(bounded, 2*time.Second)
+		registrationCtx, registrationCancel := context.WithTimeout(bounded, legacySettlementRegistrationBudget)
 		server.HandleError(func() {
 			defer registrationCancel()
 			result.Cursor, result.Registered = register(registrationCtx, shard, after)
@@ -132,7 +150,7 @@ func dispatchLegacySettlementPayersPage(ctx, bounded context.Context, shard int,
 		}
 		// Multiple dispatchers acquire payer task keys in the same order.
 		slices.SortFunc(result.PayerNetworkIds, server.Id.Cmp)
-		result.More = result.PayerCursor != nil || result.Registered > 0
+		result.More = discoveryYielded || result.PayerCursor != nil || result.Registered > 0
 	}, func(err error) {
 		if ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errLegacySettlementDispatchBudget &&
 			result.Probes > 0 && isSettlementPageCancellation(err) {
