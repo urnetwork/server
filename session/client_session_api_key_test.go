@@ -9,7 +9,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -26,7 +26,7 @@ func TestClientSessionMarksOnlyApiKeyAuthentication(t *testing.T) {
 		networkName := fmt.Sprintf("apikey%s", strings.ReplaceAll(networkId.String(), "-", "")[:12])
 		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		rootSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		rootSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId:   networkId,
 			UserId:      userId,
 			NetworkName: networkName,
@@ -34,7 +34,7 @@ func TestClientSessionMarksOnlyApiKeyAuthentication(t *testing.T) {
 		created, err := model.CreateApiKey(&model.CreateApiKeyArgs{Name: "backend"}, rootSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, created.Error, nil)
-		rootToken := jwt.NewByJwt(networkId, userId, networkName, false, false).Sign()
+		rootToken := session.NewByJwt(networkId, userId, networkName, false, false).Testing_Sign()
 
 		authenticate := func(clientSession *session.ClientSession, authorization string) error {
 			request, err := http.NewRequest(http.MethodGet, "https://api.example.test/", nil)

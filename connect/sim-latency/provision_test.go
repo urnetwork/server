@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -329,7 +329,7 @@ func TestPrewarmedPipelineRestoresPerformanceAfterTransportReplacement(t *testin
 		writeMatureReliabilityScores(ctx, server.NowUtc(), 13*time.Hour, reliabilities)
 		callerSession := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(server.NewId(), server.NewId(), "sim-caller", false, false),
+			session.NewByJwt(server.NewId(), server.NewId(), "sim-caller", false, false),
 		)
 		findProviders := func() *model.FindProviders2Result {
 			if err := model.UpdateClientScores(ctx, 5*time.Second, 1); err != nil {

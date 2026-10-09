@@ -7,7 +7,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -27,14 +27,14 @@ func TestLeaderboard(t *testing.T) {
 		// clientIdA := server.NewId()
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", false, isPro),
+			session.NewByJwt(networkIdA, userIdA, "a", false, isPro),
 		)
 
 		networkIdB := server.NewId()
 		userIdB := server.NewId()
 		clientSessionB := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdB, userIdB, "b", false, isPro),
+			session.NewByJwt(networkIdB, userIdB, "b", false, isPro),
 		)
 
 		/**
@@ -51,7 +51,7 @@ func TestLeaderboard(t *testing.T) {
 		Testing_CreateDevice(ctx, networkIdC, server.NewId(), userIdC, "synthetic-leaderboard-caller", "synthetic")
 		clientSessionC := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdC, userIdC, "c", false, isPro),
+			session.NewByJwt(networkIdC, userIdC, "c", false, isPro),
 		)
 
 		/**

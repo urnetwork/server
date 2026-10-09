@@ -15,7 +15,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -188,7 +188,7 @@ func TestPlayWebhookCreditsAndAcknowledges(t *testing.T) {
 		model.Testing_CreateNetwork(ctx, networkId, "playcredit", userId)
 
 		clientId := server.NewId()
-		webhookSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		webhookSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -248,7 +248,7 @@ func TestPlayWebhookCreditErrorIsNon2xx(t *testing.T) {
 		model.Testing_CreateNetwork(ctx, networkId, "playskuerr", userId)
 
 		clientId := server.NewId()
-		webhookSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		webhookSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -294,7 +294,7 @@ func TestPlayWebhookAcknowledgeFailureIsNon2xx(t *testing.T) {
 		model.Testing_CreateNetwork(ctx, networkId, "playackerr", userId)
 
 		clientId := server.NewId()
-		webhookSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		webhookSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,

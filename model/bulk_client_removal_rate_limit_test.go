@@ -8,7 +8,7 @@ import (
 	"github.com/go-playground/assert/v2"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -135,7 +135,7 @@ func TestRemoveNetworkClientsSurfacesDailyBudgetRejection(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx:   ctx,
-			ByJwt: &jwt.ByJwt{NetworkId: server.NewId()},
+			ByJwt: &session.ByJwt{NetworkId: server.NewId()},
 		}
 
 		_, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
@@ -164,7 +164,7 @@ func TestRemoveNetworkClientsQueuesSmallRequestWhenCurrentHourIsFull(t *testing.
 
 		sess := &session.ClientSession{
 			Ctx:   ctx,
-			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+			ByJwt: &session.ByJwt{NetworkId: networkId},
 		}
 
 		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{

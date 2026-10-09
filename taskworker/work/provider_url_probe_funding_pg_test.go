@@ -8,8 +8,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 func urlFundingSelectedGrants(t testing.TB) float64 {
@@ -71,7 +71,7 @@ func TestUrlProbeShardFundingPersistsPrivateHeadroomWithDeferredReclaim(t *testi
 		if err != nil {
 			t.Fatal(err)
 		}
-		claims, err := jwt.ParseByJwtForAudience(ctx, minted.ByClientJwt, jwt.ByJwtAudienceApi)
+		claims, err := session.ParseByJwtForAudience(ctx, minted.ByClientJwt, session.ByJwtAudienceApi)
 		if err != nil || claims == nil || claims.ClientId == nil || claims.NetworkId != owner.NetworkId {
 			t.Fatal("derived credential left its private network", err)
 		}

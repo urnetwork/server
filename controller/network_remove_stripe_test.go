@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -205,7 +205,7 @@ func networkRemoveStripeRenewalActive(ctx context.Context, networkId server.Id, 
 
 // networkRemoveTestSession builds a synthetic authenticated network session.
 func networkRemoveTestSession(ctx context.Context, networkId server.Id, userId server.Id) *session.ClientSession {
-	return session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	return session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: networkId,
 		UserId:    userId,
 	})

@@ -9,7 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -173,7 +173,7 @@ func TestFindProviders2SelectionExplainsIntentCacheAndRequestFilters(t *testing.
 			}
 			labels := map[string]string{"target_kind": "location_unknown", "request_class": requestClass, "ip_family": "any", "rank_mode": "quality", "outcome": outcome, "reason": metricReason}
 			before := selectionMetricCount(t, "urnetwork_findproviders2_selection_outcomes_total", labels)
-			clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(networkId, server.NewId(), "selection-metrics-test", false, false))
+			clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(networkId, server.NewId(), "selection-metrics-test", false, false))
 			result, err := FindProviders2(args, clientSession)
 			if err != nil {
 				t.Fatalf("%s unexpectedly failed: %v", reason, err)

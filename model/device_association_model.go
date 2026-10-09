@@ -17,7 +17,7 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -798,14 +798,19 @@ func DeviceConfirmAdopt(
 	isPro := IsProFresh(clientSession.Ctx, entitlementNetworkId)
 
 	var adopted bool
-	var deviceId server.Id
-	var clientId server.Id
+	deviceId := server.NewId()
+	clientId := server.NewId()
+	var signedCredential string
+	var mintCredential *session.ByJwt
+	candidateSessionId := server.NewId()
+	mintTime := server.CodecTime(server.NowUtc())
 	var networkId server.Id
 	var networkName string
 	var userId server.Id
 	var authType AuthType
 
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, *entitlementNetworkId, false))
 		// the tx callback reruns on commit errors: reset the outcome latch so
 		// a rerun that loses the adopt race to a concurrent confirm cannot
 		// mint a jwt for the rolled-back device/client of the prior attempt
@@ -902,9 +907,6 @@ func DeviceConfirmAdopt(
 			))
 		})
 
-		deviceId = server.NewId()
-		clientId = server.NewId()
-
 		server.RaisePgResult(tx.Exec(
 			clientSession.Ctx,
 			`
@@ -944,19 +946,24 @@ func DeviceConfirmAdopt(
 			adoptTime,
 		))
 
+		if mintCredential == nil {
+			mintCredential = session.NewByJwtWithCreateTime(networkId, userId, networkName, mintTime, authType == AuthTypeGuest, isPro).Client(deviceId, clientId)
+			if session.SessionCreationEnabled() {
+				mintCredential.SessionId = &candidateSessionId
+			}
+		}
+		server.Raise(session.ValidateByJwtStateInTx(clientSession.Ctx, tx, mintCredential, true))
+		server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, mintCredential, false))
+		var mintErr error
+		signedCredential, mintErr = session.RegisterAndSignInTx(clientSession.Ctx, tx, mintCredential, "device_adopt", nil, false)
+		server.Raise(mintErr)
 		adopted = true
-	})
+	}, server.TxReadCommitted)
 
 	if adopted {
-		byJwtWithClientId := jwt.NewByJwt(
-			networkId,
-			userId,
-			networkName,
-			authType == AuthTypeGuest,
-			isPro,
-		).Client(deviceId, clientId).Sign()
+		clientSession.WithByJwt(mintCredential).ObserveAuthenticatedUse()
 		confirmAdoptResult = &DeviceConfirmAdoptResult{
-			ByClientJwt: byJwtWithClientId,
+			ByClientJwt: signedCredential,
 		}
 	} else if returnErr == nil {
 		confirmAdoptResult = &DeviceConfirmAdoptResult{

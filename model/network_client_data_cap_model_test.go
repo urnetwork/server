@@ -9,7 +9,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -40,10 +40,10 @@ func newDataCapTestNetworkWithoutEmbed(ctx context.Context, name string) *dataCa
 	return &dataCapTestNetwork{
 		networkId:   networkId,
 		userId:      userId,
-		rootSession: session.Testing_CreateClientSession(ctx, &jwt.ByJwt{NetworkId: networkId, UserId: userId}),
+		rootSession: session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: networkId, UserId: userId}),
 		// an API key session as session/client_session.go builds it: no
 		// client id, pro mode off
-		apiKeySession: session.Testing_CreateClientSession(ctx, jwt.NewByJwt(networkId, userId, name, false, false)),
+		apiKeySession: session.Testing_CreateClientSession(ctx, session.NewByJwt(networkId, userId, name, false, false)),
 	}
 }
 
@@ -60,7 +60,7 @@ func (self *dataCapTestNetwork) provisionClient(t testing.TB, description string
 }
 
 func (self *dataCapTestNetwork) clientSession(ctx context.Context, clientId server.Id) *session.ClientSession {
-	return session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	return session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: self.networkId,
 		UserId:    self.userId,
 		ClientId:  &clientId,

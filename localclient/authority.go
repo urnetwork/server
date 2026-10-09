@@ -15,7 +15,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -43,13 +43,13 @@ type Authority struct {
 // Signature, audience, current client and credential rotation are checked now
 // and again on every operation. A local address is never an authentication.
 func New(ctx context.Context, token, apiUrl string) (*Authority, error) {
-	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryHostedBootstrap)
+	ctx = session.WithStateQuerySource(ctx, session.StateQueryHostedBootstrap)
 	return server.HandleError2(func() (*Authority, error) {
-		claims, err := jwt.ParseByJwtForAudience(ctx, token, jwt.ByJwtAudienceApi)
+		claims, err := session.ParseByJwtForAudience(ctx, token, session.ByJwtAudienceApi)
 		if err != nil {
 			return nil, err
 		}
-		if err = jwt.ValidateByJwtState(ctx, claims, true); err != nil {
+		if err = session.ValidateByJwtState(ctx, claims, true); err != nil {
 			return nil, err
 		}
 		base, err := url.Parse(strings.TrimRight(apiUrl, "/"))
@@ -79,11 +79,14 @@ func (self *Authority) authenticate(ctx context.Context, token string, parentOnl
 		return nil, err
 	}
 	if *claims.ClientId == self.clientId {
-		err = jwt.ValidateByJwtState(ctx, claims, true)
+		err = session.ValidateByJwtState(ctx, claims, true)
 	} else {
-		err = jwt.ValidateByJwtStateForParent(ctx, claims, self.clientId)
+		err = session.ValidateByJwtStateForParent(ctx, claims, self.clientId)
 	}
 	if err != nil {
+		if errors.Is(err, session.ErrAuthUnavailable) || errors.Is(err, session.ErrSessionStoreUnavailable) {
+			return nil, &connect.HttpStatusError{StatusCode: http.StatusServiceUnavailable}
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -95,15 +98,18 @@ func (self *Authority) authenticate(ctx context.Context, token string, parentOnl
 // Signature, audience and owning account/parent binding are local preflight.
 // Child source ownership and live state are checked together by authenticate;
 // parent-only mint instead validates live state in its writing transaction.
-func (self *Authority) parseClaimsPreflight(ctx context.Context, token string, parentOnly bool) (*jwt.ByJwt, error) {
+func (self *Authority) parseClaimsPreflight(ctx context.Context, token string, parentOnly bool) (*session.ByJwt, error) {
 	if self.closed.Load() {
 		return nil, context.Canceled
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	claims, err := jwt.ParseByJwtForAudience(ctx, token, jwt.ByJwtAudienceApi)
+	claims, err := session.ParseByJwtForAudience(ctx, token, session.ByJwtAudienceApi)
 	if err != nil {
+		if errors.Is(err, session.ErrAuthUnavailable) || errors.Is(err, session.ErrSessionStoreUnavailable) {
+			return nil, &connect.HttpStatusError{StatusCode: http.StatusServiceUnavailable}
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -123,7 +129,7 @@ func (self *Authority) parseClaimsPreflight(ctx context.Context, token string, p
 }
 
 // The operation owns the session and must validate its claims before writing.
-func (self *Authority) newSession(ctx context.Context, claims *jwt.ByJwt) *session.ClientSession {
+func (self *Authority) newSession(ctx context.Context, claims *session.ByJwt) *session.ClientSession {
 	ctx = model.WithContractOriginNotifications(ctx, self.notifications)
 	if self.appearances != nil {
 		ctx = model.WithProviderAppearances(ctx, self.appearances)
@@ -155,7 +161,7 @@ func convert[T any](value any) (*T, error) {
 }
 
 func (self *Authority) AuthNetworkClient(ctx context.Context, args *connect.AuthNetworkClientArgs) (*connect.AuthNetworkClientResult, error) {
-	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryHostedMint)
+	ctx = session.WithStateQuerySource(ctx, session.StateQueryHostedMint)
 	return server.HandleError2(func() (*connect.AuthNetworkClientResult, error) {
 		if args == nil || args.ClientId != nil || args.SourceClientId == nil || server.Id(*args.SourceClientId) != self.clientId {
 			return nil, errors.New("local mint requires its owning parent")
@@ -185,7 +191,7 @@ func (self *Authority) AuthNetworkClient(ctx context.Context, args *connect.Auth
 }
 
 func (self *Authority) RemoveNetworkClient(ctx context.Context, args *connect.RemoveNetworkClientArgs) (*connect.RemoveNetworkClientResult, error) {
-	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryHostedRetire)
+	ctx = session.WithStateQuerySource(ctx, session.StateQueryHostedRetire)
 	return server.HandleError2(func() (*connect.RemoveNetworkClientResult, error) {
 		if args == nil || server.Id(args.ClientId) == self.clientId || !self.ownsChild(ctx, server.Id(args.ClientId)) {
 			return nil, errors.New("local retirement requires an owned derived client")
@@ -204,7 +210,7 @@ func (self *Authority) RemoveNetworkClient(ctx context.Context, args *connect.Re
 }
 
 func (self *Authority) ConnectControl(ctx context.Context, token string, args *connect.ConnectControlArgs) (*connect.ConnectControlResult, error) {
-	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryHostedControl)
+	ctx = session.WithStateQuerySource(ctx, session.StateQueryHostedControl)
 	return server.HandleError2(func() (*connect.ConnectControlResult, error) {
 		if args == nil {
 			return nil, errors.New("local control request is absent")
@@ -228,7 +234,7 @@ func (self *Authority) ConnectControl(ctx context.Context, token string, args *c
 }
 
 func (self *Authority) FindProviders2(ctx context.Context, token string, args *connect.FindProviders2Args) (*connect.FindProviders2Result, error) {
-	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryHostedDiscovery)
+	ctx = session.WithStateQuerySource(ctx, session.StateQueryHostedDiscovery)
 	return server.HandleError2(func() (*connect.FindProviders2Result, error) {
 		if args == nil {
 			return nil, errors.New("local discovery request is absent")
@@ -269,7 +275,7 @@ func (self *Authority) Get(ctx context.Context, requestUrl, token string) ([]byt
 		if err != nil {
 			return nil, err
 		}
-		ctx = jwt.WithStateQuerySource(ctx, authorityStateQuerySource("GET", path))
+		ctx = session.WithStateQuerySource(ctx, authorityStateQuerySource("GET", path))
 		if token == "" && strings.HasPrefix(path, "/key/") {
 			token = self.token()
 		}
@@ -329,7 +335,7 @@ func (self *Authority) Post(ctx context.Context, requestUrl string, body []byte,
 		if err != nil {
 			return nil, err
 		}
-		ctx = jwt.WithStateQuerySource(ctx, authorityStateQuerySource("POST", path))
+		ctx = session.WithStateQuerySource(ctx, authorityStateQuerySource("POST", path))
 		if len(body) > 1024*1024 {
 			return nil, errors.New("local control request exceeds bound")
 		}

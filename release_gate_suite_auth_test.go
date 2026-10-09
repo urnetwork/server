@@ -24,9 +24,9 @@ import (
 	gojwt "github.com/golang-jwt/jwt/v5"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	byjwt "github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
+	byjwt "github.com/urnetwork/server/session"
 )
 
 // Only explicitly generated roots reach the child's environment. No inherited
@@ -104,8 +104,8 @@ func TestReleaseGateServicesSuiteAuthenticationAdapters(t *testing.T) {
 	if os.Getenv("RELEASE_GATE_SUITE_AUTH_CHILD") != "positive" {
 		t.Fatal("unexpected authentication child mode")
 	}
-	claims := byjwt.NewByJwt(server.NewId(), server.NewId(), "fixture-network", false, false)
-	parsed, err := byjwt.ParseByJwt(t.Context(), claims.Sign())
+	claims := bysession.NewByJwt(server.NewId(), server.NewId(), "fixture-network", false, false)
+	parsed, err := bysession.ParseByJwt(t.Context(), claims.Testing_Sign())
 	if err != nil || parsed.NetworkId != claims.NetworkId || parsed.UserId != claims.UserId {
 		t.Fatalf("genuine platform authentication failed: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestReleaseGateServicesSuiteAuthenticationAdapters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := byjwt.ParseByJwt(t.Context(), foreign); err == nil {
+	if _, err := bysession.ParseByJwt(t.Context(), foreign); err == nil {
 		t.Fatal("OAuth signer acquired platform authority")
 	}
 	for _, missing := range []bool{false, true} {
@@ -127,7 +127,7 @@ func TestReleaseGateServicesSuiteAuthenticationAdapters(t *testing.T) {
 		if missing {
 			changed.ExpiresAt = nil
 		}
-		if _, err := byjwt.ParseByJwt(t.Context(), changed.Sign()); err == nil {
+		if _, err := bysession.ParseByJwt(t.Context(), changed.Testing_Sign()); err == nil {
 			t.Fatalf("strict expiration boundary relaxed: missing=%t", missing)
 		}
 	}

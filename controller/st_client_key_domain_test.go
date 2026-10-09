@@ -131,7 +131,7 @@ func TestProviderDomainActualEnrollmentRotationAndClosedWork(t *testing.T) {
 		defer endpoint.Close()
 		strategy := connect.NewClientStrategyWithDefaults(owner)
 		defer strategy.Close()
-		control := connect.NewApiOutOfBandControl(owner, strategy, credential.Sign(), endpoint.URL)
+		control := connect.NewApiOutOfBandControl(owner, strategy, credential.Testing_Sign(), endpoint.URL)
 		settings := miner.ProviderDeviceSettings(domainHash).ClientSettings
 		settings.ControlPingTimeout = 0
 		settings.Log = connect.NewNoopLogger()

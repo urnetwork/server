@@ -21,7 +21,7 @@ import (
 	"github.com/urnetwork/server/session"
 
 	// "github.com/urnetwork/server/ulid"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/search"
 )
 
@@ -86,7 +86,7 @@ const (
 	AgreeToTerms NetworkCreateError = "The terms of service and privacy policy must be accepted."
 )
 
-func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*NetworkCheckResult, error) {
+func NetworkCheck(check *NetworkCheckArgs, clientSession *session.ClientSession) (*NetworkCheckResult, error) {
 
 	_, err := ValidateNetworkName(check.NetworkName)
 	if err != nil {
@@ -95,7 +95,7 @@ func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*Net
 		}, nil
 	}
 
-	taken := networkNameSearch().AnyAround(session.Ctx, check.NetworkName, 1)
+	taken := networkNameSearch().AnyAround(clientSession.Ctx, check.NetworkName, 1)
 
 	result := &NetworkCheckResult{
 		Available: !taken,
@@ -243,7 +243,7 @@ func networkCreateAuthShapeError(networkCreate NetworkCreateArgs) *NetworkCreate
 
 func NetworkCreate(
 	networkCreate NetworkCreateArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*NetworkCreateResult, error) {
 	userAuth, _ := NormalUserAuthV1(networkCreate.UserAuth)
 
@@ -271,7 +271,7 @@ func NetworkCreate(
 		}
 
 		// rate limit: max 5 seedphrase accounts per IP per day
-		if err := CheckNetworkCreateRateLimit(session.Ctx, session); err != nil {
+		if err := CheckNetworkCreateRateLimit(clientSession.Ctx, clientSession); err != nil {
 			return nil, err
 		}
 
@@ -286,23 +286,27 @@ func NetworkCreate(
 		}
 
 		resultNetworkCreate := networkCreateSeedphrase(
-			session.Ctx,
+			clientSession.Ctx,
 			&networkCreate,
 			validatedNetworkName,
 		)
 
 		if resultNetworkCreate.Created {
-			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
+			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, clientSession)
 
 			isPro := false
-			byJwt := jwt.NewByJwt(
+			byJwt := session.NewByJwt(
 				resultNetworkCreate.NetworkId,
 				resultNetworkCreate.UserId,
 				validatedNetworkName,
 				false,
 				isPro,
 			)
-			byJwtSigned := byJwt.Sign()
+			byJwtSigned, mintErr := session.MintNetworkSession(clientSession.Ctx, byJwt, "signup")
+			if mintErr != nil {
+				return nil, mintErr
+			}
+			clientSession.WithByJwt(byJwt).ObserveAuthenticatedUse()
 			result := &NetworkCreateResult{
 				Seedphrase: &resultNetworkCreate.Seedphrase,
 				Network: &NetworkCreateResultNetwork{
@@ -377,7 +381,7 @@ func NetworkCreate(
 	}
 
 	// check if the network name is already taken
-	err := checkNetworkNameAvailability(validatedNetworkName, session)
+	err := checkNetworkNameAvailability(validatedNetworkName, clientSession)
 	if err != nil {
 		result := &NetworkCreateResult{
 			Error: &NetworkCreateResultError{
@@ -409,7 +413,7 @@ func NetworkCreate(
 	// email/SSO/wallet paths use the existing auth rate limit. The input is
 	// valid by this point, so a slot is only ever spent on a submission that
 	// would otherwise create an account.
-	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, clientSession)
 	if !allow {
 		return nil, maxUserAuthAttemptsError(userAuth)
 	}
@@ -420,7 +424,7 @@ func NetworkCreate(
 		testAuthPolicy := testAuthPolicyForUserAuth(userAuth)
 
 		resultNetworkCreate := networkCreateUserAuth(
-			session.Ctx,
+			clientSession.Ctx,
 			&networkCreate,
 			userAuth,
 			validatedNetworkName,
@@ -429,21 +433,25 @@ func NetworkCreate(
 		)
 
 		if resultNetworkCreate.Created {
-			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
+			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, clientSession)
 
-			networkNameSearch().Add(session.Ctx, validatedNetworkName, resultNetworkCreate.NetworkId, 0)
+			networkNameSearch().Add(clientSession.Ctx, validatedNetworkName, resultNetworkCreate.NetworkId, 0)
 
 			if testAuthPolicy.BypassVerification {
-				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+				SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
 
-				byJwt := jwt.NewByJwt(
+				byJwt := session.NewByJwt(
 					resultNetworkCreate.NetworkId,
 					resultNetworkCreate.UserId,
 					validatedNetworkName,
 					false,
 					resultNetworkCreate.IsPro,
 				)
-				byJwtSigned := byJwt.Sign()
+				byJwtSigned, mintErr := session.MintNetworkSession(clientSession.Ctx, byJwt, "signup")
+				if mintErr != nil {
+					return nil, mintErr
+				}
+				clientSession.WithByJwt(byJwt).ObserveAuthenticatedUse()
 				return &NetworkCreateResult{
 					Network: &NetworkCreateResultNetwork{
 						ByJwt:       &byJwtSigned,
@@ -490,7 +498,7 @@ func NetworkCreate(
 			normalJwtUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
 
 			resultNetworkCreate := networkCreateAuthJwt(
-				session.Ctx,
+				clientSession.Ctx,
 				&networkCreate,
 				containsProfanity,
 				*authJwt,
@@ -499,23 +507,27 @@ func NetworkCreate(
 			)
 
 			if resultNetworkCreate.Created {
-				auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
+				auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, clientSession)
 
-				networkNameSearch().Add(session.Ctx, validatedNetworkName, resultNetworkCreate.NetworkId, 0)
+				networkNameSearch().Add(clientSession.Ctx, validatedNetworkName, resultNetworkCreate.NetworkId, 0)
 
-				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+				SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
 
 				guestMode := false
 
 				// successful login
-				byJwt := jwt.NewByJwt(
+				byJwt := session.NewByJwt(
 					resultNetworkCreate.NetworkId,
 					resultNetworkCreate.UserId,
 					networkCreate.NetworkName,
 					guestMode, // false
 					resultNetworkCreate.IsPro,
 				)
-				byJwtSigned := byJwt.Sign()
+				byJwtSigned, mintErr := session.MintNetworkSession(clientSession.Ctx, byJwt, "signup")
+				if mintErr != nil {
+					return nil, mintErr
+				}
+				clientSession.WithByJwt(byJwt).ObserveAuthenticatedUse()
 				result := &NetworkCreateResult{
 					Network: &NetworkCreateResultNetwork{
 						ByJwt:       &byJwtSigned,
@@ -581,7 +593,7 @@ func NetworkCreate(
 			PublicKey:  networkCreate.WalletAuth.PublicKey,
 			Message:    networkCreate.WalletAuth.Message,
 			Signature:  networkCreate.WalletAuth.Signature,
-		}, session.Ctx)
+		}, clientSession.Ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -609,7 +621,7 @@ func NetworkCreate(
 		}
 
 		networkCreateResult, err := networkCreateWalletAuth(
-			session.Ctx,
+			clientSession.Ctx,
 			&networkCreate,
 			validatedNetworkName,
 			containsProfanity,
@@ -622,11 +634,11 @@ func NetworkCreate(
 
 		if networkCreateResult.Created {
 
-			auditNetworkCreate(networkCreate, networkCreateResult.NetworkId, session)
+			auditNetworkCreate(networkCreate, networkCreateResult.NetworkId, clientSession)
 
-			networkNameSearch().Add(session.Ctx, validatedNetworkName, networkCreateResult.NetworkId, 0)
+			networkNameSearch().Add(clientSession.Ctx, validatedNetworkName, networkCreateResult.NetworkId, 0)
 
-			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+			SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
 
 			/**
 			 * Create new payout wallet
@@ -639,7 +651,7 @@ func NetworkCreate(
 				 */
 
 				walletId := CreateAccountWalletExternal(
-					session,
+					clientSession,
 					&CreateAccountWalletExternalArgs{
 						NetworkId:        networkCreateResult.NetworkId,
 						Blockchain:       networkCreate.WalletAuth.Blockchain,
@@ -653,7 +665,7 @@ func NetworkCreate(
 				 */
 				if walletId != nil {
 					err := SetPayoutWallet(
-						session.Ctx,
+						clientSession.Ctx,
 						networkCreateResult.NetworkId,
 						*walletId,
 					)
@@ -668,14 +680,18 @@ func NetworkCreate(
 			isGuest := false
 
 			// successful login
-			byJwt := jwt.NewByJwt(
+			byJwt := session.NewByJwt(
 				networkCreateResult.NetworkId,
 				networkCreateResult.UserId,
 				networkCreate.NetworkName,
 				isGuest,
 				networkCreateResult.IsPro,
 			)
-			byJwtSigned := byJwt.Sign()
+			byJwtSigned, mintErr := session.MintNetworkSession(clientSession.Ctx, byJwt, "signup")
+			if mintErr != nil {
+				return nil, mintErr
+			}
+			clientSession.WithByJwt(byJwt).ObserveAuthenticatedUse()
 			result := &NetworkCreateResult{
 				Network: &NetworkCreateResultNetwork{
 					ByJwt:       &byJwtSigned,
@@ -1245,7 +1261,7 @@ func networkCreateRedeemBalanceCodeInTx(
 func auditNetworkCreate(
 	networkCreate NetworkCreateArgs,
 	networkId server.Id,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) {
 	// The peppered address hash (server.ClientIpHash), never the raw ip:port.
 	// audit_network_event rows are permanent — there is no reaper — so a raw
@@ -1262,7 +1278,7 @@ func auditNetworkCreate(
 	details := Details{
 		NetworkCreate: networkCreate,
 	}
-	if clientAddressHash, clientPort, err := session.ClientAddressHashPort(); err == nil {
+	if clientAddressHash, clientPort, err := clientSession.ClientAddressHashPort(); err == nil {
 		details.ClientAddressHash = hex.EncodeToString(clientAddressHash[:])
 		details.ClientPort = clientPort
 	}
@@ -1276,7 +1292,7 @@ func auditNetworkCreate(
 	auditNetworkEvent := NewAuditNetworkEvent(AuditEventTypeNetworkCreated)
 	auditNetworkEvent.NetworkId = networkId
 	auditNetworkEvent.EventDetails = &detailsJsonString
-	AddAuditEvent(session.Ctx, auditNetworkEvent)
+	AddAuditEvent(clientSession.Ctx, auditNetworkEvent)
 }
 
 type NetworkUpdateArgs struct {
@@ -1367,7 +1383,7 @@ func IndexNetworkNameInTx(ctx context.Context, tx server.PgTx, networkId server.
 
 func checkNetworkNameAvailability(
 	networkName string,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (err error) {
 
 	validatedNetworkName, validationErr := ValidateNetworkName(networkName)
@@ -1376,16 +1392,16 @@ func checkNetworkNameAvailability(
 		return
 	}
 
-	taken := networkNameSearch().AnyAround(session.Ctx, validatedNetworkName, 1)
+	taken := networkNameSearch().AnyAround(clientSession.Ctx, validatedNetworkName, 1)
 
 	if taken {
 		err = errors.New(networkNameNotAvailableMessage)
 		return
 	}
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		err = nil
-		if networkNameHeldInTx(session.Ctx, tx, validatedNetworkName) {
+		if networkNameHeldInTx(clientSession.Ctx, tx, validatedNetworkName) {
 			err = errors.New(networkNameNotAvailableMessage)
 		}
 	})
@@ -1410,7 +1426,7 @@ var networkUpdateBeforeWrite func()
 // in-memory index follows once it has committed.
 func NetworkUpdate(
 	networkUpdate NetworkUpdateArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*NetworkUpdateResult, error) {
 	refusal := func(message string) (*NetworkUpdateResult, error) {
 		return &NetworkUpdateResult{
@@ -1424,16 +1440,16 @@ func NetworkUpdate(
 	if err != nil {
 		return refusal(err.Error())
 	}
-	if err := checkNetworkNameAvailability(validatedNetworkName, session); err != nil {
+	if err := checkNetworkNameAvailability(validatedNetworkName, clientSession); err != nil {
 		return refusal(err.Error())
 	}
 
 	held := false
 	var posts []server.PostFunction
-	taken := NetworkNameTx(session.Ctx, func(tx server.PgTx) {
+	taken := NetworkNameTx(clientSession.Ctx, func(tx server.PgTx) {
 		// a rerun starts over
 		posts = nil
-		held = networkNameHeldInTx(session.Ctx, tx, validatedNetworkName)
+		held = networkNameHeldInTx(clientSession.Ctx, tx, validatedNetworkName)
 		if held {
 			return
 		}
@@ -1441,24 +1457,24 @@ func NetworkUpdate(
 			networkUpdateBeforeWrite()
 		}
 		tag := RaiseNetworkNameWrite(tx.Exec(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				UPDATE network
 				SET network_name = $2
 				WHERE network_id = $1
 			`,
-			session.ByJwt.NetworkId,
+			clientSession.ByJwt.NetworkId,
 			validatedNetworkName,
 		))
 		if tag.RowsAffected() == 1 {
-			posts = append(posts, IndexNetworkNameInTx(session.Ctx, tx, session.ByJwt.NetworkId, validatedNetworkName))
+			posts = append(posts, IndexNetworkNameInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, validatedNetworkName))
 		}
 	})
 	if held || taken {
 		return refusal(networkNameNotAvailableMessage)
 	}
 	// the rename committed
-	server.RunPosts(session.Ctx, posts...)
+	server.RunPosts(clientSession.Ctx, posts...)
 
 	return &NetworkUpdateResult{}, nil
 }
@@ -1472,14 +1488,14 @@ type Network struct {
 }
 
 func GetNetwork(
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) *Network {
 	var network *Network
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 
 		result, err := tx.Query(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 			SELECT
 				network_id,
@@ -1490,7 +1506,7 @@ func GetNetwork(
 			FROM network
 			WHERE network_id = $1
 		`,
-			session.ByJwt.NetworkId,
+			clientSession.ByJwt.NetworkId,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {

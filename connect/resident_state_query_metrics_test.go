@@ -7,14 +7,14 @@ import (
 	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // The actual resident handler shares the old internal ingress bucket with
 // direct prober control, but emits no JWT query for these verified frames.
 // This is a control-boundary test, not a claim that durable frames avoid PG.
 func TestConnectStateQueryMetricResidentControlIsNotAuthentication(t *testing.T) {
-	ctx := jwt.WithStateQuerySource(t.Context(), jwt.StateQueryProberControl)
+	ctx := session.WithStateQuerySource(t.Context(), session.StateQueryProberControl)
 	attempts, stop := server.DenyPostgresForTest(t)
 	defer stop()
 	owner := newResidentController(ctx, server.NewId(), nil, DefaultExchangeSettings())

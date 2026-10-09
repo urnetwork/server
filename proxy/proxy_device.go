@@ -15,10 +15,10 @@ import (
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/localclient"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/proxy/flowtrace"
+	"github.com/urnetwork/server/session"
 )
 
 func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
@@ -774,13 +774,16 @@ func NewProxyDevice(
 	settings *ProxyDeviceSettings,
 ) (*ProxyDevice, error) {
 	// this jwt is used to access the services in the network space
-	byJwt, err := jwt.LoadByJwtFromClientId(ctx, proxyDeviceConfig.ClientId)
+	byJwt, err := session.LoadByJwtFromClientId(ctx, proxyDeviceConfig.ClientId)
 	if err != nil {
 		return nil, err
 	}
 
+	signedByJwt, mintErr := session.MintHostedSession(ctx, byJwt)
+	if mintErr != nil {
+		return nil, mintErr
+	}
 	cancelCtx, cancel := context.WithCancel(ctx)
-	signedByJwt := byJwt.Sign()
 	localControl, err := localclient.New(ctx, signedByJwt, networkSpace.GetApiUrl())
 	if err != nil {
 		cancel()

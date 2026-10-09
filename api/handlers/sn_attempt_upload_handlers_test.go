@@ -17,17 +17,17 @@ import (
 
 	"github.com/urfoundation/sn/validator"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // Signed tokens have genuine active network/device/client rows behind them.
-func snAttemptUploadTestIdentity(t testing.TB) (*jwt.ByJwt, *jwt.ByJwt) {
+func snAttemptUploadTestIdentity(t testing.TB) (*session.ByJwt, *session.ByJwt) {
 	t.Helper()
 	networkId, userId, deviceId, clientId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	model.Testing_CreateNetwork(t.Context(), networkId, "attempt-upload-"+networkId.String(), userId)
 	model.Testing_CreateDevice(t.Context(), networkId, deviceId, clientId, "attempt-upload", "test")
-	account := jwt.NewByJwt(networkId, userId, "attempt-upload", false, false)
+	account := session.NewByJwt(networkId, userId, "attempt-upload", false, false)
 	return account, account.Client(deviceId, clientId)
 }
 
@@ -73,7 +73,7 @@ func TestSnAttemptUploadRealClientQuotaStorageAndPublicReadback(t *testing.T) {
 		}))
 		defer endpoint.Close()
 		stream := validator.AttemptStreamV2Bounds{MaxDataBytes: 1024, MaxItems: 32, MaxChunkBytes: 256, MaxChunks: 8, MaxPages: 4, MaxPageBytes: 128, MaxDescriptorsPerPage: 2, MaxManifestBytes: 128}
-		writer, err := validator.NewHTTPAttemptStreamV2Writer(endpoint.URL, validator.AttemptCutV2Bounds{MaxHeaderBytes: 128, Records: stream, Proofs: stream}, func() string { return client.Sign() })
+		writer, err := validator.NewHTTPAttemptStreamV2Writer(endpoint.URL, validator.AttemptCutV2Bounds{MaxHeaderBytes: 128, Records: stream, Proofs: stream}, func() string { return client.Testing_Sign() })
 		if err != nil {
 			tb.Fatal(err)
 		}
@@ -114,21 +114,21 @@ func TestSnAttemptUploadRequiresActiveClientBeforeBodyAndStorage(t *testing.T) {
 			token := ""
 			switch fault {
 			case "network-only":
-				token = account.Sign()
+				token = account.Testing_Sign()
 			case "invalid":
 				token = "not-a-signed-client-token"
 			case "foreign-network":
 				changed := *client
 				changed.NetworkId = other.NetworkId
-				token = changed.Sign()
+				token = changed.Testing_Sign()
 			case "foreign-user":
 				changed := *client
 				changed.UserId = other.UserId
-				token = changed.Sign()
+				token = changed.Testing_Sign()
 			case "duplicate-authorization":
-				token = client.Sign()
+				token = client.Testing_Sign()
 			case "removed-client":
-				token = client.Sign()
+				token = client.Testing_Sign()
 				server.Tx(tb.Context(), func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(tb.Context(), "UPDATE network_client SET active = false WHERE client_id = $1", *client.ClientId))
 				})
@@ -136,7 +136,7 @@ func TestSnAttemptUploadRequiresActiveClientBeforeBodyAndStorage(t *testing.T) {
 			reads, reservations, stores := 0, 0, 0
 			request := snAttemptUploadTestRequest(tb, token, "metadata", []byte("data"))
 			if fault == "duplicate-authorization" {
-				request.Header.Add("Authorization", "Bearer "+otherClient.Sign())
+				request.Header.Add("Authorization", "Bearer "+otherClient.Testing_Sign())
 			}
 			request.Body = &snAttemptTestReadCloser{Reader: snAttemptTestReadFunc(func([]byte) (int, error) { reads++; return 0, io.EOF })}
 			response := snAttemptUploadTestRecorder()
@@ -164,7 +164,7 @@ func TestSnAttemptUploadAccountRotationCannotExpandDeploymentBudget(t *testing.T
 		store := server.NewLocalBlobStore(tb.TempDir(), "attempt-upload")
 		for _, item := range []struct {
 			name     string
-			identity *jwt.ByJwt
+			identity *session.ByJwt
 			status   int
 		}{
 			{name: "first-account", identity: first, status: http.StatusNoContent},
@@ -175,7 +175,7 @@ func TestSnAttemptUploadAccountRotationCannotExpandDeploymentBudget(t *testing.T
 			reads, stores := 0, 0
 			data := []byte("data")
 			reader := bytes.NewReader(data)
-			request := snAttemptUploadTestRequest(tb, item.identity.Sign(), "metadata", data)
+			request := snAttemptUploadTestRequest(tb, item.identity.Testing_Sign(), "metadata", data)
 			request.Body = &snAttemptTestReadCloser{Reader: snAttemptTestReadFunc(func(value []byte) (int, error) { reads++; return reader.Read(value) })}
 			response := snAttemptUploadTestRecorder()
 			slots := make(chan struct{}, 1)
@@ -229,7 +229,7 @@ func TestSnAttemptUploadAuthenticatedTrafficCanExhaustFreshValidatorStaging(t *t
 		defer endpoint.Close()
 		stream := validator.AttemptStreamV2Bounds{MaxDataBytes: 1024, MaxItems: 32, MaxChunkBytes: 256, MaxChunks: 8, MaxPages: 4, MaxPageBytes: 128, MaxDescriptorsPerPage: 2, MaxManifestBytes: 128}
 		bounds := validator.AttemptCutV2Bounds{MaxHeaderBytes: 128, Records: stream, Proofs: stream}
-		writer, err := validator.NewHTTPAttemptStreamV2Writer(endpoint.URL, bounds, validatorClient.Sign)
+		writer, err := validator.NewHTTPAttemptStreamV2Writer(endpoint.URL, bounds, validatorClient.Testing_Sign)
 		if err != nil {
 			tb.Fatal(err)
 		}
@@ -237,8 +237,8 @@ func TestSnAttemptUploadAuthenticatedTrafficCanExhaustFreshValidatorStaging(t *t
 		if err := writer.Write(tb.Context(), "metadata", snAttemptTestHash(prior), prior); err != nil {
 			tb.Fatalf("working validator session prerequisite: %v", err)
 		}
-		for index, identity := range []*jwt.ByJwt{firstAccount, secondAccount} {
-			adversary, err := validator.NewHTTPAttemptStreamV2Writer(endpoint.URL, bounds, identity.Sign)
+		for index, identity := range []*session.ByJwt{firstAccount, secondAccount} {
+			adversary, err := validator.NewHTTPAttemptStreamV2Writer(endpoint.URL, bounds, identity.Testing_Sign)
 			if err != nil {
 				tb.Fatal(err)
 			}
@@ -275,7 +275,7 @@ func TestSnAttemptUploadAuthenticatedTrafficCanExhaustFreshValidatorStaging(t *t
 func TestSnAttemptUploadRejectsMalformedFramingBeforeSideEffects(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		_, client := snAttemptUploadTestIdentity(tb)
-		token := client.Sign()
+		token := client.Testing_Sign()
 		for _, fault := range []string{"query", "duplicate-hash", "path", "kind", "type", "type-parameter", "encoding", "range", "partial", "chunked", "trailer", "missing-size", "too-large", "method"} {
 			request := snAttemptUploadTestRequest(tb, token, "metadata", []byte("data"))
 			want := http.StatusBadRequest
@@ -328,7 +328,7 @@ func TestSnAttemptUploadRefusesBusyOrUnavailableQuotaBeforeBody(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		_, client := snAttemptUploadTestIdentity(tb)
 		for _, fault := range []string{"busy", "quota", "unavailable"} {
-			request := snAttemptUploadTestRequest(tb, client.Sign(), "metadata", []byte("data"))
+			request := snAttemptUploadTestRequest(tb, client.Testing_Sign(), "metadata", []byte("data"))
 			reads, stores := 0, 0
 			request.Body = &snAttemptTestReadCloser{Reader: snAttemptTestReadFunc(func([]byte) (int, error) { reads++; return 0, io.EOF })}
 			slots := make(chan struct{}, 1)
@@ -359,7 +359,7 @@ func TestSnAttemptUploadOwnsAdmittedRequestAcrossQuotaBoundary(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		_, client := snAttemptUploadTestIdentity(tb)
 		data := []byte("{\"original\":true}\n")
-		request := snAttemptUploadTestRequest(tb, client.Sign(), "metadata", data)
+		request := snAttemptUploadTestRequest(tb, client.Testing_Sign(), "metadata", data)
 		store := server.NewLocalBlobStore(tb.TempDir(), "attempt-upload")
 		response := snAttemptUploadTestRecorder()
 		serveSnUploadAttemptArtifact(response, request, func() (server.BlobStore, bool) { return store, true }, func(_ context.Context, _ server.Id, size uint64) error {
@@ -387,7 +387,7 @@ func TestSnAttemptUploadRefusesBodyHashCloseAndStoredReadbackFailures(t *testing
 		_, client := snAttemptUploadTestIdentity(tb)
 		for _, fault := range []string{"hash", "close", "readback"} {
 			data := []byte("data")
-			request := snAttemptUploadTestRequest(tb, client.Sign(), "metadata", data)
+			request := snAttemptUploadTestRequest(tb, client.Testing_Sign(), "metadata", data)
 			want := http.StatusBadRequest
 			if fault == "hash" {
 				request.URL.RawQuery = "kind=metadata&hash=" + snAttemptTestHash([]byte("other"))

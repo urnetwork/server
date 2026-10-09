@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -32,7 +32,7 @@ func TestPaymentAndModelWritesRaiseStatementFailures(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "statement-failure", userId)
-		byJwt := &jwt.ByJwt{
+		byJwt := &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		}

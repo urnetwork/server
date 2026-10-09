@@ -10,12 +10,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
-func providerEgressCredentialFixture(t *testing.T) (*providerEgressCredentials, *jwt.ByJwt) {
+func providerEgressCredentialFixture(t *testing.T) (*providerEgressCredentials, *session.ByJwt) {
 	t.Helper()
 	network, user, client, device := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	credentials, err := newProviderEgressCredentials(&model.ProberIdentity{
@@ -24,18 +24,18 @@ func providerEgressCredentialFixture(t *testing.T) (*providerEgressCredentials, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims := &jwt.ByJwt{
+	claims := &session.ByJwt{
 		NetworkId: network, UserId: user, ClientId: &client, DeviceId: &device,
 		CreateTime: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
 		Roles:      []string{"synthetic-role"}, Principal: "synthetic-principal",
 	}
-	credentials.parse = func(ctx context.Context, token, audience string) (*jwt.ByJwt, error) {
-		if token != "synthetic-parent-token" || audience != jwt.ByJwtAudienceApi {
+	credentials.parse = func(ctx context.Context, token, audience string) (*session.ByJwt, error) {
+		if token != "synthetic-parent-token" || audience != session.ByJwtAudienceApi {
 			t.Error("internal mint used another credential or audience")
 		}
 		return claims, nil
 	}
-	credentials.validate = func(ctx context.Context, value *jwt.ByJwt, requireClient bool) error {
+	credentials.validate = func(ctx context.Context, value *session.ByJwt, requireClient bool) error {
 		if value != claims || !requireClient {
 			t.Error("internal mint bypassed parent-client state validation")
 		}
@@ -95,11 +95,11 @@ func TestProviderEgressCredentialsRejectInvalidParentAndForeignSource(t *testing
 		}
 		switch scenario {
 		case "signature":
-			credentials.parse = func(context.Context, string, string) (*jwt.ByJwt, error) {
+			credentials.parse = func(context.Context, string, string) (*session.ByJwt, error) {
 				return nil, errors.New("synthetic signature rejection")
 			}
 		case "revoked":
-			credentials.validate = func(context.Context, *jwt.ByJwt, bool) error { return errors.New("synthetic revoked parent") }
+			credentials.validate = func(context.Context, *session.ByJwt, bool) error { return errors.New("synthetic revoked parent") }
 		case "network":
 			claims.NetworkId = server.NewId()
 		case "user":

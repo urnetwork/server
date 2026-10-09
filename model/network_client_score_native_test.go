@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // Fixture encoding uses the same bounded page contract as the publisher;
@@ -110,7 +110,7 @@ func TestNativeFindProvidersSkipsOnlineDilution(t *testing.T) {
 			for _, publishedMode := range []RankMode{RankModeQuality, RankModeSpeed} {
 				nativeTestPublishLocation(t, location, publishedMode, scores)
 			}
-			clientSession := testingCreateProviderSearchSession(t.Context(), jwt.NewByJwt(server.NewId(), server.NewId(), "native-page-test", false, false))
+			clientSession := testingCreateProviderSearchSession(t.Context(), session.NewByJwt(server.NewId(), server.NewId(), "native-page-test", false, false))
 			result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &location}}, RankMode: mode}, clientSession)
 			if err != nil || result == nil || len(result.Providers) != 20 {
 				t.Fatalf("native quota was not filled: mode=%s result=%v err=%v", mode, result, err)
@@ -170,7 +170,7 @@ func TestNativeFindProvidersRefillsPastFilteredAllowance(t *testing.T) {
 					server.Raise(r.SAdd(t.Context(), providerHardExclusionsKey, hard...).Err())
 				})
 			}
-			clientSession := testingCreateProviderSearchSession(t.Context(), jwt.NewByJwt(callerNetwork, server.NewId(), "native-filter-test", false, false))
+			clientSession := testingCreateProviderSearchSession(t.Context(), session.NewByJwt(callerNetwork, server.NewId(), "native-filter-test", false, false))
 			result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &location}}, ExcludeClientIds: excluded}, clientSession)
 			if err != nil || result == nil || len(result.Providers) != 20 {
 				t.Fatalf("%s native refill stopped at the legacy allowance: result=%v err=%v", cause, result, err)
@@ -198,7 +198,7 @@ func TestNativeFindProvidersEmptyNativesKeepOnlineFallback(t *testing.T) {
 		for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			nativeTestPublishLocation(t, location, mode, scores)
 		}
-		clientSession := testingCreateProviderSearchSession(t.Context(), jwt.NewByJwt(server.NewId(), server.NewId(), "native-empty-test", false, false))
+		clientSession := testingCreateProviderSearchSession(t.Context(), session.NewByJwt(server.NewId(), server.NewId(), "native-empty-test", false, false))
 		result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &location}}}, clientSession)
 		if err != nil || result == nil || len(result.Providers) != 20 {
 			t.Fatalf("proven empty native sources lost online availability: result=%v err=%v", result, err)

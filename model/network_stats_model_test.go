@@ -8,7 +8,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -72,7 +72,7 @@ func testCreateParentChildClients(ctx context.Context, t testing.TB) (networkId 
 	networkId = server.NewId()
 	adminUserId := server.NewId()
 	Testing_CreateNetwork(ctx, networkId, "synthetic-stats-"+networkId.String(), adminUserId)
-	userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: networkId,
 		UserId:    adminUserId,
 	})

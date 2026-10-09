@@ -79,7 +79,7 @@ func TestSnClientKeyHistoryBatchChargesEveryMemberBeforeController(t *testing.T)
 		cfg := &controller.StConfig{Enabled: true, ChainId: 945, ContractAddress: [20]byte{2}, AttemptUploadBudget: model.StAttemptUploadBudget{RequestsPerHour: 1, BytesPerHour: protocol.MaxClientKeyHistoryResponseBytes, AccountRequestsPerHour: 1, AccountBytesPerHour: protocol.MaxClientKeyHistoryResponseBytes}}
 		controller.SetStConfig(cfg)
 		defer controller.SetStConfig(nil)
-		request := snAttemptUploadTestRequest(tb, identity.Sign(), "metadata", snClientKeyBatchTestBody(tb, 2))
+		request := snAttemptUploadTestRequest(tb, identity.Testing_Sign(), "metadata", snClientKeyBatchTestBody(tb, 2))
 		request.URL.Path = "/sn/client-key/observations"
 		response := &snClientKeyBatchTestRecorder{snAttemptUploadRecorder: snAttemptUploadTestRecorder()}
 		SnClientKeyObservations(response, request)
@@ -97,7 +97,7 @@ func TestSnClientKeyHistoryBatchChargesEveryMemberBeforeController(t *testing.T)
 func TestSnClientKeyHistoryBatchAuthenticatesBeforeBody(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		account, _ := snAttemptUploadTestIdentity(tb)
-		for _, token := range []string{"", "invalid", account.Sign()} {
+		for _, token := range []string{"", "invalid", account.Testing_Sign()} {
 			request := snAttemptUploadTestRequest(tb, token, "metadata", snClientKeyBatchTestBody(tb, 404))
 			request.URL.Path = "/sn/client-key/observations"
 			reads := 0
@@ -115,7 +115,7 @@ func TestSnClientKeyHistoryBatchAuthenticatesBeforeBody(t *testing.T) {
 func TestSnClientKeyHistoryBatchRejectsExcessiveFramingBeforeBody(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		_, identity := snAttemptUploadTestIdentity(tb)
-		request := snAttemptUploadTestRequest(tb, identity.Sign(), "metadata", snClientKeyBatchTestBody(tb, 1))
+		request := snAttemptUploadTestRequest(tb, identity.Testing_Sign(), "metadata", snClientKeyBatchTestBody(tb, 1))
 		request.URL.Path = "/sn/client-key/observations"
 		request.ContentLength = protocol.MaxClientKeyObservationBatchRequestBytes + 1
 		reads := 0
@@ -167,7 +167,7 @@ func TestSnClientKeyHistoryBatchRealHttpPropagatesFiniteWriteDeadline(t *testing
 			if err != nil {
 				tb.Fatal(err)
 			}
-			request.Header.Set("Authorization", "Bearer "+identity.Sign())
+			request.Header.Set("Authorization", "Bearer "+identity.Testing_Sign())
 			request.Header.Set("Content-Type", "application/json")
 			response, err := endpoint.Client().Do(request)
 			if err != nil {
@@ -215,7 +215,7 @@ func TestSnClientKeyHistoryBatchSharesExactActiveAdmissionWithSingleton(t *testi
 			}
 		}()
 		for _, plural := range []bool{false, true} {
-			request := snAttemptUploadTestRequest(tb, identity.Sign(), "metadata", snClientKeyBatchTestBody(tb, 1))
+			request := snAttemptUploadTestRequest(tb, identity.Testing_Sign(), "metadata", snClientKeyBatchTestBody(tb, 1))
 			reads := 0
 			request.Body = &snAttemptTestReadCloser{Reader: snAttemptTestReadFunc(func([]byte) (int, error) { reads++; return 0, io.EOF })}
 			response := &snClientKeyBatchTestRecorder{snAttemptUploadRecorder: snAttemptUploadTestRecorder()}

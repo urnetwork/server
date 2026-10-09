@@ -3,7 +3,7 @@ package model
 import (
 	"fmt"
 
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 type AuthJwt struct {
@@ -15,7 +15,7 @@ type AuthJwt struct {
 func ParseAuthJwt(authJwt string, authJwtType AuthType) (*AuthJwt, error) {
 	switch authJwtType {
 	case AuthTypeApple:
-		appleJwt, err := jwt.ParseAppleJwt(authJwt)
+		appleJwt, err := session.ParseAppleJwt(authJwt)
 		if err != nil {
 			return nil, err
 		}
@@ -25,7 +25,7 @@ func ParseAuthJwt(authJwt string, authJwtType AuthType) (*AuthJwt, error) {
 			UserName: appleJwt.UserName,
 		}, nil
 	case AuthTypeGoogle:
-		googleJwt, err := jwt.ParseGoogleJwt(authJwt)
+		googleJwt, err := session.ParseGoogleJwt(authJwt)
 		if err != nil {
 			return nil, err
 		}
@@ -41,7 +41,7 @@ func ParseAuthJwt(authJwt string, authJwtType AuthType) (*AuthJwt, error) {
 func ParseAuthJwtUnverified(authJwt string, authJwtType AuthType) (*AuthJwt, error) {
 	switch authJwtType {
 	case AuthTypeApple:
-		appleJwt, err := jwt.ParseAppleJwtUnverified(authJwt)
+		appleJwt, err := session.ParseAppleJwtUnverified(authJwt)
 		if err != nil {
 			return nil, err
 		}
@@ -51,7 +51,7 @@ func ParseAuthJwtUnverified(authJwt string, authJwtType AuthType) (*AuthJwt, err
 			UserName: appleJwt.UserName,
 		}, nil
 	case AuthTypeGoogle:
-		googleJwt, err := jwt.ParseGoogleJwtUnverified(authJwt)
+		googleJwt, err := session.ParseGoogleJwtUnverified(authJwt)
 		if err != nil {
 			return nil, err
 		}

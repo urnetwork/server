@@ -16,9 +16,9 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -37,7 +37,7 @@ func TestProviderEgressGrantedContractAPIAndLocalParity(t *testing.T) {
 				network, user, parent, device := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 				model.Testing_CreateNetwork(ctx, network, "grant-parity-"+network.String(), user)
 				model.Testing_CreateDevice(ctx, network, device, parent, "grant parent", "fixture")
-				parentToken := jwt.NewByJwt(network, user, "grant parity", false, false).Client(device, parent).Sign()
+				parentToken := session.NewByJwt(network, user, "grant parity", false, false).Client(device, parent).Testing_Sign()
 				credentials, err := newProviderEgressCredentials(&model.ProberIdentity{NetworkId: &network, UserId: &user, ClientId: &parent, ByClientJwt: parentToken})
 				server.Raise(err)
 				server.Raise(model.AddBasicTransferBalance(ctx, network, granted, server.NowUtc(), server.NowUtc().Add(time.Hour)))
@@ -54,7 +54,7 @@ func TestProviderEgressGrantedContractAPIAndLocalParity(t *testing.T) {
 				source := connect.Id(parent)
 				minted, err := credentials.AuthNetworkClient(ctx, &connect.AuthNetworkClientArgs{SourceClientId: &source})
 				server.Raise(err)
-				claims, err := jwt.ParseByJwtForAudience(ctx, minted.ByClientJwt, jwt.ByJwtAudienceApi)
+				claims, err := session.ParseByJwtForAudience(ctx, minted.ByClientJwt, session.ByJwtAudienceApi)
 				server.Raise(err)
 				if claims.ClientId == nil {
 					t.Fatal("derived client credential unavailable")

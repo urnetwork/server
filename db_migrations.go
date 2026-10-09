@@ -9875,4 +9875,9 @@ var migrations = []any{
 		CREATE INDEX CONCURRENTLY legacy_settlement_intent_owner_missing
 		ON legacy_settlement_intent(shard,contract_id) WHERE source_client_id IS NULL
 	`, `DROP INDEX IF EXISTS legacy_settlement_intent_owner_missing; `+ContractCloseOwnerMissingIndexSql),
+	newSqlMigration(sessionSchemaSql),
+	newRestartableOnlineSqlMigration(`DROP INDEX CONCURRENTLY IF EXISTS network_client_session_active`,
+		`CREATE INDEX CONCURRENTLY network_client_session_active ON network_client(network_id,session_id,client_id) WHERE active AND session_id IS NOT NULL`, sessionClientIndexSql),
+	newRestartableOnlineSqlMigration(`DROP INDEX CONCURRENTLY IF EXISTS auth_code_origin_session`,
+		`CREATE INDEX CONCURRENTLY auth_code_origin_session ON auth_code(network_id,origin_session_id) WHERE active AND origin_session_id IS NOT NULL`, sessionAuthCodeIndexSql),
 }

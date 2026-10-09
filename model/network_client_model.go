@@ -28,7 +28,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 	// "github.com/urnetwork/server/ulid"
@@ -271,17 +271,17 @@ type ProxyAuthResult struct {
 func validateClientIdentityArgs(
 	roles []string,
 	principal string,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (resolvedRoles []string, resolvedPrincipal string, message string) {
 	if 0 < len(roles) || principal != "" {
-		if session.ByJwt.ClientId != nil || !HasAnyAuthMethod(session.Ctx, session.ByJwt.UserId) {
+		if clientSession.ByJwt.ClientId != nil || !HasAnyAuthMethod(clientSession.Ctx, clientSession.ByJwt.UserId) {
 			message = "Roles and principal can only be assigned by a network session."
 			return
 		}
 	} else {
 		// inherit the session identity (e.g. a session logged in with an auth code)
-		roles = session.ByJwt.Roles
-		principal = session.ByJwt.Principal
+		roles = clientSession.ByJwt.Roles
+		principal = clientSession.ByJwt.Principal
 	}
 
 	if MaxClientRoleCount < len(roles) {
@@ -308,9 +308,9 @@ func validateClientIdentityArgs(
 
 func AuthNetworkClient(
 	authClient *AuthNetworkClientArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (authClientResult *AuthNetworkClientResult, authClientError error) {
-	return authNetworkClient(authClient, session, nil)
+	return authNetworkClient(authClient, clientSession, nil)
 }
 
 // A local owner supplies cryptographically verified parent claims. Their live
@@ -327,18 +327,37 @@ func AuthNetworkClientFromParent(authClient *AuthNetworkClientArgs, clientSessio
 
 // The optional registration owner is created only by the versioned endpoint.
 // Ordinary client creation retains its original request and response contract.
-func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.ClientSession, registration *networkClientRegistrationOwner) (authClientResult *AuthNetworkClientResult, authClientError error) {
-	return authNetworkClientWithParentState(authClient, session, registration, false)
+func authNetworkClient(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession, registration *networkClientRegistrationOwner) (authClientResult *AuthNetworkClientResult, authClientError error) {
+	return authNetworkClientWithParentState(authClient, clientSession, registration, false)
 }
 
 // Parent validation belongs to the transaction that creates the child. Other
 // entry points keep their existing caller-owned authentication boundary.
-func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session *session.ClientSession, registration *networkClientRegistrationOwner, validateParent bool) (authClientResult *AuthNetworkClientResult, authClientError error) {
+func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession, registration *networkClientRegistrationOwner, validateParent bool, internalProbe ...bool) (authClientResult *AuthNetworkClientResult, authClientError error) {
+	mintCredential := clientSession.ByJwt.Renew()
+	probe := len(internalProbe) > 0 && internalProbe[0]
+	if !probe {
+		session.PrepareSessionMint(mintCredential, clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity)
+	}
+	mint := func(ctx context.Context, tx server.PgTx, credential *session.ByJwt) (string, error) {
+		if probe {
+			return session.SignInternalProbeInTx(ctx, tx, credential)
+		}
+		kind := "legacy"
+		if clientSession.ApiKeyAuthenticated {
+			kind = "api_key_client"
+		}
+		return session.RegisterAndSignInTx(ctx, tx, credential, kind, nil, false)
+	}
+	if registration != nil {
+		registration.mintCredential = mintCredential
+	}
+
 	if authClient.ClientId == nil {
 		// a client token creates only children of its own client (AUTHZ1.md).
 		// A top-level client needs the network credential, and another
 		// client's id answers as a client that does not exist
-		if callerClientId := session.ByJwt.ClientId; callerClientId != nil {
+		if callerClientId := clientSession.ByJwt.ClientId; callerClientId != nil {
 			if authClient.SourceClientId == nil {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
@@ -357,7 +376,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			}
 		}
 
-		roles, principal, message := validateClientIdentityArgs(authClient.Roles, authClient.Principal, session)
+		roles, principal, message := validateClientIdentityArgs(authClient.Roles, authClient.Principal, clientSession)
 		if message != "" {
 			authClientResult = &AuthNetworkClientResult{
 				Error: &AuthNetworkClientError{
@@ -383,7 +402,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			}
 			proxyInvalidPerformanceProfilesAuthClient.Inc()
 			if glog.V(1) {
-				glog.Infof("[proxy][%s]auth-client refused the initial performance profile: %s\n", session.ByJwt.NetworkId, err)
+				glog.Infof("[proxy][%s]auth-client refused the initial performance profile: %s\n", clientSession.ByJwt.NetworkId, err)
 			}
 			return fmt.Sprintf("Invalid performance profile: %s", err)
 		}
@@ -405,7 +424,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			if proxyConfig.LockCallerIp {
 				// the caller's ip is the server's own input, so this is an error,
 				// not a refusal
-				addr, _, err := session.ParseClientIpPort()
+				addr, _, err := clientSession.ParseClientIpPort()
 				if err != nil {
 					authClientError = fmt.Errorf("Could not lock caller ip")
 					return
@@ -450,7 +469,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			if proxyDeviceState.Location == nil {
 				// try the country code
 				proxyDeviceState.Location = GetConnectLocationForCountryCode(
-					session.Ctx,
+					clientSession.Ctx,
 					initialDeviceState.CountryCode,
 				)
 			}
@@ -477,7 +496,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 		// this does no redis/db work at all. See NetworkConcurrentClientsExceeded.
 		// Checked before the tx so the lookup does not hold it open. Connection
 		// activation applies the same limit; see CanConnectNetworkPeer.
-		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && NetworkConcurrentClientsExceeded(session.Ctx, session.ByJwt.NetworkId)
+		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && NetworkConcurrentClientsExceeded(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 		if concurrentLimitExceeded && registration == nil {
 			authClientResult = &AuthNetworkClientResult{
 				Error: &AuthNetworkClientError{
@@ -497,7 +516,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 		var serverProxyConfig ServerProxyConfig
 		var proxyClientOptions CreateProxyClientOptions
 		if authClient.ProxyConfig != nil {
-			networkId := session.ByJwt.NetworkId
+			networkId := clientSession.ByJwt.NetworkId
 
 			serverProxyConfig = LoadServerProxyConfig()
 			if len(serverProxyConfig.Hosts) == 0 {
@@ -533,19 +552,20 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			// costs no lookup and every tier still gets them.
 			proxyClientOptions = CreateProxyClientOptions{
 				HttpsRequireAuth: authClient.ProxyConfig.HttpsRequireAuth,
-				EnableSocks:      NetworkFeatureAllowed(session.Ctx, networkId, FeatureSocksProxy),
+				EnableSocks:      NetworkFeatureAllowed(clientSession.Ctx, networkId, FeatureSocksProxy),
 				EnableWg: authClient.ProxyConfig.EnableWg &&
-					NetworkFeatureAllowed(session.Ctx, networkId, FeatureWireguardProxy),
+					NetworkFeatureAllowed(clientSession.Ctx, networkId, FeatureWireguardProxy),
 			}
 		}
 
-		var clientId server.Id
+		clientId := server.NewId()
+		mintedDeviceId := server.NewId()
 		// the proxy's mirror json and its proxy client, from the transaction
 		// that committed, for the redis writes after the commit
 		var proxyDeviceConfigJson []byte
 		var proxyClient *ProxyClient
 
-		var registrationTxOptions []any
+		registrationTxOptions := []any{server.TxReadCommitted}
 		if registration != nil {
 			// The first statement waits for the network's allocation lock.
 			// Its following lookup must see the preceding owner's commit.
@@ -559,14 +579,18 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 		var mintEntitlement proEntitlement
 		if validateParent {
 			registrationTxOptions = append(registrationTxOptions, server.TxReadBeforeBegin(func(conn server.PgCanQuery) {
-				mintEntitlement = loadProNetworkWithConn(session.Ctx, conn, session.ByJwt.NetworkId)
-				observeProNetworkLoaded(session.ByJwt.NetworkId)
+				mintEntitlement = loadProNetworkWithConn(clientSession.Ctx, conn, clientSession.ByJwt.NetworkId)
+				observeProNetworkLoaded(clientSession.ByJwt.NetworkId)
 				isPro = mintEntitlement.pro
 			}))
 		} else {
-			isPro = IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
+			isPro = IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
 		}
-		server.Tx(session.Ctx, func(tx server.PgTx) {
+		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+			server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, false))
+			if !validateParent {
+				server.Raise(session.ValidateByJwtStateInTx(clientSession.Ctx, tx, clientSession.ByJwt, false))
+			}
 			// reset in case the tx is retried on a transient error: only the
 			// attempt that commits may answer or leave a proxy to publish
 			authClientResult = nil
@@ -575,17 +599,20 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			proxyClient = nil
 
 			if validateParent {
-				if err := jwt.ValidateByJwtStateInTx(session.Ctx, tx, session.ByJwt, true); err != nil {
+				if err := session.ValidateByJwtStateInTx(clientSession.Ctx, tx, clientSession.ByJwt, true); err != nil {
+					if errors.Is(err, session.ErrAuthUnavailable) {
+						server.Raise(err)
+					}
 					authClientError = ErrClientParentInactive
 					return
 				}
 			}
-			if err := lockProberShardClientAdmissionInTx(session.Ctx, tx, session.ByJwt.NetworkId); err != nil {
+			if err := lockProberShardClientAdmissionInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId); err != nil {
 				authClientError = err
 				return
 			}
 			if registration != nil {
-				retained, found := registration.resumeInTx(tx, session, isPro, roles, principal)
+				retained, found := registration.resumeInTx(tx, clientSession, isPro, roles, principal)
 				if found {
 					authClientResult = retained
 					if retained.ClientId != nil {
@@ -600,7 +627,6 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			}
 			createTime := server.NowUtc()
 
-			clientId = server.NewId()
 			var deviceId server.Id
 
 			if authClient.SourceClientId == nil {
@@ -614,9 +640,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 				// is per network: an Embed plan raises it (see
 				// network_client_limit_model.go); the peer valve keeps the constant.
 				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent {
-					topLevelClientLimit := networkTopLevelClientLimitInTx(session.Ctx, tx, session.ByJwt.NetworkId)
+					topLevelClientLimit := networkTopLevelClientLimitInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId)
 					// the scan is bounded at the limit since only the threshold matters
-					topLevelClientCount := countNetworkActiveTopLevelClients(session.Ctx, tx, session.ByJwt.NetworkId, topLevelClientLimit+1)
+					topLevelClientCount := countNetworkActiveTopLevelClients(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, topLevelClientLimit+1)
 					if topLevelClientLimit <= topLevelClientCount {
 						authClientResult = &AuthNetworkClientResult{
 							Error: &AuthNetworkClientError{
@@ -628,10 +654,10 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 					}
 				}
 
-				deviceId = server.NewId()
+				deviceId = mintedDeviceId
 
 				server.RaisePgResult(tx.Exec(
-					session.Ctx,
+					clientSession.Ctx,
 					`
 						INSERT INTO device (
 							device_id,
@@ -643,7 +669,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 						VALUES ($1, $2, $3, $4, $5)
 					`,
 					deviceId,
-					session.ByJwt.NetworkId,
+					clientSession.ByJwt.NetworkId,
 					authClient.Description,
 					authClient.DeviceSpec,
 					createTime,
@@ -651,13 +677,13 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			} else if validateParent {
 				// The same snapshot just verified this exact active client and
 				// claimed device; no second source-client read is needed.
-				deviceId = *session.ByJwt.DeviceId
+				deviceId = *clientSession.ByJwt.DeviceId
 			} else {
 				// copy the device id from the source
 				// important: validate the source client id is in the same network
 				sourceFound := false
 				result, err := tx.Query(
-					session.Ctx,
+					clientSession.Ctx,
 					`
 						SELECT
 							device_id
@@ -667,7 +693,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 							network_id = $2
 					`,
 					*authClient.SourceClientId,
-					session.ByJwt.NetworkId,
+					clientSession.ByJwt.NetworkId,
 				)
 				server.WithPgResult(result, err, func() {
 					if result.Next() {
@@ -699,7 +725,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			// clobbered. Empty incoming values are ignored.
 			if authClient.DeviceSpec != "" {
 				server.RaisePgResult(tx.Exec(
-					session.Ctx,
+					clientSession.Ctx,
 					`
 						UPDATE device
 						SET device_spec = $2
@@ -711,7 +737,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			}
 			if authClient.Description != "" {
 				server.RaisePgResult(tx.Exec(
-					session.Ctx,
+					clientSession.Ctx,
 					`
 						UPDATE device
 						SET device_name = $2
@@ -725,7 +751,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			}
 
 			server.RaisePgResult(tx.Exec(
-				session.Ctx,
+				clientSession.Ctx,
 				`
 					INSERT INTO network_client (
 						client_id,
@@ -740,7 +766,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 					VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
 				`,
 				clientId,
-				session.ByJwt.NetworkId,
+				clientSession.ByJwt.NetworkId,
 				deviceId,
 				authClient.Description,
 				createTime,
@@ -751,7 +777,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			if authClient.ProvideIntent && authClient.SourceClientId == nil {
 				// a provider install for its life (NetworkPeerCategoryProvider)
 				server.RaisePgResult(tx.Exec(
-					session.Ctx,
+					clientSession.Ctx,
 					`
 						INSERT INTO network_client_provider_intent (
 							client_id,
@@ -765,7 +791,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			}
 
 			if 0 < len(roles) {
-				server.BatchInTx(session.Ctx, tx, func(batch server.PgBatch) {
+				server.BatchInTx(clientSession.Ctx, tx, func(batch server.PgBatch) {
 					for _, role := range roles {
 						batch.Queue(
 							`
@@ -781,7 +807,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 				})
 			}
 			if registration != nil {
-				registration.bindInTx(tx, session, clientId, deviceId)
+				registration.bindInTx(tx, clientSession, clientId, deviceId)
 			}
 
 			// a failure here panics, which rolls back the client, its device
@@ -795,10 +821,10 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 					InitialDeviceState: proxyInitialDeviceState,
 				}
 				var err error
-				proxyDeviceConfigJson, err = createProxyDeviceConfigInTx(session.Ctx, tx, proxyDeviceConfig)
+				proxyDeviceConfigJson, err = createProxyDeviceConfigInTx(clientSession.Ctx, tx, proxyDeviceConfig)
 				server.Raise(err)
 				proxyClient, err = createProxyClientInTx(
-					session.Ctx,
+					clientSession.Ctx,
 					tx,
 					serverProxyConfig,
 					proxyDeviceConfig.ProxyId,
@@ -817,17 +843,15 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			// preserve the root jwt's create time: derivative auth carries the
 			// root lineage so expiring the root can expire everything derived
 			// from it (see AuthCodeCreate)
-			byJwtWithClientId := jwt.NewByJwtWithCreateTime(
-				session.ByJwt.NetworkId,
-				session.ByJwt.UserId,
-				session.ByJwt.NetworkName,
-				session.ByJwt.CreateTime,
-				session.ByJwt.GuestMode,
-				isPro,
-			).Client(deviceId, clientId)
+			byJwtWithClientId := mintCredential
+			byJwtWithClientId.ClientId = &clientId
+			byJwtWithClientId.DeviceId = &deviceId
+			byJwtWithClientId.Pro = isPro
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
-			byClientJwtSigned := byJwtWithClientId.Sign()
+			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
+			byClientJwtSigned, mintErr := mint(clientSession.Ctx, tx, byJwtWithClientId)
+			server.Raise(mintErr)
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byClientJwtSigned,
 				ClientId:    &clientId,
@@ -843,7 +867,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			// Optional cache refresh cannot turn a committed identity into a
 			// failed mint. Version ordering still rejects older publications.
 			server.HandleError(func() {
-				storeProNetwork(session.Ctx, session.ByJwt.NetworkId, mintEntitlement)
+				storeProNetwork(clientSession.Ctx, clientSession.ByJwt.NetworkId, mintEntitlement)
 			})
 		}
 
@@ -853,17 +877,17 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 		// and the proxy hosts also poll), so a failure is logged and the call
 		// still returns the client it committed.
 		if authClientResult != nil && authClientResult.Error == nil {
-			setClientIdentityCache(session.Ctx, clientId, &ClientIdentity{
+			setClientIdentityCache(clientSession.Ctx, clientId, &ClientIdentity{
 				Roles:     roles,
 				Principal: principal,
 			})
 
 			if proxyClient != nil {
 				server.HandleError(func() {
-					setProxyDeviceConfigMirror(session.Ctx, proxyClient.ProxyId, proxyDeviceConfigJson)
+					setProxyDeviceConfigMirror(clientSession.Ctx, proxyClient.ProxyId, proxyDeviceConfigJson)
 				})
 				server.HandleError(func() {
-					publishProxyClient(session.Ctx, proxyClient)
+					publishProxyClient(clientSession.Ctx, proxyClient)
 				})
 			}
 		}
@@ -883,11 +907,13 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 		// Resolve durable-token entitlement before opening the transaction.
 		// IsProFresh checks PostgreSQL and refreshes Redis, neither of which
 		// may be nested under this transaction's checked-out connection.
-		isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
+		isPro := IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
 
 		// important: must check `network_id = session network_id`
-		server.Tx(session.Ctx, func(tx server.PgTx) {
-			if err := lockProberShardClientAdmissionInTx(session.Ctx, tx, session.ByJwt.NetworkId); err != nil {
+		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+			server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, false))
+			server.Raise(session.ValidateByJwtStateInTx(clientSession.Ctx, tx, clientSession.ByJwt, false))
+			if err := lockProberShardClientAdmissionInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId); err != nil {
 				authClientError = err
 				return
 			}
@@ -899,7 +925,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			clientFound := false
 			var deviceId *server.Id
 			result, err := tx.Query(
-				session.Ctx,
+				clientSession.Ctx,
 				`
 					SELECT device_id FROM network_client
 					WHERE
@@ -914,8 +940,8 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 					FOR NO KEY UPDATE
 				`,
 				authClient.ClientId,
-				session.ByJwt.NetworkId,
-				session.ByJwt.ClientId,
+				clientSession.ByJwt.NetworkId,
+				clientSession.ByJwt.ClientId,
 			)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
@@ -942,7 +968,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			}
 
 			tag := server.RaisePgResult(tx.Exec(
-				session.Ctx,
+				clientSession.Ctx,
 				`
 					UPDATE device
 					SET
@@ -963,7 +989,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			}
 
 			server.RaisePgResult(tx.Exec(
-				session.Ctx,
+				clientSession.Ctx,
 				`
 					UPDATE network_client
 					SET
@@ -975,7 +1001,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 						active = true
 				`,
 				authClient.ClientId,
-				session.ByJwt.NetworkId,
+				clientSession.ByJwt.NetworkId,
 				authClient.Description,
 				server.NowUtc(),
 			))
@@ -984,7 +1010,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			var principal string
 			roles := []string{}
 			result, err = tx.Query(
-				session.Ctx,
+				clientSession.Ctx,
 				`
 					SELECT principal FROM network_client
 					WHERE client_id = $1
@@ -997,7 +1023,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 				}
 			})
 			result, err = tx.Query(
-				session.Ctx,
+				clientSession.Ctx,
 				`
 					SELECT role FROM network_client_role
 					WHERE client_id = $1
@@ -1017,22 +1043,20 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, session
 			// (possibly stale) jwt claim — see the new-client branch above.
 			// preserve the root jwt's create time (root lineage; see the
 			// new-client branch above)
-			byJwtWithClientId := jwt.NewByJwtWithCreateTime(
-				session.ByJwt.NetworkId,
-				session.ByJwt.UserId,
-				session.ByJwt.NetworkName,
-				session.ByJwt.CreateTime,
-				session.ByJwt.GuestMode,
-				isPro,
-			).Client(*deviceId, *authClient.ClientId)
+			byJwtWithClientId := mintCredential
+			byJwtWithClientId.ClientId = authClient.ClientId
+			byJwtWithClientId.DeviceId = deviceId
+			byJwtWithClientId.Pro = isPro
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
-			byClientJwtSigned := byJwtWithClientId.Sign()
+			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
+			byClientJwtSigned, mintErr := mint(clientSession.Ctx, tx, byJwtWithClientId)
+			server.Raise(mintErr)
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byClientJwtSigned,
 				ClientId:    authClient.ClientId,
 			}
-		})
+		}, server.TxReadCommitted)
 	}
 
 	return
@@ -1062,31 +1086,31 @@ type RemoveNetworkClientError struct {
 
 func RemoveNetworkClient(
 	removeClient *RemoveNetworkClientArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*RemoveNetworkClientResult, error) {
 	var removeClientResult *RemoveNetworkClientResult
 	var removeClientErr error
 
 	// important: must check `network_id = session network_id`
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		var rowCount int64
 		var err error
-		if callerClientId := session.ByJwt.ClientId; callerClientId != nil {
+		if callerClientId := clientSession.ByJwt.ClientId; callerClientId != nil {
 			// a client token removes only its own client and its children
 			// (AUTHZ1.md); any other client answers as one that does not exist
 			rowCount, err = deactivateOwnedNetworkClientInTx(
-				session.Ctx,
+				clientSession.Ctx,
 				tx,
 				removeClient.ClientId,
-				session.ByJwt.NetworkId,
+				clientSession.ByJwt.NetworkId,
 				*callerClientId,
 			)
 		} else {
 			rowCount, err = deactivateNetworkClientsInTx(
-				session.Ctx,
+				clientSession.Ctx,
 				tx,
 				[]server.Id{removeClient.ClientId},
-				session.ByJwt.NetworkId,
+				clientSession.ByJwt.NetworkId,
 			)
 		}
 		server.Raise(err)
@@ -1285,10 +1309,10 @@ type RemoveNetworkClientsBatchResult struct{}
 // concurrent overlapping updates that the pool's default isolation would risk.
 func RemoveNetworkClientsBatch(
 	removeClients *RemoveNetworkClientsBatchArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*RemoveNetworkClientsBatchResult, error) {
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-		removeNetworkClientsBatchExec(session.Ctx, tx, removeClients.ClientIds, session.ByJwt.NetworkId)
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		removeNetworkClientsBatchExec(clientSession.Ctx, tx, removeClients.ClientIds, clientSession.ByJwt.NetworkId)
 	}, server.TxReadCommitted)
 	return &RemoveNetworkClientsBatchResult{}, nil
 }
@@ -1359,7 +1383,7 @@ func runNetworkClientsTaskKey(networkId server.Id) *task.RunOnceOption {
 // the caller to chunk the request themselves.
 func RemoveNetworkClients(
 	removeClients *RemoveNetworkClientsArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*RemoveNetworkClientsResult, error) {
 	if len(removeClients.ClientIds) == 0 {
 		return &RemoveNetworkClientsResult{}, nil
@@ -1388,7 +1412,7 @@ func RemoveNetworkClients(
 	// charge, a reservation that turns out to be unusable (concurrency cap
 	// or an existing in-progress run, below) has to be explicitly released
 	// rather than just not made.
-	reservationId, bucketStart, err := ReserveBulkClientRemovalSlot(session.Ctx, session.ByJwt.NetworkId, len(clientIds))
+	reservationId, bucketStart, err := ReserveBulkClientRemovalSlot(clientSession.Ctx, clientSession.ByJwt.NetworkId, len(clientIds))
 	if err != nil {
 		return nil, err
 	}
@@ -1401,9 +1425,9 @@ func RemoveNetworkClients(
 		// concurrency cap below either.
 		_, err := RemoveNetworkClientsBatch(&RemoveNetworkClientsBatchArgs{
 			ClientIds: clientIds,
-		}, session)
+		}, clientSession)
 		if err != nil {
-			CancelBulkClientRemovalReservation(session.Ctx, reservationId)
+			CancelBulkClientRemovalReservation(clientSession.Ctx, reservationId)
 			return nil, err
 		}
 		return &RemoveNetworkClientsResult{}, nil
@@ -1427,8 +1451,8 @@ func RemoveNetworkClients(
 	// the more specific AlreadyInProgress a few lines down. Both are the
 	// same instruction to the caller (retry later), so this is a deliberate
 	// simplification rather than tracking per-network exclusions.
-	if concurrentRuns := task.CountAvailableByFunctionName(session.Ctx, RemoveNetworkClientsTask); MaxConcurrentBulkClientRemovalRuns <= concurrentRuns {
-		CancelBulkClientRemovalReservation(session.Ctx, reservationId)
+	if concurrentRuns := task.CountAvailableByFunctionName(clientSession.Ctx, RemoveNetworkClientsTask); MaxConcurrentBulkClientRemovalRuns <= concurrentRuns {
+		CancelBulkClientRemovalReservation(clientSession.Ctx, reservationId)
 		return &RemoveNetworkClientsResult{TooManyConcurrentRuns: true}, nil
 	}
 
@@ -1464,8 +1488,8 @@ func RemoveNetworkClients(
 		&RemoveNetworkClientsTaskArgs{
 			ClientIds: clientIds,
 		},
-		session,
-		runNetworkClientsTaskKey(session.ByJwt.NetworkId),
+		clientSession,
+		runNetworkClientsTaskKey(clientSession.ByJwt.NetworkId),
 		// bulk cleanup must never compete with revenue/critical-path tasks
 		// (payouts, contract close) under multi-tenant load
 		task.Priority(task.TaskPrioritySlowest),
@@ -1476,7 +1500,7 @@ func RemoveNetworkClients(
 		// the reservation was made under this network's name, but it turns
 		// out there's already a run in progress -- release the slot so it
 		// doesn't sit charged against nothing.
-		CancelBulkClientRemovalReservation(session.Ctx, reservationId)
+		CancelBulkClientRemovalReservation(clientSession.Ctx, reservationId)
 		return &RemoveNetworkClientsResult{AlreadyInProgress: true}, nil
 	}
 
@@ -1517,9 +1541,9 @@ type RemoveNetworkClientsTaskResult struct {
 // idempotent, so a retried or re-run invocation is safe.
 func RemoveNetworkClientsTask(
 	removeClients *RemoveNetworkClientsTaskArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*RemoveNetworkClientsTaskResult, error) {
-	if session.ByJwt == nil {
+	if clientSession.ByJwt == nil {
 		// unreachable in the normal flow (always scheduled from an
 		// authenticated handler with ByJwt set), but this task can outlive
 		// the request that scheduled it -- fail loudly rather than panic on
@@ -1538,8 +1562,8 @@ func RemoveNetworkClientsTask(
 		batch := clientIds[:batchCount]
 		clientIds = clientIds[batchCount:]
 
-		server.MaintenanceTx(session.Ctx, func(tx server.PgTx) {
-			removeNetworkClientsBatchExec(session.Ctx, tx, batch, session.ByJwt.NetworkId)
+		server.MaintenanceTx(clientSession.Ctx, func(tx server.PgTx) {
+			removeNetworkClientsBatchExec(clientSession.Ctx, tx, batch, clientSession.ByJwt.NetworkId)
 		}, server.TxReadCommitted)
 		batches += 1
 	}
@@ -1566,10 +1590,10 @@ func RemoveNetworkClientsTask(
 func RemoveNetworkClientsTaskPost(
 	removeClients *RemoveNetworkClientsTaskArgs,
 	result *RemoveNetworkClientsTaskResult,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	if session.ByJwt == nil {
+	if clientSession.ByJwt == nil {
 		// unreachable in the normal flow, but same rationale as the guard in
 		// RemoveNetworkClientsTask: if a corrupted/empty client_by_jwt_json
 		// row reaches the post phase, fail loudly rather than nil-deref.
@@ -1582,8 +1606,8 @@ func RemoveNetworkClientsTaskPost(
 			&RemoveNetworkClientsTaskArgs{
 				ClientIds: result.RemainingClientIds,
 			},
-			session,
-			runNetworkClientsTaskKey(session.ByJwt.NetworkId),
+			clientSession,
+			runNetworkClientsTaskKey(clientSession.ByJwt.NetworkId),
 			task.Priority(task.TaskPrioritySlowest),
 			task.MaxTime(30*time.Minute),
 		)
@@ -1643,19 +1667,19 @@ const (
 // qualification. Child clients never appear, and neither do the "resident
 // proxy" devices the proxy host runs for the network's proxies; those are
 // listed by GetNetworkProxies. This is what the apps' device lists show.
-func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, error) {
-	return getNetworkClientList(session, networkClientListDevices)
+func GetNetworkClients(clientSession *session.ClientSession) (*NetworkClientsResult, error) {
+	return getNetworkClientList(clientSession, networkClientListDevices)
 }
 
 // GetNetworkProxies lists the network's hosted proxy devices (clients with a
 // `proxy_device_config` row) with their `proxy_client` credentials. Everything
 // else about a row (resident, connections, roles, provide mode) reads the same
 // as GetNetworkClients.
-func GetNetworkProxies(session *session.ClientSession) (*NetworkClientsResult, error) {
-	return getNetworkClientList(session, networkClientListProxies)
+func GetNetworkProxies(clientSession *session.ClientSession) (*NetworkClientsResult, error) {
+	return getNetworkClientList(clientSession, networkClientListProxies)
 }
 
-func getNetworkClientList(session *session.ClientSession, kind networkClientListKind) (*NetworkClientsResult, error) {
+func getNetworkClientList(clientSession *session.ClientSession, kind networkClientListKind) (*NetworkClientsResult, error) {
 	var clientsResult *NetworkClientsResult
 	var clientsErr error
 
@@ -1675,9 +1699,9 @@ func getNetworkClientList(session *session.ClientSession, kind networkClientList
 					)`
 	}
 
-	server.Db(session.Ctx, func(conn server.PgConn) {
+	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				SELECT
 					network_client.client_id,
@@ -1703,7 +1727,7 @@ func getNetworkClientList(session *session.ClientSession, kind networkClientList
 					network_client.network_id = $1 AND
 					network_client.active = true AND`+kindFilter+`
 			`,
-			session.ByJwt.NetworkId,
+			clientSession.ByJwt.NetworkId,
 			ProvideModePublic,
 		)
 		clientInfos := map[server.Id]*NetworkClientInfo{}
@@ -1746,7 +1770,7 @@ func getNetworkClientList(session *session.ClientSession, kind networkClientList
 		})
 
 		result, err = conn.Query(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				SELECT
 					network_client_role.client_id,
@@ -1759,7 +1783,7 @@ func getNetworkClientList(session *session.ClientSession, kind networkClientList
 					network_client.active = true
 				ORDER BY network_client_role.role
 			`,
-			session.ByJwt.NetworkId,
+			clientSession.ByJwt.NetworkId,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1773,7 +1797,7 @@ func getNetworkClientList(session *session.ClientSession, kind networkClientList
 		})
 
 		result, err = conn.Query(
-			session.Ctx,
+			clientSession.Ctx,
 			`
 				SELECT
 					network_client.client_id,
@@ -1791,7 +1815,7 @@ func getNetworkClientList(session *session.ClientSession, kind networkClientList
 					network_client.network_id = $1 AND
 					network_client.active = true
 			`,
-			session.ByJwt.NetworkId,
+			clientSession.ByJwt.NetworkId,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1816,14 +1840,14 @@ func getNetworkClientList(session *session.ClientSession, kind networkClientList
 	})
 
 	if clientsResult != nil && 0 < len(clientsResult.Clients) {
-		server.Redis(session.Ctx, func(r server.RedisClient) {
+		server.Redis(clientSession.Ctx, func(r server.RedisClient) {
 			// the pending connection keys use per-client hash tags (different
 			// slots), so use per-key gets in a plain pipeline, which
 			// auto-routes per slot on cluster (mget would be cross-slot)
 			getCmds := make([]*redis.StringCmd, len(clientsResult.Clients))
-			r.Pipelined(session.Ctx, func(pipe redis.Pipeliner) error {
+			r.Pipelined(clientSession.Ctx, func(pipe redis.Pipeliner) error {
 				for i, clientInfo := range clientsResult.Clients {
-					getCmds[i] = pipe.Get(session.Ctx, pendingClientConnectionKey(clientInfo.ClientId))
+					getCmds[i] = pipe.Get(clientSession.Ctx, pendingClientConnectionKey(clientInfo.ClientId))
 				}
 				return nil
 			})

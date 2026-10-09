@@ -80,14 +80,14 @@ func TestStClientKeyRegistrationCohortLateArrivalUsesFreshBoundary(t *testing.T)
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			firstResult <- stClientKeyRegistrationRequest(ctx, endpoint.URL, credential.Sign(), key)
+			firstResult <- stClientKeyRegistrationRequest(ctx, endpoint.URL, credential.Testing_Sign(), key)
 		}()
 		stClientKeyRegistrationAwait(tb, entered, firstResult)
 		stClientKeyRegistrationAwait(tb, admitted, firstResult)
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			nextResult <- stClientKeyRegistrationRequest(ctx, endpoint.URL, later.Sign(), key)
+			nextResult <- stClientKeyRegistrationRequest(ctx, endpoint.URL, later.Testing_Sign(), key)
 		}()
 		select {
 		case <-admitted:
@@ -402,11 +402,11 @@ func TestStClientKeyRegistrationCohortFailedMemberPreservesSiblingPublication(t 
 		workers.Add(2)
 		go func() {
 			defer workers.Done()
-			firstResult <- stClientKeyRegistrationRequest(ctx, endpoint.URL, credential.Sign(), key)
+			firstResult <- stClientKeyRegistrationRequest(ctx, endpoint.URL, credential.Testing_Sign(), key)
 		}()
 		go func() {
 			defer workers.Done()
-			siblingResult <- stClientKeyRegistrationRequest(ctx, endpoint.URL, sibling.Sign(), key)
+			siblingResult <- stClientKeyRegistrationRequest(ctx, endpoint.URL, sibling.Testing_Sign(), key)
 		}()
 		stClientKeyRegistrationAwait(tb, admitted, firstResult)
 		stClientKeyRegistrationAwait(tb, admitted, siblingResult)

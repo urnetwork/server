@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -60,7 +60,7 @@ func newCustomerTransferFixture(t testing.TB, action func(*http.Request) (*http.
 		}
 		return action(request)
 	}
-	f.owner = &session.ClientSession{Ctx: context.WithValue(t.Context(), circleTransferClientKey{}, f.client), ByJwt: &jwt.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()}}
+	f.owner = &session.ClientSession{Ctx: context.WithValue(t.Context(), circleTransferClientKey{}, f.client), ByJwt: &session.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()}}
 	return f
 }
 

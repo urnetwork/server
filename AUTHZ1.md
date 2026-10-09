@@ -787,3 +787,5 @@ Also:
 - `api/route_authz_test.go` pins the class in the credential-minting guard.
 - `api/route_authz_db_test.go` has the route's request in the gated-route
   sweep.
+
+Session management routes (`GET /network/sessions`, `POST /network/revoke-session`, `POST /network/revoke-other-sessions`, and `GET /network/session-operations/{operation_id}`) require network credentials; valid client credentials receive 403. API keys may list or revoke a specified session. Revoke-others requires a tagged current sign-in; API keys have none and legacy network JWTs must refresh first. The server always takes the network and kept session from authenticated identity. Untagged legacy coverage remains partial. Removing one client and revoking its sign-in are distinct: legacy descendants require active ancestors, while session/root-tagged descendants follow their selected marker/root rule and always require their own active client.

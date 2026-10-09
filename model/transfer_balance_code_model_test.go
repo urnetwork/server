@@ -8,7 +8,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -25,7 +25,7 @@ func TestBalanceCode(t *testing.T) {
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
+			session.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
 		)
 
 		checkResult0, err := CheckBalanceCode(
@@ -103,7 +103,7 @@ func TestFetchNetworkRedeemedBalanceCodes(t *testing.T) {
 
 		clientSession := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
+			session.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
 		)
 
 		redeemed, err := FetchNetworkRedeemedBalanceCodes(clientSession)

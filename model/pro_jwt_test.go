@@ -7,7 +7,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -29,9 +29,9 @@ func proJwtGrantPro(t testing.TB, ctx context.Context, networkId server.Id) {
 	UpdateProNetwork(ctx, networkId)
 }
 
-func proJwtParse(t testing.TB, ctx context.Context, signed *string) *jwt.ByJwt {
+func proJwtParse(t testing.TB, ctx context.Context, signed *string) *session.ByJwt {
 	connect.AssertEqual(t, signed != nil, true)
-	byJwt, err := jwt.ParseByJwt(ctx, *signed)
+	byJwt, err := session.ParseByJwt(ctx, *signed)
 	connect.AssertEqual(t, err, nil)
 	return byJwt
 }
@@ -55,7 +55,7 @@ func TestProJwtAuthClientRederivesUp(t *testing.T) {
 		proJwtGrantPro(t, ctx, networkId)
 
 		// caller presents a stale token minted before the upgrade (Pro=false)
-		sess := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sess := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId, UserId: userId, NetworkName: "test", Pro: false,
 		})
 		result := proJwtAuthClient(t, sess, &AuthNetworkClientArgs{Description: "d", DeviceSpec: "s"})
@@ -73,7 +73,7 @@ func TestProJwtAuthClientRederivesDown(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
 		// no pro balance granted: the network is not Pro
 
-		sess := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sess := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId, UserId: userId, NetworkName: "test", Pro: true,
 		})
 		result := proJwtAuthClient(t, sess, &AuthNetworkClientArgs{Description: "d", DeviceSpec: "s"})
@@ -91,7 +91,7 @@ func TestProJwtAuthClientReauthRederives(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
 
 		// create a client while the network is not yet Pro (stale-false token)
-		sess := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sess := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId, UserId: userId, NetworkName: "test", Pro: false,
 		})
 		created := proJwtAuthClient(t, sess, &AuthNetworkClientArgs{Description: "d", DeviceSpec: "s"})
@@ -126,7 +126,7 @@ func TestProJwtAuthClientReadsSourceOfTruthNotCache(t *testing.T) {
 
 		// re-poison (the fresh read above refreshed the cache) and issue a token
 		testingPoisonProNetworkCache(ctx, networkId, false)
-		sess := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sess := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId, UserId: userId, NetworkName: "test", Pro: false,
 		})
 		result := proJwtAuthClient(t, sess, &AuthNetworkClientArgs{Description: "d", DeviceSpec: "s"})
@@ -147,7 +147,7 @@ func TestClientJwtPreservesRootCreateTime(t *testing.T) {
 
 		// a distinctive root create time, far from now
 		rootCreateTime := server.CodecTime(server.NowUtc().Add(-45 * 24 * time.Hour))
-		sess := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sess := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId, UserId: userId, NetworkName: "test",
 			CreateTime: rootCreateTime,
 		})

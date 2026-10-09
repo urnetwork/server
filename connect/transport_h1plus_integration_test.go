@@ -71,7 +71,7 @@ func TestConnectH1PlusAuthenticationBefore101(t *testing.T) {
 			}
 		}
 		dialer := &websocket.Dialer{HandshakeTimeout: 3 * time.Second}
-		for _, header := range []http.Header{nil, headers("malformed"), headers(env.userSession.ByJwt.User().Sign())} {
+		for _, header := range []http.Header{nil, headers("malformed"), headers(env.userSession.ByJwt.Renew().Testing_Sign())} {
 			conn, err := connectlib.DialFramedUpgrade(ctx, address, header, dialer, connectlib.H1FramerProtocol)
 			if conn != nil {
 				conn.Close()

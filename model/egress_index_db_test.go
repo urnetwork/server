@@ -12,7 +12,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // The egress index and its buckets against the database (connect/GEOMAP.md
@@ -247,7 +247,7 @@ func egressTestFind(
 	t.Helper()
 	clientSession := testingCreateProviderSearchSession(
 		ctx,
-		jwt.NewByJwt(callerNetworkId, server.NewId(), "egress-test", false, false),
+		session.NewByJwt(callerNetworkId, server.NewId(), "egress-test", false, false),
 	)
 	result, err := FindProviders2(&FindProviders2Args{
 		Specs:        specs,

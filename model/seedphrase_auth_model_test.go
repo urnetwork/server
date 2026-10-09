@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 func TestSeedphraseCreateAndLogin(t *testing.T) {
@@ -46,7 +46,7 @@ func TestSeedphraseCreateAndLogin(t *testing.T) {
 		assert.NotEqual(t, loginResult.ByJwt, "")
 
 		// Test 4: Parse the JWT
-		parsed, err := jwt.ParseByJwt(ctx, loginResult.ByJwt)
+		parsed, err := session.ParseByJwt(ctx, loginResult.ByJwt)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, parsed.NetworkId, networkId)
 		assert.Equal(t, parsed.UserId, userId)

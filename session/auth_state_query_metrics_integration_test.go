@@ -7,7 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -52,11 +52,11 @@ func sessionObservedCounter(t testing.TB, name string, want map[string]string) f
 // One request emits one query event, regardless of its controller operation.
 func TestSessionStateQueryMetricUsesActualApiCaller(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := jwt.WithStateQuerySource(t.Context(), jwt.StateQueryProberControl)
+		ctx := session.WithStateQuerySource(t.Context(), session.StateQueryProberControl)
 		networkId, userId, deviceId, clientId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "api-state-query", userId)
 		model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "synthetic", "synthetic")
-		token := jwt.NewByJwt(networkId, userId, "api-state-query", false, false).Client(deviceId, clientId).Sign()
+		token := session.NewByJwt(networkId, userId, "api-state-query", false, false).Client(deviceId, clientId).Testing_Sign()
 		proberBefore := sessionStateQueryMetric(t, "prober", "control", "client", "state_valid")
 		unknownBefore := sessionStateQueryMetric(t, "unknown", "unknown", "client", "state_valid")
 		for _, control := range []struct{ method, path, operation string }{

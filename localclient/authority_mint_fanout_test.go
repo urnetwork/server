@@ -16,20 +16,20 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // Multiple independent owners share one fixture database, so their synthetic
 // network names must be unique as well as their generated identifiers.
-func authorityMintTestOwner(t testing.TB, ctx context.Context) (*Authority, *jwt.ByJwt) {
+func authorityMintTestOwner(t testing.TB, ctx context.Context) (*Authority, *session.ByJwt) {
 	t.Helper()
 	networkId, userId, deviceId, clientId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	name := "synthetic-mint-" + networkId.String()
 	model.Testing_CreateNetwork(ctx, networkId, name, userId)
 	model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
-	claims := jwt.NewByJwt(networkId, userId, name, false, false).Client(deviceId, clientId)
-	owner, err := New(ctx, claims.Sign(), "https://control.example")
+	claims := session.NewByJwt(networkId, userId, name, false, false).Client(deviceId, clientId)
+	owner, err := New(ctx, claims.Testing_Sign(), "https://control.example")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestAuthorityMintFanoutMeasuresActualSdkWork(t *testing.T) {
 				t.Fatal("independent mints collapsed onto one client")
 			}
 			clientIds[result.args.ClientId] = true
-			claims, err := jwt.ParseByJwtForAudience(ctx, result.args.ClientAuth.ByJwt, jwt.ByJwtAudienceApi)
+			claims, err := session.ParseByJwtForAudience(ctx, result.args.ClientAuth.ByJwt, session.ByJwtAudienceApi)
 			owner := owners[result.owner]
 			if err != nil || claims.ClientId == nil || claims.DeviceId == nil || claims.NetworkId != owner.networkId ||
 				*claims.DeviceId != owner.deviceId || connect.Id(*claims.ClientId) != result.args.ClientId {
@@ -253,7 +253,7 @@ func TestAuthorityMintKeepsFreshProAcrossCachedTransitions(t *testing.T) {
 		if err != nil || upgraded == nil || upgraded.ClientAuth == nil {
 			t.Fatal("upgraded mint failed", err)
 		}
-		upgradedClaims, err := jwt.ParseByJwtForAudience(ctx, upgraded.ClientAuth.ByJwt, jwt.ByJwtAudienceApi)
+		upgradedClaims, err := session.ParseByJwtForAudience(ctx, upgraded.ClientAuth.ByJwt, session.ByJwtAudienceApi)
 		if err != nil || !upgradedClaims.Pro {
 			t.Fatal("fresh child inherited stale free entitlement")
 		}
@@ -268,7 +268,7 @@ func TestAuthorityMintKeepsFreshProAcrossCachedTransitions(t *testing.T) {
 		if err != nil || lapsed == nil || lapsed.ClientAuth == nil {
 			t.Fatal("lapsed mint failed", err)
 		}
-		lapsedClaims, err := jwt.ParseByJwtForAudience(ctx, lapsed.ClientAuth.ByJwt, jwt.ByJwtAudienceApi)
+		lapsedClaims, err := session.ParseByJwtForAudience(ctx, lapsed.ClientAuth.ByJwt, session.ByJwtAudienceApi)
 		if err != nil || lapsedClaims.Pro {
 			t.Fatal("fresh child inherited stale Pro entitlement")
 		}
@@ -302,9 +302,9 @@ func TestAuthorityMintPreflightRejectsBeforePool(t *testing.T) {
 			case "device":
 				claims.DeviceId = &other
 			case "audience":
-				claims.Audience = []string{jwt.ByJwtAudienceConnect}
+				claims.Audience = []string{session.ByJwtAudienceConnect}
 			}
-			tokens = append(tokens, claims.Sign())
+			tokens = append(tokens, claims.Testing_Sign())
 		}
 		poolLabels := map[string]string{"pool": "default", "outcome": "acquired"}
 		acquiresBefore := authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels)

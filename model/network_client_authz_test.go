@@ -13,13 +13,13 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
 // clientTokenTestSession is the session of the client's own token.
 func clientTokenTestSession(ctx context.Context, userSession *session.ClientSession, clientId server.Id, deviceId server.Id) *session.ClientSession {
-	return session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	return session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: userSession.ByJwt.NetworkId,
 		UserId:    userSession.ByJwt.UserId,
 		DeviceId:  &deviceId,
@@ -153,7 +153,7 @@ func TestAuthNetworkClientClientTokenReissuesOnlyItsOwnClients(t *testing.T) {
 			connect.AssertEqual(t, err, nil)
 			connect.AssertEqual(t, result.Error, nil)
 			connect.AssertNotEqual(t, result.ByClientJwt, nil)
-			reissued, err := jwt.ParseByJwtUnverified(ctx, *result.ByClientJwt)
+			reissued, err := session.ParseByJwtUnverified(ctx, *result.ByClientJwt)
 			connect.AssertEqual(t, err, nil)
 			connect.AssertNotEqual(t, reissued.ClientId, nil)
 			connect.AssertEqual(t, *reissued.ClientId, ownClientId)

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -59,7 +59,7 @@ func TestSolanaCreditsRefuseDeletedNetworkBeforeIntent(t *testing.T) {
 			reference := "synthetic-solana-reference-" + testCase.name
 			if testCase.plan == model.SolanaPlanMonthly {
 				clientId := server.NewId()
-				userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+				userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 					NetworkId: networkId,
 					ClientId:  &clientId,
 					UserId:    userId,

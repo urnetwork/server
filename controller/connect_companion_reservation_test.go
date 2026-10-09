@@ -12,7 +12,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -98,7 +98,7 @@ func TestProberCompanionControlPathsSignActualReservation(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					byJwt := jwt.NewByJwt(providerNetworkId, server.NewId(), "synthetic provider", false, false).Client(server.NewId(), providerId)
+					byJwt := session.NewByJwt(providerNetworkId, server.NewId(), "synthetic provider", false, false).Client(server.NewId(), providerId)
 					clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 					defer clientSession.Cancel()
 					result, err := ConnectControl(&ConnectControlArgs{Pack: base64.StdEncoding.EncodeToString(pack)}, clientSession)

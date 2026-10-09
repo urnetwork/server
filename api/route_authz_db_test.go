@@ -20,9 +20,9 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 type routeAccessDbFixture struct {
@@ -48,7 +48,7 @@ func newRouteAccessDbFixture(t testing.TB, ctx context.Context) *routeAccessDbFi
 		networkId:   networkId,
 		userId:      userId,
 		networkName: networkName,
-		rootToken:   jwt.NewByJwt(networkId, userId, networkName, false, false).Sign(),
+		rootToken:   session.NewByJwt(networkId, userId, networkName, false, false).Testing_Sign(),
 	}
 
 	// the root token creates the backend's API key
@@ -590,7 +590,7 @@ func TestRealClientTokenActsOnlyForItsOwnClients(t *testing.T) {
 			ByJwt string `json:"by_jwt"`
 		}
 		self.call(t, http.MethodGet, "/auth/refresh", client, nil, http.StatusOK, &refreshed)
-		if refreshedJwt, err := jwt.ParseByJwtUnverified(ctx, refreshed.ByJwt); err != nil || refreshedJwt.ClientId == nil || *refreshedJwt.ClientId != clientId {
+		if refreshedJwt, err := session.ParseByJwtUnverified(ctx, refreshed.ByJwt); err != nil || refreshedJwt.ClientId == nil || *refreshedJwt.ClientId != clientId {
 			t.Fatalf("refresh = %v %v", refreshedJwt, err)
 		}
 	})

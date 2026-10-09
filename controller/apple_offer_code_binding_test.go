@@ -16,7 +16,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -175,7 +175,7 @@ func (self *offerCodeFakeEnv) addNetwork(withOffer bool, issuedAgo time.Duration
 			AppleOfferCode: &code,
 		}
 	}
-	clientSession := session.Testing_CreateClientSession(context.Background(), &jwt.ByJwt{
+	clientSession := session.Testing_CreateClientSession(context.Background(), &session.ByJwt{
 		NetworkId: networkId,
 		UserId:    server.NewId(),
 	})

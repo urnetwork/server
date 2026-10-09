@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // A bounded synthetic cache page, admitted by the exporter before this request.
@@ -167,7 +167,7 @@ func TestBackfillOnlineOtherModePreservesRequestFilters(t *testing.T) {
 		server.Redis(ctx, func(r server.RedisClient) {
 			server.Raise(r.SAdd(ctx, providerHardExclusionsKey, dark.ClientId.String(), intercepted.ClientId.String()).Err())
 		})
-		clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(callerNetworkId, server.NewId(), "online-backfill-test", false, false))
+		clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(callerNetworkId, server.NewId(), "online-backfill-test", false, false))
 		result, err := FindProviders2(&FindProviders2Args{
 			Specs:               []*ProviderSpec{{LocationId: &locationId}},
 			RankMode:            RankModeQuality,

@@ -12,8 +12,8 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 func TestIpFamilyIntentParsing(t *testing.T) {
@@ -120,10 +120,10 @@ func TestConnectRecordsIpFamilyIntent(t *testing.T) {
 			clientId := server.NewId()
 			deviceId := server.NewId()
 			model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "d", "d")
-			byJwt := jwt.NewByJwt(networkId, userId, networkName, false, false).Client(deviceId, clientId)
+			byJwt := session.NewByJwt(networkId, userId, networkName, false, false).Client(deviceId, clientId)
 
 			header := http.Header{}
-			header.Set("Authorization", "Bearer "+byJwt.Sign())
+			header.Set("Authorization", "Bearer "+byJwt.Testing_Sign())
 			header.Set("X-UR-AppVersion", "0.0.0")
 			header.Set("X-UR-InstanceId", server.NewId().String())
 			header.Set("X-UR-TransportVersion", "2")

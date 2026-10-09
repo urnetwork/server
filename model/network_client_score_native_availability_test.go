@@ -11,7 +11,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // Installed only on the test environment's Redis client. The exact request key
@@ -144,7 +144,7 @@ func TestNativeFindProvidersUnavailableSourcesPreserveAvailability(t *testing.T)
 						metrics = append(metrics, metric)
 					}
 				}
-				clientSession := testingCreateProviderSearchSession(t.Context(), jwt.NewByJwt(server.NewId(), server.NewId(), "native-availability-test", false, false))
+				clientSession := testingCreateProviderSearchSession(t.Context(), session.NewByJwt(server.NewId(), server.NewId(), "native-availability-test", false, false))
 				result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &location}}, RankMode: requested}, clientSession)
 				if err != nil || result == nil || len(result.Providers) != testCase.wantCount {
 					t.Fatalf("native source unavailability blocked same-target fallback: case=%s mode=%s want=%d result=%v err=%v", testCase.name, requested, testCase.wantCount, result, err)
@@ -211,7 +211,7 @@ func TestNativeFindProvidersPartialSourceKeepsValidatedPages(t *testing.T) {
 			}
 			labels := map[string]string{"rank_mode": RankModeQuality, "source": "primary", "outcome": "unavailable"}
 			before := selectionMetricCount(t, "urnetwork_findproviders2_native_source_outcomes_total", labels)
-			clientSession := testingCreateProviderSearchSession(t.Context(), jwt.NewByJwt(server.NewId(), server.NewId(), "native-partial-test", false, false))
+			clientSession := testingCreateProviderSearchSession(t.Context(), session.NewByJwt(server.NewId(), server.NewId(), "native-partial-test", false, false))
 			result, err := FindProviders2(args, clientSession)
 			if err != nil || result == nil || len(result.Providers) != 5 {
 				t.Fatalf("unavailable sibling discarded validated native pages: failure=%s result=%v err=%v", failure, result, err)
@@ -253,7 +253,7 @@ func TestNativeFindProvidersDegradedFallbackKeepsFiltersAndErrors(t *testing.T) 
 			server.Raise(r.SAdd(t.Context(), providerHardExclusionsKey, hard.ClientId.String()).Err())
 		})
 		args := &FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &location}}, ExcludeClientIds: []server.Id{explicit.ClientId}}
-		clientSession := testingCreateProviderSearchSession(t.Context(), jwt.NewByJwt(server.NewId(), server.NewId(), "native-filter-failure-test", false, false))
+		clientSession := testingCreateProviderSearchSession(t.Context(), session.NewByJwt(server.NewId(), server.NewId(), "native-filter-failure-test", false, false))
 		result, err := FindProviders2(args, clientSession)
 		if err != nil || result == nil || len(result.Providers) != len(allowed) {
 			t.Fatalf("degraded fallback lost eligible online providers: result=%v err=%v", result, err)
@@ -272,7 +272,7 @@ func TestNativeFindProvidersDegradedFallbackKeepsFiltersAndErrors(t *testing.T) 
 		}
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		clientSession = testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "native-canceled-test", false, false))
+		clientSession = testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "native-canceled-test", false, false))
 		var canceledResult *FindProviders2Result
 		var canceledErr error
 		// Redis's pre-canceled PING retains the done sentinel and context
@@ -299,7 +299,7 @@ func TestNativeFindProvidersDegradedFallbackKeepsFiltersAndErrors(t *testing.T) 
 		server.Redis(t.Context(), func(r server.RedisClient) { r.AddHook(hook) })
 		labels := map[string]string{"target_kind": "location_unknown", "request_class": "default_minimum", "ip_family": "any", "rank_mode": RankModeQuality, "outcome": "canceled", "reason": "load_primary"}
 		before := selectionMetricCount(t, "urnetwork_findproviders2_selection_outcomes_total", labels)
-		clientSession = testingCreateProviderSearchSession(inflightCtx, jwt.NewByJwt(server.NewId(), server.NewId(), "native-inflight-canceled-test", false, false))
+		clientSession = testingCreateProviderSearchSession(inflightCtx, session.NewByJwt(server.NewId(), server.NewId(), "native-inflight-canceled-test", false, false))
 		result, err = FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &inflightLocation}}}, clientSession)
 		if !hook.canceled.Load() || !errors.Is(err, context.Canceled) || result != nil {
 			t.Fatalf("in-flight native read cancellation became fallback: hook=%t err=%v", hook.canceled.Load(), err)

@@ -8,7 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 func qualityBudgetFixture(t testing.TB) (server.Id, map[server.Id]bool) {
@@ -47,7 +47,7 @@ func qualityBudgetFind(ctx context.Context, location server.Id, bestAvailable bo
 	if bestAvailable {
 		spec = &ProviderSpec{BestAvailable: true}
 	}
-	clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "quality-budget", false, false))
+	clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "quality-budget", false, false))
 	return FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{spec}, RankMode: RankModeQuality, Count: 3, ForceCount: true}, clientSession)
 }
 
@@ -181,7 +181,7 @@ func TestFindProviders2QualityUnavailablePreservesOnlineAndStrictPolicy(t *testi
 					args.Specs = append(args.Specs, &ProviderSpec{ClientId: &strictScore.ClientId})
 					args.ForceMinimum = false
 				}
-				clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "strict-quality-budget", false, false))
+				clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "strict-quality-budget", false, false))
 				result, err := FindProviders2(args, clientSession)
 				if err == nil || result != nil {
 					t.Fatalf("strict Quality silently borrowed on unavailable facts: named=%t result=%v err=%v", named, result, err)

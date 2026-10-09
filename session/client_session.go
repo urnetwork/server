@@ -14,7 +14,6 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/apikey"
-	"github.com/urnetwork/server/jwt"
 )
 
 // https://www.rfc-editor.org/rfc/rfc6750
@@ -22,6 +21,8 @@ const authBearerPrefix = "Bearer "
 
 // The Warp ingress overwrites this with the address accepted from the client.
 const urForwardedForHeader = "X-UR-Forwarded-For"
+
+type clientObservationContextKey struct{}
 
 // Request-scoped client identity and authentication state.
 type ClientSession struct {
@@ -39,13 +40,16 @@ type ClientSession struct {
 	clientAddressHash     *[32]byte
 	clientAddressHashPort int
 	Header                map[string][]string
-	ByJwt                 *jwt.ByJwt
+	ClientInfo            ClientInfo
+	ByJwt                 *ByJwt
 	// ApiKeyAuthenticated is true when the request authenticated with an API
 	// key (urn_…) rather than a signed token. ByJwt is then the network
 	// identity the key stands for, built for this request only: the caller
 	// holds the key, not a token, so no route may sign ByJwt back to it as one.
 	// Only authenticate sets it; a session built any other way never has it.
 	ApiKeyAuthenticated bool
+	// OAuth/MCP request identities are unsigned and cannot be renewed as logins.
+	UnsignedIdentity bool
 }
 
 // Resolves the ingress-owned client address before exposing request state.
@@ -58,12 +62,15 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 		return nil, err
 	}
 
-	return &ClientSession{
+	value := &ClientSession{
 		Ctx:           cancelCtx,
 		Cancel:        cancel,
 		ClientAddress: clientAddress,
 		Header:        map[string][]string(req.Header),
-	}, nil
+		ClientInfo:    ClientInfoFromHeader(req.Header),
+	}
+	value.Ctx = context.WithValue(cancelCtx, clientObservationContextKey{}, value)
+	return value, nil
 }
 
 // Normalizes an ip:port pair, including ipv4-mapped ipv6.
@@ -149,7 +156,7 @@ func ResolveClientAddress(req *http.Request) (string, error) {
 }
 
 // Creates a session for trusted in-process work.
-func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt.ByJwt) *ClientSession {
+func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *ByJwt) *ClientSession {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	return &ClientSession{
@@ -165,7 +172,7 @@ func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt
 // that persists only the peppered address hash + port (deferred tasks), never
 // the raw ip:port. ClientAddress stays empty on the returned session — see
 // the field comment on ClientSession.
-func NewLocalClientSessionWithAddressHash(ctx context.Context, clientAddressHash [32]byte, clientPort int, byJwt *jwt.ByJwt) *ClientSession {
+func NewLocalClientSessionWithAddressHash(ctx context.Context, clientAddressHash [32]byte, clientPort int, byJwt *ByJwt) *ClientSession {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	return &ClientSession{
@@ -200,7 +207,7 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request) 
 				if network == nil {
 					return errors.New("Invalid API key.")
 				}
-				self.ByJwt = jwt.NewByJwt(
+				self.ByJwt = NewByJwt(
 					network.NetworkId,
 					network.UserId,
 					network.NetworkName,
@@ -218,17 +225,18 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request) 
 				// to validate the jwt, parse it, which tests the signing key.
 				// this will fail if the signature is invalid.
 
-				byJwt, err := jwt.ParseByJwtForAudience(ctx, authStr, jwt.ByJwtAudienceApi)
+				byJwt, err := ParseByJwtForAudience(ctx, authStr, ByJwtAudienceApi)
 				if err != nil {
 					return err
 				}
-				if err := jwt.ValidateByJwtState(jwt.WithStateQuerySource(ctx, sessionStateQuerySource(req)), byJwt, false); err != nil {
+				if err := ValidateByJwtState(WithStateQuerySource(ctx, sessionStateQuerySource(req)), byJwt, false); err != nil {
 					return err
 				}
 				if glog.V(2) {
 					glog.Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
 				}
 				self.ByJwt = byJwt
+				self.ObserveAuthenticatedUse()
 				return nil
 			}
 		}
@@ -270,7 +278,7 @@ func (self *ClientSession) ClientAddressHashPort() (clientAddressHash [32]byte, 
 
 // Returns a session view with updated authentication claims. The view does not
 // carry ApiKeyAuthenticated: byJwt replaces the identity the key stood for.
-func (self *ClientSession) WithByJwt(byJwt *jwt.ByJwt) *ClientSession {
+func (self *ClientSession) WithByJwt(byJwt *ByJwt) *ClientSession {
 	return &ClientSession{
 		Ctx:                   self.Ctx,
 		Cancel:                self.Cancel,
@@ -278,18 +286,19 @@ func (self *ClientSession) WithByJwt(byJwt *jwt.ByJwt) *ClientSession {
 		clientAddressHash:     self.clientAddressHash,
 		clientAddressHashPort: self.clientAddressHashPort,
 		Header:                self.Header,
+		ClientInfo:            self.ClientInfo,
 		ByJwt:                 byJwt,
 	}
 }
 
 // Creates deterministic local state for server tests.
-func Testing_CreateClientSession(ctx context.Context, byJwt *jwt.ByJwt) *ClientSession {
+func Testing_CreateClientSession(ctx context.Context, byJwt *ByJwt) *ClientSession {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	// tests commonly hand a bare &ByJwt{NetworkId, UserId} literal; tokens
 	// minted or derived from it must survive full claims validation
 	if byJwt != nil {
-		jwt.Testing_NormalizeClaims(byJwt)
+		Testing_NormalizeClaims(byJwt)
 	}
 
 	clientAddress := "0.0.0.0:0"

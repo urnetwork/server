@@ -6,7 +6,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -17,13 +17,13 @@ func TestAccountPreferences(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
 
 		// no preferences set
-		preferences := AccountPreferencesGet(session)
+		preferences := AccountPreferencesGet(clientSession)
 		connect.AssertEqual(t, preferences, nil)
 
 		// set preferences
@@ -31,11 +31,11 @@ func TestAccountPreferences(t *testing.T) {
 			ProductUpdates: true,
 		}
 
-		_, err := AccountPreferencesSet(setPreferencesArgs, session)
+		_, err := AccountPreferencesSet(setPreferencesArgs, clientSession)
 		connect.AssertEqual(t, err, nil)
 
 		// fetched preferences should equal updated preferences
-		preferences = AccountPreferencesGet(session)
+		preferences = AccountPreferencesGet(clientSession)
 		connect.AssertEqual(t, preferences.ProductUpdates, true)
 
 		// update again to false
@@ -43,11 +43,11 @@ func TestAccountPreferences(t *testing.T) {
 			ProductUpdates: false,
 		}
 
-		_, err = AccountPreferencesSet(setPreferencesArgs, session)
+		_, err = AccountPreferencesSet(setPreferencesArgs, clientSession)
 		connect.AssertEqual(t, err, nil)
 
 		// should pass
-		preferences = AccountPreferencesGet(session)
+		preferences = AccountPreferencesGet(clientSession)
 		connect.AssertEqual(t, preferences.ProductUpdates, false)
 
 	})

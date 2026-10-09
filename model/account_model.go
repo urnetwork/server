@@ -11,6 +11,7 @@ import (
 	// "github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 type FindNetworkResult struct {
@@ -232,7 +233,9 @@ func RemoveNetworkWithStoreSnapshot(
 	storeSnapshot *RemoveNetworkStoreSnapshot,
 ) (outcome RemoveNetworkOutcome, userAuths map[string]bool) {
 	var posts []server.PostFunction
+	retirementId := server.NewId()
 	server.Tx(ctx, func(tx server.PgTx) {
+		server.Raise(session.LockSessionLifecycle(ctx, tx, networkId, true))
 		// Tx may rerun the callback after a transient database failure. Never let
 		// a value produced by an aborted attempt escape a later refusal.
 		outcome = ""
@@ -366,6 +369,7 @@ func RemoveNetworkWithStoreSnapshot(
 			}
 		})
 
+		server.Raise(session.JournalSessionRetirementInTx(ctx, tx, networkId, retirementId, "delete", server.NowUtc()))
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`

@@ -62,11 +62,12 @@ type keyEventSubscriber struct {
 
 	settings *KeyEventDeliverySettings
 
-	stateLock      sync.Mutex
-	nextListenerId int64
-	peerListeners  map[server.Id]map[int64]*model.NetworkPeerListener
-	hopListeners   map[server.Id]map[int64]*model.StreamHopListener
-	newPeerDelta   func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
+	stateLock        sync.Mutex
+	nextListenerId   int64
+	sessionListeners map[server.Id]*sessionNotificationGroup
+	peerListeners    map[server.Id]map[int64]*model.NetworkPeerListener
+	hopListeners     map[server.Id]map[int64]*model.StreamHopListener
+	newPeerDelta     func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
 
 	resyncLock   sync.Mutex
 	resyncCancel context.CancelFunc
@@ -135,6 +136,7 @@ func (self *keyEventSubscriber) AddHopListener(clientId server.Id, listener *mod
 // the resync spread timeout so a resubscribe does not stampede the registry
 // with simultaneous full reads.
 func (self *keyEventSubscriber) resyncAll() {
+	self.resyncSessions()
 	peerListeners := map[server.Id][]*model.NetworkPeerListener{}
 	hopListeners := []*model.StreamHopListener{}
 	func() {
@@ -212,6 +214,10 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 		// a ttl refresh (heartbeat), not a visible change
 		return
 	}
+	if networkId, ok := parseSessionEvent(channel); ok {
+		self.kickSession(networkId)
+		return
+	}
 	if networkId, clientId, ok := model.ParseNetworkPeerKeyEvent(channel); ok {
 		switch event {
 		case "set", "del", "expired":
@@ -270,6 +276,7 @@ func (self *keyEventSubscriber) run() {
 	db := server.RedisDb()
 	patterns := []string{
 		model.NetworkPeerKeyEventPattern(db),
+		sessionEventPattern(db),
 		model.StreamHopsKeyEventPattern(db),
 	}
 

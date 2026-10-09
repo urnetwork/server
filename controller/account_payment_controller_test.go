@@ -13,7 +13,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -219,11 +219,11 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
@@ -458,7 +458,7 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
@@ -683,7 +683,7 @@ func TestAdvancePaymentRetryAndTerminalCancellationState(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := server.NewId()
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 		})
 		defer clientSession.Cancel()

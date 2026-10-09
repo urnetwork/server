@@ -17,7 +17,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -234,7 +234,7 @@ func (self *playBindingFakeEnv) addNetwork(withOffer bool, issuedAgo time.Durati
 			PlayOfferTag: &tag,
 		}
 	}
-	clientSession := session.Testing_CreateClientSession(context.Background(), &jwt.ByJwt{
+	clientSession := session.Testing_CreateClientSession(context.Background(), &session.ByJwt{
 		NetworkId: networkId,
 		UserId:    server.NewId(),
 	})
@@ -390,7 +390,7 @@ func TestPlayUnlinkedRenewalsCreditBoundNetwork(t *testing.T) {
 	}
 
 	// the RTDN webhook and the reconciler resolve the chain to the same network
-	webhookSession := session.Testing_CreateClientSession(context.Background(), &jwt.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()})
+	webhookSession := session.Testing_CreateClientSession(context.Background(), &session.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()})
 	next := &PlaySubscription{LinkedPurchaseToken: "promo-token-1b"}
 	resolved, ok := playResolveNetworkId(webhookSession, next, "promo-token-1c", true)
 	connect.AssertEqual(t, ok, true)

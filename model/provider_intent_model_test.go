@@ -13,7 +13,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -947,7 +947,7 @@ func TestAuthNetworkClientProvideIntentExemptFromCaps(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})
@@ -1003,7 +1003,7 @@ func TestNetworkProviderInstallsKeepPeerList(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})

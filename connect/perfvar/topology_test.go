@@ -24,8 +24,8 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	connectserver "github.com/urnetwork/server/connect"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // A route name resolves all forced platform and P2P construction choices.
@@ -3771,20 +3771,20 @@ func tryNewFullTunPathWithTopologyHooks(
 		"perfvar device",
 	)
 	networkName := fmt.Sprintf("perfvar-%s", environment.networkId)
-	providerJwt := jwt.NewByJwt(
+	providerJwt := session.NewByJwt(
 		environment.networkId,
 		environment.userId,
 		networkName,
 		false,
 		false,
-	).Client(providerDeviceId, providerClientId).Sign()
-	deviceJwt := jwt.NewByJwt(
+	).Client(providerDeviceId, providerClientId).Testing_Sign()
+	deviceJwt := session.NewByJwt(
 		environment.networkId,
 		environment.userId,
 		networkName,
 		false,
 		false,
-	).Client(deviceDeviceId, deviceClientId).Sign()
+	).Client(deviceDeviceId, deviceClientId).Testing_Sign()
 
 	providerTun, providerStrategy := environment.newClientNodeWithProfileAt(
 		useExtender,

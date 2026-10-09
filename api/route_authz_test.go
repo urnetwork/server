@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 // The route table guard (route_authz.go, AUTHZ1.md). Pure: tokens are signed
@@ -116,11 +116,11 @@ type routeAccessTokens struct {
 
 func newRouteAccessTokens() *routeAccessTokens {
 	networkId := server.NewId()
-	network := jwt.NewByJwt(networkId, server.NewId(), "route-access", false, false)
+	network := session.NewByJwt(networkId, server.NewId(), "route-access", false, false)
 	return &routeAccessTokens{
 		networkId:    networkId,
-		networkToken: network.Sign(),
-		clientToken:  network.Client(server.NewId(), server.NewId()).Sign(),
+		networkToken: network.Testing_Sign(),
+		clientToken:  network.Client(server.NewId(), server.NewId()).Testing_Sign(),
 		// the gate reads only the prefix; the handler looks the key up
 		apiKey: "urn_" + strings.Repeat("k", 52),
 	}

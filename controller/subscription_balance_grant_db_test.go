@@ -15,7 +15,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -51,7 +51,7 @@ func TestSubscriptionBalanceCountsOnlyTheCurrentGrant(t *testing.T) {
 			connect.AssertEqual(t, model.GetOpenTransferByteCount(ctx, networkId), 1*model.Mib)
 		}
 		subscriptionBalance := func(networkId server.Id, clientId server.Id) *SubscriptionBalanceResult {
-			clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 				NetworkId: networkId,
 				ClientId:  &clientId,
 				UserId:    server.NewId(),

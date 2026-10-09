@@ -6,7 +6,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -53,8 +53,8 @@ func TestSetNetworkClientAclGroupRefusalsBeforeAnyQuery(t *testing.T) {
 	userId := server.NewId()
 	clientId := server.NewId()
 
-	clientSession := &session.ClientSession{Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: userId, ClientId: &clientId}}
-	rootSession := &session.ClientSession{Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: userId}}
+	clientSession := &session.ClientSession{Ctx: ctx, ByJwt: &session.ByJwt{NetworkId: networkId, UserId: userId, ClientId: &clientId}}
+	rootSession := &session.ClientSession{Ctx: ctx, ByJwt: &session.ByJwt{NetworkId: networkId, UserId: userId}}
 
 	// a client token may not set a group, not even its own
 	result, err := SetNetworkClientAclGroup(&SetNetworkClientAclGroupArgs{ClientId: clientId, AclGroup: "isolated"}, clientSession)
@@ -62,7 +62,7 @@ func TestSetNetworkClientAclGroupRefusalsBeforeAnyQuery(t *testing.T) {
 	connect.AssertEqual(t, result.NetworkClientAclGroup, (*NetworkClientAclGroup)(nil))
 	connect.AssertEqual(t, result.Error.Message, networkClientAclGroupSessionMessage)
 
-	for _, refusedSession := range []*session.ClientSession{nil, {}, {ByJwt: &jwt.ByJwt{}}} {
+	for _, refusedSession := range []*session.ClientSession{nil, {}, {ByJwt: &session.ByJwt{}}} {
 		result, err = SetNetworkClientAclGroup(&SetNetworkClientAclGroupArgs{ClientId: clientId, AclGroup: "isolated"}, refusedSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error.Message, networkClientAclGroupSessionMessage)
@@ -80,7 +80,7 @@ func TestSetNetworkClientAclGroupRefusalsBeforeAnyQuery(t *testing.T) {
 
 	// an API key session (no client id, pro mode off) passes the session check:
 	// the next refusal is the group name, not the credential
-	apiKeySession := &session.ClientSession{Ctx: ctx, ByJwt: jwt.NewByJwt(networkId, userId, "embed", false, false)}
+	apiKeySession := &session.ClientSession{Ctx: ctx, ByJwt: session.NewByJwt(networkId, userId, "embed", false, false)}
 	result, err = SetNetworkClientAclGroup(&SetNetworkClientAclGroupArgs{ClientId: clientId, AclGroup: "nope"}, apiKeySession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.Error.Message, `acl_group must be "default" or "isolated".`)
@@ -91,9 +91,9 @@ func TestGetNetworkClientAclGroupRefusalsBeforeAnyQuery(t *testing.T) {
 	networkId := server.NewId()
 	// an Embed-enabled network, so these refusals reach the route's own checks
 	primeNetworkEmbedCache(t, networkId, true)
-	rootSession := &session.ClientSession{Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: server.NewId()}}
+	rootSession := &session.ClientSession{Ctx: ctx, ByJwt: &session.ByJwt{NetworkId: networkId, UserId: server.NewId()}}
 
-	for _, refusedSession := range []*session.ClientSession{nil, {}, {ByJwt: &jwt.ByJwt{}}} {
+	for _, refusedSession := range []*session.ClientSession{nil, {}, {ByJwt: &session.ByJwt{}}} {
 		result, err := GetNetworkClientAclGroup(&GetNetworkClientAclGroupArgs{}, refusedSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error.Message, networkClientAclGroupSessionMessage)

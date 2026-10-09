@@ -6,7 +6,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -18,7 +18,7 @@ func TestStripeCustomer(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -38,7 +38,7 @@ func TestStripeCustomer(t *testing.T) {
 		networkId = server.NewId()
 		clientId = server.NewId()
 
-		userSession = session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession = session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})

@@ -13,7 +13,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
@@ -414,7 +414,7 @@ func TestPendingNetworkClientConnection(t *testing.T) {
 		userId := server.NewId()
 
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})
@@ -616,7 +616,7 @@ func TestRemoveNetworkClientsUUIDArrayBinding(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -648,7 +648,7 @@ func TestRemoveNetworkClientsEmptyIdsNoop(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -686,7 +686,7 @@ func TestRemoveNetworkClientsDeactivatesTargetedClients(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -752,7 +752,7 @@ func TestRemoveNetworkClientsSmallRequestIsSynchronous(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -784,7 +784,7 @@ func TestRemoveNetworkClientsLargeRequestIsScheduled(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -827,7 +827,7 @@ func TestRemoveNetworkClientsRejectsDuplicateInProgress(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -905,11 +905,11 @@ func TestRemoveNetworkClientsInProgressIsScopedPerNetwork(t *testing.T) {
 
 		sessA := &session.ClientSession{
 			Ctx:   ctx,
-			ByJwt: &jwt.ByJwt{NetworkId: networkIdA},
+			ByJwt: &session.ByJwt{NetworkId: networkIdA},
 		}
 		sessB := &session.ClientSession{
 			Ctx:   ctx,
-			ByJwt: &jwt.ByJwt{NetworkId: networkIdB},
+			ByJwt: &session.ByJwt{NetworkId: networkIdB},
 		}
 
 		resultA, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
@@ -936,7 +936,7 @@ func TestRemoveNetworkClientsRejectsOversizedRequest(t *testing.T) {
 		networkId := server.NewId()
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -998,7 +998,7 @@ func TestRemoveNetworkClientsTaskLifecycleThroughRealWorker(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -1131,7 +1131,7 @@ func TestRemoveNetworkClientsTaskSpansMultipleBatches(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -1176,7 +1176,7 @@ func TestRemoveNetworkClientsTaskIsIdempotentOnRetry(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -1230,7 +1230,7 @@ func TestRemoveNetworkClientsExactlyAtBatchCountIsSynchronous(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -1263,7 +1263,7 @@ func TestRemoveNetworkClientsExactlyAtCapIsAccepted(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -1298,7 +1298,7 @@ func TestRemoveNetworkClientsRejectsWhenConcurrencyCapReached(t *testing.T) {
 			occupyingNetworkId := server.NewId()
 			occupyingSess := &session.ClientSession{
 				Ctx:   ctx,
-				ByJwt: &jwt.ByJwt{NetworkId: occupyingNetworkId},
+				ByJwt: &session.ByJwt{NetworkId: occupyingNetworkId},
 			}
 			scheduled, _ := task.ScheduleTaskIfAbsent(
 				RemoveNetworkClientsTask,
@@ -1312,7 +1312,7 @@ func TestRemoveNetworkClientsRejectsWhenConcurrencyCapReached(t *testing.T) {
 		networkId := server.NewId()
 		sess := &session.ClientSession{
 			Ctx:   ctx,
-			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+			ByJwt: &session.ByJwt{NetworkId: networkId},
 		}
 
 		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
@@ -1349,7 +1349,7 @@ func TestRemoveNetworkClientsSyncPathBypassesConcurrencyCap(t *testing.T) {
 			occupyingNetworkId := server.NewId()
 			occupyingSess := &session.ClientSession{
 				Ctx:   ctx,
-				ByJwt: &jwt.ByJwt{NetworkId: occupyingNetworkId},
+				ByJwt: &session.ByJwt{NetworkId: occupyingNetworkId},
 			}
 			scheduled, _ := task.ScheduleTaskIfAbsent(
 				RemoveNetworkClientsTask,
@@ -1367,7 +1367,7 @@ func TestRemoveNetworkClientsSyncPathBypassesConcurrencyCap(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx:   ctx,
-			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+			ByJwt: &session.ByJwt{NetworkId: networkId},
 		}
 
 		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
@@ -1390,7 +1390,7 @@ func TestRemoveNetworkClientsSetsScheduledForOnImmediateAsyncRun(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx:   ctx,
-			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+			ByJwt: &session.ByJwt{NetworkId: networkId},
 		}
 
 		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
@@ -1431,7 +1431,7 @@ func TestRemoveNetworkClientsLocksNetworkWhileDeferredRequestIsQueued(t *testing
 		networkId := server.NewId()
 		sess := &session.ClientSession{
 			Ctx:   ctx,
-			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+			ByJwt: &session.ByJwt{NetworkId: networkId},
 		}
 
 		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
@@ -1476,7 +1476,7 @@ func TestRemoveNetworkClientsSpreadsDeferredRequestsAcrossTheHour(t *testing.T) 
 		for i := 0; i < 5; i++ {
 			sess := &session.ClientSession{
 				Ctx:   ctx,
-				ByJwt: &jwt.ByJwt{NetworkId: server.NewId()},
+				ByJwt: &session.ByJwt{NetworkId: server.NewId()},
 			}
 			clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
 			for j := range clientIds {
@@ -1513,7 +1513,7 @@ func TestRemoveNetworkClientsCancelsReservationOnAlreadyInProgress(t *testing.T)
 
 		sess := &session.ClientSession{
 			Ctx:   ctx,
-			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+			ByJwt: &session.ByJwt{NetworkId: networkId},
 		}
 
 		// occupy this network's run_once key directly, simulating a run
@@ -1560,7 +1560,7 @@ func TestRemoveNetworkClientsTaskPostReschedulesRemainder(t *testing.T) {
 
 		sess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: networkId,
 			},
 		}
@@ -1592,7 +1592,7 @@ func TestRemoveNetworkClientsTaskPostReschedulesRemainder(t *testing.T) {
 		otherNetworkId := server.NewId()
 		otherSess := &session.ClientSession{
 			Ctx:   ctx,
-			ByJwt: &jwt.ByJwt{NetworkId: otherNetworkId},
+			ByJwt: &session.ByJwt{NetworkId: otherNetworkId},
 		}
 		scheduledOther, _ := task.ScheduleTaskIfAbsent(
 			RemoveNetworkClientsTask,
@@ -1619,7 +1619,7 @@ func TestRemoveNetworkClientsEnforcesNetworkScoping(t *testing.T) {
 		attackerNetworkId := server.NewId()
 		attackerSess := &session.ClientSession{
 			Ctx: ctx,
-			ByJwt: &jwt.ByJwt{
+			ByJwt: &session.ByJwt{
 				NetworkId: attackerNetworkId,
 			},
 		}
@@ -2396,7 +2396,7 @@ func TestRemoveDisconnectedNetworkClientsTopLevelReap(t *testing.T) {
 		// user removal stamps deactivate_time, so removed clients also reap 30
 		// days after removal
 		removedClientId := newClient()
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &removedClientId,
 		})
@@ -2585,7 +2585,7 @@ func TestNetworkClientsListTopLevelDevicesOnly(t *testing.T) {
 		userId := server.NewId()
 
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})

@@ -10,7 +10,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 )
 
 func TestRequestAuthMethodIsBounded(t *testing.T) {
@@ -22,7 +21,7 @@ func TestRequestAuthMethodIsBounded(t *testing.T) {
 	if got := requestAuthMethod(request); got != "other" {
 		t.Fatalf("non-bearer credential method = %q, want other", got)
 	}
-	request.Header.Set("Authorization", "Bearer synthetic.jwt.fixture")
+	request.Header.Set("Authorization", "Bearer synthetic.fixture")
 	if got := requestAuthMethod(request); got != "jwt" {
 		t.Fatalf("bearer method = %q, want jwt", got)
 	}
@@ -33,7 +32,7 @@ func TestRequestAuthMethodIsBounded(t *testing.T) {
 }
 
 func TestRecordSessionAuthCountsOutcomeWithoutIdentityLabel(t *testing.T) {
-	byJwt := &jwt.ByJwt{NetworkId: server.NewId()}
+	byJwt := &ByJwt{NetworkId: server.NewId()}
 	succeededBefore := testutil.ToFloat64(sessionAuthAttemptsTotal.WithLabelValues("jwt", "succeeded"))
 	rejectedBefore := testutil.ToFloat64(sessionAuthAttemptsTotal.WithLabelValues("jwt", "rejected"))
 	recordSessionAuth("jwt", byJwt, nil)
@@ -53,7 +52,7 @@ func TestSessionActiveAuthCollectorDeduplicatesAndExpiresDigests(t *testing.T) {
 	collector := newSessionActiveAuthCollector()
 	now := time.Unix(1_800_000_000, 0)
 	collector.now = func() time.Time { return now }
-	byJwt := &jwt.ByJwt{NetworkId: server.NewId()}
+	byJwt := &ByJwt{NetworkId: server.NewId()}
 	collector.observe(byJwt)
 	collector.observe(byJwt)
 	if got := len(collector.lastSeen); got != 1 {

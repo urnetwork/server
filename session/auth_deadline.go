@@ -46,6 +46,9 @@ func (self *ClientSession) Auth(req *http.Request) (returnErr error) {
 }
 
 func authDependencyUnavailable(err error) bool {
+	if errors.Is(err, ErrSessionStoreUnavailable) || errors.Is(err, ErrAuthUnavailable) {
+		return true
+	}
 	if errors.Is(err, server.DbContextDoneError) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) {
 		return true

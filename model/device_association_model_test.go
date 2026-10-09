@@ -9,7 +9,7 @@ import (
 	"github.com/go-playground/assert/v2"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -28,7 +28,7 @@ func TestDeviceAdopt(t *testing.T) {
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
+			session.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
 		)
 
 		clientSessionNoAuth := session.Testing_CreateClientSession(
@@ -101,7 +101,7 @@ func TestDeviceAdopt(t *testing.T) {
 		assert.Equal(t, result4.Error, nil)
 		// assert.Equal(t, result4.AssociatedNetworkName, "a")
 		assert.NotEqual(t, result4.ByClientJwt, "")
-		byJwt, err := jwt.ParseByJwt(ctx, result4.ByClientJwt)
+		byJwt, err := session.ParseByJwt(ctx, result4.ByClientJwt)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, byJwt.NetworkId, networkIdA)
 		assert.Equal(t, byJwt.NetworkName, "a")
@@ -149,7 +149,7 @@ func TestDeviceConfirmAdoptWrongSecretRejected(t *testing.T) {
 
 		victimSession := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", false, false),
+			session.NewByJwt(networkIdA, userIdA, "a", false, false),
 		)
 		// create-adopt-code, adopt-status and confirm-adopt need no credentials.
 		noAuthSession := session.Testing_CreateClientSession(ctx, nil)
@@ -200,7 +200,7 @@ func TestDeviceConfirmAdoptWrongSecretRejected(t *testing.T) {
 
 		// SECURE expectation: a wrong secret must not yield a client credential.
 		if confirmed != nil && confirmed.ByClientJwt != "" {
-			byJwt, parseErr := jwt.ParseByJwt(ctx, confirmed.ByClientJwt)
+			byJwt, parseErr := session.ParseByJwt(ctx, confirmed.ByClientJwt)
 			if parseErr == nil {
 				t.Fatalf("SECURITY (VDP1): /device/confirm-adopt minted a client JWT with a WRONG "+
 					"adopt_secret — authentication bypass. Minted credential networkId=%s networkName=%q "+
@@ -236,7 +236,7 @@ func TestDeviceAdoptPartialOfferRemove(t *testing.T) {
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
+			session.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
 		)
 
 		clientSessionNoAuth := session.Testing_CreateClientSession(
@@ -325,7 +325,7 @@ func TestDeviceAdoptPartialOwnerRemove(t *testing.T) {
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
+			session.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
 		)
 
 		clientSessionNoAuth := session.Testing_CreateClientSession(
@@ -415,12 +415,12 @@ func TestDeviceShare(t *testing.T) {
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
+			session.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
 		)
 
 		clientSessionB := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdB, userIdB, "b", guestMode, isPro),
+			session.NewByJwt(networkIdB, userIdB, "b", guestMode, isPro),
 		)
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
@@ -604,7 +604,7 @@ func testingAdoptNetwork(ctx context.Context, name string) (clientSession *sessi
 	userId = server.NewId()
 	clientSession = session.Testing_CreateClientSession(
 		ctx,
-		jwt.NewByJwt(networkId, userId, name, false, false),
+		session.NewByJwt(networkId, userId, name, false, false),
 	)
 	Testing_CreateNetwork(ctx, networkId, name, userId)
 	return
@@ -728,7 +728,7 @@ func TestDeviceAdoptCannotHijackAfterAdopt(t *testing.T) {
 			}, noAuth)
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, confirmed.ByClientJwt, "")
-		byJwt, err := jwt.ParseByJwt(ctx, confirmed.ByClientJwt)
+		byJwt, err := session.ParseByJwt(ctx, confirmed.ByClientJwt)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, byJwt.NetworkId, networkIdA)
 	})

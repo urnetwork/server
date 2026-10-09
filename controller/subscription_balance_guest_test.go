@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -27,7 +27,7 @@ func TestSubscriptionBalanceGuestIgnoresTheJwtClaim(t *testing.T) {
 		}
 	}
 	sessionWithClaim := func(guestMode bool) *session.ClientSession {
-		return session.NewLocalClientSession(ctx, "127.0.0.1:1", &jwt.ByJwt{
+		return session.NewLocalClientSession(ctx, "127.0.0.1:1", &session.ByJwt{
 			NetworkId: server.NewId(),
 			UserId:    userId,
 			GuestMode: guestMode,

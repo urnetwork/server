@@ -25,7 +25,7 @@ import (
 
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -141,7 +141,7 @@ func TestProxyDeviceRpcE2E(t *testing.T) {
 		})
 
 		// peers: the proxy client is counted but never appears in the peer list
-		userSession := session.Testing_CreateClientSession(h.ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(h.ctx, &session.ByJwt{
 			NetworkId: h.pdNetworkId,
 			UserId:    h.pdUserId,
 		})

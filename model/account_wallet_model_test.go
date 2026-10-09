@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -21,7 +21,7 @@ func TestAccountWallet(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -33,7 +33,7 @@ func TestAccountWallet(t *testing.T) {
 			NetworkId:        networkId,
 		}
 
-		walletId := CreateAccountWalletExternal(session, args)
+		walletId := CreateAccountWalletExternal(clientSession, args)
 		connect.AssertNotEqual(t, walletId, nil)
 
 		fetchWallet := GetAccountWallet(ctx, *walletId)
@@ -48,7 +48,7 @@ func TestAccountWallet(t *testing.T) {
 		connect.AssertEqual(t, fetchWallet.HasSeekerToken, false)
 
 		// mark wallet as having a seeker token
-		MarkWalletSeekerHolder(fetchWallet.WalletAddress, session)
+		MarkWalletSeekerHolder(fetchWallet.WalletAddress, clientSession)
 		fetchWallet = GetAccountWallet(ctx, *walletId)
 		connect.AssertEqual(t, fetchWallet.HasSeekerToken, true)
 
@@ -57,14 +57,14 @@ func TestAccountWallet(t *testing.T) {
 		 * It should return the same wallet id as before
 		 */
 
-		walletId2 := CreateAccountWalletExternal(session, args)
+		walletId2 := CreateAccountWalletExternal(clientSession, args)
 		connect.AssertEqual(t, walletId, walletId2)
 
 		// remove wallet (set account wallet as active = false)
 		// we also clear the payout wallet if it matches
 		SetPayoutWallet(ctx, networkId, *walletId)
 
-		result := RemoveWallet(*walletId, session)
+		result := RemoveWallet(*walletId, clientSession)
 		connect.AssertEqual(t, result.Success, true)
 		connect.AssertEqual(t, result.Error, nil)
 
@@ -77,7 +77,7 @@ func TestAccountWallet(t *testing.T) {
 		connect.AssertEqual(t, fetchWallet.Active, false)
 
 		// Create a new wallet with the same address and network id
-		walletId2 = CreateAccountWalletExternal(session, args)
+		walletId2 = CreateAccountWalletExternal(clientSession, args)
 		connect.AssertEqual(t, walletId, walletId2)
 
 		// fetch the wallet again
@@ -91,9 +91,9 @@ func TestAccountWallet(t *testing.T) {
 		 * and set the has_seeker_token to true
 		 */
 		seekerHolderAddress := "0x1"
-		err := MarkWalletSeekerHolder(seekerHolderAddress, session)
+		err := MarkWalletSeekerHolder(seekerHolderAddress, clientSession)
 		connect.AssertEqual(t, err, nil)
-		accountWallets := GetActiveAccountWallets(session)
+		accountWallets := GetActiveAccountWallets(clientSession)
 		connect.AssertEqual(t, len(accountWallets.Wallets), 2)
 		connect.AssertEqual(t, accountWallets.Wallets[1].WalletAddress, seekerHolderAddress)
 		connect.AssertEqual(t, accountWallets.Wallets[1].NetworkId, networkId)
@@ -145,7 +145,7 @@ func TestCreateEthereumWallet(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -164,7 +164,7 @@ func TestCreateEthereumWallet(t *testing.T) {
 			NetworkId:        networkId,
 		}
 
-		walletId := CreateAccountWalletExternal(session, args)
+		walletId := CreateAccountWalletExternal(clientSession, args)
 		connect.AssertNotEqual(t, walletId, nil)
 	})
 }
@@ -181,7 +181,7 @@ func TestMarkWalletSeekerHolderRaisesWriteFailure(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})
@@ -236,7 +236,7 @@ func TestCreateAccountWalletStatementFailuresSurfaceAtOnce(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		byJwt := &jwt.ByJwt{
+		byJwt := &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		}

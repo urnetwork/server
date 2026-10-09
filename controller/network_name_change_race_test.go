@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -80,7 +80,7 @@ func TestChangeNetworkNameRefusesNameTakenBeforeWrite(t *testing.T) {
 					ChangeNetworkNameArgs{
 						NetworkName: takenName,
 					},
-					session.Testing_CreateClientSession(callCtx, &jwt.ByJwt{
+					session.Testing_CreateClientSession(callCtx, &session.ByJwt{
 						NetworkId: networkId,
 						UserId:    userId,
 					}),
@@ -99,14 +99,14 @@ func TestChangeNetworkNameRefusesNameTakenBeforeWrite(t *testing.T) {
 			if result == nil || result.Error == nil || result.Error.Message != "Network name not available." {
 				t.Errorf("%s: a name taken before the write answered %+v, want the refusal", c.name, result)
 			}
-			network := model.GetNetwork(session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			network := model.GetNetwork(session.Testing_CreateClientSession(ctx, &session.ByJwt{
 				NetworkId: networkId,
 				UserId:    userId,
 			}))
 			if network == nil || network.NetworkName != oldName {
 				t.Errorf("%s: the refused write left the network as %+v, want it named %q", c.name, network, oldName)
 			}
-			otherNetwork := model.GetNetwork(session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			otherNetwork := model.GetNetwork(session.Testing_CreateClientSession(ctx, &session.ByJwt{
 				NetworkId: otherNetworkId,
 				UserId:    otherUserId,
 			}))

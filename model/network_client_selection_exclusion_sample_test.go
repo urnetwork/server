@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // Compensation only spends the portion of a bounded exclusion set that could
@@ -95,7 +95,7 @@ func TestFindProviders2BroadExclusionsReachOnlineFallback(t *testing.T) {
 				_, err := pipe.Exec(ctx)
 				server.Raise(err)
 			})
-			clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "exclusion-sample-test", false, false))
+			clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "exclusion-sample-test", false, false))
 			result, err := FindProviders2(args, clientSession)
 			if err != nil || result == nil || len(result.Providers) != len(allowed) {
 				got := 0
@@ -159,7 +159,7 @@ func TestFindProviders2BroadExclusionsFillSingleFamilySample(t *testing.T) {
 			_, err := pipe.Exec(ctx)
 			server.Raise(err)
 		})
-		clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "single-family-sample-test", false, false))
+		clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "single-family-sample-test", false, false))
 		result, err := FindProviders2(args, clientSession)
 		if err != nil || result == nil || len(result.Providers) != len(allowed) {
 			got := 0

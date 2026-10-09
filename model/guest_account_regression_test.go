@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -25,7 +25,7 @@ func TestHasAnyAuthMethodReflectsRealAuthMethods(t *testing.T) {
 		addResult, err := AddAuth(AddAuthMethod{
 			UserAuth: &userAuth,
 			Password: strPtr("SomeValidPassword123!"),
-		}, session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		}, session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId, UserId: userId, NetworkName: "g" + networkId.String(), GuestMode: true,
 		}))
 		if err != nil {
@@ -52,7 +52,7 @@ func TestValidateClientIdentityArgsBlocksBareGuestButAllowsUpgradedAccount(t *te
 		// a network-level (no ClientId) guest session, as a legacy guest's
 		// still-valid pre-refresh JWT would present -- must still be blocked
 		// from assigning explicit roles/principal
-		guestSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		guestSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId, UserId: userId, NetworkName: "g" + networkId.String(), GuestMode: true,
 		})
 		result, err := AuthNetworkClient(&AuthNetworkClientArgs{
@@ -88,7 +88,7 @@ func TestValidateClientIdentityArgsBlocksBareGuestButAllowsUpgradedAccount(t *te
 		if result.Error != nil {
 			t.Fatalf("expected an upgraded (formerly-guest) account to be allowed to assign explicit roles/principal, got error: %s", result.Error.Message)
 		}
-		clientByJwt, err := jwt.ParseByJwt(ctx, *result.ByClientJwt)
+		clientByJwt, err := session.ParseByJwt(ctx, *result.ByClientJwt)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, clientByJwt.Principal, "a-legitimate-principal")
 	})

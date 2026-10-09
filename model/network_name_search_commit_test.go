@@ -16,7 +16,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -71,7 +71,7 @@ func TestNetworkUpdateIndexesNameInMemoryAfterCommit(t *testing.T) {
 					NetworkUpdateArgs{
 						NetworkName: c.newName,
 					},
-					session.Testing_CreateClientSession(callCtx, &jwt.ByJwt{
+					session.Testing_CreateClientSession(callCtx, &session.ByJwt{
 						NetworkId: networkId,
 						UserId:    userId,
 					}),

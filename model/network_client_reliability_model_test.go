@@ -14,7 +14,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -202,7 +202,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 
 				isPro := false
 
-				byJwt := jwt.NewByJwt(
+				byJwt := session.NewByJwt(
 					networkId,
 					server.NewId(),
 					"",

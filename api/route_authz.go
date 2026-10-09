@@ -3,9 +3,9 @@ package api
 import (
 	"context"
 
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 // Who may call each route, by credential (AUTHZ1.md).
@@ -54,6 +54,10 @@ const (
 // pattern". TestEveryRouteIsClassified fails for a route with no entry and for
 // an entry with no route; an unclassified route refuses client tokens.
 var routeAccessByRoute = map[string]routeAccess{
+	"GET /network/sessions":                         routeAccessNetwork,
+	"POST /network/revoke-session":                  routeAccessNetwork,
+	"POST /network/revoke-other-sessions":           routeAccessNetwork,
+	"GET /network/session-operations/([^/]+)":       routeAccessNetwork,
 	"POST /provider-work/v1/owners":                 routeAccessPublic,
 	"GET /provider-work/v1/owners":                  routeAccessPublic,
 	"GET /provider-work/v1/requests":                routeAccessPublic,
@@ -302,7 +306,7 @@ func routeAccessFor(route *router.Route) routeAccess {
 // refused on the app admin and own client payout routes too. Tests replace it.
 var networkRefusesClientAdmin = model.NetworkRefusesClientAdmin
 
-func refuseClientAdmin(ctx context.Context, byJwt *jwt.ByJwt) bool {
+func refuseClientAdmin(ctx context.Context, byJwt *session.ByJwt) bool {
 	return networkRefusesClientAdmin(ctx, byJwt.NetworkId)
 }
 

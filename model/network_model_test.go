@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -17,7 +17,7 @@ import (
 func TestNetworkCreateTermsFail(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		byJwt := jwt.ByJwt{}
+		byJwt := session.ByJwt{}
 		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
 		defer clientSession.Cancel()
 
@@ -65,7 +65,7 @@ func TestNetworkUpdate(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,

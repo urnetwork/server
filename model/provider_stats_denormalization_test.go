@@ -8,7 +8,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -28,7 +28,7 @@ func TestSweepDestinationIdDenormalization(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})

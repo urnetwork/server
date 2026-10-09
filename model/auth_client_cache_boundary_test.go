@@ -9,7 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -60,7 +60,7 @@ func TestAuthClientCommittedIdentitySurvivesCacheCancellation(t *testing.T) {
 				network, user, parentClient, device := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 				Testing_CreateNetwork(rootCtx, network, "synthetic-cache-boundary", user)
 				Testing_CreateDevice(rootCtx, network, device, parentClient, "synthetic-parent", "synthetic")
-				claims := jwt.NewByJwt(network, user, "synthetic-cache-boundary", false, false).Client(device, parentClient)
+				claims := session.NewByJwt(network, user, "synthetic-cache-boundary", false, false).Client(device, parentClient)
 				callCtx, cancel := context.WithCancel(rootCtx)
 				defer cancel()
 				hook := &committedIdentityCacheCancelHook{cancel: cancel, source: parentClient}

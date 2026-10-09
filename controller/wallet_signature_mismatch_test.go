@@ -23,7 +23,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -185,7 +185,7 @@ func TestSnWalletMappingConsentSignatureMismatchIsCoded(t *testing.T) {
 	}
 
 	networkId, userId, clientId, deviceId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
-	clientSession := session.Testing_CreateClientSession(t.Context(), jwt.NewByJwt(networkId, userId, "mapping-mismatch", false, false).Client(deviceId, clientId))
+	clientSession := session.Testing_CreateClientSession(t.Context(), session.NewByJwt(networkId, userId, "mapping-mismatch", false, false).Client(deviceId, clientId))
 	typedAddress, typedSign := testSnColdkey(t)
 	otherAddress, otherSign := testSnColdkey(t)
 	typedColdkey, err := ss58.DecodeWithPrefix(typedAddress, ss58.BittensorPrefix)

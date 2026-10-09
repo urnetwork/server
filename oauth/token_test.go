@@ -11,7 +11,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 const testAudience = "https://mcp.bringyour.com"
@@ -171,5 +171,5 @@ func TestScopeHelpers(t *testing.T) {
 
 // Parses with the ByJwt key set, to prove the oauth key set is disjoint.
 func jwtParseByJwt(t testing.TB, tokenStr string) (any, error) {
-	return jwt.ParseByJwt(context.Background(), tokenStr)
+	return session.ParseByJwt(context.Background(), tokenStr)
 }

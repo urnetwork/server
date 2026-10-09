@@ -11,7 +11,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -80,7 +80,7 @@ func TestCacheWithNetworkAuth(t *testing.T) {
 		f := CacheWithNetworkAuth(impl, "cache_test_with_network_auth", 6000*time.Second)
 
 		newSession := func(networkId server.Id, i int) *session.ClientSession {
-			byJwt := jwt.NewByJwt(
+			byJwt := session.NewByJwt(
 				networkId,
 				server.NewId(),
 				fmt.Sprintf("test%d", i),
@@ -156,7 +156,7 @@ func TestCacheWithNetworkAuthInput(t *testing.T) {
 
 		networkId := server.NewId()
 		newSession := func(i int) *session.ClientSession {
-			byJwt := jwt.NewByJwt(
+			byJwt := session.NewByJwt(
 				networkId,
 				server.NewId(),
 				fmt.Sprintf("test%d", i),
@@ -226,7 +226,7 @@ func TestCacheWithAuth(t *testing.T) {
 
 		clientSessions := []*session.ClientSession{}
 		for i := range 32 {
-			byJwt := jwt.NewByJwt(
+			byJwt := session.NewByJwt(
 				server.NewId(),
 				server.NewId(),
 				fmt.Sprintf("test%d", i),
