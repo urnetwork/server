@@ -116,7 +116,7 @@ func installCloseHistoryReadFunction(t testing.TB, functionBody string) func() {
 }
 
 // Unexpected SQL failure aborts the caller; it cannot masquerade as missing
-// optional schema. Recovery admits the exact original only after a healthy read.
+// optional history. Recovery admits the exact original only after a healthy read.
 func TestContractCloseOriginalUnexpectedSqlReadFailureRollsBackAndRecovers(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0

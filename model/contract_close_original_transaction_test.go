@@ -1,5 +1,5 @@
 // Original-history reads belong to the close transaction, including its
-// uncommitted history. Missing optional schema must not issue invalid SQL.
+// uncommitted history. Missing required schema aborts the complete owner.
 package model
 
 import (
@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urfoundation/sn/protocol"
 	coreprotocol "github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
@@ -94,60 +95,91 @@ func TestContractCloseOriginalHistoryUsesCallerTransactionWithoutSavepoint(t *te
 	})
 }
 
-// Schema mutation and recovery share the same owner as the close, proving a
-// missing optional relation/column neither issues invalid SQL nor poisons it.
-func originalCloseUnavailableSchemaTest(t testing.TB, remove, restore string) {
+// A missing deployed prerequisite refuses public admission and rolls back
+// earlier caller writes. Restoring the schema admits the exact original once.
+func originalCloseUnavailableSchemaTest(t testing.TB, remove, restore, sqlState string) {
 	t.Helper()
-	f, input, _, key := originalCloseAvailabilityFixture(t)
+	f, input, record, key := originalCloseAvailabilityFixture(t)
 	domain, err := input.Domain.Digest()
 	server.Raise(err)
 	report := signCloseReportOriginal(t, f.report(), domain, key)
-	var probe *originalCloseTransactionProbe
-	var applied bool
-	var closeErr error
 	server.Tx(f.ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(f.ctx, `CREATE TABLE synthetic_close_schema_owner(value integer)`))
 		server.RaisePgResult(tx.Exec(f.ctx, remove))
-		probe = &originalCloseTransactionProbe{PgTx: tx}
-		server.Raise(tx.QueryRow(f.ctx, `SELECT pg_backend_pid()`).Scan(&probe.callerBackendPid))
-		applied, closeErr = closeContractReportInTx(f.ctx, probe, report)
-		server.RaisePgResult(tx.Exec(f.ctx, restore))
 	}, server.TxReadCommitted, server.OptNoRetry())
-	if probe.beginCalls != 0 || probe.historyReads != 0 || closeErr != nil || !applied {
-		t.Fatalf("missing optional schema did not preserve caller: begin=%d reads=%d applied=%v err=%v", probe.beginCalls, probe.historyReads, applied, closeErr)
+	restored := false
+	restoreSchema := func() {
+		if !restored {
+			server.Tx(f.ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(f.ctx, restore))
+			}, server.TxReadCommitted, server.OptNoRetry())
+			restored = true
+		}
 	}
-	original, registration := retainedCloseOriginal(t, report)
-	if !bytes.Equal(original, report.OriginalReport) || len(registration) != 0 || retainedCloseKeyIssue(t, report) != originalCloseKeyUnavailable {
-		t.Fatal("missing optional schema lost the original or acquired registration")
+	defer restoreSchema()
+	var sqlErr *pgconn.PgError
+	if applied, err := CloseContractWithReport(f.ctx, report); applied || !errors.As(err, &sqlErr) || sqlErr.Code != sqlState {
+		t.Fatal("missing required history schema became an accepted close", applied, err)
+	}
+	assertCloseReportCounts(t, f.ctx, f.contractId, 0, 0)
+	assertCloseReportLegacyReceipts(t, f.ctx, f.contractId, 0)
+	var probe *originalCloseTransactionProbe
+	var ownerErr error
+	server.HandleError(func() {
+		server.Tx(f.ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(f.ctx, `INSERT INTO synthetic_close_schema_owner(value) VALUES(1)`))
+			probe = &originalCloseTransactionProbe{PgTx: tx}
+			server.Raise(tx.QueryRow(f.ctx, `SELECT pg_backend_pid()`).Scan(&probe.callerBackendPid))
+			_, err := closeContractReportInTx(f.ctx, probe, report)
+			server.Raise(err)
+		}, server.TxReadCommitted, server.OptNoRetry())
+	}, func(err error) { ownerErr = err })
+	if probe.beginCalls != 0 || probe.historyReads != 1 || !errors.As(ownerErr, &sqlErr) || sqlErr.Code != sqlState {
+		t.Fatalf("missing required schema did not abort caller: begin=%d reads=%d err=%v", probe.beginCalls, probe.historyReads, ownerErr)
+	}
+	server.Db(f.ctx, func(conn server.PgConn) {
+		var writes int
+		server.Raise(conn.QueryRow(f.ctx, `SELECT count(*) FROM synthetic_close_schema_owner`).Scan(&writes))
+		if writes != 0 {
+			t.Fatal("missing required schema committed an earlier caller write")
+		}
+	})
+	assertCloseReportCounts(t, f.ctx, f.contractId, 0, 0)
+	assertCloseReportLegacyReceipts(t, f.ctx, f.contractId, 0)
+	restoreSchema()
+	if applied, err := CloseContractWithReport(f.ctx, report); !applied || err != nil {
+		t.Fatal("schema recovery failed to admit the exact original", applied, err)
 	}
 	if applied, err := CloseContractWithReport(f.ctx, report); applied || err != nil {
-		t.Fatal("schema recovery repeated an admitted original", applied, err)
+		t.Fatal("schema recovery repeated the admitted original", applied, err)
 	}
-	_, registration = retainedCloseOriginal(t, report)
-	if len(registration) != 0 || retainedCloseKeyIssue(t, report) != originalCloseKeyUnavailable {
-		t.Fatal("schema recovery backfilled original registration authority")
+	original, registration := retainedCloseOriginal(t, report)
+	if !bytes.Equal(original, report.OriginalReport) || !bytes.Equal(registration, record.RegistrationBytes) || retainedCloseKeyIssue(t, report) != "" {
+		t.Fatal("schema recovery lost the original or its exact registration")
 	}
 	assertCloseReportCounts(t, f.ctx, f.contractId, 1, 20)
+	assertCloseReportLegacyReceipts(t, f.ctx, f.contractId, 1)
 }
 
-// Catalog absence is optional; the nonexistent relation is never queried.
-func TestContractCloseOriginalMissingHistoryRelationKeepsCallerTransaction(t *testing.T) {
+// The history relation is a migration prerequisite, not optional evidence.
+func TestContractCloseOriginalMissingHistoryRelationRollsBackAndRecovers(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		originalCloseUnavailableSchemaTest(t,
 			`ALTER TABLE st_client_key_history RENAME TO synthetic_close_history_unavailable`,
-			`ALTER TABLE synthetic_close_history_unavailable RENAME TO st_client_key_history`)
+			`ALTER TABLE synthetic_close_history_unavailable RENAME TO st_client_key_history`, "42P01")
 	})
 }
 
 // An incomplete rollout has a relation but cannot satisfy the immutable read.
-func TestContractCloseOriginalMissingHistoryColumnKeepsCallerTransaction(t *testing.T) {
+func TestContractCloseOriginalMissingHistoryColumnRollsBackAndRecovers(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		originalCloseUnavailableSchemaTest(t,
 			`ALTER TABLE st_client_key_history RENAME COLUMN registration_hash TO synthetic_unavailable_registration_hash`,
-			`ALTER TABLE st_client_key_history RENAME COLUMN synthetic_unavailable_registration_hash TO registration_hash`)
+			`ALTER TABLE st_client_key_history RENAME COLUMN synthetic_unavailable_registration_hash TO registration_hash`, "42703")
 	})
 }
 
