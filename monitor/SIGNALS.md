@@ -5444,7 +5444,8 @@ false, and the enclosing shard page selects chronological processing with the
 existing budget, post, cursor and financial guards. This source path does not
 prove that the resulting page completed or paid out. Missing or invalid indexes
 ordinarily produce false readiness without an error, so the captured deadlines
-justify no relaxation of catalog readiness checks.
+did not establish an invalid index. Runtime settlement index checks were later
+removed; see “Legacy settlement execution without runtime index checks.”
 
 Pool occupancy, queue wait, connection construction, exact backend/lock
 ownership and CPU cause were not captured. Do not classify these recovered
@@ -33391,71 +33392,33 @@ The direct maintenance pool must retain capacity beyond live execution guards
 for same-backend business owners; no pool or execution limit is raised here.
 
 
-### Legacy payer index readiness in completed dispatcher results
+### Legacy settlement execution without runtime index checks
 
-`FlushLegacySettlementsResult.index_readiness` retains the outcome and elapsed
-milliseconds of the existing due-index readiness probe. The fixed outcomes are
-`ready`, `catalog_invalid`, `deadline`, `canceled`, and `read_error`. The check
-keeps its 250ms context and nonretrying database policy; capturing this result
-adds no query. `catalog_invalid` describes that catalog observation, not a
-persistent schema fault. Deadlines and resource, acquisition or query failures
-remain distinguishable without storing raw error text or resource values.
+Payer execution, shard dispatch, missing-payer registration and the financial
+shard entry use their existing bounded ordinary SQL directly. Completed indexes
+are a deployment prerequisite. These entries no longer read the PostgreSQL
+catalog or a resource identity to decide index status, keep an index cache,
+refuse payer work after a 250ms check, or select a chronological fallback from
+that check. The ordinary 15-second financial budget, 5-second dispatcher budget
+with 2 seconds reserved for registration, SQL limits, ownership and settlement
+transactions remain in place. Initial payer tasks retain their 30-second
+collection window and earliest scheduling deadline.
 
-The observation follows both successful dispatch and the legacy financial
-fallback into the task's whole result. It describes the initial due-index probe;
-it does not attest the subsequent optional both-index cache observation, task
-executor binary, or a particular contract visit. A task-function error still
-follows the existing error path and may have no finished-task result. Existing
-results without this field have unknown readiness cause. Elapsed milliseconds
-cover resource resolution, acquisition and the probe; they are not PostgreSQL
-CPU time or isolated catalog execution time.
+The retired `urnetwork_legacy_payer_index_readiness_total` counter is no longer
+emitted. Its absence in a new process is not a zero-error observation. Old
+serialized task results may contain `index_readiness`; the decoder ignores that
+field. A retained result with no `dispatch` still uses its original financial
+continuation in Post. New dispatcher results contain the normal dispatch result
+without manufactured readiness metadata.
 
-A still-live positive result from the existing both-index readiness cache may
-serve the due-index check. Its resource digest must match the current bounded
-resource read, and the original five-second expiry is never extended.
-`index_readiness.cached=true` identifies that case. Cold, negative or expired
-cache state skips the extra resource read and uses the original catalog probe.
-A concurrent refresh does not erase an unexpired observation for its exact
-resource; it also cannot make a different or expired resource ready. A miss
-does not wait for that refresh or add a database retry. This reduces exposure
-to a transient redundant probe failure while known valid schema evidence is
-available; it does not cure an uncached probe failure or prove a fleet rate.
+A deterministic catalog-query tripwire covers the actual payer entry, ordinary
+registration and discovery, the financial shard entry, and an empty payer.
+The real-payer and retained no-payer fixtures must complete through their normal
+financial owners, retain provider custody, and leave NULL financial payer
+metadata unchanged. Index schema qualification remains part of deployment and
+monitoring rather than a repeated settlement admission step.
 
-Optional compatibility registration shares that exact full-index positive
-observation before its own catalog check. A miss uses the existing cache loader
-for the both-index check within the same 250ms context, then retains the
-chronological fallback on refusal. A fresh successful full check now publishes
-its exact-resource proof with the original five-second expiry measured from
-loader admission. Reusing proof never extends it; a due-only read cannot publish
-full-index authority. A successful fresh full check also rechecks its bounded
-resource digest before publishing; a changed or unreadable resource refuses the
-proof within the same context, without a second catalog query.
-Concurrent refresh, negative state and late/canceled reads
-retain the loader's existing refusal policy without another query or retry.
-
-The prior modern dispatcher path only consumed the cache: its fresh registration
-checks did not publish, and only the fallback financial lane could warm it. A
-cold modern worker could therefore keep probing despite successful full checks.
-Controls start cold, run due-only and full registration readiness in order, then
-verify cache reuse, exact expiry, resource identity and concurrent refusal. This
-source correction does not attribute an observed fleet failure rate to readiness
-or establish recovered financial throughput. The task's `index_readiness` still
-describes dispatch entry only; it does not measure the registration branch or
-prove that a particular missing payer was registered. Registration's independent
-missing-key index and unchanged chronological cursor remain authoritative.
-
-### Payer readiness and terminal execution error counters
-
-`urnetwork_legacy_payer_index_readiness_total` records the already completed
-due-index observation at the `dispatcher` or `payer` entry. Its fixed outcomes
-are `ready`, `catalog_invalid`, `deadline`, `canceled`, `read_error`, and the
-defensive `unknown`; `cached=true` applies only to a ready cached observation.
-The metric adds no resource read, SQL, retry, or financial action. Its existing
-250ms budget still includes resource resolution, acquisition and catalog work.
-Count or rate matched process generations before aggregating. Non-ready payer
-observations can identify a scheduling refusal population; they do not identify
-the failed resource, assert a persistent invalid index, or measure commits.
-Dispatcher refusal can use the existing fallback and need not fail its task.
+### Terminal execution error counters
 
 `urnetwork_taskworker_execution_errors_total` uses the existing execution
 terminal site and the same finite registered-task/attribution labels as
@@ -33477,8 +33440,8 @@ commit followed by a later function error can also be counted. Task claim,
 completion transactions, Post retries and downstream accounting remain separate.
 The existing Info execution-error log is unconditional, while successful result
 logs require verbosity one. Collector delivery or a capped log tail can conceal
-those lines despite a terminal counter. Neither telemetry addition attributes
-the earlier R54 failure rate or certifies recovered payer throughput.
+those lines despite a terminal counter. The execution counter alone does not attribute
+an earlier failure rate or certify recovered payer throughput.
 
 
 ### Task submission, completion and RunOnce conflict counters

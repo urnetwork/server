@@ -4,7 +4,6 @@ package model
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,10 +12,6 @@ import (
 )
 
 type legacySettlementPayerScopeKey struct{}
-
-// The recurring shard owner retains its chronological recovery path when this
-// optional scheduling prerequisite cannot be proved. No financial refusal.
-var ErrLegacySettlementPayerIndexUnavailable = errors.New("legacy payer due index is unavailable")
 
 const legacySettlementShardValuesSql = `(VALUES (0::smallint),(1),(2),(3),(4),(5),(6),(7),
  (8),(9),(10),(11),(12),(13),(14),(15)) AS payer_shard(shard)`
@@ -65,14 +60,6 @@ func runLegacyPayerSettlementPages(ctx context.Context, payerNetworkId server.Id
 	}
 	bounded, cancel := context.WithTimeoutCause(ctx, 15*time.Second, errLegacySettlementPageBudget)
 	defer cancel()
-	readiness := legacySettlementPayerDueIndexObservation(bounded)
-	recordLegacyPayerReadiness(legacyPayerReadinessCounter, "payer", readiness)
-	if readiness.Outcome != "ready" {
-		if bounded.Err() != nil {
-			return result, bounded.Err()
-		}
-		return result, ErrLegacySettlementPayerIndexUnavailable
-	}
 	trace, _ := ctx.Value(legacyTargetTraceKey{}).(*legacyTargetTrace)
 	if trace == nil {
 		origin := "payer_page"
