@@ -170,8 +170,10 @@ func nextLegacySourceOwner(ctx context.Context, shard int, cursor *LegacySettlem
 }
 
 // Both dispatch paths resolve their head through the shared selector. A stale
-// inferred key advances discovery only; bounded registration owns its repair.
+// hint never publishes financial work under the wrong owner. Release discovery's
+// connection before exact registration takes its own intent/contract locks.
 func legacyDispatchOwnerMatches(ctx context.Context, contractId server.Id, expected ContractCloseOwner) (matches bool) {
+	repair := false
 	server.Db(ctx, func(conn server.PgConn) {
 		actual, _, err := readContractCloseOwnerInConn(ctx, conn, contractId)
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errContractCloseOwnerUnresolved) {
@@ -179,7 +181,43 @@ func legacyDispatchOwnerMatches(ctx context.Context, contractId server.Id, expec
 		}
 		server.Raise(err)
 		matches = actual == expected
+		repair = !matches
 	}, server.OptNoRetry())
+	if repair {
+		// Populated source markers also occur on paid intents, outside the
+		// missing-marker registration index. Repair only this observed head.
+		server.Tx(ctx, func(tx server.PgTx) {
+			var payerHint, sourceHint *server.Id
+			err := tx.QueryRow(ctx, `SELECT payer_network_id,source_client_id FROM legacy_settlement_intent
+				WHERE contract_id=$1 FOR UPDATE SKIP LOCKED`, contractId).Scan(&payerHint, &sourceHint)
+			if err == pgx.ErrNoRows {
+				return
+			}
+			server.Raise(err)
+			var lockedId server.Id
+			err = tx.QueryRow(ctx, `SELECT contract_id FROM transfer_contract
+				WHERE contract_id=$1 AND outcome IS NULL FOR UPDATE SKIP LOCKED`, contractId).Scan(&lockedId)
+			if err == pgx.ErrNoRows {
+				return
+			}
+			server.Raise(err)
+			actual, sourceId, err := readContractCloseOwnerInConn(ctx, tx, contractId)
+			if errors.Is(err, errContractCloseOwnerUnresolved) {
+				return
+			}
+			server.Raise(err)
+			var payer *server.Id
+			if actual.Kind == ContractCloseOwnerPayerNetwork {
+				payer = &actual.Id
+			}
+			payerMatches := payer == nil && payerHint == nil || payer != nil && payerHint != nil && *payer == *payerHint
+			if payerMatches && sourceHint != nil && *sourceHint == sourceId {
+				return
+			}
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent
+				SET payer_network_id=$2,source_client_id=$3 WHERE contract_id=$1`, contractId, payer, sourceId))
+		}, server.TxReadCommitted, server.OptNoRetry())
+	}
 	return
 }
 
