@@ -23,7 +23,7 @@ func (self *legacySettlementDispatcherTaskTarget) TaskCompletionOwnershipKeys(_ 
 	if result.Dispatch == nil {
 		return nil, nil
 	}
-	return model.LegacyPayerSettlementQueueOwnershipKeys(result.Dispatch.PayerNetworkIds)
+	return model.LegacyCloseSettlementQueueOwnershipKeys(result.Dispatch.PayerNetworkIds, result.Dispatch.SourceClientIds)
 }
 
 func NewLegacySettlementDispatcherTaskTarget() task.Target {

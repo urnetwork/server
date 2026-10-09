@@ -303,6 +303,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		work.NewTransferDebitTaskTarget(),
 		work.NewLegacySettlementDispatcherTaskTarget(),
 		model.NewLegacyPayerSettlementTaskTarget(),
+		model.NewLegacySourceSettlementTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.ReconcileNetEscrow,
 			work.ReconcileNetEscrowPost,

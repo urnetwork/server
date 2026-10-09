@@ -41,3 +41,23 @@ func LegacyPayerSettlementQueueOwnershipKeys(payerIds []server.Id) ([]server.PgO
 	}
 	return keys, nil
 }
+
+// The two discovery families each retain the existing sixteen-probe ceiling.
+// Their namespaces are disjoint even when their UUID values are identical.
+func LegacyCloseSettlementQueueOwnershipKeys(payerIds, sourceIds []server.Id) ([]server.PgOwnershipKey, error) {
+	keys, err := LegacyPayerSettlementQueueOwnershipKeys(payerIds)
+	if err != nil {
+		return nil, err
+	}
+	if len(sourceIds) > legacySettlementPayerProbeLimit {
+		return nil, fmt.Errorf("legacy source publication exceeds discovery bound")
+	}
+	for _, id := range sourceIds {
+		owner := ContractCloseOwner{Kind: ContractCloseOwnerSourceClient, Id: id}
+		if !owner.valid() {
+			return nil, fmt.Errorf("legacy source publication has empty scope")
+		}
+		keys = append(keys, task.RunOnceOwnershipKey(owner.runOnce()))
+	}
+	return keys, nil
+}

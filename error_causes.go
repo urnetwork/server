@@ -31,6 +31,12 @@ type ErrorCauseInspection struct {
 // Breadth-first inspection retains nearby independent hard causes even when
 // another branch cycles. Each caller owns its separate leaf/ancestry policy.
 func InspectErrorCauses(err error) ErrorCauseInspection {
+	return inspectErrorCauses(err, false)
+}
+
+// Explicit batches can form opaque boundaries only for the separate batch
+// inspector, which must then inspect every original member independently.
+func inspectErrorCauses(err error, stopAtBatch bool) ErrorCauseInspection {
 	if err == nil {
 		return ErrorCauseInspection{}
 	}
@@ -47,6 +53,10 @@ func InspectErrorCauses(err error) ErrorCauseInspection {
 				result.Complete = false
 				continue
 			}
+		}
+		if _, batch := node.Err.(*ErrorCauseBatch); stopAtBatch && batch {
+			result.Nodes[index].Leaf = true
+			continue
 		}
 		var causes []error
 		switch value := node.Err.(type) {

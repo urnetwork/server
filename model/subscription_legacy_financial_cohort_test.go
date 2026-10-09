@@ -25,6 +25,7 @@ type legacyFinancialCohortFixture struct {
 	reservationAmounts []int64
 	shards             []int
 	reports            []byte
+	excludedUsage      map[server.Id]bool
 }
 
 // Two grants belong to the same payer, with a 15:1 distribution. Four provider
@@ -135,7 +136,11 @@ func legacyFinancialCohortRequire(t testing.TB, ctx context.Context, f legacyFin
 				}
 				record, err := decodeContractUsageSnapshot(usage)
 				provider := f.providers[f.providerIndexes[index]]
-				if err != nil || record.ByteCount != 3 || len(record.Providers) != 1 || record.Providers[0].ClientId != provider.destinationId || record.Providers[0].NetworkId != provider.destinationNetworkId || record.Providers[0].ByteCount != 3 {
+				if f.excludedUsage[id] {
+					if err != nil || record.ByteCount != 0 || len(record.Providers) != 0 || record.ExcludedReason != "expired_unconfirmed" {
+						t.Fatal("legacy expiry invented directional usage", index, err)
+					}
+				} else if err != nil || record.ByteCount != 3 || len(record.Providers) != 1 || record.Providers[0].ClientId != provider.destinationId || record.Providers[0].NetworkId != provider.destinationNetworkId || record.Providers[0].ByteCount != 3 {
 					t.Fatal("cohort changed original usage attribution", index, err)
 				}
 			} else if outcome != nil || !pending || settled || payout != 0 || revenue != 0 || len(usage) != 0 {

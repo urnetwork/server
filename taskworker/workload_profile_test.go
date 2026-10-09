@@ -51,6 +51,7 @@ func TestSubnetOperatorWorkloadKeepsRequiredTargets(t *testing.T) {
 		task.NewTaskTarget(work.RefreshVerifyProxyEgress), task.NewTaskTarget(work.CloseExpiredContracts),
 		task.NewTaskTarget(work.ReconcileNetEscrow), task.NewTaskTarget(work.FlushLegacySettlements),
 		model.NewLegacyPayerSettlementTaskTarget(),
+		model.NewLegacySourceSettlementTaskTarget(),
 		task.NewTaskTarget(work.RefreshContractHoles),
 		task.NewTaskTarget(model.RemoveNetworkClientsTask),
 		task.NewTaskTarget(work.DbMaintenance), task.NewTaskTarget(work.BackfillClock),
@@ -174,6 +175,7 @@ func TestSubnetOperatorWorkloadClaimsPastRetainedAndApiTasks(t *testing.T) {
 // TestSubnetOperatorWorkloadPreservesProductionDefault keeps the ordinary
 // public constructors and zero-value profile on the complete production set.
 func TestSubnetOperatorWorkloadPreservesProductionDefault(t *testing.T) {
+	t.Setenv("WARP_DOMAIN", "workload-profile.example")
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		controller.SetStConfig(&controller.StConfig{Enabled: false})

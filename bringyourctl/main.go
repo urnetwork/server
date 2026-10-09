@@ -98,6 +98,7 @@ Usage:
     bringyourctl contracts repair-expiry --private-stdin [--apply]
     bringyourctl contracts repair-redis-expiry --private-stdin [--apply]
     bringyourctl contracts drain-legacy --private-stdin [--apply]
+    bringyourctl contracts queue-expiry
     bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl contracts reconcile-net-escrow [--network_id=<network_id>] [--dry-run]
@@ -320,6 +321,9 @@ func main() {
 			adminWalletEstimateFee(opts)
 		}
 	} else if contracts, _ := opts.Bool("contracts"); contracts {
+		if queueExpiry, _ := opts.Bool("queue-expiry"); queueExpiry {
+			os.Exit(runContractExpiryRecovery(context.Background(), os.Stdout, invokeContractExpiryRecovery))
+		}
 		if drainLegacy, _ := opts.Bool("drain-legacy"); drainLegacy {
 			apply, _ := opts.Bool("--apply")
 			os.Exit(runPrivateLegacySettlementDrain(context.Background(), os.Stdin, os.Stdout, apply, invokeLegacySettlementDrain))

@@ -2675,6 +2675,18 @@ func applyContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 	contractId, clientId server.Id, usedTransferByteCount ByteCount,
 	checkpoint bool, reportId *server.Id,
 ) (applied, terminalReplay bool, returnErr error) {
+	return applyContractCloseReportWithExpiryInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, nil)
+}
+
+// Only the expiry owner with a retained original proof may finalize a disputed
+// report. It uses the same increments, receipts and transport revocation owner.
+func applyContractCloseReportWithExpiryInTx(ctx context.Context, tx server.PgTx,
+	contractId, clientId server.Id, usedTransferByteCount ByteCount,
+	checkpoint bool, reportId *server.Id, expiry *contractExpiryState,
+) (applied, terminalReplay bool, returnErr error) {
+	if expiry != nil && (!expiry.usageUnverifiedRetained || expiry.contractId != contractId) {
+		return false, false, fmt.Errorf("expiry report continuation lacks retained ownership")
+	}
 	found := false
 	var sourceId server.Id
 	var destinationId server.Id
@@ -2749,7 +2761,7 @@ func applyContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 		}
 		return
 	}
-	if dispute {
+	if dispute && expiry == nil {
 		returnErr = fmt.Errorf("Contract in dispute: %s %s %s->%s", contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
 		return
 	}
@@ -3273,7 +3285,7 @@ func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.Pg
 // Current Redis contracts append independent consumption records. Legacy
 // callers queue an intent without releasing their reservation; the worker uses
 // the original atomic debit/outcome path and commits exact earnings plus durable total-projection ownership.
-func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
+func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool, closeOwners ...ContractCloseOwner) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
@@ -3324,7 +3336,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	})
 	var usedTransferByteCount ByteCount
 	var clockTransferByteCount ByteCount
-	settlementOwner, err := readContractSettlementOwnerInTx(ctx, tx, contractId)
+	settlementOwner, err := readContractSettlementOwnerInTx(ctx, tx, contractId, closeOwners...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -4396,9 +4408,17 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 		allVisited = false
 		pageErrors = append(pageErrors, ctxErr)
 	}
-	// Keep causes flat so many completed visits do not manufacture an
-	// arbitrarily deep error graph. The bounded inspection still owns admission.
+	// Every completed row keeps its own bounded cause inspection. Inspecting
+	// their whole join would spend one row's budget on other rows' failures
+	// and repeatedly pin a fully visited raw page once enough rows fail.
 	err = errors.Join(pageErrors...)
+	var completedCauses *server.ErrorCauseBatch
+	if allVisited && err != nil {
+		if batch := server.NewErrorCauseBatch(pageErrors); forceCloseVisitBatchComplete(batch) {
+			completedCauses = batch
+			err = batch
+		}
+	}
 	if accountingOnly && 0 < accountingRejectionCount+quarantinedAccountingRejectionCount {
 		err = &ForceCloseAccountingError{
 			cause:                               err,
@@ -4406,7 +4426,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 			accountingRejectionCount:            accountingRejectionCount,
 			quarantinedAccountingRejectionCount: quarantinedAccountingRejectionCount,
 		}
-	} else if allVisited && err != nil && forceCloseVisitCauseComplete(err) {
+	} else if completedCauses != nil {
 		// Advancing the scan never finalizes this failed row. It remains in
 		// its original open/disputed set, or with its separate durable owner.
 		err = &ForceCloseVisitError{cause: err, attemptedCloseCount: closeCount, complete: true}

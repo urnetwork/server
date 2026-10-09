@@ -70,9 +70,11 @@ func forceCloseContractPagesBudgeted[Cursor any](ctx context.Context, maxCount i
 				}
 			}
 			if visited, ok := pageErr.(*ForceCloseVisitError); ok && visited.CanCheckpoint() && visited.AttemptedCloseCount() == count {
-				return closed + count, cursor, &ForceCloseVisitError{
-					cause: visited, attemptedCloseCount: closed + count, complete: true,
-				}
+				// Prior successful subpages add only their count. Preserve the
+				// exact completed-row receipt without adding another cause graph.
+				progress := *visited
+				progress.attemptedCloseCount += closed
+				return closed + count, cursor, &progress
 			}
 			return closed + count, next, pageErr
 		}

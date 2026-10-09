@@ -31,7 +31,7 @@ func TestLegacyPayerDispatchRecoversWithoutWake(t *testing.T) {
 		ctx := t.Context()
 		f, id := legacySettlementTestIntent(t, ctx)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL WHERE contract_id=$1`, id))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL,source_client_id=NULL WHERE contract_id=$1`, id))
 		})
 		// No close callback or wake is delivered. The durable intent is enough.
 		result, err := DispatchLegacySettlementPayers(ctx, int(id[15])%16, nil, nil)
@@ -105,7 +105,7 @@ func TestLegacyPayerDispatchRegistersFullBoundedNullPrefix(t *testing.T) {
  FROM unnest($1::uuid[]) WITH ORDINALITY AS pending(id,ordinal)`, ids, oldest))
 			// The current INSERT trigger fills the key. Explicitly reproduce
 			// retained pre-registration rows after that trigger has completed.
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL WHERE contract_id=ANY($1)`, ids))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL,source_client_id=NULL WHERE contract_id=ANY($1)`, ids))
 			var missing int
 			server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=ANY($1) AND payer_network_id IS NULL`, ids).Scan(&missing))
 			if missing != len(ids) {
@@ -328,7 +328,7 @@ func TestLegacyPayerDispatchHeldRegistrationKeepsRegisteredService(t *testing.T)
 		ready := newNetEscrowOrderingTestFixture(t, ctx)
 		readyId := newLegacyPayerTestIntent(t, ctx, ready, legacyPayerTestContractId(server.NewId(), 1, shard), 100, 11)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL WHERE contract_id=$1`, missingId))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL,source_client_id=NULL WHERE contract_id=$1`, missingId))
 		})
 		conn := acquireContractLifecycleTestConnection(t, ctx)
 		defer conn.Release()

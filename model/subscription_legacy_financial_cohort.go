@@ -18,7 +18,7 @@ import (
 )
 
 const legacyFinancialCohortLimit = 8
-const legacyFinancialCohortTimeout = 500 * time.Millisecond
+const legacyFinancialCohortTimeout = time.Second
 const legacyFinancialCohortEscrowLimit = 64
 const legacyFinancialCohortParticipantLimit = 256
 
@@ -27,12 +27,13 @@ var errLegacyFinancialCohortUnsupported = errors.New("legacy financial cohort re
 // A fallback has made no financial change for that contract. A successful
 // cohort may precede it, so callers consume only this returned input prefix.
 type legacyFinancialCohortAttempt struct {
-	contractId       server.Id
-	completed        bool
-	busy             bool
-	busyGate         legacySettlementBusyGate
-	fallback         bool
-	deadlineFallback bool
+	contractId             server.Id
+	completed              bool
+	busy                   bool
+	busyGate               legacySettlementBusyGate
+	fallback               bool
+	deadlineFallback       bool
+	financialWriteRollback bool
 }
 
 // Every field is scoped to one transaction. Membership and grant data are read
@@ -65,6 +66,11 @@ func flushLegacySettlementCohort(ctx context.Context, contractIds []server.Id) (
 	}
 	bounded, cancel := context.WithTimeout(ctx, legacyFinancialCohortTimeout)
 	defer cancel()
+	bounded = withLegacyFinancialCohortBudget(bounded)
+	diagnostic := newLegacyFinancialDiagnostic(bounded, "cohort")
+	defer diagnostic.finish()
+	bounded.Value(legacyFinancialCohortBudgetKey{}).(*legacyFinancialCohortBudget).diagnostic = diagnostic
+	databaseTiming, observeDatabase := observeLegacyFinancialCohort(ctx)
 	finishFinancial := enterLegacySettlementTiming(ctx, legacySettlementFinancial)
 	var posts []func() any
 	traced := map[server.Id]context.Context{}
@@ -77,13 +83,17 @@ func flushLegacySettlementCohort(ctx context.Context, contractIds []server.Id) (
 	bodyReturned := false
 	server.HandleError(func() {
 		server.Tx(bounded, func(tx server.PgTx) {
+			diagnostic.bind(tx)
+			server.Raise(checkLegacyFinancialCohortBudget(bounded, "setup"))
 			server.RaisePgResult(tx.Exec(bounded, `SET LOCAL statement_timeout='500ms'; SET LOCAL lock_timeout='250ms'`))
 			var err error
 			attempts, posts, err = flushLegacySettlementCohortInTx(bounded, tx, contractIds)
 			server.Raise(err)
 			bodyReturned = true
-		}, server.TxReadCommitted, server.OptNoRetry())
+		}, server.TxReadCommitted, server.OptNoRetry(), databaseTiming)
 	}, func(err error) { returnErr = err })
+	diagnostic.finish()
+	observeDatabase()
 	finishFinancial()
 	if returnErr != nil {
 		attempts = nil
@@ -93,8 +103,10 @@ func flushLegacySettlementCohort(ctx context.Context, contractIds []server.Id) (
 		// This branch is before any commit attempt: Tx has joined rollback.
 		// A lost acknowledgement after body return is never replayed here.
 		if !bodyReturned && ctx.Err() == nil {
+			budget, _ := bounded.Value(legacyFinancialCohortBudgetKey{}).(*legacyFinancialCohortBudget)
 			return []legacyFinancialCohortAttempt{{contractId: contractIds[0], fallback: true,
-				deadlineFallback: legacyFinancialCohortDeadlineFallback(ctx, bounded, returnErr)}}, nil
+				financialWriteRollback: budget != nil && budget.written,
+				deadlineFallback:       errors.Is(returnErr, errLegacyFinancialCohortBudget) || legacyFinancialCohortDeadlineFallback(ctx, bounded, returnErr)}}, nil
 		}
 		return nil, returnErr
 	}
@@ -125,7 +137,10 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 		return nil, nil, errLegacyFinancialCohortUnsupported
 	}
 	contracts := map[server.Id]*legacyFinancialCohortContract{}
-	rows, err := tx.Query(ctx, `SELECT owned.contract_id,owned.outcome,owned.clear_dispute
+	if err := checkLegacyFinancialCohortBudget(ctx, "intents"); err != nil {
+		return nil, nil, err
+	}
+	rows, err := queryLegacyFinancialCohort(ctx, tx, `SELECT owned.contract_id,owned.outcome,owned.clear_dispute
         FROM (SELECT unnest($1::uuid[]) AS contract_id ORDER BY contract_id OFFSET 0) AS requested
         CROSS JOIN LATERAL (SELECT contract_id,outcome,clear_dispute FROM legacy_settlement_intent
         WHERE contract_id=requested.contract_id OFFSET 0 FOR UPDATE SKIP LOCKED) AS owned`, sortedIds)
@@ -144,7 +159,10 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 	}
 	lockedContracts := map[server.Id]bool{}
 	if len(ownedIds) > 0 {
-		rows, err = tx.Query(ctx, `SELECT owned.contract_id,owned.source_network_id,owned.source_id,
+		if err := checkLegacyFinancialCohortBudget(ctx, "headers"); err != nil {
+			return nil, nil, err
+		}
+		rows, err = queryLegacyFinancialCohort(ctx, tx, `SELECT owned.contract_id,owned.source_network_id,owned.source_id,
             owned.destination_network_id,owned.destination_id,owned.payer_network_id,
             owned.companion_contract_id,owned.stream_id,owned.usage_origin_is_source,owned.outcome,
             owned.transfer_byte_count,owned.usage_unverified,owned.provider_usage
@@ -167,6 +185,27 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 			}
 		})
 	}
+	// The common selector validates each locked contract before shared grant
+	// ownership. A stale hint falls back to the individual rekey transaction.
+	for _, id := range ownedIds {
+		if lockedContracts[id] && !contracts[id].fallback {
+			if err := checkLegacyFinancialCohortBudget(ctx, "owner"); err != nil {
+				return nil, nil, err
+			}
+			closeOwner, admitted, err := validateLegacyCloseOwnerHeaderInTx(ctx, tx, id, contracts[id].owner.participants.sourceId, contracts[id].owner.participants.payerNetworkId, nil)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !admitted || closeOwner.Kind == ContractCloseOwnerSourceClient {
+				contracts[id].fallback = true
+			} else if contracts[id].owner.participants.payerNetworkId == nil {
+				// Billing consumes the same verified financial payer as routing.
+				// Only this transaction-local header changes; original metadata
+				// and the independent usage direction remain retained as written.
+				contracts[id].owner.participants.payerNetworkId = &closeOwner.Id
+			}
+		}
+	}
 	ownedIds = ownedIds[:0]
 	for _, id := range sortedIds {
 		if lockedContracts[id] && !contracts[id].fallback {
@@ -176,10 +215,13 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 	balanceIdSet := map[server.Id]bool{}
 	ownershipBalanceIdSet := map[server.Id]bool{}
 	if len(ownedIds) > 0 {
+		if err := checkLegacyFinancialCohortBudget(ctx, "membership"); err != nil {
+			return nil, nil, err
+		}
 		// Missing grants still have escrow revision ownership, but do not
 		// become financial membership. Bound each exact contract seek before
 		// its join so a dangling history cannot expand before the sentinel.
-		rows, err = tx.Query(ctx, `SELECT requested.contract_id,escrow.balance_id,balance.balance_id IS NOT NULL
+		rows, err = queryLegacyFinancialCohort(ctx, tx, `SELECT requested.contract_id,escrow.balance_id,balance.balance_id IS NOT NULL
             FROM unnest($1::uuid[]) AS requested(contract_id)
             CROSS JOIN LATERAL (SELECT balance_id FROM transfer_escrow
                 WHERE contract_id=requested.contract_id ORDER BY balance_id LIMIT $2 OFFSET 0) AS escrow
@@ -210,7 +252,10 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 	// Without an owned financial contract there is no shared key set to
 	// admit. Preserve the individual private-row busy reasons below.
 	if len(ownedIds) > 0 {
-		ownershipAdmitted, err := server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(ownedIds, ownershipBalanceIds))
+		if err := checkLegacyFinancialCohortBudget(ctx, "ownership"); err != nil {
+			return nil, nil, err
+		}
+		ownershipAdmitted, err := server.TryTxOwnershipExec(ctx, tx, legacyFinancialOwnershipKeys(ownedIds, ownershipBalanceIds))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -235,7 +280,10 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 	slices.SortFunc(balanceIds, server.Id.Cmp)
 	lockedBalanceIdSet := map[server.Id]bool{}
 	if len(balanceIds) > 0 {
-		rows, err = tx.Query(ctx, `SELECT owned.balance_id FROM (SELECT unnest($1::uuid[]) AS balance_id ORDER BY balance_id OFFSET 0) AS requested
+		if err := checkLegacyFinancialCohortBudget(ctx, "grant_rows"); err != nil {
+			return nil, nil, err
+		}
+		rows, err = queryLegacyFinancialCohort(ctx, tx, `SELECT owned.balance_id FROM (SELECT unnest($1::uuid[]) AS balance_id ORDER BY balance_id OFFSET 0) AS requested
             CROSS JOIN LATERAL (SELECT balance_id FROM transfer_balance
             WHERE balance_id=requested.balance_id OFFSET 0 FOR UPDATE SKIP LOCKED) AS owned`, balanceIds)
 		server.WithPgResult(rows, err, func() {
@@ -262,7 +310,10 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 	// membership, joined-escrow and cache snapshots. No locking snapshot is
 	// reused as the financial amounts snapshot.
 	if len(readyIds) > 0 {
-		rows, err = tx.Query(ctx, `SELECT requested.contract_id,owned.balance_id,owned.balance_byte_count,
+		if err := checkLegacyFinancialCohortBudget(ctx, "escrow_rows"); err != nil {
+			return nil, nil, err
+		}
+		rows, err = queryLegacyFinancialCohort(ctx, tx, `SELECT requested.contract_id,owned.balance_id,owned.balance_byte_count,
             owned.settled,owned.redis_reserved
             FROM unnest($1::uuid[]) AS requested(contract_id)
             CROSS JOIN LATERAL (SELECT balance_id,balance_byte_count,settled,redis_reserved
@@ -295,6 +346,9 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 	}
 	cache := map[server.Id]netEscrowSnapshot{}
 	if len(readyIds) > 0 {
+		if err := checkLegacyFinancialCohortBudget(ctx, "financial_reads"); err != nil {
+			return nil, nil, err
+		}
 		batch := &pgx.Batch{}
 		batch.Queue(`SELECT requested.contract_id,report.party,report.used_transfer_byte_count,report.checkpoint
             FROM unnest($1::uuid[]) AS requested(contract_id)
@@ -438,6 +492,16 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 // Insufficient own escrow never borrows another member's unused reservation.
 func (self *legacyFinancialCohortContract) prepare() error {
 	reports := self.owner.reports
+	// Retained usage proof cannot replace the report continuation. Refuse
+	// partials before shared writes so their individual expiry owner can act.
+	closes := map[ContractParty]contractUsageClose{}
+	for _, report := range reports {
+		closes[report.party] = contractUsageClose{ByteCount: report.byteCount, Checkpoint: report.checkpoint}
+	}
+	count, err := contractCompletedUsage(self.outcome, self.owner.capacity, closes)
+	if err != nil {
+		return err
+	}
 	used, clock, err := contractSettlementReportAmounts(reports, self.outcome)
 	if err != nil {
 		return err
@@ -458,15 +522,9 @@ func (self *legacyFinancialCohortContract) prepare() error {
 		return err
 	}
 	if self.owner.usageOriginIsSource == nil {
-		return nil
-	}
-	closes := map[ContractParty]contractUsageClose{}
-	for _, report := range reports {
-		closes[report.party] = contractUsageClose{ByteCount: report.byteCount, Checkpoint: report.checkpoint}
-	}
-	count, err := contractCompletedUsage(self.outcome, self.owner.capacity, closes)
-	if err != nil {
-		return err
+		// New outcomes require immutable usage. The individual owner may
+		// retain an expiry exclusion; no healthy cohort write precedes it.
+		return errLegacyFinancialCohortUnsupported
 	}
 	participants, _, err = contractParticipantsFromRows(self.contractId, self.owner.participants, self.owner.usageOriginIsSource, self.usageParticipants)
 	if err != nil {
@@ -480,11 +538,20 @@ func (self *legacyFinancialCohortContract) prepare() error {
 // failed query rolls the whole cohort back; optional posts are registered only
 // with its real transaction owner and remain outside grant ownership.
 func writeLegacyFinancialCohortInTx(ctx context.Context, tx server.PgTx, contracts []*legacyFinancialCohortContract, cache map[server.Id]netEscrowSnapshot) (posts []func() any, returnErr error) {
+	if err := checkLegacyFinancialCohortBudget(ctx, "outcomes"); err != nil {
+		return nil, err
+	}
 	batch := &pgx.Batch{}
 	if err := queueLegacyFinancialCohortOutcomes(batch, contracts); err != nil {
 		return nil, err
 	}
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+		return nil, err
+	}
+	if budget, _ := ctx.Value(legacyFinancialCohortBudgetKey{}).(*legacyFinancialCohortBudget); budget != nil {
+		budget.written = true
+	}
+	if err := checkLegacyFinancialCohortBudget(ctx, "post_outcomes"); err != nil {
 		return nil, err
 	}
 	debitByBalance := map[server.Id]ByteCount{}
@@ -567,6 +634,9 @@ func writeLegacyFinancialCohortInTx(ctx context.Context, tx server.PgTx, contrac
 		task.QueueTaskInBatch(tx, batch, ApplyLegacyNetEscrowMirror, json.RawMessage(data), owner,
 			task.RunOnce("legacy_net_escrow_mirror", id), task.MaxTime(netEscrowMirrorTimeout), task.RequireQueueOwnership(tx))
 	}
+	if err := checkLegacyFinancialCohortBudget(ctx, "financial_writes"); err != nil {
+		return nil, err
+	}
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
 		return nil, err
 	}
@@ -574,8 +644,14 @@ func writeLegacyFinancialCohortInTx(ctx context.Context, tx server.PgTx, contrac
 	// optional provenance, never reconstructed from another contract's plan.
 	signedCtx := providerWorkSessionContext(ctx)
 	for _, contract := range contracts {
+		if err := checkLegacyFinancialCohortBudget(ctx, "provenance"); err != nil {
+			return nil, err
+		}
 		server.AddTxCommitCount(tx, &contractClosedCounter, 1)
 		providerWorkRetainOutcomeInTx(signedCtx, tx, contract.contractId, contract.outcome, contract.closedAt)
+		if err := checkLegacyFinancialCohortBudget(ctx, "post_provenance"); err != nil {
+			return nil, err
+		}
 		contractHoleEventInTx(ctx, tx, contract.contractId, contract.owner.participants.sourceId, contract.owner.participants.destinationId, "remove")
 		if contract.clockByteCount > 0 {
 			posts = append(posts, legacySettlementClockPost(ctx, contract.clockByteCount))
