@@ -107,6 +107,15 @@ func registry() []specEndpoint {
 		{method: "POST", path: "/network/ping-report", argType: rt(controller.ExtenderPingReportArgs{}), resultType: rt(controller.ExtenderPingReportResult{})},
 		// the prober module's own pool type is the response (connect/GEOMAP.md §11.4)
 		{method: "GET", path: "/network/provider-egress-destinations", argType: nil, resultType: rt(egresshealth.Pool{})},
+		// per-client data caps for embedded clients (EMBED1.md)
+		{method: "POST", path: "/network/client-data-cap", argType: rt(model.SetClientDataCapArgs{}), resultType: rt(model.ClientDataCapResult{})},
+		{method: "GET", path: "/network/client-data-cap", argType: nil, resultType: rt(model.ClientDataCapResult{})},
+		{method: "GET", path: "/network/client-data-caps", argType: nil, resultType: rt(model.ListClientDataCapsResult{})},
+		// per-client ACL groups (EMBED1.md)
+		{method: "POST", path: "/network/client-acl-group", argType: rt(model.SetNetworkClientAclGroupArgs{}), resultType: rt(model.NetworkClientAclGroupResult{})},
+		{method: "GET", path: "/network/client-acl-group", argType: nil, resultType: rt(model.NetworkClientAclGroupResult{})},
+		// the public Services contact form (EMBED1.md)
+		{method: "POST", path: "/services/contact-sales", argType: rt(model.ServicesContactSalesArgs{}), resultType: rt(model.ServicesContactSalesResult{})},
 
 		{"POST", "/preferences/set-preferences", rt(model.AccountPreferencesSetArgs{}), rt(model.AccountPreferencesSetResult{})},
 		{"GET", "/preferences", nil, rt(model.AccountPreferencesGetResult{})},

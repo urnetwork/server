@@ -101,11 +101,14 @@ func contractSettlementSweepPayouts(used ByteCount, escrows []contractSettlement
 	return payouts, nil
 }
 
-// Endpoint direction, duplicate identities, same-network exclusions and stable
-// participant order are independent of the owner that fetched these rows.
-func contractParticipantsFromRows(contractId server.Id, owner contractParticipantOwner, usageOrigin *bool, retained []ContractParticipant) ([]ContractParticipant, server.Id, error) {
-	originIsSource := owner.companionContractId == nil
-	originNetworkId := owner.sourceNetworkId
+// contractOrigin is the paying endpoint: the source unless the contract is a
+// companion, decided by the recorded payer network when the endpoints are in
+// different networks; usageOrigin overrides the side. Settlement billing and
+// the per-client data usage meter (network_client_data_cap_model.go) both use
+// it, so the client a contract is billed to is the client its bytes count for.
+func contractOrigin(contractId server.Id, owner contractParticipantOwner, usageOrigin *bool) (originId server.Id, originNetworkId server.Id, originIsSource bool, err error) {
+	originIsSource = owner.companionContractId == nil
+	originNetworkId = owner.sourceNetworkId
 	if owner.payerNetworkId != nil {
 		originNetworkId = *owner.payerNetworkId
 		if owner.sourceNetworkId != owner.destinationNetworkId {
@@ -115,7 +118,8 @@ func contractParticipantsFromRows(contractId server.Id, owner contractParticipan
 			case owner.destinationNetworkId:
 				originIsSource = false
 			default:
-				return nil, server.Id{}, fmt.Errorf("contract payer is not an endpoint: %s", contractId)
+				err = fmt.Errorf("contract payer is not an endpoint: %s", contractId)
+				return
 			}
 		}
 	} else if !originIsSource {
@@ -124,10 +128,22 @@ func contractParticipantsFromRows(contractId server.Id, owner contractParticipan
 	if usageOrigin != nil {
 		originIsSource = *usageOrigin
 	}
-	originId := owner.sourceId
-	egress := ContractParticipant{ClientId: owner.destinationId, NetworkId: owner.destinationNetworkId}
+	originId = owner.sourceId
 	if !originIsSource {
 		originId = owner.destinationId
+	}
+	return
+}
+
+// Endpoint direction, duplicate identities, same-network exclusions and stable
+// participant order are independent of the owner that fetched these rows.
+func contractParticipantsFromRows(contractId server.Id, owner contractParticipantOwner, usageOrigin *bool, retained []ContractParticipant) ([]ContractParticipant, server.Id, error) {
+	originId, originNetworkId, originIsSource, err := contractOrigin(contractId, owner, usageOrigin)
+	if err != nil {
+		return nil, server.Id{}, err
+	}
+	egress := ContractParticipant{ClientId: owner.destinationId, NetworkId: owner.destinationNetworkId}
+	if !originIsSource {
 		egress = ContractParticipant{ClientId: owner.sourceId, NetworkId: owner.sourceNetworkId}
 	}
 	participants := map[server.Id]ContractParticipant{}

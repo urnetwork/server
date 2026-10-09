@@ -533,6 +533,10 @@ func (self *ConnectionAnnounce) run() {
 			// a provider install is counted at once but is never a peer: no
 			// metadata, events or subscriptions
 			model.AddNetworkProviderPeer(self.ctx, peerNetworkId, self.clientId, self.settings.PeerRegisterTtl)
+		} else if peersEnabled && topLevel && peerCategory == model.NetworkPeerCategoryIsolated && peerProfile != nil {
+			// an isolated client (ACL group "isolated") is counted at once but
+			// is never a peer: no metadata, events or subscriptions
+			model.AddNetworkIsolatedPeer(self.ctx, peerNetworkId, self.clientId, self.settings.PeerRegisterTtl)
 		} else if peersEnabled && topLevel && peerCategory == model.NetworkPeerCategoryClient && peerProfile != nil {
 			// ttl 0: read-only lookup — extending the resident record's expiry
 			// is the resident keepalive's job, not the announce's
