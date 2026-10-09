@@ -13,8 +13,8 @@ import (
 	"github.com/urnetwork/server/router"
 )
 
-// The Embed routes (EMBED1.md): data caps, ACL groups and the public Services
-// contact form. Pure tests: no database or redis.
+// The Embed routes (EMBED1.md): data caps, ACL groups, the network's Embed
+// state and the public Services contact form. Pure tests: no database or redis.
 
 // taggedJsonFieldNames lists a struct's exported json names, sorted.
 func taggedJsonFieldNames(structType reflect.Type) []string {
@@ -56,6 +56,7 @@ func TestEmbedRoutesRequireAToken(t *testing.T) {
 		{http.MethodGet, "/network/client-data-caps?limit=10", "", NetworkClientDataCapsList},
 		{http.MethodPost, "/network/client-acl-group", `{"client_id":"00000000-0000-0000-0000-000000000000","acl_group":"isolated"}`, NetworkClientAclGroupSet},
 		{http.MethodGet, "/network/client-acl-group?client_id=00000000-0000-0000-0000-000000000000", "", NetworkClientAclGroupGet},
+		{http.MethodGet, "/network/embed", "", NetworkEmbedGet},
 	} {
 		req := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
 		w := httptest.NewRecorder()
@@ -124,6 +125,9 @@ func TestEmbedWireFieldNames(t *testing.T) {
 	assertJsonFieldNames(t, model.NetworkClientAclGroup{}, []string{"acl_group", "client_id"})
 	assertJsonFieldNames(t, model.NetworkClientAclGroupResult{}, []string{"error"})
 
+	assertJsonFieldNames(t, model.NetworkEmbed{}, []string{"active_client_count", "client_limit", "enabled"})
+	assertJsonFieldNames(t, model.NetworkEmbedResult{}, []string{"error"})
+
 	assertJsonFieldNames(t, model.ServicesContactSalesArgs{}, []string{
 		"company",
 		"email",
@@ -138,5 +142,9 @@ func TestEmbedWireFieldNames(t *testing.T) {
 	// the group names are the API's values
 	if model.NetworkClientAclGroupDefault != "default" || model.NetworkClientAclGroupIsolated != "isolated" {
 		t.Fatalf("acl group names = %q, %q", model.NetworkClientAclGroupDefault, model.NetworkClientAclGroupIsolated)
+	}
+	// the gated routes' refusal, which the spec quotes and backends match on
+	if model.NetworkEmbedNotEnabledMessage != "Embed isn't enabled for this network." {
+		t.Fatalf("embed refusal = %q", model.NetworkEmbedNotEnabledMessage)
 	}
 }

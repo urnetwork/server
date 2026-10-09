@@ -344,6 +344,8 @@ func TestNewClientDataCap(t *testing.T) {
 // pro mode off) as the network; a client token is not the network.
 func TestClientDataCapNetworkSession(t *testing.T) {
 	networkId := server.NewId()
+	// an Embed-enabled network, so these refusals reach the route's own checks
+	primeNetworkEmbedCache(t, networkId, true)
 	userId := server.NewId()
 	clientId := server.NewId()
 

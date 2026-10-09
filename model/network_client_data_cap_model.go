@@ -407,7 +407,11 @@ func readClientDataUsage(ctx context.Context, query server.PgCanQuery, clientId 
 
 // SetClientDataCap merges a cap request for a top-level client of the caller's
 // network (POST /network/client-data-cap).
+// Refused unless the caller's network is Embed-enabled (network_embed_model.go).
 func SetClientDataCap(setClientDataCap *SetClientDataCapArgs, clientSession *session.ClientSession) (*ClientDataCapResult, error) {
+	if networkEmbedRefused(clientSession) {
+		return clientDataCapErrorResult(NetworkEmbedNotEnabledMessage), nil
+	}
 	if !clientDataCapNetworkSession(clientSession) {
 		return clientDataCapErrorResult(clientDataCapNetworkSessionMessage), nil
 	}
@@ -510,7 +514,11 @@ func SetClientDataCap(setClientDataCap *SetClientDataCapArgs, clientSession *ses
 // (GET /network/client-data-cap). A network session (root JWT or API key) reads
 // any top-level client of its network; a client token reads its own, and a
 // child client's token reads its top-level client's.
+// Refused unless the caller's network is Embed-enabled (network_embed_model.go).
 func GetClientDataCap(getClientDataCap *GetClientDataCapArgs, clientSession *session.ClientSession) (*ClientDataCapResult, error) {
+	if networkEmbedRefused(clientSession) {
+		return clientDataCapErrorResult(NetworkEmbedNotEnabledMessage), nil
+	}
 	if clientSession == nil || clientSession.ByJwt == nil || clientSession.ByJwt.NetworkId == (server.Id{}) {
 		return clientDataCapErrorResult(clientDataCapNetworkSessionMessage), nil
 	}
@@ -569,9 +577,13 @@ func GetClientDataCap(getClientDataCap *GetClientDataCapArgs, clientSession *ses
 
 // ListClientDataCaps pages through the clients of the caller's network that
 // have a cap set, in client id order (GET /network/client-data-caps).
+// Refused unless the caller's network is Embed-enabled (network_embed_model.go).
 func ListClientDataCaps(listClientDataCaps *ListClientDataCapsArgs, clientSession *session.ClientSession) (*ListClientDataCapsResult, error) {
 	refuse := func(message string) (*ListClientDataCapsResult, error) {
 		return &ListClientDataCapsResult{Error: &ClientDataCapError{Message: message}}, nil
+	}
+	if networkEmbedRefused(clientSession) {
+		return refuse(NetworkEmbedNotEnabledMessage)
 	}
 	if !clientDataCapNetworkSession(clientSession) {
 		return refuse(clientDataCapNetworkSessionMessage)

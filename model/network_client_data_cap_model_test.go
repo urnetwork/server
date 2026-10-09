@@ -23,7 +23,17 @@ type dataCapTestNetwork struct {
 	apiKeySession *session.ClientSession
 }
 
+// newDataCapTestNetwork creates an Embed-enabled network: the data-cap and
+// ACL-group APIs refuse every other network (network_embed_model.go).
 func newDataCapTestNetwork(ctx context.Context, name string) *dataCapTestNetwork {
+	network := newDataCapTestNetworkWithoutEmbed(ctx, name)
+	Testing_EnableNetworkEmbed(ctx, network.networkId)
+	return network
+}
+
+// newDataCapTestNetworkWithoutEmbed creates a network that is not
+// Embed-enabled.
+func newDataCapTestNetworkWithoutEmbed(ctx context.Context, name string) *dataCapTestNetwork {
 	networkId := server.NewId()
 	userId := server.NewId()
 	Testing_CreateNetwork(ctx, networkId, name, userId)
