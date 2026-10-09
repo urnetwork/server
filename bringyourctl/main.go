@@ -153,7 +153,8 @@ Options:
                    allowance: the top-level client limit and the concurrent
                    connection limit.
     --disable      Disable Embed for the network and return it to the default
-                   limits. Caps and ACL groups already set stay enforced.
+                   limits. Caps and ACL groups already set stay enforced, and
+                   the network's client tokens stay refused on admin routes.
 
     --private-stdin  Read the bounded private expiry request from stdin.
     --apply          Apply the scoped expiry request; omission is a read-only preview.
@@ -1116,7 +1117,9 @@ func networkClientLimit(opts docopt.Opts) {
 // contract is signed: its data-cap and ACL-group APIs open and, with
 // --client-limit, its client allowance is set. Disabling closes the APIs and
 // returns the network to the default limits; caps and ACL groups already set
-// stay enforced. It then prints the network's Embed state.
+// stay enforced, and the network stays known as one that was Embed-enabled, so
+// its client tokens stay refused on the admin routes. It then prints the
+// network's Embed state.
 func networkEmbed(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -1150,11 +1153,15 @@ func networkEmbed(opts docopt.Opts) {
 	fmt.Println(networkEmbedStatusLine(networkId, model.GetNetworkEmbed(ctx, networkId)))
 }
 
-// networkEmbedStatusLine is the line `network embed` prints.
+// networkEmbedStatusLine is the line `network embed` prints. A network that was
+// enabled and then disabled says so: its client tokens are still refused on
+// the admin routes.
 func networkEmbedStatusLine(networkId server.Id, embed *model.NetworkEmbed) string {
 	state := "not enabled"
 	if embed.Enabled {
 		state = "enabled"
+	} else if embed.EverEnabled {
+		state = "disabled (was enabled)"
 	}
 	return fmt.Sprintf("network %s embed %s, client limit %d, %d active clients", networkId, state, embed.ClientLimit, embed.ActiveClientCount)
 }

@@ -80,7 +80,8 @@ func TestNetworkEmbedUsageParses(t *testing.T) {
 	}
 }
 
-// Pure: the help states what enabling opens and what disabling keeps.
+// Pure: the help states what enabling opens and what disabling keeps: the
+// stored caps and groups, and the refusal of the network's client tokens.
 func TestNetworkEmbedHelpText(t *testing.T) {
 	for _, line := range []string{
 		"bringyourctl network embed --network_id=<network_id> [--enable [--client-limit=<limit>] | --disable]",
@@ -89,7 +90,8 @@ func TestNetworkEmbedHelpText(t *testing.T) {
 		"--client-limit=<limit>  With --enable, also set the network's client",
 		"allowance: the top-level client limit and the concurrent",
 		"--disable      Disable Embed for the network and return it to the default",
-		"limits. Caps and ACL groups already set stay enforced.",
+		"limits. Caps and ACL groups already set stay enforced, and",
+		"the network's client tokens stay refused on admin routes.",
 	} {
 		if !strings.Contains(bringyourctlUsage, line) {
 			t.Fatalf("usage is missing %q", line)
@@ -98,13 +100,19 @@ func TestNetworkEmbedHelpText(t *testing.T) {
 }
 
 // Pure: the printed state names the flag, the effective allowance and the
-// active client count.
+// active client count. A disabled network that was enabled says so, apart from
+// one that never was.
 func TestNetworkEmbedStatusLine(t *testing.T) {
 	networkId := server.NewId()
 	connect.AssertEqual(
 		t,
-		networkEmbedStatusLine(networkId, &model.NetworkEmbed{Enabled: true, ClientLimit: 5000, ActiveClientCount: 12}),
+		networkEmbedStatusLine(networkId, &model.NetworkEmbed{Enabled: true, EverEnabled: true, ClientLimit: 5000, ActiveClientCount: 12}),
 		"network "+networkId.String()+" embed enabled, client limit 5000, 12 active clients",
+	)
+	connect.AssertEqual(
+		t,
+		networkEmbedStatusLine(networkId, &model.NetworkEmbed{Enabled: false, EverEnabled: true, ClientLimit: 100, ActiveClientCount: 3}),
+		"network "+networkId.String()+" embed disabled (was enabled), client limit 100, 3 active clients",
 	)
 	connect.AssertEqual(
 		t,
@@ -155,12 +163,46 @@ func TestNetworkEmbedCommand(t *testing.T) {
 		})
 		connect.AssertEqual(t, strings.TrimSpace(out), prefix+"enabled, client limit 5000, 1 active clients")
 
-		// disable: the flag and the allowance are cleared
+		// disable: the flag and the allowance are cleared, and the network shows
+		// that it was enabled, its client tokens still refused on the admin
+		// routes
 		out = captureStdout(t, func() {
 			networkEmbed(parseNetworkEmbedArgs(t, networkIdArg, "--disable"))
 		})
-		connect.AssertEqual(t, strings.TrimSpace(out), prefix+"not enabled, client limit 100, 1 active clients")
+		connect.AssertEqual(t, strings.TrimSpace(out), prefix+"disabled (was enabled), client limit 100, 1 active clients")
 		connect.AssertEqual(t, model.NetworkEmbedEnabled(ctx, networkId), false)
+		connect.AssertEqual(t, model.NetworkEmbedEverEnabled(ctx, networkId), true)
+		connect.AssertEqual(t, model.NetworkRefusesClientAdmin(ctx, networkId), true)
 		connect.AssertEqual(t, model.GetNetworkTopLevelClientLimit(ctx, networkId).Override, false)
+
+		// show and a second disable keep it
+		for _, args := range [][]string{{networkIdArg}, {networkIdArg, "--disable"}} {
+			out = captureStdout(t, func() {
+				networkEmbed(parseNetworkEmbedArgs(t, args...))
+			})
+			connect.AssertEqual(t, strings.TrimSpace(out), prefix+"disabled (was enabled), client limit 100, 1 active clients")
+		}
+
+		// enable again, then disable again
+		out = captureStdout(t, func() {
+			networkEmbed(parseNetworkEmbedArgs(t, networkIdArg, "--enable"))
+		})
+		connect.AssertEqual(t, strings.TrimSpace(out), prefix+"enabled, client limit 100, 1 active clients")
+		connect.AssertEqual(t, model.NetworkEmbedEnabled(ctx, networkId), true)
+		out = captureStdout(t, func() {
+			networkEmbed(parseNetworkEmbedArgs(t, networkIdArg, "--disable"))
+		})
+		connect.AssertEqual(t, strings.TrimSpace(out), prefix+"disabled (was enabled), client limit 100, 1 active clients")
+		connect.AssertEqual(t, model.NetworkEmbedEnabled(ctx, networkId), false)
+		connect.AssertEqual(t, model.NetworkEmbedEverEnabled(ctx, networkId), true)
+
+		// a disable of a network that was never enabled leaves it not enabled
+		otherNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, otherNetworkId, "embed-ctl-other", server.NewId())
+		out = captureStdout(t, func() {
+			networkEmbed(parseNetworkEmbedArgs(t, "--network_id="+otherNetworkId.String(), "--disable"))
+		})
+		connect.AssertEqual(t, strings.TrimSpace(out), "network "+otherNetworkId.String()+" embed not enabled, client limit 100, 0 active clients")
+		connect.AssertEqual(t, model.NetworkEmbedEverEnabled(ctx, otherNetworkId), false)
 	})
 }

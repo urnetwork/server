@@ -9847,4 +9847,14 @@ var migrations = []any{
 			enable_time timestamp NOT NULL
 		);
 	`),
+	// 802: a disable keeps the network_embed row and sets disable_time, so a
+	// network that was ever Embed-enabled stays known (AUTHZ1.md, decision 2).
+	// Its client tokens, handed to a third party's users, stay refused on the
+	// admin routes after a disable, while the Embed APIs follow the current
+	// flag (disable_time IS NULL). A nullable column: no row is rewritten. It
+	// must exist before a binary that reads it serves, since the Embed APIs and
+	// the client token gate read it.
+	newSqlMigration(`
+		ALTER TABLE network_embed ADD COLUMN disable_time timestamp NULL;
+	`),
 }
