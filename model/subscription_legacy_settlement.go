@@ -215,6 +215,9 @@ func flushLegacySettlementWithExpiryPolicyInTx(ctx context.Context, tx server.Pg
 		return nil, false, err == nil, legacySettlementBusyAdmission, err
 	}
 	if !hasEscrow {
+		if closeOwner.Kind != ContractCloseOwnerSourceClient {
+			return nil, false, false, legacySettlementBusyNone, errContractFreeSettlementOwner
+		}
 		if needsExpiryContinuation && prepareExpiry {
 			if err := prepareLegacySettlementExpiryUsageInTx(ctx, tx, contractId, outcome, closeOwner); err != nil {
 				return nil, false, false, legacySettlementBusyNone, err

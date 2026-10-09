@@ -19,7 +19,9 @@ const forceCloseOpenContractPageSql = `
                     t.create_time,
                     NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
                     AND (t.usage_unverified OR COALESCE(t.expiration_time, t.create_time + interval '60 minutes') <= statement_timestamp() AT TIME ZONE 'UTC' OR (t.create_time <= $3
-                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $3)))
+                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $3))),
+                    CASE WHEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC'
+                        THEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') END AS next_expiration_time
                 FROM bounded t
                 LEFT JOIN LATERAL (SELECT close_time,used_transfer_byte_count,checkpoint FROM contract_close
                     WHERE contract_id=t.contract_id AND party=$1 LIMIT 1) source_contract_close ON true
@@ -40,6 +42,8 @@ const forceCloseDisputedContractPageSql = `
                 SELECT t.contract_id,t.source_id,t.destination_id,t.create_time,
                     NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
                     AND (t.usage_unverified OR COALESCE(t.expiration_time, t.create_time + interval '60 minutes') <= statement_timestamp() AT TIME ZONE 'UTC' OR (t.create_time <= $1
-                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $1)))
+                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $1))),
+                    CASE WHEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC'
+                        THEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') END AS next_expiration_time
                 FROM bounded t ORDER BY t.create_time,t.contract_id
 			`

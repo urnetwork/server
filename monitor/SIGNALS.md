@@ -6093,6 +6093,21 @@ controls passed on the final candidate in local native qualification.
 These source findings do not attribute the six selected customer intents to
 this cause before their separately qualified exact report-state read.
 
+Separate public-producer controls reproduce positive 17-byte free-contract
+expiry failures: `SetContractDispute` can leave a checkpoint, and an interrupted
+`CloseContract` can leave both final reports without an intent. Their old ordinary
+expiry routes required escrow; local native causal RED/GREEN controls verify
+normal closure through the existing source-client no-payout owner. Escrow absence
+alone grants no free authority. The locked retained header must select
+`SourceClient` before synthetic expiry reports or a no-payout outcome, including
+existing-intent and direct public-close continuations. A concrete custody refusal
+keeps a retained payer's liability unresolved and suppresses malformed-quarantine
+fallback, preserving accepted intent authority, reservations and terminal replay.
+Public endpoint reports retain their existing separate commit. The paid
+missing-escrow fixtures deliberately remove custody to test refusal; they are
+not Main observations. Source review and local native controls do not identify
+a live account cause or establish deployment, exact visitation or recovery.
+
 The 2026-10-09 recovery merge `d2caf053` adds a raw-page progress discriminator:
 a page can finish every selected visit and still retain its old task cursor.
 In the causal control, 128 independent proof failures exceeded the ordinary

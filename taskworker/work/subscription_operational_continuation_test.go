@@ -40,6 +40,7 @@ func TestCloseExpiredOperationalVisitKeepsFailureAndReachesNextRawPage(t *testin
 		}
 		slices.SortFunc(protectedIds, server.Id.Cmp)
 		created := time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
+		nextExpiration := server.NowUtc().Truncate(time.Microsecond).Add(time.Hour)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,expiration_time=NULL WHERE contract_id=$1`, first, created))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,expiration_time=NULL WHERE contract_id=$1`, tail, created.Add(2*time.Minute)))
@@ -47,7 +48,7 @@ func TestCloseExpiredOperationalVisitKeepsFailureAndReachesNextRawPage(t *testin
 				(contract_id,source_network_id,source_id,destination_network_id,destination_id,payer_network_id,
 				transfer_byte_count,usage_origin_is_source,create_time,expiration_time)
 				SELECT id,$2,$3,$2,$4,$2,100,true,$5,$6 FROM unnest($1::uuid[]) row(id)`,
-				protectedIds, networkId, sourceId, destinationId, created.Add(time.Minute), server.NowUtc().Add(time.Hour)))
+				protectedIds, networkId, sourceId, destinationId, created.Add(time.Minute), nextExpiration))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,close_time,checkpoint)
 				SELECT id,party,0,$2,true FROM unnest($1::uuid[]) row(id)
 				CROSS JOIN (VALUES ('source'),('destination')) parties(party)`, protectedIds, server.NowUtc()))
@@ -127,6 +128,9 @@ func TestCloseExpiredOperationalVisitKeepsFailureAndReachesNextRawPage(t *testin
 		if args.Sweep == nil || args.Sweep.Historical == nil || args.Sweep.Historical.Open == nil ||
 			args.Sweep.Historical.Open.ContractId != protectedIds[len(protectedIds)-1] {
 			t.Fatal("persistent row failure pinned the completed production raw page")
+		}
+		if args.NextExpiration == nil || !args.NextExpiration.Equal(nextExpiration) {
+			t.Fatal("completed operational checkpoint lost its exact observed future deadline")
 		}
 		if errorCount != 17 || !strings.Contains(diagnostic, "synthetic task proof failure") || metadata != originalMetadata ||
 			delay < 30*time.Minute || 90*time.Minute+2*time.Second <= delay || len(task.GetFinishedTasks(ctx, id)) != 0 {
