@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
@@ -21,6 +22,12 @@ const LegacySettlementPageLimit = 256
 // Preserve one bounded grant-wait opportunity per sixteen head visits, including
 // when a page continues beyond the former sixty-four-visit ceiling.
 const legacySettlementHeadGrantWaitStride = 16
+
+// Begin and transaction-local limits share one simple-query request. The
+// explicit modes preserve Tx's read-write contract even on a read-only session;
+// each contract still owns a separate transaction and releases it before posts.
+const legacySettlementBeginSql = `begin isolation level read committed read write not deferrable;
+ SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`
 
 var errLegacySettlementPending = errors.New("legacy settlement is durably pending")
 var errLegacySettlementPageBudget = errors.New("legacy settlement page budget elapsed")
@@ -429,11 +436,10 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 						return nil
 					})
 				}
-				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
 				var err error
 				posts, completed, busy, busyGate, err = flushLegacySettlementWithGrantWaitInTx(ctx, tx, contractId, wait)
 				server.Raise(err)
-			}, server.TxReadCommitted, server.OptNoRetry(), dbTiming)
+			}, pgx.TxOptions{BeginQuery: legacySettlementBeginSql}, server.OptNoRetry(), dbTiming)
 			traceLegacySettlement(ctx, "commit", "confirmed_tx_return")
 			transactionReturned = true
 		}()
