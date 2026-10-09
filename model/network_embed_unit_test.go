@@ -1,0 +1,179 @@
+package model
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
+)
+
+// Per-network Embed enablement (EMBED1.md). Pure tests: no database or redis,
+// so a gate that queried would fail here.
+
+// primeNetworkEmbedCache sets this process's cached flag for a network, so a
+// pure test exercises the Embed gate without a database.
+func primeNetworkEmbedCache(t testing.TB, networkId server.Id, enabled bool) {
+	t.Helper()
+	networkEmbedLocal.Put(networkId, networkEmbedLocalEntry{
+		enabled: enabled,
+		expiry:  server.NowUtc().Add(time.Hour),
+	})
+	t.Cleanup(func() {
+		networkEmbedLocal.Remove(networkId)
+	})
+}
+
+func TestNetworkEmbedLocalCache(t *testing.T) {
+	cache := newNetworkEmbedLocalCache()
+	networkId := server.NewId()
+	now := server.NowUtc()
+
+	_, ok := cache.Get(networkId, now)
+	connect.AssertEqual(t, ok, false)
+
+	cache.Put(networkId, networkEmbedLocalEntry{enabled: true, expiry: now.Add(time.Minute)})
+	entry, ok := cache.Get(networkId, now)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, entry.enabled, true)
+
+	// an expired entry is a miss, and is dropped
+	_, ok = cache.Get(networkId, now.Add(time.Minute))
+	connect.AssertEqual(t, ok, false)
+	connect.AssertEqual(t, len(cache.entries), 0)
+
+	// remove and clear
+	cache.Put(networkId, networkEmbedLocalEntry{enabled: false, expiry: now.Add(time.Minute)})
+	cache.Remove(networkId)
+	_, ok = cache.Get(networkId, now)
+	connect.AssertEqual(t, ok, false)
+	cache.Put(networkId, networkEmbedLocalEntry{enabled: false, expiry: now.Add(time.Minute)})
+	cache.Clear()
+	connect.AssertEqual(t, len(cache.entries), 0)
+}
+
+// A full cache restarts rather than growing past its bound.
+func TestNetworkEmbedLocalCacheBounded(t *testing.T) {
+	cache := newNetworkEmbedLocalCache()
+	expiry := server.NowUtc().Add(time.Minute)
+	for range networkEmbedLocalCacheMaxSize {
+		cache.Put(server.NewId(), networkEmbedLocalEntry{expiry: expiry})
+	}
+	connect.AssertEqual(t, len(cache.entries), networkEmbedLocalCacheMaxSize)
+	cache.Put(server.NewId(), networkEmbedLocalEntry{expiry: expiry})
+	connect.AssertEqual(t, len(cache.entries), 1)
+}
+
+// The cached flag answers without a database.
+func TestNetworkEmbedEnabledUsesTheCache(t *testing.T) {
+	enabledNetworkId := server.NewId()
+	disabledNetworkId := server.NewId()
+	primeNetworkEmbedCache(t, enabledNetworkId, true)
+	primeNetworkEmbedCache(t, disabledNetworkId, false)
+	connect.AssertEqual(t, NetworkEmbedEnabled(context.Background(), enabledNetworkId), true)
+	connect.AssertEqual(t, NetworkEmbedEnabled(context.Background(), disabledNetworkId), false)
+}
+
+// Every gated route refuses a network that is not Embed-enabled first: before
+// its session checks, its argument checks and any query. Each credential is
+// covered — the root JWT, an API key and a client JWT.
+func TestNetworkEmbedRefusedBeforeAnyQuery(t *testing.T) {
+	ctx := context.Background()
+	networkId := server.NewId()
+	userId := server.NewId()
+	clientId := server.NewId()
+	primeNetworkEmbedCache(t, networkId, false)
+
+	sessions := map[string]*session.ClientSession{
+		"root":    {Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: userId}},
+		"api key": {Ctx: ctx, ByJwt: jwt.NewByJwt(networkId, userId, "embed", false, false)},
+		"client":  {Ctx: ctx, ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: userId, ClientId: &clientId}},
+	}
+	negative := ByteCount(-5)
+	for name, clientSession := range sessions {
+		t.Run(name, func(t *testing.T) {
+			// valid and invalid arguments alike: the gate answers first
+			for _, args := range []*SetClientDataCapArgs{{ClientId: clientId}, {}, {ClientId: clientId, MonthlyByteLimit: &negative}} {
+				result, err := SetClientDataCap(args, clientSession)
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, result.ClientDataCap, (*ClientDataCap)(nil))
+				connect.AssertEqual(t, result.Error.Message, NetworkEmbedNotEnabledMessage)
+			}
+			for _, args := range []*GetClientDataCapArgs{{ClientId: clientId.String()}, {}, {ClientId: "not-a-uuid"}} {
+				result, err := GetClientDataCap(args, clientSession)
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, result.Error.Message, NetworkEmbedNotEnabledMessage)
+			}
+			for _, args := range []*ListClientDataCapsArgs{{}, {Limit: "0"}, {Cursor: "%%%"}} {
+				result, err := ListClientDataCaps(args, clientSession)
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, result.Clients, ([]*ClientDataCapResult)(nil))
+				connect.AssertEqual(t, result.Error.Message, NetworkEmbedNotEnabledMessage)
+			}
+			for _, args := range []*SetNetworkClientAclGroupArgs{{ClientId: clientId, AclGroup: "isolated"}, {}, {ClientId: clientId, AclGroup: "nope"}} {
+				result, err := SetNetworkClientAclGroup(args, clientSession)
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, result.NetworkClientAclGroup, (*NetworkClientAclGroup)(nil))
+				connect.AssertEqual(t, result.Error.Message, NetworkEmbedNotEnabledMessage)
+			}
+			for _, args := range []*GetNetworkClientAclGroupArgs{{ClientId: clientId.String()}, {}, {ClientId: "not-a-uuid"}} {
+				result, err := GetNetworkClientAclGroup(args, clientSession)
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, result.Error.Message, NetworkEmbedNotEnabledMessage)
+			}
+		})
+	}
+}
+
+// A session without a network cannot be gated: the route's own session check
+// answers, as before.
+func TestNetworkEmbedGateLeavesSessionChecks(t *testing.T) {
+	for _, clientSession := range []*session.ClientSession{nil, {}, {ByJwt: &jwt.ByJwt{}}} {
+		connect.AssertEqual(t, networkEmbedRefused(clientSession), false)
+
+		setResult, err := SetClientDataCap(&SetClientDataCapArgs{ClientId: server.NewId()}, clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, setResult.Error.Message, clientDataCapNetworkSessionMessage)
+
+		aclResult, err := SetNetworkClientAclGroup(&SetNetworkClientAclGroupArgs{ClientId: server.NewId(), AclGroup: "isolated"}, clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, aclResult.Error.Message, networkClientAclGroupSessionMessage)
+	}
+}
+
+// GET /network/embed takes only a network credential, and refuses a client JWT
+// before any query.
+func TestGetNetworkEmbedStatusRefusesNonNetworkSessions(t *testing.T) {
+	networkId := server.NewId()
+	clientId := server.NewId()
+	for _, clientSession := range []*session.ClientSession{
+		nil,
+		{},
+		{ByJwt: &jwt.ByJwt{}},
+		{Ctx: context.Background(), ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: server.NewId(), ClientId: &clientId}},
+	} {
+		result, err := GetNetworkEmbedStatus(clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.NetworkEmbed, (*NetworkEmbed)(nil))
+		connect.AssertEqual(t, result.Error.Message, networkEmbedSessionMessage)
+	}
+}
+
+// The allowance bounds shared by `network client-limit` and `network embed`.
+func TestNetworkTopLevelClientLimitMessage(t *testing.T) {
+	for _, limit := range []int{1, 100, MaxNetworkTopLevelClientLimit} {
+		connect.AssertEqual(t, networkTopLevelClientLimitMessage(limit), "")
+	}
+	for _, limit := range []int{0, -1, MaxNetworkTopLevelClientLimit + 1} {
+		connect.AssertEqual(t, networkTopLevelClientLimitMessage(limit), fmt.Sprintf("The limit must be between 1 and %d.", MaxNetworkTopLevelClientLimit))
+	}
+	// an invalid limit is refused before any query
+	err := EnableNetworkEmbed(context.Background(), server.NewId(), new(int))
+	connect.AssertNotEqual(t, err, nil)
+	err = SetNetworkTopLevelClientLimit(context.Background(), server.NewId(), MaxNetworkTopLevelClientLimit+1)
+	connect.AssertNotEqual(t, err, nil)
+}
