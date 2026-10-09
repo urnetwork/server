@@ -45,7 +45,7 @@ type contractSettlementOwner struct {
 // Keep the row lock and report read as successive statements: Read Committed
 // must take the report snapshot after any competing contract owner commits.
 // One batch removes client waits without combining their statement snapshots.
-func readContractSettlementOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id) (*contractSettlementOwner, error) {
+func readContractSettlementOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, closeOwners ...ContractCloseOwner) (*contractSettlementOwner, error) {
 	owner := &contractSettlementOwner{}
 	batch := &pgx.Batch{}
 	batch.Queue(`SELECT source_network_id,source_id,destination_network_id,destination_id,
@@ -69,6 +69,25 @@ func readContractSettlementOwnerInTx(ctx context.Context, tx server.PgTx, contra
 	})
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
 		return nil, fmt.Errorf("read contract settlement owner: %w", err)
+	}
+	if owner.participants.payerNetworkId == nil {
+		// A legacy worker passes the owner it just resolved under this same
+		// contract lock. Direct settlement resolves it on the caller's tx.
+		// Never let the old companion endpoint fallback replace real escrow
+		// evidence for billing or the paying client's usage meter.
+		var resolved ContractCloseOwner
+		if len(closeOwners) > 0 {
+			resolved = closeOwners[0]
+		} else {
+			var err error
+			resolved, _, err = readContractCloseOwnerInConn(ctx, tx, contractId)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if resolved.Kind == ContractCloseOwnerPayerNetwork {
+			owner.participants.payerNetworkId = &resolved.Id
+		}
 	}
 	return owner, nil
 }

@@ -28,7 +28,7 @@ func TestLegacyDispatchSlowDiscoveryStillRegistersMissingPayer(t *testing.T) {
 			ContractId: server.NewId(), PassEndTime: now.Add(-84 * time.Hour)}
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent
-				SET payer_network_id=NULL,next_attempt_time=$2 WHERE contract_id=$1`, id, due))
+				SET payer_network_id=NULL,source_client_id=NULL,next_attempt_time=$2 WHERE contract_id=$1`, id, due))
 		}, server.TxReadCommitted, server.OptNoRetry())
 		readyPayer := server.NewId()
 		payerAfter := &LegacySettlementPayerCursor{End: readyPayer, PassEndTime: now}

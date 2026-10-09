@@ -184,49 +184,13 @@ func flushLegacySettlementShardPage(ctx, bounded context.Context, shard int, aft
 	return
 }
 
-// The missing-key partial index fences discovery to 256 intents per shard.
-// SKIP LOCKED avoids waiting for any financial owner. The contract lookup is a
-// primary-key lateral point; registration changes no outcome, retry or money.
-// Express the integer shard as a half-open range and retain both ordering keys.
-// Equality would let the planner drop shard from ORDER BY and scan the global
-// primary key while filtering registered rows instead of using the missing index.
-const legacySettlementPayerRegistrationSql = `SELECT picked.contract_id,contract.payer
- FROM (SELECT contract_id FROM legacy_settlement_intent
- WHERE shard>=$1::smallint AND shard<($1::smallint+1) AND payer_network_id IS NULL
- ORDER BY shard,contract_id LIMIT 256 FOR UPDATE SKIP LOCKED) AS picked
- CROSS JOIN LATERAL (
- SELECT COALESCE(payer_network_id,
-   CASE WHEN companion_contract_id IS NULL THEN source_network_id ELSE destination_network_id END) AS payer
- FROM transfer_contract WHERE contract_id=picked.contract_id OFFSET 0
- ) AS contract`
-
-func registerLegacySettlementPayers(ctx context.Context, shard int) (registered int) {
+// Retained source identity marks classification for both paid and free rows.
+// A genuinely free owner remains NULL in payer_network_id without being
+// rediscovered as unregistered on every compatibility turn.
+func registerLegacySettlementPayers(ctx context.Context, shard int) int {
 	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	server.Tx(bounded, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(bounded, `SET LOCAL statement_timeout='2s'`))
-		type registration struct{ contractId, payerNetworkId server.Id }
-		registrations := make([]registration, 0, legacySettlementPayerRegistrationLimit)
-		rows, err := tx.Query(bounded, legacySettlementPayerRegistrationSql, shard)
-		server.WithPgResult(rows, err, func() {
-			for rows.Next() {
-				var value registration
-				server.Raise(rows.Scan(&value.contractId, &value.payerNetworkId))
-				registrations = append(registrations, value)
-			}
-		})
-		// One protocol batch retains point updates. A bulk UPDATE FROM may
-		// choose a whole-table hash join despite bounded picked rows.
-		if len(registrations) > 0 {
-			server.BatchInTx(bounded, tx, func(batch server.PgBatch) {
-				for _, value := range registrations {
-					batch.Queue(`UPDATE legacy_settlement_intent SET payer_network_id=$2 WHERE contract_id=$1`, value.contractId, value.payerNetworkId)
-				}
-			})
-		}
-		registered = len(registrations)
-	}, server.TxReadCommitted, server.OptNoRetry())
-	return
+	return registerLegacyCloseOwners(bounded, shard)
 }
 
 const legacySettlementPayerBeginSql = `SELECT payer_network_id,statement_timestamp() AT TIME ZONE 'UTC'

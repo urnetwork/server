@@ -2,7 +2,6 @@
 package model
 
 import (
-	"context"
 	"encoding/json"
 	"slices"
 	"testing"
@@ -41,7 +40,7 @@ func TestLegacyPayerDispatchRegistersOutsideOldChronologicalPass(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,next_attempt_time,payer_network_id)
  SELECT id,$2,'settled',$3,$4 FROM unnest($1::uuid[]) AS pending(id)`,
 				ids, shard, now.Add(-96*time.Hour), registered.sourceNetworkId))
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL,next_attempt_time=$2 WHERE contract_id=$1`, missingId, due))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL,source_client_id=NULL,next_attempt_time=$2 WHERE contract_id=$1`, missingId, due))
 			var excluded bool
 			server.Raise(tx.QueryRow(ctx, `SELECT payer_network_id IS NULL AND next_attempt_time>$2
  AND next_attempt_time<statement_timestamp() AT TIME ZONE 'UTC'
@@ -89,19 +88,16 @@ func TestLegacyPayerDispatchIndexedRegistrationSkipsOwnedIntent(t *testing.T) {
 		freeFixture := newNetEscrowOrderingTestFixture(t, ctx)
 		freeId := newLegacyPayerTestIntent(t, ctx, freeFixture, legacyPayerTestContractId(server.NewId(), 1, shard), 100, 11)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL WHERE contract_id=ANY($1)`, []server.Id{heldId, freeId}))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL,source_client_id=NULL WHERE contract_id=ANY($1)`, []server.Id{heldId, freeId}))
 		})
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		held, err := conn.Begin(ctx)
-		server.Raise(err)
-		defer held.Rollback(context.Background())
-		server.RaisePgResult(held.Exec(ctx, `SELECT contract_id FROM legacy_settlement_intent WHERE contract_id=$1 FOR UPDATE`, heldId))
+		releaseHeld := holdContractCloseTestRow(t, ctx,
+			`SELECT contract_id FROM legacy_settlement_intent WHERE contract_id=$1 FOR UPDATE`, heldId)
+		defer releaseHeld()
 		first, err := DispatchLegacySettlementPayers(ctx, shard, nil, nil)
 		if err != nil || first.RegistrationFailed || first.Registered != 1 || !first.More {
 			t.Fatal("owned missing intent blocked independent registration", first, err)
 		}
-		server.Raise(held.Rollback(ctx))
+		releaseHeld()
 		second, err := DispatchLegacySettlementPayers(ctx, shard, first.Cursor, first.PayerCursor)
 		if err != nil || second.RegistrationFailed || second.Registered != 1 || !second.More ||
 			!slices.Equal(second.PayerNetworkIds, []server.Id{freeFixture.sourceNetworkId}) {

@@ -167,6 +167,24 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 			}
 		})
 	}
+	// The common selector validates each locked contract before shared grant
+	// ownership. A stale hint falls back to the individual rekey transaction.
+	for _, id := range ownedIds {
+		if lockedContracts[id] && !contracts[id].fallback {
+			closeOwner, admitted, err := validateLegacyCloseOwnerHeaderInTx(ctx, tx, id, contracts[id].owner.participants.sourceId, contracts[id].owner.participants.payerNetworkId, nil)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !admitted || closeOwner.Kind == ContractCloseOwnerSourceClient {
+				contracts[id].fallback = true
+			} else if contracts[id].owner.participants.payerNetworkId == nil {
+				// Billing consumes the same verified financial payer as routing.
+				// Only this transaction-local header changes; original metadata
+				// and the independent usage direction remain retained as written.
+				contracts[id].owner.participants.payerNetworkId = &closeOwner.Id
+			}
+		}
+	}
 	ownedIds = ownedIds[:0]
 	for _, id := range sortedIds {
 		if lockedContracts[id] && !contracts[id].fallback {

@@ -31,6 +31,9 @@ type legacyCohortLatencyProxy struct {
 	cancel        context.CancelFunc
 	enabled       atomic.Bool
 	delayNs       atomic.Int64
+	jitter        atomic.Bool
+	jitterCharged [5]atomic.Int64
+	jitterApplied [5]atomic.Int64
 	holdSet       atomic.Bool
 	held          atomic.Int64
 	heldClosed    atomic.Int64
@@ -192,7 +195,7 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 				}
 			}
 			if header[0] == 'Z' {
-				self.ready.Add(1)
+				ready := self.ready.Add(1)
 				if sawSet && self.holdSet.CompareAndSwap(true, false) {
 					self.held.Add(1)
 					select {
@@ -203,10 +206,22 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 					return
 				}
 				sawSet = false
-				if delay := time.Duration(self.delayNs.Load()); delay > 0 {
+				delay := time.Duration(self.delayNs.Load())
+				jitterBucket := -1
+				if self.jitter.Load() {
+					// The observed Ready ordinal fixes a repeating 1..5ms
+					// sequence. Scheduling decides which connection receives it.
+					jitterBucket = int((ready - 1) % 5)
+					delay = time.Duration(jitterBucket+1) * time.Millisecond
+					self.jitterCharged[jitterBucket].Add(1)
+				}
+				if delay > 0 {
 					self.delayed.Add(1)
 					select {
 					case <-time.After(delay):
+						if jitterBucket >= 0 {
+							self.jitterApplied[jitterBucket].Add(1)
+						}
 					case <-frontendDone:
 						return
 					case <-self.ctx.Done():
@@ -239,6 +254,10 @@ func (self *legacyCohortLatencyProxy) snapshot() map[string]int64 {
 	defer self.errorLock.Unlock()
 	for _, class := range []string{"serialization_failure", "deadlock_detected", "lock_not_available", "query_canceled", "in_failed_transaction", "unique_violation", "foreign_key_violation", "other", "malformed"} {
 		counters["error_response_"+class] = self.errorClasses[class]
+	}
+	for index, bucket := range []string{"1ms", "2ms", "3ms", "4ms", "5ms"} {
+		counters["ready_jitter_charged_"+bucket] = self.jitterCharged[index].Load()
+		counters["ready_jitter_applied_"+bucket] = self.jitterApplied[index].Load()
 	}
 	return counters
 }

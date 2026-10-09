@@ -3262,7 +3262,7 @@ func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.Pg
 // Current Redis contracts append independent consumption records. Legacy
 // callers queue an intent without releasing their reservation; the worker uses
 // the original atomic debit/outcome path and commits exact earnings plus durable total-projection ownership.
-func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
+func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool, closeOwners ...ContractCloseOwner) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
@@ -3313,7 +3313,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	})
 	var usedTransferByteCount ByteCount
 	var clockTransferByteCount ByteCount
-	settlementOwner, err := readContractSettlementOwnerInTx(ctx, tx, contractId)
+	settlementOwner, err := readContractSettlementOwnerInTx(ctx, tx, contractId, closeOwners...)
 	if err != nil {
 		return nil, false, err
 	}

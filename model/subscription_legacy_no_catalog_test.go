@@ -39,8 +39,8 @@ func TestLegacySettlementEntriesDoNotReadIndexCatalog(t *testing.T) {
 		missing, missingId := legacySettlementTestIntent(t, ctx)
 		financial, financialId := legacySettlementTestIntent(t, ctx)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET payer_network_id=NULL WHERE contract_id=$1`, missingId))
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL WHERE contract_id=$1`, missingId))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET payer_network_id=NULL,source_client_id=NULL WHERE contract_id=$1`, missingId))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=NULL,source_client_id=NULL WHERE contract_id=$1`, missingId))
 		})
 		tripwire := &legacySettlementCatalogTripwire{}
 		scope, err := server.NewTestPgQueryScope(ctx, tripwire)
