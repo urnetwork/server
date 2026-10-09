@@ -30,8 +30,16 @@ var readyGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 	Help:      "1 when the migration-aware pg+redis startup gate passed and the instance is not draining",
 })
 
+var reservedUploadStartupFailedGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "api",
+	Name:      "reserved_upload_startup_failed",
+	Help:      "1 when the configured reserved validator upload admission could not start; reserved uploads are then refused while every other route serves",
+})
+
 func init() {
 	prometheus.MustRegister(readyGauge)
+	prometheus.MustRegister(reservedUploadStartupFailedGauge)
 }
 
 type RunOptions struct {
@@ -246,6 +254,23 @@ func runWithDependencies(
 	return nil
 }
 
+// A reserved upload admission the running API cannot start, such as a pinned
+// validator config newer than this build's validator package, disables only
+// the reserved upload lane: requests carrying the reserved header are refused
+// and every other route keeps serving. Failing NewRouter instead made every
+// restarting API block exit on one configuration mismatch.
+func startReservedAttemptUpload(ctx context.Context, start func(context.Context) (*controller.StReservedAttemptUpload, error)) *controller.StReservedAttemptUpload {
+	reservedUpload, err := start(ctx)
+	if err != nil {
+		reservedUpload.Close()
+		reservedUploadStartupFailedGauge.Set(1)
+		glog.Infof("[api]reserved validator staging unavailable: %s\n", err)
+		return nil
+	}
+	reservedUploadStartupFailedGauge.Set(0)
+	return reservedUpload
+}
+
 // NewRouter builds the complete api route table together with the close that
 // joins the request-time caches it owns. The alt service mounts the same
 // router on http3, so route construction and cache ownership cannot diverge
@@ -255,10 +280,7 @@ func runWithDependencies(
 // validator staging cache, whose refresh loop stops when a drain begins while
 // the routes stay served until the close joins its leases.
 func NewRouter(routeCtx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
-	reservedUpload, err := controller.NewStReservedAttemptUpload(uploadCtx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("reserved validator staging startup: %w", err)
-	}
+	reservedUpload := startReservedAttemptUpload(uploadCtx, controller.NewStReservedAttemptUpload)
 	notifications := model.NewContractOriginNotifications(routeCtx, model.DefaultContractOriginNotificationSettings())
 	// FindProviders2 answers served here count toward each provider's
 	// appearance histogram; the close writes what the drain left

@@ -9,7 +9,10 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/router"
 )
 
@@ -112,5 +115,27 @@ func TestRunRejectedAPIPreservesStatusWithoutPublishingMetrics(t *testing.T) {
 	}
 	if checks != 1 || serves != 1 || starts != 0 || flushes != 0 {
 		t.Fatalf("checks/serves/metrics starts/flushes = %d/%d/%d/%d, want 1/1/0/0", checks, serves, starts, flushes)
+	}
+}
+
+func TestReservedUploadStartupFailureDisablesOnlyTheReservedLane(t *testing.T) {
+	t.Cleanup(func() { reservedUploadStartupFailedGauge.Set(0) })
+	failed := startReservedAttemptUpload(context.Background(), func(context.Context) (*controller.StReservedAttemptUpload, error) {
+		return nil, errors.New("decode validator config: field runtime_successor_profile not found")
+	})
+	if failed != nil {
+		t.Fatal("a failed reserved upload startup returned an admission")
+	}
+	if got := testutil.ToFloat64(reservedUploadStartupFailedGauge); got != 1 {
+		t.Fatalf("startup failure gauge = %v, want 1", got)
+	}
+	unconfigured := startReservedAttemptUpload(context.Background(), func(context.Context) (*controller.StReservedAttemptUpload, error) {
+		return nil, nil
+	})
+	if unconfigured != nil {
+		t.Fatal("an unconfigured reserved upload returned an admission")
+	}
+	if got := testutil.ToFloat64(reservedUploadStartupFailedGauge); got != 0 {
+		t.Fatalf("startup failure gauge = %v after an unconfigured start, want 0", got)
 	}
 }
