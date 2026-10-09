@@ -2203,6 +2203,43 @@ An unchanged repeat is not a remedy for this measured attribution gap. Keep
 the CPU incident open until a separately qualified observation identifies the
 unassigned work; do not relabel historical wait leaders as current CPU owners.
 
+**2026-10-09 bounded CPU function-profile discriminator.** The next disabled
+source uses the existing `perf` binary to sample CPU-clock leaf functions in
+one exact PostgreSQL service cgroup at 19 Hz for five seconds. It performs no
+SQL query, stack or memory capture, installation, or profiling-policy change.
+Native unit, boot, process start, namespace, cgroup inode and postmaster
+executable must remain stable across the capture. The monotonic record window
+must enclose all sample timestamps; the separate service CPU-counter window
+also includes profiler startup and analysis and is not its denominator.
+
+The owned local control exposed a real observer compatibility failure. Its
+privileged recording succeeded, but the first parser rejected `report_schema`:
+the installed tool appended an exact null IPC column and included a software
+dummy event for metadata. The corrected source accepts only that null column,
+allows at most one metadata dummy alongside the single measuring CPU-clock
+event, and requires every sample ID to belong to CPU-clock. Raw sample counts
+and period totals must reconcile with the complete bounded histogram; loss
+and throttle records remain explicit. This does not turn metadata into CPU.
+Independent offline replay of the preserved local capture (`8d124dd9`)
+reconciled 94 samples, of which 87 had unresolved symbols, with no recorded
+loss or throttling. It did not make a new profile or establish Main coverage.
+The earlier failure without retained child diagnostics remains cause-unknown.
+
+False-positive qualifiers: leaf symbols do not identify a SQL statement or
+business caller, and sample-period weights are not exact CPU counters or SQL
+elapsed time. Other DSO symbol resolution is not independently verified by
+the postmaster executable check. False-negative qualifiers: five seconds can
+miss brief work; unresolved symbols, loss, throttling, omitted groups and
+partial output retain unknown scope. Top-32 projection omissions remain in
+the sample and period totals. Missing tools, privilege, identity or bounded
+coverage refuse the read; there is no broader event or host fallback.
+
+Source GO `b6d701d8` pins the corrected parser and 29 controls under
+`temp/pg-contention-20261004/source-pg-cpu-function-profile-disabled-v3/`.
+Require a qualified corrected owned-local pipeline and a separately reviewed
+one-use Root carrier before any Main profile. Source and local parser success
+do not resolve the measured 92.923% unknown query-CPU share.
+
 ### 1.3d Empty transfer-escrow write amplification
 Probe: `escrow-amplification`
 
