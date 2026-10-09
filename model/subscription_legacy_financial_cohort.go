@@ -27,12 +27,12 @@ var errLegacyFinancialCohortUnsupported = errors.New("legacy financial cohort re
 // A fallback has made no financial change for that contract. A successful
 // cohort may precede it, so callers consume only this returned input prefix.
 type legacyFinancialCohortAttempt struct {
-	contractId       server.Id
-	completed        bool
-	busy             bool
-	busyGate         legacySettlementBusyGate
-	fallback         bool
-	deadlineFallback bool
+	contractId             server.Id
+	completed              bool
+	busy                   bool
+	busyGate               legacySettlementBusyGate
+	fallback               bool
+	deadlineFallback       bool
 	financialWriteRollback bool
 }
 
@@ -99,7 +99,7 @@ func flushLegacySettlementCohort(ctx context.Context, contractIds []server.Id) (
 			budget, _ := bounded.Value(legacyFinancialCohortBudgetKey{}).(*legacyFinancialCohortBudget)
 			return []legacyFinancialCohortAttempt{{contractId: contractIds[0], fallback: true,
 				financialWriteRollback: budget != nil && budget.written,
-				deadlineFallback: errors.Is(returnErr, errLegacyFinancialCohortBudget) || legacyFinancialCohortDeadlineFallback(ctx, bounded, returnErr)}}, nil
+				deadlineFallback:       errors.Is(returnErr, errLegacyFinancialCohortBudget) || legacyFinancialCohortDeadlineFallback(ctx, bounded, returnErr)}}, nil
 		}
 		return nil, returnErr
 	}

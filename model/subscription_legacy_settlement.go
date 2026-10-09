@@ -73,10 +73,10 @@ type LegacySettlementFlushResult struct {
 	PassEndTime time.Time `json:"pass_end_time,omitzero"`
 	// Cohort input selection is not proof of a financial visit. Completed
 	// counts are confirmed per-contract outcomes; attempts include rollback.
-	FinancialCohortAttempts  int `json:"financial_cohort_attempts"`
-	FinancialCohortSelected  int `json:"financial_cohort_selected"`
-	FinancialCohortCompleted int `json:"financial_cohort_completed"`
-	FinancialCohortFallbacks int `json:"financial_cohort_fallbacks"`
+	FinancialCohortAttempts       int `json:"financial_cohort_attempts"`
+	FinancialCohortSelected       int `json:"financial_cohort_selected"`
+	FinancialCohortCompleted      int `json:"financial_cohort_completed"`
+	FinancialCohortFallbacks      int `json:"financial_cohort_fallbacks"`
 	FinancialCohortWriteRollbacks int `json:"financial_cohort_write_rollbacks"`
 
 	// Head outcomes are included in the total counts, not extra visits.
