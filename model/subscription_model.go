@@ -2407,7 +2407,7 @@ func GetTransferEscrow(ctx context.Context, contractId server.Id) (transferEscro
                     transfer_byte_count,
                     priority
 
-                FROM transfer_byte_count
+                FROM transfer_contract
                 WHERE
                     contract_id = $1
             `,
