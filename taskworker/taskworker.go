@@ -59,6 +59,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
 		work.ScheduleCancelHungAccountPayments(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
+		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
 		for i := range work.DefaultCloseExpiredContractsBlockSize {
 			work.ScheduleCloseExpiredContracts(clientSession, tx, i, false)
 		}
@@ -223,6 +224,8 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.PopulateAccountWalletsPost,
 			"bringyour.com/bringyour/controller.PopulateAccountWallets",
 		),
+		work.NewStartupContractClosureTaskTarget(),
+		work.NewScheduledContractClosureTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.CloseExpiredContracts,
 			work.CloseExpiredContractsPost,
