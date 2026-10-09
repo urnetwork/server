@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,6 +32,46 @@ type syntheticRouterSource struct {
 	localCalls  int
 	missingEnd  bool
 	changedBoot bool
+}
+
+func TestRouterConntrackCaptureRetainsCapacityWithoutCounterFile(t *testing.T) {
+	dir := t.TempDir()
+	for name, script := range map[string]string{
+		"hostname": "#!/bin/sh\nprintf '%s\\n' router-test\n",
+		"cat": `#!/bin/sh
+case "$1" in
+  /proc/sys/kernel/random/boot_id) printf '%s\n' aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee ;;
+  /proc/sys/net/netfilter/nf_conntrack_count|/proc/sys/net/netfilter/nf_conntrack_max) printf '%s\n' 262144 ;;
+  /sys/module/nf_conntrack/parameters/hashsize) printf '%s\n' 32768 ;;
+  /proc/net/stat/nf_conntrack) printf '%s\n' synthetic-secret; exit 1 ;;
+  /proc/uptime) printf '%s\n' '21282381.00 123456789.00' ;;
+  *) exit 91 ;;
+esac
+`,
+		"dmesg": `#!/bin/sh
+printf '%s\n' '[21282074.363152] nf_conntrack: nf_conntrack: table full, dropping packet' '[21282074.500000] unrelated synthetic-secret 192.0.2.1 eth0'
+`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := exec.Command("/bin/sh", "-c", routerCaptureCommand(syntheticRouterName, "conntrack"))
+	command.Env = append(os.Environ(), "PATH="+dir+":/usr/bin:/bin")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("optional counter failure aborted complete capacity capture: %v", err)
+	}
+	if strings.Contains(string(output), "synthetic-secret") || strings.Contains(string(output), "192.0.2.1") {
+		t.Fatal("failed optional output or raw kernel log crossed capture boundary")
+	}
+	body, boot, err := parseRouterCapture(string(output), syntheticRouterName, routerDataByteLimit)
+	if err != nil || boot != syntheticRouterBoot {
+		t.Fatalf("capture lost identity/completion fence: %v", err)
+	}
+	if !strings.Contains(body, "--stat--\nunavailable") || !strings.Contains(body, "retained_messages=1") || !strings.Contains(body, "latest_uptime_seconds=21282074.363152") {
+		t.Fatal("capture did not preserve independent counter unavailability and reduced kernel evidence")
+	}
 }
 
 func newSyntheticRouterSource() *syntheticRouterSource {
