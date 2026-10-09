@@ -6064,6 +6064,30 @@ The unit of evidence must match the question:
 | Did financial ownership commit? | The same invocation's acknowledged transaction plus a later exact outcome/escrow witness when the response was incomplete or ambiguous. | Staged outcome writes, entering commit, process exit 0, a returned batch with refused rows, or a post callback's return alone is not financial success. |
 | Did recovery finish? | Terminal outcome and unsettled reservation state, then the applicable debit journal, provider-total marker and Redis/stream/packet projections under their own owners. | Intent deletion, low CPU, no errors, a drained journal or terminal count cannot certify every downstream projection or customer UI. |
 
+For an overdue legacy intent, retain `usage_origin_is_source`,
+`usage_unverified`, the immutable expiry proof, report readiness and the actual
+serial owner together. A NULL payer key and a NULL usage direction are different
+conditions. NULL direction is an intentional legacy representation, not proof
+of corruption. Source review on 2026-10-09 found that existing intents are
+excluded from ordinary expiry preparation, explicit expiry repair refuses
+`legacy_intent_present`, and the explicit settlement drain does not prepare
+proofs. A due intent with unknown direction and no unverified-usage proof can
+therefore remain behind the settlement path. Verify that exact conjunction in a
+fresh bounded point read before attributing an account failure to it. Its repair
+must retain report validation, owner/rekey and grant admission, and use the
+existing expiry policy; do not invent a direction or bypass accounting custody.
+
+Measure close throughput over the complete invocation through debit/provider
+outputs, replay and worker join, including the configured collection delay.
+Fewer transactions or protocol replies are useful work measurements, not a
+wall-time speedup. A zero-retry assertion does not measure PostgreSQL lock waits.
+A wait observer needs real row/advisory blocking controls, a joined final
+sample, measured query cost and coverage gaps. Failed coverage leaves waits
+unqualified even when every sampled heavyweight-lock count is zero. Retain
+LWLock/IO separately, and report unprobed blocking edges as unknown. Use the
+same observer and resource limits in compared arms; never subtract its
+overlapping query wall time to manufacture a speedup.
+
 The 2026-10-07 retained case demonstrates the scope boundary. The original fixed
 32-contract cohort was all closed/SETTLED with zero unsettled escrow at
 10:06:00.785079Z. A separate complete payer count at 10:06:36.913535Z was 179,540
