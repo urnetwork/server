@@ -5,11 +5,11 @@ able to admin the network in any way", and "We don't want third party customer
 jwts to be able to admin their account in any way."
 
 This document audits every route the API serves, `api/api.go` plus
-`oauth.Routes()` (229 routes), for what a client token can do with it. It
+`oauth.Routes()` (230 routes), for what a client token can do with it. It
 records the rule the router now enforces, what remains open, and how each
 admin route is tested.
 
-Branch `fix/client-jwt-admin-authz`, from main `9a89d017`.
+Branch `fix/client-jwt-admin-authz`, from main `9a89d017`, merged with main `5342fd76` (the Embed flag).
 
 ## 1. Credentials and the threat
 
@@ -74,7 +74,7 @@ are closed, and the sign-in routes stay open until decision 1 is made.
    | Client | Any credential: acts for the caller's own client, reads what every installation shows, or buys or credits something the caller pays for | 43 |
    | Own client | A client token is accepted; the model limits it to its own client and the clients it created | 9 |
    | App admin | Administration the URnetwork apps call with their client token today. Refused for a client token of an Embed network | 27 |
-   | Network only | Administration: the network credential only | 37 |
+   | Network only | Administration: the network credential only | 38 |
 
 2. **The router enforces it.** `api.applyRouteAccess` wraps the route list
    that `routesWithReservedAttemptUpload` returns. That is the only change to
@@ -109,12 +109,11 @@ are closed, and the sign-in routes stay open until decision 1 is made.
    `TestEveryRouteIsClassified` fails until the route is classified, and it
    also fails for a classification that names no route.
 5. **Embed networks.** `model.NetworkRefusesClientAdmin` decides the App admin
-   class. Today it is true for a network on the Embed plan, which means it has
-   a `network_top_level_client_limit` row (`bringyourctl network
-   client-limit`). Once `feat/embed-flag` merges it should also be true when
-   the explicit flag is set (§5, decision 2). The lookup goes through the
-   existing per-process cache, and it runs only for a verified client token on
-   an App admin route.
+   class. It is true for an Embed-enabled network (`network_embed`,
+   `bringyourctl network embed --enable`) and for a network with the Embed
+   plan's client allowance (`network_top_level_client_limit`). Both lookups go
+   through the existing per-process caches, and they run only for a verified
+   client token on an App admin route.
 
 The first-party apps keep working on ordinary networks, and every route they
 call with a client token is unchanged there. Shipped callers of the narrowed
@@ -171,19 +170,20 @@ apps. What is implemented now is option (a).
   first (`/auth/code-create`, `/auth/add-auth`, both seedphrase routes,
   `/auth/network-delete`, `/auth/remove-auth`), then the rest.
 
-**Decision 2: merging with `feat/embed-flag`** (another fork, same day). Three
-changes are needed at merge time:
-1. `model.NetworkRefusesClientAdmin`
-   (`model/network_client_admin_model.go`) becomes
-   `NetworkEmbedEnabled(ctx, networkId) || <the Embed plan override>`, so a
-   network flagged without a client-limit override is covered too.
-2. Classify the new route. `TestEveryRouteIsClassified` fails until it is:
-   `"GET /network/embed": routeAccessNetwork`. That fork reads it with the
-   root token or an API key.
-3. The e2e fixture `routeAccessDbFixture.enableEmbed`
-   (`api/route_authz_db_test.go`) also calls `model.Testing_EnableNetworkEmbed`.
-   The data-cap and ACL routes refuse a network that is not Embed-enabled
-   once the flag lands.
+**Decision 2: an Embed disable re-opens the App admin routes.** The Embed
+flag has landed, and this branch is merged with it. `GET /network/embed` is
+classified Network only, `NetworkRefusesClientAdmin` reads the flag, and the
+e2e fixture enables Embed through `model.EnableNetworkEmbed`. However,
+`DisableNetworkEmbed` deletes the `network_embed` row and the client
+allowance. The client tokens the network handed out while Embed was on stay
+valid for up to 30 days, and after a disable they reach the App admin routes
+again. Options:
+- (a) keep a tombstone on disable (a `disable_time`, which needs a migration)
+  and keep refusing for a network that was ever Embed-enabled;
+- (b) on disable, deactivate the network's top-level clients that a backend
+  minted, so their tokens stop validating;
+- (c) accept the window, since a disable follows the end of a vetted
+  contract.
 
 **Decision 3: R1.** A client token can map its own client's provider payout
 coldkey, with the wallet's signed consent. The provider apps rely on this
@@ -213,29 +213,35 @@ database. The DB tests are written and compiled, and run after merge
 | `TestCredentialMintingRoutesAreAdminRoutes` | pure | the routes that mint a network credential or a way to sign in are admin routes, and the client-minting routes are Own client |
 | `router/client_credential_test.go` (5 tests) | pure | the gate: 403 with the message for a verified client token; network token, API key, no credential, another scheme and a non-token pass; a forged signature is left to the handler; a conditional refusal sees the verified claims; the gated route keeps its identity, streaming policy and captures |
 | `jwt/by_jwt_names_client_test.go` `TestByJwtNamesClientUnverified` | pure | the unverified client peek |
-| `model/network_client_authz_test.go` (5 tests) | DB | auth-client: no top-level mint, no child of another client, own child on its own device; reissue only its own client and its child, and another client is untouched; remove-client only its own child and itself; set-name only its own device, from its child too; each refusal writes nothing; the network session still does all of it; `NetworkRefusesClientAdmin` follows the Embed plan |
-| `api/route_authz_db_test.go` `TestRealClientTokenIsRefusedOnEveryNetworkRoute` | DB | a real client token minted by `POST /network/auth-client` with the root token gets 403 on all 37 Network only routes, with requests aimed at another client and the account; the network and admin-user rows in 26 tables are unchanged; the app route `GET /network/clients` still serves it on an ordinary network |
-| `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | DB | on an Embed network, a client token minted with the backend's **API key** gets 403 on all 64 admin routes, and nothing changes |
+| `model/network_client_authz_test.go` (5 tests) | DB | auth-client: no top-level mint, no child of another client, own child on its own device; reissue only its own client and its child, and another client is untouched; remove-client only its own child and itself; set-name only its own device, from its child too; each refusal writes nothing; the network session still does all of it; `NetworkRefusesClientAdmin` follows the Embed flag and the Embed plan allowance, and a disable clears it |
+| `api/route_authz_db_test.go` `TestRealClientTokenIsRefusedOnEveryNetworkRoute` | DB | a real client token minted by `POST /network/auth-client` with the root token gets 403 on all 38 Network only routes, with requests aimed at another client and the account; the network and admin-user rows in 26 tables are unchanged; the app route `GET /network/clients` still serves it on an ordinary network |
+| `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | DB | on an Embed network, a client token minted with the backend's **API key** gets 403 on all 65 admin routes, and nothing changes |
 | `TestRealClientTokenActsOnlyForItsOwnClients` | DB | through the router: top-level mint, child of another client, another client's reissue, another client's removal and another device's rename are refused and change nothing; it creates, reissues and removes its own child; its token refreshes |
 | `TestNetworkCredentialAdministersTheNetwork` | DB | the root token and an API key reissue another client, set the ACL group and data cap, create auth codes, set preferences, list clients and API keys, bulk-remove a client, create an API key and revoke the old one. Each effect is checked in the database |
 
-Test output (pure, on the branch):
+Test output (pure tests, after the merge with `5342fd76`):
 
 ```
-ok   github.com/urnetwork/server/router   (TestRefuseClientCredentialsGate, ...LeavesAnUnverifiedTokenToTheHandler, ...AsksTheRefusal, TestRouteWithoutTheGateServesAClientToken, TestRefuseClientCredentialsKeepsTheRoute: PASS; whole pure package: ok)
-ok   github.com/urnetwork/server/api      (the 8 route_authz_test.go tests: PASS)
-ok   github.com/urnetwork/server/jwt      (TestByJwtNamesClientUnverified: PASS)
+ok   github.com/urnetwork/server/router   every pure test in the package, the 5 gate tests included
+ok   github.com/urnetwork/server/api      every pure test in the package, the spec conformance included
+--- PASS: TestEveryRouteIsClassified
+--- PASS: TestAnUnclassifiedRouteFailsTheGuardAndRefusesClientTokens
+--- PASS: TestOnlyAdminRoutesCarryTheGate
+--- PASS: TestAdminRoutesRefuseAClientTokenThroughTheRouter
+--- PASS: TestAdminRoutesServeTheNetworkCredential
+--- PASS: TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork
+--- PASS: TestNonAdminRoutesServeAClientToken
+--- PASS: TestCredentialMintingRoutesAreAdminRoutes
+ok   github.com/urnetwork/server/jwt      TestByJwtNamesClientUnverified
 ```
 
-Pre-existing failures, not from this branch:
-- `api` `TestSpecRoutesImplemented` fails because the shared connect checkout
-  is at `97abb1e6` and documents `GET /network/embed` from `feat/embed-flag`.
-- `model` `TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks` fails
-  the same way on main. This branch adds no deactivation writer (the count
-  stays 2).
+Pre-existing failure, not from this branch:
+`model` `TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks` fails
+the same way on main. This branch adds no deactivation writer (the count stays
+2).
 
 The DB tests are compiled (`go vet ./model ./api`). Run them after merge:
-`go test -run 'TestAuthNetworkClientClientToken|TestRemoveNetworkClientClientToken|TestDeviceSetNameClientToken|TestNetworkRefusesClientAdmin' ./model`
+`go test -run 'TestAuthNetworkClientClientToken|TestRemoveNetworkClientClientToken|TestDeviceSetNameClientToken|TestNetworkRefusesClientAdminFollowsEmbed' ./model`
 and `go test -run 'TestRealClientToken|TestNetworkCredentialAdministers' ./api`.
 
 ### File to tests
@@ -245,7 +251,7 @@ and `go test -run 'TestRealClientToken|TestNetworkCredentialAdministers' ./api`.
 | `router/client_credential.go` (new), `router/router.go` (one field) | the gate, `RefuseClientCredentials`, `Method`/`Pattern`/`RefusesClientCredentials`, `Testing_WithHandler` | `router/client_credential_test.go`; through the API table in `api/route_authz_test.go` |
 | `jwt/by_jwt.go` | `ByJwtNamesClientUnverified` | `TestByJwtNamesClientUnverified`; the gate tests |
 | `api/route_authz.go` (new), `api/api.go` (one line) | classification table, `applyRouteAccess`, the Embed refusal | `api/route_authz_test.go` (8), `api/route_authz_db_test.go` (4) |
-| `model/network_client_admin_model.go` (new) | `NetworkRefusesClientAdmin` | `TestNetworkRefusesClientAdminFollowsTheEmbedPlan`; `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` |
+| `model/network_client_admin_model.go` (new) | `NetworkRefusesClientAdmin` (the Embed flag or the Embed plan allowance) | `TestNetworkRefusesClientAdminFollowsEmbed`; `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` |
 | `model/network_client_model.go` | auth-client own-client limits (new and reissue), `deactivateOwnedNetworkClientInTx`, remove-client and set-name own-client limits | `model/network_client_authz_test.go` (4); `TestRealClientTokenActsOnlyForItsOwnClients`; `TestNetworkCredentialAdministersTheNetwork` |
 
 ## 7. Route table
@@ -352,10 +358,11 @@ shipped client that calls it with a client token (call sites); the verdict.
 | `GET /network/blocked-locations` | `handlers.GetNetworkBlockedLocations` → `controller.GetNetworkBlockedLocations` | WrapRequireAuth | yes | Client | apps | unchanged |
 | `GET /network/reliability` | `handlers.GetNetworkReliability` | WrapRequireAuth | yes | Client | apps | unchanged |
 | `POST /network/client-data-cap` | `handlers.NetworkClientDataCapSet` → `model.SetClientDataCap` | WrapWithInputRequireAuth | model refuses | Network only | none (examples backends use the root credential) | **FIXED** at the router (403); the model already refused |
-| `GET /network/client-data-cap` | `handlers.NetworkClientDataCapGet` | WrapRequireAuth | own cap only (model) | Own client | examples go/embed/caps.go:90 (own cap) | unchanged (model already scopes to its own client) |
-| `GET /network/client-data-caps` | `handlers.NetworkClientDataCapsList` | WrapRequireAuth | model refuses | Network only | none | **FIXED** at the router (403); the model already refused |
+| `GET /network/client-data-cap` | `handlers.NetworkClientDataCapGet` → `func` | WrapRequireAuth | own cap only (model) | Own client | examples go/embed/caps.go:90 (own cap) | unchanged (model already scopes to its own client) |
+| `GET /network/client-data-caps` | `handlers.NetworkClientDataCapsList` → `func` | WrapRequireAuth | model refuses | Network only | none | **FIXED** at the router (403); the model already refused |
 | `POST /network/client-acl-group` | `handlers.NetworkClientAclGroupSet` → `model.SetNetworkClientAclGroup` | WrapWithInputRequireAuth | model refuses | Network only | none | **FIXED** at the router (403); the model already refused |
-| `GET /network/client-acl-group` | `handlers.NetworkClientAclGroupGet` | WrapRequireAuth | own group only (model) | Own client | — | unchanged (model already scopes to its own client) |
+| `GET /network/client-acl-group` | `handlers.NetworkClientAclGroupGet` → `func` | WrapRequireAuth | own group only (model) | Own client | — | unchanged (model already scopes to its own client) |
+| `GET /network/embed` | `handlers.NetworkEmbedGet` → `model.GetNetworkEmbedStatus` | WrapRequireAuth | model refuses | Network only | none (ur.io /app reads it with the root token) | **FIXED** at the router (403); the model already refused |
 | `POST /services/contact-sales` | `handlers.ServicesContactSales` → `model.ServicesContactSales` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /preferences/set-preferences` | `handlers.AccountPreferencesSet` → `controller.AccountPreferencesSet` | WrapWithInputRequireAuth | yes | App admin | apple AccountPreferencesViewModel.swift:144 | **FIXED** for Embed networks (403); ordinary networks: decision 1 |
 | `GET /preferences` | `handlers.AccountPreferencesGet` → `controller.AccountPreferencesGet` | WrapRequireAuth | yes | Client | apple | unchanged |
@@ -385,8 +392,8 @@ shipped client that calls it with a client token (call sites); the verdict.
 | `POST /onboarding/click` | `handlers.OnboardingClick` → `controller.OnboardingClick` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `GET /onboarding/feedback/([^/]+)` | `handlers.OnboardingFeedbackToken` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /client/events` | `handlers.ClientEventsSend` → `controller.ClientEventsSend` | WrapWithInputRequireAuth | yes | Client | — | unchanged |
-| `GET /admin/onboarding/results` | `handlers.AdminOnboardingResults` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
-| `GET /admin/onboarding/email-tracker` | `handlers.AdminOnboardingEmailTracker` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
+| `GET /admin/onboarding/results` | `handlers.AdminOnboardingResults` → `func` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
+| `GET /admin/onboarding/email-tracker` | `handlers.AdminOnboardingEmailTracker` → `func` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `GET /admin/onboarding/experiments` | `handlers.AdminOnboardingExperiments` → `controller.AdminOnboardingExperiments` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /subscription/stripe/payment-sheet` | `handlers.StripePaymentSheet` → `controller.StripePaymentSheet` | WrapWithInputRequireAuth | yes | Client | — | unchanged |
 | `GET /subscription/stripe/prices` | `handlers.StripePrices` | WrapRequireAuth | yes | Client | — | unchanged |
@@ -417,12 +424,12 @@ shipped client that calls it with a client token (call sites); the verdict.
 | `POST /connect/control` | `connectControl` | WrapWithInputRequireClient | required | Client | — | unchanged |
 | `GET /key/([^/]+)` | `handlers.GetClientKey` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `GET /key/([^/]+)/history` | `handlers.GetClientKeyHistory` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
-| `POST /sn/client-key/observation` | `handlers.SnClientKeyObservation` | WrapRequireClient | required | Client | — | unchanged |
-| `POST /sn/client-key/observations` | `handlers.SnClientKeyObservations` | WrapRequireClient | required | Client | — | unchanged |
+| `POST /sn/client-key/observation` | `handlers.SnClientKeyObservation` → `func` | WrapRequireClient | required | Client | — | unchanged |
+| `POST /sn/client-key/observations` | `handlers.SnClientKeyObservations` → `func` | WrapRequireClient | required | Client | — | unchanged |
 | `POST /verify` | `handlers.Verify` → `controller.Verify` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `GET /verify/keys` | `handlers.GetVerifyKeys` → `controller.GetVerifyKeys` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
-| `GET /verify/stats` | `handlers.GetVerifyStats` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
-| `GET /verify/proofs` | `handlers.GetVerifyProofs` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
+| `GET /verify/stats` | `handlers.GetVerifyStats` → `func` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
+| `GET /verify/proofs` | `handlers.GetVerifyProofs` → `func` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /verify/original` | `handlers.GetVerifyOriginalRequest` → `controller.GetVerifyOriginalRequest` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /verify/original/close` | `verifyRequestClosure.ServeHTTP` | custom (signed) | — (no by_jwt) | Public | — | unchanged |
 | `POST /sn/wallet` | `handlers.SnSetWallet` → `controller.SnSetWallet` | WrapWithInputRequireAuth | own client only (model) | Own client | sdk sn_wallet.go:308 (own client id) | unchanged (model already scopes to its own client) |
@@ -525,6 +532,7 @@ none).
 | `GET /network/client-data-caps` | Network only | `TestAdminRoutesRefuseAClientTokenThroughTheRouter`, `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` | `TestRealClientTokenIsRefusedOnEveryNetworkRoute`, `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential` |
 | `POST /network/client-acl-group` | Network only | `TestAdminRoutesRefuseAClientTokenThroughTheRouter`, `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` | `TestRealClientTokenIsRefusedOnEveryNetworkRoute`, `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential`, `TestNetworkCredentialAdministersTheNetwork` (root token + API key, state checked) |
 | `GET /network/client-acl-group` | Own client | existing model tests (own-client scoping predates this branch) | — | — |
+| `GET /network/embed` | Network only | `TestAdminRoutesRefuseAClientTokenThroughTheRouter`, `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` | `TestRealClientTokenIsRefusedOnEveryNetworkRoute`, `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential` |
 | `POST /preferences/set-preferences` | App admin | `TestAdminRoutesRefuseAClientTokenThroughTheRouter` (Embed); `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` (ordinary: served) | `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential`, `TestNetworkCredentialAdministersTheNetwork` (root token + API key, state checked) |
 | `POST /stripe/customer-portal` | App admin | `TestAdminRoutesRefuseAClientTokenThroughTheRouter` (Embed); `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` (ordinary: served) | `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential` |
 | `GET /wallet/balance` | Network only | `TestAdminRoutesRefuseAClientTokenThroughTheRouter`, `TestAppAdminRoutesServeAClientTokenOfAnOrdinaryNetwork` | `TestRealClientTokenIsRefusedOnEveryNetworkRoute`, `TestRealClientTokenOfAnEmbedNetworkIsRefusedOnEveryAdminRoute` | `TestAdminRoutesServeTheNetworkCredential` |

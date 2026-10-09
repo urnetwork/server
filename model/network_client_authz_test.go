@@ -247,18 +247,29 @@ func TestDeviceSetNameClientTokenRenamesOnlyItsOwnDevice(t *testing.T) {
 	})
 }
 
-// The Embed plan is what makes a network refuse its client tokens on the app
-// admin routes.
-func TestNetworkRefusesClientAdminFollowsTheEmbedPlan(t *testing.T) {
+// Embed is what makes a network refuse its client tokens on the app admin
+// routes: the flag, with or without a client allowance, or the allowance on
+// its own.
+func TestNetworkRefusesClientAdminFollowsEmbed(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId, _ := authClientTestNetwork(ctx, "test")
 		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), false)
 
+		connect.AssertEqual(t, EnableNetworkEmbed(ctx, networkId, nil), nil)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), true)
+		connect.AssertEqual(t, DisableNetworkEmbed(ctx, networkId), nil)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), false)
+
+		clientLimit := 1000
+		connect.AssertEqual(t, EnableNetworkEmbed(ctx, networkId, &clientLimit), nil)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), true)
+		connect.AssertEqual(t, DisableNetworkEmbed(ctx, networkId), nil)
+		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), false)
+
 		connect.AssertEqual(t, SetNetworkTopLevelClientLimit(ctx, networkId, 1000), nil)
 		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), true)
-
 		ClearNetworkTopLevelClientLimit(ctx, networkId)
 		connect.AssertEqual(t, NetworkRefusesClientAdmin(ctx, networkId), false)
 	})

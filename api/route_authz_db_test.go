@@ -60,11 +60,14 @@ func newRouteAccessDbFixture(t testing.TB, ctx context.Context) *routeAccessDbFi
 	return self
 }
 
-// enableEmbed puts the network on the Embed plan, which hands its client
-// tokens to a third party's users (model.NetworkRefusesClientAdmin).
+// enableEmbed enables Embed for the network with a client allowance, as
+// `bringyourctl network embed --enable --client-limit` does. An Embed network
+// hands its client tokens to a third party's users
+// (model.NetworkRefusesClientAdmin).
 func (self *routeAccessDbFixture) enableEmbed(t testing.TB) {
 	t.Helper()
-	if err := model.SetNetworkTopLevelClientLimit(self.ctx, self.networkId, 1000); err != nil {
+	clientLimit := 1000
+	if err := model.EnableNetworkEmbed(self.ctx, self.networkId, &clientLimit); err != nil {
 		t.Fatal(err)
 	}
 	if !model.NetworkRefusesClientAdmin(self.ctx, self.networkId) {
@@ -245,6 +248,7 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"POST /network/user/update":             {path: "/network/user/update", body: map[string]any{"network_name": "attacker" + self.networkName}},
 		"POST /network/client-data-cap":         {path: "/network/client-data-cap", body: map[string]any{"client_id": victimClientId, "monthly_byte_limit": 0}},
 		"GET /network/client-data-caps":         {path: "/network/client-data-caps?limit=100"},
+		"GET /network/embed":                    {path: "/network/embed"},
 		"POST /network/client-acl-group":        {path: "/network/client-acl-group", body: map[string]any{"client_id": victimClientId, "acl_group": "default"}},
 		"GET /wallet/balance":                   {path: "/wallet/balance"},
 		"POST /wallet/circle-init":              {path: "/wallet/circle-init"},

@@ -145,6 +145,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /network/client-data-caps":                 routeAccessNetwork,   // list every data cap
 	"POST /network/client-acl-group":                routeAccessNetwork,   // set a client's ACL group
 	"GET /network/client-acl-group":                 routeAccessOwnClient, // read an ACL group
+	"GET /network/embed":                            routeAccessNetwork,   // the network's Embed state; the model refuses a client token too
 	"POST /services/contact-sales":                  routeAccessPublic,
 	"POST /preferences/set-preferences":             routeAccessAppAdmin, // account email preferences
 	"GET /preferences":                              routeAccessClient,
