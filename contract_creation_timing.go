@@ -109,7 +109,7 @@ func newContractCreationMetrics() *contractCreationMetrics {
 		inflight:          prometheus.NewDesc("urnetwork_contract_creation_stage_inflight", "CreateContract calls currently in each exclusive synchronous stage", []string{"ingress", "stage"}, nil),
 		enabled:           prometheus.NewDesc("urnetwork_contract_creation_stage_timing_enabled", "Capability for bounded exclusive CreateContract stage timing", nil, nil),
 		companionReads:    prometheus.NewDesc("urnetwork_contract_creation_companion_origin_reads_total", "Companion origin Query-through-row-drain attempts by finite phase; application wall spans do not identify PostgreSQL wait or CPU", []string{"ingress", "phase"}, nil),
-		companionOutcomes: prometheus.NewDesc("urnetwork_contract_creation_companion_origin_outcomes_total", "Companion origin callback attempts by finite selection result", []string{"ingress", "outcome"}, nil),
+		companionOutcomes: prometheus.NewDesc("urnetwork_contract_creation_companion_origin_outcomes_total", "Completed companion origin callbacks by finite selection result before transaction commit; origin_ready does not prove committed creation", []string{"ingress", "outcome"}, nil),
 	}
 }
 
@@ -246,9 +246,16 @@ func BeginContractCompanionOriginRead(ctx context.Context, phase ContractCompani
 		stage = ContractStageCompanionFallbackOriginRead
 	}
 	leave := EnterContractCreationStage(ctx, stage)
+	o.mu.Lock()
+	if o.finished {
+		o.mu.Unlock()
+		leave()
+		return func() {}
+	}
 	o.metrics.mu.Lock()
 	o.metrics.values.companionReads[o.ingress][phase]++
 	o.metrics.mu.Unlock()
+	o.mu.Unlock()
 	return leave
 }
 
@@ -257,6 +264,11 @@ func BeginContractCompanionOriginRead(ctx context.Context, phase ContractCompani
 func RecordContractCompanionOriginOutcome(ctx context.Context, outcome ContractCompanionOriginOutcome) {
 	o, _ := ctx.Value(contractCreationTimingKey{}).(*ContractCreationTiming)
 	if o == nil || outcome >= contractCompanionOriginOutcomeCount {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.finished {
 		return
 	}
 	o.metrics.mu.Lock()

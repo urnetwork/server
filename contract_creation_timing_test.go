@@ -177,6 +177,21 @@ func TestContractCompanionOriginReadPanicAndHandoff(t *testing.T) {
 	}
 }
 
+func TestContractCompanionOriginTimingStopsWithOwner(t *testing.T) {
+	m := newContractCreationMetrics()
+	ctx, owner := beginContractCreationTiming(t.Context(), false, m)
+	owner.Finish(ContractCreationReply)
+	BeginContractCompanionOriginRead(ctx, ContractCompanionPlainOrigin)()
+	RecordContractCompanionOriginOutcome(ctx, ContractCompanionOriginFound)
+	BeginContractCompanionOriginRead(t.Context(), ContractCompanionFallbackOrigin)()
+	RecordContractCompanionOriginOutcome(t.Context(), ContractCompanionOriginMissing)
+	if m.values.companionReads != [2][contractCompanionOriginPhaseCount]uint64{} ||
+		m.values.companionOutcomes != [2][contractCompanionOriginOutcomeCount]uint64{} ||
+		m.values.inflight != [2][contractStageCount]int64{} {
+		t.Fatal("finished or unowned companion callback changed metrics")
+	}
+}
+
 func TestContractCreationTimingJoinedPostsKeepExclusiveOwner(t *testing.T) {
 	type otherKey struct{}
 	parent, cancel := context.WithTimeout(context.WithValue(t.Context(), otherKey{}, "retained"), 5*time.Second)
