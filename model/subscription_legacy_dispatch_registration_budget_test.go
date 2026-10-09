@@ -4,9 +4,11 @@ package model
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
@@ -68,4 +70,45 @@ func TestLegacyDispatchSlowDiscoveryStillRegistersMissingPayer(t *testing.T) {
 		})
 		requireLegacySettlementTestState(t, ctx, fixture, id, true, false, 1000, 100)
 	})
+}
+
+// Only discovery's own deadline yields to registration. Parent cancellation
+// and a database refusal preserve the completed prefix but remain errors.
+func TestLegacyDispatchDiscoveryErrorsDoNotBecomeRegistrationSuccess(t *testing.T) {
+	for _, parentCanceled := range []bool{false, true} {
+		parent, parentCancel := context.WithCancel(t.Context())
+		bounded, cancel := context.WithTimeoutCause(parent, 5*time.Second, errLegacySettlementDispatchBudget)
+		payer := server.NewId()
+		cursor := &LegacySettlementPayerCursor{End: payer, PassEndTime: server.NowUtc()}
+		var expected error = &pgconn.PgError{Code: "55P03", Message: "synthetic discovery refusal"}
+		if parentCanceled {
+			expected = context.Canceled
+		}
+		probes, registrations := 0, 0
+		result, err := dispatchLegacySettlementPayersPage(parent, bounded, 0, nil, cursor,
+			func(callCtx context.Context, _ int, _ *LegacySettlementPayerCursor) (*server.Id, *LegacySettlementPosition) {
+				probes++
+				if probes == 1 {
+					return &payer, &LegacySettlementPosition{}
+				}
+				if parentCanceled {
+					parentCancel()
+					if callCtx.Err() != context.Canceled {
+						t.Fatal("discovery lost parent cancellation")
+					}
+				}
+				server.Raise(expected)
+				return nil, nil
+			}, func(context.Context, int, *LegacySettlementCursor) (*LegacySettlementCursor, int) {
+				registrations++
+				return nil, 1
+			})
+		cancel()
+		parentCancel()
+		if !errors.Is(err, expected) || registrations != 0 || result.Registered != 0 || result.More ||
+			result.Probes != 1 || len(result.PayerNetworkIds) != 1 || result.PayerNetworkIds[0] != payer ||
+			result.PayerCursor == nil || result.PayerCursor.After == nil || *result.PayerCursor.After != payer || cursor.After != nil {
+			t.Fatal("discovery error was hidden or changed completed-prefix custody", parentCanceled, result, err)
+		}
+	}
 }
