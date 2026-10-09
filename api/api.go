@@ -366,5 +366,6 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/log/([^/]+)/upload", handlers.LogUpload),
 	}
 
-	return append(routes, oauth.Routes()...)
+	// every route is classified by credential (route_authz.go, AUTHZ1.md)
+	return applyRouteAccess(append(routes, oauth.Routes()...))
 }
