@@ -22,45 +22,45 @@ const legacyCohortDiagnosticConnectionLimit = 128
 // Times keep their monotonic component for in-process phase correlation. JSON
 // exposes wall times; neither a process id nor these timings grants ownership.
 type legacyCohortReadyDiagnostic struct {
-	Ordinal             uint64    `json:"ordinal"`
-	TransactionOrdinal  uint64    `json:"transaction_ordinal"`
-	TransactionStatus   string    `json:"transaction_status"`
-	MixedTransactions   bool      `json:"mixed_transactions"`
-	BeginCount          uint64    `json:"begin_count"`
-	CommitCount         uint64    `json:"commit_count"`
-	RollbackCount       uint64    `json:"rollback_count"`
-	EndKind             string    `json:"end_kind,omitempty"`
-	Frames              uint64    `json:"frames"`
-	Bytes               uint64    `json:"bytes"`
-	RequestedDelayNs    int64     `json:"requested_delay_ns"`
-	ReadyReceived       time.Time `json:"ready_received"`
-	TimerStart          time.Time `json:"timer_start"`
-	TimerDone           time.Time `json:"timer_done"`
-	ForwardDone         time.Time `json:"forward_done"`
-	Forwarded           bool      `json:"forwarded"`
-	StopCause           string    `json:"stop_cause,omitempty"`
+	Ordinal            uint64    `json:"ordinal"`
+	TransactionOrdinal uint64    `json:"transaction_ordinal"`
+	TransactionStatus  string    `json:"transaction_status"`
+	MixedTransactions  bool      `json:"mixed_transactions"`
+	BeginCount         uint64    `json:"begin_count"`
+	CommitCount        uint64    `json:"commit_count"`
+	RollbackCount      uint64    `json:"rollback_count"`
+	EndKind            string    `json:"end_kind,omitempty"`
+	Frames             uint64    `json:"frames"`
+	Bytes              uint64    `json:"bytes"`
+	RequestedDelayNs   int64     `json:"requested_delay_ns"`
+	ReadyReceived      time.Time `json:"ready_received"`
+	TimerStart         time.Time `json:"timer_start"`
+	TimerDone          time.Time `json:"timer_done"`
+	ForwardDone        time.Time `json:"forward_done"`
+	Forwarded          bool      `json:"forwarded"`
+	StopCause          string    `json:"stop_cause,omitempty"`
 }
 
 type legacyCohortConnectionDiagnosticSnapshot struct {
-	ConnectionOrdinal uint64                       `json:"connection_ordinal"`
-	BackendPid        uint32                       `json:"backend_pid"`
-	ReadyTotal        uint64                       `json:"ready_total"`
-	DroppedReady      uint64                       `json:"dropped_ready"`
-	Closed            bool                         `json:"closed"`
+	ConnectionOrdinal uint64                        `json:"connection_ordinal"`
+	BackendPid        uint32                        `json:"backend_pid"`
+	ReadyTotal        uint64                        `json:"ready_total"`
+	DroppedReady      uint64                        `json:"dropped_ready"`
+	Closed            bool                          `json:"closed"`
 	Ready             []legacyCohortReadyDiagnostic `json:"ready"`
 }
 
 type legacyCohortProxyDiagnosticSnapshot struct {
-	Enabled            bool                                      `json:"enabled"`
-	ReadyLimit         uint64                                    `json:"ready_limit"`
-	ConnectionLimit    int                                       `json:"connection_limit"`
-	ReadyTotal         uint64                                    `json:"ready_total"`
-	ReadyRecorded      uint64                                    `json:"ready_recorded"`
-	PendingReady       uint64                                    `json:"pending_ready"`
-	DroppedReady       uint64                                    `json:"dropped_ready"`
-	ConnectionTotal    uint64                                    `json:"connection_total"`
-	DroppedConnections uint64                                    `json:"dropped_connections"`
-	Overflow           bool                                      `json:"overflow"`
+	Enabled            bool                                       `json:"enabled"`
+	ReadyLimit         uint64                                     `json:"ready_limit"`
+	ConnectionLimit    int                                        `json:"connection_limit"`
+	ReadyTotal         uint64                                     `json:"ready_total"`
+	ReadyRecorded      uint64                                     `json:"ready_recorded"`
+	PendingReady       uint64                                     `json:"pending_ready"`
+	DroppedReady       uint64                                     `json:"dropped_ready"`
+	ConnectionTotal    uint64                                     `json:"connection_total"`
+	DroppedConnections uint64                                     `json:"dropped_connections"`
+	Overflow           bool                                       `json:"overflow"`
 	Connections        []legacyCohortConnectionDiagnosticSnapshot `json:"connections"`
 }
 

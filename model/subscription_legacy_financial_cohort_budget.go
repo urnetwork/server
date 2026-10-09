@@ -20,7 +20,7 @@ type legacyFinancialCohortBudget struct {
 	now         func() time.Time
 	admitBefore time.Time
 	written     bool
-	diagnostic *legacyFinancialDiagnostic
+	diagnostic  *legacyFinancialDiagnostic
 }
 
 // The optional clock belongs to one fixture context. Production uses monotonic

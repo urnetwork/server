@@ -42,7 +42,7 @@ type contractCloseOwnerJitterObservation struct {
 	cohortTimings               []legacyFinancialCohortObservation
 	financialDiagnostics        []legacyFinancialDiagnosticObservation
 	droppedFinancialDiagnostics int
-	nativeDiagnosticSetup bool
+	nativeDiagnosticSetup       bool
 }
 
 // Preserve both original resource configurations and pool limits. The existing
@@ -55,15 +55,15 @@ func newContractCloseOwnerJitterObservation(t testing.TB, ctx context.Context) (
 		observation.cohortTimings = append(observation.cohortTimings, value)
 		observation.stateLock.Unlock()
 	})
-    ctx = context.WithValue(ctx, legacyFinancialDiagnosticKey{}, func(value legacyFinancialDiagnosticObservation) {
-        observation.stateLock.Lock()
-        if len(observation.financialDiagnostics) < 4096 {
-            observation.financialDiagnostics = append(observation.financialDiagnostics, value)
-        } else {
-            observation.droppedFinancialDiagnostics++
-        }
-        observation.stateLock.Unlock()
-    })
+	ctx = context.WithValue(ctx, legacyFinancialDiagnosticKey{}, func(value legacyFinancialDiagnosticObservation) {
+		observation.stateLock.Lock()
+		if len(observation.financialDiagnostics) < 4096 {
+			observation.financialDiagnostics = append(observation.financialDiagnostics, value)
+		} else {
+			observation.droppedFinancialDiagnostics++
+		}
+		observation.stateLock.Unlock()
+	})
 	ctx = observation.reruns.context(ctx)
 	ctx = server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
 		switch event.Kind {
@@ -82,8 +82,12 @@ func newContractCloseOwnerJitterObservation(t testing.TB, ctx context.Context) (
 			cleanup()
 		}
 	}()
-	for _, proxy := range protocol.proxies { proxy.enableDiagnosticCapture() }
-	if observation.nativeDiagnosticSetup { requireLegacyOwnerDiagnosticLogging(t, ctx) }
+	for _, proxy := range protocol.proxies {
+		proxy.enableDiagnosticCapture()
+	}
+	if observation.nativeDiagnosticSetup {
+		requireLegacyOwnerDiagnosticLogging(t, ctx)
+	}
 	observation.protocol = protocol
 	observation.beforeCounters = parallelCloseCounterSnapshot(t)
 	observation.beforeClosed = contractClosedCounter.Snapshot()
@@ -207,7 +211,7 @@ func (self *contractCloseOwnerJitterObservation) report(t testing.TB) {
 		"financial_cohort_completed": cohortCompleted, "financial_cohort_fallbacks": cohortFallbacks,
 		"financial_cohort_write_rollbacks": cohortWriteRollbacks,
 		"cohort_database_timings":          cohortTimings,
-        "financial_phase_diagnostic": self.financialPhaseDiagnostic(),
+		"financial_phase_diagnostic":       self.financialPhaseDiagnostic(),
 		"counter_delta":                    parallelCloseCounterDelta(t, self.beforeCounters, parallelCloseCounterSnapshot(t)),
 		"close_counter_before":             self.beforeClosed, "close_counter_after": contractClosedCounter.Snapshot(),
 		"qualifiers": []string{
