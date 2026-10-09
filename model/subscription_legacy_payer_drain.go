@@ -65,7 +65,9 @@ func runLegacyPayerSettlementPages(ctx context.Context, payerNetworkId server.Id
 	}
 	bounded, cancel := context.WithTimeoutCause(ctx, 15*time.Second, errLegacySettlementPageBudget)
 	defer cancel()
-	if !legacySettlementPayerDueIndexReady(bounded) {
+	readiness := legacySettlementPayerDueIndexObservation(bounded)
+	recordLegacyPayerReadiness(legacyPayerReadinessCounter, "payer", readiness)
+	if readiness.Outcome != "ready" {
 		if bounded.Err() != nil {
 			return result, bounded.Err()
 		}

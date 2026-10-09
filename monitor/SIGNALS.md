@@ -33306,6 +33306,42 @@ describes dispatch entry only; it does not measure the registration branch or
 prove that a particular missing payer was registered. Registration's independent
 missing-key index and unchanged chronological cursor remain authoritative.
 
+### Payer readiness and terminal execution error counters
+
+`urnetwork_legacy_payer_index_readiness_total` records the already completed
+due-index observation at the `dispatcher` or `payer` entry. Its fixed outcomes
+are `ready`, `catalog_invalid`, `deadline`, `canceled`, `read_error`, and the
+defensive `unknown`; `cached=true` applies only to a ready cached observation.
+The metric adds no resource read, SQL, retry, or financial action. Its existing
+250ms budget still includes resource resolution, acquisition and catalog work.
+Count or rate matched process generations before aggregating. Non-ready payer
+observations can identify a scheduling refusal population; they do not identify
+the failed resource, assert a persistent invalid index, or measure commits.
+Dispatcher refusal can use the existing fallback and need not fail its task.
+
+`urnetwork_taskworker_execution_errors_total` uses the existing execution
+terminal site and the same finite registered-task/attribution labels as
+`executions_total`. It counts each nonnil execution error once, including
+`drained` and `target_not_found`, before the result reaches the collector. Its
+sum therefore corresponds to all errored terminal outcomes, not only `failed`.
+No task id, arguments, raw error, SQLSTATE value or other dynamic cause becomes
+a label. Typed causes distinguish cancellation/deadline, the retained database
+context marker, fixed PostgreSQL lock/cancellation/serialization/deadlock/
+capacity/connection classes and other PostgreSQL errors. Differing typed leaves
+are `mixed`; malformed or incomplete bounded cause graphs are `unknown`.
+Other ordinary errors are `other`, including errors whose original cause was
+already converted to diagnostic text. Matching error text alone never supplies
+a typed cause, and a cancellation label does not identify its resource or stage.
+
+These counters are process-local execution observations. A business rollback
+still leaves its returned function error counted; an acknowledged financial
+commit followed by a later function error can also be counted. Task claim,
+completion transactions, Post retries and downstream accounting remain separate.
+The existing Info execution-error log is unconditional, while successful result
+logs require verbosity one. Collector delivery or a capped log tail can conceal
+those lines despite a terminal counter. Neither telemetry addition attributes
+the earlier R54 failure rate or certifies recovered payer throughput.
+
 
 ### Task submission, completion and RunOnce conflict counters
 

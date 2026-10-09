@@ -47,6 +47,7 @@ func DispatchLegacySettlementPayersWithReadiness(ctx context.Context, shard int,
 		return result, nil, fmt.Errorf("invalid legacy settlement dispatch shard")
 	}
 	observation := legacySettlementPayerDueIndexObservation(ctx)
+	recordLegacyPayerReadiness(legacyPayerReadinessCounter, "dispatcher", observation)
 	readiness = &observation
 	if observation.Outcome != "ready" {
 		return result, readiness, ErrLegacySettlementPayerIndexUnavailable
