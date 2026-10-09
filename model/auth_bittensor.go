@@ -2,6 +2,7 @@ package model
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -12,13 +13,16 @@ import (
 )
 
 /**
- * Bittensor (substrate sr25519 / ss58) wallet signature verification
- * ===================================================================
- * Bittensor accounts are substrate sr25519 keys addressed with ss58.
- * The standard mobile/browser signing path (polkadot signRaw /
- * polkadot_signMessage over WalletConnect) signs with the "substrate"
- * signing context, and most signers wrap the payload in <Bytes>…</Bytes>
- * before signing — so verification accepts both the raw and wrapped forms.
+ * Bittensor (substrate sr25519 or ed25519 / ss58) wallet signature verification
+ * ==============================================================================
+ * Bittensor accounts are substrate keys addressed with ss58: sr25519 by
+ * default, ed25519 when the account was created with that scheme. The
+ * standard mobile/browser signing path (polkadot signRaw /
+ * polkadot_signMessage over WalletConnect) signs sr25519 with the
+ * "substrate" signing context and ed25519 directly. Signers differ on
+ * wrapping: polkadot-js, SubWallet and Nova wrap the payload in
+ * <Bytes>…</Bytes>, while Reown's reference wallet and some mobile wallets
+ * sign the raw bytes — so verification accepts both forms.
  * sr25519 signatures are non-deterministic; only verification is possible.
  */
 
@@ -139,10 +143,10 @@ func IsValidBittensorAddress(address string) bool {
 }
 
 /**
- * Verify a Bittensor (sr25519) wallet signature
+ * Verify a Bittensor (sr25519 or ed25519) wallet signature
  * publicKey: the ss58 wallet address
  * message: the signed message text
- * signature: the 64 byte sr25519 signature in hex (with or without 0x)
+ * signature: the 64 byte sr25519 or ed25519 signature in hex (with or without 0x)
  */
 func VerifyBittensorSignature(publicKey string, message string, signature string) (bool, error) {
 	publicKeyBytes, err := DecodeBittensorAddress(publicKey)
@@ -161,24 +165,43 @@ func VerifyBittensorSignature(publicKey string, message string, signature string
 	var signatureFixed [64]byte
 	copy(signatureFixed[:], signatureBytes)
 
+	// Signers (polkadot-js signRaw and compatible wallets) usually wrap the
+	// payload in <Bytes>…</Bytes>, but not all do (Reown's reference wallet
+	// and some mobile wallets sign the raw bytes), so both forms are accepted.
+	messageBytes := []byte(message)
+	wrappedBytes := append(append([]byte{}, bittensorBytesWrapPrefix...), append(messageBytes, bittensorBytesWrapSuffix...)...)
+	candidates := [][]byte{wrappedBytes, messageBytes}
+
+	// A substrate account may be sr25519 (the default) or ed25519, and the
+	// address does not say which: both are 32-byte keys under the same ss58
+	// encoding. The signature does. schnorrkel sets the high bit of the last
+	// byte as a marker; an ed25519 signature's S is below the group order
+	// (< 2^253), so that bit is always clear. This is how polkadot-js
+	// signatureVerify tells them apart. Accepting both curves for one key is
+	// safe: a signature under either still requires that curve's private key.
+	if signatureFixed[63]&0x80 == 0 {
+		publicKey := ed25519.PublicKey(publicKeyBytes[:])
+		for _, candidate := range candidates {
+			if ed25519.Verify(publicKey, candidate, signatureFixed[:]) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
 	pub := &schnorrkel.PublicKey{}
 	if err := pub.Decode(publicKeyBytes); err != nil {
 		return false, fmt.Errorf("invalid public key: %v", err)
 	}
 	sig := &schnorrkel.Signature{}
-	// 64 bytes that are not a well formed schnorrkel signature are client
-	// input, not a server fault -- classify them as an encoding problem so
-	// the caller answers 4xx instead of leaking this text through a 500.
+	// 64 bytes carrying the marker that are still not a well formed
+	// schnorrkel signature are client input, not a server fault -- classify
+	// them as an encoding problem so the caller answers 4xx instead of
+	// leaking this text through a 500.
 	if err := sig.Decode(signatureFixed); err != nil {
 		return false, fmt.Errorf("%w: %v", ErrWalletSignatureEncoding, err)
 	}
-
-	// signers (polkadot-js signRaw and compatible wallets) usually wrap the
-	// payload in <Bytes>…</Bytes>; accept the raw form too for signers that
-	// do not
-	messageBytes := []byte(message)
-	wrappedBytes := append(append([]byte{}, bittensorBytesWrapPrefix...), append(messageBytes, bittensorBytesWrapSuffix...)...)
-	for _, candidate := range [][]byte{wrappedBytes, messageBytes} {
+	for _, candidate := range candidates {
 		transcript := schnorrkel.NewSigningContext([]byte("substrate"), candidate)
 		ok, err := pub.Verify(sig, transcript)
 		if err == nil && ok {

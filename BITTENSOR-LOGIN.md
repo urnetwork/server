@@ -1,6 +1,6 @@
 BITTENSOR LOGIN
 
-The contract for signing in, creating a network, and adding or removing a sign-in method with a Bittensor (TAO) wallet. The server side is complete; the client must sign the exact message the server issues. Re-verified against the code on 2026-09-15: `model/wallet_auth_challenge_model.go`, `model/auth_bittensor.go`, `model/auth_model.go` (`handleLoginWallet`), `model/network_model.go` (`NetworkCreate`, wallet path), `model/network_user_model.go` (`AddAuth`, `RemoveAuth`).
+The contract for signing in, creating a network, and adding or removing a sign-in method with a Bittensor (TAO) wallet. The server side is complete; the client must sign the exact message the server issues. Re-verified against the code on 2026-10-07: `model/wallet_auth_challenge_model.go`, `model/auth_bittensor.go`, `model/auth_model.go` (`handleLoginWallet`), `model/network_model.go` (`NetworkCreate`, wallet path), `model/network_user_model.go` (`AddAuth`, `RemoveAuth`).
 
 WHY THE CURRENT CLIENT IS DENIED
 
@@ -27,9 +27,9 @@ THE FLOW (three calls)
 
    There is no QR payload in this response, by design. A WalletConnect pairing QR encodes a relay topic and a symmetric key and structurally cannot carry an application payload; the challenge and timestamp reach the wallet after pairing, as the `polkadot_signMessage` request built from `message_template`. So a pairing QR legitimately contains neither value.
 
-   Bittensor keys are substrate sr25519 keys. The standard signing path (polkadot-js `signRaw`, WalletConnect `polkadot_signMessage`, most mobile wallets) uses the `substrate` signing context and wraps the payload in `<Bytes>…</Bytes>` before signing. The server accepts both the wrapped and the raw form of the signature, so use whatever the wallet does — but always submit the unwrapped `message_template` text as `wallet_message`.
+   Bittensor keys are substrate keys: sr25519 by default, ed25519 for accounts created with that scheme. Both are accepted; the server tells them apart from the signature itself (an sr25519 signature carries schnorrkel's marker bit, an ed25519 one cannot). Wallets differ on wrapping: polkadot-js, SubWallet and Nova wrap the payload in `<Bytes>…</Bytes>` before signing, while Reown's reference wallet and some mobile wallets sign the raw bytes (observed live). The server accepts both the wrapped and the raw form, so use whatever the wallet does — but always submit the unwrapped `message_template` text as `wallet_message`.
 
-   Signature encoding: the 64-byte sr25519 signature as hex, with or without the `0x` prefix (WalletConnect returns `0x…`). ed25519 keys are not accepted for TAO.
+   Signature encoding: the 64-byte sr25519 or ed25519 signature as hex, with or without the `0x` prefix (WalletConnect returns `0x…`).
 
 3. Submit the signed challenge. All three endpoints take the same `wallet_auth` object:
 
@@ -59,8 +59,8 @@ ERRORS (message text, prefixed with the HTTP-style code)
 - `400 invalid wallet address` — not a valid ss58 address (bad base58, bad checksum, or a network prefix other than 42).
 - `400 challenge timestamp too old` / `too far in the future` — the message timestamp is outside the challenge lifetime (5 minutes back, plus a minute of slack) or more than a minute ahead of now. In practice the binding deadline is `403 challenge expired` at 5 minutes.
 - `400 challenge timestamp mismatch` / `challenge blockchain mismatch` / `challenge wallet address mismatch` — the message or address does not match the issued challenge.
-- `400 invalid signature encoding` — the signature could not be decoded at all: not hex, not 64 bytes, or 64 bytes that are not a well formed sr25519 signature.
-- `401 invalid signature` — the signature decoded but does not verify over the message (wrong key, wrong text, wrong context).
+- `400 invalid signature encoding` — the signature could not be decoded at all: not hex, not 64 bytes, or 64 bytes carrying the sr25519 marker that are not a well formed sr25519 signature.
+- `401 invalid signature` — the signature decoded but does not verify over the message (wrong key, wrong text, wrong context, or 64 bytes that verify under neither sr25519 nor ed25519).
 - `401 challenge not found` — unknown challenge value.
 - `403 challenge already used` / `403 challenge expired` — request a new challenge.
 
