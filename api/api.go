@@ -211,6 +211,12 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/network/client-data-cap", handlers.NetworkClientDataCapGet),
 		router.NewRoute("GET", "/network/client-data-caps", handlers.NetworkClientDataCapsList),
 
+		// per-client ACL groups (EMBED1.md): "isolated" keeps a client out of the
+		// network's peer list. Set with the network's root token or an API key;
+		// read with either, or with the client's own token
+		router.NewRoute("POST", "/network/client-acl-group", handlers.NetworkClientAclGroupSet),
+		router.NewRoute("GET", "/network/client-acl-group", handlers.NetworkClientAclGroupGet),
+
 		// the public Services contact form (EMBED1.md)
 		router.NewRoute("POST", "/services/contact-sales", handlers.ServicesContactSales),
 

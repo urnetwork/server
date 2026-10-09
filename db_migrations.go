@@ -9820,4 +9820,20 @@ var migrations = []any{
 		);
 		CREATE INDEX services_lead_create_time ON services_lead (create_time);
 	`),
+	// 800: per-client ACL groups (model/network_client_acl_group_model.go). A
+	// row exists only for a non-default group: no row means "default". An
+	// "isolated" client never appears in the network's peer list, receives none
+	// and does not count toward the peer valve. A new table: nothing is
+	// rewritten. It must exist before a binary that reads it serves, since the
+	// peer profile and the peer valve query it.
+	newSqlMigration(`
+		CREATE TABLE network_client_acl_group (
+			client_id uuid NOT NULL PRIMARY KEY,
+			network_id uuid NOT NULL,
+			acl_group varchar(32) NOT NULL,
+			update_time timestamp NOT NULL
+		);
+		CREATE INDEX network_client_acl_group_network_id
+		ON network_client_acl_group (network_id, client_id);
+	`),
 }

@@ -57,19 +57,23 @@ type NetworkPeer struct {
 	DisconnectTime *time.Time `json:"disconnect_time,omitempty"`
 }
 
-// NetworkPeerCategory distinguishes ordinary clients from hosted proxy clients
-// and provider installs in the peer registry. All count toward a network's
-// connected client total by their rules, but only clients appear in the peer
-// list and receive peer subscriptions: a hosted proxy device is controlled
-// remotely, and a provider install (a top-level client created with provide
-// intent, provider_intent_model.go) only provides, and an embedded fleet of
-// them must not scale the peer fan-out.
+// NetworkPeerCategory distinguishes ordinary clients from hosted proxy clients,
+// provider installs and isolated clients in the peer registry. All count toward
+// a network's connected client total by their rules, but only clients appear in
+// the peer list and receive peer subscriptions: a hosted proxy device is
+// controlled remotely, a provider install (a top-level client created with
+// provide intent, provider_intent_model.go) only provides, and an embedded
+// fleet of them must not scale the peer fan-out. An isolated client (ACL group
+// "isolated", network_client_acl_group_model.go) is registered like a hosted
+// proxy client: counted toward the client limits, never listed, and given no
+// peer subscription.
 type NetworkPeerCategory int
 
 const (
 	NetworkPeerCategoryClient   NetworkPeerCategory = 0
 	NetworkPeerCategoryProxy    NetworkPeerCategory = 1
 	NetworkPeerCategoryProvider NetworkPeerCategory = 2
+	NetworkPeerCategoryIsolated NetworkPeerCategory = 3
 )
 
 // use gob encoding for `networkPeerMeta` which is more compact than json
@@ -291,6 +295,12 @@ func (self *peersEnabledCache) Put(networkId server.Id, enabled bool) {
 	}
 }
 
+func (self *peersEnabledCache) Remove(networkId server.Id) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	delete(self.entries, networkId)
+}
+
 func (self *peersEnabledCache) Clear() {
 	self.lock.Lock()
 	defer self.lock.Unlock()
@@ -345,7 +355,8 @@ const networkPeersRecentAuthWindow = 14 * 24 * time.Hour
 // Provider installs (clients created with provide intent, a
 // network_client_provider_intent row) are not counted: they never register as
 // peers, so they add no fan-out, and a network with an embedded provider fleet
-// keeps the peer list for its other clients.
+// keeps the peer list for its other clients. Isolated clients (a
+// network_client_acl_group row) are excluded for the same reason.
 //
 // This valve is enforced INDEPENDENTLY of enforce_concurrent_clients: it only
 // removes the peer feature. The connection and creation caps
@@ -375,6 +386,12 @@ func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
 						NOT EXISTS (
 							SELECT 1 FROM network_client_provider_intent
 							WHERE network_client_provider_intent.client_id = network_client.client_id
+						) AND
+						NOT EXISTS (
+							SELECT 1 FROM network_client_acl_group
+							WHERE
+								network_client_acl_group.client_id = network_client.client_id AND
+								network_client_acl_group.acl_group = 'isolated'
 						)
 					LIMIT $2
 				) t
@@ -401,7 +418,9 @@ func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
 // resolved from the process-local cache so no additional query is made).
 // `peer` is nil when the client does not exist or is not active. `category` is
 // proxy when the client has a hosted proxy device (a proxy_device_config row),
-// and provider for a provider install (a network_client_provider_intent row).
+// provider for a provider install (a network_client_provider_intent row), and
+// isolated for a client in the "isolated" ACL group (a network_client_acl_group
+// row), in that order.
 // `peersEnabled` is false whenever the client is not an active top-level client.
 func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId server.Id, topLevel bool, category NetworkPeerCategory, peer *NetworkPeer, peersEnabled bool) {
 	server.Db(ctx, func(conn server.PgConn) {
@@ -421,7 +440,13 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 					EXISTS (
 						SELECT 1 FROM network_client_provider_intent
 						WHERE network_client_provider_intent.client_id = network_client.client_id
-					) AS is_provider
+					) AS is_provider,
+					EXISTS (
+						SELECT 1 FROM network_client_acl_group
+						WHERE
+							network_client_acl_group.client_id = network_client.client_id AND
+							network_client_acl_group.acl_group = 'isolated'
+					) AS is_isolated
 				FROM network_client
 				LEFT JOIN device ON
 					device.device_id = network_client.device_id
@@ -439,6 +464,7 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 				var deviceSpec *string
 				var isProxy bool
 				var isProvider bool
+				var isIsolated bool
 				server.Raise(result.Scan(
 					&networkId,
 					&sourceClientId,
@@ -447,13 +473,10 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 					&deviceSpec,
 					&isProxy,
 					&isProvider,
+					&isIsolated,
 				))
 				topLevel = sourceClientId == nil
-				if isProxy {
-					category = NetworkPeerCategoryProxy
-				} else if isProvider {
-					category = NetworkPeerCategoryProvider
-				}
+				category = networkPeerCategory(isProxy, isProvider, isIsolated)
 				peer = &NetworkPeer{
 					ClientId: clientId,
 				}
@@ -503,6 +526,22 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 	}
 
 	return
+}
+
+// networkPeerCategory resolves a client's registry category. A hosted proxy
+// device and a provider install keep their own categories, which are already
+// never listed; the ACL group only changes an ordinary client.
+func networkPeerCategory(isProxy bool, isProvider bool, isIsolated bool) NetworkPeerCategory {
+	switch {
+	case isProxy:
+		return NetworkPeerCategoryProxy
+	case isProvider:
+		return NetworkPeerCategoryProvider
+	case isIsolated:
+		return NetworkPeerCategoryIsolated
+	default:
+		return NetworkPeerCategoryClient
+	}
 }
 
 func sortedProvideModesList(provideModes map[ProvideMode]bool) []ProvideMode {
@@ -1074,6 +1113,97 @@ func RemoveNetworkProxyPeer(
 	server.Redis(ctx, func(r server.RedisClient) {
 		err := r.ZRem(ctx, networkPeerConnectedProxyKey(networkId), member).Err()
 		if err != nil {
+			panic(err)
+		}
+	})
+}
+
+// AddNetworkIsolatedPeer registers a connected isolated client (ACL group
+// "isolated"). It shares the hosted proxy zset: counted toward the network's
+// connected total and the concurrent connection limit, never listed, and no
+// events. Refresh by calling again with a fresh ttl.
+func AddNetworkIsolatedPeer(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	ttl time.Duration,
+) {
+	AddNetworkProxyPeer(ctx, networkId, clientId, ttl)
+}
+
+// RemoveNetworkIsolatedPeer removes a connected isolated client.
+func RemoveNetworkIsolatedPeer(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+) {
+	RemoveNetworkProxyPeer(ctx, networkId, clientId)
+}
+
+// isolateNetworkPeer removes a client from the listed peer registry when it
+// joins the "isolated" ACL group: its meta, member key, connected entry and any
+// disconnect marker go, so it is reported neither connected nor recently
+// disconnected. It advances the client's mutation fence, so an in-flight add or
+// refresh read from before cannot commit afterward, and bumps the version so
+// polling listeners full-read without it; the member key's `del` announces it
+// to key-event listeners. A connected client is moved to the isolated zset with
+// its remaining ttl, so it stays counted until its resident retires.
+func isolateNetworkPeer(ctx context.Context, networkId server.Id, clientId server.Id) {
+	member := string(clientId.Bytes())
+	server.Redis(ctx, func(r server.RedisClient) {
+		err := r.Eval(
+			ctx,
+			`
+			local meta_key = KEYS[1]
+			local member_key = KEYS[2]
+			local connected_key = KEYS[3]
+			local disconnected_key = KEYS[4]
+			local event_id_key = KEYS[5]
+			local mutation_version_key = KEYS[6]
+			local isolated_key = KEYS[7]
+
+			local member = ARGV[1]
+			local key_ttl_seconds = ARGV[2]
+
+			local expiry = redis.call('ZSCORE', connected_key, member)
+			local listed = redis.call('HEXISTS', meta_key, member) == 1 or expiry ~= false or
+				redis.call('ZSCORE', disconnected_key, member) ~= false
+
+			if redis.call('GET', mutation_version_key) == false then
+				redis.call('SET', mutation_version_key, 0, 'EX', key_ttl_seconds)
+			end
+			redis.call('INCR', mutation_version_key)
+			redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
+
+			if not listed then
+				return 0
+			end
+
+			redis.call('HDEL', meta_key, member)
+			redis.call('DEL', member_key)
+			redis.call('ZREM', connected_key, member)
+			redis.call('ZREM', disconnected_key, member)
+			if expiry ~= false then
+				redis.call('ZADD', isolated_key, expiry, member)
+				redis.call('EXPIRE', isolated_key, key_ttl_seconds)
+			end
+			redis.call('INCR', event_id_key)
+			redis.call('EXPIRE', event_id_key, key_ttl_seconds)
+			return 1
+			`,
+			[]string{
+				networkPeerMetaKey(networkId),
+				networkPeerMemberKey(networkId, clientId),
+				networkPeerConnectedKey(networkId),
+				networkPeerDisconnectedKey(networkId),
+				networkPeerEventIdKey(networkId),
+				networkPeerMutationVersionKey(networkId, clientId),
+				networkPeerConnectedProxyKey(networkId),
+			},
+			member,
+			int64(networkPeerKeyTtl/time.Second),
+		).Err()
+		if err != nil && err != server.RedisNil {
 			panic(err)
 		}
 	})
@@ -2177,15 +2307,24 @@ func GetNetworkPeersForSession(session *session.ClientSession) (*NetworkPeersRes
 		// only top-level clients have peers
 		clientId := *session.ByJwt.ClientId
 		topLevel := false
+		isolated := false
 		server.Db(session.Ctx, func(conn server.PgConn) {
 			result, err := conn.Query(
 				session.Ctx,
 				`
-					SELECT source_client_id FROM network_client
+					SELECT
+						network_client.source_client_id,
+						EXISTS (
+							SELECT 1 FROM network_client_acl_group
+							WHERE
+								network_client_acl_group.client_id = network_client.client_id AND
+								network_client_acl_group.acl_group = 'isolated'
+						) AS is_isolated
+					FROM network_client
 					WHERE
-						client_id = $1 AND
-						network_id = $2 AND
-						active = true
+						network_client.client_id = $1 AND
+						network_client.network_id = $2 AND
+						network_client.active = true
 				`,
 				clientId,
 				session.ByJwt.NetworkId,
@@ -2193,7 +2332,7 @@ func GetNetworkPeersForSession(session *session.ClientSession) (*NetworkPeersRes
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
 					var sourceClientId *server.Id
-					server.Raise(result.Scan(&sourceClientId))
+					server.Raise(result.Scan(&sourceClientId, &isolated))
 					topLevel = sourceClientId == nil
 				}
 			})
@@ -2203,6 +2342,12 @@ func GetNetworkPeersForSession(session *session.ClientSession) (*NetworkPeersRes
 				Error: &NetworkPeersError{
 					Message: "Not allowed.",
 				},
+			}, nil
+		}
+		if isolated {
+			// an isolated client receives no peer list
+			return &NetworkPeersResult{
+				Peers: []*NetworkPeer{},
 			}, nil
 		}
 		selfClientId = &clientId
