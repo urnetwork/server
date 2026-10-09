@@ -32401,11 +32401,15 @@ Probe: `router-conntrack`
 
 Every five minutes under §18.4's access/budget contract, read live
 `nf_conntrack_count`, `nf_conntrack_max`, module `hashsize`, and
-`/proc/net/stat/nf_conntrack`. Read-only kernel values, not declarations, prove
+`/proc/net/stat/nf_conntrack` when available. Read-only kernel values, not declarations, prove
 the observed applied sizes. Table and hash targets from the frozen desired
 config are independently optional: compare each known field, retain unknown
 for an absent/invalid counterpart, and never invent a platform default.
 Live pressure and counters remain observable even with no explicit target.
+Count/max/hash validity is independent of the optional per-CPU counter file:
+an absent, failed, partial or malformed counter read retains valid live sizes
+and pressure alongside `cannot-observe` for counters. A failed outer capture,
+hostname/boot fence or required scalar read still invalidates the observation.
 
 WARN `router-conntrack-capacity` (sustain 2) reports any known desired/live
 size mismatch. WARN `router-conntrack-pressure` (sustain 2) reports live
@@ -32425,6 +32429,20 @@ duplicate insertion/races and is an unknown-cause qualifier, not packet-loss
 proof. Concrete capacity or pressure findings survive an unknown counter
 pair; private counters are reduced to fixed scalar summaries only.
 
+An optional unprivileged kernel-ring read reduces only exact timestamped
+`nf_conntrack: table full, dropping packet` messages to a retained count and
+latest boot-relative timestamp. The firmware's repeated `nf_conntrack:`
+prefix is supported. No raw kernel text enters the observation or alerts.
+When the live table is full and the latest explicit message is at most 15
+minutes old on the bracketed boot, `router-conntrack-drops` retains this
+capacity-loss evidence even if per-CPU counters are unavailable. The latter
+remain unknown independently. Full occupancy alone, a missing/empty log,
+malformed/future timestamps or stale messages never prove packet loss. Log
+retention and rate limiting make message counts incomplete historical
+evidence, not a current packet-drop rate or a counter delta. After an applied
+capacity increase, old messages alone cannot establish current full-table
+loss. No zero-drop or recovery claim follows from this optional log path.
+
 False positives include temporary bursts near the static occupancy band and
 counter meanings that differ on unsupported kernels. False negatives include
 short bursts between cadences, resets/hotplug that invalidate pairing,
@@ -32434,6 +32452,32 @@ resource headroom follows from a healthy bounded software sample. Operator
 closure requires current applied limits, a reviewed memory/traffic budget,
 and complete subsequent zero-drop pairs; no restart, table flush, resizing,
 deployment or audit-completion inference is authorized by these observations.
+
+**2026-10-09 IPv4 outage evidence.** On `by-us-fmt-5-8`, the live count and
+maximum were both 262,144 in the 23:03:19Z and 23:03:20Z samples, with 32,768
+hash buckets. A bounded kernel read retained 32 explicit table-full packet-drop
+messages; the newest was approximately 306.6 seconds older than the second
+sample. This confirms recent kernel capacity loss while the sampled table
+remained full, not a measured loss rate during those two samples. The
+4.9.79-UBNT firmware lacked `/proc/net/stat/nf_conntrack`, so `insert_failed`,
+`drop` and `early_drop` deltas were unavailable, not zero. The WAN INVALID
+counter increased too, but covers broader causes and cannot be substituted
+for conntrack capacity-drop evidence. Live routes showed routed public LB
+addresses; zero DNAT rules/counters were consistent with that topology.
+
+An outside IPv4 sweep failed 18 of 20 API/Connect endpoint attempts before
+the operator increased the live maximum to 1,048,576. A subsequent read
+observed that maximum, unchanged 32,768 buckets and counts 306,563 then
+306,528, approximately 29.2 percent occupancy. The independent outside sweep
+at 23:17:55Z–23:17:57Z completed TLS and received HTTP on all 20 attempts
+across ten active public LB addresses. This establishes restored sampled
+TLS/HTTP reachability after the operator change and supports the capacity
+diagnosis on the observed router. It does not assign every earlier failure
+across other routers to this one cause, prove authenticated Connect/WebSocket
+or UDP/QUIC operation, or supply the missing zero-drop counter pairs. The
+operator change superseded the prepared capacity plan; no hash resize,
+conntrack flush, persistent configuration deployment or further router
+mutation followed from the probe.
 
 ## 19. Web platform association metadata
 

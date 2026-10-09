@@ -17,12 +17,43 @@ func NewRouterConntrackSignal() Signal {
 }
 
 type routerConntrackSample struct {
-	observation routerObservation
-	count       uint64
-	maximum     uint64
-	hash        uint64
-	header      string
-	counters    [][3]uint64
+	observation  routerObservation
+	count        uint64
+	maximum      uint64
+	hash         uint64
+	header       string
+	counters     [][3]uint64
+	counterState string
+	kernel       routerConntrackKernelEvidence
+}
+
+type routerConntrackKernelEvidence struct {
+	retainedMessages uint64
+	latestAgeSeconds float64
+	valid            bool
+}
+
+// Log absence is never a zero-drop observation. Only a complete scalar summary
+// with a sane same-boot timestamp can corroborate current full-table pressure.
+func parseRouterConntrackKernel(raw string) routerConntrackKernelEvidence {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	if len(lines) != 3 || len(raw) > 512 {
+		return routerConntrackKernelEvidence{}
+	}
+	values := make([]string, 3)
+	for index, prefix := range []string{"uptime_seconds=", "retained_messages=", "latest_uptime_seconds="} {
+		if !strings.HasPrefix(lines[index], prefix) {
+			return routerConntrackKernelEvidence{}
+		}
+		values[index] = strings.TrimPrefix(lines[index], prefix)
+	}
+	uptime, uptimeErr := strconv.ParseFloat(values[0], 64)
+	messages, messagesErr := strconv.ParseUint(values[1], 10, 64)
+	latest, latestErr := strconv.ParseFloat(values[2], 64)
+	if uptimeErr != nil || messagesErr != nil || latestErr != nil || math.IsNaN(uptime) || math.IsInf(uptime, 0) || math.IsNaN(latest) || math.IsInf(latest, 0) || uptime < 0 || latest < 0 || latest > uptime || messages > 4096 || messages == 0 && latest != 0 {
+		return routerConntrackKernelEvidence{}
+	}
+	return routerConntrackKernelEvidence{retainedMessages: messages, latestAgeSeconds: uptime - latest, valid: true}
 }
 
 type routerConntrackProbe struct {
@@ -63,41 +94,59 @@ func parseRouterConntrack(observed routerObservation) (routerConntrackSample, er
 	if result.maximum == 0 || result.hash == 0 {
 		return result, errors.New("router conntrack applied size unavailable")
 	}
-	lines := strings.Split(strings.TrimSpace(rest), "\n")
+	stat, kernel, hasKernel := strings.Cut(rest, "\n--kernel-table-full--\n")
+	if hasKernel {
+		result.kernel = parseRouterConntrackKernel(kernel)
+	}
+	if strings.TrimSpace(stat) == "unavailable" {
+		result.counterState = "counter-source-unavailable"
+		return result, nil
+	}
+	header, counters, err := parseRouterConntrackCounters(stat)
+	if err != nil {
+		result.counterState = "counter-format-unverified"
+		return result, nil
+	}
+	result.header, result.counters = header, counters
+	return result, nil
+}
+
+func parseRouterConntrackCounters(raw string) (string, [][3]uint64, error) {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
 	if len(lines) < 2 || len(lines) > 4097 {
-		return result, errors.New("router conntrack counter rows unavailable")
+		return "", nil, errors.New("router conntrack counter rows unavailable")
 	}
 	header := strings.Fields(lines[0])
 	columns := map[string]int{}
 	for index, field := range header {
 		if _, exists := columns[field]; exists {
-			return result, errors.New("router conntrack counter header duplicated")
+			return "", nil, errors.New("router conntrack counter header duplicated")
 		}
 		columns[field] = index
 	}
 	for _, field := range []string{"entries", "insert_failed", "drop", "early_drop"} {
 		if _, ok := columns[field]; !ok {
-			return result, errors.New("router conntrack counter header incomplete")
+			return "", nil, errors.New("router conntrack counter header incomplete")
 		}
 	}
-	result.header = strings.Join(header, " ")
+	counters := make([][3]uint64, 0, len(lines)-1)
 	for _, line := range lines[1:] {
 		values := strings.Fields(line)
 		if len(values) != len(header) {
-			return result, errors.New("router conntrack counter row incomplete")
+			return "", nil, errors.New("router conntrack counter row incomplete")
 		}
 		parsed := make([]uint64, len(values))
 		for index, value := range values {
 			var err error
 			parsed[index], err = strconv.ParseUint(value, 16, 64)
 			if err != nil {
-				return result, errors.New("router conntrack counter invalid")
+				return "", nil, errors.New("router conntrack counter invalid")
 			}
 		}
 		// entries is repeated per CPU, not an occupancy contribution.
-		result.counters = append(result.counters, [3]uint64{parsed[columns["insert_failed"]], parsed[columns["drop"]], parsed[columns["early_drop"]]})
+		counters = append(counters, [3]uint64{parsed[columns["insert_failed"]], parsed[columns["drop"]], parsed[columns["early_drop"]]})
 	}
-	return result, nil
+	return strings.Join(header, " "), counters, nil
 }
 
 func routerConntrackDeltas(previous, current routerConntrackSample) ([3]uint64, bool) {
@@ -145,9 +194,11 @@ func (self *routerConntrackProbe) check(ctx context.Context, env *probeEnv) ([]f
 		}
 		current, err := parseRouterConntrack(observed)
 		if err != nil {
-			return []finding{routerUnknown(h, "conntrack", "counter-format-unverified", err)}
+			return []finding{routerUnknown(h, "conntrack", "capacity-format-unverified", err)}
 		}
-		self.previous[h.name] = current
+		if current.counterState == "" {
+			self.previous[h.name] = current
+		}
 		findings := []finding{}
 		desired := observed.summary.Topology.Conntrack
 		tableKnown, hashKnown := desired.Explicit && desired.TableSize > 0, desired.Explicit && desired.HashSize > 0
@@ -166,12 +217,22 @@ func (self *routerConntrackProbe) check(ctx context.Context, env *probeEnv) ([]f
 			findings = append(findings, routerConntrackFinding(h, "router-conntrack-pressure", fmt.Sprintf("live_count=%d live_max=%d occupancy_percent=%.1f", current.count, current.maximum, 100*pressure)))
 		}
 		deltas, valid := routerConntrackDeltas(previous, current)
-		if !valid || deltas[0] > 0 && deltas[1] == 0 && deltas[2] == 0 {
+		if current.counterState != "" {
+			f := routerUnknown(h, "conntrack", current.counterState, nil)
+			f.frame = "counters"
+			findings = append(findings, f)
+		} else if !valid || deltas[0] > 0 && deltas[1] == 0 && deltas[2] == 0 {
 			f := routerUnknown(h, "conntrack", "counter-pair-or-cause-unverified", nil)
 			f.frame = "counters"
 			findings = append(findings, f)
-		} else if deltas[1] > 0 || deltas[2] > 0 {
+		}
+		if valid && (deltas[1] > 0 || deltas[2] > 0) {
 			findings = append(findings, routerConntrackFinding(h, "router-conntrack-drops", fmt.Sprintf("insert_failed_delta=%d drop_delta=%d early_drop_delta=%d live_count=%d live_max=%d", deltas[0], deltas[1], deltas[2], current.count, current.maximum)))
+		} else if current.count >= current.maximum && current.kernel.valid && current.kernel.retainedMessages > 0 && current.kernel.latestAgeSeconds <= routerPairMaxAge.Seconds() {
+			f := routerConntrackFinding(h, "router-conntrack-drops", fmt.Sprintf("live_count=%d live_max=%d retained_table_full_messages=%d latest_table_full_age_seconds=%.3f counter_pair_valid=%t", current.count, current.maximum, current.kernel.retainedMessages, current.kernel.latestAgeSeconds, valid))
+			f.mechanism = "The live table is full and the boot-bracketed kernel log retains an explicit table-full packet-drop message at most 15 minutes old. Log age is measured against the same boot's uptime."
+			f.evidence = "Retained kernel messages prove recent capacity loss, not the current packet-drop rate. Log retention and rate limiting make message counts incomplete; missing per-CPU counters remain independently unknown."
+			findings = append(findings, f)
 		}
 		return findings
 	})
