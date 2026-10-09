@@ -7956,12 +7956,25 @@ children, `initial` and `filters`. Non-missing Redis GET/pipeline errors and
 payload decode failures increment once per failed loader. An earlier
 `redis.Nil` cannot hide a later failed command. Missing keys retain normal
 absence semantics; neither missing nor valid empty payloads increment errors.
-The initial connection/PING can panic before these phase counters, while the
-owning picker outcome still records an error. Other callers of the shared
-loaders can increment phase counts without a corresponding picker request.
+A failure before a loader callback, including an already-canceled context or
+client construction, can unwind before these phase counters while the owning
+picker outcome still records an error. The ordinary Redis wrapper does not
+issue a preflight PING; dedicated non-retrying and deadline pools retain it.
+Other callers of the shared loaders can increment phase counts without a
+corresponding picker request.
 Read counts and outcome counts therefore must not be added or treated as the
 same-attempt denominator. Decode/WRONGTYPE, caller cancellation and client
 lifecycle errors do not by themselves prove a Redis service outage.
+
+An initial outcome error with zero observed read-error increments does not
+identify a cause. Model outcomes and read counters have no request join and
+can cross observation boundaries. The initial HTTP route uses `WrapNoAuth`;
+pre-handler address or credential refusals do not enter its model outcome.
+The router's Done/cancellation path can finish without an ErrorJson record.
+For a retained failing window, pair the exact initial route's HTTP status and
+terminal outcome with the same process/source clocks before asking for more
+logs. A canceled caller can reflect client abandonment or a dependency delay;
+an absent log or a coincident aggregate count does not distinguish them.
 
 Picker latency is a distinct boundary from empty results. The owning model
 also exposes `urnetwork_provider_picker_phase_seconds` (sum/count) and
@@ -7969,8 +7982,8 @@ also exposes `urnetwork_provider_picker_phase_seconds` (sum/count) and
 `direct` surfaces and `caller_location`, `initial_cache`, `search_index`,
 `location_cache`, `filters`, `format_result` phases. All children start at zero.
 Each request occupies one phase at a time; the final observation runs on
-success, error, cancellation and panic. Redis phases include the wrapper PING,
-connection acquisition, command/pipeline wait and decoding. Caller location
+success, error, cancellation and panic. Redis phases include wrapper admission and client setup,
+command/pipeline pool and socket wait, and decoding. Caller location
 includes the process-local country lookup; typed search has a separate local
 index phase. These are caller residence times, not Redis or PostgreSQL CPU.
 An inflight phase can locate a currently blocked call before it completes;
