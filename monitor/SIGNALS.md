@@ -20312,7 +20312,7 @@ The 2026-10-10 native monitor gate found eleven missing artifact contracts at
 794–795, 797–802 and 806–808: the source published head 808, while the probe
 represented only 184 of the required 195 versions from 614 onward. This was a
 detector coverage gap, not evidence that Main lacked those objects. Versions
-794–808 now share one ordered artifact/SQL list, restoring the existing
+794–809 now share one ordered artifact/SQL list, restoring the existing
 version-minus-589 row protocol without changing the migration DDL. The existing
 796 and 803–805 predicates retain their definitions in that list.
 
@@ -20329,11 +20329,19 @@ key and unique request key, and the session-index repair outbox. Versions
 807–808 independently require the exact active, non-NULL session indexes on
 clients and auth codes; invalid or not-ready concurrent builds remain drift.
 
+The subsequent scheduler release added version 809; the native monitor gate
+detected its missing artifact contract before watcher promotion. Version 809
+requires the exact nonunique btree `pending_task_function_poll_order`: global
+function-version normalization, available block, descending run priority and
+maximum runtime, then task ID, with no partial predicate or included keys.
+Invalid or not-ready builds remain drift. This schema check does not establish
+runtime task fairness or task completion.
+
 These checks pin ordinary durable tables, published column types and widths,
 nullability, defaults and stored semantics, validated nondeferrable keys, and
 complete index definitions including key order, predicates and readiness.
 Later additive columns remain valid. Native controls exercise each actual
-prefix from 793 through 808, rolled-back schema faults reaching the owning
+prefix from 793 through 809, rolled-back schema faults reaching the owning
 drift alert, and projected invalid/not-ready index states. Future artifacts
 remain pending before their versions, and unavailable catalog evidence remains
 unknown. Matching schema does not attest extender releases, Embed enforcement,

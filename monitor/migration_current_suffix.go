@@ -1,4 +1,4 @@
-// Published versions 794–808 share one ordered artifact/SQL contract. These
+// Published versions 794–809 share one ordered artifact/SQL contract. These
 // predicates read catalogs only and remain safe before the additive DDL exists.
 package monitor
 
@@ -199,4 +199,7 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationFp2Index("network_client", "network_client_session_active", "network_id, session_id, client_id", "(active AND (session_id IS NOT NULL))", false)),
 	migrationCurrentSuffix(808, "active auth-code origin session index",
 		migrationFp2Index("auth_code", "auth_code_origin_session", "network_id, origin_session_id", "(active AND (origin_session_id IS NOT NULL))", false)),
+	migrationCurrentSuffix(809, "normalized task-function due-order polling index",
+		migrationFp2Index("pending_task", "pending_task_function_poll_order",
+			"regexp_replace((function_name)::text, '/v[0-9]+'::text, ''::text, 'g'::text), available_block, run_priority DESC, run_max_time_seconds DESC, task_id", "", false)),
 }
