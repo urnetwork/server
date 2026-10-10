@@ -478,7 +478,9 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 
 // ReconcileCachedNetEscrow repairs scheduled mirror drift using a durable
 // snapshot only when its revision matches the same-statement source revision.
-// Revision triggers invalidate legacy changes; misses retain exact census.
+// Revision triggers invalidate legacy changes; misses retain exact census
+// while their live legacy history fits its bound, and are otherwise deferred
+// (see netEscrowReconcileCandidateLimit) without a publication or drift.
 // Fleet repair never writes the cache. Operators use ReconcileNetEscrow for an independent
 // exact audit, including detection of a corrupted same-revision cache entry.
 func ReconcileCachedNetEscrow(ctx context.Context) (driftByNetworkId map[server.Id]ByteCount, balanceCount int) {
@@ -502,6 +504,7 @@ func reconcileNetEscrow(ctx context.Context, apply, useCache bool) (driftByNetwo
 		networkId server.Id
 	}
 	var cursor server.Id
+	deferredCount := 0
 	for {
 		rows := []balanceRow{}
 		server.Db(ctx, func(conn server.PgConn) {
@@ -540,12 +543,14 @@ func reconcileNetEscrow(ctx context.Context, apply, useCache bool) (driftByNetwo
 		// cached amount is exact only at the revision read in the same statement;
 		// stale or missing amounts retain the per-balance history fallback. Never
 		// move this above pagination and recreate a stale global snapshot.
-		pending := readReconcileNetEscrowSnapshots(ctx, balanceIds, useCache)
-		drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
+		pending, deferred := readReconcileNetEscrowSnapshots(ctx, balanceIds, useCache)
+		reconciled := withoutNetEscrowBalances(balanceIds, deferred)
+		drift := reconcileNetEscrowBatch(ctx, pending, reconciled, apply)
 		for _, row := range rows {
 			driftByNetworkId[row.networkId] += drift[row.balanceId]
 		}
-		balanceCount += len(rows)
+		balanceCount += len(reconciled)
+		deferredCount += len(deferred)
 		cursor = rows[len(rows)-1].balanceId
 		if len(rows) < batchSize {
 			break
@@ -608,15 +613,21 @@ func reconcileNetEscrow(ctx context.Context, apply, useCache bool) (driftByNetwo
 		for i, row := range rows {
 			balanceIds[i] = row.balanceId
 		}
-		pending := readReconcileNetEscrowSnapshots(ctx, balanceIds, useCache)
-		drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
+		pending, deferred := readReconcileNetEscrowSnapshots(ctx, balanceIds, useCache)
+		reconciled := withoutNetEscrowBalances(balanceIds, deferred)
+		drift := reconcileNetEscrowBatch(ctx, pending, reconciled, apply)
 		for _, row := range rows {
 			driftByNetworkId[row.networkId] += drift[row.balanceId]
 		}
-		balanceCount += len(rows)
+		balanceCount += len(reconciled)
+		deferredCount += len(deferred)
 		if candidateCount < batchSize {
 			break
 		}
+	}
+	if 0 < deferredCount {
+		glog.Infof("[sm]reconcile net escrow deferred %d balances over the %d-row live legacy census bound\n",
+			deferredCount, netEscrowReconcileCandidateLimit)
 	}
 
 	for networkId, drift := range driftByNetworkId {
