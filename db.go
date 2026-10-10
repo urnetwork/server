@@ -671,14 +671,27 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		lifecycle := pool.observeBorrow(pgPool)
 		physical := conn.Conn().PgConn()
 		cleanup := physical.CleanupDone()
+		checkoutWrites := snapshotPgWrites(physical.Conn())
 
 		func() {
 			// Cleanup must observe the classification below. Register it first so
 			// the recovery defer runs before it during panic unwinding.
 			defer func() {
-				needsCleanup := connErr != nil || physical.IsClosed() || physical.IsBusy() || physical.TxStatus() != 'I'
+				discard := connErr != nil
+				var networkErr net.Error
+				// An already-expired caller can be refused before pgx writes
+				// anything. Its deadline is a net.Error, but an untouched idle
+				// connection is still healthy. Keep every uncertain transport,
+				// written checkout and physical cleanup on the disposal path.
+				if connectionContextDone && pgconn.SafeToRetry(connErr) &&
+					errors.As(connErr, &networkErr) && networkErr == context.DeadlineExceeded &&
+					checkoutWrites.unchanged() && !physical.IsClosed() &&
+					!physical.IsBusy() && physical.TxStatus() == 'I' {
+					discard = false
+				}
+				needsCleanup := discard || physical.IsClosed() || physical.IsBusy() || physical.TxStatus() != 'I'
 				lifecycle.beginRelease()
-				if connErr != nil {
+				if discard {
 					discardPgConnection(ctx, conn)
 					conn = nil
 				} else {
