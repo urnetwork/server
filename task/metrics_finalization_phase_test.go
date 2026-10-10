@@ -25,8 +25,12 @@ func TestTaskFinalizationPhaseDistinguishesAcquireAndAdmission(t *testing.T) {
 	for _, owned := range []bool{false, true} {
 		runOnceGenerationEnv(t, func(t testing.TB, ctx context.Context) {
 			pop := server.Config.PushSimpleResource(server.DefaultPgConfigResourceName, []byte("min_connections: 0\nmax_connections: 1\n"))
+			// The claim guard, deliberate key holder and refused admission each
+			// need a direct session. Do not inherit the ordinary pool's one slot:
+			// that would strand fixture setup before the admission under test.
+			popMaintenance := server.Config.PushSimpleResource(server.MaintenancePgConfigResourceName, []byte("min_connections: 0\nmax_connections: 3\n"))
 			server.PgReset()
-			defer func() { pop(); server.PgReset() }()
+			defer func() { popMaintenance(); pop(); server.PgReset() }()
 			admissionObserved := false
 			if owned {
 				ctx = server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
