@@ -144,15 +144,24 @@ func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *ses
 	return &CloseScheduledContractResult{Owner: owner}, err
 }
 
-// Registration also wakes because retained intents may lack current owner
-// hints. It alone repairs that metadata; this task never rewrites an intent.
+// Repair only retained routing hints in the same commit as their owner wake.
+// Busy or changed custody yields a new child without changing its deadline.
 func CloseScheduledContractPost(args *CloseScheduledContractArgs, result *CloseScheduledContractResult,
 	clientSession *session.ClientSession, tx server.PgTx) error {
 	if result.RetryAt != nil {
 		scheduleContractClose(clientSession, tx, args)
 	}
 	if result.Owner != nil {
-		model.QueueLegacyCloseSettlementsInTx(clientSession, tx, *result.Owner)
+		queued, err := model.QueueRegisteredLegacyCloseContractInTx(clientSession, tx, args.ContractId, *result.Owner)
+		if err != nil {
+			return err
+		}
+		if !queued {
+			task.ScheduleTaskInTx(tx, CloseScheduledContract, args, clientSession,
+				task.RunOnce("close_scheduled_contract", args.ContractId), task.RunAt(server.NowUtc().Add(2*time.Second)),
+				task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
+			return nil
+		}
 		shard := int(args.ContractId[15]) % model.LegacySettlementShardCount
 		scheduleFlushLegacySettlements(clientSession, tx, shard, nil, nil, true, nil, nil)
 	}
