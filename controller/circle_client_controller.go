@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/urnetwork/glog"
 
@@ -361,6 +362,91 @@ func (self *CoreCircleApiClient) GetTransaction(ctx context.Context, id string) 
 		},
 	)
 
+}
+
+// One transaction of a Circle transaction listing, with the fields that
+// payment reconciliation reads.
+type CircleListedTransaction struct {
+	Id                 string    `json:"id"`
+	State              string    `json:"state"`
+	Blockchain         string    `json:"blockchain"`
+	TransactionType    string    `json:"transactionType"`
+	Operation          string    `json:"operation"`
+	CustodyType        string    `json:"custodyType"`
+	WalletId           string    `json:"walletId"`
+	DestinationAddress string    `json:"destinationAddress"`
+	Amounts            []string  `json:"amounts"`
+	TxHash             string    `json:"txHash"`
+	CreateDate         time.Time `json:"createDate"`
+}
+
+// Circle has no lookup by idempotency key: its transaction object does not
+// carry the key. A destination's complete transaction history is the
+// observable evidence of whether a submit created a transfer.
+type circleTransactionLister interface {
+	ListDestinationTransactions(ctx context.Context, blockchain string, destinationAddress string) ([]*CircleListedTransaction, error)
+}
+
+// ListDestinationTransactions returns every transaction Circle lists for the
+// destination address on the blockchain, across all of the entity's wallets,
+// custody types and states, following Circle's pagination to the end. A page
+// limit, a repeated page or transaction, or a transaction for a different
+// destination fails the whole listing: a partial listing is never evidence
+// that a transfer is absent.
+func (self *CoreCircleApiClient) ListDestinationTransactions(ctx context.Context, blockchain string, destinationAddress string) ([]*CircleListedTransaction, error) {
+	ctx, cancel, err := self.beginReads(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	if blockchain != "SOL" && blockchain != "MATIC" {
+		return nil, fmt.Errorf("unsupported Circle listing blockchain")
+	}
+	if destinationAddress == "" || len(destinationAddress) > 512 || strings.TrimSpace(destinationAddress) != destinationAddress || strings.ContainsAny(destinationAddress, "\x00\r\n") {
+		return nil, fmt.Errorf("invalid Circle listing destination")
+	}
+	query := url.Values{}
+	query.Set("blockchain", blockchain)
+	query.Set("destinationAddress", destinationAddress)
+	query.Set("includeAll", "true")
+	query.Set("pageSize", fmt.Sprintf("%d", circleReadPageSize))
+	first := "https://api.circle.com/v1/w3s/transactions?" + query.Encode()
+	headers := self.readHeaders("")
+	transactions := []*CircleListedTransaction{}
+	seenTransactionIds := map[string]bool{}
+	seenPages := map[string]bool{}
+	pages := 0
+	for uri := first; uri != ""; {
+		if pages == maximumCircleObservationPages {
+			return nil, fmt.Errorf("Circle transaction listing page capacity exhausted")
+		}
+		pages++
+		if seenPages[uri] {
+			return nil, fmt.Errorf("Circle transaction pagination repeated a page")
+		}
+		seenPages[uri] = true
+		var next string
+		page, err := paymentHttpGet(ctx, self.readSettings, self.readHooks, uri, headers, func(response *http.Response, body []byte) ([]*CircleListedTransaction, error) {
+			var err error
+			if next, err = circleReadNext(first, response.Header); err != nil {
+				return nil, err
+			}
+			return circleReadPage[*CircleListedTransaction](body, "transactions")
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, transaction := range page {
+			if transaction == nil || !validCircleReadId(transaction.Id) || seenTransactionIds[transaction.Id] || transaction.State == "" ||
+				transaction.Blockchain != blockchain || transaction.DestinationAddress != destinationAddress || transaction.CreateDate.IsZero() {
+				return nil, fmt.Errorf("Circle transaction listing is invalid, repeated or outside its destination")
+			}
+			seenTransactionIds[transaction.Id] = true
+			transactions = append(transactions, transaction)
+		}
+		uri = next
+	}
+	return transactions, nil
 }
 
 func getWalletIdByNetwork(network string) (id string, err error) {
