@@ -6207,6 +6207,40 @@ over arbitrary payer counts, missing registrations, held owners or scheduler
 capacity. Schema readiness, current worker adoption and a fresh same-cohort
 outcome/reservation witness remain separate Main gates.
 
+#### Legacy drain: owner registration, payer claims and head revisits
+
+On 2026-10-10 the Main drain was bounded by three separate stages, none of
+them the chronological due head. The shard tasks only dispatch: every sampled
+`FlushLegacySettlements` result had `visited=0`. Settlement runs in one
+`ApplyLegacyPayerSettlements` task per payer, so one dense payer cannot hold
+another payer's turn. Busy outcomes were 8 of 18,946 visits.
+
+1. Owner registration. A TABLESAMPLE of about 40,000 intents found 88% with
+   neither `payer_network_id` nor `source_client_id`; payer and source
+   discovery cannot see those rows until registration classifies them.
+   Resolving a sample of them found two thirds belonging to ordinary payers.
+   Registration ran about 220 rows per second: one page per shard per
+   dispatcher turn, with each shard's turn claimed about every 18 seconds.
+   Read the rate from the sum of `dispatch.registered` over recent
+   `FlushLegacySettlements` results, not from table counters.
+2. Payer task claims. 3,747 payer tasks were due and the median claim delay,
+   `run_start_time - run_at` over recent finished payer tasks, was 2.7 hours.
+   With N registered functions, each got one lane turn per 2N claims, and the
+   older queued close backlog took every global claim.
+3. Head revisits of a dense payer. The head payer's turns each settled one
+   contract while `timings.selection` took about 14 of their 15 seconds. The
+   head revisit bounded its interval only by a row comparison on
+   `(next_attempt_time, contract_id)`, next to plain due-time bounds. PostgreSQL
+   ends the index scan on the plain bound and filters the row comparison, so a
+   revisit with no head left read the payer's whole remaining due range in
+   every shard: 138,153 buffers and 26.5 seconds cold on Main. The revisit now
+   also bounds `next_attempt_time` by its interval's end and read 70 buffers.
+
+Before blaming contention for a slow drain, sample registration state, the
+payer claim delay, and the selection versus financial split in payer
+`timings`. A deadline close of the same contract also deletes its intent in
+its own financial transaction; table delete rates mix both owners.
+
 ### 2.5c Contract progress evidence — selection, commit and projection
 
 This runbook joins the existing probes; it adds no account scan or automatic
