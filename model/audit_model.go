@@ -817,6 +817,10 @@ func AddAuditEvent(ctx context.Context, event interface{}) {
 		AddAuditDeviceEvent(ctx, v)
 	case *AuditContractEvent:
 		AddAuditContractEvent(ctx, v)
+	case *AuditAccountPaymentEvent:
+		// processor submit failures (controller.auditAccountPayment) were
+		// dropped by the default case until this case existed
+		AddAuditAccountPaymentEvent(ctx, v)
 	default:
 		// panic(fmt.Sprintf("Event type not recognized: %T", v))
 		glog.V(2).Infof("[audit]event type not recognized: %T", v)
