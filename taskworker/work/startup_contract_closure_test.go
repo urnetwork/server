@@ -331,7 +331,7 @@ func TestScheduledContractClosureFutureWakeRetainsDeadline(t *testing.T) {
 }
 
 // A retained intent with unclassified owner hints and a malformed report still
-// receives its real owner and registration wake; startup never edits its proof.
+// receives its real owner and registration wake; only routing hints may change.
 func TestScheduledContractClosureWakesUnclassifiedIntentWithoutProofEdits(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -366,7 +366,7 @@ func TestScheduledContractClosureWakesUnclassifiedIntentWithoutProofEdits(t *tes
 		read := func() (raw string) {
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(outcome,usage_unverified,provider_usage,
-					(SELECT row_to_json(i) FROM legacy_settlement_intent i WHERE contract_id=$1),
+					(SELECT to_jsonb(i)-'payer_network_id'-'source_client_id' FROM legacy_settlement_intent i WHERE contract_id=$1),
 					(SELECT jsonb_agg(row_to_json(r) ORDER BY party) FROM contract_close r WHERE contract_id=$1))::text
 					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&raw))
 			})
@@ -392,9 +392,13 @@ func TestScheduledContractClosureWakesUnclassifiedIntentWithoutProofEdits(t *tes
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var capped time.Time
-			server.Raise(conn.QueryRow(ctx, `SELECT expiration_time FROM transfer_contract WHERE contract_id=$1`, id).Scan(&capped))
-			if !capped.Equal(deadline) {
-				t.Fatal("accepted intent did not receive its due retirement cap")
+			var registered bool
+			server.Raise(conn.QueryRow(ctx, `SELECT expiration_time,
+				EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1
+					AND source_client_id=$2 AND payer_network_id IS NULL)
+				FROM transfer_contract WHERE contract_id=$1`, id, sourceId).Scan(&capped, &registered))
+			if !capped.Equal(deadline) || !registered {
+				t.Fatal("accepted intent did not receive its due cap and exact routing hints")
 			}
 		})
 	})
@@ -450,8 +454,8 @@ func TestScheduledContractClosureEarlierDuplicateClosesAtMinimum(t *testing.T) {
 	})
 }
 
-// The due child feeds the real registration dispatcher and source worker for
-// a retained free intent; no synthetic financial settlement completes it.
+// The due child classifies a retained free intent with its owner wake. The
+// real source worker can close it before the compatibility dispatcher runs.
 func TestScheduledContractClosureRegistersAndClosesRetainedSourceIntent(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -486,7 +490,7 @@ func TestScheduledContractClosureRegistersAndClosesRetainedSourceIntent(t *testi
 		read := func() (raw string) {
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(outcome,usage_unverified,provider_usage,
-					(SELECT row_to_json(i) FROM legacy_settlement_intent i WHERE contract_id=$1),
+					(SELECT to_jsonb(i)-'payer_network_id'-'source_client_id' FROM legacy_settlement_intent i WHERE contract_id=$1),
 					(SELECT jsonb_agg(row_to_json(r) ORDER BY party) FROM contract_close r WHERE contract_id=$1))::text
 					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&raw))
 			})
@@ -503,29 +507,23 @@ func TestScheduledContractClosureRegistersAndClosesRetainedSourceIntent(t *testi
 		defer child.Close()
 		evalStartupClosureTask(t, ctx, child, readExpiryRecoveryQueue(t, ctx)[key.String()].id)
 		server.Db(ctx, func(conn server.PgConn) {
-			var nonterminal, verified, missingProof, exactCap, unclassified bool
+			var nonterminal, verified, missingProof, exactCap, registered bool
 			server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NULL,NOT usage_unverified,provider_usage IS NULL,
 				expiration_time=$2,EXISTS(SELECT 1 FROM legacy_settlement_intent
-					WHERE contract_id=$1 AND source_client_id IS NULL AND payer_network_id IS NULL)
-				FROM transfer_contract WHERE contract_id=$1`, id, deadline).Scan(&nonterminal, &verified, &missingProof, &exactCap, &unclassified))
-			if !nonterminal || !verified || !missingProof || !exactCap || !unclassified {
-				t.Fatal("child bypassed accepted source intent or rewrote its proof", nonterminal, verified, missingProof, exactCap, unclassified)
+					WHERE contract_id=$1 AND source_client_id=$3 AND payer_network_id IS NULL)
+				FROM transfer_contract WHERE contract_id=$1`, id, deadline, sourceId).Scan(&nonterminal, &verified, &missingProof, &exactCap, &registered))
+			if !nonterminal || !verified || !missingProof || !exactCap || !registered {
+				t.Fatal("child lost atomic source registration or rewrote accepted proof", nonterminal, verified, missingProof, exactCap, registered)
 			}
 		})
 		if read() != before {
 			t.Fatal("child changed accepted source intent, reports or provider proof")
 		}
-		dispatcher := startupClosureWorker(ctx, NewLegacySettlementDispatcherTaskTarget())
-		defer dispatcher.Close()
-		registration := readExpiryRecoveryQueue(t, ctx)[task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard)).String()]
-		evalStartupClosureTask(t, ctx, dispatcher, registration.id)
-		server.Db(ctx, func(conn server.PgConn) {
-			var registered bool
-			server.Raise(conn.QueryRow(ctx, `SELECT source_client_id=$2 AND payer_network_id IS NULL FROM legacy_settlement_intent WHERE contract_id=$1`, id, sourceId).Scan(&registered))
-			if !registered {
-				t.Fatal("normal registration did not make the retained source intent selectable")
-			}
-		})
+		// Compatibility discovery has not run; the exact child owns this
+		// classification and publication, while its ordinary shard wake remains.
+		if _, found := readExpiryRecoveryQueue(t, ctx)[task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard)).String()]; !found {
+			t.Fatal("exact child lost the ordinary registration successor")
+		}
 		sourceWorker := startupClosureWorker(ctx, model.NewLegacySourceSettlementTaskTarget())
 		defer sourceWorker.Close()
 		source := readExpiryRecoveryQueue(t, ctx)[task.RunOnce("flush_legacy_source_settlements", sourceId).String()]
