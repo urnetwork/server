@@ -227,6 +227,10 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 		self.lifecycleLock.Unlock()
 		return nil, fmt.Errorf("Proxy device manager closed.")
 	}
+	if err := self.ctx.Err(); err != nil {
+		self.lifecycleLock.Unlock()
+		return nil, err
+	}
 	self.openWorkers.Add(1)
 	self.lifecycleLock.Unlock()
 	defer self.openWorkers.Done()
@@ -297,7 +301,13 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 
 		// Each new device owns the configured 24 MiB target. Other devices
 		// cannot consume or reject this device's admission budget.
-		pd, err := self.proxyDeviceBuilder(proxyId)
+		// Construction owns the signed proxy's durable configuration and identity
+		// reads. Recover here so every coalesced opener receives a completed result.
+		pd, err := server.HandleError2(func() (*ProxyDevice, error) {
+			return self.proxyDeviceBuilder(proxyId)
+		}, func(err error) (*ProxyDevice, error) {
+			return nil, err
+		})
 
 		accepted := false
 		pdState.StateLock.Lock()
@@ -306,6 +316,8 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			self.lifecycleLock.Lock()
 			if self.closed {
 				err = fmt.Errorf("Proxy device manager closed.")
+			} else if cancelErr := self.ctx.Err(); cancelErr != nil {
+				err = cancelErr
 			} else {
 				self.deviceWorkers.Add(2)
 				pdState.ProxyDevice = pd
@@ -352,8 +364,9 @@ func (self *ProxyDeviceManager) releaseProxyDeviceState(proxyId server.Id, pdSta
 	}
 }
 
-// Constructs a fresh device without publishing or starting it. Database,
-// network and tun setup run without manager or device-state locks.
+// Constructs one authenticated device owner without publishing or starting it.
+// Its configuration and identity reads may use PostgreSQL; setup runs without
+// manager or device-state locks and is never repeated by an established tun.
 func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
 	proxyDeviceConfig := model.GetProxyDeviceConfig(self.ctx, proxyId)
 	if proxyDeviceConfig == nil {
