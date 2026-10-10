@@ -37,10 +37,12 @@ func TestTaskFinalizationBorrowedPhaseAdmissionPostAndRecovery(t *testing.T) {
 		}
 		name := worker.metricName(result.task.FunctionName)
 		admission := taskFinalizationPhaseErrorsTotal.WithLabelValues(name, "admission", "deadline")
+		busy := taskFinalizationAdmissionErrorsTotal.WithLabelValues(name, "acknowledged_busy_wait", "deadline")
 		acquire := taskFinalizationPhaseErrorsTotal.WithLabelValues(name, "ownership_acquire", "deadline")
 		postFailure := errors.New("synthetic non-connection transactional Post refusal")
 		post := taskFinalizationPhaseErrorsTotal.WithLabelValues(name, "transactional_post", "other")
 		beforeAdmission, beforeAcquire, beforePost := testutil.ToFloat64(admission), testutil.ToFloat64(acquire), testutil.ToFloat64(post)
+		beforeBusy := testutil.ToFloat64(busy)
 		originalPost := result.runPost
 		postCalls := 0
 		result.runPost = func(tx server.PgTx) ([]server.PostFunction, error) {
@@ -51,7 +53,8 @@ func TestTaskFinalizationBorrowedPhaseAdmissionPostAndRecovery(t *testing.T) {
 			failure := server.HandleError(func() { worker.finalizeTaskWithGuard(result, guard) })
 			cause, _ := failure.(error)
 			if !errors.Is(cause, context.DeadlineExceeded) || !waiting || postCalls != 0 ||
-				testutil.ToFloat64(admission) != beforeAdmission+1 || testutil.ToFloat64(acquire) != beforeAcquire {
+				testutil.ToFloat64(admission) != beforeAdmission+1 || testutil.ToFloat64(acquire) != beforeAcquire ||
+				testutil.ToFloat64(busy) != beforeBusy+1 {
 				t.Fatal("borrowed refusal lost admission phase or invented a pool acquisition", failure)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
@@ -72,6 +75,7 @@ func TestTaskFinalizationBorrowedPhaseAdmissionPostAndRecovery(t *testing.T) {
 		worker.finalizeTaskWithGuard(result, guard)
 		if postCalls != 1 || guard.completionSessionError() != nil || GetFinishedTasks(ctx, ids...)[ids[0]] == nil ||
 			len(GetTasks(ctx, ids...)) != 0 || testutil.ToFloat64(admission) != beforeAdmission+1 ||
+			testutil.ToFloat64(busy) != beforeBusy+1 ||
 			testutil.ToFloat64(post) != beforePost+1 || testutil.ToFloat64(acquire) != beforeAcquire {
 			t.Fatal("borrowed phase composition changed successful completion or failed-attempt counts")
 		}

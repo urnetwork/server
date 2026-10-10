@@ -63,12 +63,14 @@ func (self *PgOwnedSession) txWithResource(ctx context.Context, keys []PgOwnersh
 	}
 	admissionCtx, cancel := context.WithTimeout(ctx, PgOwnershipAdmissionTimeout)
 	defer cancel()
+	phase.enterAdmission(DbAdmissionPrecheck)
 	for {
 		// This direct session is already retained; there is no pool acquire.
 		phase.enter(DbOperationAdmission)
 		Raise(admissionCtx.Err())
 		owner := &pgOwnedConnection{conn: self.conn, keys: keys, observation: observation,
 			backendPid: self.conn.Conn().PgConn().PID()}
+		phase.enterAdmission(DbAdmissionProbe)
 		acquired, admitted, err := self.acquire(admissionCtx, owner.backendPid, keys)
 		if err != nil {
 			// Some unreturned rows may have acquired references. Even a key
@@ -97,7 +99,9 @@ func (self *PgOwnedSession) txWithResource(ctx context.Context, keys []PgOwnersh
 		func() {
 			defer owner.release(ctx)
 			if !admitted {
+				phase.enterAdmission(DbAdmissionCleanup)
 				Raise(owner.release(ctx))
+				phase.enterAdmission(DbAdmissionAcknowledgedBusyWait)
 				owner.observe(PgOwnershipWaiting)
 				return
 			}

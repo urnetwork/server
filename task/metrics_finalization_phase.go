@@ -15,6 +15,13 @@ var taskFinalizationPhaseErrorsTotal = prometheus.NewCounterVec(prometheus.Count
 	Help:      "Failed finalization invocations per participating task by finite registered target, entered source phase and typed cause. Acquisition does not distinguish Ping from pool waiting; commit errors do not prove rollback.",
 }, []string{"task", "phase", "cause"})
 
+var taskFinalizationAdmissionErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "taskworker",
+	Name:      "finalization_admission_errors_total",
+	Help:      "Failed finalization admission attempts per participating task by finite entered stage and typed cause. Acknowledged busy wait does not prove one continuously held key; probe includes Query and reply validation. Existing session quarantine is preparation and excluded.",
+}, []string{"task", "stage", "cause"})
+
 var taskFinalizationFailureSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 	Namespace: "urnetwork",
 	Subsystem: "taskworker",
@@ -78,6 +85,24 @@ func (self *taskFinalizationObservation) failurePhase() string {
 		return "acknowledged"
 	case server.DbOperationPostCommit:
 		return "post_commit"
+	default:
+		return "unknown"
+	}
+}
+
+func (self *taskFinalizationObservation) admissionStage() string {
+	if self == nil {
+		return "unknown"
+	}
+	switch self.db.AdmissionStage() {
+	case server.DbAdmissionPrecheck:
+		return "precheck"
+	case server.DbAdmissionProbe:
+		return "probe"
+	case server.DbAdmissionCleanup:
+		return "cleanup"
+	case server.DbAdmissionAcknowledgedBusyWait:
+		return "acknowledged_busy_wait"
 	default:
 		return "unknown"
 	}

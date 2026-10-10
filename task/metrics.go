@@ -164,6 +164,7 @@ func init() {
 		taskFinalizationsTotal,
 		taskFinalizationErrorsTotal,
 		taskFinalizationPhaseErrorsTotal,
+		taskFinalizationAdmissionErrorsTotal,
 		taskFinalizationFailureSeconds,
 		taskQueueMetrics,
 		taskQueueSnapshotErrorsTotal,

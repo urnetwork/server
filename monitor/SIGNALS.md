@@ -34032,6 +34032,28 @@ builds, missing scrapes, process exit before scrape, incomplete fleet coverage,
 and a stuck finalization that has not returned can conceal failure observations.
 Zero or absent counter rates and a ready worker are not proof of closure progress.
 
+### Finalization admission boundary counter
+
+`urnetwork_taskworker_finalization_admission_errors_total{task,stage,cause}`
+is the admission-only subset of failed finalization member attempts. It keeps
+registered target names and the existing bounded typed cause classifier. Stages
+are `precheck`, `probe`, `cleanup`, `acknowledged_busy_wait`, or `unknown`.
+`probe` includes the ownership Query, row decoding and final reply validation.
+`cleanup` means releasing acknowledged partial references before waiting.
+`acknowledged_busy_wait` is entered only after a complete known-busy reply and
+successful cleanup; it does not prove one key was continuously held. No key,
+backend identity or SQL text is exported, and known-busy TryOwnedTx false results
+are ordinary returns, not failed finalization attempts.
+
+A failed probe or cleanup can latch its original error on the retained session.
+A later finalization then fails during `preparation`, before another probe, and
+is excluded from this admission-only counter. A latched raw deadline can retain
+cause `deadline`; a generic uncertain-session marker has cause `other`. Existing
+phase/cause rates cannot join those separate attempts or identify their original
+owner. Use rate before summing across processes; absent or mixed-version series
+do not prove zero contention. Observation adds no SQL or change to ownership,
+transaction retry, admission timeout, minRunAt, or financial commit authority.
+
 ### Task submission, completion and RunOnce conflict counters
 
 The Taskworker dashboard starts with `urnetwork_task_submitted_total`,
