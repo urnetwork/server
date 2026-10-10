@@ -2021,9 +2021,11 @@ claimCandidates:
 		// A forward cursor preserves one scan and snapshot across refusals.
 		// Discovery is unlocked. Queue admission precedes the exact locking
 		// recheck below; transaction end closes this non-holdable cursor.
+		// A pooled session caches FETCH result formats by SQL text. The
+		// registry's optional args column must have a distinct cache identity.
 		result, err := tx.Query(
 			ctx,
-			fmt.Sprintf(`FETCH FORWARD %d FROM pending_task_claim_candidates`, fetchCount),
+			fmt.Sprintf(`FETCH FORWARD %d FROM pending_task_claim_candidates /* group_args=%t */`, fetchCount, includeGroupArgs),
 		)
 		if err != nil {
 			return nil, guard, false, err
