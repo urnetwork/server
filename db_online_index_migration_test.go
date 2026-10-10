@@ -180,10 +180,11 @@ func migration810TestIndexRepair(t *testing.T, kind string) {
 
 // An independent repeatable-read actor pins the builder's old-snapshot phase.
 // The coordinator never acquires a second connection inside its own callback.
-func migration810HoldOldSnapshot(t testing.TB, ctx context.Context) func() {
+func migration810HoldOldSnapshot(t testing.TB, ctx context.Context) (int32, func()) {
 	t.Helper()
 	holdCtx, cancelHold := context.WithCancel(ctx)
 	ready, release := make(chan struct{}), make(chan struct{})
+	var holderPid int32
 	holder := startOwnedTransactionTest(func() {
 		MaintenanceDb(holdCtx, func(conn PgConn) {
 			tx, err := conn.BeginTx(holdCtx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
@@ -191,6 +192,7 @@ func migration810HoldOldSnapshot(t testing.TB, ctx context.Context) func() {
 			defer tx.Rollback(context.WithoutCancel(holdCtx))
 			var count int
 			Raise(tx.QueryRow(holdCtx, `SELECT count(*) FROM transfer_contract`).Scan(&count))
+			holderPid = int32(conn.Conn().PgConn().PID())
 			close(ready)
 			select {
 			case <-release:
@@ -208,7 +210,7 @@ func migration810HoldOldSnapshot(t testing.TB, ctx context.Context) func() {
 	})
 	select {
 	case <-ready:
-		return stop
+		return holderPid, stop
 	case <-holder.done:
 		stop()
 		t.Fatal("snapshot actor failed before readiness", holder.recovered)
@@ -216,26 +218,75 @@ func migration810HoldOldSnapshot(t testing.TB, ctx context.Context) func() {
 		stop()
 		t.Fatal("snapshot actor did not become ready", ctx.Err())
 	}
-	return stop
+	return holderPid, stop
 }
 
-// Native state, rather than a sleep, proves the intended surviving builder.
-func migration810WaitBuilder(t testing.TB, ctx context.Context, wantActive bool) {
+// A builder generation is tied to its exact backend, query and index artifact.
+// The test keeps its independently owned old snapshot until that builder exits.
+type migration810BuilderTestState struct {
+	pid          int32
+	backendStart time.Time
+	queryStart   time.Time
+	indexOid     uint32
+}
+
+// A real virtual-xid wait on our held snapshot, not a progress phase label
+// alone, proves custody of the still-invalid concurrent build.
+func migration810WaitBuilderBlocked(t testing.TB, ctx context.Context, holderPid int32) migration810BuilderTestState {
+	t.Helper()
+	var state migration810BuilderTestState
+	MaintenanceDb(ctx, func(conn PgConn) {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			err := conn.QueryRow(ctx, `SELECT progress.pid,builder.backend_start,builder.query_start,progress.index_relid
+				FROM pg_stat_progress_create_index AS progress
+				JOIN pg_stat_activity AS builder ON builder.pid=progress.pid
+				JOIN pg_stat_activity AS holder ON holder.pid=$1
+				WHERE progress.relid=to_regclass('public.transfer_contract')
+				AND progress.index_relid=to_regclass('public.transfer_contract_audit_closed_null_day')
+				AND progress.phase='waiting for old snapshots' AND progress.current_locker_pid=$1
+				AND $1=ANY(pg_blocking_pids(progress.pid))
+				AND builder.state='active' AND builder.wait_event_type='Lock' AND builder.wait_event='virtualxid'
+				AND holder.state='idle in transaction' AND holder.backend_xmin IS NOT NULL`, holderPid).
+				Scan(&state.pid, &state.backendStart, &state.queryStart, &state.indexOid)
+			if err == nil {
+				return
+			}
+			if err != pgx.ErrNoRows {
+				Raise(err)
+			}
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+				t.Fatal("builder did not block on its owned old snapshot", ctx.Err())
+			}
+		}
+	}, OptReadOnly(), OptNoRetry())
+	return state
+}
+
+// Client cancellation can return before PostgreSQL processes its cancellation
+// or socket closure. Keep the old snapshot held until the exact server build
+// disappears, so releasing the fixture cannot let that build finish instead.
+func migration810WaitBuilderStopped(t testing.TB, ctx context.Context, state migration810BuilderTestState) {
 	t.Helper()
 	MaintenanceDb(ctx, func(conn PgConn) {
 		ticker := time.NewTicker(10 * time.Millisecond)
 		defer ticker.Stop()
 		for {
-			var active, waiting bool
-			Raise(conn.QueryRow(ctx, `SELECT count(*)>0,COALESCE(bool_or(phase='waiting for old snapshots'),false)
-				FROM pg_stat_progress_create_index WHERE relid='public.transfer_contract'::regclass`).Scan(&active, &waiting))
-			if (wantActive && waiting) || (!wantActive && !active) {
+			var stopped bool
+			Raise(conn.QueryRow(ctx, `SELECT
+				NOT EXISTS(SELECT 1 FROM pg_stat_progress_create_index WHERE pid=$1 AND index_relid=$2)
+				AND NOT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND backend_start=$3
+					AND query_start=$4 AND state='active')`, state.pid, state.indexOid, state.backendStart, state.queryStart).Scan(&stopped))
+			if stopped {
 				return
 			}
 			select {
 			case <-ticker.C:
 			case <-ctx.Done():
-				t.Fatal("builder did not reach expected native state", wantActive, ctx.Err())
+				t.Fatal("canceled server builder did not exit while its old snapshot remained held", ctx.Err())
 			}
 		}
 	}, OptReadOnly(), OptNoRetry())
@@ -259,7 +310,7 @@ func migration810TestActiveBuilderCustody(t *testing.T, legacy bool) {
 		ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 		defer cancel()
 		migration := migration810ReplayTestFixture(t, ctx)
-		stopSnapshot := migration810HoldOldSnapshot(t, ctx)
+		holderPid, stopSnapshot := migration810HoldOldSnapshot(t, ctx)
 		defer stopSnapshot()
 		buildCtx, cancelBuild := context.WithCancel(ctx)
 		builder := startOwnedTransactionTest(func() {
@@ -276,7 +327,8 @@ func migration810TestActiveBuilderCustody(t *testing.T, legacy bool) {
 			// torn down, including assertion failure and cancellation paths.
 			<-builder.done
 		}()
-		migration810WaitBuilder(t, ctx, true)
+		state := migration810WaitBuilderBlocked(t, ctx, holderPid)
+		t.Logf("before refused replay: owned snapshot blocks builder pid=%d index=%d", state.pid, state.indexOid)
 		before := migration810ReplayTestIndex(t, ctx, false)
 		probeCtx, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
 		caught := captureDbErrorPanic(func() { ApplyDbMigrationsUpTo(probeCtx, 810) })
@@ -284,6 +336,7 @@ func migration810TestActiveBuilderCustody(t *testing.T, legacy bool) {
 		if caught == nil || !strings.Contains(fmt.Sprint(caught), "active") {
 			t.Fatal("active builder was not explicitly refused before recovery", caught)
 		}
+		t.Log("after refused replay: checking retained invalid artifact")
 		if after := migration810ReplayTestIndex(t, ctx, false); after != before || DbVersion(ctx) != 809 {
 			t.Fatal("refused replay changed builder identity or migration head", before, after)
 		}
@@ -292,15 +345,21 @@ func migration810TestActiveBuilderCustody(t *testing.T, legacy bool) {
 			t.Fatal("replay interrupted the builder", builder.recovered)
 		default:
 		}
+		stillBlocked := migration810WaitBuilderBlocked(t, ctx, holderPid)
+		if stillBlocked.pid != state.pid || stillBlocked.indexOid != state.indexOid ||
+			!stillBlocked.backendStart.Equal(state.backendStart) || !stillBlocked.queryStart.Equal(state.queryStart) {
+			t.Fatal("refused replay changed the blocked builder generation", state, stillBlocked)
+		}
 		cancelBuild()
 		if caught := builder.join(t, ctx); caught == nil {
 			t.Fatal("canceled builder reported success")
 		}
-		stopSnapshot()
-		migration810WaitBuilder(t, ctx, false)
+		migration810WaitBuilderStopped(t, ctx, state)
+		t.Log("after server cancellation, before snapshot release: checking retained invalid artifact")
 		if after := migration810ReplayTestIndex(t, ctx, false); after != before {
 			t.Fatal("canceled build lost its expected invalid residue")
 		}
+		stopSnapshot()
 		migration810ReplayTestLedger(t, ctx, 809)
 		ApplyDbMigrationsUpTo(ctx, 810)
 		if after := migration810ReplayTestIndex(t, ctx, true); after == before {
