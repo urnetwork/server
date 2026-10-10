@@ -47,7 +47,7 @@ func stPayoutAdmissionAt(ctx context.Context, cfg *StConfig, now time.Time) erro
 	if err := policy.MainnetAdmission(now, stPayoutIdentity(cfg)); err != nil {
 		return err
 	}
-	return server.RequireProviderPayoutSchema(ctx)
+	return nil
 }
 
 // Public, redacted local status. This is loaded configuration and identity
