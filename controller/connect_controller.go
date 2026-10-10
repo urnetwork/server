@@ -1024,11 +1024,16 @@ func nextContract(
 	)
 }
 
-// The lifecycle lookup, origin escrow creation and payer plan lookup
-// newContract performs. Tests replace them to check, without a database, which
-// byte count the controller requests and signs for a given escrow.
+// The lifecycle lookup, degradation valve, escrow and zero escrow creation and
+// payer plan lookup newContract performs. Tests replace them to check, without
+// a database, which byte count the controller requests and signs for a given
+// escrow, and which creation path it takes.
 var findActiveClientPairNetworks = model.FindActiveClientPairNetworks
+var zeroContractCost = model.ZeroContractCost
 var createTransferEscrow = model.CreateTransferEscrow
+var createCompanionTransferEscrow = model.CreateCompanionTransferEscrow
+var createZeroEscrowContract = model.CreateZeroEscrowContract
+var createZeroEscrowCompanionContract = model.CreateZeroEscrowCompanionContract
 var isProNetwork = model.IsProNetwork
 
 // Returns the network whose balance escrows a contract, following the order in
@@ -1076,6 +1081,12 @@ func payerMaxContractTransferByteCount(ctx context.Context, payerNetworkId serve
 
 // Model creation owns commit and returns its immutable database deadline.
 // Later stream work may reject the response but never changes that deadline.
+// While the contract degradation valve makes contracts zero cost
+// (model/network_degradation_model.go), public and companion contracts are
+// created without escrow (model/subscription_zero_escrow.go). They keep the
+// payer's plan cap, the companion origin wait and the stream handling of the
+// escrowed paths, and sign the request at the payer's escrow priority without
+// reserving it. Network and friends-and-family contracts are unchanged.
 func newContract(
 	ctx context.Context,
 	sourceId server.Id,
@@ -1124,6 +1135,9 @@ func newContract(
 		max(MinContractTransferByteCount, transferByteCount),
 		maxContractTransferByteCount,
 	) * model.ByteCount(len(intermediaryIds)+1)
+
+	// read once, before any transaction, so one request takes one funding path
+	zeroEscrow := zeroContractCost(ctx)
 
 	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
 		contractId, expirationTime, err = model.CreateContractNoEscrowWithExpiration(
@@ -1201,8 +1215,13 @@ func newContract(
 		originWatch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 		defer originWatch.Close()
 		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
+		createCompanion := createCompanionTransferEscrow
+		if zeroEscrow {
+			// the same origin wait; the companion keeps its origin link
+			createCompanion = createZeroEscrowCompanionContract
+		}
 		escrow, err := waitForCompanionOrigin(ctx, originWatch, func() (*model.TransferEscrow, error) {
-			return model.CreateCompanionTransferEscrow(
+			return createCompanion(
 				ctx,
 				sourceNetworkId,
 				sourceId,
@@ -1221,6 +1240,7 @@ func newContract(
 		expirationTime = escrow.ExpirationTime
 		// The prober's companion reservation may be smaller than the remote
 		// provider requested. Sign only the capacity actually held in escrow.
+		// A zero escrow companion holds none and returns the request.
 		contractTransferByteCount = escrow.TransferByteCount
 		priority = escrow.Priority
 
@@ -1250,7 +1270,11 @@ func newContract(
 			}
 		}
 	} else {
-		escrow, err := createTransferEscrow(
+		createPublic := createTransferEscrow
+		if zeroEscrow {
+			createPublic = createZeroEscrowContract
+		}
+		escrow, err := createPublic(
 			ctx,
 			sourceNetworkId,
 			sourceId,
@@ -1265,7 +1289,8 @@ func newContract(
 		contractId = escrow.ContractId
 		expirationTime = escrow.ExpirationTime
 		// The escrow shrinks to fit when the payer's balance is below the
-		// request. Sign only the capacity actually held in escrow.
+		// request. Sign only the capacity actually held in escrow. A zero
+		// escrow contract holds none and returns the request.
 		contractTransferByteCount = escrow.TransferByteCount
 		priority = escrow.Priority
 

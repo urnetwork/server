@@ -183,6 +183,7 @@ active missing capability and must not be read as green.
 |---|---|---|
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
+| 2.6b | Coverage gap | A probe of the contract degradation valve state is missing: `open-contracts` and `contract-rate` show the close backlog and creation rate that drive it, not whether new contracts are zero cost or providers unpaid. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
@@ -7437,6 +7438,50 @@ deterministic later-successor test locks both invariants. This approximately
 72x same-task split remains pre-rollout evidence for the 25k checkpoint and
 process-local load sensitivity; it is not permission to erase the timeout or
 raise its deadline.
+
+### 2.6b Contract degradation valve — zero contract cost
+
+`model/network_degradation_model.go`. While `config/<env>/degraded.yml` sets
+`enabled: true`, the taskworker's run-once `CheckContractDegradation` task
+runs every 15 minutes. It counts contracts created in the last 60 minutes
+(`transfer_contract_create_time`) and contracts that reached a terminal
+outcome in the last 60 minutes (`transfer_contract_closed_usage`). One check
+with `close_count < 0.7 × open_count` publishes `zero_cost=true` in the Redis
+key `network_degradation:zero_contract_cost:v1`. Charging resumes only on the
+second consecutive healthy check (`close_count >= 0.7 × open_count`, or no
+creations). The key has a one hour TTL (four checks), so a stopped or
+disabled task, a missing or malformed key, or a Redis error all charge
+normally.
+
+Active means every new public and companion contract is zero cost: it is
+created without escrow (no `transfer_escrow` rows, no payer, no Redis balance
+admission, no balance reserved or debited), and **provider payouts are zero
+for those contracts**. They settle through the no-escrow path with no sweep,
+debit, provider totals or points; only the payment-independent subnet usage
+snapshot is kept, as for network-mode traffic. Per-client data caps and the
+acceptance-test drain still refuse, but zero cost traffic does not advance a
+data cap. The valve never changes an existing contract; it decides only how
+contracts created while it is open are funded.
+
+- `urnetwork_contract_degradation_zero_cost` (taskworker gauge, 1 while the
+  last published state is zero cost) and
+  `urnetwork_contract_degradation_contracts{kind="open"|"close"}`.
+- `urnetwork_contract_degradation_checks_total{outcome}`: `zero_cost`,
+  `resuming` (healthy, zero cost held for one more check) and `charging`; the
+  failures `measurement_failed`, `state_read_failed`, `publish_failed` and
+  `superseded` publish nothing, and the published state ages out within its TTL.
+- `urnetwork_zero_contract_cost_reads_total{result}` on every contract-creating
+  service (api, connect, taskworker, proxy): 15 second cache refreshes. Only
+  `zero_cost` makes contracts free; `charging`, `missing`, `expired`,
+  `malformed`, `error` and `disabled` all charge normally.
+- Log lines `[degradation]contract check <outcome>: open=… close=… ratio=…
+  healthy=… consecutive_healthy=… zero_cost=…`.
+
+Treat an active valve as an incident signal for §2.6: it hides the
+out-of-balance symptom while providers go unpaid for the traffic. A sustained
+`measurement_failed` means the check cannot see the backlog, and the valve
+fails closed to normal charging an hour after its last publication. No probe
+reads the valve yet; the numbered coverage crosswalk records the gap.
 
 ### 2.7 New-connection rate — existing-sessions vs new-connects discriminator
 Probe: `connection-rate`
