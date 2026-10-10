@@ -983,11 +983,11 @@ func startOfUtcDay(t time.Time) time.Time {
 	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 }
 
-// Keep both outcome branches explicit so PostgreSQL can combine the existing
-// transfer_contract_closed_usage (outcome IS NOT NULL) and
-// transfer_contract_outcome_null partial indexes for a selective day. The
-// disjunction includes every outcome, including closed contracts whose outcome
-// is still NULL. A dense day can retain a sequential scan and ordinary join.
+// Keep both outcome branches explicit so PostgreSQL can combine the terminal
+// and NULL-outcome close-day partial indexes for a selective day. The latter
+// avoids scanning unrelated unsettled contracts. The disjunction includes every
+// outcome, including closed contracts whose outcome is still NULL. A dense day
+// can retain a sequential scan and ordinary join.
 // The work reduction depends on those indexes being installed, valid and ready;
 // this query does not create or repair them, or force report PK lookups.
 const transferAuditDailyBytesSQL = `

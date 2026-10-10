@@ -9885,4 +9885,16 @@ var migrations = []any{
 		`CREATE INDEX CONCURRENTLY pending_task_function_poll_order ON pending_task
 		(regexp_replace(function_name, '/v[0-9]+', '', 'g'), available_block, run_priority DESC, run_max_time_seconds DESC, task_id)`,
 		`DROP INDEX IF EXISTS pending_task_function_poll_order; `+TaskClaimFunctionIndexSql),
+	// 810: the audit's NULL-outcome arm also seeks its recorded close day.
+	// Keep the contract-id-only unsettled index for its independent readers.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_audit_closed_null_day`,
+		`CREATE INDEX CONCURRENTLY transfer_contract_audit_closed_null_day
+		 ON transfer_contract (close_time, contract_id)
+		 WHERE outcome IS NULL AND close_time IS NOT NULL`,
+		`DROP INDEX IF EXISTS transfer_contract_audit_closed_null_day;
+		 CREATE INDEX transfer_contract_audit_closed_null_day
+		 ON transfer_contract (close_time, contract_id)
+		 WHERE outcome IS NULL AND close_time IS NOT NULL`,
+	),
 }

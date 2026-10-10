@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,13 +123,17 @@ type transferAuditWorkNode struct {
 	Reads     float64                 `json:"Shared Read Blocks"`
 	LocalHit  float64                 `json:"Local Hit Blocks"`
 	LocalRead float64                 `json:"Local Read Blocks"`
+	TempRead  float64                 `json:"Temp Read Blocks"`
+	TempWrite float64                 `json:"Temp Written Blocks"`
 	Plans     []transferAuditWorkNode `json:"Plans"`
 }
 
 type transferAuditWork struct {
-	contracts, reports, buffers float64
-	bitmapOr                    bool
-	indexes                     map[string]bool
+	contractUpper, reportUpper, bitmapEntries, tempBlocks float64
+	contractRepeatedLoops                                 bool
+	contracts, reports, buffers                           float64
+	bitmapOr                                              bool
+	indexes                                               map[string]bool
 }
 
 func explainTransferAuditWork(t testing.TB, ctx context.Context, conn server.PgConn, query, mode, start, end string, want int64) transferAuditWork {
@@ -154,18 +159,33 @@ func explainTransferAuditWork(t testing.TB, ctx context.Context, conn server.PgC
 		t.Fatal("unexpected daily rollup plan count")
 	}
 	root := plans[0].Plan
-	work := transferAuditWork{buffers: root.Hits + root.Reads + root.LocalHit + root.LocalRead, indexes: map[string]bool{}}
+	work := transferAuditWork{buffers: root.Hits + root.Reads + root.LocalHit + root.LocalRead,
+		tempBlocks: root.TempRead + root.TempWrite, indexes: map[string]bool{}}
 	var inspect func(transferAuditWorkNode)
 	inspect = func(node transferAuditWorkNode) {
 		visited := node.Loops * (node.Rows + node.Removed + node.Recheck)
+		upper := visited
+		if node.Loops > 1 {
+			// EXPLAIN rounds each per-loop row/filter/recheck average.
+			upper += 1.5 * node.Loops
+		}
 		if node.Relation == "transfer_contract" {
 			work.contracts += visited
+			work.contractUpper += upper
+			work.contractRepeatedLoops = work.contractRepeatedLoops || node.Loops > 1
 		}
 		if node.Relation == "contract_close" {
 			work.reports += visited
+			work.reportUpper += upper
+		}
+		if node.NodeType == "Bitmap Index Scan" && strings.HasPrefix(node.Index, "transfer_contract") {
+			work.bitmapEntries += node.Rows * node.Loops
+			if node.Loops > 1 {
+				work.bitmapEntries += 0.5 * node.Loops
+			}
 		}
 		work.bitmapOr = work.bitmapOr || node.NodeType == "BitmapOr"
-		if node.Index != "" {
+		if node.Index != "" && node.Loops > 0 {
 			work.indexes[node.Index] = true
 		}
 		for _, child := range node.Plans {
