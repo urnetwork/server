@@ -65,6 +65,12 @@ const PgCommitTimeout = 30 * time.Second
 // transaction promptly instead of waiting for a broken connection to close.
 const PgRollbackTimeout = 30 * time.Second
 
+// PgBeginTimeout bounds how long a BEGIN round trip already in flight may
+// outlive its caller's stop (see `beginTx`). BEGIN does no work in PostgreSQL;
+// its only wait is for the transaction pooler to assign a server, the same
+// wait a new connection's validation Ping is given.
+const PgBeginTimeout = PgPingTimeout
+
 // type aliases to simplify user code
 type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx
@@ -480,6 +486,26 @@ func isConnectionError(err error) bool {
 	return err.Error() == "conn closed"
 }
 
+// Decides whether a classified connection error disposes of `physical`. pgx
+// closes a connection itself whenever it interrupts an exchange or loses its
+// transport. A timeout or other transport error therefore condemns a
+// connection only through that state: on a connection pgx still reports open,
+// idle and outside a transaction, the error came from other work, such as a
+// deadline-bound Redis or HTTP call, a caller refused before its next
+// statement was written, or another connection. Destroying it would only
+// force a reconnect through the pooler. A connection exception the server
+// reported, or a closed-connection error, still disposes of the connection.
+func pgConnectionErrorDiscards(err error, physical *pgconn.PgConn) bool {
+	if physical.IsClosed() || physical.IsBusy() || physical.TxStatus() != 'I' {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgerrcode.IsConnectionException(pgErr.Code)
+	}
+	return errors.Is(err, pgconn.ErrConnClosed) || err.Error() == "conn closed"
+}
+
 // Classifies the current failure only. A callback replay additionally requires
 // transport proof that none of its statements wrote bytes; pgx can mask a lost
 // read reply as a SafeToRetry closed-connection error.
@@ -693,24 +719,15 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		lifecycle := pool.observeBorrow(pgPool)
 		physical := conn.Conn().PgConn()
 		cleanup := physical.CleanupDone()
-		checkoutWrites := snapshotPgWrites(physical.Conn())
 
 		func() {
 			// Cleanup must observe the classification below. Register it first so
 			// the recovery defer runs before it during panic unwinding.
 			defer func() {
-				discard := connErr != nil
-				var networkErr net.Error
-				// An already-expired caller can be refused before pgx writes
-				// anything. Its deadline is a net.Error, but an untouched idle
-				// connection is still healthy. Keep every uncertain transport,
-				// written checkout and physical cleanup on the disposal path.
-				if connectionContextDone && pgconn.SafeToRetry(connErr) &&
-					errors.As(connErr, &networkErr) && networkErr == context.DeadlineExceeded &&
-					checkoutWrites.unchanged() && !physical.IsClosed() &&
-					!physical.IsBusy() && physical.TxStatus() == 'I' {
-					discard = false
-				}
+				// A stopped caller, or a deadline from other work, is a
+				// net.Error but no evidence against an idle, in-sync session.
+				// Retry and replay decisions still use the classified error.
+				discard := connErr != nil && pgConnectionErrorDiscards(connErr, physical)
 				needsCleanup := discard || physical.IsClosed() || physical.IsBusy() || physical.TxStatus() != 'I'
 				lifecycle.beginRelease()
 				if discard {
@@ -853,6 +870,36 @@ func rollbackTx(ctx context.Context, tx PgTx) {
 	_ = tx.Rollback(rollbackCtx)
 }
 
+// Bounds BEGIN after the caller stops, in place of `PgBeginTimeout`. Only
+// tests supply it, so a bound can be proven without waiting on wall time.
+type txBeginTimeout time.Duration
+
+// Issues BEGIN on a context the caller's stop cannot interrupt mid-flight.
+// pgx tears down a connection whose round trip is interrupted, and BEGIN is
+// the round trip that waits for PgBouncer to assign a server. A client that
+// disconnects after its BEGIN reached a server forces the pooler to destroy
+// that server, because it is inside a transaction: the PostgreSQL backend
+// exits and a replacement must start. Before disconnecting, pgx forwards a
+// cancel request, which itself waits for a pooler slot, so the server first
+// sits idle in transaction for up to the pooler's cancel wait. A BEGIN in
+// flight when the caller stops instead completes, and the transaction owner
+// rolls it back on its detached context, as it does for commit and rollback.
+// The round trip outlives the caller's stop by at most `timeout`; a caller
+// that never stops keeps waiting exactly as before.
+func beginTx(ctx context.Context, conn PgConn, txOptions pgx.TxOptions, timeout time.Duration) (pgx.Tx, error) {
+	beginCtx, beginCancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer beginCancel()
+	stopBound := context.AfterFunc(ctx, func() {
+		select {
+		case <-beginCtx.Done():
+		case <-time.After(timeout):
+			beginCancel()
+		}
+	})
+	defer stopBound()
+	return conn.BeginTx(beginCtx, txOptions)
+}
+
 func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), options ...any) {
 	txWithConnection(ctx, func(body func(PgConn)) {
 		dbWithPool(ctx, pool, body, options...)
@@ -870,6 +917,7 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 		AccessMode:     pgx.ReadWrite,
 		DeferrableMode: pgx.NotDeferrable,
 	}
+	beginTimeout := PgBeginTimeout
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -877,6 +925,8 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			retryOptions = v
 		case *DbTiming:
 			timing = v
+		case txBeginTimeout:
+			beginTimeout = time.Duration(v)
 		case pgx.TxOptions:
 			txOptions = v
 		case pgx.TxIsoLevel:
@@ -904,10 +954,19 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			// this attempt
 			pgStatementErrorRecorderOf(conn.Conn().PgConn()).Reset()
 			phase.enter(DbOperationBegin)
+			// pgx destroys a connection whose BEGIN fails, even when it
+			// refused a stopped caller before writing anything.
+			if err := ctx.Err(); err != nil {
+				panic(err)
+			}
 			beginStarted := timing.start()
-			rawTx, err := conn.BeginTx(ctx, txOptions)
+			rawTx, err := beginTx(ctx, conn, txOptions, beginTimeout)
 			timing.finish(DbTimingBegin, beginStarted)
 			if err != nil {
+				if ctx.Err() != nil {
+					// the bound after the caller's stop interrupted BEGIN
+					err = errors.Join(err, ctx.Err())
+				}
 				panic(err)
 			}
 			tx := &postCommitPgTx{PgTx: rawTx,
@@ -924,6 +983,11 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 					panic(err)
 				}
 			}()
+			// A caller that stopped while BEGIN waited for its server does no
+			// callback work; the rollback above returns the server instead.
+			if err := ctx.Err(); err != nil {
+				panic(err)
+			}
 			func() {
 				defer func() {
 					if err := recover(); err != nil {
