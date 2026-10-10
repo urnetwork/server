@@ -227,6 +227,9 @@ func TestWgTunFactoryCanceledOwnerDoesNotConstruct(t *testing.T) {
 // Established traffic keeps its real WireGuard-to-ProxyDevice handoff and
 // buffer ownership while another authenticated device owner remains blocked.
 func TestWgPacketLiveOwnerBypassesUnrelatedSetup(t *testing.T) {
+	// The allocator's statistics worker belongs to the process, outside this
+	// device-owner bubble. Packet copies and reconciliation still use the real pool.
+	connect.MessagePoolCounts()
 	synctest.Test(t, func(t *testing.T) {
 		manager := wgAdmissionTestManager(t)
 		liveId, coldId := server.NewId(), server.NewId()
