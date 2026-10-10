@@ -247,6 +247,15 @@ only the native polling loop could miss both adjacent paths.
 - [Function admission policy](../task/claim_function.go)
 - [Worker construction policy](../taskworker/claim_admission.go)
 
+Claim statements share the collector's guard session with live executions.
+When a refill claim's context expired during a slow FETCH, pgx closed that
+session, and every live finalization on it then failed with `conn closed` or
+`database ownership session is not idle`. A claim with a deadline now keeps
+`statement_timeout` below its remaining budget before each statement, so the
+server ends a slow claim statement first and the session stays usable.
+
+- [Guard session survives a slow claim statement](../task/claim_statement_budget_test.go)
+
 A production queue prefix alone does not prove which scheduler binary or policy
 is running. Preserve that uncertainty until deployment provenance and actual
 claims establish it. Likewise, a local metric increment may be absent from a
