@@ -259,8 +259,11 @@ func (self *safePgPool) open() *pgxpool.Pool {
 	return self.pool
 }
 
-// Validate a new socket before first use, then let pgx validate connections
-// idle for more than a second. A hot checkout needs no second round trip to
+// Only a completed successful initial Ping establishes this connection's freshness.
+const pgPoolInitialPingAtKey = "github.com/urnetwork/server.initialPingAt"
+
+// Validate a new socket before first use, then validate connections idle for
+// more than a second. A freshly validated checkout needs no second round trip to
 // the transaction pooler; failed callback connections still follow disposal
 // and safe-retry classification in dbWithPool.
 func configurePgPoolLiveness(config *pgxpool.Config) *pgPoolStartupMetrics {
@@ -277,6 +280,18 @@ func configurePgPoolLiveness(config *pgxpool.Config) *pgPoolStartupMetrics {
 		return lookup(lookupCtx, host)
 	}
 	config.PingTimeout = PgPingTimeout
+	config.ShouldPing = func(_ context.Context, params pgxpool.ShouldPingParams) bool {
+		if params.IdleDuration <= time.Second {
+			return false
+		}
+		// Puddle starts its idle clock before construction. A slow successful
+		// initial Ping can therefore look idle immediately on first checkout.
+		// Keep the normal idle check once that validation is itself older than
+		// a second; no registry or state survives this physical connection.
+		validatedAt, _ := params.Conn.PgConn().CustomData()[pgPoolInitialPingAtKey].(time.Time)
+		age := time.Since(validatedAt)
+		return validatedAt.IsZero() || age < 0 || time.Second < age
+	}
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		pgxRegisterIdType(conn.TypeMap())
 		started := startupMetrics.begin(pgPoolInitialPing)
@@ -286,6 +301,7 @@ func configurePgPoolLiveness(config *pgxpool.Config) *pgPoolStartupMetrics {
 			startupMetrics.cleanupFailedStartup(ctx, conn.PgConn(), PgStartupCleanupTimeout)
 			return err
 		}
+		conn.PgConn().CustomData()[pgPoolInitialPingAtKey] = time.Now()
 		return nil
 	}
 	return startupMetrics

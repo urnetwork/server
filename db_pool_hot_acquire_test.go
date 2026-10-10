@@ -19,16 +19,17 @@ import (
 // Owns every synthetic connection and joins its protocol reader on cleanup.
 // Optional query barriers control the exact failure boundary, not wall time.
 type pgPoolWireFixture struct {
-	stateLock   sync.Mutex
-	connections []net.Conn
-	queries     []string
-	dialCount   int
-	pingCount   int
-	closed      bool
-	workers     sync.WaitGroup
-	query       func(int, string) bool
-	queryError  func(int, string) *pgproto3.ErrorResponse
-	queryRows   func(int, string) ([]pgproto3.FieldDescription, [][][]byte)
+	stateLock     sync.Mutex
+	connections   []net.Conn
+	queries       []string
+	dialCount     int
+	pingCount     int
+	closed        bool
+	workers       sync.WaitGroup
+	query         func(int, string) bool
+	queryError    func(int, string) *pgproto3.ErrorResponse
+	queryRows     func(int, string) ([]pgproto3.FieldDescription, [][][]byte)
+	beforeStartup func(int)
 	// A late-reply barrier runs after row/command replies have been flushed.
 	beforeReady func(int, string)
 	// the number of coming commits to answer with a rollback, as postgres does
@@ -79,6 +80,9 @@ func (self *pgPoolWireFixture) dial(ctx context.Context, network string, address
 		self.dialCount += 1
 		connectionIndex := self.dialCount
 		self.stateLock.Unlock()
+		if self.beforeStartup != nil {
+			self.beforeStartup(connectionIndex)
+		}
 		backend.Send(&pgproto3.AuthenticationOk{})
 		backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "18.0"})
 		backend.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
@@ -196,7 +200,9 @@ func newPgPoolWireFixture(t testing.TB, query func(int, string) bool, shouldPing
 	startupMetrics := configurePgPoolLiveness(config)
 	configurePgPoolWriteTracking(config)
 	configurePgPoolStatementErrors(config)
-	config.ShouldPing = shouldPing
+	if shouldPing != nil {
+		config.ShouldPing = shouldPing
+	}
 	pgPool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +230,7 @@ func TestPgPoolLivenessConfigPreservesBoundedIdleChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	configurePgPoolLiveness(config)
-	if config.PingTimeout != PgPingTimeout || config.ShouldPing != nil || config.AfterConnect == nil {
+	if config.PingTimeout != PgPingTimeout || config.ShouldPing == nil || config.AfterConnect == nil {
 		t.Fatal("pool liveness lost initial validation, bounded idle Ping, or pgx idle policy")
 	}
 }
