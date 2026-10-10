@@ -42,6 +42,7 @@ type OnlineSqlMigration struct {
 	recoverySql string
 	sql         string
 	auditSql    string
+	completion  *onlineIndexMigrationCompletion
 }
 
 func newOnlineSqlMigration(sql string, auditSql string) *OnlineSqlMigration {
@@ -205,10 +206,7 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 				glog.Infof("[migrate][%d/%d]online sql = %s\n", i+1, len(migrations), v.sql)
 			}
 			MaintenanceDb(ctx, func(conn PgConn) {
-				Raise(executeOnlineSqlMigration(ctx, v, func(ctx context.Context, sql string) error {
-					_, err := conn.Exec(ctx, sql)
-					return err
-				}))
+				Raise(executeOnlineSqlMigrationOnConn(ctx, conn, v))
 			}, OptReadWrite(), OptNoRetry())
 		case *CodeMigration:
 			if DbMigrationVerbose {
@@ -9896,5 +9894,7 @@ var migrations = []any{
 		 CREATE INDEX transfer_contract_audit_closed_null_day
 		 ON transfer_contract (close_time, contract_id)
 		 WHERE outcome IS NULL AND close_time IS NOT NULL`,
-	),
+	).withIndexCompletion(810, "transfer_contract", "transfer_contract_audit_closed_null_day",
+		"CREATE INDEX transfer_contract_audit_closed_null_day ON public.transfer_contract USING btree (close_time, contract_id) WHERE ((outcome IS NULL) AND (close_time IS NOT NULL))",
+		"((outcome IS NULL) AND (close_time IS NOT NULL))"),
 }
