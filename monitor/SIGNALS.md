@@ -607,6 +607,32 @@ preserve bounded per-minute completion history, pending claim/lease state,
 direct PostgreSQL capacity, active reindex progress, and Redis cluster state;
 attribute the failed layer before mutating it.
 
+Aggregate task throughput does not clear recurring-task starvation. On
+2026-10-10 at 01:56 UTC, a complete three-minute window contained 14,947
+finished tasks but no completions for the location, score, reliability, or
+search publishers. Their six exact RunOnce rows were overdue by 4.3–5 hours,
+with no recorded claim or retry error; the reliability rollup watermark was
+also nearly five hours old. Eight current, ready Taskworkers did not clear
+this failure. Compare each source-owned RunOnce key's generated
+`available_block` with the current block, its lease and advisory ownership,
+registered target, and position in the bounded claim candidate window.
+Timestamp eligibility alone does not prove claim admission. The claimant
+orders by available block before priority and examines a finite prefix;
+older work can conceal later recurring tasks. Prove that mechanism before
+changing scheduling or releasing ownership.
+
+Cache absence has distinct product effects. Missing `{cl}i` makes the initial
+provider picker return an empty successful response. Missing
+`{provider_hard_exclusions}` removes cohort coverage and causes provider
+selection to read candidate exclusions from PostgreSQL, adding request-path
+database pressure. A normal one-shot location publication restored both and
+returned 92 public locations in about 0.6 seconds during that incident. This
+is publication evidence, not natural recurrence, current Quality coverage,
+or end-user transport recovery. Require subsequent recurring completions,
+renewed cache lifetime, and advancing reliability watermark. A stale rollup
+watermark prevents reliability score publication; merely restarting workers
+or re-scheduling an already overdue key does not repair missed claim admission.
+
 `Interrupted: context canceled` alone does not identify deployment drain or a
 short attempt. `claim_time` advances with the lease heartbeat; release minus
 claim is not execution duration. Correlate the task family's authoritative
