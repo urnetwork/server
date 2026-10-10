@@ -65,7 +65,9 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 		}
 	}
 	stopped := isolated
-	refill := false
+	// A sparse function lane can initially occupy fewer than n slots. Refill
+	// remaining ordinary capacity without delaying it until the poll timer.
+	refill := self.settings.FairClaimFunctions && !isolated
 	readyHandbacks := 0
 	retiredIds := make([]server.Id, 0, n)
 	nextPoll := self.heartbeatNow().Add(poll.delay(self.claimNow(), self.settings.PollTimeout))

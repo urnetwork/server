@@ -1467,6 +1467,9 @@ type TaskWorkerSettings struct {
 	// Filtering precedes the candidate limit, including the owner of a RunPost
 	// retry, so an unrelated backlog cannot starve registered work.
 	ClaimRegisteredTargetsOnly bool
+	// Run alternates bounded indexed function lanes with the ordinary queue.
+	// Owners enable this only after the matching migration is available.
+	FairClaimFunctions bool
 	// Opt-in per-instance limits, keyed by canonical target function name.
 	// Aliases share their target's limit; RunPost wrappers do not borrow it.
 	// Nil leaves every target unlimited. Construction snapshots this map.
@@ -1522,9 +1525,11 @@ type TaskWorker struct {
 	// A fixture can lose the finalizer's reply after its real commit returned.
 	completionBatchCommitReturned func()
 
-	stateLock         sync.Mutex
-	draining          bool
-	claimTargetCounts map[string]int
+	stateLock          sync.Mutex
+	draining           bool
+	claimTargetCounts  map[string]int
+	claimFunctionNames []string
+	claimFunctionTurn  uint64
 
 	inflightCount      atomic.Int64
 	drainCanceledCount atomic.Int64
@@ -1573,6 +1578,9 @@ func (self *TaskWorker) Run() {
 	defer self.runWg.Done()
 
 	emptyCount := 0
+	// Refill may defer an isolated lane to this Run's next initial claim.
+	// The handoff cannot be shared with another concurrent Run caller.
+	poll := &taskClaimPoll{}
 	for {
 		select {
 		case <-self.runCtx.Done():
@@ -1580,7 +1588,6 @@ func (self *TaskWorker) Run() {
 		default:
 		}
 
-		poll := &taskClaimPoll{}
 		worked, err := self.runTaskSlots(self.settings.BatchSize, poll)
 		if err != nil {
 			taskPollsTotal.WithLabelValues("error").Inc()
@@ -1753,6 +1760,17 @@ func (self *TaskWorker) AddTargets(taskTargets ...Target) {
 			self.targetMetricNames[alternateFunctionNames] = metricName
 		}
 	}
+	// Registry mutation is setup-only. Include normalized retained aliases so
+	// their queues receive the same indexed access as current target names.
+	names := map[string]bool{}
+	for name := range self.targets {
+		names[updateFunctionName(name)] = true
+	}
+	self.claimFunctionNames = self.claimFunctionNames[:0]
+	for name := range names {
+		self.claimFunctionNames = append(self.claimFunctionNames, name)
+	}
+	slices.Sort(self.claimFunctionNames)
 }
 
 // metricName resolves only registered targets and aliases; an arbitrary stale
@@ -1966,14 +1984,19 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	}
 	candidateLimit := n + 64
 	includeGroupArgs := self.hasTaskClaimGroups()
-	query, queryArgs := self.claimOwnershipCandidatesQuery(throughBlock, candidateLimit, includeGroupArgs)
+	claimFunction := self.nextClaimFunction(options)
+	openCursor := func() error {
+		bound := throughBlock
+		if claimFunction != "" {
+			// Only ordinary discovery supplies a future eligibility alarm.
+			bound = nowBlock
+		}
+		query, queryArgs := self.taskFunctionCandidatesQuery(bound, candidateLimit, true, claimFunction, includeGroupArgs)
+		_, err := tx.Exec(ctx, `DECLARE pending_task_claim_candidates NO SCROLL CURSOR FOR `+query, queryArgs...)
+		return err
+	}
 	// Keep the queue name visible in FETCH for the existing query monitors.
-	_, err = tx.Exec(
-		ctx,
-		`DECLARE pending_task_claim_candidates NO SCROLL CURSOR FOR `+query,
-		queryArgs...,
-	)
-	if err != nil {
+	if err := openCursor(); err != nil {
 		return nil, guard, false, err
 	}
 
@@ -2159,7 +2182,20 @@ claimCandidates:
 				taskCohorts[candidate.taskId] = cohort
 			}
 		}
-		if len(candidates) < fetchCount {
+		if len(candidates) < fetchCount || candidateCount >= candidateLimit {
+			if claimFunction != "" && len(taskIds) == 0 {
+				// An empty, busy or stale lane cannot spend ordinary capacity.
+				// The second cursor has its original independent n+64 bound.
+				if _, err := tx.Exec(ctx, `CLOSE pending_task_claim_candidates`); err != nil {
+					return nil, guard, false, err
+				}
+				claimFunction = ""
+				candidateCount = 0
+				if err := openCursor(); err != nil {
+					return nil, guard, false, err
+				}
+				continue
+			}
 			break
 		}
 	}
@@ -2206,6 +2242,11 @@ claimCandidates:
 		// forever behind a recurring ordinary task in the other slot.
 		isolatedPending = true
 		selectedCount = 0
+		if claimFunction != "" && options.poll != nil {
+			// Retain no row or guard here. The same Run freshly revalidates
+			// this registered lane after every live sibling has joined.
+			options.poll.isolatedFunction = claimFunction
+		}
 	}
 	for _, taskId := range taskIds[selectedCount:] {
 		if err := guard.retireTaskWithQuery(ctx, tx, taskId); err != nil {

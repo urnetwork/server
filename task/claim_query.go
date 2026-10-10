@@ -18,6 +18,10 @@ func (self *TaskWorker) claimOwnershipCandidatesQuery(nowBlock int64, candidateL
 }
 
 func (self *TaskWorker) taskCandidatesQuery(nowBlock int64, candidateLimit int, ownershipFirst bool, includeGroupArgs ...bool) (string, []any) {
+	return self.taskFunctionCandidatesQuery(nowBlock, candidateLimit, ownershipFirst, "", includeGroupArgs...)
+}
+
+func (self *TaskWorker) taskFunctionCandidatesQuery(nowBlock int64, candidateLimit int, ownershipFirst bool, claimFunction string, includeGroupArgs ...bool) (string, []any) {
 	groupArgsColumn := ""
 	if len(includeGroupArgs) != 0 && includeGroupArgs[0] {
 		groupArgsColumn = ", args_json"
@@ -65,6 +69,14 @@ func (self *TaskWorker) taskCandidatesQuery(nowBlock int64, candidateLimit int, 
 		`, len(queryArgs)+1)
 		queryArgs = append(queryArgs, excluded)
 	}
+	orderSuffix := ""
+	if claimFunction != "" {
+		claimPredicate += fmt.Sprintf(`
+			AND regexp_replace(function_name, '/v[0-9]+', '', 'g') = $%d
+		`, len(queryArgs)+1)
+		queryArgs = append(queryArgs, claimFunction)
+		orderSuffix = ", task_id"
+	}
 	return `
 			SELECT
 				task_id,
@@ -74,7 +86,7 @@ func (self *TaskWorker) taskCandidatesQuery(nowBlock int64, candidateLimit int, 
 			FROM pending_task
 			WHERE available_block <= ` + eligibilityBound + `
 		` + claimPredicate + `
-			ORDER BY available_block, run_priority DESC, run_max_time_seconds DESC
+			ORDER BY available_block, run_priority DESC, run_max_time_seconds DESC` + orderSuffix + `
 			LIMIT $2
 			` + rowLock + `
 		`, queryArgs

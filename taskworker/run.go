@@ -126,6 +126,7 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 	}
 	settings := task.DefaultTaskWorkerSettings()
 	settings.BatchSize = options.BatchSize
+	settings.FairClaimFunctions = true
 	worker, err := InitTaskWorkerForProfile(ctx, settings, options.WorkloadProfile)
 	if err != nil {
 		return nil, err

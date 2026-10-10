@@ -9880,4 +9880,9 @@ var migrations = []any{
 		`CREATE INDEX CONCURRENTLY network_client_session_active ON network_client(network_id,session_id,client_id) WHERE active AND session_id IS NOT NULL`, sessionClientIndexSql),
 	newRestartableOnlineSqlMigration(`DROP INDEX CONCURRENTLY IF EXISTS auth_code_origin_session`,
 		`CREATE INDEX CONCURRENTLY auth_code_origin_session ON auth_code(network_id,origin_session_id) WHERE active AND origin_session_id IS NOT NULL`, sessionAuthCodeIndexSql),
+	// 809: function fairness seeks never filter a different function's backlog.
+	newRestartableOnlineSqlMigration(`DROP INDEX CONCURRENTLY IF EXISTS pending_task_function_poll_order`,
+		`CREATE INDEX CONCURRENTLY pending_task_function_poll_order ON pending_task
+		(regexp_replace(function_name, '/v[0-9]+', '', 'g'), available_block, run_priority DESC, run_max_time_seconds DESC, task_id)`,
+		`DROP INDEX IF EXISTS pending_task_function_poll_order; `+TaskClaimFunctionIndexSql),
 }

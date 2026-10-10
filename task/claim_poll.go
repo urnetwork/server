@@ -6,7 +6,8 @@ import "time"
 
 // Each Run owns this state. Direct EvalTasks supplies no lookahead or timer.
 type taskClaimPoll struct {
-	availableAt time.Time
+	availableAt      time.Time
+	isolatedFunction string
 }
 
 // Consume the hint once and keep the configured polling maximum. A boundary
