@@ -4,6 +4,16 @@ package monitor
 
 import "strings"
 
+// Keep previously published single predicates byte-for-byte; their owning
+// native tests also extract the exact emitted SQL from the complete probe.
+func migrationCurrentSuffix(version int, name string, predicates ...string) snMainnetMigrationContract {
+	contract := snMainnetMigration(version, name, predicates...)
+	if len(predicates) == 1 {
+		contract.query = predicates[0]
+	}
+	return contract
+}
+
 func migrationCurrentSuffixArtifacts() []migrationArtifact {
 	artifacts := make([]migrationArtifact, 0, len(migrationCurrentSuffixContracts))
 	for _, contract := range migrationCurrentSuffixContracts {
@@ -21,7 +31,7 @@ func migrationCurrentSuffixArtifactQueries() string {
 }
 
 var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
-	snMainnetMigration(794, "tiered extender directory and release custody",
+	migrationCurrentSuffix(794, "tiered extender directory and release custody",
 		snMainnetMigrationColumns("network_extender",
 			snMainnetMigrationColumn{name: "directory_tier", kind: "smallint", notNull: true, defaultExpression: "0"},
 			snMainnetMigrationColumn{name: "canary_channel", kind: "character varying"}),
@@ -53,19 +63,20 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "country_code", kind: "character varying", notNull: true},
 			snMainnetMigrationColumn{name: "report_time", kind: "timestamp without time zone", notNull: true}),
 		snMainnetMigrationConstraints("network_extender_block_report", "PRIMARY KEY (report_id)"),
-		migrationFp2Index("network_extender_block_report", "network_extender_block_report_extender_id_country_code_report_time", "extender_id, country_code, report_time", "", false),
+		// PostgreSQL truncates the published 66-byte identifier to 63 bytes.
+		migrationFp2Index("network_extender_block_report", "network_extender_block_report_extender_id_country_code_report_t", "extender_id, country_code, report_time", "", false),
 		migrationFp2Index("network_extender_block_report", "network_extender_block_report_report_time", "report_time", "", false)),
-	snMainnetMigration(795, "extender release identity and epoch index",
+	migrationCurrentSuffix(795, "extender release identity and epoch index",
 		migrationFp2Index("network_extender_release", "network_extender_release_identity_epoch", "identity, epoch, extender_id", "", false)),
-	snMainnetMigration(796, "task run-once wake and claim generations", taskRunOnceGenerationArtifactQuery),
-	snMainnetMigration(797, "per-network top-level client limit",
+	migrationCurrentSuffix(796, "task run-once wake and claim generations", taskRunOnceGenerationArtifactQuery),
+	migrationCurrentSuffix(797, "per-network top-level client limit",
 		migrationFp2Table("network_top_level_client_limit"),
 		snMainnetMigrationColumns("network_top_level_client_limit",
 			snMainnetMigrationColumn{name: "network_id", kind: "uuid", notNull: true},
 			snMainnetMigrationColumn{name: "top_level_client_limit", kind: "integer", notNull: true},
 			snMainnetMigrationColumn{name: "update_time", kind: "timestamp without time zone", notNull: true}),
 		snMainnetMigrationConstraints("network_top_level_client_limit", "PRIMARY KEY (network_id)")),
-	snMainnetMigration(798, "per-client data cap and usage drain custody",
+	migrationCurrentSuffix(798, "per-client data cap and usage drain custody",
 		migrationFp2Table("network_client_data_cap"),
 		snMainnetMigrationColumns("network_client_data_cap",
 			snMainnetMigrationColumn{name: "client_id", kind: "uuid", notNull: true},
@@ -105,7 +116,7 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "max_drained_block", kind: "bigint", notNull: true},
 			snMainnetMigrationColumn{name: "update_time", kind: "timestamp without time zone", notNull: true}),
 		snMainnetMigrationConstraints("network_client_data_usage_rollup", "PRIMARY KEY (singleton_id)")),
-	snMainnetMigration(799, "services contact-sales lead storage",
+	migrationCurrentSuffix(799, "services contact-sales lead storage",
 		migrationFp2Table("services_lead"),
 		snMainnetMigrationColumns("services_lead",
 			snMainnetMigrationColumn{name: "lead_id", kind: "uuid", notNull: true},
@@ -119,7 +130,7 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "notify_time", kind: "timestamp without time zone"}),
 		snMainnetMigrationConstraints("services_lead", "PRIMARY KEY (lead_id)"),
 		migrationFp2Index("services_lead", "services_lead_create_time", "create_time", "", false)),
-	snMainnetMigration(800, "per-client ACL group storage",
+	migrationCurrentSuffix(800, "per-client ACL group storage",
 		migrationFp2Table("network_client_acl_group"),
 		snMainnetMigrationColumns("network_client_acl_group",
 			snMainnetMigrationColumn{name: "client_id", kind: "uuid", notNull: true},
@@ -128,19 +139,19 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "update_time", kind: "timestamp without time zone", notNull: true}),
 		snMainnetMigrationConstraints("network_client_acl_group", "PRIMARY KEY (client_id)"),
 		migrationFp2Index("network_client_acl_group", "network_client_acl_group_network_id", "network_id, client_id", "", false)),
-	snMainnetMigration(801, "network Embed enablement storage",
+	migrationCurrentSuffix(801, "network Embed enablement storage",
 		migrationFp2Table("network_embed"),
 		snMainnetMigrationColumns("network_embed",
 			snMainnetMigrationColumn{name: "network_id", kind: "uuid", notNull: true},
 			snMainnetMigrationColumn{name: "enable_time", kind: "timestamp without time zone", notNull: true}),
 		snMainnetMigrationConstraints("network_embed", "PRIMARY KEY (network_id)")),
-	snMainnetMigration(802, "network Embed retained disable timestamp",
+	migrationCurrentSuffix(802, "network Embed retained disable timestamp",
 		snMainnetMigrationColumns("network_embed",
 			snMainnetMigrationColumn{name: "disable_time", kind: "timestamp without time zone"})),
-	snMainnetMigration(803, "retained contract close source identity and exact owner assignment", contractCloseOwnerArtifactQueries[0]),
-	snMainnetMigration(804, "escrow-free source close due index", contractCloseOwnerArtifactQueries[1]),
-	snMainnetMigration(805, "unresolved contract close owner registration index", contractCloseOwnerArtifactQueries[2]),
-	snMainnetMigration(806, "session associations and durable operation custody",
+	migrationCurrentSuffix(803, "retained contract close source identity and exact owner assignment", contractCloseOwnerArtifactQueries[0]),
+	migrationCurrentSuffix(804, "escrow-free source close due index", contractCloseOwnerArtifactQueries[1]),
+	migrationCurrentSuffix(805, "unresolved contract close owner registration index", contractCloseOwnerArtifactQueries[2]),
+	migrationCurrentSuffix(806, "session associations and durable operation custody",
 		snMainnetMigrationColumns("network_client",
 			snMainnetMigrationColumn{name: "session_id", kind: "uuid"},
 			snMainnetMigrationColumn{name: "session_create_time", kind: "timestamp without time zone"}),
@@ -184,8 +195,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "next_review_time", kind: "timestamp without time zone", notNull: true},
 			snMainnetMigrationColumn{name: "update_time", kind: "timestamp without time zone", notNull: true}),
 		snMainnetMigrationConstraints("network_session_index_outbox", "PRIMARY KEY (network_id)")),
-	snMainnetMigration(807, "active client session lookup index",
+	migrationCurrentSuffix(807, "active client session lookup index",
 		migrationFp2Index("network_client", "network_client_session_active", "network_id, session_id, client_id", "(active AND (session_id IS NOT NULL))", false)),
-	snMainnetMigration(808, "active auth-code origin session index",
+	migrationCurrentSuffix(808, "active auth-code origin session index",
 		migrationFp2Index("auth_code", "auth_code_origin_session", "network_id, origin_session_id", "(active AND (origin_session_id IS NOT NULL))", false)),
 }
