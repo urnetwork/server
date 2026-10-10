@@ -51,6 +51,14 @@ func QueueLegacyCloseSettlementsInTx(clientSession *session.ClientSession, tx se
 		server.NowUtc().Add(legacyPayerSettlementCollectionWindow(clientSession.Ctx)))
 }
 
+// Queue the same owner wake into the caller's transaction-owned batch. The
+// caller must drain that batch before commit; publication keeps its ordinary
+// collection window and RunOnce conflict semantics.
+func QueueLegacyCloseSettlementsInBatch(clientSession *session.ClientSession, tx server.PgTx, batch server.PgBatch, owner ContractCloseOwner) {
+	scheduleLegacyCloseSettlements(clientSession, tx, batch, owner, nil,
+		server.NowUtc().Add(legacyPayerSettlementCollectionWindow(clientSession.Ctx)))
+}
+
 // Dispatchers coalesce these keys outside close and financial transactions.
 // A conflict keeps the existing turn's cursor; its own Post owns continuation.
 func ScheduleLegacyPayerSettlementsInTx(clientSession *session.ClientSession, tx server.PgTx,
@@ -59,6 +67,11 @@ func ScheduleLegacyPayerSettlementsInTx(clientSession *session.ClientSession, tx
 }
 
 func ScheduleLegacyCloseSettlementsInTx(clientSession *session.ClientSession, tx server.PgTx,
+	owner ContractCloseOwner, cursor *LegacySettlementCursor, next time.Time) {
+	scheduleLegacyCloseSettlements(clientSession, tx, nil, owner, cursor, next)
+}
+
+func scheduleLegacyCloseSettlements(clientSession *session.ClientSession, tx server.PgTx, batch server.PgBatch,
 	owner ContractCloseOwner, cursor *LegacySettlementCursor, next time.Time) {
 	if !owner.valid() {
 		server.Raise(fmt.Errorf("invalid legacy close task scope"))
@@ -71,8 +84,12 @@ func ScheduleLegacyCloseSettlementsInTx(clientSession *session.ClientSession, tx
 	if owner.Kind == ContractCloseOwnerSourceClient {
 		apply = ApplyLegacySourceSettlements
 	}
-	task.ScheduleTaskInTx(tx, apply, args,
-		clientSession, owner.runOnce(), task.RunAt(next), task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
+	options := []any{owner.runOnce(), task.RunAt(next), task.MaxTime(30 * time.Second), task.RequireQueueOwnership(tx)}
+	if batch != nil {
+		task.QueueTaskInBatch(tx, batch, apply, args, clientSession, options...)
+	} else {
+		task.ScheduleTaskInTx(tx, apply, args, clientSession, options...)
+	}
 }
 
 // Financial execution happens before the task's completion transaction takes

@@ -24,13 +24,21 @@ type FlushLegacySettlementsResult struct {
 }
 
 func scheduleFlushLegacySettlements(clientSession *session.ClientSession, tx server.PgTx, shard int, after *model.LegacySettlementCursor, payerAfter *model.LegacySettlementPayerCursor, more bool, sourceAfter *model.LegacySettlementPayerCursor, registrationAfter *model.LegacySettlementOwnerCursor) {
+	scheduleFlushLegacySettlementsWithBatch(clientSession, tx, nil, shard, after, payerAfter, more, sourceAfter, registrationAfter)
+}
+
+func scheduleFlushLegacySettlementsWithBatch(clientSession *session.ClientSession, tx server.PgTx, batch server.PgBatch, shard int, after *model.LegacySettlementCursor, payerAfter *model.LegacySettlementPayerCursor, more bool, sourceAfter *model.LegacySettlementPayerCursor, registrationAfter *model.LegacySettlementOwnerCursor) {
 	next := server.NowUtc().Add(2 * time.Second)
 	if more {
 		next = server.NowUtc()
 	}
 	args := &FlushLegacySettlementsArgs{Shard: shard, Cursor: after, PayerCursor: payerAfter, SourceCursor: sourceAfter, RegistrationCursor: registrationAfter}
-	task.ScheduleTaskInTx(tx, FlushLegacySettlements, args, clientSession,
-		task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard)), task.RunAt(next), task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
+	options := []any{task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard)), task.RunAt(next), task.MaxTime(30 * time.Second), task.RequireQueueOwnership(tx)}
+	if batch != nil {
+		task.QueueTaskInBatch(tx, batch, FlushLegacySettlements, args, clientSession, options...)
+	} else {
+		task.ScheduleTaskInTx(tx, FlushLegacySettlements, args, clientSession, options...)
+	}
 }
 func ScheduleFlushLegacySettlements(clientSession *session.ClientSession, tx server.PgTx) {
 	requireSettlementStartupOwnershipInTx(clientSession.Ctx, tx, legacySettlementStartupOwnershipKeys())
@@ -44,14 +52,19 @@ func FlushLegacySettlements(args *FlushLegacySettlementsArgs, clientSession *ses
 }
 func FlushLegacySettlementsPost(args *FlushLegacySettlementsArgs, result *FlushLegacySettlementsResult, clientSession *session.ClientSession, tx server.PgTx) error {
 	if result.Dispatch != nil {
-		for _, payerNetworkId := range result.Dispatch.PayerNetworkIds {
-			model.QueueLegacyCloseSettlementsInTx(clientSession, tx, model.ContractCloseOwner{Kind: model.ContractCloseOwnerPayerNetwork, Id: payerNetworkId})
-		}
-		for _, sourceClientId := range result.Dispatch.SourceClientIds {
-			model.QueueLegacyCloseSettlementsInTx(clientSession, tx, model.ContractCloseOwner{Kind: model.ContractCloseOwnerSourceClient, Id: sourceClientId})
-		}
-		scheduleFlushLegacySettlements(clientSession, tx, args.Shard, result.Dispatch.Cursor,
-			result.Dispatch.PayerCursor, result.Dispatch.More, result.Dispatch.SourceCursor, result.Dispatch.RegistrationCursor)
+		// All admitted queue keys remain owned until this transaction commits.
+		// Pipeline the bounded fan-out instead of paying one exchange per key
+		// while blocking every other publisher of any member of that set.
+		server.BatchInTx(clientSession.Ctx, tx, func(batch server.PgBatch) {
+			for _, payerNetworkId := range result.Dispatch.PayerNetworkIds {
+				model.QueueLegacyCloseSettlementsInBatch(clientSession, tx, batch, model.ContractCloseOwner{Kind: model.ContractCloseOwnerPayerNetwork, Id: payerNetworkId})
+			}
+			for _, sourceClientId := range result.Dispatch.SourceClientIds {
+				model.QueueLegacyCloseSettlementsInBatch(clientSession, tx, batch, model.ContractCloseOwner{Kind: model.ContractCloseOwnerSourceClient, Id: sourceClientId})
+			}
+			scheduleFlushLegacySettlementsWithBatch(clientSession, tx, batch, args.Shard, result.Dispatch.Cursor,
+				result.Dispatch.PayerCursor, result.Dispatch.More, result.Dispatch.SourceCursor, result.Dispatch.RegistrationCursor)
+		})
 		return nil
 	}
 	// A persisted RunPost from the earlier financial target still owns its
