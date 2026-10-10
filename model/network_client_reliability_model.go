@@ -2938,6 +2938,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		clientLocationReliabilities,
 	)
 
+	probeEligibilityTime := prepareLocationProbeEligibility(ctx, tx)
+
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -3038,7 +3040,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	    `,
 	))
 
-	updateProviderUrlProbeEligibility(ctx, tx)
+	publishLocationProbeEligibility(ctx, tx, probeEligibilityTime)
 
 	// result, err = tx.Query(
 	// 	ctx,
