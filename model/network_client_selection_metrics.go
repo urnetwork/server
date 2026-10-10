@@ -90,7 +90,7 @@ func newFindProviders2SelectionObservation(args *FindProviders2Args) *findProvid
 	rankMode := args.RankMode
 	if rankMode == "" {
 		rankMode = RankModeQuality
-	} else if rankMode != RankModeQuality && rankMode != RankModeSpeed {
+	} else if rankMode != RankModeQuality && rankMode != RankModeSpeed && rankMode != RankModeOnline {
 		rankMode = "unknown"
 	}
 	requestClass := "default_minimum"

@@ -128,7 +128,7 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 			fields = process.fields
 		case "count", "count_time", "resets", "samples":
 			outcome := providerSelectionKey{targetKind: row.Metric["target_kind"], requestClass: row.Metric["request_class"], family: row.Metric["ip_family"], rankMode: row.Metric["rank_mode"], outcome: row.Metric["outcome"], reason: row.Metric["reason"]}
-			if !contains(outcome.targetKind, "none|direct|country|region|city|location_unknown|group|best_available|mixed") || !contains(outcome.requestClass, "default_minimum|count_zero|count_small|count_positive|forced_minimum") || !contains(outcome.family, "any|v4|v6|dualstack|unknown") || !contains(outcome.rankMode, "quality|speed|unknown") {
+			if !contains(outcome.targetKind, "none|direct|country|region|city|location_unknown|group|best_available|mixed") || !contains(outcome.requestClass, "default_minimum|count_zero|count_small|count_positive|forced_minimum") || !contains(outcome.family, "any|v4|v6|dualstack|unknown") || !contains(outcome.rankMode, "quality|speed|online|unknown") {
 				return invalid()
 			}
 			validReason := false

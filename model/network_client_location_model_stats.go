@@ -292,7 +292,7 @@ func recordFindProviders2Outcome(
 	switch rankMode {
 	case "", RankModeQuality:
 		rankMode = RankModeQuality
-	case RankModeSpeed:
+	case RankModeSpeed, RankModeOnline:
 		// The request value is already one of the fixed metric vocabulary.
 	default:
 		rankMode = "unknown"

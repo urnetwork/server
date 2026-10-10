@@ -163,6 +163,30 @@ func TestProviderSelectionSignalEligibleZeroPagesAndRedacts(t *testing.T) {
 	}
 }
 
+// The online rank mode is fixed vocabulary: its invariant pages under its own
+// frame, while an unlisted rank still fails closed.
+func TestProviderSelectionSignalAcceptsOnlineRankMode(t *testing.T) {
+	for _, rankMode := range []string{"online", "synthetic-rank"} {
+		rows := selectionTestRows("eligible_not_selected", 3)
+		for _, row := range rows {
+			if labels := row["metric"].(map[string]string); labels["rank_mode"] != "" {
+				labels["rank_mode"] = rankMode
+			}
+		}
+		alerts, err := NewProviderSelectionSignal().Run(context.Background(), selectionTestSettings(t, pickerTestPayload(t, rows)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rankMode == "online" {
+			if alert := requireAlertClass(t, alerts, "provider-selection-empty-despite-eligible"); alert.Frame != "country/any/online/default_minimum" || len(alerts) != 1 {
+				t.Fatalf("online cohort lost complete attribution: frame=%s alerts=%d", alert.Frame, len(alerts))
+			}
+		} else if len(alerts) != 1 || requireAlertClass(t, alerts, "provider-selection-unavailable").Frame != "" {
+			t.Fatalf("unlisted rank mode was accepted: alerts=%d", len(alerts))
+		}
+	}
+}
+
 // A positive-count missing page is a cache consistency warning, not scarcity.
 func TestProviderSelectionSignalCacheGapBoundary(t *testing.T) {
 	for _, count := range []float64{19, 20} {

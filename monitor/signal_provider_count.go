@@ -221,7 +221,7 @@ func providerCountSeriesKey(metric map[string]string) (providerCountKey, string,
 	value := func(name string) string { return metric[name] }
 	key := providerCountKey{ipFamily: value("ip_family"), locationKind: value("location_kind"), callerCountry: value("caller_country"), rankMode: value("rank_mode"), forceMinimum: value("force_minimum")}
 	valid := func(actual string, allowed ...string) bool { return slices.Contains(allowed, actual) }
-	if !valid(key.ipFamily, "any", "v4", "v6", "dualstack", "unknown") || !valid(key.locationKind, "location", "group", "best-available", "mixed", "direct") || !valid(key.rankMode, "quality", "speed", "unknown") || !valid(key.forceMinimum, "true", "false") || !(key.callerCountry == "unknown" || (len(key.callerCountry) == 2 && key.callerCountry == strings.ToLower(key.callerCountry))) {
+	if !valid(key.ipFamily, "any", "v4", "v6", "dualstack", "unknown") || !valid(key.locationKind, "location", "group", "best-available", "mixed", "direct") || !valid(key.rankMode, "quality", "speed", "online", "unknown") || !valid(key.forceMinimum, "true", "false") || !(key.callerCountry == "unknown" || (len(key.callerCountry) == 2 && key.callerCountry == strings.ToLower(key.callerCountry))) {
 		return providerCountKey{}, "", fmt.Errorf("provider count: invalid bounded metric labels")
 	}
 	band := value("result_count")
