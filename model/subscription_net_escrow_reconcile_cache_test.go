@@ -204,13 +204,16 @@ func TestNetEscrowReconcileCacheDeletedCapturedBalance(t *testing.T) {
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		createNetEscrowOrderingTestContract(ctx, f, 17)
 		ids := []server.Id{f.balanceId}
-		before := readReconcileNetEscrowSnapshots(ctx, ids, true)
+		before, deferred := readReconcileNetEscrowSnapshots(ctx, ids, true)
+		if len(deferred) != 0 {
+			t.Fatal("a one-contract balance exceeded the scheduled census bound")
+		}
 		reconcileNetEscrowBatch(ctx, before, ids, true)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance WHERE balance_id=$1`, f.balanceId))
 		})
-		after := readReconcileNetEscrowSnapshots(ctx, ids, true)
-		if len(after) != 1 || after[f.balanceId].reserved != 0 || after[f.balanceId].endTime != nil || after[f.balanceId].revision <= before[f.balanceId].revision {
+		after, deferred := readReconcileNetEscrowSnapshots(ctx, ids, true)
+		if len(deferred) != 0 || len(after) != 1 || after[f.balanceId].reserved != 0 || after[f.balanceId].endTime != nil || after[f.balanceId].revision <= before[f.balanceId].revision {
 			t.Fatal("deleted captured balance reused its abandoned cache amount")
 		}
 		reconcileNetEscrowBatch(ctx, after, ids, true)

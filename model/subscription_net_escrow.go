@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
@@ -28,7 +29,7 @@ var netEscrowCreationSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts
 
 var netEscrowRefreshSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_net_escrow_refresh_snapshot_total",
-	Help: "Settlement, quarantine, retention and scheduled reconciliation snapshots reused at a durable revision or reloaded from escrow history; not completed settlements or census query counts.",
+	Help: "Settlement, quarantine, retention and scheduled reconciliation snapshots reused at a durable revision, reloaded from escrow history, or deferred by scheduled reconciliation over its census bound; not completed settlements or census query counts.",
 }, []string{"result"})
 
 func init() {
@@ -230,13 +231,13 @@ func publishCreatedNetEscrow(
 // Keep exact fallback for legacy writes and invalidated or deleted balances;
 // the source revision fences publishers that overtake either read/write pair.
 func readMirrorNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id) map[server.Id]netEscrowSnapshot {
-	return readCachedOrExactNetEscrowSnapshots(ctx, balanceIds, true)
+	return readCachedOrExactNetEscrowSnapshots(ctx, balanceIds)
 }
 
 // Targeted committed posts warm their exact misses. Scheduled fleet repair
-// only reuses existing cache entries: a sweep of mostly-empty balances must
-// not create a fleet-wide snapshot-write workload.
-func readCachedOrExactNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id, warmCache bool) map[server.Id]netEscrowSnapshot {
+// reads through readBoundedReconcileNetEscrowSnapshots instead and never warms:
+// a sweep of mostly-empty balances must not create a fleet-wide write workload.
+func readCachedOrExactNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id) map[server.Id]netEscrowSnapshot {
 	pending := map[server.Id]netEscrowSnapshot{}
 	if len(balanceIds) == 0 {
 		return pending
@@ -246,9 +247,7 @@ func readCachedOrExactNetEscrowSnapshots(ctx context.Context, balanceIds []serve
 	})
 	missing := missingNetEscrowSnapshots(pending, balanceIds)
 	exact := openEscrowReservedForBalances(ctx, missing)
-	if warmCache {
-		cacheCommittedNetEscrowSnapshots(ctx, exact)
-	}
+	cacheCommittedNetEscrowSnapshots(ctx, exact)
 	for balanceId, snapshot := range exact {
 		pending[balanceId] = snapshot
 	}
@@ -258,12 +257,136 @@ func readCachedOrExactNetEscrowSnapshots(ctx context.Context, balanceIds []serve
 }
 
 // Scheduled reconciliation shares committed mirror authority without writing
-// the cache. The operator's exact audit and repair do not use the cache either.
-func readReconcileNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id, useCache bool) map[server.Id]netEscrowSnapshot {
+// the cache, and returns the balances it deferred over its census bound. The
+// operator's exact audit and repair do not use the cache and defer nothing.
+func readReconcileNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id, useCache bool) (map[server.Id]netEscrowSnapshot, []server.Id) {
 	if !useCache {
-		return openEscrowReservedForBalances(ctx, balanceIds)
+		return openEscrowReservedForBalances(ctx, balanceIds), nil
 	}
-	return readCachedOrExactNetEscrowSnapshots(ctx, balanceIds, false)
+	return readBoundedReconcileNetEscrowSnapshots(ctx, balanceIds)
+}
+
+// A census statement probes one transfer_contract row for every live legacy
+// escrow row of each balance it names, so its cost follows that history, not
+// the number of balances. The unresolved-contract backlog left single current
+// balances with about 10^5 such rows, and a 10,000-balance page then could not
+// finish inside its two-minute fence; each pass restarted at that page. Scheduled
+// repair censuses a cache miss only when a bounded probe finds at most this many
+// live legacy rows. Over-bound balances keep their mirror: a later pass, a
+// targeted post or the operator's exact audit repairs them.
+const netEscrowReconcileCandidateLimit = 64
+
+// Live legacy rows, and so contract probes, that one scheduled census may visit.
+const netEscrowReconcileCensusRowBudget = 16384
+
+// Balances named by one scheduled probe or census statement.
+const netEscrowReconcileStatementBalances = 1000
+
+// Reads at most $2 live legacy rows per balance from the partial legacy index,
+// with no contract probe. Every requested balance returns exactly one count.
+const netEscrowReconcileCandidateSQL = `
+    SELECT requested_balance.balance_id, candidate.row_count
+    FROM unnest($1::uuid[]) AS requested_balance(balance_id)
+    CROSS JOIN LATERAL (
+        SELECT count(*) AS row_count
+        FROM (
+            SELECT 1
+            FROM transfer_escrow
+            WHERE transfer_escrow.balance_id = requested_balance.balance_id AND
+                transfer_escrow.settled = false AND
+                transfer_escrow.balance_byte_count <> 0 AND NOT transfer_escrow.redis_reserved
+            LIMIT $2
+        ) AS bounded_escrow
+    ) AS candidate
+`
+
+// Counts are capped one past the limit. Each probe statement is a fenced
+// read-only transaction over at most netEscrowReconcileStatementBalances.
+func readNetEscrowReconcileCandidateCounts(ctx context.Context, balanceIds []server.Id) map[server.Id]int {
+	counts := make(map[server.Id]int, len(balanceIds))
+	for start := 0; start < len(balanceIds); start += netEscrowReconcileStatementBalances {
+		batch := balanceIds[start:min(start+netEscrowReconcileStatementBalances, len(balanceIds))]
+		server.Tx(ctx, func(tx server.PgTx) {
+			configureNetEscrowReservationPageTimeout(ctx, tx, netEscrowReservationPageStatementTimeout)
+			rows, err := tx.Query(ctx, netEscrowReconcileCandidateSQL, batch, netEscrowReconcileCandidateLimit+1)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var balanceId server.Id
+					var count int
+					server.Raise(rows.Scan(&balanceId, &count))
+					counts[balanceId] = count
+				}
+			})
+		}, server.TxReadCommitted, pgx.ReadOnly)
+	}
+	return counts
+}
+
+// Splits probed balances, in order, into census statements within both the
+// balance and row budgets. An over-limit or unprobed balance is deferred.
+func planNetEscrowReconcileCensus(balanceIds []server.Id, counts map[server.Id]int) (statements [][]server.Id, deferred []server.Id) {
+	var statement []server.Id
+	rowCount := 0
+	for _, balanceId := range balanceIds {
+		count, probed := counts[balanceId]
+		if !probed || count < 0 || netEscrowReconcileCandidateLimit < count {
+			deferred = append(deferred, balanceId)
+			continue
+		}
+		if len(statement) == netEscrowReconcileStatementBalances || netEscrowReconcileCensusRowBudget < rowCount+count {
+			statements = append(statements, statement)
+			statement, rowCount = nil, 0
+		}
+		statement = append(statement, balanceId)
+		rowCount += count
+	}
+	if len(statement) != 0 {
+		statements = append(statements, statement)
+	}
+	return
+}
+
+// Current cache entries are reused without warming the cache. Misses are
+// censused only within the probe bound; deferred ones have no snapshot.
+func readBoundedReconcileNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id) (map[server.Id]netEscrowSnapshot, []server.Id) {
+	pending := map[server.Id]netEscrowSnapshot{}
+	if len(balanceIds) == 0 {
+		return pending, nil
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		pending = readCachedNetEscrowSnapshots(ctx, conn, balanceIds)
+	})
+	missing := missingNetEscrowSnapshots(pending, balanceIds)
+	statements, deferred := planNetEscrowReconcileCensus(missing, readNetEscrowReconcileCandidateCounts(ctx, missing))
+	reloaded := 0
+	for _, statement := range statements {
+		for balanceId, snapshot := range openEscrowReservedForBalances(ctx, statement) {
+			pending[balanceId] = snapshot
+		}
+		reloaded += len(statement)
+	}
+	netEscrowRefreshSnapshots.WithLabelValues("reused").Add(float64(len(balanceIds) - len(missing)))
+	netEscrowRefreshSnapshots.WithLabelValues("reloaded").Add(float64(reloaded))
+	netEscrowRefreshSnapshots.WithLabelValues("deferred").Add(float64(len(deferred)))
+	return pending, deferred
+}
+
+// Page balances without the deferred ones, in page order.
+func withoutNetEscrowBalances(balanceIds []server.Id, deferred []server.Id) []server.Id {
+	if len(deferred) == 0 {
+		return balanceIds
+	}
+	skipped := make(map[server.Id]bool, len(deferred))
+	for _, balanceId := range deferred {
+		skipped[balanceId] = true
+	}
+	kept := make([]server.Id, 0, len(balanceIds)-len(deferred))
+	for _, balanceId := range balanceIds {
+		if !skipped[balanceId] {
+			kept = append(kept, balanceId)
+		}
+	}
+	return kept
 }
 
 func refreshNetEscrow(ctx context.Context, balanceIds []server.Id) {
