@@ -366,6 +366,16 @@ func solanaCreditDataPack(
 	signature string,
 	tokenAmountReceivedUsd float64,
 ) (credited bool, returnErr error) {
+	return solanaCreditDataPackInConn(nil, clientSession, paymentSearchResult, signature, tokenAmountReceivedUsd)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func solanaCreditDataPackInConn(connOwner server.PgConn,
+	clientSession *session.ClientSession,
+	paymentSearchResult *model.PaymentIntentSearchResult,
+	signature string,
+	tokenAmountReceivedUsd float64,
+) (credited bool, returnErr error) {
 	itemId := paymentSearchResult.SubscriptionPlan
 	byteCount, ok := stripeDataPackByteCount(itemId)
 	if !ok || byteCount <= 0 {
@@ -390,7 +400,7 @@ func solanaCreditDataPack(
 	now := server.NowUtc()
 	netRevenue := model.UsdToNanoCents(tokenAmountReceivedUsd)
 
-	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+	server.TxInConn(clientSession.Ctx, connOwner, func(tx server.PgTx) {
 		credited = false
 		returnErr = nil
 		if err := model.LockPaymentNetworkInTx(tx, clientSession.Ctx, networkId); err != nil {

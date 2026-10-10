@@ -151,6 +151,37 @@ func TestContractUsageGuardPreservesPreparedExpirySnapshot(t *testing.T) {
 	})
 }
 
+// The expiration exception permits only the exact pre-existing excluded value,
+// with explicit unverified retirement. New or changed proof stays forbidden.
+func TestContractUsageGuardExcludedExpiryKeepsCustody(t *testing.T) {
+	env := DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		Db(ctx, func(conn PgConn) {
+			evidence := []byte(`{"version":1,"byte_count":0,"providers":[],"legacy_exclusion":{}}`)
+			outcome, closedAt := "settled", NowUtc()
+			if err := insertContractUsageGuardTestRow(ctx, conn, NewId(), &outcome, &closedAt, evidence); err == nil {
+				t.Fatal("new terminal insert invented a legacy exclusion")
+			}
+			id := NewId()
+			Raise(insertContractUsageGuardTestRow(ctx, conn, id, nil, nil, evidence))
+			if _, err := conn.Exec(ctx, `UPDATE transfer_contract SET outcome='settled',close_time=$2 WHERE contract_id=$1`, id, closedAt); err == nil {
+				t.Fatal("ordinary settlement accepted excluded proof")
+			}
+			RaisePgResult(conn.Exec(ctx, `UPDATE transfer_contract SET usage_unverified=true,expiration_time=$2 WHERE contract_id=$1`, id, closedAt))
+			if _, err := conn.Exec(ctx, `UPDATE transfer_contract SET outcome='settled',close_time=$2,
+				provider_usage=jsonb_set(provider_usage,'{byte_count}','1') WHERE contract_id=$1`, id, closedAt); err == nil {
+				t.Fatal("expiry rewrote retained excluded proof")
+			}
+			RaisePgResult(conn.Exec(ctx, `UPDATE transfer_contract SET outcome='settled',close_time=$2 WHERE contract_id=$1`, id, closedAt))
+			if _, err := conn.Exec(ctx, `UPDATE transfer_contract SET provider_usage=NULL WHERE contract_id=$1`, id); err == nil {
+				t.Fatal("retirement weakened immutable custody")
+			}
+		})
+	})
+}
+
 // The append cannot backfill historical credit or rewrite terminal failures.
 // The existing explicit repair remains a row-bound, zero-credit debt record.
 func TestContractUsageGuardPreservesLegacyNullWithoutBackfill(t *testing.T) {

@@ -141,6 +141,9 @@ func StSyncChainPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if _, current := stTaskDeploymentCurrent(stSyncChain.DeploymentKey); !current {
+		return nil
+	}
 	ScheduleStSyncChain(clientSession, tx)
 	return nil
 }

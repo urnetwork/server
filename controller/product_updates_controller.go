@@ -407,93 +407,115 @@ func BrevoRemoveFromList(ctx context.Context, userEmail string, listId int) erro
 	return brevoProductUpdatesError(brevoOperationRemoveFromList, status, r.Code, brevoFailureProviderRejection)
 }
 
-// these set the initial product updates for new networks and users
+// Mark only acknowledged subscriptions, join both lists, and retain partial
+// failures for task retry. Successful markers make a replay idempotent.
 func SyncInitialProductUpdates(ctx context.Context) error {
 	// this is *2 for both lists
 	// this seems to be the highest brevo will let us go
 	parallelCount := 5
 
 	var wg sync.WaitGroup
+	var stateLock sync.Mutex
+	var result error
+	failed := func(err error) {
+		stateLock.Lock()
+		defer stateLock.Unlock()
+		result = errors.Join(result, err)
+	}
 
 	// new network sync
 	wg.Add(1)
-	go server.HandleError(func() {
+	go func() {
 		defer wg.Done()
+		server.HandleError(func() {
+			userEmailNetworkIds := model.GetNetworkUserEmailsForProductUpdatesSync(ctx)
+			userEmails := slices.Collect(maps.Keys(userEmailNetworkIds))
 
-		userEmailNetworkIds := model.GetNetworkUserEmailsForProductUpdatesSync(ctx)
-		userEmails := slices.Collect(maps.Keys(userEmailNetworkIds))
+			var subWg sync.WaitGroup
 
-		var subWg sync.WaitGroup
+			n := max(16, len(userEmails)/parallelCount)
+			for j := 0; j < len(userEmails); j += n {
+				i0 := j
+				i1 := min(j+n, len(userEmails))
+				subWg.Add(1)
+				go func() {
+					defer subWg.Done()
+					server.HandleError(func() {
+						networkIdProductUpdatesSync := map[server.Id]bool{}
 
-		n := max(16, len(userEmails)/parallelCount)
-		for j := 0; j < len(userEmails); j += n {
-			i0 := j
-			i1 := min(j+n, len(userEmails))
-			subWg.Add(1)
-			go server.HandleError(func() {
-				defer subWg.Done()
+						for i := i0; i < i1; i += 1 {
+							if err := ctx.Err(); err != nil {
+								failed(err)
+								break
+							}
+							userEmail := userEmails[i]
+							networkId := userEmailNetworkIds[userEmail]
+							glog.Infof("[product_updates][%d+%d/%d]add to new networks %s\n", i0, i-i0+1, i1-i0, maskEmail(userEmail))
+							if err := BrevoAddToList(ctx, userEmail, newNetworksListId()); err == nil {
+								networkIdProductUpdatesSync[networkId] = true
+							} else {
+								failed(err)
+								glog.Infof("[product_updates][%d+%d/%d]could not add to new networks %s. err = %s\n", i0, i-i0+1, i1-i0, maskEmail(userEmail), err)
+							}
+						}
 
-				networkIdProductUpdatesSync := map[server.Id]bool{}
+						model.SetNetworkProductUpdatesSyncForUsers(ctx, networkIdProductUpdatesSync)
+					}, failed)
+				}()
+			}
 
-				for i := i0; i < i1; i += 1 {
-					userEmail := userEmails[i]
-					networkId := userEmailNetworkIds[userEmail]
-					glog.Infof("[product_updates][%d+%d/%d]add to new networks %s\n", i0, i-i0+1, i1-i0, maskEmail(userEmail))
-					if err := BrevoAddToList(ctx, userEmail, newNetworksListId()); err == nil {
-						networkIdProductUpdatesSync[networkId] = true
-					} else {
-						glog.Infof("[product_updates][%d+%d/%d]could not add to new networks %s. err = %s\n", i0, i-i0+1, i1-i0, maskEmail(userEmail), err)
-					}
-				}
-
-				model.SetNetworkProductUpdatesSyncForUsers(ctx, networkIdProductUpdatesSync)
-			})
-		}
-
-		subWg.Wait()
-	})
+			subWg.Wait()
+		}, failed)
+	}()
 
 	// product updates sync
 	wg.Add(1)
-	go server.HandleError(func() {
+	go func() {
 		defer wg.Done()
+		server.HandleError(func() {
+			userEmailUserIds := model.GetUserEmailsForProductUpdatesSync(ctx)
+			userEmails := slices.Collect(maps.Keys(userEmailUserIds))
 
-		userEmailUserIds := model.GetUserEmailsForProductUpdatesSync(ctx)
-		userEmails := slices.Collect(maps.Keys(userEmailUserIds))
+			var subWg sync.WaitGroup
 
-		var subWg sync.WaitGroup
+			n := max(16, len(userEmails)/parallelCount)
+			for j := 0; j < len(userEmails); j += n {
+				i0 := j
+				i1 := min(j+n, len(userEmails))
+				subWg.Add(1)
+				go func() {
+					defer subWg.Done()
+					server.HandleError(func() {
+						userIdProductUpdatesSync := map[server.Id]bool{}
 
-		n := max(16, len(userEmails)/parallelCount)
-		for j := 0; j < len(userEmails); j += n {
-			i0 := j
-			i1 := min(j+n, len(userEmails))
-			subWg.Add(1)
-			go server.HandleError(func() {
-				defer subWg.Done()
+						for i := i0; i < i1; i += 1 {
+							if err := ctx.Err(); err != nil {
+								failed(err)
+								break
+							}
+							userEmail := userEmails[i]
+							userId := userEmailUserIds[userEmail]
+							glog.Infof("[product_updates][%d+%d/%d]add to product updates %s\n", i0, i-i0+1, i1-i0, maskEmail(userEmail))
+							if err := BrevoAddToList(ctx, userEmail, productUpdatesListId()); err == nil {
+								userIdProductUpdatesSync[userId] = true
+							} else {
+								failed(err)
+								glog.Infof("[product_updates][%d+%d/%d]could not add to product updates %s. err = %s\n", i0, i-i0+1, i1-i0, maskEmail(userEmail), err)
+							}
+						}
 
-				userIdProductUpdatesSync := map[server.Id]bool{}
+						model.SetProductUpdatesSyncForUsers(ctx, userIdProductUpdatesSync)
+					}, failed)
+				}()
+			}
 
-				for i := i0; i < i1; i += 1 {
-					userEmail := userEmails[i]
-					userId := userEmailUserIds[userEmail]
-					glog.Infof("[product_updates][%d+%d/%d]add to product updates %s\n", i0, i-i0+1, i1-i0, maskEmail(userEmail))
-					if err := BrevoAddToList(ctx, userEmail, productUpdatesListId()); err == nil {
-						userIdProductUpdatesSync[userId] = true
-					} else {
-						glog.Infof("[product_updates][%d+%d/%d]could not add to product updates %s. err = %s\n", i0, i-i0+1, i1-i0, maskEmail(userEmail), err)
-					}
-				}
-
-				model.SetProductUpdatesSyncForUsers(ctx, userIdProductUpdatesSync)
-			})
-		}
-
-		subWg.Wait()
-	})
+			subWg.Wait()
+		}, failed)
+	}()
 
 	wg.Wait()
 
-	return nil
+	return errors.Join(result, ctx.Err())
 }
 
 type SyncProductUpdatesForUserArgs struct {

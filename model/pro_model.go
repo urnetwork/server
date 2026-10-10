@@ -187,7 +187,12 @@ func IsProNetwork(ctx context.Context, networkId server.Id) bool {
 // Note this can only replace this process's local tier. Other processes keep their own
 // entry until ProLocalCacheTtl expires, which is why that ttl is short.
 func UpdateProNetwork(ctx context.Context, networkId server.Id) bool {
-	return refreshProNetwork(ctx, networkId)
+	return UpdateProNetworkInConn(nil, ctx, networkId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func UpdateProNetworkInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) bool {
+	return refreshProNetworkInConn(connOwner, ctx, networkId)
 }
 
 // UpdateProNetworks refreshes a batch of networks, used by the monthly Pro grant
@@ -239,7 +244,12 @@ var testingProNetworkLoaded atomic.Pointer[func(networkId server.Id)]
 // Loads the entitlement from the db and stores it in both tiers, returning the loaded
 // value.
 func refreshProNetwork(ctx context.Context, networkId server.Id) bool {
-	entitlement := loadProNetwork(ctx, networkId)
+	return refreshProNetworkInConn(nil, ctx, networkId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func refreshProNetworkInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) bool {
+	entitlement := loadProNetworkInConn(connOwner, ctx, networkId)
 	observeProNetworkLoaded(networkId)
 	storeProNetwork(ctx, networkId, entitlement)
 	return entitlement.pro
@@ -267,7 +277,12 @@ func storeProNetwork(ctx context.Context, networkId server.Id, entitlement proEn
 // began, before the snapshot it reads. Keep it on the primary (server.Db): a
 // replica's clock and replay lag would not order its reads against the primary's.
 func loadProNetwork(ctx context.Context, networkId server.Id) (entitlement proEntitlement) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return loadProNetworkInConn(nil, ctx, networkId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func loadProNetworkInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) (entitlement proEntitlement) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		entitlement = loadProNetworkWithConn(ctx, conn, networkId)
 	})
 	return

@@ -165,22 +165,23 @@ func flushLegacySettlementCohortInTx(ctx context.Context, tx server.PgTx, contra
 		rows, err = queryLegacyFinancialCohort(ctx, tx, `SELECT owned.contract_id,owned.source_network_id,owned.source_id,
             owned.destination_network_id,owned.destination_id,owned.payer_network_id,
             owned.companion_contract_id,owned.stream_id,owned.usage_origin_is_source,owned.outcome,
-            owned.transfer_byte_count,owned.usage_unverified,owned.provider_usage
+            owned.transfer_byte_count,owned.usage_unverified,owned.provider_usage,owned.expiration_time
             FROM (SELECT unnest($1::uuid[]) AS contract_id ORDER BY contract_id OFFSET 0) AS requested
             CROSS JOIN LATERAL (SELECT contract_id,source_network_id,source_id,destination_network_id,destination_id,
             payer_network_id,companion_contract_id,stream_id,usage_origin_is_source,outcome,
-            transfer_byte_count,usage_unverified,provider_usage FROM transfer_contract
+            transfer_byte_count,usage_unverified,provider_usage,expiration_time FROM transfer_contract
             WHERE contract_id=requested.contract_id OFFSET 0 FOR UPDATE SKIP LOCKED) AS owned`, ownedIds)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var id server.Id
 				var owner contractSettlementOwner
+				var expirationTime *time.Time
 				server.Raise(rows.Scan(&id, &owner.participants.sourceNetworkId, &owner.participants.sourceId,
 					&owner.participants.destinationNetworkId, &owner.participants.destinationId,
 					&owner.participants.payerNetworkId, &owner.participants.companionContractId, &owner.participants.streamId,
-					&owner.usageOriginIsSource, &owner.priorOutcome, &owner.capacity, &owner.unverified, &owner.retained))
+					&owner.usageOriginIsSource, &owner.priorOutcome, &owner.capacity, &owner.unverified, &owner.retained, &expirationTime))
 				contracts[id].owner = owner
-				contracts[id].fallback = owner.priorOutcome != nil
+				contracts[id].fallback = owner.priorOutcome != nil || expirationTime != nil && !server.NowUtc().Before(*expirationTime)
 				lockedContracts[id] = true
 			}
 		})

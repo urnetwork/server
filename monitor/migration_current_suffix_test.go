@@ -25,7 +25,7 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for head := 793; head <= 810; head++ {
+		for head := 793; head <= 812; head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
@@ -98,6 +98,10 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"closed-day audit includes completed outcomes", 810, `DROP INDEX transfer_contract_audit_closed_null_day; CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(close_time,contract_id) WHERE close_time IS NOT NULL`},
 		{"closed-day audit includes open contracts", 810, `DROP INDEX transfer_contract_audit_closed_null_day; CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(close_time,contract_id) WHERE outcome IS NULL`},
 		{"closed-day audit has an extra included key", 810, `DROP INDEX transfer_contract_audit_closed_null_day; CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(close_time,contract_id) INCLUDE (outcome) WHERE outcome IS NULL AND close_time IS NOT NULL`},
+		{"missing grant receipts", 811, `DROP TABLE transfer_balance_grant_run`},
+		{"grant receipt allows duplicate run", 811, `ALTER TABLE transfer_balance_grant_run DROP CONSTRAINT transfer_balance_grant_run_pkey`},
+		{"grant receipt kind has wrong width", 811, `ALTER TABLE transfer_balance_grant_run ALTER COLUMN grant_kind TYPE varchar(33)`},
+		{"deadline guard reverted to predecessor", 812, `CREATE OR REPLACE FUNCTION transfer_contract_usage_guard() RETURNS trigger LANGUAGE plpgsql AS $guard$` + server.ContractUsageGuardOriginalFunctionBodySql + `$guard$`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

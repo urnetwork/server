@@ -1,8 +1,9 @@
-// Scheduled children make retained intents selectable in their owned handoff.
+// Old workers can leave serialized owner handoffs awaiting the current Post.
 package work
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -13,7 +14,28 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-func TestScheduledContractClosureRegistersAndSettlesRetainedPaidIntent(t *testing.T) {
+// Preserve the actual serialized result of an older child whose body committed
+// but whose Post did not. The current RunPost dispatcher must recover it.
+func retainScheduledClosureHandoff(ctx context.Context, client *session.ClientSession, worker *task.TaskWorker,
+	taskId, contractId server.Id, deadline time.Time, owner model.ContractCloseOwner) server.Id {
+	raw, err := json.Marshal(&CloseScheduledContractResult{Owner: &owner})
+	server.Raise(err)
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract
+			SET expiration_time=LEAST(COALESCE(expiration_time,$2),$2) WHERE contract_id=$1`, contractId, deadline))
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO finished_task
+			(task_id,function_name,args_json,client_address,client_address_hash,client_address_port,
+			client_by_jwt_json,run_at,run_once_key,run_priority,run_max_time_seconds,
+			run_start_time,run_end_time,result_json,post_completed)
+			SELECT task_id,function_name,args_json,client_address,client_address_hash,client_address_port,
+			client_by_jwt_json,run_at,run_once_key,run_priority,run_max_time_seconds,$3,$3,$2,false
+			FROM pending_task WHERE task_id=$1`, taskId, string(raw), deadline))
+		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE task_id=$1`, taskId))
+	})
+	return task.ScheduleTask(worker.RunPost, &task.RunPostArgs{TaskId: taskId}, client, task.RunAt(deadline))
+}
+
+func TestScheduledContractClosureRetainedPaidHandoffRegistersAndSettles(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -70,7 +92,9 @@ func TestScheduledContractClosureRegistersAndSettlesRetainedPaidIntent(t *testin
 		}, server.TxReadCommitted, server.OptNoRetry())
 		child := startupClosureWorker(ctx, NewScheduledContractClosureTaskTarget())
 		defer child.Close()
-		evalStartupClosureTask(t, ctx, child, readExpiryRecoveryQueue(t, ctx)[key.String()].id)
+		postId := retainScheduledClosureHandoff(ctx, client, child, readExpiryRecoveryQueue(t, ctx)[key.String()].id,
+			id, deadline, model.ContractCloseOwner{Kind: model.ContractCloseOwnerPayerNetwork, Id: payer})
+		evalStartupClosureTask(t, ctx, child, postId)
 		server.Db(ctx, func(conn server.PgConn) {
 			var registered bool
 			server.Raise(conn.QueryRow(ctx, `SELECT payer_network_id IS NOT DISTINCT FROM $2::uuid
@@ -132,9 +156,9 @@ func TestScheduledContractClosureRegistersAndSettlesRetainedPaidIntent(t *testin
 	})
 }
 
-// A real child body caps the deadline while an independent owner holds only I.
-// Its Post must commit a new child, never wait on I or lose the sole wake.
-func TestScheduledContractClosureBusyIntentKeepsOrdinarySuccessor(t *testing.T) {
+// A retained handoff has capped the deadline while an independent owner holds
+// only I. Its Post must commit a new child without losing the sole wake.
+func TestScheduledContractClosureRetainedBusyHandoffKeepsOrdinarySuccessor(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -158,6 +182,10 @@ func TestScheduledContractClosureBusyIntentKeepsOrdinarySuccessor(t *testing.T) 
 				ScheduledContractClose: ScheduledContractClose{ContractId: id, Deadline: deadline}})
 		}, server.TxReadCommitted, server.OptNoRetry())
 		initial := readExpiryRecoveryQueue(t, ctx)[key.String()]
+		worker := startupClosureWorker(ctx, NewScheduledContractClosureTaskTarget())
+		defer worker.Close()
+		postId := retainScheduledClosureHandoff(ctx, client, worker, initial.id, id, deadline,
+			model.ContractCloseOwner{Kind: model.ContractCloseOwnerSourceClient, Id: source})
 		conn, err := server.AcquireMaintenanceDbConn(ctx)
 		server.Raise(err)
 		defer conn.Release()
@@ -167,10 +195,8 @@ func TestScheduledContractClosureBusyIntentKeepsOrdinarySuccessor(t *testing.T) 
 		defer held.Rollback(context.Background())
 		var locked server.Id
 		server.Raise(held.QueryRow(ctx, `SELECT contract_id FROM legacy_settlement_intent WHERE contract_id=$1 FOR UPDATE`, id).Scan(&locked))
-		worker := startupClosureWorker(ctx, NewScheduledContractClosureTaskTarget())
-		defer worker.Close()
 		start := server.NowUtc()
-		evalStartupClosureTask(t, ctx, worker, initial.id)
+		evalStartupClosureTask(t, ctx, worker, postId)
 		end := server.NowUtc()
 		queue := readExpiryRecoveryQueue(t, ctx)
 		next, found := queue[key.String()]
@@ -190,7 +216,7 @@ func TestScheduledContractClosureBusyIntentKeepsOrdinarySuccessor(t *testing.T) 
 		})
 		server.Raise(held.Rollback(ctx))
 		// Cross the successor's eligibility without changing the original
-		// retirement deadline; the next normal child commits exact registration.
+		// retirement deadline; the next normal child commits reconciliation.
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2 WHERE task_id=$1`, next.id, deadline))
 		})
@@ -199,8 +225,11 @@ func TestScheduledContractClosureBusyIntentKeepsOrdinarySuccessor(t *testing.T) 
 		if _, found := queue[key.String()]; found {
 			t.Fatal("released intent retained an unnecessary child successor")
 		}
-		if _, found := queue[task.RunOnce("flush_legacy_source_settlements", source).String()]; !found {
-			t.Fatal("released intent did not receive its actual source wake")
+		if len(queue) != 0 {
+			t.Fatal("released intent left an unnecessary settlement handoff", queue)
+		}
+		if _, closed := model.GetContractClose(ctx, id); !closed {
+			t.Fatal("released intent remained open after its successor completed")
 		}
 	})
 }

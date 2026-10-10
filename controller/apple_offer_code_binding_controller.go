@@ -273,8 +273,8 @@ func verifyAppleOfferCodeTransaction(
 
 // appleOfferCodeBindingLookupFunc resolves a bound original transaction id.
 // Tests replace it.
-var appleOfferCodeBindingLookupFunc = func(ctx context.Context, originalTransactionId string) (server.Id, bool) {
-	return model.GetAppleOfferCodeBindingNetworkId(ctx, originalTransactionId)
+var appleOfferCodeBindingLookupFunc = func(connOwner server.PgConn, ctx context.Context, originalTransactionId string) (server.Id, bool) {
+	return model.GetAppleOfferCodeBindingNetworkIdInConn(connOwner, ctx, originalTransactionId)
 }
 
 // validateAppleTransactionBound is validateAppleTransaction for the paths that
@@ -287,12 +287,22 @@ func validateAppleTransactionBound(
 	allowedProductIds []string,
 	requireEntitlementFields bool,
 ) (*validatedAppleTransaction, error) {
+	return validateAppleTransactionBoundInConn(nil, ctx, notification, allowedProductIds, requireEntitlementFields)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func validateAppleTransactionBoundInConn(connOwner server.PgConn,
+	ctx context.Context,
+	notification AppleNotificationDecodedPayload,
+	allowedProductIds []string,
+	requireEntitlementFields bool,
+) (*validatedAppleTransaction, error) {
 	transaction, err := validateAppleTransactionAccount(notification, allowedProductIds, requireEntitlementFields, true)
 	if err != nil {
 		return nil, err
 	}
 	if transaction.unboundAccountToken {
-		networkId, ok := appleOfferCodeBindingLookupFunc(ctx, transaction.originalTransactionId)
+		networkId, ok := appleOfferCodeBindingLookupFunc(connOwner, ctx, transaction.originalTransactionId)
 		if !ok {
 			return nil, errors.New("invalid App Store account token")
 		}

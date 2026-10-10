@@ -241,12 +241,15 @@ func ReferralBonusCount(referralCount int) int {
 //
 // Returns the total byte count granted per network (a network that is both a referrer
 // and a referee accumulates both grants).
+// A supplied task run id commits a replay receipt with both sides' grants;
+// omit it for an intentional independent refresh.
 func AddReferralBonusesToAllNetworks(
 	ctx context.Context,
 	startTime time.Time,
 	endTime time.Time,
 	bonusPerReferral ByteCount,
 	referredBonus ByteCount,
+	runIds ...server.Id,
 ) (addedTransferBalances map[server.Id]ByteCount) {
 	addedTransferBalances = map[server.Id]ByteCount{}
 
@@ -262,6 +265,10 @@ func AddReferralBonusesToAllNetworks(
 	seekerMultiplier := Pro().SeekerDataMultiplier()
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		addedTransferBalances = map[server.Id]ByteCount{}
+		if !claimTransferGrantRunInTx(ctx, tx, GrantKindReferral, startTime, endTime, runIds) {
+			return
+		}
 		grant := func(networkId server.Id, byteCount ByteCount) {
 			if seekerMultiplier != 1.0 && seekers[networkId] {
 				byteCount = ByteCount(float64(byteCount) * seekerMultiplier)
@@ -269,10 +276,7 @@ func AddReferralBonusesToAllNetworks(
 			if byteCount <= 0 {
 				return
 			}
-			if err := AddGrantTransferBalanceInTx(tx, ctx, networkId, GrantKindReferral, byteCount, startTime, endTime); err != nil {
-				// do not fail the whole batch for one network
-				return
-			}
+			server.Raise(AddGrantTransferBalanceInTx(tx, ctx, networkId, GrantKindReferral, byteCount, startTime, endTime))
 			addedTransferBalances[networkId] += byteCount
 		}
 
@@ -297,7 +301,8 @@ func AddReferralBonusesToAllNetworks(
 	return
 }
 
-// todo - testme
+// A source query failure is not an empty referral set; propagate it so the
+// grant task retries without committing a receipt for missing work.
 func GetNetworkReferralsMap(
 	ctx context.Context,
 ) map[server.Id][]server.Id {
@@ -309,9 +314,6 @@ func GetNetworkReferralsMap(
 			ctx,
 			`SELECT network_id, referral_network_id FROM network_referral`,
 		)
-		if err != nil {
-			return
-		}
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var networkId, referralNetworkId server.Id

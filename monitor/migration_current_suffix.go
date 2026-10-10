@@ -1,4 +1,4 @@
-// Published versions 794–810 share one ordered artifact/SQL contract. These
+// Published versions 794–812 share one ordered artifact/SQL contract. These
 // predicates read catalogs only and remain safe before the additive DDL exists.
 package monitor
 
@@ -205,4 +205,13 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(810, "closed-day audit lookup for contracts without an outcome",
 		migrationFp2Index("transfer_contract", "transfer_contract_audit_closed_null_day",
 			"close_time, contract_id", "((outcome IS NULL) AND (close_time IS NOT NULL))", false)),
+	migrationCurrentSuffix(811, "recurring transfer-grant task receipts",
+		migrationFp2Table("transfer_balance_grant_run"),
+		snMainnetMigrationColumns("transfer_balance_grant_run",
+			snMainnetMigrationColumn{name: "run_id", kind: "uuid", notNull: true},
+			snMainnetMigrationColumn{name: "grant_kind", kind: "character varying(32)", notNull: true},
+			snMainnetMigrationColumn{name: "start_time", kind: "timestamp without time zone", notNull: true},
+			snMainnetMigrationColumn{name: "end_time", kind: "timestamp without time zone", notNull: true}),
+		snMainnetMigrationConstraints("transfer_balance_grant_run", "PRIMARY KEY (run_id, grant_kind)")),
+	migrationCurrentSuffix(812, "deadline closure preserves retained usage evidence", contractDeadlineUsageGuardArtifactQuery),
 }

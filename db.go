@@ -814,6 +814,12 @@ func rollbackTx(ctx context.Context, tx PgTx) {
 }
 
 func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), options ...any) {
+	txWithConnection(ctx, func(body func(PgConn)) {
+		dbWithPool(ctx, pool, body, options...)
+	}, callback, options...)
+}
+
+func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func(PgTx), options ...any) {
 	retryOptions := OptRetryDefault()
 	var timing *DbTiming
 	// by default use RepeatableRead isolation
@@ -852,7 +858,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 		var commitErr error
 		var commitPosts []PostFunction
 		var committedAt time.Time
-		dbWithPool(ctx, pool, func(conn PgConn) {
+		use(func(conn PgConn) {
 			// an earlier use of the pooled connection is not evidence about
 			// this attempt
 			pgStatementErrorRecorderOf(conn.Conn().PgConn()).Reset()
@@ -933,7 +939,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				rollbackTx(ctx, tx)
 				timing.finish(DbTimingRollback, rollbackStarted)
 			}
-		}, options...)
+		})
 
 		if pgErr != nil {
 			if retryOptions.rerunOnTransientError && retryEvidence.CanRerun(pgErr) {

@@ -398,12 +398,13 @@ func playLineItemExpiryRange(sub *PlaySubscription) (maxExpiryTime time.Time, mi
 // or its linkedPurchaseToken's (model.ResolvePlayPurchaseBinding). Tests
 // replace it.
 var playPurchaseBindingLookupFunc = func(
+	connOwner server.PgConn,
 	ctx context.Context,
 	purchaseToken string,
 	linkedPurchaseToken string,
 	inherit bool,
 ) (server.Id, bool) {
-	return model.ResolvePlayPurchaseBinding(ctx, purchaseToken, linkedPurchaseToken, inherit)
+	return model.ResolvePlayPurchaseBindingInConn(connOwner, ctx, purchaseToken, linkedPurchaseToken, inherit)
 }
 
 // playResolveNetworkId is the network a purchase belongs to, for the paths
@@ -416,14 +417,24 @@ func playResolveNetworkId(
 	purchaseToken string,
 	inherit bool,
 ) (*server.Id, bool) {
-	linkedNetworkId, ok := playLinkedNetworkId(clientSession, sub)
+	return playResolveNetworkIdInConn(nil, clientSession, sub, purchaseToken, inherit)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func playResolveNetworkIdInConn(connOwner server.PgConn,
+	clientSession *session.ClientSession,
+	sub *PlaySubscription,
+	purchaseToken string,
+	inherit bool,
+) (*server.Id, bool) {
+	linkedNetworkId, ok := playLinkedNetworkIdInConn(connOwner, clientSession, sub)
 	if !ok {
 		return nil, false
 	}
 	if linkedNetworkId != nil {
 		return linkedNetworkId, true
 	}
-	if networkId, bound := playPurchaseBindingLookupFunc(clientSession.Ctx, purchaseToken, sub.LinkedPurchaseToken, inherit); bound {
+	if networkId, bound := playPurchaseBindingLookupFunc(connOwner, clientSession.Ctx, purchaseToken, sub.LinkedPurchaseToken, inherit); bound {
 		return &networkId, true
 	}
 	return nil, true

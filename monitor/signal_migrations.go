@@ -225,13 +225,18 @@ const clientKeyPolicyNamespaceArtifactQuery = `(
 
 // Admission pins the complete installed function, its relation and its enabled
 // insert/update trigger; a numeric head cannot hide a disabled custody guard.
-var contractUsageGuardArtifactQuery = `(
+func contractUsageGuardBodyArtifactQuery(bodies ...string) string {
+	quoted := make([]string, len(bodies))
+	for index, body := range bodies {
+		quoted[index] = "'" + strings.ReplaceAll(body, "'", "''") + "'"
+	}
+	return `(
     EXISTS (
         SELECT 1 FROM pg_proc AS function_record
         WHERE function_record.oid = to_regprocedure('public.transfer_contract_usage_guard()')
           AND function_record.prorettype = 'trigger'::regtype
           AND function_record.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
-          AND function_record.prosrc = '` + strings.ReplaceAll(server.ContractUsageGuardFunctionBodySql, "'", "''") + `'
+          AND function_record.prosrc IN (` + strings.Join(quoted, ",") + `)
     )
     AND EXISTS (
         SELECT 1 FROM pg_trigger AS trigger_record
@@ -244,6 +249,15 @@ var contractUsageGuardArtifactQuery = `(
           AND NOT trigger_record.tgisinternal
     )
 )`
+}
+
+// The original custody contract accepts its published successor too. The new
+// version separately requires that successor, so old heads remain coherent
+// while an old function installed at the new head is schema drift.
+var contractUsageGuardArtifactQuery = contractUsageGuardBodyArtifactQuery(
+	server.ContractUsageGuardOriginalFunctionBodySql, server.ContractUsageGuardFunctionBodySql)
+
+var contractDeadlineUsageGuardArtifactQuery = contractUsageGuardBodyArtifactQuery(server.ContractUsageGuardFunctionBodySql)
 
 var migrationArtifacts = append(append(append([]migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},

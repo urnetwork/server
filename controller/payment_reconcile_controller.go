@@ -416,6 +416,7 @@ type PaymentReconcileRunResult struct {
 
 type paymentReconcileRun struct {
 	clientSession *session.ClientSession
+	connOwner     server.PgConn
 	runId         server.Id
 	now           time.Time
 	dryRun        bool
@@ -438,7 +439,7 @@ func paymentReconcileStoreCanAdvanceWatermark(complete bool, dryRun bool, errors
 	return complete && !dryRun && errorsAfter == errorsBefore
 }
 
-var addPaymentReconciliationEvent = model.AddPaymentReconciliationEvent
+var addPaymentReconciliationEvent = model.AddPaymentReconciliationEventInConn
 
 func (self *paymentReconcileRun) record(
 	store string,
@@ -464,7 +465,7 @@ func (self *paymentReconcileRun) record(
 		self.skipped = append(self.skipped, store)
 		self.storeResult(store).Skipped = true
 	}
-	if err := addPaymentReconciliationEvent(self.clientSession.Ctx, &model.PaymentReconciliationEvent{
+	if err := addPaymentReconciliationEvent(self.connOwner, self.clientSession.Ctx, &model.PaymentReconciliationEvent{
 		RunId:     self.runId,
 		Store:     store,
 		NetworkId: networkId,
@@ -573,7 +574,7 @@ func (self *paymentReconcileRun) repairEntitlement(
 	evidence string,
 	details map[string]any,
 ) {
-	repaired, err := model.RepairReconciledProEntitlement(
+	repaired, err := model.RepairReconciledProEntitlementInConn(self.connOwner,
 		self.clientSession.Ctx,
 		store,
 		renewal,
@@ -614,7 +615,7 @@ func (self *paymentReconcileRun) end(
 		self.record(store, model.PaymentReconcileActionWouldEnd, &networkId, evidence, details)
 		return
 	}
-	ended, err := model.EndReconciledEntitlement(self.clientSession.Ctx, networkId, store, self.now)
+	ended, err := model.EndReconciledEntitlementInConn(self.connOwner, self.clientSession.Ctx, networkId, store, self.now)
 	if err != nil {
 		self.record(
 			store,
@@ -660,7 +661,7 @@ func (self *paymentReconcileRun) storeDetail(store string) map[string]any {
 // crediting gates absorb the overlap), or the full reconcile window on the
 // first run.
 func (self *paymentReconcileRun) sinceWatermark(store string) time.Time {
-	if watermark, ok := model.GetPaymentReconcileWatermark(self.clientSession.Ctx, store); ok {
+	if watermark, ok := model.GetPaymentReconcileWatermarkInConn(self.connOwner, self.clientSession.Ctx, store); ok {
 		return watermark.Add(-1 * time.Hour)
 	}
 	return self.now.Add(-paymentReconcileWindow)
@@ -701,19 +702,21 @@ func RunPaymentReconciliationWithOptions(
 	if options.DryRun {
 		// a dry run writes nothing, so it cannot interleave harmfully with a
 		// real run: it runs lock-free (an audit can run while the task does)
-		return runPaymentReconciliation(clientSession, options), nil
+		return runPaymentReconciliation(nil, clientSession, options), nil
 	}
 
-	// One real run at a time across ALL entry points: a session-level
-	// advisory lock held on a pinned connection for the run's whole duration
+	// One real run at a time across all entry points: a session-level
+	// advisory lock held on a direct connection for the run's whole duration
 	// (the run spans many transactions and store API calls, so a tx-scoped
 	// lock cannot cover it). Try-lock: a second caller reports busy instead
 	// of queueing. OptNoRetry pins the callback to a single attempt -- the
 	// pool must never re-run a completed reconcile pass on a dropped
-	// connection.
+	// connection. Every model operation reuses this session for its sequential
+	// transactions. Retaining the lock while acquiring another PostgreSQL
+	// connection can exhaust the pool before any reconciliation write starts.
 	var result *PaymentReconcileRunResult
 	locked := false
-	server.Db(clientSession.Ctx, func(conn server.PgConn) {
+	server.MaintenanceDb(clientSession.Ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(
 			clientSession.Ctx,
 			`SELECT pg_try_advisory_lock(hashtextextended($1, 0))`,
@@ -743,7 +746,7 @@ func RunPaymentReconciliationWithOptions(
 				conn.Hijack().Close(unlockCtx)
 			}
 		}()
-		result = runPaymentReconciliation(clientSession, options)
+		result = runPaymentReconciliation(conn, clientSession, options)
 	}, server.OptNoRetry())
 	if !locked {
 		return nil, ErrPaymentReconcileRunInProgress
@@ -752,11 +755,13 @@ func RunPaymentReconciliationWithOptions(
 }
 
 func runPaymentReconciliation(
+	connOwner server.PgConn,
 	clientSession *session.ClientSession,
 	options *PaymentReconcileRunOptions,
 ) *PaymentReconcileRunResult {
 	run := &paymentReconcileRun{
 		clientSession: clientSession,
+		connOwner:     connOwner,
 		runId:         server.NewId(),
 		now:           server.NowUtc(),
 		dryRun:        options.DryRun,
@@ -840,7 +845,7 @@ func runPaymentReconciliation(
 				// the next run's listing starts here (minus the overlap
 				// backoff); a dry run never advances the watermark -- the
 				// un-eaten window is what the later real run reconciles
-				if err := model.SetPaymentReconcileWatermark(clientSession.Ctx, storeReconcile.store, run.now); err != nil {
+				if err := model.SetPaymentReconcileWatermarkInConn(connOwner, clientSession.Ctx, storeReconcile.store, run.now); err != nil {
 					glog.Errorf("[reconcile]%s: could not advance watermark: %s\n", storeReconcile.store, err)
 				}
 			}
@@ -934,7 +939,7 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 				continue
 			}
 			run.examine(store)
-			if _, credited := model.GetStripeInvoiceNetworkId(ctx, invoice.Id); credited {
+			if _, credited := model.GetStripeInvoiceNetworkIdInConn(run.connOwner, ctx, invoice.Id); credited {
 				// the webhook already handled this one
 				continue
 			}
@@ -951,7 +956,7 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 					// a non-subscription invoice -- the real run would do nothing
 					continue
 				}
-				if !model.NetworkExists(ctx, credit.networkId) {
+				if !model.NetworkExistsInConn(run.connOwner, ctx, credit.networkId) {
 					// Match the real credit's lifecycle-lock refusal without
 					// consuming its ledger or pretending a different destination
 					// would receive the paid invoice.
@@ -973,11 +978,11 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 			// the repair IS the webhook path: same network resolution, same
 			// stripe_invoice ledger gate, so a racing late webhook delivery for
 			// the same invoice credits exactly once between the two of them
-			if _, err := stripeHandleInvoicePaid(invoice, run.clientSession); err != nil {
+			if _, err := stripeHandleInvoicePaidInConn(run.connOwner, invoice, run.clientSession); err != nil {
 				run.recordStripeCreditError(invoice, err)
 				continue
 			}
-			if networkId, credited := model.GetStripeInvoiceNetworkId(ctx, invoice.Id); credited {
+			if networkId, credited := model.GetStripeInvoiceNetworkIdInConn(run.connOwner, ctx, invoice.Id); credited {
 				run.record(
 					store,
 					model.PaymentReconcileActionCredited,
@@ -997,7 +1002,7 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 
 	// leg 2: server-side -- for networks we think are actively subscribed,
 	// does Stripe agree the subscription is still alive?
-	renewals := model.GetReconcileSubscriptionRenewals(
+	renewals := model.GetReconcileSubscriptionRenewalsInConn(run.connOwner,
 		ctx,
 		store,
 		run.now.Add(-paymentReconcileWindow),
@@ -1054,7 +1059,7 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 			(fullInvoice.Subscription.Status == "canceled" &&
 				fullInvoice.Subscription.CancellationDetails.Reason == "payment_failed")) &&
 			renewal.EndTime.After(run.now) &&
-			stripeRenewalMatchesInvoice(ctx, renewal, fullInvoice)
+			stripeRenewalMatchesInvoiceInConn(run.connOwner, ctx, renewal, fullInvoice)
 		if manualPaymentGrace {
 			continue
 		}
@@ -1066,7 +1071,7 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 				map[string]any{"subscription_status": fullInvoice.Subscription.Status},
 			)
 		} else if stripeSubscriptionEntitled(fullInvoice.Subscription.Status) &&
-			stripeRenewalMatchesInvoice(ctx, renewal, fullInvoice) {
+			stripeRenewalMatchesInvoiceInConn(run.connOwner, ctx, renewal, fullInvoice) {
 			run.repairEntitlement(
 				store,
 				renewal,
@@ -1084,10 +1089,19 @@ func stripeRenewalMatchesInvoice(
 	renewal *model.ReconcileSubscriptionRenewal,
 	invoice *stripeReconcileInvoiceExpanded,
 ) bool {
+	return stripeRenewalMatchesInvoiceInConn(nil, ctx, renewal, invoice)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func stripeRenewalMatchesInvoiceInConn(connOwner server.PgConn,
+	ctx context.Context,
+	renewal *model.ReconcileSubscriptionRenewal,
+	invoice *stripeReconcileInvoiceExpanded,
+) bool {
 	if invoice == nil || invoice.Subscription == nil || invoice.Id != renewal.TransactionId {
 		return false
 	}
-	ledgerNetworkId, credited := model.GetStripeInvoiceNetworkId(ctx, renewal.TransactionId)
+	ledgerNetworkId, credited := model.GetStripeInvoiceNetworkIdInConn(connOwner, ctx, renewal.TransactionId)
 	if !credited || ledgerNetworkId != renewal.NetworkId {
 		return false
 	}
@@ -1141,7 +1155,7 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 		return false, errors.New("apple credentials disappeared mid-run")
 	}
 
-	renewals := model.GetReconcileSubscriptionRenewals(
+	renewals := model.GetReconcileSubscriptionRenewalsInConn(run.connOwner,
 		ctx,
 		store,
 		run.now.Add(-paymentReconcileWindow),
@@ -1222,7 +1236,7 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 				)
 				continue
 			}
-			transaction, err := validateAppleTransactionBound(
+			transaction, err := validateAppleTransactionBoundInConn(run.connOwner,
 				ctx,
 				AppleNotificationDecodedPayload{
 					SignedDate:      run.now.UnixMilli(),
@@ -1242,7 +1256,7 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 				continue
 			}
 			transactionId := transaction.transactionId
-			ledgerNetworkId, transactionCredited := model.GetAppleTransactionNetworkId(ctx, transactionId)
+			ledgerNetworkId, transactionCredited := model.GetAppleTransactionNetworkIdInConn(run.connOwner, ctx, transactionId)
 			if transactionCredited {
 				if ledgerNetworkId == renewal.NetworkId && appleRenewalMatchesTransaction(renewal, transaction) {
 					run.repairEntitlement(
@@ -1254,7 +1268,7 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 				}
 				continue
 			}
-			credited, networkId, err := appleReconcileCreditTransaction(ctx, claims, creds.ProductIds, run.dryRun)
+			credited, networkId, err := appleReconcileCreditTransactionInConn(run.connOwner, ctx, claims, creds.ProductIds, run.dryRun)
 			if err != nil {
 				run.record(
 					store,
@@ -1324,17 +1338,27 @@ func appleReconcileCreditTransaction(
 	allowedProductIds []string,
 	dryRun bool,
 ) (credited bool, networkId server.Id, returnErr error) {
+	return appleReconcileCreditTransactionInConn(nil, ctx, transactionClaims, allowedProductIds, dryRun)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func appleReconcileCreditTransactionInConn(connOwner server.PgConn,
+	ctx context.Context,
+	transactionClaims map[string]any,
+	allowedProductIds []string,
+	dryRun bool,
+) (credited bool, networkId server.Id, returnErr error) {
 	notification := AppleNotificationDecodedPayload{
 		SignedDate:      server.NowUtc().UnixMilli(),
 		TransactionInfo: transactionClaims,
 	}
-	transaction, err := validateAppleTransactionBound(ctx, notification, allowedProductIds, true)
+	transaction, err := validateAppleTransactionBoundInConn(connOwner, ctx, notification, allowedProductIds, true)
 	if err != nil {
 		return false, server.Id{}, err
 	}
 	networkId = transaction.networkId
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		if !appleNetworkExistsInTx(tx, ctx, transaction.networkId) {
 			returnErr = errors.New("App Store account token does not name an existing network")
 			return
@@ -1350,7 +1374,7 @@ func appleReconcileCreditTransaction(
 	}
 
 	if credited && !dryRun {
-		model.UpdateProNetwork(ctx, networkId)
+		model.UpdateProNetworkInConn(connOwner, ctx, networkId)
 	}
 	return credited, networkId, nil
 }
@@ -1370,7 +1394,7 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 	store := model.SubscriptionMarketGoogle
 	packageName := playPackageNameFunc()
 
-	renewals := model.GetReconcileSubscriptionRenewals(
+	renewals := model.GetReconcileSubscriptionRenewalsInConn(run.connOwner,
 		ctx,
 		store,
 		run.now.Add(-paymentReconcileWindow),
@@ -1448,7 +1472,7 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 		}
 
 		if sub.SubscriptionState == "SUBSCRIPTION_STATE_ACTIVE" {
-			if playUnlinkedBoundElsewhere(run.clientSession, sub, renewal) {
+			if playUnlinkedBoundElsewhereInConn(run.connOwner, run.clientSession, sub, renewal) {
 				// a purchase without an account link is bound to a different
 				// network than this renewal row: never credit the row's network
 				run.record(
@@ -1460,7 +1484,7 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 				)
 				continue
 			}
-			repairMatches, matchErr := playRenewalMatchesSubscription(
+			repairMatches, matchErr := playRenewalMatchesSubscriptionInConn(run.connOwner,
 				run.clientSession,
 				renewal,
 				sub,
@@ -1480,7 +1504,7 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 				// the renewal path's overlap gate, read-only: an existing
 				// balance overlapping this expiry means the real run would
 				// no-op, otherwise it would credit the renewal
-				if _, err := model.GetOverlappingTransferBalance(ctx, purchaseToken, maxExpiryTime); err != nil {
+				if _, err := model.GetOverlappingTransferBalanceInConn(run.connOwner, ctx, purchaseToken, maxExpiryTime); err != nil {
 					run.record(
 						store,
 						model.PaymentReconcileActionWouldCredit,
@@ -1504,7 +1528,7 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 			if !run.spend(store) {
 				return false, nil
 			}
-			result, err := PlaySubscriptionRenewal(
+			result, err := PlaySubscriptionRenewalInConn(run.connOwner,
 				&PlaySubscriptionRenewalArgs{
 					NetworkId:      renewal.NetworkId,
 					PackageName:    packageName,
@@ -1554,15 +1578,34 @@ func playUnlinkedBoundElsewhere(
 	subscription *PlaySubscription,
 	renewal *model.ReconcileSubscriptionRenewal,
 ) bool {
-	linkedNetworkId, validLink := playLinkedNetworkId(clientSession, subscription)
+	return playUnlinkedBoundElsewhereInConn(nil, clientSession, subscription, renewal)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func playUnlinkedBoundElsewhereInConn(connOwner server.PgConn,
+	clientSession *session.ClientSession,
+	subscription *PlaySubscription,
+	renewal *model.ReconcileSubscriptionRenewal,
+) bool {
+	linkedNetworkId, validLink := playLinkedNetworkIdInConn(connOwner, clientSession, subscription)
 	if !validLink || linkedNetworkId != nil {
 		return false
 	}
-	networkId, bound := playPurchaseBindingLookupFunc(clientSession.Ctx, renewal.PurchaseToken, subscription.LinkedPurchaseToken, false)
+	networkId, bound := playPurchaseBindingLookupFunc(connOwner, clientSession.Ctx, renewal.PurchaseToken, subscription.LinkedPurchaseToken, false)
 	return bound && networkId != renewal.NetworkId
 }
 
 func playRenewalMatchesSubscription(
+	clientSession *session.ClientSession,
+	renewal *model.ReconcileSubscriptionRenewal,
+	subscription *PlaySubscription,
+	maxExpiryTime time.Time,
+) (bool, error) {
+	return playRenewalMatchesSubscriptionInConn(nil, clientSession, renewal, subscription, maxExpiryTime)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func playRenewalMatchesSubscriptionInConn(connOwner server.PgConn,
 	clientSession *session.ClientSession,
 	renewal *model.ReconcileSubscriptionRenewal,
 	subscription *PlaySubscription,
@@ -1581,7 +1624,7 @@ func playRenewalMatchesSubscription(
 	}
 	// the account link, or for a purchase without one the binding the verify
 	// endpoint made (read-only: a reconcile pass never writes a binding)
-	linkedNetworkId, validLink := playResolveNetworkId(clientSession, subscription, renewal.PurchaseToken, false)
+	linkedNetworkId, validLink := playResolveNetworkIdInConn(connOwner, clientSession, subscription, renewal.PurchaseToken, false)
 	if !validLink || linkedNetworkId == nil {
 		return false, nil
 	}
@@ -1606,25 +1649,25 @@ func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 
 	// leg 1: unfulfilled payments -- money that arrived and bought nothing.
 	// The DB sweep costs no store API budget.
-	unfulfilledPayments := model.ListUnfulfilledSolanaPayments(
+	unfulfilledPayments := model.ListUnfulfilledSolanaPaymentsInConn(run.connOwner,
 		ctx,
 		model.SolanaUnfulfilledReasonNoIntent,
 		paymentReconcileRenewalLimit,
 	)
 	for _, payment := range unfulfilledPayments {
 		run.examine(store)
-		if model.IsSolanaPaymentCompleted(ctx, payment.TxSignature) {
+		if model.IsSolanaPaymentCompletedInConn(run.connOwner, ctx, payment.TxSignature) {
 			// a redelivery already credited this exact payment -- the record
 			// is stale. A dry run leaves the record for the real run to clear.
 			if !run.dryRun {
-				model.RemoveUnfulfilledSolanaPayment(ctx, payment.TxSignature)
+				model.RemoveUnfulfilledSolanaPaymentInConn(run.connOwner, ctx, payment.TxSignature)
 			}
 			continue
 		}
 		if len(payment.ReferenceCandidates) == 0 {
 			continue
 		}
-		searchResult, err := model.SearchPaymentIntents(payment.ReferenceCandidates, run.clientSession)
+		searchResult, err := model.SearchPaymentIntentsInConn(run.connOwner, payment.ReferenceCandidates, run.clientSession)
 		if err != nil || searchResult == nil {
 			continue
 		}
@@ -1643,7 +1686,7 @@ func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 			)
 			continue
 		}
-		credited, err := solanaCreditPaymentIntent(
+		credited, err := solanaCreditPaymentIntentInConn(run.connOwner,
 			run.clientSession,
 			searchResult,
 			payment.TxSignature,
@@ -1667,18 +1710,18 @@ func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 				payment.TxSignature,
 				map[string]any{"reference": searchResult.PaymentReference},
 			)
-			model.RemoveUnfulfilledSolanaPayment(ctx, payment.TxSignature)
-		} else if model.IsSolanaPaymentCompleted(ctx, payment.TxSignature) {
+			model.RemoveUnfulfilledSolanaPaymentInConn(run.connOwner, ctx, payment.TxSignature)
+		} else if model.IsSolanaPaymentCompletedInConn(run.connOwner, ctx, payment.TxSignature) {
 			// lost the race to a concurrent webhook redelivery of this same
 			// payment -- credited either way, the record is resolved
-			model.RemoveUnfulfilledSolanaPayment(ctx, payment.TxSignature)
+			model.RemoveUnfulfilledSolanaPaymentInConn(run.connOwner, ctx, payment.TxSignature)
 		}
 	}
 
 	// leg 2: verify credited payments still exist on-chain. A signature that
 	// Helius' full-history lookup cannot find means the credited transaction
 	// never landed (dropped or rolled back) -- entitlement without payment.
-	renewals := model.GetReconcileSubscriptionRenewals(
+	renewals := model.GetReconcileSubscriptionRenewalsInConn(run.connOwner,
 		ctx,
 		store,
 		run.now.Add(-paymentReconcileWindow),
@@ -1702,7 +1745,7 @@ func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 		if renewal.TransactionId == "" {
 			continue
 		}
-		intentNetworkId, signature, ok := model.GetSolanaPaymentIntentCompletion(ctx, renewal.TransactionId)
+		intentNetworkId, signature, ok := model.GetSolanaPaymentIntentCompletionInConn(run.connOwner, ctx, renewal.TransactionId)
 		if !ok || intentNetworkId != renewal.NetworkId {
 			continue
 		}
@@ -1794,17 +1837,17 @@ func solanaStatusConfirmsPayment(statusErr any, confirmationStatus *string) bool
 // truth is our own record of the settle transaction (S9).
 
 var (
-	x402ListUnresolvedSettledNotGranted = func(ctx context.Context, limit int) []*model.PaymentReconciliationEvent {
-		return model.GetUnresolvedSettledNotGrantedEvents(ctx, model.SubscriptionMarketX402, limit)
+	x402ListUnresolvedSettledNotGranted = func(connOwner server.PgConn, ctx context.Context, limit int) []*model.PaymentReconciliationEvent {
+		return model.GetUnresolvedSettledNotGrantedEventsInConn(connOwner, ctx, model.SubscriptionMarketX402, limit)
 	}
-	x402ReconcileTransactionGranted = x402TransactionGranted
+	x402ReconcileTransactionGranted = x402TransactionGrantedInConn
 )
 
 func reconcileX402(run *paymentReconcileRun, since time.Time) (bool, error) {
 	store := model.SubscriptionMarketX402
 	ctx := run.clientSession.Ctx
 
-	events := x402ListUnresolvedSettledNotGranted(ctx, paymentReconcileRenewalLimit)
+	events := x402ListUnresolvedSettledNotGranted(run.connOwner, ctx, paymentReconcileRenewalLimit)
 	for _, event := range events {
 		if !run.spend(store) {
 			return false, nil
@@ -1832,7 +1875,7 @@ func reconcileX402(run *paymentReconcileRun, since time.Time) (bool, error) {
 			"leg":     "credit",
 		}
 
-		if x402ReconcileTransactionGranted(ctx, networkId, transaction) {
+		if x402ReconcileTransactionGranted(run.connOwner, ctx, networkId, transaction) {
 			run.record(store, model.PaymentReconcileActionAlreadyCredited, &networkId, transaction, details)
 			continue
 		}
@@ -1850,9 +1893,9 @@ func reconcileX402(run *paymentReconcileRun, since time.Time) (bool, error) {
 			netRevenue := model.UsdToNanoCents(sku.PriceUsd)
 			// the purchase's email is not kept with the event: no receipt
 			if sku.Pro {
-				return x402GrantProMonthFunc(ctx, networkId, sku, netRevenue, settleResponse, nil)
+				return x402GrantProMonthFunc(run.connOwner, ctx, networkId, sku, netRevenue, settleResponse, nil)
 			}
-			return x402GrantDataFunc(ctx, networkId, sku, netRevenue, settleResponse, nil)
+			return x402GrantDataFunc(run.connOwner, ctx, networkId, sku, netRevenue, settleResponse, nil)
 		}()
 		switch {
 		case errors.Is(err, model.ErrPaymentNetworkNotFound):

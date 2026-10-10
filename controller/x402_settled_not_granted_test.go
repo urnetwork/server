@@ -124,11 +124,20 @@ func installX402SettledNotGrantedFakes(t *testing.T) (*x402FakeEventTable, *x402
 		x402ReconcileTransactionGranted = prevGranted
 	})
 
-	addPaymentReconciliationEvent = table.add
-	x402GrantProMonthFunc = grants.grant
-	x402GrantDataFunc = grants.grant
-	x402ListUnresolvedSettledNotGranted = table.unresolved
-	x402ReconcileTransactionGranted = grants.isGranted
+	addPaymentReconciliationEvent = func(_ server.PgConn, ctx context.Context, event *model.PaymentReconciliationEvent) error {
+		return table.add(ctx, event)
+	}
+	grant := func(_ server.PgConn, ctx context.Context, networkId server.Id, sku *X402Sku, revenue model.NanoCents, response *X402SettleResponse, receipt *x402Receipt) error {
+		return grants.grant(ctx, networkId, sku, revenue, response, receipt)
+	}
+	x402GrantProMonthFunc = grant
+	x402GrantDataFunc = grant
+	x402ListUnresolvedSettledNotGranted = func(_ server.PgConn, ctx context.Context, limit int) []*model.PaymentReconciliationEvent {
+		return table.unresolved(ctx, limit)
+	}
+	x402ReconcileTransactionGranted = func(_ server.PgConn, ctx context.Context, networkId server.Id, transaction string) bool {
+		return grants.isGranted(ctx, networkId, transaction)
+	}
 	return table, grants
 }
 
@@ -232,7 +241,7 @@ func TestX402ReconcileResolvesWithoutDoubleGrant(t *testing.T) {
 
 	grants.err = nil
 	callsBefore := grants.calls
-	x402GrantDataFunc = func(ctx context.Context, networkId server.Id, sku *X402Sku, netRevenue model.NanoCents, settleResponse *X402SettleResponse, receipt *x402Receipt) error {
+	x402GrantDataFunc = func(connOwner server.PgConn, ctx context.Context, networkId server.Id, sku *X402Sku, netRevenue model.NanoCents, settleResponse *X402SettleResponse, receipt *x402Receipt) error {
 		if networkId == deletedNetworkId {
 			return model.ErrPaymentNetworkNotFound
 		}

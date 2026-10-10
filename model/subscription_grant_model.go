@@ -62,6 +62,22 @@ const (
 	GrantKindReferral GrantKind = "referral"
 )
 
+// An optional durable execution identity makes all grants in the caller's
+// transaction atomic with their replay receipt. No identity means an intentional
+// independent refresh. Receipts outlive the balances they protect.
+func claimTransferGrantRunInTx(ctx context.Context, tx server.PgTx, kind GrantKind, startTime, endTime time.Time, runIds []server.Id) bool {
+	if len(runIds) == 0 {
+		return true
+	}
+	if len(runIds) != 1 || runIds[0] == (server.Id{}) {
+		panic("grant requires one nonzero execution identity")
+	}
+	result, err := tx.Exec(ctx, `INSERT INTO transfer_balance_grant_run(run_id,grant_kind,start_time,end_time)
+		VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, runIds[0], kind, startTime, endTime)
+	server.Raise(err)
+	return result.RowsAffected() == 1
+}
+
 // How long a grant of the kind stays valid past the end of its period, i.e. its
 // overlap with the next grant of the kind. false for no kind or a kind this binary
 // does not know.

@@ -9897,4 +9897,19 @@ var migrations = []any{
 	).withIndexCompletion(810, "transfer_contract", "transfer_contract_audit_closed_null_day",
 		"CREATE INDEX transfer_contract_audit_closed_null_day ON public.transfer_contract USING btree (close_time, contract_id) WHERE ((outcome IS NULL) AND (close_time IS NOT NULL))",
 		"((outcome IS NULL) AND (close_time IS NOT NULL))"),
+	// 811: a recurring grant and its task receipt commit together. Retain these
+	// small receipts after balances expire so a delayed replay cannot mint again.
+	// Apply before deploying taskworkers that pass a grant run identity.
+	newSqlMigration(`
+		CREATE TABLE transfer_balance_grant_run (
+			run_id uuid NOT NULL,
+			grant_kind varchar(32) NOT NULL,
+			start_time timestamp NOT NULL,
+			end_time timestamp NOT NULL,
+			PRIMARY KEY (run_id, grant_kind)
+		);
+	`),
+	// 812: terminal expiration can retain existing excluded proof without
+	// rewriting it or manufacturing a new legacy exclusion at settlement.
+	newSqlMigration(contractDeadlineUsageGuardSchemaSql),
 }

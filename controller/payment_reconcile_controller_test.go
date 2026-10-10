@@ -28,7 +28,8 @@ import (
 // disableAllReconcileStores pins every store to "no credentials" and restores
 // the seams on cleanup. Called first in every test so the suite is hermetic
 // even on a machine whose vault carries real store credentials.
-func disableAllReconcileStores(t testing.TB) {
+func disableAllReconcileStores(t testing.TB) func() {
+	closeScope := guardPaymentReconciliationConnections(t)
 	prevStripe := stripeReconcileHasCredentials
 	prevApple := appleReconcileHasCredentials
 	prevPlay := playReconcileHasCredentials
@@ -46,9 +47,13 @@ func disableAllReconcileStores(t testing.TB) {
 		solanaReconcileHasCredentials = prevSolana
 		x402ReconcileHasCredentials = prevX402
 	})
+	return closeScope
 }
 
 func reconcileTestSession(t testing.TB, ctx context.Context) *session.ClientSession {
+	ctx, cancel := context.WithCancelCause(ctx)
+	t.Cleanup(func() { cancel(nil) })
+	ctx = context.WithValue(ctx, paymentReconcileConnectionKey{}, &paymentReconcileConnectionState{cancel: cancel})
 	clientId := server.NewId()
 	return session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: server.NewId(),
@@ -218,7 +223,7 @@ func TestSolanaReconcileCredentialsRequireNonblankHeliusAPIKey(t *testing.T) {
 func TestPaymentReconcileSkipsStripeWithSKUOnlyVault(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		previous := stripeReconcileHasCredentials
 		stripeReconcileHasCredentials = stripeReconcileCredentialsPresent
 		t.Cleanup(func() { stripeReconcileHasCredentials = previous })
@@ -244,7 +249,7 @@ func TestPaymentReconcileSkipsStripeWithSKUOnlyVault(t *testing.T) {
 func TestPaymentReconcileMalformedCredentialResourcesSkipAllStores(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		previousStripe := stripeReconcileHasCredentials
 		previousApple := appleReconcileHasCredentials
 		previousPlay := playReconcileHasCredentials
@@ -588,7 +593,7 @@ func newSolanaReconcileTestEnv(t testing.TB) *solanaReconcileTestEnv {
 func TestPaymentReconcileSkipsStoresWithoutCredentials(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 
 		result, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
 		connect.AssertEqual(t, err, nil)
@@ -620,7 +625,7 @@ func TestPaymentReconcileSkipsStoresWithoutCredentials(t *testing.T) {
 func TestPaymentReconcileHeartbeatAndWatermarkOnNoOpRun(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		newStripeReconcileTestEnv(t)
 
 		before := server.NowUtc()
@@ -657,7 +662,7 @@ func TestPaymentReconcileHeartbeatAndWatermarkOnNoOpRun(t *testing.T) {
 func TestPaymentReconcileStoreFailureIsolated(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 		stripeEnv.failList = true
 		newSolanaReconcileTestEnv(t)
@@ -722,7 +727,7 @@ func TestPaymentReconcileStoreErrorCountDoesNotCreateResult(t *testing.T) {
 func TestPaymentReconcilePerObjectErrorDoesNotAdvanceStoreWatermark(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		playEnv := newPlayWebhookTestEnv(t, map[string]*Sku{
 			"supporter_monthly": {Supporter: true},
 		})
@@ -786,7 +791,7 @@ func TestPaymentReconcilePerObjectErrorDoesNotAdvanceStoreWatermark(t *testing.T
 func TestPaymentReconcileStripeCreditsMissedInvoice(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 
 		networkId := server.NewId()
@@ -867,7 +872,7 @@ func TestStripeInvoiceCreditIncludesManualPaymentGrace(t *testing.T) {
 func TestPaymentReconcileStripeDeletedDestinationIsDurableNotStoreError(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 
 		networkId := server.NewId()
@@ -936,7 +941,7 @@ func TestPaymentReconcileStripeDeletedDestinationIsDurableNotStoreError(t *testi
 func TestPaymentReconcileStripeDeletedDestinationAuditFailurePinsWatermark(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 
 		networkId := server.NewId()
@@ -954,11 +959,11 @@ func TestPaymentReconcileStripeDeletedDestinationAuditFailurePinsWatermark(t *te
 
 		previousAdder := addPaymentReconciliationEvent
 		failTerminalAppend := true
-		addPaymentReconciliationEvent = func(ctx context.Context, event *model.PaymentReconciliationEvent) error {
+		addPaymentReconciliationEvent = func(connOwner server.PgConn, ctx context.Context, event *model.PaymentReconciliationEvent) error {
 			if failTerminalAppend && event.Action == model.PaymentReconcileActionCreditUnfulfillable {
 				return errors.New("synthetic terminal audit append failure")
 			}
-			return model.AddPaymentReconciliationEvent(ctx, event)
+			return model.AddPaymentReconciliationEventInConn(connOwner, ctx, event)
 		}
 		t.Cleanup(func() { addPaymentReconciliationEvent = previousAdder })
 
@@ -997,7 +1002,7 @@ func TestPaymentReconcileStripeDeletedDestinationAuditFailurePinsWatermark(t *te
 func TestPaymentReconcileCompletedCreditAuditFailureRemainsBestEffort(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 
 		networkId := server.NewId()
@@ -1012,11 +1017,11 @@ func TestPaymentReconcileCompletedCreditAuditFailureRemainsBestEffort(t *testing
 		)
 
 		previousAdder := addPaymentReconciliationEvent
-		addPaymentReconciliationEvent = func(ctx context.Context, event *model.PaymentReconciliationEvent) error {
+		addPaymentReconciliationEvent = func(connOwner server.PgConn, ctx context.Context, event *model.PaymentReconciliationEvent) error {
 			if event.Action == model.PaymentReconcileActionCredited {
 				return errors.New("synthetic completed-credit audit append failure")
 			}
-			return model.AddPaymentReconciliationEvent(ctx, event)
+			return model.AddPaymentReconciliationEventInConn(connOwner, ctx, event)
 		}
 		t.Cleanup(func() { addPaymentReconciliationEvent = previousAdder })
 
@@ -1039,7 +1044,7 @@ func TestPaymentReconcileCompletedCreditAuditFailureRemainsBestEffort(t *testing
 func TestPaymentReconcileStripeDryRunQualifiesDeletedDestination(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 
 		deletedNetworkId := server.NewId()
@@ -1106,7 +1111,7 @@ func TestPaymentReconcileStripeDryRunQualifiesDeletedDestination(t *testing.T) {
 func TestPaymentReconcileStripeCreditRacesLateWebhook(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 
 		networkId := server.NewId()
@@ -1184,7 +1189,7 @@ func TestPaymentReconcileStripeCreditRacesLateWebhook(t *testing.T) {
 func TestPaymentReconcileStripeRepairsMissingProMetadata(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 		now := server.NowUtc().Truncate(time.Second)
 
@@ -1397,7 +1402,7 @@ func TestPaymentReconcileStripeRepairsMissingProMetadata(t *testing.T) {
 func TestPaymentReconcileDryRunReportsMissingProMetadataWithoutRepair(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 		now := server.NowUtc().Truncate(time.Second)
 		networkId := server.NewId()
@@ -1458,7 +1463,7 @@ func TestPaymentReconcileDryRunReportsMissingProMetadataWithoutRepair(t *testing
 func TestPaymentReconcileDeletedNetworkMakesNoProviderStatusRequest(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 		now := server.NowUtc()
 		orphanNetworkId := server.NewId()
@@ -1503,7 +1508,7 @@ func TestPaymentReconcileDeletedNetworkMakesNoProviderStatusRequest(t *testing.T
 func TestPaymentReconcileStripeEndsRevokedNotCancelAtPeriodEnd(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 
 		now := server.NowUtc()
@@ -1568,7 +1573,7 @@ func TestPaymentReconcileStripeEndsRevokedNotCancelAtPeriodEnd(t *testing.T) {
 func TestPaymentReconcileStripePastDueVersusUnpaid(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 		now := server.NowUtc().Truncate(time.Second)
 		startTime := now.Add(-10 * 24 * time.Hour)
@@ -1704,7 +1709,7 @@ func TestPaymentReconcileStripePastDueVersusUnpaid(t *testing.T) {
 func TestPaymentReconcileAppleCreditsMissedRenewal(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		appleEnv := newAppleReconcileTestEnv(t, []string{"supporter_monthly"})
 
 		networkId := server.NewId()
@@ -1812,7 +1817,7 @@ func TestPaymentReconcileAppleCreditsMissedRenewal(t *testing.T) {
 func TestPaymentReconcileAppleRepairsMissingProMetadata(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		appleEnv := newAppleReconcileTestEnv(t, []string{"supporter_monthly"})
 
 		networkId := server.NewId()
@@ -1962,7 +1967,7 @@ func TestPaymentReconcileAppleRepairsMissingProMetadata(t *testing.T) {
 func TestPaymentReconcileAppleEndsRevoked(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		appleEnv := newAppleReconcileTestEnv(t, []string{"supporter_monthly"})
 
 		now := server.NowUtc()
@@ -2043,7 +2048,7 @@ func TestPaymentReconcileAppleEndsRevoked(t *testing.T) {
 func TestPaymentReconcileGoogleCreditsMissedRenewal(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		playEnv := newPlayWebhookTestEnv(t, map[string]*Sku{
 			"supporter_monthly": {
 				FeeFraction:    0.3,
@@ -2110,7 +2115,7 @@ func TestPaymentReconcileGoogleCreditsMissedRenewal(t *testing.T) {
 func TestPaymentReconcileGoogleRepairsMissingProMetadata(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		playEnv := newPlayWebhookTestEnv(t, map[string]*Sku{
 			"supporter_monthly": {
 				FeeFraction:    0.3,
@@ -2220,7 +2225,7 @@ func TestPaymentReconcileGoogleRepairsMissingProMetadata(t *testing.T) {
 func TestPaymentReconcileGoogleEndsExpiredNotCancelWithTimeRemaining(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		playEnv := newPlayWebhookTestEnv(t, map[string]*Sku{
 			"supporter_monthly": {
 				FeeFraction:    0.3,
@@ -2290,7 +2295,7 @@ func TestPaymentReconcileGoogleEndsExpiredNotCancelWithTimeRemaining(t *testing.
 func TestPaymentReconcileSolanaCreditsResolvedUnfulfilled(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		newSolanaReconcileTestEnv(t)
 
 		networkId := server.NewId()
@@ -2369,7 +2374,7 @@ func TestPaymentReconcileSolanaCreditsResolvedUnfulfilled(t *testing.T) {
 func TestPaymentReconcileDryRunMakesNoWrites(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		stripeEnv := newStripeReconcileTestEnv(t)
 
 		now := server.NowUtc()
@@ -2485,7 +2490,7 @@ func TestPaymentReconcileDryRunMakesNoWrites(t *testing.T) {
 func TestPaymentReconcileDryRunSolanaLeavesUnfulfilled(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		newSolanaReconcileTestEnv(t)
 
 		networkId := server.NewId()
@@ -2545,7 +2550,7 @@ func TestPaymentReconcileDryRunSolanaLeavesUnfulfilled(t *testing.T) {
 func TestPaymentReconcileStoreFilter(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		newStripeReconcileTestEnv(t)
 		newSolanaReconcileTestEnv(t)
 
@@ -2581,7 +2586,7 @@ func TestPaymentReconcileStoreFilter(t *testing.T) {
 func TestPaymentReconcileRunLockExcludesConcurrentRuns(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 
 		server.Db(ctx, func(conn server.PgConn) {
 			locked := false
@@ -2624,7 +2629,7 @@ func TestPaymentReconcileRunLockExcludesConcurrentRuns(t *testing.T) {
 func TestPaymentReconcileSolanaEndsVanishedPayment(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		solanaEnv := newSolanaReconcileTestEnv(t)
 
 		webhookSession := session.Testing_CreateClientSession(ctx, nil)
@@ -2696,7 +2701,7 @@ func TestPaymentReconcileSolanaEndsVanishedPayment(t *testing.T) {
 func TestPaymentReconcileSolanaRepairsMissingProMetadata(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		solanaEnv := newSolanaReconcileTestEnv(t)
 
 		networkId := server.NewId()

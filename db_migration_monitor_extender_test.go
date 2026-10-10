@@ -41,7 +41,7 @@ func TestPublishedMigrationMonitorExtenderArtifacts(t *testing.T) {
 			sql     string
 			missing []int
 		}{
-			{name: "directory missing", sql: `ALTER TABLE network_extender RENAME TO missing_network_extender`, missing: []int{662, 669, 670, 671, 672}},
+			{name: "directory missing", sql: `ALTER TABLE network_extender RENAME TO missing_network_extender`, missing: []int{662, 669, 670, 671, 672, 794}},
 			{name: "directory column missing", sql: `ALTER TABLE network_extender DROP COLUMN network_id`, missing: []int{662}},
 			{name: "public key uniqueness missing", sql: `ALTER TABLE network_extender DROP CONSTRAINT network_extender_public_key_key`, missing: []int{662}},
 			{name: "address table missing", sql: `ALTER TABLE network_extender_address RENAME TO missing_network_extender_address`, missing: []int{663, 668}},

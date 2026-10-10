@@ -5,7 +5,7 @@ package server
 // Shared with migration admission so an altered function or disabled trigger
 // cannot hide behind an unchanged numeric migration head. The Go usage decoder
 // still owns full snapshot validation; this boundary owns presence and custody.
-const ContractUsageGuardFunctionBodySql = `
+const contractUsageGuardFunctionPrefixSql = `
 DECLARE
 	legacy jsonb;
 BEGIN
@@ -45,10 +45,35 @@ BEGIN
 			RETURN NEW;
 		END IF;
 	END IF;
-	IF NEW.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination') THEN
+	IF NEW.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination') THEN`
+
+// Keep the published migration byte-for-byte stable. The prospective append
+// below permits retirement of already-retained excluded evidence only.
+const ContractUsageGuardOriginalFunctionBodySql = contractUsageGuardFunctionPrefixSql + `
 		IF NEW.provider_usage IS NULL OR NEW.close_time IS NULL OR
 			NEW.provider_usage ? 'legacy_exclusion' THEN
 			RAISE EXCEPTION 'new contract settlement requires immutable provider usage';
+		END IF;
+	END IF;
+	RETURN NEW;
+END
+`
+
+// Retirement may retain a pre-existing excluded snapshot, marked unverified.
+// It cannot invent a legacy exclusion at settlement or revise any evidence.
+const ContractUsageGuardFunctionBodySql = contractUsageGuardFunctionPrefixSql + `
+		IF NEW.provider_usage IS NULL OR NEW.close_time IS NULL THEN
+			RAISE EXCEPTION 'new contract settlement requires immutable provider usage';
+		END IF;
+		IF NEW.provider_usage ? 'legacy_exclusion' THEN
+			IF TG_OP <> 'UPDATE' THEN
+				RAISE EXCEPTION 'new contract settlement requires immutable provider usage';
+			END IF;
+			IF OLD.provider_usage IS NULL OR
+				NEW.provider_usage IS DISTINCT FROM OLD.provider_usage OR
+				NEW.usage_unverified IS DISTINCT FROM true OR NEW.expiration_time IS NULL THEN
+				RAISE EXCEPTION 'new contract settlement requires immutable provider usage';
+			END IF;
 		END IF;
 	END IF;
 	RETURN NEW;
@@ -59,8 +84,14 @@ END
 // Old writers fail their transaction instead of publishing an incomplete epoch.
 const contractUsageGuardSchemaSql = `
 	CREATE FUNCTION transfer_contract_usage_guard()
-	RETURNS trigger LANGUAGE plpgsql AS $transfer_contract_usage_guard$` + ContractUsageGuardFunctionBodySql + `$transfer_contract_usage_guard$;
+	RETURNS trigger LANGUAGE plpgsql AS $transfer_contract_usage_guard$` + ContractUsageGuardOriginalFunctionBodySql + `$transfer_contract_usage_guard$;
 	CREATE TRIGGER transfer_contract_usage_guard
 	BEFORE INSERT OR UPDATE ON transfer_contract
 	FOR EACH ROW EXECUTE FUNCTION transfer_contract_usage_guard();
+`
+
+// This append changes no stored proof and leaves the original migration intact.
+const contractDeadlineUsageGuardSchemaSql = `
+	CREATE OR REPLACE FUNCTION transfer_contract_usage_guard()
+	RETURNS trigger LANGUAGE plpgsql AS $transfer_contract_usage_guard$` + ContractUsageGuardFunctionBodySql + `$transfer_contract_usage_guard$;
 `

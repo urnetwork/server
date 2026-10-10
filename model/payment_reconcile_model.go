@@ -94,8 +94,16 @@ func AddPaymentReconciliationEvent(
 	ctx context.Context,
 	event *PaymentReconciliationEvent,
 ) (err error) {
+	return AddPaymentReconciliationEventInConn(nil, ctx, event)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func AddPaymentReconciliationEventInConn(connOwner server.PgConn,
+	ctx context.Context,
+	event *PaymentReconciliationEvent,
+) (err error) {
 	server.HandleError(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
+		server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 			server.Raise(AddPaymentReconciliationEventInTx(tx, ctx, event))
 		})
 	}, func(handledErr error) {
@@ -204,8 +212,17 @@ func GetUnresolvedSettledNotGrantedEvents(
 	store string,
 	limit int,
 ) []*PaymentReconciliationEvent {
+	return GetUnresolvedSettledNotGrantedEventsInConn(nil, ctx, store, limit)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetUnresolvedSettledNotGrantedEventsInConn(connOwner server.PgConn,
+	ctx context.Context,
+	store string,
+	limit int,
+) []*PaymentReconciliationEvent {
 	events := []*PaymentReconciliationEvent{}
-	server.Db(ctx, func(conn server.PgConn) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -313,7 +330,15 @@ func GetPaymentReconcileWatermark(
 	ctx context.Context,
 	store string,
 ) (watermarkTime time.Time, ok bool) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return GetPaymentReconcileWatermarkInConn(nil, ctx, store)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetPaymentReconcileWatermarkInConn(connOwner server.PgConn,
+	ctx context.Context,
+	store string,
+) (watermarkTime time.Time, ok bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -340,10 +365,19 @@ func SetPaymentReconcileWatermark(
 	store string,
 	watermarkTime time.Time,
 ) (err error) {
+	return SetPaymentReconcileWatermarkInConn(nil, ctx, store, watermarkTime)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func SetPaymentReconcileWatermarkInConn(connOwner server.PgConn,
+	ctx context.Context,
+	store string,
+	watermarkTime time.Time,
+) (err error) {
 	// a failed statement raises, which ends the transaction at once; the error
 	// result is always nil. Its error used to be assigned to the result while
 	// the transaction went on to a commit that server.Tx retried for a minute.
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -393,6 +427,17 @@ func RepairReconciledProEntitlement(
 	now time.Time,
 	dryRun bool,
 ) (repaired bool, err error) {
+	return RepairReconciledProEntitlementInConn(nil, ctx, market, renewal, now, dryRun)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func RepairReconciledProEntitlementInConn(connOwner server.PgConn,
+	ctx context.Context,
+	market SubscriptionMarket,
+	renewal *ReconcileSubscriptionRenewal,
+	now time.Time,
+	dryRun bool,
+) (repaired bool, err error) {
 	if renewal == nil {
 		return false, nil
 	}
@@ -404,7 +449,7 @@ func RepairReconciledProEntitlement(
 		renewal.StartTime.UnixMicro(),
 		renewal.EndTime.UnixMicro(),
 	)
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		// Tx may retry this callback after a serialization failure. Never retain
 		// the outcome of an aborted attempt in the outer return value.
 		repaired = false
@@ -485,7 +530,7 @@ func RepairReconciledProEntitlement(
 	if repaired && !dryRun {
 		// The marker is committed. Refreshing earlier could publish a value from
 		// an uncommitted transaction or leave a rolled-back repair cached.
-		UpdateProNetwork(ctx, renewal.NetworkId)
+		UpdateProNetworkInConn(connOwner, ctx, renewal.NetworkId)
 	}
 	return repaired, nil
 }
@@ -500,8 +545,18 @@ func GetReconcileSubscriptionRenewals(
 	minEndTime time.Time,
 	limit int,
 ) []*ReconcileSubscriptionRenewal {
+	return GetReconcileSubscriptionRenewalsInConn(nil, ctx, market, minEndTime, limit)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
+	ctx context.Context,
+	market SubscriptionMarket,
+	minEndTime time.Time,
+	limit int,
+) []*ReconcileSubscriptionRenewal {
 	renewals := []*ReconcileSubscriptionRenewal{}
-	server.Db(ctx, func(conn server.PgConn) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -555,14 +610,24 @@ func EndReconciledEntitlement(
 	market SubscriptionMarket,
 	now time.Time,
 ) (ended bool, err error) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	return EndReconciledEntitlementInConn(nil, ctx, networkId, market, now)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func EndReconciledEntitlementInConn(connOwner server.PgConn,
+	ctx context.Context,
+	networkId server.Id,
+	market SubscriptionMarket,
+	now time.Time,
+) (ended bool, err error) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		ended = 0 < len(endReconciledEntitlementInTx(tx, ctx, &networkId, market, nil, "", now))
 	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if ended {
 		// the entitlement changed under the network -- refresh the pro cache so
 		// the downgrade is visible immediately rather than after ProCacheTtl
-		UpdateProNetwork(ctx, networkId)
+		UpdateProNetworkInConn(connOwner, ctx, networkId)
 	}
 	return
 }
@@ -645,11 +710,22 @@ func EndReconciledEntitlementForNetworkPurchaseToken(
 	purchaseToken string,
 	now time.Time,
 ) (ended bool, err error) {
+	return EndReconciledEntitlementForNetworkPurchaseTokenInConn(nil, ctx, networkId, market, purchaseToken, now)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func EndReconciledEntitlementForNetworkPurchaseTokenInConn(connOwner server.PgConn,
+	ctx context.Context,
+	networkId server.Id,
+	market SubscriptionMarket,
+	purchaseToken string,
+	now time.Time,
+) (ended bool, err error) {
 	if purchaseToken == "" {
 		// an empty scope must never mean "every purchase on the network"
 		return false, nil
 	}
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		// Ownership refusal must unwind this attempt, including caller receipts.
 		ended = false
 		err = nil
@@ -673,7 +749,7 @@ func EndReconciledEntitlementForNetworkPurchaseToken(
 	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if ended {
-		UpdateProNetwork(ctx, networkId)
+		UpdateProNetworkInConn(connOwner, ctx, networkId)
 	}
 	return
 }
@@ -811,7 +887,15 @@ func GetStripeInvoiceNetworkId(
 	ctx context.Context,
 	invoiceId string,
 ) (networkId server.Id, ok bool) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return GetStripeInvoiceNetworkIdInConn(nil, ctx, invoiceId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetStripeInvoiceNetworkIdInConn(connOwner server.PgConn,
+	ctx context.Context,
+	invoiceId string,
+) (networkId server.Id, ok bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -848,7 +932,15 @@ func GetAppleTransactionNetworkId(
 	ctx context.Context,
 	transactionId string,
 ) (networkId server.Id, ok bool) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return GetAppleTransactionNetworkIdInConn(nil, ctx, transactionId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetAppleTransactionNetworkIdInConn(connOwner server.PgConn,
+	ctx context.Context,
+	transactionId string,
+) (networkId server.Id, ok bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`

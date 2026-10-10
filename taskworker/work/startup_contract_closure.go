@@ -127,8 +127,9 @@ type CloseScheduledContractArgs struct {
 }
 
 type CloseScheduledContractResult struct {
-	Owner   *model.ContractCloseOwner `json:"owner,omitempty"`
-	RetryAt *time.Time                `json:"retry_at,omitempty"`
+	Owner          *model.ContractCloseOwner             `json:"owner,omitempty"`
+	RetryAt        *time.Time                            `json:"retry_at,omitempty"`
+	Reconciliation *model.ContractDeadlineReconciliation `json:"reconciliation,omitempty"`
 }
 
 func scheduleContractClose(clientSession *session.ClientSession, tx server.PgTx, args *CloseScheduledContractArgs) {
@@ -138,7 +139,7 @@ func scheduleContractClose(clientSession *session.ClientSession, tx server.PgTx,
 }
 
 // An early queue wake does not grant deadline authority. Normal task retries
-// retain failed closes; success means terminal or a durable financial handoff.
+// retain failed closes; a due success means the terminal commit completed.
 func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *session.ClientSession) (*CloseScheduledContractResult, error) {
 	if args == nil || !args.Private || args.ContractId == (server.Id{}) || args.Deadline.IsZero() {
 		return nil, fmt.Errorf("invalid scheduled contract close")
@@ -146,12 +147,14 @@ func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *ses
 	if server.NowUtc().Before(args.Deadline) {
 		return &CloseScheduledContractResult{RetryAt: &args.Deadline}, nil
 	}
-	owner, err := model.CloseContractAtDeadline(clientSession.Ctx, args.ContractId, args.Deadline)
-	return &CloseScheduledContractResult{Owner: owner}, err
+	closed, err := model.ReconcileContractAtDeadline(clientSession.Ctx, args.ContractId, args.Deadline)
+	return &CloseScheduledContractResult{Reconciliation: closed}, err
 }
 
-// Repair only retained routing hints in the same commit as their owner wake.
-// Busy or changed custody yields a new child without changing its deadline.
+// Early wakes retain the deadline. Owner handoffs are only for results written
+// by older workers; new due results already committed terminal reconciliation.
+// Register those retained hints with their owner wake; busy or changed custody
+// yields a new child without changing its deadline.
 func CloseScheduledContractPost(args *CloseScheduledContractArgs, result *CloseScheduledContractResult,
 	clientSession *session.ClientSession, tx server.PgTx) error {
 	if result.RetryAt != nil {

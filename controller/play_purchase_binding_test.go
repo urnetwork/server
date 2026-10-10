@@ -176,7 +176,7 @@ func installPlayBindingFakes(t *testing.T) *playBindingFakeEnv {
 		env.state.ledger[key] = args.NetworkId
 		return &PlaySubscriptionRenewalResult{ExpiryTime: minExpiryTime, Renewed: true}, nil
 	}
-	playPaymentIdNetworkIdFunc = func(ctx context.Context, subscriptionPaymentId server.Id) (server.Id, error) {
+	playPaymentIdNetworkIdFunc = func(_ server.PgConn, ctx context.Context, subscriptionPaymentId server.Id) (server.Id, error) {
 		// no subscription payment ids: the obfuscated id is a network id
 		return server.Id{}, errors.New("not a subscription payment id")
 	}
@@ -197,7 +197,7 @@ func installPlayBindingFakes(t *testing.T) *playBindingFakeEnv {
 	playPurchaseBindingProRefreshFunc = func(ctx context.Context, networkId server.Id) {
 		env.refreshed = append(env.refreshed, networkId)
 	}
-	playPurchaseBindingLookupFunc = func(ctx context.Context, purchaseToken string, linkedPurchaseToken string, inherit bool) (server.Id, bool) {
+	playPurchaseBindingLookupFunc = func(connOwner server.PgConn, ctx context.Context, purchaseToken string, linkedPurchaseToken string, inherit bool) (server.Id, bool) {
 		if binding, ok := env.state.bindings[purchaseToken]; ok {
 			return binding.networkId, true
 		}

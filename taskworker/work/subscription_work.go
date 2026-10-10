@@ -2,6 +2,7 @@ package work
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	mathrand "math/rand"
@@ -253,11 +254,25 @@ func BackfillInitialTransferBalance(
 	clientSession *session.ClientSession,
 ) (*BackfillInitialTransferBalanceResult, error) {
 	networkIds := model.FindNetworksWithoutTransferBalance(clientSession.Ctx)
-	for _, networkId := range networkIds {
-		// add initial transfer balance
-		controller.AddRefreshTransferBalance(clientSession.Ctx, networkId)
+	if err := backfillInitialTransferBalances(clientSession.Ctx, networkIds, controller.AddRefreshTransferBalance); err != nil {
+		return nil, err
 	}
 	return &BackfillInitialTransferBalanceResult{}, nil
+}
+
+// Retain partial progress, but never finish the one-shot task while a grant
+// failed. A replay rediscovers only networks still missing their first balance.
+func backfillInitialTransferBalances(ctx context.Context, networkIds []server.Id, grant func(context.Context, server.Id) error) error {
+	var result error
+	for _, networkId := range networkIds {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(result, err)
+		}
+		if err := grant(ctx, networkId); err != nil {
+			result = errors.Join(result, fmt.Errorf("initial balance for network %s: %w", networkId, err))
+		}
+	}
+	return errors.Join(result, ctx.Err())
 }
 
 func BackfillInitialTransferBalancePost(

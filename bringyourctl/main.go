@@ -29,7 +29,6 @@ import (
 	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/stats/sample"
 	"github.com/urnetwork/server/task"
-	"github.com/urnetwork/server/taskworker/work"
 
 	"github.com/urnetwork/proxy"
 )
@@ -100,7 +99,7 @@ Usage:
     bringyourctl contracts repair-redis-expiry --private-stdin [--apply]
     bringyourctl contracts drain-legacy --private-stdin [--apply]
     bringyourctl contracts queue-expiry
-    bringyourctl contracts schedule-open-closures
+    bringyourctl contracts schedule-open-closures [--limit=<n>]
     bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl contracts reconcile-net-escrow [--network_id=<network_id>] [--dry-run]
@@ -324,7 +323,9 @@ func main() {
 		}
 	} else if contracts, _ := opts.Bool("contracts"); contracts {
 		if scheduleOpen, _ := opts.Bool("schedule-open-closures"); scheduleOpen {
-			os.Exit(runScheduleOpenContractClosures(context.Background(), os.Stdout, work.ScheduleOpenContractClosures))
+			limit, err := synchronousContractClosureLimit(opts)
+			server.Raise(err)
+			os.Exit(runSynchronousContractClosures(context.Background(), os.Stdout, limit, model.CloseOpenContractsSynchronously))
 		}
 		if queueExpiry, _ := opts.Bool("queue-expiry"); queueExpiry {
 			os.Exit(runContractExpiryRecovery(context.Background(), os.Stdout, invokeContractExpiryRecovery))

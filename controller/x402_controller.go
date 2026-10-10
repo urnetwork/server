@@ -574,8 +574,8 @@ func X402Purchase(
 
 // x402 grant seams, so the settle->grant failure path is testable without Postgres
 var (
-	x402GrantProMonthFunc = x402GrantProMonth
-	x402GrantDataFunc     = x402GrantData
+	x402GrantProMonthFunc = x402GrantProMonthInConn
+	x402GrantDataFunc     = x402GrantDataInConn
 )
 
 // x402GrantSettled grants a settled purchase. The money has already moved, so a
@@ -595,16 +595,16 @@ func x402GrantSettled(
 
 	var err error
 	if sku.Pro {
-		err = x402GrantProMonthFunc(ctx, networkId, sku, netRevenue, settleResponse, receipt)
+		err = x402GrantProMonthFunc(nil, ctx, networkId, sku, netRevenue, settleResponse, receipt)
 	} else {
-		err = x402GrantDataFunc(ctx, networkId, sku, netRevenue, settleResponse, receipt)
+		err = x402GrantDataFunc(nil, ctx, networkId, sku, netRevenue, settleResponse, receipt)
 	}
 	if err != nil {
 		glog.Errorf(
 			"[x402]SETTLED BUT NOT GRANTED network=%s sku=%s tx=%s err=%s\n",
 			networkId, sku.SkuId, settleResponse.Transaction, err,
 		)
-		recordErr := addPaymentReconciliationEvent(ctx, &model.PaymentReconciliationEvent{
+		recordErr := addPaymentReconciliationEvent(nil, ctx, &model.PaymentReconciliationEvent{
 			// a fresh provenance id, like the other webhook-time events
 			RunId:     server.NewId(),
 			Store:     model.SubscriptionMarketX402,
@@ -659,7 +659,12 @@ func x402SkuFromSettledNotGrantedDetails(details map[string]any) (*X402Sku, stri
 
 // x402TransactionGranted is x402AlreadyGrantedForTransaction in its own read.
 func x402TransactionGranted(ctx context.Context, networkId server.Id, transaction string) (granted bool) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	return x402TransactionGrantedInConn(nil, ctx, networkId, transaction)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func x402TransactionGrantedInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id, transaction string) (granted bool) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		granted = x402AlreadyGrantedForTransaction(ctx, tx, networkId, transaction)
 	}, server.TxReadCommitted)
 	return
@@ -839,11 +844,23 @@ func x402GrantProMonth(
 	settleResponse *X402SettleResponse,
 	receipt *x402Receipt,
 ) (returnErr error) {
+	return x402GrantProMonthInConn(nil, ctx, networkId, sku, netRevenue, settleResponse, receipt)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func x402GrantProMonthInConn(connOwner server.PgConn,
+	ctx context.Context,
+	networkId server.Id,
+	sku *X402Sku,
+	netRevenue model.NanoCents,
+	settleResponse *X402SettleResponse,
+	receipt *x402Receipt,
+) (returnErr error) {
 	startTime := server.NowUtc()
 	endTime := startTime.Add(x402ProMonthDuration + manualPaymentGracePeriod)
 
 	granted := false
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		granted = false
 		returnErr = nil
 		if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
@@ -893,7 +910,7 @@ func x402GrantProMonth(
 
 	if granted {
 		// the upgrade takes effect immediately rather than after ProCacheTtl
-		model.UpdateProNetwork(ctx, networkId)
+		model.UpdateProNetworkInConn(connOwner, ctx, networkId)
 	}
 
 	return
@@ -912,11 +929,23 @@ func x402GrantData(
 	settleResponse *X402SettleResponse,
 	receipt *x402Receipt,
 ) error {
+	return x402GrantDataInConn(nil, ctx, networkId, sku, netRevenue, settleResponse, receipt)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func x402GrantDataInConn(connOwner server.PgConn,
+	ctx context.Context,
+	networkId server.Id,
+	sku *X402Sku,
+	netRevenue model.NanoCents,
+	settleResponse *X402SettleResponse,
+	receipt *x402Receipt,
+) error {
 	startTime := server.NowUtc()
 	endTime := startTime.Add(model.Pro().DataCodeDuration)
 
 	var returnErr error
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		returnErr = nil
 		if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
 			returnErr = err

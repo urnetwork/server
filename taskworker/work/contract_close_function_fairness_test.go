@@ -1,4 +1,4 @@
-// Financial progress must survive an older backlog of successful close handoffs.
+// Terminal closure and recurring work must progress through an older backlog.
 package work
 
 import (
@@ -161,33 +161,17 @@ func closeFunctionFairnessCanaries() []*closeFunctionFairnessCanary {
 }
 
 // The wrapper delegates the actual close function, result, Post and complete
-// ownership declaration. Only after its durable handoff does it place the same
-// generated owner at historical bulk+30s through the ordinary coalescing API.
+// ownership declaration, then verifies the terminal state in that transaction.
 // A one-slot Run makes the committed-prefix barrier independent of CPU speed.
 type closeFunctionFairnessTarget struct {
 	task.Target
-	ctx          context.Context
-	ownerAt      time.Time
-	prefix       chan struct{}
-	release      chan struct{}
-	committed    atomic.Int64
-	normalWindow atomic.Bool
-	stateLock    sync.Mutex
-	failure      error
+	ctx            context.Context
+	prefix         chan struct{}
+	release        chan struct{}
+	committed      atomic.Int64
+	verifiedClosed atomic.Bool
 }
 
-func (self *closeFunctionFairnessTarget) fail(err error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if self.failure == nil {
-		self.failure = err
-	}
-}
-func (self *closeFunctionFairnessTarget) err() error {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	return self.failure
-}
 func (self *closeFunctionFairnessTarget) TaskCompletionOwnershipKeys(queued *task.Task, result string) ([]server.PgOwnershipKey, error) {
 	return self.Target.(task.TaskCompletionOwnershipTarget).TaskCompletionOwnershipKeys(queued, result)
 }
@@ -197,49 +181,25 @@ func (self *closeFunctionFairnessTarget) Run(ctx context.Context, queued *task.T
 		return result, original, err
 	}
 	closed, ok := result.(*CloseScheduledContractResult)
-	if !ok {
+	if !ok || closed.Owner != nil || closed.Reconciliation == nil {
 		return nil, nil, fmt.Errorf("real close returned an unexpected result")
 	}
 	return result, func(tx server.PgTx) ([]server.PostFunction, error) {
-		before := server.NowUtc()
 		posts, err := original(tx)
 		if err != nil {
 			return nil, err
 		}
-		if closed.Owner != nil && self.normalWindow.CompareAndSwap(false, true) {
-			key := "flush_legacy_payer_settlements"
-			if closed.Owner.Kind == model.ContractCloseOwnerSourceClient {
-				key = "flush_legacy_source_settlements"
-			}
-			var runAt time.Time
-			if err := tx.QueryRow(self.ctx, `SELECT run_at FROM pending_task WHERE run_once_key=$1`, task.RunOnce(key, closed.Owner.Id).String()).Scan(&runAt); err != nil {
-				return nil, err
-			}
-			if runAt.Before(before.Add(30*time.Second-time.Microsecond)) || runAt.After(server.NowUtc().Add(30*time.Second)) {
-				return nil, fmt.Errorf("real first owner lost the production thirty-second collection window")
-			}
+		var terminal bool
+		if err := tx.QueryRow(self.ctx, `SELECT outcome IS NOT NULL AND NOT EXISTS(
+			SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
+			FROM transfer_contract WHERE contract_id=$1`, closed.Reconciliation.ContractId).Scan(&terminal); err != nil {
+			return nil, err
 		}
+		if !terminal {
+			return nil, fmt.Errorf("successful task body left its contract open")
+		}
+		self.verifiedClosed.Store(true)
 		posts = append(posts, func() any {
-			failure := server.HandleError(func() {
-				if closed.Owner != nil {
-					var payers, sources []server.Id
-					if closed.Owner.Kind == model.ContractCloseOwnerPayerNetwork {
-						payers = []server.Id{closed.Owner.Id}
-					} else {
-						sources = []server.Id{closed.Owner.Id}
-					}
-					keys, err := model.LegacyCloseSettlementQueueOwnershipKeys(payers, sources)
-					server.Raise(err)
-					s := session.NewLocalClientSession(self.ctx, "", nil)
-					defer s.Cancel()
-					server.OwnedTx(self.ctx, keys, func(tx server.PgTx) {
-						model.ScheduleLegacyCloseSettlementsInTx(s, tx, *closed.Owner, nil, self.ownerAt)
-					}, server.TxReadCommitted, server.OptNoRetry())
-				}
-			})
-			if failure != nil {
-				self.fail(fmt.Errorf("fixture historical owner placement: %v", failure))
-			}
 			if self.committed.Add(1) == closeFunctionFairnessPrefix {
 				close(self.prefix)
 				select {
@@ -328,7 +288,7 @@ func requireCloseFunctionFairnessConservation(t testing.TB, ctx context.Context,
 		var exact bool
 		server.Raise(conn.QueryRow(ctx, `SELECT
             (SELECT count(*)=288 AND bool_and(outcome='settled' AND provider_usage IS NOT NULL) FROM transfer_contract WHERE contract_id=ANY($1)) AND
-            (SELECT count(*)=576 AND bool_and(NOT checkpoint AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=ANY($1)) AND
+            (SELECT count(*)=288 AND bool_and(checkpoint AND party='source' AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=ANY($1)) AND
             (SELECT count(*)=256 AND bool_and(settled AND redis_reserved AND payout_byte_count=17 AND balance_byte_count-payout_byte_count=83) FROM transfer_escrow WHERE contract_id=ANY($2)) AND
             (SELECT count(*)=256 AND sum(payout_byte_count)=4352 AND sum(payout_net_revenue_nano_cents)=0 FROM transfer_escrow_sweep WHERE contract_id=ANY($2) AND network_id=$4) AND
             NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=ANY($3)) AND
@@ -415,7 +375,7 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 				t.Fatal("fixture prequeued financial owners or lost the exact old-block/later-canary ordering")
 			}
 		})
-		closeTarget := &closeFunctionFairnessTarget{Target: NewScheduledContractClosureTaskTarget(), ctx: ctx, ownerAt: f.bulkAt.Add(30 * time.Second), prefix: make(chan struct{}), release: make(chan struct{})}
+		closeTarget := &closeFunctionFairnessTarget{Target: NewScheduledContractClosureTaskTarget(), ctx: ctx, prefix: make(chan struct{}), release: make(chan struct{})}
 		settings := task.DefaultTaskWorkerSettings()
 		settings.BatchSize = 1
 		settings.ClaimRegisteredTargetsOnly = true
@@ -441,16 +401,15 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 		}
 		prefix := readCloseFunctionFairness(ctx, f, names)
 		t.Logf("close_function_fairness_committed_prefix=%+v", prefix)
-		if closeTarget.err() != nil || !closeTarget.normalWindow.Load() || prefix.Children != closeFunctionFairnessPrefix || prefix.Children >= closeFunctionFairnessCount || prefix.Paid == 0 || prefix.Free == 0 || prefix.Canaries != 6 || prefix.Errors != 0 {
-			t.Fatal("successful old-block closes still starve real paid/source outcomes or later recurring functions", prefix, closeTarget.err())
+		if !closeTarget.verifiedClosed.Load() || prefix.Children != closeFunctionFairnessPrefix || prefix.Children >= closeFunctionFairnessCount || prefix.Paid == 0 || prefix.Free == 0 || prefix.Canaries != 6 || prefix.Errors != 0 {
+			t.Fatal("successful old-block closes still starve real paid/source outcomes or later recurring functions", prefix)
 		}
-		// A real repeat startup pass can republish an already-finished child
-		// while its contract is still waiting for accounting. Keep that pressure
-		// finite and preserve its original old-block deadline/RunOnce semantics.
+		// A repeat startup pass must not republish a successfully closed child.
+		// Remaining open contracts keep their existing exact queue identities.
 		var repeatedContract server.Id
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT contract_id FROM transfer_contract c
-                WHERE contract_id=ANY($1) AND outcome IS NULL
+                WHERE contract_id=ANY($1) AND outcome IS NOT NULL
                 AND EXISTS(SELECT 1 FROM finished_task f WHERE function_name=$2
                     AND (f.args_json::jsonb->>'contract_id')::uuid=c.contract_id AND post_completed)
                 ORDER BY contract_id LIMIT 1`, f.ids, closeTarget.TargetFunctionName()).Scan(&repeatedContract))
@@ -459,10 +418,10 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 		server.Raise(err)
 		server.Db(ctx, func(conn server.PgConn) {
 			var repeated bool
-			server.Raise(conn.QueryRow(ctx, `SELECT count(*)=1 AND bool_and(run_at=$2 AND reschedule_error_count=0)
-                FROM pending_task WHERE run_once_key=$1`, task.RunOnce("close_scheduled_contract", repeatedContract).String(), f.bulkAt).Scan(&repeated))
-			if !repeated {
-				t.Fatal("repeat startup scan lost the old queued close block")
+			server.Raise(conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1
+				FROM pending_task WHERE run_once_key=$1)`, task.RunOnce("close_scheduled_contract", repeatedContract).String()).Scan(&repeated))
+			if repeated {
+				t.Fatal("repeat startup scan requeued an acknowledged terminal contract")
 			}
 		})
 		release()
@@ -473,8 +432,8 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 		defer ticker.Stop()
 		for {
 			current := readCloseFunctionFairness(ctx, f, names)
-			if current.Errors != 0 || closeTarget.err() != nil {
-				t.Fatal("real financial worker refused or retried the healthy fixture", current, closeTarget.err())
+			if current.Errors != 0 {
+				t.Fatal("real financial worker refused or retried the healthy fixture", current)
 			}
 			if current.Children == 288 && current.Paid == 256 && current.Free == 32 && current.PendingChildren+current.Intents+current.Unsettled+current.Journals+current.ProviderPending+current.MirrorPending == 0 {
 				break

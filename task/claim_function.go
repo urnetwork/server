@@ -2,10 +2,10 @@
 // backlog. One indexed lane turn alternates with the original global queue.
 package task
 
-// Rotation is shared by this worker's Run callers. An isolated lane handed
-// from refill to the next initial claim belongs only to that Run's poll state.
+// Rotation is shared by this worker's Run and EvalTasks callers. An isolated
+// lane handed from refill to the next claim belongs only to that Run's poll.
 func (self *TaskWorker) nextClaimFunction(options taskClaimOptions) string {
-	if !self.settings.FairClaimFunctions || options.poll == nil {
+	if !self.settings.FairClaimFunctions {
 		return ""
 	}
 	self.stateLock.Lock()
@@ -13,7 +13,7 @@ func (self *TaskWorker) nextClaimFunction(options taskClaimOptions) string {
 	if self.draining || self.runCtx.Err() != nil || len(self.claimFunctionNames) == 0 {
 		return ""
 	}
-	if !options.ordinaryOnly && options.poll.isolatedFunction != "" {
+	if options.poll != nil && !options.ordinaryOnly && options.poll.isolatedFunction != "" {
 		name := options.poll.isolatedFunction
 		options.poll.isolatedFunction = ""
 		return name

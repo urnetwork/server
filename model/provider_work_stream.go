@@ -155,7 +155,20 @@ func providerWorkAttachStreamInTx(ctx context.Context, tx server.PgTx, contractI
 // The terminal owner signs the decision and both report counters in the same
 // transaction that first makes the financial outcome visible.
 func providerWorkRetainOutcomeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, closedAt time.Time) {
+	providerWorkRetainOutcomeWithEvidencePolicyInTx(ctx, tx, contractId, outcome, closedAt, false)
+}
+
+// Expiration must close despite malformed historical evidence. Refuse only the
+// optional signed receipt for such data; database, cancellation and signer
+// failures still abort the transaction. Ordinary settlement remains strict.
+func providerWorkRetainOutcomeWithEvidencePolicyInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, closedAt time.Time, reconcile bool) {
 	providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
+		evidenceError := func(err error) error {
+			if reconcile {
+				return errProviderWorkEvidenceUnavailable
+			}
+			return err
+		}
 		body := protocol.ProviderWorkOutcome{ContractId: contractId.String(), Outcome: outcome, ClosedAtUnixMicro: closedAt.UnixMicro()}
 		var reservationHash, reservationRaw, streamHash []byte
 		var streamId *server.Id
@@ -172,13 +185,13 @@ func providerWorkRetainOutcomeInTx(ctx context.Context, tx server.PgTx, contract
 		}
 		reservation, err := protocol.DecodeProviderWorkReceipt(ctx, reservationRaw)
 		if err != nil || reservation.Reservation == nil {
-			return errors.Join(errors.New("provider work original reservation is invalid"), err)
+			return evidenceError(errors.Join(errors.New("provider work original reservation is invalid"), err))
 		}
 		if reservation.Reservation.RequestFrameHash == nil || reservation.Reservation.UsageOriginIsSource == nil || streamId != nil && len(streamHash) == 0 {
 			return errProviderWorkEvidenceUnavailable
 		}
 		if len(reservationHash) != 32 || capacity < 0 || streamId != nil && len(streamHash) != 32 {
-			return errors.New("provider work original reservation or stream is invalid")
+			return evidenceError(errors.New("provider work original reservation or stream is invalid"))
 		}
 		copy(body.ReservationHash[:], reservationHash)
 		copy(body.StreamHash[:], streamHash)
@@ -197,7 +210,7 @@ func providerWorkRetainOutcomeInTx(ctx context.Context, tx server.PgTx, contract
 			}
 			if count < 0 {
 				rows.Close()
-				return errors.New("provider work close count is negative")
+				return evidenceError(errors.New("provider work close count is negative"))
 			}
 			switch party {
 			case ContractPartySource:
@@ -208,7 +221,7 @@ func providerWorkRetainOutcomeInTx(ctx context.Context, tx server.PgTx, contract
 				body.DestinationComplete = !checkpoint
 			default:
 				rows.Close()
-				return errors.New("provider work close party is invalid")
+				return evidenceError(errors.New("provider work close party is invalid"))
 			}
 		}
 		err = rows.Err()

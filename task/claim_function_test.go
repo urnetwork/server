@@ -57,8 +57,8 @@ func TestTaskClaimFunctionRotationPreservesOrdinaryAndAliases(t *testing.T) {
 			t.Fatal("rotation skipped or duplicated a registered lane")
 		}
 	}
-	if worker.nextClaimFunction(taskClaimOptions{}) != "" {
-		t.Fatal("finite EvalTasks borrowed Run fairness state")
+	if worker.nextClaimFunction(taskClaimOptions{}) == "" {
+		t.Fatal("finite EvalTasks skipped an enabled fairness lane")
 	}
 	legacy := NewTaskWorkerWithDefaults(t.Context())
 	defer legacy.Close()

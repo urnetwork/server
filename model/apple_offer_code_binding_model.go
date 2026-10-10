@@ -20,7 +20,12 @@ import (
 // GetAppleOfferCodeBindingNetworkId is the network an original transaction id is
 // bound to, if any.
 func GetAppleOfferCodeBindingNetworkId(ctx context.Context, originalTransactionId string) (networkId server.Id, ok bool) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return GetAppleOfferCodeBindingNetworkIdInConn(nil, ctx, originalTransactionId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetAppleOfferCodeBindingNetworkIdInConn(connOwner server.PgConn, ctx context.Context, originalTransactionId string) (networkId server.Id, ok bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		err := conn.QueryRow(
 			ctx,
 			`

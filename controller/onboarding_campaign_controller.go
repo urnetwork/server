@@ -396,8 +396,11 @@ func OnboardingCampaignStep(
 		return &OnboardingCampaignStepResult{Action: onboarding.ActionExit, ExitReason: row.ExitReason}, nil
 	}
 	if row.NextStep != args.Step {
-		// a replayed or stale task: the row moved on
-		return &OnboardingCampaignStepResult{Action: onboarding.ActionSkip}, nil
+		// The body can commit its advance before task completion is recorded.
+		// Recover the durable successor on replay without sending again. A
+		// stale task also follows the current row, never its obsolete step.
+		return &OnboardingCampaignStepResult{Action: onboarding.ActionSkip,
+			NextStep: row.NextStep, NextSendAt: row.NextSendAt}, nil
 	}
 
 	facts, offer := loadOnboardingFacts(ctx, row, now)

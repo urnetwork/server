@@ -944,7 +944,12 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
 // TODO with the max end time
 // TODO if none, return err
 func GetOverlappingTransferBalance(ctx context.Context, purchaseToken string, expiryTime time.Time) (balanceId server.Id, returnErr error) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return GetOverlappingTransferBalanceInConn(nil, ctx, purchaseToken, expiryTime)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetOverlappingTransferBalanceInConn(connOwner server.PgConn, ctx context.Context, purchaseToken string, expiryTime time.Time) (balanceId server.Id, returnErr error) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		balanceId, returnErr = getOverlappingTransferBalance(conn, ctx, purchaseToken, expiryTime)
 	})
 
@@ -2997,6 +3002,12 @@ func claimContractOutcomeInTx(
 // The usage came from this transaction's locked contract and original reports.
 // Keep the guarded outcome write, signed provenance and commit event together.
 func claimContractOutcomeWithUsageInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, usage *contractUsageSnapshot) (bool, error) {
+	return claimContractOutcomeWithUsageValueInTx(ctx, tx, contractId, outcome, usage, false)
+}
+
+// Forced reconciliation can retain an existing raw snapshot exactly, including
+// damaged historical evidence. It never replaces immutable attribution.
+func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, usage any, reconcile bool) (bool, error) {
 	ctx = providerWorkSessionContext(ctx)
 	// Return the database clock from the outcome write, avoiding another round
 	// trip while grants are held. The signed original uses this exact stored time.
@@ -3026,7 +3037,7 @@ func claimContractOutcomeWithUsageInTx(ctx context.Context, tx server.PgTx, cont
 		return false, err
 	}
 	server.AddTxCommitCount(tx, &contractClosedCounter, 1)
-	providerWorkRetainOutcomeInTx(ctx, tx, contractId, outcome, closedAt)
+	providerWorkRetainOutcomeWithEvidencePolicyInTx(ctx, tx, contractId, outcome, closedAt, reconcile)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
 	return true, nil
 }
@@ -4313,10 +4324,22 @@ func forceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 					openContract := openContracts[j]
 					tag := fmt.Sprintf("[sm][%s][%d/%d]", openContract.contractId, j+1, len(openContracts))
 					var fresh *OpenContract
+					var reconciled *ContractDeadlineReconciliation
+					var reconciliationPosts []server.PostFunction
 					prepareErr := runForceClose(func() error {
 						var err error
 						server.Tx(ctx, func(tx server.PgTx) {
 							fresh = nil
+							var expirationTime *time.Time
+							deadlineErr := tx.QueryRow(ctx, `SELECT expiration_time FROM transfer_contract WHERE contract_id=$1 AND outcome IS NULL FOR UPDATE`, openContract.contractId).Scan(&expirationTime)
+							if deadlineErr == pgx.ErrNoRows {
+								return
+							}
+							server.Raise(deadlineErr)
+							if expirationTime != nil && !server.NowUtc().Before(*expirationTime) {
+								reconciled, reconciliationPosts = reconcileContractAtDeadlineInTx(ctx, tx, openContract.contractId, *expirationTime)
+								return
+							}
 							var pending bool
 							server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, openContract.contractId).Scan(&pending))
 							if pending {
@@ -4324,13 +4347,18 @@ func forceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 							}
 							fresh, err = prepareContractExpiryInTx(ctx, tx, openContract.contractId, minTime)
 							server.Raise(err)
-						}, server.TxReadCommitted)
+						}, server.TxReadCommitted, server.OptNoRetry())
+						server.RunPosts(ctx, reconciliationPosts...)
 						return err
 					})
 					if prepareErr != nil && !errors.Is(prepareErr, errContractAlreadySettled) {
 						// A failed proof read/write is not authority to quarantine.
 						contractErrors[j] = prepareErr
 						contractVisited[j] = true
+						continue
+					}
+					if reconciled != nil {
+						attempted[j], contractCompleted[j], contractVisited[j] = true, true, true
 						continue
 					}
 					if fresh == nil && prepareErr == nil {
@@ -4662,7 +4690,12 @@ func SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArg
 }
 
 func SubscriptionGetNetworkIdForPaymentId(ctx context.Context, subscriptionPaymentId server.Id) (networkId server.Id, returnErr error) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return SubscriptionGetNetworkIdForPaymentIdInConn(nil, ctx, subscriptionPaymentId)
+}
+
+// Resolve historical payment identifiers on the caller's PostgreSQL session.
+func SubscriptionGetNetworkIdForPaymentIdInConn(connOwner server.PgConn, ctx context.Context, subscriptionPaymentId server.Id) (networkId server.Id, returnErr error) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -4974,15 +5007,22 @@ func IsProFresh(
 //
 // The Pro cache is refreshed for every granted network so the upgrade is visible
 // immediately instead of after ProCacheTtl.
+// A supplied task run id commits a replay receipt with all grants; omit it for
+// an intentional independent refresh. Cached entitlement remains a projection.
 func AddProTransferBalanceToAllNetworks(
 	ctx context.Context,
 	startTime time.Time,
 	endTime time.Time,
 	balanceByteCount ByteCount,
+	runIds ...server.Id,
 ) (addedTransferBalances map[server.Id]ByteCount) {
 	addedTransferBalances = map[server.Id]ByteCount{}
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		addedTransferBalances = map[server.Id]ByteCount{}
+		if !claimTransferGrantRunInTx(ctx, tx, GrantKindPro, startTime, endTime, runIds) {
+			return
+		}
 		// network_id -> subscription revenue pro-rated to this grant window
 		supporters := map[server.Id]NanoCents{}
 
@@ -5075,11 +5115,14 @@ func AddProTransferBalanceToAllNetworks(
 // network WITHOUT an active supporter subscription, for the window
 // [startTime, endTime). The balance is unpaid and carries pro = false, so the free
 // grant can never confer Pro.
+// A supplied task run id commits a replay receipt with all grants; omit it for
+// an intentional independent refresh.
 func AddFreeTransferBalanceToAllNetworks(
 	ctx context.Context,
 	startTime time.Time,
 	endTime time.Time,
 	balanceByteCount ByteCount,
+	runIds ...server.Id,
 ) (addedTransferBalances map[server.Id]ByteCount) {
 	addedTransferBalances = map[server.Id]ByteCount{}
 
@@ -5088,6 +5131,10 @@ func AddFreeTransferBalanceToAllNetworks(
 	seekerMultiplier := Pro().SeekerDataMultiplier()
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		addedTransferBalances = map[server.Id]ByteCount{}
+		if !claimTransferGrantRunInTx(ctx, tx, GrantKindFree, startTime, endTime, runIds) {
+			return
+		}
 		networkIds := []server.Id{}
 
 		result, err := tx.Query(

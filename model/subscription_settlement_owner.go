@@ -46,6 +46,16 @@ type contractSettlementOwner struct {
 // must take the report snapshot after any competing contract owner commits.
 // One batch removes client waits without combining their statement snapshots.
 func readContractSettlementOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, closeOwners ...ContractCloseOwner) (*contractSettlementOwner, error) {
+	owner, err := readContractSettlementRowsInTx(ctx, tx, contractId)
+	if err != nil {
+		return nil, err
+	}
+	return resolveContractSettlementOwnerInTx(ctx, tx, contractId, owner, closeOwners...)
+}
+
+// The forced deadline owner also needs the original rows when payer metadata
+// is damaged. It reconciles that evidence without changing ordinary admission.
+func readContractSettlementRowsInTx(ctx context.Context, tx server.PgTx, contractId server.Id) (*contractSettlementOwner, error) {
 	owner := &contractSettlementOwner{}
 	batch := &pgx.Batch{}
 	batch.Queue(`SELECT source_network_id,source_id,destination_network_id,destination_id,
@@ -70,6 +80,10 @@ func readContractSettlementOwnerInTx(ctx context.Context, tx server.PgTx, contra
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
 		return nil, fmt.Errorf("read contract settlement owner: %w", err)
 	}
+	return owner, nil
+}
+
+func resolveContractSettlementOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, owner *contractSettlementOwner, closeOwners ...ContractCloseOwner) (*contractSettlementOwner, error) {
 	if owner.participants.payerNetworkId == nil {
 		// A legacy worker passes the owner it just resolved under this same
 		// contract lock. Direct settlement resolves it on the caller's tx.

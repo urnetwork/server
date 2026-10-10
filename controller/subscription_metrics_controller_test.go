@@ -248,7 +248,7 @@ func requireSubscriptionMetricsGeneration(
 
 // Gathers through a private pedantic registry so package-global collectors do
 // not affect exact family and label assertions.
-func gatherSubscriptionMetricFamilies(t *testing.T, collector prometheus.Collector) map[string]*dto.MetricFamily {
+func gatherSubscriptionMetricFamilies(t testing.TB, collector prometheus.Collector) map[string]*dto.MetricFamily {
 	t.Helper()
 	registry := prometheus.NewPedanticRegistry()
 	if err := registry.Register(collector); err != nil {
@@ -267,7 +267,7 @@ func gatherSubscriptionMetricFamilies(t *testing.T, collector prometheus.Collect
 
 // Finds one exact bounded-label series and returns its gauge value.
 func subscriptionMetricValue(
-	t *testing.T,
+	t testing.TB,
 	metricFamilies map[string]*dto.MetricFamily,
 	name string,
 	labels map[string]string,

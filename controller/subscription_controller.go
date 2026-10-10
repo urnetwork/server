@@ -1019,7 +1019,7 @@ func PlayWebhook(
 				// no account identifiers (a purchase outside the app's billing
 				// flow): only a binding made by the verify endpoint names the
 				// network (play_purchase_binding_controller.go)
-				boundNetworkId, bound := playPurchaseBindingLookupFunc(
+				boundNetworkId, bound := playPurchaseBindingLookupFunc(nil,
 					clientSession.Ctx,
 					rtdnMessage.SubscriptionNotification.PurchaseToken,
 					sub.LinkedPurchaseToken,
@@ -1206,6 +1206,14 @@ func PlaySubscriptionRenewal(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	clientSession *session.ClientSession,
 ) (*PlaySubscriptionRenewalResult, error) {
+	return PlaySubscriptionRenewalInConn(nil, playSubscriptionRenewal, clientSession)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	clientSession *session.ClientSession,
+) (*PlaySubscriptionRenewalResult, error) {
 
 	url := fmt.Sprintf(
 		"%s/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
@@ -1226,7 +1234,7 @@ func PlaySubscriptionRenewal(
 			switch v.StatusCode {
 			// Gone
 			case 410:
-				return endTerminalPlaySubscriptionRenewal(
+				return endTerminalPlaySubscriptionRenewalInConn(connOwner,
 					playSubscriptionRenewal,
 					clientSession,
 					time.Time{},
@@ -1279,7 +1287,7 @@ func PlaySubscriptionRenewal(
 	}
 
 	if terminal {
-		return endTerminalPlaySubscriptionRenewal(
+		return endTerminalPlaySubscriptionRenewalInConn(connOwner,
 			playSubscriptionRenewal,
 			clientSession,
 			minExpiryTime,
@@ -1294,7 +1302,7 @@ func PlaySubscriptionRenewal(
 	}
 
 	if active {
-		if _, err := model.GetOverlappingTransferBalance(clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err != nil {
+		if _, err := model.GetOverlappingTransferBalanceInConn(connOwner, clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err != nil {
 			skus := playSkusFunc()
 			skuName := playSubscriptionRenewal.SubscriptionId
 			sku, ok := skus[skuName]
@@ -1319,7 +1327,7 @@ func PlaySubscriptionRenewal(
 			// serialization failure (40001) on the rows the winner wrote.
 			// Per-statement snapshots make the post-lock re-check see the
 			// winner's commit, which is the entire point of the re-check.
-			server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+			server.TxInConn(clientSession.Ctx, connOwner, func(tx server.PgTx) {
 				renewed, creditErr = playCreditSubscriptionInTx(
 					tx,
 					clientSession,
@@ -1338,7 +1346,7 @@ func PlaySubscriptionRenewal(
 				if sku.Supporter {
 					// the pro balance is committed -- refresh the entitlement so the
 					// upgrade is visible immediately rather than after ProCacheTtl
-					model.UpdateProNetwork(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+					model.UpdateProNetworkInConn(connOwner, clientSession.Ctx, playSubscriptionRenewal.NetworkId)
 				}
 
 				return &PlaySubscriptionRenewalResult{
@@ -1462,6 +1470,15 @@ func playCreditSubscriptionInTx(
 // network-and-token entitlement. An end failure is returned so the task is
 // retried instead of recording a successful terminal stop.
 func endTerminalPlaySubscriptionRenewal(
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	clientSession *session.ClientSession,
+	expiryTime time.Time,
+) (*PlaySubscriptionRenewalResult, error) {
+	return endTerminalPlaySubscriptionRenewalInConn(nil, playSubscriptionRenewal, clientSession, expiryTime)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func endTerminalPlaySubscriptionRenewalInConn(connOwner server.PgConn,
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	clientSession *session.ClientSession,
 	expiryTime time.Time,
@@ -1730,6 +1747,15 @@ type RefreshFreeTransferBalancesArgs struct {
 type RefreshFreeTransferBalancesResult struct {
 }
 
+// The worker's durable task id survives body replay after a lost handback.
+// Direct administrative refreshes intentionally remain independent grants.
+func transferGrantRunIds(ctx context.Context) []server.Id {
+	if identity, ok := task.ExecutionIdentityFromContext(ctx); ok {
+		return []server.Id{identity.TaskId}
+	}
+	return nil
+}
+
 func ScheduleRefreshFreeTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
 	// the start of the next day
 	year, month, day := server.NowUtc().Date()
@@ -1765,6 +1791,7 @@ func RefreshFreeTransferBalances(
 		startTime,
 		endTime,
 		model.Pro().DataAmount(false),
+		transferGrantRunIds(clientSession.Ctx)...,
 	)
 	return &RefreshFreeTransferBalancesResult{}, nil
 }
@@ -1824,6 +1851,7 @@ func RefreshProTransferBalances(
 		startTime,
 		endTime,
 		model.Pro().DataAmount(true),
+		transferGrantRunIds(clientSession.Ctx)...,
 	)
 	return &RefreshProTransferBalancesResult{}, nil
 }
@@ -1885,6 +1913,7 @@ func RefreshReferralTransferBalances(
 		endTime,
 		model.Pro().ReferralBonus,
 		model.Pro().ReferredBonus,
+		transferGrantRunIds(clientSession.Ctx)...,
 	)
 	return &RefreshReferralTransferBalancesResult{}, nil
 }
@@ -2390,10 +2419,20 @@ func solanaCreditPaymentIntent(
 	signature string,
 	tokenAmountReceivedUsd float64,
 ) (credited bool, returnErr error) {
+	return solanaCreditPaymentIntentInConn(nil, clientSession, paymentSearchResult, signature, tokenAmountReceivedUsd)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func solanaCreditPaymentIntentInConn(connOwner server.PgConn,
+	clientSession *session.ClientSession,
+	paymentSearchResult *model.PaymentIntentSearchResult,
+	signature string,
+	tokenAmountReceivedUsd float64,
+) (credited bool, returnErr error) {
 	// a data pack bought for a named network from the buy-data page: data only,
 	// no subscription (pay_data_solana_controller.go)
 	if solanaIsDataPackPlan(paymentSearchResult.SubscriptionPlan) {
-		return solanaCreditDataPack(clientSession, paymentSearchResult, signature, tokenAmountReceivedUsd)
+		return solanaCreditDataPackInConn(connOwner, clientSession, paymentSearchResult, signature, tokenAmountReceivedUsd)
 	}
 
 	// Grant the plan they actually bought. This used to be a YEAR every time,
@@ -2403,7 +2442,7 @@ func solanaCreditPaymentIntent(
 
 	netRevenue := model.UsdToNanoCents(tokenAmountReceivedUsd)
 
-	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+	server.TxInConn(clientSession.Ctx, connOwner, func(tx server.PgTx) {
 		credited = false
 		returnErr = nil
 		if err := model.LockPaymentNetworkInTx(
@@ -2475,7 +2514,7 @@ func solanaCreditPaymentIntent(
 	if credited {
 		// the pro balance is committed -- refresh the entitlement so the upgrade
 		// is visible immediately rather than after ProCacheTtl
-		model.UpdateProNetwork(clientSession.Ctx, *paymentSearchResult.NetworkId)
+		model.UpdateProNetworkInConn(connOwner, clientSession.Ctx, *paymentSearchResult.NetworkId)
 	}
 
 	return credited, nil

@@ -17,6 +17,7 @@ const forceCloseOpenContractPageSql = `
                     source_contract_close.close_time,source_contract_close.used_transfer_byte_count,source_contract_close.checkpoint,
                     destination_contract_close.close_time,destination_contract_close.used_transfer_byte_count,destination_contract_close.checkpoint,
                     t.create_time,
+                    COALESCE(t.expiration_time <= statement_timestamp() AT TIME ZONE 'UTC',false) OR
                     NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
                     AND (t.usage_unverified OR COALESCE(t.expiration_time, t.create_time + interval '60 minutes') <= statement_timestamp() AT TIME ZONE 'UTC' OR (t.create_time <= $3
                         AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $3))),
@@ -40,6 +41,7 @@ const forceCloseDisputedContractPageSql = `
                     ORDER BY create_time,contract_id LIMIT $2
                 )
                 SELECT t.contract_id,t.source_id,t.destination_id,t.create_time,
+                    COALESCE(t.expiration_time <= statement_timestamp() AT TIME ZONE 'UTC',false) OR
                     NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
                     AND (t.usage_unverified OR COALESCE(t.expiration_time, t.create_time + interval '60 minutes') <= statement_timestamp() AT TIME ZONE 'UTC' OR (t.create_time <= $1
                         AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $1))),

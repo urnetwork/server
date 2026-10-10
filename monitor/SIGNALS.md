@@ -5,6 +5,9 @@ is being encoded as an automated probe in the monitor service — architecture
 and probe mapping in MONITOR.md (this directory). History: this file began as
 server/MONITOR.md, the distilled incident-diagnosis runbook.
 
+For investigation methods, including synchronous production reproductions and
+deterministic queue-starvation controls, see [DEBUG.md](DEBUG.md).
+
 Distilled from the 2026-07-15 incident day (redis cluster instability + pg
 coupling + the network-peers pubsub outage) and the preceding two weeks of
 database performance work. Historical incident entries were used to diagnose or
@@ -20407,9 +20410,16 @@ The 2026-10-10 native monitor gate found eleven missing artifact contracts at
 794–795, 797–802 and 806–808: the source published head 808, while the probe
 represented only 184 of the required 195 versions from 614 onward. This was a
 detector coverage gap, not evidence that Main lacked those objects. Versions
-794–810 now share one ordered artifact/SQL list, restoring the existing
+794–812 now share one ordered artifact/SQL list, restoring the existing
 version-minus-589 row protocol without changing the migration DDL. The existing
 796 and 803–805 predicates retain their definitions in that list.
+
+Version 811 requires the durable recurring-grant receipt table and composite
+run/kind identity. Version 812 requires the exact deadline usage guard that
+permits retirement with unchanged, previously retained excluded proof. The
+older usage-guard artifact accepts both published bodies; the version-812
+artifact requires the new body. A coherent predecessor stays behind without
+false schema drift, while a reverted guard at the new head reports drift.
 
 Versions 794–795 require the tier and canary columns, extender request,
 release and block-report ledgers with their primary keys, retention/lookup
