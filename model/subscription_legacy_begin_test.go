@@ -226,7 +226,7 @@ func TestLegacySettlementBeginLoadedPoolRequestControl(t *testing.T) {
 								for range rounds {
 									options := pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite, DeferrableMode: pgx.NotDeferrable}
 									if combined {
-										options = pgx.TxOptions{BeginQuery: legacySettlementBeginSql}
+										options.BeginQuery = legacySettlementBeginSql
 									}
 									tx := server.RaisePgResult(pool.BeginTx(ctx, options))
 									func() {

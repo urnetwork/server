@@ -439,7 +439,12 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 				var err error
 				posts, completed, busy, busyGate, err = flushLegacySettlementWithGrantWaitInTx(ctx, tx, contractId, wait)
 				server.Raise(err)
-			}, pgx.TxOptions{BeginQuery: legacySettlementBeginSql}, server.OptNoRetry(), dbTiming)
+			}, pgx.TxOptions{
+				IsoLevel:       pgx.ReadCommitted,
+				AccessMode:     pgx.ReadWrite,
+				DeferrableMode: pgx.NotDeferrable,
+				BeginQuery:     legacySettlementBeginSql,
+			}, server.OptNoRetry(), dbTiming)
 			traceLegacySettlement(ctx, "commit", "confirmed_tx_return")
 			transactionReturned = true
 		}()
