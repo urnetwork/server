@@ -1,5 +1,6 @@
 // Deadline reconciliation tests exercise actual report, intent, grant and
-// terminal transactions. No queued follow-up may be needed to finish accounting.
+// terminal transactions. Exact consumption and earnings commit with closure;
+// their existing replay-safe projections may apply afterward.
 package model
 
 import (
@@ -11,18 +12,14 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Provider totals and exact earnings must already exist when closure returns;
-// a second owner or a callback cannot be required to preserve the payment.
+// Exact earnings and their immutable unapplied owner must exist when closure
+// returns. Applied totals plus pending allocation preserve the same payment.
 func requireDeadlineProviderDurability(t testing.TB, ctx context.Context, networkId, contractId server.Id, bytes ByteCount) {
 	t.Helper()
-	server.Db(ctx, func(conn server.PgConn) {
-		var provided, payout ByteCount
-		server.Raise(conn.QueryRow(ctx, `SELECT COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$1),0),
-		 COALESCE((SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE contract_id=$2 AND network_id=$1),0)`, networkId, contractId).Scan(&provided, &payout))
-		if provided != bytes || payout != bytes {
-			t.Fatal("deadline earnings were not committed", provided, payout, bytes)
-		}
-	})
+	state := readDeadlineDeferredProjection(t, ctx, networkId, contractId)
+	if state.sweptBytes != bytes || state.accountBytes+state.pendingBytes != bytes {
+		t.Fatal("deadline earnings or their durable projection were not committed", state.sweptBytes, state.accountBytes, state.pendingBytes, bytes)
+	}
 }
 
 // Insufficient escrow, depleted credit and deleted grants previously left an
@@ -87,16 +84,25 @@ func TestDeadlineReconciliationClosesAccountingFailures(t *testing.T) {
 				server.Raise(conn.QueryRow(ctx, `SELECT settled,payout_byte_count FROM transfer_escrow WHERE contract_id=$1`, id).Scan(&settled, &payout))
 				server.Raise(conn.QueryRow(ctx, `SELECT COALESCE((SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1),0),
 					COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$2),0)`, f.balanceId, f.destinationNetworkId).Scan(&remaining, &provided))
-				if !terminal || !settled || intents != 0 || payout != sample.charged || provided != sample.charged || remaining != sample.available-sample.charged {
-					t.Fatal("closure and finances did not commit together", sample.name, terminal, settled, intents, payout, remaining, provided)
+				expectedBalance := sample.available - sample.charged
+				if sample.redis {
+					expectedBalance = sample.available
+				}
+				if !terminal || !settled || intents != 0 || payout != sample.charged || provided != 0 || remaining != expectedBalance {
+					t.Fatal("closure and durable finances did not commit together", sample.name, terminal, settled, intents, payout, remaining, provided)
 				}
 				var pending ByteCount
 				server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(sum(debit_byte_count),0) FROM transfer_debit_journal
 					WHERE balance_id=$1 AND NOT applied`, f.balanceId).Scan(&pending))
-				if pending != sample.pending || remaining < pending {
+				expectedPending := sample.pending
+				if sample.redis {
+					expectedPending += sample.charged
+				}
+				if pending != expectedPending || remaining < pending {
 					t.Fatal("deadline consumed another contract's accepted debit", sample.name, pending, remaining)
 				}
 			})
+			requireDeadlineProviderDurability(t, ctx, f.destinationNetworkId, id, sample.charged)
 			before := readRedisExpiryRepairTestState(ctx, id)
 			result, err = ReconcileContractAtDeadline(ctx, id, deadline)
 			if err != nil || !result.AlreadyClosed || result.Charged != 0 || !bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) {
@@ -315,12 +321,23 @@ func TestDeadlineReconciliationAdjacentOwners(t *testing.T) {
 				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1) AND outcome IS NOT NULL`, ids).Scan(&terminal))
 				server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count,
 					(SELECT sum(payout_byte_count) FROM transfer_escrow WHERE contract_id=ANY($2)),
-					(SELECT provided_byte_count FROM account_balance WHERE network_id=$3)
+					COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$3),0)
 					FROM transfer_balance WHERE balance_id=$1`, f.balanceId, ids, f.destinationNetworkId).Scan(&balance, &charged, &provided))
-				if terminal != count || balance != 0 || charged != 7 || provided != 7 {
+				if terminal != count || balance != 0 || charged != 7 || provided != 0 {
 					t.Fatal("adjacent owner overcharged or left a contract open", path, terminal, balance, charged, provided)
 				}
 			})
+			var pending ByteCount
+			for _, id := range ids {
+				state := readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
+				pending += state.pendingBytes
+				if state.accountBytes != 0 || state.sweptBytes != state.pendingBytes {
+					t.Fatal("adjacent owner lost exact pending provider allocation")
+				}
+			}
+			if pending != 7 {
+				t.Fatal("adjacent owner changed total funded allocation", pending)
+			}
 			if remaining := Testing_NetEscrowByteCount(ctx, f.balanceId); remaining != 0 {
 				t.Fatal("deadline retained a spent reservation", path, remaining)
 			}

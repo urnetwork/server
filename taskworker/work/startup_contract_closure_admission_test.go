@@ -39,13 +39,8 @@ func TestStartupContractClosureBusyChildOwnersKeepLaterPagesMoving(t *testing.T)
 		}
 		var refusals, releasedGroups atomic.Int64
 		ctx := server.Testing_WithPgOwnershipObservation(baseCtx, func(event server.PgOwnershipEvent) {
-			if len(event.Keys) == 0 {
+			if startupCheckpointObservedChildren(event, childKeys) == 0 {
 				return
-			}
-			for _, key := range event.Keys {
-				if !childKeys[key] {
-					return
-				}
 			}
 			if event.Kind == server.PgOwnershipWaiting || event.Kind == server.PgOwnershipRefused {
 				refusals.Add(1)
@@ -134,8 +129,13 @@ func TestStartupContractClosureBusyChildOwnersKeepLaterPagesMoving(t *testing.T)
 			}
 			queued := readExpiryRecoveryQueue(t, baseCtx)
 			current, found := queued[key]
-			if !found || current.id != initial.id || current.args != initial.args {
+			if !found || current.id != initial.id || startupCheckpointOriginalArgs(t, current.args) != initial.args {
 				t.Fatal("busy retry replaced the scanner or its fixed startup timestamp", attempt)
+			}
+			var progressArgs ScheduleOpenContractClosuresArgs
+			if json.Unmarshal([]byte(current.args), &progressArgs) != nil || progressArgs.Progress == nil ||
+				progressArgs.Progress.After != (server.Id{}) || progressArgs.Progress.RetryFrom != nil {
+				t.Fatal("busy EOF did not retain its exact earliest unpaid head group")
 			}
 			mismatches := 0
 			for index, id := range ids {
