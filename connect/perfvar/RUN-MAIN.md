@@ -119,10 +119,12 @@ external blocker is documented with the evidence needed to remove it.
 - Android `goRuntimeBytes` is the allocation surrogate for this campaign.
   Android whole-app PSS is diagnostic and does not prove the iOS Network
   Extension `phys_footprint` or jetsam boundary.
-- The iOS-profile ceiling is absolute: `goRuntimeBytes` must never exceed
-  29,360,128 bytes (28 MiB) in an acceptance sample. Android MEMSTEADY must
-  select and attest `ios-memory-audit-v1`, retaining its 20-MiB admission target
-  and 32-MiB Go soft limit. Ordinary Android 28/40 is not this profile. Statistical memory
+- Both physical profile ceilings are absolute: every retained `goRuntimeBytes`
+  value must be <=33,554,432 bytes (32 MiB) under `ios-memory-audit-v2` and
+  <=67,108,864 bytes (64 MiB) under normal `android`. Full PERF requires the
+  complete existing census independently under exact 32/32- and 64/64-MiB
+  DeviceLocal/Go-soft policies, including every phase and final teardown.
+  Historical v1 remains 20/32/28 MiB and cannot supply current evidence. Statistical memory
   improvement, a low p95, or later reclaim cannot override this gate.
 - Preserve unrelated working-tree changes. Build controls in temporary sibling
   worktrees; do not reset, switch, or clean an operator checkout. Do not pull,
@@ -310,8 +312,8 @@ Use these minimum independent sample counts:
 | --- | --- |
 | Go microbenchmark | 10 fresh process samples per side, same-session order-balanced, analyzed with a pinned `benchstat` version |
 | PERFVAR | 5 fresh complete processes per side; use the documented five internal repetitions and process-level scenario aggregate |
-| Android | 7 valid paired session blocks per device/build/underlay cell; use the session summary as the unit |
-| Video pass/fail | 7 session opportunities per required cell; do not count multiple requests on one H2/TLS connection as retries |
+| Android | 7 valid paired session blocks per profile/device/build/underlay cell; use the session summary as the unit |
+| Video pass/fail | 7 session opportunities per required profile/cell; do not count multiple requests on one H2/TLS connection as retries |
 
 Choose 7 or 11 Android blocks from the baseline noise/MDE before starting; do
 not stop early because the current point estimate looks favorable. If a cohort
@@ -320,7 +322,8 @@ default minimum practical effect is 5% for performance and 0.5 MiB for
 session-level Go-runtime memory unless the active baseline predeclares a more
 specific product threshold.
 
-The iOS-profile 28-MiB absolute ceiling is evaluated before statistics. Memory statistics
+The iOS-v2 32-MiB and Android 64-MiB absolute ceilings are evaluated before
+statistics, independently within each profile. Memory statistics
 can choose between two passing candidates; they can never make an over-ceiling
 candidate pass.
 
@@ -479,6 +482,18 @@ promotion.
 
 ## Physical Android campaign
 
+The fixed profile axis is `ios-memory-audit-v2` plus normal `android`, not an
+operator-selectable reduction. Preserve all original iOS cells and repeat the
+entire schedule for Android: four separately attested profile/arm builds,
+168 cells / 560 observations at seven blocks or 264 / 880 at eleven. Session,
+sample, live/teardown proof and comparison identities bind the selected profile
+and exact target/soft/observed limits. No startup-only diagnostic, missing
+Android cell, duplicated iOS row or cross-profile control/candidate pair can
+qualify. The version-2 coverage contract/receipt and changed source freeze
+invalidate old single-profile baseline compatibility; obtain fresh A/A and
+paired baseline evidence, never relabel old ledger entries. Existing scoped H1
+diagnostics keep their single-profile iOS-v2 default and cannot satisfy full PERF.
+
 Use the long-lived `PhysicalLowbarSessionTest` and privacy-safe collectors from
 Android's `PHYSICAL_LOWBAR.md`. Build both the exact control and candidate AAR,
 app APK, and test APK with distinct `urnetworkAcceptanceBuildId` values. Install
@@ -541,13 +556,15 @@ speed until their planned rework has its own compatible baseline.
 Evaluate memory per session and role, not per 15-second sample as independent
 data:
 
-- **29,360,128 bytes (28 MiB) is an absolute iOS-profile `goRuntimeBytes` ceiling. Every clean sample during
-  startup, active traffic, burst recovery, and the quiet connected window must
-  be at or below 28 MiB; one sample above the ceiling fails the cell.**
-- Report p50, p95, maximum, time to return below 28 MiB, and counts above 24
-  and 28 MiB, but no percentile or later reclaim can excuse an over-ceiling
-  sample. The 24-MiB count is historical comparison telemetry, not today's
-  acceptance barrier. Preserve previous 24-MiB verdicts; do not requalify old runs;
+- **Every retained iOS-v2 runtime value must be <=32 MiB and every normal-Android
+  value <=64 MiB**, including startup, active traffic, bursts, drain, transition,
+  five-minute connected quiet and final joined native teardown. One value above
+  its selected ceiling fails the cell; all four runtime scopes and retained
+  auxiliary/producer/conflicting-receipt highs remain in the peak.
+- Report per-profile p50, p95, maximum, recovery and breach counts, but no
+  percentile or later reclaim can excuse an over-ceiling value. Historical
+  24/28-MiB telemetry and verdicts retain their original meaning, not today's
+  acceptance barrier; never requalify old runs;
 - client and provider roles must pass independently;
 - packet roots must stay within the active policy bound, returned-pool storage
   must reconcile, reliable H1 carrier/Pack drops must remain zero, Pack waits
@@ -563,7 +580,7 @@ suggest reclaim; high live heap/goroutines with low pool retention suggests
 flow/topology; low live heap with high runtime suggests stacks, fragmentation,
 or allocator spans. Forced GC or trim is diagnostic, not a steady-memory fix.
 
-If a sample exceeds 28 MiB, preserve the clean run first. Then use a separately
+If a value exceeds its selected 32/64-MiB ceiling, preserve the clean run first. Then use a separately
 stamped `urnetworkMemoryProfileRateBytes=65536` build, take before/peak/after
 snapshots and a private heap profile, and reproduce the same bounded load in a
 simulator or host test. Never compare the profiled run's peak or forced-GC
@@ -572,7 +589,7 @@ recovery with the clean acceptance distribution.
 ## Regression deep dive and repair loop
 
 For every `REGRESSION`, `MIXED`, hard failure, corruption, timeout, video stall,
-or >28-MiB iOS-profile sample:
+or any value above its selected iOS-v2 32-MiB / Android 64-MiB ceiling:
 
 1. Freeze the first failing artifacts and add a `diagnosing` entry to the tests
    ledger. Reproduce with the exact identity at least once; a disappearing
