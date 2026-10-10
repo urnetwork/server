@@ -9921,4 +9921,8 @@ var migrations = []any{
 	// and a guard on transfer_escrow_sweep.payment_id updates; nothing is
 	// rewritten. Apply before deploying taskworkers that stage plan sweeps.
 	newSqlMigration(paymentPlanAssignmentSchemaSql),
+	// 815: committed payout reliability windows (db_payment_plan_reliability.go).
+	// New tables; nothing is rewritten. Apply before deploying taskworkers that
+	// commit reliability scores before the plan transaction.
+	newSqlMigration(paymentPlanReliabilitySchemaSql),
 }

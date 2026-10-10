@@ -16,8 +16,10 @@ import (
 )
 
 // the payment planner computes a payout's financial decisions in one
-// transaction, and commits the expensive sweep assignment after it in bounded
-// steps:
+// transaction, and commits the expensive parts around it in bounded steps:
+//   - the network reliability scores of the payout window are folded from
+//     committed block chunks before the plan transaction
+//     (account_payment_plan_reliability.go)
 //   - the plan transaction selects the sweeps and commits the payments, the
 //     subsidy epoch and the points, staging the selected sweeps
 //   - the staged sweeps are assigned to their payments in bounded batches, and
@@ -37,8 +39,8 @@ type PaymentPlanner struct {
 	unresolvedLegacyPaymentCount int
 	ctx                          context.Context
 	subsidyConfig                *SubsidyConfig
-	// a dry run assigns sweeps inline, since its transaction rolls back; a real
-	// plan stages them
+	// a dry run assigns sweeps and computes reliability scores inline, since
+	// its transaction rolls back; a real plan stages both
 	dryRun bool
 	// selected sweeps left for the batched assignment after the plan commits
 	stagedSweepCount int64
@@ -99,6 +101,10 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 	return createPaymentPlan(ctx, subsidyConfig, dryRun, maxDuration, true, nil)
 }
 
+// A plan whose selected window differs from the predicted window commits that
+// window's reliability scores and plans again, at most this many times in all.
+const paymentPlanReliabilityAttempts = 3
+
 // createPaymentPlan is CreatePaymentPlan with explicit control over whether the
 // shared reliability inputs are refreshed at the top of the plan.
 //
@@ -127,9 +133,11 @@ func createPaymentPlan(
 //  1. finish the staged sweep assignment of an earlier plan, whose unassigned
 //     sweeps still look unpaid to a new selection
 //  2. refresh the client location reliabilities (first slice only)
-//  3. the plan transaction: select, allocate, and commit the payments with
-//     their sweeps staged
-//  4. assign the staged sweeps in bounded batches; the payments become payable
+//  3. commit the reliability scores of the predicted window in block chunks
+//  4. the plan transaction: select, allocate, and commit the payments with
+//     their sweeps staged. A selected window that differs from the prediction
+//     commits that window's scores (3) and plans again.
+//  5. assign the staged sweeps in bounded batches; the payments become payable
 //     with the last batch
 //
 // An interruption loses only the step in flight. committedProgress reports
@@ -164,23 +172,41 @@ func createPaymentPlanWithProgress(
 			}
 			UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
 		}
+		if minTime, maxTime, ok := predictPaymentPlanReliabilityWindow(ctx, subsidyConfig, transition, maxDuration); ok {
+			progress, err := preparePaymentPlanReliabilityWindow(ctx, minTime, maxTime)
+			committedProgress = committedProgress || progress
+			if err != nil {
+				return nil, committedProgress, err
+			}
+		}
 	}
 
 	// network_id -> list of child referral networks
 	networkReferrals := GetNetworkReferralsMap(ctx)
 	seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
 
-	paymentPlan, returnErr = planPaymentsInTx(
-		ctx,
-		subsidyConfig,
-		dryRun,
-		maxDuration,
-		refreshReliabilityInputs,
-		transition,
-		networkReferrals,
-		seekerHolderNetworkIds,
-		writeInTx,
-	)
+	for attempt := 1; ; attempt += 1 {
+		paymentPlan, returnErr = planPaymentsInTx(
+			ctx,
+			subsidyConfig,
+			dryRun,
+			maxDuration,
+			refreshReliabilityInputs,
+			transition,
+			networkReferrals,
+			seekerHolderNetworkIds,
+			writeInTx,
+		)
+		var pending *paymentPlanReliabilityPendingError
+		if dryRun || paymentPlanReliabilityAttempts <= attempt || !errors.As(returnErr, &pending) {
+			break
+		}
+		progress, err := preparePaymentPlanReliabilityWindow(ctx, pending.minTime, pending.maxTime)
+		committedProgress = committedProgress || progress
+		if err != nil {
+			return nil, committedProgress, err
+		}
+	}
 	if returnErr != nil || dryRun {
 		return
 	}
@@ -197,9 +223,11 @@ func createPaymentPlanWithProgress(
 // Retained planner refusals return as errors; the plan rolls back and the
 // payout task retries. Any other panic propagates.
 func paymentPlanRetainedError(err error) bool {
+	var pending *paymentPlanReliabilityPendingError
 	return errors.Is(err, ErrProviderLegacyReliabilityWindow) || errors.Is(err, errPaymentPlanSelectionChanged) ||
 		errors.Is(err, server.ErrProviderEarningBoundaryUnavailable) || errors.Is(err, server.ErrProviderEarningBoundaryMismatch) ||
-		errors.Is(err, server.ErrProviderEarningBoundaryUnprepared) || errors.Is(err, server.ErrProviderEarningBoundarySchema)
+		errors.Is(err, server.ErrProviderEarningBoundaryUnprepared) || errors.Is(err, server.ErrProviderEarningBoundarySchema) ||
+		errors.As(err, &pending)
 }
 
 // The plan transaction. It allocates the plan's payments, subsidy epoch and
@@ -234,9 +262,8 @@ func planPaymentsInTx(
 		}
 	}()
 
-	// Reliability aggregation already occupies the plan's advisory-lock window.
-	// One maintenance owner retains its direct-postgres budget without holding
-	// an idle primary connection or committing scores before allocation succeeds.
+	// Reliability aggregation is committed before this transaction; it only
+	// reads the scores of its window (calculateReliabilityPayoutInTx).
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		paymentPlan, returnErr = nil, nil
 		configurePaymentPlanTransaction(ctx, tx)
@@ -923,7 +950,9 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	/**
 	 * reliability payout
 	 */
-	// Refresh and allocate the selected window on the same transaction owner.
+	// A real plan reads the scores committed for exactly this window before the
+	// transaction began; a missing window rolls the plan back so the caller can
+	// commit it in chunks and plan again. A dry run computes them inline.
 	reliabilityEnd := subsidyEndTime
 	if self.transition != nil && !reliabilityEnd.Before(self.transition.Cutoff) {
 		reliabilityEnd = self.transition.Cutoff.Add(-time.Nanosecond)
@@ -934,6 +963,7 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		subsidyStartTime,
 		reliabilityEnd,
 		subsidyScale,
+		self.dryRun,
 	)
 	self.networkReliabilitySubsidies = networkReliabilitySubsidies
 
