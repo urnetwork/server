@@ -605,6 +605,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()
 	var timing *DbTiming
+	phase := dbPhaseObservation(options)
 	var readObservation *DbReadObservation
 	var ownedConnection *pgOwnedConnection
 	var readBeforeBegin TxReadBeforeBegin
@@ -628,6 +629,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		}
 	}
 	if ownedConnection != nil {
+		phase.enter(DbOperationSessionSetup)
 		ownedConnection.run(ctx, callback, rwOptions.readOnly)
 		return
 	}
@@ -642,6 +644,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		callbackStarted := false
 		callbackWrites := pgWriteSnapshot{}
 		connectionRetrySafe := false
+		phase.enter(DbOperationAcquire)
 		acquireStarted := timing.start()
 		pgPool := pool.open()
 		readObservation.BeginAcquire()
@@ -702,6 +705,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				}
 			}()
 			// defer Logger().Printf("DB CLOSE\n")
+			phase.enter(DbOperationSessionSetup)
 			if !rwOptions.readOnly {
 				// the default is read only, escalate to rw
 				RaisePgResult(conn.Exec(ctx, "SET default_transaction_read_only=off"))
@@ -714,6 +718,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			}
 			callbackWrites = snapshotPgWrites(conn.Conn().PgConn().Conn())
 			callbackStarted = true
+			phase.enter(DbOperationCallback)
 			callback(conn)
 		}()
 
@@ -816,6 +821,7 @@ func rollbackTx(ctx context.Context, tx PgTx) {
 func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), options ...any) {
 	retryOptions := OptRetryDefault()
 	var timing *DbTiming
+	phase := dbPhaseObservation(options)
 	// by default use RepeatableRead isolation
 	// https://www.postgresql.org/docs/current/transaction-iso.html
 	txOptions := pgx.TxOptions{
@@ -856,6 +862,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 			// an earlier use of the pooled connection is not evidence about
 			// this attempt
 			pgStatementErrorRecorderOf(conn.Conn().PgConn()).Reset()
+			phase.enter(DbOperationBegin)
 			beginStarted := timing.start()
 			rawTx, err := conn.BeginTx(ctx, txOptions)
 			timing.finish(DbTimingBegin, beginStarted)
@@ -894,6 +901,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 						}
 					}
 				}()
+				phase.enter(DbOperationCallback)
 				callback(tx)
 			}()
 			if pgErr == nil {
@@ -913,9 +921,11 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 					context.WithoutCancel(ctx),
 					PgCommitTimeout,
 				)
+				phase.enter(DbOperationCommit)
 				commitStarted := timing.start()
 				commitErr = commitObservedTx(commitCtx, tx)
 				if commitErr == nil {
+					phase.enter(DbOperationAcknowledged)
 					committedAt = time.Now()
 					tx.committedAt = committedAt
 					commitPosts = tx.posts
@@ -987,6 +997,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 		// A confirmed commit owns its bounded publications even if the request
 		// canceled. The commit timestamp includes post queueing in that budget.
 		if len(commitPosts) > 0 {
+			phase.enter(DbOperationPostCommit)
 			postCtx, postCancel := context.WithDeadline(context.WithoutCancel(ctx), committedAt.Add(TxPostCommitTimeout))
 			for offset := 0; offset < len(commitPosts) && postCtx.Err() == nil; offset += 8 {
 				RunPosts(postCtx, commitPosts[offset:min(offset+8, len(commitPosts))]...)

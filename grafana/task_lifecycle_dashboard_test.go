@@ -23,7 +23,7 @@ func TestTaskLifecycleCountersLeadDashboard(t *testing.T) {
 			{Expr: `sum by (task) (rate(urnetwork_taskworker_execution_errors_total{env="$env",instance!="",cause!="drained"}[$__rate_interval]))`, LegendFormat: "{{task}}"},
 		}, descriptionParts: []string{"same function-failure scope as the adjacent total", "graceful drain (cause=drained) is excluded", "Repeated failures count again", "No data, not zero"}},
 		{id: 29, unit: "ops", targets: []testTarget{
-			{Expr: `sum by (task, cause) (rate(urnetwork_taskworker_finalization_errors_total{env="$env",instance!=""}[$__rate_interval]))`, LegendFormat: "{{task}} {{cause}}"},
+			{Expr: `sum by (task, phase, cause) (rate(urnetwork_taskworker_finalization_phase_errors_total{env="$env",instance!=""}[$__rate_interval]))`, LegendFormat: "{{task}} {{phase}} {{cause}}"},
 		}, descriptionParts: []string{"each distinct member once", "safe single fallback is a new attempt", "delegation is counted once", "compatibility fallback is excluded", "unknown commit replies", "commit may have succeeded", "No data, not zero"}},
 		{id: 27, unit: "ops", targets: []testTarget{
 			{Expr: "sum(rate(urnetwork_task_balked_total" + selector + "[$__rate_interval]))", LegendFormat: "balked / s"},
@@ -70,4 +70,12 @@ func TestTaskFinalizationDashboardKeepsReadinessAndCommitBoundaries(t *testing.T
 			t.Fatal("top failure panels overlap or omit a stage")
 		}
 	}
+}
+
+// A failure-stage counter and whole-invocation latency have distinct populations.
+func TestTaskFinalizationPhaseDashboardKeepsLatencyAndCauseBoundaries(t *testing.T) {
+	assertDiagnosticDashboardPanels(t, "taskworker.json", []diagnosticDashboardPanel{
+		{id: 29, unit: "ops", targets: []testTarget{{Expr: `sum by (task, phase, cause) (rate(urnetwork_taskworker_finalization_phase_errors_total{env="$env",instance!=""}[$__rate_interval]))`, LegendFormat: "{{task}} {{phase}} {{cause}}"}}, descriptionParts: []string{"not necessarily the first causal fault", "Acquire does not identify Ping", "pre-BEGIN business ownership", "after confirmed commit", "Older binaries", "No data, not zero"}},
+		{id: 30, unit: "s", targets: []testTarget{{Expr: `sum by (phase) (rate(urnetwork_taskworker_finalization_failure_seconds_sum{env="$env",instance!=""}[$__rate_interval])) / sum by (phase) (rate(urnetwork_taskworker_finalization_failure_seconds_count{env="$env",instance!=""}[$__rate_interval]))`, LegendFormat: "{{phase}}"}}, descriptionParts: []string{"including rollback and cleanup", "One latency observation per finalizer invocation", "not phase-only time", "No successful attempts", "No data, not zero"}},
+	})
 }

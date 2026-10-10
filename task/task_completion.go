@@ -23,9 +23,10 @@ func (self *TaskWorker) finalizeTaskWithGuard(r *taskExecutionResult, guard *tas
 	commitPosts []server.PostFunction,
 	postRescheduled bool,
 ) {
+	observation := newTaskFinalizationObservation()
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			self.observeTaskFinalizationFailure([]*taskExecutionResult{r}, recovered)
+			self.observeTaskFinalizationFailure([]*taskExecutionResult{r}, recovered, observation)
 			panic(recovered)
 		}
 	}()
@@ -43,12 +44,12 @@ func (self *TaskWorker) finalizeTaskWithGuard(r *taskExecutionResult, guard *tas
 	keys, owned, err := taskCompletionOwnershipKeys(self.targets[task.FunctionName], task, r.resultJson, r.err == nil)
 	server.Raise(err)
 	finish := func(tx server.PgTx) {
-		commitPosts, postRescheduled = self.finalizeTaskInTx(finalizeCtx, tx, r)
+		commitPosts, postRescheduled = self.finalizeTaskInTx(finalizeCtx, tx, r, observation)
 	}
 	if owned {
-		guard.finalizeOwnedTx(finalizeCtx, keys, finish)
+		guard.finalizeOwnedTx(finalizeCtx, keys, finish, &observation.db)
 	} else {
-		server.Tx(finalizeCtx, finish)
+		server.Tx(finalizeCtx, finish, &observation.db)
 	}
 	return
 }
@@ -56,10 +57,11 @@ func (self *TaskWorker) finalizeTaskWithGuard(r *taskExecutionResult, guard *tas
 // The caller owns one finite handback deadline and transaction. A certified
 // cohort can share those owners across member errors without extending either
 // budget, replaying a transaction, or borrowing another member's queue key.
-func (self *TaskWorker) finalizeTaskInTx(finalizeCtx context.Context, tx server.PgTx, r *taskExecutionResult) (
+func (self *TaskWorker) finalizeTaskInTx(finalizeCtx context.Context, tx server.PgTx, r *taskExecutionResult, observation *taskFinalizationObservation) (
 	commitPosts []server.PostFunction,
 	postRescheduled bool,
 ) {
+	observation.body = taskFinalizationQueueUpdate
 	task := r.task
 	commitPosts = nil
 	postRescheduled = false
@@ -106,7 +108,9 @@ func (self *TaskWorker) finalizeTaskInTx(finalizeCtx context.Context, tx server.
 
 	wakeAt := finishTaskOwnerInTx(finalizeCtx, tx, r)
 
+	observation.body = taskFinalizationTransactionalPost
 	posts, err := r.runPost(tx)
+	observation.body = taskFinalizationQueueUpdate
 	if err == nil {
 		commitPosts = posts
 		taskRunOnceWakeAfterPost(finalizeCtx, tx, task.TaskId, wakeAt)
