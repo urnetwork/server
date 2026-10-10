@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -318,6 +319,31 @@ func TestRouterOutputCapCancelsAndNeverAcceptsAValidPrefix(t *testing.T) {
 	}
 }
 
+// A forbidden ping word can follow a shell separator or executable path. It
+// must not match the suffix in the read-only kernel message "dropping packet".
+var routerCapturePingWord = regexp.MustCompile(`(^|[^[:alnum:]_])ping["']?([[:space:]]|$)`)
+
+func TestRouterCapturePingWordGuard(t *testing.T) {
+	for _, command := range []string{
+		"ping -c 1 example.invalid", "ping", "echo ready;ping -c 1 example.invalid",
+		"true && ping -c 1 example.invalid", "$(ping -c 1 example.invalid)",
+		"/bin/ping -c 1 example.invalid", "busybox ping -c 1 example.invalid",
+		"'ping' -c 1 example.invalid", `"ping" -c 1 example.invalid`, "ping\t-c 1 example.invalid",
+	} {
+		if !routerCapturePingWord.MatchString(command) {
+			t.Fatalf("ping word bypassed the capture guard: %q", command)
+		}
+	}
+	for _, text := range []string{
+		"nf_conntrack: table full, dropping packet", "dropping packet.",
+		"router_ping_count=0", "stopping read-only capture",
+	} {
+		if routerCapturePingWord.MatchString(text) {
+			t.Fatalf("a word suffix was mistaken for ping: %q", text)
+		}
+	}
+}
+
 func TestRouterRegistryAndReadOnlyCaptureProtocol(t *testing.T) {
 	want := map[string]string{"router-config": "18.4", "router-neighbors": "18.5", "router-conntrack": "18.6"}
 	for _, signal := range NewSignals() {
@@ -338,10 +364,13 @@ func TestRouterRegistryAndReadOnlyCaptureProtocol(t *testing.T) {
 		if gate < 0 || body < gate || !strings.Contains(command, "URN_ROUTER_END") || !strings.Contains(command, "router_after_boot") {
 			t.Fatal("capture does not gate identity before reads and bracket completion")
 		}
-		for _, forbidden := range []string{"sudo", "python", "ip -j", " flush", " restart", "commit", " save", "ping "} {
+		for _, forbidden := range []string{"sudo", "python", "ip -j", " flush", " restart", "commit", " save"} {
 			if strings.Contains(command, forbidden) {
 				t.Fatal("capture exceeded its read-only portable command contract")
 			}
+		}
+		if routerCapturePingWord.MatchString(command) {
+			t.Fatal("capture contains a forbidden ping word")
 		}
 	}
 }
