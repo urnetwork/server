@@ -448,19 +448,11 @@ func assertContractPayoutTestBalanceConsumed(
 ) {
 	t.Helper()
 	read := func() (remaining, consumed, pendingDebit ByteCount, journalRows, appliedRows int) {
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `
-				SELECT balance.balance_byte_count, escrow.payout_byte_count,
-					(SELECT COALESCE(SUM(debit_byte_count),0)::bigint
-					 FROM transfer_debit_journal WHERE balance_id=$1 AND NOT applied),
-					(SELECT COUNT(*) FROM transfer_debit_journal WHERE balance_id=$1),
-					(SELECT COUNT(*) FROM transfer_debit_journal WHERE balance_id=$1 AND applied)
-				FROM transfer_balance balance
-				JOIN transfer_escrow escrow ON escrow.balance_id=balance.balance_id
-				WHERE balance.balance_id=$1 AND escrow.contract_id=$2`,
-				balanceId, contractId).Scan(&remaining, &consumed, &pendingDebit, &journalRows, &appliedRows))
-		})
-		return
+		state, err := readContractPayoutTestBalance(ctx, balanceId, contractId)
+		if err != nil {
+			t.Fatalf("read payout debit authority: %v", err)
+		}
+		return state.remaining, state.consumed, state.pendingDebit, state.journalRows, state.appliedRows
 	}
 	// Payout settlement is durable before the Redis debit worker writes back
 	// the raw grant. All retained credit must already be offset by journaled

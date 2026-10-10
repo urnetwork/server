@@ -167,6 +167,7 @@ func TestEscrow(t *testing.T) {
 
 		connect.AssertEqual(t, nil, CloseContract(ctx, transferEscrow.ContractId, sourceId, 0, false))
 		connect.AssertEqual(t, nil, CloseContract(ctx, transferEscrow.ContractId, destinationId, 0, false))
+		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, netTransferByteCount, 0)
 
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		netBalanceByteCount = ByteCount(0)
@@ -188,6 +189,8 @@ func TestEscrow(t *testing.T) {
 		connect.AssertEqual(t, nil, CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false))
 		paidByteCount := usedTransferByteCount
 		paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, netTransferByteCount, paidByteCount)
+		projectLegacyProviderTotalsForTest(t, ctx)
 
 		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
@@ -255,6 +258,7 @@ func TestEscrow(t *testing.T) {
 		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
 
+		projectLegacyProviderTotalsForTest(t, ctx)
 		getAccountBalanceResult = GetAccountBalance(destinationSession)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
@@ -314,6 +318,7 @@ func TestEscrow(t *testing.T) {
 		// Prove zero public credit while the exact debit is still queued, then
 		// run the production worker before expecting the raw active row to vanish.
 		assertPayoutDebitTestConsumedAndDrained(t, ctx, balanceId, netTransferByteCount)
+		projectLegacyProviderTotalsForTest(t, ctx)
 
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		connect.AssertEqual(t, transferBalances, []*TransferBalance{})
@@ -439,6 +444,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 
 		connect.AssertEqual(t, nil, CloseContract(ctx, transferEscrow.ContractId, sourceId, 0, false))
 		connect.AssertEqual(t, nil, CloseContract(ctx, transferEscrow.ContractId, destinationId, 0, false))
+		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, 2*netTransferByteCount, 0)
 
 		transferBalances = GetActiveTransferBalances(ctx, destinationNetworkId)
 		netBalanceByteCount = ByteCount(0)
@@ -464,6 +470,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, destinationId, ByteCount(0), false))
 		paidByteCount := usedTransferByteCount
 		paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, 2*netTransferByteCount, paidByteCount)
+		projectLegacyProviderTotalsForTest(t, ctx)
 
 		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
@@ -509,6 +517,14 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
 		connect.AssertEqual(t, paymentPlan.WithheldNetworkIds, []server.Id{sourceNetworkId})
 
+		// Each completed forward reservation must be acknowledged before the
+		// next admission; checkpoint-only reverse contracts keep their tokens.
+		drainCompleted := func(want int) {
+			applied, released, busy, err := flushTransferDebitBalance(ctx, balanceId)
+			if err != nil || busy || applied != want || released != want {
+				t.Fatalf("completed companion debit owner = %d/%d busy=%t err=%v, want %d/%d", applied, released, busy, err, want, want)
+			}
+		}
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
 		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			companionTransferEscrow, err := CreateTransferEscrow(ctx, destinationNetworkId, destinationId, sourceNetworkId, sourceId, usedTransferByteCount)
@@ -525,6 +541,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 			connect.AssertEqual(t, err, nil)
 			connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, sourceId, ByteCount(0), false))
 			connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, destinationId, ByteCount(0), false))
+			drainCompleted(2)
 
 			paidByteCount += granted
 			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(granted) / float64(netTransferByteCount))
@@ -533,6 +550,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
 
+		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, 2*netTransferByteCount, paidByteCount)
+		projectLegacyProviderTotalsForTest(t, ctx)
 		getAccountBalanceResult = GetAccountBalance(sourceSession)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
@@ -576,6 +595,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 				}
 				connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, sourceId, 0, false))
 				connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, destinationId, 0, false))
+				drainCompleted(1)
 				break
 			}
 			if err != nil && 1024 < usedTransferByteCount {
@@ -583,6 +603,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 				glog.Infof("Step down contract size to %d bytes.\n", usedTransferByteCount)
 				connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, sourceId, ByteCount(0), false))
 				connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, destinationId, ByteCount(0), false))
+				drainCompleted(1)
 				continue
 			}
 			if err != nil || transferEscrow == nil || transferEscrow.TransferByteCount <= 0 ||
@@ -597,6 +618,11 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 			connect.AssertEqual(t, nil, CloseContract(ctx, transferEscrow.ContractId, destinationId, granted, contractCount%4&2 != 0))
 			connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, sourceId, ByteCount(0), false))
 			connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, destinationId, ByteCount(0), false))
+			wantDebits := 2
+			if contractCount%4 != 0 {
+				wantDebits = 1
+			}
+			drainCompleted(wantDebits)
 			paidByteCount += granted
 			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(granted) / float64(netTransferByteCount))
 			contractCount += 1
@@ -605,6 +631,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		connect.AssertEqual(t, nil, ForceCloseAllOpenContractIds(ctx, time.Now()))
 		connect.AssertEqual(t, netTransferByteCount, paidByteCount)
 		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, 2*netTransferByteCount, netTransferByteCount)
+		projectLegacyProviderTotalsForTest(t, ctx)
 
 		// at this point the balance should be half used up
 
