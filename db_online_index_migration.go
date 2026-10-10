@@ -19,7 +19,13 @@ type onlineIndexMigrationCompletion struct {
 
 // Enroll one published index without changing its registered DDL or identity.
 func (self *OnlineSqlMigration) withIndexCompletion(version int32, table, index, definition, predicate string) *OnlineSqlMigration {
-	self.completion = &onlineIndexMigrationCompletion{version, table, index, definition, predicate}
+	self.completion = &onlineIndexMigrationCompletion{
+		version:    version,
+		table:      table,
+		index:      index,
+		definition: definition,
+		predicate:  predicate,
+	}
 	return self
 }
 

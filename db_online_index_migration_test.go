@@ -1,3 +1,5 @@
+// Migration replay tests retain completed index artifacts and prove that active
+// builders keep custody until every independently owned test actor has exited.
 package server
 
 import (
@@ -111,80 +113,104 @@ func TestMigration810CompletedIndexRetainsOidAndRecordsLedger(t *testing.T) {
 	})
 }
 
-// Same-name usable mistakes and a failed concurrent uniqueness build must
-// recover through the registered DROP/CREATE CONCURRENTLY statements.
-func TestMigration810AbsentWrongAndInvalidIndexRepair(t *testing.T) {
-	for _, kind := range []string{"absent", "wrong-columns", "wrong-predicate", "wrong-table", "invalid"} {
-		t.Run(kind, func(t *testing.T) {
-			(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
-				ctx := t.Context()
-				migration810ReplayTestFixture(t, ctx)
-				var before uint32
-				MaintenanceDb(ctx, func(conn PgConn) {
-					var sql string
-					switch kind {
-					case "wrong-columns":
-						sql = `CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(contract_id)`
-					case "wrong-predicate":
-						sql = `CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(close_time,contract_id) WHERE outcome IS NULL`
-					case "wrong-table":
-						sql = `CREATE TABLE other_contract (contract_id uuid,close_time timestamp,outcome varchar(32)); CREATE INDEX transfer_contract_audit_closed_null_day ON other_contract(close_time,contract_id) WHERE outcome IS NULL AND close_time IS NOT NULL`
-					case "invalid":
-						if _, err := conn.Exec(ctx, `CREATE UNIQUE INDEX CONCURRENTLY transfer_contract_audit_closed_null_day ON transfer_contract(close_time)`); err == nil {
-							t.Fatal("concurrent uniqueness control did not fail")
-						}
-						var valid bool
-						Raise(conn.QueryRow(ctx, `SELECT indisvalid FROM pg_index WHERE indexrelid='transfer_contract_audit_closed_null_day'::regclass`).Scan(&valid))
-						if valid {
-							t.Fatal("failed concurrent build lacks real invalid residue")
-						}
-					}
-					if sql != "" {
-						RaisePgResult(conn.Exec(ctx, sql))
-					}
-					Raise(conn.QueryRow(ctx, `SELECT COALESCE(to_regclass('public.transfer_contract_audit_closed_null_day')::oid,0)`).Scan(&before))
-				}, OptReadWrite(), OptNoRetry())
-				ApplyDbMigrationsUpTo(ctx, 810)
-				if after := migration810ReplayTestIndex(t, ctx, true); before == after {
-					t.Fatal("wrong/absent/invalid artifact was admitted unchanged", kind, after)
+// An absent artifact is created through the registered concurrent DDL.
+func TestMigration810AbsentIndexRepair(t *testing.T) {
+	migration810TestIndexRepair(t, "absent")
+}
+
+// A usable same-name index with incorrect columns must be replaced.
+func TestMigration810WrongColumnsIndexRepair(t *testing.T) {
+	migration810TestIndexRepair(t, "wrong-columns")
+}
+
+// A weaker same-name predicate cannot satisfy the published migration.
+func TestMigration810WrongPredicateIndexRepair(t *testing.T) {
+	migration810TestIndexRepair(t, "wrong-predicate")
+}
+
+// A same-name index on a different parent table must not count as completion.
+func TestMigration810WrongTableIndexRepair(t *testing.T) {
+	migration810TestIndexRepair(t, "wrong-table")
+}
+
+// A real failed concurrent uniqueness build leaves residue requiring recovery.
+func TestMigration810InvalidIndexRepair(t *testing.T) {
+	migration810TestIndexRepair(t, "invalid")
+}
+
+// Incorrect or missing artifacts use the registered recovery statements and
+// the normal ledger completion transaction without changing source rows.
+func migration810TestIndexRepair(t *testing.T, kind string) {
+	t.Helper()
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		migration810ReplayTestFixture(t, ctx)
+		var before uint32
+		MaintenanceDb(ctx, func(conn PgConn) {
+			var sql string
+			switch kind {
+			case "wrong-columns":
+				sql = `CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(contract_id)`
+			case "wrong-predicate":
+				sql = `CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(close_time,contract_id) WHERE outcome IS NULL`
+			case "wrong-table":
+				sql = `CREATE TABLE other_contract (contract_id uuid,close_time timestamp,outcome varchar(32)); CREATE INDEX transfer_contract_audit_closed_null_day ON other_contract(close_time,contract_id) WHERE outcome IS NULL AND close_time IS NOT NULL`
+			case "invalid":
+				if _, err := conn.Exec(ctx, `CREATE UNIQUE INDEX CONCURRENTLY transfer_contract_audit_closed_null_day ON transfer_contract(close_time)`); err == nil {
+					t.Fatal("concurrent uniqueness control did not fail")
 				}
-				migration810ReplayTestLedger(t, ctx, 810)
-			})
-		})
-	}
+				var valid bool
+				Raise(conn.QueryRow(ctx, `SELECT indisvalid FROM pg_index WHERE indexrelid='transfer_contract_audit_closed_null_day'::regclass`).Scan(&valid))
+				if valid {
+					t.Fatal("failed concurrent build lacks real invalid residue")
+				}
+			}
+			if sql != "" {
+				RaisePgResult(conn.Exec(ctx, sql))
+			}
+			Raise(conn.QueryRow(ctx, `SELECT COALESCE(to_regclass('public.transfer_contract_audit_closed_null_day')::oid,0)`).Scan(&before))
+		}, OptReadWrite(), OptNoRetry())
+		ApplyDbMigrationsUpTo(ctx, 810)
+		if after := migration810ReplayTestIndex(t, ctx, true); before == after {
+			t.Fatal("wrong/absent/invalid artifact was admitted unchanged", kind, after)
+		}
+		migration810ReplayTestLedger(t, ctx, 810)
+	})
 }
 
 // An independent repeatable-read actor pins the builder's old-snapshot phase.
 // The coordinator never acquires a second connection inside its own callback.
 func migration810HoldOldSnapshot(t testing.TB, ctx context.Context) func() {
 	t.Helper()
+	holdCtx, cancelHold := context.WithCancel(ctx)
 	ready, release := make(chan struct{}), make(chan struct{})
 	holder := startOwnedTransactionTest(func() {
-		MaintenanceDb(ctx, func(conn PgConn) {
-			tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+		MaintenanceDb(holdCtx, func(conn PgConn) {
+			tx, err := conn.BeginTx(holdCtx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 			Raise(err)
-			defer tx.Rollback(context.WithoutCancel(ctx))
+			defer tx.Rollback(context.WithoutCancel(holdCtx))
 			var count int
-			Raise(tx.QueryRow(ctx, `SELECT count(*) FROM transfer_contract`).Scan(&count))
+			Raise(tx.QueryRow(holdCtx, `SELECT count(*) FROM transfer_contract`).Scan(&count))
 			close(ready)
 			select {
 			case <-release:
-			case <-ctx.Done():
+			case <-holdCtx.Done():
 			}
 		}, OptReadOnly(), OptNoRetry())
 	})
 	stop := sync.OnceFunc(func() {
 		close(release)
-		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		if caught := holder.join(t, cleanup); caught != nil {
-			t.Fatal("snapshot actor failed", caught)
+		cancelHold()
+		<-holder.done
+		if holder.recovered != nil {
+			t.Error("snapshot actor failed", holder.recovered)
 		}
 	})
 	select {
 	case <-ready:
 		return stop
 	case <-holder.done:
+		stop()
 		t.Fatal("snapshot actor failed before readiness", holder.recovered)
 	case <-ctx.Done():
 		stop()
@@ -215,66 +241,73 @@ func migration810WaitBuilder(t testing.TB, ctx context.Context, wantActive bool)
 	}, OptReadOnly(), OptNoRetry())
 }
 
-// Both the old uncoordinated builder and the new migration owner must retain
-// custody while active. Cancellation leaves repairable, exact invalid residue.
-func TestMigration810ActiveBuilderCustodyAndCanceledRecovery(t *testing.T) {
-	for _, legacy := range []bool{true, false} {
-		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
-			(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
-				ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
-				defer cancel()
-				migration := migration810ReplayTestFixture(t, ctx)
-				stopSnapshot := migration810HoldOldSnapshot(t, ctx)
-				defer stopSnapshot()
-				buildCtx, cancelBuild := context.WithCancel(ctx)
-				builder := startOwnedTransactionTest(func() {
-					if legacy {
-						MaintenanceDb(buildCtx, func(conn PgConn) { RaisePgResult(conn.Exec(buildCtx, migration.sql)) }, OptReadWrite(), OptNoRetry())
-					} else {
-						ApplyDbMigrationsUpTo(buildCtx, 810)
-					}
-				})
-				defer func() {
-					cancelBuild()
-					stopSnapshot()
-					cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-					defer cancel()
-					_ = builder.join(t, cleanup)
-				}()
-				migration810WaitBuilder(t, ctx, true)
-				before := migration810ReplayTestIndex(t, ctx, false)
-				probeCtx, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
-				caught := captureDbErrorPanic(func() { ApplyDbMigrationsUpTo(probeCtx, 810) })
-				cancelProbe()
-				if caught == nil || !strings.Contains(fmt.Sprint(caught), "active") {
-					t.Fatal("active builder was not explicitly refused before recovery", caught)
-				}
-				if after := migration810ReplayTestIndex(t, ctx, false); after != before || DbVersion(ctx) != 809 {
-					t.Fatal("refused replay changed builder identity or migration head", before, after)
-				}
-				select {
-				case <-builder.done:
-					t.Fatal("replay interrupted the builder", builder.recovered)
-				default:
-				}
-				cancelBuild()
-				if caught := builder.join(t, ctx); caught == nil {
-					t.Fatal("canceled builder reported success")
-				}
-				stopSnapshot()
-				migration810WaitBuilder(t, ctx, false)
-				if after := migration810ReplayTestIndex(t, ctx, false); after != before {
-					t.Fatal("canceled build lost its expected invalid residue")
-				}
-				migration810ReplayTestLedger(t, ctx, 809)
-				ApplyDbMigrationsUpTo(ctx, 810)
-				if after := migration810ReplayTestIndex(t, ctx, true); after == before {
-					t.Fatal("abandoned exact invalid index was accepted without repair")
-				}
-				migration810ReplayTestLedger(t, ctx, 810)
-			})
+// A surviving legacy builder retains custody until it is canceled and joined.
+func TestMigration810LegacyBuilderCustodyAndCanceledRecovery(t *testing.T) {
+	migration810TestActiveBuilderCustody(t, true)
+}
+
+// An enrolled recovery owner excludes a second migrator throughout the build.
+func TestMigration810OwnedBuilderCustodyAndCanceledRecovery(t *testing.T) {
+	migration810TestActiveBuilderCustody(t, false)
+}
+
+// Both old and enrolled builders leave an exact invalid artifact after owned
+// cancellation. Only after they exit may the normal migrator repair it.
+func migration810TestActiveBuilderCustody(t *testing.T, legacy bool) {
+	t.Helper()
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+		defer cancel()
+		migration := migration810ReplayTestFixture(t, ctx)
+		stopSnapshot := migration810HoldOldSnapshot(t, ctx)
+		defer stopSnapshot()
+		buildCtx, cancelBuild := context.WithCancel(ctx)
+		builder := startOwnedTransactionTest(func() {
+			if legacy {
+				MaintenanceDb(buildCtx, func(conn PgConn) { RaisePgResult(conn.Exec(buildCtx, migration.sql)) }, OptReadWrite(), OptNoRetry())
+			} else {
+				ApplyDbMigrationsUpTo(buildCtx, 810)
+			}
 		})
-	}
+		defer func() {
+			cancelBuild()
+			stopSnapshot()
+			// Cleanup must join both actors before the disposable database is
+			// torn down, including assertion failure and cancellation paths.
+			<-builder.done
+		}()
+		migration810WaitBuilder(t, ctx, true)
+		before := migration810ReplayTestIndex(t, ctx, false)
+		probeCtx, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
+		caught := captureDbErrorPanic(func() { ApplyDbMigrationsUpTo(probeCtx, 810) })
+		cancelProbe()
+		if caught == nil || !strings.Contains(fmt.Sprint(caught), "active") {
+			t.Fatal("active builder was not explicitly refused before recovery", caught)
+		}
+		if after := migration810ReplayTestIndex(t, ctx, false); after != before || DbVersion(ctx) != 809 {
+			t.Fatal("refused replay changed builder identity or migration head", before, after)
+		}
+		select {
+		case <-builder.done:
+			t.Fatal("replay interrupted the builder", builder.recovered)
+		default:
+		}
+		cancelBuild()
+		if caught := builder.join(t, ctx); caught == nil {
+			t.Fatal("canceled builder reported success")
+		}
+		stopSnapshot()
+		migration810WaitBuilder(t, ctx, false)
+		if after := migration810ReplayTestIndex(t, ctx, false); after != before {
+			t.Fatal("canceled build lost its expected invalid residue")
+		}
+		migration810ReplayTestLedger(t, ctx, 809)
+		ApplyDbMigrationsUpTo(ctx, 810)
+		if after := migration810ReplayTestIndex(t, ctx, true); after == before {
+			t.Fatal("abandoned exact invalid index was accepted without repair")
+		}
+		migration810ReplayTestLedger(t, ctx, 810)
+	})
 }
 
 // A correct artifact alone never authorizes a canceled caller to record success.
