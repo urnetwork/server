@@ -179,7 +179,7 @@ func TestStClosedWorkWindowBoundedOverflowPlan(t *testing.T) {
 				FROM generate_series(1,$2::int+$3::int+$4::int) n`, start, credited, open, canceled, provider, network, snapshot))
 			server.RaisePgResult(tx.Exec(ctx, `ANALYZE transfer_contract; ANALYZE st_provider_usage_archive; ANALYZE contract_close_report_evidence`))
 		})
-		check := func() {
+		check := func(minimumOldContractRows float64) {
 			server.Db(ctx, func(conn server.PgConn) {
 				before := stCensusPlanTestRows(t, ctx, conn, stOriginalUsageUnboundedWindowTestSql, start, end)
 				after := stCensusPlanTestRows(t, ctx, conn, stEpochProviderOriginalUsageSql, start, end)
@@ -188,7 +188,7 @@ func TestStClosedWorkWindowBoundedOverflowPlan(t *testing.T) {
 				}
 				oldWork := stCensusPlanTestExplain(t, ctx, conn, stOriginalUsageUnboundedWindowTestSql, start, end)
 				newWork := stCensusPlanTestExplain(t, ctx, conn, stEpochProviderOriginalUsageSql, start, end)
-				if oldWork.WindowRows < 32769 || oldWork.ContractRows < canceled || oldWork.JsonAggregations < 1 {
+				if oldWork.WindowRows < 32769 || oldWork.ContractRows < minimumOldContractRows || oldWork.JsonAggregations < 1 {
 					t.Fatal("control did not exercise the original history scan and discarded JSON construction", oldWork)
 				}
 				if newWork.WindowRows != 1025 || newWork.ContractRows > 8192 || newWork.JsonAggregations != 0 {
@@ -201,7 +201,7 @@ func TestStClosedWorkWindowBoundedOverflowPlan(t *testing.T) {
 			}
 		}
 		t.Log("overflow with eligible open contracts")
-		check()
+		check(canceled)
 		// Exhausting the open branch must still stop at an indexed canceled
 		// prefix. Ordering only by contract_id can sort the whole NULL range.
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -209,7 +209,9 @@ func TestStClosedWorkWindowBoundedOverflowPlan(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `ANALYZE transfer_contract`))
 		})
 		t.Log("overflow with no eligible open contracts")
-		check()
+		// Only half of canceled history has NULL close time. The old query can
+		// use that selective range but still scans it all before the global sort.
+		check(canceled / 2)
 	})
 }
 
