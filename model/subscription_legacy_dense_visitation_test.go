@@ -127,7 +127,10 @@ func testLegacySettlementDenseVisitationRealEntry(t *testing.T, holdPrefix, requ
 				result.Cursor == nil || !result.More || result.Trace == nil {
 				t.Fatalf("bounded public page failed: %+v err=%v", result, err)
 			}
-			if result.Timings == nil || result.Timings.Selection.Count < result.Visited || result.Timings.Financial.Count < result.Visited {
+			// Phase counts describe calls. One bounded selection or financial
+			// cohort serves at most legacyFinancialCohortLimit visits.
+			calls := (result.Visited + legacyFinancialCohortLimit - 1) / legacyFinancialCohortLimit
+			if result.Timings == nil || result.Timings.Selection.Count < calls || result.Timings.Financial.Count < calls {
 				t.Fatal("real public page omitted selection or financial phase observations")
 			}
 			phaseJSON, err := json.Marshal(result.Timings)
