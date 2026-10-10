@@ -3,6 +3,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 
 	"github.com/urnetwork/server"
@@ -16,6 +17,10 @@ type ForceCloseVisitError struct {
 	cause               error
 	attemptedCloseCount int64
 	complete            bool
+	// The raw cursor crossed at least one row that did not fail operationally.
+	progressed bool
+	// Rows left open after an operational failure, in page order.
+	deferredContractIds []server.Id
 }
 
 // The task still records the original failure, not a successful page.
@@ -27,6 +32,16 @@ func (self *ForceCloseVisitError) Unwrap() error { return self.cause }
 // This is the model's existing attempted-close count, not verified settlement.
 func (self *ForceCloseVisitError) AttemptedCloseCount() int64 { return self.attemptedCloseCount }
 
+// Some row succeeded, was skipped, was delegated or was classified by
+// accounting. When none did, the failures may share one unavailable dependency.
+func (self *ForceCloseVisitError) Progressed() bool { return self.progressed }
+
+// Contracts whose operational failure kept them open for a later visit. The
+// page closed nothing on their behalf; a later pass or owner retires them.
+func (self *ForceCloseVisitError) DeferredContractIds() []server.Id {
+	return append([]server.Id(nil), self.deferredContractIds...)
+}
+
 // Revalidate the witness before any wrapper or task persists its cursor.
 func (self *ForceCloseVisitError) CanCheckpoint() bool {
 	if self == nil || !self.complete || self.attemptedCloseCount < 0 || self.cause == nil {
@@ -37,6 +52,24 @@ func (self *ForceCloseVisitError) CanCheckpoint() bool {
 	}
 	return forceCloseVisitCauseComplete(self.cause)
 }
+
+// One row of a fully visited page failed. The page created this receipt only
+// after its parent context was still live once every row had returned, so any
+// cancellation or deadline inside it ended a row-local bounded operation, such
+// as a connection check, commit or child deadline. Text matches the old join.
+type forceCloseRowError struct {
+	contractId server.Id
+	index      int
+	cause      error
+}
+
+// Keep the existing per-row diagnostic used by stored task errors and logs.
+func (self *forceCloseRowError) Error() string {
+	return fmt.Sprintf("force close contract %s at index %d: %s", self.contractId, self.index, self.cause.Error())
+}
+
+// The original typed causes remain visible to every caller.
+func (self *forceCloseRowError) Unwrap() error { return self.cause }
 
 // The assembler supplied every failed row only after all visits joined. Keep
 // each row's original bounded guard instead of re-inspecting their wide join.
@@ -58,12 +91,15 @@ func forceCloseVisitBatchComplete(batch *server.ErrorCauseBatch) bool {
 
 // Inspect concrete causes with a finite bound. Custom Is/As methods cannot
 // conceal cancellation or grant cursor authority to a malformed error graph.
+// Only a row receipt from a live parent may contain a context stop; it is that
+// row's own failure. Runtime interruptions and malformed graphs never qualify.
 func forceCloseVisitCauseComplete(err error) (complete bool) {
 	defer func() {
 		if recover() != nil {
 			complete = false
 		}
 	}()
+	row, _ := err.(*forceCloseRowError)
 	causes := server.InspectErrorCauses(err)
 	if !causes.Complete || causes.NilBranches != 0 {
 		return false
@@ -77,7 +113,9 @@ func forceCloseVisitCauseComplete(err error) (complete bool) {
 		}
 		switch cause.Err {
 		case context.Canceled, context.DeadlineExceeded, server.DbContextDoneError:
-			return false
+			if row == nil {
+				return false
+			}
 		}
 	}
 	return true

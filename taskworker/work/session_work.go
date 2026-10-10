@@ -12,6 +12,16 @@ import (
 	"time"
 )
 
+// A shard reschedules itself every 30 seconds. One persistently failing
+// network or operation keeps its error and count, but the shard still retries
+// at that cadence instead of the hour-long task cap.
+const maintainNetworkSessionsErrorRetryCap = 30 * time.Second
+
+// The registered shard target keeps its function name; only failure delay is capped.
+func NewMaintainNetworkSessionsTaskTarget() task.Target {
+	return task.WithErrorRetryCap(task.NewTaskTargetWithPost(MaintainNetworkSessions, MaintainNetworkSessionsPost), maintainNetworkSessionsErrorRetryCap)
+}
+
 type MaintainNetworkSessionsArgs struct {
 	Shard int `json:"shard"`
 }

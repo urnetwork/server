@@ -182,7 +182,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExportProvidersMapPost,
 		),
 		task.NewTaskTarget(work.BackfillClock),
-		task.NewTaskTargetWithPost(work.MaintainNetworkSessions, work.MaintainNetworkSessionsPost),
+		work.NewMaintainNetworkSessionsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.WebSearchAnalytics,
 			work.WebSearchAnalyticsPost,
@@ -228,11 +228,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		),
 		work.NewStartupContractClosureTaskTarget(),
 		work.NewScheduledContractClosureTaskTarget(),
-		task.NewTaskTargetWithPost(
-			work.CloseExpiredContracts,
-			work.CloseExpiredContractsPost,
-			"bringyour.com/service/taskworker/work.CloseExpiredContracts",
-		),
+		work.NewCloseExpiredContractsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.CloseExpiredNetworkClientHandlers,
 			work.CloseExpiredNetworkClientHandlersPost,

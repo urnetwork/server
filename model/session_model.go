@@ -3,6 +3,9 @@ package model
 
 import (
 	"context"
+	"errors"
+	"fmt"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -43,12 +46,19 @@ func CleanupSessionOperation(ctx context.Context, operation session.SessionClean
 	return
 }
 
+// One operation's cleanup failure keeps only that operation pending, in its
+// original order. Later operations still recover; every failure is returned.
 func RecoverSessionOperations(ctx context.Context, limit int) error {
 	operations, err := session.PendingSessionOperations(ctx, limit)
 	if err != nil {
 		return err
 	}
+	failures := []error{}
 	for _, op := range operations {
+		if err := ctx.Err(); err != nil {
+			failures = append(failures, err)
+			break
+		}
 		result, err := session.EnforceSessionOperation(ctx, op.NetworkId, op.OperationId)
 		if err != nil {
 			continue
@@ -58,8 +68,8 @@ func RecoverSessionOperations(ctx context.Context, limit int) error {
 		}
 		op.TargetSessionIds = result.TargetSessionIds
 		if _, err = CleanupSessionOperation(ctx, op); err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("session operation %s cleanup: %w", op.OperationId, err))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }

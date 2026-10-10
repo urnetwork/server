@@ -12,10 +12,16 @@ import (
 const forceClosePageBudget = 15 * time.Second
 const forceCloseRawSubpageSize = 256
 
+// New rows stop starting this long after a scan began, well inside the
+// task's 30-minute ceiling. Running rows finish their financial and cleanup
+// phases; the subpage then checkpoints exactly the prefix that started.
+const forceClosePageDispatchLimit = 2 * time.Minute
+
 // ForceCloseOpenContractIdsBudgetedPage checkpoints complete raw subpages before
 // the task deadline. The elapsed budget stops new subpages; it does not cancel
 // in-flight closes, whose required payout posts follow their outcome commit.
-// One complete subpage may overrun the budget. Parent cancellation stays an error.
+// One subpage may overrun the budget; past the dispatch limit it starts no new
+// rows and checkpoints the prefix that started. Parent cancellation stays an error.
 func ForceCloseOpenContractIdsBudgetedPage(ctx context.Context, minTime time.Time, maxCount, parallel, blockSize, blockIndex int,
 	after *ContractExpiryCursor,
 ) (int64, *ContractExpiryCursor, error) {
@@ -28,9 +34,10 @@ func forceCloseOpenContractIdsBudgetedPage(ctx context.Context, minTime time.Tim
 	if maxCount <= 0 || parallel <= 0 || budget <= 0 || subpageSize <= 0 {
 		return 0, nil, fmt.Errorf("invalid force close page budget")
 	}
-	return forceCloseContractPagesBudgeted(ctx, maxCount, after, budget, subpageSize, time.Now,
-		func(size int, cursor *ContractExpiryCursor) (int64, *ContractExpiryCursor, error) {
-			return ForceCloseOpenContractIdsPage(ctx, minTime, size, parallel, blockSize, blockIndex, cursor)
+	return forceCloseContractPagesDispatched(ctx, maxCount, after, budget, forceClosePageDispatchLimit, subpageSize, time.Now,
+		func(size int, cursor *ContractExpiryCursor, dispatch func() bool) (int64, *ContractExpiryCursor, error) {
+			count, next, _, err := forceCloseOpenContractIdsPageDispatched(ctx, minTime, size, parallel, blockSize, blockIndex, cursor, dispatch)
+			return count, next, err
 		})
 }
 
@@ -39,10 +46,24 @@ func forceCloseOpenContractIdsBudgetedPage(ctx context.Context, minTime time.Tim
 func forceCloseContractPagesBudgeted[Cursor any](ctx context.Context, maxCount int, after *Cursor,
 	budget time.Duration, subpageSize int, now func() time.Time, page func(int, *Cursor) (int64, *Cursor, error),
 ) (closed int64, next *Cursor, returnErr error) {
-	if maxCount <= 0 || budget <= 0 || subpageSize <= 0 {
+	return forceCloseContractPagesDispatched(ctx, maxCount, after, budget, forceClosePageDispatchLimit, subpageSize, now,
+		func(size int, cursor *Cursor, _ func() bool) (int64, *Cursor, error) { return page(size, cursor) })
+}
+
+// The cooperative budget is checked between subpages. The separate dispatch
+// limit also bounds one slow subpage: its callback receives a predicate that
+// closes once that limit passes, measured on the same clock from the start.
+func forceCloseContractPagesDispatched[Cursor any](ctx context.Context, maxCount int, after *Cursor,
+	budget time.Duration, dispatchLimit time.Duration, subpageSize int, now func() time.Time,
+	page func(int, *Cursor, func() bool) (int64, *Cursor, error),
+) (closed int64, next *Cursor, returnErr error) {
+	if maxCount <= 0 || budget <= 0 || dispatchLimit <= 0 || subpageSize <= 0 {
 		return 0, after, fmt.Errorf("invalid force close page budget")
 	}
-	budgetEnd := now().Add(budget)
+	started := now()
+	budgetEnd := started.Add(budget)
+	dispatchEnd := started.Add(dispatchLimit)
+	dispatch := func() bool { return now().Before(dispatchEnd) }
 	next = after
 	for remaining := maxCount; remaining > 0; {
 		size := min(remaining, subpageSize)
@@ -50,7 +71,7 @@ func forceCloseContractPagesBudgeted[Cursor any](ctx context.Context, maxCount i
 		var cursor *Cursor
 		var pageErr error
 		server.HandleError(func() {
-			count, cursor, pageErr = page(size, next)
+			count, cursor, pageErr = page(size, next, dispatch)
 		}, func(err error) { pageErr = errors.Join(pageErr, err) })
 		if ctx.Err() != nil {
 			// Parent cancellation is never a normal page yield, even after a
@@ -72,8 +93,10 @@ func forceCloseContractPagesBudgeted[Cursor any](ctx context.Context, maxCount i
 			if visited, ok := pageErr.(*ForceCloseVisitError); ok && visited.CanCheckpoint() && visited.AttemptedCloseCount() == count {
 				// Prior successful subpages add only their count. Preserve the
 				// exact completed-row receipt without adding another cause graph.
+				// They also prove that this call already moved the raw cursor.
 				progress := *visited
 				progress.attemptedCloseCount += closed
+				progress.progressed = progress.progressed || remaining < maxCount
 				return closed + count, cursor, &progress
 			}
 			return closed + count, next, pageErr

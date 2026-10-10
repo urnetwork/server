@@ -317,3 +317,58 @@ replay reconstructs the successor from the retained campaign state. New task
 identities remain distinct grant runs, and stopped campaigns do not restart.
 See [grant replay tests](../controller/subscription_grant_task_test.go) and
 [campaign replay tests](../controller/onboarding_campaign_task_test.go).
+
+## Keep a singleton batch moving past one failed item
+
+**Use when:** a recurring singleton reports the same few item failures on
+every attempt, its `reschedule_error_count` keeps growing, and `run_at` drifts
+toward the one-hour backoff cap while other items in the same batch do commit.
+
+Compare the stored error's item identities across attempts with the durable
+state of the items that did not fail. If those items committed but the task's
+arguments did not advance, the batch is retrying from the same position and
+reaching the same failures first. Then find which deadline produced a context
+error inside one item: a bounded child operation such as a connection check,
+commit or ownership admission can expire while the task context stays live.
+
+In the 2026-10-10 `CloseExpiredContracts` stall, each attempt closed about 216
+contracts, yet about 30 rows near the head of the same raw page failed with
+`timeout: context deadline exceeded` before their expiry proof committed. That
+text is pgx's wrapper for an operation whose own context deadline expired while
+the task context was live. In that first no-retry transaction only two
+deadlines can surface this bare text: the five-second validation ping of a
+newly created pooled connection and the 30-second commit; the attempt's
+duration excludes the commit. The ping is the inferred cause, not a measured
+one. Because the page witness refused any context cause, the cursor never
+advanced, and ordinary backoff had reached roughly an hour after 29 attempts.
+
+A completed page now issues a row receipt for each failed row once its parent
+context is still live after every row returned. Such a context stop is that
+row's own failure. The page records the rows it left open, advances its
+cursor, and the task stays failing with every row in its stored error. When
+other rows made progress, it retries at the ordinary two-to-four-second scan
+cadence; the rows return on their lane's next pass. A page on which every row
+failed keeps ordinary backoff, capped at one minute for this target. A single
+slow subpage stops starting rows after two minutes and checkpoints the prefix
+that started. Nothing here closes a failed row or changes the financial rules.
+
+- [Page receipts and dispatch limit](../model/subscription_model.go)
+- [Row receipt witness](../model/subscription_expiry_page_progress.go)
+- [Model regressions](../model/subscription_expiry_deferred_row_test.go)
+- [Task-path regressions](../taskworker/work/subscription_deferred_row_test.go)
+
+Distinguish a row refused by another owner from one refused by its own page.
+Deadline reconciliation try-locks every grant of the row's payer. Two rows of
+one payer started together in the same page refuse each other, so one was
+always reported busy; both startup-expiry tests in the taskworker package
+first failed on exactly that refusal. A page now reads, in one bounded lookup before
+any transaction, which selected rows are already past an explicit deadline,
+and gives each payer's such rows one turn at a time; other rows keep full
+parallelism. A failed lookup only disables the turns. See
+[payer turns](../model/subscription_close_turns.go) and
+[their regression](../model/subscription_close_turns_test.go).
+
+`MaintainNetworkSessions` had the same shape: one failing index member or
+operation cleanup stopped the rest of its shard and the 30-second task fell
+into hour-long backoff. Its sweep and recovery now continue past a failed item
+and return every failure, and its target caps the retry delay at 30 seconds.
