@@ -3028,6 +3028,28 @@ direct-file one-shot completion markers. Abrupt termination and other service
 entrypoints have separate lifecycle owners; this is not a blanket instruction
 to restore descriptors before those services have stopped their producers.
 
+An output destination failure can also stall an otherwise live watcher. On
+2026-10-10, the exact watcher generation retained 64,459 bytes in its 65,536-byte
+stdout pipe across two local frames; its alert file ended midline and stopped
+advancing. A later private SQL sample completed durably, but its next eligible
+cadence had no attempt. `RunLoop` schedules a probe's next cadence after its
+serialized alert handler returns, so blocked output can stop future probes.
+The source left the pipe reader open when the forwarding goroutine returned
+after a destination write failure. Native `/dev/full` controls reproduce that
+orphaned reader and blocked writer; they do not establish the historical errno
+or prove disk exhaustion. The forwarding goroutine now closes its owned reader
+on every exit, and short writes and failed crash notices terminate forwarding.
+Upstream writes then fail with EPIPE or ordinary stdout/stderr SIGPIPE behavior;
+the repair neither discards subsequent output silently nor retries the failed
+destination. Successful streams larger than the pipe still drain and scrub.
+A full pipe alone can be ordinary downstream backpressure; require stationary
+output and overdue durable cadence evidence before declaring coverage lost.
+An active unit, an old completed sample, or absence of alerts cannot establish
+current coverage. A destination that never returns remains outside this finite
+write-error control. Preserve alert files, private SQL receipts and the cadence
+checkpoint across a single-owner stop/join/promotion; require advancing output
+and subsequent eligible completed samples before marking coverage recovered.
+
 Implementation regression learned 2026-08-30: the standing tailer, restart
 health, and scanner-overflow tests existed, but `Monitor.RunLoop` still ran the
 bounded one-minute `logWindowProbe`; no production path instantiated the
@@ -20380,6 +20402,53 @@ the additive ALTER. Constant defaults avoid a row backfill, but the ALTER still
 needs an AccessExclusive lock. A refused lock admission must be retried as a
 separate bounded migration attempt; the concurrent-index repair's longer lock
 timeout must not be reused for this operation.
+
+The 2026-10-10 native monitor gate found eleven missing artifact contracts at
+794–795, 797–802 and 806–808: the source published head 808, while the probe
+represented only 184 of the required 195 versions from 614 onward. This was a
+detector coverage gap, not evidence that Main lacked those objects. Versions
+794–810 now share one ordered artifact/SQL list, restoring the existing
+version-minus-589 row protocol without changing the migration DDL. The existing
+796 and 803–805 predicates retain their definitions in that list.
+
+Versions 794–795 require the tier and canary columns, extender request,
+release and block-report ledgers with their primary keys, retention/lookup
+indexes, and the separate identity/epoch release index. Versions 797–802
+require the network client limit, client cap and usage/drain/rollup tables,
+services leads, per-client ACL groups, and retained Embed enable/disable
+timestamps. The cap indexes must retain the published OR, capped, monthly
+period and zero-limit predicates. Version 806 requires the nullable client
+and auth-code session associations, durable session operations and their
+recovery/quota indexes, auth-code redemption with both its composite primary
+key and unique request key, and the session-index repair outbox. Versions
+807–808 independently require the exact active, non-NULL session indexes on
+clients and auth codes; invalid or not-ready concurrent builds remain drift.
+
+The subsequent scheduler release added version 809; the native monitor gate
+detected its missing artifact contract before watcher promotion. Version 809
+requires the exact nonunique btree `pending_task_function_poll_order`: global
+function-version normalization, available block, descending run priority and
+maximum runtime, then task ID, with no partial predicate or included keys.
+Invalid or not-ready builds remain drift. This schema check does not establish
+runtime task fairness or task completion.
+
+Version 810 requires the exact nonunique btree
+`transfer_contract_audit_closed_null_day` on `(close_time, contract_id)`, with
+both `outcome IS NULL` and `close_time IS NOT NULL`, no included keys, and valid
+and ready build state. The older contract-ID-only unsettled index cannot satisfy
+this day-range contract. Missing, reordered, broader-predicate or incomplete
+indexes remain schema drift; the schema match alone does not prove audit speed.
+
+These checks pin ordinary durable tables, published column types and widths,
+nullability, defaults and stored semantics, validated nondeferrable keys, and
+complete index definitions including key order, predicates and readiness.
+Later additive columns remain valid. Native controls exercise each actual
+prefix from 793 through 810, rolled-back schema faults reaching the owning
+drift alert, and projected invalid/not-ready index states. Future artifacts
+remain pending before their versions, and unavailable catalog evidence remains
+unknown. Matching schema does not attest extender releases, Embed enforcement,
+session behavior or fleet rollout. The coverage repair changes the monitor
+binary and requires a newly built and qualified watcher before promotion.
 
 With compatible writers and workers, a RunOnce schedule coalesces with an
 unclaimed owner. Each claim captures its wake generation in the lease UPDATE;

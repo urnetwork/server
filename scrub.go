@@ -108,6 +108,12 @@ func scrubDescriptor(fd int) (func(), error) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// A destination failure ends the consumer. Release its read end too:
+		// retaining an unread pipe would block every subsequent writer forever.
+		// Closing it makes failure observable to writers as EPIPE (or the
+		// process's normal SIGPIPE behavior for stdout/stderr). Never silently
+		// discard output or fall back to an unscrubbed destination.
+		defer reader.Close()
 		scrubLoop(reader, out)
 	}()
 
@@ -133,6 +139,10 @@ func scrubLoop(reader io.Reader, out io.Writer) {
 	buffered := []byte{}
 	chunk := make([]byte, 16*1024)
 	passthrough := false
+	write := func(line []byte) bool {
+		n, err := out.Write(line)
+		return err == nil && n == len(line)
+	}
 
 	flush := func(line []byte) bool {
 		if !passthrough && startsWithPassthroughMarker(line) {
@@ -140,14 +150,14 @@ func scrubLoop(reader io.Reader, out io.Writer) {
 			// Make the transition visible: from here on this process's logs are
 			// unscrubbed, and that should not be something an operator has to
 			// infer.
-			out.Write([]byte("[scrub] crash output detected; log scrubbing disabled for this process\n"))
+			if !write([]byte("[scrub] crash output detected; log scrubbing disabled for this process\n")) {
+				return false
+			}
 		}
 		if passthrough {
-			_, err := out.Write(line)
-			return err == nil
+			return write(line)
 		}
-		_, err := out.Write(scrubAddrs(line))
-		return err == nil
+		return write(scrubAddrs(line))
 	}
 
 	for {
