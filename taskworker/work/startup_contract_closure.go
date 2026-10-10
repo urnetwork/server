@@ -162,10 +162,15 @@ type CloseScheduledContractArgs struct {
 	ScheduledContractClose
 }
 
+// A deferred close keeps RetryAt so an older Post still reschedules it at its
+// deadline; a current Post honors the later deferral instead.
 type CloseScheduledContractResult struct {
 	Owner          *model.ContractCloseOwner             `json:"owner,omitempty"`
 	RetryAt        *time.Time                            `json:"retry_at,omitempty"`
 	Reconciliation *model.ContractDeadlineReconciliation `json:"reconciliation,omitempty"`
+	DeferredUntil  *time.Time                            `json:"deferred_until,omitempty"`
+	// Due siblings newly closed by this task's second owner turn.
+	OwnerBatchClosed int `json:"owner_batch_closed,omitempty"`
 }
 
 func scheduleContractClose(clientSession *session.ClientSession, tx server.PgTx, args *CloseScheduledContractArgs) {
@@ -176,24 +181,59 @@ func scheduleContractClose(clientSession *session.ClientSession, tx server.PgTx,
 
 // An early queue wake does not grant deadline authority. Normal task retries
 // retain failed closes; a due success means the terminal commit completed.
+// A committed terminal or missing contract finishes from one unlocked read.
+// A funded close admits its balance owner without waiting, closes, and reads
+// the owner's due siblings; one more owner turn retires up to a batch of them.
+// A held owner defers this close rather than holding the worker slot.
 func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *session.ClientSession) (*CloseScheduledContractResult, error) {
 	if args == nil || !args.Private || args.ContractId == (server.Id{}) || args.Deadline.IsZero() {
 		return nil, fmt.Errorf("invalid scheduled contract close")
 	}
-	if server.NowUtc().Before(args.Deadline) {
+	now := server.NowUtc()
+	if now.Before(args.Deadline) {
 		return &CloseScheduledContractResult{RetryAt: &args.Deadline}, nil
 	}
-	closed, err := model.ReconcileContractAtDeadline(clientSession.Ctx, args.ContractId, args.Deadline)
-	return &CloseScheduledContractResult{Reconciliation: closed}, err
+	ctx := clientSession.Ctx
+	custody, err := model.ReadContractDeadlineCustody(ctx, []server.Id{args.ContractId})
+	if err != nil {
+		return nil, err
+	}
+	state := custody[args.ContractId]
+	switch {
+	case state == nil || !state.Found:
+		return &CloseScheduledContractResult{Reconciliation: &model.ContractDeadlineReconciliation{ContractId: args.ContractId, Missing: true}}, nil
+	case state.Outcome != nil:
+		return &CloseScheduledContractResult{Reconciliation: &model.ContractDeadlineReconciliation{
+			ContractId: args.ContractId, Outcome: *state.Outcome, AlreadyClosed: true}}, nil
+	case len(state.BalanceIds) == 0:
+		// No grant owns this contract, so there is no shared owner to batch.
+		closed, err := model.ReconcileContractAtDeadline(ctx, args.ContractId, args.Deadline)
+		return &CloseScheduledContractResult{Reconciliation: closed}, err
+	}
+	closed, err := model.ReconcileContractOwnerAtDeadline(ctx, state.BalanceIds,
+		model.ContractDeadline{ContractId: args.ContractId, Deadline: args.Deadline}, dueScheduledCloses(now))
+	if err != nil {
+		return nil, err
+	}
+	if closed.Busy {
+		deferredUntil := server.NowUtc().Add(scheduledCloseOwnerBusyDeferral)
+		return &CloseScheduledContractResult{RetryAt: &args.Deadline, DeferredUntil: &deferredUntil}, nil
+	}
+	return &CloseScheduledContractResult{Reconciliation: closed.Reconciliation, OwnerBatchClosed: closed.SiblingsClosed}, nil
 }
 
 // Early wakes retain the deadline. Owner handoffs are only for results written
 // by older workers; new due results already committed terminal reconciliation.
 // Register those retained hints with their owner wake; busy or changed custody
-// yields a new child without changing its deadline.
+// yields a new child without changing its deadline. A busy owner deferral wakes
+// later; its unchanged arguments keep the original deadline authority.
 func CloseScheduledContractPost(args *CloseScheduledContractArgs, result *CloseScheduledContractResult,
 	clientSession *session.ClientSession, tx server.PgTx) error {
-	if result.RetryAt != nil {
+	if result.DeferredUntil != nil {
+		task.ScheduleTaskInTx(tx, CloseScheduledContract, args, clientSession,
+			task.RunOnce("close_scheduled_contract", args.ContractId), task.RunAt(*result.DeferredUntil),
+			task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
+	} else if result.RetryAt != nil {
 		scheduleContractClose(clientSession, tx, args)
 	}
 	if result.Owner != nil {
