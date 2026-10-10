@@ -825,15 +825,49 @@ type wgProxyDeviceOpener interface {
 	OpenProxyDevice(server.Id) (*ProxyDevice, error)
 }
 
-// wgTunFactory retains only the immutable proxy id and manager. The full
-// model.ProxyClient includes every URL, auth token, and WireGuard config
-// string; capturing that object in one durable peer closure kept all of those
-// startup JSON allocations reachable for the peer's lifetime even though Tun
-// activation needs only ProxyId.
-func wgTunFactory(opener wgProxyDeviceOpener, proxyID server.Id) func() (tun proxy.WgTun, err error) {
+// A signed peer owns one cold-open attempt at a time and a bounded failure
+// cooldown. Refused packets are never queued or used to extend the cooldown.
+const wgTunRetryTimeout = time.Second
+
+var errWgTunOpening = errors.New("proxy device construction in progress")
+
+// Retains only the immutable proxy id, opener, and one peer's admission state.
+// The peer is registered only after signature validation; the WireGuard receive
+// owner verifies Noise authentication and allowed source before invoking it.
+// A live tun bypasses this factory. No state lock spans configuration/identity
+// I/O, and concurrent cold packets refuse rather than waiting behind setup.
+func wgTunFactory(opener wgProxyDeviceOpener, proxyId server.Id) func() (tun proxy.WgTun, err error) {
+	var stateLock sync.Mutex
+	var opening bool
+	var retryAfter time.Time
+	var lastErr error
 	return func() (tun proxy.WgTun, err error) {
+		stateLock.Lock()
+		if opening {
+			stateLock.Unlock()
+			return nil, errWgTunOpening
+		}
+		if time.Now().Before(retryAfter) {
+			err = lastErr
+			stateLock.Unlock()
+			return nil, err
+		}
+		opening = true
+		stateLock.Unlock()
+
+		defer func() {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			opening = false
+			lastErr = err
+			if err != nil {
+				retryAfter = time.Now().Add(wgTunRetryTimeout)
+			} else {
+				retryAfter = time.Time{}
+			}
+		}()
 		if r := server.HandleError(func() {
-			tun, err = opener.OpenProxyDevice(proxyID)
+			tun, err = opener.OpenProxyDevice(proxyId)
 		}); r != nil {
 			if rErr, ok := r.(error); ok {
 				err = rErr
@@ -860,6 +894,16 @@ func (self *wgServer) validWgClients(proxyClients []*model.ProxyClient) (map[net
 			counts.noWgConfig += 1
 			continue
 		}
+		// Reject unsigned or mismatched identities before any policy/configuration I/O.
+		if proxyId, err := model.ParseSignedProxyId(proxyClient.AuthToken); err != nil {
+			glog.Infof("[wg][%s]signed proxy id err=%s\n", proxyClient.ProxyId, err)
+			counts.invalidAuthToken += 1
+			continue
+		} else if proxyId != proxyClient.ProxyId {
+			glog.Infof("[wg][%s]signed proxy id mismatch %s\n", proxyClient.ProxyId, proxyId)
+			counts.invalidAuthToken += 1
+			continue
+		}
 		// WireGuard is a Pro-only feature (pro.yml). This is the connection-side
 		// enforcement: a client that already holds a wg config is dropped from the
 		// server's peer set once its plan stops including WireGuard, rather than
@@ -875,16 +919,6 @@ func (self *wgServer) validWgClients(proxyClients []*model.ProxyClient) (map[net
 		if proxyClient.WgConfig.ProxyPublicKey != serverConfig.Wg.PublicKey {
 			glog.Infof("[wg][%s]public key mismatch %s<>%s\n", proxyClient.ProxyId, proxyClient.WgConfig.ProxyPublicKey, serverConfig.Wg.PublicKey)
 			counts.publicKeyMismatch += 1
-			continue
-		}
-		// verify that the access token is still valid
-		if proxyId, err := model.ParseSignedProxyId(proxyClient.AuthToken); err != nil {
-			glog.Infof("[wg][%s]signed proxy id err=%s\n", proxyClient.ProxyId, err)
-			counts.invalidAuthToken += 1
-			continue
-		} else if proxyId != proxyClient.ProxyId {
-			glog.Infof("[wg][%s]signed proxy id mismatch %s\n", proxyClient.ProxyId, proxyId)
-			counts.invalidAuthToken += 1
 			continue
 		}
 		if glog.V(1) {
