@@ -16,6 +16,12 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 	commitPosts []server.PostFunction,
 	postRescheduled bool,
 ) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			self.observeTaskFinalizationFailure([]*taskExecutionResult{r}, recovered)
+			panic(recovered)
+		}
+	}()
 	finalizeTimeout := self.settings.FinalizeTimeout
 	if finalizeTimeout <= 0 {
 		finalizeTimeout = DefaultTaskFinalizeTimeout

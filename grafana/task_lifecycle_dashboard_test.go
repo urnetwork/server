@@ -15,29 +15,33 @@ func TestTaskLifecycleCountersLeadDashboard(t *testing.T) {
 		{id: 26, unit: "ops", targets: []testTarget{
 			{Expr: "sum(rate(urnetwork_task_submitted_total" + selector + "[$__rate_interval]))", LegendFormat: "submitted / s"},
 			{Expr: "sum(rate(urnetwork_task_finished_total" + selector + "[$__rate_interval]))", LegendFormat: "finished / s"},
-			{Expr: `sum(rate(urnetwork_taskworker_execution_errors_total{env="$env",instance!="",cause!="drained"}[$__rate_interval]))`, LegendFormat: "failed attempts / s"},
+			{Expr: `sum(rate(urnetwork_taskworker_execution_errors_total{env="$env",instance!="",cause!="drained"}[$__rate_interval]))`, LegendFormat: "function failures / s"},
 			{Expr: `sum(rate(urnetwork_taskworker_execution_errors_total{env="$env",instance!="",cause="drained"}[$__rate_interval]))`, LegendFormat: "graceful drain attempts / s"},
-		}, descriptionParts: []string{"all scraped producer services", "RunOnce successors", "Rollbacks are excluded from submitted/finished", "before retry writes or finalization", "not distinct tasks or financial commits", "other cancellations remain failures", "No data, not zero"}},
+			{Expr: `sum(rate(urnetwork_taskworker_finalization_errors_total{env="$env",instance!=""}[$__rate_interval]))`, LegendFormat: "finalization failures / s"},
+		}, descriptionParts: []string{"all scraped producer services", "RunOnce successors", "Rollbacks are excluded from submitted/finished", "before retry writes or finalization", "not distinct tasks or financial commits", "other cancellations remain failures", "populations overlap and must not be summed", "unknown commit replies", "No data, not zero"}},
 		{id: 28, unit: "ops", targets: []testTarget{
 			{Expr: `sum by (task) (rate(urnetwork_taskworker_execution_errors_total{env="$env",instance!="",cause!="drained"}[$__rate_interval]))`, LegendFormat: "{{task}}"},
-		}, descriptionParts: []string{"same failure scope as the adjacent total", "graceful drain (cause=drained) is excluded", "Repeated failures count again", "No data, not zero"}},
+		}, descriptionParts: []string{"same function-failure scope as the adjacent total", "graceful drain (cause=drained) is excluded", "Repeated failures count again", "No data, not zero"}},
+		{id: 29, unit: "ops", targets: []testTarget{
+			{Expr: `sum by (task, cause) (rate(urnetwork_taskworker_finalization_errors_total{env="$env",instance!=""}[$__rate_interval]))`, LegendFormat: "{{task}} {{cause}}"},
+		}, descriptionParts: []string{"each distinct member once", "safe single fallback is a new attempt", "delegation is counted once", "compatibility fallback is excluded", "unknown commit replies", "commit may have succeeded", "No data, not zero"}},
 		{id: 27, unit: "ops", targets: []testTarget{
 			{Expr: "sum(rate(urnetwork_task_balked_total" + selector + "[$__rate_interval]))", LegendFormat: "balked / s"},
 		}, descriptionParts: []string{"accepted coalescing", "IfAbsent refusals", "later run", "No data, not zero"}},
 	})
 	dashboard := readTestDashboard(t, "taskworker.json")
-	if len(dashboard.Panels) < 2 || dashboard.Panels[0].Id != 26 || dashboard.Panels[1].Id != 28 {
+	if len(dashboard.Panels) < 3 || dashboard.Panels[0].Id != 26 || dashboard.Panels[1].Id != 28 || dashboard.Panels[2].Id != 29 {
 		t.Fatal("task lifecycle and failure counters are not first in the dashboard")
 	}
 	for _, panel := range dashboard.Panels {
-		if panel.Id != 26 && panel.Id != 28 {
+		if panel.Id != 26 && panel.Id != 28 && panel.Id != 29 {
 			if panel.GridPos.Y < 8 {
 				t.Fatal("existing panel overlaps the task lifecycle and failure row")
 			}
 		} else if panel.GridPos.Y != 0 {
 			t.Fatal("task lifecycle or failure chart is not at the top")
 		}
-		if panel.Id != 26 && panel.Id != 27 && panel.Id != 28 {
+		if panel.Id != 26 && panel.Id != 27 && panel.Id != 28 && panel.Id != 29 {
 			continue
 		}
 		for _, target := range panel.Targets {
@@ -46,6 +50,24 @@ func TestTaskLifecycleCountersLeadDashboard(t *testing.T) {
 					t.Fatalf("task lifecycle query hides a producer or missing evidence: %s", forbidden)
 				}
 			}
+		}
+	}
+}
+
+// An acknowledged outcome panel cannot advertise failed handbacks, and startup
+// readiness must not promise that the live collector is making progress.
+func TestTaskFinalizationDashboardKeepsReadinessAndCommitBoundaries(t *testing.T) {
+	dashboard := readTestDashboard(t, "taskworker.json")
+	ready, outcomes := dashboardPanelById(dashboard, 1), dashboardPanelById(dashboard, 13)
+	if ready == nil || outcomes == nil || !strings.Contains(ready.Description, "does not prove current task execution or finalization progress") ||
+		!strings.Contains(outcomes.Description, "Failed or unacknowledged finalization attempts are shown separately") ||
+		strings.Contains(outcomes.Description, "post/finalization failure visibility") {
+		t.Fatal("dashboard implies readiness or acknowledged outcomes cover finalization failures")
+	}
+	for index, id := range []int{26, 28, 29} {
+		panel := dashboardPanelById(dashboard, id)
+		if panel == nil || panel.GridPos.X != index*8 || panel.GridPos.W != 8 || panel.GridPos.Y != 0 {
+			t.Fatal("top failure panels overlap or omit a stage")
 		}
 	}
 }

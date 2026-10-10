@@ -2592,6 +2592,19 @@ UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
 two unrelated failures in one window can render a correct top shape beside
 misleading or private evidence from another shape.
 
+Task finalization remains a separate failure boundary from the function result.
+A recovered `task finalization failed` or `task completion batch remains
+unacknowledged` record can accompany an execution that returned successfully.
+`urnetwork_taskworker_finalization_errors_total` observes failed handbacks per
+participating task; `execution_errors_total` does not cover this boundary.
+Correlate a current metric increase with the exact running artifact and bounded
+original error. A typed deadline alone does not distinguish owner admission,
+database work, or an uncertain commit. An inner recovery stack attributed to `worker.Run` can establish a failed
+invocation, not process death; `/status` readiness remains a startup latch and
+cannot certify collector progress. Preserve the existing panic PAGE and its
+line-count semantics. The new attempt counter is not a deduplicated incident
+count, and missing or pre-metric-build series cannot establish zero failures.
+
 Generic `panic` retains its service-wide, empty-frame PAGE at five diagnostic
 lines/minute, including malformed or unowned records. A bounded structured
 `ErrorJson` stack additionally supplies independently counted owner frames at
@@ -33775,6 +33788,42 @@ logs require verbosity one. Collector delivery or a capped log tail can conceal
 those lines despite a terminal counter. The execution counter alone does not attribute
 an earlier failure rate or certify recovered payer throughput.
 
+
+### Finalization failure attempt counters
+
+`urnetwork_taskworker_finalization_errors_total{task,cause}` counts each distinct
+participating task once when its finalization invocation returns an error or
+panics. Single, batch, and cohort boundaries own the observation for both Run
+and finite EvalTasks. A cohort delegated to the batch owner is counted once.
+A failed shared transaction counts every participating member; if a known
+pre-commit rollback permits individual fallback, each individual call is a new
+attempt. Expected mixed-backend compatibility fallback occurs before a
+transaction and is excluded. Internal transaction retries that ultimately
+succeed emit no terminal finalization failure. A returned Post error that is
+successfully persisted as a durable retry also emits no finalization failure.
+
+Labels resolve only registered targets and aliases, with `unregistered` for
+unknown stored names. Causes reuse the bounded typed execution classifier;
+non-error panics use `non_error_panic`. No task ID, queue key, payer, argument,
+raw error or raw SQLSTATE is exported. A finalization deadline is not authority
+to label owner contention or a particular SQL phase.
+
+This is an attempt diagnostic, not a rollback or financial-failure counter.
+Unknown commit replies count as observed handback failures while their database
+outcomes remain unknown to the caller; metric instrumentation never replays
+work. Business success may precede a failed handback. Acknowledged lifecycle
+counters keep their existing transaction-bound rules and are not decremented.
+Function and finalization error populations overlap and must not be summed.
+The dashboard shows both separately at the top, by task and typed finalization
+cause. `finalizations_total` contains only acknowledged succeeded, rescheduled,
+and post_rescheduled outcomes, not failed handbacks or external Post errors.
+
+False-positive qualifier: a failed batch followed by successful individual
+fallback still records the failed attempt, and a lost reply can follow a real
+commit. Neither proves a failed settlement. False-negative qualifiers: old
+builds, missing scrapes, process exit before scrape, incomplete fleet coverage,
+and a stuck finalization that has not returned can conceal failure observations.
+Zero or absent counter rates and a ready worker are not proof of closure progress.
 
 ### Task submission, completion and RunOnce conflict counters
 

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -149,6 +150,8 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 				return nil
 			}
 			worker.AddTargets(target)
+			finalizationFailures := taskFinalizationErrorsTotal.WithLabelValues(worker.metricName(target.TargetFunctionName()), "deadline")
+			beforeFinalizationFailures := testutil.ToFloat64(finalizationFailures)
 			ids := make([]server.Id, 0, 4)
 			for index, scope := range []server.Id{failedScope, siblingScope, postScope, nextScope} {
 				at := now.Add(-2 * time.Hour)
@@ -212,6 +215,9 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 			taskQueueWait(ctx, ownerReady)
 			failureOnce.Do(func() { close(failureRelease) })
 			taskQueueWait(ctx, collectorReady)
+			if testutil.ToFloat64(finalizationFailures) != beforeFinalizationFailures+1 {
+				t.Fatal("Run finalization deadline was hidden or counted twice before collector recovery")
+			}
 			if !errors.Is(siblingCtx.Err(), context.Canceled) || worker.ctx.Err() != nil || worker.runCtx.Err() != nil {
 				t.Fatal("failed Run collector stopped refill without canceling its held sibling")
 			}
@@ -271,6 +277,9 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 				server.HandleError(worker.Run, func(err error) { nextErr = err })
 			}()
 			taskQueueWait(ctx, nextDone)
+			if testutil.ToFloat64(finalizationFailures) != beforeFinalizationFailures+1 {
+				t.Fatal("collector unwind or Run re-entry recounted an earlier finalization failure")
+			}
 			if nextErr != nil || nextCalls.Load() != 1 || GetFinishedTasks(ctx, ids[3])[ids[3]] == nil ||
 				failedCalls.Load() != 1 || siblingCalls.Load() != 1 || !reflect.DeepEqual(before, GetTasks(ctx, ids[0])[ids[0]]) {
 				t.Fatal("ordinary Run restart failed to admit unrelated work or replayed unacknowledged custody", nextErr)

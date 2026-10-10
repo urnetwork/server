@@ -128,6 +128,18 @@ func (self *TaskWorker) executeTaskRunCohort(ctx context.Context, slot *taskRunS
 // owner and one finalization deadline. No known or ambiguous failure replays the
 // cohort as independent finalizations with fresh per-member budgets.
 func (self *TaskWorker) finalizeTaskRunCohort(results []*taskExecutionResult) (returnErr error) {
+	delegated := false
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if !delegated {
+				self.observeTaskFinalizationFailure(results, recovered)
+			}
+			panic(recovered)
+		}
+		if !delegated {
+			self.observeTaskFinalizationFailure(results, returnErr)
+		}
+	}()
 	if len(results) < 2 || len(results) > taskCompletionBatchLimit {
 		return errors.New("invalid Run cohort completion size")
 	}
@@ -154,6 +166,7 @@ func (self *TaskWorker) finalizeTaskRunCohort(results []*taskExecutionResult) (r
 		allSucceeded = allSucceeded && self.canBatchTaskCompletion(result)
 	}
 	if allSucceeded {
+		delegated = true
 		_, err := self.finalizeTaskBatch(results)
 		return err
 	}
