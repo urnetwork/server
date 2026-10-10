@@ -179,25 +179,37 @@ func TestStClosedWorkWindowBoundedOverflowPlan(t *testing.T) {
 				FROM generate_series(1,$2::int+$3::int+$4::int) n`, start, credited, open, canceled, provider, network, snapshot))
 			server.RaisePgResult(tx.Exec(ctx, `ANALYZE transfer_contract; ANALYZE st_provider_usage_archive; ANALYZE contract_close_report_evidence`))
 		})
-		server.Db(ctx, func(conn server.PgConn) {
-			before := stCensusPlanTestRows(t, ctx, conn, stOriginalUsageUnboundedWindowTestSql, start, end)
-			after := stCensusPlanTestRows(t, ctx, conn, stEpochProviderOriginalUsageSql, start, end)
-			if len(before) != credited+1 || !reflect.DeepEqual(before, after) || len(after[server.Id{}].Reports) != 0 {
-				t.Fatal("overflow changed original usage or published a partial window")
+		check := func() {
+			server.Db(ctx, func(conn server.PgConn) {
+				before := stCensusPlanTestRows(t, ctx, conn, stOriginalUsageUnboundedWindowTestSql, start, end)
+				after := stCensusPlanTestRows(t, ctx, conn, stEpochProviderOriginalUsageSql, start, end)
+				if len(before) != credited+1 || !reflect.DeepEqual(before, after) || len(after[server.Id{}].Reports) != 0 {
+					t.Fatal("overflow changed original usage or published a partial window")
+				}
+				oldWork := stCensusPlanTestExplain(t, ctx, conn, stOriginalUsageUnboundedWindowTestSql, start, end)
+				newWork := stCensusPlanTestExplain(t, ctx, conn, stEpochProviderOriginalUsageSql, start, end)
+				if oldWork.WindowRows < 32769 || oldWork.ContractRows < canceled || oldWork.JsonAggregations < 1 {
+					t.Fatal("control did not exercise the original history scan and discarded JSON construction", oldWork)
+				}
+				if newWork.WindowRows != 1025 || newWork.ContractRows > 8192 || newWork.JsonAggregations != 0 {
+					t.Fatal("overflow still scanned history or encoded an unavailable window", newWork)
+				}
+			})
+			usages, census, window, err := GetStEpochProviderUsageWholeCensus(ctx, 17, start, end)
+			if err != nil || len(usages) != 1 || usages[0].ClientId != provider || usages[0].NetworkId != network || usages[0].PayoutByteCount != credited*11 || census == nil || census.Count != credited || len(census.Records) != credited || window != nil {
+				t.Fatal("optional overflow changed complete immutable provider earnings", usages, census, window, err)
 			}
-			oldWork := stCensusPlanTestExplain(t, ctx, conn, stOriginalUsageUnboundedWindowTestSql, start, end)
-			newWork := stCensusPlanTestExplain(t, ctx, conn, stEpochProviderOriginalUsageSql, start, end)
-			if oldWork.WindowRows < 32769 || oldWork.ContractRows < canceled || oldWork.JsonAggregations < 1 {
-				t.Fatal("control did not exercise the original history scan and discarded JSON construction", oldWork)
-			}
-			if newWork.WindowRows != 1025 || newWork.ContractRows > 8192 || newWork.JsonAggregations != 0 {
-				t.Fatal("overflow still scanned history or encoded an unavailable window", newWork)
-			}
-		})
-		usages, census, window, err := GetStEpochProviderUsageWholeCensus(ctx, 17, start, end)
-		if err != nil || len(usages) != 1 || usages[0].ClientId != provider || usages[0].NetworkId != network || usages[0].PayoutByteCount != credited*11 || census == nil || census.Count != credited || len(census.Records) != credited || window != nil {
-			t.Fatal("optional overflow changed complete immutable provider earnings", usages, census, window, err)
 		}
+		t.Log("overflow with eligible open contracts")
+		check()
+		// Exhausting the open branch must still stop at an indexed canceled
+		// prefix. Ordering only by contract_id can sort the whole NULL range.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome='canceled',close_time=$1::timestamp-interval '1 day' WHERE outcome IS NULL`, start))
+			server.RaisePgResult(tx.Exec(ctx, `ANALYZE transfer_contract`))
+		})
+		t.Log("overflow with no eligible open contracts")
+		check()
 	})
 }
 

@@ -17,7 +17,7 @@ const stEpochProviderOriginalUsageSql = `
     WHERE outcome IS NULL AND create_time < $2 ORDER BY contract_id LIMIT 1025)
    UNION ALL
    (SELECT contract_id, 'unassigned_canceled'::text AS disposition, close_time, NULL::jsonb FROM transfer_contract
-    WHERE outcome='canceled' AND close_time IS NULL ORDER BY contract_id LIMIT 1025)
+    WHERE outcome='canceled' AND close_time IS NULL ORDER BY close_time,contract_id LIMIT 1025)
    UNION ALL
    (SELECT contract_id, 'canceled'::text AS disposition, close_time, NULL::jsonb FROM transfer_contract
     WHERE outcome='canceled' AND $1<=close_time AND close_time<$2 ORDER BY close_time,contract_id LIMIT 1025)
