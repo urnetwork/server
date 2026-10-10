@@ -132,16 +132,17 @@ func (self *TaskWorker) finalizeTaskRunCohort(results []*taskExecutionResult) (r
 }
 
 func (self *TaskWorker) finalizeTaskRunCohortWithGuard(results []*taskExecutionResult, guard *taskClaimGuard) (returnErr error) {
+	observation := newTaskFinalizationObservation()
 	delegated := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if !delegated {
-				self.observeTaskFinalizationFailure(results, recovered)
+				self.observeTaskFinalizationFailure(results, recovered, observation)
 			}
 			panic(recovered)
 		}
 		if !delegated {
-			self.observeTaskFinalizationFailure(results, returnErr)
+			self.observeTaskFinalizationFailure(results, returnErr, observation)
 		}
 	}()
 	if len(results) < 2 || len(results) > taskCompletionBatchLimit {
@@ -183,12 +184,13 @@ func (self *TaskWorker) finalizeTaskRunCohortWithGuard(results []*taskExecutionR
 	server.HandleError(func() {
 		guard.finalizeOwnedTx(bounded, keys, func(tx server.PgTx) {
 			for _, result := range results {
-				posts, postRescheduled := self.finalizeTaskInTx(bounded, tx, result)
+				posts, postRescheduled := self.finalizeTaskInTx(bounded, tx, result, observation)
 				if len(posts) != 0 || postRescheduled {
 					panic(errors.New("Run cohort produced an uncertified post"))
 				}
 			}
-		})
+		}, &observation.db)
+		observation.acknowledged = true
 		if self.completionBatchCommitReturned != nil {
 			self.completionBatchCommitReturned()
 		}

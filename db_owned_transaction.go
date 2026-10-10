@@ -103,6 +103,7 @@ type pgOwnedConnection struct {
 // business transaction. Key-count work is proportional to the complete set,
 // with bounded SQL chunks and a finite admission context, never a fallback.
 func OwnedTx(ctx context.Context, keys []PgOwnershipKey, callback func(PgTx), options ...any) {
+	dbPhaseObservation(options).enter(DbOperationOwnershipConfiguration)
 	checkPostgresAllowed(ctx)
 	ownedTxWithResource(ctx, keys, requirePgOwnershipResource(), AcquireMaintenanceDbConn, callback, options...)
 }
@@ -111,6 +112,7 @@ func OwnedTx(ctx context.Context, keys []PgOwnershipKey, callback func(PgTx), op
 // key set whose partial locks and checkout have already been released. Every
 // route, acquisition, protocol, callback or commit failure still propagates.
 func TryOwnedTx(ctx context.Context, keys []PgOwnershipKey, callback func(PgTx), options ...any) bool {
+	dbPhaseObservation(options).enter(DbOperationOwnershipConfiguration)
 	checkPostgresAllowed(ctx)
 	return ownedTxWithResourcePolicy(ctx, keys, requirePgOwnershipResource(), AcquireMaintenanceDbConn, false, callback, options...)
 }
@@ -126,6 +128,7 @@ func ownedTxWithResource(ctx context.Context, keys []PgOwnershipKey, resource pg
 // cleanup. Only a known pre-BEGIN refusal can return without business work.
 func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resource pgOwnershipResource,
 	acquire func(context.Context) (PgConn, error), wait bool, callback func(PgTx), options ...any) bool {
+	phase := dbPhaseObservation(options)
 	keys = normalizePgOwnershipKeys(keys)
 	if len(keys) == 0 {
 		panic(errors.New("database ownership requires at least one key"))
@@ -143,6 +146,7 @@ func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resou
 	admissionCtx, cancel := context.WithTimeout(ctx, PgOwnershipAdmissionTimeout)
 	defer cancel()
 	for {
+		phase.enter(DbOperationOwnershipAcquire)
 		started := timing.start()
 		conn, err := acquire(admissionCtx)
 		timing.finish(DbTimingAcquire, started)
@@ -156,6 +160,7 @@ func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resou
 		admitted := false
 		func() {
 			defer owner.release(ctx)
+			phase.enter(DbOperationAdmission)
 			Raise(resource.validate(conn))
 			var err error
 			admitted, err = tryPgOwnershipKeys(admissionCtx, conn, keys, false, owner.backendPid)
@@ -181,6 +186,8 @@ func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resou
 			owner.observe(PgOwnershipAdmitted)
 			ownedOptions := append(append([]any{}, options...), owner, OptNoRetry())
 			Tx(ctx, func(tx PgTx) {
+				// Session validation precedes the admitted business callback.
+				phase.enter(DbOperationBegin)
 				var backendPid uint32
 				Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&backendPid))
 				if backendPid != owner.backendPid {
@@ -190,6 +197,7 @@ func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resou
 				transaction := tx.(*postCommitPgTx)
 				transaction.ownershipAllowed = false
 				transaction.ownershipKeys = keys
+				phase.enter(DbOperationCallback)
 				callback(tx)
 			}, ownedOptions...)
 		}()

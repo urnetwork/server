@@ -48,12 +48,14 @@ func TestTaskFinalizationMetricPreservesTypedPanicAndFiniteLabels(t *testing.T) 
 		target.failure = test.failure
 		metric := taskFinalizationErrorsTotal.WithLabelValues(worker.metricName(queued.FunctionName), test.cause)
 		before := testutil.ToFloat64(metric)
+		phaseMetric := taskFinalizationPhaseErrorsTotal.WithLabelValues(worker.metricName(queued.FunctionName), "preparation", test.cause)
+		beforePhase := testutil.ToFloat64(phaseMetric)
 		var caught any
 		func() {
 			defer func() { caught = recover() }()
 			worker.finalizeTask(result)
 		}()
-		if caught != test.failure || testutil.ToFloat64(metric) != before+1 {
+		if caught != test.failure || testutil.ToFloat64(metric) != before+1 || testutil.ToFloat64(phaseMetric) != beforePhase+1 {
 			t.Fatal("single finalization changed its panic or failure count", test.cause)
 		}
 	}
@@ -104,6 +106,8 @@ func TestTaskFinalizationMetricEvalTasksRollbackAndRecoveredRetry(t *testing.T) 
 			retryFailure := taskFinalizationErrorsTotal.WithLabelValues(name, "postgres_serialization")
 			executionFailure := taskExecutionErrorsTotal.WithLabelValues(name, "system", "postgres_other")
 			before, beforeRetry, beforeExecution := testutil.ToFloat64(failure), testutil.ToFloat64(retryFailure), testutil.ToFloat64(executionFailure)
+			phaseMetric := taskFinalizationPhaseErrorsTotal.WithLabelValues(name, "commit", "postgres_other")
+			beforePhase := testutil.ToFloat64(phaseMetric)
 			id := scheduleCommitPostWork(owner)
 			var caught error
 			server.HandleError(func() { _, _, _, caught = worker.EvalTasks(1) }, func(err error) { caught = err })
@@ -115,6 +119,9 @@ func TestTaskFinalizationMetricEvalTasksRollbackAndRecoveredRetry(t *testing.T) 
 				t.Fatal("function success, internal retry, or collector recovery distorted failure count")
 			}
 			if rollback {
+				if testutil.ToFloat64(phaseMetric) != beforePhase+1 {
+					t.Fatal("deferred commit refusal lost its source phase")
+				}
 				if caught == nil || GetTasks(ctx, id)[id] == nil || GetFinishedTasks(ctx, id)[id] != nil || probe.workCount.Load() != 0 {
 					t.Fatal("failed finalization changed durable rollback or post custody")
 				}
@@ -145,9 +152,11 @@ func TestTaskFinalizationMetricBatchRollbackThenSingles(t *testing.T) {
 		})
 		metric := taskFinalizationErrorsTotal.WithLabelValues(worker.metricName(results[0].task.FunctionName), "postgres_lock")
 		before := testutil.ToFloat64(metric)
+		phaseMetric := taskFinalizationPhaseErrorsTotal.WithLabelValues(worker.metricName(results[0].task.FunctionName), "queue_update", "postgres_lock")
+		beforePhase := testutil.ToFloat64(phaseMetric)
 		lifecycle := taskLifecycleCounts()
 		retry, err := worker.finalizeTaskBatch(results)
-		if !retry || err == nil || testutil.ToFloat64(metric) != before+float64(len(results)) || len(GetFinishedTasks(ctx, ids...)) != 0 {
+		if !retry || err == nil || testutil.ToFloat64(metric) != before+float64(len(results)) || testutil.ToFloat64(phaseMetric) != beforePhase+float64(len(results)) || len(GetFinishedTasks(ctx, ids...)) != 0 {
 			t.Fatal("failed shared body lost exact-member attempt observations or safe fallback")
 		}
 		requireTaskLifecycleDelta(t, lifecycle, 0, 0, 0)
@@ -202,9 +211,15 @@ func TestTaskFinalizationMetricCohortDelegationAndUnknownReply(t *testing.T) {
 				}
 				metric := taskFinalizationErrorsTotal.WithLabelValues(worker.metricName(results[0].task.FunctionName), cause)
 				before := testutil.ToFloat64(metric)
+				phase := "queue_update"
+				if lostReply {
+					phase = "acknowledged"
+				}
+				phaseMetric := taskFinalizationPhaseErrorsTotal.WithLabelValues(worker.metricName(results[0].task.FunctionName), phase, cause)
+				beforePhase := testutil.ToFloat64(phaseMetric)
 				lifecycle := taskLifecycleCounts()
 				err = worker.finalizeTaskRunCohort(results)
-				if err == nil || testutil.ToFloat64(metric) != before+float64(len(results)) || len(guard.taskIds) != len(ids) {
+				if err == nil || testutil.ToFloat64(metric) != before+float64(len(results)) || testutil.ToFloat64(phaseMetric) != beforePhase+float64(len(results)) || len(guard.taskIds) != len(ids) {
 					t.Fatal("cohort delegation double-counted, concealed failure, or changed owner custody")
 				}
 				finished := 0

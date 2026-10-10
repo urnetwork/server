@@ -163,6 +163,8 @@ func init() {
 		taskPollsTotal,
 		taskFinalizationsTotal,
 		taskFinalizationErrorsTotal,
+		taskFinalizationPhaseErrorsTotal,
+		taskFinalizationFailureSeconds,
 		taskQueueMetrics,
 		taskQueueSnapshotErrorsTotal,
 		taskExecutionMaximum,
