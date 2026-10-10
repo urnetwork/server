@@ -95,14 +95,15 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 }
 
 func (self *TaskWorker) finalizeTaskBatchWithGuard(results []*taskExecutionResult, guard *taskClaimGuard) (retrySingles bool, returnErr error) {
+	observation := newTaskFinalizationObservation()
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			self.observeTaskFinalizationFailure(results, recovered)
+			self.observeTaskFinalizationFailure(results, recovered, observation)
 			panic(recovered)
 		}
 		// Mixed backend policies are an expected pre-transaction fallback.
 		if returnErr != errTaskCompletionBatchMode {
-			self.observeTaskFinalizationFailure(results, returnErr)
+			self.observeTaskFinalizationFailure(results, returnErr, observation)
 		}
 	}()
 	if len(results) < 2 || len(results) > taskCompletionBatchLimit {
@@ -153,6 +154,7 @@ func (self *TaskWorker) finalizeTaskBatchWithGuard(results []*taskExecutionResul
 	bodyComplete := false
 	server.HandleError(func() {
 		finish := func(tx server.PgTx) {
+			observation.body = taskFinalizationQueueUpdate
 			var copied, removed, successors, expectedSuccessors, invalidGenerations, insertedSuccessors int
 			server.Raise(tx.QueryRow(ctx, taskCompletionBatchSql, ids, starts, ends, values,
 				generations, successorIds, time.Time{}, claims).Scan(&copied, &removed, &successors, &expectedSuccessors, &invalidGenerations, &insertedSuccessors))
@@ -165,10 +167,11 @@ func (self *TaskWorker) finalizeTaskBatchWithGuard(results []*taskExecutionResul
 			bodyComplete = true
 		}
 		if owned {
-			guard.finalizeOwnedTx(ctx, keys, finish)
+			guard.finalizeOwnedTx(ctx, keys, finish, &observation.db)
 		} else {
-			server.Tx(ctx, finish, server.OptNoRetry())
+			server.Tx(ctx, finish, server.OptNoRetry(), &observation.db)
 		}
+		observation.acknowledged = true
 		if self.completionBatchCommitReturned != nil {
 			self.completionBatchCommitReturned()
 		}

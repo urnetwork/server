@@ -3,6 +3,8 @@
 package task
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
 )
@@ -19,7 +21,7 @@ var taskFinalizationErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpt
 // makes new attempts; cohort delegation to the batch owner is observed only by
 // that owner. Compatibility fallback before a transaction is not a failure.
 // IDs only deduplicate this bounded call and never become metric labels.
-func (self *TaskWorker) observeTaskFinalizationFailure(results []*taskExecutionResult, failure any) {
+func (self *TaskWorker) observeTaskFinalizationFailure(results []*taskExecutionResult, failure any, observations ...*taskFinalizationObservation) {
 	if failure == nil {
 		return
 	}
@@ -27,12 +29,26 @@ func (self *TaskWorker) observeTaskFinalizationFailure(results []*taskExecutionR
 	if err, ok := failure.(error); ok {
 		cause = taskExecutionErrorCause(err)
 	}
+	var observation *taskFinalizationObservation
+	if len(observations) != 0 {
+		observation = observations[0]
+	}
+	phase := observation.failurePhase()
+	elapsed := float64(0)
+	if observation != nil {
+		elapsed = max(0, time.Since(observation.started).Seconds())
+	}
 	seen := make(map[server.Id]bool, min(len(results), taskCompletionBatchLimit))
 	for _, result := range results[:min(len(results), taskCompletionBatchLimit)] {
 		if result == nil || result.task == nil || seen[result.task.TaskId] {
 			continue
 		}
 		seen[result.task.TaskId] = true
-		taskFinalizationErrorsTotal.WithLabelValues(self.metricName(result.task.FunctionName), cause).Inc()
+		name := self.metricName(result.task.FunctionName)
+		taskFinalizationErrorsTotal.WithLabelValues(name, cause).Inc()
+		taskFinalizationPhaseErrorsTotal.WithLabelValues(name, phase, cause).Inc()
+	}
+	if observation != nil && len(seen) != 0 {
+		taskFinalizationFailureSeconds.WithLabelValues(phase).Observe(elapsed)
 	}
 }

@@ -31,12 +31,15 @@ func (self *PgOwnedSession) Err() error {
 // Admission stays outside BEGIN with the same finite budget as OwnedTx. Only
 // known busy admission repeats; no callback, commit, or uncertain unlock does.
 func (self *PgOwnedSession) Tx(ctx context.Context, keys []PgOwnershipKey, callback func(PgTx), options ...any) {
+	dbPhaseObservation(options).enter(DbOperationOwnershipConfiguration)
 	checkPostgresAllowed(ctx)
 	self.txWithResource(ctx, keys, requirePgOwnershipResource(), callback, options...)
 }
 
 func (self *PgOwnedSession) txWithResource(ctx context.Context, keys []PgOwnershipKey, resource pgOwnershipResource,
 	callback func(PgTx), options ...any) {
+	phase := dbPhaseObservation(options)
+	phase.enter(DbOperationOwnershipConfiguration)
 	checkPostgresAllowed(ctx)
 	if self.entered {
 		panic(errors.New("database ownership session is already in use"))
@@ -61,6 +64,8 @@ func (self *PgOwnedSession) txWithResource(ctx context.Context, keys []PgOwnersh
 	admissionCtx, cancel := context.WithTimeout(ctx, PgOwnershipAdmissionTimeout)
 	defer cancel()
 	for {
+		// This direct session is already retained; there is no pool acquire.
+		phase.enter(DbOperationAdmission)
 		Raise(admissionCtx.Err())
 		owner := &pgOwnedConnection{conn: self.conn, keys: keys, observation: observation,
 			backendPid: self.conn.Conn().PgConn().PID()}
@@ -100,6 +105,7 @@ func (self *PgOwnedSession) txWithResource(ctx context.Context, keys []PgOwnersh
 			owner.observe(PgOwnershipAdmitted)
 			ownedOptions := append(append([]any{}, options...), owner, OptNoRetry())
 			Tx(ctx, func(tx PgTx) {
+				phase.enter(DbOperationBegin)
 				var backendPid uint32
 				Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&backendPid))
 				if backendPid != owner.backendPid {
@@ -109,6 +115,7 @@ func (self *PgOwnedSession) txWithResource(ctx context.Context, keys []PgOwnersh
 				transaction := tx.(*postCommitPgTx)
 				transaction.ownershipAllowed = false
 				transaction.ownershipKeys = keys
+				phase.enter(DbOperationCallback)
 				callback(tx)
 			}, ownedOptions...)
 		}()
