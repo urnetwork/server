@@ -5,8 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,7 +30,7 @@ const usage = `URnetwork operator in one process.
 
 Usage:
   all [run] [options]
-  all db migrate [--sn-schedule-sha256=SHA256]
+  all db migrate
   all init-tasks
   all --help
   all --version
@@ -68,7 +66,6 @@ type commandOptions struct {
 	requireSubnet     bool
 	memoryOwnerLedger bool
 	privateHeapTarget string
-	scheduleSha256    string
 }
 
 // The complete command line is validated before loading credentials.
@@ -89,25 +86,15 @@ func parseCommand(args []string) (commandOptions, error) {
 		options.command = "init-tasks"
 		return options, nil
 	}
+	if len(args) >= 2 && args[0] == "db" && args[1] == "migrate" {
+		if len(args) != 2 {
+			return options, errors.New("db migrate accepts no arguments")
+		}
+		options.command = "migrate"
+		return options, nil
+	}
 	flags := flag.NewFlagSet("all", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	if len(args) >= 2 && args[0] == "db" && args[1] == "migrate" {
-		options.command = "migrate"
-		flags.StringVar(&options.scheduleSha256, "sn-schedule-sha256", "", "reviewed sn.yml digest")
-		if err := flags.Parse(args[2:]); err != nil {
-			return options, err
-		}
-		if flags.NArg() != 0 {
-			return options, errors.New("db migrate accepts no positional arguments")
-		}
-		var pinErr error
-		flags.Visit(func(selected *flag.Flag) {
-			if selected.Name == "sn-schedule-sha256" {
-				pinErr = validateSchedulePin(options.scheduleSha256)
-			}
-		})
-		return options, pinErr
-	}
 	if len(args) > 0 && args[0] == "run" {
 		args = args[1:]
 	}
@@ -151,15 +138,6 @@ func parseCommand(args []string) (commandOptions, error) {
 		seenPorts[port] = true
 	}
 	return options, nil
-}
-
-// An explicitly selected empty pin must not become an unselected migration.
-func validateSchedulePin(pin string) error {
-	digest, err := hex.DecodeString(pin)
-	if err != nil || len(digest) != 32 || pin != hex.EncodeToString(digest) || pin == strings.Repeat("0", 64) {
-		return errors.New("migration schedule requires a nonzero lowercase SHA-256 digest")
-	}
-	return nil
 }
 
 // All listeners use one stable Warp identity and one immutable port map.
@@ -371,26 +349,12 @@ func cancellationOnly(err error) bool {
 	return false
 }
 
-// Schema migration preserves the ordinary CLI's selected-schedule preflight
-// and post-migration exact-byte reload. It does not authorize chain readiness.
-func migrateDatabase(ctx context.Context, pin string, output io.Writer, migrate func(context.Context), load func(context.Context) (*server.ProviderPayoutTransition, error), prepare func(context.Context, string) (*server.ProviderEarningBoundary, error)) error {
+// The same ordinary migration as bringyourctl db migrate: every migration, then
+// the provider earning boundary is retained or prepared from the loaded sn.yml.
+// Neither step authorizes chain readiness.
+func migrateDatabase(ctx context.Context, output io.Writer, migrate func(context.Context), ensure func(context.Context) (*server.ProviderEarningBoundary, bool, error)) error {
 	if ctx == nil {
 		return errors.New("database migration requires context")
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if pin != "" {
-		if err := validateSchedulePin(pin); err != nil {
-			return err
-		}
-		policy, err := load(ctx)
-		if err != nil {
-			return err
-		}
-		if policy == nil || policy.ConfigSha256 != pin {
-			return errors.New("database migration requires the exact reviewed sn.yml digest")
-		}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -399,18 +363,11 @@ func migrateDatabase(ctx context.Context, pin string, output io.Writer, migrate 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if pin == "" {
-		return nil
-	}
-	boundary, err := prepare(ctx, pin)
-	if err != nil {
+	boundary, prepared, err := ensure(ctx)
+	if err != nil || boundary == nil {
 		return err
 	}
-	return json.NewEncoder(output).Encode(struct {
-		Boundary                 *server.ProviderEarningBoundary `json:"earning_boundary"`
-		DeploymentVerified       bool                            `json:"deployment_verified"`
-		ChainReadinessAuthorized bool                            `json:"chain_readiness_authorized"`
-	}{Boundary: boundary})
+	return server.WriteProviderEarningBoundary(output, boundary, prepared)
 }
 
 // Omitted gossip is allowed for a feed-only extender network, but never when
@@ -446,7 +403,7 @@ func runCommand(ctx context.Context, options commandOptions, output io.Writer) e
 		_, err = fmt.Fprintln(output, version)
 		return err
 	case "migrate":
-		return migrateDatabase(ctx, options.scheduleSha256, output, server.ApplyDbMigrations, server.LoadProviderPayoutTransition, server.PrepareProviderPayoutBoundary)
+		return migrateDatabase(ctx, output, server.ApplyDbMigrations, server.EnsureProviderPayoutBoundary)
 	case "init-tasks":
 		if err := router.CheckStartupReadiness(ctx); err != nil {
 			return err
