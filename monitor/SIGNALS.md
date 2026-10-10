@@ -621,6 +621,20 @@ orders by available block before priority and examines a finite prefix;
 older work can conceal later recurring tasks. Prove that mechanism before
 changing scheduling or releasing ownership.
 
+The next bounded read at 02:11 UTC found all first 68 due candidates were
+`CloseScheduledContract` rows in the same older available block; the six
+canaries were eligible in later blocks and absent from that prefix. A 69th
+row proved more due work. This describes the captured window; live worker
+batch sizes and every worker's cursor were not observed. A native control
+using the prior claim order committed 144 successful close-task handoffs,
+with zero paid closures, zero free closures, zero completions for the six
+recurring admission canaries, and zero task errors. Task finalizations can
+acknowledge a durable financial handoff while the contract remains open;
+verify the downstream payer/source task and actual contract outcome. With
+function lanes, the same native checkpoint had 24 paid closures, 12 free
+closures, and all six canary completions; the joined 288-contract control
+passed financial conservation and terminal replay. These are local controls.
+
 Cache absence has distinct product effects. Missing `{cl}i` makes the initial
 provider picker return an empty successful response. Missing
 `{provider_hard_exclusions}` removes cohort coverage and causes provider
@@ -632,6 +646,21 @@ or end-user transport recovery. Require subsequent recurring completions,
 renewed cache lifetime, and advancing reliability watermark. A stale rollup
 watermark prevents reliability score publication; merely restarting workers
 or re-scheduling an already overdue key does not repair missed claim admission.
+
+Location and score publications have independent lifetimes: the normal
+location task writes `{cl}i` and per-location values for 30 minutes; the score
+task writes the `ClientFilter` values used by `loadLocationStables` for 300
+minutes. Refreshing locations does not refresh those filters. Missing selected
+filter bytes or a nonpositive decoded `Count` omit a location while the API
+returns a successful response. Check the selected caller/alias/baseline filter
+and its lifetime as well as the initial catalog.
+
+A later normal location publication acknowledged 1,749 updated locations, but
+the public result stayed empty. At 02:38 UTC, `{cl}i` was present as a
+27,768-byte string with about 1,537 seconds remaining. Publication acknowledgment
+and cache presence therefore did not establish public restoration. Retain
+bounded decoded catalog counts and selected filter evidence before attributing
+that empty result; key length alone is not a location count.
 
 `Interrupted: context canceled` alone does not identify deployment drain or a
 short attempt. `claim_time` advances with the lease heartbeat; release minus
