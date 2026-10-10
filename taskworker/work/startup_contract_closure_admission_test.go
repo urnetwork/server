@@ -64,7 +64,7 @@ func TestStartupContractClosureBusyChildOwnersKeepLaterPagesMoving(t *testing.T)
 		initial := readExpiryRecoveryQueue(t, baseCtx)[key]
 		var scanArgs ScheduleOpenContractClosuresArgs
 		server.Raise(json.Unmarshal([]byte(initial.args), &scanArgs))
-		if scanArgs.PageSize != 1024 || task.GetTasks(baseCtx, initial.id)[initial.id].RunMaxTimeSeconds != 120 {
+		if scanArgs.PageSize != 1024 || task.GetTasks(baseCtx, initial.id)[initial.id].RunMaxTimeSeconds != int(startupContractClosureMaxTime/time.Second) {
 			t.Fatal("fixture did not use the production startup page size and task budget")
 		}
 		deadline := scanArgs.StartedAt.Add(model.DefaultContractExpiration)

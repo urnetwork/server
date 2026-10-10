@@ -32,10 +32,19 @@ type ScheduledContractClose struct {
 
 type ScheduleOpenContractClosuresResult struct{}
 
+// A pass enumerates every nonterminal contract and resumes from committed
+// checkpoints, so one attempt can run for hours. The default task deadline cut
+// every attempt short and the pass never finished.
+const startupContractClosureMaxTime = 24 * time.Hour
+
 func ScheduleOpenContractClosuresOnStartup(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(tx, ScheduleOpenContractClosures,
 		&ScheduleOpenContractClosuresArgs{PageSize: startupContractClosurePageSize, StartedAt: server.NowUtc().Truncate(time.Microsecond)},
-		clientSession, task.RunOnce("schedule_open_contract_closures_on_startup"), task.RunAt(server.NowUtc()))
+		clientSession, task.RunOnce("schedule_open_contract_closures_on_startup"), task.RunAt(server.NowUtc()),
+		task.MaxTime(startupContractClosureMaxTime))
+	// An earlier release scheduled the same pass under this key with a 30s
+	// deadline. Keep that pending pass and give it the same deadline.
+	task.RaiseRunOnceMaxTimeInTx(clientSession.Ctx, tx, task.RunOnce("schedule_open_contract_closures"), startupContractClosureMaxTime)
 }
 
 // One logical pass retains its original start time. The old queued After field

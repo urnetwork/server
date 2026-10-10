@@ -598,6 +598,28 @@ func ScheduleTaskIfAbsent[T any, R any](
 	return
 }
 
+// Raises the maximum run time of the task pending under runOnce to at least
+// maxTime, the same merge a RunOnce reschedule applies. Schedules nothing when
+// no task is pending under the key, and never shortens a longer time. A claimed
+// attempt keeps the deadline it was claimed with; the next claim uses the
+// raised time. Reports whether a pending task was raised.
+func RaiseRunOnceMaxTimeInTx(ctx context.Context, tx server.PgTx, runOnce *RunOnceOption, maxTime time.Duration) bool {
+	if runOnce == nil {
+		panic("RaiseRunOnceMaxTimeInTx requires a non-nil runOnce key")
+	}
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE pending_task
+			SET run_max_time_seconds = $2
+			WHERE run_once_key = $1 AND run_max_time_seconds < $2
+		`,
+		runOnce.String(),
+		int(maxTime/time.Second),
+	))
+	return 0 < tag.RowsAffected()
+}
+
 func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 	return getTasks(ctx, false, taskIds...)
 }
