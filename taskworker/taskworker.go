@@ -228,11 +228,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		),
 		work.NewStartupContractClosureTaskTarget(),
 		work.NewScheduledContractClosureTaskTarget(),
-		task.NewTaskTargetWithPost(
-			work.CloseExpiredContracts,
-			work.CloseExpiredContractsPost,
-			"bringyour.com/service/taskworker/work.CloseExpiredContracts",
-		),
+		work.NewCloseExpiredContractsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.CloseExpiredNetworkClientHandlers,
 			work.CloseExpiredNetworkClientHandlersPost,

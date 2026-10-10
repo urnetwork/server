@@ -128,7 +128,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.MaintainNetworkSessions), schedule: work.ScheduleMaintainNetworkSessions},
 		{target: work.NewStartupContractClosureTaskTarget(), schedule: work.ScheduleOpenContractClosuresOnStartup},
 		{target: work.NewScheduledContractClosureTaskTarget()},
-		{target: task.NewTaskTarget(work.CloseExpiredContracts), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
+		{target: work.NewCloseExpiredContractsTaskTarget(), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
 			for i := range work.DefaultCloseExpiredContractsBlockSize {
 				work.ScheduleCloseExpiredContracts(clientSession, tx, i, false)
 			}

@@ -33,7 +33,21 @@ const (
 	// Open and disputed rows remain independent, with a union up to 50k.
 	closeExpiredContractsMaxCount = 25_000
 	closeExpiredContractsParallel = 92
+	// The singleton retires every contract that has no other active owner. A
+	// failure it cannot checkpoint still retries within a minute instead of
+	// the hour-long task cap, so one outage cannot park the closer for an hour.
+	closeExpiredContractsErrorRetryCap = time.Minute
 )
+
+// The registered expiry target keeps its function name and legacy alias. Its
+// failures keep their text, count and missing post; only the delay is capped.
+func NewCloseExpiredContractsTaskTarget() task.Target {
+	return task.WithErrorRetryCap(task.NewTaskTargetWithPost(
+		CloseExpiredContracts,
+		CloseExpiredContractsPost,
+		"bringyour.com/service/taskworker/work.CloseExpiredContracts",
+	), closeExpiredContractsErrorRetryCap)
+}
 
 func closeExpiredContractsFull(closeCount int64) bool {
 	return int64(closeExpiredContractsMaxCount/(4*DefaultCloseExpiredContractsBlockSize)) <= closeCount
@@ -205,18 +219,44 @@ func closeExpiredContractsPageResult(ctx context.Context, args *CloseExpiredCont
 			accounting.VerifiedCloseCount(), accounting.AccountingRejectionCount(), accounting.QuarantinedAccountingRejectionCount(), delay.Milliseconds())
 	} else if visited, ok := err.(*model.ForceCloseVisitError); ok && ctx.Err() == nil &&
 		visited.CanCheckpoint() && visited.AttemptedCloseCount() == c {
-		// Keep operational error counts, metrics and ordinary backoff. This
-		// persists scan work only; it grants no financial completion authority.
-		err = task.WithRetryArgs(err, &CloseExpiredContractsArgs{
+		// The failure text, count and metrics remain. This persists scan work
+		// only; it grants no financial completion authority to the failed rows.
+		nextArgs := &CloseExpiredContractsArgs{
 			BlockSize: args.BlockSize, BlockIndex: args.BlockIndex, Cursor: next, Sweep: args.Sweep,
 			NextExpiration: args.NextExpiration,
-		})
+		}
+		deferred := visited.DeferredContractIds()
+		if visited.Progressed() {
+			// Other rows moved, so the failures belong to their own rows: a
+			// busy owner, a bounded timeout or a refused write. Keep them open
+			// for a later pass and continue at the ordinary scan cadence.
+			hasMore := next != nil || args.Sweep != nil
+			full = hasMore || closeExpiredContractsFull(c)
+			delay := closeExpiredContractsRetryDelay(c, hasMore, mathrand.Float64())
+			err = task.WithCompletedItemsRetryDelayAndArgs(err, delay, nextArgs)
+			glog.Infof("[close-expired]completed page deferred=%d attempted=%d retry_delay_ms=%d first_deferred=%s\n",
+				len(deferred), c, delay.Milliseconds(), closeExpiredContractsFirstId(deferred))
+		} else {
+			// Every row failed: possibly one unavailable dependency. Keep the
+			// ordinary backoff, which the registered target caps.
+			err = task.WithRetryArgs(err, nextArgs)
+			glog.Infof("[close-expired]completed page without progress deferred=%d attempted=%d first_deferred=%s\n",
+				len(deferred), c, closeExpiredContractsFirstId(deferred))
+		}
 	}
 	return &CloseExpiredContractsResult{
 		Full:           full,
 		Cursor:         next,
 		NextExpiration: args.NextExpiration,
 	}, err
+}
+
+// Logs one deferred identity for correlation; the stored error lists every row.
+func closeExpiredContractsFirstId(ids []server.Id) string {
+	if len(ids) == 0 {
+		return "none"
+	}
+	return ids[0].String()
 }
 
 func CloseExpiredContractsPost(
