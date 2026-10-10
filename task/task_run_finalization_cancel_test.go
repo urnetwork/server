@@ -26,6 +26,15 @@ type taskRunFinalizationCancelTarget struct {
 	publication server.PgOwnershipKey
 }
 
+// Delegate cancellation through the real body/session adapter so the collector
+// can distinguish its interruption from an unrelated returned task failure.
+func taskRunFinalizationCancellationWork(_ *runOnceGenerationArgs, client *session.ClientSession) (*struct{}, error) {
+	if err := client.Ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &struct{}{}, nil
+}
+
 func (self *taskRunFinalizationCancelTarget) TaskCompletionOwnershipKeys(queued *Task, _ string) ([]server.PgOwnershipKey, error) {
 	var args runOnceGenerationArgs
 	if err := json.Unmarshal([]byte(queued.ArgsJson), &args); err != nil {
@@ -106,7 +115,7 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 				return never
 			}
 			target := &taskRunFinalizationCancelTarget{
-				runOnceGenerationTarget: &runOnceGenerationTarget{Target: NewTaskTargetWithCommitPost(runOnceGenerationWork,
+				runOnceGenerationTarget: &runOnceGenerationTarget{Target: NewTaskTargetWithCommitPost(taskRunFinalizationCancellationWork,
 					func(args *runOnceGenerationArgs, _ *struct{}, _ *session.ClientSession, _ server.PgTx) ([]server.PostFunction, error) {
 						switch args.Scope {
 						case failedScope:
@@ -143,7 +152,6 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 					// Expose cancellation without permitting an early join.
 					// The test releases this function after probing all guards.
 					taskQueueWait(ctx, siblingRelease)
-					return runCtx.Err()
 				case nextScope:
 					nextCalls.Add(1)
 				}
@@ -158,9 +166,12 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 				if index == 3 {
 					at = now.Add(-time.Hour)
 				}
-				ids = append(ids, ScheduleTask(runOnceGenerationWork, &runOnceGenerationArgs{Scope: scope}, owner,
+				ids = append(ids, ScheduleTask(taskRunFinalizationCancellationWork, &runOnceGenerationArgs{Scope: scope}, owner,
 					runOnceGenerationKey(scope), RunAt(at)))
 			}
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET reschedule_error_count=19 WHERE task_id=$1`, ids[1]))
+			})
 			runDone := make(chan struct{})
 			var runErr error
 			var ownerDone chan error
@@ -213,6 +224,16 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 				ownerDone <- ownerErr
 			}()
 			taskQueueWait(ctx, ownerReady)
+			var siblingWakeAt *time.Time
+			if returnedError {
+				at := server.NowUtc().Add(time.Minute).Truncate(time.Microsecond)
+				siblingWakeAt = &at
+				ScheduleTask(taskRunFinalizationCancellationWork, &runOnceGenerationArgs{Scope: siblingScope}, owner,
+					runOnceGenerationKey(siblingScope), RunAt(at))
+				if siblingCtx.Err() != nil {
+					t.Fatal("a concurrent future RunOnce wake canceled the held sibling")
+				}
+			}
 			failureOnce.Do(func() { close(failureRelease) })
 			taskQueueWait(ctx, collectorReady)
 			if testutil.ToFloat64(finalizationFailures) != beforeFinalizationFailures+1 {
@@ -247,9 +268,21 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 			siblingOnce.Do(func() { close(siblingRelease) })
 			taskQueueWait(ctx, siblingHandedBack)
 			sibling := GetTasks(ctx, ids[1])[ids[1]]
-			if sibling == nil || sibling.RescheduleError != context.Canceled.Error() || sibling.RescheduleErrorCount != 1 ||
+			if sibling == nil || sibling.RescheduleError != context.Canceled.Error() || sibling.RescheduleErrorCount != 19 ||
 				GetFinishedTasks(ctx, ids[1])[ids[1]] != nil || siblingCalls.Load() != 1 || postGenerations.Load() != 0 {
-				t.Fatal("canceled sibling lost its ordinary fenced retry or committed post was dropped")
+				t.Fatal("collector-canceled sibling grew task-failure backoff or lost its fenced retry/post custody")
+			}
+			if delay := sibling.RunAt.Sub(sibling.ReleaseTime); delay < RescheduleTimeout-time.Microsecond || 2*RescheduleTimeout < delay {
+				t.Fatal("collector interruption inherited the sibling's saturated task-failure delay", delay)
+			}
+			if siblingWakeAt != nil {
+				var wake *time.Time
+				server.Db(ctx, func(conn server.PgConn) {
+					server.Raise(conn.QueryRow(ctx, `SELECT run_once_wake_at FROM pending_task WHERE task_id=$1`, ids[1]).Scan(&wake))
+				})
+				if sibling.RunOnceGeneration != 1 || wake == nil || !wake.Equal(*siblingWakeAt) || !sibling.RunAt.Before(*siblingWakeAt) {
+					t.Fatal("interrupted retry lost the later producer wake or delayed its shorter normal retry")
+				}
 			}
 			probeOwners(true)
 			postOnce.Do(func() { close(postRelease) })

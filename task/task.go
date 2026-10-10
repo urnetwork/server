@@ -36,10 +36,14 @@ import (
 // their full report; only typed cancellation is benign.
 func taskPanicError(r any) error {
 	if server.IsDoneError(r) {
+		message := fmt.Sprintf("Interrupted: %v", r)
 		if glog.V(1) {
-			return fmt.Errorf("Interrupted: %s", server.ErrorJson(r, debug.Stack()))
+			message = fmt.Sprintf("Interrupted: %s", server.ErrorJson(r, debug.Stack()))
 		}
-		return fmt.Errorf("Interrupted: %v", r)
+		if cause, ok := r.(error); ok {
+			return &taskInterruptedPanic{message: message, cause: cause}
+		}
+		return errors.New(message)
 	}
 	return fmt.Errorf("Unhandled: %s", server.ErrorJson(r, debug.Stack()))
 }
@@ -1333,6 +1337,10 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 		if r := recover(); r != nil {
 			returnErr = taskPanicError(r)
 		}
+		// Capture the body's own cancellation authority before cleanup. A
+		// locally canceled child racing a collector stop is not interrupted
+		// by that collector, and max-time attribution takes precedence.
+		bodyCancelCause := context.Cause(clientSession.Ctx)
 		// Join before reading the timer's result, including recovered panics.
 		// A canceled max-time context must not lose its timeout attribution.
 		clientSession.Cancel()
@@ -1340,6 +1348,9 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 		if timeout {
 			returnErr = errors.Join(errors.New("Timeout"), returnErr)
 			runPost = nil
+		}
+		if bodyCancelCause == errTaskCollectorInterrupted && taskCancellationOnly(returnErr) {
+			returnErr = &taskCollectorInterruption{cause: returnErr}
 		}
 	}()
 
@@ -2443,6 +2454,8 @@ type taskExecutionResult struct {
 	runEndTime   time.Time
 	resultJson   string
 	runPost      func(server.PgTx) ([]server.PostFunction, error)
+	// Only the collector's explicit cancellation cause grants a short retry.
+	collectorInterrupted bool
 }
 
 // return taskIds of the finished tasks, rescheduled tasks
@@ -2472,8 +2485,8 @@ func (self *TaskWorker) EvalTasks(n int) (
 	// survive cancellation of the process-serving context. Task functions
 	// still receive root/drain cancellation below; this detached orchestration
 	// context only keeps the collector alive long enough to finalize them.
-	evalCtx, evalCancel := context.WithCancel(context.WithoutCancel(self.ctx))
-	defer evalCancel()
+	evalCtx, evalCancel := context.WithCancelCause(context.WithoutCancel(self.ctx))
+	defer evalCancel(nil)
 
 	for _, task := range tasks {
 		// update legacy function names
@@ -2531,7 +2544,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 		// A later collector/ownership failure must not discard work from an
 		// already committed finish. Cancel live functions before external work,
 		// keeping that handback detached and the batch guard until it returns.
-		evalCancel()
+		evalCancel(errTaskCollectorInterrupted)
 		server.RunPosts(context.WithoutCancel(evalCtx), commitPosts...)
 	}()
 	var finalizePanic any
@@ -2680,7 +2693,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 				if finalizePanic == nil {
 					finalizePanic = err
 				}
-				evalCancel()
+				evalCancel(errTaskCollectorInterrupted)
 			}
 			// Finalizing ready results must not reset the lease clock. Check
 			// an overdue heartbeat between bounded handbacks even when result
