@@ -5191,7 +5191,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		publishedCountryCode *string
 	}
 
-	loadClientScore := func(result server.PgResult) (lookbackClientScore *ClientScore, cityLocationXId *server.Id, regionLocationXId *server.Id, countryLocationXId *server.Id, reputationFailedNames string, egress *clientScoreEgress) {
+	loadClientScore := func(result server.PgResult, targetIds [3]any) (lookbackClientScore *ClientScore, reputationFailedNames string, egress *clientScoreEgress) {
 		var clientId server.Id
 		var networkId server.Id
 		var netTypeScore int
@@ -5208,9 +5208,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		var ipv6Proven bool
 		egress = &clientScoreEgress{}
 		server.Raise(result.Scan(
-			&cityLocationXId,
-			&regionLocationXId,
-			&countryLocationXId,
+			targetIds[0],
+			targetIds[1],
+			targetIds[2],
 			&clientId,
 			&networkId,
 			&netTypeScore,
@@ -5270,6 +5270,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		reputationFailedNames       string
 		egress                      *clientScoreEgress
 		locationGroup               bool
+		locationGroupIds            []server.Id
 	}
 	pendingScores := []pendingClientScore{}
 	cohort := map[server.Id]bool{}
@@ -5377,7 +5378,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				sourceRows++
-				lookbackClientScore, cityLocationId, regionLocationId, countryLocationId, reputationFailedNames, egress := loadClientScore(result)
+				var cityLocationId, regionLocationId, countryLocationId *server.Id
+				lookbackClientScore, reputationFailedNames, egress := loadClientScore(result, [3]any{&cityLocationId, &regionLocationId, &countryLocationId})
 				pendingScores = append(pendingScores, pendingClientScore{
 					score: lookbackClientScore, cityId: cityLocationId, regionId: regionLocationId,
 					countryId: countryLocationId, reputationFailedNames: reputationFailedNames, egress: egress,
@@ -5388,84 +5390,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 
 		result, err = conn.Query(
 			ctx,
-			`
-	            SELECT
-	            	location_group_member_city.location_group_id AS city_location_group_id,
-	            	location_group_member_region.location_group_id AS region_location_group_id,
-	            	location_group_member_country.location_group_id AS country_location_group_id,
-	                network_client_location_reliability.client_id,
-	                network_client_location_reliability.network_id,
-	                network_client_location_reliability.max_net_type_score,
-	                network_client_location_reliability.max_net_type_score_speed,
-	                network_client_location_reliability.min_relative_latency_ms,
-		            network_client_location_reliability.max_bytes_per_second,
-		            network_client_location_reliability.has_latency_test,
-		            network_client_location_reliability.has_speed_test,
-		            COALESCE(client_connection_reliability_score.lookback_index, 0),  -- fix(beta): see LEFT JOIN comment below
-	                COALESCE(client_connection_reliability_score.reliability_weight, 1),
-	                COALESCE(client_connection_reliability_score.independent_reliability_weight, 1),
-	                -- publicly usable; see the per-location query above
-	                EXISTS (
-	                	SELECT 1 FROM provide_key
-	                	WHERE
-	                		provide_key.client_id = network_client_location_reliability.client_id AND
-	                		provide_key.provide_mode = $1
-	                ),
-	                COALESCE(provider_egress_health.reputation_failed_names, ''),
-	                network_client_location_reliability.ipv4_proven,
-	                network_client_location_reliability.ipv6_proven,
-	                -- the egress index and the published country; see the
-	                -- per-location query above
-	                network_client_location_reliability.egress_index,
-	                network_client_location_reliability.egress_quality,
-	                country_location.country_code
-
-	            FROM network_client_location_reliability
-
-	            INNER JOIN network_client ON
-	                network_client.client_id = network_client_location_reliability.client_id
-
-	            LEFT JOIN location AS country_location ON
-	                country_location.location_id = network_client_location_reliability.country_location_id
-
-	            -- fix(beta): same class of issue as UpdateClientLocations/the query
-            -- above this one -- treats an unscored client as neutral rather
-            -- than excluding it, since the reliability-scoring pipeline may
-            -- never populate at this env's small/cold-start scale
-	            LEFT JOIN client_connection_reliability_score ON
-	        		client_connection_reliability_score.client_id = network_client_location_reliability.client_id
-	            LEFT JOIN provider_egress_health ON
-	                    provider_egress_health.client_id = network_client_location_reliability.client_id AND
-	                    provider_egress_health.measured_at >= $3
-
-	            LEFT JOIN location_group_member location_group_member_city ON
-	                location_group_member_city.location_id = network_client_location_reliability.city_location_id
-
-	            LEFT JOIN location_group_member location_group_member_region ON
-	                location_group_member_region.location_id = network_client_location_reliability.region_location_id
-
-	            LEFT JOIN location_group_member location_group_member_country ON
-	                location_group_member_country.location_id = network_client_location_reliability.country_location_id
-
-	            WHERE
-	                network_client.active = true AND
-	                network_client.source_client_id IS NULL AND
-	            	network_client_location_reliability.connected = true AND
-	            	network_client_location_reliability.valid = true AND
-	            	-- same rule as the per-location query above: Public or
-	            	-- Network. This one fills locationGroupClientScores -> the
-	            	-- clientScoreLocationGroup* redis keys -> loadClientScores
-	            	-- -> FindProviders2 whenever a spec carries a
-	            	-- LocationGroupId, so a user who picks a promoted group
-	            	-- (e.g. "Strong Privacy Laws") must be filtered by the same
-	            	-- request-time network check as a plain location.
-	            	EXISTS (
-	            		SELECT 1 FROM provide_key
-	            		WHERE
-	            			provide_key.client_id = network_client_location_reliability.client_id AND
-	            			provide_key.provide_mode IN ($1, $2)
-	            	)
-	        `,
+			clientScoreLocationGroupSourceSQL,
 			ProvideModePublic,
 			ProvideModeNetwork,
 			server.NowUtc().Add(-ProviderEgressHealthMaxAge).UTC(),
@@ -5473,11 +5398,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				sourceRows++
-				lookbackClientScore, cityLocationGroupId, regionLocationGroupId, countryLocationGroupId, reputationFailedNames, egress := loadClientScore(result)
+				var cityGroups, regionGroups, countryGroups []server.Id
+				lookbackClientScore, reputationFailedNames, egress := loadClientScore(result, [3]any{&cityGroups, &regionGroups, &countryGroups})
 				pendingScores = append(pendingScores, pendingClientScore{
-					score: lookbackClientScore, cityId: cityLocationGroupId, regionId: regionLocationGroupId,
-					countryId: countryLocationGroupId, reputationFailedNames: reputationFailedNames, egress: egress,
-					locationGroup: true,
+					score: lookbackClientScore, reputationFailedNames: reputationFailedNames, egress: egress,
+					locationGroup: true, locationGroupIds: clientScoreDistinctGroupIds(cityGroups, regionGroups, countryGroups),
 				})
 				cohort[lookbackClientScore.ClientId] = true
 			}
@@ -5531,16 +5456,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				setLocationIds(addClientScore(lookbackClientScore, reputationFailedNames, clientScores))
 			}
 		} else {
-			cityLocationGroupId, regionLocationGroupId, countryLocationGroupId := row.cityId, row.regionId, row.countryId
-
-			// once per distinct group id. The three location columns can
-			// be the same id (a country-only client), in which case all
-			// three group joins resolve to the same membership rows.
-			for _, locationGroupId := range distinctIds(
-				cityLocationGroupId,
-				regionLocationGroupId,
-				countryLocationGroupId,
-			) {
+			// One provider/lookback row carries every distinct group at
+			// its three location levels, including country-only clients.
+			for _, locationGroupId := range row.locationGroupIds {
 				clientScores, ok := locationGroupClientScores[locationGroupId]
 				if !ok {
 					clientScores = map[server.Id]*ClientScore{}
