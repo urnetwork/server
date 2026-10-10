@@ -4,28 +4,37 @@ package model
 
 import "github.com/urfoundation/sn/payoutartifact"
 
-// The indexed prefix includes one sentinel. The separate CASE subquery avoids
-// building a large JSON aggregate once the complete count/byte allowance is lost.
+// Each row costs at least 512 bytes against the 512 KiB window allowance, so
+// 1025 rows prove overflow. Disjoint indexed prefixes can stop there; only a
+// complete window is sorted and encoded. Usage itself still reads every owner.
 const stEpochProviderOriginalUsageSql = `
  WITH usage_rows AS MATERIALIZED (` + stEpochProviderUsageSql + `),
  window_rows AS MATERIALIZED (
   SELECT * FROM (
-   SELECT contract_id, 'credited'::text AS disposition, close_time, provider_usage FROM usage_rows
+   (SELECT contract_id, 'credited'::text AS disposition, close_time, provider_usage FROM usage_rows LIMIT 1025)
    UNION ALL
-   SELECT contract_id, CASE WHEN outcome IS NULL THEN 'open' WHEN close_time IS NULL THEN 'unassigned_canceled' ELSE 'canceled' END,
-     close_time, NULL::jsonb FROM transfer_contract
-   WHERE (outcome IS NULL AND create_time < $2)
-      OR (outcome='canceled' AND (close_time IS NULL OR ($1<=close_time AND close_time<$2)))
-  ) AS all_rows ORDER BY contract_id LIMIT 32769
+   (SELECT contract_id, 'open'::text AS disposition, close_time, NULL::jsonb FROM transfer_contract
+    WHERE outcome IS NULL AND create_time < $2 ORDER BY contract_id LIMIT 1025)
+   UNION ALL
+   (SELECT contract_id, 'unassigned_canceled'::text AS disposition, close_time, NULL::jsonb FROM transfer_contract
+    WHERE outcome='canceled' AND close_time IS NULL ORDER BY close_time,contract_id LIMIT 1025)
+   UNION ALL
+   (SELECT contract_id, 'canceled'::text AS disposition, close_time, NULL::jsonb FROM transfer_contract
+    WHERE outcome='canceled' AND $1<=close_time AND close_time<$2 ORDER BY close_time,contract_id LIMIT 1025)
+  ) AS all_rows LIMIT 1025
+ ), window_size AS MATERIALIZED (
+  SELECT count(*) AS row_count,
+    COALESCE(sum(512+octet_length(COALESCE(provider_usage::text,''))),0) AS byte_count FROM window_rows
  ), window_body AS MATERIALIZED (
-  SELECT CASE WHEN count(*)<=32768 AND COALESCE(sum(512+octet_length(COALESCE(provider_usage::text,''))),0)<=524288
-   THEN jsonb_build_object('schema','urnetwork-closed-work-window-inventory-v1',
+  SELECT CASE WHEN row_count<=32768 AND byte_count<=524288
+   THEN (SELECT jsonb_build_object('schema','urnetwork-closed-work-window-inventory-v1',
     'start',to_char($1::timestamp,'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
     'end',to_char($2::timestamp,'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
     'records',COALESCE(jsonb_agg(jsonb_build_object('contract_id',contract_id::text,'disposition',disposition,
        'closed_at',to_char(close_time,'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
        'original_snapshot',CASE WHEN provider_usage IS NULL THEN NULL ELSE encode(convert_to(provider_usage::text,'UTF8'),'base64') END)
-      ORDER BY contract_id),'[]'::jsonb)) ELSE NULL END AS body FROM window_rows
+      ORDER BY contract_id),'[]'::jsonb)) FROM window_rows)
+   ELSE NULL END AS body FROM window_size
  )
  SELECT usage.*, CASE WHEN octet_length(combined.body)<=1048576 THEN combined.body ELSE originals.body END, false AS window_only
  FROM usage_rows AS usage CROSS JOIN window_body
