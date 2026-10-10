@@ -62,9 +62,9 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
 	connectserver "github.com/urnetwork/server/connect"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 const (
@@ -325,13 +325,13 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 			panic(fmt.Errorf("redeem balance code error = %s", result.Error.Message))
 		}
 
-		p.byJwt = jwt.NewByJwt(
+		p.byJwt = session.NewByJwt(
 			p.networkId,
 			p.userId,
 			p.networkName,
 			false,
 			false,
-		).Client(p.deviceId, p.clientId).Sign()
+		).Client(p.deviceId, p.clientId).Testing_Sign()
 		return p
 	}
 

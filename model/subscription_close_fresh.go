@@ -35,10 +35,8 @@ func forceCloseContractExpiryFreshPage(minTime, now time.Time, after *ContractEx
 			position = &ContractExpiryCursor{ScanBefore: minTime, Open: lower, Dispute: lower}
 		}
 		count, cursor, err := page(position)
-		if err != nil {
-			if _, classified := err.(*ForceCloseAccountingError); !classified {
-				return count, after, err
-			}
+		if !forceClosePageCanAdvance(err) {
+			return count, after, err
 		}
 		next.Fresh = cursor
 		next.FreshNext = false
@@ -54,10 +52,8 @@ func forceCloseContractExpiryFreshPage(minTime, now time.Time, after *ContractEx
 		return freshPage()
 	}
 	if count, catchup, handled, err := forceCloseContractExpiryCatchupPage(minTime, next, page); handled {
-		if err != nil {
-			if _, classified := err.(*ForceCloseAccountingError); !classified {
-				return count, after, err
-			}
+		if !forceClosePageCanAdvance(err) {
+			return count, after, err
 		}
 		return count, catchup, err
 	} else {
@@ -70,10 +66,8 @@ func forceCloseContractExpiryFreshPage(minTime, now time.Time, after *ContractEx
 		return 0, nil, nil
 	}
 	count, backlog, err := forceCloseContractExpirySweepPage(minTime, now, next, page)
-	if err != nil {
-		if _, classified := err.(*ForceCloseAccountingError); !classified {
-			return count, after, err
-		}
+	if !forceClosePageCanAdvance(err) {
+		return count, after, err
 	}
 	if backlog == nil {
 		next.Historical = nil

@@ -3,13 +3,43 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
+	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 )
+
+// Tracing the real hosted and frame owners catches schema checks hidden below
+// either route. Setup is complete before the disposable pool scope is installed.
+type closeOriginalCatalogTripwire struct {
+	catalogReads atomic.Int64
+	historyReads atomic.Int64
+}
+
+// Count attempted statements, including errors, without retaining report bytes.
+func (self *closeOriginalCatalogTripwire) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	sql := strings.ToLower(data.SQL)
+	for _, catalog := range []string{"pg_catalog", "information_schema", "pg_attribute", "pg_class", "pg_namespace", "pg_constraint", "pg_index", "pg_type", "to_regclass", "to_regprocedure"} {
+		if strings.Contains(sql, catalog) {
+			self.catalogReads.Add(1)
+			break
+		}
+	}
+	if strings.Contains(sql, "from st_client_key_history") {
+		self.historyReads.Add(1)
+	}
+	return ctx
+}
+
+// The tripwire observes attempts regardless of the resulting command tag.
+func (self *closeOriginalCatalogTripwire) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
+}
 
 // This signs at creation, before either actual control route sees the frame.
 func signedCloseControlReport(t testing.TB, f *closeReportControlFixture, domain [32]byte) *protocol.CloseContract {
@@ -28,13 +58,24 @@ func signedCloseControlReport(t testing.TB, f *closeReportControlFixture, domain
 }
 
 // A lost HTTP response followed by frame and HTTP retries retains the complete
-// signed bytes; absence of historical registration is not a startup dependency.
+// signed bytes. Each route admits a fresh original without querying the catalog;
+// missing registration remains unknown in the required deployed history schema.
 func TestCloseOriginalHttpFrameLostReplyRetainsExactSignature(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		f := newCloseReportControlFixture(t)
 		report := signedCloseControlReport(t, f, [32]byte{3})
+		tripwire := &closeOriginalCatalogTripwire{}
+		scope, err := server.NewTestPgQueryScope(f.ctx, tripwire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := scope.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
 		if err := f.http(t, report); err != nil {
 			t.Fatal(err)
 		}
@@ -45,12 +86,26 @@ func TestCloseOriginalHttpFrameLostReplyRetainsExactSignature(t *testing.T) {
 		if err != nil || f.http(t, report) != nil {
 			t.Fatal("exact original route retries did not converge", err)
 		}
-		assertControlCloseReportCensus(t, f, f.contractId, 1, 121)
+		frameReport := signedCloseControlReport(t, f, [32]byte{3})
+		newFrame := closeReportControlFrame(t, frameReport)
+		defer returnConnectControlFrames([]*protocol.Frame{newFrame})
+		newResults, err := ConnectControlFrames(f.ctx, f.sourceId, []*protocol.Frame{newFrame}, connect.DefaultContractManagerSettings())
+		defer returnConnectControlFrames(newResults)
+		if err != nil || f.http(t, frameReport) != nil {
+			t.Fatal("frame original admission or hosted retry failed", err)
+		}
+		if catalog, history := tripwire.catalogReads.Load(), tripwire.historyReads.Load(); catalog != 0 || history != 2 {
+			t.Fatalf("hosted/frame signed close catalog tripwire: catalog=%d history=%d want=0/2", catalog, history)
+		}
+		assertControlCloseReportCensus(t, f, f.contractId, 2, 242)
 		server.Db(f.ctx, func(conn server.PgConn) {
-			var original, registration []byte
-			server.Raise(conn.QueryRow(f.ctx, `SELECT original_report,original_key_registration FROM contract_close_report_evidence WHERE client_id=$1 AND report_id=$2`, f.sourceId, server.RequireIdFromBytes(report.ReportId)).Scan(&original, &registration))
-			if !bytes.Equal(original, report.OriginalReport) || len(registration) != 0 {
-				t.Fatal("HTTP/frame original changed or gained absent registration")
+			for _, retainedReport := range []*protocol.CloseContract{report, frameReport} {
+				var original, registration []byte
+				var issue string
+				server.Raise(conn.QueryRow(f.ctx, `SELECT original_report,original_key_registration,original_key_issue FROM contract_close_report_evidence WHERE client_id=$1 AND report_id=$2`, f.sourceId, server.RequireIdFromBytes(retainedReport.ReportId)).Scan(&original, &registration, &issue))
+				if !bytes.Equal(original, retainedReport.OriginalReport) || len(registration) != 0 || issue != "history_not_found" {
+					t.Fatal("HTTP/frame original changed or gained absent registration")
+				}
 			}
 		})
 	})

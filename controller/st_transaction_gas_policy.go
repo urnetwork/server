@@ -64,8 +64,8 @@ func (self *CoreStClient) operatorGasAdmission(ctx context.Context, signingAccou
 	if err := policy.Validate(); err != nil {
 		return refuse(err)
 	}
-	if self.cfg.DepositKey == nil || self.cfg.RootKey == nil || policy.Profile != self.cfg.Profile || policy.ChainId != self.cfg.ChainId || policy.GenesisHash != fmt.Sprintf("0x%x", self.cfg.GenesisHash) || policy.NoId != self.cfg.NoId || policy.Coordinator != strings.ToLower(self.cfg.ContractAddress.Hex()) || policy.PolicyHash != fmt.Sprintf("0x%x", self.cfg.PolicyHash) || policy.Accounts[0].Address != strings.ToLower(crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey).Hex()) || policy.Accounts[1].Address != strings.ToLower(crypto.PubkeyToAddress(self.cfg.RootKey.PublicKey).Hex()) {
-		return refuse(errors.New("operator gas policy differs from the selected deployment and vault role accounts"))
+	if err := stOperatorGasPolicyBinding(policy, self.cfg); err != nil {
+		return refuse(err)
 	}
 	var encoded []byte
 	var err error
@@ -92,6 +92,16 @@ func (self *CoreStClient) operatorGasAdmission(ctx context.Context, signingAccou
 		return refuse(err)
 	}
 	return policy, authority, nil
+}
+
+// The approved policy must name exactly the selected deployment and the vault's
+// deposit and root signers. Signing admission and the offline go-live check
+// share this binding; the policy has already passed Validate.
+func stOperatorGasPolicyBinding(policy *server.StOperatorGasPolicy, cfg *StConfig) error {
+	if cfg.DepositKey == nil || cfg.RootKey == nil || policy.Profile != cfg.Profile || policy.ChainId != cfg.ChainId || policy.GenesisHash != fmt.Sprintf("0x%x", cfg.GenesisHash) || policy.NoId != cfg.NoId || policy.Coordinator != strings.ToLower(cfg.ContractAddress.Hex()) || policy.PolicyHash != fmt.Sprintf("0x%x", cfg.PolicyHash) || policy.Accounts[0].Address != strings.ToLower(crypto.PubkeyToAddress(cfg.DepositKey.PublicKey).Hex()) || policy.Accounts[1].Address != strings.ToLower(crypto.PubkeyToAddress(cfg.RootKey.PublicKey).Hex()) {
+		return errors.New("operator gas policy differs from the selected deployment and vault role accounts")
+	}
+	return nil
 }
 
 // A pending result is reconstructed only from its durable exact unsigned

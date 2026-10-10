@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 type connectAuthFinalReadTestKey struct{}
@@ -17,12 +17,15 @@ type connectAuthFinalReadTestKey struct{}
 // active client, device and network to the current administrator and credential
 // epoch; a second weaker membership query would add no authority. Preserve
 // credential-error precedence when the instance is malformed too.
-func connectClientAuthentication(ctx context.Context, byJwt *jwt.ByJwt, instanceBytes []byte) (server.Id, int, error) {
+func connectClientAuthentication(ctx context.Context, byJwt *session.ByJwt, instanceBytes []byte) (server.Id, int, error) {
 	instanceId, instanceErr := server.IdFromBytes(instanceBytes)
 	if before, ok := ctx.Value(connectAuthFinalReadTestKey{}).(func()); ok {
 		before()
 	}
-	if err := jwt.ValidateByJwtState(ctx, byJwt, true); err != nil {
+	if err := session.ValidateByJwtState(ctx, byJwt, true); err != nil {
+		if connectAuthDependencyUnavailable(err) {
+			return server.Id{}, http.StatusServiceUnavailable, err
+		}
 		return server.Id{}, http.StatusUnauthorized, err
 	}
 	if instanceErr != nil {
@@ -66,6 +69,9 @@ func connectH1AuthenticationStatus(ctx context.Context, authenticate func() (int
 // Match session authentication's selective dependency classification. A bad
 // credential or an unrelated program error must not become a retryable outage.
 func connectAuthDependencyUnavailable(err error) bool {
+	if errors.Is(err, session.ErrAuthUnavailable) || errors.Is(err, session.ErrSessionStoreUnavailable) {
+		return true
+	}
 	if errors.Is(err, server.DbContextDoneError) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) {
 		return true

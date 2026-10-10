@@ -16,7 +16,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -105,11 +105,11 @@ func TestEscrow(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
@@ -375,11 +375,11 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
@@ -694,7 +694,7 @@ func TestSubscriptionPaymentId(t *testing.T) {
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
+			session.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
 		)
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
@@ -1376,7 +1376,7 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})

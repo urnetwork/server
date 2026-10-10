@@ -14,7 +14,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -30,12 +30,12 @@ func TestAccountWallet(t *testing.T) {
 		networkIdB := server.NewId()
 		clientIdB := server.NewId()
 
-		ownerSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		ownerSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
 
-		nonOwnerSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		nonOwnerSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkIdB,
 			ClientId:  &clientIdB,
 		})
@@ -217,7 +217,7 @@ func TestCreateAccountWalletExternalRefusesTokenTypeTheColumnCannotStore(t *test
 		networkId := server.NewId()
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "test", userId)
-		byJwt := &jwt.ByJwt{
+		byJwt := &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		}

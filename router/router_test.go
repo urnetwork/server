@@ -11,7 +11,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -133,7 +133,7 @@ func TestRouterBasic(t *testing.T) {
 		clientId := server.NewId()
 		model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test device", "test spec")
 
-		byJwt := jwt.NewByJwt(
+		byJwt := session.NewByJwt(
 			networkId,
 			userId,
 			"test",
@@ -141,12 +141,12 @@ func TestRouterBasic(t *testing.T) {
 			false, // pro is false
 		)
 		auth := func(header http.Header) {
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", byJwt.Sign()))
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", byJwt.Testing_Sign()))
 		}
 
 		byClientJwt := byJwt.Client(deviceId, clientId)
 		authClient := func(header http.Header) {
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", byClientJwt.Sign()))
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", byClientJwt.Testing_Sign()))
 		}
 
 		var err error
@@ -251,7 +251,7 @@ func TestRouterBasic(t *testing.T) {
 		model.Testing_CreateNetwork(ctx, apiNetworkId, "apitestnetwork", apiUserId)
 
 		apiClientId := server.NewId()
-		apiSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		apiSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: apiNetworkId,
 			ClientId:  &apiClientId,
 		})

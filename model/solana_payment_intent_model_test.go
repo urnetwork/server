@@ -7,7 +7,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -19,7 +19,7 @@ func TestSolanaPaymentIntents(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -74,7 +74,7 @@ func TestSolanaConsumedIntentIsNotFoundAgain(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -121,7 +121,7 @@ func TestSolanaPaymentIntentExpiry(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})
@@ -221,7 +221,7 @@ func TestSolanaMarkCompletedConcurrent(t *testing.T) {
 		networkId := server.NewId()
 		clientId := server.NewId()
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 		})

@@ -31,11 +31,11 @@ func TestTaskQueuePublicationRequiresPredeclaredSubsetAcrossBatchForms(t *testin
 				t.Fatal("owned immutable publication was not inserted")
 			}
 			server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-				QueueTaskInBatch(batch, runOnceGenerationWork, &runOnceGenerationArgs{Scope: scopes[2]}, owner,
+				QueueTaskInBatch(tx, batch, runOnceGenerationWork, &runOnceGenerationArgs{Scope: scopes[2]}, owner,
 					runOnceGenerationKey(scopes[2]), RunAt(at), RequireQueueOwnership(tx))
-				QueueRequiredTaskInBatch(batch, runOnceGenerationWork, &runOnceGenerationArgs{Scope: scopes[3]}, owner,
+				QueueRequiredTaskInBatch(tx, batch, runOnceGenerationWork, &runOnceGenerationArgs{Scope: scopes[3]}, owner,
 					runOnceGenerationKey(scopes[3]), RunAt(at), RequireQueueOwnership(tx))
-				QueueRequiredTasksInBatch(batch, runOnceGenerationWork, []RequiredTaskBatchItem[*runOnceGenerationArgs]{
+				QueueRequiredTasksInBatch(tx, batch, runOnceGenerationWork, []RequiredTaskBatchItem[*runOnceGenerationArgs]{
 					{Args: &runOnceGenerationArgs{Scope: scopes[4]}, RunOnce: runOnceGenerationKey(scopes[4])},
 				}, owner, RunAt(at), RequireQueueOwnership(tx))
 			})

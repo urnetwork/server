@@ -19,10 +19,10 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	connectserver "github.com/urnetwork/server/connect"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/localclient"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -71,7 +71,7 @@ func TestProviderTunnelActualLocalAuthorityWithoutApi(t *testing.T) {
 			if err != nil || redeemed.Error != nil {
 				tb.Fatal("balance redemption", err)
 			}
-			return n, c, jwt.NewByJwt(n, u, label, false, false).Client(d, c).Sign()
+			return n, c, session.NewByJwt(n, u, label, false, false).Client(d, c).Testing_Sign()
 		}
 		_, providerClientId, providerJwt := seed("local-provider")
 		sourceNetworkId, sourceClientId, sourceJwt := seed("local-probe")

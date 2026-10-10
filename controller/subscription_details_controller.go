@@ -203,7 +203,13 @@ func SubscriptionDetails(clientSession *session.ClientSession) (*SubscriptionDet
 		networkId,
 		model.SubscriptionTypeSupporter,
 	)
-	result := buildSubscriptionDetails(clientSession.Ctx, renewals, stripeCustomerId, &subscriptionStoreLookups)
+	lastStripeRenewal := model.GetLastSubscriptionRenewal(
+		clientSession.Ctx,
+		networkId,
+		model.SubscriptionTypeSupporter,
+		model.SubscriptionMarketStripe,
+	)
+	result := buildSubscriptionDetails(clientSession.Ctx, renewals, lastStripeRenewal, stripeCustomerId, &subscriptionStoreLookups)
 	setSubscriptionDetailsCachedIfCurrent(clientSession.Ctx, networkId, generation, result)
 	return result, nil
 }
@@ -212,9 +218,18 @@ func SubscriptionDetails(clientSession *session.ClientSession) (*SubscriptionDet
 // store (the window that ends LAST is the one the customer is paid through)
 // and asks each store about it. Pure apart from the lookups, so it is what
 // the hermetic tests exercise.
+//
+// Stripe can keep charging after its last window ends: a renewal whose payment
+// fails is retried (past_due) for days or weeks, while no row covers now. So
+// with no active Stripe row, lastStripeRenewal (the network's last Stripe
+// window, nil if it never had one) is the handle to ask Stripe with, and the
+// subscription is listed, with its cancel, only when Stripe says it still
+// bills it. A failed lookup lists nothing: an ended subscription is the
+// common case behind an old window, and unknown is not billing.
 func buildSubscriptionDetails(
 	ctx context.Context,
 	renewals []*model.ActiveSubscriptionRenewal,
+	lastStripeRenewal *model.ActiveSubscriptionRenewal,
 	stripeCustomerId string,
 	lookups *subscriptionStoreLookupSet,
 ) *SubscriptionDetailsResult {
@@ -223,6 +238,17 @@ func buildSubscriptionDetails(
 		market := strings.ToLower(strings.TrimSpace(renewal.Market))
 		if current, ok := byStore[market]; !ok || current.EndTime.Before(renewal.EndTime) {
 			byStore[market] = renewal
+		}
+	}
+	// the store answers already in hand, by store
+	storeStates := map[string]*subscriptionStoreState{}
+	if _, ok := byStore[model.SubscriptionMarketStripe]; !ok && lastStripeRenewal != nil {
+		state, err := lookupSubscriptionStoreState(ctx, model.SubscriptionMarketStripe, lastStripeRenewal, stripeCustomerId, lookups)
+		if err != nil {
+			glog.Infof("[sub]details: stripe lookup for ended window %s failed: %v\n", lastStripeRenewal.TransactionId, err)
+		} else if state != nil && state.Active {
+			byStore[model.SubscriptionMarketStripe] = lastStripeRenewal
+			storeStates[model.SubscriptionMarketStripe] = state
 		}
 	}
 	stores := make([]string, 0, len(byStore))
@@ -254,9 +280,13 @@ func buildSubscriptionDetails(
 			detail.TransactionId = renewal.TransactionId
 		}
 
-		state, err := lookupSubscriptionStoreState(ctx, store, renewal, stripeCustomerId, lookups)
-		if err != nil {
-			glog.Infof("[sub]details: %s lookup for %s failed: %v\n", store, renewal.TransactionId, err)
+		state, ok := storeStates[store]
+		if !ok {
+			var err error
+			state, err = lookupSubscriptionStoreState(ctx, store, renewal, stripeCustomerId, lookups)
+			if err != nil {
+				glog.Infof("[sub]details: %s lookup for %s failed: %v\n", store, renewal.TransactionId, err)
+			}
 		}
 		applySubscriptionStoreState(detail, state)
 		details = append(details, detail)
@@ -917,6 +947,14 @@ func stripeSetSubscriptionCancelAtPeriodEnd(
 		if strings.EqualFold(renewal.Market, model.SubscriptionMarketStripe) && renewal.TransactionId != "" {
 			invoiceId = renewal.TransactionId
 			break
+		}
+	}
+	if invoiceId == "" {
+		// no Stripe window covers now, but a failing renewal is retried after
+		// the last one ends (see buildSubscriptionDetails): that window's
+		// invoice still names the subscription, and its status below decides
+		if renewal := model.GetLastSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter, model.SubscriptionMarketStripe); renewal != nil {
+			invoiceId = renewal.TransactionId
 		}
 	}
 	if customerId == "" && invoiceId == "" {

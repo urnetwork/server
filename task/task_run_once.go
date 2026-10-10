@@ -41,6 +41,7 @@ func finishTaskOwnerInTx(ctx context.Context, tx server.PgTx, r *taskExecutionRe
 		server.Raise(errTaskClaimOwnership)
 	}
 	server.Raise(err)
+	server.AddTxCommitCount(tx, &taskFinishedCounter, 1)
 	if queued.RunOnceKey == "" {
 		return nil
 	}
@@ -63,7 +64,9 @@ func taskRunOnceWakeAfterPost(ctx context.Context, tx server.PgTx, taskId server
 	if wakeAt == nil {
 		return
 	}
-	tag := server.RaisePgResult(tx.Exec(ctx, `INSERT INTO pending_task (
+	successorId := server.NewId()
+	var inserted bool
+	err := tx.QueryRow(ctx, `INSERT INTO pending_task (
         task_id,function_name,args_json,client_address,client_address_hash,
         client_address_port,client_by_jwt_json,run_at,run_once_key,run_priority,
         run_max_time_seconds,claim_time,release_time)
@@ -74,9 +77,12 @@ func taskRunOnceWakeAfterPost(ctx context.Context, tx server.PgTx, taskId server
         ON CONFLICT (run_once_key) DO UPDATE SET
             run_at=LEAST(pending_task.run_at,EXCLUDED.run_at),
             run_priority=LEAST(pending_task.run_priority,EXCLUDED.run_priority),
-            run_max_time_seconds=GREATEST(pending_task.run_max_time_seconds,EXCLUDED.run_max_time_seconds)`,
-		taskId, server.NewId(), *wakeAt, time.Time{}))
-	if tag.RowsAffected() != 1 {
+            run_max_time_seconds=GREATEST(pending_task.run_max_time_seconds,EXCLUDED.run_max_time_seconds)
+        RETURNING task_id=$2`,
+		taskId, successorId, *wakeAt, time.Time{}).Scan(&inserted)
+	if errors.Is(err, pgx.ErrNoRows) {
 		server.Raise(errTaskClaimOwnership)
 	}
+	server.Raise(err)
+	observeTaskSubmissionInTx(tx, inserted)
 }

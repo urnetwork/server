@@ -9,8 +9,8 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -30,7 +30,7 @@ func newProviderEgressControl(credentials *providerEgressCredentials, notificati
 }
 
 func (self *providerEgressControl) ConnectControl(ctx context.Context, token string, args *connect.ConnectControlArgs) (*connect.ConnectControlResult, error) {
-	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryProberControl)
+	ctx = session.WithStateQuerySource(ctx, session.StateQueryProberControl)
 	return server.HandleError2(func() (*connect.ConnectControlResult, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -38,7 +38,7 @@ func (self *providerEgressControl) ConnectControl(ctx context.Context, token str
 		if args == nil {
 			return nil, errors.New("provider control request is absent")
 		}
-		claims, err := self.credentials.parse(ctx, token, jwt.ByJwtAudienceApi)
+		claims, err := self.credentials.parse(ctx, token, session.ByJwtAudienceApi)
 		if err != nil {
 			return nil, err
 		}

@@ -21,9 +21,9 @@ import (
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/ss58"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 // The existing HTTP and database helpers inherit one bounded test owner.
@@ -53,9 +53,9 @@ func snWalletProviderScopeRun(t *testing.T, run func(testing.TB)) {
 // The future earning clock is fixed before issuing either wallet challenge.
 type snWalletProviderScopeFixture struct {
 	rpc      *stClientKeyHistoryRPCFixture
-	provider *jwt.ByJwt
-	sibling  *jwt.ByJwt
-	owner    *jwt.ByJwt
+	provider *session.ByJwt
+	sibling  *session.ByJwt
+	owner    *session.ByJwt
 	endpoint *httptest.Server
 	key      *schnorrkel.MiniSecretKey
 	address  string
@@ -66,7 +66,7 @@ type snWalletProviderScopeFixture struct {
 func newSnWalletProviderScopeFixture(t testing.TB) *snWalletProviderScopeFixture {
 	t.Helper()
 	rpc, provider, _ := newStClientKeyHistoryControllerFixture(t)
-	owner := jwt.NewByJwt(provider.NetworkId, provider.UserId, "synthetic-wallet-owner", false, false)
+	owner := session.NewByJwt(provider.NetworkId, provider.UserId, "synthetic-wallet-owner", false, false)
 	deviceId, clientId := server.NewId(), server.NewId()
 	model.Testing_CreateDevice(t.Context(), provider.NetworkId, deviceId, clientId, "synthetic-wallet-sibling", "test")
 	key, err := schnorrkel.NewMiniSecretKeyFromRaw([32]byte{147})
@@ -91,10 +91,10 @@ func newSnWalletProviderScopeFixture(t testing.TB) *snWalletProviderScopeFixture
 
 // Issue through the authenticated route, then sign and independently decode the
 // exact displayed bytes before a caller can use the resulting history checkpoint.
-func (self *snWalletProviderScopeFixture) consent(t testing.TB, credential *jwt.ByJwt, clientId *server.Id) (*SnSetWalletArgs, protocol.WalletMappingStatement, [32]byte) {
+func (self *snWalletProviderScopeFixture) consent(t testing.TB, credential *session.ByJwt, clientId *server.Id) (*SnSetWalletArgs, protocol.WalletMappingStatement, [32]byte) {
 	t.Helper()
 	args := &SnWalletMappingChallengeArgs{ClientId: clientId, ColdkeySs58: self.address, FromEpoch: self.scope.Epoch, ThroughEpoch: self.scope.Epoch + 100}
-	status, raw := walletMappingControllerPost(t, self.endpoint.URL, "/sn/wallet/consent", credential.Sign(), args)
+	status, raw := walletMappingControllerPost(t, self.endpoint.URL, "/sn/wallet/consent", credential.Testing_Sign(), args)
 	var challenge SnWalletMappingChallengeResult
 	if status != http.StatusOK || json.Unmarshal(raw, &challenge) != nil || challenge.Message == "" {
 		t.Fatal("authorized HTTP consent issuance failed", status, string(raw))
@@ -169,9 +169,9 @@ func (self *snWalletProviderScopeFixture) rows(t testing.TB) snWalletProviderSco
 }
 
 // Successful route responses retain their original mapping fields for review.
-func (self *snWalletProviderScopeFixture) accept(t testing.TB, credential *jwt.ByJwt, proof *SnSetWalletArgs) SnSetWalletResult {
+func (self *snWalletProviderScopeFixture) accept(t testing.TB, credential *session.ByJwt, proof *SnSetWalletArgs) SnSetWalletResult {
 	t.Helper()
-	status, raw := walletMappingControllerPost(t, self.endpoint.URL, "/sn/wallet", credential.Sign(), proof)
+	status, raw := walletMappingControllerPost(t, self.endpoint.URL, "/sn/wallet", credential.Testing_Sign(), proof)
 	var accepted SnSetWalletResult
 	if status != http.StatusOK || json.Unmarshal(raw, &accepted) != nil || accepted.Error != nil {
 		t.Fatal("authorized HTTP wallet acceptance failed", status, string(raw))
@@ -181,7 +181,7 @@ func (self *snWalletProviderScopeFixture) accept(t testing.TB, credential *jwt.B
 
 // This separate roster signer explicitly admits the reviewed provider and
 // checkpoint. A retained server response alone never grants this authority.
-func (self *snWalletProviderScopeFixture) approve(t testing.TB, credential *jwt.ByJwt, head string, generation uint64) ([]byte, payoutartifact.WholeWorkExpectation) {
+func (self *snWalletProviderScopeFixture) approve(t testing.TB, credential *session.ByJwt, head string, generation uint64) ([]byte, payoutartifact.WholeWorkExpectation) {
 	t.Helper()
 	rosterKey, err := crypto.HexToECDSA(strings.Repeat("46", 32))
 	if err != nil {
@@ -212,7 +212,7 @@ func TestSnWalletProviderScopeRefusesSiblingChallenge(t *testing.T) {
 	snWalletProviderScopeRun(t, func(t testing.TB) {
 		f := newSnWalletProviderScopeFixture(t)
 		args := &SnWalletMappingChallengeArgs{ClientId: f.sibling.ClientId, ColdkeySs58: f.address, FromEpoch: f.scope.Epoch, ThroughEpoch: f.scope.Epoch + 100}
-		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/consent", f.provider.Sign(), args)
+		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet/consent", f.provider.Testing_Sign(), args)
 		if status == http.StatusOK || strings.TrimSpace(string(raw)) != protocol.ErrWalletMappingIntegrity.Error() {
 			t.Fatal("sibling consent issuance was not refused by the provider ownership gate", status, string(raw))
 		}
@@ -232,7 +232,7 @@ func TestSnWalletProviderScopeRefusesSiblingConsentAcceptance(t *testing.T) {
 	snWalletProviderScopeRun(t, func(t testing.TB) {
 		f := newSnWalletProviderScopeFixture(t)
 		proof, _, head := f.consent(t, f.owner, f.sibling.ClientId)
-		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.provider.Sign(), proof)
+		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.provider.Testing_Sign(), proof)
 		if status == http.StatusOK || strings.TrimSpace(string(raw)) != protocol.ErrWalletMappingIntegrity.Error() {
 			t.Fatal("sibling consent acceptance was not refused by the provider ownership gate", status, string(raw))
 		}
@@ -255,7 +255,7 @@ func TestSnWalletProviderScopeRefusesSiblingLoginProofWithoutConsumption(t *test
 	snWalletProviderScopeRun(t, func(t testing.TB) {
 		f := newSnWalletProviderScopeFixture(t)
 		proof, challenge := f.loginProof(t, f.sibling.ClientId)
-		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.provider.Sign(), proof)
+		status, raw := walletMappingControllerPost(t, f.endpoint.URL, "/sn/wallet", f.provider.Testing_Sign(), proof)
 		var refused SnSetWalletResult
 		if status != http.StatusOK || json.Unmarshal(raw, &refused) != nil || refused.Error == nil || refused.Error.Message != "Client does not match the authenticated provider." {
 			t.Fatal("valid sibling proof was not refused by the provider ownership gate", status, string(raw))
@@ -300,7 +300,7 @@ func TestSnWalletProviderScopeNetworkOwnerCanSelectNetworkClient(t *testing.T) {
 			t.Fatal("network owner's generic proof invented mapping consent", accepted)
 		}
 		wallets := model.GetStProviderWalletsAt(t.Context(), f.scope.StartTime)
-		for _, credential := range []*jwt.ByJwt{f.provider, f.sibling} {
+		for _, credential := range []*session.ByJwt{f.provider, f.sibling} {
 			wallet := wallets[*credential.ClientId]
 			if wallet == nil || wallet.NetworkId != credential.NetworkId || wallet.ColdkeyPubkey != f.key.Public().Encode() {
 				t.Fatal("network owner could not select its own network client", credential.ClientId, wallet)

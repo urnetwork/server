@@ -17,9 +17,9 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 // TestExchangeRelayPoolBalance drives real client-to-client traffic through a real
@@ -181,9 +181,9 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 	clientB.ContractManager().AddNoContractPeer(connect.Id(clientIdA))
 
 	newTransport := func(clientStrategy *connect.ClientStrategy, routeManager *connect.RouteManager, networkId server.Id, userId server.Id, deviceId server.Id, clientId server.Id, instanceId server.Id) *connect.PlatformTransport {
-		byJwt := jwt.NewByJwt(networkId, userId, "poolBalance", false, false).Client(deviceId, clientId)
+		byJwt := session.NewByJwt(networkId, userId, "poolBalance", false, false).Client(deviceId, clientId)
 		auth := &connect.ClientAuth{
-			ByJwt:      byJwt.Sign(),
+			ByJwt:      byJwt.Testing_Sign(),
 			InstanceId: connect.Id(instanceId),
 			AppVersion: "0.0.0",
 		}

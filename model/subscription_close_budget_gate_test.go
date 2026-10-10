@@ -214,8 +214,11 @@ func TestForceCloseBudgetAccountingAndMixedErrors(t *testing.T) {
 					if errors.As(err, &accounting) || !strings.Contains(err.Error(), "synthetic budget operational failure") {
 						t.Fatalf("mixed error gained accounting authority: %v", err)
 					}
-					if cursor != nil {
-						t.Fatalf("mixed failure skipped uncompleted page: %+v", cursor)
+					visited, ok := err.(*ForceCloseVisitError)
+					if cursor == nil || cursor.Open == nil || cursor.Open.ContractId != good.contractId ||
+						cursor.Dispute == nil || cursor.Dispute.ContractId != bad.contractId ||
+						!ok || !visited.CanCheckpoint() || visited.AttemptedCloseCount() != count {
+						t.Fatalf("completed mixed-error visits lost bounded raw progress: %+v %v", cursor, err)
 					}
 				} else {
 					if !errors.As(err, &accounting) || accounting.VerifiedCloseCount() != 1 || accounting.AccountingRejectionCount() != 1 {
@@ -226,11 +229,34 @@ func TestForceCloseBudgetAccountingAndMixedErrors(t *testing.T) {
 				if after.escrowSettled || after.escrowPayoutByteCount != before.escrowPayoutByteCount || after.payerBalanceByteCount != before.payerBalanceByteCount || after.providerPayoutByteCount != before.providerPayoutByteCount || after.requestTokenByteCount != before.requestTokenByteCount {
 					t.Fatalf("rejected money state changed: before=%+v after=%+v", before, after)
 				}
-				if state := good.state(t, ctx); !mixed && (state.providerPayoutByteCount != 0 || !state.escrowSettled) {
-					t.Fatalf("completed prefix missing financial posts: %+v", state)
-				}
 				if !mixed {
+					// Redis foreground close commits outcome, consumption and
+					// earnings. Its debit owner still holds the original reservation.
+					pending := good.state(t, ctx)
+					if pending.outcome != ContractOutcomeSettled || pending.open || pending.dispute || pending.streamFound ||
+						pending.escrowSettled || pending.escrowPayoutByteCount != 0 || !pending.redisReserved ||
+						pending.sourceCheckpoint || pending.destinationCheckpoint || pending.sourceByteCount != 1024 || pending.destinationByteCount != 1024 ||
+						pending.payerBalanceByteCount != forceCloseDisputeInitialBalance || pending.netEscrowByteCount != escrow ||
+						pending.legacyEscrowByteCount != 0 || pending.redisEscrowByteCount != escrow || pending.requestTokenByteCount != escrow ||
+						pending.providerPayoutByteCount != 0 || pending.providerEarnedByteCount != 1024 {
+						t.Fatalf("completed prefix lost its exact pre-debit custody: %+v", pending)
+					}
+					requireForceCloseDebitJournal(t, ctx, good, 1, 1024)
 					requireForceCloseBudgetProvider(t, ctx, good, 1024)
+					// Run the actual public debit page and its empty replay. Waiting
+					// for a post cannot perform this separately owned financial work.
+					drainForceCloseDebitCustody(t, ctx, good, escrow, 1024)
+					settled := good.state(t, ctx)
+					if settled.outcome != ContractOutcomeSettled || settled.open || settled.dispute || settled.streamFound ||
+						!settled.escrowSettled || settled.escrowPayoutByteCount != 1024 ||
+						settled.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 || settled.netEscrowByteCount != 0 ||
+						settled.legacyEscrowByteCount != 0 || settled.redisEscrowByteCount != 0 || settled.requestTokenByteCount != 0 ||
+						settled.providerPayoutByteCount != 0 || settled.providerEarnedByteCount != 1024 {
+						t.Fatalf("completed prefix debit lost conservation or final metadata: %+v", settled)
+					}
+					if bad.state(t, ctx) != after {
+						t.Fatal("healthy prefix owners changed the rejected contract's retained state")
+					}
 				}
 			})
 		})

@@ -51,7 +51,7 @@ func TestReliabilityRunningExpiredWindowDecision(t *testing.T) {
 	previous := reliabilityRunningWindow{
 		exists: true, minBlockNumber: 100, maxBlockNumber: 106, lastRecomputeBlock: 106,
 		degradedClassificationVersion:           reliabilityDegradedClassificationVersion,
-		degradedClassificationWriteTokenPresent: true, degradedClassificationGuardPresent: true,
+		degradedClassificationWriteTokenPresent: true,
 	}
 	for _, allowed := range []bool{false, true} {
 		for _, test := range []struct {
@@ -201,7 +201,7 @@ func TestReliabilityRunningExpiredWindowLoadedBound(t *testing.T) {
 						}
 						window := readReliabilityRunningWindow(ctx, tx, form.lookback)
 						if window.minBlockNumber != 31 || window.maxBlockNumber != 37 || window.lastRecomputeBlock != 37 ||
-							!reliabilityRunningObservationCurrent(window) || !window.degradedClassificationWriteTokenPresent || !window.degradedClassificationGuardPresent {
+							!reliabilityRunningObservationCurrent(window) || !window.degradedClassificationWriteTokenPresent {
 							t.Fatal("expired-window rebuild did not publish a complete guarded checkpoint")
 						}
 						updateClientReliabilityRunningLookbackAtBoundsInTx(tx, ctx, lb, 60, 66, false)

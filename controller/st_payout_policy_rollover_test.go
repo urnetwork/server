@@ -29,7 +29,7 @@ import (
 	"github.com/urfoundation/sn/stabi"
 	"github.com/urfoundation/sn/validator"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -217,7 +217,7 @@ func (self *stPayoutPolicyRpcFixture) Call(ctx context.Context, call map[string]
 
 // Each restart makes a fresh concrete connection owner and retains only the
 // current configuration; no retained local policy is passed to production.
-func newStPayoutPolicyFixture(t testing.TB, noId uint64) (*stPayoutPolicyRpcFixture, *jwt.ByJwt, *StConfig, func() *CoreStClient) {
+func newStPayoutPolicyFixture(t testing.TB, noId uint64) (*stPayoutPolicyRpcFixture, *session.ByJwt, *StConfig, func() *CoreStClient) {
 	t.Helper()
 	base, credential, original := newStClientKeyHistoryControllerFixture(t)
 	cfg := *original
@@ -326,7 +326,7 @@ func TestStPayoutPolicyRolloverTwoOperatorsRetainSizingAfterMigrationAndRestart(
 		server.ApplyDbMigrationsUpTo(ctx, 743)
 		type operator struct {
 			fixture      *stPayoutPolicyRpcFixture
-			credential   *jwt.ByJwt
+			credential   *session.ByJwt
 			cfg          *StConfig
 			restart      func() *CoreStClient
 			registration protocol.ClientKeyRegistration
@@ -378,7 +378,7 @@ func TestStPayoutPolicyRolloverTwoOperatorsRetainSizingAfterMigrationAndRestart(
 				router.WrapWithInputRequireClient(SnClientKeyObservation, w, r)
 			}))
 			tb.Cleanup(proofEndpoint.Close)
-			reader, err := validator.NewHTTPClientKeyHistoryReader(proofEndpoint.URL, func() string { return value.credential.Sign() })
+			reader, err := validator.NewHTTPClientKeyHistoryReader(proofEndpoint.URL, func() string { return value.credential.Testing_Sign() })
 			if err != nil {
 				tb.Fatal(err)
 			}
@@ -401,7 +401,7 @@ func TestStPayoutPolicyRolloverTwoOperatorsRetainSizingAfterMigrationAndRestart(
 			endpoint := stClientKeyRegistrationConnectEndpoint(tb)
 			seed := sha256.Sum256(value.credential.ClientId[:])
 			key := ed25519.NewKeyFromSeed(seed[:]).Public().(ed25519.PublicKey)
-			if err := stClientKeyRegistrationRequest(ctx, endpoint.URL, value.credential.Sign(), key); err != nil {
+			if err := stClientKeyRegistrationRequest(ctx, endpoint.URL, value.credential.Testing_Sign(), key); err != nil {
 				tb.Fatal(err)
 			}
 			client = value.restart()
@@ -477,7 +477,7 @@ func TestStPayoutPolicyRolloverTwoOperatorsRetainSizingAfterMigrationAndRestart(
 				tb.Fatal("unavailable informational history made free traffic payable", zero, failed, err)
 			}
 			value.fixture.configure(225, "")
-			if err := stClientKeyRegistrationRequest(ctx, endpoint.URL, value.credential.Sign(), nil); err != nil {
+			if err := stClientKeyRegistrationRequest(ctx, endpoint.URL, value.credential.Testing_Sign(), nil); err != nil {
 				tb.Fatal(err)
 			}
 			value.restart()

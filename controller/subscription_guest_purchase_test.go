@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -30,7 +30,7 @@ func guestPurchaseTestSession(t *testing.T, hasAnyAuthMethod bool, guestMode boo
 	t.Cleanup(func() {
 		purchaseHasAnyAuthMethod = previous
 	})
-	return session.NewLocalClientSession(context.Background(), "127.0.0.1:1", &jwt.ByJwt{
+	return session.NewLocalClientSession(context.Background(), "127.0.0.1:1", &session.ByJwt{
 		NetworkId: server.NewId(),
 		UserId:    userId,
 		GuestMode: guestMode,

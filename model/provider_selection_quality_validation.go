@@ -14,6 +14,25 @@ import (
 // a slow primary must not restart that budget once per candidate or page.
 const providerQualityValidationTimeout = 250 * time.Millisecond
 
+// One validation round trip reads at most one subscriber SQL chunk, so query
+// and result size stay bounded even for unusually large requests.
+const providerQualityValidationBatchSize = 256
+
+// How many candidates the next validation round trip reads while the request
+// still needs `needed` validated members. Every round trip is a primary read
+// charged to the request's one budget. Native members passed the Quality gate
+// at export, so a weighted native draw is nearly always admitted and reads
+// only what is needed. A force_minimum pool has no minimums: current facts
+// refuse most of it, its flat weights make a small draw no better ranked than
+// a full one, and needed-sized draws multiply round trips until the budget
+// expires, which a forced request cannot survive. It reads full batches.
+func providerQualityValidationDraw(needed int, forceMinimum bool) int {
+	if forceMinimum {
+		return providerQualityValidationBatchSize
+	}
+	return min(needed, providerQualityValidationBatchSize)
+}
+
 var providerQualityValidationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 	Name:    "urnetwork_findproviders2_subscriber_validation_seconds",
 	Help:    "Current subscriber validation within one provider discovery request, including database acquisition and query waits",

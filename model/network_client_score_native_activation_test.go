@@ -7,7 +7,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // Installs explicit activation only in tests that exercise the native reader.
@@ -140,7 +140,7 @@ func TestNativeReaderActivationBoundary(t *testing.T) {
 					server.Redis(t.Context(), func(r server.RedisClient) { r.AddHook(hook) })
 					hook.active.Store(true)
 					defer hook.active.Store(false)
-					clientSession := testingCreateProviderSearchSession(t.Context(), jwt.NewByJwt(server.NewId(), server.NewId(), "native-activation-test", false, false))
+					clientSession := testingCreateProviderSearchSession(t.Context(), session.NewByJwt(server.NewId(), server.NewId(), "native-activation-test", false, false))
 					result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &location}}, RankMode: requested, ForceMinimum: tc.forced}, clientSession)
 					if err != nil || result == nil || len(result.Providers) != 20 {
 						t.Fatalf("case=%s mode=%s activation changed union availability: err=%v", tc.name, requested, err)

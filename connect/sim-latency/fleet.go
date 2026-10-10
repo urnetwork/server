@@ -26,7 +26,7 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // impairEnabled gates the provider network impairment (default on). Set from
@@ -467,8 +467,9 @@ func (self *Fleet) Wait() error {
 // SimProvider/SimClient presents. Current server validation verifies both the
 // signature and the corresponding active identity rows provisioned for the run.
 func jwtSign(networkId server.Id, userId server.Id, networkName string, deviceId server.Id, clientId server.Id) string {
-	return jwt.NewByJwt(networkId, userId, networkName, false, false).
-		Client(deviceId, clientId).Sign()
+	signed, err := session.SignInternalProbe(context.Background(), session.NewByJwt(networkId, userId, networkName, false, false).Client(deviceId, clientId))
+	server.Raise(err)
+	return signed
 }
 
 func secondsDur(seconds float64, r *rng) time.Duration {

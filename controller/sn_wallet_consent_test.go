@@ -94,7 +94,7 @@ func TestWalletMappingPublicAuthenticatedConsentAndIndependentHistory(t *testing
 		if status, _ := walletMappingControllerPost(t, endpoint.URL, "/sn/wallet/consent", "", args); status == http.StatusOK {
 			t.Fatal("unauthenticated caller issued a provider mapping")
 		}
-		status, raw := walletMappingControllerPost(t, endpoint.URL, "/sn/wallet/consent", credential.Sign(), args)
+		status, raw := walletMappingControllerPost(t, endpoint.URL, "/sn/wallet/consent", credential.Testing_Sign(), args)
 		var challenge SnWalletMappingChallengeResult
 		if status != http.StatusOK || json.Unmarshal(raw, &challenge) != nil || challenge.Message == "" {
 			t.Fatal("actual authenticated mapping challenge failed", status, string(raw))
@@ -110,7 +110,7 @@ func TestWalletMappingPublicAuthenticatedConsentAndIndependentHistory(t *testing
 		}
 		set := &SnSetWalletArgs{ClientId: credential.ClientId, ColdkeySs58: address, Message: original.Message, Signature: "0x" + hex.EncodeToString(original.Signature[:])}
 		for range 2 {
-			status, raw = walletMappingControllerPost(t, endpoint.URL, "/sn/wallet", credential.Sign(), set)
+			status, raw = walletMappingControllerPost(t, endpoint.URL, "/sn/wallet", credential.Testing_Sign(), set)
 			var result SnSetWalletResult
 			if status != http.StatusOK || json.Unmarshal(raw, &result) != nil || result.Error != nil || result.MappingHash != hex.EncodeToString(head[:]) || result.MappingGeneration != 1 {
 				t.Fatal("actual wallet set did not retain original mapping", status, string(raw))
@@ -146,7 +146,7 @@ func TestWalletMappingPublicForeignClientCannotAcquireConsent(t *testing.T) {
 		foreign := *credential
 		foreign.NetworkId = server.NewId()
 		args := &SnWalletMappingChallengeArgs{ClientId: credential.ClientId, ColdkeySs58: address, FromEpoch: 0, ThroughEpoch: 100}
-		if status, _ := walletMappingControllerPost(t, endpoint.URL, "/sn/wallet/consent", foreign.Sign(), args); status == http.StatusOK {
+		if status, _ := walletMappingControllerPost(t, endpoint.URL, "/sn/wallet/consent", foreign.Testing_Sign(), args); status == http.StatusOK {
 			t.Fatal("foreign authenticated network acquired a signed association")
 		}
 	})

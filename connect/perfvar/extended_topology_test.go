@@ -25,7 +25,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
 	connectserver "github.com/urnetwork/server/connect"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -1955,7 +1955,7 @@ func newSplitExchangeEnvironmentWithProfiles(
 		cancel()
 		t.Fatalf("fund split exchange network: %v", err)
 	}
-	userSession := session.Testing_CreateClientSession(environmentCtx, jwt.NewByJwt(
+	userSession := session.Testing_CreateClientSession(environmentCtx, session.NewByJwt(
 		networkId,
 		userId,
 		fmt.Sprintf("perfvar-split-%s", networkId),

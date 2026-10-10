@@ -13,7 +13,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -65,7 +65,7 @@ func TestConnectControlSkipsReservedEscrowGrants(t *testing.T) {
 			t.Fatal("fixture did not reserve both unpaid grants")
 		}
 
-		byJwt := jwt.NewByJwt(payerNetworkId, payerUserId, "escrow api payer", false, false).
+		byJwt := session.NewByJwt(payerNetworkId, payerUserId, "escrow api payer", false, false).
 			Client(payerDeviceId, payerId)
 		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 		defer clientSession.Cancel()

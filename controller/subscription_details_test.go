@@ -59,7 +59,8 @@ func TestSubscriptionDetailsCollapsesPerStore(t *testing.T) {
 		solana: solanaLookupSubscriptionStateForTest(SubscriptionCadenceYearly),
 	}
 
-	result := buildSubscriptionDetails(context.Background(), renewals, "cus_1", lookups)
+	// the network's last stripe window is the active one: stripe is asked once
+	result := buildSubscriptionDetails(context.Background(), renewals, renewals[1], "cus_1", lookups)
 
 	if !result.HasStripeCustomer {
 		t.Fatal("expected has_stripe_customer")
@@ -149,7 +150,7 @@ func TestSubscriptionDetailsLookupFailureIsUnknownNotError(t *testing.T) {
 		},
 	}
 
-	result := buildSubscriptionDetails(context.Background(), renewals, "", lookups)
+	result := buildSubscriptionDetails(context.Background(), renewals, renewals[0], "", lookups)
 	if result.HasStripeCustomer {
 		t.Fatal("no customer row -> has_stripe_customer false")
 	}
@@ -191,6 +192,118 @@ func TestSubscriptionDetailsLookupFailureIsUnknownNotError(t *testing.T) {
 	// 100 days: neither band
 	if manual.Cadence != "" {
 		t.Fatalf("manual: cadence %q", manual.Cadence)
+	}
+}
+
+// A Stripe renewal whose payment fails is retried (past_due) after the last
+// window it paid for has ended (support inbox item 7873): no active row names
+// Stripe, yet the card is still charged. The last window's invoice is the
+// handle (a web checkout network has no customer on file), and Stripe's
+// answer that it still bills puts the subscription on the screen, cancellable,
+// beside the stores that do have an active window.
+func TestSubscriptionDetailsListsAStripeRenewalStillBeingRetried(t *testing.T) {
+	now := server.NowUtc()
+	renewals := []*model.ActiveSubscriptionRenewal{
+		subscriptionTestRenewal(model.SubscriptionMarketApple, now.Add(-1*24*time.Hour), now.Add(29*24*time.Hour), "2000000777", ""),
+	}
+	lastStripeRenewal := subscriptionTestRenewal(model.SubscriptionMarketStripe, now.Add(-370*24*time.Hour), now.Add(-5*24*time.Hour), "in_paid", "")
+	periodEnd := now.Add(360 * 24 * time.Hour)
+
+	stripeCalls := 0
+	lookups := &subscriptionStoreLookupSet{
+		stripe: func(ctx context.Context, customerId string, invoiceId string) (*subscriptionStoreState, error) {
+			stripeCalls += 1
+			if customerId != "" || invoiceId != "in_paid" {
+				t.Fatalf("stripe lookup got customer %q invoice %q", customerId, invoiceId)
+			}
+			// past_due: still billing, still set to renew
+			return &subscriptionStoreState{
+				AutoRenew:           boolPtr(true),
+				EndTime:             &periodEnd,
+				Cadence:             SubscriptionCadenceYearly,
+				StoreSubscriptionId: "sub_retry",
+				Active:              true,
+			}, nil
+		},
+		apple: func(ctx context.Context, originalTransactionId string) (*subscriptionStoreState, error) {
+			return nil, errors.New("apple is not part of this test")
+		},
+	}
+
+	result := buildSubscriptionDetails(context.Background(), renewals, lastStripeRenewal, "", lookups)
+	if stripeCalls != 1 {
+		t.Fatalf("expected one stripe lookup, got %d", stripeCalls)
+	}
+	if result.HasStripeCustomer {
+		t.Fatal("no customer row -> has_stripe_customer false")
+	}
+	if len(result.Subscriptions) != 2 {
+		t.Fatalf("expected the apple entry and the stripe one still billing, got %d: %+v", len(result.Subscriptions), result.Subscriptions)
+	}
+	apple, stripe := result.Subscriptions[0], result.Subscriptions[1]
+	if apple.Store != model.SubscriptionMarketApple || stripe.Store != model.SubscriptionMarketStripe {
+		t.Fatalf("expected [apple, stripe] (sorted by store), got [%s, %s]", apple.Store, stripe.Store)
+	}
+	if !stripe.CanCancel || stripe.ManageUrl != "" || stripe.TransactionId != "in_paid" {
+		t.Fatalf("stripe: cancellable here, by the last window's invoice: %+v", stripe)
+	}
+	if stripe.AutoRenew == nil || !*stripe.AutoRenew || stripe.CancelAtPeriodEnd {
+		t.Fatalf("stripe: the store's renewal state: %+v", stripe)
+	}
+	if !stripe.StartTime.Equal(lastStripeRenewal.StartTime) || !stripe.EndTime.Equal(periodEnd) || stripe.Cadence != SubscriptionCadenceYearly {
+		t.Fatalf("stripe: the last window's start and the store's period end: %+v", stripe)
+	}
+}
+
+// Behind an old Stripe window the subscription is usually over. Only Stripe's
+// answer that it still bills lists it: an ended subscription, a lookup that
+// failed and a lookup with nothing to say all leave the screen without it.
+func TestSubscriptionDetailsLeavesAnEndedStripeWindowUnlisted(t *testing.T) {
+	now := server.NowUtc()
+	lastStripeRenewal := subscriptionTestRenewal(model.SubscriptionMarketStripe, now.Add(-36*24*time.Hour), now.Add(-5*24*time.Hour), "in_old", "")
+	cases := []struct {
+		name  string
+		state *subscriptionStoreState
+		err   error
+	}{
+		{name: "canceled", state: stripeSubscriptionState(&stripeCustomerSubscription{Id: "sub_over", Status: "canceled"})},
+		{name: "unpaid", state: stripeSubscriptionState(&stripeCustomerSubscription{Id: "sub_unpaid", Status: "unpaid"})},
+		{name: "incomplete_expired", state: stripeSubscriptionState(&stripeCustomerSubscription{Id: "sub_expired", Status: "incomplete_expired"})},
+		{name: "lookup failed", err: errors.New("stripe is down")},
+		{name: "nothing to say"},
+	}
+	for _, c := range cases {
+		stripeCalls := 0
+		lookups := &subscriptionStoreLookupSet{
+			stripe: func(ctx context.Context, customerId string, invoiceId string) (*subscriptionStoreState, error) {
+				stripeCalls += 1
+				if customerId != "cus_1" || invoiceId != "in_old" {
+					t.Errorf("%s: stripe lookup got customer %q invoice %q", c.name, customerId, invoiceId)
+				}
+				return c.state, c.err
+			},
+		}
+		result := buildSubscriptionDetails(context.Background(), nil, lastStripeRenewal, "cus_1", lookups)
+		if stripeCalls != 1 {
+			t.Errorf("%s: expected one stripe lookup, got %d", c.name, stripeCalls)
+		}
+		if len(result.Subscriptions) != 0 {
+			t.Errorf("%s: nothing bills the network, got %+v", c.name, result.Subscriptions)
+		}
+		if !result.HasStripeCustomer {
+			t.Errorf("%s: the customer row still opens the billing portal", c.name)
+		}
+	}
+
+	// a network that never had a stripe window is not asked about one
+	result := buildSubscriptionDetails(context.Background(), nil, nil, "", &subscriptionStoreLookupSet{
+		stripe: func(ctx context.Context, customerId string, invoiceId string) (*subscriptionStoreState, error) {
+			t.Fatal("no stripe window to ask about")
+			return nil, nil
+		},
+	})
+	if len(result.Subscriptions) != 0 {
+		t.Fatalf("nothing billing: %+v", result.Subscriptions)
 	}
 }
 

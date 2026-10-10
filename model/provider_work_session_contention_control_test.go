@@ -44,9 +44,7 @@ func TestProviderWorkSessionLegacyConflictRollsBackEarlierJournalAndRetries(t *t
 			}
 			// The held endpoint is the barrier: the legacy row trigger must
 			// reject immediately instead of waiting while owning that row.
-			if !providerWorkLockSessionMutationInTx(ctx, owner, f.destinationId) {
-				t.Fatal("current owner did not acquire destination fence")
-			}
+			providerWorkLockSessionMutationInTx(ctx, owner, f.destinationId)
 			server.Db(ctx, func(other server.PgConn) {
 				legacy, err := other.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 				server.Raise(err)

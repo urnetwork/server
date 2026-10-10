@@ -461,18 +461,26 @@ func assertContractPayoutTestBalanceConsumed(
 	if remaining < 0 || remaining != pendingDebit || consumed != want {
 		t.Fatalf("settled credit/debt/consumed = %d/%d/%d, want equal nonnegative credit/debt and consumed %d", remaining, pendingDebit, consumed, want)
 	}
-	wantApplied := journalRows - appliedRows
-	var totalApplied, totalReleased int
-	for batch := 0; batch < (journalRows+transferDebitBatchSize-1)/transferDebitBatchSize; batch++ {
-		applied, released, busy, err := flushTransferDebitBalance(ctx, balanceId)
-		if err != nil || busy || applied < 0 || released <= 0 || applied > transferDebitBatchSize || released > transferDebitBatchSize {
-			t.Fatalf("bounded debit owner flush = %d/%d, busy=%t, err=%v", applied, released, busy, err)
+	if journalRows == 1 && appliedRows == 0 {
+		// Fresh full-grant settlements also prove exact per-contract ownership,
+		// reservation release and public worker pages before metadata projection.
+		assertCurrentPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, want,
+			map[server.Id]currentPayoutDebitTestAmount{contractId: {reserved: want, consumed: want}})
+	} else {
+		// Already materialized or applied journal rows retain replay coverage.
+		wantApplied := journalRows - appliedRows
+		var totalApplied, totalReleased int
+		for batch := 0; batch < (journalRows+transferDebitBatchSize-1)/transferDebitBatchSize; batch++ {
+			applied, released, busy, err := flushTransferDebitBalance(ctx, balanceId)
+			if err != nil || busy || applied < 0 || released <= 0 || applied > transferDebitBatchSize || released > transferDebitBatchSize {
+				t.Fatalf("bounded debit owner flush = %d/%d, busy=%t, err=%v", applied, released, busy, err)
+			}
+			totalApplied += applied
+			totalReleased += released
 		}
-		totalApplied += applied
-		totalReleased += released
-	}
-	if totalApplied != wantApplied || totalReleased != journalRows {
-		t.Fatalf("debit owner applied/released = %d/%d, want %d/%d", totalApplied, totalReleased, wantApplied, journalRows)
+		if totalApplied != wantApplied || totalReleased != journalRows {
+			t.Fatalf("debit owner applied/released = %d/%d, want %d/%d", totalApplied, totalReleased, wantApplied, journalRows)
+		}
 	}
 	// Retain the original durable zero/consumption assertion after the actual
 	// outcome owner has run, and prove replay cannot charge the balance again.

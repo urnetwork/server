@@ -39,12 +39,16 @@ func (self *ClientSession) Auth(req *http.Request) (returnErr error) {
 		}
 		if returnErr != nil {
 			self.ByJwt = nil
+			self.ApiKeyAuthenticated = false
 		}
 	}()
 	return self.authenticate(authCtx, req)
 }
 
 func authDependencyUnavailable(err error) bool {
+	if errors.Is(err, ErrSessionStoreUnavailable) || errors.Is(err, ErrAuthUnavailable) {
+		return true
+	}
 	if errors.Is(err, server.DbContextDoneError) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) {
 		return true

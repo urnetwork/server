@@ -194,7 +194,12 @@ var verifySettingsInstance *model.VerifySettings
 var verifyExtendBeforeTrailLock func()
 
 var verifySettingsFromVault = sync.OnceValue(func() *model.VerifySettings {
-	res := server.Vault.RequireSimpleResource("verify.yml")
+	return parseVerifySettings(server.Vault.RequireSimpleResource("verify.yml"))
+})
+
+// parseVerifySettings is the verify.yml settings loader, kept apart from the
+// process-wide once so its rules can be exercised directly.
+func parseVerifySettings(res *server.SimpleResource) *model.VerifySettings {
 	var conf struct {
 		Profile       string `yaml:"profile"`
 		PolicyHash    string `yaml:"policy_hash"`
@@ -214,6 +219,9 @@ var verifySettingsFromVault = sync.OnceValue(func() *model.VerifySettings {
 			HardSeedPerMinutePerSource   int64  `yaml:"hard_seed_per_minute_per_source"`
 			HardExtendPerMinutePerSource int64  `yaml:"hard_extend_per_minute_per_source"`
 			HardActiveTrailsPerSource    int64  `yaml:"hard_active_trails_per_source"`
+			// server-only keys, absent from the policy's verify section
+			CohortSize          *int `yaml:"cohort_size"`
+			CohortLifetimeLimit *int `yaml:"cohort_lifetime_limit"`
 		} `yaml:"settings"`
 	}
 	res.UnmarshalYaml(&conf)
@@ -249,8 +257,64 @@ var verifySettingsFromVault = sync.OnceValue(func() *model.VerifySettings {
 	s.EgressHashKey, s.EgressHashKeyId = append([]byte(nil), key...), v.EgressHashKeyId
 	s.SoftLimitsEnabled = v.SoftGuardrailsEnabled
 	s.SeedRateHardLimit, s.ExtendRateHardLimit, s.ActiveTrailsHardLimit = v.HardSeedPerMinutePerSource, v.HardExtendPerMinutePerSource, v.HardActiveTrailsPerSource
+	if s.CohortSize, s.CohortLifetimeLimit, err = verifyCohortSettings(conf.Profile, v.CohortSize, v.CohortLifetimeLimit); err != nil {
+		panic(fmt.Errorf("verify.yml %w", err))
+	}
+	if cfg := stConfig(); cfg != nil {
+		// The cohort's settlement epoch is this deployment's st epoch mirror.
+		// Without one the cohort admits nobody; it never samples unbounded.
+		s.CohortDeploymentKey = cfg.DeploymentKey()
+	}
+	if 0 < s.CohortSize {
+		glog.Infof("[verify]next-hop cohort %d per settlement epoch, %d lifetime, deployment %q\n", s.CohortSize, s.CohortLifetimeLimit, s.CohortDeploymentKey)
+	}
 	return s
-})
+}
+
+// The SN25 validator fails hard once its provider census passes the signed
+// max_providers (4096 at launch). It never expires a quality score, so its
+// census is every provider the lineage has ever scored, which the lifetime
+// limit bounds (the per-epoch size cannot). 2000 keeps the census under half
+// of 4096: a lost lifetime set (Redis data loss) can re-admit at most another
+// 2000 before the validator reaches its bound. A settlement transition costs
+// about 414 bytes a provider (one egress hash), about 0.83 MB for 2000,
+// against its 2 MiB cap.
+//
+// The validator seeds at most 30 trails a minute (3/4 of the 40/min hard
+// limit), each with M-1 = 7 assignments: about 15,000 assignments in a
+// 360-block native epoch. A 1500 cohort needs 1500 x a_min 8 = 12,000 to put
+// every member past a_min, so it does within one native epoch at full pace,
+// and it leaves 500 lifetime slots to replace members that leave.
+const (
+	verifyDefaultCohortSize          = 1500
+	verifyDefaultCohortLifetimeLimit = 2000
+)
+
+// verifyCohortSettings resolves the verify.yml cohort keys. Mainnet always
+// bounds next-hop sampling: absent keys take the defaults and zero is refused.
+// Testnet keeps unbounded sampling unless a key is present. One key given
+// alone derives the other so the lifetime limit never undercuts the size.
+func verifyCohortSettings(profile string, size, lifetimeLimit *int) (int, int, error) {
+	if size == nil && lifetimeLimit == nil {
+		if profile == "mainnet" {
+			return verifyDefaultCohortSize, verifyDefaultCohortLifetimeLimit, nil
+		}
+		return 0, 0, nil
+	}
+	var resolvedSize, resolvedLimit int
+	switch {
+	case size != nil && lifetimeLimit != nil:
+		resolvedSize, resolvedLimit = *size, *lifetimeLimit
+	case size != nil:
+		resolvedSize, resolvedLimit = *size, max(*size, verifyDefaultCohortLifetimeLimit)
+	default:
+		resolvedSize, resolvedLimit = min(verifyDefaultCohortSize, *lifetimeLimit), *lifetimeLimit
+	}
+	if resolvedSize <= 0 || resolvedLimit < resolvedSize {
+		return 0, 0, fmt.Errorf("cohort_size must be positive and at most cohort_lifetime_limit")
+	}
+	return resolvedSize, resolvedLimit, nil
+}
 
 func SetVerifySettings(settings *model.VerifySettings) {
 	verifySettingsInstance = settings
@@ -550,6 +614,14 @@ func verifySeedWithAdmission(
 	sampleExclusions = append(sampleExclusions, seedHopClientId, verify.ClientId)
 	sampleExclusions = append(sampleExclusions, assignmentExclusions...)
 	nextHop, n := model.SampleVerifyNextHop(ctx, sampleExclusions, settings)
+	if nextHop == nil && 0 < settings.CohortSize {
+		// A synthetic next hop is still an ASSIGN: the validator records it as
+		// an exposure, so each one would add a fresh unknown id to its bounded
+		// provider census. With a cohort, assign nothing at all. Real and
+		// poison seeds share this refusal, so it reveals nothing per caller.
+		model.DecrVerifyActiveTrails(ctx, verify.Vpk)
+		return nil, fmt.Errorf("503 verify next hop unavailable")
+	}
 	if nextHop == nil {
 		if !poison {
 			// no eligible provider to assign: degrade to poison so the
@@ -954,6 +1026,12 @@ func verifyExtend(
 			original := verifyRetainOriginal(ctx, len(trail.Hops), &nextTrail, extendMessage, verify.ExtendSig, "")
 			model.PublishVerifyOriginal(ctx, original, settings)
 			model.DecrVerifyActiveTrails(ctx, trail.Vpk)
+			return nil, &verifyExtendFailure{reason: "next-hop-unavailable"}
+		}
+		if 0 < settings.CohortSize {
+			// as in verifySeed, never name a synthetic hop under a cohort; the
+			// poison trail fails with the response a real trail gets
+			verifyFailTrail(ctx, trail)
 			return nil, &verifyExtendFailure{reason: "next-hop-unavailable"}
 		}
 		assignN = model.PadVerifySample(ctx, settings)

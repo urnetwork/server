@@ -469,6 +469,13 @@ func ConnectControlFrames(
 		//   under chaos churn before this was surfaced).
 		err = observeControlFrame(ctx, message, defaultControlFrameMetrics, func() error {
 			switch v := message.(type) {
+			case *protocol.StreamAuthorization:
+				// Only authenticated control requests can establish a clock
+				// anchor. Client supplied lease grants never reach a peer.
+				if len(v.ClockId) != 16 || len(v.StreamId) != 0 || v.Retired || len(v.AuthorizationGeneration) != 0 {
+					return fmt.Errorf("invalid stream clock request")
+				}
+				outFrames = []*protocol.Frame{connect.RequireToFrameWithDefaultProtocolVersion(&protocol.StreamAuthorization{ClockId: v.ClockId, ClockUnixMillis: server.NowUtc().UnixMilli()})}
 			case *protocol.CreateContract:
 				originalCtx := model.WithProviderWorkRequestFrameHash(ctx, providerWorkOriginalRequestFrameHash(frame))
 				outFrames, err = CreateContract(originalCtx, clientId, v, contractManagerSettings)
@@ -1194,7 +1201,7 @@ func newContract(
 		originWatch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 		defer originWatch.Close()
 		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
-		escrow, err := waitForCompanionOrigin(ctx, func() (*model.TransferEscrow, error) {
+		escrow, err := waitForCompanionOrigin(ctx, originWatch, func() (*model.TransferEscrow, error) {
 			return model.CreateCompanionTransferEscrow(
 				ctx,
 				sourceNetworkId,

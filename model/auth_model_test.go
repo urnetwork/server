@@ -19,7 +19,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -129,7 +129,7 @@ func TestResetPassword(t *testing.T) {
 
 		testingUserAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		byJwt := jwt.NewByJwt(
+		byJwt := session.NewByJwt(
 			networkId,
 			userId,
 			networkName,
@@ -245,7 +245,7 @@ func TestAuthCode(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		byJwt := jwt.NewByJwt(
+		byJwt := session.NewByJwt(
 			networkId,
 			userId,
 			networkName,
@@ -300,7 +300,7 @@ func TestAuthCodeIdentity(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		byJwt := jwt.NewByJwt(
+		byJwt := session.NewByJwt(
 			networkId,
 			userId,
 			networkName,
@@ -329,7 +329,7 @@ func TestAuthCodeIdentity(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertNotEqual(t, authCodeLoginResult.ByJwt, "")
 
-		loginByJwt, err := jwt.ParseByJwt(ctx, authCodeLoginResult.ByJwt)
+		loginByJwt, err := session.ParseByJwt(ctx, authCodeLoginResult.ByJwt)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, loginByJwt.Roles, []string{"role1", "role2"})
 		connect.AssertEqual(t, loginByJwt.Principal, "svc-a")
@@ -346,14 +346,14 @@ func TestAuthCodeIdentity(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, authClientResult.Error, nil)
 
-		clientByJwt, err := jwt.ParseByJwt(ctx, *authClientResult.ByClientJwt)
+		clientByJwt, err := session.ParseByJwt(ctx, *authClientResult.ByClientJwt)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertNotEqual(t, clientByJwt.ClientId, nil)
 		connect.AssertEqual(t, clientByJwt.Roles, []string{"role1", "role2"})
 		connect.AssertEqual(t, clientByJwt.Principal, "svc-a")
 
 		// LoadByJwtFromClientId rebuilds the identity from the db
-		loadedByJwt, err := jwt.LoadByJwtFromClientId(ctx, *clientByJwt.ClientId)
+		loadedByJwt, err := session.LoadByJwtFromClientId(ctx, *clientByJwt.ClientId)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, loadedByJwt.Roles, []string{"role1", "role2"})
 		connect.AssertEqual(t, loadedByJwt.Principal, "svc-a")
@@ -363,11 +363,11 @@ func TestAuthCodeIdentity(t *testing.T) {
 		// jwt's GuestMode claim — RefreshToken zeroes that claim on the first
 		// refresh regardless of account state — so the fixture must be a user
 		// with zero rows in every auth table, not this test's real user
-		// wearing a guest-flagged jwt.
+		// wearing a guest-flagged session.
 		guestNetworkId := server.NewId()
 		guestUserId := server.NewId()
 		Testing_CreateLegacyGuestNetwork(ctx, guestNetworkId, guestUserId)
-		guestSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(
+		guestSession := session.Testing_CreateClientSession(ctx, session.NewByJwt(
 			guestNetworkId,
 			guestUserId,
 			"g"+guestNetworkId.String(),
@@ -960,7 +960,7 @@ func TestAuthVerifyCodeInvalidation(t *testing.T) {
 		userId := server.NewId()
 		userAuth := Testing_CreateNetwork(ctx, networkId, "test", userId)
 
-		byJwt := jwt.NewByJwt(networkId, userId, "test", false, false)
+		byJwt := session.NewByJwt(networkId, userId, "test", false, false)
 		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 
 		createCode := func() string {
@@ -1118,7 +1118,7 @@ func TestAuthVerifyAddedUserAuth(t *testing.T) {
 		connect.AssertEqual(t, verifyResult.Error, nil)
 		connect.AssertNotEqual(t, verifyResult.Network, nil)
 
-		byJwt, err := jwt.ParseByJwt(ctx, verifyResult.Network.ByJwt)
+		byJwt, err := session.ParseByJwt(ctx, verifyResult.Network.ByJwt)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, byJwt.NetworkId, networkId)
 		connect.AssertEqual(t, byJwt.UserId, userId)

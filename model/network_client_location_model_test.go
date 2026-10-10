@@ -16,7 +16,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -24,7 +24,7 @@ import (
 // caller address participates in geolocation even when the provider address is
 // already stored, so the generic 0.0.0.0 test session would require the real
 // MMDB and make these otherwise synthetic model tests host-dependent.
-func testingCreateProviderSearchSession(ctx context.Context, byJwt *jwt.ByJwt) *session.ClientSession {
+func testingCreateProviderSearchSession(ctx context.Context, byJwt *session.ByJwt) *session.ClientSession {
 	clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 	clientSession.ClientAddress = "192.0.2.1:0"
 	return clientSession
@@ -158,7 +158,7 @@ func TestBestAvailableProviders(t *testing.T) {
 
 		clientSessionA := testingCreateProviderSearchSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
+			session.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
 		)
 
 		clientId := server.NewId()
@@ -307,7 +307,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 
 			clientSession := testingCreateProviderSearchSession(
 				ctx,
-				jwt.NewByJwt(
+				session.NewByJwt(
 					networkId,
 					userId,
 					fmt.Sprintf("network%d", i),
@@ -529,7 +529,7 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 
 		clientSession := testingCreateProviderSearchSession(
 			ctx,
-			jwt.NewByJwt(networkId, userId, "a", guestMode, isPro),
+			session.NewByJwt(networkId, userId, "a", guestMode, isPro),
 		)
 
 		clientId := server.NewId()
@@ -912,7 +912,7 @@ func TestFindProviders2ProviderLocation(t *testing.T) {
 
 		clientSession := testingCreateProviderSearchSession(
 			ctx,
-			jwt.NewByJwt(networkId, userId, "a", guestMode, isPro),
+			session.NewByJwt(networkId, userId, "a", guestMode, isPro),
 		)
 
 		clientId := server.NewId()
@@ -1114,7 +1114,7 @@ func TestFindProviders2ReliabilityFlushLag(t *testing.T) {
 			networkId := server.NewId()
 			clientSession := testingCreateProviderSearchSession(
 				ctx,
-				jwt.NewByJwt(networkId, server.NewId(), fmt.Sprintf("network%d", i), false, false),
+				session.NewByJwt(networkId, server.NewId(), fmt.Sprintf("network%d", i), false, false),
 			)
 
 			clientId := server.NewId()
@@ -1335,7 +1335,7 @@ func TestFindProviders2ReliabilityDeployGap(t *testing.T) {
 			networkId := server.NewId()
 			clientSession := testingCreateProviderSearchSession(
 				ctx,
-				jwt.NewByJwt(networkId, server.NewId(), fmt.Sprintf("network%d", i), false, false),
+				session.NewByJwt(networkId, server.NewId(), fmt.Sprintf("network%d", i), false, false),
 			)
 
 			clientId := server.NewId()
@@ -2456,7 +2456,7 @@ func TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork(t *testing.
 		findFrom := func(networkId server.Id, name string) map[server.Id]*FindProvidersProvider {
 			clientSession := testingCreateProviderSearchSession(
 				ctx,
-				jwt.NewByJwt(networkId, server.NewId(), name, false, false),
+				session.NewByJwt(networkId, server.NewId(), name, false, false),
 			)
 			res, err := FindProviders2(
 				&FindProviders2Args{
@@ -2516,7 +2516,7 @@ func TestLoadLocationStablesHonoursForceMinimum(t *testing.T) {
 
 		clientSession := testingCreateProviderSearchSession(
 			ctx,
-			jwt.NewByJwt(networkId, userId, "a", false, false),
+			session.NewByJwt(networkId, userId, "a", false, false),
 		)
 
 		handlerId := CreateNetworkClientHandler(ctx)
@@ -4073,7 +4073,7 @@ func TestFindProviders2ClientIdBypassesHealthGate(t *testing.T) {
 
 		clientSession := testingCreateProviderSearchSession(
 			ctx,
-			jwt.NewByJwt(networkId, server.NewId(), "test", false, false),
+			session.NewByJwt(networkId, server.NewId(), "test", false, false),
 		)
 
 		result, err := FindProviders2(&FindProviders2Args{

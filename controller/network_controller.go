@@ -4,7 +4,6 @@ import (
 	// "time"
 	"fmt"
 
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -29,9 +28,9 @@ func (self *networkCreateCodedRefusal) HttpErrorResultBody() any {
 
 func NetworkCreate(
 	networkCreate model.NetworkCreateArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*model.NetworkCreateResult, error) {
-	result, err := model.NetworkCreate(networkCreate, session)
+	result, err := model.NetworkCreate(networkCreate, clientSession)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +45,7 @@ func NetworkCreate(
 		// duplicate-account refusals as unhandled HTTP 500 failures.
 		return nil, result.Error
 	}
-	enrollNetworkCreateOnboardingPostPrimary(result, session)
+	enrollNetworkCreateOnboardingPostPrimary(result, clientSession)
 
 	/**
 	 * we only add transfer balance if the user is not pro (no balance code redeemed)
@@ -55,12 +54,12 @@ func NetworkCreate(
 	 */
 	if !result.IsPro {
 		// add regular balance
-		AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
+		AddRefreshTransferBalance(clientSession.Ctx, result.Network.NetworkId)
 	}
 
 	if networkCreate.ReferralCode != nil {
 		model.CreateNetworkReferral(
-			session.Ctx,
+			clientSession.Ctx,
 			result.Network.NetworkId,
 			*networkCreate.ReferralCode,
 		)
@@ -87,8 +86,8 @@ func NetworkCreate(
 	// sign-up keeps its choice until AuthVerify completes it.
 	productUpdates := ProductUpdatesFromCreateArgs(&networkCreate)
 	if result.Network != nil {
-		model.AccountPreferencesSetForNetwork(session.Ctx, result.Network.NetworkId, productUpdates)
-		WriteServerEvent(session, result.Network.NetworkId, model.EventSignupOptoutChanged, map[string]any{
+		model.AccountPreferencesSetForNetwork(clientSession.Ctx, result.Network.NetworkId, productUpdates)
+		WriteServerEvent(clientSession, result.Network.NetworkId, model.EventSignupOptoutChanged, map[string]any{
 			"product_updates": productUpdates,
 		}, "")
 	}
@@ -99,7 +98,7 @@ func NetworkCreate(
 		result.VerificationRequired.SendError = sendVerification(
 			result.VerificationRequired.UserAuth,
 			verifyUseNumeric,
-			session,
+			clientSession,
 			authVerifySendResult,
 		)
 	} else {
@@ -112,13 +111,13 @@ func NetworkCreate(
 			)
 		}
 
-		byJwt, err := jwt.ParseByJwt(session.Ctx, *(result.Network.ByJwt))
+		byJwt, err := session.ParseByJwt(clientSession.Ctx, *(result.Network.ByJwt))
 		if err == nil {
 			AccountPreferencesSet(
 				&model.AccountPreferencesSetArgs{
 					ProductUpdates: productUpdates,
 				},
-				session.WithByJwt(byJwt),
+				clientSession.WithByJwt(byJwt),
 			)
 		}
 
@@ -196,12 +195,12 @@ type NetworkRemoveResult struct {
 	Error *NetworkRemoveResultError `json:"error,omitempty"`
 }
 
-func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error) {
+func NetworkRemove(clientSession *session.ClientSession) (*NetworkRemoveResult, error) {
 	// Authorize before the provider call. RemoveNetwork repeats this check while
 	// holding the deletion row lock, but moving Stripe cancellation ahead of
 	// deletion must not let a non-admin cancel the network's subscription.
-	network := model.GetNetwork(session)
-	if network == nil || network.AdminUserId == nil || *network.AdminUserId != session.ByJwt.UserId {
+	network := model.GetNetwork(clientSession)
+	if network == nil || network.AdminUserId == nil || *network.AdminUserId != clientSession.ByJwt.UserId {
 		return nil, fmt.Errorf("Could not remove network")
 	}
 
@@ -209,7 +208,7 @@ func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error)
 	// local owner. Each confirmed cancellation closes only its own renewal, so
 	// partial progress is retryable and any remaining failure leaves the
 	// network and its authentication context intact.
-	return networkRemoveWithSteps(session, &defaultNetworkRemoveSteps)
+	return networkRemoveWithSteps(clientSession, &defaultNetworkRemoveSteps)
 }
 
 type GetNetworkReliabilityResult struct {
@@ -222,10 +221,10 @@ type GetNetworkReliabilityError struct {
 }
 
 func GetNetworkReliability(
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*GetNetworkReliabilityResult, error) {
 
-	window, err := model.GetNetworkReliabilityWindow(session)
+	window, err := model.GetNetworkReliabilityWindow(clientSession)
 	if err != nil {
 		return nil, err
 	}

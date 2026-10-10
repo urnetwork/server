@@ -12,7 +12,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 	"maps"
 )
@@ -32,11 +32,11 @@ func TestCancelAccountPayment(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
@@ -153,11 +153,11 @@ func TestPlanPaymentsMaxDuration(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
@@ -290,11 +290,11 @@ func TestPlanPaymentsMaxDurationLoop(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
@@ -483,11 +483,11 @@ func TestPlanPaymentsDryRun(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
@@ -592,11 +592,11 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
@@ -727,15 +727,15 @@ func TestPlanPaymentsNeverAssignsForeignWallet(t *testing.T) {
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
-		foreignSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		foreignSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: foreignNetworkId,
 			ClientId:  &foreignClientId,
 		})
@@ -863,15 +863,15 @@ func TestPaymentPlanSubsidyEqualWeight(t *testing.T) {
 		testingCreatePaymentClient(ctx, providerANetworkId, providerAClientId)
 		testingCreatePaymentClient(ctx, providerBNetworkId, providerBClientId)
 
-		paidPayerSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		paidPayerSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: paidPayerNetworkId,
 			ClientId:  &paidPayerClientId,
 		})
-		providerASession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		providerASession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: providerANetworkId,
 			ClientId:  &providerAClientId,
 		})
-		providerBSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		providerBSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: providerBNetworkId,
 			ClientId:  &providerBClientId,
 		})
@@ -1015,11 +1015,11 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 			EndTime:          server.NowUtc().Add(24 * time.Hour),
 		})
 
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})

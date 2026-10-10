@@ -9,7 +9,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -43,7 +43,7 @@ func TestPlanPaymentsMaxDurationLoopWritesInEachSliceTransaction(t *testing.T) {
 		destinationId := server.NewId()
 		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
 		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
-		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: sourceNetworkId,
 			ClientId:  &sourceId,
 		})

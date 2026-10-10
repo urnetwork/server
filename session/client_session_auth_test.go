@@ -11,7 +11,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -27,9 +27,9 @@ func TestClientSessionRejectsInactiveAndRotatedJwt(t *testing.T) {
 		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
 		model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "jwt-state-device", "test")
 
-		credential := jwt.NewByJwt(networkId, userId, networkName, false, false).
+		credential := session.NewByJwt(networkId, userId, networkName, false, false).
 			Client(deviceId, clientId).
-			Sign()
+			Testing_Sign()
 		authenticate := func() error {
 			request, err := http.NewRequest(http.MethodGet, "https://api.example.test/", nil)
 			if err != nil {
@@ -78,13 +78,13 @@ func TestClientSessionAcceptsLegacyJwtUntilGateFlips(t *testing.T) {
 
 		// legacy credentials: business claims and create_time only, exactly
 		// what pre-hardening mints produced
-		legacyUser := &jwt.ByJwt{
+		legacyUser := &session.ByJwt{
 			NetworkId:   networkId,
 			UserId:      userId,
 			NetworkName: networkName,
 			CreateTime:  server.CodecTime(server.NowUtc()),
 		}
-		legacyClient := &jwt.ByJwt{
+		legacyClient := &session.ByJwt{
 			NetworkId:   networkId,
 			UserId:      userId,
 			NetworkName: networkName,
@@ -104,20 +104,20 @@ func TestClientSessionAcceptsLegacyJwtUntilGateFlips(t *testing.T) {
 			return clientSession.Auth(request)
 		}
 
-		popOff := jwt.Testing_SetRejectMissingExpiration(false)
-		connect.AssertEqual(t, authenticate(legacyUser.Sign()), nil)
-		connect.AssertEqual(t, authenticate(legacyClient.Sign()), nil)
+		popOff := session.Testing_SetRejectMissingExpiration(false)
+		connect.AssertEqual(t, authenticate(legacyUser.Testing_Sign()), nil)
+		connect.AssertEqual(t, authenticate(legacyClient.Testing_Sign()), nil)
 
 		// the connect-transport path: parse for the connect audience, then
 		// bind to current client state
-		parsedClient, err := jwt.ParseByJwtForAudience(ctx, legacyClient.Sign(), jwt.ByJwtAudienceConnect)
+		parsedClient, err := session.ParseByJwtForAudience(ctx, legacyClient.Testing_Sign(), session.ByJwtAudienceConnect)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, jwt.ValidateByJwtState(ctx, parsedClient, true), nil)
+		connect.AssertEqual(t, session.ValidateByJwtState(ctx, parsedClient, true), nil)
 		popOff()
 
-		popOn := jwt.Testing_SetRejectMissingExpiration(true)
-		connect.AssertEqual(t, authenticate(legacyUser.Sign()) != nil, true)
-		connect.AssertEqual(t, authenticate(legacyClient.Sign()) != nil, true)
+		popOn := session.Testing_SetRejectMissingExpiration(true)
+		connect.AssertEqual(t, authenticate(legacyUser.Testing_Sign()) != nil, true)
+		connect.AssertEqual(t, authenticate(legacyClient.Testing_Sign()) != nil, true)
 		popOn()
 	})
 }
@@ -140,12 +140,12 @@ func TestClientSessionAcceptsExpiredJwtUntilGateFlips(t *testing.T) {
 		// a fully modern client credential whose lifetime has passed, like the
 		// 30-day-era mints still held by deployed clients
 		expiredCredential := func() string {
-			byClientJwt := jwt.NewByJwt(networkId, userId, networkName, false, false).
+			byClientJwt := session.NewByJwt(networkId, userId, networkName, false, false).
 				Client(deviceId, clientId)
 			byClientJwt.IssuedAt = gojwt.NewNumericDate(server.NowUtc().Add(-25 * time.Hour))
 			byClientJwt.NotBefore = byClientJwt.IssuedAt
 			byClientJwt.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-time.Hour))
-			return byClientJwt.Sign()
+			return byClientJwt.Testing_Sign()
 		}
 
 		authenticate := func(credential string) error {
@@ -159,17 +159,17 @@ func TestClientSessionAcceptsExpiredJwtUntilGateFlips(t *testing.T) {
 			return clientSession.Auth(request)
 		}
 
-		popOff := jwt.Testing_SetRejectExpired(false)
+		popOff := session.Testing_SetRejectExpired(false)
 		connect.AssertEqual(t, authenticate(expiredCredential()), nil)
 
 		// the connect-transport path: parse for the connect audience, then
 		// bind to current client state
-		parsedClient, err := jwt.ParseByJwtForAudience(ctx, expiredCredential(), jwt.ByJwtAudienceConnect)
+		parsedClient, err := session.ParseByJwtForAudience(ctx, expiredCredential(), session.ByJwtAudienceConnect)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, jwt.ValidateByJwtState(ctx, parsedClient, true), nil)
+		connect.AssertEqual(t, session.ValidateByJwtState(ctx, parsedClient, true), nil)
 		popOff()
 
-		popOn := jwt.Testing_SetRejectExpired(true)
+		popOn := session.Testing_SetRejectExpired(true)
 		connect.AssertEqual(t, authenticate(expiredCredential()) != nil, true)
 		popOn()
 	})

@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // TokenKeyPurpose labels the HMAC key derived from the jwt signing key.
@@ -133,7 +133,7 @@ func FlowSteps() []string {
 
 // NewToken signs claims with the deployment's current key.
 func NewToken(claims *TokenClaims) (string, error) {
-	keys := jwt.DerivedKeys(TokenKeyPurpose)
+	keys := session.DerivedKeys(TokenKeyPurpose)
 	if len(keys) == 0 {
 		return "", errors.New("no signing key")
 	}
@@ -142,7 +142,7 @@ func NewToken(claims *TokenClaims) (string, error) {
 
 // Parse verifies a token against every key the deployment has.
 func Parse(token string, now time.Time) (*TokenClaims, error) {
-	return ParseToken(jwt.DerivedKeys(TokenKeyPurpose), token, now)
+	return ParseToken(session.DerivedKeys(TokenKeyPurpose), token, now)
 }
 
 // In-app destinations a landing page routes to (mmm/onboarding/PLAN.md

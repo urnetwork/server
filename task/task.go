@@ -27,7 +27,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -465,7 +465,8 @@ func ScheduleTaskInTx[T any, R any](
 
 	claimTime := time.Time{}
 
-	server.RaisePgResult(tx.Exec(
+	var inserted bool
+	server.Raise(tx.QueryRow(
 		clientSession.Ctx,
 		`
 			INSERT INTO pending_task (
@@ -489,6 +490,7 @@ func ScheduleTaskInTx[T any, R any](
 				run_max_time_seconds = GREATEST(pending_task.run_max_time_seconds, $10),
 				run_once_generation = pending_task.run_once_generation + 1,
 				run_once_wake_at = LEAST(pending_task.run_once_wake_at, $7)
+			RETURNING task_id=$1
 		`,
 		p.taskId,
 		p.functionName,
@@ -501,7 +503,8 @@ func ScheduleTaskInTx[T any, R any](
 		p.priority,
 		p.maxTimeSeconds,
 		claimTime,
-	))
+	).Scan(&inserted))
+	observeTaskSubmissionInTx(tx, inserted)
 	return p.taskId
 }
 
@@ -567,6 +570,7 @@ func ScheduleTaskInTxIfAbsent[T any, R any](
 		claimTime,
 	))
 	scheduled = 0 < tag.RowsAffected()
+	observeTaskSubmissionInTx(tx, scheduled)
 	if !scheduled {
 		return scheduled, server.Id{}
 	}
@@ -1097,9 +1101,9 @@ type Task struct {
 }
 
 func (self *Task) ClientSession(ctx context.Context) (*session.ClientSession, error) {
-	var byJwt *jwt.ByJwt
+	var byJwt *session.ByJwt
 	if self.ClientByJwtJson != "" {
-		byJwt = &jwt.ByJwt{}
+		byJwt = &session.ByJwt{}
 		err := json.Unmarshal([]byte(self.ClientByJwtJson), byJwt)
 		if err != nil {
 			return nil, err
@@ -1150,9 +1154,9 @@ type FinishedTask struct {
 }
 
 func (self *FinishedTask) ClientSession(ctx context.Context) (*session.ClientSession, error) {
-	var byJwt *jwt.ByJwt
+	var byJwt *session.ByJwt
 	if self.ClientByJwtJson != "" {
-		byJwt = &jwt.ByJwt{}
+		byJwt = &session.ByJwt{}
 		err := json.Unmarshal([]byte(self.ClientByJwtJson), byJwt)
 		if err != nil {
 			return nil, err

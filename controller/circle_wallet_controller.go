@@ -28,7 +28,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 
@@ -57,20 +57,20 @@ type WalletCircleInitError struct {
 }
 
 func WalletCircleInit(
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*WalletCircleInitResult, error) {
-	_, err := createCircleUser(session)
+	_, err := createCircleUser(clientSession)
 	if err != nil {
 		return nil, err
 	}
 
-	circleUserToken, err := createCircleUserToken(session)
+	circleUserToken, err := createCircleUserToken(clientSession)
 	if err != nil {
 		return nil, err
 	}
 
 	return server.HttpPostRequireStatusOk(
-		session.Ctx,
+		clientSession.Ctx,
 		"https://api.circle.com/v1/w3s/user/initialize",
 		map[string]any{
 			"idempotencyKey": server.NewId(),
@@ -114,7 +114,7 @@ type WalletValidateAddressArgs struct {
 
 func WalletValidateAddress(
 	walletValidateAddress *WalletValidateAddressArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*WalletValidateAddressResult, error) {
 	blockchain, err := model.ParseBlockchain(walletValidateAddress.Chain)
 	if err != nil {
@@ -154,8 +154,8 @@ type WalletBalanceResult struct {
 	WalletInfo *CircleWalletInfo `json:"wallet_info,omitempty"`
 }
 
-func WalletBalance(session *session.ClientSession) (*WalletBalanceResult, error) {
-	walletInfo, err := findMostRecentCircleWallet(session)
+func WalletBalance(clientSession *session.ClientSession) (*WalletBalanceResult, error) {
+	walletInfo, err := findMostRecentCircleWallet(clientSession)
 	if err != nil {
 		return nil, err
 	}
@@ -187,16 +187,16 @@ type WalletCircleTransferOutError struct {
 
 func WalletCircleTransferOut(
 	walletCircleTransferOut *WalletCircleTransferOutArgs,
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (result *WalletCircleTransferOutResult, returnErr error) {
-	if session == nil || session.Ctx == nil {
+	if clientSession == nil || clientSession.Ctx == nil {
 		return nil, fmt.Errorf("customer transfer requires a caller context")
 	}
-	client, _ := session.Ctx.Value(circleTransferClientKey{}).(*circleTransferClient)
+	client, _ := clientSession.Ctx.Value(circleTransferClientKey{}).(*circleTransferClient)
 	if client == nil {
 		client = &circleTransferClient{}
 	}
-	return client.transfer(walletCircleTransferOut, session)
+	return client.transfer(walletCircleTransferOut, clientSession)
 }
 
 type GetPublicKeyResult struct {
@@ -236,20 +236,20 @@ func encryptOAEP(pubKey *rsa.PublicKey, message []byte) (ciphertext []byte, err 
 	return
 }
 
-func createCircleUser(session *session.ClientSession) (
+func createCircleUser(clientSession *session.ClientSession) (
 	circleUserId server.Id,
 	resultErr error,
 ) {
 	circleUserId = model.GetOrCreateCircleUserId(
-		session.Ctx,
-		session.ByJwt.NetworkId,
-		session.ByJwt.UserId,
+		clientSession.Ctx,
+		clientSession.ByJwt.NetworkId,
+		clientSession.ByJwt.UserId,
 	)
 
 	circleApiToken := circleConfig()["api_token"]
 
 	_, resultErr = server.HttpPost(
-		session.Ctx,
+		clientSession.Ctx,
 		"https://api.circle.com/v1/w3s/users",
 		map[string]any{
 			"userId": circleUserId,
@@ -295,18 +295,18 @@ type CircleUserToken struct {
 }
 
 func createCircleUserToken(
-	session *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*CircleUserToken, error) {
 	circleUserId := model.GetOrCreateCircleUserId(
-		session.Ctx,
-		session.ByJwt.NetworkId,
-		session.ByJwt.UserId,
+		clientSession.Ctx,
+		clientSession.ByJwt.NetworkId,
+		clientSession.ByJwt.UserId,
 	)
 
 	circleApiToken := circleConfig()["api_token"]
 
 	return server.HttpPostRequireStatusOk(
-		session.Ctx,
+		clientSession.Ctx,
 		"https://api.circle.com/v1/w3s/users/token",
 		map[string]any{
 			"userId": circleUserId,
@@ -397,8 +397,8 @@ type CircleWalletInfo struct {
 	Address              string          `json:"address"`
 }
 
-func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletInfo, error) {
-	circleWallets, err := findCircleWallets(session)
+func findMostRecentCircleWallet(clientSession *session.ClientSession) (*CircleWalletInfo, error) {
+	circleWallets, err := findCircleWallets(clientSession)
 
 	if err != nil {
 		return nil, err
@@ -644,14 +644,14 @@ func getCircleWallet(ctx context.Context, circleWalletId string) (*CircleWallet,
 	return (&CoreCircleApiClient{}).getCircleWallet(ctx, circleWalletId)
 }
 
-func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, error) {
-	if session == nil || session.Ctx == nil {
+func findCircleWallets(clientSession *session.ClientSession) ([]*CircleWalletInfo, error) {
+	if clientSession == nil || clientSession.Ctx == nil {
 		return nil, fmt.Errorf("Circle wallet observation requires a context")
 	}
-	if err := session.Ctx.Err(); err != nil {
+	if err := clientSession.Ctx.Err(); err != nil {
 		return nil, err
 	}
-	return (&CoreCircleApiClient{}).findCircleWallets(session, createCircleUserToken,
+	return (&CoreCircleApiClient{}).findCircleWallets(clientSession, createCircleUserToken,
 		fmt.Sprint(circleConfig()["blockchain_name"]), fmt.Sprint(circleConfig()["blockchain"]))
 }
 
@@ -701,7 +701,7 @@ func PopulateAccountWallets(
 }
 
 func handleUser(user model.CircleUC, clientSession *session.ClientSession) error {
-	userSession := session.NewLocalClientSession(clientSession.Ctx, "0.0.0.0:0", &jwt.ByJwt{
+	userSession := session.NewLocalClientSession(clientSession.Ctx, "0.0.0.0:0", &session.ByJwt{
 		NetworkId: user.NetworkId,
 		UserId:    user.UserId,
 	})

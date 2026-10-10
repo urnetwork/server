@@ -25,6 +25,10 @@ type ProviderWorkSessionSource struct {
 
 type providerWorkSessionSourceContextKey struct{}
 
+// A per-operation test seam can stop optional loading before any pg owner.
+// Production contexts use the vault loader without replacing global state.
+type providerWorkSessionSourceLoaderContextKey struct{}
+
 // Own the key and public policy before entering any transaction callback.
 func NewProviderWorkSessionSource(authority protocol.ProviderWorkSourceAuthority, key ed25519.PrivateKey) (*ProviderWorkSessionSource, error) {
 	if err := authority.Validate(); err != nil {
@@ -49,7 +53,11 @@ func providerWorkSessionContext(ctx context.Context) context.Context {
 	if ctx.Value(providerWorkSessionSourceContextKey{}) != nil {
 		return ctx
 	}
-	source, _ := loadProviderWorkSessionSource()
+	loader := loadProviderWorkSessionSource
+	if contextual, ok := ctx.Value(providerWorkSessionSourceLoaderContextKey{}).(func() (*ProviderWorkSessionSource, error)); ok && contextual != nil {
+		loader = contextual
+	}
+	source, _ := loader()
 	return WithProviderWorkSessionSource(ctx, source)
 }
 
@@ -117,7 +125,7 @@ func providerWorkSessionSourceFromBytes(raw []byte) (*ProviderWorkSessionSource,
 // window. Expired producer configuration can never mint a fresh original.
 func (self *ProviderWorkSessionSource) sign(ctx context.Context, value protocol.ProviderWorkReceipt, at int64) (protocol.ProviderWorkReceipt, []byte, [32]byte, error) {
 	if self == nil || at < self.authority.FromUnixMicro || at >= self.authority.ThroughUnixMicro {
-		return value, nil, [32]byte{}, errors.New("provider work source is outside its original authority window")
+		return value, nil, [32]byte{}, errProviderWorkEvidenceUnavailable
 	}
 	value.DomainHash = self.authority.DomainHash
 	value.SourceId = self.authority.SourceId

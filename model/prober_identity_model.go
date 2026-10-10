@@ -9,7 +9,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -59,7 +59,7 @@ const (
 	// re-minted.
 	//
 	// It is deliberately NOT derived from the jwt's own lifetime. That lifetime
-	// (jwt.expiryDuration) is unexported, so this package cannot read it, and it
+	// (session.expiryDuration) is unexported, so this package cannot read it, and it
 	// has already been changed once. A duplicated copy here would drift
 	// silently, and the direction it drifts is the bad one: a shortened lifetime
 	// with a stale copy here means an EXPIRED prober credential. A short,
@@ -261,7 +261,7 @@ func setProberIdentityClient(
 // clients are re-provisionable by design.
 //
 // by_client_jwt is dropped with it. A credential naming a client that no longer
-// exists is refused at auth anyway (see jwt.ValidateByJwtState), so keeping it
+// exists is refused at auth anyway (see session.ValidateByJwtState), so keeping it
 // would only make a dead token look like a live one.
 func clearProberIdentityClient(ctx context.Context) {
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -282,7 +282,7 @@ func clearProberIdentityClient(ctx context.Context) {
 // getNetworkAdminUserId reads back the user the network was created for.
 //
 // NetworkCreate's result carries the network id but NOT the user id, and the
-// user id is needed for every later re-mint (jwt.NewByJwt takes it), long after
+// user id is needed for every later re-mint (session.NewByJwt takes it), long after
 // the create call is gone. Reading it from the row that was just written keeps
 // the stored identity consistent with the database by construction.
 func getNetworkAdminUserId(ctx context.Context, networkId server.Id) (userId server.Id, found bool) {
@@ -501,10 +501,10 @@ func createProberNetwork(
 	// (db_migrations.go:6455). Do not "fix" that by adding one.
 	//
 	// Nothing in this system needs it. This server holds the jwt signing keys
-	// (jwt/by_jwt.go:68, byPrivateKeys), so mintProberClientJwt below re-mints
+	// (jwt/by_session.go:68, byPrivateKeys), so mintProberClientJwt below re-mints
 	// this account's client credential from the stored network_id/user_id
-	// whenever it likes -- the only identity jwt.NewByJwt takes is those three
-	// stored fields; its other two arguments are flags (jwt/by_jwt.go:217-223).
+	// whenever it likes -- the only identity session.NewByJwt takes is those three
+	// stored fields; its other two arguments are flags (jwt/by_session.go:217-223).
 	// A seedphrase is a HUMAN login credential, and no human ever logs into a
 	// machine-operated identity.
 	//
@@ -567,7 +567,7 @@ func mintProberClientJwt(
 ) error {
 	// pro is re-derived from the source of truth inside AuthNetworkClient, so
 	// the value carried here never reaches the minted credential.
-	byJwt := jwt.NewByJwt(
+	byJwt := session.NewByJwt(
 		*identity.NetworkId,
 		*identity.UserId,
 		identity.NetworkName,
@@ -640,12 +640,12 @@ func authProberClient(
 	proberSession *session.ClientSession,
 	clientId *server.Id,
 ) (*AuthNetworkClientResult, error) {
-	return AuthNetworkClient(
+	return authNetworkClientWithParentState(
 		&AuthNetworkClientArgs{
 			ClientId:    clientId,
 			Description: ProberClientDescription,
 			DeviceSpec:  ProberClientDeviceSpec,
 		},
-		proberSession,
+		proberSession, nil, false, true,
 	)
 }

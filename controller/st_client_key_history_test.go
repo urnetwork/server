@@ -24,7 +24,7 @@ import (
 	"github.com/urfoundation/sn/validator"
 	connectprotocol "github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -154,13 +154,13 @@ func (self *stClientKeyHistoryRPCFixture) Call(_ context.Context, call map[strin
 
 // Installs actual concrete runtime owners; the only external fixture is raw
 // Ethereum JSON-RPC. Each private signer and blob store belongs to this test.
-func newStClientKeyHistoryControllerFixture(t testing.TB) (*stClientKeyHistoryRPCFixture, *jwt.ByJwt, *StConfig) {
+func newStClientKeyHistoryControllerFixture(t testing.TB) (*stClientKeyHistoryRPCFixture, *session.ByJwt, *StConfig) {
 	t.Helper()
 	fixture, credential, cfg := newStClientKeyHistoryControllerFixtureWithoutBlobStore(t)
 	// Initialize the existing local test JWT owner before selecting an isolated
 	// blob vault. Its process-cached keys continue to authenticate real requests;
 	// no signer, credentials or cloud endpoint are copied into the private vault.
-	_ = credential.Sign()
+	_ = credential.Testing_Sign()
 	fixture.blobRoot = controllerUseLocalBlobStore(t)
 	return fixture, credential, cfg
 }
@@ -168,7 +168,7 @@ func newStClientKeyHistoryControllerFixture(t testing.TB) (*stClientKeyHistoryRP
 // Share the concrete RPC, signer and SQL owners with fixtures that select their
 // own storage backend. In particular, dev-local storage is not a declaration of
 // production Linux durable-volume custody.
-func newStClientKeyHistoryControllerFixtureWithoutBlobStore(t testing.TB) (*stClientKeyHistoryRPCFixture, *jwt.ByJwt, *StConfig) {
+func newStClientKeyHistoryControllerFixtureWithoutBlobStore(t testing.TB) (*stClientKeyHistoryRPCFixture, *session.ByJwt, *StConfig) {
 	t.Helper()
 	root, err := crypto.HexToECDSA(strings.Repeat("12", 32))
 	if err != nil {
@@ -204,7 +204,7 @@ func newStClientKeyHistoryControllerFixtureWithoutBlobStore(t testing.TB) (*stCl
 	networkID, userID, clientID, deviceID := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	model.Testing_CreateNetwork(t.Context(), networkID, "key-history-"+networkID.String(), userID)
 	model.Testing_CreateDevice(t.Context(), networkID, deviceID, clientID, "key-history", "test")
-	credential := jwt.NewByJwt(networkID, userID, "key-history", false, false).Client(deviceID, clientID)
+	credential := session.NewByJwt(networkID, userID, "key-history", false, false).Client(deviceID, clientID)
 	return fixture, credential, cfg
 }
 
@@ -221,7 +221,7 @@ func TestStClientKeyHistoryActualControlAndValidatorHTTPReader(t *testing.T) {
 			router.WrapWithInputRequireClient(SnClientKeyObservation, w, r)
 		}))
 		defer endpoint.Close()
-		reader, err := validator.NewHTTPClientKeyHistoryReader(endpoint.URL, func() string { return credential.Sign() })
+		reader, err := validator.NewHTTPClientKeyHistoryReader(endpoint.URL, func() string { return credential.Testing_Sign() })
 		if err != nil {
 			tb.Fatal(err)
 		}

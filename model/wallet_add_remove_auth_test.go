@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -83,7 +83,7 @@ func authParityAccount(
 	// Testing_CreateNetwork seeds one email auth and returns its address, so
 	// every account here starts with exactly one non-wallet sign-in method
 	userAuth = Testing_CreateNetwork(ctx, networkId, networkName, userId)
-	clientSession = session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	clientSession = session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId:   networkId,
 		UserId:      userId,
 		NetworkName: networkName,

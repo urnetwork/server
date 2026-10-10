@@ -32,6 +32,8 @@ const (
 	ContractStageClientStamp
 	ContractStageStream
 	ContractStageResponse
+	ContractStageCompanionPlainOriginRead
+	ContractStageCompanionFallbackOriginRead
 	contractStageCount
 )
 
@@ -40,6 +42,31 @@ var contractCreationStages = [contractStageCount]string{
 	"endpoint_lookup", "companion_origin", "payer_gate", "transaction",
 	"shard_fence", "grant_selection", "reservation_snapshot", "client_fence",
 	"post_commit", "client_stamp", "stream", "response",
+	"companion_plain_origin_read", "companion_fallback_origin_read",
+}
+
+type ContractCompanionOriginPhase uint8
+
+const (
+	ContractCompanionPlainOrigin ContractCompanionOriginPhase = iota
+	ContractCompanionFallbackOrigin
+	contractCompanionOriginPhaseCount
+)
+
+var contractCompanionOriginPhases = [contractCompanionOriginPhaseCount]string{"plain", "fallback"}
+
+type ContractCompanionOriginOutcome uint8
+
+const (
+	ContractCompanionOriginFound ContractCompanionOriginOutcome = iota
+	ContractCompanionOriginMissing
+	ContractCompanionOriginPayerHandoff
+	ContractCompanionOriginError
+	contractCompanionOriginOutcomeCount
+)
+
+var contractCompanionOriginOutcomes = [contractCompanionOriginOutcomeCount]string{
+	"origin_ready", "missing_origin", "payer_handoff", "error_or_panic",
 }
 
 // A generated contract reply is not proof of delivery, first provider write,
@@ -60,25 +87,29 @@ var contractCreationResults = [contractCreationResultCount]string{
 }
 
 type contractCreationValues struct {
-	seconds  [2][contractStageCount]float64
-	counts   [2][contractCreationResultCount]uint64
-	inflight [2][contractStageCount]int64
+	seconds           [2][contractStageCount]float64
+	counts            [2][contractCreationResultCount]uint64
+	inflight          [2][contractStageCount]int64
+	companionReads    [2][contractCompanionOriginPhaseCount]uint64
+	companionOutcomes [2][contractCompanionOriginOutcomeCount]uint64
 }
 
 type contractCreationMetrics struct {
-	mu                                 sync.Mutex
-	values                             contractCreationValues
-	now                                func() time.Time
-	seconds, counts, inflight, enabled *prometheus.Desc
+	mu                                                                    sync.Mutex
+	values                                                                contractCreationValues
+	now                                                                   func() time.Time
+	seconds, counts, inflight, enabled, companionReads, companionOutcomes *prometheus.Desc
 }
 
 func newContractCreationMetrics() *contractCreationMetrics {
 	return &contractCreationMetrics{
-		now:      time.Now,
-		seconds:  prometheus.NewDesc("urnetwork_contract_creation_completed_stage_seconds_total", "Exclusive wall residence of returned CreateContract calls, including cancellation and panic; no unfinished residence", []string{"ingress", "stage"}, nil),
-		counts:   prometheus.NewDesc("urnetwork_contract_creation_completed_total", "Returned CreateContract calls by response disposition; contract_reply does not prove delivery or provider contact", []string{"ingress", "outcome"}, nil),
-		inflight: prometheus.NewDesc("urnetwork_contract_creation_stage_inflight", "CreateContract calls currently in each exclusive synchronous stage", []string{"ingress", "stage"}, nil),
-		enabled:  prometheus.NewDesc("urnetwork_contract_creation_stage_timing_enabled", "Capability for bounded exclusive CreateContract stage timing", nil, nil),
+		now:               time.Now,
+		seconds:           prometheus.NewDesc("urnetwork_contract_creation_completed_stage_seconds_total", "Exclusive wall residence of returned CreateContract calls, including cancellation and panic; no unfinished residence", []string{"ingress", "stage"}, nil),
+		counts:            prometheus.NewDesc("urnetwork_contract_creation_completed_total", "Returned CreateContract calls by response disposition; contract_reply does not prove delivery or provider contact", []string{"ingress", "outcome"}, nil),
+		inflight:          prometheus.NewDesc("urnetwork_contract_creation_stage_inflight", "CreateContract calls currently in each exclusive synchronous stage", []string{"ingress", "stage"}, nil),
+		enabled:           prometheus.NewDesc("urnetwork_contract_creation_stage_timing_enabled", "Capability for bounded exclusive CreateContract stage timing", nil, nil),
+		companionReads:    prometheus.NewDesc("urnetwork_contract_creation_companion_origin_reads_total", "Companion origin Query-through-row-drain attempts by finite phase; application wall spans do not identify PostgreSQL wait or CPU", []string{"ingress", "phase"}, nil),
+		companionOutcomes: prometheus.NewDesc("urnetwork_contract_creation_companion_origin_outcomes_total", "Completed companion origin callbacks by finite selection result before transaction commit; origin_ready does not prove committed creation", []string{"ingress", "outcome"}, nil),
 	}
 }
 
@@ -91,6 +122,8 @@ func (m *contractCreationMetrics) Describe(ch chan<- *prometheus.Desc) {
 	ch <- m.counts
 	ch <- m.inflight
 	ch <- m.enabled
+	ch <- m.companionReads
+	ch <- m.companionOutcomes
 }
 
 func (m *contractCreationMetrics) Collect(ch chan<- prometheus.Metric) {
@@ -104,6 +137,12 @@ func (m *contractCreationMetrics) Collect(ch chan<- prometheus.Metric) {
 		}
 		for outcome, name := range contractCreationResults {
 			ch <- prometheus.MustNewConstMetric(m.counts, prometheus.CounterValue, float64(values.counts[ingress][outcome]), label, name)
+		}
+		for phase, name := range contractCompanionOriginPhases {
+			ch <- prometheus.MustNewConstMetric(m.companionReads, prometheus.CounterValue, float64(values.companionReads[ingress][phase]), label, name)
+		}
+		for outcome, name := range contractCompanionOriginOutcomes {
+			ch <- prometheus.MustNewConstMetric(m.companionOutcomes, prometheus.CounterValue, float64(values.companionOutcomes[ingress][outcome]), label, name)
 		}
 	}
 	ch <- prometheus.MustNewConstMetric(m.enabled, prometheus.GaugeValue, 1)
@@ -191,6 +230,50 @@ func EnterContractCreationStage(ctx context.Context, stage ContractCreationStage
 			o.stage = previous
 		})
 	}
+}
+
+// BeginContractCompanionOriginRead measures only the synchronous application
+// span from Query entry through WithPgResult row drain. Call the returned leave
+// function both immediately after the drain and in a defer for panic unwinding;
+// EnterContractCreationStage makes that double close idempotent.
+func BeginContractCompanionOriginRead(ctx context.Context, phase ContractCompanionOriginPhase) func() {
+	o, _ := ctx.Value(contractCreationTimingKey{}).(*ContractCreationTiming)
+	if o == nil || phase >= contractCompanionOriginPhaseCount {
+		return func() {}
+	}
+	stage := ContractStageCompanionPlainOriginRead
+	if phase == ContractCompanionFallbackOrigin {
+		stage = ContractStageCompanionFallbackOriginRead
+	}
+	leave := EnterContractCreationStage(ctx, stage)
+	o.mu.Lock()
+	if o.finished {
+		o.mu.Unlock()
+		leave()
+		return func() {}
+	}
+	o.metrics.mu.Lock()
+	o.metrics.values.companionReads[o.ingress][phase]++
+	o.metrics.mu.Unlock()
+	o.mu.Unlock()
+	return leave
+}
+
+// The callback can run again after a payer handoff; each invocation records
+// one outcome without an identifier, SQL text, or caller-controlled label.
+func RecordContractCompanionOriginOutcome(ctx context.Context, outcome ContractCompanionOriginOutcome) {
+	o, _ := ctx.Value(contractCreationTimingKey{}).(*ContractCreationTiming)
+	if o == nil || outcome >= contractCompanionOriginOutcomeCount {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.finished {
+		return
+	}
+	o.metrics.mu.Lock()
+	o.metrics.values.companionOutcomes[o.ingress][outcome]++
+	o.metrics.mu.Unlock()
 }
 
 func (o *ContractCreationTiming) Finish(result ContractCreationResult) {

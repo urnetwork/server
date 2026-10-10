@@ -27,9 +27,9 @@ import (
 	"github.com/urnetwork/connect"
 	connectprotocol "github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/startifact"
 	"google.golang.org/protobuf/proto"
 )
@@ -124,7 +124,7 @@ func (self *stClientKeyRegistrationRpcFixture) counts() (uint64, uint64) {
 
 // The existing concrete controller fixture owns Sql, keys and local storage.
 // Only its raw network endpoint and private collection clock are selected here.
-func newStClientKeyRegistrationFixture(t testing.TB, noId uint64, collection time.Duration) (*stClientKeyRegistrationRpcFixture, *jwt.ByJwt, *StConfig, *stClientKeyRegistrationCohorts) {
+func newStClientKeyRegistrationFixture(t testing.TB, noId uint64, collection time.Duration) (*stClientKeyRegistrationRpcFixture, *session.ByJwt, *StConfig, *stClientKeyRegistrationCohorts) {
 	t.Helper()
 	base, credential, cfg := newStClientKeyHistoryControllerFixture(t)
 	base.domain.NoID, cfg.NoId = noId, noId
@@ -227,7 +227,7 @@ func stClientKeyRegistrationRequest(ctx context.Context, endpoint, token string,
 }
 
 // Original independently signed Sql bytes must match both immutable paths.
-func stClientKeyRegistrationAssertStored(t testing.TB, fixture *stClientKeyRegistrationRpcFixture, cfg *StConfig, credential *jwt.ByJwt, key []byte, boundary protocol.ClientKeyEffectiveBoundary) model.StClientKeyHistoryRecord {
+func stClientKeyRegistrationAssertStored(t testing.TB, fixture *stClientKeyRegistrationRpcFixture, cfg *StConfig, credential *session.ByJwt, key []byte, boundary protocol.ClientKeyEffectiveBoundary) model.StClientKeyHistoryRecord {
 	t.Helper()
 	base := fixture.snapshot()
 	history, err := model.LoadStClientKeyHistory(t.Context(), base.domain, *credential.ClientId, model.MaxStClientKeyHistoryRegistrations, model.MaxStClientKeyHistoryBytes)
@@ -327,14 +327,14 @@ func TestStClientKeyRegistrationCohortActualThousandClientsTwoOperators(t *testi
 				defer progressLock.Unlock()
 				tb.Logf("actual operator=%d registration_progress sql_ready=%d first_sql_ready=%s last_sql_ready=%s published_before_final_census=%d first_published=%s last_published=%s ready_window_sizes=%v", noId, sqlReady, firstSqlReady, lastSqlReady, published, firstPublished, lastPublished, publicationWindows)
 			})
-			credentials := make([]*jwt.ByJwt, 500)
+			credentials := make([]*session.ByJwt, 500)
 			tokens := make([]string, 500)
 			keys := make([][]byte, 500)
 			for index := range credentials {
 				clientId, deviceId := server.NewId(), server.NewId()
 				model.Testing_CreateDevice(tb.Context(), credential.NetworkId, deviceId, clientId, "registration-cohort", "test")
 				credentials[index] = credential.Client(deviceId, clientId)
-				tokens[index] = credentials[index].Sign()
+				tokens[index] = credentials[index].Testing_Sign()
 				seed := sha256.Sum256(clientId[:])
 				keys[index] = bytes.Clone(ed25519.NewKeyFromSeed(seed[:])[32:])
 			}

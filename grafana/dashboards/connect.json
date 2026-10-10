@@ -61,7 +61,7 @@
             "id": 23,
             "type": "timeseries",
             "title": "contracts opened and closed / s",
-            "description": "Opens count first committed inserts across legacy, Redis and no-escrow backends; reuse and rollback do not count. Closes count first committed terminal outcomes, including quarantine, not completion of later Redis debit/projection work. Observed across all scraped writing services in the selected env; Connect block/host filters do not apply. Missing counters are No data, not zero. Rates may undercount during mixed deployment, missed scrapes, process failure or unsampled CLI writes.",
+            "description": "Opens count first committed inserts across legacy, Redis and no-escrow backends; reuse and rollback do not count. Closes count first committed terminal transitions, including quarantine and deletion without a prior outcome, before later Redis debit/projection work completes. Disputes and final reports remain pending until terminal closure. Observed across all scraped writing services in the selected env; Connect block/host filters do not apply. Missing counters are No data, not zero. Rates may undercount during mixed deployment, missed scrapes, process failure or unsampled CLI writes.",
             "gridPos": {
                 "h": 8,
                 "w": 12,

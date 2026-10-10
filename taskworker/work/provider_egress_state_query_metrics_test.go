@@ -13,8 +13,8 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -58,12 +58,12 @@ func proberObservedCounter(t testing.TB, name string, want map[string]string) fl
 // revocation reaches the JWT query, while completed owner retirement does not.
 func TestProviderEgressStateQueryMetricActualOperations(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(jwt.WithStateQuerySource(t.Context(), jwt.StateQueryApiControl), 30*time.Second)
+		ctx, cancel := context.WithTimeout(session.WithStateQuerySource(t.Context(), session.StateQueryApiControl), 30*time.Second)
 		defer cancel()
 		networkId, userId, deviceId, clientId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "prober-state-query", userId)
 		model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "synthetic", "synthetic")
-		token := jwt.NewByJwt(networkId, userId, "prober-state-query", false, false).Client(deviceId, clientId).Sign()
+		token := session.NewByJwt(networkId, userId, "prober-state-query", false, false).Client(deviceId, clientId).Testing_Sign()
 		credentials, err := newProviderEgressCredentials(&model.ProberIdentity{NetworkId: &networkId, UserId: &userId, ClientId: &clientId, ByClientJwt: token})
 		if err != nil {
 			t.Fatal(err)
@@ -77,7 +77,7 @@ func TestProviderEgressStateQueryMetricActualOperations(t *testing.T) {
 		if proberStateQueryMetric(t, "prober", "mint", "client", "state_valid") != before+1 {
 			t.Fatal("mint source missing")
 		}
-		claims, err := jwt.ParseByJwtForAudience(ctx, child.ByClientJwt, jwt.ByJwtAudienceApi)
+		claims, err := session.ParseByJwtForAudience(ctx, child.ByClientJwt, session.ByJwtAudienceApi)
 		if err != nil {
 			t.Fatal(err)
 		}

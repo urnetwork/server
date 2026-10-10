@@ -50,10 +50,10 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
 	connectserver "github.com/urnetwork/server/connect"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/proxy"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 const (
@@ -468,8 +468,8 @@ func setupFetchTestStackWithOptions(t testing.TB, options *fetchTestStackOptions
 		model.Testing_CreateDevice(ctx, providerNetworkId, providerDeviceId, providerClientId, "provider", "provider")
 		fetchTestRedeemBalance(t, ctx, providerNetworkId, fetchTestInitialBalance)
 
-		providerByJwt := jwt.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
-			Client(providerDeviceId, providerClientId).Sign()
+		providerByJwt := session.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
+			Client(providerDeviceId, providerClientId).Testing_Sign()
 
 		// The sdk's NewPlatformDeviceLocal hardcodes allowProvider=false (it's for
 		// embedded source devices that reach providers via the multi-client

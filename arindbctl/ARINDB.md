@@ -926,6 +926,274 @@ reader's identity. State/province/country top-30 completeness remains open:
 availability and service-presence sources do not supply comparable subscriber
 rankings or attribute the sampled Main providers to these operators.
 
+The separate October 8 Canada packet proposes thirteen exact subscriber ASNs
+on the tracked `5bbba6ad` baseline. Its retained ARIN records identify each
+ASN's current registrant; primary operator or regulator sources establish
+subscriber service and, where needed, the legal-name/brand relationship:
+
+| Reviewed operator group | Exact ASN additions | Limited regional evidence |
+| --- | --- | --- |
+| Bell Canada | 855, 7122 | Atlantic business Internet terms; Winnipeg evidence remains dated 2021 |
+| Cogeco Connexion | 11290 | Eligible addresses in Ontario and Quebec |
+| Eastlink | 11260 | Named New Brunswick communities, St. John's and Irricana, Alberta |
+| TekSavvy | 5645 | Conditional home Internet in all ten provinces; no territory inference |
+| Northwestel | 22573 | Business Internet in all three territories and northern British Columbia |
+| Xplore | 22995 | Canadian residential fibre, fixed wireless and satellite; no admin1 projection |
+| Beanfield | 21949 | Eligible residential buildings in Ontario, Quebec and British Columbia |
+| Execulink | 7794 | Southwestern Ontario and qualified named communities |
+| Access Communications | 21804 | Rural Saskatchewan, subject to address/site qualification |
+| Tbaytel | 32277 | Northern Ontario; the Terrace Bay activation remains dated 2023 |
+| Valley Fiber | 396420 | Manitoba residential fibre with approximate coverage and address checks |
+| Sogetel | 4540 | Five named administrative regions within Quebec |
+
+Ten groups are new; Bell retains AS577 and Cogeco retains AS7992. Candidate
+`c95cfe5b` contains 5,232 subscriber groups, six negative groups and 5,508 unique
+subscriber ASNs across the same 160 countries. Canada context grows from six
+groups/seven ASNs to sixteen groups/twenty ASNs. These are proposed catalog
+counts, not measured provider coverage or Quality gains. All unowned stanza
+bytes, existing negative groups, feed pins and policy controls are preserved.
+
+The review records mixed hosting, colocation or cloud products for Bell,
+Eastlink, TekSavvy, Beanfield, Execulink and Sogetel. These products preserve
+the need for an applicable use discriminator; they neither approve hosting
+prefixes nor justify rejecting an entire subscriber operator. Ordinary
+subscriber resale remains eligible. Registry ambiguity, an unknown competing
+origin, independent exclusions/risk, weak origin visibility and invalid RPKI
+continue to follow the existing classifier policy. The URL success gate stays
+at least 0.8. This is a demonstrated catalog omission, not evidence that those
+independent gates are too strict or that any current Main provider will pass.
+
+The regional inventory has partial subscriber-service presence for all thirteen
+Canadian provinces and territories. TekSavvy's dedicated Saskatchewan page
+supplies conditional service evidence beyond its general nine-province fibre
+sentence; the generic address form does not establish service in the three
+territories. Northwestel's general operating area includes High Level, Alberta,
+but that alone is not counted as retail Internet service. Marketing footprint,
+historical rollout, homes passed and subscriber count remain distinct. No
+regional top-30 completeness, subscriber ranking or route geography is inferred.
+Of the retained September 30 APNIC Canada priority queue, eight ASNs are already
+reviewed subscribers, eleven are proposed here, one retains an explicit negative
+and ten remain unreviewed. Beanfield and Northwestel are additional candidates
+outside that queue. Starlink is already globally reviewed; the absence of CA
+context does not require another group while optional country withholding is
+disabled. Popularity and corporate affiliation alone never approve an ASN.
+
+Research, the exact config patch, source receipts and qualification inputs are
+retained under `artifacts/arin-ca-regional-research-20261008-v1`, frozen by
+`research-freeze.json` (`6cb20a1d`). Eastlink and Valley Fiber's unavailable raw
+HTTP requests are preserved as failures; separately retained official-page/PDF
+web-tool text projections are labelled as projections. Their hashes do not
+claim raw page/PDF identity. Nine data-only composition controls passed,
+including refusal of changed negatives, refreshed feed clocks, removed prior
+ASNs and unreviewed ASN/country additions. Independent source review and four
+native qualification tests are separate gates. Independent composition review
+`239ee059` verified all 176 frozen files and preservation controls; semantic
+subscriber-source review `a4b250db` accepted all thirteen registry-to-service
+judgments with the recorded mixed-use and projection limitations. Four native
+qualification tests passed in the combined Canada gate `e70099a3`. They cover strict catalog
+parsing, exact identities, base-state/risk preservation, unknown origins,
+visibility/RPKI withholding and six explicit negative-use classes. They open
+no evidence feed, MMDB or database. Source composition has not refreshed the
+expired evidence bundle or constructed, published or adopted a new resource.
+Current census coverage and actual provider impact remain unknown until the
+separate Root-owned observation and artifact gates succeed.
+
+The follow-up Canada packet reviews the ten remaining ASNs in that retained
+national priority queue. It proposes six additional subscriber ASNs and four
+hosting ASNs, each with its own exact registry record and primary service-use
+evidence:
+
+| Reviewed use | Operator group | Exact ASN additions |
+| --- | --- | --- |
+| Subscriber access | EBOX | 1403 |
+| Subscriber access | Altima Telecom | 22423, 396338 |
+| Subscriber access | OXIO | 398721 |
+| Subscriber access | Distributel Communications | 11814 |
+| Subscriber access | Primus Telecommunications Canada | 6407 |
+| Hosting | GLOBALTELEHOST / GTHost | 62563 |
+| Hosting | B2 Net Solutions / ServerMania | 55286 |
+| Hosting | Akamai / Linode cloud | 63949 |
+| Hosting | Datacamp Limited | 212238 |
+
+Cumulative candidate `cdcc4471` retains every `c95cfe5b` stanza and adds these
+nine groups. It contains 5,237 subscriber groups, ten negative groups and 5,514
+unique subscriber ASNs across 160 subscriber countries. Canada context is
+21 groups/26 ASNs. The cumulative change from tracked `5bbba6ad` is nineteen
+subscriber ASNs and four hosting ASNs. Neither proposal has produced a new
+Main resource or a measured provider gain.
+
+Current legal and support pages resolve EBOX, Altima, OXIO, Distributel and
+Primus to their subscriber brands. Separate registrants remain separate
+groups: Bell, TELUS and Cogeco relationships do not approve other ASNs or
+lend a parent group's route visibility. Primus's current support/billing
+page supplies the Primus Telecommunications Canada name and Bell division
+bridge when main-site legal pages are unavailable. Its published personal
+web-page/domain hosting caveat remains explicit. Distributel's EBOX sales link
+does not establish migration of all existing customers or routes.
+
+GTHost's legal term "Subscriber" describes customers of servers, VMs, storage
+and IP allocations. It is not subscriber-access evidence. Its terms identify
+GLOBALTELEHOST; ServerMania's own history identifies B2 Net Solutions. The
+Linode-named ASN is registered to Akamai in the exact APNIC record. RIPE's
+AS212238 organization record identifies Datacamp; the AS60068 named separately
+on Datacamp's corporate site is not added. RIR redirects and organization roles
+are retained explicitly, without treating maintainer contacts as operators.
+The four hosting additions veto clean inference without adding unsupported
+proxy, VPN, Tor or virtual-ISP risk flags.
+
+EBOX adds qualified Ontario/Quebec presence, Altima five named provinces and
+OXIO six; Primus and Distributel are not assigned provinces from general
+branding. The cumulative proposals supply use dispositions for all thirty
+ASNs in the retained September 30 Canada priority queue: twenty-five subscriber
+and five hosting identities. That queue is not a national or regional
+subscriber-market top thirty. All thirteen regional inventory rows remain
+partial, with rankings and subscription counts unknown.
+
+The follow-up is frozen under `artifacts/arin-ca-remaining-review-20261008-v1`
+by `research-freeze.json` (`c21eb1c7`). Its incremental `c95cfe5b` patch and
+cumulative `5bbba6ad` patch are both retained. Nine data-only composition
+controls passed, including refusal of hosting-to-subscriber changes,
+unsupported proxy risk, affiliate-ASN additions, changed prior identities and
+feed-clock relabelling. Independent composition review `57336ce6` verified
+all 132 frozen files and the preservation controls. Semantic source review
+`2b893d77` accepted the six access and four hosting identities with the recorded
+limitations. The five follow-up native tests also passed in combined gate
+`e70099a3`, adding actual hosting-origin vetoes and unsupported-risk checks to
+the access-identity controls. All nine tests used the exact clean `116350e6`
+source, two CPU cores, a 2-GiB memory cap and no swap; they opened no feed,
+MMDB or database. The ARIN Go source is unchanged at the later `53675285`
+canonical observation and from the qualified `bbc8972f` builder. This extends
+catalog/schema and decision qualification without claiming that every later
+server package was tested. Fresh feeds, artifact construction/readbacks,
+publication, mapped adoption and the separate URL health gate remain necessary.
+
+Root merged the Canada catalog into Config `07d0f94b` and its documentation
+into Server `84a43192`. A later clean Server `9bc8a7e5` observation still has
+the same 41 ARIN Go postimages as the native `116350e6` and compiled `bbc8972f`
+sources; the complete later server graph is outside that equivalence claim.
+The canonical catalog is byte-exact `cdcc4471`. Disabled preparation
+`artifacts/arin-canada-resource-preparation-20261008-v2` binds those source
+gates, the nine native controls and the current Config lineage. It preserves
+the incoming `713a53d` changes to `main/sn.yml` and
+`main/operator-gas-authority.yml`; ARIN work does not attest their financial
+activation or authorize restoring the earlier Config parent. The normal
+strict 38-source refresh, bounded 12-GiB augmentation and exact final-artifact
+readbacks remain unexecuted in this preparation. Neither integration nor its
+disabled build plan establishes current reader adoption or provider gains.
+
+The next country research packet reviews Singapore. The latest retained
+October 6 06:03 country-tagged sample contains 207 complete, consistent
+non-Quality classifications: 192 carry a stored US tag and three an SG tag,
+the largest non-US count. Those booleans do not identify an ASN, registrant,
+unknown origin or explicit exclusion. The later census/lifecycle lane has
+collected no newer country/ASN cause bins. Singapore is therefore a bounded
+research priority, not a measured missing-subscriber or Quality-gain finding;
+the dominant US count remains unexplained at the operator level.
+
+The separate proposal adds six exact subscriber ASNs and four hosting ASNs
+to merged `cdcc4471`, using current RIR records and primary operator/regulator
+evidence:
+
+| Reviewed use | Operator group | Exact ASN additions |
+| --- | --- | --- |
+| Subscriber access | Singtel Mobile | 45143 |
+| Subscriber access | SingNet | 3758 |
+| Subscriber access | SIMBA Telecom | 4817 |
+| Subscriber access | MyRepublic | 56300 |
+| Subscriber access | ViewQwest | 18106 |
+| Subscriber access | Whiz Communications | 135600 |
+| Hosting | FDCservers.net | 30058 |
+| Hosting | Zenlayer | 62610, 21859 |
+| Hosting | Contabo Asia | 141995 |
+
+APNIC still names Singapore Telecom Mobile for AS45143. Singtel's business
+transfer announcement and IMDA's spectrum instrument independently bridge it
+to Singtel Mobile Singapore effective October 1, 2010; current mobile terms
+identify the successor's subscriber service. AS56300 retains MYREPUBLIC
+LIMITED. The operative IMDA licence explicitly transfers that licence to
+MyRepublic Broadband on November 30, 2021. This is business/licence continuity,
+not an assumed corporate rename. Current fixed-access terms and support
+establish its subscriber service independently of StarHub ownership. The
+October 8, 2026 mobile-acquisition announcement remains conditional and does
+not prove completion, ASN migration or shared origin visibility.
+
+SingNet's current GOMO contract, SIMBA's mobile/fibre contracts, ViewQwest's
+residential terms and WhizComms' fibre-ready-premises contract supply direct
+access-service evidence. Their parent or affiliated ASNs are not imported.
+Ordinary broadband resale does not itself establish virtual-ISP risk.
+FDCservers and Zenlayer's server/cloud/transit offerings remain explicit
+non-subscriber uses. Contabo Asia has its own exact APNIC identity, corporate
+operational-domain bridge and official Singapore server products; the
+operator-maintained directory is supplementary context only. None of these
+hosting judgments invents proxy, VPN, Tor or virtual-ISP risk flags.
+
+Candidate `8adadba2` contains 5,243 subscriber groups, thirteen negative groups
+and 5,520 unique subscriber ASNs across the same 160 countries. Singapore
+context grows from three groups/five ASNs to nine groups/eleven ASNs. Every
+prior operator stanza, all ten prior negative groups and the complete
+feed/policy header remain byte-exact. Twelve data-only composition controls
+pass, including refusal of changed negatives, affiliate ASN additions,
+borrowed parent identities, changed country context and relabelled clocks.
+Empty HTTP-success bodies and a legal URL redirected to unrelated HTML remain
+unusable source evidence. The packet is frozen under
+`artifacts/arin-sg-priority-research-20261008-v1` by `research-freeze.json`
+(`a1a6ea27`). Independent semantic/composition review passed (`b20cdd57`),
+followed by all five pure native parser/decision controls (`3bad67ef`) on
+clean Server `116350e6`. Root merged the exact catalog into Config
+`6a0b12b5`. These source and native gates do not include feeds, an augmented
+resource, reader adoption or provider outcomes.
+
+The merged Canada/Singapore resource successor is frozen under
+`artifacts/arin-ca-sg-resource-preparation-20261008-v1`: handoff `2c4f14cc`,
+disabled build plan `bee5637e` and preparation freeze `078ff4bf`. It supersedes
+the Canada-only `cdcc4471` plan. Clean observations bind Config `6a0b12b5`,
+catalog `8adadba2` and Server `30a56d9a`; all 41 ARIN Go files match the
+qualified builder/native source. The incoming `713a53d` SN and operator-gas
+authority files remain byte-exact, and all eleven audited SN consumers match
+their reviewed source. Their financial readiness remains a separate gate.
+
+The plan requires 38 fresh strict evidence sources, preserves all thirteen
+negative groups and dispositions 37 subscriber plus eight hosting ASNs in
+the actual output. It retains the October 6 registration base with its real
+clock, then requires full/native/mapped, RPKI, policy and independent audit
+readbacks. The qualified historical CLI's actual Go 1.27.1/module graph is
+distinct from the pending security successor; no current scanner result or
+final successor graph is invented. Root must bind the chosen builder and
+exclusive resource window before execution.
+
+Separate disabled publication and measurement plans preserve the complete
+currently selected Config inventory, private hash-only profile provenance,
+GeoLite/places and current SN authority. They use the normal scanner-gated
+Config packager, exact image/version selection and explicit restart scope.
+Actual reader generations, fresh connection lookups, rollup/publication
+clocks and a coherent census must precede any current Quality-gain claim.
+URL success of at least 0.8 and the mature four-hour quota remain separate.
+No resource build, publication, Main capture or Quality gain follows from
+this preparation.
+
+The proposal dispositions the retained Singapore national APNIC queue as ten
+subscriber, eight explicitly negative and twelve unreviewed ASNs. Those
+estimated-user entries are not subscriber counts or market ranks. The five
+Community Development Council districts have a current official geographic
+inventory, distinct from URA planning regions. District-specific subscriber
+presence, subscription counts and top-30 ranks remain unknown; national
+marketing and conditional premises eligibility do not fill those gaps.
+
+A separate primary-source follow-up keeps Cloudflare AS13335 unclassified
+at the whole-operator level. Its current BYOIP and Magic Transit documentation
+explicitly covers customer-owned prefixes announced under AS13335, ISP/customer
+letters of agency and traffic returned to the customer's network; Direct
+Server Return can retain egress through that customer's ISP. The inference is
+limited: an origin ASN and corporate brand alone do not prove that every
+address is tenant compute or a forward-proxy/VPN exit. A blanket hosting or
+proxy addition could override independent subscriber-prefix evidence for
+transparent protected networks. This is a possible mechanism, not an observed
+Main classification error or permission to approve all Cloudflare space.
+Existing applicable relay-prefix, VPN and other negative/risk evidence remains
+authoritative. Exact source receipts and the explicit no-change decision are
+frozen in `artifacts/arin-sg-mixed-origin-research-20261008-v1`
+(`bc89ad16`); no catalog or classifier change follows from this finding.
+
 The twelve-ASN augmentation has a separately qualified reuse executor
 (`db1631d8`) and full/native/mapped readback preparation (`1a6c7beb`). It keeps
 the validated registration base, all 38 original feed bytes and observation

@@ -19,7 +19,7 @@ import (
 
 	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -205,7 +205,7 @@ func TestConnectUpgradeNilFramedConstructorFailureClosesOwnedSocket(t *testing.T
 		ctx := context.Background()
 		networkId, userId := server.NewId(), server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "synthetic-upgrade-network", userId)
-		userSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(networkId, userId, "synthetic-upgrade-network", false, false))
+		userSession := session.Testing_CreateClientSession(ctx, session.NewByJwt(networkId, userId, "synthetic-upgrade-network", false, false))
 		client, err := model.AuthNetworkClient(&model.AuthNetworkClientArgs{Description: "synthetic upgrade client", DeviceSpec: "synthetic"}, userSession)
 		if err != nil || client == nil || client.Error != nil || client.ByClientJwt == nil {
 			tb.Fatalf("synthetic authentication setup failed: %T", err)

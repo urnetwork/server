@@ -53,6 +53,90 @@ func makeCloseRetryTaskDue(ctx context.Context, id server.Id) {
 	})
 }
 
+// The reportless Redis sibling owns a zero-byte debit until its real worker
+// releases that reservation. Keep the companion reader purely observational:
+// assert both reservations before this explicit handoff and one after replay.
+func drainCloseRetryOriginDebits(t testing.TB, ctx context.Context, fixtures ...closeRetryFixture) {
+	t.Helper()
+	readCompanion := func(fixture closeRetryFixture) (snapshot string) {
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(c.dispute,c.outcome,c.open,c.usage_unverified,c.provider_usage,
+				e.settled,e.balance_byte_count,e.payout_byte_count,
+				(SELECT jsonb_agg(jsonb_build_array(party,used_transfer_byte_count,close_time,checkpoint) ORDER BY party)
+				 FROM contract_close WHERE contract_id=c.contract_id))::text
+				FROM transfer_contract c JOIN transfer_escrow e USING(contract_id)
+				WHERE c.contract_id=$1 AND e.balance_id=$2`, fixture.companionId, fixture.balanceId).Scan(&snapshot))
+		})
+		return
+	}
+	requireOrigin := func(fixture closeRetryFixture, settled bool) {
+		shard := int(fixture.balanceId[15]) % model.TransferDebitShardCount
+		var terminal, metadataSettled, redisReserved, exactJournal bool
+		var reserved, payout, credit, debit model.ByteCount
+		var journals int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT c.outcome=$3 AND NOT c.dispute AND NOT c.open,
+				e.settled,e.redis_reserved,e.balance_byte_count,COALESCE(e.payout_byte_count,0),b.balance_byte_count,
+				(SELECT count(*) FROM transfer_debit_journal WHERE contract_id=$1),
+				(SELECT COALESCE(sum(debit_byte_count),0) FROM transfer_debit_journal WHERE contract_id=$1),
+				(SELECT COALESCE(bool_and(balance_id=$2 AND shard=$4 AND NOT applied AND debit_byte_count=0),true)
+				 FROM transfer_debit_journal WHERE contract_id=$1)
+				FROM transfer_contract c JOIN transfer_escrow e USING(contract_id)
+				JOIN transfer_balance b USING(balance_id) WHERE c.contract_id=$1 AND e.balance_id=$2`,
+				fixture.originId, fixture.balanceId, model.ContractOutcomeSettled, shard).Scan(
+				&terminal, &metadataSettled, &redisReserved, &reserved, &payout, &credit, &journals, &debit, &exactJournal))
+		})
+		wantJournals, wantReserved := 1, 2*fixture.grant
+		if settled {
+			wantJournals, wantReserved = 0, fixture.grant
+		}
+		if !terminal || metadataSettled != settled || !redisReserved || reserved != fixture.grant || payout != 0 ||
+			credit != 8*fixture.grant || journals != wantJournals || debit != 0 || !exactJournal ||
+			model.Testing_NetEscrowByteCount(ctx, fixture.balanceId) != wantReserved {
+			t.Fatal("reportless origin lost its exact zero-debit reservation owner", settled, journals, debit, credit)
+		}
+	}
+	protected := map[server.Id]string{}
+	for _, fixture := range fixtures {
+		protected[fixture.companionId] = readCompanion(fixture)
+		requireOrigin(fixture, false)
+	}
+	for pass := range 2 {
+		// Join every observed origin before replay, so a bounded public
+		// page cannot legitimately advance to another fixture's pending debt.
+		for _, fixture := range fixtures {
+			previous := fixture.balanceId
+			for index := len(previous) - 1; ; index-- {
+				if index < 0 {
+					t.Fatal("synthetic balance has no preceding UUID")
+				}
+				if previous[index] != 0 {
+					previous[index]--
+					break
+				}
+				previous[index] = 255
+			}
+			shard := int(fixture.balanceId[15]) % model.TransferDebitShardCount
+			result, err := model.FlushTransferDebits(ctx, shard, &previous, 1)
+			if err != nil || result.Failed != 0 || result.Busy != 0 {
+				t.Fatal("exact reportless debit owner or replay failed", result, err)
+			}
+			if pass == 0 {
+				if result.Balances != 1 || result.Applied != 1 || result.Released != 1 || !result.More ||
+					result.LastBalanceId == nil || *result.LastBalanceId != fixture.balanceId {
+					t.Fatal("reportless debit page lost its exact balance or release", result)
+				}
+			} else if result.Applied != 0 || result.Released != 0 {
+				t.Fatal("empty reportless debit replay repeated financial work", result)
+			}
+			requireOrigin(fixture, true)
+			if readCompanion(fixture) != protected[fixture.companionId] {
+				t.Fatal("reportless sibling debit changed the disputed companion")
+			}
+		}
+	}
+}
+
 // The exact model and scheduler traverse two rejected pages, finish the empty
 // tail and return to the protected head. Only normal completion invokes Post.
 func TestCloseAccountingRetryPersistsContinuationAndReturnsToHead(t *testing.T) {
@@ -94,10 +178,14 @@ func TestCloseAccountingRetryPersistsContinuationAndReturnsToHead(t *testing.T) 
 				t.Fatal("accounting page lost its failing durable task")
 			}
 			args, storedError, count, currentMetadata, delay := readCloseRetryTask(t, ctx, id)
-			if args.Cursor == nil || args.Cursor.Dispute == nil || args.Cursor.Dispute.ContractId != expected || !strings.Contains(storedError, expected.String()) || count != attempt+1 || currentMetadata != metadata || delay < time.Minute || 5*time.Minute <= delay {
-				t.Fatal("accounting retry lost cursor progress, error, identity or cadence")
+			if args.Cursor == nil || args.Cursor.Dispute == nil || args.Cursor.Dispute.ContractId != expected || !strings.Contains(storedError, expected.String()) || count != attempt+1 || currentMetadata != metadata {
+				t.Fatal("accounting retry lost cursor progress, error or identity")
+			}
+			if delay < 2*time.Second || 4*time.Second <= delay {
+				t.Fatalf("completed raw continuation retry=%s, want bounded2–4s cadence", delay)
 			}
 		}
+		drainCloseRetryOriginDebits(t, ctx, first, second)
 		first.requireAccounting(t, ctx)
 		second.requireAccounting(t, ctx)
 		if calls.Load() != 2 || postCalls.Load() != 0 || len(task.GetFinishedTasks(ctx, id)) != 0 {
@@ -161,6 +249,7 @@ func TestCloseAccountingRetryResetsCursorOnRejectedPassEnd(t *testing.T) {
 				t.Fatal("reset failed to revisit the earlier protected dispute")
 			}
 		}
+		drainCloseRetryOriginDebits(t, ctx, first, second)
 		first.requireAccounting(t, ctx)
 		second.requireAccounting(t, ctx)
 	})
@@ -214,6 +303,7 @@ func TestCloseAccountingRetryRejectsAmbiguousProgress(t *testing.T) {
 				t.Fatal("ambiguous or canceled result advanced a task cursor")
 			}
 		}
+		drainCloseRetryOriginDebits(t, ctx, first)
 		first.requireAccounting(t, ctx)
 	})
 }

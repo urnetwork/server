@@ -14,18 +14,18 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
 )
 
-func authorityTestOwner(t testing.TB, ctx context.Context) (*Authority, *jwt.ByJwt) {
+func authorityTestOwner(t testing.TB, ctx context.Context) (*Authority, *session.ByJwt) {
 	t.Helper()
 	network, user, device, client := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	model.Testing_CreateNetwork(ctx, network, "local-authority-test", user)
 	model.Testing_CreateDevice(ctx, network, device, client, "test", "test")
-	claims := jwt.NewByJwt(network, user, "local-authority-test", false, false).Client(device, client)
-	owner, err := New(ctx, claims.Sign(), "https://control.example")
+	claims := session.NewByJwt(network, user, "local-authority-test", false, false).Client(device, client)
+	owner, err := New(ctx, claims.Testing_Sign(), "https://control.example")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,14 +33,14 @@ func authorityTestOwner(t testing.TB, ctx context.Context) (*Authority, *jwt.ByJ
 	return owner, claims
 }
 
-func authorityTestMint(t testing.TB, ctx context.Context, owner *Authority) (*connect.AuthNetworkClientResult, *jwt.ByJwt) {
+func authorityTestMint(t testing.TB, ctx context.Context, owner *Authority) (*connect.AuthNetworkClientResult, *session.ByJwt) {
 	t.Helper()
 	parent := connect.Id(owner.clientId)
 	result, err := owner.AuthNetworkClient(ctx, &connect.AuthNetworkClientArgs{SourceClientId: &parent, Description: "derived-test", DeviceSpec: "test"})
 	if err != nil || result == nil || result.Error != nil || result.ByClientJwt == "" {
 		t.Fatal("local mint failed", err)
 	}
-	claims, err := jwt.ParseByJwtForAudience(ctx, result.ByClientJwt, jwt.ByJwtAudienceApi)
+	claims, err := session.ParseByJwtForAudience(ctx, result.ByClientJwt, session.ByJwtAudienceApi)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,8 +76,8 @@ func TestAuthorityDerivedScopeSurvivesReconstruction(t *testing.T) {
 		s.Cancel()
 		otherDevice, otherClient := server.NewId(), server.NewId()
 		model.Testing_CreateDevice(ctx, claims.NetworkId, otherDevice, otherClient, "other", "other")
-		otherClaims := jwt.NewByJwt(claims.NetworkId, claims.UserId, claims.NetworkName, false, false).Client(otherDevice, otherClient)
-		other, err := New(ctx, otherClaims.Sign(), owner.apiUrl)
+		otherClaims := session.NewByJwt(claims.NetworkId, claims.UserId, claims.NetworkName, false, false).Client(otherDevice, otherClient)
+		other, err := New(ctx, otherClaims.Testing_Sign(), owner.apiUrl)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -88,8 +88,8 @@ func TestAuthorityDerivedScopeSurvivesReconstruction(t *testing.T) {
 		_, err = owner.authenticate(ctx, "invalid.signature.token", false)
 		authorityTestUnauthorized(t, err)
 		wrongAudience := *claims
-		wrongAudience.Audience = []string{jwt.ByJwtAudienceConnect}
-		_, err = owner.authenticate(ctx, wrongAudience.Sign(), false)
+		wrongAudience.Audience = []string{session.ByJwtAudienceConnect}
+		_, err = owner.authenticate(ctx, wrongAudience.Testing_Sign(), false)
 		authorityTestUnauthorized(t, err)
 		_, err = owner.authenticate(ctx, child.ByClientJwt, true)
 		authorityTestUnauthorized(t, err)

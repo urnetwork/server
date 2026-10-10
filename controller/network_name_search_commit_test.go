@@ -17,7 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -119,7 +119,7 @@ func TestChangeNetworkNameIndexesNameInMemoryAfterCommit(t *testing.T) {
 					ChangeNetworkNameArgs{
 						NetworkName: c.newName,
 					},
-					session.Testing_CreateClientSession(callCtx, &jwt.ByJwt{
+					session.Testing_CreateClientSession(callCtx, &session.ByJwt{
 						NetworkId: networkId,
 						UserId:    userId,
 					}),

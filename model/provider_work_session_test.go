@@ -51,6 +51,13 @@ func newProviderWorkSessionFixture(t testing.TB) *providerWorkSessionFixture {
 	ctx := WithProviderWorkSessionSource(t.Context(), source)
 	f := &providerWorkSessionFixture{ctx: ctx, source: source, sourceId: server.NewId(), destinationId: server.NewId(), intermediaryId: server.NewId(), sourceNetworkId: server.NewId(), destinationNetworkId: server.NewId(), intermediaryNetworkId: server.NewId()}
 	addContractPayoutTestClients(ctx, map[server.Id]server.Id{f.sourceId: f.sourceNetworkId, f.destinationId: f.destinationNetworkId, f.intermediaryId: f.intermediaryNetworkId})
+	// Complete independent analytics before admission. The real connection
+	// owners reuse the recorded day without leaving a worker in a query scope.
+	waitConnectDayWrites(
+		recordConnectDayForTest(ctx, f.sourceId, now),
+		recordConnectDayForTest(ctx, f.destinationId, now),
+		recordConnectDayForTest(ctx, f.intermediaryId, now),
+	)
 	f.handlerId = CreateNetworkClientHandler(ctx)
 	f.sourceConnectionId, _, _, _, err = ConnectNetworkClientWithIpFamily(ctx, f.sourceId, "192.0.2.10:10001", f.handlerId, 4)
 	if err != nil {
@@ -161,9 +168,13 @@ func TestProviderWorkSessionActualAdmissionReservationClose(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
+		observer, closeObservation := providerWorkObserveRuntimeQueries(t, t.Context())
+		defer closeObservation()
 		f := newProviderWorkSessionFixture(t)
 		id := f.contract(t)
 		f.close(t, id)
+		closeObservation()
+		observer.requireNoCatalog(t, "insert into network_client_connection", "insert into provider_work_session_receipt", "insert into provider_work_reservation_original", "insert into provider_work_outcome_original", "from pg_locks")
 		receipts := providerWorkFixtureReceipts(t, f.ctx, id)
 		reservation := providerWorkFixtureReservation(t, receipts, id)
 		if !reservation.Reservation.Complete || reservation.Reservation.SourceId != f.sourceId.String() || reservation.Reservation.DestinationNetworkId != f.destinationNetworkId.String() {
@@ -307,6 +318,8 @@ func TestProviderWorkSessionActualStreamBirthAndInheritedCohort(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
+		observer, closeObservation := providerWorkObserveRuntimeQueries(t, t.Context())
+		defer closeObservation()
 		f := newProviderWorkSessionFixture(t)
 		frame, err := connect.ToFrame(&coreprotocol.CreateContract{DestinationId: f.destinationId.Bytes(), TransferByteCount: 121, IntermediaryIds: [][]byte{f.intermediaryId.Bytes()}}, connect.DefaultProtocolVersion)
 		if err != nil {
@@ -335,6 +348,8 @@ func TestProviderWorkSessionActualStreamBirthAndInheritedCohort(t *testing.T) {
 		}
 		f.close(t, origin)
 		f.close(t, inherited)
+		closeObservation()
+		observer.requireNoCatalog(t, "insert into provider_work_stream_original", "insert into contract_participant", "insert into provider_work_stream_contract", "insert into provider_work_outcome_original", "from pg_locks")
 		originals := providerWorkFixtureReceipts(t, f.ctx, origin, inherited)
 		var cohortHash [32]byte
 		cohortCount := 0
@@ -403,15 +418,13 @@ func providerWorkSessionFundingOriginals(t *testing.T, redis bool) {
 					t.Fatal(err)
 				}
 			} else {
-				var posts []func() any
-				server.Tx(f.ctx, func(tx server.PgTx) {
-					var err error
-					escrow, posts, err = createTransferEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 121, nil)
-					if err != nil {
-						t.Fatal(err)
-					}
-				})
-				server.RunPosts(f.ctx, posts...)
+				// The legacy entry owns fresh read-committed, no-retry
+				// admission and releases its transaction before running posts.
+				var err error
+				escrow, err = createTransferEscrow(f.requestContext(t, nil), f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			free := f.contract(t)
 			contractIds := []server.Id{escrow.ContractId, free}
@@ -700,9 +713,7 @@ func TestProviderWorkSessionLegacyWriterRetriesWithoutHoldingConnectionRow(t *te
 				t.Fatal(err)
 			}
 			defer rollbackCloseReportTestTransaction(ctx, tx)
-			if !providerWorkLockSessionMutationInTx(ctx, tx, f.sourceId) {
-				t.Fatal("new admission owner did not acquire its ordered fences")
-			}
+			providerWorkLockSessionMutationInTx(ctx, tx, f.sourceId)
 			server.Db(ctx, func(other server.PgConn) {
 				legacy, err := other.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 				server.Raise(err)

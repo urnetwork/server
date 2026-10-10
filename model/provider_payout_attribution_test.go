@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -226,7 +226,7 @@ func providerPayoutTestSession(ctx context.Context, networkId server.Id) *sessio
 	userId := server.NewId()
 	networkName := "provider-payout-" + networkId.String()
 	Testing_CreateNetwork(ctx, networkId, networkName, userId)
-	return session.Testing_CreateClientSession(ctx, jwt.NewByJwt(networkId, userId, networkName, false, false))
+	return session.Testing_CreateClientSession(ctx, session.NewByJwt(networkId, userId, networkName, false, false))
 }
 
 // All public payout readers must agree on each client/day and aggregate using

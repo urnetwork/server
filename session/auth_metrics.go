@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-
-	"github.com/urnetwork/server/jwt"
 )
 
 var sessionAuthAttemptsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -85,7 +83,7 @@ func (self *sessionActiveAuthCollector) Collect(metrics chan<- prometheus.Metric
 }
 
 // observe stores a digest of a successfully authenticated network principal.
-func (self *sessionActiveAuthCollector) observe(byJwt *jwt.ByJwt) {
+func (self *sessionActiveAuthCollector) observe(byJwt *ByJwt) {
 	if byJwt == nil {
 		return
 	}
@@ -113,7 +111,7 @@ func requestAuthMethod(req *http.Request) string {
 
 // recordSessionAuth records validation outcome and successful principal
 // activity without route, identity, credential, or error labels.
-func recordSessionAuth(method string, byJwt *jwt.ByJwt, err error) {
+func recordSessionAuth(method string, byJwt *ByJwt, err error) {
 	outcome := "rejected"
 	if err == nil && byJwt != nil {
 		outcome = "succeeded"

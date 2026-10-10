@@ -10,7 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // One-slot PostgreSQL contention exercises the real selector, native/legacy
@@ -99,7 +99,7 @@ func TestFindProviders2PrefilterBoundsSubscriberReadsUnderContention(t *testing.
 						<-start
 						var resultErr error
 						if panicErr := server.HandleError(func() {
-							clientSession := testingCreateProviderSearchSession(requestCtx, jwt.NewByJwt(callerNetwork, server.NewId(), "prefilter-contention-test", false, false))
+							clientSession := testingCreateProviderSearchSession(requestCtx, session.NewByJwt(callerNetwork, server.NewId(), "prefilter-contention-test", false, false))
 							result, err := FindProviders2(args, clientSession)
 							if err != nil || result == nil || len(result.Providers) != len(allowed) {
 								resultErr = errors.New("request lost the complete allowed population")

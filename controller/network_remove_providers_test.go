@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -78,7 +78,7 @@ func (self *networkRemoveStepsFake) steps() *networkRemoveSteps {
 func networkRemoveStepsTestSession() *session.ClientSession {
 	return &session.ClientSession{
 		Ctx:   context.Background(),
-		ByJwt: jwt.NewByJwt(server.NewId(), server.NewId(), "synthetic", false, false),
+		ByJwt: session.NewByJwt(server.NewId(), server.NewId(), "synthetic", false, false),
 	}
 }
 

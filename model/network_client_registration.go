@@ -16,7 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -100,11 +100,12 @@ type RegisterNetworkClientError struct {
 }
 
 type networkClientRegistrationOwner struct {
-	request       RegisterNetworkClientArgs
-	requestHash   string
-	authorityHash string
-	deviceId      server.Id
-	code          string
+	mintCredential *session.ByJwt
+	request        RegisterNetworkClientArgs
+	requestHash    string
+	authorityHash  string
+	deviceId       server.Id
+	code           string
 }
 
 // Canonical hex excludes an empty/zero identifier and alternate encodings.
@@ -210,9 +211,12 @@ func (self *networkClientRegistrationOwner) resumeInTx(tx server.PgTx, clientSes
 	if storedPrincipal != principal || !slices.Equal(storedRoles, roles) {
 		return refused("identity_unavailable", "The registered identity no longer matches its original role authority.")
 	}
-	credential := jwt.NewByJwtWithCreateTime(claims.NetworkId, claims.UserId, claims.NetworkName, claims.CreateTime, claims.GuestMode, isPro).Client(deviceId, clientId)
+	credential := self.mintCredential
+	credential.ClientId, credential.DeviceId, credential.Pro = &clientId, &deviceId, isPro
 	credential.Roles, credential.Principal = storedRoles, storedPrincipal
-	signed := credential.Sign()
+	server.Raise(session.AssociateSessionClientInTx(ctx, tx, credential, false))
+	signed, mintErr := session.RegisterAndSignInTx(ctx, tx, credential, "legacy", nil, false)
+	server.Raise(mintErr)
 	self.deviceId = deviceId
 	return &AuthNetworkClientResult{ByClientJwt: &signed, ClientId: &clientId}, true
 }

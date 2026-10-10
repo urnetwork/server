@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -177,7 +177,7 @@ func TestProberCompanionReservationSeparatesDerivedProbeTunnels(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		payerNetworkId, parentId, providerNetworkId, providerId := companionReservationFixture(ctx, true)
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: payerNetworkId,
 			UserId:    server.NewId(),
 			ClientId:  &parentId,

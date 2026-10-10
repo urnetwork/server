@@ -2435,7 +2435,7 @@
     {
       "type": "timeseries",
       "title": "authentication decisions / s",
-      "description": "JWTs rejected by bounded cause, and JWTs accepted only because a migration gate still permits a legacy condition. Legacy accepts should reach zero before the corresponding gate is removed.",
+      "description": "JWTs rejected by bounded cause, JWTs accepted only because a migration gate still permits a legacy condition (by credential kind: network sign-in token or client token), and network token refreshes by outcome. Legacy accepts should reach zero before the corresponding gate is removed; network tokens renew only at POST /auth/network-refresh, so their expired accepts decide when reject_expired can be flipped on.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2489,9 +2489,18 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (service, cause) (rate(urnetwork_auth_jwt_legacy_accepts_total{env=\"$env\"}[$__rate_interval]))",
+          "expr": "sum by (service, cause, kind) (rate(urnetwork_auth_jwt_legacy_accepts_total{env=\"$env\"}[$__rate_interval]))",
           "refId": "B",
-          "legendFormat": "legacy accepted {{service}} / {{cause}}"
+          "legendFormat": "legacy accepted {{service}} / {{cause}} / {{kind}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service, outcome) (rate(urnetwork_auth_network_refreshes_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "network refresh {{service}} / {{outcome}}"
         }
       ]
     },

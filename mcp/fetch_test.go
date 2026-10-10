@@ -19,7 +19,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -199,7 +199,7 @@ func TestReuseProxyRequiresCurrentNetworkOwner(t *testing.T) {
 		ownerSession := session.NewLocalClientSession(
 			ctx,
 			"",
-			jwt.NewByJwt(ownerNetworkId, ownerUserId, ownerNetworkName, false, false),
+			session.NewByJwt(ownerNetworkId, ownerUserId, ownerNetworkName, false, false),
 		)
 		defer ownerSession.Cancel()
 		ownerBinding := identityStateBinding(
@@ -234,7 +234,7 @@ func TestReuseProxyRequiresCurrentNetworkOwner(t *testing.T) {
 		attackerSession := session.NewLocalClientSession(
 			ctx,
 			"",
-			jwt.NewByJwt(attackerNetworkId, attackerUserId, attackerNetworkName, false, false),
+			session.NewByJwt(attackerNetworkId, attackerUserId, attackerNetworkName, false, false),
 		)
 		defer attackerSession.Cancel()
 		attackerBinding := identityStateBinding(

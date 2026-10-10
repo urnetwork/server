@@ -12,7 +12,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -36,7 +36,7 @@ func TestConnectControlReturnsResponseFrameOwnership(t *testing.T) {
 			"destination",
 			"destination",
 		)
-		byJwt := jwt.NewByJwt(
+		byJwt := session.NewByJwt(
 			networkId,
 			userId,
 			"control pool",

@@ -73,6 +73,7 @@ func registry() []specEndpoint {
 		{"POST", "/auth/login-with-password", rt(model.AuthLoginWithPasswordArgs{}), rt(model.AuthLoginWithPasswordResult{})},
 		{"POST", "/auth/verify", rt(model.AuthVerifyArgs{}), rt(model.AuthVerifyResult{})},
 		{"GET", "/auth/refresh", nil, rt(controller.RefreshTokenResult{})},
+		{"POST", "/auth/network-refresh", nil, rt(controller.NetworkRefreshTokenResult{})},
 		{"POST", "/auth/verify-send", rt(controller.AuthVerifySendArgs{}), rt(controller.AuthVerifySendResult{})},
 		{"POST", "/auth/password-reset", rt(controller.AuthPasswordResetArgs{}), rt(controller.AuthPasswordResetResult{})},
 		{"POST", "/auth/password-set", rt(model.AuthPasswordSetArgs{}), rt(controller.AuthPasswordSetResult{})},
@@ -107,6 +108,16 @@ func registry() []specEndpoint {
 		{method: "POST", path: "/network/ping-report", argType: rt(controller.ExtenderPingReportArgs{}), resultType: rt(controller.ExtenderPingReportResult{})},
 		// the prober module's own pool type is the response (connect/GEOMAP.md §11.4)
 		{method: "GET", path: "/network/provider-egress-destinations", argType: nil, resultType: rt(egresshealth.Pool{})},
+		// per-client data caps for embedded clients (EMBED1.md)
+		{method: "POST", path: "/network/client-data-cap", argType: rt(model.SetClientDataCapArgs{}), resultType: rt(model.ClientDataCapResult{})},
+		{method: "GET", path: "/network/client-data-cap", argType: nil, resultType: rt(model.ClientDataCapResult{})},
+		{method: "GET", path: "/network/client-data-caps", argType: nil, resultType: rt(model.ListClientDataCapsResult{})},
+		// per-client ACL groups (EMBED1.md)
+		{method: "POST", path: "/network/client-acl-group", argType: rt(model.SetNetworkClientAclGroupArgs{}), resultType: rt(model.NetworkClientAclGroupResult{})},
+		{method: "GET", path: "/network/client-acl-group", argType: nil, resultType: rt(model.NetworkClientAclGroupResult{})},
+		{method: "GET", path: "/network/embed", argType: nil, resultType: rt(model.NetworkEmbedResult{})},
+		// the public Services contact form (EMBED1.md)
+		{method: "POST", path: "/services/contact-sales", argType: rt(model.ServicesContactSalesArgs{}), resultType: rt(model.ServicesContactSalesResult{})},
 
 		{"POST", "/preferences/set-preferences", rt(model.AccountPreferencesSetArgs{}), rt(model.AccountPreferencesSetResult{})},
 		{"GET", "/preferences", nil, rt(model.AccountPreferencesGetResult{})},

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // The real SQL-to-cache publisher emits separate native and online-union
@@ -165,7 +165,7 @@ func TestNativeFindProvidersUsesOtherNativesBeforeOnline(t *testing.T) {
 		for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			nativeTestPublishLocation(t, location, mode, scores)
 		}
-		clientSession := testingCreateProviderSearchSession(t.Context(), jwt.NewByJwt(server.NewId(), server.NewId(), "native-other-test", false, false))
+		clientSession := testingCreateProviderSearchSession(t.Context(), session.NewByJwt(server.NewId(), server.NewId(), "native-other-test", false, false))
 		result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &location}}}, clientSession)
 		if err != nil || result == nil || len(result.Providers) != 20 {
 			t.Fatalf("other-native refill did not fill after primary exhaustion: result=%v err=%v", result, err)
@@ -200,7 +200,7 @@ func TestNativeFindProvidersUnavailableOtherSourceKeepsPrimary(t *testing.T) {
 			key := clientScoreNativeKey(clientScoreLocationCountsKey(false, RankModeSpeed, location, server.Id{}))
 			server.Raise(r.Set(t.Context(), key, "synthetic-incomplete-pointer", time.Hour).Err())
 		})
-		clientSession := testingCreateProviderSearchSession(t.Context(), jwt.NewByJwt(server.NewId(), server.NewId(), "native-unavailable-test", false, false))
+		clientSession := testingCreateProviderSearchSession(t.Context(), session.NewByJwt(server.NewId(), server.NewId(), "native-unavailable-test", false, false))
 		result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &location}}}, clientSession)
 		if err != nil || result == nil || len(result.Providers) != 20 {
 			t.Fatalf("unknown other-native source blocked validated online availability: result=%v err=%v", result, err)

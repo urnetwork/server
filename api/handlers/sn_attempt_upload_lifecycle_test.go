@@ -127,7 +127,7 @@ func TestSnAttemptUploadRealHTTP1CancellationInterruptsBeforeClose(t *testing.T)
 			tb.Fatal(err)
 		}
 		defer connection.Close()
-		request := snAttemptUploadTestRequest(tb, client.Sign(), "metadata", []byte("data"))
+		request := snAttemptUploadTestRequest(tb, client.Testing_Sign(), "metadata", []byte("data"))
 		// Only one of the four declared bytes is sent; the peer stays open.
 		if _, err := fmt.Fprintf(connection, "POST %s HTTP/1.1\r\nHost: %s\r\nAuthorization: %s\r\nContent-Type: application/json\r\nContent-Length: 4\r\n\r\nd", request.URL.RequestURI(), endpoint.Listener.Addr().String(), request.Header.Get("Authorization")); err != nil {
 			tb.Fatal(err)
@@ -213,7 +213,7 @@ func TestSnAttemptUploadRealHTTP2CancellationKeepsPeerConnection(t *testing.T) {
 		reader, writer := io.Pipe()
 		defer reader.Close()
 		defer writer.Close()
-		request := snAttemptUploadTestRequest(tb, identity.Sign(), "metadata", []byte("data"))
+		request := snAttemptUploadTestRequest(tb, identity.Testing_Sign(), "metadata", []byte("data"))
 		request.URL.Scheme, request.URL.Host = "https", endpoint.Listener.Addr().String()
 		request.RequestURI = ""
 		request.Body = reader
@@ -308,7 +308,7 @@ func TestSnAttemptUploadNativeDeadlineCapabilityPrecedesQuota(t *testing.T) {
 			}
 			data := []byte("data")
 			body := bytes.NewReader(data)
-			request := snAttemptUploadTestRequest(tb, client.Sign(), "metadata", data)
+			request := snAttemptUploadTestRequest(tb, client.Testing_Sign(), "metadata", data)
 			request.Body = &snAttemptTestReadCloser{Reader: snAttemptTestReadFunc(func(value []byte) (int, error) { reads++; return body.Read(value) })}
 			store := server.NewLocalBlobStore(tb.TempDir(), "attempt-upload")
 			serveSnUploadAttemptArtifact(owned, request,
@@ -336,7 +336,7 @@ func TestSnAttemptUploadNativeDeadlineFailureStillJoinsClose(t *testing.T) {
 		var deadlines, closes atomic.Int32
 		response := snAttemptUploadTestRecorder()
 		response.deadline = func(time.Time) error { deadlines.Add(1); return cause }
-		request := snAttemptUploadTestRequest(tb, client.Sign(), "metadata", []byte("data")).WithContext(ctx)
+		request := snAttemptUploadTestRequest(tb, client.Testing_Sign(), "metadata", []byte("data")).WithContext(ctx)
 		data := bytes.NewReader([]byte("data"))
 		request.Body = &snAttemptTestReadCloser{
 			Reader: snAttemptTestReadFunc(func(value []byte) (int, error) { cancel(); return data.Read(value) }),

@@ -83,7 +83,8 @@ SELECT (SELECT count(*) FROM copied),(SELECT count(*) FROM removed),
   JOIN unnest($1::uuid[],$5::bigint[]) AS observed(task_id,claimed_generation)
    ON removed.task_id=observed.task_id
   WHERE removed.run_once_key IS NOT NULL
-   AND removed.run_once_generation < observed.claimed_generation)`
+   AND removed.run_once_generation < observed.claimed_generation),
+ (SELECT count(*) FROM successors WHERE task_id=ANY($6::uuid[]))`
 
 // The existing advisory guard remains held until the collector joins all work.
 // A known pre-commit rollback may fall back to independent owners, so one refused
@@ -138,12 +139,15 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 	bodyComplete := false
 	server.HandleError(func() {
 		finish := func(tx server.PgTx) {
-			var copied, removed, successors, expectedSuccessors, invalidGenerations int
+			var copied, removed, successors, expectedSuccessors, invalidGenerations, insertedSuccessors int
 			server.Raise(tx.QueryRow(ctx, taskCompletionBatchSql, ids, starts, ends, values,
-				generations, successorIds, time.Time{}, claims).Scan(&copied, &removed, &successors, &expectedSuccessors, &invalidGenerations))
+				generations, successorIds, time.Time{}, claims).Scan(&copied, &removed, &successors, &expectedSuccessors, &invalidGenerations, &insertedSuccessors))
 			if copied != len(results) || removed != len(results) || successors != expectedSuccessors || invalidGenerations != 0 {
 				server.Raise(errTaskCompletionBatchOwnership)
 			}
+			server.AddTxCommitCount(tx, &taskFinishedCounter, uint64(copied))
+			server.AddTxCommitCount(tx, &taskSubmittedCounter, uint64(insertedSuccessors))
+			server.AddTxCommitCount(tx, &taskBalkedCounter, uint64(successors-insertedSuccessors))
 			bodyComplete = true
 		}
 		if owned {

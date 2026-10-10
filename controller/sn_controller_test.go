@@ -16,7 +16,7 @@ import (
 	"github.com/urfoundation/sn/ss58"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -147,7 +147,7 @@ func TestSnSetWalletSignatureMismatchCode(t *testing.T) {
 	message := model.FormatWalletAuthChallengeMessage("c24td2FsbGV0LW1pc21hdGNo", server.NowUtc().Unix())
 	expiredMessage := model.FormatWalletAuthChallengeMessage("c24td2FsbGV0LWV4cGlyZWQ=", server.NowUtc().Add(-time.Hour).Unix())
 
-	clientSession := session.Testing_CreateClientSession(context.Background(), &jwt.ByJwt{
+	clientSession := session.Testing_CreateClientSession(context.Background(), &session.ByJwt{
 		NetworkId: server.NewId(),
 		UserId:    server.NewId(),
 	})
@@ -229,7 +229,7 @@ func TestSnSetWalletSignatureMismatchOnIssuedChallenge(t *testing.T) {
 		message := challenge.MessageTemplate
 
 		networkId := server.NewId()
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    server.NewId(),
 		})

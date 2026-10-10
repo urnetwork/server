@@ -11,7 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -39,8 +39,8 @@ type providerEgressCredentials struct {
 	userId          server.Id
 	clientId        server.Id
 	parentJwt       string
-	parse           func(context.Context, string, string) (*jwt.ByJwt, error)
-	validate        func(context.Context, *jwt.ByJwt, bool) error
+	parse           func(context.Context, string, string) (*session.ByJwt, error)
+	validate        func(context.Context, *session.ByJwt, bool) error
 	mint            func(*model.AuthNetworkClientArgs, *session.ClientSession) (*model.AuthNetworkClientResult, error)
 	retire          func(*model.RemoveNetworkClientArgs, *session.ClientSession) (*model.RemoveNetworkClientResult, error)
 	captureResident func(context.Context, server.Id, server.Id) (*model.NetworkClientResidentRetirement, error)
@@ -54,7 +54,7 @@ func newProviderEgressCredentials(identity *model.ProberIdentity) (*providerEgre
 	}
 	return &providerEgressCredentials{
 		networkId: *identity.NetworkId, userId: *identity.UserId, clientId: *identity.ClientId, parentJwt: identity.ByClientJwt,
-		parse: jwt.ParseByJwtForAudience, validate: jwt.ValidateByJwtState,
+		parse: session.ParseByJwtForAudience, validate: session.ValidateByJwtState,
 		mint: model.AuthNetworkClient, retire: model.RetireProberNetworkClient,
 		captureResident: model.CaptureResidentForClientRetirement, removeResident: model.RemoveCapturedResidentForClient,
 	}, nil
@@ -64,7 +64,7 @@ func (self *providerEgressCredentials) parentSession(ctx context.Context) (*sess
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	claims, err := self.parse(ctx, self.parentJwt, jwt.ByJwtAudienceApi)
+	claims, err := self.parse(ctx, self.parentJwt, session.ByJwtAudienceApi)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +97,7 @@ func recordProviderEgressCredentialResult(operation string, err error) {
 }
 
 func (self *providerEgressCredentials) AuthNetworkClient(ctx context.Context, args *connect.AuthNetworkClientArgs) (result *connect.AuthNetworkClientResult, returnErr error) {
-	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryProberMint)
+	ctx = session.WithStateQuerySource(ctx, session.StateQueryProberMint)
 	defer func() { recordProviderEgressCredentialResult("mint", returnErr) }()
 	return server.HandleError2(func() (*connect.AuthNetworkClientResult, error) {
 		if args == nil || args.ClientId != nil || args.SourceClientId == nil || server.Id(*args.SourceClientId) != self.clientId {
@@ -135,7 +135,7 @@ func (self *providerEgressCredentials) AuthNetworkClient(ctx context.Context, ar
 }
 
 func (self *providerEgressCredentials) RemoveNetworkClient(ctx context.Context, args *connect.RemoveNetworkClientArgs) (result *connect.RemoveNetworkClientResult, returnErr error) {
-	ctx = jwt.WithStateQuerySource(ctx, jwt.StateQueryProberRetire)
+	ctx = session.WithStateQuerySource(ctx, session.StateQueryProberRetire)
 	defer func() { recordProviderEgressCredentialResult("retire", returnErr) }()
 	return server.HandleError2(func() (*connect.RemoveNetworkClientResult, error) {
 		if args == nil || args.ClientId == (connect.Id{}) || server.Id(args.ClientId) == self.clientId {

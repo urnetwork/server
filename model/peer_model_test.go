@@ -15,7 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -495,7 +495,7 @@ func TestNetworkPeerProvideModesUpdate(t *testing.T) {
 		userId := server.NewId()
 
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})
@@ -1308,7 +1308,7 @@ func TestNetworkPeerProfile(t *testing.T) {
 		userId := server.NewId()
 
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})
@@ -1374,7 +1374,7 @@ func TestNetworkPeerProfile(t *testing.T) {
 		guestNetworkId := server.NewId()
 		guestUserId := server.NewId()
 		Testing_CreateLegacyGuestNetwork(ctx, guestNetworkId, guestUserId)
-		guestSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		guestSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: guestNetworkId,
 			UserId:    guestUserId,
 		})
@@ -1390,7 +1390,7 @@ func TestNetworkPeerProfile(t *testing.T) {
 
 		// a client session cannot assign roles or principal
 		deviceId := server.NewId()
-		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 			DeviceId:  &deviceId,
@@ -1408,7 +1408,7 @@ func TestNetworkPeerProfile(t *testing.T) {
 
 		// a session with roles and principal (e.g. from an auth code) passes
 		// them to clients it creates
-		serviceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		serviceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 			Roles:     []string{"service-role"},
@@ -1439,7 +1439,7 @@ func TestNetworkProxyPeer(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})
@@ -1934,7 +1934,7 @@ func TestNetworkClientReauthIdentity(t *testing.T) {
 		userId := server.NewId()
 
 		Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})
@@ -1961,14 +1961,14 @@ func TestNetworkClientReauthIdentity(t *testing.T) {
 		)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, reauthResult.Error, nil)
-		reauthByJwt, err := jwt.ParseByJwt(ctx, *reauthResult.ByClientJwt)
+		reauthByJwt, err := session.ParseByJwt(ctx, *reauthResult.ByClientJwt)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, reauthByJwt.Roles, []string{"role1", "role2"})
 		assert.Equal(t, reauthByJwt.Principal, "svc-a")
 
 		// a session with its own identity claims does not override the
 		// client's stored identity on re-auth
-		serviceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		serviceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 			Roles:     []string{"other-role"},
@@ -1983,7 +1983,7 @@ func TestNetworkClientReauthIdentity(t *testing.T) {
 		)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, reauthResult.Error, nil)
-		reauthByJwt, err = jwt.ParseByJwt(ctx, *reauthResult.ByClientJwt)
+		reauthByJwt, err = session.ParseByJwt(ctx, *reauthResult.ByClientJwt)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, reauthByJwt.Roles, []string{"role1", "role2"})
 		assert.Equal(t, reauthByJwt.Principal, "svc-a")
@@ -2018,7 +2018,7 @@ func TestNetworkPeerTopLevelClientLimit(t *testing.T) {
 		userId := server.NewId()
 
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})
@@ -2099,7 +2099,7 @@ func TestNetworkTopLevelClientLimitDisabled(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "test", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		})

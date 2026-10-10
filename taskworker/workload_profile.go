@@ -125,6 +125,9 @@ func subnetOperatorTasks() []subnetOperatorTask {
 			work.ScheduleBackfillClock(clientSession, tx, server.NowUtc())
 		}},
 		{target: task.NewTaskTarget(work.RemoveExpiredAuthCodes), schedule: work.ScheduleRemoveExpiredAuthCodes},
+		{target: task.NewTaskTarget(work.MaintainNetworkSessions), schedule: work.ScheduleMaintainNetworkSessions},
+		{target: work.NewStartupContractClosureTaskTarget(), schedule: work.ScheduleOpenContractClosuresOnStartup},
+		{target: work.NewScheduledContractClosureTaskTarget()},
 		{target: task.NewTaskTarget(work.CloseExpiredContracts), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
 			for i := range work.DefaultCloseExpiredContractsBlockSize {
 				work.ScheduleCloseExpiredContracts(clientSession, tx, i, false)
@@ -149,6 +152,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: work.NewTransferDebitTaskTarget(), schedule: work.ScheduleFlushTransferDebits},
 		{target: work.NewLegacySettlementDispatcherTaskTarget(), schedule: work.ScheduleFlushLegacySettlements},
 		{target: model.NewLegacyPayerSettlementTaskTarget()},
+		{target: model.NewLegacySourceSettlementTaskTarget()},
 		{target: task.NewTaskTarget(work.DbMaintenance), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
 			work.ScheduleDbMaintenance(clientSession, tx, 0)
 		}},
@@ -165,6 +169,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.RollupTransferAuditEvents), schedule: work.ScheduleRollupTransferAuditEvents},
 		{target: task.NewTaskTarget(work.RemoveOldClientReliabilityStats), schedule: work.ScheduleRemoveOldClientReliabilityStats},
 		{target: task.NewTaskTarget(work.RollupClientReliabilityStats), schedule: work.ScheduleRollupClientReliabilityStats},
+		{target: task.NewTaskTarget(work.RollupClientDataUsage), schedule: work.ScheduleRollupClientDataUsage},
 		{target: task.NewTaskTarget(work.UpdateClientReliabilityScores), schedule: work.ScheduleUpdateClientReliabilityScores},
 		{target: task.NewTaskTarget(work.RemoveOldProvideKeyChanges), schedule: work.ScheduleRemoveOldProvideKeyChanges},
 		{target: task.NewTaskTarget(work.UpdateNetworkReliabilityWindow), schedule: work.ScheduleUpdateNetworkReliabilityWindow},

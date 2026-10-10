@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
@@ -138,16 +139,67 @@ func TestRedisCurrentJoinRecoveryUnderstandsReducedAppliedDebit(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		ctx := t.Context()
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		contract := redisCurrentJoinRetainedContract(t, ctx, f, 100)
-		server.RunPosts(ctx, asyncDebitTestSettle(ctx, contract.ContractId, 11)...)
+		type expectedState struct {
+			credit, token, allocation, payout, debt ByteCount
+			pending, applied                        int
+			marker                                  bool
+		}
+		providerFixture := &forceCloseDisputeFixture{contractId: contract.ContractId, providerNetworkId: f.destinationNetworkId}
+		providerWant := forceCloseProviderProjection{}
+		requireState := func(want expectedState) {
+			t.Helper()
+			credit, pending, applied := asyncDebitTestState(t, ctx, f.balanceId)
+			if credit != want.credit || pending != want.pending || applied != want.applied || Testing_NetEscrowByteCount(ctx, f.balanceId) != want.token {
+				t.Fatalf("recovery conservation credit=%d pending=%d applied=%d; want=%+v", credit, pending, applied, want)
+			}
+			server.Db(ctx, func(conn server.PgConn) {
+				var allocation, payout, debt ByteCount
+				var marked bool
+				server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count,COALESCE(payout_byte_count,0),redis_reserved FROM transfer_escrow WHERE contract_id=$1 AND balance_id=$2`, contract.ContractId, f.balanceId).Scan(&allocation, &payout, &marked))
+				server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(sum(debit_byte_count),0) FROM transfer_debit_journal WHERE contract_id=$1 AND balance_id=$2`, contract.ContractId, f.balanceId).Scan(&debt))
+				if !marked || allocation != want.allocation || payout != want.payout || debt != want.debt {
+					t.Fatal("recovery changed immutable allocation, payout metadata or durable consumption")
+				}
+			})
+			server.Redis(ctx, func(client server.RedisClient) {
+				values, err := client.HGetAll(ctx, redisContractReservationKeys(f.balanceId)[1]).Result()
+				server.Raise(err)
+				if want.token == 0 {
+					if len(values) != 0 {
+						t.Fatal("completed recovery retained or recreated a token")
+					}
+				} else if len(values) != 1 || values[contract.ContractId.String()] != strconv.FormatInt(int64(want.token), 10) {
+					t.Fatal("recovery substituted a reservation token")
+				}
+			})
+			redisRecoveryRequireMarker(t, ctx, f.balanceId, contract.ContractId, want.marker)
+			if provider := readForceCloseProviderProjection(t, ctx, providerFixture); provider != providerWant {
+				t.Fatalf("debit or recovery changed provider earnings or their durable projection owner: got=%+v want=%+v", provider, providerWant)
+			}
+		}
+		want := expectedState{credit: 1000, token: 100, allocation: 100, marker: true}
+		requireState(want)
+		posts := asyncDebitTestSettle(ctx, contract.ContractId, 11)
+		server.RunPosts(ctx, posts...)
+		want.pending, want.debt = 1, 11
+		providerWant = forceCloseProviderProjection{sweptBytes: 11, unappliedBytes: 11, owners: 1}
+		requireState(want)
+		// Current settlement posts retain the original token until the worker.
+		// Explicit repair is the supported producer of a reduced pending token.
+		ReconcileRedisContractReservation(ctx, contract.ContractId)
+		want.token = 11
+		requireState(want)
 		if err := recoverRedisReservationRequest(ctx, f.balanceId, contract.ContractId); err == nil || errors.Is(err, errRedisReservationRecoveryIdentity) {
 			t.Fatal("pending debit became absent or contradictory SQL custody", err)
 		}
 		if Testing_NetEscrowByteCount(ctx, f.balanceId) != 11 {
 			t.Fatal("recovery changed the exact already-settled token")
 		}
+		requireState(want)
 		hook := &asyncDebitReleaseHook{key: redisContractReservationKeys(f.balanceId)[0]}
 		hook.enabled.Store(true)
 		defer hook.enabled.Store(false)
@@ -155,6 +207,9 @@ func TestRedisCurrentJoinRecoveryUnderstandsReducedAppliedDebit(t *testing.T) {
 		if _, _, _, err := flushTransferDebitBalance(ctx, f.balanceId); err == nil || hook.hits.Load() == 0 {
 			t.Fatal("fixture did not retain the real applied-debit release failure", err)
 		}
+		want.credit, want.payout = 989, 11
+		want.pending, want.applied = 0, 1
+		requireState(want)
 		hook.enabled.Store(false)
 		if err := recoverRedisReservationRequest(ctx, f.balanceId, contract.ContractId); err != nil {
 			t.Fatal("exact reduced applied debit was mistaken for changed authority", err)
@@ -162,11 +217,25 @@ func TestRedisCurrentJoinRecoveryUnderstandsReducedAppliedDebit(t *testing.T) {
 		if Testing_NetEscrowByteCount(ctx, f.balanceId) != 0 {
 			t.Fatal("committed debit recovery did not release its original token")
 		}
+		want.token, want.marker = 0, false
+		requireState(want)
 		n, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
 		credit, pending, applied := asyncDebitTestState(t, ctx, f.balanceId)
 		if err != nil || n != 0 || released != 1 || busy || credit != 989 || pending+applied != 0 {
 			t.Fatal("writeback replay re-debited recovered credit", credit, pending, applied, err)
 		}
+		want.applied, want.debt = 0, 0
+		requireState(want)
+		server.RunPosts(ctx, posts...)
+		ReconcileRedisContractReservation(ctx, contract.ContractId)
+		if err := recoverRedisReservationRequest(ctx, f.balanceId, contract.ContractId); err != nil {
+			t.Fatal("completed missing marker lost idempotent recovery", err)
+		}
+		n, released, busy, err = flushTransferDebitBalance(ctx, f.balanceId)
+		if err != nil || n != 0 || released != 0 || busy {
+			t.Fatal("completed debit replay recreated work", err)
+		}
+		requireState(want)
 	})
 }
 

@@ -16,7 +16,7 @@ import (
 	"github.com/urnetwork/sdk"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -555,7 +555,7 @@ func authClientTestNetwork(ctx context.Context, networkName string) (networkId s
 	networkId = server.NewId()
 	userId := server.NewId()
 	Testing_CreateNetwork(ctx, networkId, networkName, userId)
-	userSession = session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	userSession = session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: networkId,
 		UserId:    userId,
 	})

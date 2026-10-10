@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // A failed transaction's preparation is not authority for its retry. Land an
@@ -58,7 +58,7 @@ func TestAuthorityMintRetryRefreshesEntitlementBeforeSnapshot(t *testing.T) {
 		if err != nil || args == nil || args.ClientAuth == nil {
 			t.Fatal("retried mint did not return a child", err)
 		}
-		claims, err := jwt.ParseByJwtForAudience(ctx, args.ClientAuth.ByJwt, jwt.ByJwtAudienceApi)
+		claims, err := session.ParseByJwtForAudience(ctx, args.ClientAuth.ByJwt, session.ByJwtAudienceApi)
 		if err != nil || !claims.Pro || retries.Load() != 1 {
 			t.Fatal("retry reused the first attempt's entitlement")
 		}

@@ -8,7 +8,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -21,7 +21,7 @@ import (
 
 func payDataTestSession(t testing.TB) *session.ClientSession {
 	clientId := server.NewId()
-	return session.Testing_CreateClientSession(context.Background(), &jwt.ByJwt{
+	return session.Testing_CreateClientSession(context.Background(), &session.ByJwt{
 		NetworkId: server.NewId(),
 		ClientId:  &clientId,
 		UserId:    server.NewId(),

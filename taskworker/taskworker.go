@@ -50,6 +50,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleBackfillClock(clientSession, tx, server.NowUtc())
 		work.ScheduleWebSearchAnalytics(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
+		work.ScheduleMaintainNetworkSessions(clientSession, tx)
 		controller.ScheduleAppleOfferCodeTopUp(clientSession, tx, server.NowUtc().Add(1*time.Hour))
 		controller.ScheduleOnboardingResultsRollup(clientSession, tx, onboarding.NextRollupAt(server.NowUtc()))
 		controller.ScheduleOnboardingEmailTrackerSync(clientSession, tx, server.NowUtc())
@@ -59,6 +60,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
 		work.ScheduleCancelHungAccountPayments(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
+		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
 		for i := range work.DefaultCloseExpiredContractsBlockSize {
 			work.ScheduleCloseExpiredContracts(clientSession, tx, i, false)
 		}
@@ -105,6 +107,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
 		work.ScheduleRollupClientReliabilityStats(clientSession, tx)
+		work.ScheduleRollupClientDataUsage(clientSession, tx)
 		work.ScheduleUpdateClientReliabilityScores(clientSession, tx)
 		work.ScheduleRemoveOldProvideKeyChanges(clientSession, tx)
 		work.ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
@@ -179,6 +182,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExportProvidersMapPost,
 		),
 		task.NewTaskTarget(work.BackfillClock),
+		task.NewTaskTargetWithPost(work.MaintainNetworkSessions, work.MaintainNetworkSessionsPost),
 		task.NewTaskTargetWithPost(
 			work.WebSearchAnalytics,
 			work.WebSearchAnalyticsPost,
@@ -222,6 +226,8 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.PopulateAccountWalletsPost,
 			"bringyour.com/bringyour/controller.PopulateAccountWallets",
 		),
+		work.NewStartupContractClosureTaskTarget(),
+		work.NewScheduledContractClosureTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.CloseExpiredContracts,
 			work.CloseExpiredContractsPost,
@@ -302,6 +308,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		work.NewTransferDebitTaskTarget(),
 		work.NewLegacySettlementDispatcherTaskTarget(),
 		model.NewLegacyPayerSettlementTaskTarget(),
+		model.NewLegacySourceSettlementTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.ReconcileNetEscrow,
 			work.ReconcileNetEscrowPost,
@@ -400,6 +407,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RollupClientReliabilityStats,
 			work.RollupClientReliabilityStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RollupClientDataUsage,
+			work.RollupClientDataUsagePost,
 		),
 		task.NewTaskTargetWithPost(
 			work.UpdateClientReliabilityScores,

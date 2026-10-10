@@ -16,7 +16,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -61,7 +61,7 @@ func playRevokeTestSupporterSkus() map[string]*Sku {
 
 func playRevokeTestSession(ctx context.Context, networkId server.Id, userId server.Id) *session.ClientSession {
 	clientId := server.NewId()
-	return session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+	return session.Testing_CreateClientSession(ctx, &session.ByJwt{
 		NetworkId: networkId,
 		ClientId:  &clientId,
 		UserId:    userId,

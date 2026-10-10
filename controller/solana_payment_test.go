@@ -8,7 +8,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -138,7 +138,7 @@ func TestSolanaIntentRefusedPlansCreateNothing(t *testing.T) {
 		clientId := server.NewId()
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "solanarefused", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -213,7 +213,7 @@ func TestSolanaIntentQuoteIsTheServersAndDuplicatesAreLoud(t *testing.T) {
 		clientId := server.NewId()
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "solanaquote", userId)
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -313,7 +313,7 @@ func TestSolanaWebhookGrantsExactlyThePlanQuoted(t *testing.T) {
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "solanamonthly", userId)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -372,7 +372,7 @@ func TestSolanaWebhookOverpaymentBuysThePlanQuotedNotAYear(t *testing.T) {
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "solanaoverpay", userId)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -417,7 +417,7 @@ func TestSolanaWebhookUnderpaymentTakesNothingAndKeepsTheQuote(t *testing.T) {
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "solanaunderpay", userId)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -481,7 +481,7 @@ func TestSolanaWebhookBatchSurvivesLeadingNoise(t *testing.T) {
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "solanabatch", userId)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -545,7 +545,7 @@ func TestSolanaWebhookLatePaymentStillCredits(t *testing.T) {
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "solanalate", userId)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -601,7 +601,7 @@ func TestSolanaWebhookRecordsUnmatchedAndUnderpaid(t *testing.T) {
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "solanaunfulfilled", userId)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -681,7 +681,7 @@ func TestSolanaWebhookCreditsMemolessExactAmount(t *testing.T) {
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "solanamemoless", userId)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,

@@ -12,11 +12,11 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/localclient"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 	"github.com/urnetwork/server/qualityprobe/prober"
+	"github.com/urnetwork/server/session"
 )
 
 // The real prober must never publish the unavailable instrument's result.
@@ -60,7 +60,7 @@ func TestUrlProbeRejectedLocalWriterIsNotMeasured(t *testing.T) {
 		model.Testing_CreateDevice(ctx, providerNetwork, server.NewId(), providerClient, "provider", "fixture")
 		model.SetProvide(ctx, providerClient, map[model.ProvideMode][]byte{model.ProvideModePublic: bytes.Repeat([]byte{42}, 32)})
 		server.Raise(model.AddBasicTransferBalance(ctx, sourceNetwork, 1024*1024*1024, server.NowUtc(), server.NowUtc().Add(time.Hour)))
-		token := jwt.NewByJwt(sourceNetwork, sourceUser, "local-writer-source", false, false).Client(sourceDevice, sourceClient).Sign()
+		token := session.NewByJwt(sourceNetwork, sourceUser, "local-writer-source", false, false).Client(sourceDevice, sourceClient).Testing_Sign()
 		authority, err := localclient.New(ctx, token, trap.URL)
 		if err != nil {
 			tb.Fatal(err)

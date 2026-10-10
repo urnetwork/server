@@ -336,6 +336,18 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 		if len(fixture.finance.ids) != parallelPublicCloseCount+1 {
 			t.Fatal("parallel-close requires2048 simultaneous peers plus one actual native anchor")
 		}
+		// Open directly before either native-barrier or protocol rebinding.
+		// This sampler owns no application pool slot and does not mistake a
+		// granted idle native owner or a nonwaiting try refusal for SQL waiting.
+		databaseWait := newLegacyCloseDBWaitObserver(t, ctx)
+		defer func() {
+			// On failure the existing caller/worker cleanup below runs first.
+			// Preserve a final joined report even if a financial assertion exits.
+			databaseWait.close()
+			diagnostics.log("direct_database_lock_wait_final", map[string]any{
+				"test_failed": t.Failed(), "database_lock_wait_observation": databaseWait.snapshot(),
+			})
+		}()
 		retries := &parallelCloseRetryObservation{}
 		ctx = retries.context(ctx)
 		ownership := newParallelCloseCommonOwnership(fixture)
@@ -365,6 +377,7 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 		beforeCounters := parallelCloseCounterSnapshot(t)
 		beforeClosed := contractClosedCounter.Snapshot()
 		protocol.enabled(true)
+		databaseWait.start(t)
 		// Keep the native owner prelude, every configured coalescing delay and
 		// the final worker handback in the complete fixture interval. Public
 		// call latency is recorded independently below, starting at invocation.
@@ -416,9 +429,10 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 				"holder_release_requested": barrier.released.Load(), "wire": protocol.snapshot(),
 				"ownership": ownership.snapshot(), "actual_tx_reruns": retries.callbacks.Load(),
 				"counters": diagnostics.counters(beforeCounters), "financial_custody": contractClosedCounter.Snapshot(),
-				"test_parent_context_done":  ctx.Err() != nil,
-				"native_page_budget_ns":     (15 * time.Second).Nanoseconds(),
-				"native_page_context_cause": "not exposed by the unchanged target API; terminal observation does not identify its initiator"})
+				"database_lock_wait_observation": databaseWait.snapshot(),
+				"test_parent_context_done":       ctx.Err() != nil,
+				"native_page_budget_ns":          (15 * time.Second).Nanoseconds(),
+				"native_page_context_cause":      "not exposed by the unchanged target API; terminal observation does not identify its initiator"})
 		}
 		defer func() {
 			if !controlComplete {
@@ -695,6 +709,11 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 		recordEvent("all_outputs_rechecked_after_drain_handback_and_run_join")
 		fullFixtureNs := events["all_outputs_rechecked_after_drain_handback_and_run_join"]
 		publicBurstFullNs := fullFixtureNs - events["public_burst_start"]
+		// Keep the original full-path endpoints above unchanged. Sampling ran
+		// throughout actual work; this final observation/close is separately
+		// reported overhead after the acknowledged output/Run-join boundary.
+		databaseWait.close()
+		databaseWaitResult := databaseWait.snapshot()
 		protocol.enabled(false)
 		wire := protocol.snapshot()
 		delta := parallelCloseCounterDelta(t, beforeCounters, parallelCloseCounterSnapshot(t))
@@ -765,8 +784,11 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 			"event_offsets_from_pipeline_start_ns": events, "public_call_latency_ns": callLatency,
 			"finished_payer_turns":                            payerTurns,
 			"full_fixture_including_native_anchor_prelude_ns": fullFixtureNs, "public_burst_through_all_outputs_and_join_ns": publicBurstFullNs,
+			"database_lock_wait_observation":                                         databaseWaitResult,
+			"database_lock_wait_scope":                                               "armed before the unchanged pipeline-start boundary; actual native prelude, public burst, collection, all registered output work and Drain/Run join are sampled; the final sample joins just after the unchanged measured endpoint; later independent financial/replay verification is outside this sampler window",
+			"database_lock_wait_overhead":                                            "one additional direct read-only session; query wall/count and actual coverage gaps reported separately; start/final query edges bracket the measured window and concurrent sampling cost remains inside it; use identical observation in matched baseline/candidate arms and never subtract overlapping query wall from throughput wall",
 			"observed_public_closes_per_second_including_all_outputs_and_held_owner": float64(parallelPublicCloseCount) * float64(time.Second) / float64(publicBurstFullNs),
-			"invocation_span_ns": lastInvocation - firstInvocation, "peak_public_call_intervals": peak, "acknowledgements_observed_while_held": heldAcknowledgements,
+			"invocation_span_ns":                                                     lastInvocation - firstInvocation, "peak_public_call_intervals": peak, "acknowledgements_observed_while_held": heldAcknowledgements,
 			"held_state": heldState, "held_native_state": heldNative, "final_state": final, "actual_work_tx_reruns": workReruns, "actual_including_replay_tx_reruns": retries.callbacks.Load(), "counter_deltas": delta,
 			"wire": wire, "holder_commits": barrier.commits.Load(), "holder_rollbacks": barrier.rollbacks.Load(), "holder_lost": barrier.lost.Load(),
 			"native_owner_resource": nativeOwnerResource, "common_ownership": ownership.snapshot(),
@@ -803,6 +825,12 @@ func TestingParallelPublicCloseSharedPayers(t *testing.T, counts []int, shard, d
 					t.Fatal(fmt.Sprintf("parallel-close wire refusal %s/%s=%d", route, key, value))
 				}
 			}
+		}
+		// The held-owner control deliberately observes nonwaiting admission
+		// refusals. Those do not authorize actual PostgreSQL blocking waits.
+		// Preserve all original financial and zero-retry assertions above.
+		if err := databaseWaitResult.zeroWaitError(); err != nil {
+			t.Fatal("public parallel-close failed direct PostgreSQL lock-wait observation", err)
 		}
 		controlComplete = true
 	})

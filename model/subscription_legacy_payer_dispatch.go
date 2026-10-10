@@ -9,23 +9,32 @@ import (
 	"slices"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
 var errLegacySettlementDispatchBudget = errors.New("legacy settlement dispatch budget")
+var errLegacySettlementDiscoveryBudget = errors.New("legacy settlement payer discovery budget")
+
+const legacySettlementDispatchBudget = 5 * time.Second
+const legacySettlementRegistrationBudget = 2 * time.Second
+const legacySettlementDiscoveryBudget = legacySettlementDispatchBudget - legacySettlementRegistrationBudget
 
 // Identity is private task data. Cursor is a bounded compatibility-registration
 // traversal; PayerCursor controls fair service independently of contract density.
 type LegacySettlementDispatchResult struct {
-	Private            bool                         `json:"_private_task_arguments"`
-	PayerNetworkIds    []server.Id                  `json:"payer_network_ids"`
-	Cursor             *LegacySettlementCursor      `json:"cursor,omitempty"`
-	PayerCursor        *LegacySettlementPayerCursor `json:"payer_cursor,omitempty"`
-	Probes             int                          `json:"probes"`
-	Registered         int                          `json:"registered"`
-	RegistrationFailed bool                         `json:"registration_failed"`
-	More               bool                         `json:"more"`
+	Private                bool                         `json:"_private_task_arguments"`
+	PayerNetworkIds        []server.Id                  `json:"payer_network_ids"`
+	SourceClientIds        []server.Id                  `json:"source_client_ids,omitempty"`
+	SourceCursor           *LegacySettlementPayerCursor `json:"source_cursor,omitempty"`
+	SourceProbes           int                          `json:"source_probes,omitempty"`
+	Cursor                 *LegacySettlementCursor      `json:"cursor,omitempty"`
+	PayerCursor            *LegacySettlementPayerCursor `json:"payer_cursor,omitempty"`
+	Probes                 int                          `json:"probes"`
+	Registered             int                          `json:"registered"`
+	RegistrationFailed     bool                         `json:"registration_failed"`
+	RegistrationCursor     *LegacySettlementOwnerCursor `json:"registration_cursor,omitempty"`
+	RegistrationUnresolved int                          `json:"registration_unresolved,omitempty"`
+	More                   bool                         `json:"more"`
 }
 
 // A fixed payer round and at most sixteen probes prevent a dense account from
@@ -37,13 +46,23 @@ func DispatchLegacySettlementPayers(ctx context.Context, shard int, after *Legac
 	if shard < 0 || shard >= LegacySettlementShardCount {
 		return result, fmt.Errorf("invalid legacy settlement dispatch shard")
 	}
-	if !legacySettlementPayerDueIndexReady(ctx) {
-		return result, ErrLegacySettlementPayerIndexUnavailable
-	}
-	bounded, cancel := context.WithTimeoutCause(ctx, 5*time.Second, errLegacySettlementDispatchBudget)
+	bounded, cancel := context.WithTimeoutCause(ctx, legacySettlementDispatchBudget, errLegacySettlementDispatchBudget)
 	defer cancel()
-	return dispatchLegacySettlementPayersPage(ctx, bounded, shard, after, payerAfter,
-		nextLegacySettlementPayer, registerLegacySettlementPayerPage)
+	result, returnErr = dispatchLegacySettlementPayersPage(ctx, bounded, shard, after, payerAfter,
+		func(ctx context.Context, shard int, cursor *LegacySettlementPayerCursor) (*server.Id, *LegacySettlementPosition) {
+			payer, ready := nextLegacySettlementPayer(ctx, shard, cursor)
+			if payer != nil && ready != nil && !legacyDispatchOwnerMatches(ctx, ready.ContractId, ContractCloseOwner{Kind: ContractCloseOwnerPayerNetwork, Id: *payer}) {
+				ready = nil
+			}
+			return payer, ready
+		}, registerLegacySettlementPayerDispatchPage)
+	return
+}
+
+// Registration owns a fixed missing-key batch within the caller's budget.
+// Registered work enters the next bounded discovery turn.
+func registerLegacySettlementPayerDispatchPage(ctx context.Context, shard int, after *LegacySettlementCursor) (*LegacySettlementCursor, int) {
+	return after, registerLegacySettlementPayers(ctx, shard)
 }
 
 // Only this page owns its time budget. A completed discovery prefix can be
@@ -53,6 +72,7 @@ func dispatchLegacySettlementPayersPage(ctx, bounded context.Context, shard int,
 	payerAfter *LegacySettlementPayerCursor,
 	next func(context.Context, int, *LegacySettlementPayerCursor) (*server.Id, *LegacySettlementPosition),
 	register func(context.Context, int, *LegacySettlementCursor) (*LegacySettlementCursor, int),
+	sourceOwners ...*legacySourceOwnerDispatch,
 ) (result LegacySettlementDispatchResult, returnErr error) {
 	result.Private = true
 	result.Cursor = after
@@ -61,27 +81,57 @@ func dispatchLegacySettlementPayersPage(ctx, bounded context.Context, shard int,
 		result.PayerCursor = &cursor
 	}
 	server.HandleError(func() {
-		if result.PayerCursor == nil {
-			result.PayerCursor = beginLegacySettlementPayerRound(bounded, shard)
+		// Reserve registration's existing allowance inside the same turn.
+		// Otherwise slow registered payers can consume every page before any
+		// missing key is enrolled. Completed discovery still precedes cleanup.
+		discoveryBudget := legacySettlementDiscoveryBudget
+		if len(sourceOwners) > 0 {
+			discoveryBudget /= 2
 		}
-		for probe := 0; probe < legacySettlementPayerProbeLimit && result.PayerCursor != nil; probe++ {
-			payer, ready := next(bounded, shard, result.PayerCursor)
-			if payer == nil {
-				result.PayerCursor = nil
-				break
+		discovery, discoveryCancel := context.WithTimeoutCause(bounded, discoveryBudget, errLegacySettlementDiscoveryBudget)
+		var discoveryErr error
+		server.HandleError(func() {
+			defer discoveryCancel()
+			if (result.PayerCursor == nil || result.PayerCursor.End == (server.Id{})) && (len(sourceOwners) == 0 || !sourceOwners[0].payerDone) {
+				result.PayerCursor = &LegacySettlementPayerCursor{}
+				result.PayerCursor = beginLegacySettlementPayerRound(discovery, shard)
 			}
-			result.Probes++
-			if ready != nil {
-				result.PayerNetworkIds = append(result.PayerNetworkIds, *payer)
+			for probe := 0; probe < legacySettlementPayerProbeLimit && result.PayerCursor != nil; probe++ {
+				payer, ready := next(discovery, shard, result.PayerCursor)
+				if payer == nil {
+					result.PayerCursor = nil
+					break
+				}
+				result.Probes++
+				if ready != nil && (len(sourceOwners) == 0 || sourceOwners[0].ownerMatches(discovery, ready.ContractId, ContractCloseOwner{Kind: ContractCloseOwnerPayerNetwork, Id: *payer})) {
+					result.PayerNetworkIds = append(result.PayerNetworkIds, *payer)
+				}
+				result.PayerCursor.After = payer
 			}
-			result.PayerCursor.After = payer
+		}, func(err error) { discoveryErr = err })
+		discoveryYielded := discoveryErr != nil && bounded.Err() == nil &&
+			context.Cause(discovery) == errLegacySettlementDiscoveryBudget && isSettlementPageCancellation(discoveryErr)
+		if discoveryErr != nil && !discoveryYielded {
+			server.Raise(discoveryErr)
+		}
+		if len(sourceOwners) > 0 {
+			source := sourceOwners[0]
+			sourceCtx, sourceCancel := context.WithTimeoutCause(bounded, legacySettlementDiscoveryBudget/2, errLegacySettlementDiscoveryBudget)
+			var sourceErr error
+			server.HandleError(func() {
+				defer sourceCancel()
+				server.Raise(source.discover(sourceCtx, shard))
+			}, func(err error) { sourceErr = err })
+			source.yielded = sourceErr != nil && bounded.Err() == nil && context.Cause(sourceCtx) == errLegacySettlementDiscoveryBudget && isSettlementPageCancellation(sourceErr)
+			if sourceErr != nil && !source.yielded {
+				server.Raise(sourceErr)
+			}
+			slices.SortFunc(source.ids, server.Id.Cmp)
 		}
 		// Discover registered work before optional compatibility registration:
 		// transaction cleanup can outlive its own query context. This prefix
 		// retains scheduling custody if our page deadline expires in cleanup.
-		// The chronological index also works while the NULL-payer index is
-		// being repaired. Newly registered keys enter the next bounded turn.
-		registrationCtx, registrationCancel := context.WithTimeout(bounded, 2*time.Second)
+		registrationCtx, registrationCancel := context.WithTimeout(bounded, legacySettlementRegistrationBudget)
 		server.HandleError(func() {
 			defer registrationCancel()
 			result.Cursor, result.Registered = register(registrationCtx, shard, after)
@@ -97,10 +147,10 @@ func dispatchLegacySettlementPayersPage(ctx, bounded context.Context, shard int,
 		}
 		// Multiple dispatchers acquire payer task keys in the same order.
 		slices.SortFunc(result.PayerNetworkIds, server.Id.Cmp)
-		result.More = result.PayerCursor != nil || result.Registered > 0
+		result.More = discoveryYielded || result.PayerCursor != nil || result.Registered > 0
 	}, func(err error) {
 		if ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errLegacySettlementDispatchBudget &&
-			result.Probes > 0 && isSettlementPageCancellation(err) {
+			(result.Probes > 0 || (len(sourceOwners) > 0 && sourceOwners[0].probes > 0)) && isSettlementPageCancellation(err) {
 			// The interrupted probe has not moved After. Publication of this
 			// prefix and its successor belongs to the task's ordinary Post.
 			slices.SortFunc(result.PayerNetworkIds, server.Id.Cmp)
@@ -109,70 +159,5 @@ func dispatchLegacySettlementPayersPage(ctx, bounded context.Context, shard int,
 		}
 		returnErr = err
 	})
-	return
-}
-
-// At most 256 chronological due candidates are read, irrespective of NULL
-// density. Only missing keys are updated, by primary key and without financial
-// locks. The fixed cutoff/cursor survives task continuation. Future retries
-// need no owner until they become due, and normal recurring discovery revisits.
-func registerLegacySettlementPayerPage(ctx context.Context, shard int, after *LegacySettlementCursor) (next *LegacySettlementCursor, registered int) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
-		query := `SELECT next_attempt_time,contract_id,payer_network_id,
- statement_timestamp() AT TIME ZONE 'UTC' FROM legacy_settlement_intent
- WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
- ORDER BY next_attempt_time,contract_id LIMIT 256`
-		args := []any{shard}
-		if after != nil {
-			var passEnd any
-			if !after.PassEndTime.IsZero() {
-				passEnd = after.PassEndTime
-			}
-			query = `SELECT next_attempt_time,contract_id,payer_network_id,
- COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
- WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
- AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
- AND (next_attempt_time,contract_id)>($2,$3)
- ORDER BY next_attempt_time,contract_id LIMIT 256`
-			args = append(args, after.NextAttemptTime, after.ContractId, passEnd)
-		}
-		var missing []server.Id
-		count := 0
-		rows, err := tx.Query(ctx, query, args...)
-		server.WithPgResult(rows, err, func() {
-			for rows.Next() {
-				position := &LegacySettlementCursor{}
-				var payer *server.Id
-				server.Raise(rows.Scan(&position.NextAttemptTime, &position.ContractId, &payer, &position.PassEndTime))
-				next = position
-				count++
-				if payer == nil {
-					missing = append(missing, position.ContractId)
-				}
-			}
-		})
-		slices.SortFunc(missing, server.Id.Cmp)
-		if len(missing) > 0 {
-			// Preserve indexed point updates in one protocol batch. Separate
-			// round trips can exhaust the whole registration budget on a full
-			// NULL prefix even when each individual statement is inexpensive.
-			server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-				for _, id := range missing {
-					batch.Queue(`UPDATE legacy_settlement_intent AS intent
- SET payer_network_id=(SELECT COALESCE(payer_network_id,
- CASE WHEN companion_contract_id IS NULL THEN source_network_id ELSE destination_network_id END)
- FROM transfer_contract WHERE contract_id=$1)
- WHERE intent.contract_id=$1 AND intent.payer_network_id IS NULL`, id).Exec(func(tag pgconn.CommandTag) error {
-						registered += int(tag.RowsAffected())
-						return nil
-					})
-				}
-			})
-		}
-		if count < legacySettlementPayerRegistrationLimit {
-			next = nil
-		}
-	}, server.TxReadCommitted, server.OptNoRetry())
 	return
 }

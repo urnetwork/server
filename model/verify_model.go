@@ -26,6 +26,9 @@ package model
 //	verify_seed_ip_<hash>_<window> seed fixed-window counter per source ip (§9)
 //	verify_seed_vpk_<vpk>_<window> seed fixed-window counter per vpk (§9)
 //	verify_trails_<vpk>     active trail count per vpk (concurrent-trail cap, §9)
+//	{verify_cohort:<deployment>}e<epoch>       providers admitted for one settlement epoch
+//	{verify_cohort:<deployment>}e<epoch>draws  next hops drawn from that cohort
+//	{verify_cohort:<deployment>}lifetime       every provider ever admitted (no ttl)
 //
 // The egress index is fed by exactly one bijection-gated feeder
 // (`feedVerifyEgressLease`) with two independently owned sources: observed connection source ips
@@ -174,6 +177,15 @@ type VerifySettings struct {
 	// EgressHashKeyId is published.
 	EgressHashKey   []byte
 	EgressHashKeyId string
+	// CohortSize, when positive, limits next-hop sampling to at most this many
+	// distinct providers per coordinator settlement epoch, and
+	// CohortLifetimeLimit to at most that many distinct providers over the
+	// deployment's life (verify_cohort_model.go). Zero keeps uniform sampling
+	// over every eligible provider. CohortDeploymentKey names the st epoch
+	// mirror that supplies the epoch.
+	CohortSize          int
+	CohortLifetimeLimit int
+	CohortDeploymentKey StDeploymentKey
 }
 
 // TrailTtl is the redis lifetime of one trail's state (VALIDATOR.md §5.5:
@@ -559,11 +571,17 @@ func RefreshVerifyProxyEgress(ctx context.Context, settings *VerifySettings) {
 // that fail token validation at the draw are still counted in `n` (tokens
 // refill passively so set membership cannot track them). Members with no
 // provide modes are lazily evicted from the set.
+//
+// With a configured cohort (CohortSize > 0) every draw comes from the bounded
+// settlement-epoch cohort instead, and nothing falls back to this uniform draw.
 func SampleVerifyNextHop(
 	ctx context.Context,
 	excludeClientIds []server.Id,
 	settings *VerifySettings,
 ) (nextHop *server.Id, n int) {
+	if 0 < settings.CohortSize {
+		return sampleVerifyCohortNextHop(ctx, excludeClientIds, settings)
+	}
 	server.Redis(ctx, func(r server.RedisClient) {
 		total, err := r.SCard(ctx, verifyEligibleKey).Result()
 		if err != nil && !errors.Is(err, redis.Nil) {
@@ -611,22 +629,8 @@ func SampleVerifyNextHop(
 			server.Raise(err)
 			candidate := allowed[pickIndex.Int64()]
 
-			candidateId, err := server.ParseId(candidate)
-			if err != nil {
-				r.SRem(ctx, verifyEligibleKey, candidate)
-				continue
-			}
-			if !verifyClientHasLiveEgress(ctx, r, candidateId, uint64(server.NowUtc().UnixMilli())) {
-				// The set may outlive an address lease or race a disconnect.
-				// Never spend a token or assign an unattributable source.
-				server.Raise(r.SRem(ctx, verifyEligibleKey, candidate).Err())
-				excluded[candidate] = true
-				continue
-			}
-			provideModes, err := GetProvideModes(ctx, candidateId)
-			if err != nil || len(provideModes) == 0 {
-				// no longer a provider: lazily evict
-				r.SRem(ctx, verifyEligibleKey, candidate)
+			candidateId, ok := verifyCandidateAssignable(ctx, r, candidate)
+			if !ok {
 				excluded[candidate] = true
 				continue
 			}
@@ -640,6 +644,30 @@ func SampleVerifyNextHop(
 		}
 	})
 	return
+}
+
+// verifyCandidateAssignable re-checks one drawn provider before it can be
+// assigned: a parseable id, exactly one live attributable egress, and an
+// active provide mode. A failed candidate is lazily evicted from the eligible
+// set, which may outlive an address lease or race a disconnect; it must never
+// spend a token or be assigned as an unattributable source.
+func verifyCandidateAssignable(ctx context.Context, r server.RedisClient, candidate string) (server.Id, bool) {
+	candidateId, err := server.ParseId(candidate)
+	if err != nil {
+		r.SRem(ctx, verifyEligibleKey, candidate)
+		return server.Id{}, false
+	}
+	if !verifyClientHasLiveEgress(ctx, r, candidateId, uint64(server.NowUtc().UnixMilli())) {
+		server.Raise(r.SRem(ctx, verifyEligibleKey, candidate).Err())
+		return server.Id{}, false
+	}
+	provideModes, err := GetProvideModes(ctx, candidateId)
+	if err != nil || len(provideModes) == 0 {
+		// no longer a provider: lazily evict
+		r.SRem(ctx, verifyEligibleKey, candidate)
+		return server.Id{}, false
+	}
+	return candidateId, true
 }
 
 // PadVerifySample performs the read/write pattern of `SampleVerifyNextHop`

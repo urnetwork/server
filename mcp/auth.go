@@ -31,7 +31,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/session"
 )
@@ -140,7 +140,7 @@ func clientSessionFromToken(ctx context.Context, req *mcpsdk.CallToolRequest) (*
 	principal, _ := tokenInfo.Extra["principal"].(string)
 	roles, _ := tokenInfo.Extra["roles"].([]string)
 
-	byJwt := jwt.NewByJwt(
+	byJwt := session.NewByJwt(
 		networkId,
 		userId,
 		// the network name is not in the token; the model layer that needs it
@@ -154,6 +154,7 @@ func clientSessionFromToken(ctx context.Context, req *mcpsdk.CallToolRequest) (*
 	byJwt.Principal = principal
 	byJwt.Roles = roles
 	clientSession.ByJwt = byJwt
+	clientSession.UnsignedIdentity = true
 
 	return clientSession, nil
 }

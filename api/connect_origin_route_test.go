@@ -18,9 +18,9 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -34,7 +34,7 @@ func TestConnectControlOwnedRouterPublishesCommittedOrigins(t *testing.T) {
 		model.Testing_CreateDevice(ctx, networkId, deviceId, sourceId, "origin-route-source", "test")
 		model.Testing_CreateDevice(ctx, networkId, server.NewId(), destinationId, "origin-route-destination", "test")
 		model.SetProvide(ctx, destinationId, map[model.ProvideMode][]byte{model.ProvideModeNetwork: bytes.Repeat([]byte{1}, 32)})
-		token := jwt.NewByJwt(networkId, userId, "origin-route", false, false).Client(deviceId, sourceId).Sign()
+		token := session.NewByJwt(networkId, userId, "origin-route", false, false).Client(deviceId, sourceId).Testing_Sign()
 		owned, closeOwned, err := NewRouter(ctx, ctx)
 		if err != nil {
 			t.Fatal(err)

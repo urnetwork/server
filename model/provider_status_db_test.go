@@ -11,7 +11,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // The provider status and the appearance histogram against the database and
@@ -328,7 +328,7 @@ func TestFindProviders2CountsReturnedProviderAppearances(t *testing.T) {
 		find := func(findCtx context.Context) []server.Id {
 			clientSession := testingCreateProviderSearchSession(
 				findCtx,
-				jwt.NewByJwt(server.NewId(), server.NewId(), "appearance-test", false, false),
+				session.NewByJwt(server.NewId(), server.NewId(), "appearance-test", false, false),
 			)
 			result, err := FindProviders2(&FindProviders2Args{
 				Specs:      egressTestLocationSpec(city),

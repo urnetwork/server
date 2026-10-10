@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // Every preferred page has the same rejection cause, making the boundary
@@ -76,7 +76,7 @@ func TestFindProviders2PostFilterRefillReachesSameTargetOnline(t *testing.T) {
 				_, err := pipe.Exec(ctx)
 				server.Raise(err)
 			})
-			clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(callerNetworkId, server.NewId(), "postfilter-sample-test", false, false))
+			clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(callerNetworkId, server.NewId(), "postfilter-sample-test", false, false))
 			result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &locationId}}}, clientSession)
 			if err != nil || result == nil || len(result.Providers) != 20 {
 				got := 0
@@ -156,7 +156,7 @@ func TestFindProviders2RefillReadErrorsPreserveModeBoundary(t *testing.T) {
 			}
 			labels := map[string]string{"rank_mode": failedMode, "source": source, "outcome": "unavailable"}
 			before := selectionMetricCount(t, "urnetwork_findproviders2_native_source_outcomes_total", labels)
-			clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "refill-read-test", false, false))
+			clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "refill-read-test", false, false))
 			result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &locationId}}}, clientSession)
 			if err != nil || result == nil || len(result.Providers) != len(allowed) {
 				t.Fatalf("refill failure changed validated fallback supply: mode=%s err=%v", failedMode, err)

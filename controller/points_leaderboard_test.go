@@ -8,7 +8,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -122,7 +122,7 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 			ids = append(ids, networkId)
 			// The token name is intentionally stale: own-row identity comes from
 			// the current network row, as it must after a rename.
-			sessions = append(sessions, session.Testing_CreateClientSession(ctx, jwt.NewByJwt(networkId, userId, tokenName, false, false)))
+			sessions = append(sessions, session.Testing_CreateClientSession(ctx, session.NewByJwt(networkId, userId, tokenName, false, false)))
 			// network i earns 10*(5-i) points in every epoch up to i+1
 			for epoch := uint64(1); epoch <= uint64(i+1); epoch += 1 {
 				model.Testing_InsertAccountPointForBlock(ctx, networkId, model.PointsToNanoPoints(float64(10*(5-i))), epoch, now)

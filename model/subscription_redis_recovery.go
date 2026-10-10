@@ -92,6 +92,12 @@ func recoverRedisReservationInTx(ctx context.Context, tx server.PgTx, balanceId 
 	if !locked {
 		return false, errRedisReservationRequestActive
 	}
+	return recoverRedisReservationWithFenceInTx(ctx, tx, balanceId, candidate)
+}
+
+// Caller already holds this contract's v2 advisory fence in the supplied
+// transaction, and retains it through Redis release or marker acknowledgement.
+func recoverRedisReservationWithFenceInTx(ctx context.Context, tx server.PgTx, balanceId server.Id, candidate redisReservationRecoveryCandidate) (bool, error) {
 	var contract, escrow, matching, terminal, debitPending bool
 	server.Raise(tx.QueryRow(ctx, `SELECT
 		EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1),
@@ -127,7 +133,8 @@ func recoverRedisReservationInTx(ctx context.Context, tx server.PgTx, balanceId 
 	return operation == "release-owned" && released > 0 && err == nil, err
 }
 
-// One public operation joins every foreground transaction before cleanup.
+// One public operation joins every foreground transaction before cleanup. The
+// action returns a successful escrow only after its commit is acknowledged.
 // Only a known insufficient-balance refusal can retry after actual recovery;
 // success, ambiguous SQL, and a canceled caller are never replayed.
 func runRedisContractAdmission(ctx context.Context, action func(context.Context) (*TransferEscrow, error)) (escrow *TransferEscrow, returnErr error) {
@@ -162,7 +169,11 @@ func runRedisContractAdmission(ctx context.Context, action func(context.Context)
 			}
 		}
 		if !recoveryAttempted {
-			admission.recoverRetained(ctx)
+			var publication *TransferEscrow
+			if returnErr == nil && escrow != nil && escrow.ContractId == admission.contractId {
+				publication = escrow
+			}
+			admission.recoverRetainedWithPublication(ctx, publication)
 		}
 	}()
 	escrow, returnErr = action(ctx)
@@ -184,14 +195,26 @@ func runRedisContractAdmission(ctx context.Context, action func(context.Context)
 // Redis and PG. A timed-out query aborts only this transaction, never the
 // already-joined foreground owner. Markers rotate and retain unknown outcomes.
 func (self *redisContractAdmission) recoverRetained(ctx context.Context) bool {
+	return self.recoverRetainedWithPublication(ctx, nil)
+}
+
+// A matching returned escrow carries acknowledged commit authority only from
+// the joined public operation above. All other candidates retain SQL proof.
+func (self *redisContractAdmission) recoverRetainedWithPublication(ctx context.Context, publication *TransferEscrow) bool {
 	page, cancel := context.WithTimeout(ctx, redisContractAdmissionTimeout)
 	defer cancel()
-	return self.recoverRetainedPage(page)
+	return self.recoverRetainedPageWithPublication(page, publication)
 }
 
 // The page owner supplies the one finite deadline. Separating its construction
 // lets deterministic SQL-lock tests cancel the same actual page after a barrier.
-func (self *redisContractAdmission) recoverRetainedPage(page context.Context) (progress bool) {
+func (self *redisContractAdmission) recoverRetainedPage(page context.Context) bool {
+	return self.recoverRetainedPageWithPublication(page, nil)
+}
+
+// Discovery retains its original 32-candidate cap before any acknowledged own
+// token is removed from the SQL work list. No caller holds PG during this page.
+func (self *redisContractAdmission) recoverRetainedPageWithPublication(page context.Context, publication *TransferEscrow) (progress bool) {
 	if _, bounded := page.Deadline(); !bounded || page.Err() != nil {
 		redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
 		return false
@@ -219,8 +242,8 @@ func (self *redisContractAdmission) recoverRetainedPage(page context.Context) (p
 	// Discover bounded candidates before acquiring PG. An empty page is normal
 	// after successful publication and needs no SQL transaction; cold Redis
 	// routing and candidate reads must not hold a PostgreSQL snapshot or slot.
-	// Discovery changes no token amount. The SQL fence still covers every
-	// custody check and exact Redis release/publication below.
+	// Discovery changes no token amount. Remaining candidates keep their SQL
+	// fence around every custody check and exact release/publication below.
 	type retainedCandidate struct {
 		balanceId server.Id
 		candidate redisReservationRecoveryCandidate
@@ -242,6 +265,36 @@ func (self *redisContractAdmission) recoverRetainedPage(page context.Context) (p
 			retained = append(retained, retainedCandidate{balanceId: balanceId, candidate: candidate})
 		}
 	}
+	if page.Err() != nil {
+		redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
+		return false
+	}
+	// The successful transaction already proved only its exact selected tokens.
+	// Keep failed acknowledgements, changed amounts and every peer on the old
+	// custody path. Filtering must not refill or reorder the collected page.
+	pending := retained[:0]
+	for index, item := range retained {
+		if page.Err() != nil {
+			pending = append(pending, retained[index:]...)
+			break
+		}
+		acknowledged := false
+		if publication != nil && publication.ContractId == self.contractId && item.candidate.contractId == self.contractId {
+			for _, balance := range publication.Balances {
+				if balance != nil && balance.BalanceId == item.balanceId && balance.BalanceByteCount == item.candidate.amount {
+					_, err := redisContractReservation(page, "published", item.balanceId, item.candidate.contractId, 0, item.candidate.amount, redisContractReservationLease)
+					acknowledged = err == nil
+					break
+				}
+			}
+		}
+		if acknowledged {
+			redisContractReservationResults.WithLabelValues("recovery", "completed").Inc()
+		} else {
+			pending = append(pending, item)
+		}
+	}
+	retained = pending
 	if page.Err() != nil {
 		redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
 		return false
@@ -312,7 +365,7 @@ func recoverRedisReservationRequest(ctx context.Context, balanceId, contractId s
 			return nil
 		})
 		if returnErr == nil && amount != 0 {
-			_, returnErr = recoverRedisReservationInTx(attempt, tx, balanceId, redisReservationRecoveryCandidate{contractId: contractId, amount: amount})
+			_, returnErr = recoverRedisReservationWithFenceInTx(attempt, tx, balanceId, redisReservationRecoveryCandidate{contractId: contractId, amount: amount})
 		}
 	}, server.TxReadCommitted, server.OptNoRetry())
 	return

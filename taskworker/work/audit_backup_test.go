@@ -39,7 +39,8 @@ func TestTransferAuditRollupDefersBackupWithoutLosingDays(t *testing.T) {
 	}
 	args, _ = nextTransferAuditRollup(resumed, result)
 	calls := 0
-	for _, wantDays := range []int{3, 3, 2} {
+	for index := range 8 {
+		wantDays := 1
 		result = rollupTransferAuditEvents(ctx, args, resumed, func(context.Context) bool { return false }, func(gotCtx context.Context, min, max time.Time) int {
 			calls++
 			if gotCtx != ctx || !min.Equal(wantMin) {
@@ -56,11 +57,11 @@ func TestTransferAuditRollupDefersBackupWithoutLosingDays(t *testing.T) {
 			t.Fatalf("resumed result=%+v", result)
 		}
 		args, runAt = nextTransferAuditRollup(resumed, result)
-		if wantDays == 3 && (args.MinTime == nil || !runAt.Equal(resumed.Add(30*time.Minute))) {
+		if index < 7 && (args.MinTime == nil || !runAt.Equal(resumed)) {
 			t.Fatalf("backlog continuation=(%+v,%s)", args, runAt)
 		}
 	}
-	if calls != 3 || args.MinTime != nil || !runAt.Equal(resumed.Add(6*time.Hour)) {
+	if calls != 8 || args.MinTime != nil || !runAt.Equal(resumed.Add(6*time.Hour)) {
 		t.Fatalf("completed rollup did not restore ordinary cadence: (%+v,%s)", args, runAt)
 	}
 }
@@ -69,16 +70,32 @@ func TestTransferAuditRollupQuietPathPreservesNormalWindow(t *testing.T) {
 	now := time.Date(2026, 9, 27, 14, 0, 0, 0, time.UTC)
 	futureMin := now
 	for _, args := range []*RollupTransferAuditEventsArgs{nil, {}, {MinTime: &futureMin}} {
-		checks, calls := 0, 0
-		result := rollupTransferAuditEvents(context.Background(), args, now, func(context.Context) bool { checks++; return false }, func(_ context.Context, min, max time.Time) int {
-			calls++
-			if !min.Equal(now.Add(-3*24*time.Hour)) || !max.Equal(now) {
-				t.Fatalf("ordinary range changed: [%s,%s)", min, max)
+		wantMin := now.Add(-3 * 24 * time.Hour)
+		for index := range 3 {
+			checks, calls := 0, 0
+			wantMax := wantMin.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
+			if index == 2 {
+				wantMax = now
 			}
-			return 3
-		})
-		if checks != 1 || calls != 1 || result.Deferred || result.DayCount != 3 {
-			t.Fatalf("quiet result=%+v checks=%d calls=%d", result, checks, calls)
+			result := rollupTransferAuditEvents(context.Background(), args, now, func(context.Context) bool { checks++; return false }, func(_ context.Context, min, max time.Time) int {
+				calls++
+				if !min.Equal(wantMin) || !max.Equal(wantMax) {
+					t.Fatalf("ordinary day range changed: [%s,%s)", min, max)
+				}
+				return 1
+			})
+			if checks != 1 || calls != 1 || result.Deferred || result.DayCount != 1 {
+				t.Fatalf("quiet result=%+v checks=%d calls=%d", result, checks, calls)
+			}
+			var runAt time.Time
+			args, runAt = nextTransferAuditRollup(now, result)
+			wantMin = wantMax
+			if index < 2 && (args.MinTime == nil || !args.MinTime.Equal(wantMin) || !runAt.Equal(now)) {
+				t.Fatal("completed day lost its immediate continuation")
+			}
+			if index == 2 && (args.MinTime != nil || !runAt.Equal(now.Add(6*time.Hour))) {
+				t.Fatal("completed three-day window lost its ordinary refresh cadence")
+			}
 		}
 	}
 }
@@ -91,8 +108,8 @@ func TestTransferAuditRollupContinuationPersistsBoundedRange(t *testing.T) {
 		minTime := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 		for _, result := range []*RollupTransferAuditEventsResult{
 			{Deferred: true, MinTime: &minTime},
-			{DayCount: 3, MinTime: &minTime},
-			{DayCount: 3},
+			{DayCount: 1, MinTime: &minTime},
+			{DayCount: 1},
 		} {
 			before := server.NowUtc()
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -107,7 +124,10 @@ func TestTransferAuditRollupContinuationPersistsBoundedRange(t *testing.T) {
 				server.Raise(json.Unmarshal([]byte(argsJSON), &args))
 				wantDelay := 6 * time.Hour
 				if result.MinTime != nil {
-					wantDelay = transferAuditBackupRetry
+					wantDelay = 0
+					if result.Deferred {
+						wantDelay = transferAuditBackupRetry
+					}
 					if args.MinTime == nil || !args.MinTime.Equal(minTime) {
 						t.Fatalf("continuation lost lower bound: %+v", args)
 					}

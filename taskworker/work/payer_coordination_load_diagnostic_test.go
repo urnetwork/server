@@ -15,8 +15,8 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -67,7 +67,7 @@ func newPrivateLoadFixtureCount(t testing.TB, ctx context.Context, index, histor
 		if err != nil {
 			t.Fatal(err)
 		}
-		claims, err := jwt.ParseByJwtForAudience(ctx, minted.ByClientJwt, jwt.ByJwtAudienceApi)
+		claims, err := session.ParseByJwtForAudience(ctx, minted.ByClientJwt, session.ByJwtAudienceApi)
 		if err != nil || claims.ClientId == nil {
 			t.Fatal("derived credential lacks its actual client", err)
 		}

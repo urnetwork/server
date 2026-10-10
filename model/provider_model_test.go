@@ -9,7 +9,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -25,7 +25,7 @@ func TestStatsProviders(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkId, "provider-net", userId)
 		clientSession := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkId, userId, "provider-net", false, false),
+			session.NewByJwt(networkId, userId, "provider-net", false, false),
 		)
 
 		// two provider clients in the caller network
@@ -393,7 +393,7 @@ func TestStatsProvidersProviderEnumeration(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkId, "enum-net", userId)
 		clientSession := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkId, userId, "enum-net", false, false),
+			session.NewByJwt(networkId, userId, "enum-net", false, false),
 		)
 
 		// active provider with two provide_keys: must appear exactly once
@@ -474,7 +474,7 @@ func TestStatsProvidersOverviewDedupsMultiProvideKey(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkId, "overview-multikey-net", userId)
 		clientSession := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkId, userId, "overview-multikey-net", false, false),
+			session.NewByJwt(networkId, userId, "overview-multikey-net", false, false),
 		)
 
 		// one provider client holding TWO provide_keys

@@ -2449,3 +2449,33 @@ func TestInternalNetworkMeasurementsAreScopedAndReplicaSafe(t *testing.T) {
 		}
 	}
 }
+
+// Flipping reject_expired waits on network tokens: a client token refreshes on
+// its half-life, a network token only at POST /auth/network-refresh. The
+// authentication panel keeps the legacy accepts split by credential kind and
+// charts the network refresh outcomes beside them.
+func TestAuthenticationPanelSplitsLegacyAcceptsByCredentialKind(t *testing.T) {
+	dashboard := readTestDashboard(t, "signals.json")
+	var panel *testPanel
+	for panelIndex := range dashboard.Panels {
+		if dashboard.Panels[panelIndex].Title == "authentication decisions / s" {
+			panel = &dashboard.Panels[panelIndex]
+			break
+		}
+	}
+	if panel == nil {
+		t.Fatal("signals dashboard lacks the authentication decisions panel")
+	}
+	expressions := []string{}
+	for _, target := range panel.Targets {
+		expressions = append(expressions, target.Expr)
+	}
+	for _, want := range []string{
+		`sum by (service, cause, kind) (rate(urnetwork_auth_jwt_legacy_accepts_total{env="$env"}[$__rate_interval]))`,
+		`sum by (service, outcome) (rate(urnetwork_auth_network_refreshes_total{env="$env"}[$__rate_interval]))`,
+	} {
+		if !slices.Contains(expressions, want) {
+			t.Errorf("authentication panel lacks %q", want)
+		}
+	}
+}

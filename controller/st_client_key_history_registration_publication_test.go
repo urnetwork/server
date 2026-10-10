@@ -505,7 +505,7 @@ func TestStClientKeyRegistrationCohortPublicationActualControllerOwnsFinalFailur
 		key := bytes.Repeat([]byte{9}, 32)
 		results := make(chan error, 2)
 		workers.Add(2)
-		for _, token := range []string{credential.Sign(), sibling.Sign()} {
+		for _, token := range []string{credential.Testing_Sign(), sibling.Testing_Sign()} {
 			go func() {
 				defer workers.Done()
 				results <- stClientKeyRegistrationRequest(ctx, endpoint.URL, token, key)
@@ -550,7 +550,7 @@ func TestStClientKeyRegistrationCohortPublicationActualControllerOwnsFinalFailur
 		cohorts.beforeSealForTest, cohorts.afterAdmissionForTest = nil, nil
 		cohorts.beforePublicationForTest, cohorts.afterPublicationAdmissionForTest = nil, nil
 		cohorts.afterPublicationWindowForTest, cohorts.afterPublicationForTest = nil, nil
-		if err := stClientKeyRegistrationRequest(ctx, endpoint.URL, credential.Sign(), key); err != nil {
+		if err := stClientKeyRegistrationRequest(ctx, endpoint.URL, credential.Testing_Sign(), key); err != nil {
 			tb.Fatal("actual final failure retained an unusable publication owner", err)
 		}
 		stClientKeyRegistrationAssertPublicationIdle(tb, cohorts)

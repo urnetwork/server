@@ -8,7 +8,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -25,7 +25,7 @@ func TestProJwtRefreshTokenRederives(t *testing.T) {
 		model.Testing_CreateNetwork(ctx, networkId, "test", userId)
 
 		// create a client while the network is not Pro -> its token is Pro=false
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId, UserId: userId, NetworkName: "test", Pro: false,
 		})
 		authResult, err := model.AuthNetworkClient(
@@ -33,7 +33,7 @@ func TestProJwtRefreshTokenRederives(t *testing.T) {
 			userSession,
 		)
 		connect.AssertEqual(t, err, nil)
-		clientByJwt, err := jwt.ParseByJwt(ctx, *authResult.ByClientJwt)
+		clientByJwt, err := session.ParseByJwt(ctx, *authResult.ByClientJwt)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, clientByJwt.Pro, false)
 
@@ -52,7 +52,7 @@ func TestProJwtRefreshTokenRederives(t *testing.T) {
 		refreshResult, err := controller.RefreshToken(clientSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, refreshResult.Error, nil)
-		refreshed, err := jwt.ParseByJwt(ctx, refreshResult.ByJwt)
+		refreshed, err := session.ParseByJwt(ctx, refreshResult.ByJwt)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, refreshed.Pro, true)
 	})

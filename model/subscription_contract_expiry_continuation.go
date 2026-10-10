@@ -4,35 +4,137 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
+
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 )
 
-// Canonical close-report receipts keep their existing owner. Ordinary expiry
-// follows CloseContract unchanged; the scoped adapter supplies no report ID and
-// adds its expected-payer/report-state fence around that same report owner.
+// A missing peer accepts the existing count for billing only. A checkpoint
+// receives a zero increment, leaving its original byte contribution unchanged.
+type contractExpiryReportContinuation struct {
+	clientId              server.Id
+	usedTransferByteCount ByteCount
+	label                 string
+}
+
+// Ordinary expiry and an existing intent choose exactly the same report edits.
+// An accepted adjudication finalizes only its selected, already present report.
+func contractExpiryReportContinuations(state *contractExpiryState, outcome ContractOutcome) ([]contractExpiryReportContinuation, error) {
+	sourceFinal := contractExpiryReportContinuation{clientId: state.sourceId, label: "finalize source checkpoint"}
+	destinationFinal := contractExpiryReportContinuation{clientId: state.destinationId, label: "finalize destination checkpoint"}
+	switch outcome {
+	case ContractOutcomeDisputeResolvedToSource:
+		if state.sourceCloseTime == nil {
+			return nil, fmt.Errorf("adjudicated expiry lacks its source report")
+		}
+		if *state.sourceCheckpoint {
+			return []contractExpiryReportContinuation{sourceFinal}, nil
+		}
+		return nil, nil
+	case ContractOutcomeDisputeResolvedToDestination:
+		if state.destinationCloseTime == nil {
+			return nil, fmt.Errorf("adjudicated expiry lacks its destination report")
+		}
+		if *state.destinationCheckpoint {
+			return []contractExpiryReportContinuation{destinationFinal}, nil
+		}
+		return nil, nil
+	case ContractOutcomeSettled:
+	default:
+		return nil, fmt.Errorf("unknown expiry continuation outcome")
+	}
+	if state.sourceCloseTime == nil && state.destinationCloseTime == nil {
+		sourceFinal.label = "both sides"
+		destinationFinal.label = ""
+		return []contractExpiryReportContinuation{sourceFinal, destinationFinal}, nil
+	}
+	if state.sourceCloseTime == nil {
+		sourceFinal.usedTransferByteCount = *state.destinationUsedTransferByteCount
+		sourceFinal.label = "source accepts destination"
+		reports := []contractExpiryReportContinuation{sourceFinal}
+		if *state.destinationCheckpoint {
+			destinationFinal.label = ""
+			reports = append(reports, destinationFinal)
+		}
+		return reports, nil
+	}
+	if state.destinationCloseTime == nil {
+		destinationFinal.usedTransferByteCount = *state.sourceUsedTransferByteCount
+		destinationFinal.label = "destination accepts source"
+		reports := []contractExpiryReportContinuation{destinationFinal}
+		if *state.sourceCheckpoint {
+			sourceFinal.label = ""
+			reports = append(reports, sourceFinal)
+		}
+		return reports, nil
+	}
+	reports := []contractExpiryReportContinuation{}
+	if *state.sourceCheckpoint {
+		reports = append(reports, sourceFinal)
+	}
+	if *state.destinationCheckpoint {
+		reports = append(reports, destinationFinal)
+	}
+	return reports, nil
+}
+
+// The caller owns this contract and retained its original proof before any
+// synthetic billing peer. All reports and financial work use the caller's tx.
+func continueContractExpiryReportsInTx(ctx context.Context, tx server.PgTx, state *contractExpiryState, outcome ContractOutcome) error {
+	if !state.usageUnverifiedRetained {
+		return fmt.Errorf("expiry report continuation lacks retained ownership")
+	}
+	reports, err := contractExpiryReportContinuations(state, outcome)
+	if err != nil {
+		return err
+	}
+	for _, report := range reports {
+		_, _, err := applyContractCloseReportWithExpiryInTx(ctx, tx, state.contractId, report.clientId,
+			report.usedTransferByteCount, false, nil, state)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Ordinary and scoped expiry use the public report owner without a report ID.
+// Admit any no-escrow report edit under that same contract lock; the separate
+// outcome transaction keeps normal settlement and projection ownership.
 func closeContractWithExpiryScope(ctx context.Context, scope *contractExpiryRepairScope,
 	contractId, clientId server.Id, usedTransferByteCount ByteCount, checkpoint bool,
 ) (returnErr error) {
-	if scope == nil {
-		return CloseContract(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
-	}
 	if usedTransferByteCount < 0 {
 		return errors.New("invalid used transfer byte count")
 	}
-	var terminalReplay bool
+	var terminalReplay, deferred bool
 	contractExpiryContinuationTx(ctx, contractId, scope, func(tx server.PgTx) {
+		var currentOutcome *ContractOutcome
+		server.Raise(tx.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId).Scan(&currentOutcome))
+		var hasEscrow, pending bool
+		if currentOutcome == nil {
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),
+                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, contractId).Scan(&hasEscrow, &pending))
+		}
+		if currentOutcome == nil && !hasEscrow {
+			if pending {
+				deferred = true
+				return
+			}
+			server.Raise(validateContractFreeSettlementOwnerInTx(ctx, tx, contractId))
+		}
 		_, terminalReplay, returnErr = applyContractCloseReportInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, nil)
 		server.Raise(returnErr)
 	})
-	if terminalReplay {
+	if terminalReplay || deferred {
 		return nil
 	}
 	closed, err := settleContractWithExpiryScope(ctx, contractId, scope)
 	if err != nil {
 		return err
 	}
-	if closed && scope.redis == nil {
+	if closed && (scope == nil || scope.redis == nil) {
 		RemoveFromStream(ctx, contractId)
 	}
 	return nil
@@ -67,14 +169,38 @@ func settleExpiredContractDispute(ctx context.Context, tag string, contractId se
 		}
 		_, proofErr := retainedContractExpiryUsage(retained)
 		server.Raise(proofErr)
-		// Ordinary CloseContract refuses a disputed row. This expiry owner may
-		// finalize its existing checkpoints after their original proof commits,
-		// retaining every byte count and the immutable proof. A failed financial
-		// transaction rolls these flags back with its dispute clear; legacy work
-		// commits them with its intent and keeps the dispute until settlement.
-		server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET checkpoint=false WHERE contract_id=$1 AND checkpoint`, contractId))
-		var legacy bool
-		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT redis_reserved)`, contractId).Scan(&legacy))
+		var hasEscrow, legacy, pending bool
+		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),
+            EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT redis_reserved),
+            EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, contractId).Scan(&hasEscrow, &legacy, &pending))
+		if !hasEscrow && pending {
+			// A new accepted intent owns its outcome. Its worker may hold I;
+			// never wait for or delete it while ordinary expiry holds C.
+			// Cleanup observes the intent and records the usual deferred handoff.
+			return
+		}
+		if !hasEscrow {
+			server.Raise(validateContractFreeSettlementOwnerInTx(ctx, tx, contractId))
+		}
+		// Reload reports under this owner. Partial disputes need the same
+		// missing-peer billing continuation as ordinary expiry; their retained
+		// proof still records only the original reports.
+		fresh, err := prepareContractExpiryInTx(ctx, tx, contractId, server.NowUtc())
+		server.Raise(err)
+		if fresh == nil {
+			panic(errors.New("disputed expiry lost retained ownership"))
+		}
+		server.Raise(continueContractExpiryReportsInTx(ctx, tx, fresh, ContractOutcomeSettled))
+		if !hasEscrow {
+			// The same source owner handles free intents and ordinary expiry.
+			// Positive reports retain their clock but require no funded payout.
+			posts, resolved, err = settleLegacyContractWithoutEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled, true)
+			server.Raise(err)
+			if !resolved {
+				panic(errors.New("contract remained non-final after force-close attempt"))
+			}
+			return
+		}
 		if legacy {
 			server.Raise(queueLegacySettlementInTx(ctx, tx, contractId, ContractOutcomeSettled, true))
 			return
@@ -92,7 +218,6 @@ func settleExpiredContractDispute(ctx context.Context, tag string, contractId se
 		if changed.RowsAffected() == 0 {
 			return
 		}
-		var err error
 		posts, resolved, err = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
 		server.Raise(err)
 		if !resolved {
@@ -123,126 +248,54 @@ func continueContractExpiry(ctx context.Context, tag string, openContract *contr
 		return nil
 	}
 
-	if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
-		// close with both sides 0
-		recordForceCloseContract("both sides", tag)
-
-		err := closeContractWithExpiryScope(
-			ctx, scope,
-			openContract.contractId,
-			openContract.sourceId,
-			ByteCount(0),
-			false,
-		)
-		if err != nil {
-			return err
-		}
-
-		err = closeContractWithExpiryScope(
-			ctx, scope,
-			openContract.contractId,
-			openContract.destinationId,
-			ByteCount(0),
-			false,
-		)
-		if err != nil {
-			return err
-		}
-
-	} else if openContract.sourceCloseTime == nil {
-		// Source accepts destination. A lone destination checkpoint must
-		// also be made final; adding the missing source close alone leaves
-		// one checkpoint row and therefore cannot settle the contract.
-		recordForceCloseContract("source accepts destination", tag)
-
-		err := closeContractWithExpiryScope(
-			ctx, scope,
-			openContract.contractId,
-			openContract.sourceId,
-			*openContract.destinationUsedTransferByteCount,
-			false,
-		)
-		if err != nil {
-			return err
-		}
-		if *openContract.destinationCheckpoint {
-			err = closeContractWithExpiryScope(
-				ctx, scope,
-				openContract.contractId,
-				openContract.destinationId,
-				ByteCount(0),
-				false,
-			)
-			if err != nil {
+	reports, err := contractExpiryReportContinuations(openContract, ContractOutcomeSettled)
+	if err != nil {
+		return err
+	}
+	if len(reports) > 0 {
+		for _, report := range reports {
+			if report.label != "" {
+				recordForceCloseContract(report.label, tag)
+			}
+			if err := closeContractWithExpiryScope(ctx, scope, openContract.contractId, report.clientId,
+				report.usedTransferByteCount, false); err != nil {
 				return err
 			}
 		}
-
-	} else if openContract.destinationCloseTime == nil {
-		// Destination accepts source. Mirror the checkpoint finalization
-		// above so either one-sided orientation converges in one sweep.
-		recordForceCloseContract("destination accepts source", tag)
-
-		err := closeContractWithExpiryScope(
-			ctx, scope,
-			openContract.contractId,
-			openContract.destinationId,
-			*openContract.sourceUsedTransferByteCount,
-			false,
-		)
-		if err != nil {
-			return err
-		}
-		if *openContract.sourceCheckpoint {
-			err = closeContractWithExpiryScope(
-				ctx, scope,
-				openContract.contractId,
-				openContract.sourceId,
-				ByteCount(0),
-				false,
-			)
-			if err != nil {
-				return err
-			}
-		}
-
-	} else if *openContract.sourceCheckpoint || *openContract.destinationCheckpoint {
-		// finalize one or more checkpoints
-
-		if *openContract.sourceCheckpoint {
-			recordForceCloseContract("finalize source checkpoint", tag)
-
-			err := closeContractWithExpiryScope(
-				ctx, scope,
-				openContract.contractId,
-				openContract.sourceId,
-				ByteCount(0),
-				false,
-			)
-			if err != nil {
-				return err
-			}
-		}
-
-		if *openContract.destinationCheckpoint {
-			recordForceCloseContract("finalize destination checkpoint", tag)
-			err := closeContractWithExpiryScope(
-				ctx, scope,
-				openContract.contractId,
-				openContract.destinationId,
-				ByteCount(0),
-				false,
-			)
-			if err != nil {
-				return err
-			}
-		}
-
 	} else {
-		// nothing to settle, just close the transaction
+		// A report can commit before its public close resumes settlement.
+		// Recover that exact no-escrow owner even when no report edit remains.
 		var posts []func() any
 		var err error
 		contractExpiryContinuationTx(ctx, openContract.contractId, scope, func(tx server.PgTx) {
+			var currentOutcome *ContractOutcome
+			server.Raise(tx.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, openContract.contractId).Scan(&currentOutcome))
+			if currentOutcome != nil {
+				return
+			}
+			var hasEscrow, pending bool
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),
+                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, openContract.contractId).Scan(&hasEscrow, &pending))
+			if !hasEscrow {
+				if pending {
+					return
+				}
+				server.Raise(validateContractFreeSettlementOwnerInTx(ctx, tx, openContract.contractId))
+				// The proof is sticky, but reports and dispute state can change
+				// after preparation. Revalidate them under this outcome owner.
+				fresh, prepareErr := prepareContractExpiryInTx(ctx, tx, openContract.contractId, server.NowUtc())
+				if errors.Is(prepareErr, errContractAlreadySettled) {
+					return
+				}
+				server.Raise(prepareErr)
+				if fresh == nil || !fresh.usageUnverifiedRetained {
+					panic(errors.New("free expiry lost retained ownership"))
+				}
+				server.Raise(continueContractExpiryReportsInTx(ctx, tx, fresh, ContractOutcomeSettled))
+				posts, _, err = settleLegacyContractWithoutEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled, fresh.dispute)
+				server.Raise(err)
+				return
+			}
 			posts, _, err = settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled, scope)
 			if scope != nil {
 				server.Raise(err)

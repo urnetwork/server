@@ -13,7 +13,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -157,7 +157,7 @@ func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.T
 	// validates every claim — a zero CreateTime is rejected as "Invalid
 	// signed token claims", the transports redial forever, and every test
 	// on this env times out waiting for its provide ack (c13-1).
-	userSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(
+	userSession := session.Testing_CreateClientSession(ctx, session.NewByJwt(
 		networkId,
 		userId,
 		fmt.Sprintf("peerdiscovery-%s", networkId),
@@ -457,7 +457,7 @@ func TestExchangePeerDiscovery(t *testing.T) {
 		connect.AssertEqual(t, len(peersResult.Peers), 2)
 
 		// a top-level client session sees the other peer, excluding itself
-		byJwtA, err := jwt.ParseByJwt(ctx, byClientJwtA)
+		byJwtA, err := session.ParseByJwt(ctx, byClientJwtA)
 		connect.AssertEqual(t, err, nil)
 		clientSessionA := session.Testing_CreateClientSession(ctx, byJwtA)
 		peersResult, err = model.GetNetworkPeersForSession(clientSessionA)
@@ -761,7 +761,7 @@ func TestExchangePeerDiscoveryDerivativeClient(t *testing.T) {
 		connect.AssertEqual(t, disconnectedCountD, 0)
 
 		// the fast peer discovery api rejects a derivative client session
-		byJwtD, err := jwt.ParseByJwt(ctx, byClientJwtD)
+		byJwtD, err := session.ParseByJwt(ctx, byClientJwtD)
 		connect.AssertEqual(t, err, nil)
 		clientSessionD := session.Testing_CreateClientSession(ctx, byJwtD)
 		peersResult, err := model.GetNetworkPeersForSession(clientSessionD)
@@ -933,7 +933,7 @@ func TestExchangePeerDiscoveryNetworkIsolation(t *testing.T) {
 		model.Testing_CreateNetwork(ctx, networkId2, fmt.Sprintf("peerdiscovery2-%s", networkId2), userId2)
 		// minted, not a literal: derived client jwts must survive the
 		// transport's claims validation (see the env setup comment)
-		userSession2 := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(
+		userSession2 := session.Testing_CreateClientSession(ctx, session.NewByJwt(
 			networkId2,
 			userId2,
 			fmt.Sprintf("peerdiscovery2-%s", networkId2),

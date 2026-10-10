@@ -327,6 +327,7 @@ func AddToStream(
 				return nil
 			})
 
+			server.Raise(storeStreamParticipants(ctx, streamId, streamKey))
 			if initialSize == 0 {
 				for clientId, edges := range streamKey.Edges() {
 					// bump the per-client hops version (PEERS2.md
@@ -726,6 +727,8 @@ func removeFromStreams(ctx context.Context, contractIds []server.Id) (removed ma
 				continue
 			}
 			pipe.SRem(ctx, pairStreamsKey(entry.key.SourceId(), entry.key.DestinationId()), entry.key.Bytes())
+			pipe.Del(ctx, streamAuthorityKey(entry.streamId, "p"))
+			pipe.Set(ctx, streamAuthorityKey(entry.streamId, "r"), 1, 8*time.Hour)
 			for clientId, edges := range entry.key.Edges() {
 				hop := NewStreamHop(edges[0], edges[1], entry.streamId)
 				pipe.Eval(ctx, removeStreamHopScript,

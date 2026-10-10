@@ -11,89 +11,76 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server"
 )
 
-// Optional provenance uses a savepoint so missing rollout tables or a bounded
-// evidence refusal cannot abort ordinary connection and accounting traffic.
+// Only expected evidence gaps refuse the optional original. Schema and SQL
+// failures belong to the caller's transaction, as do missing ownership fences.
+var errProviderWorkEvidenceUnavailable = errors.New("provider work original evidence is unavailable")
+
+// The signer is optional; its database objects are migration prerequisites.
+// Once SQL starts, every unexpected failure belongs to the caller's transaction.
 func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(server.PgTx) error) bool {
 	if providerWorkSessionSourceFromContext(ctx) == nil {
 		return false
 	}
-	return providerWorkOptionalSchemaInTx(ctx, tx, fn)
-}
-
-// Fences also apply to unsigned current callers. Before the optional migration
-// exists, a savepoint preserves their original operation and compatibility.
-// A savepoint that cannot be created raises: the transaction is aborted, its
-// context canceled or its connection lost, so the caller cannot go on either.
-func providerWorkOptionalSchemaInTx(ctx context.Context, tx server.PgTx, fn func(server.PgTx) error) bool {
-	optional := server.RaisePgResult(tx.Begin(ctx))
-	if err := fn(optional); err != nil {
-		// Cancellation can close pgx before savepoint cleanup. Preserve the
-		// refused operation and caller stop when cleanup reports only conn closed.
-		rollbackErr := optional.Rollback(ctx)
-		if rollbackErr != nil || ctx.Err() != nil {
-			server.Raise(errors.Join(err, rollbackErr, ctx.Err()))
-		}
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "40001" {
-			server.Raise(err)
-		}
+	server.Raise(ctx.Err())
+	err := fn(tx)
+	if ctx.Err() != nil {
+		server.Raise(errors.Join(err, ctx.Err()))
+	}
+	if err == errProviderWorkEvidenceUnavailable {
 		return false
 	}
-	server.Raise(optional.Commit(ctx))
+	server.Raise(err)
 	return true
 }
 
 // Lock keys, rather than UUID order, define the order because advisory hashes
 // may collide. Both request directions and connection owners use this function.
 func providerWorkLockEndpointsInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) {
-	providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
-		if _, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`); err != nil {
-			return err
-		}
-		return providerWorkLockEndpointReadRowsInTx(ctx, optional, clientIds)
-	})
+	if providerWorkSessionSourceFromContext(ctx) == nil {
+		return
+	}
+	server.Raise(ctx.Err())
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`)
+	server.Raise(errors.Join(err, ctx.Err()))
+	server.Raise(errors.Join(providerWorkLockEndpointReadRowsInTx(ctx, tx, clientIds), ctx.Err()))
 }
 
 // Current writers prelock every endpoint. The shared bridge supports databases
 // that still have the original v776 functions; the repair removes its exclusive
 // holder and makes conflicting rolling writers retry before waiting on a fence.
-func providerWorkLockSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) bool {
-	return providerWorkLockSessionMutationHeadInTx(ctx, tx, true, clientIds...)
+func providerWorkLockSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) {
+	providerWorkLockSessionMutationHeadInTx(ctx, tx, true, clientIds...)
 }
 
 // READ COMMITTED connection owners take a fresh snapshot after their endpoint
 // wait. Their trigger's non-key sequence update needs no preliminary FOR UPDATE
 // on the head; the endpoint fence still orders every mutation and signed cut.
 // Repeatable-read callers must retain the generic stale-head guard above.
-func providerWorkLockCurrentSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) bool {
-	return providerWorkLockSessionMutationHeadInTx(ctx, tx, false, clientIds...)
+func providerWorkLockCurrentSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) {
+	providerWorkLockSessionMutationHeadInTx(ctx, tx, false, clientIds...)
 }
 
 // The compatibility bridge and endpoint key/order are identical for both
 // isolation modes. Only the old-snapshot guard depends on the caller's mode.
-func providerWorkLockSessionMutationHeadInTx(ctx context.Context, tx server.PgTx, lockHead bool, clientIds ...server.Id) bool {
+func providerWorkLockSessionMutationHeadInTx(ctx context.Context, tx server.PgTx, lockHead bool, clientIds ...server.Id) {
 	if len(clientIds) == 0 {
-		return false
+		return
 	}
-	return providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) error {
-		if _, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`); err != nil {
-			return err
-		}
-		if lockHead {
-			if err := providerWorkLockEndpointRowsInTx(ctx, optional, clientIds); err != nil {
-				return err
-			}
-		} else if _, err := optional.Exec(ctx, providerWorkEndpointWriteLockSQL, clientIds); err != nil {
-			return err
-		}
-		_, err := optional.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)
-		return err
-	})
+	server.Raise(ctx.Err())
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`)
+	server.Raise(errors.Join(err, ctx.Err()))
+	if lockHead {
+		err = providerWorkLockEndpointRowsInTx(ctx, tx, clientIds)
+	} else {
+		_, err = tx.Exec(ctx, providerWorkEndpointWriteLockSQL, clientIds)
+	}
+	server.Raise(errors.Join(err, ctx.Err()))
+	_, err = tx.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)
+	server.Raise(errors.Join(err, ctx.Err()))
 }
 
 var providerWorkEndpointWriteLockSQL = server.TaggedDatabaseStatement(`SELECT pg_advisory_xact_lock(776,lock_key) FROM
@@ -161,6 +148,8 @@ func providerWorkRequireEndpointFencesInTx(ctx context.Context, tx server.PgTx, 
 
 // Only a live first admission may observe an empty genesis. An existing head
 // permanently prevents rebasing after a gap, restart, cleanup, or key rotation.
+// If signing refuses after append, the unsigned baseline remains a permanent
+// gap with the owning connection mutation; a later source cannot backfill it.
 func providerWorkSessionGenesisInTx(ctx context.Context, tx server.PgTx, clientId server.Id) {
 	providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
 		if err := providerWorkRequireEndpointFencesInTx(ctx, optional, clientId); err != nil {
@@ -220,9 +209,22 @@ func providerWorkSignSessionEventsInTx(ctx context.Context, tx server.PgTx, clie
 		return err
 	}
 	if len(events) > int(source.authority.MaxEndpointEvents) {
-		return errors.New("provider work live event batch exceeds authority")
+		return errProviderWorkEvidenceUnavailable
 	}
+	type original struct {
+		clientId server.Id
+		sequence uint64
+		raw      []byte
+		hash     [32]byte
+	}
+	originals := []original{}
+	previousOriginals := map[server.Id]original{}
 	for _, e := range events {
+		// A rollout can first observe an already-connected endpoint. Neither
+		// its unknown genesis nor an exhausted history bound is corruption.
+		if e.sequence > uint64(source.authority.MaxEndpointEvents) || e.sequence == 1 && e.kind != "baseline" {
+			return errProviderWorkEvidenceUnavailable
+		}
 		if e.networkId == nil {
 			continue
 		}
@@ -235,7 +237,9 @@ func providerWorkSignSessionEventsInTx(ctx context.Context, tx server.PgTx, clie
 		}
 		if e.sequence > 1 {
 			var previous []byte
-			if err := tx.QueryRow(ctx, `SELECT receipt_hash FROM provider_work_session_receipt WHERE client_id=$1 AND sequence=$2`, e.clientId, e.sequence-1).Scan(&previous); err != nil {
+			if staged, found := previousOriginals[e.clientId]; found && staged.sequence == e.sequence-1 {
+				previous = staged.hash[:]
+			} else if err := tx.QueryRow(ctx, `SELECT receipt_hash FROM provider_work_session_receipt WHERE client_id=$1 AND sequence=$2`, e.clientId, e.sequence-1).Scan(&previous); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					continue
 				}
@@ -250,7 +254,14 @@ func providerWorkSignSessionEventsInTx(ctx context.Context, tx server.PgTx, clie
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO provider_work_session_receipt(client_id,sequence,receipt_hash,original) VALUES($1,$2,$3,$4)`, e.clientId, e.sequence, hash[:], raw); err != nil {
+		prepared := original{clientId: e.clientId, sequence: e.sequence, raw: raw, hash: hash}
+		originals = append(originals, prepared)
+		previousOriginals[e.clientId] = prepared
+	}
+	// A later evidence refusal leaves the entire batch unsigned. SQL failures
+	// roll back the owner, including any receipt already inserted by this loop.
+	for _, prepared := range originals {
+		if _, err := tx.Exec(ctx, `INSERT INTO provider_work_session_receipt(client_id,sequence,receipt_hash,original) VALUES($1,$2,$3,$4)`, prepared.clientId, prepared.sequence, prepared.hash[:], prepared.raw); err != nil {
 			return err
 		}
 	}
@@ -384,6 +395,11 @@ func providerWorkRetainReservationInTx(ctx context.Context, tx server.PgTx, cont
 		}
 		if capacity < 0 {
 			return errors.New("provider work reservation capacity is negative")
+		}
+		// Ordinary contract accounting supports a self-pair, while the
+		// original-work protocol only attributes distinct endpoints.
+		if sourceId == destinationId {
+			return errProviderWorkEvidenceUnavailable
 		}
 		if err := providerWorkRequireEndpointFencesInTx(ctx, optional, sourceId, destinationId); err != nil {
 			return err

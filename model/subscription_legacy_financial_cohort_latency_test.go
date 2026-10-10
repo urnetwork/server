@@ -25,31 +25,46 @@ import (
 // frame contents are retained. The one-shot SET barrier has no timer: only
 // actual client closure or parent cancellation releases it.
 type legacyCohortLatencyProxy struct {
-	listener      net.Listener
-	target        string
-	ctx           context.Context
-	cancel        context.CancelFunc
-	enabled       atomic.Bool
-	delayNs       atomic.Int64
-	holdSet       atomic.Bool
-	held          atomic.Int64
-	heldClosed    atomic.Int64
-	ready         atomic.Int64
-	delayed       atomic.Int64
-	frontendBytes atomic.Int64
-	backendBytes  atomic.Int64
-	begins        atomic.Int64
-	errorLock     sync.Mutex
-	errorClasses  map[string]int64
-	commits       atomic.Int64
-	rollbacks     atomic.Int64
-	activeClosed  atomic.Int64
-	maxTxNs       atomic.Int64
-	stateLock     sync.Mutex
-	connectionKVs map[net.Conn]bool
-	accepted      chan struct{}
-	joined        sync.WaitGroup
-	closeOnce     sync.Once
+	listener                   net.Listener
+	target                     string
+	ctx                        context.Context
+	cancel                     context.CancelFunc
+	enabled                    atomic.Bool
+	delayNs                    atomic.Int64
+	jitter                     atomic.Bool
+	jitterCharged              [5]atomic.Int64
+	jitterApplied              [5]atomic.Int64
+	holdSet                    atomic.Bool
+	held                       atomic.Int64
+	heldClosed                 atomic.Int64
+	ready                      atomic.Int64
+	delayed                    atomic.Int64
+	frontendBytes              atomic.Int64
+	backendBytes               atomic.Int64
+	begins                     atomic.Int64
+	errorLock                  sync.Mutex
+	errorClasses               map[string]int64
+	commits                    atomic.Int64
+	rollbacks                  atomic.Int64
+	writeCommits               atomic.Int64
+	writeRollbacks             atomic.Int64
+	activeWritesClosed         atomic.Int64
+	activeClosed               atomic.Int64
+	commandCompleteObservation atomic.Pointer[legacyCohortCommandCompleteObservation]
+	diagnosticCapture          atomic.Pointer[legacyCohortProxyDiagnosticCapture]
+	diagnosticOrdinal          atomic.Uint64
+	maxTxNs                    atomic.Int64
+	stateLock                  sync.Mutex
+	connectionKVs              map[net.Conn]bool
+	accepted                   chan struct{}
+	joined                     sync.WaitGroup
+	closeOnce                  sync.Once
+}
+
+// A fixture can advance its private admission clock after an actual completed
+// statement. The callback must not retain frame data or perform blocking work.
+type legacyCohortCommandCompleteObservation struct {
+	observe func([]byte)
 }
 
 // Counts bytes read during the enabled window without retaining request data.
@@ -140,9 +155,31 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 	}()
 	defer func() { _ = client.Close(); _ = upstream.Close(); <-frontendDone }()
 	var transactionStarted time.Time
+	transactionHadWrites := false
 	defer func() {
 		if !transactionStarted.IsZero() {
 			self.activeClosed.Add(1)
+			if transactionHadWrites {
+				self.activeWritesClosed.Add(1)
+			}
+		}
+	}()
+	connectionOrdinal := self.diagnosticOrdinal.Add(1)
+	var backendPid uint32
+	var diagnostic *legacyCohortProxyDiagnosticCapture
+	var connectionDiagnostic *legacyCohortConnectionDiagnosticCapture
+	var diagnosticFrames legacyCohortDiagnosticFrames
+	var pendingDiagnostic legacyCohortReadyDiagnostic
+	observingReady := false
+	defer func() {
+		if observingReady {
+			if pendingDiagnostic.StopCause == "" {
+				pendingDiagnostic.StopCause = "forwarding_stopped"
+			}
+			connectionDiagnostic.finishReady(pendingDiagnostic)
+		}
+		if connectionDiagnostic != nil {
+			connectionDiagnostic.close()
 		}
 	}()
 	sawSet := false
@@ -160,7 +197,41 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 			return
 		}
 
-		if self.enabled.Load() {
+		capture := diagnostic
+		if capture == nil {
+			capture = self.diagnosticCapture.Load()
+		}
+		var readyReceived time.Time
+		if capture != nil && header[0] == 'Z' {
+			readyReceived = time.Now()
+		}
+		// Only the process id crosses into diagnostic state. The other
+		// BackendKeyData bytes remain solely in this forwarded frame.
+		if header[0] == 'K' && len(body) == 8 {
+			backendPid = binary.BigEndian.Uint32(body[:4])
+			if connectionDiagnostic != nil {
+				connectionDiagnostic.setBackendPid(backendPid)
+			}
+		}
+		if diagnostic == nil && capture != nil {
+			diagnostic = capture
+			connectionDiagnostic = diagnostic.connection(connectionOrdinal, backendPid)
+		}
+		enabled := self.enabled.Load()
+		if diagnostic != nil {
+			diagnosticFrames.observe(header[0], body, enabled)
+			if header[0] == 'Z' {
+				if enabled {
+					value := diagnosticFrames.ready(readyReceived, body)
+					if diagnostic.beginReady(connectionDiagnostic) {
+						pendingDiagnostic, observingReady = value, true
+					}
+				} else {
+					diagnosticFrames.resetCycle()
+				}
+			}
+		}
+		if enabled {
 			self.backendBytes.Add(int64(len(header) + len(body)))
 			if header[0] == 'E' {
 				self.errorLock.Lock()
@@ -172,8 +243,13 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 				case bytes.Equal(body, []byte("BEGIN\x00")):
 					self.begins.Add(1)
 					transactionStarted = time.Now()
+					transactionHadWrites = false
 				case bytes.Equal(body, []byte("SET\x00")):
 					sawSet = !transactionStarted.IsZero()
+				case bytes.HasPrefix(body, []byte("INSERT ")), bytes.HasPrefix(body, []byte("UPDATE ")), bytes.HasPrefix(body, []byte("DELETE ")):
+					if !transactionStarted.IsZero() {
+						transactionHadWrites = true
+					}
 				case bytes.Equal(body, []byte("COMMIT\x00")), bytes.Equal(body, []byte("ROLLBACK\x00")):
 					if !transactionStarted.IsZero() {
 						elapsed := time.Since(transactionStarted).Nanoseconds()
@@ -186,40 +262,99 @@ func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 					}
 					if bytes.Equal(body, []byte("COMMIT\x00")) {
 						self.commits.Add(1)
+						if transactionHadWrites {
+							self.writeCommits.Add(1)
+						}
 					} else {
 						self.rollbacks.Add(1)
+						if transactionHadWrites {
+							self.writeRollbacks.Add(1)
+						}
 					}
+					transactionHadWrites = false
+				}
+				if observation := self.commandCompleteObservation.Load(); observation != nil {
+					observation.observe(body)
 				}
 			}
 			if header[0] == 'Z' {
-				self.ready.Add(1)
+				ready := self.ready.Add(1)
 				if sawSet && self.holdSet.CompareAndSwap(true, false) {
 					self.held.Add(1)
 					select {
 					case <-frontendDone:
 						self.heldClosed.Add(1)
+						if observingReady {
+							pendingDiagnostic.StopCause = "held_frontend_closed"
+						}
 					case <-self.ctx.Done():
+						if observingReady {
+							pendingDiagnostic.StopCause = "held_context_done"
+						}
 					}
 					return
 				}
 				sawSet = false
-				if delay := time.Duration(self.delayNs.Load()); delay > 0 {
+				delay := time.Duration(self.delayNs.Load())
+				jitterBucket := -1
+				if self.jitter.Load() {
+					// The observed Ready ordinal fixes a repeating 1..5ms
+					// sequence. Scheduling decides which connection receives it.
+					jitterBucket = int((ready - 1) % 5)
+					delay = time.Duration(jitterBucket+1) * time.Millisecond
+					self.jitterCharged[jitterBucket].Add(1)
+				}
+				if observingReady {
+					pendingDiagnostic.RequestedDelayNs = int64(delay)
+				}
+				if delay > 0 {
 					self.delayed.Add(1)
+					if observingReady {
+						pendingDiagnostic.TimerStart = time.Now()
+					}
 					select {
 					case <-time.After(delay):
+						if observingReady {
+							pendingDiagnostic.TimerDone = time.Now()
+						}
+						if jitterBucket >= 0 {
+							self.jitterApplied[jitterBucket].Add(1)
+						}
 					case <-frontendDone:
+						if observingReady {
+							pendingDiagnostic.TimerDone = time.Now()
+							pendingDiagnostic.StopCause = "timer_frontend_closed"
+						}
 						return
 					case <-self.ctx.Done():
+						if observingReady {
+							pendingDiagnostic.TimerDone = time.Now()
+							pendingDiagnostic.StopCause = "timer_context_done"
+						}
 						return
 					}
 				}
 			}
 		}
 		if _, err := client.Write(header[:]); err != nil {
+			if observingReady {
+				pendingDiagnostic.ForwardDone = time.Now()
+				pendingDiagnostic.StopCause = "header_write_error"
+			}
 			return
 		}
 		if _, err := client.Write(body); err != nil {
+			if observingReady {
+				pendingDiagnostic.ForwardDone = time.Now()
+				pendingDiagnostic.StopCause = "body_write_error"
+			}
 			return
+		}
+		if observingReady {
+			pendingDiagnostic.ForwardDone = time.Now()
+			pendingDiagnostic.Forwarded = true
+			connectionDiagnostic.finishReady(pendingDiagnostic)
+			observingReady = false
 		}
 	}
 }
@@ -231,6 +366,9 @@ func (self *legacyCohortLatencyProxy) snapshot() map[string]int64 {
 		"ready_replies_observed":  self.ready.Load(), "ready_replies_charged_delay": self.delayed.Load(),
 		"frontend_bytes_read": self.frontendBytes.Load(), "complete_backend_frame_bytes_read": self.backendBytes.Load(),
 		"commit_commands_observed": self.commits.Load(), "rollback_commands_observed": self.rollbacks.Load(),
+		"transactions_with_writes_committed":                 self.writeCommits.Load(),
+		"transactions_with_writes_rolled_back":               self.writeRollbacks.Load(),
+		"connections_closed_with_active_writes":              self.activeWritesClosed.Load(),
 		"connections_closed_after_begin_without_end_command": self.activeClosed.Load(),
 		"max_begin_to_end_command_observed_ns":               self.maxTxNs.Load(),
 		"held_financial_set_replies":                         self.held.Load(), "held_reply_client_closures": self.heldClosed.Load(),
@@ -239,6 +377,10 @@ func (self *legacyCohortLatencyProxy) snapshot() map[string]int64 {
 	defer self.errorLock.Unlock()
 	for _, class := range []string{"serialization_failure", "deadlock_detected", "lock_not_available", "query_canceled", "in_failed_transaction", "unique_violation", "foreign_key_violation", "other", "malformed"} {
 		counters["error_response_"+class] = self.errorClasses[class]
+	}
+	for index, bucket := range []string{"1ms", "2ms", "3ms", "4ms", "5ms"} {
+		counters["ready_jitter_charged_"+bucket] = self.jitterCharged[index].Load()
+		counters["ready_jitter_applied_"+bucket] = self.jitterApplied[index].Load()
 	}
 	return counters
 }
@@ -457,7 +599,7 @@ func legacyFinancialCohortLatencyLoad(t *testing.T, delay time.Duration) {
 		out := map[string]any{
 			"profile": os.Getenv("URN_LEGACY_FINANCIAL_COHORT_PROFILE"), "contracts": count, "workers": shards, "shards": shards,
 			"payer_networks": 1, "shared_grants": 2, "providers": 4, "grant_distribution": "15:1 within each shard",
-			"modeled_delay_per_ready_ns": delay.Nanoseconds(), "cohort_limit": 8, "cohort_child_deadline_ns": int64(500 * time.Millisecond),
+			"modeled_delay_per_ready_ns": delay.Nanoseconds(), "cohort_limit": 8, "cohort_child_deadline_ns": int64(legacyFinancialCohortTimeout),
 			"rounds": rounds, "zero_completion_waves": noProgressWaves, "visits": visits, "completed": completed, "busy": busy, "pages": pages, "cohorts": cohorts,
 			"financial_and_joined_page_wall_ns": financialElapsed.Nanoseconds(), "including_owner_drain_wall_ns": includingOwners.Nanoseconds(),
 			"closes_per_second": float64(completed) / financialElapsed.Seconds(), "closes_per_second_including_owners": float64(completed) / includingOwners.Seconds(),
@@ -468,7 +610,7 @@ func legacyFinancialCohortLatencyLoad(t *testing.T, delay time.Duration) {
 				"A separately configured pg_maintenance.yml direct claim pool bypasses this proxy. Wall/PGSS include that traffic; protocol counters and modeled delay cover only pg.yml. Backend byte counts exclude incomplete frames interrupted by cancellation.",
 				"Both source arms use the same fixed funded work, public owner, four slots and complete durable output drain; no production scheduler gaps or new arrivals are modeled.",
 				"All cohort timeout/rollback/fallback work remains inside the wall/SQL/protocol/phase denominators; no machine-dependent throughput threshold is asserted.",
-				"The 500ms child context bounds acquire/body; commit acknowledgement uses the existing separate timeout and is not a 500ms lock-hold guarantee.",
+				"The reported cohort child context bounds acquire/body and is clamped by its real parent; commit acknowledgement uses the existing separate timeout and is not a lock-hold guarantee. The literal statement500ms and lock250ms limits remain unchanged.",
 				"Proxy BEGIN-to-end command spans are client/protocol observations, not grant row-lock residence or query CPU; disconnected active transactions are counted separately.",
 				"SQL totals retain separate nested work; Redis hooks cover all three pools but dispatches are not network round trips.",
 				"This finite sensitivity is not sustained fleet throughput, all-close workload mix, or proof of the overall fivefold target.",

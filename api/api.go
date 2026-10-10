@@ -97,6 +97,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/auth/verify", handlers.AuthVerify),
 		router.NewRoute("POST", "/auth/wallet-challenge", handlers.AuthWalletChallenge),
 		router.NewRoute("GET", "/auth/refresh", handlers.AuthRefreshToken),
+		router.NewRoute("POST", "/auth/network-refresh", handlers.AuthNetworkRefreshToken),
 		router.NewRoute("POST", "/auth/verify-send", handlers.AuthVerifySend),
 		router.NewRoute("POST", "/auth/password-reset", handlers.AuthPasswordReset),
 		router.NewRoute("POST", "/auth/password-set", handlers.AuthPasswordSet),
@@ -181,6 +182,10 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// forward -- see model.ProviderClientVerdictQuorumMet.
 		router.NewRoute("POST", "/network/provider-verdict", handlers.ProviderClientVerdictSubmit),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
+		router.NewRoute("GET", "/network/sessions", handlers.NetworkSessions),
+		router.NewRoute("POST", "/network/revoke-session", handlers.RevokeNetworkSession),
+		router.NewRoute("POST", "/network/revoke-other-sessions", handlers.RevokeOtherNetworkSessions),
+		router.NewRoute("GET", "/network/session-operations/([^/]+)", handlers.NetworkSessionOperation),
 		router.NewRoute("GET", "/network/proxies", handlers.NetworkProxies),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
@@ -203,6 +208,27 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 
 		// reliability
 		router.NewRoute("GET", "/network/reliability", handlers.GetNetworkReliability),
+
+		// per-client data caps for embedded clients (EMBED1.md): set and list
+		// with the network's root token or an API key; read one with either, or
+		// with the client's own token
+		router.NewRoute("POST", "/network/client-data-cap", handlers.NetworkClientDataCapSet),
+		router.NewRoute("GET", "/network/client-data-cap", handlers.NetworkClientDataCapGet),
+		router.NewRoute("GET", "/network/client-data-caps", handlers.NetworkClientDataCapsList),
+
+		// per-client ACL groups (EMBED1.md): "isolated" keeps a client out of the
+		// network's peer list. Set with the network's root token or an API key;
+		// read with either, or with the client's own token
+		router.NewRoute("POST", "/network/client-acl-group", handlers.NetworkClientAclGroupSet),
+		router.NewRoute("GET", "/network/client-acl-group", handlers.NetworkClientAclGroupGet),
+
+		// whether the network is Embed-enabled, its client allowance and its
+		// counted clients (EMBED1.md); the data-cap and ACL-group routes above
+		// refuse a network that is not. Read with the root token or an API key
+		router.NewRoute("GET", "/network/embed", handlers.NetworkEmbedGet),
+
+		// the public Services contact form (EMBED1.md)
+		router.NewRoute("POST", "/services/contact-sales", handlers.ServicesContactSales),
 
 		router.NewRoute("POST", "/preferences/set-preferences", handlers.AccountPreferencesSet),
 		router.NewRoute("GET", "/preferences", handlers.AccountPreferencesGet),
@@ -345,5 +371,6 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/log/([^/]+)/upload", handlers.LogUpload),
 	}
 
-	return append(routes, oauth.Routes()...)
+	// every route is classified by credential (route_authz.go, AUTHZ1.md)
+	return applyRouteAccess(append(routes, oauth.Routes()...))
 }

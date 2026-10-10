@@ -29,12 +29,14 @@ import (
 	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/stats/sample"
 	"github.com/urnetwork/server/task"
+	"github.com/urnetwork/server/taskworker/work"
 
 	"github.com/urnetwork/proxy"
 )
 
-func main() {
-	usage := `BringYour control.
+// bringyourctlUsage is the docopt usage text, at package level so tests can
+// parse a command line without running main.
+const bringyourctlUsage = `BringYour control.
 
 Usage:
     bringyourctl sn-transition-status
@@ -67,6 +69,8 @@ Usage:
     bringyourctl locations add-default [-a]
     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
     bringyourctl network remove --network_id=<network_id> --user_id=<user_id>
+    bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
+    bringyourctl network embed --network_id=<network_id> [--enable [--client-limit=<limit>] | --disable]
     bringyourctl balance-code create --duration=<duration> --balance=<balance> --cost=<usd> --email=<email> [--count=<count>]
     bringyourctl balance-code check --secret=<secret>
     bringyourctl send network-welcome --user_auth=<user_auth>
@@ -95,6 +99,8 @@ Usage:
     bringyourctl contracts repair-expiry --private-stdin [--apply]
     bringyourctl contracts repair-redis-expiry --private-stdin [--apply]
     bringyourctl contracts drain-legacy --private-stdin [--apply]
+    bringyourctl contracts queue-expiry
+    bringyourctl contracts schedule-open-closures
     bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl contracts reconcile-net-escrow [--network_id=<network_id>] [--dry-run]
@@ -140,6 +146,18 @@ Options:
     --network_id=<network_id>
     --user_id=<user_id>
     --secret=<secret>
+    --set=<limit>  Set the network's Embed plan client allowance: the top-level
+                   client limit and the concurrent connection limit (the defaults
+                   are 100 and the tier's concurrent_clients).
+    --clear        Return the network to the default limits.
+    --enable       Enable Embed for the network, once its sales contract is
+                   signed: its data-cap and ACL-group APIs open.
+    --client-limit=<limit>  With --enable, also set the network's client
+                   allowance: the top-level client limit and the concurrent
+                   connection limit.
+    --disable      Disable Embed for the network and return it to the default
+                   limits. Caps and ACL groups already set stay enforced, and
+                   the network's client tokens stay refused on admin routes.
 
     --private-stdin  Read the bounded private expiry request from stdin.
     --apply          Apply the scoped expiry request; omission is a read-only preview.
@@ -152,6 +170,9 @@ Options:
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
     --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, or solana.
     -c --count=<count>	Number to process [default: 1000].`
+
+func main() {
+	usage := bringyourctlUsage
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
@@ -235,6 +256,10 @@ Options:
 			networkFind(opts)
 		} else if remove, _ := opts.Bool("remove"); remove {
 			networkRemove(opts)
+		} else if clientLimit, _ := opts.Bool("client-limit"); clientLimit {
+			networkClientLimit(opts)
+		} else if embed, _ := opts.Bool("embed"); embed {
+			networkEmbed(opts)
 		}
 	} else if network, _ := opts.Bool("balance-code"); network {
 		if create, _ := opts.Bool("create"); create {
@@ -298,6 +323,12 @@ Options:
 			adminWalletEstimateFee(opts)
 		}
 	} else if contracts, _ := opts.Bool("contracts"); contracts {
+		if scheduleOpen, _ := opts.Bool("schedule-open-closures"); scheduleOpen {
+			os.Exit(runScheduleOpenContractClosures(context.Background(), os.Stdout, work.ScheduleOpenContractClosures))
+		}
+		if queueExpiry, _ := opts.Bool("queue-expiry"); queueExpiry {
+			os.Exit(runContractExpiryRecovery(context.Background(), os.Stdout, invokeContractExpiryRecovery))
+		}
 		if drainLegacy, _ := opts.Bool("drain-legacy"); drainLegacy {
 			apply, _ := opts.Bool("--apply")
 			os.Exit(runPrivateLegacySettlementDrain(context.Background(), os.Stdin, os.Stdout, apply, invokeLegacySettlementDrain))
@@ -1053,6 +1084,95 @@ func networkRemove(opts docopt.Opts) {
 		os.Exit(1)
 	}
 	fmt.Printf("network %s removed\n", networkId)
+}
+
+// networkClientLimit shows, sets or clears the Embed plan client allowance of a
+// network (model/network_client_limit_model.go): an Embed plan sets the
+// network's client allowance — the top-level client limit and the concurrent
+// connection limit. It then prints the effective allowance.
+func networkClientLimit(opts docopt.Opts) {
+	ctx := context.Background()
+
+	networkIdStr, _ := opts.String("--network_id")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+
+	if setStr, _ := opts.String("--set"); setStr != "" {
+		limit, err := strconv.Atoi(setStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid --set: %s\n", err)
+			os.Exit(1)
+		}
+		if err := model.SetNetworkTopLevelClientLimit(ctx, networkId, limit); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	} else if clear, _ := opts.Bool("--clear"); clear {
+		model.ClearNetworkTopLevelClientLimit(ctx, networkId)
+	}
+
+	limit := model.GetNetworkTopLevelClientLimit(ctx, networkId)
+	if limit.Override {
+		fmt.Printf("network %s client allowance %d (Embed plan: top-level client limit and concurrent connection limit)\n", networkId, limit.Limit)
+	} else {
+		fmt.Printf("network %s top-level client limit %d (default; concurrent connections follow the tier)\n", networkId, limit.Limit)
+	}
+}
+
+// networkEmbed enables, disables or shows Embed for a network
+// (model/network_embed_model.go). The team enables Embed once a network's sales
+// contract is signed: its data-cap and ACL-group APIs open and, with
+// --client-limit, its client allowance is set. Disabling closes the APIs and
+// returns the network to the default limits; caps and ACL groups already set
+// stay enforced, and the network stays known as one that was Embed-enabled, so
+// its client tokens stay refused on the admin routes. It then prints the
+// network's Embed state.
+func networkEmbed(opts docopt.Opts) {
+	ctx := context.Background()
+
+	networkIdStr, _ := opts.String("--network_id")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+
+	if enable, _ := opts.Bool("--enable"); enable {
+		var clientLimit *int
+		if limitStr, _ := opts.String("--client-limit"); limitStr != "" {
+			limit, err := strconv.Atoi(limitStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid --client-limit: %s\n", err)
+				os.Exit(1)
+			}
+			clientLimit = &limit
+		}
+		if err := model.EnableNetworkEmbed(ctx, networkId, clientLimit); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	} else if disable, _ := opts.Bool("--disable"); disable {
+		if err := model.DisableNetworkEmbed(ctx, networkId); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+
+	fmt.Println(networkEmbedStatusLine(networkId, model.GetNetworkEmbed(ctx, networkId)))
+}
+
+// networkEmbedStatusLine is the line `network embed` prints. A network that was
+// enabled and then disabled says so: its client tokens are still refused on
+// the admin routes.
+func networkEmbedStatusLine(networkId server.Id, embed *model.NetworkEmbed) string {
+	state := "not enabled"
+	if embed.Enabled {
+		state = "enabled"
+	} else if embed.EverEnabled {
+		state = "disabled (was enabled)"
+	}
+	return fmt.Sprintf("network %s embed %s, client limit %d, %d active clients", networkId, state, embed.ClientLimit, embed.ActiveClientCount)
 }
 
 func balanceCodeCreate(opts docopt.Opts) {

@@ -11,7 +11,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // The test owns these exact keys in the disposable Redis database. Successful
@@ -176,7 +176,7 @@ func TestNativeCommandFailureKeepsVerifiedSiblingsAndRequestGates(t *testing.T) 
 				labels := map[string]string{"rank_mode": RankModeQuality, "source": "primary", "outcome": "unavailable"}
 				before := selectionMetricCount(t, "urnetwork_findproviders2_native_source_outcomes_total", labels)
 				args := &FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &goodLocation}, {LocationId: &failedLocation}}, ForceCount: true, Count: 5, ExcludeClientIds: []server.Id{explicit.ClientId}}
-				clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "native-sibling-error-test", false, false))
+				clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "native-sibling-error-test", false, false))
 				result, err := FindProviders2(args, clientSession)
 				if err != nil || result == nil || len(result.Providers) != 5 {
 					t.Fatalf("%s failed to serve verified same-target native supply: err=%v", failure, err)
@@ -234,7 +234,7 @@ func TestNativeCommandFailureCanceledReadDiscardsSuccessfulSiblings(t *testing.T
 		server.Redis(t.Context(), func(r server.RedisClient) { r.AddHook(hook) })
 		hook.active.Store(true)
 		defer hook.active.Store(false)
-		clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "native-sibling-cancel-test", false, false))
+		clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "native-sibling-cancel-test", false, false))
 		result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &good}, {LocationId: &failed}}}, clientSession)
 		if !errors.Is(err, context.Canceled) || result != nil || hook.matched.Load() != 1 {
 			t.Fatal("canceled native read returned successful sibling rows or entered fallback")

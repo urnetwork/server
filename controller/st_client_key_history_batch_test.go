@@ -184,7 +184,7 @@ func runStClientKeyHistoryBatchPopulation(t *testing.T, distinct bool) {
 			}
 			sort.Slice(requests, func(i, j int) bool { return bytes.Compare(requests[i].ClientID[:], requests[j].ClientID[:]) < 0 })
 			endpoint := stClientKeyBatchTestEndpoint(tb)
-			reader, err := validator.NewHTTPClientKeyHistoryReader(endpoint.URL, func() string { return credential.Sign() })
+			reader, err := validator.NewHTTPClientKeyHistoryReader(endpoint.URL, func() string { return credential.Testing_Sign() })
 			if err != nil {
 				tb.Fatal(err)
 			}

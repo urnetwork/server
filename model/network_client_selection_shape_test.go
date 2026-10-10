@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 // Two independent cache pages may contain the same candidates. Each case
@@ -99,7 +99,7 @@ func TestFindProviders2SelectionSmallResultBoundaries(t *testing.T) {
 			}
 			labels := map[string]string{"target_kind": targetKind, "request_class": requestClass, "ip_family": "any", "rank_mode": "quality", "outcome": "nonempty", "reason": testCase.reason}
 			before := selectionMetricCount(t, "urnetwork_findproviders2_selection_outcomes_total", labels)
-			clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(networkId, server.NewId(), "selection-shape-test", false, false))
+			clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(networkId, server.NewId(), "selection-shape-test", false, false))
 			result, err := FindProviders2(args, clientSession)
 			if err != nil || result == nil || len(result.Providers) != 2 {
 				t.Fatalf("%s did not preserve the expected two-provider response: error=%v", testCase.boundary, err)
@@ -144,7 +144,7 @@ func TestFindProviders2SelectionResultBandsAndDirectIntent(t *testing.T) {
 			}
 			labels := map[string]string{"target_kind": targetKind, "request_class": "default_minimum", "ip_family": "any", "rank_mode": "quality", "outcome": "nonempty", "reason": testCase.reason}
 			before := selectionMetricCount(t, "urnetwork_findproviders2_selection_outcomes_total", labels)
-			clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "selection-band-test", false, false))
+			clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "selection-band-test", false, false))
 			result, err := FindProviders2(args, clientSession)
 			if err != nil || result == nil || len(result.Providers) != testCase.count {
 				t.Fatalf("result band changed response count=%d direct=%t: error=%v", testCase.count, testCase.direct, err)

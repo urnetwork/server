@@ -10,7 +10,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -21,7 +21,7 @@ func TestNetworkCreate(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		session := session.Testing_CreateClientSession(ctx, nil)
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
 
 		referralNetworkId := server.NewId()
 		model.Testing_CreateNetwork(ctx, referralNetworkId, "referralNetwork", server.NewId())
@@ -43,18 +43,18 @@ func TestNetworkCreate(t *testing.T) {
 			Terms:        true,
 			ReferralCode: &referralCode.ReferralCode,
 		}
-		result, err := NetworkCreate(networkCreate, session)
+		result, err := NetworkCreate(networkCreate, clientSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, nil)
 		connect.AssertNotEqual(t, result.Network, nil)
 
 		// session.ByJwt.NetworkId = result.Network.NetworkId
-		session.ByJwt = &jwt.ByJwt{
+		clientSession.ByJwt = &session.ByJwt{
 			NetworkId: result.Network.NetworkId,
 		}
 
 		// ensure referral code has been created for this network
-		networkReferralCode := model.GetNetworkReferralCode(session.Ctx, result.Network.NetworkId)
+		networkReferralCode := model.GetNetworkReferralCode(clientSession.Ctx, result.Network.NetworkId)
 		connect.AssertNotEqual(t, networkReferralCode, nil)
 
 		// check referral network has points applied
@@ -65,7 +65,7 @@ func TestNetworkCreate(t *testing.T) {
 		// connect.AssertNotEqual(t, networkPoints[0].PointValue, 0)
 		//
 		// network name should not contain profanity
-		network := model.GetNetwork(session)
+		network := model.GetNetwork(clientSession)
 		connect.AssertNotEqual(t, network, nil)
 		connect.AssertEqual(t, network.ContainsProfanity, false)
 
@@ -76,7 +76,7 @@ func TestNetworkCreate(t *testing.T) {
 		// The referee state is part of the referral-code response so every client
 		// can show its own +3 GiB/day benefit immediately after sign-up, even
 		// before the first daily grant and with zero outgoing referrals.
-		terms, err := GetNetworkReferralCode(session)
+		terms, err := GetNetworkReferralCode(clientSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, terms.HasReferralNetwork, true)
 		connect.AssertEqual(t, terms.TotalReferrals, 0)
@@ -95,7 +95,7 @@ func TestNetworkCreateWithProfanity(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		session := session.Testing_CreateClientSession(ctx, nil)
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
 
 		referralNetworkId := server.NewId()
 		model.Testing_CreateNetwork(ctx, referralNetworkId, "referralNetwork", server.NewId())
@@ -112,17 +112,17 @@ func TestNetworkCreateWithProfanity(t *testing.T) {
 			Terms:        true,
 			ReferralCode: &referralCode,
 		}
-		result, err := NetworkCreate(networkCreate, session)
+		result, err := NetworkCreate(networkCreate, clientSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, nil)
 		connect.AssertNotEqual(t, result.Network, nil)
 
-		session.ByJwt = &jwt.ByJwt{
+		clientSession.ByJwt = &session.ByJwt{
 			NetworkId: result.Network.NetworkId,
 		}
 
 		// check network contains profanity
-		network := model.GetNetwork(session)
+		network := model.GetNetwork(clientSession)
 		connect.AssertNotEqual(t, network, nil)
 		connect.AssertEqual(t, network.ContainsProfanity, true)
 	})
@@ -145,7 +145,7 @@ func TestNetworkNameUpdate(t *testing.T) {
 
 		model.Testing_CreateNetwork(ctx, networkIdB, networkNameB, userIdB)
 
-		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
 			UserId:    userId,
@@ -194,7 +194,7 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
-		session := session.Testing_CreateClientSession(ctx, nil)
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
 
 		userAuth := "foo@ur.io"
 		password := "bar123456789Foo!"
@@ -223,7 +223,7 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 			BalanceCode: &balanceCode.Secret,
 		}
 
-		result, err := NetworkCreate(networkCreate, session)
+		result, err := NetworkCreate(networkCreate, clientSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, nil)
 

@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -42,7 +42,7 @@ func TestNetworkUpdateRefusesNameTakenBeforeWrite(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkId, "update-race-network", userId)
 		otherNetworkId := server.NewId()
 		Testing_CreateNetwork(ctx, otherNetworkId, "update-race-other", server.NewId())
-		byJwt := &jwt.ByJwt{
+		byJwt := &session.ByJwt{
 			NetworkId: networkId,
 			UserId:    userId,
 		}
@@ -110,7 +110,7 @@ func TestNetworkUpdateStoresValidatedName(t *testing.T) {
 			NetworkUpdateArgs{
 				NetworkName: " Validated Name After ",
 			},
-			session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			session.Testing_CreateClientSession(ctx, &session.ByJwt{
 				NetworkId: networkId,
 				UserId:    userId,
 			}),

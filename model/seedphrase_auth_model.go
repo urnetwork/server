@@ -11,7 +11,7 @@ import (
 	bip39 "github.com/tyler-smith/go-bip39"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 type SeedphraseLoginResult struct {
@@ -106,7 +106,7 @@ func LoginWithSeedphrase(
 	if networkId == (server.Id{}) {
 		// The seedphrase auth row outlived its network_user (e.g. the
 		// network was deleted but the auth row wasn't cleaned up by some
-		// other path). jwt.NewByJwt panics on a zero network id, so fail
+		// other path). session.NewByJwt panics on a zero network id, so fail
 		// cleanly here instead of turning an orphaned-row edge case into
 		// a 500.
 		return nil, errors.New("unknown seedphrase")
@@ -114,8 +114,12 @@ func LoginWithSeedphrase(
 
 	isPro := IsPro(ctx, &networkId)
 
-	byJwt := jwt.NewByJwt(networkId, userId, networkName, false, isPro)
-	return &SeedphraseLoginResult{ByJwt: byJwt.Sign()}, nil
+	byJwt := session.NewByJwt(networkId, userId, networkName, false, isPro)
+	signed, err := session.MintNetworkSession(ctx, byJwt, "seedphrase")
+	if err != nil {
+		return nil, err
+	}
+	return &SeedphraseLoginResult{ByJwt: signed}, nil
 }
 
 func RegenerateSeedphrase(ctx context.Context, userId server.Id) (string, error) {

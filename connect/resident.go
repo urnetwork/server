@@ -1077,6 +1077,12 @@ func (self *Exchange) nominateLocalResident(
 						*resident.peerNetworkId,
 						clientId,
 					)
+				} else if resident.peerCategory == model.NetworkPeerCategoryIsolated {
+					model.RemoveNetworkIsolatedPeer(
+						cleanupCtx,
+						*resident.peerNetworkId,
+						clientId,
+					)
 				} else {
 					model.RemoveNetworkPeer(
 						cleanupCtx,
@@ -1168,13 +1174,22 @@ func (self *Exchange) refreshResidentRegistration(resident *Resident) bool {
 				model.AddNetworkProviderPeer(peerCtx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
 				return
 			}
+			if resident.peerCategory == model.NetworkPeerCategoryIsolated {
+				// an isolated client (ACL group "isolated") is counted but
+				// never a peer; the add doubles as the heartbeat
+				model.AddNetworkIsolatedPeer(peerCtx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
+				return
+			}
 			if !model.RefreshNetworkPeer(peerCtx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
 				// the registration was lost (e.g. expired while the
 				// client was disconnected, or pruned at an expiry
 				// race); re-add with a fresh profile
 				// peersEnabled is not re-checked: peerNetworkId set means
 				// the network was enabled when the resident was created
-				if _, topLevel, _, peerProfile, _ := model.GetNetworkPeerProfile(peerCtx, clientId); topLevel && peerProfile != nil {
+				// only a client still in the default ACL group is re-listed:
+				// one that was isolated since is dropped here, and its
+				// retired resident record closes this resident on its poll
+				if _, topLevel, category, peerProfile, _ := model.GetNetworkPeerProfile(peerCtx, clientId); topLevel && peerProfile != nil && category == model.NetworkPeerCategoryClient {
 					model.AddNetworkPeer(peerCtx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
 				}
 			}
@@ -3625,7 +3640,8 @@ type Resident struct {
 	// set when the client is a top-level client of its network.
 	// Top-level clients are registered in the network peer registry and
 	// receive network peer updates (see model/peer_model.go).
-	peerNetworkId *server.Id
+	peerNetworkId    *server.Id
+	sessionNetworkId *server.Id
 	// the initial peer registration, captured at create
 	peerProfile *model.NetworkPeer
 	// the peer category. Proxy clients are registered for counting but get no
@@ -3787,7 +3803,11 @@ func newResidentDuringAdmission(
 	if beforeProfile := exchange.beforeResidentProfileForTest; beforeProfile != nil {
 		beforeProfile(resident)
 	}
-	if networkId, topLevel, category, peerProfile, peersEnabled := model.GetNetworkPeerProfile(cancelCtx, clientId); topLevel && peersEnabled && peerProfile != nil {
+	networkId, topLevel, category, peerProfile, peersEnabled := model.GetNetworkPeerProfile(cancelCtx, clientId)
+	if networkId != (server.Id{}) {
+		resident.sessionNetworkId = &networkId
+	}
+	if topLevel && peersEnabled && peerProfile != nil {
 		resident.peerNetworkId = &networkId
 		resident.peerProfile = peerProfile
 		resident.peerCategory = category
@@ -4067,6 +4087,27 @@ func streamHopsToReset(hops []model.StreamHop) *protocol.StreamReset {
 
 func (self *Resident) Run() {
 	defer self.cancel()
+	if self.exchange.keyEventSubscriber != nil && self.sessionNetworkId != nil {
+		networkId := *self.sessionNetworkId
+		hints := make(chan *protocol.NetworkSessionsChanged, 1)
+		remove := self.exchange.keyEventSubscriber.AddSessionListener(networkId, nil, func(hint *protocol.NetworkSessionsChanged) {
+			select {
+			case hints <- hint:
+			default:
+			}
+		})
+		defer remove()
+		go func() {
+			for {
+				select {
+				case <-self.ctx.Done():
+					return
+				case hint := <-hints:
+					self.sendListenerFrame(connect.RequireToFrameWithDefaultProtocolVersion(hint))
+				}
+			}
+		}()
+	}
 
 	// the initial stream state is sent as a `StreamReset` with the full hop
 	// snapshot from the listener's first read (below), NOT an eager empty
@@ -4076,40 +4117,26 @@ func (self *Resident) Run() {
 	// reset, which matches the previous empty-reset behavior.
 	// Subsequent hop changes are sent incrementally (open/close), identical
 	// for both client generations.
-	streamHopAccumulator := model.NewStreamHopAccumulator(
-		func(hop model.StreamHop) {
-			// added
-			streamOpen := streamHopToProtocol(hop)
-			frame := connect.RequireToFrameWithDefaultProtocolVersion(streamOpen)
-			self.sendListenerFrame(frame)
-		},
-		func(hop model.StreamHop) {
-			// removed
-			streamClose := &protocol.StreamClose{
-				StreamId: hop.StreamId().Bytes(),
+	// Lease publication is separate from the registry listener: its bounded
+	// I/O cannot block Redis key-event dispatch or the stream lifecycle owner.
+	hopSnapshots := make(chan []model.StreamHop, 1)
+	go self.runStreamAuthorizations(hopSnapshots)
+	streamHopListener := model.NewStreamHopListener(self.ctx, self.clientId, func(event *model.StreamHopEvent) {
+		snapshot := append([]model.StreamHop(nil), event.StreamHops...)
+		select {
+		case hopSnapshots <- snapshot:
+		default:
+			select {
+			case <-hopSnapshots:
+			default:
 			}
-			frame := connect.RequireToFrameWithDefaultProtocolVersion(streamClose)
-			self.sendListenerFrame(frame)
-		},
-	)
-	// the listener callback runs on the single listener goroutine
-	initialHopSync := true
-	streamHopListener := model.NewStreamHopListener(
-		self.ctx,
-		self.clientId,
-		func(event *model.StreamHopEvent) {
-			if initialHopSync {
-				initialHopSync = false
-				frame := connect.RequireToFrameWithDefaultProtocolVersion(streamHopsToReset(event.StreamHops))
-				self.sendListenerFrame(frame)
+			select {
+			case hopSnapshots <- snapshot:
+			default:
 			}
-			// the accumulator emits adds for the first snapshot too; the
-			// client's open is idempotent for streams kept by the reset
-			streamHopAccumulator.Event(event)
-		},
-		self.exchange.streamHopsPollInterval(),
-		self.exchange.listenerFullReadEvery(),
-	)
+		}
+	}, self.exchange.streamHopsPollInterval(), self.exchange.listenerFullReadEvery())
+
 	if self.afterStreamHopListenerStartForTest != nil {
 		self.afterStreamHopListenerStartForTest(streamHopListener)
 	}
@@ -4130,8 +4157,9 @@ func (self *Resident) Run() {
 
 	// only top-level client-category peers get network peer updates.
 	// The listener polls the per-network version counter and sends the
-	// complete list on any change (PEERS2.md). Proxy clients are counted but
-	// get no listener — a hosted device does not consume the peer list.
+	// complete list on any change (PEERS2.md). Proxy and isolated clients
+	// are counted but get no listener — a hosted device does not consume the
+	// peer list, and an isolated client (ACL group "isolated") receives none.
 	if self.exchange.settings.EnableNetworkPeers && self.peerNetworkId != nil && self.peerCategory == model.NetworkPeerCategoryClient {
 		networkPeerListener := model.NewNetworkPeerListener(
 			self.ctx,

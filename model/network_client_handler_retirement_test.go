@@ -98,9 +98,7 @@ func TestHandlerRetirementDoesNotConvoyAcrossEndpoints(t *testing.T) {
 		holder, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 		server.Raise(err)
 		defer rollbackCloseReportTestTransaction(ctx, holder)
-		if !providerWorkLockSessionMutationInTx(ctx, holder, f.destinationId) {
-			t.Fatal("synthetic last endpoint fence unavailable")
-		}
+		providerWorkLockSessionMutationInTx(ctx, holder, f.destinationId)
 		var reruns atomic.Int64
 		workerCtx, stop := context.WithCancel(server.Testing_WithTxRerunHook(ctx, func() { reruns.Add(1) }))
 		result := make(chan error, 1)
@@ -214,10 +212,14 @@ func TestHandlerRetirementBoundsPerEndpointJournal(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_client_handler WHERE handler_id=$1`, handlerId))
 		})
+		observer, closeObservation := providerWorkObserveRuntimeQueries(t, ctx)
+		defer closeObservation()
 		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc().Add(-time.Hour))
 		requireProviderWorkConnectionJournal(t, f, 2+count+64, 2)
 		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc().Add(-time.Hour))
 		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc().Add(-time.Hour))
+		closeObservation()
+		observer.requireNoCatalog(t, "pg_try_advisory_xact_lock", "for update skip locked", "insert into provider_work_session_receipt")
 		requireProviderWorkConnectionJournal(t, f, 2+2*count, 1)
 	})
 }
@@ -302,22 +304,13 @@ func TestHandlerRetirementFailureAndCancellationLeaveNoPartialJournal(t *testing
 	})
 }
 
-// The real savepoint sees a native non-schema SQL error at the head stage.
-// Its rollback must not be mistaken for permission to retire without a fence.
+// The caller sees a native non-schema SQL error at the head stage.
+// That error cannot become permission to retire without a fence.
 type handlerRetirementFaultTx struct {
 	server.PgTx
 }
 
-// Preserve the wrapper when the production owner opens its optional savepoint.
-func (self *handlerRetirementFaultTx) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := self.PgTx.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &handlerRetirementFaultTx{PgTx: tx}, nil
-}
-
-// All other SQL is real and unchanged; division by zero aborts this savepoint.
+// All other SQL is real and unchanged; division by zero aborts the owner.
 func (self *handlerRetirementFaultTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
 	if strings.Contains(query, "WITH owned AS (") {
 		return self.PgTx.QueryRow(ctx, `SELECT 1/0`)

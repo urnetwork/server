@@ -22,7 +22,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -271,7 +271,7 @@ func installSolanaFakePaymentTransactionDeps(t *testing.T, intent *model.SolanaP
 func solanaTestPaymentSession(networkId server.Id) *session.ClientSession {
 	return &session.ClientSession{
 		Ctx:   context.Background(),
-		ByJwt: &jwt.ByJwt{NetworkId: networkId, UserId: server.NewId()},
+		ByJwt: &session.ByJwt{NetworkId: networkId, UserId: server.NewId()},
 	}
 }
 

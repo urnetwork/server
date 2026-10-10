@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
+
 	"github.com/urnetwork/server/session"
 )
 
@@ -19,7 +19,7 @@ import (
 func walletRemovalPoolFixture(t testing.TB, ctx context.Context) (server.Id, server.Id) {
 	t.Helper()
 	networkId := server.NewId()
-	owner := session.NewLocalClientSession(ctx, "192.0.2.1:443", &jwt.ByJwt{NetworkId: networkId})
+	owner := session.NewLocalClientSession(ctx, "192.0.2.1:443", &session.ByJwt{NetworkId: networkId})
 	defer owner.Cancel()
 	walletId := CreateAccountWalletExternal(owner, &CreateAccountWalletExternalArgs{
 		NetworkId: networkId, Blockchain: "MATIC", WalletAddress: "synthetic-pool-wallet", DefaultTokenType: "USDC",
@@ -66,7 +66,7 @@ func TestRemoveWalletConcurrentSinglePoolConnection(t *testing.T) {
 			for _, f := range fixtures {
 				go func() {
 					<-start
-					owner := session.NewLocalClientSession(bounded, "192.0.2.1:443", &jwt.ByJwt{NetworkId: f.networkId})
+					owner := session.NewLocalClientSession(bounded, "192.0.2.1:443", &session.ByJwt{NetworkId: f.networkId})
 					defer owner.Cancel()
 					var out outcome
 					server.HandleError(func() { out.result = RemoveWallet(f.walletId, owner) }, func(err error) { out.err = err })
@@ -114,7 +114,7 @@ func TestRemoveWalletCommitFailurePreservesSelection(t *testing.T) {
 				AFTER UPDATE ON account_wallet DEFERRABLE INITIALLY DEFERRED
 				FOR EACH ROW EXECUTE FUNCTION synthetic_wallet_removal_commit_failure()`))
 		})
-		owner := session.NewLocalClientSession(ctx, "192.0.2.1:443", &jwt.ByJwt{NetworkId: networkId})
+		owner := session.NewLocalClientSession(ctx, "192.0.2.1:443", &session.ByJwt{NetworkId: networkId})
 		defer owner.Cancel()
 		var err error
 		server.HandleError(func() { RemoveWallet(walletId, owner) }, func(cause error) { err = cause })
@@ -149,17 +149,17 @@ func TestRemoveWalletSinglePoolOwnershipAndCancellation(t *testing.T) {
 		withNetworkUserSingleConnection(t, func() {
 			bounded, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
-			stranger := session.NewLocalClientSession(bounded, "192.0.2.2:443", &jwt.ByJwt{NetworkId: server.NewId()})
+			stranger := session.NewLocalClientSession(bounded, "192.0.2.2:443", &session.ByJwt{NetworkId: server.NewId()})
 			defer stranger.Cancel()
 			if result := RemoveWallet(walletId, stranger); result.Success {
 				t.Fatal("foreign network removed wallet")
 			}
-			owner := session.NewLocalClientSession(bounded, "192.0.2.1:443", &jwt.ByJwt{NetworkId: networkId})
+			owner := session.NewLocalClientSession(bounded, "192.0.2.1:443", &session.ByJwt{NetworkId: networkId})
 			defer owner.Cancel()
 			if result := RemoveWallet(server.NewId(), owner); result.Success {
 				t.Fatal("missing wallet removal succeeded")
 			}
-			canceled := session.NewLocalClientSession(bounded, "192.0.2.1:443", &jwt.ByJwt{NetworkId: networkId})
+			canceled := session.NewLocalClientSession(bounded, "192.0.2.1:443", &session.ByJwt{NetworkId: networkId})
 			canceled.Cancel()
 			if err := server.HandleError(func() { RemoveWallet(walletId, canceled) }); err == nil {
 				t.Fatal("canceled owner removed wallet")

@@ -16,9 +16,8 @@ var ErrContractCloseOriginalIntegrity = errors.New("original close signature con
 
 // These bounded retained diagnostics never grant registered-key authority.
 const (
-	originalCloseKeyMissing     = "history_not_found"
-	originalCloseKeyCapacity    = "history_capacity"
-	originalCloseKeyUnavailable = "history_read_unavailable"
+	originalCloseKeyMissing  = "history_not_found"
+	originalCloseKeyCapacity = "history_capacity"
 )
 
 var errOriginalCloseKeyCapacity = errors.New("original close key history exceeds its finite admission bound")
@@ -51,7 +50,8 @@ func validateContractCloseOriginal(report ContractCloseReport) (*coreprotocol.Or
 
 // Key history is independently immutable. Select an exact historical key from
 // the report's own domain, never today's Redis projection or another policy.
-// Missing history leaves the component unknown without blocking the obligation.
+// Migrations own the required schema. Missing history remains unknown; any SQL
+// error, including absent schema, aborts the caller's transaction.
 func originalCloseKeyRegistrationInTx(ctx context.Context, tx server.PgTx, original *coreprotocol.OriginalCloseReport) ([]byte, string, error) {
 	if original == nil {
 		return nil, "", nil
@@ -59,31 +59,17 @@ func originalCloseKeyRegistrationInTx(ctx context.Context, tx server.PgTx, origi
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	// A failed optional SQL read must not leave the accounting transaction
-	// aborted. pgx nested transactions provide an owned savepoint, not a commit.
-	optionalTx, err := tx.Begin(ctx)
-	if err != nil {
-		return nil, "", err
-	}
-	registration, readErr := readOriginalCloseKeyRegistration(ctx, optionalTx, original)
+	registration, readErr := readOriginalCloseKeyRegistration(ctx, tx, original)
 	if ownerErr := ctx.Err(); ownerErr != nil {
 		// The enclosing owner rolls back the whole transaction with bounded cleanup.
 		return nil, "", errors.Join(ownerErr, readErr)
 	}
 	if readErr != nil {
-		if err := optionalTx.Rollback(ctx); err != nil {
-			return nil, "", errors.Join(readErr, err)
-		}
-		if errors.Is(readErr, ErrContractCloseOriginalIntegrity) || errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
-			return nil, "", readErr
-		}
-		if errors.Is(readErr, errOriginalCloseKeyCapacity) {
+		// Capacity alone is optional; a joined drain failure still aborts.
+		if readErr == errOriginalCloseKeyCapacity {
 			return nil, originalCloseKeyCapacity, nil
 		}
-		return nil, originalCloseKeyUnavailable, nil
-	}
-	if err := optionalTx.Commit(ctx); err != nil {
-		return nil, "", err
+		return nil, "", readErr
 	}
 	if len(registration) == 0 {
 		return nil, originalCloseKeyMissing, nil
@@ -91,16 +77,22 @@ func originalCloseKeyRegistrationInTx(ctx context.Context, tx server.PgTx, origi
 	return registration, "", nil
 }
 
-// This bounded reader retains only an exact original registration. Its owner
-// classifies capacity or SQL unavailability separately from contradictory bytes.
-func readOriginalCloseKeyRegistration(ctx context.Context, tx server.PgTx, original *coreprotocol.OriginalCloseReport) ([]byte, error) {
+// This bounded reader retains only an exact original registration. Capacity is
+// optional only when row cleanup confirms no independent SQL/protocol failure.
+func readOriginalCloseKeyRegistration(ctx context.Context, tx server.PgTx, original *coreprotocol.OriginalCloseReport) (registration []byte, returnErr error) {
 	rows, err := tx.Query(ctx, `SELECT registration,registration_hash,evidence,evidence_hash
  FROM st_client_key_history WHERE client_id=$1 AND domain_hash=$2
  ORDER BY generation DESC LIMIT $3`, server.Id(original.ClientId), original.DomainHash[:], MaxStClientKeyHistoryRegistrations+1)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			registration = nil
+			returnErr = errors.Join(returnErr, fmt.Errorf("read original close key history: %w", err))
+		}
+	}()
 	var used uint64
 	for count := uint64(0); rows.Next(); count++ {
 		if err := ctx.Err(); err != nil {
@@ -130,9 +122,6 @@ func readOriginalCloseKeyRegistration(ctx context.Context, tx server.PgTx, origi
 		if record.Registration.Present && record.Registration.PublicKey == original.PublicKey {
 			return bytes.Clone(record.RegistrationBytes), nil
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read original close key history: %w", err)
 	}
 	return nil, nil
 }
