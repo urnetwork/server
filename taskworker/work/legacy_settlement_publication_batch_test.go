@@ -331,10 +331,14 @@ type legacyDispatchEval struct {
 	err      error
 }
 
-// A batch never releases its keys before commit. While the completed publisher
-// is held at an unrelated post barrier, a real child waits outside BEGIN and an
-// independent child finishes. Releasing the publisher lets the exact waiter
-// finish once, with both its financial owner and registration wake committed.
+// A batch never releases its keys before commit. A due close commits its own
+// deadline reconciliation and needs no dispatcher owner key, so the remaining
+// waiter is an older worker's retained payer handoff, finished by the current
+// RunPost retry. While the completed publisher is held at an unrelated post
+// barrier, that retry waits outside BEGIN for the payer key, and a due close
+// of another held payer reconciles without waiting. Releasing the publisher
+// lets the exact waiter finish once, with its payer and registration wakes
+// committed and its contract still held for that financial owner.
 func TestLegacyDispatcherPublicationCommitReleasesActualCloseChild(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -344,23 +348,18 @@ func TestLegacyDispatcherPublicationCommitReleasesActualCloseChild(t *testing.T)
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
 		var ids [2]server.Id
-		var closeOwners [2]model.ContractCloseOwner
+		var payerIds [2]server.Id
 		deadline := server.NowUtc().Truncate(time.Microsecond).Add(-2 * time.Minute)
 		for index := range ids {
 			networkId, sourceId, destinationId := server.NewId(), server.NewId(), server.NewId()
 			model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("synthetic-dispatch-publication-%d", index), server.NewId())
 			model.Testing_CreateDevice(ctx, networkId, server.NewId(), sourceId, "synthetic-source", "synthetic")
 			model.Testing_CreateDevice(ctx, networkId, server.NewId(), destinationId, "synthetic-destination", "synthetic")
+			model.AddBasicTransferBalance(ctx, networkId, 1000, server.NowUtc(), server.NowUtc().Add(time.Hour))
 			var err error
-			if index == 0 {
-				model.AddBasicTransferBalance(ctx, networkId, 1000, server.NowUtc(), server.NowUtc().Add(time.Hour))
-				ids[index], _, err = model.CreateContract(ctx, networkId, sourceId, networkId, destinationId, 100)
-				closeOwners[index] = model.ContractCloseOwner{Kind: model.ContractCloseOwnerPayerNetwork, Id: networkId}
-			} else {
-				ids[index], err = model.CreateContractNoEscrow(ctx, networkId, sourceId, networkId, destinationId, 100)
-				closeOwners[index] = model.ContractCloseOwner{Kind: model.ContractCloseOwnerSourceClient, Id: sourceId}
-			}
+			ids[index], _, err = model.CreateContract(ctx, networkId, sourceId, networkId, destinationId, 100)
 			server.Raise(err)
+			payerIds[index] = networkId
 			server.Raise(model.CloseContract(ctx, ids[index], sourceId, 17, true))
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,next_attempt_time)
@@ -376,24 +375,37 @@ func TestLegacyDispatcherPublicationCommitReleasesActualCloseChild(t *testing.T)
 		first := queue[task.RunOnce("close_scheduled_contract", ids[0]).String()].id
 		second := queue[task.RunOnce("close_scheduled_contract", ids[1]).String()].id
 		args, result := legacyDispatchPublicationFixture()
-		result.Dispatch.PayerNetworkIds[0] = closeOwners[0].Id
+		result.Dispatch.PayerNetworkIds[0], result.Dispatch.PayerNetworkIds[1] = payerIds[0], payerIds[1]
 		for args.Shard == int(ids[0][15])%model.LegacySettlementShardCount || args.Shard == int(ids[1][15])%model.LegacySettlementShardCount {
 			args.Shard = (args.Shard + 1) % model.LegacySettlementShardCount
 		}
-		payerKey := task.RunOnceOwnershipKey(task.RunOnce("flush_legacy_payer_settlements", closeOwners[0].Id))
-		ready, release, waiting := make(chan struct{}), make(chan struct{}), make(chan struct{})
-		var releaseOnce, waitOnce sync.Once
-		ownerDone, childDone := make(chan struct{}), make(chan struct{})
+		var payerKeys [2]server.PgOwnershipKey
+		for index, payerId := range payerIds {
+			payerKeys[index] = task.RunOnceOwnershipKey(task.RunOnce("flush_legacy_payer_settlements", payerId))
+		}
+		ready, release, waiting, independentWaiting := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var releaseOnce, waitOnce, independentWaitOnce sync.Once
+		ownerDone, childDone, independentDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 		var ownerErr error
-		var completed legacyDispatchEval
+		var completed, independentCompleted legacyDispatchEval
 		workerCtx := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
-			if event.Kind == server.PgOwnershipWaiting && slices.Contains(event.Keys, payerKey) {
+			if event.Kind == server.PgOwnershipWaiting && slices.Contains(event.Keys, payerKeys[0]) {
 				waitOnce.Do(func() { close(waiting) })
 			}
 		})
+		independentCtx := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+			if event.Kind == server.PgOwnershipWaiting && slices.Contains(event.Keys, payerKeys[1]) {
+				independentWaitOnce.Do(func() { close(independentWaiting) })
+			}
+		})
 		worker := startupClosureWorker(workerCtx, NewScheduledContractClosureTaskTarget())
-		independent := startupClosureWorker(ctx, NewScheduledContractClosureTaskTarget())
-		startedChild := false
+		independent := startupClosureWorker(independentCtx, NewScheduledContractClosureTaskTarget())
+		// An older worker committed the first close's body, named its payer
+		// and lost its Post; only its serialized result and RunPost remain.
+		postId := retainScheduledClosureHandoff(ctx, owner, worker, first, ids[0], deadline,
+			model.ContractCloseOwner{Kind: model.ContractCloseOwnerPayerNetwork, Id: payerIds[0]})
+		makeCloseRetryTaskDue(ctx, postId)
+		startedChild, startedIndependent := false, false
 		defer func() {
 			releaseOnce.Do(func() { close(release) })
 			worker.Close()
@@ -405,6 +417,9 @@ func TestLegacyDispatcherPublicationCommitReleasesActualCloseChild(t *testing.T)
 			<-ownerDone
 			if startedChild {
 				<-childDone
+			}
+			if startedIndependent {
+				<-independentDone
 			}
 		}()
 		go func() {
@@ -426,29 +441,53 @@ func TestLegacyDispatcherPublicationCommitReleasesActualCloseChild(t *testing.T)
 			}, func(err error) { completed.err = err })
 		}()
 		legacyDispatchAwait(ctx, waiting)
-		pending := task.GetTasks(ctx, first)[first]
-		if pending == nil || pending.ClaimGeneration != 1 || task.GetFinishedTasks(ctx, first)[first] != nil {
-			t.Fatal("held publisher did not retain the actual claimed child's unfinished custody")
+		pending := task.GetTasks(ctx, postId)[postId]
+		retained := task.GetFinishedTasks(ctx, first)[first]
+		if pending == nil || pending.ClaimGeneration != 1 || retained == nil || retained.PostCompleted || task.GetFinishedTasks(ctx, postId)[postId] != nil {
+			t.Fatal("held publisher did not retain the actual claimed retry's unfinished custody")
 		}
-		finished, retried, posts, err := independent.EvalTasks(1)
-		if err != nil || !reflect.DeepEqual(finished, []server.Id{second}) || len(retried)+len(posts) != 0 || task.GetFinishedTasks(ctx, second)[second] == nil {
-			t.Fatal("held unrelated publication stopped independent child finalization", finished, retried, posts, err)
+		startedIndependent = true
+		go func() {
+			defer close(independentDone)
+			server.HandleError(func() {
+				independentCompleted.finished, independentCompleted.retried, independentCompleted.posts, independentCompleted.err = independent.EvalTasks(1)
+			}, func(err error) { independentCompleted.err = err })
+		}()
+		select {
+		case <-independentDone:
+		case <-independentWaiting:
+			t.Fatal("due close of a held payer waited for the unrelated dispatcher publication")
+		case <-ctx.Done():
+			t.Fatal("due close of a held payer did not finish", ctx.Err())
 		}
-		if !reflect.DeepEqual(pending, task.GetTasks(ctx, first)[first]) || task.GetFinishedTasks(ctx, first)[first] != nil {
-			t.Fatal("waiting child changed its claim before acquiring its real owner keys")
+		if independentCompleted.err != nil || !reflect.DeepEqual(independentCompleted.finished, []server.Id{second}) ||
+			len(independentCompleted.retried)+len(independentCompleted.posts) != 0 || task.GetFinishedTasks(ctx, second)[second] == nil {
+			t.Fatal("held unrelated publication stopped independent child finalization", independentCompleted.finished, independentCompleted.err)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var reconciled bool
+			server.Raise(conn.QueryRow(ctx, `SELECT outcome='settled'
+				AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
+				FROM transfer_contract WHERE contract_id=$1`, ids[1]).Scan(&reconciled))
+			if !reconciled {
+				t.Fatal("due close did not commit its own deadline reconciliation")
+			}
+		})
+		if !reflect.DeepEqual(pending, task.GetTasks(ctx, postId)[postId]) || task.GetFinishedTasks(ctx, first)[first].PostCompleted {
+			t.Fatal("waiting retry changed its claim before acquiring its real owner keys")
 		}
 		releaseOnce.Do(func() { close(release) })
 		legacyDispatchAwait(ctx, ownerDone)
 		legacyDispatchAwait(ctx, childDone)
-		if ownerErr != nil || completed.err != nil || !reflect.DeepEqual(completed.finished, []server.Id{first}) || len(completed.retried)+len(completed.posts) != 0 ||
-			task.GetTasks(ctx, first)[first] != nil || task.GetFinishedTasks(ctx, first)[first] == nil {
-			t.Fatal("acknowledged publication did not release the exact child for ordinary finalization", ownerErr, completed.err)
+		if ownerErr != nil || completed.err != nil || !reflect.DeepEqual(completed.finished, []server.Id{postId}) || len(completed.retried)+len(completed.posts) != 0 ||
+			task.GetTasks(ctx, postId)[postId] != nil || task.GetFinishedTasks(ctx, postId)[postId] == nil || !task.GetFinishedTasks(ctx, first)[first].PostCompleted {
+			t.Fatal("acknowledged publication did not release the exact retry for ordinary finalization", ownerErr, completed.err)
 		}
 		queue = readExpiryRecoveryQueue(t, ctx)
-		payer := queue[task.RunOnce("flush_legacy_payer_settlements", closeOwners[0].Id).String()]
+		payer := queue[task.RunOnce("flush_legacy_payer_settlements", payerIds[0]).String()]
 		registration, registered := queue[task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", int(ids[0][15])%model.LegacySettlementShardCount)).String()]
 		if payer.id == (server.Id{}) || payer.generation != 1 || payer.wakeAt == nil || !registered || registration.runAt.After(server.NowUtc()) {
-			t.Fatal("child finalization did not preserve the coalesced payer and registration wakes")
+			t.Fatal("retry finalization did not preserve the coalesced payer and registration wakes")
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var held bool
@@ -457,7 +496,7 @@ func TestLegacyDispatcherPublicationCommitReleasesActualCloseChild(t *testing.T)
 				AND EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT settled)
 				AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)
-				FROM transfer_contract WHERE contract_id=$1`, ids[0], closeOwners[0].Id).Scan(&held))
+				FROM transfer_contract WHERE contract_id=$1`, ids[0], payerIds[0]).Scan(&held))
 			if !held {
 				t.Fatal("queue handoff bypassed the actual paid contract's financial owner")
 			}
