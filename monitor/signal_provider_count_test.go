@@ -61,6 +61,31 @@ func TestProviderCountSignalSyntheticSmallListAndForceMinimumControl(t *testing.
 	}
 }
 
+// The online rank mode is bounded vocabulary like the others: its ordinary
+// cohort is judged, and its ForceMinimum cohort stays a diagnostic control.
+func TestProviderCountSignalJudgesOnlineRankMode(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	online := func(bands map[string]float64, forceMinimum string) string {
+		payload := providerCountFixture(t, now, bands, forceMinimum)
+		if !strings.Contains(payload, `"rank_mode":"quality"`) {
+			t.Fatal("fixture no longer labels its rank mode")
+		}
+		return strings.ReplaceAll(payload, `"rank_mode":"quality"`, `"rank_mode":"online"`)
+	}
+	alerts, err := NewProviderCountSignal().Run(context.Background(), providerCountSyntheticSettings(t, now, online(map[string]float64{"0": 16, "3-9": 4}, "false")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "provider-count-effective-empty")
+	if !strings.Contains(alert.Markdown(), "rank_mode=online") {
+		t.Fatalf("online cohort lost its rank mode:\n%s", alert.Markdown())
+	}
+	alerts, err = NewProviderCountSignal().Run(context.Background(), providerCountSyntheticSettings(t, now, online(map[string]float64{"0": 100}, "true")))
+	if err != nil || len(alerts) != 0 {
+		t.Fatalf("forced online cohort: alerts=%+v err=%v", alerts, err)
+	}
+}
+
 func TestProviderCountSignalSyntheticMissingTelemetryIsVisible(t *testing.T) {
 	now := time.Date(2026, 9, 22, 19, 30, 0, 0, time.UTC)
 	_, err := NewProviderCountSignal().Run(context.Background(), providerCountSyntheticSettings(t, now, providerCountFixture(t, now, nil, "false")))

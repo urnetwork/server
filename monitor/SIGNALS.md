@@ -8419,7 +8419,7 @@ unchanged. New labels are finite vocabulary only:
   `count_zero` (forced count <=0), `count_small` (forced count 1–2),
   `count_positive` (forced count >=3), or `forced_minimum`;
 - `ip_family`: `any`, `v4`, `v6`, `dualstack`, `unknown`;
-- `rank_mode`: `quality`, `speed`, `unknown`;
+- `rank_mode`: `quality`, `speed`, `online`, `unknown`;
 - `outcome`: `nonempty`, `zero`, `error`, `canceled`; and
 - `reason`: the fixed completed-result reason or the failed request stage.
 

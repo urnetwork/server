@@ -4880,6 +4880,14 @@ type RankMode = string
 const (
 	RankModeQuality RankMode = "quality"
 	RankModeSpeed   RankMode = "speed"
+	// Every online provider: each provider that passed the common gates at
+	// export, native Quality and Speed members included (ClientScore.Online).
+	// It has no minimums, no subscriber validation and no borrowing, and
+	// draws its members uniformly: the ip_family filter still decides which
+	// families are eligible, but no family is preferred over another. It
+	// reads the exported non-forced union pool, so it has no score keys of
+	// its own.
+	RankModeOnline RankMode = "online"
 )
 
 type FindProviders2Args struct {
@@ -4888,12 +4896,16 @@ type FindProviders2Args struct {
 	ForceCount          bool            `json:"force_count"`
 	ExcludeClientIds    []server.Id     `json:"exclude_client_ids"`
 	ExcludeDestinations [][]server.Id   `json:"exclude_destinations"`
-	RankMode            RankMode        `json:"rank_mode"`
-	ForceMinimum        bool            `json:"force_minimum"`
+	// "quality" (the default when empty), "speed" or "online". force_minimum
+	// is accepted with "online" and changes nothing: the online bucket has
+	// no minimums to force.
+	RankMode     RankMode `json:"rank_mode"`
+	ForceMinimum bool     `json:"force_minimum"`
 	// IpFamily filters providers by proven address family, in the connect
 	// vocabulary: "" and "v4-capable" (dualstack first, then v4-only),
 	// "v6-capable" (dualstack first, then v6-only), and the exact categories
-	// "dualstack", "v4-only", "v6-only". See ipFamilyFacetsForFilter.
+	// "dualstack", "v4-only", "v6-only". See ipFamilyFacetsForFilter. An
+	// online request draws the families a filter names without preference.
 	IpFamily string `json:"ip_family"`
 }
 
@@ -5901,6 +5913,47 @@ func loadClientScoresWithCursor(
 	facets []ipFamilyFacet,
 	observations ...*findProviders2LoadObservation,
 ) (clientScores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
+	return loadClientScoresInFacetOrder(forceMinimum, rankMode, ctx, locationIds, locationGroupIds, clientLocationId, n, facets, true, observations...)
+}
+
+// The non-forced union pool of either mode is the whole online bucket: it
+// holds the mode's native members and every online provider, and every native
+// member of either mode is online. Online reads Quality's, whose key the
+// location picker already reads as the native-or-online supply.
+const onlineClientScoreSourceRankMode = RankModeQuality
+
+// Loads the online bucket (RankModeOnline) from the non-forced union pool,
+// never the native pages, which hold one mode's native members only, nor the
+// forced pool, which has no online requirement. The requested facets share
+// one draw order, so a preferred family cannot crowd the others out of the
+// rows the request reads.
+func loadOnlineClientScoresWithCursor(
+	ctx context.Context,
+	locationIds map[server.Id]bool,
+	locationGroupIds map[server.Id]bool,
+	clientLocationId server.Id,
+	n int,
+	facets []ipFamilyFacet,
+	observations ...*findProviders2LoadObservation,
+) (map[server.Id]*ClientScore, *clientScoreCursor, error) {
+	return loadClientScoresInFacetOrder(false, onlineClientScoreSourceRankMode, ctx, locationIds, locationGroupIds, clientLocationId, n, facets, false, observations...)
+}
+
+// With facetPriority every page of a preferred facet is drawn before any page
+// of the next (see loadClientScores); without it, the pages of every requested
+// facet are drawn in one shuffled order.
+func loadClientScoresInFacetOrder(
+	forceMinimum bool,
+	rankMode RankMode,
+	ctx context.Context,
+	locationIds map[server.Id]bool,
+	locationGroupIds map[server.Id]bool,
+	clientLocationId server.Id,
+	n int,
+	facets []ipFamilyFacet,
+	facetPriority bool,
+	observations ...*findProviders2LoadObservation,
+) (clientScores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
 	var observation *findProviders2LoadObservation
 	if 0 < len(observations) {
 		observation = observations[0]
@@ -6072,6 +6125,13 @@ func loadClientScoresWithCursor(
 			}
 		}
 
+		if !facetPriority {
+			pageCounts := map[string]int{}
+			for _, group := range groupSampleKeyCounts {
+				maps.Copy(pageCounts, group)
+			}
+			groupSampleKeyCounts = []map[string]int{pageCounts}
+		}
 		cursor = newClientScoreCursor(groupSampleKeyCounts, observation)
 		cursor.sourceIncomplete = sourceIncomplete
 		clientScores, returnErr = cursor.readWithClient(ctx, r, n)
@@ -6283,20 +6343,35 @@ func FindProviders2(
 		observation.enter("load_primary")
 		observation.load.privateSource = "primary_legacy"
 		loadStartTime := time.Now()
-		clientScores, primaryCursor, err := loadPreferredClientScoresWithCursor(
-			requestSettings.NativeReaderEnabled,
-			findProviders2.ForceMinimum,
-			rankMode,
-			session.Ctx,
-			locationIds,
-			locationGroupIds,
-			clientLocationId,
-			loadCount,
-			facets,
-			&observation.load,
-		)
+		var clientScores map[server.Id]*ClientScore
+		var primaryCursor *clientScoreCursor
+		if rankMode == RankModeOnline {
+			clientScores, primaryCursor, err = loadOnlineClientScoresWithCursor(
+				session.Ctx,
+				locationIds,
+				locationGroupIds,
+				clientLocationId,
+				loadCount,
+				facets,
+				&observation.load,
+			)
+		} else {
+			clientScores, primaryCursor, err = loadPreferredClientScoresWithCursor(
+				requestSettings.NativeReaderEnabled,
+				findProviders2.ForceMinimum,
+				rankMode,
+				session.Ctx,
+				locationIds,
+				locationGroupIds,
+				clientLocationId,
+				loadCount,
+				facets,
+				&observation.load,
+			)
+		}
 		if err != nil {
-			if session.Ctx.Err() != nil || findProviders2.ForceMinimum {
+			// Online, like force_minimum, has no other bucket to fall back to.
+			if session.Ctx.Err() != nil || findProviders2.ForceMinimum || rankMode == RankModeOnline {
 				return nil, err
 			}
 			// Native cache availability is not a security decision. Preserve
@@ -6526,6 +6601,25 @@ func FindProviders2(
 					clientScore.UrlProbeSuccessWeight = 1
 				}
 			}
+			if mode == RankModeOnline {
+				for clientId, clientScore := range clientScores {
+					// A native member is an online member, whatever its
+					// record says. The union pool holds nothing else; keep
+					// that true of the answer even for a record that is not.
+					if clientScore.PassesMinimums[RankModeQuality] || clientScore.PassesMinimums[RankModeSpeed] {
+						clientScore.Online = true
+					}
+					if !clientScore.Online {
+						delete(clientScores, clientId)
+						continue
+					}
+					// Every online member is equally likely.
+					if clientScore.ScaledWeights == nil {
+						clientScore.ScaledWeights = map[string]float32{}
+					}
+					clientScore.ScaledWeights[mode] = 1.0
+				}
+			}
 			before := len(clientScores)
 			for clientId := range hardExcludedClientIds {
 				delete(clientScores, clientId)
@@ -6711,7 +6805,9 @@ func FindProviders2(
 			}
 			return nil
 		}
-		if err := refillPool(clientScores, nil, rankMode, primaryCursor, hardExcludedClientIds, false, !findProviders2.ForceMinimum); err != nil {
+		// The online bucket is no mode's native membership; it refills on
+		// online members like the online fallback.
+		if err := refillPool(clientScores, nil, rankMode, primaryCursor, hardExcludedClientIds, false, !findProviders2.ForceMinimum && rankMode != RankModeOnline); err != nil {
 			return nil, err
 		}
 		observation.primaryClientScores = clientScores
@@ -6766,16 +6862,35 @@ func FindProviders2(
 			return clientIds
 		}
 
+		// Draws up to n members of the online bucket, every one equally likely
+		// apart from the intermediaries filterPool down-weights, in one draw
+		// across the requested facets and with no tier banding.
+		selectOnlineUniformly := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
+			clientIds := slices.Collect(maps.Keys(candidateClientScores))
+			mathrand.Shuffle(len(clientIds), func(i int, j int) {
+				clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
+			})
+			n = max(0, min(n, len(clientIds)))
+			connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
+				return candidateClientScores[clientId].ScaledWeights[RankModeOnline]
+			})
+			return clientIds[:n]
+		}
+
 		// Native membership comes only from the shared gate decision. The
 		// performance tier orders members within this bucket.
 		nativeClientScores = map[server.Id]*ClientScore{}
 		for clientId, clientScore := range clientScores {
-			if (findProviders2.ForceMinimum || clientScore.PassesMinimums[rankMode]) &&
+			if (findProviders2.ForceMinimum || clientScore.PassesMinimums[rankMode] || (rankMode == RankModeOnline && clientScore.Online)) &&
 				(rankMode != RankModeQuality || qualityReadClientIds[clientId]) {
 				nativeClientScores[clientId] = clientScore
 			}
 		}
-		clientIds = selectProviders(nativeClientScores, rankMode, count)
+		if rankMode == RankModeOnline {
+			clientIds = selectOnlineUniformly(nativeClientScores, count)
+		} else {
+			clientIds = selectProviders(nativeClientScores, rankMode, count)
+		}
 
 		observation.enter("directory")
 		directory := locationDirectory()
@@ -6923,6 +7038,10 @@ func FindProviders2(
 			}
 			findProviders2BackfillProviders.WithLabelValues(rankMode).Observe(float64(len(borrowedClientIds)))
 			findProviders2AnsweredProviders.WithLabelValues(rankMode).Add(float64(len(clientIds) + len(borrowedClientIds)))
+		} else if rankMode == RankModeOnline && !findProviders2.ForceMinimum {
+			// The online bucket holds every online provider: nothing to borrow.
+			findProviders2BackfillProviders.WithLabelValues(rankMode).Observe(0)
+			findProviders2AnsweredProviders.WithLabelValues(rankMode).Add(float64(len(clientIds)))
 		}
 		chosenClientIds := append(slices.Clone(clientIds), borrowedClientIds...)
 		observation.discoveryReturned = len(chosenClientIds)

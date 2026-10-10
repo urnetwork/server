@@ -462,7 +462,8 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 }
 
 // The bucket a request in rankMode borrows from first when its own comes up
-// short, false for a mode that is neither.
+// short, false for a mode that is neither. Online borrows from nothing: it
+// already holds every online provider.
 func backfillRankMode(rankMode RankMode) (RankMode, bool) {
 	switch rankMode {
 	case RankModeQuality:
@@ -700,8 +701,8 @@ func egressEvidenceTime(run *EgressHealthRun, observedAt *time.Time) *time.Time 
 const ProviderEgressIndexNone = "none"
 
 // The online bucket's name where the buckets are labelled beside the two rank
-// modes. No request can name it.
-const ProviderEgressBucketOnline = "online"
+// modes, and the rank mode a request names it by (RankModeOnline).
+const ProviderEgressBucketOnline = RankModeOnline
 
 // The three buckets, in the order the backfill borrows toward.
 var ProviderEgressBuckets = []string{
