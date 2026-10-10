@@ -8980,6 +8980,39 @@ of live application callers. The healthy small-query fixture retained all
 backend preserved. This is a count/lifetime discriminator, not proof that
 closed clients caused Main's loss of backend capacity.
 
+The 2026-10-10 05:13:46Z bounded native discriminator joined two client
+snapshots around one kernel socket sample on one shard. Of its oldest 128
+selected waiting clients, 112 retained the same client identity/state/link and
+process-owned socket inode before and after a kernel `CLOSE-WAIT` observation;
+16 remained unknown. The waiting-client cap was hit. This proves peer FIN on
+those retained native frontend legs while they were still queued. It does not
+identify the application, FIN initiator, cancellation reason, or fleet share.
+A missing kernel match stays unknown; `ESTABLISHED` alone would not prove a
+healthy or live application caller. The 6-byte receive queues were not read
+and must not be identified as a particular protocol message.
+
+In the same stable shard generation, paired counters 0.602 seconds apart
+showed 25 assignments, 325 received client bytes and no additional server
+response bytes or completed query/transaction time. No established normal
+servers were observed in either frame, one login was present in each, and the
+login identity changed. Those aggregates are not exact joins to the 112
+sockets. Current maximum client wait was about 41 seconds, not proof of the
+120-second queue deadline being reached. Preserve exact process, socket inode,
+client identity and timestamp joins privately; publish only finite counts,
+cap/unknown status and source-generation qualifications.
+
+The source repair checks already-available input on authenticated, unlinked
+paused waiters before backend assignment. It preserves buffered live payload
+and existing buffer/receive-loop bounds. Matched local native controls with a
+five-second pgx Ping and configured 120-second pool queue timeout preserved
+the healthy backend with the candidate, while the baseline lost it, in both
+plaintext and TLS. Healthy queued clients, cleanup joining and cancellation
+ownership controls also passed (20 selected cases). This establishes that
+mechanism, not the origin of Main's queued bytes or a recovery claim. Release
+still requires the target package ABI, TLS/authentication and notify-readiness
+checks, then fresh shard response progress and application outcomes. Neither
+counter growth nor a successful restart substitutes for those boundaries.
+
 Required detector follow-up (prospective, not implemented by the current
 listener/log probe): collect the bounded native states and paired progress
 fields on the existing inventory-owned route at least once per minute.
