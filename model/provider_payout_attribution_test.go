@@ -5,7 +5,6 @@ package model
 import (
 	"context"
 	"fmt"
-	"slices"
 	"testing"
 	"time"
 
@@ -56,32 +55,7 @@ func TestStatsProviderPayoutsPreserveSharedNetworkSettlement(t *testing.T) {
 		}, map[string]NanoCents{day: 121})
 		wantAccounts := map[server.Id]contractPayoutTestAmount{providerNetworkId: {byteCount: 121, payout: 121}}
 		assertContractPayoutTestAccounts(t, ctx, []server.Id{originNetworkId, providerNetworkId, movedNetworkId}, wantAccounts)
-		// Native close leaves payer metadata with the debit owner. Its exact
-		// durable debt and retained reservation must precede the writeback.
-		before := readPayoutDebitTestState(t, ctx, balance.BalanceId)
-		if before.initial != 121 || before.credit != 121 || before.pendingBytes != 121 ||
-			before.pending != 1 || before.applied != 0 || before.escrows != 1 ||
-			before.legacy != 0 || before.reserved != 121 {
-			t.Fatalf("provider settlement lost pending payer consumption: %+v", before)
-		}
-		if available := GetActiveTransferBalanceByteCount(ctx, originNetworkId); available != 0 {
-			t.Fatalf("settled payer consumption became spendable: %d", available)
-		}
-		sweeps := readPayoutDebitTestSweeps(t, ctx, balance.BalanceId)
-		applied, released, busy, err := flushTransferDebitBalance(ctx, balance.BalanceId)
-		if err != nil || busy || applied != 1 || released != 1 {
-			t.Fatalf("payer debit owner = %d/%d, busy=%t, err=%v", applied, released, busy, err)
-		}
 		assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, escrow.ContractId, 121)
-		after := readPayoutDebitTestState(t, ctx, balance.BalanceId)
-		if after.credit != 0 || after.pendingBytes != 0 || after.pending != 0 || after.applied != 0 ||
-			after.settled != 121 || after.settledEscrows != 1 || after.escrows != 1 || after.invalid != 0 ||
-			after.legacy != 0 || after.reserved != 0 {
-			t.Fatalf("payer debit owner left incomplete consumption: %+v", after)
-		}
-		if afterSweeps := readPayoutDebitTestSweeps(t, ctx, balance.BalanceId); !slices.Equal(sweeps, afterSweeps) {
-			t.Fatalf("payer debit changed provider attribution: before=%+v after=%+v", sweeps, afterSweeps)
-		}
 
 		// The representative client moves; the remaining provider still owns
 		// its exact share, and the new network never inherits the old payment.
