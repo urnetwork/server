@@ -335,7 +335,15 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	// bounded path the close-time join/bound is applied once to the union of
 	// both arms, so it filters the unpaid and canceled sweeps identically (the
 	// same single close-time join the old anti-join query used).
-	closeTimeJoin := ""
+	//
+	// Every plan carries its selected contracts' create and close times, so the
+	// subsidy range reads the selection instead of joining the 2B-row
+	// transfer_contract a second time (that join ran for up to 36 minutes
+	// inside the plan transaction). An unbounded plan keeps contract-less
+	// sweeps with NULL times, as before.
+	closeTimeJoin := `
+        LEFT JOIN transfer_contract ON
+            transfer_contract.contract_id = u.contract_id`
 	closeTimeBound := ""
 	closeTimeArgs := []any{}
 	if self.bounded {
@@ -388,7 +396,9 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 			u.payout_byte_count,
 			u.payout_net_revenue_nano_cents,
 			u.sweep_time,
-			u.payment_id AS previous_payment_id
+			u.payment_id AS previous_payment_id,
+			transfer_contract.create_time AS contract_create_time,
+			transfer_contract.close_time AS contract_close_time
 
         FROM (
             SELECT
@@ -519,19 +529,18 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 // paymentPlanSubsidyRangeSQL derives the subsidy epoch from the exact sweep set
 // selected by planPayments. temp_account_payment has already applied the
 // unpaid/safely-canceled predicate and, for bounded plans, the close-time
-// upper bound. Reading transfer_escrow_sweep again would both broaden the
-// epoch to historical paid sweeps and force PostgreSQL to rescan the full
-// sweep history. Duplicate selected rows for one contract do not affect
-// MIN/MAX.
+// upper bound, and it carries each selected contract's times. Reading
+// transfer_escrow_sweep again would both broaden the epoch to historical paid
+// sweeps and force PostgreSQL to rescan the full sweep history; joining
+// transfer_contract again re-reads millions of contract rows in the plan
+// transaction. Duplicate selected rows for one contract do not affect MIN/MAX,
+// and contract-less rows carry NULL times, which MIN/MAX ignore.
 const paymentPlanSubsidyRangeSQL = `
 	SELECT
-		MIN(transfer_contract.create_time) AS subsidy_start_time,
-		MAX(transfer_contract.close_time) AS subsidy_end_time
+		MIN(temp_account_payment.contract_create_time) AS subsidy_start_time,
+		MAX(temp_account_payment.contract_close_time) AS subsidy_end_time
 
 	FROM temp_account_payment
-
-	INNER JOIN transfer_contract ON
-		transfer_contract.contract_id = temp_account_payment.contract_id
 `
 
 // this assumes the table `temp_account_payment` exists in the transaction
