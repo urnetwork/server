@@ -15,6 +15,8 @@ func TestPacketPostgresGuardCoversAcquisitionFamilies(t *testing.T) {
 		func() { MaintenanceDb(ctx, func(PgConn) { t.Error("maintenance callback ran") }) },
 		func() { Tx(ctx, func(PgTx) { t.Error("transaction callback ran") }) },
 		func() { MaintenanceTx(ctx, func(PgTx) { t.Error("maintenance transaction callback ran") }) },
+		func() { OwnedTx(ctx, nil, func(PgTx) { t.Error("owned transaction callback ran") }) },
+		func() { TryOwnedTx(ctx, nil, func(PgTx) { t.Error("try-owned transaction callback ran") }) },
 		func() { _, _ = AcquireMaintenanceDbConn(ctx) },
 	}
 	for index, operation := range operations {
@@ -67,6 +69,10 @@ func TestPacketPostgresGuardProcessScopeCatchesFreshContexts(t *testing.T) {
 			MaintenanceTx(context.Background(), func(PgTx) { t.Error("maintenance transaction callback ran") })
 		},
 		func() { _, _ = AcquireMaintenanceDbConn(context.Background()) },
+		func() { OwnedTx(context.Background(), nil, func(PgTx) { t.Error("owned transaction callback ran") }) },
+		func() {
+			TryOwnedTx(context.Background(), nil, func(PgTx) { t.Error("try-owned transaction callback ran") })
+		},
 	}
 	for index, operation := range operations {
 		func() {

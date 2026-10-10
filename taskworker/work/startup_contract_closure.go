@@ -50,6 +50,7 @@ func ScheduleOpenContractClosures(args *ScheduleOpenContractClosuresArgs, client
 		return nil, fmt.Errorf("invalid startup contract scan page size")
 	}
 	var lastContractId server.Id
+	busy := false
 	for {
 		if err := clientSession.Ctx.Err(); err != nil {
 			return nil, err
@@ -72,14 +73,15 @@ func ScheduleOpenContractClosures(args *ScheduleOpenContractClosuresArgs, client
 			})
 		}, server.OptNoRetry())
 		// Release the maintenance connection before ordinary queue writes.
-		// A partial page never advances the cursor past an unpublished child.
+		// A busy group cannot hold back independent later pages. Any refusal
+		// retains this scanner for a full retry, including all skipped groups.
 		for offset := 0; offset < len(contracts); offset += startupContractClosurePublicationSize {
 			chunk := contracts[offset:min(offset+startupContractClosurePublicationSize, len(contracts))]
 			keys := make([]server.PgOwnershipKey, 0, len(chunk))
 			for _, contract := range chunk {
 				keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("close_scheduled_contract", contract.ContractId)))
 			}
-			server.OwnedTx(clientSession.Ctx, keys, func(tx server.PgTx) {
+			admitted := server.TryOwnedTx(clientSession.Ctx, keys, func(tx server.PgTx) {
 				server.BatchInTx(clientSession.Ctx, tx, func(batch server.PgBatch) {
 					for _, contract := range chunk {
 						args := &CloseScheduledContractArgs{Private: true, ScheduledContractClose: contract}
@@ -89,11 +91,15 @@ func ScheduleOpenContractClosures(args *ScheduleOpenContractClosuresArgs, client
 					}
 				})
 			}, server.TxReadCommitted, server.OptNoRetry())
+			busy = busy || !admitted
 		}
 		if len(contracts) == 0 {
 			break
 		}
 		lastContractId = contracts[len(contracts)-1].ContractId
+	}
+	if busy {
+		return nil, fmt.Errorf("startup contract scan child publication ownership is busy")
 	}
 	return &ScheduleOpenContractClosuresResult{}, nil
 }

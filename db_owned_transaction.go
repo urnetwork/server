@@ -104,10 +104,25 @@ func OwnedTx(ctx context.Context, keys []PgOwnershipKey, callback func(PgTx), op
 	ownedTxWithResource(ctx, keys, requirePgOwnershipResource(), AcquireMaintenanceDbConn, callback, options...)
 }
 
+// Probe once on the same direct maintenance route. False means a known busy
+// key set whose partial locks and checkout have already been released. Every
+// route, acquisition, protocol, callback or commit failure still propagates.
+func TryOwnedTx(ctx context.Context, keys []PgOwnershipKey, callback func(PgTx), options ...any) bool {
+	checkPostgresAllowed(ctx)
+	return ownedTxWithResourcePolicy(ctx, keys, requirePgOwnershipResource(), AcquireMaintenanceDbConn, false, callback, options...)
+}
+
 // The production caller supplies only the explicit direct resource/acquirer.
 // A private transport seam exercises actual pgx replies without global pools.
 func ownedTxWithResource(ctx context.Context, keys []PgOwnershipKey, resource pgOwnershipResource,
 	acquire func(context.Context) (PgConn, error), callback func(PgTx), options ...any) {
+	ownedTxWithResourcePolicy(ctx, keys, resource, acquire, true, callback, options...)
+}
+
+// Both policies share authority checks, transaction custody and acknowledged
+// cleanup. Only a known pre-BEGIN refusal can return without business work.
+func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resource pgOwnershipResource,
+	acquire func(context.Context) (PgConn, error), wait bool, callback func(PgTx), options ...any) bool {
 	keys = normalizePgOwnershipKeys(keys)
 	if len(keys) == 0 {
 		panic(errors.New("database ownership requires at least one key"))
@@ -152,7 +167,11 @@ func ownedTxWithResource(ctx context.Context, keys []PgOwnershipKey, resource pg
 				// Return pool capacity before observing or waiting. A crowded
 				// resource cannot retain every slot needed by unrelated work.
 				Raise(owner.release(ctx))
-				owner.observe(PgOwnershipWaiting)
+				if wait {
+					owner.observe(PgOwnershipWaiting)
+				} else {
+					owner.observe(PgOwnershipRefused)
+				}
 				return
 			}
 			owner.admitted = true
@@ -171,8 +190,8 @@ func ownedTxWithResource(ctx context.Context, keys []PgOwnershipKey, resource pg
 				callback(tx)
 			}, ownedOptions...)
 		}()
-		if admitted {
-			return
+		if admitted || !wait {
+			return admitted
 		}
 		select {
 		case <-admissionCtx.Done():
