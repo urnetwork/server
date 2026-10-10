@@ -66,7 +66,7 @@ var taskFinalizationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "taskworker",
 	Name:      "finalizations_total",
-	Help:      "Task finalization outcomes after function execution, including post-hook reschedules.",
+	Help:      "Acknowledged task finalization outcomes: succeeded, rescheduled, or post_rescheduled. Excludes failed or unacknowledged finalization attempts and external post errors.",
 }, []string{"outcome"})
 
 var taskQueueSnapshotErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
@@ -162,6 +162,7 @@ func init() {
 		taskExecutionBytesTotal,
 		taskPollsTotal,
 		taskFinalizationsTotal,
+		taskFinalizationErrorsTotal,
 		taskQueueMetrics,
 		taskQueueSnapshotErrorsTotal,
 		taskExecutionMaximum,

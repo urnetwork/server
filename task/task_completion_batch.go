@@ -91,6 +91,16 @@ SELECT (SELECT count(*) FROM copied),(SELECT count(*) FROM removed),
 // row cannot poison its neighbors. Once the body succeeds, any commit error is
 // left unresolved: no replay or completion count may assume acknowledgement.
 func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retrySingles bool, returnErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			self.observeTaskFinalizationFailure(results, recovered)
+			panic(recovered)
+		}
+		// Mixed backend policies are an expected pre-transaction fallback.
+		if returnErr != errTaskCompletionBatchMode {
+			self.observeTaskFinalizationFailure(results, returnErr)
+		}
+	}()
 	if len(results) < 2 || len(results) > taskCompletionBatchLimit {
 		return false, errors.New("invalid task completion batch size")
 	}

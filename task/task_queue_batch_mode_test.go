@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -47,6 +48,9 @@ func runTaskQueueMixedBatchModes(t *testing.T, run bool) {
 			}},
 			&runOnceGenerationTarget{Target: NewTaskTarget(taskQueueGenericBatchWork), batch: true},
 		)
+		ordinaryFailures := taskFinalizationErrorsTotal.WithLabelValues(worker.metricName(NewTaskTarget(runOnceGenerationWork).TargetFunctionName()), "other")
+		genericFailures := taskFinalizationErrorsTotal.WithLabelValues(worker.metricName(NewTaskTarget(taskQueueGenericBatchWork).TargetFunctionName()), "other")
+		beforeOrdinary, beforeGeneric := testutil.ToFloat64(ordinaryFailures), testutil.ToFloat64(genericFailures)
 		published := make(chan struct{}, 4)
 		worker.completionResultPublished = func() { published <- struct{}{} }
 		worker.taskSlotEventPublished = func() { published <- struct{}{} }
@@ -98,6 +102,9 @@ func runTaskQueueMixedBatchModes(t *testing.T, run bool) {
 			if err != nil || len(finished) != 4 || len(retried)+len(posts) != 0 {
 				t.Fatalf("mixed-mode finite handback failed: finished=%d error=%v", len(finished), err)
 			}
+		}
+		if testutil.ToFloat64(ordinaryFailures) != beforeOrdinary || testutil.ToFloat64(genericFailures) != beforeGeneric {
+			t.Fatal("healthy pre-transaction compatibility fallback emitted finalization failures")
 		}
 		if len(GetTasks(ctx, ids...)) != 0 || len(GetFinishedTasks(ctx, ids...)) != 4 {
 			t.Fatal("mixed modes lost exact durable completion custody")
