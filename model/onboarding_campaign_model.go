@@ -416,7 +416,12 @@ func ListNetworkOnboardingEmails(ctx context.Context, networkId server.Id) (emai
 // NetworkExists is whether the network row still exists (networks are hard
 // deleted).
 func NetworkExists(ctx context.Context, networkId server.Id) (exists bool) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return NetworkExistsInConn(nil, ctx, networkId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func NetworkExistsInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) (exists bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `SELECT 1 FROM network WHERE network_id = $1`, networkId)
 		server.WithPgResult(result, err, func() {
 			exists = result.Next()

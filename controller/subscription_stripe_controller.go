@@ -796,6 +796,14 @@ func stripeHandleInvoicePaid(
 	invoice *StripeEventInvoiceObject,
 	clientSession *session.ClientSession,
 ) (*StripeWebhookResult, error) {
+	return stripeHandleInvoicePaidInConn(nil, invoice, clientSession)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func stripeHandleInvoicePaidInConn(connOwner server.PgConn,
+	invoice *StripeEventInvoiceObject,
+	clientSession *session.ClientSession,
+) (*StripeWebhookResult, error) {
 	credit, err := stripeResolveInvoiceCredit(invoice.Id, clientSession)
 	if err != nil {
 		return nil, err
@@ -807,7 +815,7 @@ func stripeHandleInvoicePaid(
 	feeFraction := 0.3
 	netRevenue := model.UsdToNanoCents((1.0 - feeFraction) * float64(invoice.Total) / 100.0)
 
-	_, err = stripeCreditInvoicePaid(
+	_, err = stripeCreditInvoicePaidInConn(connOwner,
 		clientSession.Ctx,
 		credit.networkId,
 		invoiceId,
@@ -892,8 +900,20 @@ func stripeCreditInvoicePaid(
 	startTime time.Time,
 	endTime time.Time,
 ) (credited bool, returnErr error) {
+	return stripeCreditInvoicePaidInConn(nil, ctx, networkId, invoiceId, netRevenue, startTime, endTime)
+}
 
-	server.Tx(ctx, func(tx server.PgTx) {
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func stripeCreditInvoicePaidInConn(connOwner server.PgConn,
+	ctx context.Context,
+	networkId server.Id,
+	invoiceId string,
+	netRevenue model.NanoCents,
+	startTime time.Time,
+	endTime time.Time,
+) (credited bool, returnErr error) {
+
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		credited = false
 		returnErr = nil
 		if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
@@ -961,7 +981,7 @@ func stripeCreditInvoicePaid(
 	if credited {
 		// the pro balance is committed -- refresh the entitlement cache so the
 		// upgrade is visible immediately rather than after ProCacheTtl
-		model.UpdateProNetwork(ctx, networkId)
+		model.UpdateProNetworkInConn(connOwner, ctx, networkId)
 	}
 
 	return credited, nil

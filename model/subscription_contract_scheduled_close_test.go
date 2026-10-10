@@ -53,8 +53,8 @@ func TestScheduledContractCloseCapsEveryFreeReportShape(t *testing.T) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, server.NowUtc().Add(3*time.Hour)))
 			})
 			before := readRedisExpiryRepairTestState(ctx, id)
-			if owner, err := CloseContractAtDeadline(ctx, id, server.NowUtc().Add(time.Hour)); err == nil || owner != nil || !bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) {
-				t.Fatal("future scheduled close changed a live contract", sample.name, err)
+			if owner, err := CloseContractAtDeadline(ctx, id, time.Time{}); err == nil || owner != nil || !bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) {
+				t.Fatal("invalid scheduled close changed a live contract", sample.name, err)
 			}
 			owner, err := CloseContractAtDeadline(ctx, id, deadline)
 			if err != nil || owner != nil {
@@ -64,7 +64,7 @@ func TestScheduledContractCloseCapsEveryFreeReportShape(t *testing.T) {
 				server.Db(ctx, func(conn server.PgConn) {
 					var exact bool
 					server.Raise(conn.QueryRow(ctx, `SELECT outcome='settled' AND NOT dispute
-						AND (SELECT count(*)=2 AND bool_and(NOT checkpoint AND used_transfer_byte_count=0) FROM contract_close WHERE contract_id=$1)
+						AND NOT EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1)
 						AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)
 						AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)
 						AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1)
@@ -74,7 +74,9 @@ func TestScheduledContractCloseCapsEveryFreeReportShape(t *testing.T) {
 					}
 				})
 			} else {
-				requireFreeExpiryOwnerClosed(t, ctx, []server.Id{id})
+				if closed, terminal := GetContractClose(ctx, id); !terminal || closed.Outcome != ContractOutcomeSettled {
+					t.Fatal("free deadline did not commit closure", sample.name)
+				}
 			}
 			proof, snapshot := readContractExpiryTestSnapshot(t, ctx, id)
 			wantReports := 0
@@ -132,25 +134,15 @@ func TestScheduledContractCloseKeepsRedisAndLegacyAccounting(t *testing.T) {
 			if err != nil {
 				t.Fatal("scheduled paid close failed", legacy, err)
 			}
-			if legacy {
-				if owner == nil || owner.Kind != ContractCloseOwnerPayerNetwork || owner.Id != f.sourceNetworkId {
-					t.Fatal("legacy scheduled close lost actual escrow payer")
-				}
-				page, err := FlushLegacyPayerSettlements(ctx, f.sourceNetworkId, nil, 8)
-				if err != nil || page.Completed != 1 || page.Failed != 0 {
-					t.Fatal("legacy scheduled close bypassed or lost payer work", page, err)
-				}
-			} else {
-				if owner != nil {
-					t.Fatal("Redis close invented a legacy intent")
-				}
-				applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
-				if err != nil || applied != 1 || released != 1 || busy {
-					t.Fatal("scheduled Redis debit lost its ordinary owner", applied, released, busy, err)
-				}
+			if owner != nil {
+				t.Fatal("deadline returned unfinished financial work")
+			}
+			applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
+			if err != nil || applied != 0 || released != 0 || busy {
+				t.Fatal("deadline left asynchronous consumption", applied, released, busy, err)
 			}
 			requireLegacySettlementTestState(t, ctx, f, id, false, true, 983, 0)
-			requireLegacyProviderDurability(t, ctx, f, id, 17)
+			requireDeadlineProviderDurability(t, ctx, f.destinationNetworkId, id, 17)
 			before := readRedisExpiryRepairTestState(ctx, id)
 			if _, err := CloseContractAtDeadline(ctx, id, deadline); err != nil || !bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) {
 				t.Fatal("scheduled paid replay repeated work", legacy, err)
@@ -176,13 +168,6 @@ func TestScheduledContractCloseCapsHeldFreshExistingIntent(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, server.NowUtc().Add(3*time.Hour)))
 			server.Raise(queueLegacySettlementInTx(ctx, tx, id, ContractOutcomeSettled, false))
 		})
-		readIntent := func() (raw string) {
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT row_to_json(i)::text FROM legacy_settlement_intent i WHERE contract_id=$1`, id).Scan(&raw))
-			})
-			return
-		}
-		before := readIntent()
 		// Hold C until the actual task is waiting, then commit a fresh public
 		// report through its InTx owner. Lock observation, not a sleep, proves
 		// the task captured its retirement authority after this report.
@@ -205,8 +190,7 @@ func TestScheduledContractCloseCapsHeldFreshExistingIntent(t *testing.T) {
 			}
 		}()
 		var expectedState string
-		const stateSql = `SELECT jsonb_build_array(outcome,usage_unverified,provider_usage,
-			(SELECT row_to_json(i) FROM legacy_settlement_intent i WHERE contract_id=$1),
+		const stateSql = `SELECT jsonb_build_array(
 			(SELECT jsonb_agg(row_to_json(r) ORDER BY party) FROM contract_close r WHERE contract_id=$1))::text
 			FROM transfer_contract WHERE contract_id=$1`
 		server.Tx(bounded, func(tx server.PgTx) {
@@ -254,8 +238,8 @@ func TestScheduledContractCloseCapsHeldFreshExistingIntent(t *testing.T) {
 			t.Fatal("scheduled close did not join after C release", bounded.Err())
 		}
 		owner, err := completed.owner, completed.err
-		if err != nil || owner == nil || owner.Kind != ContractCloseOwnerPayerNetwork || owner.Id != f.sourceNetworkId || readIntent() != before {
-			t.Fatal("scheduled close replaced accepted intent authority", err)
+		if err != nil || owner != nil {
+			t.Fatal("scheduled close did not finish accepted intent", err)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var current string
@@ -274,8 +258,8 @@ func TestScheduledContractCloseCapsHeldFreshExistingIntent(t *testing.T) {
 			}
 		})
 		page, err := FlushLegacyPayerSettlements(ctx, f.sourceNetworkId, nil, 8)
-		if err != nil || page.Completed != 1 || page.Failed != 0 {
-			t.Fatal("due accepted intent did not complete through its payer", page, err)
+		if err != nil || page.Completed != 0 || page.Failed != 0 {
+			t.Fatal("due accepted intent was not retired with closure", page, err)
 		}
 		closed, terminal := GetContractClose(ctx, id)
 		if !terminal || closed.Outcome != ContractOutcomeSettled {
@@ -285,9 +269,8 @@ func TestScheduledContractCloseCapsHeldFreshExistingIntent(t *testing.T) {
 	})
 }
 
-// Scheduling is not financial forgiveness. An underfunded accepted intent
-// remains nonterminal and fully reserved after the normal payer rejects it.
-func TestScheduledContractCloseRetainsUnderfundedIntent(t *testing.T) {
+// An underfunded intent consumes available escrow and closes at its deadline.
+func TestScheduledContractCloseReconcilesUnderfundedIntent(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -299,14 +282,14 @@ func TestScheduledContractCloseRetainsUnderfundedIntent(t *testing.T) {
 		server.Raise(CloseContract(ctx, id, f.sourceId, 300, true))
 		server.Raise(SettleEscrow(ctx, id, ContractOutcomeSettled))
 		owner, err := CloseContractAtDeadline(ctx, id, server.NowUtc().Add(-time.Minute))
-		if err != nil || owner == nil || owner.Id != f.sourceNetworkId {
-			t.Fatal("underfunded intent lost durable handoff", err)
+		if err != nil || owner != nil {
+			t.Fatal("underfunded intent did not finish", err)
 		}
 		page, err := FlushLegacyPayerSettlements(ctx, f.sourceNetworkId, nil, 8)
-		if err != nil || page.Completed != 0 || page.Failed != 1 {
-			t.Fatal("scheduled deadline bypassed accounting refusal", page, err)
+		if err != nil || page.Completed != 0 || page.Failed != 0 {
+			t.Fatal("scheduled deadline left repeated accounting failure", page, err)
 		}
-		requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
+		requireLegacySettlementTestState(t, ctx, f, id, false, true, 900, 0)
 	})
 }
 
@@ -348,8 +331,7 @@ func TestScheduledContractClosePreservesExistingAdjudication(t *testing.T) {
 		})
 		read := func() (raw string) {
 			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(outcome,usage_unverified,provider_usage,
-					(SELECT row_to_json(i) FROM legacy_settlement_intent i WHERE contract_id=$1),
+				server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(
 					(SELECT jsonb_agg(row_to_json(r) ORDER BY party) FROM contract_close r WHERE contract_id=$1))::text
 					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&raw))
 			})
@@ -357,12 +339,12 @@ func TestScheduledContractClosePreservesExistingAdjudication(t *testing.T) {
 		}
 		before := read()
 		owner, err := CloseContractAtDeadline(ctx, id, server.NowUtc().Add(-time.Minute))
-		if err != nil || owner == nil || owner.Kind != ContractCloseOwnerPayerNetwork || owner.Id != f.sourceNetworkId || read() != before {
+		if err != nil || owner != nil || read() != before {
 			t.Fatal("scheduled cap changed accepted adjudication", err)
 		}
 		page, err := FlushLegacyPayerSettlements(ctx, f.sourceNetworkId, nil, 8)
-		if err != nil || page.Completed != 1 || page.Failed != 0 {
-			t.Fatal("capped adjudication lost its payer", page, err)
+		if err != nil || page.Completed != 0 || page.Failed != 0 {
+			t.Fatal("capped adjudication retained unfinished financial work", page, err)
 		}
 		closed, terminal := GetContractClose(ctx, id)
 		if !terminal || closed.Outcome != ContractOutcomeDisputeResolvedToSource {
@@ -370,7 +352,7 @@ func TestScheduledContractClosePreservesExistingAdjudication(t *testing.T) {
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var exact bool
-			server.Raise(conn.QueryRow(ctx, `SELECT count(*)=1 AND bool_and(party='source' AND NOT checkpoint AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=$1`, id).Scan(&exact))
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*)=1 AND bool_and(party='source' AND checkpoint AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=$1`, id).Scan(&exact))
 			if !exact {
 				t.Fatal("adjudication fabricated an unselected report")
 			}

@@ -9885,4 +9885,19 @@ var migrations = []any{
 		`CREATE INDEX CONCURRENTLY pending_task_function_poll_order ON pending_task
 		(regexp_replace(function_name, '/v[0-9]+', '', 'g'), available_block, run_priority DESC, run_max_time_seconds DESC, task_id)`,
 		`DROP INDEX IF EXISTS pending_task_function_poll_order; `+TaskClaimFunctionIndexSql),
+	// 810: a recurring grant and its task receipt commit together. Retain these
+	// small receipts after balances expire so a delayed replay cannot mint again.
+	// Apply before deploying taskworkers that pass a grant run identity.
+	newSqlMigration(`
+		CREATE TABLE transfer_balance_grant_run (
+			run_id uuid NOT NULL,
+			grant_kind varchar(32) NOT NULL,
+			start_time timestamp NOT NULL,
+			end_time timestamp NOT NULL,
+			PRIMARY KEY (run_id, grant_kind)
+		);
+	`),
+	// 811: terminal expiration can retain existing excluded proof without
+	// rewriting it or manufacturing a new legacy exclusion at settlement.
+	newSqlMigration(contractDeadlineUsageGuardSchemaSql),
 }

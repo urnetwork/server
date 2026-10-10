@@ -5,6 +5,9 @@ is being encoded as an automated probe in the monitor service — architecture
 and probe mapping in MONITOR.md (this directory). History: this file began as
 server/MONITOR.md, the distilled incident-diagnosis runbook.
 
+For investigation methods, including synchronous production reproductions and
+deterministic queue-starvation controls, see [DEBUG.md](DEBUG.md).
+
 Distilled from the 2026-07-15 incident day (redis cluster instability + pg
 coupling + the network-peers pubsub outage) and the preceding two weeks of
 database performance work. Historical incident entries were used to diagnose or

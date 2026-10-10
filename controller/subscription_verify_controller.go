@@ -88,7 +88,7 @@ const maxPlayPurchaseTokenLength = 4 * 1024
 // these.
 var playVerifyRateLimitFunc = CheckVerifyPurchaseRateLimit
 var playVerifyRenewalFunc = PlaySubscriptionRenewal
-var playPaymentIdNetworkIdFunc = model.SubscriptionGetNetworkIdForPaymentId
+var playPaymentIdNetworkIdFunc = model.SubscriptionGetNetworkIdForPaymentIdInConn
 
 type VerifyPlayPurchaseArgs struct {
 	// PackageName defaults to (and must match) this app's package.
@@ -264,6 +264,11 @@ func playLinkedNetworkId(
 	clientSession *session.ClientSession,
 	sub *PlaySubscription,
 ) (*server.Id, bool) {
+	return playLinkedNetworkIdInConn(nil, clientSession, sub)
+}
+
+// Resolve the account link without acquiring another PostgreSQL session.
+func playLinkedNetworkIdInConn(connOwner server.PgConn, clientSession *session.ClientSession, sub *PlaySubscription) (*server.Id, bool) {
 	identifiers := sub.ExternalAccountIdentifiers
 	if identifiers == nil {
 		return nil, true
@@ -280,7 +285,7 @@ func playLinkedNetworkId(
 		if err != nil {
 			return nil, false
 		}
-		networkId, err := playPaymentIdNetworkIdFunc(clientSession.Ctx, networkIdOrSubscriptionPaymentId)
+		networkId, err := playPaymentIdNetworkIdFunc(connOwner, clientSession.Ctx, networkIdOrSubscriptionPaymentId)
 		if err != nil {
 			// the obfuscated account id is just a plain network id
 			networkId = networkIdOrSubscriptionPaymentId

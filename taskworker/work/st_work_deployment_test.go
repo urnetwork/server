@@ -67,5 +67,7 @@ func TestStSettlementTasksRejectStaleCoordinatorPayloads(t *testing.T) {
 
 	if result, err := StSyncChain(&StSyncChainArgs{DeploymentKey: stale}, nil); err != nil || result == nil {
 		t.Fatalf("stale sync result/error=%+v/%v", result, err)
+	} else if err := StSyncChainPost(&StSyncChainArgs{DeploymentKey: stale}, result, nil, nil); err != nil {
+		t.Fatal(err)
 	}
 }

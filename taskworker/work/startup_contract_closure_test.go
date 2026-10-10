@@ -4,7 +4,6 @@ package work
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -332,7 +331,7 @@ func TestScheduledContractClosureFutureWakeRetainsDeadline(t *testing.T) {
 
 // A retained intent with unclassified owner hints and a malformed report still
 // receives its real owner and registration wake; startup never edits its proof.
-func TestScheduledContractClosureWakesUnclassifiedIntentWithoutProofEdits(t *testing.T) {
+func TestScheduledContractClosureReconcilesUnclassifiedMalformedIntent(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -365,8 +364,7 @@ func TestScheduledContractClosureWakesUnclassifiedIntentWithoutProofEdits(t *tes
 		})
 		read := func() (raw string) {
 			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(outcome,usage_unverified,provider_usage,
-					(SELECT row_to_json(i) FROM legacy_settlement_intent i WHERE contract_id=$1),
+				server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(
 					(SELECT jsonb_agg(row_to_json(r) ORDER BY party) FROM contract_close r WHERE contract_id=$1))::text
 					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&raw))
 			})
@@ -381,14 +379,13 @@ func TestScheduledContractClosureWakesUnclassifiedIntentWithoutProofEdits(t *tes
 		}, server.TxReadCommitted, server.OptNoRetry())
 		worker := startupClosureWorker(ctx, NewScheduledContractClosureTaskTarget())
 		defer worker.Close()
-		wakeBefore := server.NowUtc()
 		evalStartupClosureTask(t, ctx, worker, readExpiryRecoveryQueue(t, ctx)[key.String()].id)
-		wakeAfter := server.NowUtc()
 		queue := readExpiryRecoveryQueue(t, ctx)
-		actual, actualFound := queue[task.RunOnce("flush_legacy_source_settlements", sourceId).String()]
-		registration, registrationFound := queue[task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard)).String()]
-		if !actualFound || !registrationFound || actual.runAt.Before(wakeBefore.Add(30*time.Second)) || actual.runAt.After(wakeAfter.Add(30*time.Second)) || registration.runAt.After(wakeAfter) || before != read() {
-			t.Fatal("accepted malformed intent lost wake or changed proof/authority")
+		if len(queue) != 0 || before != read() {
+			t.Fatal("malformed intent required another task or changed original reports")
+		}
+		if _, terminal := model.GetContractClose(ctx, id); !terminal {
+			t.Fatal("successful child left malformed contract open")
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var capped time.Time
@@ -438,7 +435,7 @@ func TestScheduledContractClosureEarlierDuplicateClosesAtMinimum(t *testing.T) {
 		server.Db(ctx, func(conn server.PgConn) {
 			var exact bool
 			server.Raise(conn.QueryRow(ctx, `SELECT expiration_time=$2
-				AND (SELECT count(*)=2 AND bool_and(NOT checkpoint AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=$1)
+				AND (SELECT count(*)=1 AND bool_and(checkpoint AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1)
@@ -450,9 +447,9 @@ func TestScheduledContractClosureEarlierDuplicateClosesAtMinimum(t *testing.T) {
 	})
 }
 
-// The due child feeds the real registration dispatcher and source worker for
-// a retained free intent; no synthetic financial settlement completes it.
-func TestScheduledContractClosureRegistersAndClosesRetainedSourceIntent(t *testing.T) {
+// The due child finishes a retained source intent even when its dispatch hints
+// are missing. Task success now requires the actual terminal state.
+func TestScheduledContractClosureClosesRetainedSourceIntent(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -485,8 +482,7 @@ func TestScheduledContractClosureRegistersAndClosesRetainedSourceIntent(t *testi
 		})
 		read := func() (raw string) {
 			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(outcome,usage_unverified,provider_usage,
-					(SELECT row_to_json(i) FROM legacy_settlement_intent i WHERE contract_id=$1),
+				server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(
 					(SELECT jsonb_agg(row_to_json(r) ORDER BY party) FROM contract_close r WHERE contract_id=$1))::text
 					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&raw))
 			})
@@ -508,28 +504,16 @@ func TestScheduledContractClosureRegistersAndClosesRetainedSourceIntent(t *testi
 				expiration_time=$2,EXISTS(SELECT 1 FROM legacy_settlement_intent
 					WHERE contract_id=$1 AND source_client_id IS NULL AND payer_network_id IS NULL)
 				FROM transfer_contract WHERE contract_id=$1`, id, deadline).Scan(&nonterminal, &verified, &missingProof, &exactCap, &unclassified))
-			if !nonterminal || !verified || !missingProof || !exactCap || !unclassified {
-				t.Fatal("child bypassed accepted source intent or rewrote its proof", nonterminal, verified, missingProof, exactCap, unclassified)
+			if nonterminal || verified || missingProof || !exactCap || unclassified {
+				t.Fatal("child did not finish accepted source intent", nonterminal, verified, missingProof, exactCap, unclassified)
 			}
 		})
 		if read() != before {
 			t.Fatal("child changed accepted source intent, reports or provider proof")
 		}
-		dispatcher := startupClosureWorker(ctx, NewLegacySettlementDispatcherTaskTarget())
-		defer dispatcher.Close()
-		registration := readExpiryRecoveryQueue(t, ctx)[task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard)).String()]
-		evalStartupClosureTask(t, ctx, dispatcher, registration.id)
-		server.Db(ctx, func(conn server.PgConn) {
-			var registered bool
-			server.Raise(conn.QueryRow(ctx, `SELECT source_client_id=$2 AND payer_network_id IS NULL FROM legacy_settlement_intent WHERE contract_id=$1`, id, sourceId).Scan(&registered))
-			if !registered {
-				t.Fatal("normal registration did not make the retained source intent selectable")
-			}
-		})
-		sourceWorker := startupClosureWorker(ctx, model.NewLegacySourceSettlementTaskTarget())
-		defer sourceWorker.Close()
-		source := readExpiryRecoveryQueue(t, ctx)[task.RunOnce("flush_legacy_source_settlements", sourceId).String()]
-		evalStartupClosureTask(t, ctx, sourceWorker, source.id)
+		if queue := readExpiryRecoveryQueue(t, ctx); len(queue) != 0 {
+			t.Fatal("child left a settlement handoff", queue)
+		}
 		closed, terminal := model.GetContractClose(ctx, id)
 		if !terminal || closed.Outcome != model.ContractOutcomeSettled {
 			t.Fatal("registered source worker did not close its capped partial intent")
@@ -537,7 +521,7 @@ func TestScheduledContractClosureRegistersAndClosesRetainedSourceIntent(t *testi
 		server.Db(ctx, func(conn server.PgConn) {
 			var exact bool
 			server.Raise(conn.QueryRow(ctx, `SELECT usage_unverified
-				AND (SELECT count(*)=2 AND bool_and(NOT checkpoint AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=$1)
+				AND (SELECT count(*)=1 AND bool_and(checkpoint AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)

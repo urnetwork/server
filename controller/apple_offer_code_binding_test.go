@@ -148,7 +148,7 @@ func installOfferCodeFakes(t *testing.T) *offerCodeFakeEnv {
 	appleOfferCodeProRefreshFunc = func(ctx context.Context, networkId server.Id) {
 		env.refreshed = append(env.refreshed, networkId)
 	}
-	appleOfferCodeBindingLookupFunc = func(ctx context.Context, originalTransactionId string) (server.Id, bool) {
+	appleOfferCodeBindingLookupFunc = func(connOwner server.PgConn, ctx context.Context, originalTransactionId string) (server.Id, bool) {
 		networkId, ok := env.state.bindings[originalTransactionId]
 		return networkId, ok
 	}

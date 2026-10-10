@@ -185,6 +185,7 @@ func flushLegacySettlementWithExpiryPolicyInTx(ctx context.Context, tx server.Pg
 		return nil, false, true, legacySettlementBusyIntent, nil
 	}
 	var terminal, hasEscrow, needsExpiryContinuation bool
+	var expirationTime *time.Time
 	var sourceId server.Id
 	var payerNetworkId *server.Id
 	found = false
@@ -200,11 +201,11 @@ func flushLegacySettlementWithExpiryPolicyInTx(ctx context.Context, tx server.Pg
             WHEN 'dispute_resolved_to_destination' THEN
                 NOT EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party='destination' AND NOT checkpoint)
             ELSE false
-        END
+        END,expiration_time
         FROM transfer_contract WHERE contract_id=$1 FOR UPDATE SKIP LOCKED`, contractId, outcome)
 	server.WithPgResult(rows, err, func() {
 		if rows.Next() {
-			server.Raise(rows.Scan(&terminal, &hasEscrow, &sourceId, &payerNetworkId, &needsExpiryContinuation))
+			server.Raise(rows.Scan(&terminal, &hasEscrow, &sourceId, &payerNetworkId, &needsExpiryContinuation, &expirationTime))
 			found = true
 		}
 	})
@@ -220,6 +221,10 @@ func flushLegacySettlementWithExpiryPolicyInTx(ctx context.Context, tx server.Pg
 	closeOwner, admitted, err := validateLegacyCloseOwnerHeaderInTx(ctx, tx, contractId, sourceId, payerNetworkId, &hasEscrow)
 	if err != nil || !admitted {
 		return nil, false, err == nil, legacySettlementBusyAdmission, err
+	}
+	if prepareExpiry && expirationTime != nil && !server.NowUtc().Before(*expirationTime) {
+		closed, posts := reconcileContractAtDeadlineInTx(ctx, tx, contractId, *expirationTime)
+		return posts, !closed.Missing, false, legacySettlementBusyNone, nil
 	}
 	if !hasEscrow {
 		if closeOwner.Kind != ContractCloseOwnerSourceClient {

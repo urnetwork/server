@@ -23,7 +23,12 @@ import (
 // GetPlayPurchaseBinding is the network a purchase token is bound to, if any,
 // and the root token of its chain.
 func GetPlayPurchaseBinding(ctx context.Context, purchaseToken string) (networkId server.Id, rootPurchaseToken string, ok bool) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return GetPlayPurchaseBindingInConn(nil, ctx, purchaseToken)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetPlayPurchaseBindingInConn(connOwner server.PgConn, ctx context.Context, purchaseToken string) (networkId server.Id, rootPurchaseToken string, ok bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		err := conn.QueryRow(
 			ctx,
 			`
@@ -105,20 +110,30 @@ func ResolvePlayPurchaseBinding(
 	linkedPurchaseToken string,
 	inherit bool,
 ) (networkId server.Id, ok bool) {
-	if networkId, _, ok = GetPlayPurchaseBinding(ctx, purchaseToken); ok {
+	return ResolvePlayPurchaseBindingInConn(nil, ctx, purchaseToken, linkedPurchaseToken, inherit)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func ResolvePlayPurchaseBindingInConn(connOwner server.PgConn,
+	ctx context.Context,
+	purchaseToken string,
+	linkedPurchaseToken string,
+	inherit bool,
+) (networkId server.Id, ok bool) {
+	if networkId, _, ok = GetPlayPurchaseBindingInConn(connOwner, ctx, purchaseToken); ok {
 		return
 	}
 	if linkedPurchaseToken == "" || linkedPurchaseToken == purchaseToken {
 		return
 	}
-	linkedNetworkId, rootPurchaseToken, linkedOk := GetPlayPurchaseBinding(ctx, linkedPurchaseToken)
+	linkedNetworkId, rootPurchaseToken, linkedOk := GetPlayPurchaseBindingInConn(connOwner, ctx, linkedPurchaseToken)
 	if !linkedOk {
 		return
 	}
 	if !inherit {
 		return linkedNetworkId, true
 	}
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		BindPlayPurchaseInTx(tx, ctx, purchaseToken, rootPurchaseToken, linkedNetworkId, "")
 		// a concurrent inherit may have won; either way the row is now the answer
 		networkId, _, ok = GetPlayPurchaseBindingInTx(tx, ctx, purchaseToken)

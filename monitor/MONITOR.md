@@ -19,6 +19,9 @@ implements). Current open items and their corrections belong to the chained
 run ledger described in RUN-MAIN.md; the historical checklist is not live
 authorization to execute its operational or architectural proposals.
 
+Root-cause agents can use [DEBUG.md](DEBUG.md) as the debugging technique
+catalog, including synchronous reproductions of asynchronous production work.
+
 The current CLI emits active Alerts, not ticket lifecycle events. It renders
 each eligible alert batch as Markdown or JSONL on stdout; stderr carries
 diagnostics. The private legacy ticket manager and console emitter remain in

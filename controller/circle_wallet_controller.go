@@ -661,6 +661,8 @@ type PopulateAccountWalletsArgs struct {
 type PopulateAccountWalletsResult struct {
 }
 
+// Empty work succeeds. Partial failures remain retryable after healthy users
+// finish; wallet creation is idempotent when the task is replayed.
 func PopulateAccountWallets(
 	populateAccountWallet *PopulateAccountWalletsArgs,
 	clientSession *session.ClientSession,
@@ -668,43 +670,47 @@ func PopulateAccountWallets(
 
 	circleUCUsers := model.GetCircleUCUsers(clientSession.Ctx)
 
-	if len(circleUCUsers) == 0 {
-		return nil, fmt.Errorf("no users found")
-	}
-
 	glog.V(2).Infof("[walletc]%d circle users found \n", len(circleUCUsers))
-
-	errUserIds := []server.Id{}
-
-	for _, user := range circleUCUsers {
-		time.Sleep(500 * time.Millisecond)
-		err := handleUser(user, clientSession)
-		if err != nil {
-			glog.Infof("[walletc]error for user %s: %v \n", user.UserId.String(), err)
-			errUserIds = append(errUserIds, user.CircleUCUserId)
-		}
+	if err := populateAccountWalletUsers(circleUCUsers, clientSession, 500*time.Millisecond, handleUser); err != nil {
+		return nil, err
 	}
-
-	// create a JSON file with the user ids that failed
-	if len(errUserIds) > 0 {
-		errUserIdStrs := []string{}
-		for _, errUserId := range errUserIds {
-			errUserIdStrs = append(errUserIdStrs, errUserId.String())
-		}
-		glog.Infof("[walletc]Error creating account wallets for the following users: %s", strings.Join(errUserIdStrs, ", "))
-	}
-
 	glog.V(2).Infof("[walletc]PopulateAccountWallets done")
-
 	return &PopulateAccountWalletsResult{}, nil
-
 }
 
+// Throttle external requests with the task's cancellation, and retain every
+// failed user in the returned error instead of acknowledging a partial batch.
+func populateAccountWalletUsers(users []model.CircleUC, clientSession *session.ClientSession, interval time.Duration,
+	handle func(model.CircleUC, *session.ClientSession) error,
+) error {
+	var result error
+	for _, user := range users {
+		if err := clientSession.Ctx.Err(); err != nil {
+			return errors.Join(result, err)
+		}
+		if interval > 0 {
+			timer := time.NewTimer(interval)
+			select {
+			case <-clientSession.Ctx.Done():
+				timer.Stop()
+				return errors.Join(result, clientSession.Ctx.Err())
+			case <-timer.C:
+			}
+		}
+		if err := handle(user, clientSession); err != nil {
+			result = errors.Join(result, fmt.Errorf("populate wallet for user %s: %w", user.UserId, err))
+		}
+	}
+	return errors.Join(result, clientSession.Ctx.Err())
+}
+
+// Each temporary authenticated session belongs to this one user's attempt.
 func handleUser(user model.CircleUC, clientSession *session.ClientSession) error {
 	userSession := session.NewLocalClientSession(clientSession.Ctx, "0.0.0.0:0", &session.ByJwt{
 		NetworkId: user.NetworkId,
 		UserId:    user.UserId,
 	})
+	defer userSession.Cancel()
 
 	walletInfo, err := findCircleWallets(userSession)
 	if err != nil {

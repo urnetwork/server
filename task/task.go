@@ -1467,7 +1467,7 @@ type TaskWorkerSettings struct {
 	// Filtering precedes the candidate limit, including the owner of a RunPost
 	// retry, so an unrelated backlog cannot starve registered work.
 	ClaimRegisteredTargetsOnly bool
-	// Run alternates bounded indexed function lanes with the ordinary queue.
+	// Run and EvalTasks alternate indexed function lanes with the ordinary queue.
 	// Owners enable this only after the matching migration is available.
 	FairClaimFunctions bool
 	// Opt-in per-instance limits, keyed by canonical target function name.

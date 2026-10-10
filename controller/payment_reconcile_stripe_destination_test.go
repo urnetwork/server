@@ -34,7 +34,7 @@ func stripeTestUnresolvedInvoice(invoiceId string, now time.Time) map[string]any
 func TestPaymentReconcileStripeUnresolvedDestinationIsDurableNotStoreError(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		env := newStripeReconcileTestEnv(t)
 		now := server.NowUtc()
 		invoiceId := "in_synthetic_unresolved_2099"
@@ -83,7 +83,7 @@ func TestPaymentReconcileStripeUnresolvedDestinationIsDurableNotStoreError(t *te
 func TestPaymentReconcileStripeDryRunQualifiesUnresolvedDestination(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		env := newStripeReconcileTestEnv(t)
 		invoiceId := "in_synthetic_dry_unresolved_2099"
 		env.listInvoices = []map[string]any{{"id": invoiceId, "total": 1700}}
@@ -115,18 +115,18 @@ func TestPaymentReconcileStripeDryRunQualifiesUnresolvedDestination(t *testing.T
 func TestPaymentReconcileStripeUnresolvedDestinationAuditFailurePinsWatermark(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		env := newStripeReconcileTestEnv(t)
 		invoiceId := "in_synthetic_unresolved_audit_2099"
 		env.listInvoices = []map[string]any{{"id": invoiceId, "total": 1700}}
 		env.fullInvoices[invoiceId] = stripeTestUnresolvedInvoice(invoiceId, server.NowUtc())
 		previousAdder := addPaymentReconciliationEvent
 		failAppend := true
-		addPaymentReconciliationEvent = func(ctx context.Context, event *model.PaymentReconciliationEvent) error {
+		addPaymentReconciliationEvent = func(connOwner server.PgConn, ctx context.Context, event *model.PaymentReconciliationEvent) error {
 			if failAppend && event.Action == model.PaymentReconcileActionCreditUnfulfillable {
 				return errors.New("synthetic unresolved audit append failure")
 			}
-			return model.AddPaymentReconciliationEvent(ctx, event)
+			return model.AddPaymentReconciliationEventInConn(connOwner, ctx, event)
 		}
 		t.Cleanup(func() { addPaymentReconciliationEvent = previousAdder })
 		for _, dryRun := range []bool{true, false} {
@@ -155,7 +155,7 @@ func TestPaymentReconcileStripeUnresolvedDestinationAuditFailurePinsWatermark(t 
 func TestPaymentReconcileStripeIncompleteDestinationEvidencePinsWatermark(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		env := newStripeReconcileTestEnv(t)
 		invoiceId := "in_synthetic_partial_destination_2099"
 		env.listInvoices = []map[string]any{{"id": invoiceId, "total": 1700}}
@@ -205,7 +205,7 @@ func TestPaymentReconcileStripeIncompleteDestinationEvidencePinsWatermark(t *tes
 func TestPaymentReconcileStripeLegacyDestinationResolutionMatchesDryRun(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		env := newStripeReconcileTestEnv(t)
 		for _, resolution := range []string{"checkout", "email"} {
 			networkId := server.NewId()
@@ -264,7 +264,7 @@ func TestPaymentReconcileStripeLegacyDestinationResolutionMatchesDryRun(t *testi
 func TestPaymentReconcileStripeIncompleteInvoiceDestinationPinsWatermark(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		disableAllReconcileStores(t)
+		defer disableAllReconcileStores(t)()
 		env := newStripeReconcileTestEnv(t)
 		invoiceId := "in_synthetic_incomplete_invoice_2099"
 		env.listInvoices = []map[string]any{{"id": invoiceId, "total": 1700}}

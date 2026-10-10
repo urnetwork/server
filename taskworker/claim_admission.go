@@ -19,6 +19,10 @@ func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile Wor
 		settings = task.DefaultTaskWorkerSettings()
 	}
 	ownerSettings := *settings
+	// All entry points, including InitTaskWorker/EvalTasks, need the same
+	// indexed admission lanes as Run. A close backlog must not hide its
+	// downstream financial owners or recurring maintenance.
+	ownerSettings.FairClaimFunctions = true
 	ownerSettings.TargetClaimLimits = maps.Clone(settings.TargetClaimLimits)
 	if ownerSettings.TargetClaimLimits == nil {
 		ownerSettings.TargetClaimLimits = map[string]int{}

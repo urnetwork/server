@@ -83,10 +83,18 @@ func SearchPaymentIntents(
 	references []string,
 	session *session.ClientSession,
 ) (*PaymentIntentSearchResult, error) {
+	return SearchPaymentIntentsInConn(nil, references, session)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func SearchPaymentIntentsInConn(connOwner server.PgConn,
+	references []string,
+	session *session.ClientSession,
+) (*PaymentIntentSearchResult, error) {
 
 	var paymentIntent *PaymentIntentSearchResult
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.TxInConn(session.Ctx, connOwner, func(tx server.PgTx) {
 
 		result, err := tx.Query(
 			session.Ctx,
@@ -168,7 +176,15 @@ func IsSolanaPaymentCompleted(
 	ctx context.Context,
 	signature string,
 ) (completed bool) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return IsSolanaPaymentCompletedInConn(nil, ctx, signature)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func IsSolanaPaymentCompletedInConn(connOwner server.PgConn,
+	ctx context.Context,
+	signature string,
+) (completed bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -273,8 +289,17 @@ func ListUnfulfilledSolanaPayments(
 	reason string,
 	limit int,
 ) []*UnfulfilledSolanaPayment {
+	return ListUnfulfilledSolanaPaymentsInConn(nil, ctx, reason, limit)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func ListUnfulfilledSolanaPaymentsInConn(connOwner server.PgConn,
+	ctx context.Context,
+	reason string,
+	limit int,
+) []*UnfulfilledSolanaPayment {
 	payments := []*UnfulfilledSolanaPayment{}
-	server.Db(ctx, func(conn server.PgConn) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -319,9 +344,17 @@ func RemoveUnfulfilledSolanaPayment(
 	ctx context.Context,
 	txSignature string,
 ) (err error) {
+	return RemoveUnfulfilledSolanaPaymentInConn(nil, ctx, txSignature)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func RemoveUnfulfilledSolanaPaymentInConn(connOwner server.PgConn,
+	ctx context.Context,
+	txSignature string,
+) (err error) {
 	// a failed delete raises, which ends the transaction at once; the error
 	// result is always nil
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -369,7 +402,15 @@ func GetSolanaPaymentIntentCompletion(
 	ctx context.Context,
 	reference string,
 ) (networkId server.Id, signature string, ok bool) {
-	server.Db(ctx, func(conn server.PgConn) {
+	return GetSolanaPaymentIntentCompletionInConn(nil, ctx, reference)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetSolanaPaymentIntentCompletionInConn(connOwner server.PgConn,
+	ctx context.Context,
+	reference string,
+) (networkId server.Id, signature string, ok bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`

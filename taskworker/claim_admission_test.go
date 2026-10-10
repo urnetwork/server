@@ -22,6 +22,10 @@ func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 		t.Fatal("production target placement differs or mutated its caller")
 	}
 	production.TargetClaimLimits = nil
+	if !production.FairClaimFunctions || settings.FairClaimFunctions {
+		t.Fatal("production fairness is missing or mutated caller settings")
+	}
+	production.FairClaimFunctions = settings.FairClaimFunctions
 	if !reflect.DeepEqual(production, settings) {
 		t.Fatal("probe placement changed ordinary worker settings")
 	}
