@@ -176,7 +176,7 @@ func TestStClosedWorkWindowBoundedOverflowPlan(t *testing.T) {
 				 CASE WHEN n<=$2 THEN 'settled' WHEN n<=$2+$3 THEN NULL ELSE 'canceled' END,
 				 CASE WHEN n<=$2 THEN $1::timestamp WHEN n<=$2+$3 OR n%2=0 THEN NULL ELSE $1::timestamp-interval '1 day' END,
 				 CASE WHEN n<=$2 THEN $7::jsonb ELSE NULL END,true
-				FROM generate_series(1,$2+$3+$4) n`, start, credited, open, canceled, provider, network, snapshot))
+				FROM generate_series(1,$2::int+$3::int+$4::int) n`, start, credited, open, canceled, provider, network, snapshot))
 			server.RaisePgResult(tx.Exec(ctx, `ANALYZE transfer_contract; ANALYZE st_provider_usage_archive; ANALYZE contract_close_report_evidence`))
 		})
 		server.Db(ctx, func(conn server.PgConn) {
