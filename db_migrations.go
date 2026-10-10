@@ -9912,4 +9912,9 @@ var migrations = []any{
 	// 812: terminal expiration can retain existing excluded proof without
 	// rewriting it or manufacturing a new legacy exclusion at settlement.
 	newSqlMigration(contractDeadlineUsageGuardSchemaSql),
+	// 813: id-less checkpoints retain a conservative lower bound. Apply before
+	// deploying close-report writers; existing aggregates are not rewritten.
+	newSqlMigration(`ALTER TABLE contract_close
+		ADD COLUMN legacy_checkpoint_byte_count bigint,
+		ADD COLUMN identified_checkpoint_byte_count bigint`),
 }

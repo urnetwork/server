@@ -791,7 +791,9 @@ func TestFindNetworksWithoutTransferBalance(t *testing.T) {
 }
 
 func TestClosePartialContract(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -911,15 +913,21 @@ func TestClosePartialContract(t *testing.T) {
 			}
 		}
 
-		endingTransferBalanceA := GetActiveTransferBalanceByteCount(ctx, networkIdA)
-		endingTransferBalanceB := GetActiveTransferBalanceByteCount(ctx, networkIdB)
-		connect.AssertEqual(t, endingTransferBalanceA, initialTransferBalance-2*512*1024)
-		connect.AssertEqual(t, endingTransferBalanceB, initialTransferBalance-2*512*1024)
+		for _, networkId := range []server.Id{networkIdA, networkIdB} {
+			balances := GetActiveTransferBalances(ctx, networkId)
+			connect.AssertEqual(t, len(balances), 1)
+			// Normal closure commits the exact debit, whose independent owner
+			// releases the original reservation and refunds its unused portion.
+			assertPayoutDebitTestConsumptionAndDrain(t, ctx, balances[0].BalanceId, initialTransferBalance, 2*512*1024)
+			connect.AssertEqual(t, GetActiveTransferBalanceByteCount(ctx, networkId), initialTransferBalance-2*512*1024)
+		}
 	})
 }
 
 func TestClosePartialContractWithCheckpoint(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -1018,17 +1026,21 @@ func TestClosePartialContractWithCheckpoint(t *testing.T) {
 			}
 		}
 
-		ForceCloseAllOpenContractIds(ctx, time.Now())
+		server.Raise(ForceCloseAllOpenContractIds(ctx, time.Now()))
 
-		endingTransferBalanceA := GetActiveTransferBalanceByteCount(ctx, networkIdA)
-		endingTransferBalanceB := GetActiveTransferBalanceByteCount(ctx, networkIdB)
-		connect.AssertEqual(t, endingTransferBalanceA, initialTransferBalance-2*512*1024)
-		connect.AssertEqual(t, endingTransferBalanceB, initialTransferBalance-2*512*1024)
+		for _, networkId := range []server.Id{networkIdA, networkIdB} {
+			balances := GetActiveTransferBalances(ctx, networkId)
+			connect.AssertEqual(t, len(balances), 1)
+			assertPayoutDebitTestConsumptionAndDrain(t, ctx, balances[0].BalanceId, initialTransferBalance, 2*512*1024)
+			connect.AssertEqual(t, GetActiveTransferBalanceByteCount(ctx, networkId), initialTransferBalance-2*512*1024)
+		}
 	})
 }
 
 func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -1154,7 +1166,10 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 			}
 		}
 
-		ForceCloseAllOpenContractIds(ctx, time.Now())
+		server.Raise(ForceCloseAllOpenContractIds(ctx, time.Now()))
+		balances := GetActiveTransferBalances(ctx, networkIdA)
+		connect.AssertEqual(t, len(balances), 1)
+		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balances[0].BalanceId, initialTransferBalance, 4*512*1024)
 
 		endingTransferBalanceA := GetActiveTransferBalanceByteCount(ctx, networkIdA)
 		endingTransferBalanceB := GetActiveTransferBalanceByteCount(ctx, networkIdB)

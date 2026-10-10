@@ -143,26 +143,56 @@ func TestCloseReportConflictKeepsHealthyBatchSibling(t *testing.T) {
 	})
 }
 
-// Empty ids retain legacy incremental reports even when an identified peer shares the contract.
-func TestCloseReportLegacyEmptyIdRemainsIncremental(t *testing.T) {
+// A lost reply can replay through either route, including one that strips the id.
+// Ambiguous legacy work is a lower bound; distinct identified work remains exact.
+func TestCloseReportLegacyEmptyIdRemainsConservative(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		f := newCloseReportControlFixture(t)
+		before := testutil.ToFloat64(transferByteCounter)
 		report := &protocol.CloseContract{ContractId: f.contractId.Bytes(), AckedByteCount: 20, UnackedByteCount: ^uint64(0), Checkpoint: true}
 		for range 2 {
 			if err := f.http(t, report); err != nil {
 				t.Fatal(err)
 			}
 		}
-		assertControlCloseReportCensus(t, f, f.contractId, 0, 40)
+		assertControlCloseReportCensus(t, f, f.contractId, 0, 20)
 		report.ReportId = server.NewId().Bytes()
 		for range 2 {
 			if err := f.http(t, report); err != nil {
 				t.Fatal(err)
 			}
 		}
-		assertControlCloseReportCensus(t, f, f.contractId, 1, 60)
+		assertControlCloseReportCensus(t, f, f.contractId, 1, 20)
+		report.ReportId = server.NewId().Bytes()
+		if err := CloseContract(f.ctx, f.sourceId, report); err != nil {
+			t.Fatal(err)
+		}
+		assertControlCloseReportCensus(t, f, f.contractId, 2, 40)
+		if delta := testutil.ToFloat64(transferByteCounter) - before; delta != 40 {
+			t.Fatal("legacy or mixed-route replay inflated transfer metrics", delta)
+		}
+	})
+}
+
+// A legacy final retry is inert while its peer is still open, including metrics.
+func TestCloseReportLegacyFinalRetryCountsCommittedBytesOnce(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newCloseReportControlFixture(t)
+		before := testutil.ToFloat64(transferByteCounter)
+		report := &protocol.CloseContract{ContractId: f.contractId.Bytes(), AckedByteCount: 20}
+		for range 2 {
+			if err := f.http(t, report); err != nil {
+				t.Fatal(err)
+			}
+		}
+		assertControlCloseReportCensus(t, f, f.contractId, 0, 20)
+		if delta := testutil.ToFloat64(transferByteCounter) - before; delta != 20 {
+			t.Fatal("legacy final replay inflated transfer metrics", delta)
+		}
 	})
 }
 

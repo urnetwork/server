@@ -25,7 +25,7 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for head := 793; head <= 812; head++ {
+		for head := 793; head <= 813; head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
@@ -102,6 +102,12 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"grant receipt allows duplicate run", 811, `ALTER TABLE transfer_balance_grant_run DROP CONSTRAINT transfer_balance_grant_run_pkey`},
 		{"grant receipt kind has wrong width", 811, `ALTER TABLE transfer_balance_grant_run ALTER COLUMN grant_kind TYPE varchar(33)`},
 		{"deadline guard reverted to predecessor", 812, `CREATE OR REPLACE FUNCTION transfer_contract_usage_guard() RETURNS trigger LANGUAGE plpgsql AS $guard$` + server.ContractUsageGuardOriginalFunctionBodySql + `$guard$`},
+		{"missing legacy checkpoint bound", 813, `ALTER TABLE contract_close DROP COLUMN legacy_checkpoint_byte_count`},
+		{"legacy checkpoint bound truncates bytes", 813, `ALTER TABLE contract_close ALTER COLUMN legacy_checkpoint_byte_count TYPE integer`},
+		{"invented legacy checkpoint bound", 813, `ALTER TABLE contract_close ALTER COLUMN legacy_checkpoint_byte_count SET DEFAULT 0`},
+		{"missing identified checkpoint total", 813, `ALTER TABLE contract_close DROP COLUMN identified_checkpoint_byte_count`},
+		{"identified checkpoint total truncates bytes", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count TYPE integer`},
+		{"invented identified checkpoint total", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count SET DEFAULT 0`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

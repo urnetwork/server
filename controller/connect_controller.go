@@ -1440,23 +1440,18 @@ func CloseContract(
 		if err != nil || reportId == (server.Id{}) {
 			return model.ErrContractCloseReportInvalid
 		}
-		applied, err := model.CloseContractWithReport(ctx, model.ContractCloseReport{
+		added, err := model.CloseContractWithReportUsage(ctx, model.ContractCloseReport{
 			ReportId: reportId, ContractId: contractId, ClientId: clientId,
 			AckedByteCount: usedTransferByteCount, UnackedByteCount: closeContract.UnackedByteCount,
 			Checkpoint: checkpoint, OriginalReport: closeContract.OriginalReport, OriginalInventory: closeContract.OriginalInventory,
 		})
-		if applied {
-			// Count the committed original once, even if later settlement needs retry.
-			transferByteCounter.Add(float64(usedTransferByteCount))
-		}
+		// Count the committed increment even if later settlement needs retry.
+		transferByteCounter.Add(float64(added))
 		return err
 	}
-	// Empty-id peers retain the original cumulative checkpoint contract.
-	err := model.CloseContract(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
-	if err == nil {
-		// the acked byte count is incremental per checkpoint, so this sums to
-		// the total transferred bytes (matching the contract_close accumulation)
-		transferByteCounter.Add(float64(usedTransferByteCount))
-	}
+	// Legacy checkpoints conservatively retain a lower bound. A successful
+	// duplicate (including a final replay) contributes no additional bytes.
+	added, err := model.CloseContractUsage(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
+	transferByteCounter.Add(float64(added))
 	return err
 }

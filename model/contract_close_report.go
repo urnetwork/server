@@ -35,14 +35,31 @@ var ErrContractCloseReportClosed = errors.New("contract close report party is al
 // panic/retry ownership. Only this private envelope is consumed by the public API.
 type contractCloseReportAbort struct{ cause error }
 
-// Applied means this call committed new completed bytes, including zero-byte finality.
+// Applied means this call committed a new logical report, including zero-byte
+// finality and identified work already covered by a legacy checkpoint bound.
 // Exact retries remain successful after settlement or contract-directory cleanup.
+// Success acknowledges the report, not necessarily a terminal outcome:
+// checkpoints, disputes and deferred legacy settlement can remain unfinished.
 func CloseContractWithReport(ctx context.Context, report ContractCloseReport) (applied bool, returnErr error) {
+	applied, _, returnErr = closeContractWithReportUsage(ctx, report)
+	return
+}
+
+// Return the actual committed increment for transport metrics. In mixed legacy
+// mode, a new identified report can be retained without increasing the bound.
+// A later settlement error does not erase an already committed report delta.
+func CloseContractWithReportUsage(ctx context.Context, report ContractCloseReport) (ByteCount, error) {
+	_, added, err := closeContractWithReportUsage(ctx, report)
+	return added, err
+}
+
+// Original evidence, the receipt and conservative accounting share one commit.
+func closeContractWithReportUsage(ctx context.Context, report ContractCloseReport) (applied bool, addedByteCount ByteCount, returnErr error) {
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if report.ReportId == (server.Id{}) || report.ContractId == (server.Id{}) || report.ClientId == (server.Id{}) || report.AckedByteCount < 0 {
-		return false, ErrContractCloseReportInvalid
+		return false, 0, ErrContractCloseReportInvalid
 	}
 	report.OriginalInventory = bytes.Clone(report.OriginalInventory)
 	if len(report.OriginalInventory) == 0 {
@@ -53,12 +70,13 @@ func CloseContractWithReport(ctx context.Context, report ContractCloseReport) (a
 		report.OriginalReport = nil
 	}
 	if _, err := validateContractCloseOriginal(report); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if refusal, ok := recovered.(contractCloseReportAbort); ok {
 				applied = false
+				addedByteCount = 0
 				returnErr = refusal.cause
 			} else {
 				panic(recovered)
@@ -68,8 +86,9 @@ func CloseContractWithReport(ctx context.Context, report ContractCloseReport) (a
 	server.Tx(ctx, func(tx server.PgTx) {
 		// The transaction owner may retry a rolled-back attempt; never retain its result.
 		applied = false
+		addedByteCount = 0
 		var err error
-		applied, err = closeContractReportInTx(ctx, tx, report)
+		applied, addedByteCount, err = closeContractReportUsageInTx(ctx, tx, report)
 		if err != nil {
 			panic(contractCloseReportAbort{cause: err})
 		}
@@ -83,19 +102,19 @@ func CloseContractWithReport(ctx context.Context, report ContractCloseReport) (a
  WHERE contract_id=$1 AND outcome IS NULL AND NOT dispute)`, report.ContractId).Scan(&pending))
 		})
 		if !pending {
-			return false, nil
+			return false, 0, nil
 		}
 	}
 	// The original accepted transaction may have lost its reply before settlement.
 	// Resume the idempotent original settlement even on an exact duplicate report.
 	closed, err := settleContract(ctx, report.ContractId)
 	if err != nil {
-		return applied, err
+		return applied, addedByteCount, err
 	}
 	if closed {
 		RemoveFromStream(ctx, report.ContractId)
 	}
-	return applied, nil
+	return applied, addedByteCount, nil
 }
 
 // Read only immutable retained facts; no current client membership is consulted.
@@ -128,27 +147,33 @@ func matchContractCloseReportInTx(ctx context.Context, tx server.PgTx, report Co
 // The contract row serializes admission with ordinary closes and settlement.
 // The unique owner/report key also fences reuse against another contract row.
 func closeContractReportInTx(ctx context.Context, tx server.PgTx, report ContractCloseReport) (bool, error) {
+	applied, _, err := closeContractReportUsageInTx(ctx, tx, report)
+	return applied, err
+}
+
+// Preserve exact original custody even when the accounting delta is conservative.
+func closeContractReportUsageInTx(ctx context.Context, tx server.PgTx, report ContractCloseReport) (bool, ByteCount, error) {
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	original, err := validateContractCloseOriginal(report)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if found, err := matchContractCloseReportInTx(ctx, tx, report); found || err != nil {
-		return false, err
+		return false, 0, err
 	}
 	var sourceId, destinationId server.Id
 	var outcome *ContractOutcome
 	var dispute bool
 	err = tx.QueryRow(ctx, `SELECT source_id,destination_id,outcome,dispute FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, report.ContractId).Scan(&sourceId, &destinationId, &outcome, &dispute)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, fmt.Errorf("Contract not found: %s", report.ContractId)
+		return false, 0, fmt.Errorf("Contract not found: %s", report.ContractId)
 	}
 	server.Raise(err)
 	// A concurrent identical report may have committed while the row lock waited.
 	if found, err := matchContractCloseReportInTx(ctx, tx, report); found || err != nil {
-		return false, err
+		return false, 0, err
 	}
 	var party ContractParty
 	if report.ClientId == sourceId {
@@ -157,7 +182,7 @@ func closeContractReportInTx(ctx context.Context, tx server.PgTx, report Contrac
 		party = ContractPartyDestination
 	}
 	if party == "" {
-		return false, fmt.Errorf("Client is not a party to the contract: %s", report.ContractId)
+		return false, 0, fmt.Errorf("Client is not a party to the contract: %s", report.ContractId)
 	}
 	// A rolling older writer may already have accepted this exact increment.
 	// It did not retain unacked bytes, a client signature or registration, so
@@ -168,25 +193,25 @@ func closeContractReportInTx(ctx context.Context, tx server.PgTx, report Contrac
   WHERE contract_id=$1 AND party=$2 AND report_id=$3`, report.ContractId, party, report.ReportId).Scan(&legacyAcked, &legacyCheckpoint)
 	if err == nil {
 		if legacyAcked != report.AckedByteCount || legacyCheckpoint != report.Checkpoint {
-			return false, ErrContractCloseReportConflict
+			return false, 0, ErrContractCloseReportConflict
 		}
-		return false, nil
+		return false, 0, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		server.Raise(err)
 	}
 	if outcome != nil {
 		if *outcome == ContractOutcomeSettled {
-			return false, fmt.Errorf("%w: %s", errContractAlreadySettled, report.ContractId)
+			return false, 0, fmt.Errorf("%w: %s", errContractAlreadySettled, report.ContractId)
 		}
-		return false, fmt.Errorf("Contract already closed with outcome %s: %s", *outcome, report.ContractId)
+		return false, 0, fmt.Errorf("Contract already closed with outcome %s: %s", *outcome, report.ContractId)
 	}
 	if dispute {
-		return false, fmt.Errorf("Contract in dispute: %s", report.ContractId)
+		return false, 0, fmt.Errorf("Contract in dispute: %s", report.ContractId)
 	}
 	registration, keyIssue, err := originalCloseKeyRegistrationInTx(ctx, tx, original)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	// Reserve before accumulating. A different-contract collision must never
 	// commit an increment before discovering that its report key already exists.
@@ -198,18 +223,18 @@ func closeContractReportInTx(ctx context.Context, tx server.PgTx, report Contrac
 	if tag.RowsAffected() == 0 {
 		found, err := matchContractCloseReportInTx(ctx, tx, report)
 		if !found && err == nil {
-			return false, errors.New("original contract close report disappeared during admission")
+			return false, 0, errors.New("original contract close report disappeared during admission")
 		}
-		return false, err
+		return false, 0, err
 	}
 	// Use the current published transaction owner for both the old rolling
 	// receipt and the byte increment. Any refusal rolls back our reservation too.
-	applied, _, err := applyContractCloseReportInTx(ctx, tx, report.ContractId, report.ClientId, report.AckedByteCount, report.Checkpoint, &report.ReportId)
+	applied, _, added, err := applyContractCloseReportUsageInTx(ctx, tx, report.ContractId, report.ClientId, report.AckedByteCount, report.Checkpoint, &report.ReportId, nil)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if !applied {
-		return false, ErrContractCloseReportClosed
+		return false, 0, ErrContractCloseReportClosed
 	}
-	return true, nil
+	return true, added, nil
 }

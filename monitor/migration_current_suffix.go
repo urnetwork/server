@@ -1,4 +1,4 @@
-// Published versions 794–812 share one ordered artifact/SQL contract. These
+// Published versions 794–813 share one ordered artifact/SQL contract. These
 // predicates read catalogs only and remain safe before the additive DDL exists.
 package monitor
 
@@ -214,4 +214,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "end_time", kind: "timestamp without time zone", notNull: true}),
 		snMainnetMigrationConstraints("transfer_balance_grant_run", "PRIMARY KEY (run_id, grant_kind)")),
 	migrationCurrentSuffix(812, "deadline closure preserves retained usage evidence", contractDeadlineUsageGuardArtifactQuery),
+	migrationCurrentSuffix(813, "conservative legacy close checkpoints",
+		snMainnetMigrationColumns("contract_close",
+			snMainnetMigrationColumn{name: "legacy_checkpoint_byte_count", kind: "bigint"},
+			snMainnetMigrationColumn{name: "identified_checkpoint_byte_count", kind: "bigint"})),
 }
