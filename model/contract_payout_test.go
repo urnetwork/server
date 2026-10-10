@@ -447,10 +447,51 @@ func assertContractPayoutTestBalanceConsumed(
 	want ByteCount,
 ) {
 	t.Helper()
-	// These public fixtures reserve and consume one complete grant. The
-	// journal owns consumption before the worker projects escrow metadata.
-	assertCurrentPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, want,
-		map[server.Id]currentPayoutDebitTestAmount{contractId: {reserved: want, consumed: want}})
+	read := func() (remaining, consumed, pendingDebit ByteCount, journalRows, appliedRows int) {
+		state, err := readContractPayoutTestBalance(ctx, balanceId, contractId)
+		if err != nil {
+			t.Fatalf("read payout debit authority: %v", err)
+		}
+		return state.remaining, state.consumed, state.pendingDebit, state.journalRows, state.appliedRows
+	}
+	// Payout settlement is durable before the Redis debit worker writes back
+	// the raw grant. All retained credit must already be offset by journaled
+	// consumption; a synchronous PostgreSQL settlement has both values zero.
+	remaining, consumed, pendingDebit, journalRows, appliedRows := read()
+	if remaining < 0 || remaining != pendingDebit || consumed != want {
+		t.Fatalf("settled credit/debt/consumed = %d/%d/%d, want equal nonnegative credit/debt and consumed %d", remaining, pendingDebit, consumed, want)
+	}
+	if journalRows == 1 && appliedRows == 0 {
+		// Fresh full-grant settlements also prove exact per-contract ownership,
+		// reservation release and public worker pages before metadata projection.
+		assertCurrentPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, want,
+			map[server.Id]currentPayoutDebitTestAmount{contractId: {reserved: want, consumed: want}})
+	} else {
+		// Already materialized or applied journal rows retain replay coverage.
+		wantApplied := journalRows - appliedRows
+		var totalApplied, totalReleased int
+		for batch := 0; batch < (journalRows+transferDebitBatchSize-1)/transferDebitBatchSize; batch++ {
+			applied, released, busy, err := flushTransferDebitBalance(ctx, balanceId)
+			if err != nil || busy || applied < 0 || released <= 0 || applied > transferDebitBatchSize || released > transferDebitBatchSize {
+				t.Fatalf("bounded debit owner flush = %d/%d, busy=%t, err=%v", applied, released, busy, err)
+			}
+			totalApplied += applied
+			totalReleased += released
+		}
+		if totalApplied != wantApplied || totalReleased != journalRows {
+			t.Fatalf("debit owner applied/released = %d/%d, want %d/%d", totalApplied, totalReleased, wantApplied, journalRows)
+		}
+	}
+	// Retain the original durable zero/consumption assertion after the actual
+	// outcome owner has run, and prove replay cannot charge the balance again.
+	applied, released, busy, err := flushTransferDebitBalance(ctx, balanceId)
+	if err != nil || busy || applied != 0 || released != 0 {
+		t.Fatalf("debit owner replay = %d/%d, busy=%t, err=%v", applied, released, busy, err)
+	}
+	remaining, consumed, pendingDebit, journalRows, appliedRows = read()
+	if remaining != 0 || consumed != want || pendingDebit != 0 || journalRows != 0 || appliedRows != 0 {
+		t.Fatalf("flushed balance remaining/consumed/debt/journal/applied = %d/%d/%d/%d/%d, want 0/%d/0/0/0", remaining, consumed, pendingDebit, journalRows, appliedRows, want)
+	}
 }
 
 // This is the deterministic root-cause matrix for contract payouts. A contract

@@ -105,7 +105,9 @@ func assertCurrentPayoutDebitTestConsumptionAndDrain(t testing.TB, ctx context.C
 		state := readPayoutDebitTestState(t, ctx, balanceId)
 		if state.initial != initial || state.credit != initial-drainedConsumed || state.pending != len(contractIds)-drained ||
 			state.pendingBytes != consumed-drainedConsumed || state.applied != 0 || state.settled != drainedConsumed ||
-			state.settledEscrows != drained || state.invalid != len(contractIds)-drained || state.escrows != len(contractIds)+before.anchors ||
+			state.settledEscrows != drained || state.invalid != 0 || state.invalidReservations != 0 ||
+			state.unmaterializedEscrows != len(contractIds)-drained || state.unmaterialized != consumed-drainedConsumed ||
+			state.pendingReserved != reserved-drainedReserved || state.escrows != len(contractIds)+before.anchors ||
 			state.anchors != before.anchors || state.anchorRows != before.anchorRows || state.legacy != 0 || state.reserved != reserved-drainedReserved {
 			t.Fatalf("current debit owner lost exact credit, metadata or full reservation: drained=%d state=%+v", drained, state)
 		}

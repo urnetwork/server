@@ -6378,6 +6378,14 @@ owner addresses committed-rate visibility; exact traces and existing source-
 qualified point readers address bounded causal questions. Neither introduces
 automatic account cleanup, a broader financial scan or a new fleet SLO.
 
+The singleton legacy financial owner and explicit applying drain combine
+`BEGIN` with their existing two transaction-local timeouts in one request.
+The existing financial transaction, rollback and post ownership are unchanged;
+the newer bounded forward cohorts retain their separate 500 ms statement budget.
+The native two-slot control checks one fewer Query/ReadyForQuery cycle per
+transaction. Its elapsed time does not establish production throughput, grant
+availability or backlog recovery. Read-only previews retain repeatable read.
+
 ### 2.6 Open-contract set size — the close-backlog canary
 Probe: `open-contracts`
 

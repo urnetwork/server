@@ -295,8 +295,9 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 		before := readPayoutDebitTestState(t, ctx, balanceId)
 		consumed := ByteCount(len(paidContractIds))*1024 + 512
 		if before.initial != 1024*1024 || before.credit != before.initial || before.pending != len(paidContractIds)+1 ||
-			before.pendingBytes != consumed || before.applied != 0 || before.reserved != consumed || before.legacy != 0 ||
-			before.escrows != 1 || before.invalid != 0 || before.settled != 512 {
+			before.pendingBytes != consumed || before.applied != 0 || before.reserved != consumed+512 || before.legacy != 0 ||
+			before.escrows != 1 || before.invalid != 0 || before.invalidReservations != 0 || before.settled != 0 ||
+			before.unmaterialized != 512 || before.unmaterializedEscrows != 1 {
 			t.Fatalf("cascade lost retained credit, consumption or live metadata: %+v", before)
 		}
 		drainPayoutDebitTestPending(t, ctx, balanceId, before)
