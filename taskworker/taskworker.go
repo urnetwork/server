@@ -182,7 +182,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExportProvidersMapPost,
 		),
 		task.NewTaskTarget(work.BackfillClock),
-		task.NewTaskTargetWithPost(work.MaintainNetworkSessions, work.MaintainNetworkSessionsPost),
+		work.NewMaintainNetworkSessionsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.WebSearchAnalytics,
 			work.WebSearchAnalyticsPost,

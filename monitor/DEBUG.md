@@ -279,3 +279,8 @@ and gives each payer's such rows one turn at a time; other rows keep full
 parallelism. A failed lookup only disables the turns. See
 [payer turns](../model/subscription_close_turns.go) and
 [their regression](../model/subscription_close_turns_test.go).
+
+`MaintainNetworkSessions` had the same shape: one failing index member or
+operation cleanup stopped the rest of its shard and the 30-second task fell
+into hour-long backoff. Its sweep and recovery now continue past a failed item
+and return every failure, and its target caps the retry delay at 30 seconds.

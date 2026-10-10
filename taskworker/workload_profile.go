@@ -125,7 +125,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 			work.ScheduleBackfillClock(clientSession, tx, server.NowUtc())
 		}},
 		{target: task.NewTaskTarget(work.RemoveExpiredAuthCodes), schedule: work.ScheduleRemoveExpiredAuthCodes},
-		{target: task.NewTaskTarget(work.MaintainNetworkSessions), schedule: work.ScheduleMaintainNetworkSessions},
+		{target: work.NewMaintainNetworkSessionsTaskTarget(), schedule: work.ScheduleMaintainNetworkSessions},
 		{target: work.NewStartupContractClosureTaskTarget(), schedule: work.ScheduleOpenContractClosuresOnStartup},
 		{target: work.NewScheduledContractClosureTaskTarget()},
 		{target: work.NewCloseExpiredContractsTaskTarget(), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
