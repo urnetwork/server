@@ -6226,7 +6226,9 @@ another payer's turn. Busy outcomes were 8 of 18,946 visits.
 2. Payer task claims. 3,747 payer tasks were due and the median claim delay,
    `run_start_time - run_at` over recent finished payer tasks, was 2.7 hours.
    With N registered functions, each got one lane turn per 2N claims, and the
-   older queued close backlog took every global claim.
+   older queued close backlog took every global claim. Lane turns now go only
+   to functions with due work, and payer turns are limited to two per
+   instance; see DEBUG.md on queue starvation.
 3. Head revisits of a dense payer. The head payer's turns each settled one
    contract while `timings.selection` took about 14 of their 15 seconds. The
    head revisit bounded its interval only by a row comparison on
