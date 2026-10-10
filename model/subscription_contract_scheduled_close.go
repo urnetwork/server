@@ -39,6 +39,25 @@ type ContractDeadlineReconciliation struct {
 	Adjustments   []string        `json:"adjustments,omitempty"`
 }
 
+// A contract has one escrow row per funding grant. Production statistics can
+// estimate tens of thousands of rows for one contract id, which made the planner
+// add parallel workers and JIT to a few index probes while the grant owner was
+// held. A bounded per-contract scan keeps the estimate small; a larger set fails
+// closed instead of being truncated.
+const deadlineEscrowRowLimit = 1024
+
+var deadlineEscrowRowsSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_count,COALESCE(b.start_balance_byte_count,0),
+	COALESCE(b.net_revenue_nano_cents,0),b.network_id,
+	GREATEST(0,COALESCE(b.balance_byte_count,0)::numeric-COALESCE((SELECT sum(debit_byte_count)
+	FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND NOT j.applied),0))::bigint,
+	e.settled,e.payout_byte_count,e.redis_reserved,
+	(SELECT debit_byte_count FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND j.contract_id=e.contract_id)
+	FROM unnest(ARRAY[$1::uuid]) AS requested(contract_id)
+	CROSS JOIN LATERAL (SELECT contract_id,balance_id,balance_byte_count,settled,payout_byte_count,redis_reserved
+		FROM transfer_escrow WHERE contract_id=requested.contract_id ORDER BY balance_id LIMIT %d) AS e
+	LEFT JOIN transfer_balance b USING(balance_id)
+	ORDER BY b.end_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1)
+
 // Grant values are read after sorted grant locks. Missing grants remain visible
 // so every reservation can be retired, including orphaned legacy escrows.
 type contractDeadlineEscrow struct {
@@ -191,14 +210,7 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 	})
 	positive, redisReservations := lockSettlementReservations(ctx, tx, contractId, balanceIds)
 	escrows := []contractDeadlineEscrow{}
-	rows, err = tx.Query(ctx, `SELECT e.balance_id,e.balance_byte_count,COALESCE(b.start_balance_byte_count,0),
-				COALESCE(b.net_revenue_nano_cents,0),b.network_id,
-				GREATEST(0,COALESCE(b.balance_byte_count,0)::numeric-COALESCE((SELECT sum(debit_byte_count)
-				FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND NOT j.applied),0))::bigint,
-				e.settled,e.payout_byte_count,e.redis_reserved,
-				(SELECT debit_byte_count FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND j.contract_id=e.contract_id)
-				FROM transfer_escrow e LEFT JOIN transfer_balance b USING(balance_id)
-				WHERE e.contract_id=$1 ORDER BY b.end_time NULLS LAST,e.balance_id`, contractId)
+	rows, err = tx.Query(ctx, deadlineEscrowRowsSql, contractId)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
 			var escrow contractDeadlineEscrow
@@ -207,6 +219,9 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 			escrows = append(escrows, escrow)
 		}
 	})
+	if deadlineEscrowRowLimit < len(escrows) {
+		server.Raise(fmt.Errorf("deadline escrow rows exceed their bound"))
+	}
 	fundedUsage := result.Requested
 	if len(escrows) == 0 && owner.participants.payerNetworkId == nil {
 		fundedUsage = 0
@@ -269,8 +284,7 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 	// Outcome/metadata triggers invalidate the cache revision. A bad
 	// optional snapshot must not block financial reconciliation.
 	if len(positive) > 0 {
-		ids := settlementReservationIds(positive)
-		posts = append(posts, func() any { refreshNetEscrow(ctx, ids); return nil })
+		posts = append(posts, deadlineNetEscrowRefreshPost(ctx, settlementReservationIds(positive)))
 	}
 	if len(redisReservations) > 0 {
 		posts = append(posts, func() any { ReconcileRedisContractReservation(ctx, contractId); return nil })
