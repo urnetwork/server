@@ -64,14 +64,14 @@ func TestPgPoolMetricsPublishFiniteCompleteSnapshot(t *testing.T) {
 		metricCount += len(family.Metric)
 		for _, metric := range family.Metric {
 			for _, label := range metric.Label {
-				if label.GetName() != "pool" && label.GetName() != "state" && label.GetName() != "outcome" && label.GetName() != "reason" {
+				if label.GetName() != "pool" && label.GetName() != "state" && label.GetName() != "outcome" && label.GetName() != "reason" && label.GetName() != "phase" {
 					t.Fatalf("unexpected PostgreSQL pool metric label %q", label.GetName())
 				}
 			}
 		}
 	}
-	if metricCount != 16 {
-		t.Fatalf("PostgreSQL pool metrics = %d, want 16 complete samples", metricCount)
+	if metricCount != 28 {
+		t.Fatalf("PostgreSQL pool metrics = %d, want 28 complete samples", metricCount)
 	}
 	assertPgPoolMetricValue(t, families, "urnetwork_pg_pool_connections", "state", "maximum", 8)
 	assertPgPoolMetricValue(t, families, "urnetwork_pg_pool_acquires_total", "outcome", "canceled", 2)

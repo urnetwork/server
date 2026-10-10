@@ -25,6 +25,7 @@ type pgPoolMetricSnapshot struct {
 	lifetimeDestroyed       int64
 	idleDestroyed           int64
 	wrapper                 pgPoolWrapperSnapshot
+	startup                 [pgPoolStartupPhaseCount]pgPoolStartupPhaseSnapshot
 }
 
 // pgPoolMetricsSource supplies a snapshot without opening a pool.
@@ -54,6 +55,7 @@ func (self *safePgPool) metricSnapshot() (pgPoolMetricSnapshot, bool) {
 		lifetimeDestroyed:       stats.MaxLifetimeDestroyCount(),
 		idleDestroyed:           stats.MaxIdleDestroyCount(),
 		wrapper:                 self.wrapperSnapshot(self.pool),
+		startup:                 self.startupMetrics.snapshot(),
 	}, true
 }
 
@@ -66,6 +68,9 @@ type pgPoolMetricsCollector struct {
 	destroyedDesc       *prometheus.Desc
 	wrapperDesc         *prometheus.Desc
 	trackingDroppedDesc *prometheus.Desc
+	startupActiveDesc   *prometheus.Desc
+	startupCompleteDesc *prometheus.Desc
+	startupDurationDesc *prometheus.Desc
 	stateLock           sync.Mutex
 	sources             map[string]pgPoolMetricsSource
 }
@@ -108,6 +113,21 @@ func newPgPoolMetricsCollector(sources map[string]pgPoolMetricsSource) *pgPoolMe
 			"Cumulative wrapper cleanup observations omitted by this process and pool role because a generation's bounded registry was full; pending cleanup coverage may be incomplete.",
 			[]string{"pool"}, nil,
 		),
+		startupActiveDesc: prometheus.NewDesc(
+			"urnetwork_pg_pool_startup_phases_active",
+			"PostgreSQL constructors inside initial Ping or failed-startup cleanup; sampled separately from pool state.",
+			[]string{"pool", "phase"}, nil,
+		),
+		startupCompleteDesc: prometheus.NewDesc(
+			"urnetwork_pg_pool_startup_phases_completed_total",
+			"Completed PostgreSQL startup phases by fixed outcome for this pool generation; cleanup ok requires observed CleanupDone.",
+			[]string{"pool", "phase", "outcome"}, nil,
+		),
+		startupDurationDesc: prometheus.NewDesc(
+			"urnetwork_pg_pool_startup_phase_duration_seconds_total",
+			"Cumulative completed PostgreSQL startup phase time for this pool generation; excludes still-active phases.",
+			[]string{"pool", "phase"}, nil,
+		),
 		sources: sources,
 	}
 }
@@ -130,6 +150,9 @@ func (self *pgPoolMetricsCollector) Describe(descriptions chan<- *prometheus.Des
 	descriptions <- self.destroyedDesc
 	descriptions <- self.wrapperDesc
 	descriptions <- self.trackingDroppedDesc
+	descriptions <- self.startupActiveDesc
+	descriptions <- self.startupCompleteDesc
+	descriptions <- self.startupDurationDesc
 }
 
 // Collect implements prometheus.Collector without initializing unused pools.
@@ -182,5 +205,13 @@ func (self *pgPoolMetricsCollector) Collect(metrics chan<- prometheus.Metric) {
 			metrics <- prometheus.MustNewConstMetric(self.wrapperDesc, prometheus.GaugeValue, float64(state.value), role, state.name)
 		}
 		metrics <- prometheus.MustNewConstMetric(self.trackingDroppedDesc, prometheus.CounterValue, float64(snapshot.wrapper.trackingDropped), role)
+		for phase, name := range [...]string{"initial_ping", "failed_startup_cleanup"} {
+			observation := snapshot.startup[phase]
+			metrics <- prometheus.MustNewConstMetric(self.startupActiveDesc, prometheus.GaugeValue, float64(observation.active), role, name)
+			metrics <- prometheus.MustNewConstMetric(self.startupDurationDesc, prometheus.CounterValue, observation.durationSeconds, role, name)
+			for outcome, result := range [...]string{"ok", "deadline", "canceled", "other"} {
+				metrics <- prometheus.MustNewConstMetric(self.startupCompleteDesc, prometheus.CounterValue, float64(observation.completed[outcome]), role, name, result)
+			}
+		}
 	}
 }

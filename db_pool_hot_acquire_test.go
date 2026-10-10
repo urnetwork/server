@@ -193,7 +193,7 @@ func newPgPoolWireFixture(t testing.TB, query func(int, string) bool, shouldPing
 	for _, f := range configure {
 		f(fixture, config)
 	}
-	configurePgPoolLiveness(config)
+	startupMetrics := configurePgPoolLiveness(config)
 	configurePgPoolWriteTracking(config)
 	configurePgPoolStatementErrors(config)
 	config.ShouldPing = shouldPing
@@ -201,7 +201,7 @@ func newPgPoolWireFixture(t testing.TB, query func(int, string) bool, shouldPing
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool := &safePgPool{pool: pgPool}
+	pool := &safePgPool{pool: pgPool, startupMetrics: startupMetrics}
 	t.Cleanup(func() {
 		fixture.stateLock.Lock()
 		fixture.closed = true

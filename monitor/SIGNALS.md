@@ -14142,6 +14142,31 @@ is not an exact ownership partition. Compare actual producer generations and
 fresh metrics before using this discriminator; it changes no financial
 outcome, retry, commit/rollback, pool sizing or socket-disposal decision.
 
+`urnetwork_pg_pool_startup_phases_active{pool,phase}` separates the existing
+constructor's `initial_ping` from `failed_startup_cleanup`. Both remain part of
+pgx's `constructing` population; they exclude idle-connection validation and
+borrowed-connection disposal. Acquisition cancellation does not erase a phase
+still running under pgx's detached constructor context. Each actual pool
+generation owns fresh counters; an unused or closed pool emits no series.
+`urnetwork_pg_pool_startup_phases_completed_total{pool,phase,outcome}` counts
+actual phase returns as `ok`, `deadline`, `canceled` or `other`. Deadline includes
+typed context, socket and pgx timeouts, without identifying their cause or caller.
+Cleanup `ok` specifically means `CleanupDone` was observed; a successful or
+failed `Close` return alone does not establish physical cleanup. Cleanup budget
+expiry counts as `deadline`, never as a confirmed join, and does not change the
+original validation error or disposal budget.
+
+`urnetwork_pg_pool_startup_phase_duration_seconds_total{pool,phase}` sums only
+completed phase durations. Divide its rate by all completion outcomes for that
+phase to measure completed mean duration; still-active work has no completed
+duration. Compare fresh, matching producer generations with constructor starts
+and acquire outcomes before distinguishing churn from retained work. Pool and
+phase snapshots are separate, so subtracting active phases from `constructing`
+is not an exact instantaneous residual. Remaining pre-hook work may be DNS,
+TCP or PostgreSQL login; these metrics do not distinguish those stages, prove
+PgBouncer peer routing, or attribute a timeout to executing application SQL.
+The observer adds no SQL, socket, timer, worker, retry or connection budget.
+
 The 2026-10-01 grant-allocation discriminator adds a concrete lock-fanout
 boundary. Twelve direct-primary snapshots at 19:21:38–19:22:06 UTC retained
 5,679 active lock-wait backend-samples versus 175 active no-wait samples;

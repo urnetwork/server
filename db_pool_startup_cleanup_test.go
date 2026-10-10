@@ -182,7 +182,7 @@ func TestPgAfterConnectFailureRetainsCapacityUntilCleanup(t *testing.T) {
 				}
 				return &startupCleanupCountedConn{Conn: conn, live: &live}, nil
 			}
-			configurePgPoolLiveness(config)
+			startupMetrics := configurePgPoolLiveness(config)
 			configurePgPoolWriteTracking(config)
 			config.ShouldPing = func(context.Context, pgxpool.ShouldPingParams) bool { return false }
 			validate := config.AfterConnect
@@ -305,6 +305,11 @@ func TestPgAfterConnectFailureRetainsCapacityUntilCleanup(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("Acquire did not return validation error")
 				}
+			}
+			phases := startupMetrics.snapshot()
+			if phases[pgPoolInitialPing].active != 0 || phases[pgPoolInitialPing].completed != [pgPoolStartupOutcomeCount]uint64{pgPoolStartupDeadline: 1} ||
+				phases[pgPoolFailedStartupCleanup].active != 0 || phases[pgPoolFailedStartupCleanup].completed != [pgPoolStartupOutcomeCount]uint64{pgPoolStartupOk: 1} {
+				t.Fatal("real pgx timeout or physical cleanup join was misclassified", phases)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()

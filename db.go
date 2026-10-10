@@ -130,6 +130,7 @@ type safePgPool struct {
 	ctx                context.Context
 	mutex              sync.Mutex
 	pool               *pgxpool.Pool
+	startupMetrics     *pgPoolStartupMetrics
 	lifecycleLock      sync.Mutex
 	lifecycle          *pgPoolWrapperLifecycle
 	lifecycleDropped   atomic.Uint64
@@ -246,7 +247,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			panic(fmt.Sprintf("Unable to parse url: %s", err))
 		}
 		glog.Infof("[db]statement_tag = %s\n", processPgStatementTag())
-		configurePgPoolLiveness(config)
+		self.startupMetrics = configurePgPoolLiveness(config)
 		configurePgPoolWriteTracking(config)
 		configurePgPoolStatementErrors(config)
 
@@ -262,7 +263,8 @@ func (self *safePgPool) open() *pgxpool.Pool {
 // idle for more than a second. A hot checkout needs no second round trip to
 // the transaction pooler; failed callback connections still follow disposal
 // and safe-retry classification in dbWithPool.
-func configurePgPoolLiveness(config *pgxpool.Config) {
+func configurePgPoolLiveness(config *pgxpool.Config) *pgPoolStartupMetrics {
+	startupMetrics := &pgPoolStartupMetrics{}
 	if config.ConnConfig.ConnectTimeout <= 0 || PgConnectTimeout < config.ConnConfig.ConnectTimeout {
 		config.ConnConfig.ConnectTimeout = PgConnectTimeout
 	}
@@ -277,28 +279,32 @@ func configurePgPoolLiveness(config *pgxpool.Config) {
 	config.PingTimeout = PgPingTimeout
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		pgxRegisterIdType(conn.TypeMap())
-		if err := pingPgConnection(ctx, conn); err != nil {
-			cleanupFailedPgStartup(ctx, conn.PgConn(), PgStartupCleanupTimeout)
+		started := startupMetrics.begin(pgPoolInitialPing)
+		err := pingPgConnection(ctx, conn)
+		startupMetrics.finish(pgPoolInitialPing, time.Since(started), err)
+		if err != nil {
+			startupMetrics.cleanupFailedStartup(ctx, conn.PgConn(), PgStartupCleanupTimeout)
 			return err
 		}
 		return nil
 	}
+	return startupMetrics
 }
 
 // A failed Ping can mark a PgConn closed before its cancel/Terminate cleanup
 // has disposed of the socket. Close alone then returns immediately. Retain the
 // failed constructor until CleanupDone, subject to the same finite budget used
-// by pgxpool's ordinary destructor. Acquire cancellation must not skip cleanup.
-func cleanupFailedPgStartup(ctx context.Context, conn interface {
-	Close(context.Context) error
-	CleanupDone() chan struct{}
-}, timeout time.Duration) {
+// by pgxpool's ordinary destructor. The result reports that join, not Close's
+// secondary error. Acquire cancellation must not skip cleanup.
+func cleanupFailedPgStartup(ctx context.Context, conn pgStartupCleanupConnection, timeout time.Duration) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 	_ = conn.Close(cleanupCtx)
 	select {
 	case <-conn.CleanupDone():
+		return nil
 	case <-cleanupCtx.Done():
+		return cleanupCtx.Err()
 	}
 }
 
