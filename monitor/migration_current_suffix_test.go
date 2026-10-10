@@ -25,7 +25,7 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for head := 793; head <= 808; head++ {
+		for head := 793; head <= 809; head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
@@ -87,6 +87,12 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"client session index has extra included key", 807, `DROP INDEX network_client_session_active; CREATE INDEX network_client_session_active ON network_client(network_id,session_id,client_id) INCLUDE (active) WHERE active AND session_id IS NOT NULL`},
 		{"auth-code session index reordered", 808, `DROP INDEX auth_code_origin_session; CREATE INDEX auth_code_origin_session ON auth_code(origin_session_id,network_id) WHERE active AND origin_session_id IS NOT NULL`},
 		{"missing auth-code session index", 808, `DROP INDEX auth_code_origin_session`},
+		{"missing function poll index", 809, `DROP INDEX pending_task_function_poll_order`},
+		{"function poll normalization misses repeated version segments", 809, `DROP INDEX pending_task_function_poll_order; CREATE INDEX pending_task_function_poll_order ON pending_task(regexp_replace(function_name, '/v[0-9]+', ''), available_block, run_priority DESC, run_max_time_seconds DESC, task_id)`},
+		{"function poll priority precedes due range", 809, `DROP INDEX pending_task_function_poll_order; CREATE INDEX pending_task_function_poll_order ON pending_task(regexp_replace(function_name, '/v[0-9]+', '', 'g'), run_priority DESC, available_block, run_max_time_seconds DESC, task_id)`},
+		{"function poll priority direction reversed", 809, `DROP INDEX pending_task_function_poll_order; CREATE INDEX pending_task_function_poll_order ON pending_task(regexp_replace(function_name, '/v[0-9]+', '', 'g'), available_block, run_priority, run_max_time_seconds DESC, task_id)`},
+		{"function poll index has an unowned predicate", 809, `DROP INDEX pending_task_function_poll_order; CREATE INDEX pending_task_function_poll_order ON pending_task(regexp_replace(function_name, '/v[0-9]+', '', 'g'), available_block, run_priority DESC, run_max_time_seconds DESC, task_id) WHERE run_priority > 0`},
+		{"function poll index has an extra included key", 809, `DROP INDEX pending_task_function_poll_order; CREATE INDEX pending_task_function_poll_order ON pending_task(regexp_replace(function_name, '/v[0-9]+', '', 'g'), available_block, run_priority DESC, run_max_time_seconds DESC, task_id) INCLUDE (function_name)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -134,8 +140,10 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 			}{
 				{807, "network_client", "network_client_session_active"},
 				{808, "auth_code", "auth_code_origin_session"},
+				{809, "pending_task", "pending_task_function_poll_order"},
 			} {
-				var definition, predicate string
+				var definition string
+				var predicate *string
 				server.Raise(conn.QueryRow(ctx, `SELECT pg_get_indexdef(indexrelid), pg_get_expr(indpred,indrelid)
  FROM pg_index WHERE indexrelid=to_regclass('public.'||$1)`, index.name).Scan(&definition, &predicate))
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
