@@ -9917,4 +9917,8 @@ var migrations = []any{
 	newSqlMigration(`ALTER TABLE contract_close
 		ADD COLUMN legacy_checkpoint_byte_count bigint,
 		ADD COLUMN identified_checkpoint_byte_count bigint`),
+	// 814: durable payout planning (db_payment_plan_assignment.go). New tables
+	// and a guard on transfer_escrow_sweep.payment_id updates; nothing is
+	// rewritten. Apply before deploying taskworkers that stage plan sweeps.
+	newSqlMigration(paymentPlanAssignmentSchemaSql),
 }

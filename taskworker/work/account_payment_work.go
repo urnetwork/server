@@ -1,6 +1,7 @@
 package work
 
 import (
+	"errors"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -55,6 +56,12 @@ func Payout(
 	// submits are idempotent, so payouts are re-enabled.
 	err := controller.SendPayments(clientSession)
 	if err != nil {
+		var progressErr *model.PaymentPlanProgressError
+		if errors.As(err, &progressErr) {
+			// the run committed planning steps that the next run resumes, so a
+			// drain, max time or later failure retries promptly, not after backoff
+			return nil, task.WithCommittedProgressRetry(err)
+		}
 		return nil, err
 	}
 

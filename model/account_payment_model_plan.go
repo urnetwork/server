@@ -15,7 +15,16 @@ import (
 	// "github.com/urnetwork/server/session"
 )
 
-// the payment planner computes a payout in one large transaction
+// the payment planner computes a payout's financial decisions in one
+// transaction, and commits the expensive sweep assignment after it in bounded
+// steps:
+//   - the plan transaction selects the sweeps and commits the payments, the
+//     subsidy epoch and the points, staging the selected sweeps
+//   - the staged sweeps are assigned to their payments in bounded batches, and
+//     the payments become payable only after the last batch
+//     (account_payment_plan_assignment.go)
+//
+// A drain or restart loses at most the step in flight; the next run resumes.
 // the coponents of the payout are:
 // 1. escrow net revenue share (the `NetRevenue` part of the escrow is 100% transferred to the provider)
 //    note all `NetRevenue` will be zero when fully migrated to points/token,
@@ -28,6 +37,11 @@ type PaymentPlanner struct {
 	unresolvedLegacyPaymentCount int
 	ctx                          context.Context
 	subsidyConfig                *SubsidyConfig
+	// a dry run assigns sweeps inline, since its transaction rolls back; a real
+	// plan stages them
+	dryRun bool
+	// selected sweeps left for the batched assignment after the plan commits
+	stagedSweepCount int64
 
 	// when > 0, bound this plan to at most maxDuration of the oldest unpaid
 	// sweeps so a large backlog is drained in bounded slices instead of one
@@ -105,52 +119,126 @@ func createPaymentPlan(
 	refreshReliabilityInputs bool,
 	writeInTx func(server.PgTx, *PaymentPlan),
 ) (paymentPlan *PaymentPlan, returnErr error) {
-	defer func() {
-		if value := recover(); value != nil {
-			if err, ok := value.(error); ok && (errors.Is(err, ErrProviderLegacyReliabilityWindow) || errors.Is(err, errPaymentPlanSelectionChanged) ||
-				errors.Is(err, server.ErrProviderEarningBoundaryUnavailable) || errors.Is(err, server.ErrProviderEarningBoundaryMismatch) ||
-				errors.Is(err, server.ErrProviderEarningBoundaryUnprepared) || errors.Is(err, server.ErrProviderEarningBoundarySchema)) {
-				paymentPlan = nil
-				returnErr = err
-				return
-			}
-			panic(value)
-		}
-	}()
+	paymentPlan, _, returnErr = createPaymentPlanWithProgress(ctx, subsidyConfig, dryRun, maxDuration, refreshReliabilityInputs, writeInTx)
+	return
+}
+
+// A real plan runs as committed steps:
+//  1. finish the staged sweep assignment of an earlier plan, whose unassigned
+//     sweeps still look unpaid to a new selection
+//  2. refresh the client location reliabilities (first slice only)
+//  3. the plan transaction: select, allocate, and commit the payments with
+//     their sweeps staged
+//  4. assign the staged sweeps in bounded batches; the payments become payable
+//     with the last batch
+//
+// An interruption loses only the step in flight. committedProgress reports
+// whether this call committed any step, so a caller can retry promptly. A
+// plan whose transaction committed is returned even when its assignment was
+// interrupted; the next call resumes the assignment. A dry run commits nothing.
+func createPaymentPlanWithProgress(
+	ctx context.Context,
+	subsidyConfig *SubsidyConfig,
+	dryRun bool,
+	maxDuration time.Duration,
+	refreshReliabilityInputs bool,
+	writeInTx func(server.PgTx, *PaymentPlan),
+) (paymentPlan *PaymentPlan, committedProgress bool, returnErr error) {
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if dryRun {
-		// recover the rollback sentinel so a dry run returns the computed plan
-		// normally. Any other panic (e.g. a real db error) still propagates.
-		defer func() {
-			if r := recover(); r != nil {
-				if r == errPaymentPlanDryRun {
-					return
-				}
-				panic(r)
-			}
-		}()
-	} else if refreshReliabilityInputs {
-		// refresh the reliability inputs used by this plan. This is a persistent
-		// write, so it is skipped for a dry run; a dry run then previews using
-		// the reliability values from the last refresh.
-		now := server.NowUtc()
-		if transition != nil {
-			now = server.MinTime(now, transition.Cutoff)
+	if !dryRun {
+		progress, err := completePaymentPlanAssignments(ctx)
+		committedProgress = committedProgress || progress
+		if err != nil {
+			return nil, committedProgress, err
 		}
-		UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
+		if refreshReliabilityInputs {
+			// refresh the reliability inputs used by this plan. This is a persistent
+			// write, so it is skipped for a dry run; a dry run then previews using
+			// the reliability values from the last refresh.
+			now := server.NowUtc()
+			if transition != nil {
+				now = server.MinTime(now, transition.Cutoff)
+			}
+			UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
+		}
 	}
 
 	// network_id -> list of child referral networks
 	networkReferrals := GetNetworkReferralsMap(ctx)
 	seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
 
+	paymentPlan, returnErr = planPaymentsInTx(
+		ctx,
+		subsidyConfig,
+		dryRun,
+		maxDuration,
+		refreshReliabilityInputs,
+		transition,
+		networkReferrals,
+		seekerHolderNetworkIds,
+		writeInTx,
+	)
+	if returnErr != nil || dryRun {
+		return
+	}
+	committedProgress = true
+
+	if 0 < paymentPlan.PendingSweepAssignmentCount {
+		if _, err := completePaymentPlanAssignments(ctx); err != nil {
+			return paymentPlan, committedProgress, err
+		}
+	}
+	return
+}
+
+// Retained planner refusals return as errors; the plan rolls back and the
+// payout task retries. Any other panic propagates.
+func paymentPlanRetainedError(err error) bool {
+	return errors.Is(err, ErrProviderLegacyReliabilityWindow) || errors.Is(err, errPaymentPlanSelectionChanged) ||
+		errors.Is(err, server.ErrProviderEarningBoundaryUnavailable) || errors.Is(err, server.ErrProviderEarningBoundaryMismatch) ||
+		errors.Is(err, server.ErrProviderEarningBoundaryUnprepared) || errors.Is(err, server.ErrProviderEarningBoundarySchema)
+}
+
+// The plan transaction. It allocates the plan's payments, subsidy epoch and
+// points, and for a real plan stages the selected sweeps instead of updating
+// them inline. A pending staged assignment refuses a new selection.
+func planPaymentsInTx(
+	ctx context.Context,
+	subsidyConfig *SubsidyConfig,
+	dryRun bool,
+	maxDuration time.Duration,
+	inspectUnresolved bool,
+	transition *server.ProviderPayoutTransition,
+	networkReferrals map[server.Id][]server.Id,
+	seekerHolderNetworkIds map[server.Id]bool,
+	writeInTx func(server.PgTx, *PaymentPlan),
+) (paymentPlan *PaymentPlan, returnErr error) {
+	defer func() {
+		if value := recover(); value != nil {
+			if err, ok := value.(error); ok {
+				// the dry run sentinel rolls the transaction back after the plan
+				// was computed; the caller still receives the computed plan
+				if errors.Is(err, errPaymentPlanDryRun) {
+					return
+				}
+				if paymentPlanRetainedError(err) {
+					paymentPlan = nil
+					returnErr = err
+					return
+				}
+			}
+			panic(value)
+		}
+	}()
+
 	// Reliability aggregation already occupies the plan's advisory-lock window.
 	// One maintenance owner retains its direct-postgres budget without holding
 	// an idle primary connection or committing scores before allocation succeeds.
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		paymentPlan, returnErr = nil, nil
 		configurePaymentPlanTransaction(ctx, tx)
 		// ReadCommitted takes the sweep/frontier snapshot only after the prior
 		// planner commits. A process-local lock cannot serialize CLI and workers.
@@ -169,12 +257,20 @@ func createPaymentPlan(
 			}()
 		}
 
+		// the unassigned sweeps of a staged plan still look unpaid, so no
+		// selection (or preview) can run until that assignment completes
+		if paymentPlanAssignmentPendingInTx(ctx, tx) {
+			returnErr = ErrPaymentPlanAssignmentPending
+			return
+		}
+
 		planner := &PaymentPlanner{
 			ctx:                    ctx,
 			subsidyConfig:          subsidyConfig,
+			dryRun:                 dryRun,
 			maxDuration:            maxDuration,
 			transition:             transition,
-			inspectUnresolved:      refreshReliabilityInputs,
+			inspectUnresolved:      inspectUnresolved,
 			tx:                     tx,
 			paymentPlanId:          server.NewId(),
 			networkReferrals:       networkReferrals,
@@ -229,6 +325,7 @@ func createPaymentPlan(
 			RestoredLegacyPaymentCount:   planner.restoredLegacyPaymentCount,
 			UnresolvedLegacyPaymentCount: planner.unresolvedLegacyPaymentCount,
 			LegacyRecoveryScanLimit:      legacyPaymentRecoveryLimit,
+			PendingSweepAssignmentCount:  planner.stagedSweepCount,
 		}
 
 		// set the bonus weights for next payout
@@ -336,11 +433,11 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	// both arms, so it filters the unpaid and canceled sweeps identically (the
 	// same single close-time join the old anti-join query used).
 	//
-	// Every plan carries its selected contracts' create and close times, so the
-	// subsidy range reads the selection instead of joining the 2B-row
-	// transfer_contract a second time (that join ran for up to 36 minutes
-	// inside the plan transaction). An unbounded plan keeps contract-less
-	// sweeps with NULL times, as before.
+	// Every plan carries its selected contracts' create, close and reap times,
+	// so the subsidy range and the staging retention check read the selection
+	// instead of joining the 2B-row transfer_contract a second time (that join
+	// ran for up to 36 minutes inside the plan transaction). An unbounded plan
+	// keeps contract-less sweeps with NULL times, as before.
 	closeTimeJoin := `
         LEFT JOIN transfer_contract ON
             transfer_contract.contract_id = u.contract_id`
@@ -398,7 +495,8 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 			u.sweep_time,
 			u.payment_id AS previous_payment_id,
 			transfer_contract.create_time AS contract_create_time,
-			transfer_contract.close_time AS contract_close_time
+			transfer_contract.close_time AS contract_close_time,
+			transfer_contract.reap_time AS contract_reap_time
 
         FROM (
             SELECT
@@ -1056,7 +1154,14 @@ func (self *PaymentPlanner) finalizePayments() {
 
 	self.assignPaymentBonuses()
 
-	self.assignSweeps(paymentSweepAssignmentMetrics)
+	if self.dryRun {
+		// the dry run transaction rolls back; preview the full assignment
+		self.assignSweeps(paymentSweepAssignmentMetrics)
+	} else {
+		// one UPDATE of a slice's ~11M sweeps ran for up to 2.2h inside this
+		// transaction; stage them for bounded batches after it commits
+		self.stageSweeps()
+	}
 
 	// The leaderboard's per-week paid-traffic attribution is processed by a
 	// separate bounded task after this payout transaction commits. A full plan
