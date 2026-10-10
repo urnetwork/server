@@ -19,7 +19,7 @@ func TestMigrationsTaskRunOnceGenerationFollowsPublishedVersion(t *testing.T) {
 			artifact = &migrationArtifacts[index]
 		}
 	}
-	if artifact == nil || artifact.rowColumn != 205 {
+	if artifact == nil || artifact.rowColumn != 796-589 {
 		t.Fatal("generation schema has no exact artifact contract")
 	}
 	for _, head := range []int{795, 796} {

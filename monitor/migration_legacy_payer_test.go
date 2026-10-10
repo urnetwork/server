@@ -42,6 +42,25 @@ func legacySettlementPayerTestQuery(t testing.TB) string {
 		strings.Join(legacySettlementPayerArtifactQueries, ",") + "]"
 }
 
+// Migration803's UPDATE OF trigger owns an attribute dependency that PostgreSQL
+// correctly refuses to retarget during ALTER TYPE or DROP COLUMN. Preserve its
+// exact catalog definition around these transaction-local column faults so the
+// old payer contract is still exercised on the current fully migrated schema.
+// The caller's savepoint restores both the column and the original trigger.
+func legacySettlementPayerColumnFault(sql string) string {
+	return `DO $payer_column_fault$
+DECLARE close_owner_trigger text;
+BEGIN
+ SELECT pg_get_triggerdef(oid) INTO STRICT close_owner_trigger FROM pg_catalog.pg_trigger
+ WHERE tgrelid='public.legacy_settlement_intent'::regclass
+ AND tgname='legacy_settlement_intent_resolve_close_owner' AND NOT tgisinternal;
+ DROP TRIGGER legacy_settlement_intent_resolve_close_owner ON legacy_settlement_intent;
+ ` + sql + `;
+ EXECUTE close_owner_trigger;
+END;
+$payer_column_fault$;`
+}
+
 // Future absence is pending migration; the same absent artifact at its
 // published version must reach its exact schema-drift attribution.
 func TestMigrationsLegacyPayerArtifactsFollowPublishedVersions(t *testing.T) {
@@ -142,9 +161,9 @@ func TestMigrationsLegacyPayerCatalogFaultsReachSignal(t *testing.T) {
 			}{
 				{name: "missing payer", version: 791, sql: `ALTER TABLE legacy_settlement_intent RENAME COLUMN payer_network_id TO synthetic_payer`},
 				{name: "required payer", version: 791, sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN payer_network_id SET NOT NULL`},
-				{name: "wrong payer type", version: 791, sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN payer_network_id TYPE text USING payer_network_id::text`},
+				{name: "wrong payer type", version: 791, sql: legacySettlementPayerColumnFault(`ALTER TABLE legacy_settlement_intent ALTER COLUMN payer_network_id TYPE text USING payer_network_id::text`)},
 				{name: "defaulted payer", version: 791, sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN payer_network_id SET DEFAULT '00000000-0000-0000-0000-000000000000'::uuid`},
-				{name: "generated payer", version: 791, sql: `ALTER TABLE legacy_settlement_intent DROP COLUMN payer_network_id; ALTER TABLE legacy_settlement_intent ADD COLUMN payer_network_id uuid GENERATED ALWAYS AS (contract_id) STORED`},
+				{name: "generated payer", version: 791, sql: legacySettlementPayerColumnFault(`ALTER TABLE legacy_settlement_intent DROP COLUMN payer_network_id; ALTER TABLE legacy_settlement_intent ADD COLUMN payer_network_id uuid GENERATED ALWAYS AS (contract_id) STORED`)},
 				{name: "missing rolling writer function", version: 791, sql: `DROP FUNCTION assign_legacy_settlement_intent_payer() CASCADE`},
 				{name: "missing rolling writer trigger", version: 791, sql: `DROP TRIGGER legacy_settlement_intent_assign_payer ON legacy_settlement_intent`},
 				{name: "disabled rolling writer", version: 791, sql: `ALTER TABLE legacy_settlement_intent DISABLE TRIGGER legacy_settlement_intent_assign_payer`},

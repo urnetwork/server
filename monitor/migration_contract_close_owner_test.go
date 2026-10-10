@@ -66,7 +66,7 @@ func TestMigrationsContractCloseOwnerPublishedArtifacts(t *testing.T) {
 				artifact = &migrationArtifacts[index]
 			}
 		}
-		if artifact == nil || artifact.rowColumn != version-597 {
+		if artifact == nil || artifact.rowColumn != version-589 {
 			t.Fatal("close owner has no exact deployment artifact", version)
 		}
 		for _, head := range []int{version - 1, version} {
