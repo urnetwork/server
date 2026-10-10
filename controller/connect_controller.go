@@ -805,6 +805,10 @@ func CreateContract(
 		}
 		if companion {
 			resolution.path = contractResolutionStreamFallback
+			// The fallback settles return traffic on the origin that already
+			// carries the forward direction. It is not a session-setup race,
+			// so one lookup decides it instead of the companion origin wait.
+			ctx = withCompanionOriginSingleLookup(ctx)
 			glog.V(2).Infof("[contract][companion-fallback]%s->%s relationship=%d not provided; using companion Stream\n", clientId, destinationId, provideRelationship)
 		}
 	}
