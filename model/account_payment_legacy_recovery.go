@@ -17,7 +17,6 @@ func (self *PaymentPlanner) recoverLegacyComponents() {
 	if self.transition == nil {
 		return
 	}
-	server.Raise(server.RequireProviderPayoutSchema(self.ctx))
 	result, err := self.tx.Query(self.ctx, `SELECT payment_id FROM account_payment
 		WHERE canceled AND NOT completed AND circle_idempotency_key IS NULL AND payment_record IS NULL AND tx_hash IS NULL
 		AND NOT attribution_review_required AND (subsidy_payout_nano_cents>0 OR reliability_subsidy_nano_cents>0)

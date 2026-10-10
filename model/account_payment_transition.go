@@ -43,9 +43,6 @@ func RequireProviderUsdcPayment(ctx context.Context, paymentId server.Id) error 
 	if err != nil || policy == nil {
 		return err
 	}
-	if err := server.RequireProviderPayoutSchema(ctx); err != nil {
-		return err
-	}
 	var admissionErr error
 	server.Db(ctx, func(conn server.PgConn) {
 		_, _, admissionErr = providerUsdcPaymentAttribution(ctx, conn, paymentId, policy)

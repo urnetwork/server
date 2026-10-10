@@ -204,11 +204,15 @@ func DrainLegacySettlements(ctx context.Context, request LegacySettlementDrainRe
 			var completed, busy bool
 			var gate legacySettlementBusyGate
 			server.Tx(bounded, func(tx server.PgTx) {
-				configureContractExpiryRepairTx(bounded, tx)
 				var err error
 				posts, completed, busy, gate, err = drainLegacySettlementInTx(bounded, tx, id, request.ExpectedPayerNetworkId)
 				server.Raise(err)
-			}, server.TxReadCommitted, server.OptNoRetry(), dbTiming)
+			}, pgx.TxOptions{
+				IsoLevel:       pgx.ReadCommitted,
+				AccessMode:     pgx.ReadWrite,
+				DeferrableMode: pgx.NotDeferrable,
+				BeginQuery:     legacySettlementBeginSql,
+			}, server.OptNoRetry(), dbTiming)
 			traceLegacySettlement(bounded, "commit", "confirmed_tx_return")
 			traceLegacySettlementResult(bounded, completed, busy, gate, nil)
 			if busy {
