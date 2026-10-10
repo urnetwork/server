@@ -6703,8 +6703,8 @@ coverage, but can discard the acceleration checkpoint. After every taskworker
 converges, require the exact executor artifact and consecutive persisted
 catch-up bounds/handoffs, then a bounded same-cohort terminal/reservation witness.
 
-The absolute-lifetime path uses the one `CloseExpiredContracts` coordinator,
-seeded immediately by both workload profiles after startup dependency admission.
+The recurring absolute-lifetime path uses the one `CloseExpiredContracts`
+coordinator, seeded immediately by both workload profiles after startup dependency admission.
 Legacy ledger, Redis admission and no-escrow creation all persist a database-clock
 deadline of 60 minutes and return that exact value for the provider-signed
 contract. Checkpoints do not update it. Both open/disputed selection and the
@@ -6819,8 +6819,8 @@ passed five selected tests after the fix (receipt SHA-256
 This follow-up does not identify a writer, backfill stored deadlines, or establish
 deployment beyond the frozen `db179741` R54 source.
 
-Startup uses one RunOnce key for this coordinator, preserving an existing
-cursor instead of inserting one task per contract. Its ordinary Post persists
+`CloseExpiredContracts` startup uses one RunOnce key for that coordinator,
+preserving an existing cursor instead of inserting one task per contract. Its ordinary Post persists
 the next bounded scan and schedules another run; a startup request during an
 active claim must advance that successor to the earliest explicit wake without
 replacing the Post's arguments. Native synthetic startup controls cover both
@@ -6828,6 +6828,46 @@ profiles, fresh bilateral checkpoints on due legacy and Redis contracts,
 unchanged live/NULL neighbors, exact 17+17-byte debit and restart replay. Their
 cold legacy reservation projection converges only after its separately queued
 mirror task completes; a terminal close alone is not that projection's receipt.
+
+The separate `ScheduleOpenContractClosures` startup pass uses
+`schedule_open_contract_closures_on_startup` and publishes per-contract
+`CloseScheduledContract` children. It reads every `outcome IS NULL` shape in
+1,024-row primary-key pages, including disputed nonterminal rows, and publishes
+groups of at most 256 under their complete child RunOnce ownership keys. One
+retained `StartedAt` supplies the default deadline; explicit expiration and an
+existing earlier child wake remain authoritative. A short page is not EOF.
+
+2026-10-10 local admission discriminator: the previous blocking owner could
+spend its five-second admission limit on one busy child key, abort the pass,
+then retry from the head. Two real worker attempts over 2,049 synthetic contracts
+each left 1,537 independent children unqueued while two child ownership keys
+were held. Fix `3e51c22e` uses `TryOwnedTx` on the same direct maintenance
+session route: a known busy group releases all partial keys and its checkout
+before later groups proceed. Any skipped group makes EOF return an error, so
+the original scanner and arguments remain pending for ordinary retry. Errors
+during acquisition, probing or refusal cleanup still propagate, as do business
+and commit errors.
+
+Independent PG18/Redis qualification reproduced that baseline failure and
+passed 35 focused scanner, ownership, packet-guard and startup-profile controls.
+With two 256-row groups held, 1,537 new children were published and two existing
+children retained; 510 remained absent until release, then all 2,049 were queued
+and the scanner completed. The entire regression took 2.55 seconds, including
+setup, two busy attempts and the final pass; this only bounds the final pass
+from above, not its isolated latency. Controls include
+`TestStartupContractClosureBusyChildOwnersKeepLaterPagesMoving` and
+`TestTryOwnedTxBusyReleasesPartialKeysAndCheckout`; native receipt
+`sol-startup-busy-pages-native-GO.json` has SHA-256
+`c1f6b5943c93c344f45ab848fefbc6a7a96c34a014d7ac1f130af6617837a968`.
+
+A permanently busy key can still leave unscheduled children in its 256-row
+group, and a whole pass exceeding the unchanged 120-second task budget can
+still repeat a prefix. No durable cursor or timeout extension was added. These
+local controls do not establish Main causation, full contract coverage or
+financial completion. Correlate the exact current parent claim, stored error
+and retained arguments with bounded child pending/finished observations; an
+old parent snapshot or absence within a capped finished-task window cannot
+establish every prior visit or continuing starvation.
 
 A fully classified accounting refusal with a remaining raw cursor or sweep
 needs the bounded 2–4-second continuation cadence. Selecting the 1–5-minute idle
