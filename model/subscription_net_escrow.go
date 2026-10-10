@@ -265,7 +265,7 @@ func readReconcileNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id
 	if !useCache {
 		return openEscrowReservedForBalances(ctx, balanceIds), nil
 	}
-	return readBoundedNetEscrowSnapshots(ctx, balanceIds, false)
+	return readBoundedNetEscrowSnapshots(ctx, balanceIds, false, netEscrowReconcileCensusBound)
 }
 
 // A census statement probes one transfer_contract row for every live legacy
@@ -281,8 +281,31 @@ const netEscrowReconcileCandidateLimit = 64
 // Live legacy rows, and so contract probes, that one scheduled census may visit.
 const netEscrowReconcileCensusRowBudget = 16384
 
-// Balances named by one scheduled probe or census statement.
+// Balances named by one probe or census statement, on either path.
 const netEscrowReconcileStatementBalances = 1000
+
+// Refresh and quarantine posts maintain the mirror that Redis admission
+// subtracts from grant credit, so a deferred mirror stays overstated after
+// releases and refuses credit. Only the extreme tail defers here: on Main the
+// grants over 64 live legacy rows are nearly all over 4,096 (most over 16,384).
+const netEscrowRefreshCensusRowBound = 4096
+
+// Live legacy rows, and so contract probes, that one refresh census may visit.
+const netEscrowRefreshCensusStatementRows = 65536
+
+// Bounds one census reader: a balance whose probe finds more live legacy rows
+// than candidateLimit is deferred, and one census statement visits at most
+// statementRows of them.
+type netEscrowCensusBound struct {
+	candidateLimit int
+	statementRows  int
+}
+
+// Scheduled repair only repairs drift, so it defers early.
+var netEscrowReconcileCensusBound = netEscrowCensusBound{candidateLimit: netEscrowReconcileCandidateLimit, statementRows: netEscrowReconcileCensusRowBudget}
+
+// Mirror posts defer only the extreme tail; see netEscrowRefreshCensusRowBound.
+var netEscrowRefreshCensusBound = netEscrowCensusBound{candidateLimit: netEscrowRefreshCensusRowBound, statementRows: netEscrowRefreshCensusStatementRows}
 
 // Reads at most $2 live legacy rows per balance from the partial legacy index,
 // with no contract probe. Every requested balance returns exactly one count.
@@ -304,11 +327,11 @@ const netEscrowReconcileCandidateSQL = `
 
 // Counts are capped one past the limit, in probe statements of at most
 // netEscrowReconcileStatementBalances inside the caller's fenced transaction.
-func readNetEscrowReconcileCandidateCountsInTx(ctx context.Context, tx server.PgTx, balanceIds []server.Id) map[server.Id]int {
+func readNetEscrowCandidateCountsInTx(ctx context.Context, tx server.PgTx, balanceIds []server.Id, limit int) map[server.Id]int {
 	counts := make(map[server.Id]int, len(balanceIds))
 	for start := 0; start < len(balanceIds); start += netEscrowReconcileStatementBalances {
 		batch := balanceIds[start:min(start+netEscrowReconcileStatementBalances, len(balanceIds))]
-		rows, err := tx.Query(ctx, netEscrowReconcileCandidateSQL, batch, netEscrowReconcileCandidateLimit+1)
+		rows, err := tx.Query(ctx, netEscrowReconcileCandidateSQL, batch, limit+1)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var balanceId server.Id
@@ -324,7 +347,7 @@ func readNetEscrowReconcileCandidateCountsInTx(ctx context.Context, tx server.Pg
 // One fenced read-only transaction, the shape of openEscrowReservedForBalances,
 // probes every balance and then censuses only the admitted ones in bounded
 // statements. A retried attempt starts over.
-func readBoundedNetEscrowCensus(ctx context.Context, balanceIds []server.Id) (exact map[server.Id]netEscrowSnapshot, statementBalances int, deferred []server.Id) {
+func readBoundedNetEscrowCensus(ctx context.Context, balanceIds []server.Id, bound netEscrowCensusBound) (exact map[server.Id]netEscrowSnapshot, statementBalances int, deferred []server.Id) {
 	exact = map[server.Id]netEscrowSnapshot{}
 	if len(balanceIds) == 0 {
 		return
@@ -334,7 +357,7 @@ func readBoundedNetEscrowCensus(ctx context.Context, balanceIds []server.Id) (ex
 		exact, statementBalances = map[server.Id]netEscrowSnapshot{}, 0
 		configureNetEscrowReservationPageTimeout(ctx, tx, netEscrowReservationPageStatementTimeout)
 		var statements [][]server.Id
-		statements, deferred = planNetEscrowReconcileCensus(balanceIds, readNetEscrowReconcileCandidateCountsInTx(ctx, tx, balanceIds))
+		statements, deferred = planNetEscrowCensus(balanceIds, readNetEscrowCandidateCountsInTx(ctx, tx, balanceIds, bound.candidateLimit), bound)
 		for _, statement := range statements {
 			for balanceId, snapshot := range readNetEscrowSnapshots(ctx, tx, statement) {
 				exact[balanceId] = snapshot
@@ -347,16 +370,16 @@ func readBoundedNetEscrowCensus(ctx context.Context, balanceIds []server.Id) (ex
 
 // Splits probed balances, in order, into census statements within both the
 // balance and row budgets. An over-limit or unprobed balance is deferred.
-func planNetEscrowReconcileCensus(balanceIds []server.Id, counts map[server.Id]int) (statements [][]server.Id, deferred []server.Id) {
+func planNetEscrowCensus(balanceIds []server.Id, counts map[server.Id]int, bound netEscrowCensusBound) (statements [][]server.Id, deferred []server.Id) {
 	var statement []server.Id
 	rowCount := 0
 	for _, balanceId := range balanceIds {
 		count, probed := counts[balanceId]
-		if !probed || count < 0 || netEscrowReconcileCandidateLimit < count {
+		if !probed || count < 0 || bound.candidateLimit < count {
 			deferred = append(deferred, balanceId)
 			continue
 		}
-		if len(statement) == netEscrowReconcileStatementBalances || netEscrowReconcileCensusRowBudget < rowCount+count {
+		if len(statement) == netEscrowReconcileStatementBalances || bound.statementRows < rowCount+count {
 			statements = append(statements, statement)
 			statement, rowCount = nil, 0
 		}
@@ -372,7 +395,7 @@ func planNetEscrowReconcileCensus(balanceIds []server.Id, counts map[server.Id]i
 // Current cache entries are reused. Misses are censused only within the probe
 // bound, and deferred ones have no snapshot. Targeted mirror posts warm the
 // cache from each committed census; scheduled fleet repair never warms it.
-func readBoundedNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id, warmCache bool) (map[server.Id]netEscrowSnapshot, []server.Id) {
+func readBoundedNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id, warmCache bool, bound netEscrowCensusBound) (map[server.Id]netEscrowSnapshot, []server.Id) {
 	pending := map[server.Id]netEscrowSnapshot{}
 	if len(balanceIds) == 0 {
 		return pending, nil
@@ -381,7 +404,7 @@ func readBoundedNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id, 
 		pending = readCachedNetEscrowSnapshots(ctx, conn, balanceIds)
 	})
 	missing := missingNetEscrowSnapshots(pending, balanceIds)
-	exact, reloaded, deferred := readBoundedNetEscrowCensus(ctx, missing)
+	exact, reloaded, deferred := readBoundedNetEscrowCensus(ctx, missing, bound)
 	if warmCache {
 		cacheCommittedNetEscrowSnapshots(ctx, exact)
 	}
@@ -414,7 +437,7 @@ func withoutNetEscrowBalances(balanceIds []server.Id, deferred []server.Id) []se
 
 // Committed closes, settlements, prober shard and balance retention refresh
 // their balances here. Like scheduled repair, the census is bounded: a balance
-// with more live legacy rows than netEscrowReconcileCandidateLimit keeps its
+// with more live legacy rows than netEscrowRefreshCensusRowBound keeps its
 // last published mirror (counted as deferred). An unbounded census of grants
 // with 10^5 such rows, run per close, saturated the database.
 func refreshNetEscrow(ctx context.Context, balanceIds []server.Id) {
@@ -428,7 +451,7 @@ func refreshNetEscrow(ctx context.Context, balanceIds []server.Id) {
 	const batchSize = 10000
 	for start := 0; start < len(balanceIds); start += batchSize {
 		batch := balanceIds[start:min(start+batchSize, len(balanceIds))]
-		pending, deferred := readBoundedNetEscrowSnapshots(mirrorCtx, batch, true)
+		pending, deferred := readBoundedNetEscrowSnapshots(mirrorCtx, batch, true, netEscrowRefreshCensusBound)
 		reconcileNetEscrowBatch(mirrorCtx, pending, withoutNetEscrowBalances(batch, deferred), true)
 	}
 }
@@ -466,7 +489,7 @@ func releaseNetEscrowForContract(ctx context.Context, contractId server.Id) {
 	if len(legacyIds) > 0 {
 		// The same bounded census as refreshNetEscrow; deferred balances keep
 		// their last published mirror.
-		pending, deferred := readBoundedNetEscrowSnapshots(mirrorCtx, legacyIds, true)
+		pending, deferred := readBoundedNetEscrowSnapshots(mirrorCtx, legacyIds, true, netEscrowRefreshCensusBound)
 		reconcileNetEscrowBatch(mirrorCtx, pending, withoutNetEscrowBalances(legacyIds, deferred), true)
 	}
 }

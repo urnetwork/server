@@ -143,45 +143,47 @@ func TestNetEscrowReconcileDefersCensusBeyondBound(t *testing.T) {
 	})
 }
 
-// Census statements keep page order within both the balance and row budgets;
-// an over-limit or unprobed balance is deferred instead of censused.
+// Census statements keep page order within both the balance and row budgets of
+// each path's bound; an over-limit or unprobed balance is deferred instead.
 func TestNetEscrowReconcileCensusPlanBoundsStatements(t *testing.T) {
-	var balanceIds, wantDeferred []server.Id
-	counts := map[server.Id]int{}
-	add := func(n int, count int, probed bool) {
-		for range n {
-			balanceId := server.NewId()
-			balanceIds = append(balanceIds, balanceId)
-			if probed {
-				counts[balanceId] = count
+	for _, bound := range []netEscrowCensusBound{netEscrowReconcileCensusBound, netEscrowRefreshCensusBound} {
+		var balanceIds, wantDeferred []server.Id
+		counts := map[server.Id]int{}
+		add := func(n int, count int, probed bool) {
+			for range n {
+				balanceId := server.NewId()
+				balanceIds = append(balanceIds, balanceId)
+				if probed {
+					counts[balanceId] = count
+				}
+				if !probed || bound.candidateLimit < count {
+					wantDeferred = append(wantDeferred, balanceId)
+				}
 			}
-			if !probed || netEscrowReconcileCandidateLimit < count {
-				wantDeferred = append(wantDeferred, balanceId)
+		}
+		add(netEscrowReconcileStatementBalances+5, 0, true)
+		add(1, bound.candidateLimit+1, true)
+		add(1, 0, false)
+		add(2*bound.statementRows/bound.candidateLimit+3, bound.candidateLimit, true)
+		add(3, 1, true)
+		statements, deferred := planNetEscrowCensus(balanceIds, counts, bound)
+		if !slices.Equal(deferred, wantDeferred) {
+			t.Fatal("census plan deferred the wrong balances", bound, len(deferred), len(wantDeferred))
+		}
+		var planned []server.Id
+		for _, statement := range statements {
+			rowCount := 0
+			for _, balanceId := range statement {
+				rowCount += counts[balanceId]
 			}
+			if len(statement) == 0 || netEscrowReconcileStatementBalances < len(statement) || bound.statementRows < rowCount {
+				t.Fatal("census statement exceeded its balance or row budget", bound, len(statement), rowCount)
+			}
+			planned = append(planned, statement...)
 		}
-	}
-	add(netEscrowReconcileStatementBalances+5, 0, true)
-	add(1, netEscrowReconcileCandidateLimit+1, true)
-	add(1, 0, false)
-	add(2*netEscrowReconcileCensusRowBudget/netEscrowReconcileCandidateLimit+3, netEscrowReconcileCandidateLimit, true)
-	add(3, 1, true)
-	statements, deferred := planNetEscrowReconcileCensus(balanceIds, counts)
-	if !slices.Equal(deferred, wantDeferred) {
-		t.Fatal("census plan deferred the wrong balances", len(deferred), len(wantDeferred))
-	}
-	var planned []server.Id
-	for _, statement := range statements {
-		rowCount := 0
-		for _, balanceId := range statement {
-			rowCount += counts[balanceId]
+		want := withoutNetEscrowBalances(balanceIds, wantDeferred)
+		if !slices.Equal(planned, want) || len(statements) != 4 {
+			t.Fatal("census plan lost, repeated or reordered a probed balance", bound, len(planned), len(want), len(statements))
 		}
-		if len(statement) == 0 || netEscrowReconcileStatementBalances < len(statement) || netEscrowReconcileCensusRowBudget < rowCount {
-			t.Fatal("census statement exceeded its balance or row budget", len(statement), rowCount)
-		}
-		planned = append(planned, statement...)
-	}
-	want := withoutNetEscrowBalances(balanceIds, wantDeferred)
-	if !slices.Equal(planned, want) || len(statements) != 4 {
-		t.Fatal("census plan lost, repeated or reordered a probed balance", len(planned), len(want), len(statements))
 	}
 }
