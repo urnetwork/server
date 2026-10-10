@@ -1047,19 +1047,7 @@ func (self *PaymentPlanner) finalizePayments() {
 
 	self.assignPaymentBonuses()
 
-	// A nonparticipating writer cannot replace the selected original owner and
-	// leave this plan's amounts/points committed against somebody else's sweeps.
-	var expectedSweepCount int64
-	for networkId := range self.networkPayments {
-		expectedSweepCount += self.networkSweepCounts[networkId]
-	}
-	tag := server.RaisePgResult(self.tx.Exec(
-		self.ctx,
-		paymentPlanAssignSweepsSql,
-	))
-	if tag.RowsAffected() != expectedSweepCount {
-		panic(errPaymentPlanSelectionChanged)
-	}
+	self.assignSweeps(paymentSweepAssignmentMetrics)
 
 	// The leaderboard's per-week paid-traffic attribution is processed by a
 	// separate bounded task after this payout transaction commits. A full plan

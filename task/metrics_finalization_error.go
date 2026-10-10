@@ -47,6 +47,9 @@ func (self *TaskWorker) observeTaskFinalizationFailure(results []*taskExecutionR
 		name := self.metricName(result.task.FunctionName)
 		taskFinalizationErrorsTotal.WithLabelValues(name, cause).Inc()
 		taskFinalizationPhaseErrorsTotal.WithLabelValues(name, phase, cause).Inc()
+		if phase == "admission" {
+			taskFinalizationAdmissionErrorsTotal.WithLabelValues(name, observation.admissionStage(), cause).Inc()
+		}
 	}
 	if observation != nil && len(seen) != 0 {
 		taskFinalizationFailureSeconds.WithLabelValues(phase).Observe(elapsed)

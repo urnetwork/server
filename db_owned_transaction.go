@@ -161,9 +161,10 @@ func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resou
 		func() {
 			defer owner.release(ctx)
 			phase.enter(DbOperationAdmission)
+			phase.enterAdmission(DbAdmissionPrecheck)
 			Raise(resource.validate(conn))
 			var err error
-			admitted, err = tryPgOwnershipKeys(admissionCtx, conn, keys, false, owner.backendPid)
+			admitted, err = tryPgOwnershipKeys(admissionCtx, conn, keys, false, owner.backendPid, phase)
 			if err != nil {
 				if admissionCtx.Err() != nil {
 					err = dbContextDoneCause(admissionCtx, err)
@@ -174,8 +175,10 @@ func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resou
 			if !admitted {
 				// Return pool capacity before observing or waiting. A crowded
 				// resource cannot retain every slot needed by unrelated work.
+				phase.enterAdmission(DbAdmissionCleanup)
 				Raise(owner.release(ctx))
 				if wait {
+					phase.enterAdmission(DbAdmissionAcknowledgedBusyWait)
 					owner.observe(PgOwnershipWaiting)
 				} else {
 					owner.observe(PgOwnershipRefused)
@@ -416,14 +419,18 @@ func (self *pgTransactionOwnership) observe(kind PgOwnershipEventKind) {
 // Nonblocking probes are explicitly bounded per statement. Every returned key
 // comes from a supplied array; no advisory function runs on a queue scan or an
 // expression whose LIMIT could be evaluated after acquiring additional locks.
-func tryPgOwnershipKeys(ctx context.Context, query PgCanQuery, keys []PgOwnershipKey, transactional bool, backendPid uint32) (bool, error) {
-	admitted, _, err := tryPgOwnershipKeyReplies(ctx, query, keys, transactional, backendPid, false)
+func tryPgOwnershipKeys(ctx context.Context, query PgCanQuery, keys []PgOwnershipKey, transactional bool, backendPid uint32, phases ...*DbPhaseObservation) (bool, error) {
+	admitted, _, err := tryPgOwnershipKeyReplies(ctx, query, keys, transactional, backendPid, false, phases...)
 	return admitted, err
 }
 
 // The direct execution variant retains a nonzero backend identity from every
 // row and chunk. No startup PID or earlier pooled connection supplies proof.
-func tryPgOwnershipKeyReplies(ctx context.Context, query PgCanQuery, keys []PgOwnershipKey, transactional bool, backendPid uint32, exec bool) (bool, uint32, error) {
+func tryPgOwnershipKeyReplies(ctx context.Context, query PgCanQuery, keys []PgOwnershipKey, transactional bool, backendPid uint32, exec bool, phases ...*DbPhaseObservation) (bool, uint32, error) {
+	var phase *DbPhaseObservation
+	if len(phases) != 0 {
+		phase = phases[0]
+	}
 	function := "pg_try_advisory_lock"
 	if transactional {
 		function = "pg_try_advisory_xact_lock"
@@ -441,6 +448,7 @@ func tryPgOwnershipKeyReplies(ctx context.Context, query PgCanQuery, keys []PgOw
 		if exec {
 			args = append([]any{pgx.QueryExecModeExec}, args...)
 		}
+		phase.enterAdmission(DbAdmissionProbe)
 		rows, err := query.Query(ctx, `SELECT pg_backend_pid(),`+function+`(owner.first,owner.second)
 			FROM unnest($1::integer[],$2::integer[]) AS owner(first,second)`, args...)
 		if err != nil {

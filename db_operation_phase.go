@@ -24,7 +24,36 @@ const (
 // do not replace the last database operation phase. No callback can affect database behavior.
 // A phase records source entry, not a completed operation or financial outcome.
 type DbPhaseObservation struct {
-	phase DbOperationPhase
+	phase     DbOperationPhase
+	admission DbAdmissionStage
+}
+
+// DbAdmissionStage is the last entered pre-BEGIN ownership operation. A busy
+// wait follows an acknowledged refusal and successful cleanup; it does not
+// identify a key or prove that the same key remained held during the wait.
+type DbAdmissionStage uint8
+
+const (
+	DbAdmissionUnknown DbAdmissionStage = iota
+	DbAdmissionPrecheck
+	DbAdmissionProbe
+	DbAdmissionCleanup
+	DbAdmissionAcknowledgedBusyWait
+)
+
+func (self *DbPhaseObservation) enterAdmission(stage DbAdmissionStage) {
+	if self != nil {
+		self.admission = stage
+	}
+}
+
+// AdmissionStage is meaningful only while Phase reports DbOperationAdmission.
+// Probe includes the Query, row decoding, and terminal Rows.Err reply checks.
+func (self *DbPhaseObservation) AdmissionStage() DbAdmissionStage {
+	if self == nil {
+		return DbAdmissionUnknown
+	}
+	return self.admission
 }
 
 func (self *DbPhaseObservation) enter(phase DbOperationPhase) {
