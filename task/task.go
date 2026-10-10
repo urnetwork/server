@@ -141,9 +141,10 @@ func taskAdvisoryLockKey(taskId server.Id) int64 {
 }
 
 type taskClaimGuard struct {
-	conn         server.PgConn
-	releaseOnce  sync.Once
-	admissionKVs map[server.Id]*taskClaimReservation
+	conn              server.PgConn
+	completionSession *server.PgOwnedSession
+	releaseOnce       sync.Once
+	admissionKVs      map[server.Id]*taskClaimReservation
 	// Collector-owned exact identities also prevent reentrant session claims.
 	taskIds        map[server.Id]bool
 	groupKeyStates map[taskClaimGroupKey]*taskClaimGroupState
@@ -153,6 +154,9 @@ type taskClaimGuard struct {
 func (self *taskClaimGuard) ping(ctx context.Context) error {
 	if self == nil || self.conn == nil {
 		return errors.New("task claim guard is not active")
+	}
+	if err := self.completionSessionError(); err != nil {
+		return err
 	}
 	return self.conn.Ping(ctx)
 }
@@ -1917,6 +1921,9 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	isolatedPending bool,
 	returnErr error,
 ) {
+	if err := guard.completionSessionError(); err != nil {
+		return nil, guard, false, err
+	}
 	if options.poll != nil {
 		options.poll.availableAt = time.Time{}
 	}
@@ -2474,7 +2481,9 @@ func (self *TaskWorker) EvalTasks(n int) (
 	}
 	executionTargets := self.prepareTaskBatchTargets(tasks)
 
-	taskCtx, taskCancel := context.WithCancel(evalCtx)
+	// Execution cancellation must not drop the results that prove each claimed
+	// sibling joined. Only the collector closes the result-delivery context.
+	taskCtx, taskCancel := context.WithCancel(context.WithoutCancel(evalCtx))
 	results := make(chan *taskExecutionResult, len(tasks))
 	executionAdmissions := claimGuard.retainExecutionAdmissions(tasks)
 
@@ -2537,7 +2546,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 				glog.Infof("[%s]task finalization failed: %v\n", r.task.TaskId, recovered)
 			}
 		}()
-		posts, postRescheduled := self.finalizeTask(r)
+		posts, postRescheduled := self.finalizeTaskWithGuard(r, claimGuard)
 		delete(heartbeatTasks, r.task.TaskId)
 		commitPosts = append(commitPosts, posts...)
 		switch {
@@ -2559,6 +2568,12 @@ func (self *TaskWorker) EvalTasks(n int) (
 		startTime := self.heartbeatNow()
 		nextHeartbeatTime := startTime.Add(ReleaseTimeout / 3)
 		heartbeat := func() {
+			if claimGuard.completionSessionError() != nil {
+				// A quarantined borrowed scope cannot perform more direct SQL.
+				// Keep its session until all sibling results and posts join.
+				nextHeartbeatTime = self.heartbeatNow().Add(ReleaseTimeout / 3)
+				return
+			}
 			elapsedSeconds := float32(self.heartbeatNow().Sub(startTime)/time.Millisecond) / 1000
 			if 10 <= elapsedSeconds {
 				for _, task := range heartbeatTasks {
@@ -2612,7 +2627,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 				finalize(ready[0])
 				return
 			}
-			retrySingles, err := self.finalizeTaskBatch(ready)
+			retrySingles, err := self.finalizeTaskBatchWithGuard(ready, claimGuard)
 			switch {
 			case err == nil:
 				for _, r := range ready {
@@ -2661,6 +2676,12 @@ func (self *TaskWorker) EvalTasks(n int) (
 			finalizeReady(ready)
 		}
 		for {
+			if err := claimGuard.completionSessionError(); err != nil {
+				if finalizePanic == nil {
+					finalizePanic = err
+				}
+				evalCancel()
+			}
 			// Finalizing ready results must not reset the lease clock. Check
 			// an overdue heartbeat between bounded handbacks even when result
 			// delivery is continuously ready; the guard connection stays serial.

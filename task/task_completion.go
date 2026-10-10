@@ -16,6 +16,13 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 	commitPosts []server.PostFunction,
 	postRescheduled bool,
 ) {
+	return self.finalizeTaskWithGuard(r, nil)
+}
+
+func (self *TaskWorker) finalizeTaskWithGuard(r *taskExecutionResult, guard *taskClaimGuard) (
+	commitPosts []server.PostFunction,
+	postRescheduled bool,
+) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			self.observeTaskFinalizationFailure([]*taskExecutionResult{r}, recovered)
@@ -39,7 +46,7 @@ func (self *TaskWorker) finalizeTask(r *taskExecutionResult) (
 		commitPosts, postRescheduled = self.finalizeTaskInTx(finalizeCtx, tx, r)
 	}
 	if owned {
-		server.OwnedTx(finalizeCtx, keys, finish, server.TxReadCommitted, server.OptNoRetry())
+		guard.finalizeOwnedTx(finalizeCtx, keys, finish)
 	} else {
 		server.Tx(finalizeCtx, finish)
 	}
