@@ -213,7 +213,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 			}
 			logTaskExecutionResult(result)
 		}
-		if err := self.finalizeTaskRunCohort(event.cohortResults); err != nil {
+		if err := self.finalizeTaskRunCohortWithGuard(event.cohortResults, guard); err != nil {
 			if firstPanic == nil {
 				firstPanic = err
 			}
@@ -257,7 +257,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 					glog.Infof("[%s]task finalization failed: %v\n", r.task.TaskId, recovered)
 				}
 			}()
-			posts, postRescheduled = self.finalizeTask(r)
+			posts, postRescheduled = self.finalizeTaskWithGuard(r, guard)
 		}()
 		if failed {
 			// Keep ambiguous/failed ownership and its heartbeat until every
@@ -352,7 +352,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 			handleSingleEvent(event)
 			return 1
 		}
-		retrySingles, err := self.finalizeTaskBatch(ready)
+		retrySingles, err := self.finalizeTaskBatchWithGuard(ready, guard)
 		if retrySingles {
 			for _, r := range ready {
 				if !self.heartbeatNow().Before(nextHeartbeat) {
@@ -397,6 +397,14 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 		launch(tasks)
 		runDone := self.runCtx.Done()
 		for len(active) != 0 {
+			if err := guard.completionSessionError(); err != nil {
+				// Committed results already handed off their posts. Unknown
+				// scope cleanup prevents new work while those posts and live
+				// siblings join under the original execution/group guard.
+				claimErr = err
+				stopped = true
+				evalCancel()
+			}
 			if self.runCtx.Err() != nil {
 				stopped = true
 				runDone = nil

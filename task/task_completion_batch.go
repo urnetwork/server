@@ -91,6 +91,10 @@ SELECT (SELECT count(*) FROM copied),(SELECT count(*) FROM removed),
 // row cannot poison its neighbors. Once the body succeeds, any commit error is
 // left unresolved: no replay or completion count may assume acknowledgement.
 func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retrySingles bool, returnErr error) {
+	return self.finalizeTaskBatchWithGuard(results, nil)
+}
+
+func (self *TaskWorker) finalizeTaskBatchWithGuard(results []*taskExecutionResult, guard *taskClaimGuard) (retrySingles bool, returnErr error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			self.observeTaskFinalizationFailure(results, recovered)
@@ -161,7 +165,7 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 			bodyComplete = true
 		}
 		if owned {
-			server.OwnedTx(ctx, keys, finish, server.TxReadCommitted, server.OptNoRetry())
+			guard.finalizeOwnedTx(ctx, keys, finish)
 		} else {
 			server.Tx(ctx, finish, server.OptNoRetry())
 		}
@@ -169,5 +173,5 @@ func (self *TaskWorker) finalizeTaskBatch(results []*taskExecutionResult) (retry
 			self.completionBatchCommitReturned()
 		}
 	}, func(err error) { returnErr = err })
-	return returnErr != nil && !bodyComplete && !errors.Is(returnErr, errTaskCompletionBatchOwnership), returnErr
+	return returnErr != nil && !bodyComplete && guard.completionSessionError() == nil && !errors.Is(returnErr, errTaskCompletionBatchOwnership), returnErr
 }

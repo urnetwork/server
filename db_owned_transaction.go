@@ -80,7 +80,7 @@ func Testing_WithPgOwnershipObservation(ctx context.Context, observe func(PgOwne
 	return context.WithValue(ctx, pgOwnershipObservationKey{}, &PgOwnershipObservation{Observe: observe})
 }
 
-// This option is private: only OwnedTx can donate an admitted connection to
+// This option is private: only ownership admission can donate a connection to
 // the ordinary transaction engine. Its sole caller owns all lifecycle fields.
 type pgOwnedConnection struct {
 	conn        PgConn
@@ -91,6 +91,9 @@ type pgOwnedConnection struct {
 	entered     bool
 	released    bool
 	discard     bool
+	// A retained caller owns the connection and supplies exact-scope cleanup.
+	// Ordinary OwnedTx leaves this nil and retains its existing pool lifecycle.
+	releaseScope func(context.Context) error
 }
 
 // Admit the complete key set before BEGIN, then reuse the normal transaction
@@ -504,6 +507,9 @@ func (self *pgOwnedConnection) release(ctx context.Context) (returnErr error) {
 		return nil
 	}
 	self.released = true
+	if self.releaseScope != nil {
+		return self.releaseScope(ctx)
+	}
 	if !self.discard && !self.conn.Conn().IsClosed() && self.conn.Conn().PgConn().TxStatus() == 'I' {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), PgCloseTimeout)
 		_, err := self.conn.Exec(cleanupCtx, `SELECT pg_advisory_unlock_all()`)
