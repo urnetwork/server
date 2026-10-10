@@ -14142,6 +14142,15 @@ is not an exact ownership partition. Compare actual producer generations and
 fresh metrics before using this discriminator; it changes no financial
 outcome, retry, commit/rollback, pool sizing or socket-disposal decision.
 
+Puddle starts its idle clock before construction. The successful initial Ping
+records its completion on the same physical connection, preventing a slow
+constructor from immediately receiving another validation query. The ordinary
+greater-than-one-second idle check resumes once that validation is also older
+than one second; an absent or malformed completion record cannot bypass it.
+This changes no caller, Ping, cleanup or SQL budget and establishes no Main
+cause by itself. Idle-Ping failures remain outside wrapper cleanup tracking
+and the constructor-only phase metrics below.
+
 `urnetwork_pg_pool_startup_phases_active{pool,phase}` separates the existing
 constructor's `initial_ping` from `failed_startup_cleanup`. Both remain part of
 pgx's `constructing` population; they exclude idle-connection validation and
