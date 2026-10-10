@@ -212,7 +212,12 @@ func publishCreatedNetEscrow(
 			changed = append(changed, balanceId)
 		}
 	}
-	for balanceId, snapshot := range openEscrowReservedForBalances(mirrorCtx, changed) {
+	exact := openEscrowReservedForBalances(mirrorCtx, changed)
+	// Reuse only this committed census at its observed revision. Delayed
+	// creation posts must not each rescan the same cold balance history.
+	// The census connection has returned before the optional ownership probe.
+	cacheCommittedNetEscrowSnapshots(mirrorCtx, exact)
+	for balanceId, snapshot := range exact {
 		pending[balanceId] = snapshot
 	}
 	reconcileNetEscrowBatch(mirrorCtx, pending, balanceIds, true)

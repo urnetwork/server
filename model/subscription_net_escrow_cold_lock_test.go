@@ -128,17 +128,26 @@ func TestNetEscrowColdSettlementRollbackLostPostsAndReplay(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET used_transfer_byte_count=8 WHERE contract_id=$1`, contract.ContractId))
 		})
 		cold()
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
-		defer tx.Rollback(context.Background())
-		abandoned, closed, err := settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
-		server.Raise(err)
-		if !closed || len(abandoned) == 0 || len(readCachedNetEscrowSnapshots(ctx, tx, ids)) != 0 {
-			t.Fatal("cold transaction invented a cached prediction")
-		}
-		server.Raise(tx.Rollback(ctx))
+		var abandoned []func() any
+		var closed bool
+		var err error
+		rollback := errors.New("synthetic cold settlement rollback")
+		func() {
+			defer func() {
+				if failure := recover(); failure != rollback {
+					t.Fatalf("cold settlement rollback error_type=%T, want exact synthetic rollback", failure)
+				}
+			}()
+			server.Tx(ctx, func(tx server.PgTx) {
+				abandoned, closed, err = settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
+				server.Raise(err)
+				if !closed || len(abandoned) == 0 || len(readCachedNetEscrowSnapshots(ctx, tx, ids)) != 0 {
+					t.Fatal("cold transaction invented a cached prediction")
+				}
+				panic(rollback)
+			}, server.TxReadCommitted, server.OptNoRetry())
+			t.Fatal("synthetic rollback unexpectedly committed")
+		}()
 		server.RunPosts(ctx, abandoned...)
 		if got := settlementCacheSnapshot(ctx, ids)[f.balanceId].reserved; got != 20 {
 			t.Fatal("abandoned post released uncommitted reservation", got)
@@ -160,7 +169,7 @@ func TestNetEscrowColdSettlementRollbackLostPostsAndReplay(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			committed, closed, err = settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
 			server.Raise(err)
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		check(95, true)
 		if len(settlementCacheSnapshot(ctx, ids)) != 0 {
 			t.Fatal("cold commit fabricated cache authority")
@@ -176,7 +185,7 @@ func TestNetEscrowColdSettlementRollbackLostPostsAndReplay(t *testing.T) {
 			if again || len(posts) != 0 {
 				t.Fatal("ambiguous commit replay reclaimed settlement")
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		server.RunPosts(ctx, committed...)
 		server.RunPosts(ctx, abandoned...)
 		check(95, true)
