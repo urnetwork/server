@@ -601,117 +601,122 @@ func getTasks(ctx context.Context, exactClaim bool, taskIds ...server.Id) map[se
 	if len(taskIds) == 0 {
 		return map[server.Id]*Task{}
 	}
-
-	tasks := map[server.Id]*Task{}
-
-	read := func(query server.PgCanQuery) {
-		selectSql := `
-    		SELECT
-		    	pending_task.task_id,
-		        pending_task.function_name,
-		        pending_task.args_json,
-		        pending_task.client_address,
-		        pending_task.client_address_hash,
-		        pending_task.client_address_port,
-		        pending_task.client_by_jwt_json,
-		        pending_task.run_at,
-		        pending_task.run_once_key,
-		        pending_task.run_once_generation,
-		        pending_task.claim_generation,
-		        pending_task.run_priority,
-		        pending_task.run_max_time_seconds,
-		        pending_task.claim_time,
-		        pending_task.release_time,
-		        pending_task.reschedule_error,
-		        pending_task.reschedule_error_count
-		    FROM pending_task
-		`
-
-		var result server.PgResult
-		var err error
-
-		if exactClaim {
-			result, err = query.Query(ctx, selectSql+` WHERE task_id=ANY($1::uuid[])`, taskIds)
-		} else if len(taskIds) < 32 {
-			// `task_id IN (...)` is more efficient than a temp table for small lists
-
-			taskIdParams := []string{}
-			for i := 0; i < len(taskIds); i += 1 {
-				taskIdParams = append(taskIdParams, fmt.Sprintf("$%d", i+1))
-			}
-
-			taskIdValues := []any{}
-			for _, taskId := range taskIds {
-				taskIdValues = append(taskIdValues, taskId)
-			}
-
-			result, err = query.Query(
-				ctx,
-				selectSql+`
-				    WHERE task_id IN (`+strings.Join(taskIdParams, ",")+`)
-			    `,
-				taskIdValues...,
-			)
-		} else {
-			result, err = query.Query(
-				ctx,
-				selectSql+`
-				    INNER JOIN temp_task_ids ON temp_task_ids.task_id = pending_task.task_id
-			    `,
-			)
-		}
-
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				task := &Task{}
-				var byJwtJson *string
-				var runOnceKey *string
-				var rescheduleError *string
-				server.Raise(result.Scan(
-					&task.TaskId,
-					&task.FunctionName,
-					&task.ArgsJson,
-					&task.ClientAddress,
-					&task.ClientAddressHash,
-					&task.ClientAddressPort,
-					&byJwtJson,
-					&task.RunAt,
-					&runOnceKey,
-					&task.RunOnceGeneration,
-					&task.ClaimGeneration,
-					&task.RunPriority,
-					&task.RunMaxTimeSeconds,
-					&task.ClaimTime,
-					&task.ReleaseTime,
-					&rescheduleError,
-					&task.RescheduleErrorCount,
-				))
-				if byJwtJson != nil {
-					task.ClientByJwtJson = *byJwtJson
-				}
-				if runOnceKey != nil {
-					task.RunOnceKey = *runOnceKey
-				}
-				if rescheduleError != nil {
-					task.RescheduleError = *rescheduleError
-				}
-				tasks[task.TaskId] = task
-			}
-		})
-	}
+	var tasks map[server.Id]*Task
 	if exactClaim || len(taskIds) < 32 {
-		// One exact-ID statement needs no transaction wrapper. Claims still
-		// read after COMMIT so concurrent deletion and producer wakes remain
-		// visible; an uncertain read is returned without an automatic replay.
-		server.Db(ctx, func(conn server.PgConn) { read(conn) }, server.OptNoRetry())
+		server.Db(ctx, func(conn server.PgConn) {
+			tasks = getTasksInConn(ctx, conn, exactClaim, taskIds...)
+		}, server.OptNoRetry())
 	} else {
-		// Large reads retain their transaction-local ID table and one snapshot.
+		// Large public reads keep their transaction-local ID table and snapshot.
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
-			read(tx)
+			tasks = getTasksInConn(ctx, tx, false, taskIds...)
 		})
 	}
+	return tasks
+}
 
+// Read through an existing owner without acquiring another PostgreSQL connection.
+// The caller owns any transaction and keeps this query within its connection's
+// serialized lifetime. Rows close before a claim can launch or heartbeat.
+func getTasksInConn(ctx context.Context, query server.PgCanQuery, exactClaim bool, taskIds ...server.Id) map[server.Id]*Task {
+	if len(taskIds) == 0 {
+		return map[server.Id]*Task{}
+	}
+	tasks := map[server.Id]*Task{}
+	selectSql := `
+    		SELECT
+	    	pending_task.task_id,
+	        pending_task.function_name,
+	        pending_task.args_json,
+	        pending_task.client_address,
+	        pending_task.client_address_hash,
+	        pending_task.client_address_port,
+	        pending_task.client_by_jwt_json,
+	        pending_task.run_at,
+	        pending_task.run_once_key,
+	        pending_task.run_once_generation,
+	        pending_task.claim_generation,
+	        pending_task.run_priority,
+	        pending_task.run_max_time_seconds,
+	        pending_task.claim_time,
+	        pending_task.release_time,
+	        pending_task.reschedule_error,
+	        pending_task.reschedule_error_count
+	    FROM pending_task
+	`
+
+	var result server.PgResult
+	var err error
+
+	if exactClaim {
+		result, err = query.Query(ctx, selectSql+` WHERE task_id=ANY($1::uuid[])`, taskIds)
+	} else if len(taskIds) < 32 {
+		// `task_id IN (...)` is more efficient than a temp table for small lists
+
+		taskIdParams := []string{}
+		for i := 0; i < len(taskIds); i += 1 {
+			taskIdParams = append(taskIdParams, fmt.Sprintf("$%d", i+1))
+		}
+
+		taskIdValues := []any{}
+		for _, taskId := range taskIds {
+			taskIdValues = append(taskIdValues, taskId)
+		}
+
+		result, err = query.Query(
+			ctx,
+			selectSql+`
+			    WHERE task_id IN (`+strings.Join(taskIdParams, ",")+`)
+		    `,
+			taskIdValues...,
+		)
+	} else {
+		result, err = query.Query(
+			ctx,
+			selectSql+`
+			    INNER JOIN temp_task_ids ON temp_task_ids.task_id = pending_task.task_id
+		    `,
+		)
+	}
+
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			task := &Task{}
+			var byJwtJson *string
+			var runOnceKey *string
+			var rescheduleError *string
+			server.Raise(result.Scan(
+				&task.TaskId,
+				&task.FunctionName,
+				&task.ArgsJson,
+				&task.ClientAddress,
+				&task.ClientAddressHash,
+				&task.ClientAddressPort,
+				&byJwtJson,
+				&task.RunAt,
+				&runOnceKey,
+				&task.RunOnceGeneration,
+				&task.ClaimGeneration,
+				&task.RunPriority,
+				&task.RunMaxTimeSeconds,
+				&task.ClaimTime,
+				&task.ReleaseTime,
+				&rescheduleError,
+				&task.RescheduleErrorCount,
+			))
+			if byJwtJson != nil {
+				task.ClientByJwtJson = *byJwtJson
+			}
+			if runOnceKey != nil {
+				task.RunOnceKey = *runOnceKey
+			}
+			if rescheduleError != nil {
+				task.RescheduleError = *rescheduleError
+			}
+			tasks[task.TaskId] = task
+		}
+	})
 	return tasks
 }
 
@@ -2335,7 +2340,10 @@ claimCandidates:
 		readCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		defer cancel()
 	}
-	claimedTasks = getTasks(readCtx, options.runCohorts, taskIds...)
+	// COMMIT ends the claim snapshot, but this collector still owns its direct
+	// session. A fresh exact read must not wait for another pool connection
+	// while these committed execution guards remain held.
+	claimedTasks = getTasksInConn(readCtx, guard.conn, true, taskIds...)
 	for _, taskId := range taskIds {
 		if queued := claimedTasks[taskId]; queued != nil {
 			// A producer may commit between claim and this exact-ID read. Its
