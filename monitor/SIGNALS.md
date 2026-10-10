@@ -25904,6 +25904,38 @@ error — deliberate, so fleet status sampling doesn't count drains).
 - GOTCHA: readiness is start-time-latched by design. A runtime redis outage
   does not flip /status; that is 1.2's job (task canaries).
 
+The 2026-10-10 bounded fleet capture found all eight `a1b91a4d` Taskworkers
+ready while each emitted task-finalization timeouts. The retained recovery
+stacks belonged to the inner `worker.Run` supervisor. Readiness therefore did
+not establish continuing Run-loop intake. In that source, a fatal handback
+stops refill and removes the returned task from the active set, but retains its
+execution guard and heartbeat until every sibling function and committed post
+joins. Only then does the original failure reach the supervisor for restart.
+An `eval active` line can consequently describe retained custody after the task
+function has already returned.
+
+The source correction cancels sibling function contexts when ordinary, cohort
+or batch finalization fails, then keeps the same join and guard-release order.
+Already committed detached posts still run to completion; uncertain handbacks
+are never replayed, and the failed task's durable lease remains unchanged.
+Canceled siblings use ordinary retry policy. A real five-second pre-BEGIN
+ownership refusal reproduced the uncanceled-sibling stall on the old source;
+the candidate passed ten native controls covering cancellation, exact guards,
+committed post generations, RunOnce minimum deadlines and subsequent Run
+progress. This establishes a cooperative sibling-drain correction. A function
+that ignores cancellation or an unjoined post still retains custody.
+
+A separate two-frame exact-key capture, 5.363 seconds apart, found the selected
+task's own pending, finished and execution keys free. Its conditional current
+payer-continuation queue key was held by different active sessions and
+transactions in the two frames, each executing the normal `ScheduleTaskInTx`
+RunOnce UPSERT with no observed SQL wait or blocker. This establishes publisher
+turnover, not one continuously held five-second blocker. The current owner
+mapping is conditional: the earlier finalizer's returned result and requested
+key set were not captured. Do not attribute all fleet timeouts to this sampled
+publisher. Verify actual post-adoption completion and queue progress separately
+from readiness and from the controlled source fix.
+
 ### 12.3 Stuck leases (post-SIGKILL / crash)
 Probe: `stuck-leases`
 

@@ -216,6 +216,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				firstPanic = err
 			}
 			stopped = true
+			evalCancel()
 			return
 		}
 		for _, result := range event.cohortResults {
@@ -259,6 +260,8 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 		if failed {
 			// Keep ambiguous/failed ownership and its heartbeat until every
 			// other slot joins; never replay a possibly committed finalization.
+			// Stop sibling functions so this failed collector can drain.
+			evalCancel()
 			removeActive(event.taskId)
 			return
 		}
@@ -365,6 +368,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				firstPanic = err
 			}
 			stopped = true
+			evalCancel()
 			for _, r := range ready {
 				removeActive(r.task.TaskId)
 			}
