@@ -180,10 +180,8 @@ func TestStartupContractClosurePagesKeepCapAndEarliestWake(t *testing.T) {
 			ownedKeys := map[server.PgOwnershipKey]bool{}
 			ctx := server.Testing_WithPgOwnershipObservation(baseCtx, func(event server.PgOwnershipEvent) {
 				stateLock.Lock()
-				publication := len(event.Keys) > 0
-				for _, key := range event.Keys {
-					publication = publication && childKeys[key]
-				}
+				childCount := startupCheckpointObservedChildren(event, childKeys)
+				publication := childCount > 0
 				if event.Kind == server.PgOwnershipAdmitted {
 					maxOwnedKeys = max(maxOwnedKeys, len(event.Keys))
 					for _, key := range event.Keys {
@@ -192,7 +190,7 @@ func TestStartupContractClosurePagesKeepCapAndEarliestWake(t *testing.T) {
 				}
 				closeNow := false
 				if event.Kind == server.PgOwnershipReleased && publication {
-					published += len(event.Keys)
+					published += childCount
 					if published == 1024 && !closedPrefix {
 						closedPrefix, closeNow = true, true
 					}
@@ -234,7 +232,7 @@ func TestStartupContractClosurePagesKeepCapAndEarliestWake(t *testing.T) {
 			ownedScan := ownedKeys[task.RunOnceOwnershipKey(task.RunOnce("schedule_open_contract_closures_on_startup"))] &&
 				ownedKeys[server.NewPgOwnershipKey("finished_task/task_id", first.id)]
 			stateLock.Unlock()
-			if maxKeys != 256 || !ownedScan || !closed || boundaryErr != nil {
+			if maxKeys != 257 || !ownedScan || !closed || boundaryErr != nil {
 				t.Fatal("single scan lost bounded publication, completion ownership or its real page boundary", maxKeys, ownedScan, closed, boundaryErr)
 			}
 			for _, id := range ids[:2] {
@@ -535,7 +533,7 @@ func TestScheduledContractClosureClosesRetainedSourceIntent(t *testing.T) {
 }
 
 // A refusal on the second page retains the complete first page and its first
-// chunk. A retry rescans from the head and coalesces that committed prefix.
+// chunk. A retry resumes after the last atomically committed child/checkpoint.
 func TestStartupContractClosurePublicationRetryKeepsCommittedPrefix(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -572,8 +570,13 @@ func TestStartupContractClosurePublicationRetryKeepsCommittedPrefix(t *testing.T
 		}
 		partial := readExpiryRecoveryQueue(t, ctx)
 		current, found := partial[key]
-		if !found || current.id != initial.id || current.args != initial.args || len(partial) != 1281 {
+		if !found || current.id != initial.id || startupCheckpointOriginalArgs(t, current.args) != initial.args || len(partial) != 1281 {
 			t.Fatal("failed page advanced its cursor or lost the committed 1280-child prefix", len(partial))
+		}
+		var progressArgs ScheduleOpenContractClosuresArgs
+		if json.Unmarshal([]byte(current.args), &progressArgs) != nil || progressArgs.Progress == nil ||
+			progressArgs.Progress.After != ids[1279] || progressArgs.Progress.RetryFrom != nil {
+			t.Fatal("failed publication advanced beyond its last committed chunk")
 		}
 		for index, id := range ids {
 			_, found := partial[task.RunOnce("close_scheduled_contract", id).String()]

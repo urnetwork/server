@@ -138,8 +138,12 @@ func TestScheduledContractCloseKeepsRedisAndLegacyAccounting(t *testing.T) {
 				t.Fatal("deadline returned unfinished financial work")
 			}
 			applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
-			if err != nil || applied != 0 || released != 0 || busy {
-				t.Fatal("deadline left asynchronous consumption", applied, released, busy, err)
+			wantDebits := 0
+			if !legacy {
+				wantDebits = 1
+			}
+			if err != nil || applied != wantDebits || released != wantDebits || busy {
+				t.Fatal("deadline did not preserve its original consumption owner", applied, released, busy, err)
 			}
 			requireLegacySettlementTestState(t, ctx, f, id, false, true, 983, 0)
 			requireDeadlineProviderDurability(t, ctx, f.destinationNetworkId, id, 17)

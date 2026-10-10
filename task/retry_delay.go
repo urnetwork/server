@@ -12,9 +12,10 @@ import (
 // The target owns the complete failure it wraps; a nested hint inside a joined
 // error cannot shorten another failure's backoff.
 type retryDelayError struct {
-	cause         error
-	delay         time.Duration
-	retryArgsJson *string
+	cause             error
+	delay             time.Duration
+	retryArgsJson     *string
+	committedProgress bool
 }
 
 // Preserve the original durable error text.
@@ -31,6 +32,20 @@ func WithRetryDelay(err error, delay time.Duration) error {
 		return err
 	}
 	return &retryDelayError{cause: err, delay: delay}
+}
+
+// A target may attest a committed progress checkpoint after its ordinary
+// adapter returns, including a budget interruption. Only that exact root hint
+// shortens continuation delay; failure text/count and normal handback remain.
+// Collector interruption already has its own nonfailure retry policy.
+func WithCommittedProgressRetry(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, interrupted := err.(*taskCollectorInterruption); interrupted {
+		return err
+	}
+	return &retryDelayError{cause: err, delay: RescheduleTimeout, committedProgress: true}
 }
 
 // WithRetryDelayAndArgs checkpoints only target-attested completed work on a
@@ -147,7 +162,7 @@ func taskErrorRetryDelayWithCauses(err error, errorCount int, randomUnit float64
 		backoffMaxExponent = 0
 	} else if causes.complete && causes.targetMissing {
 		backoffMaxExponent = targetNotFoundBackoffMaxExponent
-	} else if hint, ok := err.(*retryDelayError); ok && causes.complete && validTaskRetryDelay(hint.delay) && !causes.canceled {
+	} else if hint, ok := err.(*retryDelayError); ok && causes.complete && validTaskRetryDelay(hint.delay) && (!causes.canceled || hint.committedProgress) {
 		return hint.delay, errorCountDelta
 	}
 	return errorRescheduleDelay(

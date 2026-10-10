@@ -8,11 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/task"
 )
 
 // An expiration close must finish with the existing contract closed and its
@@ -26,8 +26,9 @@ func CloseContractAtDeadline(ctx context.Context, contractId server.Id, deadline
 	return nil, err
 }
 
-// Counts describe this invocation's committed financial changes. Original
-// reports and actual escrow payouts remain the durable reconciliation record.
+// Counts describe this invocation's committed consumption, including durable
+// Redis debit journal entries. Original reports and exact escrow payouts remain
+// the financial record; provider totals are a replay-safe projection.
 type ContractDeadlineReconciliation struct {
 	ContractId    server.Id       `json:"contract_id"`
 	Outcome       ContractOutcome `json:"outcome"`
@@ -64,23 +65,72 @@ type contractDeadlineEscrow struct {
 // metadata and outcome commit atomically. A database, ownership or cancellation
 // failure that prevents that commit must return an explicit error for retry,
 // never acknowledge an open contract as closed. Optional caches run after commit.
+// For Redis reservations the committed debit journal is consumption authority;
+// its existing batch updates grant totals. Provider totals likewise use the
+// immutable projection payload committed with exact earnings. Neither worker
+// chooses or repairs this contract's settlement after terminal acknowledgement.
 func ReconcileContractAtDeadline(ctx context.Context, contractId server.Id, deadline time.Time) (result *ContractDeadlineReconciliation, returnErr error) {
 	if contractId == (server.Id{}) || deadline.IsZero() {
 		return nil, fmt.Errorf("invalid scheduled contract close")
 	}
 	var posts []server.PostFunction
 	server.HandleError(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
-			result, posts = reconcileContractAtDeadlineInTx(ctx, tx, contractId, deadline)
-		}, server.TxReadCommitted, server.OptNoRetry())
+		// Discover only prospective identities without holding a transaction.
+		// Admission can then wait without retaining the contract or intent.
+		// The locked callback checks the full current scope before any write.
+		balanceIds := readDeadlineBalanceIds(ctx, contractId)
+		keys := deadlineFinancialOwnershipKeys(contractId, balanceIds)
+		body := func(tx server.PgTx) {
+			result, posts = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, true)
+		}
+		if len(keys) == 0 {
+			server.Tx(ctx, body, server.TxReadCommitted, server.OptNoRetry())
+		} else {
+			server.OwnedTx(ctx, keys, body, server.TxReadCommitted, server.OptNoRetry())
+		}
 		server.RunPosts(ctx, posts...)
 	}, func(err error) { result, returnErr = nil, err })
 	return
 }
 
+// Exact private reservation membership is only an admission hint. A closed or
+// missing contract needs no financial owner; the callback still reads its state.
+func readDeadlineBalanceIds(ctx context.Context, contractId server.Id) (ids []server.Id) {
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, `SELECT escrow.balance_id
+			FROM (SELECT contract_id FROM transfer_contract WHERE contract_id=$1 AND outcome IS NULL OFFSET 0) AS contract
+			CROSS JOIN LATERAL (SELECT balance_id FROM transfer_escrow WHERE contract_id=contract.contract_id OFFSET 0) AS escrow
+			ORDER BY escrow.balance_id`, contractId)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var id server.Id
+				server.Raise(rows.Scan(&id))
+				ids = append(ids, id)
+			}
+		})
+	}, server.OptNoRetry())
+	return
+}
+
+// Funding still shares the grant owner with journal application and legacy
+// writers. Provider totals do not: only this contract's immutable publication
+// key joins the close. No shared provider-account row is written here.
+func deadlineFinancialOwnershipKeys(contractId server.Id, balanceIds []server.Id) []server.PgOwnershipKey {
+	if len(balanceIds) == 0 {
+		return nil
+	}
+	return append(transferBalanceOwnershipKeys(balanceIds),
+		task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId)))
+}
+
 // Reuse the caller's transaction when an overdue intent already owns its rows.
-// All errors abort that transaction; returned posts require a confirmed commit.
-func reconcileContractAtDeadlineInTx(ctx context.Context, tx server.PgTx, contractId server.Id, deadline time.Time) (result *ContractDeadlineReconciliation, posts []server.PostFunction) {
+// Such callers may not wait for admission while holding those rows. All errors
+// abort that transaction; returned posts require a confirmed commit.
+func reconcileContractAtDeadlineInTx(ctx context.Context, tx server.PgTx, contractId server.Id, deadline time.Time) (*ContractDeadlineReconciliation, []server.PostFunction) {
+	return reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, false)
+}
+
+func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server.PgTx, contractId server.Id, deadline time.Time, preAdmitted bool) (result *ContractDeadlineReconciliation, posts []server.PostFunction) {
 	result = &ContractDeadlineReconciliation{ContractId: contractId}
 	owner, err := readContractSettlementRowsInTx(ctx, tx, contractId)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -120,22 +170,18 @@ func reconcileContractAtDeadlineInTx(ctx context.Context, tx server.PgTx, contra
 	}
 	balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, []server.Id{contractId})
 	server.Raise(err)
-	networkIds := []server.Id{}
-	for _, participant := range participants {
-		// No escrow means no earnings write. Same-network shares are also
-		// ineligible, so neither case may compete for an account owner.
-		if len(balanceIds) > 0 && participant.NetworkId != originNetworkId {
-			networkIds = append(networkIds, participant.NetworkId)
-		}
-	}
-	slices.SortFunc(networkIds, server.Id.Cmp)
-	networkIds = slices.Compact(networkIds)
-	keys := append(transferBalanceOwnershipKeys(balanceIds), accountBalanceOwnershipKeys(networkIds)...)
+	keys := deadlineFinancialOwnershipKeys(contractId, balanceIds)
 	if len(keys) > 0 {
-		admitted, err := server.TryTxOwnership(ctx, tx, keys)
-		server.Raise(err)
-		if !admitted {
-			server.Raise(errTransferBalanceOwnershipBusy)
+		if preAdmitted {
+			if !server.TxOwnsKeys(tx, keys) {
+				server.Raise(fmt.Errorf("deadline financial ownership changed before transaction"))
+			}
+		} else {
+			admitted, err := server.TryTxOwnership(ctx, tx, keys)
+			server.Raise(err)
+			if !admitted {
+				server.Raise(errTransferBalanceOwnershipBusy)
+			}
 		}
 	}
 	rows, err := tx.Query(ctx, `SELECT balance_id FROM transfer_balance WHERE balance_id=ANY($1) ORDER BY balance_id FOR UPDATE`, balanceIds)
@@ -182,13 +228,28 @@ func reconcileContractAtDeadlineInTx(ctx context.Context, tx server.PgTx, contra
 	if !claimed {
 		server.Raise(fmt.Errorf("deadline reconciliation did not close locked contract"))
 	}
+	redisDebits := make(map[server.Id]bool, len(escrows))
+	for _, escrow := range escrows {
+		redisDebits[escrow.balanceId] = escrow.redisReserved
+	}
 	for _, balanceId := range balanceIds {
 		payout, exists := payouts[balanceId]
 		if !exists {
 			continue
 		}
 		if payout.payoutByteCount > 0 {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1`, balanceId, payout.payoutByteCount))
+			if redisDebits[balanceId] {
+				// Preserve the existing native reservation until the batched
+				// debit commits. The unique journal and terminal outcome share
+				// this commit; losing any post cannot lose or repeat the charge.
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_debit_journal
+					(contract_id,balance_id,debit_byte_count,shard) VALUES($1,$2,$3,$4)`,
+					contractId, balanceId, payout.payoutByteCount, transferDebitShard(balanceId)))
+			} else {
+				// Legacy admission subtracts live escrow, not pending journals.
+				// Keep its existing atomic debit before releasing that escrow.
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1`, balanceId, payout.payoutByteCount))
+			}
 			result.Charged += payout.payoutByteCount
 		}
 	}
@@ -198,12 +259,13 @@ func reconcileContractAtDeadlineInTx(ctx context.Context, tx server.PgTx, contra
 			batch.Queue(participantSweepInsertSQL, contractId, key.balanceId, key.networkId,
 				payout.payoutByteCount, payout.payout, payout.destinationId, payout.providerPayouts)
 		}
-		for _, networkId := range networkIds {
-			if payout := accountPayouts[networkId]; payout != nil {
-				batch.Queue(legacyProviderTotalWriteSql, networkId, payout.payoutByteCount, payout.payout)
-			}
-		}
 	})
+	if len(accountPayouts) > 0 {
+		// Exact earnings and the immutable projection owner are mandatory
+		// writes in the terminal commit. Only display totals wait for their
+		// existing provider batch; a held account cannot reject this close.
+		queueLegacyProviderTotalsInTx(ctx, tx, contractId, accountPayouts)
+	}
 	// Outcome/metadata triggers invalidate the cache revision. A bad
 	// optional snapshot must not block financial reconciliation.
 	if len(positive) > 0 {

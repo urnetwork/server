@@ -116,13 +116,12 @@ func TestStartupContractClosureActiveWakeKeepsFullPass(t *testing.T) {
 			if event.Kind != server.PgOwnershipReleased || len(event.Keys) == 0 {
 				return
 			}
-			for _, key := range event.Keys {
-				if !childKeys[key] {
-					return
-				}
+			count := startupCheckpointObservedChildren(event, childKeys)
+			if count == 0 {
+				return
 			}
 			observationLock.Lock()
-			published += len(event.Keys)
+			published += count
 			pause := published == 1024 && !paused
 			if pause {
 				paused = true
@@ -181,7 +180,7 @@ func TestStartupContractClosureActiveWakeKeepsFullPass(t *testing.T) {
 		running := prefix[key]
 		// Claims and producer wakes have independent counters. This first
 		// claim advances once while no new startup request has arrived yet.
-		if running.id != initial.id || running.args != initial.args || len(prefix) != 1025 || running.claim == 0 ||
+		if running.id != initial.id || startupCheckpointOriginalArgs(t, running.args) != initial.args || len(prefix) != 1025 || running.claim == 0 ||
 			running.claim != initial.claim+1 || running.generation != initial.generation || !running.releaseTime.After(server.NowUtc()) {
 			t.Fatal("first-page barrier did not retain the actual live scanner claim")
 		}
@@ -258,13 +257,8 @@ func TestStartupContractClosureFindsAppendAfterShortPage(t *testing.T) {
 		var addedDeadline time.Time
 		var appendErr error
 		ctx := server.Testing_WithPgOwnershipObservation(baseCtx, func(event server.PgOwnershipEvent) {
-			if event.Kind != server.PgOwnershipReleased || len(event.Keys) != len(ids) {
+			if event.Kind != server.PgOwnershipReleased || startupCheckpointObservedChildren(event, keys) != len(ids) {
 				return
-			}
-			for _, key := range event.Keys {
-				if !keys[key] {
-					return
-				}
 			}
 			stateLock.Lock()
 			create := !appended

@@ -19,8 +19,10 @@ const startupContractClosurePublicationSize = 256
 
 // One timestamp supplies the default lifetime for this complete startup pass.
 type ScheduleOpenContractClosuresArgs struct {
-	PageSize  int       `json:"page_size"`
-	StartedAt time.Time `json:"started_at"`
+	Private   bool                            `json:"_private_task_arguments,omitempty"`
+	PageSize  int                             `json:"page_size"`
+	StartedAt time.Time                       `json:"started_at"`
+	Progress  *startupContractClosureProgress `json:"_startup_scan_progress,omitempty"`
 }
 
 type ScheduledContractClose struct {
@@ -36,8 +38,8 @@ func ScheduleOpenContractClosuresOnStartup(clientSession *session.ClientSession,
 		clientSession, task.RunOnce("schedule_open_contract_closures_on_startup"), task.RunAt(server.NowUtc()))
 }
 
-// Every page belongs to this invocation. The old queued After field is ignored;
-// retry starts at the head and coalesces any children already committed.
+// One logical pass retains its original start time. The old queued After field
+// remains ignored; only a claim-fenced committed checkpoint can resume a pass.
 func ScheduleOpenContractClosures(args *ScheduleOpenContractClosuresArgs, clientSession *session.ClientSession) (*ScheduleOpenContractClosuresResult, error) {
 	if args == nil || args.StartedAt.IsZero() {
 		return nil, fmt.Errorf("startup contract scan has no start time")
@@ -50,7 +52,12 @@ func ScheduleOpenContractClosures(args *ScheduleOpenContractClosuresArgs, client
 		return nil, fmt.Errorf("invalid startup contract scan page size")
 	}
 	var lastContractId server.Id
-	busy := false
+	var retryFrom *server.Id
+	checkpoint, _ := clientSession.Ctx.Value(startupContractClosureCheckpointKey{}).(*startupContractClosureCheckpoint)
+	if checkpoint != nil {
+		lastContractId = checkpoint.progress.After
+		retryFrom = checkpoint.progress.RetryFrom
+	}
 	for {
 		if err := clientSession.Ctx.Err(); err != nil {
 			return nil, err
@@ -73,13 +80,23 @@ func ScheduleOpenContractClosures(args *ScheduleOpenContractClosuresArgs, client
 			})
 		}, server.OptNoRetry())
 		// Release the maintenance connection before ordinary queue writes.
-		// A busy group cannot hold back independent later pages. Any refusal
-		// retains this scanner for a full retry, including all skipped groups.
+		// A busy group cannot hold back independent later pages. Its earliest
+		// predecessor remains debt in each later committed checkpoint.
 		for offset := 0; offset < len(contracts); offset += startupContractClosurePublicationSize {
 			chunk := contracts[offset:min(offset+startupContractClosurePublicationSize, len(contracts))]
 			keys := make([]server.PgOwnershipKey, 0, len(chunk))
 			for _, contract := range chunk {
 				keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("close_scheduled_contract", contract.ContractId)))
+			}
+			if checkpoint != nil {
+				keys = append(keys, checkpoint.key)
+			}
+			var next *startupContractClosureProgress
+			if checkpoint != nil {
+				copyProgress := *checkpoint.progress
+				copyProgress.After = chunk[len(chunk)-1].ContractId
+				copyProgress.RetryFrom = retryFrom
+				next = &copyProgress
 			}
 			admitted := server.TryOwnedTx(clientSession.Ctx, keys, func(tx server.PgTx) {
 				server.BatchInTx(clientSession.Ctx, tx, func(batch server.PgBatch) {
@@ -90,16 +107,35 @@ func ScheduleOpenContractClosures(args *ScheduleOpenContractClosuresArgs, client
 							task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
 					}
 				})
+				if checkpoint != nil {
+					checkpoint.write(clientSession.Ctx, tx, args, next)
+				}
 			}, server.TxReadCommitted, server.OptNoRetry())
-			busy = busy || !admitted
+			if admitted {
+				if checkpoint != nil {
+					checkpoint.progress = next
+					checkpoint.published = true
+				}
+			} else if retryFrom == nil {
+				predecessor := lastContractId
+				retryFrom = &predecessor
+			}
+			lastContractId = chunk[len(chunk)-1].ContractId
 		}
 		if len(contracts) == 0 {
 			break
 		}
-		lastContractId = contracts[len(contracts)-1].ContractId
 	}
-	if busy {
-		return nil, fmt.Errorf("startup contract scan child publication ownership is busy")
+	if retryFrom != nil {
+		if checkpoint != nil {
+			next := *checkpoint.progress
+			next.After, next.RetryFrom = *retryFrom, nil
+			server.OwnedTx(clientSession.Ctx, []server.PgOwnershipKey{checkpoint.key}, func(tx server.PgTx) {
+				checkpoint.write(clientSession.Ctx, tx, args, &next)
+			}, server.TxReadCommitted, server.OptNoRetry())
+			checkpoint.progress = &next
+		}
+		return nil, task.WithRetryDelay(fmt.Errorf("startup contract scan child publication ownership is busy"), task.RescheduleTimeout)
 	}
 	return &ScheduleOpenContractClosuresResult{}, nil
 }
