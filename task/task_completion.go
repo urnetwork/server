@@ -76,6 +76,12 @@ func (self *TaskWorker) finalizeTaskInTx(finalizeCtx context.Context, tx server.
 			task.RescheduleErrorCount,
 			mathrand.Float64(),
 		)
+		if r.collectorInterrupted {
+			// The body was stopped to release a failed collector's custody.
+			// Preserve its error and pending owner without growing task backoff.
+			delay = errorRescheduleDelay(RescheduleTimeout, RescheduleBackoffMaxTimeout, 0, 0, mathrand.Float64())
+			errorCountDelta = 0
+		}
 		var retryArgsJson *string
 		if self.ctx.Err() == nil && self.drainCtx.Err() == nil {
 			retryArgsJson = taskRetryArgsJson(r.err)
@@ -88,7 +94,8 @@ func (self *TaskWorker) finalizeTaskInTx(finalizeCtx context.Context, tx server.
 						reschedule_error = $2,
 						reschedule_error_count = pending_task.reschedule_error_count + $5,
 						args_json = COALESCE($6, pending_task.args_json),
-						run_at = $3,
+						run_at = CASE WHEN run_once_generation > $8 AND run_once_wake_at IS NOT NULL
+							THEN LEAST($3, run_once_wake_at) ELSE $3 END,
 						release_time = $4
 					WHERE task_id = $1 AND claim_generation = $7
 				`,
@@ -99,6 +106,7 @@ func (self *TaskWorker) finalizeTaskInTx(finalizeCtx context.Context, tx server.
 			errorCountDelta,
 			retryArgsJson,
 			task.ClaimGeneration,
+			task.RunOnceGeneration,
 		))
 		if tag.RowsAffected() != 1 {
 			server.Raise(errTaskClaimOwnership)

@@ -43,8 +43,8 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 		return false, errors.New("nonempty task claim has no advisory ownership guard")
 	}
 
-	evalCtx, evalCancel := context.WithCancel(context.WithoutCancel(self.ctx))
-	defer evalCancel()
+	evalCtx, evalCancel := context.WithCancelCause(context.WithoutCancel(self.ctx))
+	defer evalCancel(nil)
 	active := map[server.Id]*Task{}
 	activeSlots := map[server.Id]*taskRunSlot{}
 	taskSlots := map[server.Id]*taskRunSlot{}
@@ -218,7 +218,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				firstPanic = err
 			}
 			stopped = true
-			evalCancel()
+			evalCancel(errTaskCollectorInterrupted)
 			return
 		}
 		for _, result := range event.cohortResults {
@@ -263,7 +263,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 			// Keep ambiguous/failed ownership and its heartbeat until every
 			// other slot joins; never replay a possibly committed finalization.
 			// Stop sibling functions so this failed collector can drain.
-			evalCancel()
+			evalCancel(errTaskCollectorInterrupted)
 			removeActive(event.taskId)
 			return
 		}
@@ -370,7 +370,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				firstPanic = err
 			}
 			stopped = true
-			evalCancel()
+			evalCancel(errTaskCollectorInterrupted)
 			for _, r := range ready {
 				removeActive(r.task.TaskId)
 			}
@@ -391,7 +391,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				if firstPanic == nil {
 					firstPanic = recovered
 				}
-				evalCancel()
+				evalCancel(errTaskCollectorInterrupted)
 			}
 		}()
 		launch(tasks)
@@ -403,7 +403,7 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				// siblings join under the original execution/group guard.
 				claimErr = err
 				stopped = true
-				evalCancel()
+				evalCancel(errTaskCollectorInterrupted)
 			}
 			if self.runCtx.Err() != nil {
 				stopped = true

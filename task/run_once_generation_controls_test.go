@@ -124,11 +124,12 @@ func TestRunOnceFailedExecutionKeepsWakeForRetry(t *testing.T) {
 			runOnceGenerationKey(scope), RunAt(server.NowUtc().Add(-time.Hour)))
 		target := &runOnceGenerationTarget{Target: NewTaskTarget(runOnceGenerationWork)}
 		calls := 0
+		wakeAt := server.NowUtc().Add(-time.Hour).Truncate(time.Microsecond)
 		target.before = func(context.Context, *Task) error {
 			calls++
 			if calls == 1 {
 				ScheduleTask(runOnceGenerationWork, &runOnceGenerationArgs{Scope: scope}, owner,
-					runOnceGenerationKey(scope), RunAt(server.NowUtc().Add(-time.Hour)))
+					runOnceGenerationKey(scope), RunAt(wakeAt))
 				return io.ErrUnexpectedEOF
 			}
 			return nil
@@ -141,10 +142,21 @@ func TestRunOnceFailedExecutionKeepsWakeForRetry(t *testing.T) {
 			pending.RescheduleErrorCount != 1 || pending.RunOnceGeneration != 1 || len(GetFinishedTasks(ctx, oldId)) != 0 {
 			t.Fatal("failed invocation lost its exact pending wake/retry owner", err, pending)
 		}
-		// Explicit due-state intervention isolates custody from randomized backoff.
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2,release_time=$2 WHERE task_id=$1`, oldId, time.Time{}))
+		if !pending.RunAt.Equal(wakeAt) {
+			t.Fatal("failed invocation replaced the producer's earlier RunOnce wake with error backoff", pending.RunAt, wakeAt)
+		}
+		// The error handback releases at now. Its generated availability block
+		// is therefore still later than an immediate poll, even for a past wake.
+		// Advance only the existing claim-clock seam to that exact stored block;
+		// no manual run_at/lease update or second producer is needed.
+		var availableBlock int64
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT available_block FROM pending_task WHERE task_id=$1`, oldId).Scan(&availableBlock))
 		})
+		if availableBlock <= pending.ReleaseTime.Unix()/BlockSizeSeconds || pending.ReleaseTime.Unix()/BlockSizeSeconds+2 < availableBlock {
+			t.Fatal("retry eligibility did not retain the handback's next availability block")
+		}
+		worker.claimNow = func() time.Time { return time.Unix(availableBlock*BlockSizeSeconds, 0) }
 		finished, retried, posts, err = worker.EvalTasks(1)
 		if err != nil || len(finished) != 1 || finished[0] != oldId || len(retried)+len(posts) != 0 ||
 			len(runOnceGenerationPending(ctx, []server.Id{scope})) != 0 || calls != 2 {

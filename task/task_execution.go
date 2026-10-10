@@ -44,6 +44,11 @@ func (self *TaskWorker) executeTask(evalCtx context.Context, task *Task, target 
 			stopAfterDrain := context.AfterFunc(self.drainCtx, fnCancel)
 			defer stopAfterDrain()
 
+			// Inspect before fnCancel cleanup can supply a cancellation of its
+			// own. Only the collector can set this private ancestor cause.
+			defer func() {
+				r.collectorInterrupted = taskCollectorInterrupted(fnCtx, err)
+			}()
 			defer func() {
 				if r := recover(); r != nil {
 					glog.Infof("Unexpected error: %s\n", server.ErrorJson(r, debug.Stack()))
