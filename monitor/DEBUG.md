@@ -132,6 +132,94 @@ contracts, absent intents, and completed task Post steps.
 The synchronous technique revealed the model issue; it did not, by itself,
 explain or repair queue starvation. Investigate those layers independently.
 
+## Trace accounting corruption before the expiration fallback
+
+**Use when:** forced reconciliation closes a contract, but its original reports
+or funding disagree. A successful fallback does not establish that ordinary
+close accounting was correct.
+
+Compare contract capacity, both accumulated reports and their checkpoint flags,
+retained report identities, escrow reservations, surviving grant records, and
+the accepted settlement intent. Check the contract's creation/report dates
+against the deployed writers. Keep normal-close reproductions before the stored
+expiration so the fallback cannot conceal their failure.
+
+Two mechanisms reproduce the accounting failures from the closure incident:
+
+- The old id-less path summed checkpoint increments. If an acknowledgement was
+  lost, sending it again incremented the same party twice. With a 600-byte
+  reservation, one 400-byte checkpoint delivered twice plus a 100-byte final
+  produces 900 bytes at the receiver against 500 at the sender. The 700-byte
+  mean exceeds escrow; normal Redis settlement fails and legacy settlement
+  retains a failing intent.
+  If the report difference exceeds 16 MiB, ordinary close instead marks a
+  dispute. That call returns nil but does not commit a terminal outcome.
+- Historical retention deleted expired grants without excluding unsettled
+  escrow. Normal settlement joins escrow to its grant; deleting the grant makes
+  reserved funds disappear from that calculation. The current retention owner
+  protects unsettled escrow and pending debit journals. Grant expiration ends
+  admission and must not erase an outstanding financial obligation.
+
+The three original sampled contracts were created September 22–26, 2026. Their
+destination totals were approximately twice their source totals, two had missing
+grants, and none retained report identities. They predate the October 3 report
+deduplication changes. These observations fit the reproduced mechanisms; without
+individual historical reports or deletion audit records, they do not prove the
+exact duplicated delivery or grant-deletion invocation.
+
+The compatibility path remains relevant. A bounded October 10 sample of 128
+contracts created about fifteen minutes earlier included two positive
+destination checkpoints on contracts with no report receipts. Most other
+id-less reports in that sample were zero-byte source finals, which do not
+demonstrate checkpoint duplication. This is evidence of the old report path
+remaining in use, not an estimate of its prevalence across production.
+
+New SDK reports retain one `ReportId` through native and out-of-band retries;
+both controller routes must preserve it into `CloseContractWithReport`.
+Old clients remain supported with deliberately conservative accounting: retain
+the largest id-less checkpoint, and use the greater of that bound and the sum
+of distinct identified checkpoints if delivery routes mix. Add the final
+increment once. Equal-sized legacy operations cannot be distinguished from
+retries and may be undercounted; identified operations remain independently
+recorded. Never fabricate report identities or signatures to fill that gap.
+
+A conservative lower bound below an exact peer is not evidence of a dispute.
+Ordinary settlement uses the existing mean of the accepted totals. A lower
+bound exceeding an exact peer still triggers the ordinary disagreement check.
+Transport metrics count only newly committed report bytes, including when
+admission succeeds but later settlement needs a retry. Billing uses the
+reconciled totals; neither should count a replay twice.
+
+Migration 813 adds `contract_close.legacy_checkpoint_byte_count` and
+`identified_checkpoint_byte_count`; apply it before deploying the new
+close-report writers. The identified total bootstraps from existing receipts
+when an old row first changes, then advances with each new receipt. All writers
+must be upgraded before assuming the old accumulation path is gone. Existing
+aggregates are preserved as a historical floor, so this change prevents new
+inflation but does not reconstruct unknown old deliveries or repair their
+totals. Expiration's fair reconciliation remains responsible for those
+unfinished historical contracts.
+
+Also distinguish expected waiting from a failure: a source final plus a
+destination checkpoint intentionally remains resumable until the destination
+finalizes or expiration retires it. A dispute can have `open=false` and a
+`close_time` while `outcome` remains null. A legacy close can acknowledge an
+intent while still awaiting money settlement. The terminal outcome, together
+with the debit and payout records, is the closure authority.
+
+[Normal-close root-cause tests](../model/subscription_normal_close_regression_test.go)
+exercise duplicate delivery with and without report identities, both financial
+backends, the dispute threshold, and historical versus protected grant
+retention. Replaying the same committed legacy checkpoint caused the tests to
+fail with insufficient escrow or dispute before the fix; both report modes now
+settle before expiration. The retention negative control still reproduces a
+missing grant. The
+[controller route tests](../controller/connect_close_report_test.go) also check
+that HTTP and resident-frame retries share the same report receipt and metrics
+count only newly committed bytes. The
+[legacy compatibility tests](../model/contract_close_legacy_test.go) cover mixed
+delivery order, rollback, concurrent retries, finality and directional disputes.
+
 ## Prove queue starvation at a bounded admission boundary
 
 **Use when:** due tasks accumulate behind another task function, especially

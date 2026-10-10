@@ -2615,8 +2615,13 @@ func createContractNoEscrowInTx(
 	return
 }
 
-// this will create a close entry,
-// then settle if all parties agree, or set dispute if there is a dispute
+// Accept a legacy report, then attempt ordinary settlement once both parties
+// are final. Id-less checkpoints retain their largest observed increment,
+// rather than summing ambiguous retries. This may undercount distinct work;
+// callers with stable identities use CloseContractWithReport for exact counts.
+// The final increment is added once. A nil error may acknowledge a checkpoint,
+// dispute or durable settlement intent; expiration has the stronger terminal
+// guarantee documented on ReconcileContractAtDeadline.
 func CloseContract(
 	ctx context.Context,
 	contractId server.Id,
@@ -2624,8 +2629,17 @@ func CloseContract(
 	usedTransferByteCount ByteCount,
 	checkpoint bool,
 ) error {
-	_, err := closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, nil)
+	_, err := CloseContractUsage(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
 	return err
+}
+
+// Return only the bytes this legacy delivery actually committed, including
+// when subsequent settlement fails. Retries and already-final parties add zero.
+func CloseContractUsage(ctx context.Context, contractId, clientId server.Id,
+	usedTransferByteCount ByteCount, checkpoint bool,
+) (ByteCount, error) {
+	_, added, err := closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, nil)
+	return added, err
 }
 
 // CloseContractReport acknowledges an exact logical report once. A retry may
@@ -2642,25 +2656,25 @@ func CloseContractReport(
 	if reportId == (server.Id{}) {
 		return false, fmt.Errorf("invalid close report identity")
 	}
-	return closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, &reportId)
+	applied, _, err := closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, &reportId)
+	return applied, err
 }
 
+// Commit report admission before attempting the independently retryable settlement.
 func closeContractReport(
 	ctx context.Context,
 	contractId, clientId server.Id,
 	usedTransferByteCount ByteCount,
 	checkpoint bool,
 	reportId *server.Id,
-) (applied bool, returnErr error) {
-	// settle := false
-	// dispute := false
+) (applied bool, addedByteCount ByteCount, returnErr error) {
 	if usedTransferByteCount < 0 {
-		return false, fmt.Errorf("Invalid used transfer byte count: %d", usedTransferByteCount)
+		return false, 0, fmt.Errorf("Invalid used transfer byte count: %d", usedTransferByteCount)
 	}
 
 	terminalReplay := false
 	server.Tx(ctx, func(tx server.PgTx) {
-		applied, terminalReplay, returnErr = applyContractCloseReportInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId)
+		applied, terminalReplay, addedByteCount, returnErr = applyContractCloseReportUsageInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, nil)
 	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if terminalReplay {
@@ -2696,8 +2710,23 @@ func applyContractCloseReportWithExpiryInTx(ctx context.Context, tx server.PgTx,
 	contractId, clientId server.Id, usedTransferByteCount ByteCount,
 	checkpoint bool, reportId *server.Id, expiry *contractExpiryState,
 ) (applied, terminalReplay bool, returnErr error) {
+	applied, terminalReplay, _, returnErr = applyContractCloseReportUsageInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, expiry)
+	return
+}
+
+// The contract lock serializes each report and its returned accounting delta.
+// A legacy checkpoint establishes a lower bound, not an identifiable increment.
+// Mixed transports take max(legacy bound, sum of identified checkpoints), since
+// either route may have stripped the identity from the same logical operation.
+// Existing pre-upgrade totals are retained as a floor, never rewritten as proof.
+// Cache the identified sum with the aggregate. Only an old/uninitialized writer
+// state needs a receipt scan; ordinary admission stays constant work per report.
+func applyContractCloseReportUsageInTx(ctx context.Context, tx server.PgTx,
+	contractId, clientId server.Id, usedTransferByteCount ByteCount,
+	checkpoint bool, reportId *server.Id, expiry *contractExpiryState,
+) (applied, terminalReplay bool, addedByteCount ByteCount, returnErr error) {
 	if expiry != nil && (!expiry.usageUnverifiedRetained || expiry.contractId != contractId) {
-		return false, false, fmt.Errorf("expiry report continuation lacks retained ownership")
+		return false, false, 0, fmt.Errorf("expiry report continuation lacks retained ownership")
 	}
 	found := false
 	var sourceId server.Id
@@ -2778,60 +2807,48 @@ func applyContractCloseReportWithExpiryInTx(ctx context.Context, tx server.PgTx,
 		return
 	}
 
-	if checkpoint {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-                    INSERT INTO contract_close (
-                        contract_id,
-                        party,
-                        used_transfer_byte_count,
-                        close_time,
-                        checkpoint
-                    )
-                    VALUES ($1, $2, $3, $4, true)
-                    ON CONFLICT (contract_id, party) DO UPDATE
-                    SET
-                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
-                        close_time = $4
-                    WHERE
-                        contract_close.checkpoint = true
-                `,
-			contractId,
-			party,
-			usedTransferByteCount,
-			server.NowUtc(),
-		))
-		applied = tag.RowsAffected() == 1
-
-	} else {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-                    INSERT INTO contract_close (
-                        contract_id,
-                        party,
-                        used_transfer_byte_count,
-                        close_time,
-                        checkpoint
-                    )
-                    VALUES ($1, $2, $3, $4, false)
-                    ON CONFLICT (contract_id, party) DO UPDATE
-                    SET
-                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
-                        close_time = $4,
-                        checkpoint = false
-                    WHERE
-                        contract_close.checkpoint = true
-                `,
-			contractId,
-			party,
-			usedTransferByteCount,
-			server.NowUtc(),
-		))
-		applied = tag.RowsAffected() == 1
-	}
-	if reportId != nil {
+	result, err = tx.Query(ctx, `WITH prior AS MATERIALIZED (
+		SELECT used_transfer_byte_count,legacy_checkpoint_byte_count,identified_checkpoint_byte_count
+		FROM contract_close WHERE contract_id=$1 AND party=$2
+	), identified AS MATERIALIZED (
+		SELECT CASE WHEN identified_checkpoint_byte_count IS NOT NULL
+			AND used_transfer_byte_count = greatest(COALESCE(legacy_checkpoint_byte_count,0), identified_checkpoint_byte_count)
+			THEN identified_checkpoint_byte_count
+			ELSE (SELECT COALESCE(sum(used_transfer_byte_count),0)::bigint FROM contract_close_report
+				WHERE contract_id=$1 AND party=$2 AND checkpoint)
+			END AS byte_count FROM prior
+	), changed AS (
+		INSERT INTO contract_close
+			(contract_id,party,used_transfer_byte_count,close_time,checkpoint,legacy_checkpoint_byte_count,identified_checkpoint_byte_count)
+		VALUES($1,$2,$3::bigint,$4,$5,CASE WHEN $5 AND $6 THEN $3::bigint ELSE NULL END,
+			CASE WHEN $5 AND NOT $6 THEN $3::bigint ELSE 0 END)
+		ON CONFLICT (contract_id,party) DO UPDATE SET
+			used_transfer_byte_count = CASE
+				WHEN NOT $5 THEN greatest(contract_close.used_transfer_byte_count, (SELECT byte_count FROM identified)) + $3::bigint
+				WHEN $6 THEN greatest(contract_close.used_transfer_byte_count, (SELECT byte_count FROM identified), $3::bigint)
+				ELSE greatest(contract_close.used_transfer_byte_count,
+					(SELECT byte_count FROM identified) + $3::bigint)
+			END,
+			legacy_checkpoint_byte_count = CASE
+				WHEN $5 AND $6 THEN greatest(COALESCE(contract_close.legacy_checkpoint_byte_count,0), $3::bigint,
+					CASE WHEN contract_close.used_transfer_byte_count > (SELECT byte_count FROM identified)
+					THEN contract_close.used_transfer_byte_count ELSE 0 END)
+				WHEN contract_close.used_transfer_byte_count > (SELECT byte_count FROM identified)
+					THEN greatest(contract_close.legacy_checkpoint_byte_count, contract_close.used_transfer_byte_count)
+				ELSE contract_close.legacy_checkpoint_byte_count END,
+			identified_checkpoint_byte_count = (SELECT byte_count FROM identified) + CASE WHEN $5 AND NOT $6 THEN $3::bigint ELSE 0 END,
+			close_time=$4, checkpoint=$5
+		WHERE contract_close.checkpoint
+		RETURNING used_transfer_byte_count
+	) SELECT changed.used_transfer_byte_count - COALESCE((SELECT used_transfer_byte_count FROM prior),0) FROM changed`,
+		contractId, party, usedTransferByteCount, server.NowUtc(), checkpoint, reportId == nil)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&addedByteCount))
+			applied = true
+		}
+	})
+	if reportId != nil && applied {
 		// The existing contract row lock serializes this receipt with its
 		// party increment. No shared payer/network row is acquired here.
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report
@@ -2869,6 +2886,7 @@ func settleContractWithExpiryScope(ctx context.Context, contractId server.Id, sc
 		type closeRecord struct {
 			usedTransferByteCount ByteCount
 			checkpoint            bool
+			conservative          bool
 		}
 		closes := map[ContractParty]closeRecord{}
 		result, err := tx.Query(
@@ -2877,7 +2895,8 @@ func settleContractWithExpiryScope(ctx context.Context, contractId server.Id, sc
             SELECT
                 party,
                 used_transfer_byte_count,
-                checkpoint
+                checkpoint,
+                legacy_checkpoint_byte_count IS NOT NULL
             FROM contract_close
             WHERE
                 contract_id = $1
@@ -2889,14 +2908,17 @@ func settleContractWithExpiryScope(ctx context.Context, contractId server.Id, sc
 				var closeParty ContractParty
 				var closeUsedTransferByteCount ByteCount
 				var closeCheckpoint bool
+				var conservative bool
 				server.Raise(result.Scan(
 					&closeParty,
 					&closeUsedTransferByteCount,
 					&closeCheckpoint,
+					&conservative,
 				))
 				closes[closeParty] = closeRecord{
 					usedTransferByteCount: closeUsedTransferByteCount,
 					checkpoint:            closeCheckpoint,
+					conservative:          conservative,
 				}
 			}
 		})
@@ -2929,7 +2951,11 @@ func settleContractWithExpiryScope(ctx context.Context, contractId server.Id, sc
 
 			if hasEscrow {
 				diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
-				if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
+				// A legacy lower bound can legitimately fall below an exact peer
+				// by more than the tolerance. It cannot explain exceeding that
+				// peer. Preserve real disagreements and the ordinary mean payout.
+				compatibleBound := sourceClose.conservative && diff < 0 || destinationClose.conservative && 0 < diff
+				if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference || compatibleBound {
 					// fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
 					posts, closed, returnErr = settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, contractId, ContractOutcomeSettled, scope)
 				} else {

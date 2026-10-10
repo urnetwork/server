@@ -21,6 +21,10 @@ const completedTransferBalanceSpoolByteLimit int64 = 256 << 20
 
 var errCompletedTransferBalanceSpoolCapacity = errors.New("completed transfer balance discovery exceeds its spool byte limit")
 
+// Tests retain the actual file handle to detect anonymous descriptor leaks on
+// every platform. No observer is installed in normal retention contexts.
+type completedTransferBalanceSpoolObserverKey struct{}
+
 // Discover the same indexed expiry set as the old retention delete, once.
 // The existing index has only end_time: UUID keyset pages would repeatedly
 // scan/sort a large equal-expiry cohort. Retained rows must not restart a page.
@@ -78,6 +82,9 @@ func removeCompletedTransferBalanceBatchesWithByteLimit(ctx context.Context, min
 		_ = spool.Close()
 		_ = os.Remove(spool.Name())
 	}()
+	if observe, ok := ctx.Value(completedTransferBalanceSpoolObserverKey{}).(func(*os.File)); ok {
+		observe(spool)
+	}
 	// Unlink while open: cancellation, panic and process exit cannot leave a
 	// named file of balance IDs. CreateTemp already restricts access to 0600.
 	server.Raise(os.Remove(spool.Name()))

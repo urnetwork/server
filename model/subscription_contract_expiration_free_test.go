@@ -43,6 +43,13 @@ func freeExpiryOwnerClockCount(batch *legacySettlementPostBatch) int {
 // No free terminal path may create a reservation, payout, or debit journal.
 func requireFreeExpiryOwnerClosed(t testing.TB, ctx context.Context, ids []server.Id) {
 	t.Helper()
+	requireFreeExpiryOwnerClosedReports(t, ctx, ids, 2, false)
+}
+
+// A forced one-sided close retains only its original source checkpoint; an
+// ordinary bilateral close retains both final reports. Neither creates debt.
+func requireFreeExpiryOwnerClosedReports(t testing.TB, ctx context.Context, ids []server.Id, reportsPerContract int, checkpoint bool) {
+	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {
 		var exact bool
 		server.Raise(conn.QueryRow(ctx, `SELECT
@@ -51,8 +58,8 @@ func requireFreeExpiryOwnerClosed(t testing.TB, ctx context.Context, ids []serve
             AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=ANY($1::uuid[]))
             AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=ANY($1::uuid[]))
             AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=ANY($1::uuid[]))
-            AND (SELECT count(*)=$2*2 AND bool_and(NOT checkpoint AND used_transfer_byte_count=17)
-                FROM contract_close WHERE contract_id=ANY($1::uuid[]))`, ids, len(ids)).Scan(&exact))
+            AND (SELECT count(*)=$2*$3::bigint AND bool_and(checkpoint=$4 AND used_transfer_byte_count=17 AND ($3::bigint<>1 OR party='source'))
+                FROM contract_close WHERE contract_id=ANY($1::uuid[]))`, ids, len(ids), reportsPerContract, checkpoint).Scan(&exact))
 		if !exact {
 			t.Fatal("free expiry lost final positive reports or acquired financial custody")
 		}
@@ -125,7 +132,11 @@ func TestContractExpirationFreeDisputeUsesPublicSourceOwner(t *testing.T) {
 			if err != nil || count != 1 || freeExpiryOwnerClockCount(batch) != index*2+2 {
 				t.Fatal("ordinary free dispute did not use its no-payout owner", missingDeadline, count, err)
 			}
-			requireFreeExpiryOwnerClosed(t, ctx, ids)
+			if missingDeadline {
+				requireFreeExpiryOwnerClosed(t, ctx, ids)
+			} else {
+				requireFreeExpiryOwnerClosedReports(t, ctx, ids, 1, true)
+			}
 			proof, snapshot := readContractExpiryTestSnapshot(t, ctx, ids[0])
 			controlProof, _ := readContractExpiryTestSnapshot(t, ctx, ids[1])
 			if !bytes.Equal(proof, controlProof) || snapshot.ByteCount != 0 || len(snapshot.Providers) != 0 ||

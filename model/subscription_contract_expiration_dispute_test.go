@@ -1,4 +1,4 @@
-// Expiry finalizes disputed checkpoints through their existing financial owner.
+// Expiry reconciles disputed checkpoints atomically while retaining original reports.
 package model
 
 import (
@@ -12,8 +12,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Live report flags may become final, but original checkpoint proof and the
-// delivered amounts remain exactly the same throughout settlement and replay.
+// Explicit deadlines retain live checkpoint flags. The historical NULL-deadline
+// continuation finalizes them, but both paths preserve the original immutable
+// checkpoint proof and exactly the same delivered amounts.
 func requireExpirationCheckpointReports(t testing.TB, ctx context.Context, id server.Id, checkpoint bool) []byte {
 	t.Helper()
 	data, proof := readContractExpiryTestSnapshot(t, ctx, id)
@@ -36,6 +37,28 @@ func requireExpirationCheckpointReports(t testing.TB, ctx context.Context, id se
 		}
 	})
 	return data
+}
+
+// Deadline closure commits exact debt before the independent debit worker.
+// Verify its retained consumption, then apply and replay that owner explicitly.
+func requireDisputedExpirationDebitAndDrain(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, id server.Id) {
+	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		var exact bool
+		server.Raise(conn.QueryRow(ctx, `SELECT count(*)=1
+			AND bool_and(balance_id=$2 AND debit_byte_count=300 AND NOT applied)
+			FROM transfer_debit_journal WHERE contract_id=$1`, id, f.balanceId).Scan(&exact))
+		if !exact {
+			t.Fatal("disputed deadline lost its exact pending debit")
+		}
+	})
+	requireLegacySettlementTestState(t, ctx, f, id, false, true, 1000, 300)
+	for _, want := range []int{1, 0} {
+		applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
+		if err != nil || busy || applied != want || released != want {
+			t.Fatal("disputed deadline debit or replay changed consumption", applied, released, busy, err)
+		}
+	}
 }
 
 // Both reservation owners retire a disputed bilateral checkpoint. Fresh NULL
@@ -88,34 +111,39 @@ func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T)
 				})
 			}
 			count, _, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-			wantCount := int64(0)
-			if scenario.redis {
-				wantCount = 1
+			wantCount := int64(1)
+			if scenario.missingDeadline && !scenario.redis {
+				wantCount = 0
 			}
 			if err != nil || count != wantCount {
 				t.Fatalf("%s disputed expiration count=%d want=%d err=%v", scenario.name, count, wantCount, err)
 			}
-			proof := requireExpirationCheckpointReports(t, ctx, id, false)
-			if scenario.redis {
-				flushed, err := FlushTransferDebits(ctx, int(f.balanceId[15])%TransferDebitShardCount, nil, 1)
-				if err != nil || flushed.Failed != 0 {
-					t.Fatal("disputed Redis debit failed", err)
-				}
-			} else {
-				requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 1000)
-				server.Db(ctx, func(conn server.PgConn) {
-					var dispute bool
-					server.Raise(conn.QueryRow(ctx, `SELECT dispute FROM transfer_contract WHERE contract_id=$1`, id).Scan(&dispute))
-					if !dispute {
-						t.Fatal("queued legacy intent cleared dispute before financial completion")
+			proof := requireExpirationCheckpointReports(t, ctx, id, !scenario.missingDeadline)
+			if scenario.redis && !scenario.missingDeadline {
+				requireDisputedExpirationDebitAndDrain(t, ctx, f, id)
+			}
+			if scenario.missingDeadline {
+				if scenario.redis {
+					flushed, err := FlushTransferDebits(ctx, int(f.balanceId[15])%TransferDebitShardCount, nil, 1)
+					if err != nil || flushed.Failed != 0 {
+						t.Fatal("historical Redis continuation lost its debit", err)
 					}
-				})
-				complete, busy, _, err := flushLegacySettlement(ctx, id)
-				if err != nil || !complete || busy {
-					t.Fatalf("legacy disputed continuation: complete=%t busy=%t err=%v", complete, busy, err)
+				} else {
+					requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 1000)
+					complete, busy, _, err := flushLegacySettlement(ctx, id)
+					if err != nil || !complete || busy {
+						t.Fatal("historical legacy continuation lost its financial owner", complete, busy, err)
+					}
 				}
 			}
 			requireLegacySettlementTestState(t, ctx, f, id, false, true, 700, 0)
+			if scenario.missingDeadline {
+				// The old no-deadline continuation can still publish its
+				// independently durable provider projection after the close.
+				requireLegacyProviderDurability(t, ctx, f, id, 300)
+			} else {
+				requireDeadlineProviderDurability(t, ctx, f.destinationNetworkId, id, 300)
+			}
 			checkCompleted := func() {
 				server.Db(ctx, func(conn server.PgConn) {
 					var paid ByteCount
@@ -130,7 +158,7 @@ func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T)
 			}
 			checkCompleted()
 			count, _, err = ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-			if err != nil || count != 0 || !bytes.Equal(proof, requireExpirationCheckpointReports(t, ctx, id, false)) {
+			if err != nil || count != 0 || !bytes.Equal(proof, requireExpirationCheckpointReports(t, ctx, id, !scenario.missingDeadline)) {
 				t.Fatal("disputed expiry replay changed terminal accounting or original proof", err)
 			}
 			requireLegacySettlementTestState(t, ctx, f, id, false, true, 700, 0)
@@ -139,9 +167,9 @@ func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T)
 	})
 }
 
-// PostgreSQL rejects the dispute clear after the checkpoint update has run.
-// Their shared transaction must roll flags, outcome and all money back, while
-// retaining the separately committed original proof for a successful retry.
+// PostgreSQL rejects the dispute clear in the reconciliation transaction.
+// Its proof, outcome and all money must roll back together; the original report
+// rows remain available for a subsequent successful retirement.
 func TestContractExpirationDisputedCheckpointCancellationRollsBackFinalization(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -163,31 +191,39 @@ func TestContractExpirationDisputedCheckpointCancellationRollsBackFinalization(t
 				FOR EACH ROW WHEN (OLD.dispute AND NOT NEW.dispute AND NEW.outcome IS NULL)
 				EXECUTE FUNCTION synthetic_expiration_dispute_cancel();`))
 		})
+		before := readRedisExpiryRepairTestState(ctx, id)
 		_, _, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
 		var canceled *pgconn.PgError
 		if !errors.As(err, &canceled) || canceled.Code != "57014" {
 			t.Fatal("dispute clear did not retain its database cancellation", err)
 		}
-		proof := requireExpirationCheckpointReports(t, ctx, id, true)
+		if !bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) {
+			t.Fatal("canceled reconciliation changed its original reports or financial state")
+		}
 		requireLegacySettlementTestState(t, ctx, f, id, false, false, 1000, 1000)
 		server.Db(ctx, func(conn server.PgConn) {
-			var dispute bool
-			server.Raise(conn.QueryRow(ctx, `SELECT dispute FROM transfer_contract WHERE contract_id=$1`, id).Scan(&dispute))
-			if !dispute {
-				t.Fatal("canceled finalization cleared dispute")
+			var unchanged bool
+			server.Raise(conn.QueryRow(ctx, `SELECT dispute AND outcome IS NULL AND provider_usage IS NULL
+				AND (SELECT count(*)=2 AND bool_and(checkpoint AND used_transfer_byte_count=300)
+				FROM contract_close WHERE contract_id=$1) FROM transfer_contract WHERE contract_id=$1`, id).Scan(&unchanged))
+			if !unchanged {
+				t.Fatal("canceled reconciliation changed proof, dispute or original reports")
 			}
 		})
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER synthetic_expiration_dispute_cancel ON transfer_contract`))
 		})
 		count, _, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-		if err != nil || count != 1 || !bytes.Equal(proof, requireExpirationCheckpointReports(t, ctx, id, false)) {
+		if err != nil || count != 1 {
 			t.Fatal("disputed expiry did not resume with its original proof", count, err)
 		}
-		flushed, err := FlushTransferDebits(ctx, int(f.balanceId[15])%TransferDebitShardCount, nil, 1)
-		if err != nil || flushed.Failed != 0 {
-			t.Fatal("resumed disputed debit failed", err)
-		}
+		proof := requireExpirationCheckpointReports(t, ctx, id, true)
+		requireDisputedExpirationDebitAndDrain(t, ctx, f, id)
 		requireLegacySettlementTestState(t, ctx, f, id, false, true, 700, 0)
+		requireDeadlineProviderDurability(t, ctx, f.destinationNetworkId, id, 300)
+		count, _, err = ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
+		if err != nil || count != 0 || !bytes.Equal(proof, requireExpirationCheckpointReports(t, ctx, id, true)) {
+			t.Fatal("reconciled checkpoint replay changed original proof", count, err)
+		}
 	})
 }
