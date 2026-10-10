@@ -20240,6 +20240,38 @@ needs an AccessExclusive lock. A refused lock admission must be retried as a
 separate bounded migration attempt; the concurrent-index repair's longer lock
 timeout must not be reused for this operation.
 
+The 2026-10-10 native monitor gate found eleven missing artifact contracts at
+794–795, 797–802 and 806–808: the source published head 808, while the probe
+represented only 184 of the required 195 versions from 614 onward. This was a
+detector coverage gap, not evidence that Main lacked those objects. Versions
+794–808 now share one ordered artifact/SQL list, restoring the existing
+version-minus-589 row protocol without changing the migration DDL. The existing
+796 and 803–805 predicates retain their definitions in that list.
+
+Versions 794–795 require the tier and canary columns, extender request,
+release and block-report ledgers with their primary keys, retention/lookup
+indexes, and the separate identity/epoch release index. Versions 797–802
+require the network client limit, client cap and usage/drain/rollup tables,
+services leads, per-client ACL groups, and retained Embed enable/disable
+timestamps. The cap indexes must retain the published OR, capped, monthly
+period and zero-limit predicates. Version 806 requires the nullable client
+and auth-code session associations, durable session operations and their
+recovery/quota indexes, auth-code redemption with both its composite primary
+key and unique request key, and the session-index repair outbox. Versions
+807–808 independently require the exact active, non-NULL session indexes on
+clients and auth codes; invalid or not-ready concurrent builds remain drift.
+
+These checks pin ordinary durable tables, published column types and widths,
+nullability, defaults and stored semantics, validated nondeferrable keys, and
+complete index definitions including key order, predicates and readiness.
+Later additive columns remain valid. Native controls exercise each actual
+prefix from 793 through 808, rolled-back schema faults reaching the owning
+drift alert, and projected invalid/not-ready index states. Future artifacts
+remain pending before their versions, and unavailable catalog evidence remains
+unknown. Matching schema does not attest extender releases, Embed enforcement,
+session behavior or fleet rollout. The coverage repair changes the monitor
+binary and requires a newly built and qualified watcher before promotion.
+
 With compatible writers and workers, a RunOnce schedule coalesces with an
 unclaimed owner. Each claim captures its wake generation in the lease UPDATE;
 a later same-key schedule records the earliest requested wake time. Successful
