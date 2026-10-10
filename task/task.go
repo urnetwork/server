@@ -2001,15 +2001,16 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		}
 	}()
 
-	tx, err := guard.conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: server.TxReadCommitted})
+	rawTx, err := guard.conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: server.TxReadCommitted})
 	if err != nil {
 		return nil, guard, false, err
 	}
 	defer func() {
 		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), DefaultTaskFinalizeTimeout)
-		_ = tx.Rollback(rollbackCtx)
+		_ = rawTx.Rollback(rollbackCtx)
 		rollbackCancel()
 	}()
+	tx := newClaimBudgetTx(ctx, rawTx)
 	if err := server.ValidatePgTaskClaimTransaction(ctx, guard.conn, tx); err != nil {
 		return nil, guard, false, err
 	}
