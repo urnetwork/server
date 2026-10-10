@@ -6885,14 +6885,52 @@ from above, not its isolated latency. Controls include
 `sol-startup-busy-pages-native-GO.json` has SHA-256
 `c1f6b5943c93c344f45ab848fefbc6a7a96c34a014d7ac1f130af6617837a968`.
 
-A permanently busy key can still leave unscheduled children in its 256-row
-group, and a whole pass exceeding the unchanged 120-second task budget can
-still repeat a prefix. No durable cursor or timeout extension was added. These
-local controls do not establish Main causation, full contract coverage or
-financial completion. Correlate the exact current parent claim, stored error
-and retained arguments with bounded child pending/finished observations; an
-old parent snapshot or absence within a capped finished-task window cannot
-establish every prior visit or continuing starvation.
+That admission repair still let a whole pass exceeding its unchanged 120-second
+budget repeat the head. A later bounded Main read retained the current parent's
+`Timeout\nInterrupted: context canceled`, hour-scale backoff, and six unchanged
+open contract headers without pending children. Claim heartbeat timestamps and
+absence within capped finished history do not establish run duration, every
+prior visit, or the origin of every cancellation.
+
+The native budget control over 4,103 rows reproduced the mechanism: five
+attempts interrupted through the real task timer after committed publication
+still left only the first 1,024 children on old source. Commit `63804c389`
+checkpoints each group of at most 256 children with the exact parent's queue
+ownership and claim fence in the same transaction. Retries retain the pending
+identity, original `StartedAt`, failure history, and skipped busy-group debt.
+A budget interruption receives the two-second continuation only after
+acknowledged progress.
+The task budget remains 120 seconds. New RunOnce requests retain their earliest
+fresh-pass wake without canceling the active pass. Successful EOF restores the
+original arguments; a failed finalizer retains progress. The candidate reached
+all 4,103 children over five bounded attempts, preserving explicit expirations
+and the original NULL fallback. See
+`TestStartupContractClosureBudgetResumesCommittedPass`; child publication is
+not terminal closure or completed accounting.
+
+A separate bounded current body-error capture classified 205 financial-admission
+source frames among 208 owning-stack records. Seven complete retained exemplars
+proved the exact financial-ownership busy refusal; the eighth showed a pre-BEGIN
+pool-acquisition timeout. These capped record counts are not unique failures or
+fleet rates and do not distinguish a held grant from a held provider account.
+Native held-owner controls reproduced both the shared provider refusal and
+grant admission after business rows were locked.
+The same commit admits the complete grant and per-contract publication owners
+before BEGIN, then rechecks the locked scope. The terminal commit records exact
+Redis debit journals and immutable provider allocations; existing workers apply
+those projections. Legacy unmarked escrow retains its direct debit. Original
+reports, funding limits, escrow payouts and terminal replay remain authoritative;
+no timeout increase or transaction replay hides an ownership error.
+
+The combined PG18/Redis gate passed 52 focused controls, including 2,048 public
+Redis contracts across 64 payers, four providers and 32 overlapping callers,
+real debit/provider drains, conservation and terminal replay. Acknowledged
+pre-BEGIN waiting was permitted and counted; this is not a zero-wait or Main
+throughput claim. Require fresh parent progress/EOF, bounded child and terminal
+outcomes, downstream financial completion, and matched creation/closure rates
+before claiming backlog recovery. Native receipt
+`sol-combined-scanner-deadline-native-GO.json` has SHA-256
+`cf066ec8346b644f5c3b131c69f61c295e09db9f090ad3ecb91add18f7467e83`.
 
 A fully classified accounting refusal with a remaining raw cursor or sweep
 needs the bounded 2–4-second continuation cadence. Selecting the 1–5-minute idle
