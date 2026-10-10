@@ -10,9 +10,14 @@ import (
 	"github.com/urnetwork/server/taskworker/work"
 )
 
+// Queued scheduled closes per instance. Most are terminal no-ops or deferrals;
+// the admitted ones hold a grant for a bounded two-turn batch.
+const scheduledCloseClaimLimit = 8
+
 // One provider-probe shard per instance prevents several polling loops from
 // co-locating long-lived tunnel pools. One legacy mirror repair bounds cold
-// history work moved off the financial page. Each worker has independent
+// history work moved off the financial page. Scheduled closes bound queue
+// churn and concurrent financial batches. Each worker has independent
 // capacity, and caller-owned settings and maps remain unchanged.
 func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile WorkloadProfile) *task.TaskWorkerSettings {
 	if settings == nil {
@@ -28,6 +33,7 @@ func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile Wor
 		ownerSettings.TargetClaimLimits = map[string]int{}
 	}
 	ownerSettings.TargetClaimLimits[task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror).TargetFunctionName()] = 1
+	ownerSettings.TargetClaimLimits[task.NewTaskTarget(work.CloseScheduledContract).TargetFunctionName()] = scheduledCloseClaimLimit
 	if profile == WorkloadProfileProduction {
 		name := task.NewTaskTarget(work.ProviderEgressProbe).TargetFunctionName()
 		ownerSettings.TargetClaimLimits[name] = 1
