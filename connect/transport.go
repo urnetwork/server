@@ -1221,7 +1221,10 @@ func readConnectH1PooledWithDeadline(ws connect.H1MessageConn, timeout time.Dura
 }
 
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
+	h1Observation := newConnectH1Observation(connect.IsFramedUpgrade(r, connect.H1FramerProtocol))
+	defer h1Observation.finish()
 	if !self.beginHandle() {
+		h1Observation.result = connectH1ResultHandlerClosed
 		http.Error(w, "connect handler closed", http.StatusServiceUnavailable)
 		return
 	}
@@ -1230,6 +1233,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// a draining service refuses new connections, so a redialing client fails
 	// fast and lands on a sibling service via the lb (CONNECTDRAIN2.md §3.3)
 	if self.exchange.settings.EnableDrainCoordination && self.exchange.IsDraining() {
+		h1Observation.result = connectH1ResultDraining
 		http.Error(w, "draining", http.StatusServiceUnavailable)
 		return
 	}
@@ -1263,6 +1267,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		defer handleCancel()
 		select {
 		case <-r.Context().Done():
+			h1Observation.close(connectH1CloseRequestCanceled)
 		case <-handleCtx.Done():
 		}
 	})
@@ -1280,8 +1285,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if addrPort, err := server.ParseClientAddress(clientAddress); err != nil {
+		h1Observation.result = connectH1ResultAddressRefused
 		return
 	} else if AllowOnlyIpv4 && !addrPort.Addr().Is4() {
+		h1Observation.result = connectH1ResultAddressRefused
 		return
 	}
 
@@ -1292,16 +1299,19 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		&self.settings.ConnectionRateLimitSettings,
 	)
 	if err != nil {
+		h1Observation.result = connectH1ResultRateLimitInit
 		glog.Infof("[t]rate limit init err = %s\n", err)
 		return
 	}
 	err, disconnect := rateLimit.Connect()
 	defer disconnect()
 	if authCtx.Err() != nil {
+		h1Observation.result = connectH1ResultAuthDeadline
 		http.Error(w, "Service temporarily unavailable.", http.StatusServiceUnavailable)
 		return
 	}
 	if err != nil {
+		h1Observation.result = connectH1ResultRateLimit
 		if glog.V(1) {
 			glog.Infof("[t]rate limit err = %s\n", err)
 		}
@@ -1367,14 +1377,17 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}()
 	if custom {
 		if !self.settings.EnableH1Plus || !connect.H1PlusAvailable() {
+			h1Observation.result = connectH1ResultUpgradeUnavailable
 			http.Error(w, "upgrade unavailable", http.StatusUpgradeRequired)
 			return
 		}
 		if err := connect.ValidateFramedUpgradeRequest(r, connect.H1FramerProtocol); err != nil {
+			h1Observation.result = connectH1ResultUpgradeInvalid
 			http.Error(w, "invalid upgrade", http.StatusBadRequest)
 			return
 		}
 		if auth == nil {
+			h1Observation.result = connectH1ResultAuthFrame
 			connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), &connect.HTTPUpgradeError{StatusCode: 401, Reason: "authorization", Terminal: true})
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -1389,9 +1402,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		batchResponseWriter := &connectH1BatchResponseWriter{ResponseWriter: w}
 		websocketConn, upgradeErr := upgrader.Upgrade(batchResponseWriter, r, nil)
 		if upgradeErr != nil {
+			h1Observation.result = connectH1ResultUpgradeError
 			return
 		}
 		ws = websocketConn
+		h1Observation.upgraded = true
 
 		// enforce the message size limit on messages in
 		// +4 for the framer's length header (the websocket carries the framed message).
@@ -1400,20 +1415,24 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		if auth == nil {
 			messageType, authFrameBytes, err := readConnectH1AuthWithDeadline(ws, time.Until(authDeadline))
 			if err != nil {
+				h1Observation.result = connectH1ResultAuthRead
 				// server.Logger("TIMEOUT HA\n")
 				return
 			}
 			if messageType != websocket.BinaryMessage {
+				h1Observation.result = connectH1ResultAuthFrame
 				return
 			}
 
 			message, err := connect.DecodeFrame(authFrameBytes)
 			if err != nil {
+				h1Observation.result = connectH1ResultAuthFrame
 				return
 			}
 			var ok bool
 			auth, ok = message.(*protocol.Auth)
 			if !ok {
+				h1Observation.result = connectH1ResultAuthFrame
 				return
 			}
 
@@ -1442,17 +1461,22 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		var err error
 		byJwt, err = session.ParseByJwtForAudience(authCtx, auth.ByJwt, session.ByJwtAudienceConnect)
 		if err != nil {
+			h1Observation.result = connectH1ResultJwtRefused
 			if glog.V(1) {
 				glog.Infof("[t]auth jwt err = %s\n", err)
 			}
 			return http.StatusUnauthorized, err
 		}
 		if byJwt.ClientId == nil {
+			h1Observation.result = connectH1ResultClientMissing
 			return http.StatusForbidden, nil
 		}
 		var status int
 		instanceId, status, err = connectClientAuthentication(
 			session.WithStateQuerySource(authCtx, session.StateQueryConnectH1), byJwt, auth.InstanceId)
+		if status != 0 {
+			h1Observation.result = connectH1ResultStateRefused
+		}
 		if status == http.StatusUnauthorized {
 			if glog.V(1) {
 				glog.Infof("[t]inactive auth jwt: %s\n", err)
@@ -1461,6 +1485,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return status, err
 	})
 	if authStatus != 0 {
+		if authStatus == http.StatusServiceUnavailable {
+			h1Observation.result = connectH1ResultAuthDependency
+		}
 		rejectCustomAuth(authStatus)
 		return
 	}
@@ -1492,9 +1519,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		handleCancel()
 	})
 	if leaseErr != nil {
+		h1Observation.result = connectH1ResultStateRefused
 		status := http.StatusUnauthorized
 		if connectAuthDependencyUnavailable(leaseErr) {
 			status = http.StatusServiceUnavailable
+			h1Observation.result = connectH1ResultAuthDependency
 		}
 		rejectCustomAuth(status)
 		return
@@ -1516,27 +1545,33 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, max(time.Nanosecond, min(self.settings.WriteTimeout, time.Until(authDeadline))))
 		connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), upgradeErr)
 		if upgradeErr != nil {
+			h1Observation.result = connectH1ResultUpgradeError
 			return
 		}
 		framedConn, framedErr := connect.NewFramedMessageConn(conn, connect.H1FramerProtocol, self.settings.FramerSettings.MaxMessageLen, self.settings.H1PlusStats)
 		if framedErr != nil {
+			h1Observation.result = connectH1ResultUpgradeError
 			conn.Close()
 			return
 		}
 		ws = framedConn
+		h1Observation.upgraded = true
 	}
 
 	if len(authEcho) > 0 {
 		if err := echoConnectH1AuthWithDeadline(ws, min(self.settings.WriteTimeout, time.Until(authDeadline)), authEcho); err != nil {
+			h1Observation.result = connectH1ResultAuthEcho
 			return
 		}
 	}
 	if authCtx.Err() != nil {
+		h1Observation.result = connectH1ResultAuthDeadline
 		return
 	}
 	// Retire the authentication timer before publishing serving ownership.
 	// Its deadline must never become the resident or financial-control lifetime.
 	authCancel()
+	h1Observation.admit()
 
 	// the declared family rides with the connection record; the observed
 	// family is re-derived from the same address at the model
@@ -1580,6 +1615,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				&self.settings.ProviderIntentCheckSettings,
 			)
 			if !providerIntentCheck.Start() {
+				h1Observation.close(connectH1CloseClientLimit)
 				// over the client limit: no worker writes yet
 				countClientLimitKick(connectTransportH1, clientLimitKickCauseProviderIntent)
 				writeConnectH1ClientLimitExceeded(ws, self.settings.WriteTimeout)
@@ -1638,6 +1674,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		workers.start(func() {
 			defer handleCancel()
 			residentTransport.Run()
+			h1Observation.close(connectH1CloseResident)
 		})
 		if providerIntentCheck != nil {
 			workers.start(func() {
@@ -1662,6 +1699,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					trace = beginH1RelayLineage("edge_h1_read", clientId, connectionId, message, len(residentTransport.send), cap(residentTransport.send))
 				}
 				if err != nil {
+					h1Observation.readError(err)
 					if h1RelayLineageTraceEnabled {
 						trace.end("edge_h1_read_error", false, 0, 0)
 					}
@@ -1749,6 +1787,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			}()
 
 			recordWriteError := func(err error) {
+				h1Observation.close(connectH1CloseWriteError)
 				// A WebSocket deadline or partial write is terminal; the Transfer
 				// sequence retries each logical message over a replacement route.
 				if connectionId := announce.ConnectionId(); connectionId != nil {
@@ -1776,6 +1815,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 			// the client limit exceeded close ends the writer and the connection
 			writeKick := func(cause string) {
+				h1Observation.close(connectH1CloseClientLimit)
 				countClientLimitKick(connectTransportH1, cause)
 				if err := writeConnectH1ClientLimitExceeded(ws, self.settings.WriteTimeout); err != nil {
 					recordWriteError(err)
@@ -1927,6 +1967,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 		select {
 		case <-handleCtx.Done():
+			if self.ctx.Err() != nil {
+				h1Observation.close(connectH1CloseHandlerCanceled)
+			}
 			return
 		}
 	}
