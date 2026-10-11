@@ -1,15 +1,17 @@
-// The contract degradation valve at the CreateContract boundary. An open
-// contract holds its escrow against the payer's balance, so with escrow a payer
-// whose balance is empty or held by unclosed contracts is refused with
-// InsufficientBalance. While the valve makes contracts zero cost, the same
-// requests are signed without escrow, leave every balance untouched and settle
-// with no payout, while a data capped client and an acceptance-test drain are
-// still refused. The tests open and close the valve through degraded.yml and
-// the published Redis state, the path contract creation reads.
+// The contract degradation valve at the CreateContract boundary. Contract
+// creation deducts first: while the payer has anything left, a contract
+// escrows, shrink-to-fit included, whether or not the valve is open. Only a
+// payer whose balance escrow admission finds exhausted is affected by the
+// valve: open, the contract is signed without escrow and settles with no
+// payout; closed, it is refused with InsufficientBalance. A data capped
+// client and an acceptance-test drain are refused either way. The tests open
+// and close the valve through degraded.yml and the published Redis state,
+// the path contract creation reads.
 package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -217,11 +219,115 @@ func requireZeroEscrowSettledWithoutPayout(t testing.TB, ctx context.Context, co
 	}
 }
 
-// A payer with no transfer balance at all is signed a contract of the requested
-// size while the valve is open, with no escrow and no payer, and it settles with
-// no payout after the valve closes again. With escrow this request is refused
-// with InsufficientBalance.
-func TestZeroEscrowPublicContractNeedsNoBalance(t *testing.T) {
+// The contract is escrowed against the payer network, so its balance is
+// charged as usual.
+func requireZeroEscrowEscrowed(t testing.TB, ctx context.Context, contractId server.Id, payerNetworkId server.Id) {
+	t.Helper()
+	state := readZeroEscrowContractState(t, ctx, contractId)
+	if state.payerNetworkId == nil || *state.payerNetworkId != payerNetworkId || state.escrowCount == 0 {
+		t.Fatalf("contract %s has payer %v and %d escrow rows, want escrow against %s", contractId, state.payerNetworkId, state.escrowCount, payerNetworkId)
+	}
+}
+
+// The contract was created free: no escrow and no payer.
+func requireZeroEscrowFree(t testing.TB, ctx context.Context, contractId server.Id) {
+	t.Helper()
+	state := readZeroEscrowContractState(t, ctx, contractId)
+	if state.payerNetworkId != nil || state.escrowCount != 0 {
+		t.Fatalf("contract %s has payer %v and %d escrow rows, want a free contract", contractId, state.payerNetworkId, state.escrowCount)
+	}
+}
+
+// Adds an unpaid grant of byteCount to a network, valid for the next hour.
+// It starts a minute ago: admission rechecks the start against the database
+// clock, which may trail this process's clock.
+func addZeroEscrowGrant(ctx context.Context, networkId server.Id, byteCount model.ByteCount) {
+	now := server.NowUtc()
+	server.Raise(model.AddBasicTransferBalance(ctx, networkId, byteCount, now.Add(-time.Minute), now.Add(time.Hour)))
+}
+
+// Case 1: with the valve open a funded payer is still charged. The contract
+// escrows the request against the payer and its available balance decreases by
+// that much. The previous valve gave this payer a free contract.
+func TestValveOpenEscrowsFundedPayer(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := model.WithProviderWorkSessionSource(t.Context(), nil)
+		f := newZeroEscrowFixture(ctx)
+		defer model.Testing_SetZeroContractCost(ctx, true)()
+		addZeroEscrowGrant(ctx, f.userNetworkId, 64*model.Mib)
+		before := model.GetActiveTransferBalanceByteCount(ctx, f.userNetworkId)
+
+		requested := 4 * model.Mib
+		stored, refusal := zeroEscrowCreateContract(t, ctx, f.userId, &protocol.CreateContract{
+			DestinationId:     f.providerId.Bytes(),
+			TransferByteCount: uint64(requested),
+		}, f.providerSecret)
+		if refusal != nil {
+			t.Fatalf("a funded payer was refused while the valve is open: %s", refusal)
+		}
+		if stored.TransferByteCount != uint64(zeroEscrowSignedSize(requested)) {
+			t.Fatalf("signed %d bytes, want the requested %d", stored.TransferByteCount, zeroEscrowSignedSize(requested))
+		}
+		requireZeroEscrowEscrowed(t, ctx, server.RequireIdFromBytes(stored.ContractId), f.userNetworkId)
+		if after := model.GetActiveTransferBalanceByteCount(ctx, f.userNetworkId); after != before-zeroEscrowSignedSize(requested) {
+			t.Fatalf("available balance went from %d to %d, want it to drop by %d", before, after, zeroEscrowSignedSize(requested))
+		}
+		if open := model.GetOpenTransferByteCount(ctx, f.userNetworkId); open != zeroEscrowSignedSize(requested) {
+			t.Fatalf("%d open bytes against the payer, want %d", open, zeroEscrowSignedSize(requested))
+		}
+	})
+}
+
+// Case 2: with the valve open a partially funded payer is charged what it has
+// left. A request larger than the balance shrinks to the balance and escrows
+// it, with no fallback while any balance remains; only the next request, once
+// nothing is left, is free.
+func TestValveOpenShrinksBeforeFallingBack(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := model.WithProviderWorkSessionSource(t.Context(), nil)
+		f := newZeroEscrowFixture(ctx)
+		defer model.Testing_SetZeroContractCost(ctx, true)()
+		available := 2 * model.Mib
+		addZeroEscrowGrant(ctx, f.userNetworkId, available)
+		request := &protocol.CreateContract{
+			DestinationId:     f.providerId.Bytes(),
+			TransferByteCount: uint64(8 * model.Mib),
+		}
+
+		shrunk, refusal := zeroEscrowCreateContract(t, ctx, f.userId, request, f.providerSecret)
+		if refusal != nil {
+			t.Fatalf("a partially funded payer was refused while the valve is open: %s", refusal)
+		}
+		if shrunk.TransferByteCount != uint64(available) {
+			t.Fatalf("signed %d bytes, want the %d left in the balance", shrunk.TransferByteCount, available)
+		}
+		requireZeroEscrowEscrowed(t, ctx, server.RequireIdFromBytes(shrunk.ContractId), f.userNetworkId)
+		if left := model.GetActiveTransferBalanceByteCount(ctx, f.userNetworkId); left != 0 {
+			t.Fatalf("%d bytes still available after the shrunk contract, want 0", left)
+		}
+
+		free, refusal := zeroEscrowCreateContract(t, ctx, f.userId, request, f.providerSecret)
+		if refusal != nil {
+			t.Fatalf("an exhausted payer was refused while the valve is open: %s", refusal)
+		}
+		if free.TransferByteCount != uint64(zeroEscrowSignedSize(8*model.Mib)) {
+			t.Fatalf("the free contract signed %d bytes, want the request %d", free.TransferByteCount, zeroEscrowSignedSize(8*model.Mib))
+		}
+		requireZeroEscrowFree(t, ctx, server.RequireIdFromBytes(free.ContractId))
+		if open := model.GetOpenTransferByteCount(ctx, f.userNetworkId); open != available {
+			t.Fatalf("%d open bytes against the payer, want only the shrunk contract's %d", open, available)
+		}
+	})
+}
+
+// Case 3: with the valve open a payer with no balance at all is signed a free
+// contract of the requested size, with no escrow and no payer, and it settles
+// with no payout after the valve closes again.
+func TestValveOpenGivesExhaustedPayerFreeContract(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -246,11 +352,8 @@ func TestZeroEscrowPublicContractNeedsNoBalance(t *testing.T) {
 		if stored.Priority == nil || *stored.Priority != model.UnpaidPriority {
 			t.Fatalf("signed priority %v, want unpaid %d", stored.Priority, model.UnpaidPriority)
 		}
-
+		requireZeroEscrowFree(t, ctx, contractId)
 		state := readZeroEscrowContractState(t, ctx, contractId)
-		if state.payerNetworkId != nil || state.escrowCount != 0 {
-			t.Fatalf("zero escrow contract has a payer %v or %d escrow rows", state.payerNetworkId, state.escrowCount)
-		}
 		if state.companionContractId != nil || state.usageOriginIsSource == nil || !*state.usageOriginIsSource {
 			t.Fatal("a public contract lost its source usage origin")
 		}
@@ -258,10 +361,7 @@ func TestZeroEscrowPublicContractNeedsNoBalance(t *testing.T) {
 			t.Fatalf("stored %d bytes at priority %d, want the signed contract", state.transferByteCount, state.priority)
 		}
 		if balances := zeroEscrowNetworkBalances(ctx, f.userNetworkId); len(balances) != 0 {
-			t.Fatalf("zero escrow creation wrote payer balances %v", balances)
-		}
-		if open := model.GetOpenTransferByteCount(ctx, f.userNetworkId); open != 0 {
-			t.Fatalf("zero escrow contract counts %d open bytes against the payer", open)
+			t.Fatalf("free creation wrote payer balances %v", balances)
 		}
 
 		// Settlement reads the missing escrow, not the valve.
@@ -269,16 +369,42 @@ func TestZeroEscrowPublicContractNeedsNoBalance(t *testing.T) {
 		zeroEscrowCloseContract(t, ctx, contractId, f.userId, f.providerId, requested/2)
 		requireZeroEscrowSettledWithoutPayout(t, ctx, contractId)
 		if balances := zeroEscrowNetworkBalances(ctx, f.userNetworkId); len(balances) != 0 {
-			t.Fatalf("zero escrow settlement wrote payer balances %v", balances)
+			t.Fatalf("free settlement wrote payer balances %v", balances)
 		}
 	})
 }
 
-// The control: while the valve is closed a contract escrows the whole balance
-// and a second one is refused while the first holds it. Opening the valve
-// admits the same payer without touching the held escrow; closing it again
-// restores escrow, and the refusal, for new contracts.
-func TestZeroEscrowValveClosedKeepsNormalEscrow(t *testing.T) {
+// Case 4: with the valve closed a payer with no balance is refused with
+// InsufficientBalance and no contract is created.
+func TestValveClosedRefusesExhaustedPayer(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := model.WithProviderWorkSessionSource(t.Context(), nil)
+		f := newZeroEscrowFixture(ctx)
+		defer model.Testing_SetZeroContractCost(ctx, false)()
+
+		_, refusal := zeroEscrowCreateContract(t, ctx, f.userId, &protocol.CreateContract{
+			DestinationId:     f.providerId.Bytes(),
+			TransferByteCount: uint64(model.Mib),
+		}, f.providerSecret)
+		if refusal == nil || *refusal != protocol.ContractError_InsufficientBalance {
+			t.Fatalf("a payer with no balance got %v while the valve is closed, want InsufficientBalance", refusal)
+		}
+		var contractCount int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE source_id = $1`, f.userId).Scan(&contractCount))
+		})
+		if contractCount != 0 {
+			t.Fatalf("the refused payer has %d contracts", contractCount)
+		}
+	})
+}
+
+// The valve decides only for an exhausted payer. Closed, a balance held by an
+// open contract refuses the next one; opening the valve makes that next one
+// free without touching the held escrow; closing it again restores the refusal.
+func TestValveFallsBackOnlyWhileOpen(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -287,8 +413,7 @@ func TestZeroEscrowValveClosedKeepsNormalEscrow(t *testing.T) {
 		defer model.Testing_SetZeroContractCost(ctx, false)()
 
 		size := zeroEscrowSignedSize(2 * model.Mib)
-		now := server.NowUtc()
-		server.Raise(model.AddBasicTransferBalance(ctx, f.userNetworkId, size, now, now.Add(time.Hour)))
+		addZeroEscrowGrant(ctx, f.userNetworkId, size)
 		request := &protocol.CreateContract{
 			DestinationId:     f.providerId.Bytes(),
 			TransferByteCount: uint64(size),
@@ -299,13 +424,7 @@ func TestZeroEscrowValveClosedKeepsNormalEscrow(t *testing.T) {
 			t.Fatalf("a funded payer was refused while the valve is closed: %s", refusal)
 		}
 		heldId := server.RequireIdFromBytes(held.ContractId)
-		heldState := readZeroEscrowContractState(t, ctx, heldId)
-		if heldState.payerNetworkId == nil || *heldState.payerNetworkId != f.userNetworkId || heldState.escrowCount != 1 {
-			t.Fatalf("valve closed: contract payer %v with %d escrow rows, want the user network with one", heldState.payerNetworkId, heldState.escrowCount)
-		}
-		if open := model.GetOpenTransferByteCount(ctx, f.userNetworkId); open != size {
-			t.Fatalf("valve closed: %d open bytes, want the escrowed %d", open, size)
-		}
+		requireZeroEscrowEscrowed(t, ctx, heldId, f.userNetworkId)
 		balances := zeroEscrowNetworkBalances(ctx, f.userNetworkId)
 
 		_, refusal = zeroEscrowCreateContract(t, ctx, f.userId, request, f.providerSecret)
@@ -318,23 +437,17 @@ func TestZeroEscrowValveClosedKeepsNormalEscrow(t *testing.T) {
 		if refusal != nil {
 			t.Fatalf("valve open: a payer whose balance an open contract holds was refused: %s", refusal)
 		}
-		admittedState := readZeroEscrowContractState(t, ctx, server.RequireIdFromBytes(admitted.ContractId))
-		if admittedState.payerNetworkId != nil || admittedState.escrowCount != 0 {
-			t.Fatal("valve open: the contract was escrowed")
-		}
+		requireZeroEscrowFree(t, ctx, server.RequireIdFromBytes(admitted.ContractId))
 		if open := model.GetOpenTransferByteCount(ctx, f.userNetworkId); open != size {
 			t.Fatalf("valve open: %d open bytes, want only the held %d", open, size)
 		}
 		after := zeroEscrowNetworkBalances(ctx, f.userNetworkId)
-		if len(after) != len(balances) {
-			t.Fatalf("valve open: payer balances changed from %v to %v", balances, after)
-		}
 		for balanceId, balanceByteCount := range balances {
-			if after[balanceId] != balanceByteCount {
+			if after[balanceId] != balanceByteCount || len(after) != len(balances) {
 				t.Fatalf("valve open: payer balances changed from %v to %v", balances, after)
 			}
 		}
-		if heldAfter := readZeroEscrowContractState(t, ctx, heldId); heldAfter.escrowCount != 1 || heldAfter.outcome != nil {
+		if heldAfter := readZeroEscrowContractState(t, ctx, heldId); heldAfter.escrowCount == 0 || heldAfter.outcome != nil {
 			t.Fatal("valve open: the held contract's escrow changed")
 		}
 
@@ -346,43 +459,86 @@ func TestZeroEscrowValveClosedKeepsNormalEscrow(t *testing.T) {
 	})
 }
 
-// A companion is paid by its destination. Here the user's whole balance is held
-// by the escrowed origin, so with escrow the provider's companion reply is
-// refused with InsufficientBalance. While the valve is open the companion is signed
-// for the requested size, keeps its origin link and the destination's usage
-// origin, takes no escrow and settles with no payout.
-func TestZeroEscrowCompanionContractNeedsNoBalance(t *testing.T) {
+// Creates the user's escrowed origin to the provider, the contract a provider
+// companion answers.
+func createZeroEscrowOrigin(t testing.TB, ctx context.Context, f *zeroEscrowFixture, size model.ByteCount) server.Id {
+	t.Helper()
+	origin, refusal := zeroEscrowCreateContract(t, ctx, f.userId, &protocol.CreateContract{
+		DestinationId:     f.providerId.Bytes(),
+		TransferByteCount: uint64(size),
+	}, f.providerSecret)
+	if refusal != nil {
+		t.Fatalf("the origin was refused: %s", refusal)
+	}
+	originId := server.RequireIdFromBytes(origin.ContractId)
+	requireZeroEscrowEscrowed(t, ctx, originId, f.userNetworkId)
+	return originId
+}
+
+// The provider's companion reply to the user, paid by the user.
+func createZeroEscrowCompanion(t testing.TB, ctx context.Context, f *zeroEscrowFixture, size model.ByteCount) (*protocol.StoredContract, *protocol.ContractError) {
+	t.Helper()
+	streamVersion := uint32(connect.DefaultStreamVersion)
+	return zeroEscrowCreateContract(t, ctx, f.providerId, &protocol.CreateContract{
+		DestinationId:     f.userId.Bytes(),
+		TransferByteCount: uint64(size),
+		Companion:         true,
+		StreamVersion:     &streamVersion,
+	}, f.userSecret)
+}
+
+// Companion case 1: with the valve open a companion paid by a funded user is
+// escrowed against the user, linked to its origin, and the user's available
+// balance decreases by it.
+func TestValveOpenEscrowsFundedCompanionPayer(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := model.WithProviderWorkSessionSource(t.Context(), nil)
 		f := newZeroEscrowFixture(ctx)
-		defer model.Testing_SetZeroContractCost(ctx, false)()
+		defer model.Testing_SetZeroContractCost(ctx, true)()
+		addZeroEscrowGrant(ctx, f.userNetworkId, 64*model.Mib)
+		originId := createZeroEscrowOrigin(t, ctx, f, zeroEscrowSignedSize(2*model.Mib))
+		before := model.GetActiveTransferBalanceByteCount(ctx, f.userNetworkId)
 
-		originSize := zeroEscrowSignedSize(2 * model.Mib)
-		now := server.NowUtc()
-		server.Raise(model.AddBasicTransferBalance(ctx, f.userNetworkId, originSize, now, now.Add(time.Hour)))
-		origin, refusal := zeroEscrowCreateContract(t, ctx, f.userId, &protocol.CreateContract{
-			DestinationId:     f.providerId.Bytes(),
-			TransferByteCount: uint64(originSize),
-		}, f.providerSecret)
+		requested := 3 * model.Mib
+		companion, refusal := createZeroEscrowCompanion(t, ctx, f, requested)
 		if refusal != nil {
-			t.Fatalf("the escrowed origin was refused: %s", refusal)
+			t.Fatalf("a companion paid by a funded user was refused while the valve is open: %s", refusal)
 		}
-		originId := server.RequireIdFromBytes(origin.ContractId)
+		companionId := server.RequireIdFromBytes(companion.ContractId)
+		requireZeroEscrowEscrowed(t, ctx, companionId, f.userNetworkId)
+		state := readZeroEscrowContractState(t, ctx, companionId)
+		if state.companionContractId == nil || *state.companionContractId != originId {
+			t.Fatalf("companion origin %v, want %s", state.companionContractId, originId)
+		}
+		if after := model.GetActiveTransferBalanceByteCount(ctx, f.userNetworkId); after != before-model.ByteCount(companion.TransferByteCount) {
+			t.Fatalf("available balance went from %d to %d, want it to drop by the companion's %d", before, after, companion.TransferByteCount)
+		}
+	})
+}
+
+// Companion case 3: the user's whole balance is held by the escrowed origin, so
+// escrow admission finds the companion's payer exhausted. With the valve open
+// the companion is free: signed for the request, linked to its origin with the
+// destination's usage origin, no escrow, and it settles with no payout.
+func TestValveOpenGivesExhaustedCompanionPayerFreeContract(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := model.WithProviderWorkSessionSource(t.Context(), nil)
+		f := newZeroEscrowFixture(ctx)
+		defer model.Testing_SetZeroContractCost(ctx, true)()
+		originSize := zeroEscrowSignedSize(2 * model.Mib)
+		addZeroEscrowGrant(ctx, f.userNetworkId, originSize)
+		// a funded origin escrows even with the valve open
+		originId := createZeroEscrowOrigin(t, ctx, f, originSize)
 		balances := zeroEscrowNetworkBalances(ctx, f.userNetworkId)
 
-		defer model.Testing_SetZeroContractCost(ctx, true)()
 		requested := 3 * model.Mib
-		streamVersion := uint32(connect.DefaultStreamVersion)
-		companion, refusal := zeroEscrowCreateContract(t, ctx, f.providerId, &protocol.CreateContract{
-			DestinationId:     f.userId.Bytes(),
-			TransferByteCount: uint64(requested),
-			Companion:         true,
-			StreamVersion:     &streamVersion,
-		}, f.userSecret)
+		companion, refusal := createZeroEscrowCompanion(t, ctx, f, requested)
 		if refusal != nil {
-			t.Fatalf("a companion whose payer's balance an open contract holds was refused while the valve is open: %s", refusal)
+			t.Fatalf("a companion whose payer is exhausted was refused while the valve is open: %s", refusal)
 		}
 		companionId := server.RequireIdFromBytes(companion.ContractId)
 		if companion.TransferByteCount != uint64(zeroEscrowSignedSize(requested)) {
@@ -392,16 +548,13 @@ func TestZeroEscrowCompanionContractNeedsNoBalance(t *testing.T) {
 		if companion.Priority == nil || *companion.Priority != model.UnpaidPriority {
 			t.Fatalf("signed priority %v, want the payer's unpaid %d", companion.Priority, model.UnpaidPriority)
 		}
-
+		requireZeroEscrowFree(t, ctx, companionId)
 		state := readZeroEscrowContractState(t, ctx, companionId)
 		if state.companionContractId == nil || *state.companionContractId != originId {
 			t.Fatalf("companion origin %v, want %s", state.companionContractId, originId)
 		}
 		if state.usageOriginIsSource == nil || *state.usageOriginIsSource {
 			t.Fatal("a companion lost its destination usage origin")
-		}
-		if state.payerNetworkId != nil || state.escrowCount != 0 {
-			t.Fatalf("zero escrow companion has a payer %v or %d escrow rows", state.payerNetworkId, state.escrowCount)
 		}
 		if open := model.GetOpenTransferByteCount(ctx, f.userNetworkId); open != originSize {
 			t.Fatalf("%d open bytes, want only the origin's %d", open, originSize)
@@ -415,15 +568,42 @@ func TestZeroEscrowCompanionContractNeedsNoBalance(t *testing.T) {
 
 		zeroEscrowCloseContract(t, ctx, companionId, f.providerId, f.userId, requested/2)
 		requireZeroEscrowSettledWithoutPayout(t, ctx, companionId)
-		if originState := readZeroEscrowContractState(t, ctx, originId); originState.outcome != nil || originState.escrowCount != 1 {
+		if originState := readZeroEscrowContractState(t, ctx, originId); originState.outcome != nil || originState.escrowCount == 0 {
 			t.Fatal("closing the companion changed its escrowed origin")
+		}
+	})
+}
+
+// Companion case 4: with the valve closed, a companion whose payer's balance
+// its origin holds is refused with InsufficientBalance.
+func TestValveClosedRefusesExhaustedCompanionPayer(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := model.WithProviderWorkSessionSource(t.Context(), nil)
+		f := newZeroEscrowFixture(ctx)
+		defer model.Testing_SetZeroContractCost(ctx, false)()
+		originSize := zeroEscrowSignedSize(2 * model.Mib)
+		addZeroEscrowGrant(ctx, f.userNetworkId, originSize)
+		createZeroEscrowOrigin(t, ctx, f, originSize)
+
+		_, refusal := createZeroEscrowCompanion(t, ctx, f, 3*model.Mib)
+		if refusal == nil || *refusal != protocol.ContractError_InsufficientBalance {
+			t.Fatalf("an exhausted companion payer got %v while the valve is closed, want InsufficientBalance", refusal)
+		}
+		var companionCount int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE source_id = $1`, f.providerId).Scan(&companionCount))
+		})
+		if companionCount != 0 {
+			t.Fatalf("the refused companion created %d contracts", companionCount)
 		}
 	})
 }
 
 // A per-client data cap is the user's own limit, not balance: a capped payer is
 // refused while the valve is open, and clearing the cap admits it.
-func TestZeroEscrowStillRefusesDataCappedClient(t *testing.T) {
+func TestValveOpenStillRefusesDataCappedClient(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -473,7 +653,7 @@ func TestZeroEscrowStillRefusesDataCappedClient(t *testing.T) {
 
 // The acceptance-test balance drain is an explicit test switch: a drained payer
 // is refused while the valve is open, and restoring the drain admits it.
-func TestZeroEscrowStillRefusesTestBalanceDrain(t *testing.T) {
+func TestValveOpenStillRefusesTestBalanceDrain(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -500,6 +680,52 @@ func TestZeroEscrowStillRefusesTestBalanceDrain(t *testing.T) {
 		}
 		if _, refusal := zeroEscrowCreateContract(t, ctx, f.userId, request, f.providerSecret); refusal != nil {
 			t.Fatalf("restoring the drain did not admit the payer: %s", refusal)
+		}
+	})
+}
+
+// A probe shard follows the same rule. With the valve open a funded shard
+// escrows against its private grant; once the grant is exhausted the shard's
+// next contract is free; with the valve closed it is refused.
+func TestValveDeductsProberShardBeforeFreeData(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := model.WithProviderWorkSessionSource(t.Context(), nil)
+		owner, err := model.BeginProberShard(ctx, model.ProberShardKey{TaskId: server.NewId(), Epoch: server.NewId(), ShardCount: 1}, 8*model.Mib, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		peerNetworkId, peerId := server.NewId(), server.NewId()
+		model.Testing_CreateNetwork(ctx, peerNetworkId, "zero-escrow-shard-peer-"+peerNetworkId.String(), server.NewId())
+		model.Testing_CreateDevice(ctx, peerNetworkId, server.NewId(), peerId, "synthetic shard peer", "synthetic")
+		create := func() (server.Id, error) {
+			contractId, _, _, _, _, err := newContract(ctx, owner.ClientId, peerId, nil, false, true, model.Mib,
+				model.ProvideModePublic, false, 0, connect.DefaultContractManagerSettings())
+			return contractId, err
+		}
+
+		closeValve := model.Testing_SetZeroContractCost(ctx, true)
+		defer closeValve()
+		funded, err := create()
+		if err != nil {
+			t.Fatalf("a funded shard was refused while the valve is open: %v", err)
+		}
+		requireZeroEscrowEscrowed(t, ctx, funded, owner.NetworkId)
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count = 0 WHERE balance_id = $1`, owner.BalanceId))
+		})
+		free, err := create()
+		if err != nil {
+			t.Fatalf("an exhausted shard was refused while the valve is open: %v", err)
+		}
+		requireZeroEscrowFree(t, ctx, free)
+
+		closeValve()
+		defer model.Testing_SetZeroContractCost(ctx, false)()
+		if _, err := create(); !errors.Is(err, model.ErrContractBalanceExhausted) {
+			t.Fatalf("an exhausted shard got %v while the valve is closed, want the exhausted balance refusal", err)
 		}
 	})
 }

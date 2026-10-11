@@ -1085,12 +1085,14 @@ func payerMaxContractTransferByteCount(ctx context.Context, payerNetworkId serve
 
 // Model creation owns commit and returns its immutable database deadline.
 // Later stream work may reject the response but never changes that deadline.
-// While the contract degradation valve makes contracts zero cost
-// (model/network_degradation_model.go), public and companion contracts are
-// created without escrow (model/subscription_zero_escrow.go). They keep the
-// payer's plan cap, the companion origin wait and the stream handling of the
-// escrowed paths, and sign the request at the payer's escrow priority without
-// reserving it. Network and friends-and-family contracts are unchanged.
+// Public and companion contracts always try escrow first, so a payer is
+// charged, shrink-to-fit included, while anything is left. Only when escrow
+// admission finds the balance exhausted (model.ErrContractBalanceExhausted)
+// and the contract degradation valve is open (model/network_degradation_model.go)
+// is the contract created without escrow instead (model/subscription_zero_escrow.go),
+// at the request size and the payer's escrow priority. Every other refusal,
+// including a data cap or test drain, stands. Network and friends-and-family
+// contracts are unchanged.
 func newContract(
 	ctx context.Context,
 	sourceId server.Id,
@@ -1139,9 +1141,6 @@ func newContract(
 		max(MinContractTransferByteCount, transferByteCount),
 		maxContractTransferByteCount,
 	) * model.ByteCount(len(intermediaryIds)+1)
-
-	// read once, before any transaction, so one request takes one funding path
-	zeroEscrow := zeroContractCost(ctx)
 
 	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
 		contractId, expirationTime, err = model.CreateContractNoEscrowWithExpiration(
@@ -1219,13 +1218,8 @@ func newContract(
 		originWatch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 		defer originWatch.Close()
 		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
-		createCompanion := createCompanionTransferEscrow
-		if zeroEscrow {
-			// the same origin wait; the companion keeps its origin link
-			createCompanion = createZeroEscrowCompanionContract
-		}
 		escrow, err := waitForCompanionOrigin(ctx, originWatch, func() (*model.TransferEscrow, error) {
-			return createCompanion(
+			escrow, err := createCompanionTransferEscrow(
 				ctx,
 				sourceNetworkId,
 				sourceId,
@@ -1234,6 +1228,20 @@ func newContract(
 				contractTransferByteCount,
 				contractManagerSettings.OriginContractLinger,
 			)
+			// deduct first: free data only once the payer has nothing left and
+			// the valve is open; the companion keeps its origin link
+			if errors.Is(err, model.ErrContractBalanceExhausted) && zeroContractCost(ctx) {
+				return createZeroEscrowCompanionContract(
+					ctx,
+					sourceNetworkId,
+					sourceId,
+					destinationNetworkId,
+					destinationId,
+					contractTransferByteCount,
+					contractManagerSettings.OriginContractLinger,
+				)
+			}
+			return escrow, err
 		}, originWatch.Update)
 		leaveOrigin()
 		if err != nil {
@@ -1274,11 +1282,7 @@ func newContract(
 			}
 		}
 	} else {
-		createPublic := createTransferEscrow
-		if zeroEscrow {
-			createPublic = createZeroEscrowContract
-		}
-		escrow, err := createPublic(
+		escrow, err := createTransferEscrow(
 			ctx,
 			sourceNetworkId,
 			sourceId,
@@ -1286,6 +1290,18 @@ func newContract(
 			destinationId,
 			contractTransferByteCount,
 		)
+		// deduct first: free data only once the payer has nothing left and
+		// the valve is open
+		if errors.Is(err, model.ErrContractBalanceExhausted) && zeroContractCost(ctx) {
+			escrow, err = createZeroEscrowContract(
+				ctx,
+				sourceNetworkId,
+				sourceId,
+				destinationNetworkId,
+				destinationId,
+				contractTransferByteCount,
+			)
+		}
 		if err != nil {
 			returnErr = err
 			return

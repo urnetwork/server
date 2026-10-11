@@ -1,7 +1,8 @@
 // CheckContractDegradation is the 15 minute run-once owner of the contract
 // degradation valve (model/network_degradation_model.go). Each run measures the
 // last hour's contract creations against terminal outcomes and publishes
-// whether new contracts are zero cost. config/<env>/degraded.yml enables it:
+// whether the valve is open, which lets a payer whose balance escrow finds
+// exhausted get a free contract. config/<env>/degraded.yml enables it:
 // startup seeds the owner only while enabled and reaps a left-over row while
 // disabled, and a run while disabled measures and writes nothing and schedules
 // no successor.

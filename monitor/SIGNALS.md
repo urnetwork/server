@@ -183,7 +183,7 @@ active missing capability and must not be read as green.
 |---|---|---|
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
-| 2.6b | Coverage gap | A probe of the contract degradation valve state is missing: `open-contracts` and `contract-rate` show the close backlog and creation rate that drive it, not whether new contracts are zero cost or providers unpaid. |
+| 2.6b | Coverage gap | A probe of the contract degradation valve state is missing: `open-contracts` and `contract-rate` show the close backlog and creation rate that drive it, not whether exhausted payers get free contracts or providers go unpaid. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
@@ -7484,18 +7484,22 @@ with `close_count < 0.7 × open_count` publishes `zero_cost=true` in the Redis
 key `network_degradation:zero_contract_cost:v1`. Charging resumes only on the
 second consecutive healthy check (`close_count >= 0.7 × open_count`, or no
 creations). The key has a one hour TTL (four checks), so a stopped or
-disabled task, a missing or malformed key, or a Redis error all charge
-normally.
+disabled task, a missing or malformed key, or a Redis error all close the
+valve.
 
-Active means every new public and companion contract is zero cost: it is
-created without escrow (no `transfer_escrow` rows, no payer, no Redis balance
-admission, no balance reserved or debited), and **provider payouts are zero
-for those contracts**. They settle through the no-escrow path with no sweep,
-debit, provider totals or points; only the payment-independent subnet usage
+Active still deducts first. Every public and companion contract, probe
+shards included, escrows against its payer as usual, shrink-to-fit
+included, while the payer has anything left. Only when escrow admission
+finds the payer's balance exhausted (a complete grant census below the
+shrink floor) is that contract created free instead of refused with
+InsufficientBalance: no `transfer_escrow` rows, no payer, no balance
+reserved or debited, and **provider payouts are zero for those
+contracts**. They settle through the no-escrow path with no sweep, debit,
+provider totals or points; only the payment-independent subnet usage
 snapshot is kept, as for network-mode traffic. Per-client data caps and the
-acceptance-test drain still refuse, but zero cost traffic does not advance a
+acceptance-test drain still refuse, and free traffic does not advance a
 data cap. The valve never changes an existing contract; it decides only how
-contracts created while it is open are funded.
+an exhausted payer's new contract is funded.
 
 - `urnetwork_contract_degradation_zero_cost` (taskworker gauge, 1 while the
   last published state is zero cost) and
@@ -7504,15 +7508,19 @@ contracts created while it is open are funded.
   `resuming` (healthy, zero cost held for one more check) and `charging`; the
   failures `measurement_failed`, `state_read_failed`, `publish_failed` and
   `superseded` publish nothing, and the published state ages out within its TTL.
-- `urnetwork_zero_contract_cost_reads_total{result}` on every contract-creating
-  service (api, connect, taskworker, proxy): 15 second cache refreshes. Only
-  `zero_cost` makes contracts free; `charging`, `missing`, `expired`,
-  `malformed`, `error` and `disabled` all charge normally.
+- `urnetwork_zero_escrow_contracts_total{kind="public"|"companion"}` on every
+  contract-creating service (api, connect, taskworker, proxy): the free
+  contracts actually created for exhausted payers.
+- `urnetwork_zero_contract_cost_reads_total{result}` on the same services: 15
+  second cache refreshes, read only after an exhausted refusal. Only
+  `zero_cost` lets that contract be free; `charging`, `missing`, `expired`,
+  `malformed`, `error` and `disabled` keep the refusal.
 - Log lines `[degradation]contract check <outcome>: open=… close=… ratio=…
   healthy=… consecutive_healthy=… zero_cost=…`.
 
 Treat an active valve as an incident signal for §2.6: it hides the
-out-of-balance symptom while providers go unpaid for the traffic. A sustained
+out-of-balance symptom of exhausted payers while providers go unpaid for
+their traffic. A sustained
 `measurement_failed` means the check cannot see the backlog, and the valve
 fails closed to normal charging an hour after its last publication. No probe
 reads the valve yet; the numbered coverage crosswalk records the gap.
