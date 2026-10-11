@@ -35,6 +35,13 @@ func AdvancePointsBlockRollup(ctx context.Context) (advancedBatches int, returnE
 								AND point.point_value > 0
 								AND point.create_time >= $2::timestamp
 						)
+						-- a plan still assigning its staged sweeps would end the
+						-- rollup early, before its remaining sweeps are its own
+						AND NOT EXISTS (
+							SELECT 1 FROM payment_plan_assignment AS pending_assignment
+							WHERE pending_assignment.payment_plan_id = account_payment.payment_plan_id
+								AND pending_assignment.complete_time IS NULL
+						)
 					ORDER BY create_time, payment_id
 					LIMIT 1
 					FOR UPDATE SKIP LOCKED
