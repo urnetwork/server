@@ -5173,36 +5173,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	defer sourceLoadSpan.finish()
 	sourceRows := 0
 
-	addClientScore := func(lookbackClientScore *ClientScore, reputationFailedNames string, m map[server.Id]*ClientScore) *ClientScore {
-		clientScore, ok := m[lookbackClientScore.ClientId]
-		if !ok {
-			clientScore = &ClientScore{
-				ClientId:              lookbackClientScore.ClientId,
-				NetworkId:             lookbackClientScore.NetworkId,
-				NetworkOnly:           lookbackClientScore.NetworkOnly,
-				ReputationFailedNames: reputationFailedNames,
-				IpFamilies:            lookbackClientScore.IpFamilies,
-				LookbackClientScores:  map[int]*ClientScore{},
-			}
-			m[lookbackClientScore.ClientId] = clientScore
-		}
-		clientScore.LookbackClientScores[lookbackClientScore.LookbackIndex] = lookbackClientScore
-		return clientScore
-	}
-
-	locationClientScores := map[server.Id]map[server.Id]*ClientScore{}
-	locationGroupClientScores := map[server.Id]map[server.Id]*ClientScore{}
-
-	// What the rules of connect/GEOMAP.md §10.3 read about a provider from its
-	// rollup row, the same in both pool queries.
-	type clientScoreEgress struct {
-		egressIndex   *int
-		egressQuality *bool
-		// the country of the rollup's location, which the country gate
-		// compares with a fresh probe's
-		publishedCountryCode *string
-	}
-
 	loadClientScore := func(result server.PgResult, targetIds [3]any) (lookbackClientScore *ClientScore, reputationFailedNames string, egress *clientScoreEgress) {
 		var clientId server.Id
 		var networkId server.Id
@@ -5276,18 +5246,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// A client added between the two queries must receive evidence as well.
 	egressTestEnabled := providerEgressTestEnabled()
 	egressSettings := egressIndexSettings()
-	type pendingClientScore struct {
-		score                       *ClientScore
-		cityId, regionId, countryId *server.Id
-		reputationFailedNames       string
-		egress                      *clientScoreEgress
-		locationGroup               bool
-		locationGroupIds            []server.Id
-	}
-	pendingScores := []pendingClientScore{}
+	pendingScores := []clientScoreSourceRow{}
 	cohort := map[server.Id]bool{}
-	clientIdEgresses := map[server.Id]*clientScoreEgress{}
-	hardExcludedClientIds := map[server.Id]bool{}
 	shadowScoreCapture := beginArinShadowScoreCapture()
 
 	server.Db(ctx, func(conn server.PgConn) {
@@ -5392,7 +5352,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				sourceRows++
 				var cityLocationId, regionLocationId, countryLocationId *server.Id
 				lookbackClientScore, reputationFailedNames, egress := loadClientScore(result, [3]any{&cityLocationId, &regionLocationId, &countryLocationId})
-				pendingScores = append(pendingScores, pendingClientScore{
+				pendingScores = append(pendingScores, clientScoreSourceRow{
 					score: lookbackClientScore, cityId: cityLocationId, regionId: regionLocationId,
 					countryId: countryLocationId, reputationFailedNames: reputationFailedNames, egress: egress,
 				})
@@ -5412,7 +5372,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				sourceRows++
 				var cityGroups, regionGroups, countryGroups []server.Id
 				lookbackClientScore, reputationFailedNames, egress := loadClientScore(result, [3]any{&cityGroups, &regionGroups, &countryGroups})
-				pendingScores = append(pendingScores, pendingClientScore{
+				pendingScores = append(pendingScores, clientScoreSourceRow{
 					score: lookbackClientScore, reputationFailedNames: reputationFailedNames, egress: egress,
 					locationGroup: true, locationGroupIds: clientScoreDistinctGroupIds(cityGroups, regionGroups, countryGroups),
 				})
@@ -5426,60 +5386,17 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// health map, including providers outside this serving cohort. Keep that
 	// diagnostic population and its exact evidence window unchanged.
 	countFilter.healthCounts, countFilter.healthWindowEnd = getAllProviderEgressHealthCountsSnapshot(ctx)
-	for i, row := range pendingScores {
-		// Release staging references as each row is moved into its target maps.
-		pendingScores[i] = pendingClientScore{}
-		lookbackClientScore, reputationFailedNames, egress := row.score, row.reputationFailedNames, row.egress
-		if shadowScoreCapture != nil {
-			shadowScoreCapture.observe(lookbackClientScore, egress.publishedCountryCode, countFilter.egressFacts(lookbackClientScore.ClientId, egress.publishedCountryCode, egress.egressIndex, egress.egressQuality, egressSettings), egressTestEnabled)
-		}
-		if countFilter.hasHardEgressFailure(lookbackClientScore.ClientId) {
-			hardExcludedClientIds[lookbackClientScore.ClientId] = true
-			continue
-		}
-		clientIdEgresses[lookbackClientScore.ClientId] = egress
-		if !row.locationGroup {
-			cityLocationId, regionLocationId, countryLocationId := row.cityId, row.regionId, row.countryId
-
-			// top-level only; the lookback copies stay nil (see `ClientScore`)
-			setLocationIds := func(clientScore *ClientScore) {
-				clientScore.CityLocationId = cityLocationId
-				clientScore.RegionLocationId = regionLocationId
-				clientScore.CountryLocationId = countryLocationId
-			}
-
-			// once per distinct location id: a country-only client stores
-			// its country id in all three columns (see
-			// SetConnectionLocation), and a client belongs in a location's
-			// pool once. The per-location map is keyed by client id so a
-			// repeat is already absorbed, but going through the set makes
-			// the intent explicit and keeps this loop in step with the
-			// counting loop in UpdateClientLocations.
-			for _, locationId := range distinctIds(
-				cityLocationId,
-				regionLocationId,
-				countryLocationId,
-			) {
-				clientScores, ok := locationClientScores[locationId]
-				if !ok {
-					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[locationId] = clientScores
-				}
-				setLocationIds(addClientScore(lookbackClientScore, reputationFailedNames, clientScores))
-			}
-		} else {
-			// One provider/lookback row carries every distinct group at
-			// its three location levels, including country-only clients.
-			for _, locationGroupId := range row.locationGroupIds {
-				clientScores, ok := locationGroupClientScores[locationGroupId]
-				if !ok {
-					clientScores = map[server.Id]*ClientScore{}
-					locationGroupClientScores[locationGroupId] = clientScores
-				}
-				addClientScore(lookbackClientScore, reputationFailedNames, clientScores)
-			}
+	var observeShadowScore func(clientScoreSourceRow)
+	if shadowScoreCapture != nil {
+		observeShadowScore = func(row clientScoreSourceRow) {
+			shadowScoreCapture.observe(row.score, row.egress.publishedCountryCode, countFilter.egressFacts(row.score.ClientId, row.egress.publishedCountryCode, row.egress.egressIndex, row.egress.egressQuality, egressSettings), egressTestEnabled)
 		}
 	}
+	targetMaps := newClientScoreTargetMaps(pendingScores, nil, countFilter.hasHardEgressFailure, observeShadowScore)
+	locationClientScores := targetMaps.locationClientScores
+	locationGroupClientScores := targetMaps.locationGroupClientScores
+	clientIdEgresses := targetMaps.clientIdEgresses
+	hardExcludedClientIds := targetMaps.hardExcludedClientIds
 	pendingScores = nil
 	cohort = nil
 
@@ -5548,103 +5465,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		}
 	}
 	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthWindowEnd, countFilter.healthCounts, locationClientScores, locationGroupClientScores)
-	// splitClientScoreSamples shuffles and buckets one list of scores into
-	// ClientScoreSampleCount-sized samples. Encode on demand so 48 parallel
-	// caller-location exporters retain at most one sample each, rather than
-	// every encoded sample for their current provider location. The returned
-	// bytes move directly into the 512-item/8MiB streaming writer and are
-	// cleared after the synchronous Exec.
-	splitClientScoreSamples := func(clientScores []*ClientScore) (countsBytes []byte, counts []int, encodeSample func(int) []byte) {
-		mathrand.Shuffle(len(clientScores), func(i int, j int) {
-			clientScores[i], clientScores[j] = clientScores[j], clientScores[i]
-		})
-
-		n := (len(clientScores) + ClientScoreSampleCount - 1) / ClientScoreSampleCount
-
-		counts = make([]int, n)
-		clientsPerSample := 0
-		if 0 < n {
-			clientsPerSample = (len(clientScores) + n - 1) / n
-			for i := range n {
-				i0 := i * clientsPerSample
-				i1 := min((i+1)*clientsPerSample, len(clientScores))
-				counts[i] = i1 - i0
-			}
-		}
-		encodeSample = func(i int) []byte {
-			i0 := i * clientsPerSample
-			i1 := min((i+1)*clientsPerSample, len(clientScores))
-			return encodeClientScoreGobValue(updateClientScoresPhaseMetrics, clientScores[i0:i1])
-		}
-
-		countsBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, counts)
-		return
-	}
-
-	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) clientScoreExportPayload {
-		mapSpan := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseTargetMap)
-		defer mapSpan.finish()
-		clientScores := []*ClientScore{}
-		facetClientScores := map[ipFamilyFacet][]*ClientScore{}
-		nativeFacetClientScores := map[ipFamilyFacet][]*ClientScore{}
-		publicCount := 0
-		publicNetReliabilityWeight := float64(0)
-		for _, clientScore := range s {
-			if !forceMinimum && clientScore.PassesMinimums[rankMode] {
-				facet := clientScore.ipFamilyFacet()
-				nativeFacetClientScores[facet] = append(nativeFacetClientScores[facet], clientScore)
-			}
-			// an online provider sits in both modes' samples, native to
-			// neither: FindProviders2 borrows from it last
-			if clientScore.PassesMinimums[rankMode] || clientScore.Online || forceMinimum {
-				clientScores = append(clientScores, clientScore)
-				facet := clientScore.ipFamilyFacet()
-				facetClientScores[facet] = append(facetClientScores[facet], clientScore)
-				if !clientScore.NetworkOnly {
-					publicCount += 1
-					publicNetReliabilityWeight += clientScore.ReliabilityWeight
-				}
-			}
-		}
-
-		// the samples above carry Network-only providers too -- FindProviders2
-		// filters them per request against the caller's network -- but the
-		// ClientFilter does not. It is read only by loadLocationStables, which
-		// decides the `Stable` flag GetProviderLocations publishes to every
-		// user. That is a public surface, so like the provider count in
-		// UpdateClientLocations it counts only providers a stranger can reach:
-		// a location whose only supply is network-only is not stable, and with
-		// zero public providers it reports no providers at all.
-		filter := &ClientFilter{
-			Count:                publicCount,
-			NetReliabilityWeight: publicNetReliabilityWeight,
-		}
-
-		payload := clientScoreExportPayload{
-			facets: map[ipFamilyFacet]clientScoreFacetPayload{},
-		}
-		updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseTargetMap, len(s), 0)
-		mapSpan.finish()
-		payload.countsBytes, payload.counts, payload.encodeSample = splitClientScoreSamples(clientScores)
-		if !forceMinimum {
-			payload.nativeFacets = map[ipFamilyFacet]clientScoreFacetPayload{}
-			for _, facet := range ipFamilyFacets {
-				nativePayload := clientScoreFacetPayload{}
-				nativePayload.countsBytes, nativePayload.counts, nativePayload.encodeSample = splitClientScoreSamples(nativeFacetClientScores[facet])
-				payload.nativeFacets[facet] = nativePayload
-			}
-		}
-		// every facet, an empty one included: see the key layout comment
-		for _, facet := range ipFamilyFacets {
-			facetPayload := clientScoreFacetPayload{}
-			facetPayload.countsBytes, facetPayload.counts, facetPayload.encodeSample = splitClientScoreSamples(facetClientScores[facet])
-			payload.facets[facet] = facetPayload
-		}
-
-		payload.filterBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, filter)
-
-		return payload
-	}
 
 	// location id -> network id
 	excludeLocationNetworkIds := map[server.Id]map[server.Id]bool{}
@@ -5683,22 +5503,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	}
 	clientLocationIds = append(clientLocationIds, slices.Collect(maps.Values(countryCodeLocationIds()))...)
 
-	type clientScoreTarget struct {
-		id            server.Id
-		locationGroup bool
-		clientScores  map[server.Id]*ClientScore
-	}
-	targets := make([]clientScoreTarget, 0, len(locationClientScores)+len(locationGroupClientScores))
-	for locationId, clientScores := range locationClientScores {
-		targets = append(targets, clientScoreTarget{id: locationId, clientScores: clientScores})
-	}
-	for locationGroupId, clientScores := range locationGroupClientScores {
-		targets = append(targets, clientScoreTarget{
-			id:            locationGroupId,
-			locationGroup: true,
-			clientScores:  clientScores,
-		})
-	}
+	targets := targetMaps.targets()
 	updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseSourceLoad, sourceRows, 0)
 	sourceLoadSpan.finish()
 
@@ -5731,51 +5536,10 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 								for _, target := range blockTargets {
 									exportIndex := exportCount.Add(1)
 									kind := "location"
-									keys := clientScoreTargetKeys{}
 									if target.locationGroup {
 										kind = "location_group"
-										keys = clientScoreTargetKeys{
-											counts: func(callerId server.Id) string {
-												return clientScoreLocationGroupCountsKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											filter: func(callerId server.Id) string {
-												return clientScoreLocationGroupFilterKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											sample: func(callerId server.Id, sampleIndex int) string {
-												return clientScoreLocationGroupSampleKey(forceMinimum, rankMode, target.id, callerId, sampleIndex)
-											},
-											alias: func(callerId server.Id) string {
-												return clientScoreLocationGroupAliasKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											facetCounts: func(callerId server.Id, facet ipFamilyFacet) string {
-												return clientScoreLocationGroupFacetCountsKey(forceMinimum, rankMode, target.id, callerId, facet)
-											},
-											facetSample: func(callerId server.Id, facet ipFamilyFacet, sampleIndex int) string {
-												return clientScoreLocationGroupFacetSampleKey(forceMinimum, rankMode, target.id, callerId, facet, sampleIndex)
-											},
-										}
-									} else {
-										keys = clientScoreTargetKeys{
-											counts: func(callerId server.Id) string {
-												return clientScoreLocationCountsKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											filter: func(callerId server.Id) string {
-												return clientScoreLocationFilterKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											sample: func(callerId server.Id, sampleIndex int) string {
-												return clientScoreLocationSampleKey(forceMinimum, rankMode, target.id, callerId, sampleIndex)
-											},
-											alias: func(callerId server.Id) string {
-												return clientScoreLocationAliasKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											facetCounts: func(callerId server.Id, facet ipFamilyFacet) string {
-												return clientScoreLocationFacetCountsKey(forceMinimum, rankMode, target.id, callerId, facet)
-											},
-											facetSample: func(callerId server.Id, facet ipFamilyFacet, sampleIndex int) string {
-												return clientScoreLocationFacetSampleKey(forceMinimum, rankMode, target.id, callerId, facet, sampleIndex)
-											},
-										}
 									}
+									keys := newClientScoreTargetKeys(forceMinimum, rankMode, target)
 									// Target-oriented export has thousands more progress units than
 									// the old caller-oriented loop. Keep production progress useful
 									// without turning the root CPU fix into a log-volume regression.
@@ -5959,170 +5723,37 @@ func loadClientScoresInFacetOrder(
 		observation = observations[0]
 	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		type countsRead struct {
-			caller   *redis.StringCmd
-			baseline *redis.StringCmd
-		}
-		type targetRead struct {
-			alias    *redis.StringCmd
-			unfacted countsRead
-			facets   map[ipFamilyFacet]countsRead
-		}
-		locationReads := map[server.Id]targetRead{}
-		locationGroupReads := map[server.Id]targetRead{}
-
 		// plain pipeline instead of tx: independent gets across cluster slots
 		pipe := r.Pipeline()
-		for locationId, _ := range locationIds {
-			read := targetRead{
-				unfacted: countsRead{
-					caller: pipe.Get(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId)),
-				},
-				facets: map[ipFamilyFacet]countsRead{},
-			}
-			if clientLocationId != (server.Id{}) {
-				read.alias = pipe.Get(ctx, clientScoreLocationAliasKey(forceMinimum, rankMode, locationId, clientLocationId))
-				read.unfacted.baseline = pipe.Get(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, server.Id{}))
-			}
-			for _, facet := range facets {
-				facetRead := countsRead{
-					caller: pipe.Get(ctx, clientScoreLocationFacetCountsKey(forceMinimum, rankMode, locationId, clientLocationId, facet)),
-				}
-				if clientLocationId != (server.Id{}) {
-					facetRead.baseline = pipe.Get(ctx, clientScoreLocationFacetCountsKey(forceMinimum, rankMode, locationId, server.Id{}, facet))
-				}
-				read.facets[facet] = facetRead
-			}
-			locationReads[locationId] = read
-		}
-		for locationGroupId, _ := range locationGroupIds {
-			read := targetRead{
-				unfacted: countsRead{
-					caller: pipe.Get(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId)),
-				},
-				facets: map[ipFamilyFacet]countsRead{},
-			}
-			if clientLocationId != (server.Id{}) {
-				read.alias = pipe.Get(ctx, clientScoreLocationGroupAliasKey(forceMinimum, rankMode, locationGroupId, clientLocationId))
-				read.unfacted.baseline = pipe.Get(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, server.Id{}))
-			}
-			for _, facet := range facets {
-				facetRead := countsRead{
-					caller: pipe.Get(ctx, clientScoreLocationGroupFacetCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId, facet)),
-				}
-				if clientLocationId != (server.Id{}) {
-					facetRead.baseline = pipe.Get(ctx, clientScoreLocationGroupFacetCountsKey(forceMinimum, rankMode, locationGroupId, server.Id{}, facet))
-				}
-				read.facets[facet] = facetRead
-			}
-			locationGroupReads[locationGroupId] = read
-		}
+		locationReads, locationGroupReads := newClientScoreTargetReads(
+			forceMinimum,
+			rankMode,
+			locationIds,
+			locationGroupIds,
+			clientLocationId,
+			facets,
+			func(key string) *redis.StringCmd {
+				return pipe.Get(ctx, key)
+			},
+		)
 		if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
 			clientScoreReadMetrics.counts.Inc()
 			returnErr = fmt.Errorf("read client score counts: %w", err)
 			return
 		}
 
-		// sample keys grouped by draw order: one group per requested facet,
-		// then the un-faceted fallback group
-		groupCount := len(facets) + 1
-		groupSampleKeyCounts := make([]map[string]int, groupCount)
-		sourceIncomplete := false
-		for i := range groupSampleKeyCounts {
-			groupSampleKeyCounts[i] = map[string]int{}
-		}
-
-		decodeCounts := func(alias *redis.StringCmd, read countsRead) (effectiveClientLocationId server.Id, counts []int, ok bool) {
-			effectiveClientLocationId, countsBytes := selectClientScorePayload(
-				clientLocationId,
-				clientScoreCommandBytes(alias),
-				clientScoreCommandBytes(read.caller),
-				clientScoreCommandBytes(read.baseline),
-			)
-			if len(countsBytes) == 0 {
-				return
-			}
-			b := bytes.NewBuffer(countsBytes)
-			e := gob.NewDecoder(b)
-			if err := e.Decode(&counts); err != nil {
-				returnErr = err
-				return
-			}
-			ok = true
+		groupSampleKeyCounts, sourceIncomplete, err := clientScoreTargetPageCounts(
+			forceMinimum,
+			rankMode,
+			clientLocationId,
+			facets,
+			locationReads,
+			locationGroupReads,
+			observation,
+		)
+		if err != nil {
+			returnErr = err
 			return
-		}
-
-		addTarget := func(
-			read targetRead,
-			groupId *server.Id,
-			facetSampleKey func(effectiveClientLocationId server.Id, facet ipFamilyFacet, index int) string,
-			sampleKey func(effectiveClientLocationId server.Id, index int) string,
-		) {
-			faceted := false
-			facetCount := 0
-			for facetIndex, facet := range facets {
-				effectiveClientLocationId, counts, ok := decodeCounts(read.alias, read.facets[facet])
-				if returnErr != nil {
-					return
-				}
-				if !ok {
-					continue
-				}
-				faceted = true
-				facetCount++
-				for i, count := range counts {
-					groupSampleKeyCounts[facetIndex][facetSampleKey(effectiveClientLocationId, facet, i)] = count
-				}
-			}
-			if faceted {
-				if facetCount != len(facets) {
-					sourceIncomplete = true
-				}
-				return
-			}
-			// written before the facets existed: fall back to the un-faceted buckets
-			effectiveClientLocationId, counts, ok := decodeCounts(read.alias, read.unfacted)
-			if returnErr != nil || !ok {
-				sourceIncomplete = true
-				if returnErr == nil && observation != nil {
-					observation.missingTarget(groupId, clientLocationId, rankMode)
-				}
-				return
-			}
-			for i, count := range counts {
-				groupSampleKeyCounts[groupCount-1][sampleKey(effectiveClientLocationId, i)] = count
-			}
-		}
-
-		for locationId, read := range locationReads {
-			addTarget(
-				read,
-				nil,
-				func(effectiveClientLocationId server.Id, facet ipFamilyFacet, index int) string {
-					return clientScoreLocationFacetSampleKey(forceMinimum, rankMode, locationId, effectiveClientLocationId, facet, index)
-				},
-				func(effectiveClientLocationId server.Id, index int) string {
-					return clientScoreLocationSampleKey(forceMinimum, rankMode, locationId, effectiveClientLocationId, index)
-				},
-			)
-			if returnErr != nil {
-				return
-			}
-		}
-		for locationGroupId, read := range locationGroupReads {
-			addTarget(
-				read,
-				&locationGroupId,
-				func(effectiveClientLocationId server.Id, facet ipFamilyFacet, index int) string {
-					return clientScoreLocationGroupFacetSampleKey(forceMinimum, rankMode, locationGroupId, effectiveClientLocationId, facet, index)
-				},
-				func(effectiveClientLocationId server.Id, index int) string {
-					return clientScoreLocationGroupSampleKey(forceMinimum, rankMode, locationGroupId, effectiveClientLocationId, index)
-				},
-			)
-			if returnErr != nil {
-				return
-			}
 		}
 
 		if !facetPriority {
