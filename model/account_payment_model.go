@@ -498,6 +498,7 @@ func (self *PaymentPlanProgress) Committed() bool {
 	return self != nil && self.committed.Load()
 }
 
+// Marks the observer in ctx, if any; a context without one records nothing.
 func notePaymentPlanProgress(ctx context.Context) {
 	if progress, ok := ctx.Value(paymentPlanProgressKey{}).(*PaymentPlanProgress); ok {
 		progress.committed.Store(true)

@@ -78,6 +78,8 @@ type payoutTaskTarget struct {
 	task.Target
 }
 
+// The registered payout target, under Payout's function name and its
+// pre-2024.11 alternate name.
 func NewPayoutTaskTarget() task.Target {
 	return &payoutTaskTarget{
 		Target: task.NewTaskTargetWithPost(
@@ -88,6 +90,9 @@ func NewPayoutTaskTarget() task.Target {
 	}
 }
 
+// Runs the ordinary target, including its max-time timer, with a progress
+// observer in its context. A failure keeps its text and arguments and still
+// counts as an error; only its retry delay changes.
 func (self *payoutTaskTarget) Run(ctx context.Context, queued *task.Task) (any, func(server.PgTx) ([]server.PostFunction, error), error) {
 	ctx, progress := model.WithPaymentPlanProgress(ctx)
 	result, post, err := self.Target.Run(ctx, queued)
