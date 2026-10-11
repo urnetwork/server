@@ -2,7 +2,10 @@
 // predicates read catalogs only and remain safe before the additive DDL exists.
 package monitor
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Keep previously published single predicates byte-for-byte; their owning
 // native tests also extract the exact emitted SQL from the complete probe.
@@ -228,6 +231,15 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(815, "committed payout reliability windows",
 		migrationFp2Table("payment_plan_reliability_window"),
 		migrationFp2Table("payment_plan_reliability_partial")),
+	migrationCurrentSuffix(816, "unread sweep destination index removed",
+		migrationIndexRemoved("transfer_escrow_sweep", "transfer_escrow_sweep_destination_id_sweep_time")),
+}
+
+// A dropped index stays dropped: a rebuilt copy under the published name would
+// again be maintained on every write without a reader.
+func migrationIndexRemoved(table, name string) string {
+	return fmt.Sprintf(`NOT EXISTS (SELECT 1 FROM index_artifact
+		WHERE table_name = '%s' AND index_name = '%s')`, table, name)
 }
 
 // The 814 guard fires only for payment_id changes, so tgattr names that column

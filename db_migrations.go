@@ -9925,4 +9925,31 @@ var migrations = []any{
 	// New tables; nothing is rewritten. Apply before deploying taskworkers that
 	// commit reliability scores before the plan transaction.
 	newSqlMigration(paymentPlanReliabilitySchemaSql),
+
+	// The index drops below remove indexes that no current reader uses, to cut
+	// write amplification on the saturated Main primary. Each was audited on
+	// 2026-10-11 against pg_stat_user_indexes (counters cumulative since the
+	// 2026-08-24 18:24 UTC stats reset, last_idx_scan per index) and every query
+	// in this repository, including the weekly orphan sweep, the payout plan,
+	// maintenance and admin commands. Every insert and every non-HOT update of a
+	// matching row still writes each of them.
+	//
+	// DROP INDEX CONCURRENTLY waits for every transaction that holds a lock on
+	// the table, including a running pg_dump. Run these after such a
+	// transaction ends, or pre-drop out of band with the same statement; IF
+	// EXISTS then makes the migration a no-op. An interrupted drop leaves an
+	// invalid index that the same statement removes when it is rerun.
+
+	// 816: transfer_escrow_sweep_destination_id_sweep_time (24 GB on Main) served
+	// the provider-payout stats that filtered sweeps by destination_id and
+	// sweep_time. b12af6b3 moved those stats to provider_payouts, and the index
+	// has not been scanned since 2026-09-07 23:24 UTC, through four Sunday
+	// payouts and the October month boundary. Only the one-time
+	// `bringyourctl db backfill-sweep-destination-id` still filtered on the
+	// column, and it now scans the table instead. Apply outside the Sunday
+	// 10:00 UTC payout, whose bulk payment_id update holds the sweep table.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_escrow_sweep_destination_id_sweep_time`,
+		`DROP INDEX IF EXISTS transfer_escrow_sweep_destination_id_sweep_time`,
+	),
 }

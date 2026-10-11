@@ -6101,9 +6101,10 @@ func AddSweepDestinationIdColumn(ctx context.Context) {
 // sweeps whose contract no longer exists are left NULL (no destination to copy)
 // and are reaped by SweepOrphanContractData; the stats filters exclude NULL.
 //
-// The `destination_id IS NULL` scan rides
-// transfer_escrow_sweep_destination_id_sweep_time (btree indexes NULLs), so each
-// batch is index-driven rather than a full table scan. It is safe to re-run.
+// Migration 816 dropped transfer_escrow_sweep_destination_id_sweep_time once the
+// provider stats stopped reading sweep destinations (b12af6b3), so each batch
+// now finds its `destination_id IS NULL` rows with a table scan from the start.
+// It is safe to re-run, but on a large sweep table every batch is a full scan.
 func BackfillSweepDestinationIds(ctx context.Context, limit int) (backfilledCount int64) {
 	for {
 		var batchCount int64
