@@ -12,11 +12,13 @@ import (
 var sessionStorageSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "urnetwork_session_storage_seconds", Help: "Required session authority/inventory storage latency", Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2}}, []string{"operation", "outcome"})
 var sessionCapacityRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "urnetwork_session_capacity_refusals_total", Help: "Admission refused without evicting an accepted session"}, []string{"capacity"})
 var sessionLeaseRetirements = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "urnetwork_session_lease_retirements_total", Help: "Independent authorization lease retirements"}, []string{"cause"})
+var sessionLeaseUnavailableRechecks = prometheus.NewCounter(prometheus.CounterOpts{Name: "urnetwork_session_lease_unavailable_rechecks_total", Help: "Authorization lease rechecks that produced no definitive answer; the admitted transport is kept"})
+var sessionLeaseUnverifiedSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{Name: "urnetwork_session_lease_unverified_seconds", Help: "Time since a lease's last successful authoritative check, observed at each unanswered recheck", Buckets: []float64{60, 120, 300, 600, 1800, 3600, 7200, 21600, 86400}})
 var sessionJournalBacklog = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "urnetwork_session_journal_pending", Help: "Durable session operation and index repair backlog"}, []string{"state"})
 var sessionJournalAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "urnetwork_session_journal_oldest_seconds", Help: "Age of oldest unfinished session operation or index repair"}, []string{"state"})
 
 func init() {
-	prometheus.MustRegister(sessionStorageSeconds, sessionCapacityRefusals, sessionLeaseRetirements, sessionJournalBacklog, sessionJournalAge)
+	prometheus.MustRegister(sessionStorageSeconds, sessionCapacityRefusals, sessionLeaseRetirements, sessionLeaseUnavailableRechecks, sessionLeaseUnverifiedSeconds, sessionJournalBacklog, sessionJournalAge)
 }
 
 func observeSessionStorage(operation string, start time.Time, err error) {

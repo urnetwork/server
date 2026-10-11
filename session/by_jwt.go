@@ -452,6 +452,17 @@ func init() {
 	prometheus.MustRegister(authRejectionCounter, authLegacyAcceptCounter)
 }
 
+// A definitive credential refusal with its caller-facing message, distinct from
+// an unavailable dependency so an authorization lease can tell an answer from
+// a failed check.
+type byJwtRejection struct {
+	message string
+}
+
+func (self *byJwtRejection) Error() string {
+	return self.message
+}
+
 // rejectByJwt counts a rejection, emits its detail at V(1), and returns the
 // opaque caller-facing error. The detail never reaches the default log level:
 // see AuthRejectionCause.
@@ -460,7 +471,7 @@ func rejectByJwt(cause AuthRejectionCause, detailFormat string, args ...any) err
 	if glog.V(1) {
 		glog.Infof("[jwt]reject %s: %s\n", cause, fmt.Sprintf(detailFormat, args...))
 	}
-	return errors.New("Could not verify signed token.")
+	return &byJwtRejection{message: "Could not verify signed token."}
 }
 
 // rejectByJwtClaims is rejectByJwt for the claims-shape failures, which
@@ -470,7 +481,7 @@ func rejectByJwtClaims(cause AuthRejectionCause, detailFormat string, args ...an
 	if glog.V(1) {
 		glog.Infof("[jwt]reject %s: %s\n", cause, fmt.Sprintf(detailFormat, args...))
 	}
-	return errors.New("Invalid signed token claims.")
+	return &byJwtRejection{message: "Invalid signed token claims."}
 }
 
 func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
@@ -644,11 +655,11 @@ func validateSessionAuthority(ctx context.Context, byJwt *ByJwt) error {
 func validateByJwtStateIdentity(byJwt *ByJwt, requireClient bool) error {
 	if byJwt == nil {
 		authRejectionCounter.WithLabelValues(string(AuthRejectionMissingToken)).Inc()
-		return errors.New("Missing signed token.")
+		return &byJwtRejection{message: "Missing signed token."}
 	}
 	if requireClient && byJwt.ClientId == nil || byJwt.ClientId != nil && byJwt.DeviceId == nil {
 		authRejectionCounter.WithLabelValues(string(AuthRejectionClientRequired)).Inc()
-		return errors.New("Client credential required.")
+		return &byJwtRejection{message: "Client credential required."}
 	}
 	return nil
 }
