@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/urfoundation/sn/payoutartifact"
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 )
 
@@ -74,10 +75,13 @@ func GetStEpochProviderUsageCensus(ctx context.Context, epoch uint64, startTime,
 func GetStEpochProviderUsageWholeCensus(ctx context.Context, epoch uint64, startTime, endTime time.Time) ([]*StProviderUsage, *payoutartifact.ClosedWorkCensus, *payoutartifact.ClosedWorkWindow, error) {
 	census := &payoutartifact.ClosedWorkCensus{Schema: payoutartifact.ClosedWorkSchema}
 	var window *payoutartifact.ClosedWorkWindow
+	readStart := time.Now()
 	usages, err := getStEpochProviderUsageWithCensus(ctx, epoch, startTime, endTime, census, &window)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// the statement must finish inside the epoch close's task max time
+	glog.Infof("[st]epoch %d census read %d closed contracts for %d providers in %s\n", epoch, census.Count, len(usages), time.Since(readStart).Round(time.Millisecond))
 	if census.Records == nil {
 		return usages, nil, nil, nil
 	}

@@ -90,8 +90,10 @@ type StWallet struct {
 }
 
 // A provider association read from account history or verified original
-// consent. SetTime orders account projections only; payout selection requires
-// the independently approved consent chain and its effective earning epoch.
+// consent. SetTime orders account projections only. A configured roster's
+// payout selects only the approved consent chain effective at the epoch;
+// without a roster, an account-history wallet pays only a provider that has no
+// signed wallet evidence at all.
 type StProviderWallet struct {
 	ClientId          server.Id
 	NetworkId         server.Id

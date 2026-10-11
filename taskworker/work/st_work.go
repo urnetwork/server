@@ -12,6 +12,8 @@ package work
 //     contract clock stays authoritative; every deadline decision is
 //     re-checked in blocks inside the controller flows.
 //   - StEpochClose(e): compute + store the payout leaves/root; mark closed.
+//     Past its commit window an epoch closes without leaves and finalizes
+//     as a missed root.
 //   - StCommitRoot(e): idempotent commitOperator within the +commitWindow
 //     deadline; bounded retries via task reschedule; T-2h alert (D-11).
 //   - StDeposit(e): previous-epoch signed usage (bytes and users) priced at
@@ -28,6 +30,7 @@ package work
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -56,6 +59,13 @@ const (
 	stCommitRootRetryDelay   = 5 * time.Minute
 	stDepositRetryDelay      = 15 * time.Minute
 	stFinalizePokeRetryDelay = 5 * time.Minute
+
+	// The close reads every contract closed in the epoch in one census
+	// statement. On Main the 24-hour epoch 0 closed 9.2M contracts, read in
+	// 195-419 s (mean 249 s); the 7-day epoch 1 projects to 64-71M, 30-55
+	// minutes at those rates. Three hours stays inside the 4-hour root commit
+	// window and leaves an hour to commit.
+	stEpochCloseMaxTime = 3 * time.Hour
 )
 
 // StSyncChain (periodic)
@@ -206,7 +216,7 @@ func scheduleStEpochClose(clientSession *session.ClientSession, deploymentKey mo
 		clientSession,
 		task.RunOnce("st_epoch_close", deploymentKey, epoch),
 		task.RunAt(runAt),
-		task.MaxTime(1*time.Hour),
+		task.MaxTime(stEpochCloseMaxTime),
 	)
 }
 
@@ -221,6 +231,13 @@ func StEpochClose(
 	ctx := clientSession.Ctx
 
 	root, leafCount, err := controller.StComputeEpochPayout(ctx, stEpochClose.Epoch)
+	if errors.Is(err, controller.ErrStCommitWindowClosed) {
+		// Closed without leaves, the sync finalizes it like any missed commit
+		// so the funded pool total carries (D-11). Retrying cannot commit.
+		model.SetStEpochStatus(ctx, deploymentKey, stEpochClose.Epoch, model.StEpochStatusClosed)
+		glog.Errorf("[st]epoch %d closed without a payout: %s\n", stEpochClose.Epoch, err)
+		return &StEpochCloseResult{}, nil
+	}
 	if err != nil {
 		glog.Infof("[st]epoch %d close failed (attempt %d): %s\n", stEpochClose.Epoch, stEpochClose.Attempt, err)
 		return &StEpochCloseResult{Retry: true}, nil
@@ -248,7 +265,7 @@ func StEpochClosePost(
 				clientSession,
 				task.RunOnce("st_epoch_close", stEpochClose.DeploymentKey, stEpochClose.Epoch),
 				task.RunAt(server.NowUtc().Add(stEpochCloseRetryDelay)),
-				task.MaxTime(1*time.Hour),
+				task.MaxTime(stEpochCloseMaxTime),
 			)
 		}
 		return nil
