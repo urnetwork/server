@@ -642,6 +642,124 @@ func TestApplySchemaFixAdoptsBareConstraintIndex(t *testing.T) {
 	})
 }
 
+// Storage parameters are compared per table in any listed order. Drift is
+// reported with review SQL that restores the migrated values, and --fix applies
+// none of it.
+func TestSchemaDiffReportsStorageParameterDrift(t *testing.T) {
+	snapshot := func(parameters ...string) *SchemaSnapshot {
+		return &SchemaSnapshot{
+			tables:            map[string]bool{"t": true},
+			columns:           map[string][]auditColumn{"t": {{name: "id", typ: "bigint", notNull: true}}},
+			indexes:           map[string]auditIndex{},
+			constraints:       map[string][]auditConstraint{},
+			storageParameters: map[string][]string{"t": parameters},
+		}
+	}
+	expected := snapshot("fillfactor=90", "autovacuum_vacuum_cost_delay=2")
+
+	if d := diffSchemas(expected, snapshot("autovacuum_vacuum_cost_delay=2", "fillfactor=90")); d.HasDifferences() {
+		t.Fatalf("reordered storage parameters reported as drift:\n%s", d.Report())
+	}
+
+	d := diffSchemas(expected, snapshot("autovacuum_enabled=false", "autovacuum_vacuum_cost_delay=2"))
+	if !d.HasDifferences() {
+		t.Fatal("a missing fillfactor and an extra autovacuum_enabled were not reported")
+	}
+	report := d.Report()
+	for _, want := range []string{
+		"STORAGE PARAMETERS that differ from expected",
+		"expected: autovacuum_vacuum_cost_delay=2, fillfactor=90",
+		"actual:   autovacuum_enabled=false, autovacuum_vacuum_cost_delay=2",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("Report() missing %q\n---\n%s", want, report)
+		}
+	}
+	for _, sql := range []string{d.FixSql(), d.NotAppliedSql(false), d.NotAppliedSql(true)} {
+		for _, want := range []string{
+			"--   ALTER TABLE t SET (fillfactor = '90');",
+			"--   ALTER TABLE t RESET (autovacuum_enabled);",
+		} {
+			if !strings.Contains(sql, want) {
+				t.Fatalf("review SQL missing %q\n---\n%s", want, sql)
+			}
+		}
+	}
+	if statements := append(d.FixStatements(), d.IndexDropStatements()...); len(statements) != 0 {
+		t.Fatalf("storage parameter drift produced applied statements: %v", statements)
+	}
+
+	// a changed value is set back, and a parameter the migrations set is not reset
+	changed := diffSchemas(expected, snapshot("autovacuum_vacuum_cost_delay=2", "fillfactor=100"))
+	if fix := changed.FixSql(); !strings.Contains(fix, "--   ALTER TABLE t SET (fillfactor = '90');") || strings.Contains(fix, "RESET") {
+		t.Fatalf("changed fillfactor review SQL:\n%s", fix)
+	}
+}
+
+// A missing table is created with the storage parameters its migrations set,
+// so the fix does not leave a storage difference behind.
+func TestFixStatementsCreatesMissingTableWithStorageParameters(t *testing.T) {
+	expected := &SchemaSnapshot{
+		tables:            map[string]bool{"t": true},
+		columns:           map[string][]auditColumn{"t": {{name: "id", typ: "bigint", notNull: true}}},
+		storageParameters: map[string][]string{"t": {"autovacuum_vacuum_cost_delay=2", "fillfactor=90"}},
+	}
+	actual := &SchemaSnapshot{tables: map[string]bool{}}
+	want := "CREATE TABLE t (\n    id bigint NOT NULL\n) WITH (autovacuum_vacuum_cost_delay = '2', fillfactor = '90');"
+	if statements := diffSchemas(expected, actual).FixStatements(); !contains(statements, want) {
+		t.Fatalf("FixStatements() = %q, want it to contain %q", statements, want)
+	}
+}
+
+// The audit sees storage parameters that drifted from their migrations: a reset
+// transfer_contract fillfactor (820) and a changed contract_close one (821).
+// --fix leaves them, and running the review SQL restores a clean audit.
+func TestAuditSchemaReportsStorageParameterDrift(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		MaintenanceTx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(ctx, `
+				ALTER TABLE transfer_contract RESET (fillfactor);
+				ALTER TABLE contract_close SET (fillfactor = 80);
+			`))
+		})
+
+		result := AuditSchema(ctx)
+		if !result.Diff.HasDifferences() {
+			t.Fatal("audit did not report the drifted fillfactor of the contract tables")
+		}
+		report := result.Diff.Report()
+		for _, want := range []string{"~ transfer_contract", "~ contract_close", "fillfactor=80"} {
+			if !strings.Contains(report, want) {
+				t.Fatalf("Report() missing %q\n---\n%s", want, report)
+			}
+		}
+
+		ApplySchemaFix(ctx, result.Diff, true, nil)
+		if !AuditSchema(ctx).Diff.HasDifferences() {
+			t.Fatal("db audit --fix applied a storage parameter change")
+		}
+
+		reviewStatements := []string{}
+		for _, line := range strings.Split(result.Diff.NotAppliedSql(true), "\n") {
+			if statement, ok := strings.CutPrefix(strings.TrimSpace(line), "--   ALTER TABLE "); ok {
+				reviewStatements = append(reviewStatements, "ALTER TABLE "+statement)
+			}
+		}
+		if len(reviewStatements) != 2 {
+			t.Fatalf("review statements = %q, want one SET for each contract table", reviewStatements)
+		}
+		for _, statement := range reviewStatements {
+			MaintenanceTx(ctx, func(tx PgTx) {
+				RaisePgResult(tx.Exec(ctx, statement))
+			})
+		}
+		if again := AuditSchema(ctx); again.Diff.HasDifferences() {
+			t.Fatalf("after the review SQL, DB should match the head, got diffs:\n%s", again.Diff.Report())
+		}
+	})
+}
+
 func contains(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {

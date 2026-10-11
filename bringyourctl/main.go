@@ -488,11 +488,13 @@ func dbScrubClientAddresses(opts docopt.Opts) {
 //	db audit                      report the drift, then print the reconciling
 //	                              SQL as a dry run (summary at top, SQL at bottom)
 //	db audit --fix                APPLY the additive changes (CREATE TABLE / ADD
-//	                              COLUMN / CREATE INDEX), then print the drops that
-//	                              were not applied for manual review
+//	                              COLUMN / CREATE INDEX), then print the drops and
+//	                              storage parameter changes that were not applied
+//	                              for manual review
 //	db audit --fix --force-drop-indexes
 //	                              also drop/recreate indexes (safe to recreate);
-//	                              table/column drops are still never applied
+//	                              table/column drops and storage parameter
+//	                              changes are still never applied
 func dbAudit(opts docopt.Opts) {
 	fix, _ := opts.Bool("--fix")
 	forceDropIndexes, _ := opts.Bool("--force-drop-indexes")
