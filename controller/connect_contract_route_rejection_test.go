@@ -266,17 +266,17 @@ func TestCreateContractRecordsDestinationRetiredAtTheWriteBoundary(t *testing.T)
 		observed, statements, closeScope := observeRouteRejectionStatements(t, ctx)
 		defer closeScope()
 		first := createRouteRejectionContract(t, observed, sourceId, destinationId, false)
-		firstReads := statements.take()
+		firstReads, firstPairReads := statements.take(), pairReads
 		repeat := createRouteRejectionContract(t, observed, sourceId, destinationId, false)
-		repeatReads := statements.take()
+		repeatReads, repeatPairReads := statements.take(), pairReads-firstPairReads
 		if !isRouteReliabilityRefusal(first) || !isRouteReliabilityRefusal(repeat) {
 			t.Fatalf("a destination retired at the write boundary was not refused as an unreliable route: %+v, %+v", first, repeat)
 		}
-		if pairReads != 1 || len(firstReads) == 0 {
-			t.Fatalf("the first request made %d write boundary reads and %d statements, want 1 and some", pairReads, len(firstReads))
+		if firstPairReads != 1 || len(firstReads) == 0 {
+			t.Fatalf("the first request made %d write boundary reads and %d statements, want 1 and some", firstPairReads, len(firstReads))
 		}
-		if len(repeatReads) != 0 {
-			t.Fatalf("a repeated refusal at the write boundary used %d statements, want 0 (the first used %d): %q", len(repeatReads), len(firstReads), repeatReads)
+		if repeatPairReads != 0 || len(repeatReads) != 0 {
+			t.Fatalf("a repeated refusal at the write boundary made %d write boundary reads and used %d statements, want 0 and 0 (the first used %d): %q", repeatPairReads, len(repeatReads), len(firstReads), repeatReads)
 		}
 	})
 }
