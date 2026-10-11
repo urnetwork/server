@@ -12,6 +12,8 @@ package work
 //     contract clock stays authoritative; every deadline decision is
 //     re-checked in blocks inside the controller flows.
 //   - StEpochClose(e): compute + store the payout leaves/root; mark closed.
+//     Past its commit window an epoch closes without leaves and finalizes
+//     as a missed root.
 //   - StCommitRoot(e): idempotent commitOperator within the +commitWindow
 //     deadline; bounded retries via task reschedule; T-2h alert (D-11).
 //   - StDeposit(e): previous-epoch signed usage (bytes and users) priced at
@@ -28,6 +30,7 @@ package work
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -221,6 +224,13 @@ func StEpochClose(
 	ctx := clientSession.Ctx
 
 	root, leafCount, err := controller.StComputeEpochPayout(ctx, stEpochClose.Epoch)
+	if errors.Is(err, controller.ErrStCommitWindowClosed) {
+		// Closed without leaves, the sync finalizes it like any missed commit
+		// so the funded pool total carries (D-11). Retrying cannot commit.
+		model.SetStEpochStatus(ctx, deploymentKey, stEpochClose.Epoch, model.StEpochStatusClosed)
+		glog.Errorf("[st]epoch %d closed without a payout: %s\n", stEpochClose.Epoch, err)
+		return &StEpochCloseResult{}, nil
+	}
 	if err != nil {
 		glog.Infof("[st]epoch %d close failed (attempt %d): %s\n", stEpochClose.Epoch, stEpochClose.Attempt, err)
 		return &StEpochCloseResult{Retry: true}, nil

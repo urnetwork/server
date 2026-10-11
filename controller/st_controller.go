@@ -3125,6 +3125,11 @@ func (self *StPublishOutcome) String() string {
 
 var errStNotConfigured = errors.New("st: not configured (st.yml missing or disabled)")
 
+// The epoch's root commit window closed before its payout was computed, so no
+// root can be committed for it. Finalize records the missed root and the
+// funded pool total carries to the next finalized epoch (D-11).
+var ErrStCommitWindowClosed = errors.New("st: root commit window closed before the payout was computed")
+
 // stRequire returns the config + client or the not-configured error.
 func stRequire() (*StConfig, StClient, error) {
 	cfg := stConfig()
@@ -3558,6 +3563,16 @@ func StComputeEpochPayout(ctx context.Context, epoch uint64) (root [32]byte, lea
 		}
 		if outcome.Retry || outcome.Status == model.StPublishStatusFailed {
 			return root, 0, fmt.Errorf("st: epoch %d emission close not confirmed: %s", epoch, outcome)
+		}
+		// The emission is captured or deferred, so finalize can record a
+		// missed root. Past the deadline the commit path refuses, so the
+		// payout is not recomputed on every retry.
+		closeBlock, err := client.EpochCloseBlock(ctx, epoch)
+		if err != nil {
+			return root, 0, err
+		}
+		if closeBlock != 0 && closeBlock+state.CommitWindowBlocks < state.HeadBlock {
+			return root, 0, ErrStCommitWindowClosed
 		}
 		authority, err := client.PayoutEpochAuthority(ctx, epoch)
 		if err != nil {
