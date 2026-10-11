@@ -10,20 +10,12 @@ import (
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-// Legacy payer settlement turns per instance. On Main a running turn keeps
-// about one PostgreSQL backend busy, mostly in financial transactions, and the
-// fleet averaged 3.8 concurrent turns; two per instance caps payer work at
-// about ten backends across five instances.
-const legacyPayerSettlementClaimLimit = 2
-
 // One provider-probe shard per instance prevents several polling loops from
 // co-locating long-lived tunnel pools. One legacy mirror repair bounds cold
-// history work moved off the financial page. Legacy payer turns are bounded
-// because lanes no longer starve them. Each worker has independent capacity,
-// and caller-owned settings and maps remain unchanged. A saturated limit makes
-// every claim filter that target's due rows out of the oldest-first candidate
-// scan, so only targets that never dominate the queue are limited. A payer has
-// one queued turn, so its filter reads at most one row per due payer.
+// history work moved off the financial page. Each worker has independent
+// capacity, and caller-owned settings and maps remain unchanged. A saturated
+// limit makes every claim filter that target's rows out of the oldest-first
+// candidate scan, so only targets that never dominate the queue are limited.
 func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile WorkloadProfile) *task.TaskWorkerSettings {
 	if settings == nil {
 		settings = task.DefaultTaskWorkerSettings()
@@ -38,7 +30,6 @@ func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile Wor
 		ownerSettings.TargetClaimLimits = map[string]int{}
 	}
 	ownerSettings.TargetClaimLimits[task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror).TargetFunctionName()] = 1
-	ownerSettings.TargetClaimLimits[model.NewLegacyPayerSettlementTaskTarget().TargetFunctionName()] = legacyPayerSettlementClaimLimit
 	if profile == WorkloadProfileProduction {
 		name := task.NewTaskTarget(work.ProviderEgressProbe).TargetFunctionName()
 		ownerSettings.TargetClaimLimits[name] = 1

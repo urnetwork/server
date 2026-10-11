@@ -11,16 +11,14 @@ import (
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-// Probe placement is production-only; mirror repair and payer settlement are
-// bounded in both profiles that can produce them. Other worker settings retain
-// their values.
+// Probe placement is production-only; mirror repair is bounded in both
+// profiles that can produce it. Other worker settings retain their values.
 func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 	settings := task.DefaultTaskWorkerSettings()
 	production := taskWorkerSettingsForProfile(settings, WorkloadProfileProduction)
 	name := task.NewTaskTarget(work.ProviderEgressProbe).TargetFunctionName()
 	mirror := task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror).TargetFunctionName()
-	payer := model.NewLegacyPayerSettlementTaskTarget().TargetFunctionName()
-	if !reflect.DeepEqual(production.TargetClaimLimits, map[string]int{name: 1, mirror: 1, payer: legacyPayerSettlementClaimLimit}) || settings.TargetClaimLimits != nil {
+	if !reflect.DeepEqual(production.TargetClaimLimits, map[string]int{name: 1, mirror: 1}) || settings.TargetClaimLimits != nil {
 		t.Fatal("production target placement differs or mutated its caller")
 	}
 	production.TargetClaimLimits = nil
@@ -32,8 +30,8 @@ func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 		t.Fatal("probe placement changed ordinary worker settings")
 	}
 	operator := taskWorkerSettingsForProfile(settings, WorkloadProfileSubnetOperator)
-	if !reflect.DeepEqual(operator.TargetClaimLimits, map[string]int{mirror: 1, payer: legacyPayerSettlementClaimLimit}) || !operator.ClaimRegisteredTargetsOnly {
-		t.Fatal("independent profile did not retain mirror and payer placement")
+	if !reflect.DeepEqual(operator.TargetClaimLimits, map[string]int{mirror: 1}) || !operator.ClaimRegisteredTargetsOnly {
+		t.Fatal("independent profile did not retain mirror-only placement")
 	}
 }
 
