@@ -42,6 +42,9 @@ func dialRefusedWebSocket(t testing.TB, ctx context.Context, env *peerDiscoveryE
 	instance := server.NewId()
 	headers := authenticationDeadlineHeaders(token, instance)
 	headers.Set("X-UR-AppVersion", testingRefusalAppVersion)
+	// a client with stream leases reads the close, so it is not held
+	// (transport_refusal_hold.go)
+	headers.Set("X-UR-StreamLeaseVersion", "1")
 	if frameAuth {
 		headers.Del("Authorization")
 	}
@@ -72,6 +75,8 @@ func dialRefusedWebSocket(t testing.TB, ctx context.Context, env *peerDiscoveryE
 // A WebSocket refusal follows the 101, so without an in-band close the
 // client saw only a drop and redialed it at once. Every refusal now carries
 // the authorization close, and a credential's retries run one state query.
+// These clients read the close; the ones that cannot are held first
+// (transport_refusal_hold_test.go).
 func TestConnectWebSocketRefusalCarriesTheAuthorizationClose(t *testing.T) {
 	environment := server.DefaultTestEnv()
 	environment.RerunCount = 0

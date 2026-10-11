@@ -509,6 +509,10 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// the sum across connections.
 		H3MaxStreamReceiveWindow:          0,
 		H3MaxTotalConnectionReceiveWindow: 0,
+
+		RefusalHoldTimeout:           defaultRefusalHoldTimeout,
+		RefusalHoldKeepaliveInterval: defaultRefusalHoldKeepaliveInterval,
+		RefusalHoldMaxCount:          defaultRefusalHoldMaxCount,
 	}
 }
 
@@ -565,9 +569,24 @@ type ConnectHandlerSettings struct {
 	ConnectionRateLimitSettings
 	// the check of connections that declare provide intent (provider_intent.go)
 	ProviderIntentCheckSettings ProviderIntentCheckSettings
+	// A WebSocket refused for its credential, whose client cannot read the
+	// authorization close, is held open this long before the close
+	// (transport_refusal_hold.go). Zero closes at once.
+	RefusalHoldTimeout time.Duration
+	// The keepalive of a held refusal, inside the 30 second read deadline of
+	// the clients it holds.
+	RefusalHoldKeepaliveInterval time.Duration
+	// The bound of the refusals held at once; past it a refusal closes at once.
+	RefusalHoldMaxCount int
 	// Tests replace only the configuration loader so initialization failure can
 	// be held before any listener goroutine exists.
 	transportTlsLoader func(*server.TransportTlsSettings) (*server.TransportTls, error)
+	// Nil outside package tests. The refusal hold's clock and tick, a call
+	// with each hold's outcome, and a call after each tick is served.
+	refusalHoldNowForTest    func() time.Time
+	refusalHoldTickForTest   <-chan time.Time
+	refusalHoldHeldForTest   func(outcome string)
+	refusalHoldTickedForTest func()
 }
 
 // Keeps server-resident Transfer recovery symmetric with the client H3 path.
@@ -772,6 +791,9 @@ type ConnectHandler struct {
 	activeCount int
 	activeZero  chan struct{}
 	closing     bool
+
+	// holds the WebSocket refusals of clients that cannot read the close
+	refusalHold *connectRefusalHold
 }
 
 // ConnectHandlerPacketConns contains already-bound packet sockets for the QUIC
@@ -967,8 +989,12 @@ func newConnectHandlerWithPacketConns(
 		activeCount: activeCount,
 		activeZero:  activeZero,
 	}
+	h.refusalHold = newConnectRefusalHold(cancelCtx, exchange.IsDraining, settings)
 
 	go server.HandleError(h.run, cancel)
+	// the hold releases every socket it holds when it stops, so a failure of
+	// its own leaves serving untouched
+	go server.HandleError(h.refusalHold.run)
 
 	return h, nil
 }
@@ -1459,7 +1485,15 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if refused && ws != nil {
-			writeConnectAuthorizationClose(ws, connectCredentialRefusalCloseCode(err))
+			code := connectCredentialRefusalCloseCode(err)
+			// a header-auth client without stream leases cannot read the close
+			// and redials at once; the hold takes the socket and closes it later
+			// (transport_refusal_hold.go)
+			if len(authEcho) == 0 && auth.StreamLeaseVersion == 0 && self.refusalHold.hold(ws, code) {
+				ws = nil
+				return
+			}
+			writeConnectAuthorizationClose(ws, code)
 		}
 	}
 
