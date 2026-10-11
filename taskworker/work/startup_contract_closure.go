@@ -37,14 +37,18 @@ type ScheduleOpenContractClosuresResult struct{}
 // every attempt short and the pass never finished.
 const startupContractClosureMaxTime = 24 * time.Hour
 
+// An earlier release scheduled the same pass under this key. Both passes
+// walked the same contracts, the earlier key hours behind, so each of its
+// upserts only moved an already queued close back to that pass's earlier
+// deadline and recorded another wake. Its pending pass finishes on its next
+// claim without reading; the startup pass covers every contract it would.
+const retiredStartupContractClosureKey = "schedule_open_contract_closures"
+
 func ScheduleOpenContractClosuresOnStartup(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(tx, ScheduleOpenContractClosures,
 		&ScheduleOpenContractClosuresArgs{PageSize: startupContractClosurePageSize, StartedAt: server.NowUtc().Truncate(time.Microsecond)},
 		clientSession, task.RunOnce("schedule_open_contract_closures_on_startup"), task.RunAt(server.NowUtc()),
 		task.MaxTime(startupContractClosureMaxTime))
-	// An earlier release scheduled the same pass under this key with a 30s
-	// deadline. Keep that pending pass and give it the same deadline.
-	task.RaiseRunOnceMaxTimeInTx(clientSession.Ctx, tx, task.RunOnce("schedule_open_contract_closures"), startupContractClosureMaxTime)
 }
 
 // One logical pass retains its original start time. The old queued After field
@@ -226,7 +230,7 @@ func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *ses
 		return &CloseScheduledContractResult{Reconciliation: closed}, err
 	}
 	closed, err := model.ReconcileContractOwnerAtDeadline(ctx, state.BalanceIds,
-		model.ContractDeadline{ContractId: args.ContractId, Deadline: args.Deadline}, dueScheduledCloses(now))
+		model.ContractDeadline{ContractId: args.ContractId, Deadline: args.Deadline}, dueContractDeadlines(now))
 	if err != nil {
 		return nil, err
 	}
