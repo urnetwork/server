@@ -5248,6 +5248,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	egressSettings := egressIndexSettings()
 	pendingScores := []clientScoreSourceRow{}
 	cohort := map[server.Id]bool{}
+	knownLocationGroupIds := []server.Id{}
 	shadowScoreCapture := beginArinShadowScoreCapture()
 
 	server.Db(ctx, func(conn server.PgConn) {
@@ -5379,6 +5380,24 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				cohort[lookbackClientScore.ClientId] = true
 			}
 		})
+
+		// Every group is an export target, including one whose members have no
+		// supply, so FindProviders2 can tell it from a group never written.
+		result, err = conn.Query(
+			ctx,
+			`
+			SELECT location_group_id
+			FROM location_group
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				sourceRows++
+				var locationGroupId server.Id
+				server.Raise(result.Scan(&locationGroupId))
+				knownLocationGroupIds = append(knownLocationGroupIds, locationGroupId)
+			}
+		})
 	})
 
 	countFilter := newProviderCommonFilterForClients(ctx, slices.Collect(maps.Keys(cohort)))
@@ -5392,7 +5411,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			shadowScoreCapture.observe(row.score, row.egress.publishedCountryCode, countFilter.egressFacts(row.score.ClientId, row.egress.publishedCountryCode, row.egress.egressIndex, row.egress.egressQuality, egressSettings), egressTestEnabled)
 		}
 	}
-	targetMaps := newClientScoreTargetMaps(pendingScores, nil, countFilter.hasHardEgressFailure, observeShadowScore)
+	targetMaps := newClientScoreTargetMaps(pendingScores, knownLocationGroupIds, countFilter.hasHardEgressFailure, observeShadowScore)
 	locationClientScores := targetMaps.locationClientScores
 	locationGroupClientScores := targetMaps.locationGroupClientScores
 	clientIdEgresses := targetMaps.clientIdEgresses
@@ -5504,6 +5523,14 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	clientLocationIds = append(clientLocationIds, slices.Collect(maps.Values(countryCodeLocationIds()))...)
 
 	targets := targetMaps.targets()
+	// published with encoded-empty payloads: every row hard-excluded, or a
+	// known group without rows
+	emptyTargetCount := 0
+	for _, target := range targets {
+		if len(target.clientScores) == 0 {
+			emptyTargetCount += 1
+		}
+	}
 	updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseSourceLoad, sourceRows, 0)
 	sourceLoadSpan.finish()
 
@@ -5631,10 +5658,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		}
 		shadowScoreCapture.publish(nativeCensus, locationClientScores, locationGroupClientScores)
 		glog.Infof(
-			"[nclm]update %d client locations x %d location scores, %d location group scores\n",
+			"[nclm]update %d client locations x %d location scores, %d location group scores, %d of them empty\n",
 			len(clientLocationIds),
 			len(locationClientScores),
 			len(locationGroupClientScores),
+			emptyTargetCount,
 		)
 	} else {
 		glog.Infof("[nclm]update err = %s\n", returnErr)

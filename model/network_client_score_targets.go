@@ -45,10 +45,16 @@ type clientScoreTargetMaps struct {
 
 // Moves each staged row into its targets' provider maps, merging a provider's
 // lookback rows into one top-level score per target. A provider with a
-// current hard egress failure joins no target. Rows are cleared as they are
-// consumed so their staging references are released early. observe, when
-// set, sees every row before the hard-exclusion check. knownLocationGroupIds
-// is not read yet.
+// current hard egress failure joins no target, but the targets its rows name
+// are still created, and every known location group is a target even when no
+// row names it. The export then writes an encoded-empty payload for a target
+// without admitted providers, so a reader can tell "no providers" from "never
+// written" (cache_empty, not cache_missing), and a target that lost its last
+// admitted provider stops serving its previous payload instead of keeping it
+// until the cache ttl. A location no row names at all is still not visited.
+// Rows are cleared as they are consumed so their staging references are
+// released early. observe, when set, sees every row before the hard-exclusion
+// check.
 func newClientScoreTargetMaps(
 	rows []clientScoreSourceRow,
 	knownLocationGroupIds []server.Id,
@@ -60,6 +66,9 @@ func newClientScoreTargetMaps(
 		locationGroupClientScores: map[server.Id]map[server.Id]*ClientScore{},
 		clientIdEgresses:          map[server.Id]*clientScoreEgress{},
 		hardExcludedClientIds:     map[server.Id]bool{},
+	}
+	for _, locationGroupId := range knownLocationGroupIds {
+		self.locationGroupClientScores[locationGroupId] = map[server.Id]*ClientScore{}
 	}
 
 	addClientScore := func(lookbackClientScore *ClientScore, reputationFailedNames string, m map[server.Id]*ClientScore) *ClientScore {
@@ -86,11 +95,12 @@ func newClientScoreTargetMaps(
 		if observe != nil {
 			observe(row)
 		}
-		if hardExcluded(lookbackClientScore.ClientId) {
+		excluded := hardExcluded(lookbackClientScore.ClientId)
+		if excluded {
 			self.hardExcludedClientIds[lookbackClientScore.ClientId] = true
-			continue
+		} else {
+			self.clientIdEgresses[lookbackClientScore.ClientId] = egress
 		}
-		self.clientIdEgresses[lookbackClientScore.ClientId] = egress
 		if !row.locationGroup {
 			cityLocationId, regionLocationId, countryLocationId := row.cityId, row.regionId, row.countryId
 
@@ -118,7 +128,9 @@ func newClientScoreTargetMaps(
 					clientScores = map[server.Id]*ClientScore{}
 					self.locationClientScores[locationId] = clientScores
 				}
-				setLocationIds(addClientScore(lookbackClientScore, reputationFailedNames, clientScores))
+				if !excluded {
+					setLocationIds(addClientScore(lookbackClientScore, reputationFailedNames, clientScores))
+				}
 			}
 		} else {
 			// One provider/lookback row carries every distinct group at
@@ -129,14 +141,16 @@ func newClientScoreTargetMaps(
 					clientScores = map[server.Id]*ClientScore{}
 					self.locationGroupClientScores[locationGroupId] = clientScores
 				}
-				addClientScore(lookbackClientScore, reputationFailedNames, clientScores)
+				if !excluded {
+					addClientScore(lookbackClientScore, reputationFailedNames, clientScores)
+				}
 			}
 		}
 	}
 	return self
 }
 
-// One target of the export and its providers.
+// One target of the export and its admitted providers, possibly none.
 type clientScoreTarget struct {
 	id            server.Id
 	locationGroup bool
