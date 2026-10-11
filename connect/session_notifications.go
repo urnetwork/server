@@ -36,6 +36,13 @@ func parseSessionEvent(channel string) (server.Id, bool) {
 
 // One group per network/process does one bounded revision read, coalescing
 // outbound hints for five seconds. Local authorization kicks do not wait on it.
+//
+// Registration rechecks only the new listener. A session event that landed
+// between its final authorization check and this registration reached no
+// listener of its own, so the new listener revalidates once. A peer joining
+// changes no other listener's authorization: rechecking the whole network
+// here made every connection cost one authoritative PostgreSQL check per
+// connection of its network on the process, quadratic in a reconnect wave.
 func (self *keyEventSubscriber) AddSessionListener(networkId server.Id, recheck func(), hint func(*protocol.NetworkSessionsChanged)) func() {
 	self.stateLock.Lock()
 	if self.sessionListeners == nil {
@@ -51,8 +58,15 @@ func (self *keyEventSubscriber) AddSessionListener(networkId server.Id, recheck 
 	id := self.nextListenerId
 	self.nextListenerId++
 	group.listeners[id] = sessionNotificationListener{recheck, hint}
+	// the coalesced revision read delivers the new listener its first hint
+	select {
+	case group.kick <- struct{}{}:
+	default:
+	}
 	self.stateLock.Unlock()
-	self.kickSession(networkId)
+	if recheck != nil {
+		recheck()
+	}
 	return func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -118,6 +132,23 @@ func (self *keyEventSubscriber) runSessionNotifications(networkId server.Id, gro
 		select {
 		case <-group.kick:
 		default:
+		}
+		// The revision read only produces hints, and it returns every live
+		// session of the network while its prune can publish a session event
+		// that rechecks every listener of the network on every process. Skip
+		// it while no listener of the group consumes hints.
+		hinted := func() bool {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			for _, listener := range group.listeners {
+				if listener.hint != nil {
+					return true
+				}
+			}
+			return false
+		}()
+		if !hinted {
+			continue
 		}
 		revision := self.sessionRevision
 		if revision == nil {
