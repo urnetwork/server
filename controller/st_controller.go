@@ -152,6 +152,8 @@ type StConfig struct {
 	ContractAddress        common.Address
 	SettlementVault        common.Address
 	ReserveSink            common.Address
+	SettlementV2           common.Address
+	VaultV2                common.Address
 	Netuid                 uint64
 	NoId                   uint64
 	TreasuryHotkey         [32]byte
@@ -234,6 +236,8 @@ type stVaultFile struct {
 	LegacyContractAddress  string                         `yaml:"contract_address"`
 	SettlementVault        string                         `yaml:"settlement_vault_address"`
 	ReserveSink            string                         `yaml:"reserve_sink_address"`
+	SettlementV2           string                         `yaml:"settlement_v2_address"`
+	VaultV2                string                         `yaml:"vault_v2_address"`
 	Netuid                 uint64                         `yaml:"netuid"`
 	NoId                   uint64                         `yaml:"no_id"`
 	TreasuryHotkey         string                         `yaml:"treasury_hotkey"`
@@ -266,6 +270,8 @@ type stVaultFile struct {
 	TestnetContractAddress        string                         `yaml:"testnet-coordinator-address"`
 	TestnetSettlementVault        string                         `yaml:"testnet-settlement-vault-address"`
 	TestnetReserveSink            string                         `yaml:"testnet-reserve-sink-address"`
+	TestnetSettlementV2           string                         `yaml:"testnet-settlement-v2-address"`
+	TestnetVaultV2                string                         `yaml:"testnet-vault-v2-address"`
 	TestnetNetuid                 uint64                         `yaml:"testnet-netuid"`
 	TestnetNoId                   uint64                         `yaml:"testnet-no-id"`
 	TestnetTreasuryHotkey         string                         `yaml:"testnet-treasury-hotkey"`
@@ -350,6 +356,7 @@ type stSelectedConfig struct {
 	DeployBlock                                                                                                    uint64
 	PublicRpcUrl, GenesisHash, DeploymentId, PolicyHash                                                            string
 	ContractAddress, SettlementVault, ReserveSink                                                                  string
+	SettlementV2, VaultV2                                                                                          string
 	TreasuryHotkey, DepositHotkey                                                                                  string
 	DepositKey, RootKey, ArtifactKey                                                                               string
 	DepositTiers                                                                                                   []StDepositTier
@@ -368,6 +375,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			DeploymentId: f.TestnetDeploymentId, PolicyHash: f.TestnetPolicyHash,
 			ContractAddress: f.TestnetContractAddress, SettlementVault: f.TestnetSettlementVault,
 			ReserveSink: f.TestnetReserveSink, Netuid: f.TestnetNetuid, NoId: f.TestnetNoId,
+			SettlementV2: f.TestnetSettlementV2, VaultV2: f.TestnetVaultV2,
 			TreasuryHotkey: f.TestnetTreasuryHotkey, DepositHotkey: f.TestnetDepositHotkey,
 			DepositKey: f.TestnetDepositKey, RootKey: f.TestnetRootKey, ArtifactKey: f.TestnetArtifactKey,
 			DepositAlphaRaoPerGib:  f.TestnetDepositAlphaRaoPerGib,
@@ -387,6 +395,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			PublicRpcUrl:          f.PublicRpcUrl, ChainId: f.ChainId, GenesisHash: f.GenesisHash,
 			DeploymentId: f.DeploymentId, PolicyHash: f.PolicyHash,
 			ContractAddress: f.ContractAddress, SettlementVault: f.SettlementVault, ReserveSink: f.ReserveSink,
+			SettlementV2: f.SettlementV2, VaultV2: f.VaultV2,
 			Netuid: f.Netuid, NoId: f.NoId, TreasuryHotkey: f.TreasuryHotkey,
 			DepositHotkey: f.DepositHotkey, DepositKey: f.DepositKey, RootKey: f.RootKey,
 			ArtifactKey: f.ArtifactKey, DepositAlphaRaoPerGib: f.DepositAlphaRaoPerGib,
@@ -479,6 +488,9 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	cfg.ReserveSink = common.HexToAddress(s.ReserveSink)
 	if cfg.ContractAddress == cfg.SettlementVault || cfg.ContractAddress == cfg.ReserveSink || cfg.SettlementVault == cfg.ReserveSink {
 		return nil, fmt.Errorf("st.yml coordinator, settlement vault, and reserve sink must be distinct")
+	}
+	if err := stLedgerV2ConfigAddresses(cfg, s.SettlementV2, s.VaultV2); err != nil {
+		return nil, fmt.Errorf("st.yml %s %w", profile, err)
 	}
 	if cfg.GenesisHash, err = stParseHex32(s.GenesisHash); err != nil {
 		return nil, fmt.Errorf("st.yml genesis_hash: %w", err)
@@ -1537,7 +1549,7 @@ func (self *CoreStClient) reconcileAccountIntents(
 		if err != nil {
 			return err
 		}
-		cancelIntent := stale || expiredClose || expiredDeposit
+		cancelIntent := stale || expiredClose || expiredDeposit || self.spentLedgerV2Intent(ctx, client, intent, from, finalized)
 		desiredKind := model.StTxAttemptExecution
 		if cancelIntent {
 			desiredKind = model.StTxAttemptCancellation
@@ -2578,6 +2590,9 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		if self.coordinator != nil {
 			addresses = append(addresses, self.cfg.SettlementVault, self.cfg.ReserveSink)
 		}
+		if self.cfg.LedgerV2Enabled() {
+			addresses = append(addresses, self.cfg.SettlementV2, self.cfg.VaultV2)
+		}
 		out, err := client.FilterLogs(callCtx, ethereum.FilterQuery{
 			FromBlock: new(big.Int).SetUint64(fromBlock),
 			ToBlock:   new(big.Int).SetUint64(toBlock),
@@ -2602,7 +2617,11 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		}
 		kind := ""
 		var args map[string]any
-		for _, decode := range decoders {
+		logDecoders := decoders
+		if v2Decoders, ok := self.stLedgerV2EventDecoders(log.Address); ok {
+			logDecoders = v2Decoders
+		}
+		for _, decode := range logDecoders {
 			if k, a, ok := decode(log); ok {
 				kind = k
 				args = a
@@ -3210,6 +3229,9 @@ func StCloseOperatorEpoch(ctx context.Context, epoch uint64) (*StPublishOutcome,
 	if err := stPayoutAdmission(ctx, cfg); err != nil {
 		return nil, err
 	}
+	if err := stV1EpochAdmission(ctx, cfg, epoch); err != nil {
+		return nil, err
+	}
 	pool, err := client.PoolState(ctx, epoch, cfg.NoId)
 	if err != nil {
 		return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}, nil
@@ -3653,6 +3675,9 @@ func StCommitEpochRoot(ctx context.Context, epoch uint64) (*StPublishOutcome, er
 		return nil, err
 	}
 	if err := stPayoutAdmission(ctx, cfg); err != nil {
+		return nil, err
+	}
+	if err := stV1EpochAdmission(ctx, cfg, epoch); err != nil {
 		return nil, err
 	}
 
@@ -4225,6 +4250,7 @@ func StSyncChainEvents(ctx context.Context, _ uint64) (int, error) {
 		model.UpsertStEvents(ctx, cfg.DeploymentKey(), events)
 		stApplyEventStatuses(ctx, cfg, events)
 		stApplyHeadBindings(ctx, cfg, events)
+		stApplyLedgerV2Events(ctx, cfg, events)
 		model.SetStChainCheckpoint(ctx, cfg.DeploymentKey(), model.StChainCheckpoint{NextBlock: nextBlock, BlockHash: canonicalHashes[toBlock]})
 		synced += len(events)
 		fromBlock = nextBlock
