@@ -270,6 +270,14 @@ five seconds without a seek. Keep the lane cursor's full ORDER BY in that seek:
 with only a LIMIT, the planner chose the global poll index and filtered the
 whole due queue for an empty lane.
 
+A seek is cheap only while the queue's deleted rows can be pruned. On
+2026-10-11 a seven-hour `pg_dump` transaction held the xmin horizon, so
+`pending_task` kept 15.5M dead rows and one LIMIT 1 seek read 100k buffers in
+the payer lane and 63k in the close lane before its first due row. The probe
+pays that prefix once; the lane cursor then starts at the block of the row the
+probe found, so a claim does not read the prefix twice. Check `backend_xmin`
+age in `pg_stat_activity` before attributing slow claims to the queue itself.
+
 Once lanes reach them, legacy payer settlement turns are limited to two per
 instance; a running turn keeps about one PostgreSQL backend busy. A saturated
 limit filters that target's due rows from every global claim. Payer turns
