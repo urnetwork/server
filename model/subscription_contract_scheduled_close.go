@@ -58,6 +58,14 @@ var deadlineEscrowRowsSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_coun
 	LEFT JOIN transfer_balance b USING(balance_id)
 	ORDER BY b.end_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1)
 
+// The planner still costs the read at the row limit, and each estimated row
+// pays for two debit journal probes. Once dead journal tuples left that small
+// table a few hundred pages, the cost passed the JIT inline and optimize
+// thresholds and every close compiled the read before running it, about 200 ms
+// of CPU while the grant owner was held. Index probes gain nothing from JIT,
+// so the close turns it off for the rest of its transaction.
+const deadlineEscrowRowsJitSql = `SELECT set_config('jit', 'off', true)`
+
 // Grant values are read after sorted grant locks. Missing grants remain visible
 // so every reservation can be retired, including orphaned legacy escrows.
 type contractDeadlineEscrow struct {
@@ -210,6 +218,7 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 	})
 	positive, redisReservations := lockSettlementReservations(ctx, tx, contractId, balanceIds)
 	escrows := []contractDeadlineEscrow{}
+	server.RaisePgResult(tx.Exec(ctx, deadlineEscrowRowsJitSql))
 	rows, err = tx.Query(ctx, deadlineEscrowRowsSql, contractId)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
