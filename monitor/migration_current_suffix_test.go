@@ -25,7 +25,7 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for head := 793; head <= 813; head++ {
+		for head := 793; head <= 814; head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
@@ -108,6 +108,14 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing identified checkpoint total", 813, `ALTER TABLE contract_close DROP COLUMN identified_checkpoint_byte_count`},
 		{"identified checkpoint total truncates bytes", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count TYPE integer`},
 		{"invented identified checkpoint total", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count SET DEFAULT 0`},
+		{"missing verified consent chains", 814, `DROP TABLE st_verified_wallet_consent`},
+		{"verified consent generations not unique", 814, `ALTER TABLE st_verified_wallet_consent DROP CONSTRAINT st_verified_wallet_consent_pkey`},
+		{"verified consent kinds not closed", 814, `ALTER TABLE st_verified_wallet_consent DROP CONSTRAINT st_verified_wallet_consent_kind_check`},
+		{"verified consent epochs truncate", 814, `ALTER TABLE st_verified_wallet_consent ALTER COLUMN from_epoch TYPE integer`},
+		{"nullable verified consent signer", 814, `ALTER TABLE st_verified_wallet_consent ALTER COLUMN prospective_signer DROP NOT NULL`},
+		{"missing FleetBound scan checkpoint", 814, `DROP TABLE st_fleet_bound_sync`},
+		{"FleetBound checkpoints not unique", 814, `ALTER TABLE st_fleet_bound_sync DROP CONSTRAINT st_fleet_bound_sync_pkey`},
+		{"nullable FleetBound checkpoint", 814, `ALTER TABLE st_fleet_bound_sync ALTER COLUMN next_block DROP NOT NULL`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
