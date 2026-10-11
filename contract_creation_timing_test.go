@@ -78,11 +78,11 @@ func TestContractCreationTimingBoundedConcurrentCollection(t *testing.T) {
 		t.Fatal(err)
 	}
 	expect := map[string]int{
-		"urnetwork_contract_creation_completed_stage_seconds_total":   38,
+		"urnetwork_contract_creation_completed_stage_seconds_total":   40,
 		"urnetwork_contract_creation_completed_total":                 10,
-		"urnetwork_contract_creation_stage_inflight":                  38,
+		"urnetwork_contract_creation_stage_inflight":                  40,
 		"urnetwork_contract_creation_stage_timing_enabled":            1,
-		"urnetwork_contract_creation_companion_origin_reads_total":    4,
+		"urnetwork_contract_creation_companion_origin_reads_total":    6,
 		"urnetwork_contract_creation_companion_origin_outcomes_total": 8,
 	}
 	for _, f := range families {
@@ -139,7 +139,7 @@ func TestContractCompanionOriginReadSpansAndAttempts(t *testing.T) {
 	owner.Finish(ContractCreationReply)
 	if m.values.seconds[1][ContractStageCompanionPlainOriginRead] != 2 ||
 		m.values.seconds[1][ContractStageCompanionFallbackOriginRead] != 3 ||
-		m.values.companionReads[1] != [contractCompanionOriginPhaseCount]uint64{1, 1} ||
+		m.values.companionReads[1] != [contractCompanionOriginPhaseCount]uint64{1, 1, 0} ||
 		m.values.companionOutcomes[1][ContractCompanionOriginFound] != 1 ||
 		m.values.inflight != [2][contractStageCount]int64{} {
 		t.Fatal("companion read span, attempt, or owner partition changed")

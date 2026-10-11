@@ -2049,6 +2049,62 @@ func CreateCompanionContract(
 // manufactured dead-on-arrival multiclient window clients).
 var ErrMissingCompanionOrigin = fmt.Errorf("Missing origin contract for companion.")
 
+// Any open or lingering contract in the reverse direction, plain or companion:
+// the union of the plain and the chained origin selections in
+// createCompanionTransferEscrow, which differ only in companion_contract_id.
+// $1 and $2 are the origin's source and destination, the companion's reverse;
+// $3 is the earliest close time of a lingering origin.
+const companionOriginExistsSql = `
+	SELECT EXISTS (
+		SELECT 1 FROM transfer_contract
+		WHERE
+			-- equivalent to the generated open flag but opaque to legacy
+			-- false-zero open/outcome indexes
+			(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
+			source_id = $1 AND
+			destination_id = $2
+	) OR EXISTS (
+		SELECT 1 FROM transfer_contract
+		WHERE
+			open = false AND
+			$3 <= close_time AND
+			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
+			source_id = $1 AND
+			destination_id = $2
+	)
+`
+
+// A companion whose forward contract passed its deadline has no origin, and
+// old clients keep asking for it. Deciding that absence inside the write
+// transaction cost BEGIN, both origin reads and COMMIT; this is one statement
+// outside any transaction block. It has the visibility of the transaction's
+// first read, since each read committed statement takes a fresh snapshot. A
+// true result is only a hint and takes no lock: the transaction selects the
+// origin again and rechecks its deadline after the client lifecycle fence, as
+// before. companion_contract_id has no foreign key, so the companion insert
+// never locked its origin row either.
+func companionOriginExists(
+	ctx context.Context,
+	sourceId server.Id,
+	destinationId server.Id,
+	originContractTimeout time.Duration,
+) (exists bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		leaveRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionOriginPrecheck)
+		defer leaveRead()
+		// the origin direction is reversed
+		server.Raise(conn.QueryRow(
+			ctx,
+			companionOriginExistsSql,
+			destinationId,
+			sourceId,
+			server.NowUtc().Add(-originContractTimeout),
+		).Scan(&exists))
+	})
+	return
+}
+
 // The internal prober owns its return-path reservation ramp as well as its
 // outgoing ramp. A provider's defaults must not reserve a larger companion
 // against that account than the probe's own origin ramp. The earliest origin
@@ -2083,6 +2139,15 @@ func createCompanionTransferEscrow(
 ) (transferEscrow *TransferEscrow, returnErr error) {
 	// Direct callers must not load or verify an optional file while holding pg.
 	ctx = providerWorkSessionContext(ctx)
+	// An absent origin is decided by one read-only statement, before the
+	// payer's turn and before any transaction. Only when an origin exists
+	// does the read committed write transaction open, and it selects the
+	// origin again inside, ahead of the client lifecycle fence and the
+	// origin deadline recheck that follow it.
+	if !companionOriginExists(ctx, sourceId, destinationId, originContractTimeout) {
+		server.RecordContractCompanionOriginOutcome(ctx, server.ContractCompanionOriginMissing)
+		return nil, ErrMissingCompanionOrigin
+	}
 	var posts []func() any
 	payerNetworkId := destinationNetworkId
 	requestedBytes := contractTransferByteCount

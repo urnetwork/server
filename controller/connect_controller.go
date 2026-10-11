@@ -27,6 +27,19 @@ var ControlId = server.Id(connect.ControlId)
 
 var errContractDestinationInactive = model.ErrContractDestinationInactive
 
+// The write boundary's fresh lifecycle read found the destination missing or
+// inactive. One value, so the route rejection cache can match it exactly.
+var errContractDestinationInactiveAtWrite = fmt.Errorf("%w: %v", errContractDestinationInactive, model.ErrActiveClientNotFound)
+
+type contractOriginFenceKey struct{}
+
+// Carries the update channel that the companion origin wait armed immediately
+// before its final authoritative read, from newContract back to
+// CreateContract. Written and read by the one synchronous request.
+type contractOriginFence struct {
+	update <-chan struct{}
+}
+
 var MinContractTransferByteCount = func() model.ByteCount {
 	settings := connect.DefaultClientSettings()
 	return max(
@@ -103,6 +116,13 @@ var inactiveDestinationDetailsCounter = prometheus.NewCounterVec(
 	[]string{"request_companion", "sender_role", "source_owner", "destination_owner", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
 )
 
+// Deterministic route refusals answered from, stored in, or not stored in the
+// owner's route rejection cache. A hit is also counted as a rejection above.
+var contractRouteRejectionCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_connect_contract_route_rejection_cache_total",
+	Help: "Inactive-destination and missing-companion-origin refusals by cache result: hit (answered without a database read), stored, or unstored (fenced by an origin edge during the read, bound disabled, or owner closed).",
+}, []string{"cause", "result"})
+
 var controlFrameFailureCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -125,10 +145,16 @@ func init() {
 			}
 		}
 	}
+	for _, cause := range []string{"inactive_destination", "missing_companion_origin"} {
+		for _, result := range []string{"hit", "stored", "unstored"} {
+			contractRouteRejectionCounter.WithLabelValues(cause, result)
+		}
+	}
 	prometheus.MustRegister(
 		transferByteCounter,
 		contractFailureCounter,
 		contractRejectionCounter,
+		contractRouteRejectionCounter,
 		missingOriginDetailsCounter,
 		inactiveDestinationDetailsCounter,
 		controlFrameFailureCounter,
@@ -729,6 +755,49 @@ func CreateContract(
 	// fall back to a companion contract because the destination does not advertise
 	// the ideal relationship mode.
 	companion := createContract.Companion
+
+	// A missing or inactive destination and a missing companion origin repeat
+	// for every identical request until the route changes, and old clients keep
+	// asking on their own interval. The origin notification owner keeps each
+	// such refusal briefly (model/contract_route_rejection.go), so a repeat is
+	// answered here, before any read. Only those refusals are recorded, never a
+	// contract, a canceled request or any other failure.
+	notifications := model.GetContractOriginNotifications(ctx)
+	routeRejectable := clientId != ControlId && destinationId != ControlId
+	if routeRejectable {
+		if rejection, ok := notifications.RouteRejection(clientId, destinationId, createContract.Companion); ok {
+			err := errContractDestinationInactive
+			if rejection.Cause == model.ContractRouteMissingOrigin {
+				err = model.ErrMissingCompanionOrigin
+			}
+			rejectionCause = contractFailureClass(err)
+			// replay the labels of the recorded refusal, with this sender's lane
+			recordContractFailureResolved(
+				clientId,
+				destinationId,
+				createContract.Companion,
+				model.ByteCount(createContract.TransferByteCount),
+				err,
+				contractResolution{
+					path:                 rejection.ResolutionPath,
+					relationship:         rejection.Relationship.Mode,
+					sourceLifecycle:      rejection.Relationship.SourceLifecycle,
+					destinationLifecycle: rejection.Relationship.DestinationLifecycle,
+					sourceOwner:          rejection.Relationship.SourceOwner,
+					destinationOwner:     rejection.Relationship.DestinationOwner,
+					senderRole:           createContract.SenderRole,
+				},
+			)
+			contractRouteRejectionCounter.WithLabelValues(rejectionCause, "hit").Inc()
+			contractError := contractResultError(err)
+			frame, err := connect.ToFrame(&protocol.CreateContractResult{Error: &contractError}, connect.DefaultProtocolVersion)
+			if err != nil {
+				return nil, err
+			}
+			timingResult = server.ContractCreationRejected
+			return []*protocol.Frame{frame}, nil
+		}
+	}
 	relationshipDetails := getProvideRelationshipDetails(ctx, clientId, destinationId)
 	resolution := contractResolution{
 		path:                 contractResolutionRelationship,
@@ -738,6 +807,22 @@ func CreateContract(
 		sourceOwner:          relationshipDetails.SourceOwner,
 		destinationOwner:     relationshipDetails.DestinationOwner,
 		senderRole:           createContract.SenderRole,
+	}
+	// A missing-origin refusal needs the fence its origin read armed; a
+	// destination refusal has none (an inactive client is never reactivated).
+	recordRouteRejection := func(cause model.ContractRouteRejectionCause, fence <-chan struct{}) {
+		if !routeRejectable || notifications == nil || ctx.Err() != nil {
+			return
+		}
+		result := "unstored"
+		if notifications.RecordRouteRejection(clientId, destinationId, createContract.Companion, model.ContractRouteRejection{
+			Cause:          cause,
+			ResolutionPath: resolution.path,
+			Relationship:   relationshipDetails,
+		}, fence) {
+			result = "stored"
+		}
+		contractRouteRejectionCounter.WithLabelValues(rejectionCause, result).Inc()
 	}
 
 	// A provide-mode key can outlive the derived identity that published it.
@@ -755,6 +840,7 @@ func CreateContract(
 			errContractDestinationInactive,
 			resolution,
 		)
+		recordRouteRejection(model.ContractRouteDestinationInactive, nil)
 		contractError := protocol.ContractError_Reliability
 		result := &protocol.CreateContractResult{Error: &contractError}
 		frame, err := connect.ToFrame(result, connect.DefaultProtocolVersion)
@@ -866,7 +952,8 @@ func CreateContract(
 		return nil, err
 	}
 
-	contractId, transferByteCount, priority, streamId, expirationTime, err := nextContract(ctx, clientId, createContract, companion, provideMode, contractManagerSettings)
+	originFence := &contractOriginFence{}
+	contractId, transferByteCount, priority, streamId, expirationTime, err := nextContract(context.WithValue(ctx, contractOriginFenceKey{}, originFence), clientId, createContract, companion, provideMode, contractManagerSettings)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
@@ -884,6 +971,13 @@ func CreateContract(
 			err,
 			resolution,
 		)
+		// Only the exact verdicts, never one joined with another failure.
+		switch {
+		case err == model.ErrMissingCompanionOrigin && originFence.update != nil:
+			recordRouteRejection(model.ContractRouteMissingOrigin, originFence.update)
+		case err == errContractDestinationInactiveAtWrite || err == errContractDestinationInactive:
+			recordRouteRejection(model.ContractRouteDestinationInactive, nil)
+		}
 		contractError := contractResultError(err)
 		result := &protocol.CreateContractResult{
 			Error: &contractError,
@@ -1117,7 +1211,7 @@ func newContract(
 		return
 	}
 	if destinationNetworkIdPointer == nil {
-		returnErr = fmt.Errorf("%w: %v", errContractDestinationInactive, model.ErrActiveClientNotFound)
+		returnErr = errContractDestinationInactiveAtWrite
 		return
 	}
 	sourceNetworkId, destinationNetworkId := *sourceNetworkIdPointer, *destinationNetworkIdPointer
@@ -1217,6 +1311,17 @@ func newContract(
 		// already exists.
 		originWatch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 		defer originWatch.Close()
+		// The wait arms the watch immediately before each authoritative read;
+		// the last armed channel fences a missing-origin refusal (see
+		// CreateContract). A nil watch arms nothing, so nothing is recorded.
+		originFence, _ := ctx.Value(contractOriginFenceKey{}).(*contractOriginFence)
+		armOriginRead := func() <-chan struct{} {
+			update := originWatch.Update()
+			if originFence != nil {
+				originFence.update = update
+			}
+			return update
+		}
 		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
 		escrow, err := waitForCompanionOrigin(ctx, originWatch, func() (*model.TransferEscrow, error) {
 			escrow, err := createCompanionTransferEscrow(
@@ -1242,7 +1347,7 @@ func newContract(
 				)
 			}
 			return escrow, err
-		}, originWatch.Update)
+		}, armOriginRead)
 		leaveOrigin()
 		if err != nil {
 			returnErr = err
