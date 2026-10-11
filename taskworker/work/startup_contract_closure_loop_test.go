@@ -29,9 +29,10 @@ func TestStartupContractClosureRejectsInvalidArguments(t *testing.T) {
 }
 
 // A retained old-key task has no PageSize and may carry the old After cursor.
-// The new startup key is independent; both actual executions scan from the head
-// and publish the same child identities without postponing existing wakes.
-func TestStartupContractClosureLegacyArgsAndNewKeyCoexist(t *testing.T) {
+// The earlier key's pass is retired: its claim finishes without publishing.
+// The new startup key is independent of it, and its actual execution scans
+// from the head and publishes each child once with its own lifetime.
+func TestStartupContractClosureRetiresLegacyArgsBesideTheNewKey(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -65,16 +66,8 @@ func TestStartupContractClosureLegacyArgsAndNewKeyCoexist(t *testing.T) {
 		defer worker.Close()
 		evalStartupClosureTask(t, ctx, worker, oldId)
 		first := readExpiryRecoveryQueue(t, ctx)
-		if _, found := first[oldKey]; found || len(first) != len(ids)+1 || first[newKey].id != current.id {
-			t.Fatal("legacy After or zero PageSize skipped the head or changed the independent startup")
-		}
-		for _, id := range ids {
-			row, found := first[task.RunOnce("close_scheduled_contract", id).String()]
-			var child CloseScheduledContractArgs
-			if !found || json.Unmarshal([]byte(row.args), &child) != nil || child.ContractId != id ||
-				!child.Deadline.Equal(started.Add(model.DefaultContractExpiration)) || !row.runAt.Equal(child.Deadline) {
-				t.Fatal("legacy argument compatibility omitted a child or changed its original lifetime")
-			}
+		if _, found := first[oldKey]; found || len(first) != 1 || first[newKey].id != current.id || first[newKey].args != current.args {
+			t.Fatal("the retired key's pass published children or changed the independent startup", len(first))
 		}
 		evalStartupClosureTask(t, ctx, worker, current.id)
 		second := readExpiryRecoveryQueue(t, ctx)
@@ -82,10 +75,11 @@ func TestStartupContractClosureLegacyArgsAndNewKeyCoexist(t *testing.T) {
 			t.Fatal("new startup did not finish one complete pass", len(second))
 		}
 		for _, id := range ids {
-			key := task.RunOnce("close_scheduled_contract", id).String()
-			before, after := first[key], second[key]
-			if before.id != after.id || before.args != after.args || !before.runAt.Equal(after.runAt) {
-				t.Fatal("independent startup key duplicated a child or postponed its earlier wake")
+			row, found := second[task.RunOnce("close_scheduled_contract", id).String()]
+			var child CloseScheduledContractArgs
+			if !found || json.Unmarshal([]byte(row.args), &child) != nil || child.ContractId != id ||
+				!child.Deadline.Equal(args.StartedAt.Add(model.DefaultContractExpiration)) || !row.runAt.Equal(child.Deadline) {
+				t.Fatal("startup pass omitted a child or changed its lifetime")
 			}
 		}
 	})

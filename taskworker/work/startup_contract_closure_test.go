@@ -608,3 +608,66 @@ func TestStartupContractClosurePublicationRetryKeepsCommittedPrefix(t *testing.T
 		}
 	})
 }
+
+// An earlier release scheduled the startup pass under another key, and both
+// passes walked the same contracts with that one hours behind: each of its
+// upserts moved an already queued close back to its earlier deadline and
+// recorded another wake. On the unchanged worker its claim scanned and
+// published every open contract again. It now finishes on its claim without
+// publishing, startup does not keep it alive, and the startup pass still
+// queues every contract.
+func TestStartupContractClosureRetiresTheEarlierKeyPass(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := model.WithProviderWorkSessionSource(t.Context(), nil)
+		networkId, sourceId, destinationId := newStartupClosureFreeClients(ctx)
+		ids := newStartupClosureScanContracts(ctx, networkId, sourceId, destinationId, 4)
+		owner := session.NewLocalClientSession(ctx, "", nil)
+		defer owner.Cancel()
+		retiredKey := task.RunOnce("schedule_open_contract_closures").String()
+		server.Tx(ctx, func(tx server.PgTx) {
+			task.ScheduleTaskInTx(tx, ScheduleOpenContractClosures,
+				&ScheduleOpenContractClosuresArgs{PageSize: startupContractClosurePageSize, StartedAt: server.NowUtc().Truncate(time.Microsecond).Add(-2 * time.Hour)},
+				owner, task.RunOnce("schedule_open_contract_closures"), task.RunAt(server.NowUtc()), task.MaxTime(30*time.Second))
+		})
+		retired, found := readExpiryRecoveryQueue(t, ctx)[retiredKey]
+		if !found {
+			t.Fatal("fixture did not queue the earlier key's pass")
+		}
+		worker := startupClosureWorker(ctx, NewStartupContractClosureTaskTarget())
+		defer worker.Close()
+		evalStartupClosureTask(t, ctx, worker, retired.id)
+		queuedCloses := func() (count int) {
+			queue := readExpiryRecoveryQueue(t, ctx)
+			for _, id := range ids {
+				if _, queued := queue[task.RunOnce("close_scheduled_contract", id).String()]; queued {
+					count++
+				}
+			}
+			return
+		}
+		if count := queuedCloses(); count != 0 {
+			t.Fatalf("the earlier key's pass published %d closes", count)
+		}
+		if _, pending := readExpiryRecoveryQueue(t, ctx)[retiredKey]; pending {
+			t.Fatal("the earlier key's pass is still pending after its claim")
+		}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			ScheduleOpenContractClosuresOnStartup(owner, tx)
+		})
+		queue := readExpiryRecoveryQueue(t, ctx)
+		if _, pending := queue[retiredKey]; pending {
+			t.Fatal("startup scheduled the earlier key's pass again")
+		}
+		startup, found := queue[task.RunOnce("schedule_open_contract_closures_on_startup").String()]
+		if !found {
+			t.Fatal("startup did not queue its own pass")
+		}
+		evalStartupClosureTask(t, ctx, worker, startup.id)
+		if count := queuedCloses(); count != len(ids) {
+			t.Fatalf("startup pass queued %d of %d contracts", count, len(ids))
+		}
+	})
+}

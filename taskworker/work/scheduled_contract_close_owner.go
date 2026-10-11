@@ -1,14 +1,20 @@
 // A due scheduled close also retires due siblings that share its financial
-// owner. Each sibling's deadline comes from its own queued close; the sibling's
-// task later finishes through the terminal fast path without any owner.
+// owner. Each sibling's deadline comes from its own queued close or, for a
+// contract issued with one, its stored deadline; a queued sibling's task later
+// finishes through the terminal fast path without any owner.
 //
 // The queue runs in deadline order and then in publication order, which is
 // contract creation order. One payer grant owns runs of thousands of
 // consecutive queued closes, so at the queue head every worker slot claims the
 // same owner, one closes a batch and the rest refuse. A refused or terminal
 // close retires nothing of its own. It instead closes one other owner's due
-// queued closes, sampled from random queue pages, so the fleet works many
-// owners at once instead of the one at the head.
+// contracts: first the owner of a contract whose stored deadline passed within
+// the last hour, read from a random slice of that hour, then within the rest
+// of the last day and the rest of the deadline lookback, and otherwise the
+// owner of a queued close sampled from random queue pages. The queue holds only
+// legacy contracts behind days of older deadlines, so contracts that carry
+// their own deadline are otherwise reached by no queued close at all. The
+// newest come first: most hold escrow on a grant that is still active.
 package work
 
 import (
@@ -56,7 +62,24 @@ const scheduledCloseStealOwnerAttempts = 2
 // terminal close still finishes with its own ordinary result.
 const scheduledCloseStealTimeout = time.Minute
 
+// A steal looks for contracts whose stored deadline passed within each window
+// in turn: the last hour, the rest of the last day, the rest of the lookback.
+// It reads one random slice of a window, so a window already closed costs at
+// most a slice of index entries. Main's contracts carry a stored deadline from
+// 2026-10-07, so once that date is beyond the lookback no slice reads only
+// legacy contracts.
+const scheduledCloseRecentWindow = time.Hour
+const scheduledCloseDayWindow = 24 * time.Hour
+const scheduledCloseDeadlineLookback = 5 * 24 * time.Hour
+const scheduledCloseRecentSlice = 2 * time.Second
+
 var scheduledCloseStealSlots = make(chan struct{}, scheduledCloseStealConcurrency)
+
+// Chooses a uniform slice start between windowStart and span later. A test
+// fixes it on its own contracts.
+var scheduledCloseRecentSliceStart = func(windowStart time.Time, span time.Duration) time.Time {
+	return windowStart.Add(time.Duration(mathrand.Int64N(int64(span))))
+}
 
 // The canonical target name of a queued close, set once the function exists.
 var scheduledCloseFunctionName string
@@ -113,6 +136,60 @@ func dueScheduledCloses(now time.Time) model.ContractDeadlineDueFunc {
 	}
 }
 
+// A contract issued with an immutable deadline carries on its row the deadline
+// its queued close would carry, so once that deadline passes the contract is
+// due without a queued close. A due queued close keeps its own, possibly
+// earlier, deadline. A legacy contract without a stored deadline is due only
+// through its queued close.
+func dueContractDeadlines(now time.Time) model.ContractDeadlineDueFunc {
+	scheduled := dueScheduledCloses(now)
+	return func(ctx context.Context, query server.PgCanQuery, contractIds []server.Id) []model.ContractDeadline {
+		deadlines := scheduled(ctx, query, contractIds)
+		queued := make(map[server.Id]bool, len(deadlines))
+		for _, deadline := range deadlines {
+			queued[deadline.ContractId] = true
+		}
+		unqueuedIds := make([]server.Id, 0, len(contractIds))
+		for _, contractId := range contractIds {
+			if !queued[contractId] {
+				unqueuedIds = append(unqueuedIds, contractId)
+			}
+		}
+		return append(deadlines, model.ReadDueContractExpirationsInConn(ctx, query, unqueuedIds, now)...)
+	}
+}
+
+// Reads open contracts whose stored deadline passed at now, from one random
+// slice of those whose creation-based deadline passed within the recent window
+// and, while a slice holds none, from one random slice of each older window,
+// ordered by contract. The caller's own contract is skipped. Each read stops at
+// one candidate batch, and its connection is released before returning.
+func sampleRecentDueContracts(ctx context.Context, now time.Time, excludeContractId server.Id) (candidates []model.ContractDeadline) {
+	windowEnd := now.Add(-model.DefaultContractExpiration)
+	windows := []time.Duration{scheduledCloseRecentWindow, scheduledCloseDayWindow - scheduledCloseRecentWindow,
+		scheduledCloseDeadlineLookback - scheduledCloseDayWindow}
+	for _, window := range windows {
+		windowStart := windowEnd.Add(-window)
+		sliceStart := scheduledCloseRecentSliceStart(windowStart, window-scheduledCloseRecentSlice)
+		contracts, err := model.ReadOpenContractDeadlines(ctx, model.ContractIdTimeBound(sliceStart),
+			model.ContractIdTimeBound(sliceStart.Add(scheduledCloseRecentSlice)), scheduledCloseStealCandidateLimit, false)
+		if err != nil {
+			glog.Infof("[close-scheduled]recent sample failed: %v\n", err)
+			return nil
+		}
+		for _, contract := range contracts {
+			if deadline, ok := contract.Due(now); ok && contract.ContractId != excludeContractId {
+				candidates = append(candidates, deadline)
+			}
+		}
+		if len(candidates) != 0 {
+			return
+		}
+		windowEnd = windowStart
+	}
+	return
+}
+
 // Reads due, unclaimed queued closes from random pages of the queue, ordered by
 // contract. A claimed close belongs to its running owner and is skipped, as is
 // the caller's own contract. The connection is released before returning.
@@ -164,11 +241,13 @@ func sampleDueScheduledCloses(ctx context.Context, now time.Time, excludeContrac
 }
 
 // Spends a claim whose own close retired nothing on another owner: closes one
-// sampled due queued close of an owner disjoint from heldBalanceIds, with up to
-// a batch of that owner's due siblings, through the ordinary owner batch.
-// Each closed contract keeps the deadline of its own queued close. Returns the
-// contracts newly closed. Steals are best effort: a busy process, the steal
-// bound or any failure closes nothing and never fails the caller's own close.
+// due contract of an owner disjoint from heldBalanceIds, with up to a batch of
+// that owner's due siblings, through the ordinary owner batch. A contract due
+// through its stored deadline, recently due first, is preferred to a sampled
+// queued close. Each closed contract keeps the deadline of its own queued close
+// or its stored deadline. Returns the contracts newly closed. Steals are best
+// effort: a busy process, the steal bound or any failure closes nothing and
+// never fails the caller's own close.
 func stealScheduledCloseOwner(ctx context.Context, now time.Time, excludeContractId server.Id, heldBalanceIds []server.Id) (stolenClosed int) {
 	select {
 	case scheduledCloseStealSlots <- struct{}{}:
@@ -179,7 +258,10 @@ func stealScheduledCloseOwner(ctx context.Context, now time.Time, excludeContrac
 	ctx, cancel := context.WithTimeout(ctx, scheduledCloseStealTimeout)
 	defer cancel()
 	server.HandleError(func() {
-		candidates := sampleDueScheduledCloses(ctx, now, excludeContractId)
+		candidates := sampleRecentDueContracts(ctx, now, excludeContractId)
+		if len(candidates) == 0 {
+			candidates = sampleDueScheduledCloses(ctx, now, excludeContractId)
+		}
 		attempted := map[string]bool{}
 		// Queued closes outlive their contracts, so read custody a chunk at a
 		// time until an open contract of an untried owner turns up.
@@ -211,7 +293,7 @@ func stealScheduledCloseOwner(ctx context.Context, now time.Time, excludeContrac
 					continue
 				}
 				attempted[owner] = true
-				closed, err := model.ReconcileContractOwnerAtDeadline(ctx, state.BalanceIds, candidate, dueScheduledCloses(now))
+				closed, err := model.ReconcileContractOwnerAtDeadline(ctx, state.BalanceIds, candidate, dueContractDeadlines(now))
 				if err != nil {
 					glog.Infof("[close-scheduled]steal of %s failed: %v\n", candidate.ContractId, err)
 					return
