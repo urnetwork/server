@@ -207,7 +207,9 @@ func readScheduledCloseResults(t testing.TB, ctx context.Context) []CloseSchedul
 // One grant owner admitted once per queued contract on the old worker, so a
 // backlog serialized behind its own owner. The owner is now admitted twice per
 // bounded batch: once for the primary and its sibling read, once for the
-// siblings. The other queued closes finish through the terminal read.
+// siblings. The other queued closes finish through the terminal read, and a
+// terminal claim may close a later batch for the same owner instead of the
+// next open queued close.
 func TestScheduledContractCloseOwnerBatchBoundsAdmissions(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -229,7 +231,7 @@ func TestScheduledContractCloseOwnerBatchBoundsAdmissions(t *testing.T) {
 				admitted, waiting, refused, executions, 2*batches, count)
 		}
 		requireScheduledCloseOwnerSettled(t, ctx, payer, count)
-		closing, siblings, terminal := 0, 0, 0
+		closing, siblings, terminal, stealing, stolen := 0, 0, 0, 0, 0
 		for _, result := range readScheduledCloseResults(t, ctx) {
 			switch {
 			case result.Reconciliation == nil || result.Reconciliation.Missing:
@@ -240,9 +242,14 @@ func TestScheduledContractCloseOwnerBatchBoundsAdmissions(t *testing.T) {
 				closing++
 				siblings += result.OwnerBatchClosed
 			}
+			if result.StolenClosed != 0 {
+				stealing++
+				stolen += result.StolenClosed
+			}
 		}
-		if closing != batches || closing+siblings != count || terminal != count-batches {
-			t.Fatalf("results closing=%d siblings=%d terminal=%d; want %d batches covering %d contracts", closing, siblings, terminal, batches, count)
+		if closing+stealing != batches || closing+siblings+stolen != count || terminal != count-closing {
+			t.Fatalf("results closing=%d siblings=%d stealing=%d stolen=%d terminal=%d; want %d batches covering %d contracts",
+				closing, siblings, stealing, stolen, terminal, batches, count)
 		}
 	})
 }
