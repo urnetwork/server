@@ -86,6 +86,12 @@ type Config struct {
 	// Bounds how long the packet pump waits for the multi-client to take one
 	// packet from the tun. Zero or negative means 15s.
 	PacketSendTimeout time.Duration
+	// How long the provider must send nothing before Close retires the
+	// derived client (see providerReturnDrain). Zero or negative means 1s.
+	ReturnQuietInterval time.Duration
+	// Bounds that whole wait, for a provider that never goes quiet. It sits
+	// inside CloseTimeout. Zero or negative means 5s.
+	ReturnDrainTimeout time.Duration
 }
 
 // Returns CloseTimeout, or its default when unset.
@@ -102,6 +108,98 @@ func (self Config) packetSendTimeout() time.Duration {
 		return self.PacketSendTimeout
 	}
 	return 15 * time.Second
+}
+
+// Returns ReturnQuietInterval, or its default when unset.
+func (self Config) returnQuietInterval() time.Duration {
+	if 0 < self.ReturnQuietInterval {
+		return self.ReturnQuietInterval
+	}
+	return time.Second
+}
+
+// Returns ReturnDrainTimeout, or its default when unset.
+func (self Config) returnDrainTimeout() time.Duration {
+	if 0 < self.ReturnDrainTimeout {
+		return self.ReturnDrainTimeout
+	}
+	return 5 * time.Second
+}
+
+// Provider returns that are still arriving when a probe ends.
+//
+// A provider on SDK v2026.8.31 or later keeps every TCP return it read from an
+// origin until the derived client acknowledges it, and keeps retransmitting
+// it otherwise; the provider's own TCP flow also replays unacknowledged origin
+// bytes until this tunnel's netstack answers. A probe that stops reading early
+// or leaves a pooled connection open therefore must not revoke its derived
+// client while the provider is still sending: each return arriving at a
+// revoked client is bandwidth the provider spends forever.
+//
+// The receive callback records every provider return. Close waits, with the
+// tun, the packet pump and the multi-client all still live, until a whole
+// quiet interval passes with no return. Until then each return is
+// acknowledged by the derived client, and the live netstack answers it with
+// the ACK or RST that ends the provider's flow. The wait is bounded by
+// timeout and by Close's own deadline, so a provider that never goes quiet
+// only delays teardown.
+//
+// Safe for concurrent use: observe runs on receive callbacks while one Close
+// waits.
+type providerReturnDrain struct {
+	returnCount   atomic.Uint64
+	quietInterval time.Duration
+	timeout       time.Duration
+	// time.After in production. Tests release each wait at an explicit barrier.
+	after func(time.Duration) <-chan time.Time
+}
+
+// A drain with nothing recorded yet.
+func newProviderReturnDrain(quietInterval time.Duration, timeout time.Duration) *providerReturnDrain {
+	return &providerReturnDrain{
+		quietInterval: quietInterval,
+		timeout:       timeout,
+		after:         time.After,
+	}
+}
+
+// Records one provider return. It is on the receive path, so it does no more
+// than one atomic increment.
+func (self *providerReturnDrain) observe() {
+	self.returnCount.Add(1)
+}
+
+// Returns true once a whole quiet interval, counted from this call, passes
+// with no provider return; false when the timeout or ctx ends the wait first,
+// or when dataDone closes: a data path the caller already canceled has no live
+// destination left to drain for. A return during an interval starts another.
+func (self *providerReturnDrain) wait(ctx context.Context, dataDone <-chan struct{}) bool {
+	timeout := self.after(self.timeout)
+	lastCount := self.returnCount.Load()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-dataDone:
+			return false
+		case <-timeout:
+			return false
+		case <-self.after(self.quietInterval):
+		}
+		count := self.returnCount.Load()
+		if count == lastCount {
+			return true
+		}
+		lastCount = count
+	}
+}
+
+// Delivers each provider return to the tun, recording it for the drain first.
+func providerReturnReceiver(write func([]byte) (int, error), returns *providerReturnDrain) connect.ReceivePacketFunction {
+	return func(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte) {
+		returns.observe()
+		_, _ = write(packet)
+	}
 }
 
 // The cause (context.Cause) of Tunnel.Lost when the
@@ -231,8 +329,10 @@ func inTunnelOnlyDnsResolverSettings() *connect.DnsResolverSettings {
 // dialed through it egresses from that provider.
 type Tunnel struct {
 	cancelData      context.CancelFunc
+	dataDone        <-chan struct{}
 	cancelLifecycle context.CancelFunc
 	tun             *connect.Tun
+	returns         *providerReturnDrain
 	multiClient     *connect.RemoteUserNatMultiClient
 	generator       *connect.ApiMultiClientGenerator
 	clientStrategy  *connect.ClientStrategy
@@ -343,12 +443,11 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	setup := newProviderSetupState(cfg.SetupObservations, providerClientId)
 	multiClientSettings := providerTunnelMultiClientSettingsForConfig(cfg)
 	multiClientSettings.InitialPingObservations = cfg.InitialPingObservations
+	returns := newProviderReturnDrain(cfg.returnQuietInterval(), cfg.returnDrainTimeout())
 	multiClient := connect.NewRemoteUserNatMultiClient(
 		dataCtx,
 		&providerRegistrationGenerator{ApiMultiClientGenerator: generator, registration: registration, setup: setup},
-		func(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte) {
-			_, _ = tun.Write(packet)
-		},
+		providerReturnReceiver(tun.Write, returns),
 		protocol.ProvideMode_Network,
 		multiClientSettings,
 	)
@@ -396,8 +495,10 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 
 	return &Tunnel{
 		cancelData:      cancelData,
+		dataDone:        dataCtx.Done(),
 		cancelLifecycle: cancelLifecycle,
 		tun:             tun,
+		returns:         returns,
 		multiClient:     multiClient,
 		generator:       generator,
 		clientStrategy:  clientStrategy,
@@ -554,6 +655,8 @@ func (self *Tunnel) Close() error {
 		defer cancel()
 		self.closeErr = closeTunnelParts(
 			ctx,
+			self.tun.DohCache().Close,
+			func(ctx context.Context) { self.returns.wait(ctx, self.dataDone) },
 			self.cancelData,
 			self.tun.Close,
 			self.pumpDone,
@@ -572,11 +675,21 @@ func (self *Tunnel) Close() error {
 // OOB transports remain owned by ApiMultiClientGenerator; closing only the
 // former leaves asynchronous retirement tails behind each short-lived probe.
 //
+// The provider's flows end first, while the whole data path is still live.
+// closeResolver retires the tunnel's private DoH cache, whose pooled TLS
+// connections would otherwise close only inside a netstack that can no longer
+// send, and drainReturns holds teardown until the provider has gone quiet (see
+// providerReturnDrain). Only then does packet admission stop and the derived
+// client get revoked; a provider return that reached a revoked client would be
+// retransmitted to it forever.
+//
 // Every close is attempted even after an earlier one reports an error. This is
 // teardown: an error is useful to the caller, but it is not permission to leak
 // the remaining owners.
 func closeTunnelParts(
 	ctx context.Context,
+	closeResolver func(),
+	drainReturns func(context.Context),
 	cancelData context.CancelFunc,
 	closeTun func() error,
 	pumpDone <-chan struct{},
@@ -585,7 +698,9 @@ func closeTunnelParts(
 	closeClientStrategy func(),
 	cancelLifecycle context.CancelFunc,
 ) error {
-	// Stop packet admission first. The lifecycle context deliberately remains
+	closeResolver()
+	drainReturns(ctx)
+	// Stop packet admission next. The lifecycle context deliberately remains
 	// live through generator retirement so its final authenticated
 	// remove-client request can complete.
 	cancelData()

@@ -14805,6 +14805,14 @@ success uses the existing short retry pace to replenish its deficit. Warmup
 success pacing and quota-full oldest-run expiry remain separate. Accepted
 measured failures count toward the same quota; setup-only completions do not.
 
+Each URL turn's tunnel teardown keeps the derived client, packet pump and
+netstack live until the provider has returned nothing for one second (at most
+five, inside the close timeout), after first closing the tunnel's pooled DoH
+connections. Late provider returns are acknowledged and answered with the ACK or
+RST that ends the provider's flow instead of reaching a revoked client, which a
+provider on SDK v2026.8.31 or later otherwise retransmits to indefinitely. Turn
+and close timings include this drain; it is not provider latency.
+
 Bounded diagnosis must name its indexed raw cohort before applying current
 eligibility or history projections. The admission head filters the stored
 `provider_egress_probe_cycle.eligible` hint; the census reconstructs current
