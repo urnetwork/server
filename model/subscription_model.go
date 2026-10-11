@@ -5832,6 +5832,10 @@ type sweepOrphanStep struct {
 	sql              string
 	deleteSql        string
 	newCursorTargets func() []any
+	// Replaces the SQL page loop for a step that clears mirrors after each
+	// committed page. It keeps sweepOrphanCursor's start, budget and resume
+	// contract, with a cursor shaped by newCursorTargets.
+	sweep func(ctx context.Context, startKey []any, maxRowCount int, sliceSize int) (removedCount int64, rowCount int, endKey []any, done bool)
 }
 
 // sweepOrphanSteps pages steps in order starting from start, stopping once every
@@ -5872,13 +5876,21 @@ func sweepOrphanSteps(
 		}
 		key = nil
 
-		stepRemoved, rowCount, endKey, stepDone := sweepOrphanCursor(
-			ctx,
-			steps[step],
-			startKey,
-			remaining,
-			sliceSize,
-		)
+		var stepRemoved int64
+		var rowCount int
+		var endKey []any
+		var stepDone bool
+		if steps[step].sweep != nil {
+			stepRemoved, rowCount, endKey, stepDone = steps[step].sweep(ctx, startKey, remaining, sliceSize)
+		} else {
+			stepRemoved, rowCount, endKey, stepDone = sweepOrphanCursor(
+				ctx,
+				steps[step],
+				startKey,
+				remaining,
+				sliceSize,
+			)
+		}
 		removedCount += stepRemoved
 		if !stepDone {
 			return removedCount, SweepOrphanCursor{
@@ -5908,6 +5920,10 @@ func encodeSweepCursorKey(values []any) []string {
 			key[i] = v.String()
 		case string:
 			key[i] = v
+		case int:
+			key[i] = strconv.Itoa(v)
+		case int64:
+			key[i] = strconv.FormatInt(v, 10)
 		default:
 			// a new key column type must extend both halves of the codec
 			panic(fmt.Errorf("unsupported sweep cursor column type %T", value))
@@ -5934,6 +5950,18 @@ func decodeSweepCursorKey(key []string, targets []any) (values []any, ok bool) {
 			values[i] = id
 		case *string:
 			values[i] = key[i]
+		case *int:
+			n, err := strconv.Atoi(key[i])
+			if err != nil {
+				return nil, false
+			}
+			values[i] = n
+		case *int64:
+			n, err := strconv.ParseInt(key[i], 10, 64)
+			if err != nil {
+				return nil, false
+			}
+			values[i] = n
 		default:
 			return nil, false
 		}
@@ -6049,27 +6077,6 @@ func sweepOrphanCursor(
 			return removedCount, rowCount, cursor, false
 		}
 	}
-}
-
-// sweepOrphanTable pages one child table to completion in a single call: the
-// unbudgeted, non-resumable form of sweepOrphanCursor, for sweeps whose driver
-// tables are small enough that a whole pass fits comfortably in one run (see
-// SweepOrphanNetworkClientData). Sweeps over the contract-scale tables must use
-// the budgeted form instead — see the note on sweepOrphanSteps.
-func sweepOrphanTable(
-	ctx context.Context,
-	sliceSize int,
-	sql string,
-	newCursorTargets func() []any,
-) (removedCount int64) {
-	removedCount, _, _, _ = sweepOrphanCursor(
-		ctx,
-		sweepOrphanStep{sql: sql, newCursorTargets: newCursorTargets},
-		nil,
-		0,
-		sliceSize,
-	)
-	return
 }
 
 // derefCursor dereferences a slice of typed pointers into a slice of their
