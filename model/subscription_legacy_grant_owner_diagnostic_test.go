@@ -114,10 +114,12 @@ func TestLegacySettlementSharedGrantAcrossAllShards(t *testing.T) {
 				pages <- pageResult{shard: shard, page: page, err: err}
 			}()
 		}
+		// The owner admitted the grant's financial ownership keys before its
+		// grant lock, so every sibling cohort is refused at that admission.
 		busy := 0
 		for range LegacySettlementShardCount - 1 {
 			result := <-pages
-			if result.err != nil || result.page.Completed != 0 || result.page.Failed != 0 || result.page.Visited != perShard || result.page.BusyGrantSetMismatch != perShard || result.page.BusyOrGone != perShard {
+			if result.err != nil || result.page.Completed != 0 || result.page.Failed != 0 || result.page.Visited != perShard || result.page.BusyAdmissionDeferred != perShard || result.page.BusyOrGone != perShard {
 				t.Fatalf("sibling shard did not identify actual legacy owner: %+v", result)
 			}
 			busy += result.page.BusyOrGone
@@ -142,7 +144,7 @@ func TestLegacySettlementSharedGrantAcrossAllShards(t *testing.T) {
 		completed, retries := 0, 0
 		for range LegacySettlementShardCount {
 			result := <-pages
-			if result.err != nil || result.page.Failed != 0 || result.page.BusyOrGone != result.page.BusyGrantSetMismatch {
+			if result.err != nil || result.page.Failed != 0 || result.page.BusyOrGone != result.page.BusyAdmissionDeferred {
 				t.Fatalf("concurrent same-grant page had a different failure: %+v", result)
 			}
 			completed += result.page.Completed

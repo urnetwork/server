@@ -122,8 +122,11 @@ func TestLegacySettlementFinancialLatencyDenseSharedGrant(t *testing.T) {
 				owner.afterGrant = func() {
 					var err error
 					busyPage, err = FlushLegacySettlements(ctx, 1, nil, 64)
+					// The owner admitted the grant's financial ownership keys before
+					// its grant lock, so each cohort of the page yields at admission,
+					// including the one holding the owner's own intent.
 					if err != nil || busyPage.Visited != 64 || busyPage.Completed != 0 || busyPage.Failed != 0 ||
-						busyPage.BusyIntentUnavailable != 1 || busyPage.BusyGrantSetMismatch != 63 || busyPage.Cursor == nil {
+						busyPage.BusyAdmissionDeferred != 64 || busyPage.BusyOrGone != 64 || busyPage.Cursor == nil {
 						t.Fatalf("owned grant did not refuse the exact dense prefix: %+v err=%v", busyPage, err)
 					}
 					complete, blocked, _, err := flushLegacySettlement(ctx, independentId)
