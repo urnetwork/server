@@ -25,7 +25,8 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for head := 793; head <= 813; head++ {
+		last := migrationCurrentSuffixContracts[len(migrationCurrentSuffixContracts)-1].artifact.requiredVersion
+		for head := 793; head <= last; head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
@@ -108,6 +109,12 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing identified checkpoint total", 813, `ALTER TABLE contract_close DROP COLUMN identified_checkpoint_byte_count`},
 		{"identified checkpoint total truncates bytes", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count TYPE integer`},
 		{"invented identified checkpoint total", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count SET DEFAULT 0`},
+		{"missing payout plan sweep staging", 814, `DROP TABLE payment_plan_sweep`},
+		{"payout plan allows two pending plans", 814, `DROP INDEX payment_plan_assignment_pending`},
+		{"missing sweep owner guard", 814, `DROP TRIGGER payment_plan_sweep_owner_guard ON transfer_escrow_sweep`},
+		{"sweep owner guard fires on every update", 814, `DROP TRIGGER payment_plan_sweep_owner_guard ON transfer_escrow_sweep; CREATE TRIGGER payment_plan_sweep_owner_guard BEFORE UPDATE ON transfer_escrow_sweep FOR EACH ROW EXECUTE FUNCTION payment_plan_sweep_owner_guard()`},
+		{"missing reliability window", 815, `DROP TABLE payment_plan_reliability_window CASCADE`},
+		{"missing reliability partials", 815, `DROP TABLE payment_plan_reliability_partial`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
