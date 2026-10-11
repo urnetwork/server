@@ -117,6 +117,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing reliability partials", 815, `DROP TABLE payment_plan_reliability_partial`},
 		{"dropped sweep destination index rebuilt", 816, `CREATE INDEX transfer_escrow_sweep_destination_id_sweep_time ON transfer_escrow_sweep (destination_id, sweep_time) INCLUDE (payout_net_revenue_nano_cents)`},
 		{"dropped open pair index rebuilt", 817, `CREATE INDEX transfer_contract_pair_open_create_time ON transfer_contract (source_id, destination_id, create_time) WHERE open AND companion_contract_id IS NULL`},
+		{"dropped open destination index rebuilt", 818, `CREATE INDEX transfer_contract_open_destination_partial ON transfer_contract (destination_id) WHERE open`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -194,6 +195,7 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 			}{
 				{816, "transfer_escrow_sweep", "transfer_escrow_sweep_destination_id_sweep_time"},
 				{817, "transfer_contract", "transfer_contract_pair_open_create_time"},
+				{818, "transfer_contract", "transfer_contract_open_destination_partial"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool

@@ -235,6 +235,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationIndexRemoved("transfer_escrow_sweep", "transfer_escrow_sweep_destination_id_sweep_time")),
 	migrationCurrentSuffix(817, "legacy open pair index removed",
 		migrationIndexRemoved("transfer_contract", "transfer_contract_pair_open_create_time")),
+	migrationCurrentSuffix(818, "legacy open destination index removed",
+		migrationIndexRemoved("transfer_contract", "transfer_contract_open_destination_partial")),
 }
 
 // A dropped index stays dropped: a rebuilt copy under the published name would

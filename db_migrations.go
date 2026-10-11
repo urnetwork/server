@@ -9962,4 +9962,14 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_pair_open_create_time`,
 		`DROP INDEX IF EXISTS transfer_contract_pair_open_create_time`,
 	),
+	// 818: transfer_contract_open_destination_partial (6 GB) served the
+	// destination arm of `open AND (source_id = $1 OR destination_id = $1)`.
+	// That reader now uses the unresolved CASE predicate (and has no production
+	// caller), and the open-contract stats order by create_time through
+	// transfer_contract_open_partial_create_time. Not scanned since 2026-09-27
+	// 01:21 UTC. Dropping it also removes a whole-heap priority rebuild.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_open_destination_partial`,
+		`DROP INDEX IF EXISTS transfer_contract_open_destination_partial`,
+	),
 }
