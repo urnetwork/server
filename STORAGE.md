@@ -270,16 +270,24 @@ Storage tuning is not one-and-done — inflow and schema change. Each cycle:
    thrashing vacuum and raise `autovacuum_work_mem`.
 
 Cadence: snapshot monthly, and any time an alert fires on primary disk. The
-`bringyourctl db maintenance <epoch> [--reindex] [--cleanup] [--analyze]`
+`bringyourctl db maintenance <epoch> [--reindex] [--cleanup] [--analyze] [--include-large]`
 command drives the periodic REINDEX/ANALYZE rotation (`db_maintenance.go`);
 per-table autovacuum handles the between-maintenance reclamation. The recurring
 rotation must not full-table reindex `contract_close`, `transfer_escrow`,
-`transfer_contract`, `transfer_escrow_sweep`, or the partition-managed
-reliability/connection tables: their size or churn requires the targeted-index,
-partition-turnover, tuned-autovacuum, or one-time `pg_repack` strategies above.
-With cleanup enabled, maintenance removes inactive
-`_ccnew`/`_ccold` indexes (including associated TOAST indexes) before and after
-each rebuild so an interrupted attempt cannot accumulate numbered retry debris.
+`transfer_contract`, `transfer_escrow_sweep`, `network_client`, or the
+partition-managed reliability/connection tables: their size or churn requires
+the targeted-index, partition-turnover, tuned-autovacuum, or one-time
+`pg_repack` strategies above. Any other table above 16 GiB (heap, toast, and
+valid indexes) is cleanup-only unless an operator run passes `--include-large`.
+A rebuild starts only while no transaction in the database is 10 minutes old,
+no other index build is in progress, and fewer than 48 backends are running on
+cpu; otherwise the epoch is deferred to the next slot and continued there, as it
+is five minutes after a drain interrupts it. With cleanup enabled, maintenance
+drops an invalid `_ccnew`/`_ccold` index (including associated TOAST indexes)
+only when it is the copy of a valid index with the same definition, at the start
+of each run and before and after each rebuild (after a failed or canceled one on
+a bounded context detached from the canceled one), so an interrupted attempt
+cannot strand or accumulate numbered retry debris.
 
 ### Watch items carried out of 2026-07 (update as resolved)
 - [ ] `contract_close`, `transfer_contract`, `transfer_escrow`: one-time

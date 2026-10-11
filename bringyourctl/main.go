@@ -42,7 +42,7 @@ Usage:
     bringyourctl db version
     bringyourctl db migrate
     bringyourctl db vacuum [--exclude=<table>...]
-    bringyourctl db maintenance (all|<epoch>) [--reindex] [--cleanup] [--analyze]
+    bringyourctl db maintenance (all|<epoch>) [--reindex] [--cleanup] [--analyze] [--include-large]
     bringyourctl db audit [--fix [--force-drop-indexes]]
     bringyourctl db backfill-sweep-destination-id [--batch=<n>]
     bringyourctl db backfill-contract-reap-time [--batch=<n>]
@@ -635,6 +635,24 @@ func dbMaintenance(opts docopt.Opts) {
 	reindex, _ := opts.Bool("--reindex")
 	cleanup, _ := opts.Bool("--cleanup")
 	analyze, _ := opts.Bool("--analyze")
+	// the explicit opt-in that lets this run rebuild tables above the
+	// automatic rotation's size bound
+	includeLarge, _ := opts.Bool("--include-large")
+
+	// a stopped run prints why; the load guard applies to operator runs too
+	report := func(outcome *server.DbMaintenanceOutcome) bool {
+		if outcome.Stopped == "" {
+			return true
+		}
+		fmt.Printf(
+			"Maintenance %s: %s (%d table(s) and %d priority index(es) done).\n",
+			outcome.Stopped,
+			outcome.Reason,
+			len(outcome.DoneTables),
+			len(outcome.DoneIndexes),
+		)
+		return false
+	}
 
 	// `all` runs a full reindex cycle. Reindexing is spread across
 	// DbReindexEpochs epochs (each table is hash-assigned to exactly one epoch
@@ -645,25 +663,30 @@ func dbMaintenance(opts docopt.Opts) {
 		fmt.Printf("Running DB maintenance for a full cycle (%d epochs) ...\n", server.DbReindexEpochs)
 		for epoch := uint64(0); epoch < server.DbReindexEpochs; epoch += 1 {
 			fmt.Printf(">>> maintenance epoch %d/%d\n", epoch, server.DbReindexEpochs-1)
-			server.DbMaintenance(context.Background(), epoch, &server.DbMaintenanceOptions{
-				Reindex: reindex,
-				Cleanup: cleanup,
-				Analyze: analyze && epoch == server.DbReindexEpochs-1,
+			outcome := server.DbMaintenance(context.Background(), epoch, &server.DbMaintenanceOptions{
+				Reindex:            reindex,
+				Cleanup:            cleanup,
+				Analyze:            analyze && epoch == server.DbReindexEpochs-1,
+				IncludeLargeTables: includeLarge,
 			})
+			if !report(outcome) {
+				return
+			}
 		}
 		return
 	}
 
 	epoch, _ := opts.Int("<epoch>")
 	dbMaintenanceOpts := &server.DbMaintenanceOptions{
-		Reindex: reindex,
-		Cleanup: cleanup,
-		Analyze: analyze,
+		Reindex:            reindex,
+		Cleanup:            cleanup,
+		Analyze:            analyze,
+		IncludeLargeTables: includeLarge,
 	}
 
 	fmt.Printf("Running DB maintenance ...\n")
 	// server.DbMigrationVerbose = true
-	server.DbMaintenance(context.Background(), uint64(epoch), dbMaintenanceOpts)
+	report(server.DbMaintenance(context.Background(), uint64(epoch), dbMaintenanceOpts))
 }
 
 // VACUUM (FULL, ANALYZE) every public table except the excluded ones (and their
