@@ -238,6 +238,8 @@ func TestSessionAuthorityPrecedenceRetainsCommonChecks(t *testing.T) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active=true WHERE client_id=$1`, b))
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active=false WHERE client_id=$1`, c))
 			})
+			// the fixture reactivates clients, which production never does
+			stateRefusals.forget()
 			if ValidateByJwtState(ctx, claims, true) == nil {
 				t.Fatal(mode, "accepted inactive own client")
 			}
@@ -245,6 +247,7 @@ func TestSessionAuthorityPrecedenceRetainsCommonChecks(t *testing.T) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active=true WHERE client_id=$1`, c))
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_user SET credential_change_time=$2 WHERE user_id=$1`, userId, claims.CreateTime.Add(time.Second)))
 			})
+			stateRefusals.forget()
 			if ValidateByJwtState(ctx, claims, true) == nil {
 				t.Fatal(mode, "ignored credential rotation")
 			}

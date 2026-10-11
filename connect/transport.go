@@ -1439,9 +1439,15 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			authEcho = append([]byte(nil), authFrameBytes...)
 		}
 	}
-	rejectCustomAuth := func(status int) {
+	// A WebSocket refusal follows its 101, so a refusal of the credential
+	// itself closes it in band (transport_credential_refusal.go).
+	rejectAuth := func(status int, err error) {
 		if authCtx.Err() != nil {
 			status = http.StatusServiceUnavailable
+		}
+		refused := connectCredentialRefused(status)
+		if refused {
+			countConnectCredentialRefusal(h1Observation.carrier, auth.AppVersion)
 		}
 		if custom {
 			connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), &connect.HTTPUpgradeError{StatusCode: status, Reason: "authorization", Terminal: status != http.StatusServiceUnavailable})
@@ -1450,11 +1456,16 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				message = "Service temporarily unavailable."
 			}
 			http.Error(w, message, status)
+			return
+		}
+		if refused && ws != nil {
+			writeConnectAuthorizationClose(ws, connectCredentialRefusalCloseCode(err))
 		}
 	}
 
 	var byJwt *session.ByJwt
 	var instanceId server.Id
+	var authErr error
 	authStatus := connectH1AuthenticationStatus(authCtx, func() (int, error) {
 		// Auth failures are client-driven and unbounded in rate, so they are
 		// counted in the jwt package rather than logged per occurrence.
@@ -1465,6 +1476,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			if glog.V(1) {
 				glog.Infof("[t]auth jwt err = %s\n", err)
 			}
+			authErr = err
 			return http.StatusUnauthorized, err
 		}
 		if byJwt.ClientId == nil {
@@ -1482,13 +1494,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				glog.Infof("[t]inactive auth jwt: %s\n", err)
 			}
 		}
+		authErr = err
 		return status, err
 	})
 	if authStatus != 0 {
 		if authStatus == http.StatusServiceUnavailable {
 			h1Observation.result = connectH1ResultAuthDependency
 		}
-		rejectCustomAuth(authStatus)
+		rejectAuth(authStatus, authErr)
 		return
 	}
 	clientId := *byJwt.ClientId
@@ -1525,7 +1538,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusServiceUnavailable
 			h1Observation.result = connectH1ResultAuthDependency
 		}
-		rejectCustomAuth(status)
+		rejectAuth(status, leaseErr)
 		return
 	}
 	if self.settings.testingAfterAuthorizationLease != nil {
@@ -2359,6 +2372,9 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	provideIntent := false
 	useH3Datagrams := false
 	connectionRegistered := false
+	// set only when the credential itself was refused, not a check failed
+	var refusalErr error
+	refusalAppVersion := ""
 	defer func() {
 		if lease != nil {
 			lease.Close()
@@ -2372,6 +2388,11 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		stream,
 		time.Until(authDeadline),
 		func(auth *protocol.Auth, authFrameBytes []byte) error {
+			refused := func(err error) error {
+				refusalErr = err
+				refusalAppVersion = auth.AppVersion
+				return err
+			}
 			var authErr error
 			byJwt, authErr = session.ParseByJwtForAudience(
 				authCtx,
@@ -2379,14 +2400,18 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				session.ByJwtAudienceConnect,
 			)
 			if authErr != nil {
-				return authErr
+				return refused(authErr)
 			}
 			if byJwt.ClientId == nil {
-				return fmt.Errorf("Missing client id.")
+				return refused(fmt.Errorf("Missing client id."))
 			}
-			instanceId, _, authErr = connectClientAuthentication(
+			var authStatus int
+			instanceId, authStatus, authErr = connectClientAuthentication(
 				session.WithStateQuerySource(authCtx, session.StateQueryConnectH3), byJwt, auth.InstanceId)
 			if authErr != nil {
+				if connectCredentialRefused(authStatus) {
+					return refused(authErr)
+				}
 				return authErr
 			}
 			clientId = *byJwt.ClientId
@@ -2412,6 +2437,9 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				handleCancel()
 			})
 			if leaseErr != nil {
+				if !connectAuthDependencyUnavailable(leaseErr) {
+					return refused(leaseErr)
+				}
 				return leaseErr
 			}
 			connectionState := conn.ConnectionState()
@@ -2440,6 +2468,11 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		},
 	)
 	if err != nil {
+		// a refusal past the auth deadline is a deadline, as on h1
+		if refusalErr != nil && authCtx.Err() == nil {
+			countConnectCredentialRefusal(connectTransportH3, refusalAppVersion)
+			_ = conn.CloseWithError(quic.ApplicationErrorCode(connectCredentialRefusalCloseCode(refusalErr)), "authorization refused")
+		}
 		return err
 	}
 	if authCtx.Err() != nil {
