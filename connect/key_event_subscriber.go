@@ -137,9 +137,12 @@ func (self *keyEventSubscriber) AddHopListener(clientId server.Id, listener *mod
 
 // resyncAll trickles a forced resync across every registration, spread over
 // the resync spread timeout so a resubscribe does not stampede the registry
-// with simultaneous full reads.
+// with simultaneous full reads. Session listeners trickle too: each recheck
+// is an authoritative PostgreSQL read, and a resubscribe or corrective poll
+// used to start one for every lease of the process in the same instant. Each
+// lease's own recheck timer still bounds its staleness meanwhile.
 func (self *keyEventSubscriber) resyncAll() {
-	self.resyncSessions()
+	sessionRechecks := self.resyncSessionRechecks()
 	peerListeners := map[server.Id][]*model.NetworkPeerListener{}
 	hopListeners := []*model.StreamHopListener{}
 	func() {
@@ -156,7 +159,7 @@ func (self *keyEventSubscriber) resyncAll() {
 			}
 		}
 	}()
-	count := len(peerListeners) + len(hopListeners)
+	count := len(sessionRechecks) + len(peerListeners) + len(hopListeners)
 	if count == 0 {
 		return
 	}
@@ -171,6 +174,14 @@ func (self *keyEventSubscriber) resyncAll() {
 	self.resyncLock.Unlock()
 
 	go server.HandleError(func() {
+		for _, recheck := range sessionRechecks {
+			recheck()
+			select {
+			case <-resyncCtx.Done():
+				return
+			case <-time.After(spacing):
+			}
+		}
 		for networkId, listeners := range peerListeners {
 			// One authoritative read per network/process, then distribute the
 			// immutable snapshot to every resident listener. This prevents a

@@ -172,3 +172,43 @@ func TestSessionNotificationsSkipRevisionReadWithoutHintListeners(t *testing.T) 
 		removeHint()
 	})
 }
+
+// A (re)subscribe and every corrective poll resync all registrations, and the
+// settings promise those resyncs trickle over ResyncSpreadTimeout. Session
+// listeners were instead all rechecked at once, so every resubscribe made each
+// lease of the process start a PostgreSQL check in the same instant.
+func TestKeyEventResyncSpreadsSessionRechecks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var revisionReads atomic.Int64
+		subscriber := newSessionFanoutSubscriber(ctx, &revisionReads)
+		subscriber.settings = &KeyEventDeliverySettings{ResyncSpreadTimeout: 30 * time.Second}
+
+		const listenerCount = 6
+		networkIds := []server.Id{server.NewId(), server.NewId()}
+		var rechecks atomic.Int64
+		removes := []func(){}
+		for i := range listenerCount {
+			removes = append(removes, subscriber.AddSessionListener(networkIds[i%len(networkIds)], func() { rechecks.Add(1) }, nil))
+		}
+		synctest.Wait()
+		registered := rechecks.Load()
+
+		subscriber.resyncAll()
+		synctest.Wait()
+		if immediate := rechecks.Load() - registered; 1 < immediate {
+			t.Fatalf("resync rechecked %d of %d listeners at once", immediate, listenerCount)
+		}
+
+		time.Sleep(30 * time.Second)
+		synctest.Wait()
+		if resynced := rechecks.Load() - registered; resynced != listenerCount {
+			t.Fatalf("resync rechecked %d of %d listeners within its spread window", resynced, listenerCount)
+		}
+
+		for _, remove := range removes {
+			remove()
+		}
+	})
+}

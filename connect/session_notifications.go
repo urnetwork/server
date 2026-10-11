@@ -97,16 +97,26 @@ func (self *keyEventSubscriber) kickSession(networkId server.Id) {
 		}
 	}
 }
-func (self *keyEventSubscriber) resyncSessions() {
+
+// One recheck per session listener of every network, for a resync to trickle
+// with the other registrations over its spread window. Each group's revision
+// read is nudged now, so hint listeners converge without waiting.
+func (self *keyEventSubscriber) resyncSessionRechecks() []func() {
 	self.stateLock.Lock()
-	ids := []server.Id{}
-	for id := range self.sessionListeners {
-		ids = append(ids, id)
+	defer self.stateLock.Unlock()
+	rechecks := []func(){}
+	for _, group := range self.sessionListeners {
+		for _, listener := range group.listeners {
+			if listener.recheck != nil {
+				rechecks = append(rechecks, listener.recheck)
+			}
+		}
+		select {
+		case group.kick <- struct{}{}:
+		default:
+		}
 	}
-	self.stateLock.Unlock()
-	for _, id := range ids {
-		self.kickSession(id)
-	}
+	return rechecks
 }
 func (self *keyEventSubscriber) runSessionNotifications(networkId server.Id, group *sessionNotificationGroup) {
 	var last time.Time
