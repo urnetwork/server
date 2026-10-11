@@ -3,6 +3,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -100,6 +101,8 @@ func RepairSessionIndexes(ctx context.Context, limit int) error {
 
 // Review each network under its own slot, then use a revision CAS on the index.
 // A concurrent create either defeats this CAS or republishes after it.
+// One network's failure leaves only that member due; later members are still
+// reviewed and every failure is returned. A spent budget stops the walk.
 func SweepSessionIndexShard(ctx context.Context, shard, limit int, now time.Time) (int, error) {
 	if shard < 0 || shard >= SessionIndexShards {
 		return 0, fmt.Errorf("invalid session maintenance shard")
@@ -115,43 +118,52 @@ func SweepSessionIndexShard(ctx context.Context, shard, limit int, now time.Time
 		return 0, err
 	}
 	reviewed := 0
+	failures := []error{}
 	for _, value := range due {
+		if err := ctx.Err(); err != nil {
+			failures = append(failures, err)
+			break
+		}
 		networkId, err := server.ParseId(value)
 		if err != nil {
-			return reviewed, err
+			failures = append(failures, fmt.Errorf("session index member %q: %w", value, err))
+			continue
 		}
-		keys := sessionIndexKeys(networkId)
-		var revision string
-		err = server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
-			var err error
-			revision, err = r.Get(ctx, keys[1]).Result()
-			return err
-		})
-		if err != nil {
+		review := func() error {
+			keys := sessionIndexKeys(networkId)
+			var revision string
+			err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+				var err error
+				revision, err = r.Get(ctx, keys[1]).Result()
+				return err
+			})
 			if err == server.RedisNil {
-				if err = publishSessionIndex(ctx, networkId, now, server.NewId().String()); err != nil {
-					return reviewed, err
-				}
-				continue
+				return publishSessionIndex(ctx, networkId, now, server.NewId().String())
 			}
-			return reviewed, err
+			if err != nil {
+				return err
+			}
+			var review struct {
+				NextReview int64 `json:"next_review"`
+			}
+			if err = sessionEval(ctx, sessionReviewLua, sessionSharedKeys(networkId), []any{now.UnixMilli(), server.NewId().String()}, &review); err != nil {
+				return err
+			}
+			next := ""
+			if review.NextReview > 0 {
+				next = strconv.FormatInt(review.NextReview, 10)
+			}
+			if err = server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+				return r.Eval(ctx, sessionIndexCasLua, keys, networkId.String(), revision, next).Err()
+			}); err != nil {
+				return err
+			}
+			reviewed++
+			return nil
 		}
-		var review struct {
-			NextReview int64 `json:"next_review"`
+		if err := review(); err != nil {
+			failures = append(failures, fmt.Errorf("session index network %s: %w", networkId, err))
 		}
-		if err = sessionEval(ctx, sessionReviewLua, sessionSharedKeys(networkId), []any{now.UnixMilli(), server.NewId().String()}, &review); err != nil {
-			return reviewed, err
-		}
-		next := ""
-		if review.NextReview > 0 {
-			next = strconv.FormatInt(review.NextReview, 10)
-		}
-		if err = server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
-			return r.Eval(ctx, sessionIndexCasLua, keys, networkId.String(), revision, next).Err()
-		}); err != nil {
-			return reviewed, err
-		}
-		reviewed++
 	}
-	return reviewed, nil
+	return reviewed, errors.Join(failures...)
 }

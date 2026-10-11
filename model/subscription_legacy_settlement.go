@@ -532,6 +532,16 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 		sourceBatch := scoped && owner.Kind == ContractCloseOwnerSourceClient
 		cohortEnabled := len(cohort) > 0 && (sourceBatch || cooldown.ready(shard))
 		for remaining := limit; remaining > 0; {
+			// A prefetched row has no selection of its own to observe the
+			// page budget. No visit starts after that budget ends. A returned
+			// cohort member other than a fallback starts nothing: its own
+			// transaction has already committed or refused it, and recording
+			// it keeps that acknowledged prefix in the result and cursor.
+			if len(financialAttempts) == 0 || financialAttempts[0].fallback {
+				if err := bounded.Err(); err != nil {
+					server.Raise(err)
+				}
+			}
 			visitHead := headRemaining > 0 && forwardUntilHead == 0
 			var next *LegacySettlementCursor
 			lookupLimit := 1
@@ -568,10 +578,12 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
                       AND (next_attempt_time,contract_id)>($2,$3) ORDER BY next_attempt_time,contract_id LIMIT 1`
 							args = append(args, cursor.NextAttemptTime, cursor.ContractId, passEndTime)
 							if visitHead {
+								// A row bound cannot end the index scan beside another due
+								// bound; the plain cursor time stops it at the revisited interval.
 								query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
                       WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
                       AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
-                      AND (next_attempt_time,contract_id)<=($2,$3)`
+                      AND next_attempt_time<=$2 AND (next_attempt_time,contract_id)<=($2,$3)`
 								if headAfter != nil {
 									query += ` AND (next_attempt_time,contract_id)>($5,$6)`
 									args = append(args, headAfter.NextAttemptTime, headAfter.ContractId)
@@ -579,7 +591,7 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 								if headWrapped {
 									// A page can wrap once. Its second segment ends at the
 									// original lower bound so no head is visited twice.
-									query += fmt.Sprintf(` AND (next_attempt_time,contract_id)<=($%d,$%d)`, len(args)+1, len(args)+2)
+									query += fmt.Sprintf(` AND next_attempt_time<=$%d AND (next_attempt_time,contract_id)<=($%d,$%d)`, len(args)+1, len(args)+1, len(args)+2)
 									args = append(args, headCycleBefore.NextAttemptTime, headCycleBefore.ContractId)
 								}
 								query += ` ORDER BY next_attempt_time,contract_id LIMIT 1`

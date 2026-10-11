@@ -278,6 +278,11 @@ func TestOpenContractPlansIgnoreFalseZeroGeneratedOpenStats(t *testing.T) {
 			assertPlanUsesAnyIndex(t, originPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
 			assertPlanAvoidsIndexes(t, originPlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
 
+			// the actual companion origin existence read, before any transaction
+			existencePlan := explainOpenContractPlan(t, ctx, conn, companionOriginExistsSql, sourceId, destinationId, server.NowUtc().Add(-time.Hour))
+			assertPlanUsesAnyIndex(t, existencePlan, openContractSourcePairIndex, openContractDestinationPairIndex)
+			assertPlanAvoidsIndexes(t, existencePlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
+
 			escrowPlan := explainOpenContractPlan(t, ctx, conn, `
 				SELECT transfer_contract.contract_id,
 				       transfer_contract.transfer_byte_count,

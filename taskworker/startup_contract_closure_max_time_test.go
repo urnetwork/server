@@ -14,8 +14,9 @@ import (
 
 // Production held two passes that never finished: one under the earlier key
 // with a 30s deadline and one under the startup key with the 2 minute default.
-// Every attempt timed out and restarted. Startup keeps both pending passes and
-// gives each a 24 hour deadline.
+// Every attempt timed out and restarted. Startup gives its own pass a 24 hour
+// deadline. The earlier key's pass is retired on its next claim, so startup
+// leaves it as it is.
 func TestTaskworkerStartupGivesEveryPendingScanTwentyFourHours(t *testing.T) {
 	t.Setenv("WARP_DOMAIN", "startup-close.example")
 	env := server.DefaultTestEnv()
@@ -37,9 +38,9 @@ func TestTaskworkerStartupGivesEveryPendingScanTwentyFourHours(t *testing.T) {
 
 		server.Raise(initTaskScheduleForProfile(model.WithProviderWorkSessionSource(ctx, nil), WorkloadProfileProduction))
 
-		wanted := int((24 * time.Hour) / time.Second)
+		wantedSeconds := map[*task.RunOnceOption]int{legacyKey: 30, startupKey: int((24 * time.Hour) / time.Second)}
 		server.Db(ctx, func(conn server.PgConn) {
-			for _, key := range []*task.RunOnceOption{legacyKey, startupKey} {
+			for key, wanted := range wantedSeconds {
 				var count, maxTimeSeconds int
 				server.Raise(conn.QueryRow(ctx,
 					`SELECT count(*), coalesce(max(run_max_time_seconds), 0) FROM pending_task WHERE run_once_key=$1`,
@@ -49,7 +50,7 @@ func TestTaskworkerStartupGivesEveryPendingScanTwentyFourHours(t *testing.T) {
 					t.Fatal("startup changed how many passes are pending", key.String(), count)
 				}
 				if maxTimeSeconds != wanted {
-					t.Fatal("pending pass keeps a deadline shorter than 24 hours", key.String(), maxTimeSeconds)
+					t.Fatal("pending pass has the wrong deadline", key.String(), maxTimeSeconds, wanted)
 				}
 			}
 		})

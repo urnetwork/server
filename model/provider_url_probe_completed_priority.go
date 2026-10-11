@@ -118,12 +118,18 @@ func providerUrlProbePromoteSql(shardIndex, shardCount int) string {
 
 // One fixed observation time covers maintenance and the following claim.
 // False means more bounded work is required, not that the due cohort is empty.
+// Only priority admission reads the result. Ordinary admission still retires
+// expired runs but skips the pending scan, which re-read every owned slot's
+// expired head, dead queue entries included, for an answer it discarded.
 func maintainProviderUrlProbeCompletedPriority(ctx context.Context, tx server.PgTx, now time.Time, shardIndex, shardCount int, priority bool, observation *ProviderUrlProbeDueObservation) bool {
 	var changed int
 	observation.measure(ProviderUrlProbeDueExpiry, func() {
 		server.Raise(tx.QueryRow(ctx, providerUrlProbeExpirySql(shardIndex, shardCount),
 			now.UTC(), providerUrlProbeExpiryClients).Scan(&changed))
 	})
+	if !priority {
+		return true
+	}
 	var pending bool
 	observation.measure(ProviderUrlProbeDueExpiryPending, func() {
 		server.Raise(tx.QueryRow(ctx, providerUrlProbeMaintenancePendingSql(
@@ -131,9 +137,6 @@ func maintainProviderUrlProbeCompletedPriority(ctx context.Context, tx server.Pg
 	})
 	if pending {
 		return false
-	}
-	if !priority {
-		return true
 	}
 	observation.measure(ProviderUrlProbeDuePromote, func() {
 		server.Raise(tx.QueryRow(ctx, providerUrlProbePromoteSql(shardIndex, shardCount),

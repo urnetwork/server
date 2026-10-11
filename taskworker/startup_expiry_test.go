@@ -89,8 +89,8 @@ func testTaskworkerStartupExpiresContracts(t *testing.T, profile WorkloadProfile
 			// NULL checkpoints now retire at creation plus 60 minutes too.
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,expiration_time=NULL
 				WHERE contract_id=$1`, legacyNullId, now.Add(-time.Minute)))
-			// Cold historical reservations must reach Redis through their queued
-			// mirror owner; the bounded financial post only publishes warm state.
+			// Cold historical reservations must still reach Redis once the
+			// expired closes commit.
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, balanceId))
 		}, server.TxReadCommitted, server.OptNoRetry())
 		if model.DefaultContractExpiration != 60*time.Minute || model.Testing_NetEscrowByteCount(ctx, balanceId) != 500 {
@@ -134,11 +134,18 @@ func testTaskworkerStartupExpiresContracts(t *testing.T, profile WorkloadProfile
 		if err != nil || len(finished) != 1 || finished[0] != closeTaskId || len(retried)+len(posts) != 0 {
 			t.Fatal("startup-seeded expiry did not complete its bounded page", finished, retried, posts, err)
 		}
-		// Legacy expiry retains its financial intent, while Redis retains its
-		// debit journal. Complete each unchanged owner before checking money.
+		// Deadline reconciliation settles an expired legacy contract and retires
+		// its intent in one transaction. Redis retains its debit journal.
+		server.Db(ctx, func(conn server.PgConn) {
+			var pending int
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=ANY($1)`, expiredIds).Scan(&pending))
+			if pending != 0 {
+				t.Fatal("startup expiry left an expired legacy intent", pending)
+			}
+		})
 		legacy, err := model.FlushLegacySettlements(ctx, int(legacyExpiredId[15])%model.LegacySettlementShardCount, nil, 32)
-		if err != nil || legacy.Completed != 1 || legacy.Failed != 0 {
-			t.Fatal("startup expiry lost the legacy financial continuation", legacy, err)
+		if err != nil || legacy.Visited != 0 {
+			t.Fatal("startup expiry left a legacy financial continuation", legacy, err)
 		}
 		debit, err := model.FlushTransferDebits(ctx, int(balanceId[15])%model.TransferDebitShardCount, nil, 1)
 		if err != nil || debit.Failed != 0 {
@@ -202,21 +209,9 @@ func testTaskworkerStartupExpiresContracts(t *testing.T, profile WorkloadProfile
 				t.Fatal("startup expiry changed live reservations or debited delivered work twice", stage, credit, reserved, projected, available)
 			}
 		}
-		// The financial owners debit 17 bytes each before the cold legacy
-		// projection releases its expired 100-byte reservation.
-		requireAccounting("before legacy mirror", 400, 566)
-		var mirrorTaskId server.Id
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.Raise(tx.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE function_name=$1 AND run_once_key=$2`,
-				mirrorTarget.TargetFunctionName(), task.RunOnce("legacy_net_escrow_mirror", balanceId).String()).Scan(&mirrorTaskId))
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2 WHERE task_id=$1`, mirrorTaskId, time.Unix(1, 0).UTC()))
-		}, server.TxReadCommitted, server.OptNoRetry())
-		worker.AddTargets(mirrorTarget)
-		finished, retried, posts, err = worker.EvalTasks(1)
-		if err != nil || len(finished) != 1 || finished[0] != mirrorTaskId || len(retried)+len(posts) != 0 {
-			t.Fatal("startup expiry did not complete its durable legacy mirror", finished, retried, posts, err)
-		}
-		requireAccounting("after legacy mirror", 300, 666)
+		// Each owner debits 17 bytes. The deadline close's own refresh releases
+		// both expired reservations from the cold projection after its commit.
+		requireAccounting("after expiry", 300, 666)
 		// A second process starts after both commits. Its new immediate sweep
 		// cannot repeat either backend's debit or erase the three live peers.
 		server.Raise(initTaskScheduleForProfile(ctx, profile))

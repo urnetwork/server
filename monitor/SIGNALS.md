@@ -183,6 +183,7 @@ active missing capability and must not be read as green.
 |---|---|---|
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
+| 2.6b | Coverage gap | A probe of the contract degradation valve state is missing: `open-contracts` and `contract-rate` show the close backlog and creation rate that drive it, not whether exhausted payers get free contracts or providers go unpaid. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
@@ -6206,6 +6207,40 @@ over arbitrary payer counts, missing registrations, held owners or scheduler
 capacity. Schema readiness, current worker adoption and a fresh same-cohort
 outcome/reservation witness remain separate Main gates.
 
+#### Legacy drain: owner registration, payer claims and head revisits
+
+On 2026-10-10 the Main drain was bounded by three separate stages, none of
+them the chronological due head. The shard tasks only dispatch: every sampled
+`FlushLegacySettlements` result had `visited=0`. Settlement runs in one
+`ApplyLegacyPayerSettlements` task per payer, so one dense payer cannot hold
+another payer's turn. Busy outcomes were 8 of 18,946 visits.
+
+1. Owner registration. A TABLESAMPLE of about 40,000 intents found 88% with
+   neither `payer_network_id` nor `source_client_id`; payer and source
+   discovery cannot see those rows until registration classifies them.
+   Resolving a sample of them found two thirds belonging to ordinary payers.
+   Registration ran about 220 rows per second: one page per shard per
+   dispatcher turn, with each shard's turn claimed about every 18 seconds.
+   Read the rate from the sum of `dispatch.registered` over recent
+   `FlushLegacySettlements` results, not from table counters.
+2. Payer task claims. 3,747 payer tasks were due and the median claim delay,
+   `run_start_time - run_at` over recent finished payer tasks, was 2.7 hours.
+   With N registered functions, each got one lane turn per 2N claims, and the
+   older queued close backlog took every global claim.
+3. Head revisits of a dense payer. The head payer's turns each settled one
+   contract while `timings.selection` took about 14 of their 15 seconds. The
+   head revisit bounded its interval only by a row comparison on
+   `(next_attempt_time, contract_id)`, next to plain due-time bounds. PostgreSQL
+   ends the index scan on the plain bound and filters the row comparison, so a
+   revisit with no head left read the payer's whole remaining due range in
+   every shard: 138,153 buffers and 26.5 seconds cold on Main. The revisit now
+   also bounds `next_attempt_time` by its interval's end and read 70 buffers.
+
+Before blaming contention for a slow drain, sample registration state, the
+payer claim delay, and the selection versus financial split in payer
+`timings`. A deadline close of the same contract also deletes its intent in
+its own financial transaction; table delete rates mix both owners.
+
 ### 2.5c Contract progress evidence — selection, commit and projection
 
 This runbook joins the existing probes; it adds no account scan or automatic
@@ -7438,6 +7473,58 @@ deterministic later-successor test locks both invariants. This approximately
 process-local load sensitivity; it is not permission to erase the timeout or
 raise its deadline.
 
+### 2.6b Contract degradation valve — zero contract cost
+
+`model/network_degradation_model.go`. While `config/<env>/degraded.yml` sets
+`enabled: true`, the taskworker's run-once `CheckContractDegradation` task
+runs every 15 minutes. It counts contracts created in the last 60 minutes
+(`transfer_contract_create_time`) and contracts that reached a terminal
+outcome in the last 60 minutes (`transfer_contract_closed_usage`). One check
+with `close_count < 0.7 × open_count` publishes `zero_cost=true` in the Redis
+key `network_degradation:zero_contract_cost:v1`. Charging resumes only on the
+second consecutive healthy check (`close_count >= 0.7 × open_count`, or no
+creations). The key has a one hour TTL (four checks), so a stopped or
+disabled task, a missing or malformed key, or a Redis error all close the
+valve.
+
+Active still deducts first. Every public and companion contract, probe
+shards included, escrows against its payer as usual, shrink-to-fit
+included, while the payer has anything left. Only when escrow admission
+finds the payer's balance exhausted (a complete grant census below the
+shrink floor) is that contract created free instead of refused with
+InsufficientBalance: no `transfer_escrow` rows, no payer, no balance
+reserved or debited, and **provider payouts are zero for those
+contracts**. They settle through the no-escrow path with no sweep, debit,
+provider totals or points; only the payment-independent subnet usage
+snapshot is kept, as for network-mode traffic. Per-client data caps and the
+acceptance-test drain still refuse, and free traffic does not advance a
+data cap. The valve never changes an existing contract; it decides only how
+an exhausted payer's new contract is funded.
+
+- `urnetwork_contract_degradation_zero_cost` (taskworker gauge, 1 while the
+  last published state is zero cost) and
+  `urnetwork_contract_degradation_contracts{kind="open"|"close"}`.
+- `urnetwork_contract_degradation_checks_total{outcome}`: `zero_cost`,
+  `resuming` (healthy, zero cost held for one more check) and `charging`; the
+  failures `measurement_failed`, `state_read_failed`, `publish_failed` and
+  `superseded` publish nothing, and the published state ages out within its TTL.
+- `urnetwork_zero_escrow_contracts_total{kind="public"|"companion"}` on every
+  contract-creating service (api, connect, taskworker, proxy): the free
+  contracts actually created for exhausted payers.
+- `urnetwork_zero_contract_cost_reads_total{result}` on the same services: 15
+  second cache refreshes, read only after an exhausted refusal. Only
+  `zero_cost` lets that contract be free; `charging`, `missing`, `expired`,
+  `malformed`, `error` and `disabled` keep the refusal.
+- Log lines `[degradation]contract check <outcome>: open=… close=… ratio=…
+  healthy=… consecutive_healthy=… zero_cost=…`.
+
+Treat an active valve as an incident signal for §2.6: it hides the
+out-of-balance symptom of exhausted payers while providers go unpaid for
+their traffic. A sustained
+`measurement_failed` means the check cannot see the backlog, and the valve
+fails closed to normal charging an hour after its last publication. No probe
+reads the valve yet; the numbered coverage crosswalk records the gap.
+
 ### 2.7 New-connection rate — existing-sessions vs new-connects discriminator
 Probe: `connection-rate`
 
@@ -8611,6 +8698,25 @@ an observer-path failure; an inventory-bound, strict SSH gateway route supplied
 the successful control without changing Redis. An absent native-source schema
 metric on the observed API processes remains instrumentation/deployment
 uncertainty, not zero native-source events.
+
+Empty-target publication (2026-10-11 source correction): `UpdateClientScores`
+used to create a target only when one of its source rows was admitted. A
+location or group whose every row was hard-excluded, and a group with no rows,
+were never written, so FindProviders2 reported `cache_missing` for them, the
+same reason a broken writer produces. A target that lost its last admitted
+provider also kept its previous payload until the 5h ttl; request-time hard
+exclusions then emptied it as `filtered_hard`. On Main every group-target
+request for 14 days returned zero as `cache_missing`, and the 2026-10-10 22:41Z
+export admitted only about 1.8k providers (85-94% hard-excluded) before new
+`filtered_hard` zeroes appeared. The writer now creates every target a source
+row names before the hard-exclusion check and seeds every `location_group`
+row, so one complete export from the corrected Taskworker publishes such a
+target as encoded-empty documents and aliases, read as `cache_empty`. That
+reason then describes publication, not why supply is absent; trace hard
+exclusions and group membership separately. A location that no current row
+names (all of its providers disconnected) is still not visited: its old
+payload remains until the ttl and then expires to `cache_missing`. API rollout
+alone changes nothing.
 
 Native-reader activation boundary (2026-09-29 source correction):
 `provider.yml` → `egress_index.native_reader_enabled` defaults to false;
@@ -14717,6 +14823,30 @@ expire. A mature provider still below ten measurements after an accepted
 success uses the existing short retry pace to replenish its deficit. Warmup
 success pacing and quota-full oldest-run expiry remain separate. Accepted
 measured failures count toward the same quota; setup-only completions do not.
+
+Local failures back off per provider. A completed turn that measured nothing
+(`tunnel_failed`, `run_not_measured`, `health_not_run`, `submit_failed`) first
+retries after `url_failure_interval_seconds`, and each consecutive earlier
+local failure claimed in the trailing four hours doubles that wait, up to 30
+minutes, times a factor in [0.9, 1.1] that is fixed per issued claim. A
+measured completion, success or measured failure, ends the streak; an
+abandoned lease neither ends nor extends it. A readiness-vetoed or unstarted
+turn still only shortens its issued fifteen-minute lease. A provider that keeps
+failing locally therefore holds a future `next_attempt_at` up to about 33
+minutes out and is claimed about twice an hour, where the flat interval
+re-claimed it about a minute after every failure. No quota credit, measured
+cadence, security recheck or eligibility rule changes, and any measured turn
+resets the streak, so the backoff paces only providers whose recent turns all
+failed locally. Such a provider's future deadline is retry pacing, not scheduler
+failure or quota expiry.
+
+Each URL turn's tunnel teardown keeps the derived client, packet pump and
+netstack live until the provider has returned nothing for one second (at most
+five, inside the close timeout), after first closing the tunnel's pooled DoH
+connections. Late provider returns are acknowledged and answered with the ACK or
+RST that ends the provider's flow instead of reaching a revoked client, which a
+provider on SDK v2026.8.31 or later otherwise retransmits to indefinitely. Turn
+and close timings include this drain; it is not provider latency.
 
 Bounded diagnosis must name its indexed raw cohort before applying current
 eligibility or history projections. The admission head filters the stored

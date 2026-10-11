@@ -96,6 +96,11 @@ func TestForceCloseBudgetLoadedSubpageReplay(t *testing.T) {
 // A real Redis-backed reservation remains owned while the later contract's
 // PostgreSQL finalization crosses the elapsed budget. Parent cancellation takes the same
 // barrier but must stay an error rather than becoming a normal page yield.
+// A Redis foreground close commits its outcome, consumption journal and
+// earnings together; the separately owned debit page then applies the payer
+// debit, settles the escrow metadata and releases the reservation. No close
+// callback owns that later work, so the budget overrun is checked against the
+// committed custody first and against the debit owner's result afterward.
 func TestForceCloseBudgetRedisReservationAndParentCancel(t *testing.T) {
 	for _, parentCancel := range []bool{false, true} {
 		name := "owner budget"
@@ -153,17 +158,24 @@ func TestForceCloseBudgetRedisReservationAndParentCancel(t *testing.T) {
 					t.Fatalf("interrupted contract's reserved financial state changed: before=%+v after=%+v", beforeSecond, afterSecond)
 				}
 				if !parentCancel {
-					settled := firstFixture.state(t, setupCtx)
-					if settled.outcome != ContractOutcomeSettled || !settled.escrowSettled || settled.providerPayoutByteCount != 0 || settled.escrowPayoutByteCount != 1024 || settled.requestTokenByteCount != 1024 || settled.redisEscrowByteCount != 1024 || settled.streamFound {
-						t.Fatalf("budget overrun lost required financial posts: %+v", settled)
+					pending := firstFixture.state(t, setupCtx)
+					if pending.outcome != ContractOutcomeSettled || pending.open || pending.dispute || pending.streamFound ||
+						pending.escrowSettled || pending.escrowPayoutByteCount != 0 || !pending.redisReserved ||
+						pending.sourceByteCount != 1024 || pending.destinationByteCount != 1024 ||
+						pending.payerBalanceByteCount != forceCloseDisputeInitialBalance || pending.netEscrowByteCount != 4096 ||
+						pending.legacyEscrowByteCount != 0 || pending.redisEscrowByteCount != 4096 || pending.requestTokenByteCount != 4096 ||
+						pending.providerPayoutByteCount != 0 || pending.providerEarnedByteCount != 1024 {
+						t.Fatalf("budget overrun lost the committed close's exact pre-debit custody: %+v", pending)
 					}
+					requireForceCloseDebitJournal(t, setupCtx, firstFixture, 1, 1024)
 					requireForceCloseBudgetProvider(t, setupCtx, firstFixture, 1024)
 					applied, released, busy, debitErr := flushTransferDebitBalance(setupCtx, firstFixture.balanceId)
 					if debitErr != nil || applied != 1 || released != 1 || busy {
 						t.Fatalf("owner debit failed conservation: applied=%d released=%d busy=%t err=%v", applied, released, busy, debitErr)
 					}
 					final := firstFixture.state(t, setupCtx)
-					if final.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 || final.requestTokenByteCount != 0 || final.redisEscrowByteCount != 0 || final.providerPayoutByteCount != 0 {
+					if final.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 || final.requestTokenByteCount != 0 || final.redisEscrowByteCount != 0 || final.providerPayoutByteCount != 0 ||
+						!final.escrowSettled || final.escrowPayoutByteCount != 1024 || final.netEscrowByteCount != 0 {
 						t.Fatalf("owner debit financial result: %+v", final)
 					}
 					if a, r, b, e := flushTransferDebitBalance(setupCtx, firstFixture.balanceId); a != 0 || r != 0 || b || e != nil || firstFixture.state(t, setupCtx) != final {

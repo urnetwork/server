@@ -25,7 +25,8 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for head := 793; head <= 813; head++ {
+		last := migrationCurrentSuffixContracts[len(migrationCurrentSuffixContracts)-1].artifact.requiredVersion
+		for head := 793; head <= last; head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
@@ -108,6 +109,16 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing identified checkpoint total", 813, `ALTER TABLE contract_close DROP COLUMN identified_checkpoint_byte_count`},
 		{"identified checkpoint total truncates bytes", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count TYPE integer`},
 		{"invented identified checkpoint total", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count SET DEFAULT 0`},
+		{"missing payout plan sweep staging", 814, `DROP TABLE payment_plan_sweep`},
+		{"payout plan allows two pending plans", 814, `DROP INDEX payment_plan_assignment_pending`},
+		{"missing sweep owner guard", 814, `DROP TRIGGER payment_plan_sweep_owner_guard ON transfer_escrow_sweep`},
+		{"sweep owner guard fires on every update", 814, `DROP TRIGGER payment_plan_sweep_owner_guard ON transfer_escrow_sweep; CREATE TRIGGER payment_plan_sweep_owner_guard BEFORE UPDATE ON transfer_escrow_sweep FOR EACH ROW EXECUTE FUNCTION payment_plan_sweep_owner_guard()`},
+		{"missing reliability window", 815, `DROP TABLE payment_plan_reliability_window CASCADE`},
+		{"missing reliability partials", 815, `DROP TABLE payment_plan_reliability_partial`},
+		{"dropped sweep destination index rebuilt", 816, `CREATE INDEX transfer_escrow_sweep_destination_id_sweep_time ON transfer_escrow_sweep (destination_id, sweep_time) INCLUDE (payout_net_revenue_nano_cents)`},
+		{"dropped open pair index rebuilt", 817, `CREATE INDEX transfer_contract_pair_open_create_time ON transfer_contract (source_id, destination_id, create_time) WHERE open AND companion_contract_id IS NULL`},
+		{"dropped open destination index rebuilt", 818, `CREATE INDEX transfer_contract_open_destination_partial ON transfer_contract (destination_id) WHERE open`},
+		{"dropped reschedule error index rebuilt", 819, `CREATE INDEX pending_task_has_reschedule_error ON pending_task (has_reschedule_error, task_id)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -174,6 +185,35 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 						index.table, index.name, definition, predicate, state.valid, state.ready).Scan(&matched))
 					if matched != state.want {
 						t.Fatalf("version %d index valid=%t ready=%t matched=%t", index.version, state.valid, state.ready, matched)
+					}
+				}
+			}
+			// An interrupted DROP INDEX CONCURRENTLY leaves the index invalid, and
+			// later not ready, until the drop is rerun. Only absence is removal.
+			for _, index := range []struct {
+				version     int
+				table, name string
+			}{
+				{816, "transfer_escrow_sweep", "transfer_escrow_sweep_destination_id_sweep_time"},
+				{817, "transfer_contract", "transfer_contract_pair_open_create_time"},
+				{818, "transfer_contract", "transfer_contract_open_destination_partial"},
+				{819, "pending_task", "pending_task_has_reschedule_error"},
+			} {
+				guard := migrationCurrentSuffixTestContract(t, index.version).query
+				var absent bool
+				server.Raise(conn.QueryRow(ctx, `WITH index_artifact AS (
+ SELECT NULL::text AS table_name, NULL::text AS index_name WHERE false) SELECT `+guard).Scan(&absent))
+				if !absent {
+					t.Fatalf("version %d removed index is not recognized as absent", index.version)
+				}
+				for _, state := range []struct{ valid, ready bool }{{true, true}, {false, true}, {false, false}} {
+					var removed bool
+					server.Raise(conn.QueryRow(ctx, `WITH index_artifact AS (
+ SELECT $1::text AS table_name, $2::text AS index_name,
+ $3::boolean AS indisvalid, $4::boolean AS indisready) SELECT `+guard,
+						index.table, index.name, state.valid, state.ready).Scan(&removed))
+					if removed {
+						t.Fatalf("version %d leftover index valid=%t ready=%t reported as removed", index.version, state.valid, state.ready)
 					}
 				}
 			}

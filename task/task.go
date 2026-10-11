@@ -856,6 +856,8 @@ func ListPendingTasks(ctx context.Context) []server.Id {
 }
 
 // the task struct has the latest error attached to it
+// Migration 819 dropped pending_task_has_reschedule_error, which no production
+// path read, so this scans pending_task. Keep it off hot or periodic paths.
 func ListRescheduledTasks(ctx context.Context) []server.Id {
 	taskIds := []server.Id{}
 
@@ -2001,15 +2003,16 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		}
 	}()
 
-	tx, err := guard.conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: server.TxReadCommitted})
+	rawTx, err := guard.conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: server.TxReadCommitted})
 	if err != nil {
 		return nil, guard, false, err
 	}
 	defer func() {
 		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), DefaultTaskFinalizeTimeout)
-		_ = tx.Rollback(rollbackCtx)
+		_ = rawTx.Rollback(rollbackCtx)
 		rollbackCancel()
 	}()
+	tx := newClaimBudgetTx(ctx, rawTx)
 	if err := server.ValidatePgTaskClaimTransaction(ctx, guard.conn, tx); err != nil {
 		return nil, guard, false, err
 	}

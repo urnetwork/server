@@ -277,16 +277,15 @@ func TestLegacySettlementDrainRollbackLostAckAndAccounting(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=2000 WHERE balance_id=$1`, f.balanceId))
 		})
 		before := legacyDrainTestReports(ctx, id)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
+		// Each owner gets a real owned server transaction whose end the test chooses.
+		tx, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		_, completed, busy, _, err := drainLegacySettlementInTx(ctx, tx, id, f.sourceNetworkId)
 		server.Raise(err)
 		if !completed || busy {
 			t.Fatal("rollback control did not reach financial prefix")
 		}
-		server.Raise(tx.Rollback(ctx))
+		server.Raise(finish(false))
 		requireLegacyDrainNoFinancialPrefix(t, ctx, id)
 		requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -315,14 +314,14 @@ func TestLegacySettlementDrainRollbackLostAckAndAccounting(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE task_id=$1`, collision))
 		})
-		tx, err = conn.Begin(ctx)
-		server.Raise(err)
+		tx, finish = beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		posts, completed, busy, _, err := drainLegacySettlementInTx(ctx, tx, id, f.sourceNetworkId)
 		server.Raise(err)
 		if !completed || busy {
 			t.Fatal("lost-ack control never owned settlement")
 		}
-		server.Raise(tx.Commit(ctx)) // Deliberately omit reply consumption and all posts.
+		server.Raise(finish(true)) // Deliberately omit reply consumption and all posts.
 		result, err = DrainLegacySettlements(ctx, request)
 		if err != nil || result.Contracts[0].FinancialCommitAcknowledged || result.Contracts[0].Status != "busy_intent_or_absent" {
 			t.Fatal("lost-ack replay repeated financial transition")

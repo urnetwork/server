@@ -95,14 +95,26 @@ func CompleteProviderUrlProbeRun(ctx context.Context, completion ProviderUrlProb
 		if counted {
 			increment = 1
 		}
+		// Only the latest claim's local failure can schedule the retry below.
+		// Its delay backs off with the provider's consecutive earlier local
+		// failures (provider_url_probe_local_retry.go), read before this
+		// receipt's own row is written.
+		var retryDelay time.Duration
+		if completion.ProbeFailure != "" && latestOrdinal == completion.ClaimOrdinal {
+			base := providerUrlProbeLocalRetryBase()
+			streak := providerUrlProbeLocalFailureStreakInTx(ctx, tx, completion.ClientId, completion.ClaimOrdinal, claimedAt, base)
+			retryDelay = providerUrlProbeLocalRetryDelay(completion.ClientId, completion.ClaimOrdinal, streak, base)
+		}
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_url_probe_run
 			SET reported_completed_at=$3,completed_at=$4,received_at=$5,probe_failure=$6,counted=$7
 			WHERE client_id=$1 AND claim_ordinal=$2`,
 			completion.ClientId, completion.ClaimOrdinal, reportedAt, effectiveAt, receivedAt, completion.ProbeFailure, counted))
-		// A finished local turn no longer owns an in-flight lease. Only its
-		// exact issued deadline may enter local retry; custom/newer deadlines
-		// and newer accepted results keep their owners. Anchor the local retry
-		// to first server receipt, and never extend an earlier deadline.
+		// A finished local turn no longer owns an in-flight lease. A turn
+		// allowed to pace retries after its backed-off delay from the finished
+		// turn. Otherwise only its exact issued deadline may enter local retry;
+		// custom/newer deadlines and newer accepted results keep their owners.
+		// That retry is anchored to first server receipt and never extends the
+		// earlier deadline.
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle AS cycle SET
 			completed_run_count=completed_run_count+$4,
 			completed_next_expiry_at=CASE WHEN $4>0
@@ -113,13 +125,14 @@ func CompleteProviderUrlProbeRun(ctx context.Context, completion ProviderUrlProb
 				AND ((SELECT `+providerUrlProbeMeasuredWorkDueSql("recent", "$3", "$8")+` FROM (`+providerUrlProbeRunWindowSql("cycle.client_id", "$3")+`) AS recent)
 					OR (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`))
 				AND (cycle.latest_result_at IS NULL OR cycle.latest_result_at<$3)
-				THEN CASE WHEN $6 THEN `+providerUrlProbePacedAttemptSql("cycle", "$3", "0")+`
-					ELSE LEAST(cycle.next_attempt_at, `+providerUrlProbePacedAttemptSql("cycle", "$10", "0")+`) END
+				THEN CASE WHEN $6 THEN $10::timestamp
+					ELSE LEAST(cycle.next_attempt_at, $11::timestamp) END
 				ELSE cycle.next_attempt_at END
 			WHERE cycle.client_id=$1`,
 			completion.ClientId, completion.ClaimOrdinal, effectiveAt, increment,
 			effectiveAt.Add(ProviderUrlProbeCompletedWindow), completion.AllowPacing, completion.ProbeFailure, ProviderUrlProbeRunTarget,
-			claimedAt.Add(ProviderEgressProbeAttemptBackoff), receivedAt))
+			claimedAt.Add(ProviderEgressProbeAttemptBackoff),
+			effectiveAt.Add(retryDelay), receivedAt.Add(retryDelay)))
 		receipt = &ProviderUrlProbeCompletionReceipt{CompletedAt: effectiveAt, ReceivedAt: receivedAt}
 	})
 	if returnErr != nil || receipt == nil {

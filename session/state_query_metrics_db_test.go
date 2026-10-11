@@ -44,6 +44,8 @@ func TestStateQueryMetricActualSqlOutcomes(t *testing.T) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active=$2 WHERE client_id=$1`, clientId, control.active))
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_user SET credential_change_time=$2 WHERE user_id=$1`, userId, changed))
 			})
+			// the fixture reactivates the client, which production never does
+			stateRefusals.forget()
 			isClient := control.claims.ClientId != nil
 			before := stateQueryCount(control.source, isClient, control.outcome)
 			queryCtx := ctx

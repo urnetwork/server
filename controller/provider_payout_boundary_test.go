@@ -1,14 +1,21 @@
+// Controller sends consult the retained provider earning boundary: drift
+// refuses before money moves, accepted attempts still reconcile, and an
+// unavailable observation holds the same payment for a bounded retry.
 package controller
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -111,6 +118,49 @@ func TestProviderBoundaryAcceptedAttemptReconcilesDuringDrift(t *testing.T) {
 	})
 }
 
+// The retained earning-boundary statement, as every ordinary observation sends it.
+const providerBoundaryReadSql = "SELECT earning_identity, identity_sha256, initial_config_sha256, prepared_at FROM provider_payout_boundary"
+
+// Records how PostgreSQL ended each retained earning-boundary read on the
+// traced fixture pools. Its methods are safe for concurrent use.
+type providerBoundaryReadTrace struct {
+	stateLock sync.Mutex
+	readErrs  []error
+}
+
+// Marks a boundary read so its completion can be attributed to it.
+type providerBoundaryReadKey struct{}
+
+// Only the exact boundary statement is marked; every other statement passes through.
+func (self *providerBoundaryReadTrace) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.HasPrefix(strings.TrimSpace(data.SQL), providerBoundaryReadSql) {
+		return context.WithValue(ctx, providerBoundaryReadKey{}, true)
+	}
+	return ctx
+}
+
+// Retains a marked read's completion error, nil when the read succeeded.
+func (self *providerBoundaryReadTrace) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	if marked, _ := ctx.Value(providerBoundaryReadKey{}).(bool); marked {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.readErrs = append(self.readErrs, data.Err)
+	}
+}
+
+// Completion errors of the boundary reads observed so far, in order.
+func (self *providerBoundaryReadTrace) snapshot() []error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Clone(self.readErrs)
+}
+
+// A boundary read that exhausts its physical statement budget holds the
+// payment for one bounded continuation of the same attempt. Ordinary
+// observations read only provider_payout_boundary (never migration_catalog),
+// so an access-exclusive lock on that table is the barrier: the actual SELECT
+// can end only when PostgreSQL cancels it, and the trace proves that read, not
+// another statement, hit the timeout.
 func TestProviderBoundaryDatabaseObservationTimeoutSchedulesSamePayment(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		cutoff := time.Date(2020, 1, 7, 0, 0, 0, 0, time.UTC)
@@ -133,13 +183,21 @@ func TestProviderBoundaryDatabaseObservationTimeoutSchedulesSamePayment(t *testi
 			server.RaisePgResult(conn.Exec(ctx, `ALTER DATABASE `+databaseSql+` SET statement_timeout='100ms'`))
 		}, server.OptReadWrite())
 		server.PgReset()
+		// The scope must exist before the blocker takes a pool connection.
+		trace := &providerBoundaryReadTrace{}
+		scope, err := server.NewTestPgQueryScope(ctx, trace)
+		if err != nil {
+			t.Fatal(err)
+		}
 		blocker, err := server.AcquireMaintenanceDbConn(ctx)
 		if err != nil {
+			_ = scope.Close()
 			t.Fatal(err)
 		}
 		lock, err := blocker.Begin(ctx)
 		if err != nil {
 			blocker.Release()
+			_ = scope.Close()
 			t.Fatal(err)
 		}
 		finish := func() {
@@ -150,21 +208,31 @@ func TestProviderBoundaryDatabaseObservationTimeoutSchedulesSamePayment(t *testi
 				_, resetErr := blocker.Exec(cleanupCtx, `ALTER DATABASE `+databaseSql+` RESET statement_timeout`)
 				blocker.Release()
 				blocker = nil
+				// Every traced user has returned; restore the fixture pools before reset.
+				scopeErr := scope.Close()
 				server.PgReset()
-				if resetErr != nil {
-					t.Error("private database timeout cleanup", resetErr)
+				if resetErr != nil || scopeErr != nil {
+					t.Error("private database timeout cleanup", resetErr, scopeErr)
 				}
 			}
 		}
 		defer finish()
-		if _, err := lock.Exec(ctx, `LOCK TABLE migration_catalog IN ACCESS EXCLUSIVE MODE`); err != nil {
+		if _, err := lock.Exec(ctx, `LOCK TABLE provider_payout_boundary IN ACCESS EXCLUSIVE MODE`); err != nil {
 			t.Fatal(err)
 		}
-		// The retained lock forces the actual boundary SELECT to hit its physical
-		// PostgreSQL statement budget while the payment owner's context is live.
 		args := &AdvancePaymentArgs{PaymentId: payment.PaymentId}
 		result, err := AdvancePayment(args, owner)
 		finish()
+		reads := trace.snapshot()
+		if len(reads) == 0 {
+			t.Fatal("payment path issued no retained boundary read under the barrier")
+		}
+		for _, readErr := range reads {
+			var timeout *pgconn.PgError
+			if !errors.As(readErr, &timeout) || timeout.Code != pgerrcode.QueryCanceled || !strings.Contains(timeout.Message, "statement timeout") {
+				t.Fatal("held boundary read did not end at its physical statement budget", readErr)
+			}
+		}
 		if err != nil || result == nil || result.Complete || result.Canceled || !result.Retryable || !strings.Contains(result.HeldReason, "statement timeout") || sends != 0 || owner.Ctx.Err() != nil {
 			t.Fatal("temporary observation ended or sent retained payment", result, err, sends)
 		}

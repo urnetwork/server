@@ -1,8 +1,11 @@
-// Published versions 794–813 share one ordered artifact/SQL contract. These
+// Published versions from 794 through head share one ordered artifact/SQL contract. These
 // predicates read catalogs only and remain safe before the additive DDL exists.
 package monitor
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Keep previously published single predicates byte-for-byte; their owning
 // native tests also extract the exact emitted SQL from the complete probe.
@@ -218,4 +221,38 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		snMainnetMigrationColumns("contract_close",
 			snMainnetMigrationColumn{name: "legacy_checkpoint_byte_count", kind: "bigint"},
 			snMainnetMigrationColumn{name: "identified_checkpoint_byte_count", kind: "bigint"})),
+	// Presence of the published payout planning schema. The positional row
+	// protocol needs one contract per version before later versions can be read.
+	migrationCurrentSuffix(814, "durable payout plan assignment and sweep owner guard",
+		migrationFp2Table("payment_plan_assignment"),
+		migrationFp2Table("payment_plan_sweep"),
+		migrationFp2Index("payment_plan_assignment", "payment_plan_assignment_pending", "(true)", "(complete_time IS NULL)", true),
+		paymentPlanSweepOwnerGuardArtifactQuery),
+	migrationCurrentSuffix(815, "committed payout reliability windows",
+		migrationFp2Table("payment_plan_reliability_window"),
+		migrationFp2Table("payment_plan_reliability_partial")),
+	migrationCurrentSuffix(816, "unread sweep destination index removed",
+		migrationIndexRemoved("transfer_escrow_sweep", "transfer_escrow_sweep_destination_id_sweep_time")),
+	migrationCurrentSuffix(817, "legacy open pair index removed",
+		migrationIndexRemoved("transfer_contract", "transfer_contract_pair_open_create_time")),
+	migrationCurrentSuffix(818, "legacy open destination index removed",
+		migrationIndexRemoved("transfer_contract", "transfer_contract_open_destination_partial")),
+	migrationCurrentSuffix(819, "unread task reschedule error index removed",
+		migrationIndexRemoved("pending_task", "pending_task_has_reschedule_error")),
 }
+
+// A dropped index stays dropped: a rebuilt copy under the published name would
+// again be maintained on every write without a reader.
+func migrationIndexRemoved(table, name string) string {
+	return fmt.Sprintf(`NOT EXISTS (SELECT 1 FROM index_artifact
+		WHERE table_name = '%s' AND index_name = '%s')`, table, name)
+}
+
+// The 814 guard fires only for payment_id changes, so tgattr names that column
+// rather than being empty like the other row triggers in this suffix.
+const paymentPlanSweepOwnerGuardArtifactQuery = `EXISTS(SELECT 1 FROM pg_trigger t
+ WHERE t.tgrelid=to_regclass('public.transfer_escrow_sweep') AND t.tgname='payment_plan_sweep_owner_guard'
+ AND t.tgfoid=to_regprocedure('public.payment_plan_sweep_owner_guard()') AND NOT t.tgisinternal
+ AND t.tgenabled IN ('O','A') AND t.tgtype=19 AND t.tgqual IS NULL AND t.tgnargs=0
+ AND t.tgattr=(SELECT a.attnum::text::int2vector FROM pg_attribute a
+  WHERE a.attrelid=to_regclass('public.transfer_escrow_sweep') AND a.attname='payment_id'))`

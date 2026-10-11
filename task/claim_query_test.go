@@ -146,9 +146,15 @@ type taskClaimQueryTestPlan struct {
 	Plans        []taskClaimQueryTestPlan `json:"Plans"`
 }
 
+// Rows the claim reads for each claimed task after discovery: the locking
+// recheck, and the lease's capture of the prior wake and its update.
+const taskClaimDenseClaimedRowReads = 4
+
 // A dense due backlog contains one eligible target every 256 rows, alongside
-// future and leased work. Actual takeTasks visits only enough of that backlog
-// to fill its batch; its previous eager SELECT visits all 16,384 due rows.
+// future and leased work. Actual takeTasks discovers only enough of that
+// backlog to fill its batch; its previous eager SELECT visits all 16,384 due
+// rows. After discovery, each claimed task costs a fixed number of row reads
+// however large the backlog is.
 func TestTaskClaimDenseSaturatedQueueWork(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -292,7 +298,7 @@ func TestTaskClaimDenseSaturatedQueueWork(t *testing.T) {
 			var beforePid, afterPid int32
 			var beforeVisits, afterVisits int64
 			var claimConn *pgx.Conn
-			var stageVisits int64
+			var stageVisits, discoveryVisits, claimedVisits int64
 			logStage := func(stage string) {
 				pid, visits, err := readVisits(claimConn)
 				server.Raise(err)
@@ -300,6 +306,11 @@ func TestTaskClaimDenseSaturatedQueueWork(t *testing.T) {
 					t.Fatal("claim stage lost backend counter continuity", stage, pid, visits)
 				}
 				t.Logf("claim attempt %d stage %s: rows_visited=%d total=%d", attempt, stage, visits-stageVisits, visits-beforeVisits)
+				if stage == "cursor" {
+					discoveryVisits += visits - stageVisits
+				} else {
+					claimedVisits += visits - stageVisits
+				}
 				stageVisits = visits
 			}
 			worker.claimBeforeQuery = func(tx server.PgTx) error {
@@ -347,10 +358,16 @@ func TestTaskClaimDenseSaturatedQueueWork(t *testing.T) {
 				t.Fatalf("claim counter endpoints lost backend/transaction continuity: before=%d/%d after=%d/%d", beforePid, beforeVisits, afterPid, afterVisits)
 			}
 			cursorVisits := afterVisits - beforeVisits
-			if cursorVisits < eligibleStride*batchSize || eligibleStride*batchSize+2*batchSize < cursorVisits {
-				t.Fatalf("claim attempt %d scanned unneeded fallback rows: visits=%d before=%d after=%d eager=%.0f", attempt, cursorVisits, beforeVisits, afterVisits, eagerVisits)
+			if discoveryVisits+claimedVisits != cursorVisits {
+				t.Fatalf("claim attempt %d stages did not cover the claim: discovery=%d claimed=%d total=%d", attempt, discoveryVisits, claimedVisits, cursorVisits)
 			}
-			t.Logf("claim attempt %d: rows_visited=%d before=%d after=%d eager_rows=%.0f", attempt, cursorVisits, beforeVisits, afterVisits, eagerVisits)
+			if discoveryVisits < eligibleStride*batchSize || eligibleStride*batchSize+batchSize < discoveryVisits {
+				t.Fatalf("claim attempt %d scanned unneeded fallback rows: discovery=%d before=%d after=%d eager=%.0f", attempt, discoveryVisits, beforeVisits, afterVisits, eagerVisits)
+			}
+			if taskClaimDenseClaimedRowReads*batchSize < claimedVisits {
+				t.Fatalf("claim attempt %d read %d rows after discovery for %d claimed tasks", attempt, claimedVisits, batchSize)
+			}
+			t.Logf("claim attempt %d: rows_visited=%d discovery=%d claimed=%d eager_rows=%.0f", attempt, cursorVisits, discoveryVisits, claimedVisits, eagerVisits)
 		}
 		if after := GetTasks(ctx, expectedIds...); !reflect.DeepEqual(before, after) {
 			t.Fatal("rolled-back measurements changed durable task claims")

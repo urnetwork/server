@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
@@ -81,16 +81,21 @@ func TestParseCommandRejectsInvalidArguments(t *testing.T) {
 	}
 }
 
-// A present empty pin must not silently select the ordinary migration path.
-func TestParseCommandSchedulePin(t *testing.T) {
-	pin := strings.Repeat("ab", 32)
-	options, err := parseCommand([]string{"db", "migrate", "--sn-schedule-sha256=" + pin})
-	if err != nil || options.command != "migrate" || options.scheduleSha256 != pin {
-		t.Fatalf("selected schedule = %+v, %v", options, err)
+// The removed transition option is absent from usage and refused in every
+// spelling, so plain db migrate is the only migration command line.
+func TestParseCommandRejectsRemovedSchedulePin(t *testing.T) {
+	if strings.Contains(usage, "sn-schedule-sha256") {
+		t.Fatal("usage still offers the removed schedule option")
 	}
-	for _, pin := range []string{"", strings.Repeat("0", 64), strings.Repeat("AB", 32), strings.Repeat("a", 63), strings.Repeat("g", 64)} {
-		if _, err := parseCommand([]string{"db", "migrate", "--sn-schedule-sha256=" + pin}); err == nil {
-			t.Errorf("accepted invalid selected schedule %q", pin)
+	pin := strings.Repeat("ab", 32)
+	for _, args := range [][]string{
+		{"db", "migrate", "--sn-schedule-sha256=" + pin},
+		{"db", "migrate", "--sn-schedule-sha256", pin},
+		{"db", "migrate", "-sn-schedule-sha256=" + pin},
+		{"db", "migrate", "--sn-schedule-sha256="},
+	} {
+		if _, err := parseCommand(args); err == nil {
+			t.Errorf("accepted removed schedule option %v", args)
 		}
 	}
 }
@@ -695,174 +700,96 @@ func TestCancellationOnlyRetainsOperationalCauses(t *testing.T) {
 	}
 }
 
-// Selected migration must compare the reviewed digest before schema mutation
-// and prepare against that same digest after schema mutation succeeds.
-func TestMigrateDatabaseSelectedScheduleOrdering(t *testing.T) {
-	pin := strings.Repeat("ab", 32)
-	boundary := &server.ProviderEarningBoundary{IdentitySha256: strings.Repeat("cd", 32), InitialConfigSha256: pin}
-	var events []string
-	var output bytes.Buffer
-	err := migrateDatabase(context.Background(), pin, &output,
-		func(context.Context) { events = append(events, "migrate") },
-		func(context.Context) (*server.ProviderPayoutTransition, error) {
-			events = append(events, "load")
-			return &server.ProviderPayoutTransition{ConfigSha256: pin}, nil
-		},
-		func(ctx context.Context, selected string) (*server.ProviderEarningBoundary, error) {
-			events = append(events, "prepare")
-			if selected != pin || !slices.Equal(events, []string{"load", "migrate", "prepare"}) {
-				t.Errorf("prepare selection/order: %q %v", selected, events)
-			}
-			return boundary, nil
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(events, []string{"load", "migrate", "prepare"}) {
-		t.Errorf("migration order = %v", events)
-	}
-	var result struct {
-		Boundary                 *server.ProviderEarningBoundary `json:"earning_boundary"`
-		DeploymentVerified       bool                            `json:"deployment_verified"`
-		ChainReadinessAuthorized bool                            `json:"chain_readiness_authorized"`
-	}
-	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Boundary == nil || result.Boundary.InitialConfigSha256 != pin || result.Boundary.IdentitySha256 != boundary.IdentitySha256 || result.DeploymentVerified || result.ChainReadinessAuthorized {
-		t.Errorf("migration report = %+v", result)
-	}
+// The expected confirmation, built from the boundary rather than the output.
+func migrateTestLine(state string, boundary *server.ProviderEarningBoundary) string {
+	return fmt.Sprintf("%s provider earning boundary: cutoff_utc=%s identity_sha256=%s initial_config_sha256=%s prepared_at=%s\n",
+		state, boundary.CutoffUtc, boundary.IdentitySha256, boundary.InitialConfigSha256, boundary.PreparedAt.UTC().Format(time.RFC3339Nano))
 }
 
-// A pin mismatch or unavailable schedule never permits the first schema write.
-func TestMigrateDatabaseRejectsUnreviewedScheduleBeforeMutation(t *testing.T) {
-	pin := strings.Repeat("ab", 32)
-	loadErr := errors.New("synthetic schedule unreadable")
+// Migrations precede the boundary step, whose prepared or retained result is
+// the one confirmation line; without a schedule nothing is written.
+func TestMigrateDatabaseEnsuresBoundaryAfterMigration(t *testing.T) {
+	boundary := &server.ProviderEarningBoundary{IdentitySha256: strings.Repeat("cd", 32), InitialConfigSha256: strings.Repeat("ab", 32),
+		CutoffUtc: "2035-01-01T00:00:00Z", PreparedAt: time.Date(2035, 1, 2, 0, 0, 0, 0, time.UTC)}
 	for _, c := range []struct {
-		policy *server.ProviderPayoutTransition
-		err    error
+		boundary *server.ProviderEarningBoundary
+		prepared bool
+		want     string
 	}{
-		{policy: nil},
-		{policy: &server.ProviderPayoutTransition{ConfigSha256: strings.Repeat("cd", 32)}},
-		{err: loadErr},
+		{boundary: boundary, prepared: true, want: migrateTestLine("Prepared", boundary)},
+		{boundary: boundary, prepared: false, want: migrateTestLine("Retained", boundary)},
+		{boundary: nil, prepared: false, want: ""},
 	} {
+		var events []string
 		var output bytes.Buffer
-		mutated := false
-		prepared := false
-		err := migrateDatabase(context.Background(), pin, &output,
-			func(context.Context) { mutated = true },
-			func(context.Context) (*server.ProviderPayoutTransition, error) { return c.policy, c.err },
-			func(context.Context, string) (*server.ProviderEarningBoundary, error) {
-				prepared = true
-				return nil, nil
+		err := migrateDatabase(context.Background(), &output,
+			func(context.Context) { events = append(events, "migrate") },
+			func(context.Context) (*server.ProviderEarningBoundary, bool, error) {
+				events = append(events, "ensure")
+				return c.boundary, c.prepared, nil
 			})
-		if err == nil || mutated || prepared || output.Len() != 0 {
-			t.Errorf("unreviewed migration: err=%v mutated=%v prepared=%v output=%q", err, mutated, prepared, output.String())
-		}
-		if c.err != nil && !errors.Is(err, c.err) {
-			t.Errorf("schedule read lost cause: %v", err)
+		if err != nil || !slices.Equal(events, []string{"migrate", "ensure"}) || output.String() != c.want {
+			t.Errorf("migration prepared=%v: err=%v events=%v output=%q want %q", c.prepared, err, events, output.String(), c.want)
 		}
 	}
 }
 
-// The ordinary migration path does not imply selection or boundary readiness.
-func TestMigrateDatabaseWithoutSelection(t *testing.T) {
-	var output bytes.Buffer
-	migrations := 0
-	err := migrateDatabase(context.Background(), "", &output,
-		func(context.Context) { migrations++ },
-		func(context.Context) (*server.ProviderPayoutTransition, error) {
-			t.Error("unselected migration loaded schedule")
-			return nil, nil
-		},
-		func(context.Context, string) (*server.ProviderEarningBoundary, error) {
-			t.Error("unselected migration prepared boundary")
-			return nil, nil
-		})
-	if err != nil || migrations != 1 || output.Len() != 0 {
-		t.Errorf("ordinary migration: err=%v migrations=%d output=%q", err, migrations, output.String())
-	}
-}
-
-// The post-migration exact-byte check can still fail and must emit no receipt.
+// A boundary step failure fails the command after its migrations and writes
+// no confirmation.
 func TestMigrateDatabasePropagatesPreparationFailure(t *testing.T) {
-	pin := strings.Repeat("ab", 32)
-	cause := errors.New("synthetic schedule changed during migration")
+	cause := errors.New("synthetic boundary refusal")
 	var output bytes.Buffer
 	migrated := false
-	err := migrateDatabase(context.Background(), pin, &output,
+	err := migrateDatabase(context.Background(), &output,
 		func(context.Context) { migrated = true },
-		func(context.Context) (*server.ProviderPayoutTransition, error) {
-			return &server.ProviderPayoutTransition{ConfigSha256: pin}, nil
-		},
-		func(context.Context, string) (*server.ProviderEarningBoundary, error) {
+		func(context.Context) (*server.ProviderEarningBoundary, bool, error) {
 			if !migrated {
-				t.Error("prepared before schema migration")
+				t.Error("boundary step ran before migrations")
 			}
-			return nil, cause
+			return nil, false, cause
 		})
 	if !errors.Is(err, cause) || !migrated || output.Len() != 0 {
 		t.Errorf("preparation failure: err=%v migrated=%v output=%q", err, migrated, output.String())
 	}
 }
 
-// Cancellation at every external phase prevents subsequent migration effects.
+// Cancellation before or during migration prevents every later step.
 func TestMigrateDatabaseCancellationGates(t *testing.T) {
-	pin := strings.Repeat("ab", 32)
-	for _, cancelAt := range []string{"before-load", "after-load", "after-migrate"} {
+	for _, cancelAt := range []string{"before-migrate", "during-migrate"} {
 		ctx, cancel := context.WithCancel(context.Background())
 		var events []string
 		var output bytes.Buffer
-		if cancelAt == "before-load" {
+		if cancelAt == "before-migrate" {
 			cancel()
 		}
-		err := migrateDatabase(ctx, pin, &output,
+		err := migrateDatabase(ctx, &output,
 			func(context.Context) {
 				events = append(events, "migrate")
-				if cancelAt == "after-migrate" {
-					cancel()
-				}
+				cancel()
 			},
-			func(context.Context) (*server.ProviderPayoutTransition, error) {
-				events = append(events, "load")
-				if cancelAt == "after-load" {
-					cancel()
-				}
-				return &server.ProviderPayoutTransition{ConfigSha256: pin}, nil
-			},
-			func(context.Context, string) (*server.ProviderEarningBoundary, error) {
-				events = append(events, "prepare")
-				return nil, nil
+			func(context.Context) (*server.ProviderEarningBoundary, bool, error) {
+				events = append(events, "ensure")
+				return nil, false, nil
 			})
 		cancel()
-		want := map[string][]string{"before-load": nil, "after-load": {"load"}, "after-migrate": {"load", "migrate"}}
+		want := map[string][]string{"before-migrate": nil, "during-migrate": {"migrate"}}
 		if !errors.Is(err, context.Canceled) || !slices.Equal(events, want[cancelAt]) || output.Len() != 0 {
 			t.Errorf("cancel %s: err=%v events=%v output=%q", cancelAt, err, events, output.String())
 		}
 	}
 }
 
-// Invalid direct inputs cannot reach even the injected schedule loader.
+// A missing owner context cannot reach either injected step.
 func TestMigrateDatabaseRejectsInvalidInputs(t *testing.T) {
 	called := false
-	for _, c := range []struct {
-		ctx context.Context
-		pin string
-	}{
-		{ctx: nil, pin: strings.Repeat("ab", 32)},
-		{ctx: context.Background(), pin: "invalid"},
-		{ctx: context.Background(), pin: strings.Repeat("0", 64)},
-	} {
-		err := migrateDatabase(c.ctx, c.pin, io.Discard,
-			func(context.Context) { called = true },
-			func(context.Context) (*server.ProviderPayoutTransition, error) { called = true; return nil, nil },
-			func(context.Context, string) (*server.ProviderEarningBoundary, error) { called = true; return nil, nil })
-		if err == nil {
-			t.Errorf("accepted invalid migration input %+v", c)
-		}
-	}
-	if called {
-		t.Error("invalid migration reached side effect")
+	err := migrateDatabase(nil, io.Discard,
+		func(context.Context) { called = true },
+		func(context.Context) (*server.ProviderEarningBoundary, bool, error) {
+			called = true
+			return nil, false, nil
+		})
+	if err == nil || called {
+		t.Errorf("missing owner context: err=%v called=%v", err, called)
 	}
 }
 

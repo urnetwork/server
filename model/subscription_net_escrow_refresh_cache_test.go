@@ -98,9 +98,11 @@ func TestNetEscrowDelayedSettlementUsesCurrentDurableCacheAndAvoidsHistory(t *te
 	})
 }
 
-// Twenty delayed settlement mirrors share 10,001 surviving reservations. A
-// missing cache is the exact-history control; overtaking admission supplies the
-// current committed cached amount. Every callback reads exactly one balance.
+// Twenty delayed settlement mirrors share 10,001 surviving reservations, far
+// past the refresh census bound. Overtaking admission supplies the current
+// committed cached amount, which every callback reuses. With the cache missing,
+// every callback defers rather than census that history, and leaves the
+// published mirror as it was.
 func TestNetEscrowRefreshCacheConcurrentMirrorCost(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -127,6 +129,8 @@ func TestNetEscrowRefreshCacheConcurrentMirrorCost(t *testing.T) {
 			}
 			beforeReload := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reloaded"))
 			beforeReuse := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reused"))
+			beforeDeferred := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("deferred"))
+			mirrorBefore := Testing_NetEscrowByteCount(ctx, f.balanceId)
 			var wg sync.WaitGroup
 			start := make(chan struct{})
 			began := time.Now()
@@ -138,14 +142,21 @@ func TestNetEscrowRefreshCacheConcurrentMirrorCost(t *testing.T) {
 			wg.Wait()
 			reloads := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reloaded")) - beforeReload
 			reused := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reused")) - beforeReuse
-			// Concurrent cold readers may all start before the first guarded
-			// warmup commits; later readers may reuse it. Both schedules retain
-			// exactly twenty complete reads, and a warm start requires no census.
-			if reused+reloads != 20 || (!missing && reloads != 0) || (missing && (reloads < 1 || reloads > 20)) {
-				t.Fatalf("missing=%t completed reloads=%v reused=%v", missing, reloads, reused)
-			}
-			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 10002 {
-				t.Fatalf("concurrent delayed settlement mirrors published%d, want10002", got)
+			deferred := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("deferred")) - beforeDeferred
+			if missing {
+				if reloads != 0 || reused != 0 || deferred != 20 {
+					t.Fatalf("missing=%t reloads=%v reused=%v deferred=%v, want 0/0/20", missing, reloads, reused, deferred)
+				}
+				if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != mirrorBefore {
+					t.Fatalf("deferred mirrors rewrote the published counter: %d, was %d", got, mirrorBefore)
+				}
+			} else {
+				if reused != 20 || reloads != 0 || deferred != 0 {
+					t.Fatalf("missing=%t reloads=%v reused=%v deferred=%v, want 0/20/0", missing, reloads, reused, deferred)
+				}
+				if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 10002 {
+					t.Fatalf("concurrent delayed settlement mirrors published%d, want10002", got)
+				}
 			}
 			t.Logf("missing_cache=%t completed_one_balance_mirrors=20 exact_history_reads=%v elapsed=%s", missing, reloads, time.Since(began))
 		}

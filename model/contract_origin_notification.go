@@ -42,14 +42,27 @@ func init() {
 
 // These budgets belong to one lifecycle owner, never to the process. Exhausting
 // them loses only an optimization: the request's bounded PostgreSQL wait remains.
+// Route rejections (contract_route_rejection.go) are bounded by count and by a
+// timeout; zero disables them.
 type ContractOriginNotificationSettings struct {
-	MaxWaiters       int
-	PublishQueueSize int
-	PublishWorkers   int
+	MaxWaiters            int
+	PublishQueueSize      int
+	PublishWorkers        int
+	MaxRouteRejections    int
+	RouteRejectionTimeout time.Duration
 }
 
+// The route rejection bound holds about 6 MiB. The timeout is not exactly
+// 10s: old sdks retry a refused route every 5s, and a refusal kept for
+// exactly two retry intervals expires just before the second retry.
 func DefaultContractOriginNotificationSettings() ContractOriginNotificationSettings {
-	return ContractOriginNotificationSettings{MaxWaiters: 8192, PublishQueueSize: 1024, PublishWorkers: 2}
+	return ContractOriginNotificationSettings{
+		MaxWaiters:            8192,
+		PublishQueueSize:      1024,
+		PublishWorkers:        2,
+		MaxRouteRejections:    16384,
+		RouteRejectionTimeout: 12 * time.Second,
+	}
 }
 
 type contractOriginSubscription interface {
@@ -85,6 +98,8 @@ type ContractOriginNotifications struct {
 	closed    bool
 	waiters   int
 	buckets   [contractOriginBucketCount]contractOriginBucket
+	// Owns its own lock; never taken while holding stateLock.
+	routeRejections *contractRouteRejections
 }
 
 // The constructor starts the owner loops, but no subscription is opened until a
@@ -99,13 +114,15 @@ func newContractOriginNotifications(
 	subscribe func(context.Context, string) (contractOriginSubscription, error),
 	publish func(context.Context, string, string) error,
 ) *ContractOriginNotifications {
-	if settings.MaxWaiters <= 0 || settings.PublishQueueSize <= 0 || settings.PublishWorkers <= 0 || settings.PublishWorkers > contractOriginBucketCount {
+	if settings.MaxWaiters <= 0 || settings.PublishQueueSize <= 0 || settings.PublishWorkers <= 0 || settings.PublishWorkers > contractOriginBucketCount ||
+		settings.MaxRouteRejections < 0 || settings.RouteRejectionTimeout < 0 {
 		panic("invalid contract origin notification budgets")
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	notifications := &ContractOriginNotifications{
 		ctx: ctx, cancel: cancel, settings: settings, subscribe: subscribe, publish: publish,
-		queue: make(chan [32]byte, settings.PublishQueueSize),
+		queue:           make(chan [32]byte, settings.PublishQueueSize),
+		routeRejections: newContractRouteRejections(settings.MaxRouteRejections, settings.RouteRejectionTimeout),
 	}
 	for i := range notifications.buckets {
 		notifications.buckets[i] = contractOriginBucket{needed: make(chan struct{}), pairs: map[[32]byte]*contractOriginPair{}}
@@ -225,6 +242,9 @@ func notifyCommittedContractOrigin(ctx context.Context, sourceId server.Id, dest
 		return
 	}
 	key := contractOriginPairHash(sourceId, destinationId)
+	// A route refused here for this origin's pair is open now. Other owners
+	// learn it from the published edge (see `notifyBucket`).
+	notifications.routeRejections.invalidate(key)
 	event := "owner_closed"
 	func() {
 		notifications.stateLock.Lock()
@@ -387,6 +407,14 @@ func (self *ContractOriginNotifications) notifyBucket(index int, key *[32]byte) 
 		pair.lookup.invalidate()
 		pair.version.Update(func(version uint64) uint64 { return version + 1 })
 	}
+	// Remove route rejections only after the version edges: a verdict whose
+	// fence is one of those channels is then either refused by its closed
+	// fence or recorded before this removal (see `contractRouteRejections.put`).
+	if key != nil {
+		self.routeRejections.invalidate(*key)
+	} else {
+		self.routeRejections.invalidateBucket(index)
+	}
 }
 
 func (self *ContractOriginNotifications) Close() {
@@ -394,6 +422,8 @@ func (self *ContractOriginNotifications) Close() {
 		self.stateLock.Lock()
 		self.closed = true
 		self.stateLock.Unlock()
+		// no edge can remove a route rejection once the readers stop
+		self.routeRejections.close()
 		self.cancel()
 		self.workers.Wait()
 		var pairs []*contractOriginPair

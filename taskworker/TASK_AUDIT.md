@@ -1,6 +1,6 @@
 # Async task correctness audit
 
-This inventory covers the 94 registered application targets in the production
+This inventory covers the 95 registered application targets in the production
 and subnet-operator registries, including factory-built financial targets and
 retired compatibility handlers. The built-in `RunPost` dispatcher is covered
 separately by the task-helper tests below. Unregistered/manual utilities are not
@@ -101,6 +101,7 @@ cases passed the final run.
 | [BackfillInitialTransferBalance](../taskworker/work/subscription_work.go) | Partial failure remains an error; successful networks are not granted again. | [TestInitialBalanceBackfillTaskGrantsOnce](../taskworker/work/initial_balance_task_test.go); [TestInitialBalanceBackfillRetainsGrantErrorsAndCancellation](../taskworker/work/initial_balance_task_test.go) |
 | [CancelHungAccountPayments](../taskworker/work/account_payment_work.go) | Retire only eligible records, preserve live/accepted work, replay and retain one future run. | [TestMaintenanceTasksCommitSelectiveCleanupAndRecurrence](../taskworker/work/async_maintenance_correctness_test.go) |
 | [CleanupExpiredPaymentIntents](../taskworker/work/subscription_work.go) | Retire only eligible records, preserve live/accepted work, replay and retain one future run. | [TestMaintenanceTasksCommitSelectiveCleanupAndRecurrence](../taskworker/work/async_maintenance_correctness_test.go) |
+| [CloseContractDeadlines](../taskworker/work/contract_deadline_close.go) | Contracts with a stored deadline retire at that deadline through owner batches, newest first; retained position, one retry, legacy rows untouched. | [TestContractDeadlinePassRetiresNewDeadlinesThroughOwnerBatches](../taskworker/work/contract_deadline_close_test.go); [TestContractDeadlinePassClosesNewDeadlinesBeforeTheBacklog](../taskworker/work/contract_deadline_close_test.go); [TestTaskworkerStartupArmsTheContractDeadlinePass](../taskworker/contract_deadline_close_startup_test.go) |
 | [CloseExpiredContracts](../taskworker/work/subscription_work.go) | Terminal outcomes, retained evidence, funding conservation, deadline eligibility, task handback and fairness. | [TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress](../taskworker/work/contract_close_function_fairness_test.go); [TestDeadlineReconciliationAdjacentOwners](../model/subscription_deadline_reconciliation_test.go) |
 | [CloseExpiredNetworkClientHandlers](../taskworker/work/network_client_work.go) | Retire only eligible records, preserve live/accepted work, replay and retain one future run. | [TestMaintenanceTasksCommitSelectiveCleanupAndRecurrence](../taskworker/work/async_maintenance_correctness_test.go) |
 | [CloseScheduledContract](../taskworker/work/startup_contract_closure.go) | Terminal outcomes, retained evidence, funding conservation, deadline eligibility, task handback and fairness. | [TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress](../taskworker/work/contract_close_function_fairness_test.go); [TestDeadlineReconciliationAdjacentOwners](../model/subscription_deadline_reconciliation_test.go) |

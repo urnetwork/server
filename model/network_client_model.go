@@ -15,7 +15,7 @@ import (
 	// "strings"
 	// "sync"
 
-	// "bytes"
+	"bytes"
 	"fmt"
 	"time"
 
@@ -2269,11 +2269,17 @@ func GetClientIdentity(ctx context.Context, clientId server.Id) (identity *Clien
 // provideMirrorTtl bounds the redis mirrors of per-client provide state (the
 // provide modes list, the per-mode secret keys, and the client identity).
 // The mirrors are caches over the postgres source of truth (`provide_key`,
-// `network_client`/`network_client_role`): reads fall back to the db on a
-// miss, and active clients rewrite the keys on every `SetProvide` (and the
-// identity read-through refills its key), so expiring an idle client's keys
-// is safe. These keys used to have no ttl and accumulated without bound
-// (millions of keys cluster-wide), which volatile-ttl eviction cannot touch.
+// `network_client`/`network_client_role`). `SetProvide` rewrites them on every
+// change, and a read that misses refills them from one postgres read, which a
+// second read confirms when the client has keys (see `refillProvideMirror`;
+// the identity read-through refills its own key), so
+// the ttl only bounds how long an unused client's keys stay resident. A client
+// provides when its settings change, not periodically: a multi-client window
+// provides once when it is created, so its mirror expired 72h later while the
+// window stayed active, and before the refill every contract to it read its
+// modes and its secret from postgres. These keys used to have no ttl and
+// accumulated without bound (millions of keys cluster-wide), which
+// volatile-ttl eviction cannot touch.
 const provideMirrorTtl = 72 * time.Hour
 
 func provideModesKey(clientId server.Id) string {
@@ -2393,6 +2399,129 @@ func MigrateProvideMode(ctx context.Context, blockSize int) {
 	}
 }
 
+// Fills a missing mirror with one postgres snapshot, the mode list and every
+// secret together, and never overwrites a mirror that exists. `SetProvide`
+// writes its whole mirror unconditionally after it commits, so a refill whose
+// snapshot predates that commit either finds the newer list and writes
+// nothing, or lands first and is replaced. A removal deletes the mirror
+// instead, which this script cannot tell from an expired one (see
+// `refillProvideMirror`). Returns 1 when it wrote, 0 when another list is
+// mirrored, and 2 when this list is: a command retried after its reply was
+// lost finds its own write. KEYS[1] is the mode list and KEYS[2..] the
+// secrets, in the order of ARGV[3..]; ARGV[2] is the ttl in ms.
+var provideMirrorRefillScript = redis.NewScript(`
+local provideModesListJson = redis.call('GET', KEYS[1])
+if provideModesListJson then
+	if provideModesListJson == ARGV[1] then
+		return 2
+	end
+	return 0
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+for i = 2, #KEYS do
+	redis.call('SET', KEYS[i], ARGV[i + 1], 'PX', ARGV[2])
+end
+return 1
+`)
+
+// Takes back one fill whose snapshot was not confirmed, unless a writer
+// already replaced its mode list. KEYS[1] is the mode list and KEYS[2..] the
+// secrets the fill wrote; ARGV[1] is the mode list it wrote.
+var provideMirrorUnfillScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+	return 0
+end
+redis.call('DEL', unpack(KEYS))
+return 1
+`)
+
+// Bounds the take-back of an unconfirmed fill, which runs even when the
+// caller was canceled.
+const provideMirrorUnfillTimeout = 5 * time.Second
+
+// Reads every provide key of a client in one statement. A client with no keys
+// returns an empty map, which the refill mirrors as an empty mode list.
+func loadProvideSecretKeys(ctx context.Context, clientId server.Id) (secretKeys map[ProvideMode][]byte) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT provide_mode, secret_key FROM provide_key
+				WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			secretKeys = map[ProvideMode][]byte{}
+			for result.Next() {
+				var provideMode ProvideMode
+				var secretKey []byte
+				server.Raise(result.Scan(&provideMode, &secretKey))
+				secretKeys[provideMode] = secretKey
+			}
+		})
+	})
+	return
+}
+
+// Mirrors one `loadProvideSecretKeys` snapshot when no mirror exists, so the
+// next read of this client is served by redis until the ttl. The fill is
+// optional: a redis failure or cancellation leaves the next read on postgres.
+//
+// Every removal (client reap, orphan sweep, prober shard cleanup) commits the
+// delete of the keys and then deletes the mirror. A fill whose snapshot
+// predates that commit but lands after the mirror delete put the removed
+// client's modes and secrets back until the ttl, so a fill that may have
+// written keys reads them again and keeps itself only if they are unchanged.
+// A removal that commits after that read deletes the mirror after the fill
+// landed. A fill that cannot be confirmed is taken back, and the next read
+// refills. An empty list needs no check: a removal leaves no keys, and
+// `SetProvide` writes its list after it commits.
+func refillProvideMirror(ctx context.Context, clientId server.Id, secretKeys map[ProvideMode][]byte) {
+	provideModes := slices.Sorted(maps.Keys(secretKeys))
+	if provideModes == nil {
+		// `[]`, not `null`: an empty list is a cached "provides nothing"
+		provideModes = []ProvideMode{}
+	}
+	provideModesListJson, err := json.Marshal(provideModes)
+	if err != nil {
+		return
+	}
+	keys := []string{provideModesKey(clientId)}
+	args := []any{provideModesListJson, provideMirrorTtl.Milliseconds()}
+	for _, provideMode := range provideModes {
+		keys = append(keys, provideModeSecretKeyKey(clientId, provideMode))
+		args = append(args, secretKeys[provideMode])
+	}
+	// whether this fill may have written, including a lost reply
+	filled := false
+	server.HandleError(func() {
+		server.Redis(ctx, func(r server.RedisClient) {
+			// all keys share the {pm_<clientId>} hash tag (one slot)
+			fillResult, err := provideMirrorRefillScript.Run(ctx, r, keys, args...).Int64()
+			filled = err != nil || fillResult != 0
+		})
+	})
+	if !filled || len(provideModes) == 0 {
+		return
+	}
+
+	confirmed := false
+	server.HandleError(func() {
+		confirmed = maps.EqualFunc(loadProvideSecretKeys(ctx, clientId), secretKeys, bytes.Equal)
+	})
+	if confirmed {
+		return
+	}
+	unfillCtx, unfillCancel := context.WithTimeout(context.WithoutCancel(ctx), provideMirrorUnfillTimeout)
+	defer unfillCancel()
+	server.HandleError(func() {
+		server.Redis(unfillCtx, func(r server.RedisClient) {
+			_ = provideMirrorUnfillScript.Run(unfillCtx, r, keys, provideModesListJson).Err()
+		})
+	})
+}
+
 func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[ProvideMode]bool, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		provideModesListJson, _ := r.Get(ctx, provideModesKey(clientId)).Result()
@@ -2414,26 +2543,15 @@ func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[
 
 	// the redis mirror carries a ttl (provideMirrorTtl), so this db fallback
 	// is load-bearing for idle clients whose keys expired, not just for
-	// provide_key rows older than the redis layer
+	// provide_key rows older than the redis layer. It refills the mirror so
+	// only the first read after an expiry reaches postgres.
 	if provideModes == nil && returnErr == nil {
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
-					SELECT provide_mode FROM provide_key
-					WHERE client_id = $1
-				`,
-				clientId,
-			)
-			server.WithPgResult(result, err, func() {
-				provideModes = map[ProvideMode]bool{}
-				for result.Next() {
-					var provideMode ProvideMode
-					server.Raise(result.Scan(&provideMode))
-					provideModes[provideMode] = true
-				}
-			})
-		})
+		secretKeys := loadProvideSecretKeys(ctx, clientId)
+		refillProvideMirror(ctx, clientId, secretKeys)
+		provideModes = map[ProvideMode]bool{}
+		for provideMode := range secretKeys {
+			provideModes[provideMode] = true
+		}
 	}
 
 	return
@@ -2444,40 +2562,48 @@ func GetProvideSecretKey(
 	clientId server.Id,
 	provideMode ProvideMode,
 ) (secretKey []byte, returnErr error) {
+	// The mode list is read with the secret: `SetProvide` and the refill write
+	// both together, so a list without this mode means postgres has no key.
+	provideModesListed := false
+	provideModeListed := false
 	server.Redis(ctx, func(r server.RedisClient) {
-		secretKeyStr, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, provideMode)).Result()
-		if secretKeyStr != "" {
-			secretKey = []byte(secretKeyStr)
+		// both keys share the {pm_<clientId>} hash tag (one slot)
+		values, err := r.MGet(ctx, provideModeSecretKeyKey(clientId, provideMode), provideModesKey(clientId)).Result()
+		if err != nil || len(values) != 2 {
+			// unavailable; fall back to the db below
+			return
 		}
-		// otherwise leave secretKey nil and fall back to the db below
+		if secretKeyStr, _ := values[0].(string); secretKeyStr != "" {
+			secretKey = []byte(secretKeyStr)
+			return
+		}
+		if provideModesListJson, _ := values[1].(string); provideModesListJson != "" {
+			var provideModesList []ProvideMode
+			if json.Unmarshal([]byte(provideModesListJson), &provideModesList) == nil {
+				provideModesListed = true
+				provideModeListed = slices.Contains(provideModesList, provideMode)
+			}
+		}
 	})
+	if secretKey != nil {
+		return
+	}
+	if provideModesListed && !provideModeListed {
+		returnErr = fmt.Errorf("Provide secret key not set.")
+		return
+	}
 
 	// the redis mirror carries a ttl (provideMirrorTtl), so this db fallback
 	// is load-bearing for idle clients whose keys expired, not just for
-	// provide_key rows older than the redis layer
-	if secretKey == nil && returnErr == nil {
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
-					SELECT
-						secret_key
-					FROM provide_key
-					WHERE
-						client_id = $1 AND
-						provide_mode = $2
-				`,
-				clientId,
-				provideMode,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&secretKey))
-				} else {
-					returnErr = fmt.Errorf("Provide secret key not set.")
-				}
-			})
-		})
+	// provide_key rows older than the redis layer. It refills the whole
+	// mirror when the mode list is missing too; a listed mode whose secret
+	// alone is missing reads postgres until its list expires.
+	secretKeys := loadProvideSecretKeys(ctx, clientId)
+	if !provideModesListed {
+		refillProvideMirror(ctx, clientId, secretKeys)
+	}
+	if secretKey = secretKeys[provideMode]; secretKey == nil {
+		returnErr = fmt.Errorf("Provide secret key not set.")
 	}
 
 	return
@@ -3589,19 +3715,48 @@ func removeProvideKeysForClientIds(ctx context.Context, clientIds []server.Id) {
 	}
 }
 
-// SweepOrphanNetworkClientData removes rows in the network-client dependent
+// SweepOrphanNetworkClientData pages every network-client dependent table to
+// completion in one call: the on-demand `bringyourctl db sweep-orphans` path.
+func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCount int64) {
+	removedCount, _, _ = SweepOrphanNetworkClientDataFrom(ctx, SweepOrphanCursor{}, 0, sliceSize)
+	return
+}
+
+// SweepOrphanNetworkClientDataFrom removes rows in the network-client dependent
 // tables whose parent row no longer exists. RemoveDisconnectedNetworkClients
 // cascades dependents together with the parent deletes, so this is a
 // low-cadence safety net for orphans left by other deletion paths or older
-// releases, not the primary cleanup mechanism. Each call intentionally traverses
-// every child table in primary-key order, with at most sliceSize selected keys
-// per page (see sweepOrphanCursor).
-func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCount int64) {
-	// per-connection tables whose connection is gone, keyed by connection_id
-	removedCount += sweepOrphanTable(
+// releases, not the primary cleanup mechanism. Each table is paged in
+// primary-key order, with at most sliceSize selected keys per page (see
+// sweepOrphanCursor).
+//
+// A call pages at most maxRowCount rows starting from start, and returns the
+// position it stopped at. Pass the returned cursor as the next call's start to
+// resume; done reports that every table has been fully paged, so the caller can
+// begin a fresh pass. maxRowCount <= 0 pages every table to completion.
+func SweepOrphanNetworkClientDataFrom(
+	ctx context.Context,
+	start SweepOrphanCursor,
+	maxRowCount int,
+	sliceSize int,
+) (removedCount int64, end SweepOrphanCursor, done bool) {
+	return sweepOrphanSteps(
 		ctx,
+		sweepOrphanNetworkClientSteps(),
+		start,
+		maxRowCount,
 		sliceSize,
-		`
+	)
+}
+
+// Step order is the persisted cursor's table identity; keep existing positions
+// stable. Steps that clear mirrors after each committed page supply sweep.
+func sweepOrphanNetworkClientSteps() []sweepOrphanStep {
+	return []sweepOrphanStep{
+		// per-connection tables whose connection is gone, keyed by connection_id
+		{
+			table: "network_client_location",
+			sql: `
 		WITH slice AS (
 			SELECT connection_id
 			FROM network_client_location
@@ -3624,13 +3779,11 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 		SELECT (SELECT count(*) FROM slice), (SELECT count(*) FROM del), bound.connection_id
 		FROM bound
 		`,
-		func() []any { return []any{new(server.Id)} },
-	)
-
-	removedCount += sweepOrphanTable(
-		ctx,
-		sliceSize,
-		`
+			newCursorTargets: func() []any { return []any{new(server.Id)} },
+		},
+		{
+			table: "network_client_latency",
+			sql: `
 		WITH slice AS (
 			SELECT connection_id
 			FROM network_client_latency
@@ -3653,13 +3806,11 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 		SELECT (SELECT count(*) FROM slice), (SELECT count(*) FROM del), bound.connection_id
 		FROM bound
 		`,
-		func() []any { return []any{new(server.Id)} },
-	)
-
-	removedCount += sweepOrphanTable(
-		ctx,
-		sliceSize,
-		`
+			newCursorTargets: func() []any { return []any{new(server.Id)} },
+		},
+		{
+			table: "network_client_speed",
+			sql: `
 		WITH slice AS (
 			SELECT connection_id
 			FROM network_client_speed
@@ -3682,173 +3833,22 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 		SELECT (SELECT count(*) FROM slice), (SELECT count(*) FROM del), bound.connection_id
 		FROM bound
 		`,
-		func() []any { return []any{new(server.Id)} },
-	)
-
-	// proxy device configs whose client is gone, paged by proxy_id. RETURNING
-	// feeds the redis mirror cleanup and the proxy_client/proxy_client_change
-	// cascade, so this is an inline cursor loop rather than a sweepOrphanCursor
-	// call: the slice statement UNIONs a single bound sentinel row (is_bound =
-	// true, slice count, max proxy_id) with the deleted proxy_ids (is_bound =
-	// false), so pagination advances even in slices where nothing was deleted.
-	{
-		var cursor server.Id
-		firstSlice := true
-		for {
-			var orphanProxyIds []server.Id
-			var sliceCount int64
-			var maxProxyId server.Id
-			gotBound := false
-			server.MaintenanceTx(ctx, func(tx server.PgTx) {
-				// reset in case the tx is retried on a transient error
-				orphanProxyIds = nil
-				sliceCount = 0
-				gotBound = false
-
-				result, err := tx.Query(
-					ctx,
-					`
-					WITH slice AS (
-						SELECT proxy_id
-						FROM proxy_device_config
-						WHERE ($1 OR proxy_id > $2)
-						ORDER BY proxy_id
-						LIMIT $3
-					), del AS (
-						DELETE FROM proxy_device_config
-						USING slice
-						WHERE
-							proxy_device_config.proxy_id = slice.proxy_id AND
-							NOT EXISTS (
-								SELECT 1 FROM network_client
-								WHERE network_client.client_id = proxy_device_config.client_id
-							)
-						RETURNING proxy_device_config.proxy_id
-					), bound AS (
-						SELECT proxy_id FROM slice ORDER BY proxy_id DESC LIMIT 1
-					)
-					SELECT true, (SELECT count(*) FROM slice), bound.proxy_id
-					FROM bound
-					UNION ALL
-					SELECT false, NULL, del.proxy_id
-					FROM del
-					`,
-					firstSlice,
-					cursor,
-					sliceSize,
-				)
-				server.WithPgResult(result, err, func() {
-					for result.Next() {
-						var isBound bool
-						var sc *int64
-						var proxyId server.Id
-						server.Raise(result.Scan(&isBound, &sc, &proxyId))
-						if isBound {
-							gotBound = true
-							if sc != nil {
-								sliceCount = *sc
-							}
-							maxProxyId = proxyId
-						} else {
-							orphanProxyIds = append(orphanProxyIds, proxyId)
-						}
-					}
-				})
-			}, server.TxReadCommitted)
-
-			server.Redis(ctx, func(r server.RedisClient) {
-				for _, proxyId := range orphanProxyIds {
-					err := r.Del(ctx, proxyDeviceConfigKey(proxyId)).Err()
-					server.Raise(err)
-				}
-			})
-			removeProxyClientData(ctx, orphanProxyIds)
-
-			removedCount += int64(len(orphanProxyIds))
-			if !gotBound || sliceCount < int64(sliceSize) {
-				break
-			}
-			cursor = maxProxyId
-			firstSlice = false
-		}
-	}
-
-	// Proxy clients whose config is gone (including historical/manual
-	// deletion paths), keyed by proxy_id. This custom cursor mirrors the normal
-	// deletion path and returns the released egress identity before the row is
-	// gone; a generic count-only orphan sweep would leave it until TTL.
-	{
-		var cursor server.Id
-		firstSlice := true
-		for {
-			var released []releasedProxyEgress
-			var sliceCount, deletedCount int64
-			var maxProxyID server.Id
-			gotBound := false
-			server.MaintenanceTx(ctx, func(tx server.PgTx) {
-				released = nil
-				sliceCount, deletedCount, gotBound = 0, 0, false
-				result, err := tx.Query(ctx, `
-					WITH slice AS (
-						SELECT proxy_id
-						FROM proxy_client
-						WHERE ($1 OR proxy_id > $2)
-						ORDER BY proxy_id
-						LIMIT $3
-					), del AS (
-						DELETE FROM proxy_client
-						USING slice
-						WHERE proxy_client.proxy_id = slice.proxy_id
-							AND NOT EXISTS (
-								SELECT 1 FROM proxy_device_config
-								WHERE proxy_device_config.proxy_id = proxy_client.proxy_id
-							)
-						RETURNING proxy_client.proxy_id, proxy_client.client_id, proxy_client.client_ipv4
-					), bound AS (
-						SELECT proxy_id FROM slice ORDER BY proxy_id DESC LIMIT 1
-					)
-					SELECT true, (SELECT count(*) FROM slice), NULL::bigint,
-						bound.proxy_id, NULL::uuid, NULL::bigint
-					FROM bound
-					UNION ALL
-					SELECT false, NULL, 1, del.proxy_id, del.client_id, del.client_ipv4
-					FROM del
-				`, firstSlice, cursor, sliceSize)
-				server.WithPgResult(result, err, func() {
-					for result.Next() {
-						var isBound bool
-						var scanned, deleted *int64
-						var proxyID server.Id
-						var clientID *server.Id
-						var ipv4 *int64
-						server.Raise(result.Scan(&isBound, &scanned, &deleted, &proxyID, &clientID, &ipv4))
-						if isBound {
-							gotBound, maxProxyID = true, proxyID
-							if scanned != nil {
-								sliceCount = *scanned
-							}
-						} else if clientID != nil {
-							deletedCount++
-							released = append(released, releasedProxyEgress{ClientID: *clientID, IPv4: ipv4})
-						}
-					}
-				})
-			}, server.TxReadCommitted)
-			clearReleasedProxyEgress(ctx, released)
-			removedCount += deletedCount
-			if !gotBound || sliceCount < int64(sliceSize) {
-				break
-			}
-			cursor, firstSlice = maxProxyID, false
-		}
-	}
-
-	// change rows whose proxy client is gone, keyed by (proxy_host, block,
-	// change_id)
-	removedCount += sweepOrphanTable(
-		ctx,
-		sliceSize,
-		`
+			newCursorTargets: func() []any { return []any{new(server.Id)} },
+		},
+		{
+			table:            "proxy_device_config",
+			newCursorTargets: func() []any { return []any{new(server.Id)} },
+			sweep:            sweepOrphanProxyDeviceConfigs,
+		},
+		{
+			table:            "proxy_client",
+			newCursorTargets: func() []any { return []any{new(server.Id)} },
+			sweep:            sweepOrphanProxyClients,
+		},
+		// change rows whose proxy client is gone, keyed by (proxy_host, block, change_id)
+		{
+			table: "proxy_client_change",
+			sql: `
 		WITH slice AS (
 			SELECT proxy_host, block, change_id
 			FROM proxy_client_change
@@ -3879,17 +3879,18 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 			bound.proxy_host, bound.block, bound.change_id
 		FROM bound
 		`,
-		func() []any { return []any{new(string), new(string), new(int64)} },
-	)
-
-	// Provide keys use a bounded full-key page and locked-tuple deletion.
-	removedCount += sweepOrphanProvideKeys(ctx, sliceSize)
-
-	// TLS certificates whose client is gone, keyed by client_id
-	removedCount += sweepOrphanTable(
-		ctx,
-		sliceSize,
-		`
+			newCursorTargets: func() []any { return []any{new(string), new(string), new(int64)} },
+		},
+		// provide keys use a bounded full-key page and locked-tuple deletion
+		{
+			table:            "provide_key",
+			newCursorTargets: func() []any { return []any{new(server.Id), new(ProvideMode)} },
+			sweep:            sweepOrphanProvideKeyCursor,
+		},
+		// TLS certificates whose client is gone, keyed by client_id
+		{
+			table: "client_tls_certificate",
+			sql: `
 		WITH slice AS (
 			SELECT client_id
 			FROM client_tls_certificate
@@ -3912,14 +3913,12 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 		SELECT (SELECT count(*) FROM slice), (SELECT count(*) FROM del), bound.client_id
 		FROM bound
 		`,
-		func() []any { return []any{new(server.Id)} },
-	)
-
-	// devices no client references, keyed by device_id
-	removedCount += sweepOrphanTable(
-		ctx,
-		sliceSize,
-		`
+			newCursorTargets: func() []any { return []any{new(server.Id)} },
+		},
+		// devices no client references, keyed by device_id
+		{
+			table: "device",
+			sql: `
 		WITH slice AS (
 			SELECT device_id
 			FROM device
@@ -3942,10 +3941,183 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 		SELECT (SELECT count(*) FROM slice), (SELECT count(*) FROM del), bound.device_id
 		FROM bound
 		`,
-		func() []any { return []any{new(server.Id)} },
-	)
+			newCursorTargets: func() []any { return []any{new(server.Id)} },
+		},
+	}
+}
 
-	return
+// Proxy device configs whose client is gone, paged by proxy_id. RETURNING
+// feeds the redis mirror cleanup and the proxy_client/proxy_client_change
+// cascade, so this is its own cursor loop rather than a SQL step: the slice
+// statement UNIONs a single bound sentinel row (is_bound = true, slice count,
+// max proxy_id) with the deleted proxy_ids (is_bound = false), so pagination
+// advances even in slices where nothing was deleted. It keeps
+// sweepOrphanCursor's start, budget and resume contract.
+func sweepOrphanProxyDeviceConfigs(ctx context.Context, startKey []any, maxRowCount int, sliceSize int) (removedCount int64, rowCount int, endKey []any, done bool) {
+	var cursor server.Id
+	firstSlice := startKey == nil
+	if !firstSlice {
+		cursor = startKey[0].(server.Id)
+	}
+	for {
+		var orphanProxyIds []server.Id
+		var sliceCount int64
+		var maxProxyId server.Id
+		gotBound := false
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			// reset in case the tx is retried on a transient error
+			orphanProxyIds = nil
+			sliceCount = 0
+			gotBound = false
+
+			result, err := tx.Query(
+				ctx,
+				`
+				WITH slice AS (
+					SELECT proxy_id
+					FROM proxy_device_config
+					WHERE ($1 OR proxy_id > $2)
+					ORDER BY proxy_id
+					LIMIT $3
+				), del AS (
+					DELETE FROM proxy_device_config
+					USING slice
+					WHERE
+						proxy_device_config.proxy_id = slice.proxy_id AND
+						NOT EXISTS (
+							SELECT 1 FROM network_client
+							WHERE network_client.client_id = proxy_device_config.client_id
+						)
+					RETURNING proxy_device_config.proxy_id
+				), bound AS (
+					SELECT proxy_id FROM slice ORDER BY proxy_id DESC LIMIT 1
+				)
+				SELECT true, (SELECT count(*) FROM slice), bound.proxy_id
+				FROM bound
+				UNION ALL
+				SELECT false, NULL, del.proxy_id
+				FROM del
+				`,
+				firstSlice,
+				cursor,
+				sliceSize,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var isBound bool
+					var sc *int64
+					var proxyId server.Id
+					server.Raise(result.Scan(&isBound, &sc, &proxyId))
+					if isBound {
+						gotBound = true
+						if sc != nil {
+							sliceCount = *sc
+						}
+						maxProxyId = proxyId
+					} else {
+						orphanProxyIds = append(orphanProxyIds, proxyId)
+					}
+				}
+			})
+		}, server.TxReadCommitted)
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, proxyId := range orphanProxyIds {
+				err := r.Del(ctx, proxyDeviceConfigKey(proxyId)).Err()
+				server.Raise(err)
+			}
+		})
+		removeProxyClientData(ctx, orphanProxyIds)
+
+		removedCount += int64(len(orphanProxyIds))
+		rowCount += int(sliceCount)
+		if !gotBound || sliceCount < int64(sliceSize) {
+			return removedCount, rowCount, nil, true
+		}
+		cursor = maxProxyId
+		firstSlice = false
+		if 0 < maxRowCount && maxRowCount <= rowCount {
+			return removedCount, rowCount, []any{cursor}, false
+		}
+	}
+}
+
+// Proxy clients whose config is gone (including historical/manual deletion
+// paths), keyed by proxy_id. This custom cursor mirrors the normal deletion path
+// and returns the released egress identity before the row is gone; a generic
+// count-only orphan sweep would leave it until TTL. It keeps sweepOrphanCursor's
+// start, budget and resume contract.
+func sweepOrphanProxyClients(ctx context.Context, startKey []any, maxRowCount int, sliceSize int) (removedCount int64, rowCount int, endKey []any, done bool) {
+	var cursor server.Id
+	firstSlice := startKey == nil
+	if !firstSlice {
+		cursor = startKey[0].(server.Id)
+	}
+	for {
+		var released []releasedProxyEgress
+		var sliceCount, deletedCount int64
+		var maxProxyID server.Id
+		gotBound := false
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			released = nil
+			sliceCount, deletedCount, gotBound = 0, 0, false
+			result, err := tx.Query(ctx, `
+				WITH slice AS (
+					SELECT proxy_id
+					FROM proxy_client
+					WHERE ($1 OR proxy_id > $2)
+					ORDER BY proxy_id
+					LIMIT $3
+				), del AS (
+					DELETE FROM proxy_client
+					USING slice
+					WHERE proxy_client.proxy_id = slice.proxy_id
+						AND NOT EXISTS (
+							SELECT 1 FROM proxy_device_config
+							WHERE proxy_device_config.proxy_id = proxy_client.proxy_id
+						)
+					RETURNING proxy_client.proxy_id, proxy_client.client_id, proxy_client.client_ipv4
+				), bound AS (
+					SELECT proxy_id FROM slice ORDER BY proxy_id DESC LIMIT 1
+				)
+				SELECT true, (SELECT count(*) FROM slice), NULL::bigint,
+					bound.proxy_id, NULL::uuid, NULL::bigint
+				FROM bound
+				UNION ALL
+				SELECT false, NULL, 1, del.proxy_id, del.client_id, del.client_ipv4
+				FROM del
+			`, firstSlice, cursor, sliceSize)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var isBound bool
+					var scanned, deleted *int64
+					var proxyID server.Id
+					var clientID *server.Id
+					var ipv4 *int64
+					server.Raise(result.Scan(&isBound, &scanned, &deleted, &proxyID, &clientID, &ipv4))
+					if isBound {
+						gotBound, maxProxyID = true, proxyID
+						if scanned != nil {
+							sliceCount = *scanned
+						}
+					} else if clientID != nil {
+						deletedCount++
+						released = append(released, releasedProxyEgress{ClientID: *clientID, IPv4: ipv4})
+					}
+				}
+			})
+		}, server.TxReadCommitted)
+		clearReleasedProxyEgress(ctx, released)
+		removedCount += deletedCount
+		rowCount += int(sliceCount)
+		if !gotBound || sliceCount < int64(sliceSize) {
+			return removedCount, rowCount, nil, true
+		}
+		cursor, firstSlice = maxProxyID, false
+		if 0 < maxRowCount && maxRowCount <= rowCount {
+			return removedCount, rowCount, []any{cursor}, false
+		}
+	}
 }
 
 func CreateNetworkClientHandler(ctx context.Context) (handlerId server.Id) {

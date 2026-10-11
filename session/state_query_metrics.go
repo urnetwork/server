@@ -116,12 +116,18 @@ type stateQueryObservation struct {
 	outcome    stateQueryOutcome
 }
 
-// Starts immediately before the chosen account/client statement is sent.
-func beginStateQuery(ctx context.Context, client bool) stateQueryObservation {
+// The trusted source a server call site selected for ctx, or unknown.
+func stateQuerySourceFromContext(ctx context.Context) StateQuerySource {
 	source, _ := ctx.Value(stateQuerySourceKey{}).(StateQuerySource)
 	if stateQuerySourceCount <= source {
-		source = StateQueryUnknown
+		return StateQueryUnknown
 	}
+	return source
+}
+
+// Starts immediately before the chosen account/client statement is sent.
+func beginStateQuery(ctx context.Context, client bool) stateQueryObservation {
+	source := stateQuerySourceFromContext(ctx)
 	credential := 0
 	if client {
 		credential = 1

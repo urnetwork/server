@@ -40,9 +40,9 @@ const bringyourctlUsage = `BringYour control.
 Usage:
     bringyourctl sn-transition-status
     bringyourctl db version
-    bringyourctl db migrate [--sn-schedule-sha256=<sha256>]
+    bringyourctl db migrate
     bringyourctl db vacuum [--exclude=<table>...]
-    bringyourctl db maintenance (all|<epoch>) [--reindex] [--cleanup] [--analyze]
+    bringyourctl db maintenance (all|<epoch>) [--reindex] [--cleanup] [--analyze] [--include-large]
     bringyourctl db audit [--fix [--force-drop-indexes]]
     bringyourctl db backfill-sweep-destination-id [--batch=<n>]
     bringyourctl db backfill-contract-reap-time [--batch=<n>]
@@ -91,6 +91,7 @@ Usage:
     bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd> --adjustment_id=<adjustment_id> --reason=<reason>
     bringyourctl payouts plan [--send] [--dry-run] [--max_duration=<max_duration>]
     bringyourctl payouts populate-tx-hashes
+    bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -130,10 +131,10 @@ Usage:
     bringyourctl st deposit [--alpha_rao=<alpha_rao>]
     bringyourctl st commit --epoch=<epoch>
     bringyourctl st finalize --epoch=<epoch>
+    bringyourctl st payout-dry-run --epoch=<epoch> [--out=<path>]
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
 
 Options:
-    --sn-schedule-sha256=<sha256>  Prepare the immutable earning boundary from this exact reviewed sn.yml after migrations.
     -h --help     Show this screen.
     --version     Show version.
     -r --realm=<realm>  Search realm.
@@ -168,6 +169,7 @@ Options:
     --blockchain=<blockchain>  Blockchain.
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
     --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, or solana.
+    --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {
@@ -313,6 +315,8 @@ func main() {
 			server.Raise(payoutPlanApplyBonus(opts))
 		} else if ptxh, _ := opts.Bool("populate-tx-hashes"); ptxh {
 			populateTxHashes()
+		} else if reconcileLegacy, _ := opts.Bool("reconcile-legacy-attempts"); reconcileLegacy {
+			os.Exit(reconcileLegacyPayoutAttempts(opts))
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
 		if send, _ := opts.Bool("transfer"); send {
@@ -439,6 +443,8 @@ func main() {
 			stCommit(opts)
 		} else if finalize, _ := opts.Bool("finalize"); finalize {
 			stFinalize(opts)
+		} else if payoutDryRun, _ := opts.Bool("payout-dry-run"); payoutDryRun {
+			stPayoutDryRun(opts)
 		}
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
@@ -454,10 +460,12 @@ func dbVersion(opts docopt.Opts) {
 	fmt.Printf("Current DB version: %d\n", version)
 }
 
+// Applies every pending migration, then retains or prepares the provider
+// earning boundary (see migrateWithPayoutBoundary).
 func dbMigrate(opts docopt.Opts) {
 	fmt.Printf("Applying DB migrations ...\n")
 	server.DbMigrationVerbose = true
-	server.Raise(migrateWithPayoutBoundary(context.Background(), opts, os.Stdout, server.ApplyDbMigrations))
+	server.Raise(migrateWithPayoutBoundary(context.Background(), os.Stdout, server.ApplyDbMigrations, server.EnsureProviderPayoutBoundary))
 }
 
 // dbScrubClientAddresses re-runs the 20260807 raw-client-address scrub
@@ -544,9 +552,9 @@ func dbAudit(opts docopt.Opts) {
 }
 
 // dbBackfillSweepDestinationId backfills transfer_escrow_sweep.destination_id
-// on existing rows so the provider payout stats see pre-deploy sweeps. The
-// column and its covering index are created by db migration; this only fills
-// historical rows. It is idempotent and safe to re-run.
+// on existing rows. The provider payout stats that needed it now read
+// provider_payouts, and migration 816 dropped the column's covering index, so
+// each batch scans the sweep table. It is idempotent and safe to re-run.
 func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -630,6 +638,24 @@ func dbMaintenance(opts docopt.Opts) {
 	reindex, _ := opts.Bool("--reindex")
 	cleanup, _ := opts.Bool("--cleanup")
 	analyze, _ := opts.Bool("--analyze")
+	// the explicit opt-in that lets this run rebuild tables above the
+	// automatic rotation's size bound
+	includeLarge, _ := opts.Bool("--include-large")
+
+	// a stopped run prints why; the load guard applies to operator runs too
+	report := func(outcome *server.DbMaintenanceOutcome) bool {
+		if outcome.Stopped == "" {
+			return true
+		}
+		fmt.Printf(
+			"Maintenance %s: %s (%d table(s) and %d priority index(es) done).\n",
+			outcome.Stopped,
+			outcome.Reason,
+			len(outcome.DoneTables),
+			len(outcome.DoneIndexes),
+		)
+		return false
+	}
 
 	// `all` runs a full reindex cycle. Reindexing is spread across
 	// DbReindexEpochs epochs (each table is hash-assigned to exactly one epoch
@@ -640,25 +666,30 @@ func dbMaintenance(opts docopt.Opts) {
 		fmt.Printf("Running DB maintenance for a full cycle (%d epochs) ...\n", server.DbReindexEpochs)
 		for epoch := uint64(0); epoch < server.DbReindexEpochs; epoch += 1 {
 			fmt.Printf(">>> maintenance epoch %d/%d\n", epoch, server.DbReindexEpochs-1)
-			server.DbMaintenance(context.Background(), epoch, &server.DbMaintenanceOptions{
-				Reindex: reindex,
-				Cleanup: cleanup,
-				Analyze: analyze && epoch == server.DbReindexEpochs-1,
+			outcome := server.DbMaintenance(context.Background(), epoch, &server.DbMaintenanceOptions{
+				Reindex:            reindex,
+				Cleanup:            cleanup,
+				Analyze:            analyze && epoch == server.DbReindexEpochs-1,
+				IncludeLargeTables: includeLarge,
 			})
+			if !report(outcome) {
+				return
+			}
 		}
 		return
 	}
 
 	epoch, _ := opts.Int("<epoch>")
 	dbMaintenanceOpts := &server.DbMaintenanceOptions{
-		Reindex: reindex,
-		Cleanup: cleanup,
-		Analyze: analyze,
+		Reindex:            reindex,
+		Cleanup:            cleanup,
+		Analyze:            analyze,
+		IncludeLargeTables: includeLarge,
 	}
 
 	fmt.Printf("Running DB maintenance ...\n")
 	// server.DbMigrationVerbose = true
-	server.DbMaintenance(context.Background(), uint64(epoch), dbMaintenanceOpts)
+	report(server.DbMaintenance(context.Background(), uint64(epoch), dbMaintenanceOpts))
 }
 
 // VACUUM (FULL, ANALYZE) every public table except the excluded ones (and their
@@ -1548,6 +1579,51 @@ func printPayoutLoopSummary(plans []*model.PaymentPlan) {
 		"drained %d slice(s): %d payment(s), %.4f USD total\n",
 		len(plans), totalPayments, model.NanoCentsToUsd(total),
 	)
+}
+
+// reconcileLegacyPayoutAttempts decides legacy keyed provider payments from
+// Circle's destination history (controller/account_payment_legacy_reconcile.go).
+// Without --apply it is a dry run that reads Circle and reports counts only.
+// The output carries counts only: no payment, network, wallet or amount.
+func reconcileLegacyPayoutAttempts(opts docopt.Opts) int {
+	apply, _ := opts.Bool("--apply")
+	groupLimit := 0
+	if groupLimitStr, _ := opts.String("--group_limit"); groupLimitStr != "" {
+		var err error
+		groupLimit, err = strconv.Atoi(groupLimitStr)
+		if err != nil || groupLimit < 0 {
+			fmt.Printf("invalid --group_limit %q\n", groupLimitStr)
+			return 2
+		}
+	}
+	settings := controller.DefaultLegacyProviderPaymentReconcileSettings()
+	settings.DryRun = !apply
+	settings.GroupLimit = groupLimit
+
+	ctx := context.Background()
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	result, err := controller.ReconcileLegacyProviderPaymentAttempts(clientSession, settings)
+	if result != nil {
+		mode := "dry run (nothing written)"
+		if apply {
+			mode = "applied"
+		}
+		fmt.Printf("legacy provider payment attempts: %s\n", mode)
+		fmt.Printf("  attempts:              %d\n", result.AttemptCount)
+		fmt.Printf("  destination groups:    %d (looked up %d, deferred %d)\n", result.GroupCount, result.LookedUpGroupCount, result.DeferredGroupCount)
+		fmt.Printf("  found (record bound):  %d\n", result.FoundCount)
+		fmt.Printf("  absent (key released): %d\n", result.AbsentCount)
+		fmt.Printf("  held, ambiguous:       %d\n", result.AmbiguousCount)
+		fmt.Printf("  held, lookup error:    %d\n", result.LookupErrorCount)
+		fmt.Printf("  held, ineligible:      %d\n", result.IneligibleCount)
+		fmt.Printf("  held, changed:         %d\n", result.RefusedCount)
+	}
+	if err != nil {
+		fmt.Printf("legacy provider payment reconciliation err = %s\n", err)
+		return 1
+	}
+	return 0
 }
 
 func listPendingPayouts(opts docopt.Opts) {

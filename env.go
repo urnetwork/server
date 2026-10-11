@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"maps"
 
@@ -189,8 +190,10 @@ type resolverHomeObservation struct {
 
 // Each lookup owns its optional credential-access check; no process identity
 // changes or mutable global hooks are needed to inspect another service owner.
+// A cached lookup also owns an observer of the entries its result depends on.
 type resolverFilesystem struct {
-	access func(operation string, path string) error
+	access   func(operation string, path string) error
+	observer *resolverObserver
 }
 
 // Access refusals retain their cause but can never masquerade as file absence.
@@ -208,7 +211,10 @@ func (self resolverFilesystem) stat(path string) (os.FileInfo, error) {
 	if err := self.checkAccess("stat", path); err != nil {
 		return nil, err
 	}
-	return os.Stat(path)
+	self.observer.observeParent(path)
+	info, err := os.Stat(path)
+	self.observer.observeError(err)
+	return info, err
 }
 
 // A non-following stat has the same ancestor-search access contract.
@@ -216,7 +222,10 @@ func (self resolverFilesystem) lstat(path string) (os.FileInfo, error) {
 	if err := self.checkAccess("stat", path); err != nil {
 		return nil, err
 	}
-	return os.Lstat(path)
+	self.observer.observeParent(path)
+	info, err := os.Lstat(path)
+	self.observer.observeError(err)
+	return info, err
 }
 
 // Directory enumeration additionally requires read and search on the target.
@@ -224,7 +233,12 @@ func (self resolverFilesystem) readDir(path string) ([]os.DirEntry, error) {
 	if err := self.checkAccess("read-dir", path); err != nil {
 		return nil, err
 	}
-	return os.ReadDir(path)
+	self.observer.observeParent(path)
+	// the listing is observed through the directory, before it is read
+	self.observer.observeDirectory(path)
+	entries, err := os.ReadDir(path)
+	self.observer.observeError(err)
+	return entries, err
 }
 
 // Only the underlying filesystem can establish absence. A callback may wrap
@@ -526,18 +540,39 @@ func RequireConfigVersion() string {
 	return configVersion
 }
 
+// Resolves resources under one mount type. Resolutions are cached per mount
+// root, environment and resource path, and every lookup first re-observes the
+// filesystem entries the cached resolution depended on (see
+// resolverResolution), so a vault or config push, a new version directory, and
+// a file added, replaced or rewritten in place are all seen by the next lookup
+// without probing and logging the whole search again. Safe for concurrent use.
 type Resolver struct {
 	mountType MountType
 
+	// Fixed at construction. Tests that need a controlled clock construct their own resolver.
+	now func() time.Time
+
 	stateLock sync.Mutex
-	// relPath -> id -> value
-	relPathOverrides map[string]map[int][]byte
+	// relPath -> id -> override
+	relPathOverrides map[string]map[int]resolverOverride
+	keyResolutions   map[resolverResolutionKey]*resolverResolution
 }
+
+// A pushed value stands in for a resource. The serial is unique to one push.
+type resolverOverride struct {
+	value  []byte
+	serial uint64
+}
+
+// Distinguishes pushes so a value derived from one is never reused for another.
+var resolverOverrideSerial atomic.Uint64
 
 func NewResolver(mountType MountType) *Resolver {
 	return &Resolver{
 		mountType:        mountType,
-		relPathOverrides: map[string]map[int][]byte{},
+		now:              time.Now,
+		relPathOverrides: map[string]map[int]resolverOverride{},
+		keyResolutions:   map[resolverResolutionKey]*resolverResolution{},
 	}
 }
 
@@ -549,20 +584,38 @@ func (self *Resolver) PushSimpleResource(relPath string, value []byte) func() {
 
 	overrides, ok := self.relPathOverrides[relPath]
 	if !ok {
-		overrides = map[int][]byte{}
+		overrides = map[int]resolverOverride{}
 		self.relPathOverrides[relPath] = overrides
 	}
 	nextId := 0
 	for id, _ := range overrides {
 		nextId = max(nextId, id+1)
 	}
-	overrides[nextId] = value
+	overrides[nextId] = resolverOverride{
+		value:  value,
+		serial: resolverOverrideSerial.Add(1),
+	}
 
 	return func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		delete(overrides, nextId)
 	}
+}
+
+// The latest pushed override for relPath, if any.
+func (self *Resolver) override(relPath string) (resolverOverride, bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	overrides, ok := self.relPathOverrides[relPath]
+	if !ok || len(overrides) == 0 {
+		return resolverOverride{}, false
+	}
+	maxId := 0
+	for id, _ := range overrides {
+		maxId = max(maxId, id)
+	}
+	return overrides[maxId], true
 }
 
 func (self *Resolver) ResourcePath(relPath string) (string, error) {
@@ -574,23 +627,86 @@ func (self *Resolver) ResourcePath(relPath string) (string, error) {
 }
 
 func (self *Resolver) ResourcePaths(relPath string) ([]string, error) {
+	resolution := self.resolution(relPath)
+	if resolution.err != nil {
+		return nil, resolution.err
+	}
+	// callers own the returned slice; the cached one is shared
+	return slices.Clone(resolution.paths), nil
+}
+
+// Identifies the current resolution and override of relPath, including a
+// stable absence. Equal versions name the same resolution of unchanged
+// filesystem entries and the same pushed override, so a value derived from the
+// resource can be reused while its version is unchanged (see
+// ResourceValueCache). An unavailable or recently changed resolution is never
+// equal to another.
+func (self *Resolver) resourceVersion(relPath string) ResourceVersion {
+	override, _ := self.override(relPath)
+	return ResourceVersion{
+		resolution: self.resolution(relPath).generation,
+		override:   override.serial,
+	}
+}
+
+// The resolution of relPath: the cached one when every entry it observed is
+// unchanged, else a new resolution of the current filesystem, which is cached
+// when it is stable. A not-found resolution is cached like a found one, so an
+// absent optional resource stays absent without searching again. An
+// unavailable resolution is never cached and forgets any cached one.
+func (self *Resolver) resolution(relPath string) *resolverResolution {
 	if filepath.IsAbs(relPath) {
 		panic("Resource path must be relative.")
 	}
 
-	var homes []resolverHomeObservation
+	var root string
 	switch self.mountType {
 	case MOUNT_TYPE_VAULT:
-		homes = resolveMultiHomeObserved(VaultHomeRoot())
+		root = VaultHomeRoot()
 	case MOUNT_TYPE_CONFIG:
-		homes = resolveMultiHomeObserved(ConfigHomeRoot())
+		root = ConfigHomeRoot()
 	case MOUNT_TYPE_SITE:
-		homes = resolveMultiHomeObserved(SiteHomeRoot())
+		root = SiteHomeRoot()
 	default:
 		panic(fmt.Sprintf("Unknown mount type %s", self.mountType))
 	}
+	env, _ := Env()
+	key := resolverResolutionKey{root: root, env: env, relPath: relPath}
 
-	return (resolverFilesystem{}).resolveResourcePaths(homes, relPath, self.mountType)
+	cached := func() *resolverResolution {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.keyResolutions[key]
+	}()
+	if cached != nil && cached.current() {
+		return cached
+	}
+
+	// the clock is read before the first observation (see stable)
+	start := self.now()
+	observer := &resolverObserver{cacheable: true}
+	filesystem := resolverFilesystem{observer: observer}
+	paths, err := filesystem.resolveResourcePaths(filesystem.resolveMultiHomeObserved(root, env), relPath, self.mountType)
+	resolution := &resolverResolution{
+		paths:      paths,
+		err:        err,
+		generation: resolverGeneration.Add(1),
+	}
+	resolved := err == nil || errors.Is(err, ErrResourceNotFound) && !errors.Is(err, ErrResourceUnavailable)
+	cacheable := resolved && observer.stable(start)
+	if cacheable {
+		resolution.observations = observer.observations
+	}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if !cacheable {
+			delete(self.keyResolutions, key)
+		} else if _, ok := self.keyResolutions[key]; ok || len(self.keyResolutions) < maxResolverResolutions {
+			self.keyResolutions[key] = resolution
+		}
+	}()
+	return resolution
 }
 
 // Resolve a resource beneath an explicit mount root and environment, using the
@@ -671,6 +787,8 @@ func (self resolverFilesystem) resolveResourcePaths(homes []resolverHomeObservat
 func (self resolverFilesystem) regularResourcePath(path string) (bool, error) {
 	if info, err := self.stat(path); err == nil {
 		if info.Mode().IsRegular() {
+			// a selected file is observed itself, so a rewrite in place is seen
+			self.observer.observeFile(path, info)
 			return true, nil
 		}
 		return false, fmt.Errorf("%w: %s is not a regular file", ErrResourceUnavailable, path)
@@ -705,34 +823,26 @@ func (self *Resolver) RequireBytes(relPath string) []byte {
 
 // list indexes are not in the res path; instead, each element is expanded out into the value array
 func (self *Resolver) SimpleResource(relPath string) (*SimpleResource, error) {
-	override := func() []byte {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		if overrides, ok := self.relPathOverrides[relPath]; ok {
-			if len(overrides) == 0 {
-				return nil
-			}
-			maxId := 0
-			for id, _ := range overrides {
-				maxId = max(maxId, id)
-			}
-			return overrides[maxId]
-		}
-		return nil
-	}()
-	path, err := self.ResourcePath(relPath)
-	if err != nil {
+	override, _ := self.override(relPath)
+	resolution := self.resolution(relPath)
+	path := relPath
+	if resolution.err != nil {
 		// an override does not need a backing file
 		// (`PushSimpleResource` can stand in for a resource that does not
 		// exist in the environment)
-		if override == nil {
-			return nil, err
+		if override.value == nil {
+			return nil, resolution.err
 		}
-		path = relPath
+	} else {
+		path = resolution.paths[0]
 	}
 	return &SimpleResource{
 		path:     path,
-		override: override,
+		override: override.value,
+		version: ResourceVersion{
+			resolution: resolution.generation,
+			override:   override.serial,
+		},
 	}, nil
 }
 
@@ -747,7 +857,14 @@ func (self *Resolver) RequireSimpleResource(relPath string) *SimpleResource {
 type SimpleResource struct {
 	path      string
 	override  []byte
+	version   ResourceVersion
 	parsedObj map[string]any
+}
+
+// The resolution and override this resource was selected by (see
+// Resolver.resourceVersion). A changed file is a different version.
+func (self *SimpleResource) Version() ResourceVersion {
+	return self.version
 }
 
 func (self *SimpleResource) bytes() ([]byte, error) {
@@ -887,10 +1004,8 @@ func (self *SimpleResource) StringList(path ...string) []string {
 func translateString(value string) string {
 	// simple "j2" format
 	// {{ env:XXX }}
-	re := regexp.MustCompile("{{[^}]*}}")
-	envRe := regexp.MustCompile("^{{\\s*env:([^}\\s]*)\\s*}}$")
-	translatedValue := string(re.ReplaceAllFunc([]byte(value), func(match []byte) []byte {
-		envMatches := envRe.FindStringSubmatch(string(match))
+	translatedValue := string(templateExpression.ReplaceAllFunc([]byte(value), func(match []byte) []byte {
+		envMatches := templateEnvExpression.FindStringSubmatch(string(match))
 		if envMatches == nil {
 			return match
 		}

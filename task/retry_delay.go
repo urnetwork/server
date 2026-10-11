@@ -12,9 +12,11 @@ import (
 // The target owns the complete failure it wraps; a nested hint inside a joined
 // error cannot shorten another failure's backoff.
 type retryDelayError struct {
-	cause             error
-	delay             time.Duration
-	retryArgsJson     *string
+	cause         error
+	delay         time.Duration
+	retryArgsJson *string
+	// The target attests committed progress despite cancellation causes. Only
+	// a live task context may keep this; otherwise both hints are withdrawn.
 	committedProgress bool
 }
 
@@ -61,6 +63,26 @@ func WithRetryDelayAndArgs(err error, delay time.Duration, args any) error {
 	return withTaskRetryArgs(hint, args)
 }
 
+// A target attests that it finished every item it selected, and that each
+// cancellation or deadline in this failure ended one item's own bounded
+// operation while the task context stayed live. The checkpoint and bounded
+// delay then survive those causes. Task-context cancellation still withdraws
+// both, and an unencodable checkpoint keeps ordinary backoff, not a hot retry.
+func WithCompletedItemsRetryDelayAndArgs(err error, delay time.Duration, args any) error {
+	if err == nil || !validTaskRetryDelay(delay) {
+		return err
+	}
+	hint := &retryDelayError{cause: err, delay: delay, committedProgress: true}
+	if !taskRetryCheckpointAllowed(hint) {
+		return err
+	}
+	checkpointed, ok := withTaskRetryArgs(hint, args).(*retryDelayError)
+	if !ok || checkpointed.retryArgsJson == nil {
+		return err
+	}
+	return checkpointed
+}
+
 // Checkpoints target-attested completed work while preserving ordinary error
 // backoff. A zero internal delay is deliberately not a cadence override.
 func WithRetryArgs(err error, args any) error {
@@ -81,11 +103,12 @@ func withTaskRetryArgs(hint *retryDelayError, args any) error {
 		return hint
 	}
 	argsJson := string(data)
-	return &retryDelayError{cause: hint.cause, delay: hint.delay, retryArgsJson: &argsJson}
+	return &retryDelayError{cause: hint.cause, delay: hint.delay, retryArgsJson: &argsJson, committedProgress: hint.committedProgress}
 }
 
 // A root hint owns its complete failure; joins/wrappers never grant checkpoint
-// authority to another error. Cancellation and ownership loss remain retriable.
+// authority to another error. Cancellation and ownership loss remain retriable
+// unless the target attested item-local stops under its live task context.
 func taskRetryCheckpointAllowed(hint *retryDelayError) bool {
 	if hint == nil {
 		return false
@@ -95,7 +118,7 @@ func taskRetryCheckpointAllowed(hint *retryDelayError) bool {
 	}
 	causes := inspectTaskRetryCauses(hint)
 	return (hint.delay == 0 || validTaskRetryDelay(hint.delay)) && causes.complete &&
-		!causes.canceled && !causes.drained && !causes.targetMissing
+		(!causes.canceled || hint.committedProgress) && !causes.drained && !causes.targetMissing
 }
 
 // Reads an immutable checkpoint only from the exact completed target failure.

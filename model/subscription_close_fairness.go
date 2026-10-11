@@ -51,8 +51,9 @@ func ForceCloseOpenContractIdsScheduledPage(ctx context.Context, minTime time.Ti
 		return 0, nil, expiration, fmt.Errorf("invalid force close page budget")
 	}
 	nextExpiration := earlierContractExpiration(nil, expiration)
-	count, next, err := forceCloseContractPagesBudgeted(ctx, maxCount, after, forceClosePageBudget, forceCloseRawSubpageSize, time.Now,
-		func(size int, cursor *ContractExpirySweepCursor) (int64, *ContractExpirySweepCursor, error) {
+	count, next, err := forceCloseContractPagesDispatched(ctx, maxCount, after, forceClosePageBudget, forceClosePageDispatchLimit,
+		forceCloseRawSubpageSize, time.Now,
+		func(size int, cursor *ContractExpirySweepCursor, dispatch func() bool) (int64, *ContractExpirySweepCursor, error) {
 			// Admit both quiet candidates and missing deadlines that reached
 			// their maximum lifetime, even with an older retained quiet cutoff.
 			now := server.NowUtc()
@@ -62,7 +63,7 @@ func ForceCloseOpenContractIdsScheduledPage(ctx context.Context, minTime time.Ti
 			}
 			return forceCloseContractExpiryFreshPage(scanBefore, now, cursor,
 				func(position *ContractExpiryCursor) (int64, *ContractExpiryCursor, error) {
-					count, next, observed, err := forceCloseOpenContractIdsPage(ctx, minTime, size, parallel, blockSize, blockIndex, position)
+					count, next, observed, err := forceCloseOpenContractIdsPageDispatched(ctx, minTime, size, parallel, blockSize, blockIndex, position, dispatch)
 					if ctx.Err() == nil && forceClosePageCanAdvance(err) {
 						nextExpiration = earlierContractExpiration(nextExpiration, observed)
 					}

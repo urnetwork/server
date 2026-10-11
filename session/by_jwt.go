@@ -452,6 +452,17 @@ func init() {
 	prometheus.MustRegister(authRejectionCounter, authLegacyAcceptCounter)
 }
 
+// A definitive credential refusal with its caller-facing message, distinct from
+// an unavailable dependency so an authorization lease can tell an answer from
+// a failed check.
+type byJwtRejection struct {
+	message string
+}
+
+func (self *byJwtRejection) Error() string {
+	return self.message
+}
+
 // rejectByJwt counts a rejection, emits its detail at V(1), and returns the
 // opaque caller-facing error. The detail never reaches the default log level:
 // see AuthRejectionCause.
@@ -460,7 +471,7 @@ func rejectByJwt(cause AuthRejectionCause, detailFormat string, args ...any) err
 	if glog.V(1) {
 		glog.Infof("[jwt]reject %s: %s\n", cause, fmt.Sprintf(detailFormat, args...))
 	}
-	return errors.New("Could not verify signed token.")
+	return &byJwtRejection{message: "Could not verify signed token."}
 }
 
 // rejectByJwtClaims is rejectByJwt for the claims-shape failures, which
@@ -470,7 +481,7 @@ func rejectByJwtClaims(cause AuthRejectionCause, detailFormat string, args ...an
 	if glog.V(1) {
 		glog.Infof("[jwt]reject %s: %s\n", cause, fmt.Sprintf(detailFormat, args...))
 	}
-	return errors.New("Invalid signed token claims.")
+	return &byJwtRejection{message: "Invalid signed token claims."}
 }
 
 func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
@@ -589,33 +600,29 @@ func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience strin
 
 // ValidateByJwtState binds a cryptographically valid token to current account
 // and client state. Password resets invalidate older credentials through
-// credential_change_time, and removed clients stop working immediately.
-func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (returnErr error) {
+// credential_change_time, and removed clients stop working immediately. A
+// client credential the state query already found without an active row is
+// refused from memory (state_refusal_cache.go).
+func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) error {
 	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
 		return err
 	}
 	if err := validateSessionAuthority(ctx, byJwt); err != nil {
 		return err
 	}
-	server.Db(ctx, func(conn server.PgConn) {
-		returnErr = validateByJwtStateQuery(ctx, conn, byJwt, nil)
-	})
-	return
+	return validateByJwtStateRemembered(ctx, byJwt, nil)
 }
 
 // Checks durable child ownership and live credentials in one primary-key read.
 // The caller still authenticates the token and binds its owning account first.
-func ValidateByJwtStateForParent(ctx context.Context, byJwt *ByJwt, parentClientId server.Id) (returnErr error) {
+func ValidateByJwtStateForParent(ctx context.Context, byJwt *ByJwt, parentClientId server.Id) error {
 	if err := validateByJwtStateIdentity(byJwt, true); err != nil {
 		return err
 	}
 	if err := validateSessionAuthority(ctx, byJwt); err != nil {
 		return err
 	}
-	server.Db(ctx, func(conn server.PgConn) {
-		returnErr = validateByJwtStateQuery(ctx, conn, byJwt, &parentClientId)
-	})
-	return
+	return validateByJwtStateRemembered(ctx, byJwt, &parentClientId)
 }
 
 // Checks the same live state through the caller's already-owned transaction.
@@ -627,7 +634,8 @@ func ValidateByJwtStateInTx(ctx context.Context, tx server.PgTx, byJwt *ByJwt, r
 	if err := validateSessionAuthority(ctx, byJwt); err != nil {
 		return err
 	}
-	return validateByJwtStateQuery(ctx, tx, byJwt, nil)
+	_, err := validateByJwtStateQuery(ctx, tx, byJwt, nil)
+	return err
 }
 
 func validateSessionAuthority(ctx context.Context, byJwt *ByJwt) error {
@@ -644,18 +652,20 @@ func validateSessionAuthority(ctx context.Context, byJwt *ByJwt) error {
 func validateByJwtStateIdentity(byJwt *ByJwt, requireClient bool) error {
 	if byJwt == nil {
 		authRejectionCounter.WithLabelValues(string(AuthRejectionMissingToken)).Inc()
-		return errors.New("Missing signed token.")
+		return &byJwtRejection{message: "Missing signed token."}
 	}
 	if requireClient && byJwt.ClientId == nil || byJwt.ClientId != nil && byJwt.DeviceId == nil {
 		authRejectionCounter.WithLabelValues(string(AuthRejectionClientRequired)).Inc()
-		return errors.New("Client credential required.")
+		return &byJwtRejection{message: "Client credential required."}
 	}
 	return nil
 }
 
 // One entered SQL query owns one observation, through a connection or a
 // transaction. Operational failures still unwind to the owning DB boundary.
-func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt, parentClientId *server.Id) error {
+// noActiveRow is the completed query's definitive verdict that no active row
+// matched; a rotated credential is refused without it.
+func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt, parentClientId *server.Id) (noActiveRow bool, err error) {
 	valid := false
 	var credentialChangeTime time.Time
 	func() {
@@ -719,12 +729,7 @@ func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt 
 	// (row gone/inactive vs credential rotation) is visible in the counter,
 	// and with ids at V(1)
 	if !valid {
-		authRejectionCounter.WithLabelValues(string(AuthRejectionNoActiveRow)).Inc()
-		if glog.V(1) {
-			glog.Infof("[jwt]reject %s: network=%s user=%s client=%v\n",
-				AuthRejectionNoActiveRow, byJwt.NetworkId, byJwt.UserId, byJwt.ClientId)
-		}
-		return ErrByJwtInactive
+		return true, rejectNoActiveRow(byJwt)
 	}
 	if byJwt.CreateTime.Before(credentialChangeTime) {
 		authRejectionCounter.WithLabelValues(string(AuthRejectionCredentialRotated)).Inc()
@@ -732,9 +737,20 @@ func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt 
 			glog.Infof("[jwt]reject %s: rotated at %s, token created %s (user=%s)\n",
 				AuthRejectionCredentialRotated, credentialChangeTime, byJwt.CreateTime, byJwt.UserId)
 		}
-		return ErrByJwtInactive
+		return false, ErrByJwtInactive
 	}
-	return nil
+	return false, nil
+}
+
+// Counts a no-active-row rejection, emits its detail at V(1), and returns the
+// caller-facing error, for a query verdict and a remembered one alike.
+func rejectNoActiveRow(byJwt *ByJwt) error {
+	authRejectionCounter.WithLabelValues(string(AuthRejectionNoActiveRow)).Inc()
+	if glog.V(1) {
+		glog.Infof("[jwt]reject %s: network=%s user=%s client=%v\n",
+			AuthRejectionNoActiveRow, byJwt.NetworkId, byJwt.UserId, byJwt.ClientId)
+	}
+	return ErrByJwtInactive
 }
 
 func ParseByJwtUnverified(ctx context.Context, jwtStr string) (*ByJwt, error) {

@@ -22,7 +22,7 @@ import (
 // The caller supplies the already retained same-SQL window and independently
 // read epoch boundaries. Every expected owner comes solely from the root roster.
 func stPrepareWholeWorkInventory(ctx context.Context, cfg *StConfig, epoch *StPayoutEpochAuthority, window *payoutartifact.ClosedWorkWindow) (*payoutartifact.WholeWorkInventory, payoutartifact.WholeWorkExpectation, error) {
-	approved, err := stLoadProviderWorkAuthority(ctx, cfg, epoch)
+	approved, _, err := stLoadProviderWorkAuthority(ctx, cfg, epoch)
 	if err != nil {
 		return nil, payoutartifact.WholeWorkExpectation{}, err
 	}

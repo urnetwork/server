@@ -125,10 +125,11 @@ func subnetOperatorTasks() []subnetOperatorTask {
 			work.ScheduleBackfillClock(clientSession, tx, server.NowUtc())
 		}},
 		{target: task.NewTaskTarget(work.RemoveExpiredAuthCodes), schedule: work.ScheduleRemoveExpiredAuthCodes},
-		{target: task.NewTaskTarget(work.MaintainNetworkSessions), schedule: work.ScheduleMaintainNetworkSessions},
+		{target: work.NewMaintainNetworkSessionsTaskTarget(), schedule: work.ScheduleMaintainNetworkSessions},
 		{target: work.NewStartupContractClosureTaskTarget(), schedule: work.ScheduleOpenContractClosuresOnStartup},
 		{target: work.NewScheduledContractClosureTaskTarget()},
-		{target: task.NewTaskTarget(work.CloseExpiredContracts), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
+		{target: work.NewContractDeadlineCloseTaskTarget(), schedule: work.ScheduleCloseContractDeadlines},
+		{target: work.NewCloseExpiredContractsTaskTarget(), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
 			for i := range work.DefaultCloseExpiredContractsBlockSize {
 				work.ScheduleCloseExpiredContracts(clientSession, tx, i, false)
 			}
@@ -170,6 +171,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.RemoveOldClientReliabilityStats), schedule: work.ScheduleRemoveOldClientReliabilityStats},
 		{target: task.NewTaskTarget(work.RollupClientReliabilityStats), schedule: work.ScheduleRollupClientReliabilityStats},
 		{target: task.NewTaskTarget(work.RollupClientDataUsage), schedule: work.ScheduleRollupClientDataUsage},
+		// creates contracts too; seeded only while degraded.yml enables it
+		{target: task.NewTaskTarget(work.CheckContractDegradation), schedule: work.ScheduleCheckContractDegradation},
 		{target: task.NewTaskTarget(work.UpdateClientReliabilityScores), schedule: work.ScheduleUpdateClientReliabilityScores},
 		{target: task.NewTaskTarget(work.RemoveOldProvideKeyChanges), schedule: work.ScheduleRemoveOldProvideKeyChanges},
 		{target: task.NewTaskTarget(work.UpdateNetworkReliabilityWindow), schedule: work.ScheduleUpdateNetworkReliabilityWindow},

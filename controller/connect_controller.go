@@ -27,6 +27,19 @@ var ControlId = server.Id(connect.ControlId)
 
 var errContractDestinationInactive = model.ErrContractDestinationInactive
 
+// The write boundary's fresh lifecycle read found the destination missing or
+// inactive. One value, so the route rejection cache can match it exactly.
+var errContractDestinationInactiveAtWrite = fmt.Errorf("%w: %v", errContractDestinationInactive, model.ErrActiveClientNotFound)
+
+type contractOriginFenceKey struct{}
+
+// Carries the update channel that the companion origin wait armed immediately
+// before its final authoritative read, from newContract back to
+// CreateContract. Written and read by the one synchronous request.
+type contractOriginFence struct {
+	update <-chan struct{}
+}
+
 var MinContractTransferByteCount = func() model.ByteCount {
 	settings := connect.DefaultClientSettings()
 	return max(
@@ -103,6 +116,13 @@ var inactiveDestinationDetailsCounter = prometheus.NewCounterVec(
 	[]string{"request_companion", "sender_role", "source_owner", "destination_owner", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
 )
 
+// Deterministic route refusals answered from, stored in, or not stored in the
+// owner's route rejection cache. A hit is also counted as a rejection above.
+var contractRouteRejectionCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_connect_contract_route_rejection_cache_total",
+	Help: "Inactive-destination and missing-companion-origin refusals by cache result: hit (answered without a database read), stored, or unstored (fenced by an origin edge during the read, bound disabled, or owner closed).",
+}, []string{"cause", "result"})
+
 var controlFrameFailureCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -125,10 +145,16 @@ func init() {
 			}
 		}
 	}
+	for _, cause := range []string{"inactive_destination", "missing_companion_origin"} {
+		for _, result := range []string{"hit", "stored", "unstored"} {
+			contractRouteRejectionCounter.WithLabelValues(cause, result)
+		}
+	}
 	prometheus.MustRegister(
 		transferByteCounter,
 		contractFailureCounter,
 		contractRejectionCounter,
+		contractRouteRejectionCounter,
 		missingOriginDetailsCounter,
 		inactiveDestinationDetailsCounter,
 		controlFrameFailureCounter,
@@ -729,6 +755,49 @@ func CreateContract(
 	// fall back to a companion contract because the destination does not advertise
 	// the ideal relationship mode.
 	companion := createContract.Companion
+
+	// A missing or inactive destination and a missing companion origin repeat
+	// for every identical request until the route changes, and old clients keep
+	// asking on their own interval. The origin notification owner keeps each
+	// such refusal briefly (model/contract_route_rejection.go), so a repeat is
+	// answered here, before any read. Only those refusals are recorded, never a
+	// contract, a canceled request or any other failure.
+	notifications := model.GetContractOriginNotifications(ctx)
+	routeRejectable := clientId != ControlId && destinationId != ControlId
+	if routeRejectable {
+		if rejection, ok := notifications.RouteRejection(clientId, destinationId, createContract.Companion); ok {
+			err := errContractDestinationInactive
+			if rejection.Cause == model.ContractRouteMissingOrigin {
+				err = model.ErrMissingCompanionOrigin
+			}
+			rejectionCause = contractFailureClass(err)
+			// replay the labels of the recorded refusal, with this sender's lane
+			recordContractFailureResolved(
+				clientId,
+				destinationId,
+				createContract.Companion,
+				model.ByteCount(createContract.TransferByteCount),
+				err,
+				contractResolution{
+					path:                 rejection.ResolutionPath,
+					relationship:         rejection.Relationship.Mode,
+					sourceLifecycle:      rejection.Relationship.SourceLifecycle,
+					destinationLifecycle: rejection.Relationship.DestinationLifecycle,
+					sourceOwner:          rejection.Relationship.SourceOwner,
+					destinationOwner:     rejection.Relationship.DestinationOwner,
+					senderRole:           createContract.SenderRole,
+				},
+			)
+			contractRouteRejectionCounter.WithLabelValues(rejectionCause, "hit").Inc()
+			contractError := contractResultError(err)
+			frame, err := connect.ToFrame(&protocol.CreateContractResult{Error: &contractError}, connect.DefaultProtocolVersion)
+			if err != nil {
+				return nil, err
+			}
+			timingResult = server.ContractCreationRejected
+			return []*protocol.Frame{frame}, nil
+		}
+	}
 	relationshipDetails := getProvideRelationshipDetails(ctx, clientId, destinationId)
 	resolution := contractResolution{
 		path:                 contractResolutionRelationship,
@@ -738,6 +807,22 @@ func CreateContract(
 		sourceOwner:          relationshipDetails.SourceOwner,
 		destinationOwner:     relationshipDetails.DestinationOwner,
 		senderRole:           createContract.SenderRole,
+	}
+	// A missing-origin refusal needs the fence its origin read armed; a
+	// destination refusal has none (an inactive client is never reactivated).
+	recordRouteRejection := func(cause model.ContractRouteRejectionCause, fence <-chan struct{}) {
+		if !routeRejectable || notifications == nil || ctx.Err() != nil {
+			return
+		}
+		result := "unstored"
+		if notifications.RecordRouteRejection(clientId, destinationId, createContract.Companion, model.ContractRouteRejection{
+			Cause:          cause,
+			ResolutionPath: resolution.path,
+			Relationship:   relationshipDetails,
+		}, fence) {
+			result = "stored"
+		}
+		contractRouteRejectionCounter.WithLabelValues(rejectionCause, result).Inc()
 	}
 
 	// A provide-mode key can outlive the derived identity that published it.
@@ -755,6 +840,7 @@ func CreateContract(
 			errContractDestinationInactive,
 			resolution,
 		)
+		recordRouteRejection(model.ContractRouteDestinationInactive, nil)
 		contractError := protocol.ContractError_Reliability
 		result := &protocol.CreateContractResult{Error: &contractError}
 		frame, err := connect.ToFrame(result, connect.DefaultProtocolVersion)
@@ -805,6 +891,10 @@ func CreateContract(
 		}
 		if companion {
 			resolution.path = contractResolutionStreamFallback
+			// The fallback settles return traffic on the origin that already
+			// carries the forward direction. It is not a session-setup race,
+			// so one lookup decides it instead of the companion origin wait.
+			ctx = withCompanionOriginSingleLookup(ctx)
 			glog.V(2).Infof("[contract][companion-fallback]%s->%s relationship=%d not provided; using companion Stream\n", clientId, destinationId, provideRelationship)
 		}
 	}
@@ -862,7 +952,8 @@ func CreateContract(
 		return nil, err
 	}
 
-	contractId, transferByteCount, priority, streamId, expirationTime, err := nextContract(ctx, clientId, createContract, companion, provideMode, contractManagerSettings)
+	originFence := &contractOriginFence{}
+	contractId, transferByteCount, priority, streamId, expirationTime, err := nextContract(context.WithValue(ctx, contractOriginFenceKey{}, originFence), clientId, createContract, companion, provideMode, contractManagerSettings)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
@@ -880,6 +971,13 @@ func CreateContract(
 			err,
 			resolution,
 		)
+		// Only the exact verdicts, never one joined with another failure.
+		switch {
+		case err == model.ErrMissingCompanionOrigin && originFence.update != nil:
+			recordRouteRejection(model.ContractRouteMissingOrigin, originFence.update)
+		case err == errContractDestinationInactiveAtWrite || err == errContractDestinationInactive:
+			recordRouteRejection(model.ContractRouteDestinationInactive, nil)
+		}
 		contractError := contractResultError(err)
 		result := &protocol.CreateContractResult{
 			Error: &contractError,
@@ -1024,11 +1122,16 @@ func nextContract(
 	)
 }
 
-// The lifecycle lookup, origin escrow creation and payer plan lookup
-// newContract performs. Tests replace them to check, without a database, which
-// byte count the controller requests and signs for a given escrow.
+// The lifecycle lookup, degradation valve, escrow and zero escrow creation and
+// payer plan lookup newContract performs. Tests replace them to check, without
+// a database, which byte count the controller requests and signs for a given
+// escrow, and which creation path it takes.
 var findActiveClientPairNetworks = model.FindActiveClientPairNetworks
+var zeroContractCost = model.ZeroContractCost
 var createTransferEscrow = model.CreateTransferEscrow
+var createCompanionTransferEscrow = model.CreateCompanionTransferEscrow
+var createZeroEscrowContract = model.CreateZeroEscrowContract
+var createZeroEscrowCompanionContract = model.CreateZeroEscrowCompanionContract
 var isProNetwork = model.IsProNetwork
 
 // Returns the network whose balance escrows a contract, following the order in
@@ -1076,6 +1179,14 @@ func payerMaxContractTransferByteCount(ctx context.Context, payerNetworkId serve
 
 // Model creation owns commit and returns its immutable database deadline.
 // Later stream work may reject the response but never changes that deadline.
+// Public and companion contracts always try escrow first, so a payer is
+// charged, shrink-to-fit included, while anything is left. Only when escrow
+// admission finds the balance exhausted (model.ErrContractBalanceExhausted)
+// and the contract degradation valve is open (model/network_degradation_model.go)
+// is the contract created without escrow instead (model/subscription_zero_escrow.go),
+// at the request size and the payer's escrow priority. Every other refusal,
+// including a data cap or test drain, stands. Network and friends-and-family
+// contracts are unchanged.
 func newContract(
 	ctx context.Context,
 	sourceId server.Id,
@@ -1100,7 +1211,7 @@ func newContract(
 		return
 	}
 	if destinationNetworkIdPointer == nil {
-		returnErr = fmt.Errorf("%w: %v", errContractDestinationInactive, model.ErrActiveClientNotFound)
+		returnErr = errContractDestinationInactiveAtWrite
 		return
 	}
 	sourceNetworkId, destinationNetworkId := *sourceNetworkIdPointer, *destinationNetworkIdPointer
@@ -1200,18 +1311,47 @@ func newContract(
 		// already exists.
 		originWatch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 		defer originWatch.Close()
+		// The wait arms the watch immediately before each authoritative read;
+		// the last armed channel fences a missing-origin refusal (see
+		// CreateContract). A nil watch arms nothing, so nothing is recorded.
+		originFence, _ := ctx.Value(contractOriginFenceKey{}).(*contractOriginFence)
+		armOriginRead := func() <-chan struct{} {
+			update := originWatch.Update()
+			if originFence != nil {
+				originFence.update = update
+			}
+			return update
+		}
+		// A closed origin anchors companions until its original deadline, not
+		// only for the client library's linger after its close. The reply path
+		// therefore outlives a forward contract that settled early.
+		originCloseLinger := max(contractManagerSettings.OriginContractLinger, model.CompanionOriginCloseLinger)
 		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
 		escrow, err := waitForCompanionOrigin(ctx, originWatch, func() (*model.TransferEscrow, error) {
-			return model.CreateCompanionTransferEscrow(
+			escrow, err := createCompanionTransferEscrow(
 				ctx,
 				sourceNetworkId,
 				sourceId,
 				destinationNetworkId,
 				destinationId,
 				contractTransferByteCount,
-				contractManagerSettings.OriginContractLinger,
+				originCloseLinger,
 			)
-		}, originWatch.Update)
+			// deduct first: free data only once the payer has nothing left and
+			// the valve is open; the companion keeps its origin link
+			if errors.Is(err, model.ErrContractBalanceExhausted) && zeroContractCost(ctx) {
+				return createZeroEscrowCompanionContract(
+					ctx,
+					sourceNetworkId,
+					sourceId,
+					destinationNetworkId,
+					destinationId,
+					contractTransferByteCount,
+					originCloseLinger,
+				)
+			}
+			return escrow, err
+		}, armOriginRead)
 		leaveOrigin()
 		if err != nil {
 			returnErr = err
@@ -1221,6 +1361,7 @@ func newContract(
 		expirationTime = escrow.ExpirationTime
 		// The prober's companion reservation may be smaller than the remote
 		// provider requested. Sign only the capacity actually held in escrow.
+		// A zero escrow companion holds none and returns the request.
 		contractTransferByteCount = escrow.TransferByteCount
 		priority = escrow.Priority
 
@@ -1258,6 +1399,18 @@ func newContract(
 			destinationId,
 			contractTransferByteCount,
 		)
+		// deduct first: free data only once the payer has nothing left and
+		// the valve is open
+		if errors.Is(err, model.ErrContractBalanceExhausted) && zeroContractCost(ctx) {
+			escrow, err = createZeroEscrowContract(
+				ctx,
+				sourceNetworkId,
+				sourceId,
+				destinationNetworkId,
+				destinationId,
+				contractTransferByteCount,
+			)
+		}
 		if err != nil {
 			returnErr = err
 			return
@@ -1265,7 +1418,8 @@ func newContract(
 		contractId = escrow.ContractId
 		expirationTime = escrow.ExpirationTime
 		// The escrow shrinks to fit when the payer's balance is below the
-		// request. Sign only the capacity actually held in escrow.
+		// request. Sign only the capacity actually held in escrow. A zero
+		// escrow contract holds none and returns the request.
 		contractTransferByteCount = escrow.TransferByteCount
 		priority = escrow.Priority
 

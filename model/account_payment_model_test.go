@@ -14,6 +14,7 @@ import (
 	"github.com/urnetwork/server"
 
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 	"maps"
 )
 
@@ -1053,6 +1054,49 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
 
+		// Settlement leaves two balances to owners that production workers run.
+		// A closed contract keeps its whole escrow reserved, with its payer
+		// debit pending, until the debit worker commits the journal batch
+		// (subscription_transfer_debit.go), and each contract's provider totals
+		// are an ApplyLegacyProviderTotals task (subscription_provider_totals.go).
+		// Run both, as the drain below does for the debits, before reading
+		// either party's balance.
+		totalsSettings := task.DefaultTaskWorkerSettings()
+		totalsSettings.ClaimRegisteredTargetsOnly = true
+		totalsWorker := task.NewTaskWorker(ctx, totalsSettings)
+		defer totalsWorker.Close()
+		totalsTarget := task.NewTaskTarget(ApplyLegacyProviderTotals)
+		totalsWorker.AddTargets(totalsTarget)
+		runSettlementOwners := func() {
+			for _, balance := range GetActiveTransferBalances(ctx, sourceNetworkId) {
+				for {
+					applied, _, busy, flushErr := flushTransferDebitBalance(ctx, balance.BalanceId)
+					connect.AssertEqual(t, flushErr, nil)
+					connect.AssertEqual(t, busy, false)
+					if applied == 0 {
+						break
+					}
+				}
+			}
+			// a loaded database can stop a totals task at its budget; it retries
+			for attempt := 0; ; attempt += 1 {
+				var pendingCount int
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.Raise(tx.QueryRow(ctx, `SELECT COUNT(*) FROM pending_task WHERE function_name=$1`, totalsTarget.TargetFunctionName()).Scan(&pendingCount))
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$1, release_time=$1 WHERE function_name=$2`, time.Time{}, totalsTarget.TargetFunctionName()))
+				})
+				if pendingCount == 0 {
+					break
+				}
+				if 64 <= attempt {
+					t.Fatalf("provider totals tasks did not finish: pending=%d", pendingCount)
+				}
+				_, _, postRetried, evalErr := totalsWorker.EvalTasks(64)
+				connect.AssertEqual(t, evalErr, nil)
+				connect.AssertEqual(t, len(postRetried), 0)
+			}
+		}
+
 		// test that escrow prevents concurrent contracts
 
 		transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferByteCount)
@@ -1071,6 +1115,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 
 		CloseContract(ctx, transferEscrow.ContractId, sourceId, 0, false)
 		CloseContract(ctx, transferEscrow.ContractId, destinationId, 0, false)
+		runSettlementOwners()
 
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		netBalanceByteCount = ByteCount(0)
@@ -1090,6 +1135,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		usedTransferByteCount := ByteCount(1024)
 		CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
 		CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+		runSettlementOwners()
 		paidByteCount := usedTransferByteCount
 		paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 
@@ -1169,6 +1215,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 			paidByteCount += usedTransferByteCount
 			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		}
+		runSettlementOwners()
 
 		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
@@ -1289,6 +1336,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		}
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		connect.AssertEqual(t, transferBalances, []*TransferBalance{})
+		runSettlementOwners()
 
 		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)

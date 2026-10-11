@@ -482,6 +482,7 @@ func calculateReliabilityPayout(
 			subsidyStartTime,
 			now,
 			subsidyScale,
+			true,
 		)
 	})
 	return
@@ -490,6 +491,19 @@ func calculateReliabilityPayout(
 /**
  * Returns map networkId -> NetworkReliabilitySubsidy
  * This is the amount of subsidy paid to each network for reliability
+ *
+ * The scores cover the subsidy window [subsidyStartTime, subsidyEndTime] — the
+ * window this subsidy actually pays for — instead of scanning all the way to
+ * now. During a backlog drain subsidyEndTime can be far behind now, so scanning
+ * to now would re-scan weeks of client_reliability that belong to later subsidy
+ * periods.
+ *
+ * With inlineScores the scores are recomputed in the caller's transaction (a
+ * dry run, or the standalone tooling path). Otherwise the payout planner
+ * committed them in chunks before its transaction
+ * (preparePaymentPlanReliabilityWindow), and a window that is not committed or
+ * was replaced panics paymentPlanReliabilityPendingError, rolling the plan back
+ * so its caller can commit the window and plan again.
  */
 func calculateReliabilityPayoutInTx(
 	ctx context.Context,
@@ -497,23 +511,25 @@ func calculateReliabilityPayoutInTx(
 	subsidyStartTime time.Time,
 	subsidyEndTime time.Time,
 	subsidyScale float64,
+	inlineScores bool,
 ) map[server.Id]NetworkReliabilitySubsidy {
 
 	networkReliabilitySubsidies := map[server.Id]NetworkReliabilitySubsidy{}
 
-	// Recompute reliability scores over the subsidy window
-	// [subsidyStartTime, subsidyEndTime] — the window this subsidy actually
-	// pays for — instead of scanning all the way to now. During a backlog
-	// drain subsidyEndTime can be far behind now, so scanning to now would
-	// re-scan weeks of client_reliability that belong to later subsidy periods
-	// and bloat this transaction; bounding to the window keeps the scan (and
-	// the commit) proportional to the slice being paid.
-	// note `complete=false` is used here since dependencies are computed outside of the tx at the top of the plan function
-	//
-	// The planner owns one maintenance transaction, including this aggregation.
-	// Its advisory lock already spans the refresh; the same bounded statement
-	// now uses one connection and rolls back with failed or preview allocations.
-	UpdateNetworkReliabilityScoresInTx(tx, ctx, subsidyStartTime, subsidyEndTime, false)
+	minBlock := reliabilityBlockNumber(subsidyStartTime)
+	maxBlock := reliabilityBlockNumber(subsidyEndTime) + 1
+	var shift int64
+	if inlineScores {
+		// note `complete=false` is used here since dependencies are computed outside of the tx at the top of the plan function
+		UpdateNetworkReliabilityScoresInTx(tx, ctx, subsidyStartTime, subsidyEndTime, false)
+		shift = reliabilityRollupBlockShift(ctx, tx, maxBlock)
+	} else {
+		var ok bool
+		shift, ok = paymentPlanReliabilityWindowInTx(ctx, tx, subsidyStartTime, subsidyEndTime)
+		if !ok {
+			panic(&paymentPlanReliabilityPendingError{minTime: subsidyStartTime, maxTime: subsidyEndTime})
+		}
+	}
 
 	// get reliability scores
 	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
@@ -522,9 +538,6 @@ func calculateReliabilityPayoutInTx(
 	if transition != nil {
 		// A no-coverage recompute deliberately retains cached scores. They are
 		// not evidence for this payment's window, especially after the cutoff.
-		minBlock := reliabilityBlockNumber(subsidyStartTime)
-		maxBlock := reliabilityBlockNumber(subsidyEndTime) + 1
-		shift := reliabilityRollupBlockShift(ctx, tx, maxBlock)
 		var mismatch bool
 		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM network_connection_reliability_score
 			WHERE min_block_number<>$1 OR max_block_number<>$2)`, minBlock-shift, maxBlock-shift).Scan(&mismatch))

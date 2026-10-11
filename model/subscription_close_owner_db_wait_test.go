@@ -484,7 +484,18 @@ func (self *legacyCloseDBWaitObserver) snapshot() legacyCloseDBWaitReport {
 	return result
 }
 
+// A zero-wait claim needs both full coverage and no sampled wait.
 func (self legacyCloseDBWaitReport) zeroWaitError() error {
+	if err := self.coverageError(); err != nil {
+		return err
+	}
+	return self.observedWaitError()
+}
+
+// Whether the sampler covered its window well enough to support a zero claim.
+// The sampler's own query latency, the host's scheduling and which backends an
+// unprivileged role may see decide this, not the observed workload.
+func (self legacyCloseDBWaitReport) coverageError() error {
 	if !self.Joined || !self.ConnectionClosed || self.CloseFailed || self.StopCause != "final_sample_joined" || self.Samples < 3 || self.SampleErrors != 0 ||
 		self.UnobservableBackendSamples != 0 || self.WindowWallNs <= 0 || self.QueryWallTotalNs <= 0 ||
 		self.StateNullBackendSamples != 0 || self.StateDisabledBackendSamples != 0 || self.BackendTypeUnavailableSamples != 0 || self.PermissionDeniedBackendSamples != 0 ||
@@ -492,6 +503,11 @@ func (self legacyCloseDBWaitReport) zeroWaitError() error {
 		self.CoverageExceededIntervals != 0 || self.ConservativeBlindIntervalNs > int64(legacyCloseDBWaitCoverageLimit) {
 		return fmt.Errorf("direct PostgreSQL lock observer has incomplete or insufficient sampling coverage")
 	}
+	return nil
+}
+
+// A sampled wait or blocking edge is a real observation at any coverage.
+func (self legacyCloseDBWaitReport) observedWaitError() error {
 	if self.LockWaitBackendSamples != 0 || self.BlockingBackendSamples != 0 || self.BlockingEdgeSamples != 0 ||
 		self.UngrantedLockBackendSamples != 0 || self.SQLLockBackendSamples != 0 || self.AdvisoryLockBackendSamples != 0 || self.OmittedWaitEvents != 0 {
 		return fmt.Errorf("direct PostgreSQL lock observer sampled an actual wait or blocking edge")
