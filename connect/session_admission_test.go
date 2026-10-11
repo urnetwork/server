@@ -218,16 +218,19 @@ func TestSessionAdmissionClientInfoRoundTripsAcrossCarriers(t *testing.T) {
 
 // Only definitive answers retire an admitted transport: a confirmed revocation
 // closes with the revoked cause and the credential's horizon with the expired
-// cause. An unavailable store keeps the transport (session package tests).
+// cause. An unavailable store keeps the transport (session package tests); the
+// revocation is found by a recheck the test drives (drivenLeaseRechecks).
 func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndExpired(t *testing.T) {
 	environment := server.DefaultTestEnv()
 	environment.RerunCount = 0
 	environment.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
-		leases := make(chan *session.AuthorizationLease, 2)
+		leases := make(chan *drivenLeaseRechecks, 2)
 		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, nil, func(settings *ConnectHandlerSettings) {
-			settings.testingAfterAuthorizationLease = func(_ *session.ByJwt, lease *session.AuthorizationLease) { leases <- lease }
+			settings.testingAfterAuthorizationLease = func(_ *session.ByJwt, lease *session.AuthorizationLease) {
+				leases <- newDrivenLeaseRechecks(lease)
+			}
 		})
 		defer env.Close()
 		for _, revoked := range []bool{false, true} {
@@ -237,7 +240,7 @@ func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndExpired(t *testing.T) 
 				t.Fatal(err)
 			}
 			defer closeClient()
-			lease := <-leases
+			rechecks := <-leases
 			want := uint32(session.AuthorizationExpiredCloseCode - 4000)
 			if revoked {
 				actor := session.NewLocalClientSession(ctx, "192.0.2.1:1", session.NewByJwt(claims.NetworkId, claims.UserId, claims.NetworkName, false, false))
@@ -247,10 +250,10 @@ func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndExpired(t *testing.T) 
 					t.Fatal(err)
 				}
 				want = uint32(session.AuthorizationRevokedCloseCode - 4000)
-				lease.Recheck()
+				rechecks.findRevocation(ctx, t)
 			} else {
 				// beyond any credential horizon (exp plus the session grace)
-				lease.Testing_Expire(time.Now().Add(366 * 24 * time.Hour))
+				rechecks.lease.Testing_Expire(time.Now().Add(366 * 24 * time.Hour))
 			}
 			_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
 			for {

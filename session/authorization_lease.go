@@ -159,7 +159,8 @@ type AuthorizationLease struct {
 	closeTransport func(int)
 	once           sync.Once
 	publish        func(context.Context, time.Time) error
-	// the authoritative credential check, checkLeaseCredential outside tests
+	// the authoritative credential check, checkLeaseCredential outside tests;
+	// read under stateLock, since Testing_InterposeRecheck replaces it
 	check func(context.Context, *ByJwt) error
 	// start of the admission check, the first verification
 	started time.Time
@@ -297,13 +298,13 @@ func (self *AuthorizationLease) runChecks() {
 		retry = nil
 		start := time.Now()
 		self.stateLock.Lock()
-		generation, closed := self.state.generation, self.state.closed
+		generation, closed, check := self.state.generation, self.state.closed, self.check
 		self.stateLock.Unlock()
 		if closed {
 			return
 		}
 		ctx, cancel := context.WithTimeout(self.ctx, 2*time.Second)
-		err := self.check(ctx, self.credential)
+		err := check(ctx, self.credential)
 		cancel()
 		if err != nil {
 			if !authorizationRejectionDefinitive(err) {
@@ -351,6 +352,22 @@ func (self *AuthorizationLease) runChecks() {
 			return
 		}
 	}
+}
+
+// Routes every later recheck through interpose(check), so a test outside the
+// package can observe each authoritative result or stand in for a store that
+// does not answer. The admission check has already run. A recheck already in
+// flight keeps the check it started with.
+func (self *AuthorizationLease) Testing_InterposeRecheck(interpose func(check func(context.Context, *ByJwt) error) func(context.Context, *ByJwt) error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.check = interpose(self.check)
+}
+
+// Closes when the lease ends: when it retires its transport, or when the
+// transport's own close closes it.
+func (self *AuthorizationLease) Testing_Done() <-chan struct{} {
+	return self.ctx.Done()
 }
 
 // Testing_Expire delivers the horizon timer's retirement at an explicit clock,
