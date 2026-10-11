@@ -380,3 +380,30 @@ func TestStLedgerV2SyncFailures(t *testing.T) {
 		}
 	})
 }
+
+// Readers get a committed ledger's tree and accounts, checked against the
+// committed root.
+func TestStLedgerV2TreeForReaders(t *testing.T) {
+	resetLedgerV2Caches()
+	defer resetLedgerV2Caches()
+	builder := newFakeLedgerBuilder(&[]string{})
+	SetStLedgerBuilder(builder)
+	defer SetStLedgerBuilder(nil)
+	accounts := ledgerV2Accounts(ledgerV2Coldkey(1), 500, ledgerV2Coldkey(2), 700)
+	builder.ledgers[[32]byte{7}] = accounts
+	built, err := merkle.BuildLedgerSumTree(context.Background(), accounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, total := built.Root()
+	tree, got, err := StLedgerV2Tree(context.Background(), [32]byte{7}, root, &total, 2)
+	if err != nil || !reflect.DeepEqual(got, accounts) || tree.LeafCount() != 2 {
+		t.Fatalf("tree %v accounts %v, %v", tree, got, err)
+	}
+	if _, _, err := StLedgerV2Tree(context.Background(), [32]byte{7}, root, &total, 3); err == nil || !strings.Contains(err.Error(), "do not rebuild its root") {
+		t.Fatalf("a different account count: %v", err)
+	}
+	if _, _, err := StLedgerV2Tree(context.Background(), [32]byte{8}, root, &total, 2); err == nil || err.Error() != "fake builder: unknown ledger" {
+		t.Fatalf("an unknown ledger: %v", err)
+	}
+}

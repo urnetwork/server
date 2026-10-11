@@ -792,6 +792,17 @@ func stLedgerV2CachedTree(ctx context.Context, ledgerHash [32]byte, root [32]byt
 	return cached, nil
 }
 
+// StLedgerV2Tree returns the sum tree and the accounts of a committed ledger,
+// built from its stored account rows and cached, after checking them against
+// the committed root, total and account count. Proofs for readers come from it.
+func StLedgerV2Tree(ctx context.Context, ledgerHash [32]byte, root [32]byte, total *uint256.Int, leafCount uint64) (*merkle.LedgerSumTree, []merkle.LedgerAccount, error) {
+	cached, err := stLedgerV2CachedTree(ctx, ledgerHash, root, total, leafCount)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cached.tree, cached.accounts, nil
+}
+
 // stLedgerV2Opening is the checkPath argument set for an index of the latest
 // finalized root. It refuses to send an opening that shows a fault.
 func stLedgerV2Opening(ctx context.Context, latest *StLedgerV2FinalizedRoot, pending *StLedgerV2Pending, index uint64) (*StLedgerV2Answer, error) {
