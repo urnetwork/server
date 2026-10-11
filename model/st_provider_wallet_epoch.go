@@ -13,6 +13,7 @@ import (
 	"github.com/urfoundation/sn/payoutartifact"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/ss58"
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 )
 
@@ -82,6 +83,37 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 	if authority.ExpectedProviders == nil {
 		return nil, protocol.ErrWalletMappingUnavailable
 	}
+	heads := stProviderWalletHeads{providers: authority.ExpectedProviders, network: authority.NetworkWallet, delegation: authority.HotkeyDelegation}
+	return selectStProviderWalletsForEpoch(ctx, expected.ClientKeyRootSigner, scope, heads, false)
+}
+
+// The exact history heads one selection reads: the signed roster's pins, or,
+// before a roster signer is provisioned, the newest retained originals.
+type stProviderWalletHeads struct {
+	providers  []payoutartifact.WholeWorkExpectedProvider
+	network    func(networkId [16]byte) (payoutartifact.WholeWorkNetworkWallet, bool)
+	delegation func(networkId [16]byte) (payoutartifact.WholeWorkHotkeyDelegation, bool)
+}
+
+// The protocol's own verdicts on retained evidence. A database or transport
+// failure carries none of them and fails the whole selection for a retry.
+func stWalletMappingRefusal(err error) bool {
+	return errors.Is(err, protocol.ErrWalletMappingUnavailable) || errors.Is(err, protocol.ErrWalletMappingIntegrity) || errors.Is(err, protocol.ErrWalletMappingCapacity) || errors.Is(err, protocol.ErrWalletMappingNotEffective)
+}
+
+// Every head is verified the same way whichever source pinned it. With
+// unmapRefusals, a provider whose evidence is absent, not effective or refused
+// is left out of the map (unmapped); otherwise any refusal fails the selection.
+func selectStProviderWalletsForEpoch(ctx context.Context, rootSigner common.Address, scope StProviderWalletEpochScope, heads stProviderWalletHeads, unmapRefusals bool) (map[server.Id]*StProviderWallet, error) {
+	unmapped := func(clientId [16]byte, err error) bool {
+		if !unmapRefusals || ctx.Err() != nil || !stWalletMappingRefusal(err) {
+			return false
+		}
+		if !errors.Is(err, protocol.ErrWalletMappingAbsent) && !errors.Is(err, protocol.ErrWalletMappingNotEffective) {
+			glog.Infof("[st]epoch %d provider %s wallet evidence refused: %v\n", scope.Epoch, server.Id(clientId), err)
+		}
+		return true
+	}
 	// The provider's own chain at the epoch. The roster pinning no head is
 	// absent; a verified chain without a consent effective at the epoch is not
 	// effective; both may fall back. Every other refusal is final for the epoch.
@@ -107,7 +139,7 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 		if mapping.Statement.NetworkId != provider.NetworkId {
 			return nil, protocol.WalletMappingConsent{}, protocol.ErrWalletMappingIntegrity
 		}
-		if err := protocol.VerifyProspectiveWalletMapping(ctx, mapping, expected.ClientKeyRootSigner, scope.Start.Number, scope.StartTime.Unix()); err != nil {
+		if err := protocol.VerifyProspectiveWalletMapping(ctx, mapping, rootSigner, scope.Start.Number, scope.StartTime.Unix()); err != nil {
 			return nil, protocol.WalletMappingConsent{}, err
 		}
 		return protocol.ProviderEarningWallet(mapping), originals[mapping.Statement.Generation-1], nil
@@ -116,7 +148,7 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 	// it, the consent effective at the epoch and the same prospective gate as a
 	// provider consent. A network the roster pins no chain for is absent.
 	networkChain := func(networkId [16]byte) *stNetworkEarningChain {
-		pinned, ok := authority.NetworkWallet(networkId)
+		pinned, ok := heads.network(networkId)
 		if !ok {
 			return &stNetworkEarningChain{err: protocol.WalletMappingAbsentError()}
 		}
@@ -132,7 +164,7 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 		if err != nil {
 			return &stNetworkEarningChain{err: err}
 		}
-		if err := protocol.VerifyProspectiveNetworkWalletMapping(ctx, mapping, expected.ClientKeyRootSigner, scope.Start.Number, scope.StartTime.Unix()); err != nil {
+		if err := protocol.VerifyProspectiveNetworkWalletMapping(ctx, mapping, rootSigner, scope.Start.Number, scope.StartTime.Unix()); err != nil {
 			return &stNetworkEarningChain{err: err}
 		}
 		return &stNetworkEarningChain{mapping: mapping, original: originals[mapping.Statement.Generation-1]}
@@ -143,7 +175,7 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 	// function with the same prospective gate. A network the roster pins no
 	// delegation for is absent.
 	hotkeyChain := func(networkId [16]byte, clientId [16]byte) *stHotkeyEarningChain {
-		pinned, ok := authority.HotkeyDelegation(networkId)
+		pinned, ok := heads.delegation(networkId)
 		if !ok {
 			return &stHotkeyEarningChain{err: protocol.WalletMappingAbsentError()}
 		}
@@ -165,7 +197,7 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 		if err != nil {
 			return &stHotkeyEarningChain{err: err}
 		}
-		wallet, err := protocol.ResolveHotkeyEarningWallet(ctx, clientId, protocol.HotkeyEarningWalletEvidence{Delegations: delegations, DelegationExpected: expectation, Consents: consents}, expected.ClientKeyRootSigner, scope.Start.Number, scope.StartTime.Unix())
+		wallet, err := protocol.ResolveHotkeyEarningWallet(ctx, clientId, protocol.HotkeyEarningWalletEvidence{Delegations: delegations, DelegationExpected: expectation, Consents: consents}, rootSigner, scope.Start.Number, scope.StartTime.Unix())
 		if err != nil {
 			return &stHotkeyEarningChain{err: err}
 		}
@@ -174,12 +206,12 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 		}
 		return &stHotkeyEarningChain{wallet: wallet, original: consents[wallet.ConsentGeneration-1]}
 	}
-	wallets := make(map[server.Id]*StProviderWallet, len(authority.ExpectedProviders))
+	wallets := make(map[server.Id]*StProviderWallet, len(heads.providers))
 	// each network chain and delegation is read and verified at most once, and
 	// only when a provider of the network falls back to it
 	networkIdChains := map[[16]byte]*stNetworkEarningChain{}
 	hotkeyNetworkIdChains := map[[16]byte]*stHotkeyEarningChain{}
-	for _, provider := range authority.ExpectedProviders {
+	for _, provider := range heads.providers {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -213,6 +245,9 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 			return &wallet, nil
 		})
 		if err != nil {
+			if unmapped(provider.ClientId, err) {
+				continue
+			}
 			return nil, err
 		}
 		original := ownOriginal
@@ -224,11 +259,18 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 			original = protocol.WalletMappingConsent{Message: hotkeyOriginal.Message, Signature: hotkeyOriginal.ColdkeySignature}
 		}
 		if earning.ClientId != provider.ClientId || earning.NetworkId != provider.NetworkId {
+			if unmapped(provider.ClientId, protocol.ErrWalletMappingIntegrity) {
+				continue
+			}
 			return nil, protocol.ErrWalletMappingIntegrity
 		}
 		address, err := ss58.Encode(earning.Coldkey, ss58.BittensorPrefix)
 		if err != nil {
-			return nil, errors.Join(protocol.ErrWalletMappingIntegrity, err)
+			err = errors.Join(protocol.ErrWalletMappingIntegrity, err)
+			if unmapped(provider.ClientId, err) {
+				continue
+			}
+			return nil, err
 		}
 		message := original.Message
 		signature := "0x" + hex.EncodeToString(original.Signature[:])

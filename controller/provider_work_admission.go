@@ -28,40 +28,42 @@ type stProviderWorkAuthority struct {
 
 // Absence remains optional unknown. Returned authority must match the actual
 // finalized epoch, operator domain, public request key and independent root.
-func stLoadProviderWorkAuthority(ctx context.Context, cfg *StConfig, epoch *StPayoutEpochAuthority) (*stProviderWorkAuthority, error) {
+// configured is false only when no provider_work.yml is provisioned at all; a
+// configured policy whose epoch roster is missing returns nil and true.
+func stLoadProviderWorkAuthority(ctx context.Context, cfg *StConfig, epoch *StPayoutEpochAuthority) (approved *stProviderWorkAuthority, configured bool, resultErr error) {
 	domainHash, approver, expected, err := LoadProviderWorkAuthorityPolicy()
 	if errors.Is(err, server.ErrResourceNotFound) {
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	expected.EarningSelection, err = model.GetProviderPayoutEarningSelection(ctx)
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	if cfg == nil || epoch == nil || cfg.Netuid == 0 || cfg.Netuid > 65535 || cfg.ArtifactKey == nil {
-		return nil, model.ErrProviderWorkInvalid
+		return nil, true, model.ErrProviderWorkInvalid
 	}
 	domain := protocol.ClientKeyHistoryDomain{ChainID: cfg.ChainId, GenesisHash: cfg.GenesisHash, Netuid: uint16(cfg.Netuid), Coordinator: cfg.ContractAddress, SettlementVault: cfg.SettlementVault, DeploymentIDHash: sha256.Sum256([]byte(cfg.DeploymentId)), PolicyHash: epoch.PolicyHash, NoID: cfg.NoId}
 	actual, err := domain.Digest()
 	if err != nil || actual != domainHash || expected.AuthoritySigner == crypto.PubkeyToAddress(cfg.ArtifactKey.PublicKey) {
-		return nil, errors.Join(model.ErrProviderWorkConflict, err)
+		return nil, true, errors.Join(model.ErrProviderWorkConflict, err)
 	}
 	raw, authority, err := model.GetProviderWorkAuthority(ctx, domainHash, epoch.Epoch, expected.AuthoritySigner)
 	if errors.Is(err, model.ErrProviderWorkMissing) {
-		return nil, nil
+		return nil, true, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	start := payoutartifact.Boundary{Number: epoch.Start.Block, Hash: common.Hash(epoch.Start.Hash).Hex()}
 	end := payoutartifact.Boundary{Number: epoch.End.Block, Hash: common.Hash(epoch.End.Hash).Hex()}
 	if authority.Domain != domain || authority.Start != start || authority.End != end || authority.RequestPublicKey != approver {
-		return nil, model.ErrProviderWorkConflict
+		return nil, true, model.ErrProviderWorkConflict
 	}
 	artifact := &payoutartifact.Artifact{DeploymentID: cfg.DeploymentId, ChainID: cfg.ChainId, GenesisHash: common.Hash(cfg.GenesisHash).Hex(), Netuid: uint16(cfg.Netuid), Coordinator: cfg.ContractAddress, SettlementVault: cfg.SettlementVault, Epoch: epoch.Epoch, NoID: cfg.NoId, PolicyHash: common.Hash(epoch.PolicyHash).Hex(), Start: start, End: end, Signer: crypto.PubkeyToAddress(cfg.ArtifactKey.PublicKey)}
-	return &stProviderWorkAuthority{Raw: raw, Authority: authority, Expectation: expected, Artifact: artifact}, nil
+	return &stProviderWorkAuthority{Raw: raw, Authority: authority, Expectation: expected, Artifact: artifact}, true, nil
 }
 
 // Add explicit zero rows only from an independently signed prospective roster.

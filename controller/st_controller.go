@@ -3380,7 +3380,7 @@ func stComputeReleasePayout(
 	if authority == nil || authority.Epoch != epoch || authority.PolicyHash != cfg.PolicyHash || authority.Start.Block != startBlock || authority.End.Block != closeBlock || !authority.StartTime.Equal(startTime) || !authority.EndTime.Equal(endTime) {
 		return [32]byte{}, 0, errors.New("st: payout policy or window differs from authenticated epoch authority")
 	}
-	workAuthority, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
+	workAuthority, workConfigured, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
@@ -3396,7 +3396,17 @@ func stComputeReleasePayout(
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
-	wallets, err := stProviderWalletsForEpoch(ctx, cfg, workAuthority, authority)
+	var wallets map[server.Id]*model.StProviderWallet
+	if workConfigured {
+		wallets, err = stProviderWalletsForEpoch(ctx, cfg, workAuthority, authority)
+	} else {
+		// No roster signer is provisioned yet; signed retained consents select
+		// the wallets of observed providers until provider_work.yml exists.
+		wallets, err = stRetainedProviderWalletsForEpoch(ctx, cfg, authority, usages)
+		if err == nil {
+			glog.Infof("[st]epoch %d payout wallets from retained consents: %d of %d providers mapped\n", epoch, len(wallets), len(usages))
+		}
+	}
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
