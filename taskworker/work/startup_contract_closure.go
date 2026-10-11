@@ -180,6 +180,9 @@ type CloseScheduledContractResult struct {
 	DeferredUntil  *time.Time                            `json:"deferred_until,omitempty"`
 	// Due siblings newly closed by this task's second owner turn.
 	OwnerBatchClosed int `json:"owner_batch_closed,omitempty"`
+	// Another owner's due contracts newly closed by this task's claim after
+	// its own close was refused or already terminal.
+	StolenClosed int `json:"stolen_closed,omitempty"`
 }
 
 func scheduleContractClose(clientSession *session.ClientSession, tx server.PgTx, args *CloseScheduledContractArgs) {
@@ -193,7 +196,8 @@ func scheduleContractClose(clientSession *session.ClientSession, tx server.PgTx,
 // A committed terminal or missing contract finishes from one unlocked read.
 // A funded close admits its balance owner without waiting, closes, and reads
 // the owner's due siblings; one more owner turn retires up to a batch of them.
-// A held owner defers this close rather than holding the worker slot.
+// A held owner defers this close rather than holding the worker slot. A held
+// or terminal close first spends its claim on another owner's due closes.
 func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *session.ClientSession) (*CloseScheduledContractResult, error) {
 	if args == nil || !args.Private || args.ContractId == (server.Id{}) || args.Deadline.IsZero() {
 		return nil, fmt.Errorf("invalid scheduled contract close")
@@ -210,10 +214,12 @@ func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *ses
 	state := custody[args.ContractId]
 	switch {
 	case state == nil || !state.Found:
-		return &CloseScheduledContractResult{Reconciliation: &model.ContractDeadlineReconciliation{ContractId: args.ContractId, Missing: true}}, nil
+		return &CloseScheduledContractResult{Reconciliation: &model.ContractDeadlineReconciliation{ContractId: args.ContractId, Missing: true},
+			StolenClosed: stealScheduledCloseOwner(ctx, now, args.ContractId, nil)}, nil
 	case state.Outcome != nil:
 		return &CloseScheduledContractResult{Reconciliation: &model.ContractDeadlineReconciliation{
-			ContractId: args.ContractId, Outcome: *state.Outcome, AlreadyClosed: true}}, nil
+			ContractId: args.ContractId, Outcome: *state.Outcome, AlreadyClosed: true},
+			StolenClosed: stealScheduledCloseOwner(ctx, now, args.ContractId, nil)}, nil
 	case len(state.BalanceIds) == 0:
 		// No grant owns this contract, so there is no shared owner to batch.
 		closed, err := model.ReconcileContractAtDeadline(ctx, args.ContractId, args.Deadline)
@@ -225,8 +231,9 @@ func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *ses
 		return nil, err
 	}
 	if closed.Busy {
+		stolenClosed := stealScheduledCloseOwner(ctx, now, args.ContractId, state.BalanceIds)
 		deferredUntil := server.NowUtc().Add(scheduledCloseOwnerBusyDeferral)
-		return &CloseScheduledContractResult{RetryAt: &args.Deadline, DeferredUntil: &deferredUntil}, nil
+		return &CloseScheduledContractResult{RetryAt: &args.Deadline, DeferredUntil: &deferredUntil, StolenClosed: stolenClosed}, nil
 	}
 	return &CloseScheduledContractResult{Reconciliation: closed.Reconciliation, OwnerBatchClosed: closed.SiblingsClosed}, nil
 }
