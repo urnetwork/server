@@ -391,6 +391,7 @@ func TestStLedgerV2SpentIntentsAreRetired(t *testing.T) {
 // pause, vault2's pool, funding, roots, pending root, commit spacing and
 // demands, and STSettlement2's approvals and quorum; each refused or
 // out-of-range read is an error.
+// SV-1 (chain reads)
 func TestStLedgerV2ClientReadsChainState(t *testing.T) {
 	ctx := context.Background()
 	fixture := newLedgerV2RPC(t)
@@ -524,6 +525,7 @@ func (self ledgerV2DataError) Error() string  { return "execution reverted" }
 func (self ledgerV2DataError) ErrorData() any { return self.data }
 
 // Reverts are named from the v2 contracts' and LedgerTree's errors.
+// SV-7 (SPEC A6)
 func TestStLedgerV2RevertNames(t *testing.T) {
 	for _, test := range []struct {
 		err  error
@@ -546,6 +548,7 @@ func TestStLedgerV2RevertNames(t *testing.T) {
 
 // The checkPath calldata carries the account, its proof and the pending
 // path exactly.
+// SV-1 (demand answering)
 func TestStLedgerV2PackCheckPath(t *testing.T) {
 	accounts := ledgerV2Accounts(ledgerV2Coldkey(1), 500, ledgerV2Coldkey(2), 2000, ledgerV2Coldkey(3), 1500)
 	tree, err := merkle.BuildLedgerSumTree(context.Background(), accounts)

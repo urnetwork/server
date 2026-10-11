@@ -29,7 +29,7 @@ func ledgerV2TransitionFixture(t *testing.T, settlement string, vault string) ([
 	return data, identity
 }
 
-// SV-config: sn.yml keeps v2 off without the addresses, parses them with
+// §13 (server config): sn.yml keeps v2 off without the addresses, parses them with
 // known fields only, and admits mainnet writes only for the same v2 identity.
 func TestLedgerV2AddressesInEarningsSchedule(t *testing.T) {
 	data, identity := payoutTransitionFixture(t)
@@ -70,7 +70,7 @@ func TestLedgerV2AddressesInEarningsSchedule(t *testing.T) {
 	}
 }
 
-// SV-config: each malformed v2 identity is refused with its exact reason, by
+// §13 (server config): each malformed v2 identity is refused with its exact reason, by
 // the shared validator and through sn.yml.
 func TestLedgerV2AddressesRefuseMalformed(t *testing.T) {
 	const (
@@ -105,15 +105,20 @@ func TestLedgerV2AddressesRefuseMalformed(t *testing.T) {
 	}
 }
 
-// The v2 tables are one appended migration after the contract-close counters
-// of migration 813, installing exactly the v2 schema.
+// The v2 tables are one migration appended after the published history,
+// installing exactly the v2 schema.
+// §8 data model (SV-5)
 func TestStLedgerV2MigrationAppendsSchema(t *testing.T) {
 	index := sqlMigrationIndex(t, "CREATE TABLE st_ledger_v2_epoch_rows")
-	prior, ok := migrations[index-1].(*SqlMigration)
-	if !ok || !strings.Contains(prior.sql, "identified_checkpoint_byte_count") {
-		t.Fatal("v2 schema does not follow migration 813")
+	if index < 813 {
+		t.Fatalf("v2 migration index %d is not after migration 813 (index 812)", index)
 	}
 	if current, ok := migrations[index].(*SqlMigration); !ok || current.sql != stLedgerV2SchemaSql {
 		t.Fatal("v2 migration does not install its complete schema")
+	}
+	for i, migration := range migrations[index+1:] {
+		if sql, ok := migration.(*SqlMigration); ok && strings.Contains(sql.sql, "st_ledger_v2_epoch_rows (") {
+			t.Fatalf("migration %d installs the v2 schema again", index+1+i)
+		}
 	}
 }

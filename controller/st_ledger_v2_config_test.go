@@ -14,7 +14,7 @@ const (
 	testLedgerV2Vault      = "0x00000000000000000000000000000000000000a2"
 )
 
-// SV-config: st.yml selects the v2 addresses per profile without fallback,
+// §13 (server config): st.yml selects the v2 addresses per profile without fallback,
 // keeps v2 off without them, and the selected payout identity carries them.
 func TestStConfigSelectsLedgerV2Addresses(t *testing.T) {
 	f := releaseStVaultFile()
@@ -59,7 +59,7 @@ func TestStConfigSelectsLedgerV2Addresses(t *testing.T) {
 	}
 }
 
-// SV-config: each malformed st.yml v2 identity is refused with its reason.
+// §13 (server config): each malformed st.yml v2 identity is refused with its reason.
 func TestStConfigRefusesMalformedLedgerV2Addresses(t *testing.T) {
 	for _, test := range []struct {
 		name, settlement, vault, reason string

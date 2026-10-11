@@ -90,6 +90,7 @@ func testLedgerV2Amount(epoch uint64, coldkey byte, amount uint64) *StLedgerV2Am
 
 // The mirror records each root's outcome only from pending, keeps funding
 // snapshots immutable, and tracks demands until answered.
+// SV-5 (mirror)
 func TestStLedgerV2MirrorRecordsChainState(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -178,6 +179,7 @@ func TestStLedgerV2MirrorRecordsChainState(t *testing.T) {
 
 // A finalized root's new accounts and amounts are recorded once, in root
 // order, atomically; every refusal leaves nothing written.
+// SV-5 (per-epoch amounts for readers)
 func TestStLedgerV2RecordFinalizedRoots(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

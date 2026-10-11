@@ -585,6 +585,7 @@ func TestStLedgerV2DriverRaisesEveryAlert(t *testing.T) {
 
 // Finalized roots are rebuilt from their recorded inputs and recorded for
 // readers once, in root order; a rebuild that differs is never recorded.
+// SV-5 (per-epoch amounts for readers)
 func TestStLedgerV2DriverRecordsFinalizedRoots(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2Fixture(t)
@@ -703,6 +704,7 @@ func TestStV1DriverStopsAtFirstV2Epoch(t *testing.T) {
 
 // The pool's registration is read until vault2 reports it, then cached; an
 // unregistered answer is read again after a minute.
+// SV-4
 func TestStLedgerV2FirstEpochCache(t *testing.T) {
 	f := newLedgerV2FixtureWithoutDb(t)
 	f.chain.registered = false

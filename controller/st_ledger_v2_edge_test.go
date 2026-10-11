@@ -25,6 +25,7 @@ import (
 
 // Steps and sync turns refuse without settlement v2, without a chain client,
 // without payout admission, and for an unknown step.
+// SV-1
 func TestStLedgerV2StepRefusals(t *testing.T) {
 	ctx := context.Background()
 	resetLedgerV2Caches()
@@ -79,6 +80,7 @@ func TestStLedgerV2StepRefusals(t *testing.T) {
 }
 
 // The tree cache keeps the four most recent trees and each tree once.
+// SV-1 (demand answering)
 func TestStLedgerV2TreeCacheKeepsRecentTrees(t *testing.T) {
 	resetLedgerV2Caches()
 	defer resetLedgerV2Caches()
@@ -93,6 +95,7 @@ func TestStLedgerV2TreeCacheKeepsRecentTrees(t *testing.T) {
 
 // Each failure of the epoch step is retried without a chain write, and each
 // refused build is never published or committed.
+// SV-1 (retries)
 func TestStLedgerV2EpochStepFailures(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2Fixture(t)
@@ -227,6 +230,7 @@ func startifactRef(object []byte) string {
 }
 
 // Ledger objects go to the configured blob store unless a test overrides it.
+// SV-3 (objects)
 func TestStLedgerV2ObjectsUseTheConfiguredStore(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		SetStLedgerV2ObjectStore(nil)
@@ -241,6 +245,7 @@ func TestStLedgerV2ObjectsUseTheConfiguredStore(t *testing.T) {
 }
 
 // Chain amounts convert to uint256 only when they fit.
+// SV-1
 func TestStLedgerV2ChainAmounts(t *testing.T) {
 	for _, value := range []*big.Int{nil, big.NewInt(-1), new(big.Int).Lsh(big.NewInt(1), 256)} {
 		if _, err := stUint256(value); err == nil {
@@ -253,6 +258,7 @@ func TestStLedgerV2ChainAmounts(t *testing.T) {
 }
 
 // A root never covers more than 96 epochs.
+// SV-1 (§6.6 bound)
 func TestStLedgerV2RootCoversAtMost96Epochs(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2Fixture(t)
@@ -266,6 +272,7 @@ func TestStLedgerV2RootCoversAtMost96Epochs(t *testing.T) {
 }
 
 // Each failure of the finalize and answer steps is retried without a send.
+// SV-1 (retries)
 func TestStLedgerV2FinalizeAndAnswerFailures(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2Fixture(t)
@@ -307,6 +314,7 @@ func TestStLedgerV2FinalizeAndAnswerFailures(t *testing.T) {
 
 // Each failure of the record step is retried and writes nothing; roots are
 // recorded in root order, the second appending only its new accounts.
+// SV-5
 func TestStLedgerV2RecordFailures(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2Fixture(t)
@@ -360,6 +368,7 @@ func TestStLedgerV2RecordFailures(t *testing.T) {
 }
 
 // A sync turn that cannot read the pool or an epoch window plans nothing.
+// SV-1
 func TestStLedgerV2SyncFailures(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2Fixture(t)
@@ -383,6 +392,7 @@ func TestStLedgerV2SyncFailures(t *testing.T) {
 
 // Readers get a committed ledger's tree and accounts, checked against the
 // committed root.
+// SV-3 (account proofs)
 func TestStLedgerV2TreeForReaders(t *testing.T) {
 	resetLedgerV2Caches()
 	defer resetLedgerV2Caches()

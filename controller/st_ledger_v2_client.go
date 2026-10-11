@@ -389,7 +389,7 @@ var stLedgerV2ErrorNames = func() map[[4]byte]string {
 	return names
 }()
 
-// The revert's error name, "reverted" for an unnamed revert, or "failed".
+// The revert's error name, "reverts" for an unnamed revert, or "failed".
 func stLedgerV2RevertName(err error) string {
 	selector, reverted := stLedgerV2RevertSelector(err)
 	if !reverted {

@@ -17,6 +17,7 @@ func ledgerObjectTestStore(t *testing.T) server.BlobStore {
 }
 
 // Ledger objects are written once under their sha256 and read back verified.
+// SV-3 (object immutability)
 func TestLedgerObjectPutIfAbsentRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	store := ledgerObjectTestStore(t)
@@ -43,6 +44,7 @@ func TestLedgerObjectPutIfAbsentRoundTrip(t *testing.T) {
 }
 
 // Every refusal of the object store, each triggered alone.
+// SV-3 (object immutability)
 func TestLedgerObjectRefusals(t *testing.T) {
 	ctx := context.Background()
 	store := ledgerObjectTestStore(t)

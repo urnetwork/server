@@ -72,6 +72,7 @@ func ledgerV2Word(value uint64) common.Hash {
 }
 
 // Mirror decoding: every vault2 and STSettlement2 event, with exact fields.
+// SV-5 (mirror)
 func TestStLedgerV2EventDecodersExactFields(t *testing.T) {
 	cfg := ledgerV2TestConfig()
 	vault, settlement := &stabi.STSettlementVault2MetaData, &stabi.STSettlement2MetaData
@@ -126,6 +127,7 @@ func TestStLedgerV2EventDecodersExactFields(t *testing.T) {
 
 // Mirror decoding: v2 decoders serve only the configured v2 addresses, each
 // contract decodes only its own events, and nothing is decoded with v2 off.
+// SV-5 (mirror)
 func TestStLedgerV2EventDecodersRouteByAddress(t *testing.T) {
 	cfg := ledgerV2TestConfig()
 	client := &CoreStClient{cfg: cfg}
@@ -151,6 +153,7 @@ func TestStLedgerV2EventDecodersRouteByAddress(t *testing.T) {
 
 // Mirror decoding through SyncEvents: the log filter adds the v2 contracts,
 // and a v2 log is decoded only by the v2 decoders.
+// SV-5 (mirror)
 func TestStSyncEventsMirrorsLedgerV2Contracts(t *testing.T) {
 	cfg := ledgerV2TestConfig()
 	v2Log := ledgerV2EventLog(t, &stabi.STSettlementVault2MetaData, cfg.VaultV2, "EmissionDeferred", []common.Hash{ledgerV2Word(6), ledgerV2Word(1)}, big.NewInt(3000))
@@ -220,6 +223,7 @@ func ledgerV2MirrorEvent(t testing.TB, block uint64, index int, kind string, dat
 
 // The mirror applies funding, roots and demands in block order, idempotently,
 // and alerts on a deferred epoch of this pool.
+// SV-5 (mirror), SV-1 (missed-close alert)
 func TestStLedgerV2MirrorAppliesEvents(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
