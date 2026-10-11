@@ -5317,15 +5317,24 @@ func (self *fullTunPath) joinSourcePackCarrierBoundary(
 		return carrierEnd, nil
 	}
 	p2pSnapshot := p2pNetworkSnapshot{}
+	var p2pRouterPending []p2pRouterPendingPoolSnapshot
 	if self.p2pNetwork != nil {
 		p2pSnapshot = self.p2pNetwork.snapshot()
+		p2pRouterPending = snapshotP2pRouterPending([]*p2pReceiveCredits{
+			self.p2pNetwork.forwardReceiveCredits,
+			self.p2pNetwork.reverseReceiveCredits,
+		})
 	}
 	streamSnapshot := []streamP2pHopSnapshot{}
+	var streamRouterPending []p2pRouterPendingPoolSnapshot
+	streamNonAdjacent := streamP2pNonAdjacentSnapshot{}
 	if self.streamP2pNetwork != nil {
 		streamSnapshot = self.streamP2pNetwork.snapshot()
+		streamRouterPending = snapshotP2pRouterPending(self.streamP2pNetwork.receiveCreditPools())
+		streamNonAdjacent = self.streamP2pNetwork.nonAdjacent.snapshot()
 	}
 	return perfvarCarrierBoundary{}, fmt.Errorf(
-		"join source, workload Pack, and carrier boundary at %s: context=%v device-invalid=%t device-workload-started=%d device-workload-terminal-failures=%d device-all-terminal-failures=%d device-failure-samples=%+v provider-invalid=%t provider-workload-started=%d provider-workload-terminal-failures=%d provider-all-terminal-failures=%d provider-failure-samples=%+v access-links=%+v p2p=%+v stream=%+v",
+		"join source, workload Pack, and carrier boundary at %s: context=%v device-invalid=%t device-workload-started=%d device-workload-terminal-failures=%d device-all-terminal-failures=%d device-failure-samples=%+v provider-invalid=%t provider-workload-started=%d provider-workload-terminal-failures=%d provider-all-terminal-failures=%d provider-failure-samples=%+v access-links=%+v p2p=%+v stream=%+v p2p-router-pending=%+v stream-router-pending=%+v stream-non-adjacent=%+v",
 		stage,
 		ctx.Err(),
 		self.devicePackSends.invalid.Load(),
@@ -5341,6 +5350,9 @@ func (self *fullTunPath) joinSourcePackCarrierBoundary(
 		self.environment.network.snapshotLinks(),
 		p2pSnapshot,
 		streamSnapshot,
+		p2pRouterPending,
+		streamRouterPending,
+		streamNonAdjacent,
 	)
 }
 

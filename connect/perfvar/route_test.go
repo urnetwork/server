@@ -1368,19 +1368,31 @@ func measureP2pRoute(
 
 // Close orders client, server, exchange, and network teardown explicitly.
 func (self *routeEnvironment) close() {
+	_ = self.closeWithError()
+}
+
+// Return the same reported lifecycle errors to measured-run callers without
+// changing the close wrapper, deadline, ordering, or independent cleanup joins.
+func (self *routeEnvironment) closeWithError() error {
+	var closeErr error
+	recordError := func(format string, args ...any) {
+		err := fmt.Errorf(format, args...)
+		closeErr = errors.Join(closeErr, err)
+		self.t.Errorf("%v", err)
+	}
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer closeCancel()
 	if err := closeRouteClientLifecyclesAndWait(
 		closeCtx,
 		routeClientLifecycles(self.clients),
 	); err != nil {
-		self.t.Errorf("route clients did not close: %v", err)
+		recordError("route clients did not close: %v", err)
 	}
 	// Client close submits its final contract controls. Join them while the
 	// fixture context is still live; canceling first turns valid database
 	// cleanup into a teardown-only timeout under race instrumentation.
 	if !self.controls.closeAndWait(closeCtx) {
-		self.t.Errorf("route out-of-band controls did not become idle")
+		recordError("route out-of-band controls did not become idle")
 	}
 	for _, extenderServer := range self.extenders {
 		extenderServer.CloseAndWait()
@@ -1391,18 +1403,18 @@ func (self *routeEnvironment) close() {
 	self.exchange.Close()
 	self.cancel()
 	if !self.handler.WaitForIdle(closeCtx) {
-		self.t.Errorf("route handler did not become idle")
+		recordError("route handler did not become idle")
 	}
 	if !self.announces.closeAndWait(closeCtx) {
-		self.t.Errorf("route connection announcements did not become idle")
+		recordError("route connection announcements did not become idle")
 	}
 	if !self.exchange.WaitForIdle(closeCtx) {
-		self.t.Errorf("route exchange did not become idle")
+		recordError("route exchange did not become idle")
 	}
 	self.network.close()
 	poolSnapshotAfter, poolBalanced := routeMessagePoolBalance(self.poolOutstandingBefore)
 	if !poolBalanced {
-		self.t.Errorf(
+		recordError(
 			"route message-pool ownership did not reconcile: %d -> %d classes=%v -> %v",
 			self.poolOutstandingBefore,
 			poolSnapshotAfter.outstanding,
@@ -1410,6 +1422,7 @@ func (self *routeEnvironment) close() {
 			poolSnapshotAfter.classes,
 		)
 	}
+	return closeErr
 }
 
 // Environment teardown cannot reach client close, later owners, or pool
