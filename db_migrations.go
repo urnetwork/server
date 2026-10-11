@@ -9952,4 +9952,14 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS transfer_escrow_sweep_destination_id_sweep_time`,
 		`DROP INDEX IF EXISTS transfer_escrow_sweep_destination_id_sweep_time`,
 	),
+	// 817: transfer_contract_pair_open_create_time (13 GB) served pair lookups
+	// written as `open AND companion_contract_id IS NULL`. 20a9414e moved every
+	// pair reader to the opaque unresolved CASE predicate, which this partial
+	// index cannot match, and the unresolved pair indexes now serve them. Not
+	// scanned since 2026-09-08 12:49 UTC. Dropping it also removes one of the
+	// three priority rebuilds, each of which scans the whole contract heap.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_pair_open_create_time`,
+		`DROP INDEX IF EXISTS transfer_contract_pair_open_create_time`,
+	),
 }

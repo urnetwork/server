@@ -14,6 +14,7 @@ func TestDroppedHotTableIndexesStayOutOfSchemaAndMaintenance(t *testing.T) {
 		ctx := context.Background()
 		dropped := []string{
 			"transfer_escrow_sweep_destination_id_sweep_time",
+			"transfer_contract_pair_open_create_time",
 		}
 		exists := func(name string) bool {
 			var present bool

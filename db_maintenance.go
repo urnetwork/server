@@ -24,7 +24,6 @@ const DbReindexEpochs = uint64(8)
 // set.
 var priorityReindexIndexes = []string{
 	"transfer_contract_open_partial_create_time",
-	"transfer_contract_pair_open_create_time",
 	"transfer_contract_open_destination_partial",
 }
 

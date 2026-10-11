@@ -233,6 +233,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationFp2Table("payment_plan_reliability_partial")),
 	migrationCurrentSuffix(816, "unread sweep destination index removed",
 		migrationIndexRemoved("transfer_escrow_sweep", "transfer_escrow_sweep_destination_id_sweep_time")),
+	migrationCurrentSuffix(817, "legacy open pair index removed",
+		migrationIndexRemoved("transfer_contract", "transfer_contract_pair_open_create_time")),
 }
 
 // A dropped index stays dropped: a rebuilt copy under the published name would
