@@ -25,7 +25,7 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for head := 793; head <= 813; head++ {
+		for head := 793; head <= 815; head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
@@ -108,6 +108,22 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing identified checkpoint total", 813, `ALTER TABLE contract_close DROP COLUMN identified_checkpoint_byte_count`},
 		{"identified checkpoint total truncates bytes", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count TYPE integer`},
 		{"invented identified checkpoint total", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count SET DEFAULT 0`},
+		{"missing ledger epoch rows", 814, `DROP TABLE st_ledger_v2_epoch_rows`},
+		{"epoch rows with both chunks and a declaration", 814, `ALTER TABLE st_ledger_v2_epoch_rows DROP CONSTRAINT st_ledger_v2_epoch_rows_check`},
+		{"account coldkeys not unique per pool", 814, `ALTER TABLE st_ledger_v2_account DROP CONSTRAINT st_ledger_v2_account_deployment_key_no_id_coldkey_key`},
+		{"missing account coldkey lookup", 814, `DROP INDEX st_ledger_v2_account_coldkey`},
+		{"funding truncates rao", 814, `ALTER TABLE st_ledger_v2_funding ALTER COLUMN funded_through TYPE numeric(38,0)`},
+		{"root status not closed", 814, `ALTER TABLE st_ledger_v2_root DROP CONSTRAINT st_ledger_v2_root_status_check`},
+		{"open demand lookup includes answered demands", 814, `DROP INDEX st_ledger_v2_demand_open; CREATE INDEX st_ledger_v2_demand_open ON st_ledger_v2_demand(deployment_key,no_id,seq)`},
+		{"amounts allow zero", 814, `ALTER TABLE st_ledger_v2_amount DROP CONSTRAINT st_ledger_v2_amount_amount_check`},
+		{"missing verified consent chains", 815, `DROP TABLE st_verified_wallet_consent`},
+		{"verified consent generations not unique", 815, `ALTER TABLE st_verified_wallet_consent DROP CONSTRAINT st_verified_wallet_consent_pkey`},
+		{"verified consent kinds not closed", 815, `ALTER TABLE st_verified_wallet_consent DROP CONSTRAINT st_verified_wallet_consent_kind_check`},
+		{"verified consent epochs truncate", 815, `ALTER TABLE st_verified_wallet_consent ALTER COLUMN from_epoch TYPE integer`},
+		{"nullable verified consent signer", 815, `ALTER TABLE st_verified_wallet_consent ALTER COLUMN prospective_signer DROP NOT NULL`},
+		{"missing FleetBound scan checkpoint", 815, `DROP TABLE st_fleet_bound_sync`},
+		{"FleetBound checkpoints not unique", 815, `ALTER TABLE st_fleet_bound_sync DROP CONSTRAINT st_fleet_bound_sync_pkey`},
+		{"nullable FleetBound checkpoint", 815, `ALTER TABLE st_fleet_bound_sync ALTER COLUMN next_block DROP NOT NULL`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
