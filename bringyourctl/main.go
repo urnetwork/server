@@ -130,6 +130,7 @@ Usage:
     bringyourctl st deposit [--alpha_rao=<alpha_rao>]
     bringyourctl st commit --epoch=<epoch>
     bringyourctl st finalize --epoch=<epoch>
+    bringyourctl st payout-dry-run --epoch=<epoch> [--out=<path>]
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
 
 Options:
@@ -438,6 +439,8 @@ func main() {
 			stCommit(opts)
 		} else if finalize, _ := opts.Bool("finalize"); finalize {
 			stFinalize(opts)
+		} else if payoutDryRun, _ := opts.Bool("payout-dry-run"); payoutDryRun {
+			stPayoutDryRun(opts)
 		}
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
