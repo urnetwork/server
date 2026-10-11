@@ -14,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus"
+	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
@@ -128,6 +129,12 @@ func TestConnectH1LifecyclePost101AuthRefusalIsNotAdmission(t *testing.T) {
 		}
 		defer conn.Close()
 		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		// the refusal is in band: the authorization close control, then the
+		// close (transport_credential_refusal.go)
+		messageType, message, err := conn.ReadMessage()
+		if err != nil || messageType != websocket.BinaryMessage || string(message) != string(testingTransportCloseControl(clientconnect.TransportCloseReasonCredentialRejected)) {
+			t.Fatalf("refused JWT got no authorization close: %d bytes, err %v", len(message), err)
+		}
 		if _, _, err := conn.ReadMessage(); err == nil {
 			t.Fatal("refused JWT left a usable WebSocket")
 		}

@@ -11,7 +11,8 @@
 // WebSocket refusal reads as a dropped connection, which a client redials at
 // once, forever. Clients from connect 2026-10-09 read the close as a definitive
 // refusal; older clients drop the unknown close control and see the close they
-// always saw.
+// always saw, after a hold that slows their redials
+// (transport_refusal_hold.go).
 package connect
 
 import (
