@@ -68,6 +68,9 @@ type keyEventSubscriber struct {
 	peerListeners    map[server.Id]map[int64]*model.NetworkPeerListener
 	hopListeners     map[server.Id]map[int64]*model.StreamHopListener
 	newPeerDelta     func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
+	// the session revision read behind hints; session.NetworkSessionRevision
+	// when unset
+	sessionRevision func(context.Context, server.Id) (string, int64, error)
 
 	resyncLock   sync.Mutex
 	resyncCancel context.CancelFunc

@@ -119,8 +119,12 @@ func (self *keyEventSubscriber) runSessionNotifications(networkId server.Id, gro
 		case <-group.kick:
 		default:
 		}
+		revision := self.sessionRevision
+		if revision == nil {
+			revision = session.NetworkSessionRevision
+		}
 		ctx, cancel := context.WithTimeout(group.ctx, 100*time.Millisecond)
-		generation, eventId, err := session.NetworkSessionRevision(ctx, networkId)
+		generation, eventId, err := revision(ctx, networkId)
 		cancel()
 		if err != nil {
 			continue
