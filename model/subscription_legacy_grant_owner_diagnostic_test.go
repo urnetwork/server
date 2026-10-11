@@ -39,6 +39,9 @@ func TestLegacySettlementSharedGrantAcrossAllShards(t *testing.T) {
 			server.Raise(CloseContract(ctx, id, f.destinationId, 11, false))
 			ids[index] = id
 		}
+		// Synthetic ID rewrites invalidate the cache. Keep this fixture warm,
+		// so every settlement transaction must carry it forward exactly.
+		refreshNetEscrow(ctx, []server.Id{f.balanceId})
 		before := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId]
 		acquired := make(chan struct{})
 		release := make(chan struct{})
