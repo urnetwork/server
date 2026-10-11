@@ -81,8 +81,6 @@ const dbMaintenanceFailedReindexCleanupTimeout = 20 * time.Second
 // set.
 var priorityReindexIndexes = []string{
 	"transfer_contract_open_partial_create_time",
-	"transfer_contract_pair_open_create_time",
-	"transfer_contract_open_destination_partial",
 }
 
 // The table that owns every priority index; its debris is cleaned around each

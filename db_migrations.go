@@ -9925,4 +9925,61 @@ var migrations = []any{
 	// New tables; nothing is rewritten. Apply before deploying taskworkers that
 	// commit reliability scores before the plan transaction.
 	newSqlMigration(paymentPlanReliabilitySchemaSql),
+
+	// The index drops below remove indexes that no current reader uses, to cut
+	// write amplification on the saturated Main primary. Each was audited on
+	// 2026-10-11 against pg_stat_user_indexes (counters cumulative since the
+	// 2026-08-24 18:24 UTC stats reset, last_idx_scan per index) and every query
+	// in this repository, including the weekly orphan sweep, the payout plan,
+	// maintenance and admin commands. Every insert and every non-HOT update of a
+	// matching row still writes each of them.
+	//
+	// DROP INDEX CONCURRENTLY waits for every transaction that holds a lock on
+	// the table, including a running pg_dump. Run these after such a
+	// transaction ends, or pre-drop out of band with the same statement; IF
+	// EXISTS then makes the migration a no-op. An interrupted drop leaves an
+	// invalid index that the same statement removes when it is rerun.
+
+	// 816: transfer_escrow_sweep_destination_id_sweep_time (24 GB on Main) served
+	// the provider-payout stats that filtered sweeps by destination_id and
+	// sweep_time. b12af6b3 moved those stats to provider_payouts, and the index
+	// has not been scanned since 2026-09-07 23:24 UTC, through four Sunday
+	// payouts and the October month boundary. Only the one-time
+	// `bringyourctl db backfill-sweep-destination-id` still filtered on the
+	// column, and it now scans the table instead. Apply outside the Sunday
+	// 10:00 UTC payout, whose bulk payment_id update holds the sweep table.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_escrow_sweep_destination_id_sweep_time`,
+		`DROP INDEX IF EXISTS transfer_escrow_sweep_destination_id_sweep_time`,
+	),
+	// 817: transfer_contract_pair_open_create_time (13 GB) served pair lookups
+	// written as `open AND companion_contract_id IS NULL`. 20a9414e moved every
+	// pair reader to the opaque unresolved CASE predicate, which this partial
+	// index cannot match, and the unresolved pair indexes now serve them. Not
+	// scanned since 2026-09-08 12:49 UTC. Dropping it also removes one of the
+	// three priority rebuilds, each of which scans the whole contract heap.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_pair_open_create_time`,
+		`DROP INDEX IF EXISTS transfer_contract_pair_open_create_time`,
+	),
+	// 818: transfer_contract_open_destination_partial (6 GB) served the
+	// destination arm of `open AND (source_id = $1 OR destination_id = $1)`.
+	// That reader now uses the unresolved CASE predicate (and has no production
+	// caller), and the open-contract stats order by create_time through
+	// transfer_contract_open_partial_create_time. Not scanned since 2026-09-27
+	// 01:21 UTC. Dropping it also removes a whole-heap priority rebuild.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_open_destination_partial`,
+		`DROP INDEX IF EXISTS transfer_contract_open_destination_partial`,
+	),
+	// 819: pending_task_has_reschedule_error (3 GB) indexes a boolean ahead of
+	// task_id. Every task insert and every claim or release writes it; those
+	// updates move available_block, so they are never HOT.
+	// Its only reader, task.ListRescheduledTasks, is called from tests alone; the
+	// queue metrics count reschedule errors in a whole-table aggregate. Its 268
+	// scans since 2026-08-24 came from manual queries.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS pending_task_has_reschedule_error`,
+		`DROP INDEX IF EXISTS pending_task_has_reschedule_error`,
+	),
 }

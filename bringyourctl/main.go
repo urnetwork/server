@@ -552,9 +552,9 @@ func dbAudit(opts docopt.Opts) {
 }
 
 // dbBackfillSweepDestinationId backfills transfer_escrow_sweep.destination_id
-// on existing rows so the provider payout stats see pre-deploy sweeps. The
-// column and its covering index are created by db migration; this only fills
-// historical rows. It is idempotent and safe to re-run.
+// on existing rows. The provider payout stats that needed it now read
+// provider_payouts, and migration 816 dropped the column's covering index, so
+// each batch scans the sweep table. It is idempotent and safe to re-run.
 func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	ctx := context.Background()
 
