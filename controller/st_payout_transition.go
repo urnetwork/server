@@ -16,7 +16,8 @@ func stPayoutIdentity(cfg *StConfig) server.ProviderPayoutMainnet {
 		GenesisHash: fmt.Sprintf("0x%x", cfg.GenesisHash), Netuid: uint16(cfg.Netuid),
 		DeploymentId: cfg.DeploymentId, Coordinator: cfg.ContractAddress.Hex(),
 		SettlementVault: cfg.SettlementVault.Hex(), PolicyHash: fmt.Sprintf("0x%x", cfg.PolicyHash),
-		ReadinessSha256: cfg.LaunchReadinessSha256}
+		ReadinessSha256: cfg.LaunchReadinessSha256, SettlementV2Address: stLedgerV2Address(cfg.SettlementV2),
+		VaultV2Address: stLedgerV2Address(cfg.VaultV2)}
 }
 
 func stPayoutAdmission(ctx context.Context, cfg *StConfig) error {

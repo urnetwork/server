@@ -193,5 +193,6 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.StCommitRoot)},
 		{target: task.NewTaskTarget(work.StDeposit)},
 		{target: task.NewTaskTarget(work.StFinalizePoke)},
+		{target: task.NewTaskTarget(work.StLedgerV2Step)},
 	}
 }
