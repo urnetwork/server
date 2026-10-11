@@ -549,18 +549,20 @@ func TestSnLedgerAccountBuildsEachTreeOnce(t *testing.T) {
 	})
 }
 
-// SV-3: the SDK's strict parser (sdk/sn_ledger.go) accepts the endpoint's
-// real answers over HTTP and shows every state from them: finalized, paid,
-// claimable and pending across several pools, an account only in the pending
-// root, and an unknown coldkey as an empty list rather than an error.
+// SV-3, CL-2: the SDK's strict parser (sdk/sn_ledger.go) accepts the
+// endpoint's real answers over HTTP and shows every state from them:
+// finalized, paid, claimable and pending across several pools, an account
+// only in the pending root, and an unknown coldkey as an empty list rather
+// than an error. The 502 of a ledger that cannot be read reaches the SDK as
+// ledger_unavailable with no balances, never as zero.
 func TestSnLedgerAccountAnswersParseInTheSdk(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		newLedgerV2EndpointFixture(t)
+		f := newLedgerV2EndpointFixture(t)
 		mux := http.NewServeMux()
 		mux.HandleFunc("/sn/ledger/account", SnLedgerAccount)
 		host := httptest.NewServer(mux)
 		t.Cleanup(host.Close)
-		read := func(coldkey [32]byte) *sdk.SnLedgerAccountsResult {
+		fetch := func(coldkey [32]byte) *sdk.SnLedgerAccountsResult {
 			settings := sdk.NewSnChainSettings()
 			settings.ArtifactBaseUrl = host.URL
 			results := make(chan *sdk.SnLedgerAccountsResult, 1)
@@ -572,14 +574,18 @@ func TestSnLedgerAccountAnswersParseInTheSdk(t *testing.T) {
 			}))
 			select {
 			case result := <-results:
-				if result.Error != nil {
-					t.Fatalf("the sdk refused the answer: %+v", result.Error)
-				}
 				return result
 			case <-time.After(30 * time.Second):
 				t.Fatal("the sdk read did not call back")
 				return nil
 			}
+		}
+		read := func(coldkey [32]byte) *sdk.SnLedgerAccountsResult {
+			result := fetch(coldkey)
+			if result.Error != nil {
+				t.Fatalf("the sdk refused the answer: %+v", result.Error)
+			}
+			return result
 		}
 		accounts := func(result *sdk.SnLedgerAccountsResult) []sdk.SnLedgerAccount {
 			out := []sdk.SnLedgerAccount{}
@@ -604,6 +610,12 @@ func TestSnLedgerAccountAnswersParseInTheSdk(t *testing.T) {
 			if got := accounts(read(test.coldkey)); !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("0x%x: %+v\nwant %+v", test.coldkey, got, test.want)
 			}
+		}
+
+		f.chain.failNext("claimed", errors.New("vault2 claimed(1, 0): rpc down"))
+		result := fetch(ledgerV2A)
+		if result.Error == nil || result.Error.Code != sdk.SnErrorCodeLedgerUnavailable || result.Error.Message != "http 502 fetching the ledger account" || result.Accounts.Len() != 0 {
+			t.Fatalf("an unavailable ledger in the sdk: %+v, %d accounts", result.Error, result.Accounts.Len())
 		}
 	})
 }
