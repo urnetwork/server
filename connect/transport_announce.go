@@ -127,6 +127,11 @@ type ConnectionAnnounceSettings struct {
 	reliabilityStatsRecordedForTest func(server.Id, model.ClientReliabilityStats)
 	// Runs after the fresh connection identity and initial samples are admitted.
 	connectionRegisteredForTest func(*ConnectionAnnounce)
+	// Runs after the final model cleanup with the connection and the result of
+	// its disconnect.
+	connectionDisconnectedForTest func(server.Id, error)
+	// Replaces connectionVerifySettings.
+	verifySettingsForTest func() (*model.VerifySettings, bool)
 }
 
 type LatencyTest struct {
@@ -467,7 +472,11 @@ func (self *ConnectionAnnounce) run() {
 	// ttl-refresh while connected, release only this connection on disconnect.
 	// Overlapping H1/H3 connections retain independent leases. The bijection gate in
 	// the model excludes shared or ambiguous ips (§8.2).
-	verifySettings, verifyEnabled := connectionVerifySettings()
+	resolveVerifySettings := connectionVerifySettings
+	if self.settings.verifySettingsForTest != nil {
+		resolveVerifySettings = self.settings.verifySettingsForTest
+	}
+	verifySettings, verifyEnabled := resolveVerifySettings()
 	verifyEgressIp, verifyEgressOk := netip.Addr{}, false
 	if verifyEnabled {
 		verifyEgressIp, verifyEgressOk = model.ParseVerifyEgressIp(self.clientAddress)
@@ -479,12 +488,15 @@ func (self *ConnectionAnnounce) run() {
 			// database response cannot strand an idle transaction indefinitely.
 			cleanupCtx, cleanupCancel := connectionCleanupContext(self.ctx)
 			defer cleanupCancel()
-			model.DisconnectNetworkClient(cleanupCtx, connectionId)
+			disconnectErr := model.DisconnectNetworkClient(cleanupCtx, connectionId)
 			if verifyEgressOk {
 				model.ClearVerifyConnectionEgress(cleanupCtx, self.clientId, connectionId, verifyEgressIp, verifySettings)
 			}
 			if glog.V(1) {
 				glog.Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash[:]))
+			}
+			if disconnected := self.settings.connectionDisconnectedForTest; disconnected != nil {
+				disconnected(connectionId, disconnectErr)
 			}
 		})
 	}

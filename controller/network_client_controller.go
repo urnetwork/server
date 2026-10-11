@@ -151,6 +151,20 @@ func ConnectNetworkClient(
 	return ConnectNetworkClientWithIpFamily(ctx, clientId, clientAddress, handlerId, retryLocationTimeout, 0)
 }
 
+// Keys a test-only replacement for the connection location writer.
+type connectionLocationWriterKey struct{}
+
+// Returns a context whose ConnectNetworkClientWithIpFamily calls writer in
+// place of SetConnectionLocation, for the first attempt and every retry, with
+// the connection's context, id and ip. Production contexts never carry one,
+// and a context without one costs one lookup per connection. Tests only.
+func Testing_WithConnectionLocationWriter(
+	ctx context.Context,
+	writer func(ctx context.Context, connectionId server.Id, clientIp string) error,
+) context.Context {
+	return context.WithValue(ctx, connectionLocationWriterKey{}, writer)
+}
+
 // ConnectNetworkClientWithIpFamily is ConnectNetworkClient with the address
 // family the transport declared it intends to prove (0, 4 or 6; see
 // model.ConnectionProvenIpFamily).
@@ -169,7 +183,12 @@ func ConnectNetworkClientWithIpFamily(
 		return
 	}
 
-	locationErr := SetConnectionLocation(ctx, connectionId, clientIp)
+	setLocation := SetConnectionLocation
+	if writer, ok := ctx.Value(connectionLocationWriterKey{}).(func(context.Context, server.Id, string) error); ok {
+		setLocation = writer
+	}
+
+	locationErr := setLocation(ctx, connectionId, clientIp)
 	if locationErr != nil && 0 < retryLocationTimeout {
 		// keep the client ip in memory and do not persist to task, etc
 		// the retry remains active as long as the context (which should be the connection context)
@@ -181,7 +200,7 @@ func ConnectNetworkClientWithIpFamily(
 				case <-time.After(retryLocationTimeout):
 				}
 
-				locationErr := SetConnectionLocation(ctx, connectionId, clientIp)
+				locationErr := setLocation(ctx, connectionId, clientIp)
 				if locationErr == nil {
 					return
 				}
