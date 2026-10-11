@@ -449,6 +449,25 @@ func (self *ConnectionAnnounce) run() {
 	// FIXME remove ip
 	// glog.Infof("[t]announce %s [%s]\n", self.clientId, self.clientAddress)
 
+	// verify egress feeder (observed source ip, sn/VALIDATOR.md §8): while
+	// connected, this client's observed address is a candidate provider
+	// egress for `/verify` source-ip attribution. Feed on connect,
+	// ttl-refresh while connected, release only this connection on disconnect.
+	// Overlapping H1/H3 connections retain independent leases. The bijection gate in
+	// the model excludes shared or ambiguous ips (§8.2).
+	// The settings resolve before the connection row commits: they raise when
+	// verify.yml cannot be read, and a raise after the commit but before the
+	// cleanup below is registered would leave the row connected.
+	resolveVerifySettings := connectionVerifySettings
+	if self.settings.verifySettingsForTest != nil {
+		resolveVerifySettings = self.settings.verifySettingsForTest
+	}
+	verifySettings, verifyEnabled := resolveVerifySettings()
+	verifyEgressIp, verifyEgressOk := netip.Addr{}, false
+	if verifyEnabled {
+		verifyEgressIp, verifyEgressOk = model.ParseVerifyEgressIp(self.clientAddress)
+	}
+
 	// FIXME compute expected latency between client and this edge
 	// FIXME store edge coordinated in the config as host variables
 	// FIXME pass the host coordinate in here so the expected latency can be set
@@ -465,22 +484,9 @@ func (self *ConnectionAnnounce) run() {
 		glog.Infof("[t][%s]could not connect client. err = %s\n", hex.EncodeToString(clientAddressHash[:]), err)
 		return
 	}
-
-	// verify egress feeder (observed source ip, sn/VALIDATOR.md §8): while
-	// connected, this client's observed address is a candidate provider
-	// egress for `/verify` source-ip attribution. Feed on connect,
-	// ttl-refresh while connected, release only this connection on disconnect.
-	// Overlapping H1/H3 connections retain independent leases. The bijection gate in
-	// the model excludes shared or ambiguous ips (§8.2).
-	resolveVerifySettings := connectionVerifySettings
-	if self.settings.verifySettingsForTest != nil {
-		resolveVerifySettings = self.settings.verifySettingsForTest
-	}
-	verifySettings, verifyEnabled := resolveVerifySettings()
-	verifyEgressIp, verifyEgressOk := netip.Addr{}, false
-	if verifyEnabled {
-		verifyEgressIp, verifyEgressOk = model.ParseVerifyEgressIp(self.clientAddress)
-	}
+	// Registered as soon as the committed row's id exists, so a raise in any
+	// later step still disconnects the row, exactly once. Handler retirement
+	// does not cover a row whose handler is alive.
 	cleanup = func() {
 		server.HandleError(func() {
 			// The transport is normally canceled before cleanup begins. Preserve

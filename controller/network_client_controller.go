@@ -188,7 +188,20 @@ func ConnectNetworkClientWithIpFamily(
 		setLocation = writer
 	}
 
-	locationErr := setLocation(ctx, connectionId, clientIp)
+	// The row has committed, and the caller can disconnect it only once this
+	// returns its id. So the first attempt must not raise past here: a raise (a
+	// database error, or the transport canceled while a write waits for a pool
+	// connection) is that attempt's error, and the retry below owns the
+	// location as it owns a returned error. A canceled transport ends the retry
+	// at once.
+	locationErr := server.HandleError1(
+		func() error {
+			return setLocation(ctx, connectionId, clientIp)
+		},
+		func(err error) error {
+			return err
+		},
+	)
 	if locationErr != nil && 0 < retryLocationTimeout {
 		// keep the client ip in memory and do not persist to task, etc
 		// the retry remains active as long as the context (which should be the connection context)
@@ -299,18 +312,19 @@ func SetConnectionLocation(
 	//
 	// The lookup is non-fatal by construction. model.Db raises non-transient,
 	// non-connection postgres errors as a panic (see isTransientError /
-	// isConnectionError in db.go), and this call sits on
-	// ConnectNetworkClient's path *before* connect's disconnect-cleanup defer
-	// is registered (connect/transport_announce.go) -- so an escaping panic
-	// does not just fail the location lookup, it tears the connection down and
-	// leaves its network_client_connection row orphaned as connected = true.
+	// isConnectionError in db.go). ConnectNetworkClientWithIpFamily contains a
+	// raise from this function as a failed attempt; it used to escape before
+	// connect registered its disconnect cleanup (connect/transport_announce.go),
+	// tearing the connection down and leaving its network_client_connection
+	// row orphaned as connected = true. Contained, it still costs the
+	// connection its location until a retry, where mmdb would have placed it.
 	//
 	// The concrete hazard is deploy ordering. provider_egress_location is a
 	// new table in this change; roll the binary before running
 	// `bringyourctl db migrate` and every announce hits undefined_table
 	// (42P01), which is neither transient nor a connection error, and every
-	// connection in that window orphans. That exact failure mode has already
-	// cost this project ~30k orphaned rows once, and deploy ordering is not
+	// connection in that window would lose its location. That failure mode
+	// once cost this project ~30k orphaned rows, and deploy ordering is not
 	// something a test suite catches.
 	//
 	// So: swallow ANY failure here and fall through to the mmdb path.
