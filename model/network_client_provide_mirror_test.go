@@ -18,8 +18,9 @@ import (
 // Contract creation to a non-companion destination reads the destination's
 // modes and then the selected mode's secret. After the mirror expires, the
 // first pair of reads refills the mode list and every secret from one read,
-// and the rest are served by redis.
-func TestProvideMirrorExpiryCostsOneRead(t *testing.T) {
+// which one more read confirms is still current, and the rest are served by
+// redis.
+func TestProvideMirrorExpiryCostsOneRefill(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientId := server.NewId()
@@ -44,8 +45,8 @@ func TestProvideMirrorExpiryCostsOneRead(t *testing.T) {
 				t.Fatalf("stream secret after expiry = %x, %v", secretKey, err)
 			}
 		}
-		if reads := statements.take(); len(reads) != 1 {
-			t.Fatalf("three mode and secret lookups after the mirror expired used %d statements, want 1: %q", len(reads), reads)
+		if reads := statements.take(); len(reads) != 2 {
+			t.Fatalf("three mode and secret lookups after the mirror expired used %d statements, want 2 (the refill and its confirmation): %q", len(reads), reads)
 		}
 		secretKey, err := GetProvideSecretKey(observed, clientId, ProvideModeNetwork)
 		if err != nil || !bytes.Equal(secretKey, networkKey) {
@@ -69,9 +70,9 @@ func TestProvideMirrorExpiryCostsOneRead(t *testing.T) {
 }
 
 // A companion request between networks reads only the Stream secret. After
-// the mirror expires, its first read refills the whole mirror, so the later
-// secret reads and a later mode read cost nothing.
-func TestProvideSecretKeyExpiryCostsOneRead(t *testing.T) {
+// the mirror expires, its first read refills the whole mirror and confirms
+// the fill, so the later secret reads and a later mode read cost nothing.
+func TestProvideSecretKeyExpiryCostsOneRefill(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientId := server.NewId()
@@ -93,8 +94,8 @@ func TestProvideSecretKeyExpiryCostsOneRead(t *testing.T) {
 		if err != nil || len(provideModes) != 1 || !provideModes[ProvideModeStream] {
 			t.Fatalf("modes after expiry = %v, %v", provideModes, err)
 		}
-		if reads := statements.take(); len(reads) != 1 {
-			t.Fatalf("three secret lookups and a mode lookup after the mirror expired used %d statements, want 1: %q", len(reads), reads)
+		if reads := statements.take(); len(reads) != 2 {
+			t.Fatalf("three secret lookups and a mode lookup after the mirror expired used %d statements, want 2 (the refill and its confirmation): %q", len(reads), reads)
 		}
 	})
 }
