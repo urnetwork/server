@@ -239,6 +239,10 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationIndexRemoved("transfer_contract", "transfer_contract_open_destination_partial")),
 	migrationCurrentSuffix(819, "unread task reschedule error index removed",
 		migrationIndexRemoved("pending_task", "pending_task_has_reschedule_error")),
+	migrationCurrentSuffix(820, "transfer_contract fillfactor 90",
+		migrationTableFillfactor("transfer_contract", 90)),
+	migrationCurrentSuffix(821, "contract_close fillfactor 90",
+		migrationTableFillfactor("contract_close", 90)),
 }
 
 // A dropped index stays dropped: a rebuilt copy under the published name would
@@ -246,6 +250,14 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 func migrationIndexRemoved(table, name string) string {
 	return fmt.Sprintf(`NOT EXISTS (SELECT 1 FROM index_artifact
 		WHERE table_name = '%s' AND index_name = '%s')`, table, name)
+}
+
+// Only the table's own reloptions carry its fillfactor. A reset or another
+// value fills new pages again, and updates that would fit stop staying HOT.
+// Other storage parameters belong to other migrations and are not compared.
+func migrationTableFillfactor(table string, fillfactor int) string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM pg_class WHERE oid=to_regclass('public.%s')
+		AND coalesce(reloptions, ARRAY[]::text[]) @> ARRAY['fillfactor=%d']::text[])`, table, fillfactor)
 }
 
 // The 814 guard fires only for payment_id changes, so tgattr names that column
