@@ -11,6 +11,29 @@ import (
 
 const AuthorizationLeaseDuration = 90 * time.Second
 const AuthorizationRecheckInterval = 60 * time.Second
+
+// An authoritative check that finds the authorization store unavailable is
+// retried after this delay, doubling per consecutive unavailable result up to
+// AuthorizationUnavailableRetryMaxInterval. The next scheduled recheck is 60
+// seconds away while the lease has at most 30 seconds left, so without a
+// retry one slow read lets a valid transport lapse. A retry never renews by
+// itself: only a successful check does, and the independent timer still
+// retires the transport at its deadline when the store stays unavailable.
+const AuthorizationUnavailableRetryInterval = 5 * time.Second
+const AuthorizationUnavailableRetryMaxInterval = 20 * time.Second
+
+// Each retry delay is stretched by up to half, by a fraction fixed per
+// credential, so leases that failed together, such as every lease of a
+// network rechecked by one session event, do not all retry in one instant.
+// The fraction comes from the random tail of the credential's id.
+func authorizationRetryJitter(credential *ByJwt) float64 {
+	id := credential.NetworkId
+	if credential.ClientId != nil {
+		id = *credential.ClientId
+	}
+	return float64(id[len(id)-1]) / 256
+}
+
 const AuthorizationUnavailableCloseCode = 4002
 const AuthorizationRevokedCloseCode = 4003
 const AuthorizationExpiredCloseCode = 4004
@@ -179,13 +202,18 @@ func (self *AuthorizationLease) runTimer() {
 func (self *AuthorizationLease) runChecks() {
 	ticker := time.NewTicker(AuthorizationRecheckInterval)
 	defer ticker.Stop()
+	// armed only after an unavailable result; a nil channel never fires
+	var retry <-chan time.Time
+	retryInterval := AuthorizationUnavailableRetryInterval
 	for {
 		select {
 		case <-self.ctx.Done():
 			return
 		case <-ticker.C:
 		case <-self.wake:
+		case <-retry:
 		}
+		retry = nil
 		start := time.Now()
 		self.stateLock.Lock()
 		generation, closed := self.state.generation, self.state.closed
@@ -198,6 +226,8 @@ func (self *AuthorizationLease) runChecks() {
 		cancel()
 		if err != nil {
 			if errors.Is(err, ErrAuthUnavailable) || errors.Is(err, ErrSessionStoreUnavailable) {
+				retry = time.After(retryInterval + time.Duration(float64(retryInterval)*authorizationRetryJitter(self.credential)/2))
+				retryInterval = min(2*retryInterval, AuthorizationUnavailableRetryMaxInterval)
 				continue
 			}
 			cause := AuthorizationRejectedCloseCode
@@ -209,6 +239,7 @@ func (self *AuthorizationLease) runChecks() {
 			self.closeWithCause(cause)
 			return
 		}
+		retryInterval = AuthorizationUnavailableRetryInterval
 		self.stateLock.Lock()
 		renewed := self.state.renew(start, time.Now(), self.terminal, generation)
 		deadline := self.state.deadline
