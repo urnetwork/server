@@ -1,9 +1,9 @@
-// A downstream provider owner can extend an upstream grant's financial lock.
+// A held provider row cannot extend an upstream grant's financial lock.
 package model
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -11,11 +11,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/task"
 )
 
-// The actual PostgreSQL blocking edge identifies the provider row owner before
-// a second contract proves that its shared grant is still unavailable.
-func TestLegacySettlementProviderTotalWaitRetainsGrant(t *testing.T) {
+// A held provider row must not hold up the upstream grant. The financial owner
+// queues provider totals instead of writing them, so it settles while the row
+// is held and a second contract on the shared grant settles right after it.
+// The projection writes the totals exactly once after the row is released.
+func TestLegacySettlementProviderTotalWaitReleasesGrant(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -34,6 +37,10 @@ func TestLegacySettlementProviderTotalWaitRetainsGrant(t *testing.T) {
 		})
 		server.Raise(CloseContract(ctx, secondId, f.sourceId, 11, false))
 		server.Raise(CloseContract(ctx, secondId, f.destinationId, 11, false))
+		// Synthetic ID rewrites invalidate the cache. Keep this fixture warm.
+		refreshNetEscrow(ctx, []server.Id{f.balanceId})
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		holder := acquireContractLifecycleTestConnection(t, ctx)
 		defer holder.Release()
 		held, err := holder.Begin(ctx)
@@ -41,78 +48,55 @@ func TestLegacySettlementProviderTotalWaitRetainsGrant(t *testing.T) {
 		var releaseOnce sync.Once
 		releaseProvider := func() { releaseOnce.Do(func() { _ = held.Rollback(context.Background()) }) }
 		defer releaseProvider()
-		var holderPid int
-		server.Raise(held.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPid))
 		server.RaisePgResult(held.Exec(ctx, `SELECT network_id FROM account_balance WHERE network_id=$1 FOR UPDATE`, f.destinationNetworkId))
-		enteredProvider := make(chan struct{})
-		ownerDone := make(chan any, 1)
-		var ownerPid int
-		var workers sync.WaitGroup
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			ownerDone <- server.HandleError(func() {
-				var ownerPosts []func() any
-				server.Tx(ctx, func(tx server.PgTx) {
-					// This synthetic holder is bounded independently of the
-					// worker's production timeout; no elapsed latency is claimed.
-					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='3s'; SET LOCAL lock_timeout='2s'`))
-					server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&ownerPid))
-					wrapped := &legacyProviderOwnerDiagnosticTx{PgTx: tx, beforeProvider: func() { close(enteredProvider) }}
-					var completed, busy bool
-					var err error
-					ownerPosts, completed, busy, _, err = flushLegacySettlementInTx(ctx, wrapped, firstId)
-					server.Raise(err)
-					if !completed || busy {
-						server.Raise(fmt.Errorf("provider-wait owner did not settle"))
-					}
-				}, server.TxReadCommitted, server.OptNoRetry())
-				server.RunPosts(ctx, ownerPosts...)
-			})
-		}()
-		defer func() {
-			releaseProvider()
-			cancel()
-			workers.Wait()
-		}()
-		select {
-		case <-enteredProvider:
-		case err := <-ownerDone:
-			t.Fatal("owner ended before provider write", err)
-		case <-ctx.Done():
-			t.Fatal("owner did not reach provider write", ctx.Err())
+		// Control: the provider row is really held against any writer.
+		probe := acquireContractLifecycleTestConnection(t, ctx)
+		_, err = probe.Exec(ctx, `SELECT network_id FROM account_balance WHERE network_id=$1 FOR UPDATE NOWAIT`, f.destinationNetworkId)
+		probe.Release()
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+			t.Fatal("provider row was not held", err)
 		}
-		poll := time.NewTicker(5 * time.Millisecond)
-		defer poll.Stop()
-		for {
-			blocked := false
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT $2=ANY(pg_blocking_pids($1)) AND EXISTS(
-                    SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock' AND query LIKE '%INSERT INTO account_balance%')`, ownerPid, holderPid).Scan(&blocked))
-			})
-			if blocked {
-				break
+		provider := &legacyProviderStatementWatch{}
+		var ownerPosts []func() any
+		server.Tx(ctx, func(tx server.PgTx) {
+			// A wait on the held row fails here instead of hanging the test.
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='3s'; SET LOCAL lock_timeout='2s'`))
+			var completed, busy bool
+			var err error
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, provider.hook())
+			defer unhook()
+			ownerPosts, completed, busy, _, err = flushLegacySettlementInTx(hooked, tx, firstId)
+			if err != nil || !completed || busy {
+				t.Fatal("financial owner waited on the held provider row", completed, busy, err)
 			}
-			select {
-			case err := <-ownerDone:
-				t.Fatal("owner ended before actual provider blocking edge", err)
-			case <-ctx.Done():
-				t.Fatal("actual provider blocking edge never appeared", ctx.Err())
-			case <-poll.C:
-			}
+		}, server.TxReadCommitted, server.OptNoRetry())
+		if len(provider.statements) != 0 {
+			t.Fatal("financial owner wrote the provider row inside its grant transaction", provider.statements)
 		}
+		server.RunPosts(ctx, ownerPosts...)
 		completed, busy, gate, err := flushLegacySettlement(ctx, secondId)
-		if err != nil || completed || !busy || gate != legacySettlementBusyGrantSet {
-			t.Fatal("provider-blocked owner did not retain its shared grant", completed, busy, gate, err)
-		}
-		releaseProvider()
-		if err := <-ownerDone; err != nil {
-			t.Fatal("released provider owner did not commit", err)
-		}
-		completed, busy, gate, err = flushLegacySettlement(ctx, secondId)
 		if err != nil || !completed || busy || gate != legacySettlementBusyNone {
-			t.Fatal("released sibling did not complete", completed, busy, gate, err)
+			t.Fatal("held provider row retained the shared grant", completed, busy, gate, err)
 		}
+		// Both totals wait in their projections, not in the financial owners.
+		server.Db(ctx, func(conn server.PgConn) {
+			var provided, pendingBytes, pendingRevenue int64
+			server.Raise(conn.QueryRow(ctx, `WITH unapplied AS (
+                SELECT allocation FROM pending_task
+                CROSS JOIN LATERAL jsonb_array_elements(args_json::jsonb->'totals') AS allocation
+                WHERE function_name=$2 AND (args_json::jsonb->>'applied')::boolean=false
+                    AND (allocation->>'network_id')::uuid=$1
+            ) SELECT COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$1),0),
+                COALESCE((SELECT sum((allocation->>'bytes')::bigint) FROM unapplied),0),
+                COALESCE((SELECT sum((allocation->>'revenue')::bigint) FROM unapplied),0)`,
+				f.destinationNetworkId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(&provided, &pendingBytes, &pendingRevenue))
+			if provided != 0 || pendingBytes != 22 || pendingRevenue != 22 {
+				t.Fatal("provider totals did not wait in their projections", provided, pendingBytes, pendingRevenue)
+			}
+		})
+		releaseProvider()
+		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
 			var terminal, metadata, pending int
 			var credit, swept, provided, sweptRevenue, providedRevenue int64
@@ -127,27 +111,29 @@ func TestLegacySettlementProviderTotalWaitRetainsGrant(t *testing.T) {
                 (SELECT provided_net_revenue_nano_cents FROM account_balance WHERE network_id=$3)`,
 				[]server.Id{firstId, secondId}, f.balanceId, f.destinationNetworkId).Scan(&terminal, &metadata, &pending, &credit, &swept, &provided, &sweptRevenue, &providedRevenue))
 			if terminal != 2 || metadata != 2 || pending != 0 || credit != 978 || swept != 22 || provided != 22 || sweptRevenue != 22 || providedRevenue != 22 {
-				t.Fatal("provider-wait replay changed accounting", terminal, metadata, pending, credit, swept, provided, sweptRevenue, providedRevenue)
+				t.Fatal("provider projection changed accounting", terminal, metadata, pending, credit, swept, provided, sweptRevenue, providedRevenue)
 			}
 		})
 		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 0)
-		t.Log("actual provider-row blocking edge retained the financial grant; sibling classified grant-set busy, then both settled exactly after release; synthetic control does not identify a Main owner")
 	})
 }
 
-// The signal is before the real SQL call; PostgreSQL blocking evidence, not
-// this signal alone, establishes that the owner actually waits downstream.
-type legacyProviderOwnerDiagnosticTx struct {
-	server.PgTx
-	beforeProvider func()
+// Records each statement of the hooked transaction that touches a provider
+// account row.
+type legacyProviderStatementWatch struct {
+	statements []string
 }
 
-// Preserve the actual provider statement and all financial transaction state.
-func (self *legacyProviderOwnerDiagnosticTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	if self.beforeProvider != nil && strings.Contains(sql, "INSERT INTO account_balance") {
-		hook := self.beforeProvider
-		self.beforeProvider = nil
-		hook()
-	}
-	return self.PgTx.Exec(ctx, sql, args...)
+// Watches statements and every statement queued in a batch.
+func (self *legacyProviderStatementWatch) hook() *legacyStatementHook {
+	return &legacyStatementHook{before: func(_ context.Context, sql string, queued []string) {
+		if queued == nil {
+			queued = []string{sql}
+		}
+		for _, statement := range queued {
+			if strings.Contains(statement, "account_balance") {
+				self.statements = append(self.statements, strings.Join(strings.Fields(statement), " "))
+			}
+		}
+	}}
 }

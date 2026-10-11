@@ -532,6 +532,16 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 		sourceBatch := scoped && owner.Kind == ContractCloseOwnerSourceClient
 		cohortEnabled := len(cohort) > 0 && (sourceBatch || cooldown.ready(shard))
 		for remaining := limit; remaining > 0; {
+			// A prefetched row has no selection of its own to observe the
+			// page budget. No visit starts after that budget ends. A returned
+			// cohort member other than a fallback starts nothing: its own
+			// transaction has already committed or refused it, and recording
+			// it keeps that acknowledged prefix in the result and cursor.
+			if len(financialAttempts) == 0 || financialAttempts[0].fallback {
+				if err := bounded.Err(); err != nil {
+					server.Raise(err)
+				}
+			}
 			visitHead := headRemaining > 0 && forwardUntilHead == 0
 			var next *LegacySettlementCursor
 			lookupLimit := 1
