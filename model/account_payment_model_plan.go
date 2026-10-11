@@ -676,6 +676,51 @@ const paymentPlanSubsidyRangeSQL = `
 	FROM temp_account_payment
 `
 
+// No product nets more than this in one purchase; a year of Pro nets about $40.
+// A balance claiming more holds a misrecorded price, such as an App Store price
+// from a non-USD storefront read as USD, and adds nothing to the subsidy revenue.
+const maxPlausibleBalanceSubsidyNetRevenueUsd = 100.0
+
+// A balance that funded a selected sweep, with the subscription revenue it carries.
+type subsidyRevenueBalance struct {
+	startTime         time.Time
+	endTime           time.Time
+	subsidyNetRevenue NanoCents
+}
+
+// The subscription revenue rate per subsidy period (`days`) over the subsidy
+// window, so that `subscription_net_revenue_fraction` of it compares with
+// `min_payout_usd`, which is also per period, before both scale to the window.
+// Each balance adds its revenue pro-rated to the part of the window it covers:
+// a balance spans many plan windows (a month of Pro, a year's purchase), and
+// adding its full revenue to each plan that drew from it counted it many times
+// over. A balance above a plausible price adds nothing.
+func subsidyNetRevenuePerPeriod(
+	subsidyRevenueBalances []*subsidyRevenueBalance,
+	windowStartTime time.Time,
+	windowEndTime time.Time,
+	period time.Duration,
+) NanoCents {
+	window := windowEndTime.Sub(windowStartTime)
+	if window <= 0 {
+		return 0
+	}
+	maxBalanceSubsidyNetRevenue := UsdToNanoCents(maxPlausibleBalanceSubsidyNetRevenueUsd)
+	windowSubsidyNetRevenue := 0.0
+	for _, revenueBalance := range subsidyRevenueBalances {
+		if revenueBalance.subsidyNetRevenue <= 0 || maxBalanceSubsidyNetRevenue < revenueBalance.subsidyNetRevenue {
+			continue
+		}
+		balanceDuration := revenueBalance.endTime.Sub(revenueBalance.startTime)
+		overlap := server.MinTime(revenueBalance.endTime, windowEndTime).Sub(server.MaxTime(revenueBalance.startTime, windowStartTime))
+		if balanceDuration <= 0 || overlap <= 0 {
+			continue
+		}
+		windowSubsidyNetRevenue += float64(revenueBalance.subsidyNetRevenue) * float64(overlap) / float64(balanceDuration)
+	}
+	return NanoCents(windowSubsidyNetRevenue * float64(period) / float64(window))
+}
+
 // this assumes the table `temp_account_payment` exists in the transaction
 func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	// roll up all the sweeps per payer network, payee network
@@ -690,7 +735,7 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	}
 
 	payerPayeeNetworkSweeps := map[server.Id]map[server.Id]*networkSweep{}
-	payerSubsidyNetRevenues := map[server.Id]NanoCents{}
+	subsidyRevenueBalances := []*subsidyRevenueBalance{}
 
 	result, err := self.tx.Query(
 		self.ctx,
@@ -741,12 +786,14 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		}
 	})
 
+	// the revenue counts once the window is known (see subsidyNetRevenuePerPeriod)
 	result, err = self.tx.Query(
 		self.ctx,
 		`
 			SELECT
-	    		transfer_balance.network_id AS payer_network_id,
-	    		SUM(transfer_balance.subsidy_net_revenue_nano_cents) AS subsidy_net_revenue_nano_cents
+	    		transfer_balance.start_time,
+	    		transfer_balance.end_time,
+	    		transfer_balance.subsidy_net_revenue_nano_cents
 	    	FROM (
 	    		SELECT
 	    			DISTINCT balance_id
@@ -754,15 +801,18 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	    	) b
 	    	INNER JOIN transfer_balance ON
 	    		transfer_balance.balance_id = b.balance_id
-	    	GROUP BY transfer_balance.network_id
+	    	WHERE 0 < transfer_balance.subsidy_net_revenue_nano_cents
 	    `,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
-			var payerNetworkId server.Id
-			var subscriptionNetRevenue NanoCents
-			server.Raise(result.Scan(&payerNetworkId, &subscriptionNetRevenue))
-			payerSubsidyNetRevenues[payerNetworkId] = subscriptionNetRevenue
+			revenueBalance := &subsidyRevenueBalance{}
+			server.Raise(result.Scan(
+				&revenueBalance.startTime,
+				&revenueBalance.endTime,
+				&revenueBalance.subsidyNetRevenue,
+			))
+			subsidyRevenueBalances = append(subsidyRevenueBalances, revenueBalance)
 		}
 	})
 
@@ -773,8 +823,7 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	// the subsidy weighs all traffic equally regardless of paid status.
 	paidUserCount := 0
 	trafficUserCount := 0
-	netRevenue := NanoCents(0)
-	for payerNetworkId, payeeNetworkSweeps := range payerPayeeNetworkSweeps {
+	for _, payeeNetworkSweeps := range payerPayeeNetworkSweeps {
 		payerNetPayoutByteCountPaid := ByteCount(0)
 		payerNetPayoutByteCountUnpaid := ByteCount(0)
 		for _, sweep := range payeeNetworkSweeps {
@@ -794,7 +843,6 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		if 0 < payerNetPayoutByteCountPaid+payerNetPayoutByteCountUnpaid {
 			trafficUserCount += 1
 		}
-		netRevenue += payerSubsidyNetRevenues[payerNetworkId]
 	}
 
 	// note the aggregates are NULL when no swept contracts exist
@@ -882,6 +930,12 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		return
 	}
 
+	netRevenue := subsidyNetRevenuePerPeriod(
+		subsidyRevenueBalances,
+		subsidyStartTime,
+		subsidyEndTime,
+		self.subsidyConfig.Duration(),
+	)
 	subsidyPayoutUsd := max(
 		self.subsidyConfig.MinPayoutUsd,
 		self.subsidyConfig.UsdPerActiveUser*float64(activeUserCount),
