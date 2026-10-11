@@ -130,6 +130,8 @@ type StLedgerV2Client interface {
 	LedgerV2FundedThrough(ctx context.Context, noId uint64, epoch uint64) (uint256.Int, error)
 	// LedgerV2Demand reads vault2.demanded(noId, seq, index): a DemandState.
 	LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, index uint64) (uint8, error)
+	// LedgerV2Claimed reads vault2.claimed(noId, index) at the finalized head.
+	LedgerV2Claimed(ctx context.Context, noId uint64, index uint64) (uint256.Int, error)
 	// LedgerV2Close sends closeOperatorEpoch under v2close:e:no.
 	LedgerV2Close(ctx context.Context, epoch uint64, noId uint64) (string, error)
 	// LedgerV2Commit sends commitDistribution under v2commit:e:no.
