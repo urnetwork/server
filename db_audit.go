@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 )
@@ -24,13 +23,6 @@ import (
 // backfills or database-level settings with no effect on the audited public
 // catalog. Online SQL migrations provide a transaction-safe audit equivalent,
 // so concurrent index changes remain visible to the expected schema.
-//
-// Table storage parameters (reloptions: fillfactor and the autovacuum tuning)
-// are set only by migrations, so they are compared too. A difference is
-// reported with review SQL and never applied: changing one takes SHARE UPDATE
-// EXCLUSIVE, which cancels a running autovacuum of the table, and a differing
-// value on a live table may be deliberate tuning. TOAST parameters live on the
-// TOAST relation and are not compared.
 
 type auditColumn struct {
 	name       string
@@ -57,8 +49,6 @@ type SchemaSnapshot struct {
 	columns     map[string][]auditColumn
 	indexes     map[string]auditIndex
 	constraints map[string][]auditConstraint
-	// reloptions entries ("name=value") per table, sorted
-	storageParameters map[string][]string
 }
 
 // introspectSchema reads the public-schema shape of the database the global
@@ -71,11 +61,10 @@ type SchemaSnapshot struct {
 // cannot be dropped with DROP INDEX either.
 func introspectSchema(ctx context.Context) *SchemaSnapshot {
 	s := &SchemaSnapshot{
-		tables:            map[string]bool{},
-		columns:           map[string][]auditColumn{},
-		indexes:           map[string]auditIndex{},
-		constraints:       map[string][]auditConstraint{},
-		storageParameters: map[string][]string{},
+		tables:      map[string]bool{},
+		columns:     map[string][]auditColumn{},
+		indexes:     map[string]auditIndex{},
+		constraints: map[string][]auditConstraint{},
 	}
 
 	MaintenanceDb(ctx, func(conn PgConn) {
@@ -184,32 +173,6 @@ func introspectSchema(ctx context.Context) *SchemaSnapshot {
 			}
 		})
 	})
-
-	MaintenanceDb(ctx, func(conn PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-            SELECT c.relname, parameter.value
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            CROSS JOIN LATERAL unnest(c.reloptions) AS parameter(value)
-            WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relispartition
-              AND c.relname <> 'migration_audit'
-            `,
-		)
-		WithPgResult(result, err, func() {
-			for result.Next() {
-				var table string
-				var parameter string
-				Raise(result.Scan(&table, &parameter))
-				s.storageParameters[table] = append(s.storageParameters[table], parameter)
-			}
-		})
-	})
-	// sorted in Go: the audited and the expected database may collate differently
-	for _, parameters := range s.storageParameters {
-		sort.Strings(parameters)
-	}
 
 	return s
 }
@@ -324,13 +287,6 @@ type indexChange struct {
 	actualDef   string
 }
 
-// Sorted reloptions entries of one table present in both databases.
-type storageParameterChange struct {
-	table    string
-	expected []string
-	actual   []string
-}
-
 // SchemaDiff is the difference of an actual database against an expected one.
 // "missing" = expected but absent from the DB; "extra" = present in the DB but
 // not expected.
@@ -344,7 +300,6 @@ type SchemaDiff struct {
 	missingIdx         []string
 	extraIdx           []string
 	changedIdx         []indexChange
-	changedStorage     []storageParameterChange
 
 	// adoptConstraintIndex[name] means a missing PK/UNIQUE constraint should be
 	// added with ADD CONSTRAINT ... USING INDEX name, because a bare index of that
@@ -416,17 +371,6 @@ func diffSchemas(expected, actual *SchemaSnapshot) *SchemaDiff {
 				d.extraConstraints[table] = append(d.extraConstraints[table], con.name)
 			}
 		}
-
-		// a missing table's storage parameters come with its CREATE TABLE
-		expectedParameters := slices.Sorted(slices.Values(expected.storageParameters[table]))
-		actualParameters := slices.Sorted(slices.Values(actual.storageParameters[table]))
-		if !slices.Equal(expectedParameters, actualParameters) {
-			d.changedStorage = append(d.changedStorage, storageParameterChange{
-				table:    table,
-				expected: expectedParameters,
-				actual:   actualParameters,
-			})
-		}
 	}
 
 	for name, idx := range expected.indexes {
@@ -477,7 +421,6 @@ func diffSchemas(expected, actual *SchemaSnapshot) *SchemaDiff {
 	sort.Strings(d.missingIdx)
 	sort.Strings(d.extraIdx)
 	sort.Slice(d.changedIdx, func(i, j int) bool { return d.changedIdx[i].name < d.changedIdx[j].name })
-	sort.Slice(d.changedStorage, func(i, j int) bool { return d.changedStorage[i].table < d.changedStorage[j].table })
 
 	return d
 }
@@ -506,8 +449,7 @@ func (d *SchemaDiff) HasDifferences() bool {
 		len(d.extraConstraints) > 0 ||
 		len(d.missingIdx) > 0 ||
 		len(d.extraIdx) > 0 ||
-		len(d.changedIdx) > 0 ||
-		len(d.changedStorage) > 0
+		len(d.changedIdx) > 0
 }
 
 // Report renders the diff as a human-readable audit.
@@ -574,20 +516,6 @@ func (d *SchemaDiff) Report() string {
 		}
 	}
 
-	if len(d.changedStorage) > 0 {
-		b.WriteString("\nSTORAGE PARAMETERS that differ from expected (tables present in both):\n")
-		parametersText := func(parameters []string) string {
-			if len(parameters) == 0 {
-				return "(none)"
-			}
-			return strings.Join(parameters, ", ")
-		}
-		for _, change := range d.changedStorage {
-			fmt.Fprintf(&b, "  ~ %s\n      expected: %s\n      actual:   %s\n",
-				change.table, parametersText(change.expected), parametersText(change.actual))
-		}
-	}
-
 	if !d.HasDifferences() {
 		b.WriteString("\nNo differences: the DB matches the expected schema at this version.\n")
 	}
@@ -595,12 +523,11 @@ func (d *SchemaDiff) Report() string {
 	return b.String()
 }
 
-// FixSql renders the full reconciliation as SQL in four tiers, all shown for a
+// FixSql renders the full reconciliation as SQL in three tiers, all shown for a
 // dry run: the additive changes `db audit --fix` applies (uncommented), the
 // index drops/recreations `db audit --fix --force-drop-indexes` also applies
-// (commented), and the storage parameter changes and table/column drops that
-// are never applied automatically (commented). `db audit` (no --fix) prints
-// this after the report.
+// (commented), and the table/column drops that are never applied automatically
+// (commented). `db audit` (no --fix) prints this after the report.
 func (d *SchemaDiff) FixSql() string {
 	var b strings.Builder
 
@@ -615,13 +542,6 @@ func (d *SchemaDiff) FixSql() string {
 		d.writeIndexDropSql(&b)
 	}
 
-	if d.hasStorageChanges() {
-		b.WriteString("\n\n-- Storage parameters that differ from the migrations. NEVER applied\n")
-		b.WriteString("-- automatically -- each takes SHARE UPDATE EXCLUSIVE, which cancels a running\n")
-		b.WriteString("-- autovacuum of the table, and a live value may be deliberate tuning:")
-		d.writeStorageSql(&b)
-	}
-
 	if d.hasDataDrops() {
 		b.WriteString("\n\n-- Extra objects in the DB, not defined by the migrations. NEVER dropped\n")
 		b.WriteString("-- automatically -- review and apply by hand (a table/column drop loses data;\n")
@@ -633,21 +553,16 @@ func (d *SchemaDiff) FixSql() string {
 	return b.String()
 }
 
-// NotAppliedSql renders the changes `db audit --fix` did NOT apply, commented,
-// for manual review. When forceDropIndexes is false the index drops/recreations
-// are included (they were not applied); the storage parameter changes and the
-// table/column drops are always included. Empty when there is nothing left to
-// review.
+// NotAppliedSql renders the destructive changes `db audit --fix` did NOT apply,
+// commented, for manual review. When forceDropIndexes is false the index
+// drops/recreations are included (they were not applied); the table/column drops
+// are always included. Empty when there is nothing left to review.
 func (d *SchemaDiff) NotAppliedSql(forceDropIndexes bool) string {
 	var b strings.Builder
 
 	if !forceDropIndexes && d.hasIndexDrops() {
 		b.WriteString("\n-- Index changes not applied (re-run --fix with --force-drop-indexes to apply):")
 		d.writeIndexDropSql(&b)
-	}
-	if d.hasStorageChanges() {
-		b.WriteString("\n-- Storage parameter changes not applied (review and apply by hand):")
-		d.writeStorageSql(&b)
 	}
 	if d.hasDataDrops() {
 		b.WriteString("\n-- Data changes not applied (review and apply by hand -- data loss):")
@@ -664,51 +579,8 @@ func (d *SchemaDiff) hasIndexDrops() bool {
 	return 0 < len(d.changedIdx) || 0 < len(d.extraIdx)
 }
 
-func (d *SchemaDiff) hasStorageChanges() bool {
-	return 0 < len(d.changedStorage)
-}
-
 func (d *SchemaDiff) hasDataDrops() bool {
 	return 0 < len(d.extraTables) || 0 < len(d.extraCols) || 0 < len(d.extraConstraints)
-}
-
-// Renders a reloptions entry ("name=value") as a storage parameter assignment.
-// Quoting the value is valid for every parameter type.
-func storageParameterSql(parameter string) string {
-	name, value, _ := strings.Cut(parameter, "=")
-	return fmt.Sprintf("%s = '%s'", name, strings.ReplaceAll(value, "'", "''"))
-}
-
-// Emits, as commented SQL, the statements that give each table the storage
-// parameters the migrations set: a SET of every expected parameter that is
-// absent or has another value, then a RESET of every parameter the migrations
-// do not set. These are never applied automatically.
-func (d *SchemaDiff) writeStorageSql(b *strings.Builder) {
-	for _, change := range d.changedStorage {
-		setParameters := []string{}
-		for _, parameter := range change.expected {
-			if !slices.Contains(change.actual, parameter) {
-				setParameters = append(setParameters, storageParameterSql(parameter))
-			}
-		}
-		expectedNames := map[string]bool{}
-		for _, parameter := range change.expected {
-			name, _, _ := strings.Cut(parameter, "=")
-			expectedNames[name] = true
-		}
-		resetNames := []string{}
-		for _, parameter := range change.actual {
-			if name, _, _ := strings.Cut(parameter, "="); !expectedNames[name] {
-				resetNames = append(resetNames, name)
-			}
-		}
-		if 0 < len(setParameters) {
-			fmt.Fprintf(b, "\n--   ALTER TABLE %s SET (%s);", change.table, strings.Join(setParameters, ", "))
-		}
-		if 0 < len(resetNames) {
-			fmt.Fprintf(b, "\n--   ALTER TABLE %s RESET (%s);", change.table, strings.Join(resetNames, ", "))
-		}
-	}
 }
 
 func (d *SchemaDiff) writeAdditiveSql(b *strings.Builder) {
@@ -851,9 +723,8 @@ func (d *SchemaDiff) DataDropCount() int {
 
 // createTableSql reconstructs a CREATE TABLE for a table missing from the DB,
 // using the expected snapshot. Primary key / unique / check constraints are
-// inlined, and its storage parameters go in a WITH clause. FixStatements emits
-// foreign keys only after every missing table has been created. It is
-// review-quality DDL, not a substitute for the migration.
+// inlined. FixStatements emits foreign keys only after every missing table has
+// been created. It is review-quality DDL, not a substitute for the migration.
 func (d *SchemaDiff) createTableSql(table string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CREATE TABLE %s (\n", table)
@@ -869,15 +740,7 @@ func (d *SchemaDiff) createTableSql(table string) string {
 		lines = append(lines, "    "+con.def)
 	}
 	b.WriteString(strings.Join(lines, ",\n"))
-	b.WriteString("\n)")
-	if parameters := d.expected.storageParameters[table]; 0 < len(parameters) {
-		parameterSqls := make([]string, 0, len(parameters))
-		for _, parameter := range parameters {
-			parameterSqls = append(parameterSqls, storageParameterSql(parameter))
-		}
-		fmt.Fprintf(&b, " WITH (%s)", strings.Join(parameterSqls, ", "))
-	}
-	b.WriteString(";")
+	b.WriteString("\n);")
 	return b.String()
 }
 

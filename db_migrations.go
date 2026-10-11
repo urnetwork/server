@@ -9982,33 +9982,4 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS pending_task_has_reschedule_error`,
 		`DROP INDEX IF EXISTS pending_task_has_reschedule_error`,
 	),
-
-	// 820 and 821 keep a tenth of each contract table heap page free, so an
-	// update that changes no indexed column can stay on its page as a HOT
-	// update, with no new index entries. On Main, since the 2026-08-24 stats
-	// reset, 4.2% of transfer_contract updates were HOT and 73% moved to another
-	// page. Its usage_unverified and provider_usage updates (254M rows in
-	// pg_stat_statements) change no indexed column and miss HOT only because the
-	// page is full. 39% of contract_close upserts were HOT and 61% moved page;
-	// its only index is the primary key.
-	//
-	// The ALTER changes only the catalog and rewrites nothing. Existing pages
-	// keep their fill, pages filled from now on keep 10% free, and the heap grows
-	// about 10% as it turns over. It takes SHARE UPDATE EXCLUSIVE, which readers,
-	// writers and pg_dump do not conflict with. Autovacuum, ANALYZE, REINDEX
-	// CONCURRENTLY and other DDL on the table do. The server cancels a
-	// conflicting autovacuum after deadlock_timeout unless it prevents
-	// wraparound, and the cancelled pass starts over later, so apply while
-	// pg_stat_progress_vacuum shows no long pass on the table. The lock timeout
-	// gives up behind a holder that is not cancelled, such as the maintenance
-	// REINDEX CONCURRENTLY of transfer_contract_open_partial_create_time. The
-	// migration then rolls back, and a rerun sets the same value.
-	newSqlMigration(`
-		SET LOCAL lock_timeout = '5s';
-		ALTER TABLE transfer_contract SET (fillfactor = 90);
-	`),
-	newSqlMigration(`
-		SET LOCAL lock_timeout = '5s';
-		ALTER TABLE contract_close SET (fillfactor = 90);
-	`),
 }

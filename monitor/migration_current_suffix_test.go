@@ -119,12 +119,6 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"dropped open pair index rebuilt", 817, `CREATE INDEX transfer_contract_pair_open_create_time ON transfer_contract (source_id, destination_id, create_time) WHERE open AND companion_contract_id IS NULL`},
 		{"dropped open destination index rebuilt", 818, `CREATE INDEX transfer_contract_open_destination_partial ON transfer_contract (destination_id) WHERE open`},
 		{"dropped reschedule error index rebuilt", 819, `CREATE INDEX pending_task_has_reschedule_error ON pending_task (has_reschedule_error, task_id)`},
-		{"transfer_contract pages filled again", 820, `ALTER TABLE transfer_contract RESET (fillfactor)`},
-		{"transfer_contract fillfactor changed", 820, `ALTER TABLE transfer_contract SET (fillfactor = 100)`},
-		{"transfer_contract fillfactor only on an index", 820, `ALTER TABLE transfer_contract RESET (fillfactor); ALTER INDEX transfer_contract_pkey SET (fillfactor = 90)`},
-		{"contract_close pages filled again", 821, `ALTER TABLE contract_close RESET (fillfactor)`},
-		{"contract_close fillfactor changed", 821, `ALTER TABLE contract_close SET (fillfactor = 80)`},
-		{"contract_close fillfactor only on an index", 821, `ALTER TABLE contract_close RESET (fillfactor); ALTER INDEX contract_close_pkey SET (fillfactor = 90)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
