@@ -16,6 +16,9 @@ import (
 func TestLegacySettlementCompletesWithSharedFinancialRowsHeld(t *testing.T) {
 	legacySettlementHeldRowsControl(t, 64, 0)
 }
+
+// The same barrier holds while 512 legacy and 64 marked contracts on one payer
+// close concurrently; both modes then drain with exact conservation.
 func TestLegacySettlementLargeNMixedSamePayer(t *testing.T) {
 	legacySettlementHeldRowsControl(t, 512, 64)
 }
@@ -141,7 +144,9 @@ func legacySettlementHeldRowsControl(t *testing.T, count, markedCount int) {
 			var swept, provided int64
 			server.Raise(conn.QueryRow(ctx, `SELECT (SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE network_id=$1),
                 (SELECT provided_byte_count FROM account_balance WHERE network_id=$1)`, f.destinationNetworkId).Scan(&swept, &provided))
-			if swept != 11*int64(count+markedCount) || provided != 11*int64(count) {
+			// Marked settlements commit their earnings with the durable debt, so
+			// both modes reach the provider's lifetime total.
+			if swept != 11*int64(count+markedCount) || provided != swept {
 				t.Fatal("mixed provider financial conservation failed", swept, provided)
 			}
 		})
