@@ -83,14 +83,19 @@ func closeContractWithReportUsage(ctx context.Context, report ContractCloseRepor
 			}
 		}
 	}()
+	receiverFollowsSenderFinal := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		// The transaction owner may retry a rolled-back attempt; never retain its result.
 		applied = false
 		addedByteCount = 0
+		receiverFollowsSenderFinal = false
 		var err error
 		applied, addedByteCount, err = closeContractReportUsageInTx(ctx, tx, report)
 		if err != nil {
 			panic(contractCloseReportAbort{cause: err})
+		}
+		if applied {
+			receiverFollowsSenderFinal = contractReportFollowsSenderFinalInTx(ctx, tx, report.ContractId, report.ClientId)
 		}
 	}, server.TxReadCommitted)
 	if !applied {
@@ -107,11 +112,14 @@ func closeContractWithReportUsage(ctx context.Context, report ContractCloseRepor
 	}
 	// The original accepted transaction may have lost its reply before settlement.
 	// Resume the idempotent original settlement even on an exact duplicate report.
-	closed, err := settleContract(ctx, report.ContractId)
+	// A duplicate resumes only the two-final rule: its original ordering against
+	// the sender's final is not retained, so a contract whose checkpoint did not
+	// complete waits for the receiver's next report or the expiry task.
+	closed, completedCheckpoint, err := settleReportedContract(ctx, report.ContractId, receiverFollowsSenderFinal)
 	if err != nil {
 		return applied, addedByteCount, err
 	}
-	if closed {
+	if closed && !completedCheckpoint {
 		RemoveFromStream(ctx, report.ContractId)
 	}
 	return applied, addedByteCount, nil

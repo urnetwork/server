@@ -85,8 +85,10 @@ func init() {
 // createCompanionTransferEscrow's plain origin read without its prober
 // reservation column. The two branches are disjoint on open, so the global
 // earliest is the earlier of each branch's earliest, and each branch is a
-// bounded index range. $1 and $2 are the origin's source and destination, the
-// companion's reverse; $3 is the earliest close time of a lingering origin.
+// bounded index range; the closed branch is bounded by the contract id (see
+// CompanionOriginCloseLinger). $1 and $2 are the origin's source and
+// destination, the companion's reverse; $3 is the earliest close time of a
+// lingering origin.
 const zeroEscrowPlainOriginSql = `
 	SELECT contract_id
 	FROM (
@@ -109,14 +111,19 @@ const zeroEscrowPlainOriginSql = `
 
 		(
 			SELECT contract_id, create_time
-			FROM transfer_contract
-			WHERE
-				open = false AND
-				$3 <= close_time AND
-				COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-				source_id = $1 AND
-				destination_id = $2 AND
-				companion_contract_id IS NULL
+			FROM (
+				SELECT contract_id, create_time
+				FROM transfer_contract
+				WHERE
+					open = false AND
+					$3 <= close_time AND
+					contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
+					source_id = $1 AND
+					destination_id = $2 AND
+					companion_contract_id IS NULL
+				OFFSET 0
+			) AS closed_origin
 			ORDER BY create_time ASC
 			LIMIT 1
 		)
@@ -159,14 +166,19 @@ const zeroEscrowChainedOriginSql = `
 
 		(
 			SELECT contract_id, create_time, payer_network_id, source_network_id, destination_network_id
-			FROM transfer_contract
-			WHERE
-				open = false AND
-				$3 <= close_time AND
-				COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-				source_id = $1 AND
-				destination_id = $2 AND
-				companion_contract_id IS NOT NULL
+			FROM (
+				SELECT contract_id, create_time, payer_network_id, source_network_id, destination_network_id
+				FROM transfer_contract
+				WHERE
+					open = false AND
+					$3 <= close_time AND
+					contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
+					source_id = $1 AND
+					destination_id = $2 AND
+					companion_contract_id IS NOT NULL
+				OFFSET 0
+			) AS closed_companion_origin
 			ORDER BY create_time ASC
 			LIMIT 1
 		)

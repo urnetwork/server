@@ -1322,6 +1322,10 @@ func newContract(
 			}
 			return update
 		}
+		// A closed origin anchors companions until its original deadline, not
+		// only for the client library's linger after its close. The reply path
+		// therefore outlives a forward contract that settled early.
+		originCloseLinger := max(contractManagerSettings.OriginContractLinger, model.CompanionOriginCloseLinger)
 		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
 		escrow, err := waitForCompanionOrigin(ctx, originWatch, func() (*model.TransferEscrow, error) {
 			escrow, err := createCompanionTransferEscrow(
@@ -1331,7 +1335,7 @@ func newContract(
 				destinationNetworkId,
 				destinationId,
 				contractTransferByteCount,
-				contractManagerSettings.OriginContractLinger,
+				originCloseLinger,
 			)
 			// deduct first: free data only once the payer has nothing left and
 			// the valve is open; the companion keeps its origin link
@@ -1343,7 +1347,7 @@ func newContract(
 					destinationNetworkId,
 					destinationId,
 					contractTransferByteCount,
-					contractManagerSettings.OriginContractLinger,
+					originCloseLinger,
 				)
 			}
 			return escrow, err
