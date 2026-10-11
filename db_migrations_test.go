@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -973,22 +974,34 @@ func TestApplyDbMigrations(t *testing.T) {
 
 		ApplyDbMigrations(ctx)
 
-		var reloptions []string
+		// Storage parameters each table carries at head. The contract tables
+		// keep room for updates on their page (migrations 820 and 821).
+		expectedTableReloptions := map[string][]string{
+			"pending_task": {
+				"autovacuum_vacuum_scale_factor=0",
+				"autovacuum_vacuum_threshold=50",
+				"autovacuum_vacuum_cost_delay=0",
+				"autovacuum_analyze_scale_factor=0",
+				"autovacuum_analyze_threshold=50",
+			},
+			"transfer_contract": {"fillfactor=90"},
+			"contract_close":    {"fillfactor=90"},
+		}
+		tableReloptions := map[string][]string{}
 		var retiredIndexExists bool
 		var idleTimeoutConfigured bool
 		MaintenanceDb(ctx, func(conn PgConn) {
-			result, err := conn.Query(ctx, `
-				SELECT coalesce(reloptions, ARRAY[]::text[])
-				FROM pg_class
-				WHERE oid = 'pending_task'::regclass
-			`)
-			WithPgResult(result, err, func() {
-				if result.Next() {
-					Raise(result.Scan(&reloptions))
-				}
-			})
+			for table := range expectedTableReloptions {
+				var reloptions []string
+				Raise(conn.QueryRow(ctx, `
+					SELECT coalesce(reloptions, ARRAY[]::text[])
+					FROM pg_class
+					WHERE oid = to_regclass('public.'||$1)
+				`, table).Scan(&reloptions))
+				tableReloptions[table] = reloptions
+			}
 
-			result, err = conn.Query(ctx, `
+			result, err := conn.Query(ctx, `
 				SELECT to_regclass('transfer_contract_open_source_id_companion_contract_id') IS NOT NULL
 			`)
 			WithPgResult(result, err, func() {
@@ -1014,16 +1027,11 @@ func TestApplyDbMigrations(t *testing.T) {
 			})
 		}, OptReadWrite())
 
-		options := strings.Join(reloptions, ",")
-		for _, want := range []string{
-			"autovacuum_vacuum_scale_factor=0",
-			"autovacuum_vacuum_threshold=50",
-			"autovacuum_vacuum_cost_delay=0",
-			"autovacuum_analyze_scale_factor=0",
-			"autovacuum_analyze_threshold=50",
-		} {
-			if !strings.Contains(options, want) {
-				t.Fatalf("pending_task reloptions %q missing %q", options, want)
+		for table, wants := range expectedTableReloptions {
+			for _, want := range wants {
+				if !slices.Contains(tableReloptions[table], want) {
+					t.Fatalf("%s reloptions %q missing %q", table, tableReloptions[table], want)
+				}
 			}
 		}
 		if retiredIndexExists {
