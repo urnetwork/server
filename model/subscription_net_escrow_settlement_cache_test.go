@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/server"
@@ -27,30 +26,44 @@ func settlementCacheCloseReports(ctx context.Context, contractId server.Id) {
 	})
 }
 
-// Each hook runs after the snapshot read and before its revision transition.
-// A second real connection commits a legacy write while settlement is open.
-type settlementCacheMutationTx struct {
-	server.PgTx
+// Each hook runs after the snapshot read and before its revision transition:
+// the claim hook before the outcome claim, the metadata hook before the first
+// batch. A second real connection commits a legacy write while settlement is
+// open. Each runs once.
+type settlementCacheMutation struct {
 	beforeClaim    func()
 	beforeMetadata func()
 }
 
-func (tx *settlementCacheMutationTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	if strings.Contains(sql, "UPDATE transfer_contract") && strings.Contains(sql, "RETURNING close_time") && tx.beforeClaim != nil {
-		hook := tx.beforeClaim
-		tx.beforeClaim = nil
-		hook()
-	}
-	return tx.PgTx.QueryRow(ctx, sql, args...)
+// Runs the matching callback before the real statement is sent.
+func (self *settlementCacheMutation) hook() *legacyStatementHook {
+	return &legacyStatementHook{before: func(_ context.Context, sql string, queued []string) {
+		if queued == nil && self.beforeClaim != nil && strings.Contains(sql, "UPDATE transfer_contract") && strings.Contains(sql, "RETURNING close_time") {
+			hook := self.beforeClaim
+			self.beforeClaim = nil
+			hook()
+		}
+		if queued != nil && self.beforeMetadata != nil {
+			hook := self.beforeMetadata
+			self.beforeMetadata = nil
+			hook()
+		}
+	}}
 }
 
-func (tx *settlementCacheMutationTx) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
-	if tx.beforeMetadata != nil {
-		hook := tx.beforeMetadata
-		tx.beforeMetadata = nil
-		hook()
-	}
-	return tx.PgTx.SendBatch(ctx, batch)
+// Counts the exact reservation census statements a settlement's own owned
+// transaction sends, alone or queued in a batch.
+func settlementCacheCensusCounter(count *atomic.Int64) *legacyStatementHook {
+	return &legacyStatementHook{before: func(_ context.Context, sql string, queued []string) {
+		if queued == nil {
+			queued = []string{sql}
+		}
+		for _, statement := range queued {
+			if statement == netEscrowReservationPageSQL {
+				count.Add(1)
+			}
+		}
+	}}
 }
 
 func TestNetEscrowSettlementCacheLegacyMutationInvalidatesPrediction(t *testing.T) {
@@ -72,14 +85,18 @@ func TestNetEscrowSettlementCacheLegacyMutationInvalidatesPrediction(t *testing.
 				mutated = true
 			}
 			var posts []func() any
+			stopHooks := startLegacyStatementHooks(t, ctx)
+			defer stopHooks()
 			server.Tx(ctx, func(tx server.PgTx) {
-				wrapped := &settlementCacheMutationTx{PgTx: tx}
+				mutation := &settlementCacheMutation{}
 				if stage == "outcome" {
-					wrapped.beforeClaim = legacy
+					mutation.beforeClaim = legacy
 				}
 				var err error
 				var closed bool
-				posts, closed, err = settleEscrowInTx(ctx, wrapped, contract.ContractId, ContractOutcomeSettled)
+				hooked, unhook := withLegacyStatementHooks(ctx, tx, mutation.hook())
+				defer unhook()
+				posts, closed, err = settleEscrowInTx(hooked, tx, contract.ContractId, ContractOutcomeSettled)
 				server.Raise(err)
 				if !closed {
 					t.Fatal("outcome did not commit")
@@ -87,10 +104,13 @@ func TestNetEscrowSettlementCacheLegacyMutationInvalidatesPrediction(t *testing.
 			}, server.TxReadCommitted, server.OptNoRetry())
 			if stage == "metadata" {
 				server.Tx(ctx, func(tx server.PgTx) {
-					wrapped := &settlementCacheMutationTx{PgTx: tx, beforeMetadata: legacy}
-					settleEscrowMetadataInTx(ctx, wrapped, contract.ContractId, server.NowUtc(), map[server.Id]sweepPayout{f.balanceId: {escrowBalanceByteCount: 17}})
+					mutation := &settlementCacheMutation{beforeMetadata: legacy}
+					hooked, unhook := withLegacyStatementHooks(ctx, tx, mutation.hook())
+					defer unhook()
+					settleEscrowMetadataInTx(hooked, tx, contract.ContractId, server.NowUtc(), map[server.Id]sweepPayout{f.balanceId: {escrowBalanceByteCount: 17}})
 				}, server.TxReadCommitted, server.OptNoRetry())
 			}
+			stopHooks()
 			if !mutated {
 				t.Fatal("interleaving hook did not run")
 			}
@@ -145,16 +165,24 @@ func TestNetEscrowSettlementCacheLocksExactContribution(t *testing.T) {
 			}
 			blocked++
 		}
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		server.Tx(ctx, func(tx server.PgTx) {
-			_, closed, err := settleEscrowInTx(ctx, &settlementCacheMutationTx{PgTx: tx, beforeClaim: legacy}, contract.ContractId, ContractOutcomeSettled)
+			claim := &settlementCacheMutation{beforeClaim: legacy}
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, claim.hook())
+			defer unhook()
+			_, closed, err := settleEscrowInTx(hooked, tx, contract.ContractId, ContractOutcomeSettled)
 			server.Raise(err)
 			if !closed {
 				t.Fatal("outcome not claimed")
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		server.Tx(ctx, func(tx server.PgTx) {
-			settleEscrowMetadataInTx(ctx, &settlementCacheMutationTx{PgTx: tx, beforeMetadata: legacy}, contract.ContractId, server.NowUtc(), map[server.Id]sweepPayout{f.balanceId: {escrowBalanceByteCount: 17}})
-		}, server.TxReadCommitted)
+			metadata := &settlementCacheMutation{beforeMetadata: legacy}
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, metadata.hook())
+			defer unhook()
+			settleEscrowMetadataInTx(hooked, tx, contract.ContractId, server.NowUtc(), map[server.Id]sweepPayout{f.balanceId: {escrowBalanceByteCount: 17}})
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if got := settlementCacheSnapshot(ctx, []server.Id{f.balanceId})[f.balanceId].reserved; got != 3 || blocked != 2 {
 			t.Fatalf("reserved=%d blocked_mutations=%d want3/2", got, blocked)
 		}
@@ -172,11 +200,9 @@ func TestNetEscrowSettlementCacheRollbackAndAmbiguousCommit(t *testing.T) {
 		settlementCacheCloseReports(ctx, contract.ContractId)
 		ids := []server.Id{f.balanceId}
 		before := settlementCacheSnapshot(ctx, ids)[f.balanceId]
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
-		defer tx.Rollback(context.Background())
+		// Each owner gets a real owned server transaction whose end the test chooses.
+		tx, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		abandoned, closed, err := settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
 		server.Raise(err)
 		if !closed || readCachedNetEscrowSnapshots(ctx, tx, ids)[f.balanceId].reserved != 3 {
@@ -186,7 +212,7 @@ func TestNetEscrowSettlementCacheRollbackAndAmbiguousCommit(t *testing.T) {
 		if got := settlementCacheSnapshot(ctx, ids)[f.balanceId]; got.revision != before.revision || got.reserved != before.reserved {
 			t.Fatal("uncommitted cache escaped")
 		}
-		server.Raise(tx.Rollback(ctx))
+		server.Raise(finish(false))
 		server.RunPosts(ctx, abandoned...)
 		var settled bool
 		server.Db(ctx, func(conn server.PgConn) {
@@ -201,7 +227,7 @@ func TestNetEscrowSettlementCacheRollbackAndAmbiguousCommit(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			committedPosts, closed, err = settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
 			server.Raise(err)
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		committed := settlementCacheSnapshot(ctx, ids)[f.balanceId]
 		if !closed || committed.reserved != 3 || committed.revision != before.revision+1 {
 			t.Fatal("outcome commit depends on its metadata replay")
@@ -212,13 +238,12 @@ func TestNetEscrowSettlementCacheRollbackAndAmbiguousCommit(t *testing.T) {
 			if closed || len(posts) != 0 {
 				t.Fatal("ambiguous-commit retry reclaimed settlement")
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		// A metadata transaction rollback must restore its preceding snapshot.
-		tx, err = conn.Begin(ctx)
-		server.Raise(err)
-		defer tx.Rollback(context.Background())
+		tx, finish = beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		settleEscrowMetadataInTx(ctx, tx, contract.ContractId, server.NowUtc(), map[server.Id]sweepPayout{f.balanceId: {escrowBalanceByteCount: 17}})
-		server.Raise(tx.Rollback(ctx))
+		server.Raise(finish(false))
 		if got := settlementCacheSnapshot(ctx, ids)[f.balanceId]; got.revision != committed.revision || got.reserved != 3 {
 			t.Fatal("metadata rollback lost preceding exact cache")
 		}
@@ -315,21 +340,27 @@ func TestNetEscrowSettlementCacheTwentyCloseCost(t *testing.T) {
 			beforeReload := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reloaded"))
 			beforeReuse := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reused"))
 			var mainReads atomic.Int64
+			census := settlementCacheCensusCounter(&mainReads)
+			stopHooks := startLegacyStatementHooks(t, ctx)
+			defer stopHooks()
 			began := time.Now()
 			for _, id := range contracts {
 				var posts []func() any
 				server.Tx(ctx, func(tx server.PgTx) {
 					var err error
 					var closed bool
-					posts, closed, err = settleEscrowInTx(ctx, admissionCacheTestTx{PgTx: tx, exact: &mainReads}, id, ContractOutcomeSettled)
+					hooked, unhook := withLegacyStatementHooks(ctx, tx, census)
+					defer unhook()
+					posts, closed, err = settleEscrowInTx(hooked, tx, id, ContractOutcomeSettled)
 					server.Raise(err)
 					if !closed {
 						t.Fatal("staged contract was not claimed")
 					}
-				}, server.TxReadCommitted)
+				}, server.TxReadCommitted, server.OptNoRetry())
 				server.RunPosts(ctx, posts...)
 			}
 			elapsed := time.Since(began)
+			stopHooks()
 			reloaded := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reloaded")) - beforeReload
 			reused := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reused")) - beforeReuse
 			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 10001 {

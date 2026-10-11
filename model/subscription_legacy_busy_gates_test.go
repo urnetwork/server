@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 )
 
@@ -141,19 +140,24 @@ func TestLegacySettlementBusyGateChangedJoinSnapshot(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count) VALUES($1,$2,100)`, id, appearing))
 		})
 		changed := false
-		server.Tx(ctx, func(tx server.PgTx) {
-			wrapped := &legacySettlementCountBarrierTx{PgTx: tx, afterCount: func() {
-				server.Tx(ctx, func(other server.PgTx) {
-					server.RaisePgResult(other.Exec(ctx, `INSERT INTO transfer_balance(balance_id,network_id,start_time,end_time,start_balance_byte_count,balance_byte_count,net_revenue_nano_cents)
+		barrier := &legacySettlementCountBarrier{afterCount: func() {
+			server.Tx(ctx, func(other server.PgTx) {
+				server.RaisePgResult(other.Exec(ctx, `INSERT INTO transfer_balance(balance_id,network_id,start_time,end_time,start_balance_byte_count,balance_byte_count,net_revenue_nano_cents)
                     VALUES($1,$2,now(),now()+interval '30 days',1000,1000,0)`, appearing, f.sourceNetworkId))
-				}, server.TxReadCommitted)
-				changed = true
-			}}
-			_, completed, busy, gate, err := flushLegacySettlementInTx(ctx, wrapped, id)
+			}, server.TxReadCommitted)
+			changed = true
+		}}
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
+		server.Tx(ctx, func(tx server.PgTx) {
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, barrier.hook())
+			defer unhook()
+			_, completed, busy, gate, err := flushLegacySettlementInTx(hooked, tx, id)
 			if err != nil || completed || !busy || gate != legacySettlementBusyGrantSet || !changed {
 				t.Fatal("changed statement snapshot was not a grant-set refusal", completed, busy, gate, changed, err)
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
+		stopHooks()
 		requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
 		requireLegacyProviderDurability(t, ctx, f, id, 0)
 		completed, busy, gate, err := flushLegacySettlement(ctx, id)
@@ -168,34 +172,19 @@ func TestLegacySettlementBusyGateChangedJoinSnapshot(t *testing.T) {
 	})
 }
 
-// This test-only transaction wrapper runs a real independent commit between the
-// count and lock statements, without adding a hook to production ownership code.
-type legacySettlementCountBarrierTx struct {
-	server.PgTx
+// Runs a real independent commit between the grant count and the grant lock,
+// without replacing the settlement's owned transaction or adding a hook to
+// production ownership code.
+type legacySettlementCountBarrier struct {
 	afterCount func()
 }
 
-// All statements use the real transaction; only the count's completed read arms
-// the deterministic change before the next statement takes its snapshot.
-func (self *legacySettlementCountBarrierTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	row := self.PgTx.QueryRow(ctx, sql, args...)
-	if sql == legacySettlementExpectedGrantCountSQL {
-		return &legacySettlementCountBarrierRow{Row: row, afterCount: self.afterCount}
-	}
-	return row
-}
-
-// Scan must finish and release its result before another transaction changes membership.
-type legacySettlementCountBarrierRow struct {
-	pgx.Row
-	afterCount func()
-}
-
-// A failed count never triggers the synthetic membership change.
-func (self *legacySettlementCountBarrierRow) Scan(dest ...any) error {
-	err := self.Row.Scan(dest...)
-	if err == nil {
-		self.afterCount()
-	}
-	return err
+// Only the count's completed read arms the change, so the next statement takes
+// its snapshot after the commit. A failed count never triggers it.
+func (self *legacySettlementCountBarrier) hook() *legacyStatementHook {
+	return &legacyStatementHook{after: func(sql string, _ time.Duration, err error) {
+		if err == nil && sql == legacySettlementExpectedGrantCountSQL {
+			self.afterCount()
+		}
+	}}
 }

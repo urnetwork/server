@@ -54,7 +54,7 @@ func TestNetEscrowSettlementOverflowDoesNotReleaseCredit(t *testing.T) {
 			if !errors.Is(err, errContractInsufficientEscrow) || closed || len(posts) != 0 {
 				t.Errorf("overflow released spent credit: closed=%t posts=%d error=%v", closed, len(posts), err)
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if reserved := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId].reserved; reserved != 700 {
 			t.Fatalf("oversized reports released reservation: %d", reserved)
 		}
@@ -91,7 +91,7 @@ func TestNetEscrowSettlementMaximumCreditDebitsExactly(t *testing.T) {
 				if remaining != math.MaxInt64-first {
 					t.Fatalf("maximum-credit debit: remaining=%d want=%d", remaining, math.MaxInt64-first)
 				}
-			}, server.TxReadCommitted)
+			}, server.TxReadCommitted, server.OptNoRetry())
 		}
 	})
 }
@@ -128,7 +128,7 @@ func TestNetEscrowSettlementRejectsNegativeLegacyReports(t *testing.T) {
 						if remaining != 1000 {
 							t.Fatalf("rejected legacy reports changed payer credit: %d", remaining)
 						}
-					}, server.TxReadCommitted)
+					}, server.TxReadCommitted, server.OptNoRetry())
 					if reserved := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId].reserved; reserved != 700 {
 						t.Fatalf("rejected legacy reports changed reservation: %d", reserved)
 					}

@@ -174,17 +174,15 @@ func TestLegacyNetEscrowMirrorDeleteBeforeProducerLeavesFreshOwner(t *testing.T)
 func TestLegacyNetEscrowMirrorFinancialRollbackWarmInvalidationAndOldReader(t *testing.T) {
 	legacyMirrorTestEnv(t, func(t testing.TB, ctx context.Context) {
 		f, id := legacySettlementTestIntent(t, ctx)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
-		defer tx.Rollback(context.Background())
+		// The owner gets a real owned server transaction whose end the test chooses.
+		tx, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		_, complete, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
 		server.Raise(err)
 		if !complete || busy {
 			t.Fatal("rollback did not reach the actual financial transition")
 		}
-		server.Raise(tx.Rollback(ctx))
+		server.Raise(finish(false))
 		server.Db(ctx, func(conn server.PgConn) {
 			var count int
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE function_name=$1`, legacyColdPageMirrorFunction).Scan(&count))
@@ -196,7 +194,7 @@ func TestLegacyNetEscrowMirrorFinancialRollbackWarmInvalidationAndOldReader(t *t
 		server.Tx(ctx, func(tx server.PgTx) {
 			posts, complete, busy, _, err = flushLegacySettlementInTx(ctx, tx, id)
 			server.Raise(err)
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if !complete || busy {
 			t.Fatal("committed financial owner did not finish")
 		}
