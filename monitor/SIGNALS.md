@@ -14805,6 +14805,22 @@ success uses the existing short retry pace to replenish its deficit. Warmup
 success pacing and quota-full oldest-run expiry remain separate. Accepted
 measured failures count toward the same quota; setup-only completions do not.
 
+Local failures back off per provider. A completed turn that measured nothing
+(`tunnel_failed`, `run_not_measured`, `health_not_run`, `submit_failed`) first
+retries after `url_failure_interval_seconds`, and each consecutive earlier
+local failure claimed in the trailing four hours doubles that wait, up to 30
+minutes, times a factor in [0.9, 1.1] that is fixed per issued claim. A
+measured completion, success or measured failure, ends the streak; an
+abandoned lease neither ends nor extends it. A readiness-vetoed or unstarted
+turn still only shortens its issued fifteen-minute lease. A provider that keeps
+failing locally therefore holds a future `next_attempt_at` up to about 33
+minutes out and is claimed about twice an hour, where the flat interval
+re-claimed it about a minute after every failure. No quota credit, measured
+cadence, security recheck or eligibility rule changes, and any measured turn
+resets the streak, so the backoff paces only providers whose recent turns all
+failed locally. Such a provider's future deadline is retry pacing, not scheduler
+failure or quota expiry.
+
 Each URL turn's tunnel teardown keeps the derived client, packet pump and
 netstack live until the provider has returned nothing for one second (at most
 five, inside the close timeout), after first closing the tunnel's pooled DoH
