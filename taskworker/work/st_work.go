@@ -59,6 +59,13 @@ const (
 	stCommitRootRetryDelay   = 5 * time.Minute
 	stDepositRetryDelay      = 15 * time.Minute
 	stFinalizePokeRetryDelay = 5 * time.Minute
+
+	// The close reads every contract closed in the epoch in one census
+	// statement. On Main the 24-hour epoch 0 closed 9.2M contracts, read in
+	// 195-419 s (mean 249 s); the 7-day epoch 1 projects to 64-71M, 30-55
+	// minutes at those rates. Three hours stays inside the 4-hour root commit
+	// window and leaves an hour to commit.
+	stEpochCloseMaxTime = 3 * time.Hour
 )
 
 // StSyncChain (periodic)
@@ -209,7 +216,7 @@ func scheduleStEpochClose(clientSession *session.ClientSession, deploymentKey mo
 		clientSession,
 		task.RunOnce("st_epoch_close", deploymentKey, epoch),
 		task.RunAt(runAt),
-		task.MaxTime(1*time.Hour),
+		task.MaxTime(stEpochCloseMaxTime),
 	)
 }
 
@@ -258,7 +265,7 @@ func StEpochClosePost(
 				clientSession,
 				task.RunOnce("st_epoch_close", stEpochClose.DeploymentKey, stEpochClose.Epoch),
 				task.RunAt(server.NowUtc().Add(stEpochCloseRetryDelay)),
-				task.MaxTime(1*time.Hour),
+				task.MaxTime(stEpochCloseMaxTime),
 			)
 		}
 		return nil
