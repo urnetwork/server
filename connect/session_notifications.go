@@ -36,6 +36,13 @@ func parseSessionEvent(channel string) (server.Id, bool) {
 
 // One group per network/process does one bounded revision read, coalescing
 // outbound hints for five seconds. Local authorization kicks do not wait on it.
+//
+// Registration rechecks only the new listener. A session event that landed
+// between its final authorization check and this registration reached no
+// listener of its own, so the new listener revalidates once. A peer joining
+// changes no other listener's authorization: rechecking the whole network
+// here made every connection cost one authoritative PostgreSQL check per
+// connection of its network on the process, quadratic in a reconnect wave.
 func (self *keyEventSubscriber) AddSessionListener(networkId server.Id, recheck func(), hint func(*protocol.NetworkSessionsChanged)) func() {
 	self.stateLock.Lock()
 	if self.sessionListeners == nil {
@@ -51,8 +58,15 @@ func (self *keyEventSubscriber) AddSessionListener(networkId server.Id, recheck 
 	id := self.nextListenerId
 	self.nextListenerId++
 	group.listeners[id] = sessionNotificationListener{recheck, hint}
+	// the coalesced revision read delivers the new listener its first hint
+	select {
+	case group.kick <- struct{}{}:
+	default:
+	}
 	self.stateLock.Unlock()
-	self.kickSession(networkId)
+	if recheck != nil {
+		recheck()
+	}
 	return func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -83,16 +97,26 @@ func (self *keyEventSubscriber) kickSession(networkId server.Id) {
 		}
 	}
 }
-func (self *keyEventSubscriber) resyncSessions() {
+
+// One recheck per session listener of every network, for a resync to trickle
+// with the other registrations over its spread window. Each group's revision
+// read is nudged now, so hint listeners converge without waiting.
+func (self *keyEventSubscriber) resyncSessionRechecks() []func() {
 	self.stateLock.Lock()
-	ids := []server.Id{}
-	for id := range self.sessionListeners {
-		ids = append(ids, id)
+	defer self.stateLock.Unlock()
+	rechecks := []func(){}
+	for _, group := range self.sessionListeners {
+		for _, listener := range group.listeners {
+			if listener.recheck != nil {
+				rechecks = append(rechecks, listener.recheck)
+			}
+		}
+		select {
+		case group.kick <- struct{}{}:
+		default:
+		}
 	}
-	self.stateLock.Unlock()
-	for _, id := range ids {
-		self.kickSession(id)
-	}
+	return rechecks
 }
 func (self *keyEventSubscriber) runSessionNotifications(networkId server.Id, group *sessionNotificationGroup) {
 	var last time.Time
@@ -119,8 +143,29 @@ func (self *keyEventSubscriber) runSessionNotifications(networkId server.Id, gro
 		case <-group.kick:
 		default:
 		}
+		// The revision read only produces hints, and it returns every live
+		// session of the network while its prune can publish a session event
+		// that rechecks every listener of the network on every process. Skip
+		// it while no listener of the group consumes hints.
+		hinted := func() bool {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			for _, listener := range group.listeners {
+				if listener.hint != nil {
+					return true
+				}
+			}
+			return false
+		}()
+		if !hinted {
+			continue
+		}
+		revision := self.sessionRevision
+		if revision == nil {
+			revision = session.NetworkSessionRevision
+		}
 		ctx, cancel := context.WithTimeout(group.ctx, 100*time.Millisecond)
-		generation, eventId, err := session.NetworkSessionRevision(ctx, networkId)
+		generation, eventId, err := revision(ctx, networkId)
 		cancel()
 		if err != nil {
 			continue
