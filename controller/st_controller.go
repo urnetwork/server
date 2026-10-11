@@ -3401,17 +3401,7 @@ func stComputeReleasePayout(
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
-	var wallets map[server.Id]*model.StProviderWallet
-	if workConfigured {
-		wallets, err = stProviderWalletsForEpoch(ctx, cfg, workAuthority, authority)
-	} else {
-		// No roster signer is provisioned yet; signed retained consents select
-		// the wallets of observed providers until provider_work.yml exists.
-		wallets, err = stRetainedProviderWalletsForEpoch(ctx, cfg, authority, usages)
-		if err == nil {
-			glog.Infof("[st]epoch %d payout wallets from retained consents: %d of %d providers mapped\n", epoch, len(wallets), len(usages))
-		}
-	}
+	wallets, _, err := stSelectReleasePayoutWallets(ctx, cfg, workAuthority, workConfigured, authority, usages)
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
