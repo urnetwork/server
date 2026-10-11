@@ -395,6 +395,12 @@ func recordConnectDayWrite(job connectDayWriteJob) {
 	}()
 	// The cache deduplicates clients, not networks. Serializable isolation makes
 	// competing empty network/day reads conflict and retry after one commits.
+	//
+	// The day bound is a row comparison on (network_id, at), which only the
+	// network's own index can use. A new UTC day lies past the last ANALYZE of
+	// `at`, and a plain range let PostgreSQL estimate the whole day at one row
+	// under (name, at), so each probe read every network's connect.day row of
+	// the day. The row comparison's estimate depends only on network_id.
 	server.Tx(writeCtx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			writeCtx,
@@ -431,9 +437,9 @@ func recordConnectDayWrite(job connectDayWriteJob) {
 						FROM network_onboarding_event e
 						WHERE
 							e.network_id = nc.network_id AND
-							e.name = $3::varchar(64) AND
-							$6::timestamp <= e.at AND
-							e.at < $7::timestamp
+							(e.network_id, e.at) >= (nc.network_id, $6::timestamp) AND
+							(e.network_id, e.at) < (nc.network_id, $7::timestamp) AND
+							e.name = $3::varchar(64)
 					)
 			`,
 			server.NewId(),

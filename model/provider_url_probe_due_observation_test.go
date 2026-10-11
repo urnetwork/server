@@ -125,7 +125,8 @@ func TestUrlDueObservationPreservesDatabaseResults(t *testing.T) {
 					if phase == int(ProviderUrlProbeDueRetentionTransaction) || phase == int(ProviderUrlProbeDueRetentionQuery) {
 						want = 0
 					}
-					if !priority && (phase == int(ProviderUrlProbeDuePromote) || phase == int(ProviderUrlProbeDuePromotePending)) {
+					// ordinary admission does not read whether maintenance is pending
+					if !priority && (phase == int(ProviderUrlProbeDueExpiryPending) || phase == int(ProviderUrlProbeDuePromote) || phase == int(ProviderUrlProbeDuePromotePending)) {
 						want = 0
 					}
 					if sample.Count != want || (want > 0 && sample.Duration <= 0) || (want == 0 && sample.Duration != 0) {
