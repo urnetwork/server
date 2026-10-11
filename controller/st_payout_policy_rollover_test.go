@@ -593,7 +593,7 @@ func TestStPayoutPolicyRolloverFreshIssuanceRejectsBackdating(t *testing.T) {
 		if err != nil {
 			tb.Fatal(err)
 		}
-		approved, err := stLoadProviderWorkAuthority(tb.Context(), cfg, boundary)
+		approved, _, err := stLoadProviderWorkAuthority(tb.Context(), cfg, boundary)
 		if err != nil || approved == nil {
 			tb.Fatal("fresh provider authority is unavailable", err)
 		}

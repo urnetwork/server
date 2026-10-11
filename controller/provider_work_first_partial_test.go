@@ -295,7 +295,7 @@ func providerWorkFirstPartialRun(t *testing.T, networkMode bool) {
 				t.Fatal("first-partial selection omitted or reconstructed original settlement", original.id)
 			}
 		}
-		approved, err := stLoadProviderWorkAuthority(ctx, f.cfg, f.epoch)
+		approved, _, err := stLoadProviderWorkAuthority(ctx, f.cfg, f.epoch)
 		if err != nil || approved == nil || approved.Expectation.EarningSelection == nil {
 			t.Fatal("independently prepared earning selection unavailable", err)
 		}
