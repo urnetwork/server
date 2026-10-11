@@ -2269,11 +2269,16 @@ func GetClientIdentity(ctx context.Context, clientId server.Id) (identity *Clien
 // provideMirrorTtl bounds the redis mirrors of per-client provide state (the
 // provide modes list, the per-mode secret keys, and the client identity).
 // The mirrors are caches over the postgres source of truth (`provide_key`,
-// `network_client`/`network_client_role`): reads fall back to the db on a
-// miss, and active clients rewrite the keys on every `SetProvide` (and the
-// identity read-through refills its key), so expiring an idle client's keys
-// is safe. These keys used to have no ttl and accumulated without bound
-// (millions of keys cluster-wide), which volatile-ttl eviction cannot touch.
+// `network_client`/`network_client_role`). `SetProvide` rewrites them on every
+// change, and a read that misses refills them from one postgres read (see
+// `refillProvideMirror`; the identity read-through refills its own key), so
+// the ttl only bounds how long an unused client's keys stay resident. A client
+// provides when its settings change, not periodically: a multi-client window
+// provides once when it is created, so its mirror expired 72h later while the
+// window stayed active, and before the refill every contract to it read its
+// modes and its secret from postgres. These keys used to have no ttl and
+// accumulated without bound (millions of keys cluster-wide), which
+// volatile-ttl eviction cannot touch.
 const provideMirrorTtl = 72 * time.Hour
 
 func provideModesKey(clientId server.Id) string {
@@ -2393,6 +2398,80 @@ func MigrateProvideMode(ctx context.Context, blockSize int) {
 	}
 }
 
+// Fills a missing mirror with one postgres snapshot, the mode list and every
+// secret together, and never overwrites a mirror that exists. `SetProvide`
+// writes its whole mirror unconditionally after it commits, so a refill whose
+// snapshot predates that commit either finds the newer list and writes
+// nothing, or lands first and is replaced. KEYS[1] is the mode list and
+// KEYS[2..] the secrets, in the order of ARGV[3..]; ARGV[2] is the ttl in ms.
+var provideMirrorRefillScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 1 then
+	return 0
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+for i = 2, #KEYS do
+	redis.call('SET', KEYS[i], ARGV[i + 1], 'PX', ARGV[2])
+end
+return 1
+`)
+
+// Reads every provide key of a client in one statement. A client with no keys
+// returns an empty map, which the refill mirrors as an empty mode list.
+func loadProvideSecretKeys(ctx context.Context, clientId server.Id) (secretKeys map[ProvideMode][]byte) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT provide_mode, secret_key FROM provide_key
+				WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			secretKeys = map[ProvideMode][]byte{}
+			for result.Next() {
+				var provideMode ProvideMode
+				var secretKey []byte
+				server.Raise(result.Scan(&provideMode, &secretKey))
+				secretKeys[provideMode] = secretKey
+			}
+		})
+	})
+	return
+}
+
+// Mirrors one `loadProvideSecretKeys` snapshot when no mirror exists, so the
+// next read of this client is served by redis until the ttl. The fill is
+// optional: a redis failure or cancellation leaves the next read on postgres.
+// A delete path (client reap, orphan sweep, shard cleanup) that commits and
+// clears the mirror between this snapshot and the fill can leave the deleted
+// client's keys mirrored until the ttl; those clients no longer exist, and
+// contract creation checks the endpoint lifecycle before it reads provide
+// state.
+func refillProvideMirror(ctx context.Context, clientId server.Id, secretKeys map[ProvideMode][]byte) {
+	provideModes := slices.Sorted(maps.Keys(secretKeys))
+	if provideModes == nil {
+		// `[]`, not `null`: an empty list is a cached "provides nothing"
+		provideModes = []ProvideMode{}
+	}
+	provideModesListJson, err := json.Marshal(provideModes)
+	if err != nil {
+		return
+	}
+	keys := []string{provideModesKey(clientId)}
+	args := []any{provideModesListJson, provideMirrorTtl.Milliseconds()}
+	for _, provideMode := range provideModes {
+		keys = append(keys, provideModeSecretKeyKey(clientId, provideMode))
+		args = append(args, secretKeys[provideMode])
+	}
+	server.HandleError(func() {
+		server.Redis(ctx, func(r server.RedisClient) {
+			// all keys share the {pm_<clientId>} hash tag (one slot)
+			_ = provideMirrorRefillScript.Run(ctx, r, keys, args...).Err()
+		})
+	})
+}
+
 func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[ProvideMode]bool, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		provideModesListJson, _ := r.Get(ctx, provideModesKey(clientId)).Result()
@@ -2414,26 +2493,15 @@ func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[
 
 	// the redis mirror carries a ttl (provideMirrorTtl), so this db fallback
 	// is load-bearing for idle clients whose keys expired, not just for
-	// provide_key rows older than the redis layer
+	// provide_key rows older than the redis layer. It refills the mirror so
+	// only the first read after an expiry reaches postgres.
 	if provideModes == nil && returnErr == nil {
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
-					SELECT provide_mode FROM provide_key
-					WHERE client_id = $1
-				`,
-				clientId,
-			)
-			server.WithPgResult(result, err, func() {
-				provideModes = map[ProvideMode]bool{}
-				for result.Next() {
-					var provideMode ProvideMode
-					server.Raise(result.Scan(&provideMode))
-					provideModes[provideMode] = true
-				}
-			})
-		})
+		secretKeys := loadProvideSecretKeys(ctx, clientId)
+		refillProvideMirror(ctx, clientId, secretKeys)
+		provideModes = map[ProvideMode]bool{}
+		for provideMode := range secretKeys {
+			provideModes[provideMode] = true
+		}
 	}
 
 	return
@@ -2444,40 +2512,48 @@ func GetProvideSecretKey(
 	clientId server.Id,
 	provideMode ProvideMode,
 ) (secretKey []byte, returnErr error) {
+	// The mode list is read with the secret: `SetProvide` and the refill write
+	// both together, so a list without this mode means postgres has no key.
+	provideModesListed := false
+	provideModeListed := false
 	server.Redis(ctx, func(r server.RedisClient) {
-		secretKeyStr, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, provideMode)).Result()
-		if secretKeyStr != "" {
-			secretKey = []byte(secretKeyStr)
+		// both keys share the {pm_<clientId>} hash tag (one slot)
+		values, err := r.MGet(ctx, provideModeSecretKeyKey(clientId, provideMode), provideModesKey(clientId)).Result()
+		if err != nil || len(values) != 2 {
+			// unavailable; fall back to the db below
+			return
 		}
-		// otherwise leave secretKey nil and fall back to the db below
+		if secretKeyStr, _ := values[0].(string); secretKeyStr != "" {
+			secretKey = []byte(secretKeyStr)
+			return
+		}
+		if provideModesListJson, _ := values[1].(string); provideModesListJson != "" {
+			var provideModesList []ProvideMode
+			if json.Unmarshal([]byte(provideModesListJson), &provideModesList) == nil {
+				provideModesListed = true
+				provideModeListed = slices.Contains(provideModesList, provideMode)
+			}
+		}
 	})
+	if secretKey != nil {
+		return
+	}
+	if provideModesListed && !provideModeListed {
+		returnErr = fmt.Errorf("Provide secret key not set.")
+		return
+	}
 
 	// the redis mirror carries a ttl (provideMirrorTtl), so this db fallback
 	// is load-bearing for idle clients whose keys expired, not just for
-	// provide_key rows older than the redis layer
-	if secretKey == nil && returnErr == nil {
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
-					SELECT
-						secret_key
-					FROM provide_key
-					WHERE
-						client_id = $1 AND
-						provide_mode = $2
-				`,
-				clientId,
-				provideMode,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&secretKey))
-				} else {
-					returnErr = fmt.Errorf("Provide secret key not set.")
-				}
-			})
-		})
+	// provide_key rows older than the redis layer. It refills the whole
+	// mirror when the mode list is missing too; a listed mode whose secret
+	// alone is missing reads postgres until its list expires.
+	secretKeys := loadProvideSecretKeys(ctx, clientId)
+	if !provideModesListed {
+		refillProvideMirror(ctx, clientId, secretKeys)
+	}
+	if secretKey = secretKeys[provideMode]; secretKey == nil {
+		returnErr = fmt.Errorf("Provide secret key not set.")
 	}
 
 	return
