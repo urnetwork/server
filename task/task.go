@@ -1580,6 +1580,8 @@ type TaskWorker struct {
 	claimFunctionNames   []string
 	claimCheckpointNames []string
 	claimFunctionTurn    uint64
+	// Lanes a probe or lane cursor found without due work, until when.
+	claimFunctionEmptyUntil map[string]time.Time
 
 	inflightCount      atomic.Int64
 	drainCanceledCount atomic.Int64
@@ -1612,6 +1614,7 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 		refreshTaskTimestampLeases: refreshTaskTimestampLeases,
 		drainLogf:                  glog.Infof,
 		claimTargetCounts:          map[string]int{},
+		claimFunctionEmptyUntil:    map[string]time.Time{},
 	}
 
 	taskWorker.AddTargets(
@@ -2044,14 +2047,24 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	}
 	candidateLimit := n + 64
 	includeGroupArgs := self.hasTaskClaimGroups()
+	handoff := options.poll != nil && !options.ordinaryOnly && options.poll.isolatedFunction != ""
 	claimFunction := self.nextClaimFunction(options)
+	// Where the probe found the chosen lane's first due row.
+	var claimFirstBlock int64
+	if claimFunction != "" && !handoff {
+		if claimFunction, claimFirstBlock, err = self.firstDueClaimFunction(ctx, tx, claimFunction, nowBlock); err != nil {
+			return nil, guard, false, err
+		}
+	}
 	openCursor := func() error {
 		bound := throughBlock
+		firstBlock := int64(0)
 		if claimFunction != "" {
 			// Only ordinary discovery supplies a future eligibility alarm.
 			bound = nowBlock
+			firstBlock = claimFirstBlock
 		}
-		query, queryArgs := self.taskFunctionCandidatesQuery(bound, candidateLimit, true, claimFunction, includeGroupArgs)
+		query, queryArgs := self.taskFunctionCandidatesFromQuery(bound, candidateLimit, true, claimFunction, firstBlock, includeGroupArgs)
 		_, err := tx.Exec(ctx, `DECLARE pending_task_claim_candidates NO SCROLL CURSOR FOR `+query, queryArgs...)
 		return err
 	}
@@ -2250,6 +2263,9 @@ claimCandidates:
 				// The second cursor has its original independent n+64 bound.
 				if _, err := tx.Exec(ctx, `CLOSE pending_task_claim_candidates`); err != nil {
 					return nil, guard, false, err
+				}
+				if candidateCount == 0 {
+					self.passEmptyClaimFunction(claimFunction)
 				}
 				claimFunction = ""
 				candidateCount = 0

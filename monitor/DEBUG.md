@@ -256,6 +256,39 @@ server ends a slow claim statement first and the session stays usable.
 
 - [Guard session survives a slow claim statement](../task/claim_statement_budget_test.go)
 
+Equal lane turns can still starve a function. Each claim alternates between
+the global queue and one function lane, and lanes once rotated over every
+registered function, empty or not. With about 98 registered functions and an
+older dominant backlog taking every global claim, a low-volume function got
+one lane turn per roughly 196 claims; on Main its due tasks waited hours. Read
+the delay per function from recent finished tasks as `run_start_time - run_at`,
+next to the oldest pending `run_at` from the function index, before changing
+priorities or batch sizes. A lane turn now goes to the first lane in rotation
+order with a due row. One statement checks up to 16 lanes, one LIMIT 1 seek
+each on the function index, and each process passes a lane it found empty for
+five seconds without a seek. Keep the lane cursor's full ORDER BY in that seek:
+with only a LIMIT, the planner chose the global poll index and filtered the
+whole due queue for an empty lane.
+
+A seek is cheap only while the queue's deleted rows can be pruned. On
+2026-10-11 a seven-hour `pg_dump` transaction held the xmin horizon, so
+`pending_task` kept 15.5M dead rows and one LIMIT 1 seek read 100k buffers in
+the payer lane and 63k in the close lane before its first due row. The probe
+pays that prefix once; the lane cursor then starts at the block of the row the
+probe found, so a claim does not read the prefix twice. Check `backend_xmin`
+age in `pg_stat_activity` before attributing slow claims to the queue itself.
+
+Once lanes reach them, legacy payer settlement turns are limited to two per
+instance; a running turn keeps about one PostgreSQL backend busy. A saturated
+limit filters that target's due rows from every global claim. Payer turns
+queue behind the older close backlog, where the filter reads nothing; at the
+queue head it reads one row per queued payer. If due payer turns reach the
+head in the thousands, raise or remove the limit rather than letting every
+claim filter them.
+
+- [Lane turn and probe cost controls](../task/claim_function_due_lane_test.go)
+- [Saturated payer limit scan controls](../taskworker/claim_admission_payer_scan_test.go)
+
 A production queue prefix alone does not prove which scheduler binary or policy
 is running. Preserve that uncertainty until deployment provenance and actual
 claims establish it. Likewise, a local metric increment may be absent from a

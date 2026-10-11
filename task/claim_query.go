@@ -22,6 +22,13 @@ func (self *TaskWorker) taskCandidatesQuery(nowBlock int64, candidateLimit int, 
 }
 
 func (self *TaskWorker) taskFunctionCandidatesQuery(nowBlock int64, candidateLimit int, ownershipFirst bool, claimFunction string, includeGroupArgs ...bool) (string, []any) {
+	return self.taskFunctionCandidatesFromQuery(nowBlock, candidateLimit, ownershipFirst, claimFunction, 0, includeGroupArgs...)
+}
+
+// A positive firstBlock starts a lane's cursor at the block where its probe
+// found the first due row. Rows below it that arrive after the probe wait for
+// a later turn; the ordinary queue has no such bound.
+func (self *TaskWorker) taskFunctionCandidatesFromQuery(nowBlock int64, candidateLimit int, ownershipFirst bool, claimFunction string, firstBlock int64, includeGroupArgs ...bool) (string, []any) {
 	groupArgsColumn := ""
 	if len(includeGroupArgs) != 0 && includeGroupArgs[0] {
 		groupArgsColumn = ", args_json"
@@ -76,6 +83,12 @@ func (self *TaskWorker) taskFunctionCandidatesQuery(nowBlock int64, candidateLim
 		`, len(queryArgs)+1)
 		queryArgs = append(queryArgs, claimFunction)
 		orderSuffix = ", task_id"
+		if 0 < firstBlock {
+			claimPredicate += fmt.Sprintf(`
+			AND available_block >= (SELECT $%d::bigint)
+		`, len(queryArgs)+1)
+			queryArgs = append(queryArgs, firstBlock)
+		}
 	}
 	return `
 			SELECT
