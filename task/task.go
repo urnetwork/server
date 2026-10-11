@@ -856,6 +856,8 @@ func ListPendingTasks(ctx context.Context) []server.Id {
 }
 
 // the task struct has the latest error attached to it
+// Migration 819 dropped pending_task_has_reschedule_error, which no production
+// path read, so this scans pending_task. Keep it off hot or periodic paths.
 func ListRescheduledTasks(ctx context.Context) []server.Id {
 	taskIds := []server.Id{}
 

@@ -16,6 +16,7 @@ func TestDroppedHotTableIndexesStayOutOfSchemaAndMaintenance(t *testing.T) {
 			"transfer_escrow_sweep_destination_id_sweep_time",
 			"transfer_contract_pair_open_create_time",
 			"transfer_contract_open_destination_partial",
+			"pending_task_has_reschedule_error",
 		}
 		exists := func(name string) bool {
 			var present bool

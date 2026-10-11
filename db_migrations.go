@@ -9972,4 +9972,14 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_open_destination_partial`,
 		`DROP INDEX IF EXISTS transfer_contract_open_destination_partial`,
 	),
+	// 819: pending_task_has_reschedule_error (3 GB) indexes a boolean ahead of
+	// task_id. Every task insert and every claim or release writes it; those
+	// updates move available_block, so they are never HOT.
+	// Its only reader, task.ListRescheduledTasks, is called from tests alone; the
+	// queue metrics count reschedule errors in a whole-table aggregate. Its 268
+	// scans since 2026-08-24 came from manual queries.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS pending_task_has_reschedule_error`,
+		`DROP INDEX IF EXISTS pending_task_has_reschedule_error`,
+	),
 }
