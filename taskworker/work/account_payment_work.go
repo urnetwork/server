@@ -1,7 +1,7 @@
 package work
 
 import (
-	"errors"
+	"context"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -47,6 +47,8 @@ func SchedulePayout(clientSession *session.ClientSession, tx server.PgTx) {
 	)
 }
 
+// A run that committed planning progress retries promptly through its target
+// (NewPayoutTaskTarget), however it stopped.
 func Payout(
 	schedulePayout *SchedulePayoutArgs,
 	clientSession *session.ClientSession,
@@ -56,18 +58,48 @@ func Payout(
 	// submits are idempotent, so payouts are re-enabled.
 	err := controller.SendPayments(clientSession)
 	if err != nil {
-		var progressErr *model.PaymentPlanProgressError
-		if errors.As(err, &progressErr) {
-			// the run committed planning steps that the next run resumes, so a
-			// drain, max time or later failure retries promptly, not after backoff
-			return nil, task.WithCommittedProgressRetry(err)
-		}
 		return nil, err
 	}
 
 	return &SchedulePayoutResult{
 		Success: true,
 	}, nil
+}
+
+// The payout task's target. The next run resumes a run's committed planning
+// progress (a plan, a staged assignment batch or its completion, or a
+// reliability chunk), so a run that committed progress retries promptly however
+// it stopped: a returned error, a panic, a drain, or its own max time. The task
+// runner joins its "Timeout" error around the body's failure after the body
+// returns, and it shortens a retry only for a hint at the root of the failure,
+// so the hint is attached here, outside the runner. A run that committed
+// nothing keeps the ordinary error backoff.
+type payoutTaskTarget struct {
+	task.Target
+}
+
+// The registered payout target, under Payout's function name and its
+// pre-2024.11 alternate name.
+func NewPayoutTaskTarget() task.Target {
+	return &payoutTaskTarget{
+		Target: task.NewTaskTargetWithPost(
+			Payout,
+			PayoutPost,
+			"bringyour.com/service/taskworker/work.Payout",
+		),
+	}
+}
+
+// Runs the ordinary target, including its max-time timer, with a progress
+// observer in its context. A failure keeps its text and arguments and still
+// counts as an error; only its retry delay changes.
+func (self *payoutTaskTarget) Run(ctx context.Context, queued *task.Task) (any, func(server.PgTx) ([]server.PostFunction, error), error) {
+	ctx, progress := model.WithPaymentPlanProgress(ctx)
+	result, post, err := self.Target.Run(ctx, queued)
+	if err != nil && progress.Committed() {
+		err = task.WithCommittedProgressRetry(err)
+	}
+	return result, post, err
 }
 
 func PayoutPost(

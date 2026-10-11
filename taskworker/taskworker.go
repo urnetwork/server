@@ -197,11 +197,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveExpiredAuthCodesPost,
 			"bringyour.com/service/taskworker/work.RemoveExpiredAuthCodes",
 		),
-		task.NewTaskTargetWithPost(
-			work.Payout,
-			work.PayoutPost,
-			"bringyour.com/service/taskworker/work.Payout",
-		),
+		work.NewPayoutTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.ProcessPendingPayouts,
 			work.ProcessPendingPayoutsPost,

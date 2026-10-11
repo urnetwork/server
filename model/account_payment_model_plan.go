@@ -141,9 +141,11 @@ func createPaymentPlan(
 //     with the last batch
 //
 // An interruption loses only the step in flight. committedProgress reports
-// whether this call committed any step, so a caller can retry promptly. A
-// plan whose transaction committed is returned even when its assignment was
-// interrupted; the next call resumes the assignment. A dry run commits nothing.
+// whether this call committed any step, so a caller can retry promptly; a
+// progress observer in ctx (WithPaymentPlanProgress) also learns of it when a
+// later step panics. A plan whose transaction committed is returned even when
+// its assignment was interrupted; the next call resumes the assignment. A dry
+// run commits nothing.
 func createPaymentPlanWithProgress(
 	ctx context.Context,
 	subsidyConfig *SubsidyConfig,
@@ -152,6 +154,12 @@ func createPaymentPlanWithProgress(
 	refreshReliabilityInputs bool,
 	writeInTx func(server.PgTx, *PaymentPlan),
 ) (paymentPlan *PaymentPlan, committedProgress bool, returnErr error) {
+	// runs on a panic too, with the steps committed before it
+	defer func() {
+		if committedProgress {
+			notePaymentPlanProgress(ctx)
+		}
+	}()
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return nil, false, err

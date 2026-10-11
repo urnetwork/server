@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	// "encoding/json"
@@ -471,6 +472,37 @@ func (self *PaymentPlanProgressError) Error() string {
 
 func (self *PaymentPlanProgressError) Unwrap() error {
 	return self.Err
+}
+
+// Committed planning progress, observed through a caller's context. Each
+// planning call with that context records its committed steps (a plan, a
+// staged assignment batch or its completion, or a reliability chunk) before it
+// returns or unwinds, so the caller can attribute them to a failure that
+// replaced the planner's own error, such as a panic or a task runner's
+// max-time wrapping. Safe for concurrent use.
+type PaymentPlanProgress struct {
+	committed atomic.Bool
+}
+
+type paymentPlanProgressKey struct{}
+
+// A child context whose payment planning records committed progress in the
+// returned observer.
+func WithPaymentPlanProgress(ctx context.Context) (context.Context, *PaymentPlanProgress) {
+	progress := &PaymentPlanProgress{}
+	return context.WithValue(ctx, paymentPlanProgressKey{}, progress), progress
+}
+
+// Whether a planning call with the observer's context committed progress.
+func (self *PaymentPlanProgress) Committed() bool {
+	return self != nil && self.committed.Load()
+}
+
+// Marks the observer in ctx, if any; a context without one records nothing.
+func notePaymentPlanProgress(ctx context.Context) {
+	if progress, ok := ctx.Value(paymentPlanProgressKey{}).(*PaymentPlanProgress); ok {
+		progress.committed.Store(true)
+	}
 }
 
 // The bounded drain of PlanPaymentsWithMaxDurationLoop, with writeInTx run in
