@@ -48,18 +48,22 @@ func TestLegacySettlementOwnedMetadataCoverageAndSnapshots(t *testing.T) {
 					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=ANY($1)`, ids))
 				})
 			}
-			trace := &legacyGrantOwnerDiagnosticTx{afterGrant: func() {}}
+			trace := &legacyGrantOwnerDiagnostic{afterGrant: func() {}}
 			var posts []func() any
+			stopHooks := startLegacyStatementHooks(t, ctx)
+			defer stopHooks()
 			server.Tx(ctx, func(tx server.PgTx) {
-				trace.PgTx = tx
 				var completed, busy bool
 				var err error
-				posts, completed, busy, _, err = flushLegacySettlementInTx(ctx, trace, id)
+				hooked, unhook := withLegacyStatementHooks(ctx, tx, trace.hook())
+				defer unhook()
+				posts, completed, busy, _, err = flushLegacySettlementInTx(hooked, tx, id)
 				server.Raise(err)
 				if !completed || busy {
 					t.Fatal(mode, "did not complete")
 				}
 			}, server.TxReadCommitted, server.OptNoRetry())
+			stopHooks()
 			wantFallback := mode == "zero" || mode == "settled" || mode == "mixed"
 			metadataReads := 0
 			for _, statement := range trace.statements {
@@ -127,8 +131,10 @@ func TestLegacySettlementOwnedMetadataRejectsChangedRevision(t *testing.T) {
 		refreshNetEscrow(ctx, []server.Id{f.balanceId})
 		before := settlementCacheSnapshot(ctx, []server.Id{f.balanceId})[f.balanceId]
 		mutated := false
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		server.Tx(ctx, func(tx server.PgTx) {
-			wrapped := &settlementCacheMutationTx{PgTx: tx, beforeClaim: func() {
+			mutation := &settlementCacheMutation{beforeClaim: func() {
 				server.Tx(ctx, func(other server.PgTx) {
 					server.RaisePgResult(other.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=9 WHERE contract_id=$1`, neighbor.ContractId))
 				}, server.TxReadCommitted, server.OptNoRetry())
@@ -136,12 +142,15 @@ func TestLegacySettlementOwnedMetadataRejectsChangedRevision(t *testing.T) {
 			}}
 			var completed, busy bool
 			var err error
-			posts, completed, busy, _, err = flushLegacySettlementInTx(ctx, wrapped, id)
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, mutation.hook())
+			defer unhook()
+			posts, completed, busy, _, err = flushLegacySettlementInTx(hooked, tx, id)
 			server.Raise(err)
 			if !completed || busy || !mutated {
 				t.Fatal("interleaving did not complete")
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
+		stopHooks()
 		if _, present := settlementCacheSnapshot(ctx, []server.Id{f.balanceId})[f.balanceId]; present {
 			t.Fatal("inline metadata published a stale amount under a newer revision")
 		}
@@ -178,32 +187,29 @@ func TestLegacySettlementOwnedMetadataRollbackAndLostReply(t *testing.T) {
 		})
 		refreshNetEscrow(ctx, ids)
 		before := settlementCacheSnapshot(ctx, ids)[f.balanceId]
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
-		defer tx.Rollback(context.Background())
+		// Each owner gets a real owned server transaction whose end the test chooses.
+		tx, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		abandoned, completed, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
 		server.Raise(err)
 		if !completed || busy {
 			t.Fatal("rollback owner failed")
 		}
-		server.Raise(tx.Rollback(ctx))
+		server.Raise(finish(false))
 		server.RunPosts(ctx, abandoned...)
 		if got := settlementCacheSnapshot(ctx, ids)[f.balanceId]; got.revision != before.revision || got.reserved != 100 {
 			t.Fatal("abandoned prediction escaped", before, got)
 		}
 		requireLegacyProviderDurability(t, ctx, f, id, 0)
 		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 100)
-		tx, err = conn.Begin(ctx)
-		server.Raise(err)
-		defer tx.Rollback(context.Background())
+		tx, finish = beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		posts, completed, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
 		server.Raise(err)
 		if !completed || busy {
 			t.Fatal("commit owner failed")
 		}
-		server.Raise(tx.Commit(ctx))
+		server.Raise(finish(true))
 		requireLegacyOwnedMetadataFinancialState(t, ctx, f, id, ids)
 		if got := settlementCacheSnapshot(ctx, ids)[f.balanceId]; got.revision != before.revision+2 || got.reserved != 0 {
 			t.Fatal("committed financial metadata depends on a post", before, got)

@@ -8701,6 +8701,25 @@ the successful control without changing Redis. An absent native-source schema
 metric on the observed API processes remains instrumentation/deployment
 uncertainty, not zero native-source events.
 
+Empty-target publication (2026-10-11 source correction): `UpdateClientScores`
+used to create a target only when one of its source rows was admitted. A
+location or group whose every row was hard-excluded, and a group with no rows,
+were never written, so FindProviders2 reported `cache_missing` for them, the
+same reason a broken writer produces. A target that lost its last admitted
+provider also kept its previous payload until the 5h ttl; request-time hard
+exclusions then emptied it as `filtered_hard`. On Main every group-target
+request for 14 days returned zero as `cache_missing`, and the 2026-10-10 22:41Z
+export admitted only about 1.8k providers (85-94% hard-excluded) before new
+`filtered_hard` zeroes appeared. The writer now creates every target a source
+row names before the hard-exclusion check and seeds every `location_group`
+row, so one complete export from the corrected Taskworker publishes such a
+target as encoded-empty documents and aliases, read as `cache_empty`. That
+reason then describes publication, not why supply is absent; trace hard
+exclusions and group membership separately. A location that no current row
+names (all of its providers disconnected) is still not visited: its old
+payload remains until the ttl and then expires to `cache_missing`. API rollout
+alone changes nothing.
+
 Native-reader activation boundary (2026-09-29 source correction):
 `provider.yml` → `egress_index.native_reader_enabled` defaults to false;
 missing, unreadable or malformed configuration keeps union-cache reads. A

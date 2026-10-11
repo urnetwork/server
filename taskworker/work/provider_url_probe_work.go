@@ -57,6 +57,9 @@ func (self *providerEgressProbePass) runUrlProbes(ctx context.Context, args *Pro
 	execution.Full.AllDestinations = false
 	pass := *self
 	pass.fullReleaseDeadline, _ = ctx.Deadline()
+	// Each pass judges its own turns; no window outlives the pass or is shared
+	// with another shard's.
+	pass.urlCommonMode = newProviderUrlProbeCommonMode(args.ShardIndex, args.ShardCount)
 	startedAt := time.Now()
 	result, runErr := pass.drainUrlProbes(ctx, &execution, pins, pool, observation)
 	urlProbePassSeconds.Observe(time.Since(startedAt).Seconds())

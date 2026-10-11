@@ -81,6 +81,9 @@ func (self *legacySettlementTimingGate) ProcessPipelineHook(next redis.ProcessPi
 // commits. Every independently funded contract must already have committed
 // when that held page batch starts. The baseline stops after the first commit
 // at this exact barrier. Releasing it verifies exact projection and replay.
+// The page settles each contract in its own financial owner, so the barrier
+// separates page-batched projection from per-contract projection; one bounded
+// selection prefetches both contracts.
 func TestLegacySettlementTimingAttributesJoinedCallbackWait(t *testing.T) {
 	for _, family := range []string{"mirror", "clock", "stream"} {
 		env := server.DefaultTestEnv()
@@ -104,6 +107,9 @@ func TestLegacySettlementTimingAttributesJoinedCallbackWait(t *testing.T) {
 			server.Raise(CloseContract(ctx, secondId, second.destinationId, 11, false))
 			refreshNetEscrow(ctx, []server.Id{second.balanceId})
 			shard := int(firstId[15]) % LegacySettlementShardCount
+			cooldown := newLegacyFinancialCohortCooldown()
+			cooldown.deferProbe(shard)
+			ctx = context.WithValue(ctx, legacyFinancialCohortCooldownKey{}, cooldown)
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, firstId, server.NowUtc().Add(-time.Hour)))
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, secondId, server.NowUtc().Add(-30*time.Minute)))
@@ -176,7 +182,7 @@ func TestLegacySettlementTimingAttributesJoinedCallbackWait(t *testing.T) {
 				t.Fatal("phase instrumentation changed the completed financial page", got.err)
 			}
 			timings := got.result.Timings
-			if timings.Selection.Count != 2 || timings.Financial.Count != 2 || timings.JoinedPosts.Count != 1 ||
+			if timings.Selection.Count != 1 || timings.Financial.Count != 2 || timings.JoinedPosts.Count != 1 ||
 				timings.Mirror.Count != 1 || timings.ColdCensus.Count != 0 || timings.Clock.Count != 1 || timings.Stream.Count != 1 {
 				t.Fatalf("actual phase ownership differed: %+v", timings)
 			}

@@ -11,9 +11,10 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Both public expiry paths deliberately yield to an existing intent. Only its
-// ordinary worker can retain the zero-credit proof and finish unchanged money.
-// Fixed old/future clocks exercise policy without waiting for real expiry.
+// Both public expiry paths deliberately yield to an existing intent until an
+// explicit deadline arrives. Only its ordinary worker can then retain the
+// zero-credit proof and finish unchanged money. Fixed old/future clocks
+// exercise policy without waiting for real expiry.
 func TestLegacySettlementMissingDirectionExpiryPolicy(t *testing.T) {
 	for _, test := range []struct {
 		name              string
@@ -26,7 +27,6 @@ func TestLegacySettlementMissingDirectionExpiryPolicy(t *testing.T) {
 		{name: "legacy absolute", createdAge: 2 * time.Hour, due: true},
 		{name: "legacy quiet", createdAge: 10 * time.Minute, reportAge: 10 * time.Minute, due: true},
 		{name: "legacy recent"},
-		{name: "explicit expired", explicitDeadline: true, deadlineRemaining: -time.Hour, due: true},
 		{name: "explicit future", createdAge: 2 * time.Hour, explicitDeadline: true, deadlineRemaining: time.Hour},
 	} {
 		env := server.DefaultTestEnv()
@@ -366,6 +366,56 @@ func TestLegacySourceSettlementMissingDirectionExpiry(t *testing.T) {
 		replay, err := runLegacyCloseSettlementPages(ctx, owner, nil, 8, true)
 		if err != nil || replay.Visited != 0 || replay.Completed != 0 || replay.Cursor != nil || replay.More {
 			t.Fatal("source legacy expiry replay repeated work", replay, err)
+		}
+	})
+}
+
+// An arrived explicit deadline no longer waits for the pending intent. The
+// expiry sweep settles that contract at its deadline and retires the intent in
+// the same commit, with the same money and zero-credit exclusion the worker
+// would retain and without inferring the unknown direction. The payer's other
+// intents keep their ordinary owner.
+func TestLegacySettlementMissingDirectionArrivedDeadlineSettlesAtExpiry(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		f := legacyFinancialCohortSeed(t, ctx, 8)
+		id := f.ids[3]
+		now := server.NowUtc()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET usage_origin_is_source=NULL,create_time=$2,expiration_time=$3 WHERE contract_id=$1`,
+				id, now, now.Add(-time.Hour)))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET close_time=$2 WHERE contract_id=$1`, id, now))
+		}, server.TxReadCommitted, server.OptNoRetry())
+		f.reports = legacyFinancialCohortReports(ctx, f.ids)
+		count, _, err := ForceCloseOpenContractIdsPage(ctx, now.Add(-5*time.Minute), 16, 1, 0, 0, nil)
+		if err != nil || count != 1 {
+			t.Fatal("expiry sweep left an arrived deadline to its intent", count, err)
+		}
+		f.excludedUsage = map[server.Id]bool{id: true}
+		legacyFinancialCohortRequire(t, ctx, f, map[server.Id]bool{id: true})
+		server.Db(ctx, func(conn server.PgConn) {
+			var unchangedDirection, unverified bool
+			server.Raise(conn.QueryRow(ctx, `SELECT usage_origin_is_source IS NULL,usage_unverified FROM transfer_contract WHERE contract_id=$1`, id).Scan(&unchangedDirection, &unverified))
+			if !unchangedDirection || !unverified {
+				t.Fatal("deadline settlement inferred direction or verified unknown usage")
+			}
+		})
+		repair, err := RepairContractExpiry(ctx, ContractExpiryRepairRequest{
+			ExpectedPayerNetworkId: f.payer.sourceNetworkId, ContractIds: []server.Id{id}, Apply: true,
+		})
+		if err != nil || len(repair.Contracts) != 1 || repair.Contracts[0].Status != "terminal" || repair.Contracts[0].ProofCommitted {
+			t.Fatal("explicit repair changed a deadline-settled contract", repair, err)
+		}
+		page, err := FlushLegacyPayerSettlements(ctx, f.payer.sourceNetworkId, nil, 8)
+		if err != nil || page.Completed != 7 || page.Visited != 7 || page.Failed != 0 || page.BusyOrGone != 0 {
+			t.Fatal("payer page did not settle the other intents exactly once", page, err)
+		}
+		legacyFinancialCohortRequire(t, ctx, f, legacyFinancialCohortCompleted(f.ids))
+		if again, _, err := ForceCloseOpenContractIdsPage(ctx, now.Add(-5*time.Minute), 16, 1, 0, 0, nil); err != nil || again != 0 {
+			t.Fatal("repeated expiry sweep changed settled contracts", again, err)
 		}
 	})
 }
