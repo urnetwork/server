@@ -9917,4 +9917,7 @@ var migrations = []any{
 	newSqlMigration(`ALTER TABLE contract_close
 		ADD COLUMN legacy_checkpoint_byte_count bigint,
 		ADD COLUMN identified_checkpoint_byte_count bigint`),
+	// 814: settlement v2 ledger records and vault2 mirror (st_ledger_v2_schema.go).
+	// New tables only. Apply before deploying a server with v2 addresses.
+	newSqlMigration(stLedgerV2SchemaSql),
 }
