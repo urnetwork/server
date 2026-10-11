@@ -762,7 +762,9 @@ func TestRedisConfirmedCompanionPublicationAvoidsRetainedTransaction(t *testing.
 			t.Fatal("companion publication lost its origin authority", err)
 		}
 		requireRedisPublicationCustody(t, ctx, fixture, origin.ContractId, escrow.ContractId, 40, 2)
-		observer.require(t, 1, 0)
+		// the origin existence read releases its connection before the
+		// transaction acquires one
+		observer.require(t, 2, 0)
 		hook.require(t, 0)
 	})
 }

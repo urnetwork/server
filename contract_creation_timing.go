@@ -34,6 +34,7 @@ const (
 	ContractStageResponse
 	ContractStageCompanionPlainOriginRead
 	ContractStageCompanionFallbackOriginRead
+	ContractStageCompanionOriginPrecheckRead
 	contractStageCount
 )
 
@@ -43,6 +44,7 @@ var contractCreationStages = [contractStageCount]string{
 	"shard_fence", "grant_selection", "reservation_snapshot", "client_fence",
 	"post_commit", "client_stamp", "stream", "response",
 	"companion_plain_origin_read", "companion_fallback_origin_read",
+	"companion_origin_precheck_read",
 }
 
 type ContractCompanionOriginPhase uint8
@@ -50,10 +52,12 @@ type ContractCompanionOriginPhase uint8
 const (
 	ContractCompanionPlainOrigin ContractCompanionOriginPhase = iota
 	ContractCompanionFallbackOrigin
+	// the read-only existence read before any transaction opens
+	ContractCompanionOriginPrecheck
 	contractCompanionOriginPhaseCount
 )
 
-var contractCompanionOriginPhases = [contractCompanionOriginPhaseCount]string{"plain", "fallback"}
+var contractCompanionOriginPhases = [contractCompanionOriginPhaseCount]string{"plain", "fallback", "precheck"}
 
 type ContractCompanionOriginOutcome uint8
 
@@ -242,8 +246,11 @@ func BeginContractCompanionOriginRead(ctx context.Context, phase ContractCompani
 		return func() {}
 	}
 	stage := ContractStageCompanionPlainOriginRead
-	if phase == ContractCompanionFallbackOrigin {
+	switch phase {
+	case ContractCompanionFallbackOrigin:
 		stage = ContractStageCompanionFallbackOriginRead
+	case ContractCompanionOriginPrecheck:
+		stage = ContractStageCompanionOriginPrecheckRead
 	}
 	leave := EnterContractCreationStage(ctx, stage)
 	o.mu.Lock()

@@ -10,76 +10,10 @@ package model
 import (
 	"bytes"
 	"context"
-	"strings"
-	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 )
-
-type provideMirrorStatementsKey struct{}
-
-// Records the statements issued under one marked context, so other users of
-// the fixture pools cannot change a count. Batches count each queued statement.
-type provideMirrorStatements struct {
-	stateLock  sync.Mutex
-	statements []string
-}
-
-func (self *provideMirrorStatements) record(ctx context.Context, sql string) {
-	if marker, _ := ctx.Value(provideMirrorStatementsKey{}).(*provideMirrorStatements); marker != self {
-		return
-	}
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.statements = append(self.statements, strings.Join(strings.Fields(sql), " "))
-}
-
-func (self *provideMirrorStatements) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	self.record(ctx, data.SQL)
-	return ctx
-}
-
-func (self *provideMirrorStatements) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
-}
-
-func (self *provideMirrorStatements) TraceBatchStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchStartData) context.Context {
-	for _, query := range data.Batch.QueuedQueries {
-		self.record(ctx, query.SQL)
-	}
-	return ctx
-}
-
-func (self *provideMirrorStatements) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {
-}
-
-func (self *provideMirrorStatements) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {
-}
-
-// Returns the statements recorded since the last take.
-func (self *provideMirrorStatements) take() []string {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	statements := self.statements
-	self.statements = nil
-	return statements
-}
-
-// The caller must defer the returned close inside its TestEnv callback.
-func observeProvideMirrorStatements(t testing.TB, ctx context.Context) (context.Context, *provideMirrorStatements, func()) {
-	t.Helper()
-	statements := &provideMirrorStatements{}
-	scope, err := server.NewTestPgQueryScope(ctx, statements)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return context.WithValue(ctx, provideMirrorStatementsKey{}, statements), statements, func() {
-		if err := scope.Close(); err != nil {
-			t.Error(err)
-		}
-	}
-}
 
 // Contract creation to a non-companion destination reads the destination's
 // modes and then the selected mode's secret. After the mirror expires, the
@@ -98,7 +32,7 @@ func TestProvideMirrorExpiryCostsOneRead(t *testing.T) {
 		// what the ttl leaves 72h after the window's only provide
 		Testing_DeleteProvideMirror(ctx, clientId)
 
-		observed, statements, closeScope := observeProvideMirrorStatements(t, ctx)
+		observed, statements, closeScope := observePgStatements(t, ctx)
 		defer closeScope()
 		for range 3 {
 			provideModes, err := GetProvideModes(observed, clientId)
@@ -147,7 +81,7 @@ func TestProvideSecretKeyExpiryCostsOneRead(t *testing.T) {
 		})
 		Testing_DeleteProvideMirror(ctx, clientId)
 
-		observed, statements, closeScope := observeProvideMirrorStatements(t, ctx)
+		observed, statements, closeScope := observePgStatements(t, ctx)
 		defer closeScope()
 		for range 3 {
 			secretKey, err := GetProvideSecretKey(observed, clientId, ProvideModeStream)
@@ -173,7 +107,7 @@ func TestProvideMirrorCachesNoProvideKeys(t *testing.T) {
 		ctx := context.Background()
 		clientId := server.NewId()
 
-		observed, statements, closeScope := observeProvideMirrorStatements(t, ctx)
+		observed, statements, closeScope := observePgStatements(t, ctx)
 		defer closeScope()
 		for range 2 {
 			provideModes, err := GetProvideModes(observed, clientId)
