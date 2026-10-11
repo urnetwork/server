@@ -2049,18 +2049,22 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	includeGroupArgs := self.hasTaskClaimGroups()
 	handoff := options.poll != nil && !options.ordinaryOnly && options.poll.isolatedFunction != ""
 	claimFunction := self.nextClaimFunction(options)
+	// Where the probe found the chosen lane's first due row.
+	var claimFirstBlock int64
 	if claimFunction != "" && !handoff {
-		if claimFunction, err = self.firstDueClaimFunction(ctx, tx, claimFunction, nowBlock); err != nil {
+		if claimFunction, claimFirstBlock, err = self.firstDueClaimFunction(ctx, tx, claimFunction, nowBlock); err != nil {
 			return nil, guard, false, err
 		}
 	}
 	openCursor := func() error {
 		bound := throughBlock
+		firstBlock := int64(0)
 		if claimFunction != "" {
 			// Only ordinary discovery supplies a future eligibility alarm.
 			bound = nowBlock
+			firstBlock = claimFirstBlock
 		}
-		query, queryArgs := self.taskFunctionCandidatesQuery(bound, candidateLimit, true, claimFunction, includeGroupArgs)
+		query, queryArgs := self.taskFunctionCandidatesFromQuery(bound, candidateLimit, true, claimFunction, firstBlock, includeGroupArgs)
 		_, err := tx.Exec(ctx, `DECLARE pending_task_claim_candidates NO SCROLL CURSOR FOR `+query, queryArgs...)
 		return err
 	}

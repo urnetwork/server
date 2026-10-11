@@ -25,9 +25,10 @@ const claimFunctionEmptyLaneTtl = 5 * time.Second
 // row, so no lane reads another lane's rows however large that backlog is. The
 // lane cursor's full order makes the function index the only presorted path;
 // a scan of the global poll order expecting an early match would filter the
-// whole due queue for an empty lane.
-const claimFunctionProbeSql = `SELECT lane.position FROM unnest($1::text[]) WITH ORDINALITY AS lane(name,position)
- CROSS JOIN LATERAL (SELECT 1 FROM pending_task
+// whole due queue for an empty lane. The chosen lane's first due block bounds
+// its cursor, so index entries the probe already passed are not read twice.
+const claimFunctionProbeSql = `SELECT lane.position,due.available_block FROM unnest($1::text[]) WITH ORDINALITY AS lane(name,position)
+ CROSS JOIN LATERAL (SELECT available_block FROM pending_task
  WHERE regexp_replace(function_name, '/v[0-9]+', '', 'g') = lane.name AND available_block <= (SELECT $2::bigint)
  ORDER BY available_block, run_priority DESC, run_max_time_seconds DESC, task_id LIMIT 1) AS due
  ORDER BY lane.position LIMIT 1`
@@ -105,33 +106,34 @@ func (self *TaskWorker) passClaimFunctions(empty []string, steps int, now time.T
 	self.claimFunctionTurn += 2 * uint64(steps)
 }
 
-// The first lane in start's window with due work, or "" when none has any.
-// Lanes before it are recorded empty. The next lane turn starts after the
-// chosen lane, or after the window.
-func (self *TaskWorker) firstDueClaimFunction(ctx context.Context, tx server.PgTx, start string, nowBlock int64) (string, error) {
+// The first lane in start's window with due work, or "" when none has any,
+// with the block of that lane's first due row, or zero without a probe. Lanes
+// before it are recorded empty. The next lane turn starts after the chosen
+// lane, or after the window.
+func (self *TaskWorker) firstDueClaimFunction(ctx context.Context, tx server.PgTx, start string, nowBlock int64) (string, int64, error) {
 	now := self.claimNow()
 	names, steps := self.claimFunctionWindow(start, now)
 	switch {
 	case len(names) == 0:
-		return "", nil
+		return "", 0, nil
 	case len(names) == 1 && names[0] == start:
 		// The lane cursor itself is this lane's only seek.
-		return start, nil
+		return start, 0, nil
 	}
-	var position int64
-	err := tx.QueryRow(ctx, claimFunctionProbeSql, names, nowBlock).Scan(&position)
+	var position, firstBlock int64
+	err := tx.QueryRow(ctx, claimFunctionProbeSql, names, nowBlock).Scan(&position, &firstBlock)
 	if errors.Is(err, pgx.ErrNoRows) {
 		self.passClaimFunctions(names, steps[len(steps)-1], now)
-		return "", nil
+		return "", 0, nil
 	}
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if position < 1 || int64(len(names)) < position {
-		return "", errors.New("task claim lane probe returned an unknown lane")
+		return "", 0, errors.New("task claim lane probe returned an unknown lane")
 	}
 	self.passClaimFunctions(names[:position-1], steps[position-1], now)
-	return names[position-1], nil
+	return names[position-1], firstBlock, nil
 }
 
 // A lane cursor that found no due row at all records its lane empty.
