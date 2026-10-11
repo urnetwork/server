@@ -621,12 +621,13 @@ func TestSetConnectionLocationProbedCityWinsOverMmdbCity(t *testing.T) {
 // so rolling the binary before running `bringyourctl db migrate` makes every
 // single connection announce hit it.
 //
-// That matters far more than a failed lookup, because SetConnectionLocation is
-// called from ConnectNetworkClient *before* connect's disconnect-cleanup defer
-// is registered (connect/transport_announce.go): an escaping panic tears the
-// connection down and orphans its network_client_connection row as
-// connected = true. This project has already lost ~30k rows to that exact
-// deploy-ordering mistake once.
+// An escaping panic used to matter far more than a failed lookup: it left
+// ConnectNetworkClient before connect registered its disconnect cleanup
+// (connect/transport_announce.go), tearing the connection down and orphaning
+// its network_client_connection row as connected = true, and this project
+// lost ~30k rows to that deploy-ordering mistake once. ConnectNetworkClient
+// now contains the raise as a failed location attempt, which still costs the
+// connection the mmdb location this fallback gives it.
 //
 // The failure is injected for real -- the table is dropped, so the query
 // genuinely raises 42P01 out of the pgx driver -- rather than asserted against
