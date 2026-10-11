@@ -703,6 +703,9 @@ type StClient interface {
 	// batches. A binding active at either boundary is active for payout
 	// exclusion across the complete closed epoch.
 	BindingsAt(ctx context.Context, clientIds [][16]byte, epoch uint64, startBlock uint64, closeBlock uint64) ([]*StFleetBindingState, error)
+	// FleetBoundEvents reads the coordinator's FleetBound logs in one inclusive
+	// block range as mirror rows (st_head_exclusion.go).
+	FleetBoundEvents(ctx context.Context, fromBlock uint64, toBlock uint64) ([]*model.StChainEvent, error)
 	EpochDeposit(ctx context.Context, epoch uint64, noId uint64) (*big.Int, error)
 	ConvictionBeforeEpoch(ctx context.Context, epoch uint64, noId uint64) (*big.Int, error)
 }
