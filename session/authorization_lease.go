@@ -56,6 +56,8 @@ type AuthorizationLease struct {
 	closeTransport func(int)
 	once           sync.Once
 	publish        func(context.Context, time.Time) error
+	// the authoritative credential check, checkLeaseCredential outside tests
+	check func(context.Context, *ByJwt) error
 }
 
 // Registration into the owning connection map must happen before calling this.
@@ -69,6 +71,12 @@ func StartConnectionAuthorizationLease(ctx context.Context, credential *ByJwt, g
 	})
 }
 func startAuthorizationLease(ctx context.Context, credential *ByJwt, closeTransport func(int), publish func(context.Context, time.Time) error) (*AuthorizationLease, error) {
+	return startAuthorizationLeaseWithCheck(ctx, credential, closeTransport, publish, checkLeaseCredential)
+}
+
+// The check performs every authoritative credential read: the final check
+// before admission and each recheck that can renew the lease.
+func startAuthorizationLeaseWithCheck(ctx context.Context, credential *ByJwt, closeTransport func(int), publish func(context.Context, time.Time) error, check func(context.Context, *ByJwt) error) (*AuthorizationLease, error) {
 	start := time.Now()
 	terminal := credential.AcceptUntil()
 	if credential.SessionId == nil && credential.RootClientId == nil && !rejectExpired() {
@@ -80,7 +88,7 @@ func startAuthorizationLease(ctx context.Context, credential *ByJwt, closeTransp
 		}
 	}
 	checkCtx, cancelCheck := context.WithTimeout(ctx, 2*time.Second)
-	err := checkLeaseCredential(checkCtx, credential)
+	err := check(checkCtx, credential)
 	cancelCheck()
 	if err != nil {
 		return nil, err
@@ -98,7 +106,7 @@ func startAuthorizationLease(ctx context.Context, credential *ByJwt, closeTransp
 		}
 	}
 	leaseCtx, cancel := context.WithCancel(ctx)
-	lease := &AuthorizationLease{ctx: leaseCtx, cancel: cancel, state: authorizationLeaseState{deadline: deadline, generation: 1}, wake: make(chan struct{}, 1), terminal: terminal, credential: credential, closeTransport: closeTransport, publish: publish}
+	lease := &AuthorizationLease{ctx: leaseCtx, cancel: cancel, state: authorizationLeaseState{deadline: deadline, generation: 1}, wake: make(chan struct{}, 1), terminal: terminal, credential: credential, closeTransport: closeTransport, publish: publish, check: check}
 	go lease.runTimer()
 	go lease.runChecks()
 	return lease, nil
@@ -186,7 +194,7 @@ func (self *AuthorizationLease) runChecks() {
 			return
 		}
 		ctx, cancel := context.WithTimeout(self.ctx, 2*time.Second)
-		err := checkLeaseCredential(ctx, self.credential)
+		err := self.check(ctx, self.credential)
 		cancel()
 		if err != nil {
 			if errors.Is(err, ErrAuthUnavailable) || errors.Is(err, ErrSessionStoreUnavailable) {
