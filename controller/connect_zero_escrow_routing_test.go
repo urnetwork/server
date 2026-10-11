@@ -1,13 +1,15 @@
-// While the contract degradation valve makes contracts zero cost, newContract
-// must route public and companion contracts to the zero escrow creators and
-// never to an escrow creator: escrow admission holds a PostgreSQL transaction
-// across Redis reservation, which starves the connection pool under a hot
-// payer. Database free.
+// Contract creation deducts first. newContract always runs escrow admission
+// for public and companion contracts; only escrow's exhausted balance refusal,
+// while the contract degradation valve is open, falls back to a zero escrow
+// creator. Every other refusal stands, including a data cap or test drain
+// refusal that shares the exhausted message, and the valve is read only after
+// an exhausted refusal. Database free.
 package controller
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,189 +18,155 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// Replaces the four creators: an escrow creator fails the test, and a zero
-// escrow creator records the size it was asked for. Restore with the result.
+// The calls one newContract made to the replaced creators and valve.
+type zeroEscrowRoutingCalls struct {
+	escrowRequests []model.ByteCount
+	freeRequests   []model.ByteCount
+	valveReads     int
+}
+
+// Replaces the lifecycle lookup, the valve and the four creators. The escrow
+// creators return escrowResult or escrowErr; the zero escrow creators return
+// freeResult. Restore with the result.
 func withZeroEscrowRoutingCreators(
-	t testing.TB,
 	sourceNetworkId server.Id,
 	destinationNetworkId server.Id,
-	publicEscrow *model.TransferEscrow,
-	companionEscrow *model.TransferEscrow,
-	publicRequests *[]model.ByteCount,
-	companionRequests *[]model.ByteCount,
+	escrowResult *model.TransferEscrow,
+	escrowErr error,
+	freeResult *model.TransferEscrow,
+	valveOpen bool,
+	calls *zeroEscrowRoutingCalls,
 ) func() {
-	previousFind := findActiveClientPairNetworks
+	previousFind, previousValve := findActiveClientPairNetworks, zeroContractCost
 	previousPublic, previousCompanion := createTransferEscrow, createCompanionTransferEscrow
-	previousZeroPublic, previousZeroCompanion := createZeroEscrowContract, createZeroEscrowCompanionContract
+	previousFreePublic, previousFreeCompanion := createZeroEscrowContract, createZeroEscrowCompanionContract
 	findActiveClientPairNetworks = func(ctx context.Context, a server.Id, b server.Id) (*server.Id, *server.Id) {
 		return &sourceNetworkId, &destinationNetworkId
 	}
-	createTransferEscrow = func(context.Context, server.Id, server.Id, server.Id, server.Id, model.ByteCount) (*model.TransferEscrow, error) {
-		t.Error("the valve is open but newContract ran public escrow admission")
-		return nil, errors.New("synthetic escrow refusal")
+	zeroContractCost = func(context.Context) bool {
+		calls.valveReads += 1
+		return valveOpen
 	}
-	createCompanionTransferEscrow = func(context.Context, server.Id, server.Id, server.Id, server.Id, model.ByteCount, time.Duration) (*model.TransferEscrow, error) {
-		t.Error("the valve is open but newContract ran companion escrow admission")
-		return nil, errors.New("synthetic escrow refusal")
+	escrow := func(contractTransferByteCount model.ByteCount) (*model.TransferEscrow, error) {
+		calls.escrowRequests = append(calls.escrowRequests, contractTransferByteCount)
+		if escrowErr != nil {
+			return nil, escrowErr
+		}
+		return escrowResult, nil
 	}
-	createZeroEscrowContract = func(ctx context.Context, _ server.Id, _ server.Id, _ server.Id, _ server.Id, contractTransferByteCount model.ByteCount) (*model.TransferEscrow, error) {
-		*publicRequests = append(*publicRequests, contractTransferByteCount)
-		return publicEscrow, nil
+	free := func(contractTransferByteCount model.ByteCount) (*model.TransferEscrow, error) {
+		calls.freeRequests = append(calls.freeRequests, contractTransferByteCount)
+		return freeResult, nil
 	}
-	createZeroEscrowCompanionContract = func(ctx context.Context, _ server.Id, _ server.Id, _ server.Id, _ server.Id, contractTransferByteCount model.ByteCount, _ time.Duration) (*model.TransferEscrow, error) {
-		*companionRequests = append(*companionRequests, contractTransferByteCount)
-		return companionEscrow, nil
+	createTransferEscrow = func(_ context.Context, _ server.Id, _ server.Id, _ server.Id, _ server.Id, contractTransferByteCount model.ByteCount) (*model.TransferEscrow, error) {
+		return escrow(contractTransferByteCount)
+	}
+	createCompanionTransferEscrow = func(_ context.Context, _ server.Id, _ server.Id, _ server.Id, _ server.Id, contractTransferByteCount model.ByteCount, _ time.Duration) (*model.TransferEscrow, error) {
+		return escrow(contractTransferByteCount)
+	}
+	createZeroEscrowContract = func(_ context.Context, _ server.Id, _ server.Id, _ server.Id, _ server.Id, contractTransferByteCount model.ByteCount) (*model.TransferEscrow, error) {
+		return free(contractTransferByteCount)
+	}
+	createZeroEscrowCompanionContract = func(_ context.Context, _ server.Id, _ server.Id, _ server.Id, _ server.Id, contractTransferByteCount model.ByteCount, _ time.Duration) (*model.TransferEscrow, error) {
+		return free(contractTransferByteCount)
 	}
 	return func() {
-		findActiveClientPairNetworks = previousFind
+		findActiveClientPairNetworks, zeroContractCost = previousFind, previousValve
 		createTransferEscrow, createCompanionTransferEscrow = previousPublic, previousCompanion
-		createZeroEscrowContract, createZeroEscrowCompanionContract = previousZeroPublic, previousZeroCompanion
+		createZeroEscrowContract, createZeroEscrowCompanionContract = previousFreePublic, previousFreeCompanion
 	}
 }
 
-// A free payer's 128 MiB request is sized at the 64 MiB free cap, as escrow
-// sizes it, and the controller signs the zero escrow result: its size, its
-// derived priority (paid here, never the trusted network priority) and its
-// deadline. No escrow creator runs for either kind of contract.
-func TestNewContractZeroEscrowNeverRunsEscrowAdmission(t *testing.T) {
-	previousZeroContractCost := zeroContractCost
-	defer func() { zeroContractCost = previousZeroContractCost }()
-	zeroContractCost = func(context.Context) bool { return true }
+// For public and companion contracts alike: a funded payer escrows and the
+// valve is never read; an exhausted payer is free only while the valve is open
+// and refused while it is closed; a data cap or drain refusal, which shares the
+// exhausted message but not its identity, and any other error are refused
+// without reading the valve. Escrow and free creation are both asked for the
+// free payer's 64 MiB cap of a 128 MiB request, and the controller signs what
+// the creator returns: its size and priority, never the trusted priority.
+func TestNewContractFallsBackOnlyForExhaustedBalance(t *testing.T) {
 	defer model.Testing_SetMaxContractTransferByteCount(64*model.Mib, 0)()
 	lookup := &proLookup{}
 	defer withProLookup(lookup)()
 
-	sourceNetworkId := server.NewId()
-	sourceId := server.NewId()
-	destinationNetworkId := server.NewId()
-	destinationId := server.NewId()
+	exhausted := fmt.Errorf("%w (%d).", model.ErrContractBalanceExhausted, 0)
+	// the message data cap and test drain refusals share with exhaustion
+	capped := errors.New("Insufficient balance (0).")
+	failed := errors.New("synthetic escrow failure")
+	capSize := 64 * model.Mib
 	originContractId := server.NewId()
 	expirationTime := time.UnixMilli(2_000_000_000_000).UTC()
-	capped := 64 * model.Mib
-	publicEscrow := &model.TransferEscrow{
-		ContractId:        server.NewId(),
-		ExpirationTime:    expirationTime,
-		TransferByteCount: capped,
-		Priority:          model.PaidPriority,
-		Balances:          []*model.TransferEscrowBalance{},
-	}
-	companionEscrow := &model.TransferEscrow{
-		ContractId:          server.NewId(),
-		CompanionContractId: &originContractId,
-		ExpirationTime:      expirationTime,
-		TransferByteCount:   capped,
-		Priority:            model.UnpaidPriority,
-		Balances:            []*model.TransferEscrowBalance{},
-	}
-	var publicRequests []model.ByteCount
-	var companionRequests []model.ByteCount
-	defer withZeroEscrowRoutingCreators(t, sourceNetworkId, destinationNetworkId, publicEscrow, companionEscrow, &publicRequests, &companionRequests)()
-
-	requested := 128 * model.Mib
-	contractId, count, priority, streamId, returnedExpirationTime, err := newContract(
-		context.Background(),
-		sourceId,
-		destinationId,
-		nil,
-		false,
-		true,
-		requested,
-		model.ProvideModePublic,
-		false,
-		0,
-		connect.DefaultContractManagerSettings(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(publicRequests) != 1 || publicRequests[0] != capped {
-		t.Fatalf("public zero escrow requests %v, want one at the free cap %d", publicRequests, capped)
-	}
-	if contractId != publicEscrow.ContractId || count != capped || priority != model.PaidPriority || streamId != nil ||
-		!returnedExpirationTime.Equal(expirationTime) {
-		t.Fatalf("public contract %s signs %d bytes at priority %d, want the zero escrow result", contractId, count, priority)
-	}
-	if len(lookup.lookupNetworkIds) != 1 || lookup.lookupNetworkIds[0] != sourceNetworkId {
-		t.Fatalf("plan lookups %v, want the would-be payer, the source network", lookup.lookupNetworkIds)
-	}
-
-	contractId, count, priority, streamId, _, err = newContract(
-		context.Background(),
-		sourceId,
-		destinationId,
-		nil,
-		true,
-		false,
-		requested,
-		model.ProvideModeStream,
-		false,
-		0,
-		connect.DefaultContractManagerSettings(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(companionRequests) != 1 || companionRequests[0] != capped {
-		t.Fatalf("companion zero escrow requests %v, want one at the free cap %d", companionRequests, capped)
-	}
-	if contractId != companionEscrow.ContractId || count != capped || priority != model.UnpaidPriority || streamId != nil {
-		t.Fatalf("companion contract %s signs %d bytes at priority %d, want the zero escrow result", contractId, count, priority)
-	}
-	if len(lookup.lookupNetworkIds) != 2 || lookup.lookupNetworkIds[1] != destinationNetworkId {
-		t.Fatalf("plan lookups %v, want the companion's would-be payer, the destination network", lookup.lookupNetworkIds)
-	}
-}
-
-// The control: while the valve is closed the same calls take the escrow creators
-// and never a zero escrow creator.
-func TestNewContractZeroEscrowOffRunsEscrowAdmission(t *testing.T) {
-	previousZeroContractCost := zeroContractCost
-	defer func() { zeroContractCost = previousZeroContractCost }()
-	zeroContractCost = func(context.Context) bool { return false }
-
-	sourceNetworkId := server.NewId()
-	destinationNetworkId := server.NewId()
-	previousFind := findActiveClientPairNetworks
-	previousPublic, previousCompanion := createTransferEscrow, createCompanionTransferEscrow
-	previousZeroPublic, previousZeroCompanion := createZeroEscrowContract, createZeroEscrowCompanionContract
-	defer func() {
-		findActiveClientPairNetworks = previousFind
-		createTransferEscrow, createCompanionTransferEscrow = previousPublic, previousCompanion
-		createZeroEscrowContract, createZeroEscrowCompanionContract = previousZeroPublic, previousZeroCompanion
-	}()
-	findActiveClientPairNetworks = func(ctx context.Context, a server.Id, b server.Id) (*server.Id, *server.Id) {
-		return &sourceNetworkId, &destinationNetworkId
-	}
-	originContractId := server.NewId()
-	escrowCount := 0
-	createTransferEscrow = func(_ context.Context, _ server.Id, _ server.Id, _ server.Id, _ server.Id, contractTransferByteCount model.ByteCount) (*model.TransferEscrow, error) {
-		escrowCount += 1
-		return &model.TransferEscrow{ContractId: server.NewId(), TransferByteCount: contractTransferByteCount, Priority: model.PaidPriority}, nil
-	}
-	createCompanionTransferEscrow = func(_ context.Context, _ server.Id, _ server.Id, _ server.Id, _ server.Id, contractTransferByteCount model.ByteCount, _ time.Duration) (*model.TransferEscrow, error) {
-		escrowCount += 1
-		return &model.TransferEscrow{ContractId: server.NewId(), CompanionContractId: &originContractId, TransferByteCount: contractTransferByteCount, Priority: model.PaidPriority}, nil
-	}
-	createZeroEscrowContract = func(context.Context, server.Id, server.Id, server.Id, server.Id, model.ByteCount) (*model.TransferEscrow, error) {
-		t.Error("the valve is closed but newContract skipped public escrow")
-		return nil, errors.New("synthetic zero escrow refusal")
-	}
-	createZeroEscrowCompanionContract = func(context.Context, server.Id, server.Id, server.Id, server.Id, model.ByteCount, time.Duration) (*model.TransferEscrow, error) {
-		t.Error("the valve is closed but newContract skipped companion escrow")
-		return nil, errors.New("synthetic zero escrow refusal")
-	}
 
 	for _, companion := range []bool{false, true} {
-		provideMode := model.ProvideModePublic
-		if companion {
-			provideMode = model.ProvideModeStream
+		for _, test := range []struct {
+			name          string
+			escrowErr     error
+			valveOpen     bool
+			wantFree      bool
+			wantErr       error
+			wantValveRead bool
+		}{
+			{name: "funded, valve open", valveOpen: true},
+			{name: "funded, valve closed"},
+			{name: "exhausted, valve open", escrowErr: exhausted, valveOpen: true, wantFree: true, wantValveRead: true},
+			{name: "exhausted, valve closed", escrowErr: exhausted, wantErr: exhausted, wantValveRead: true},
+			{name: "data cap or drain, valve open", escrowErr: capped, valveOpen: true, wantErr: capped},
+			{name: "other failure, valve open", escrowErr: failed, valveOpen: true, wantErr: failed},
+		} {
+			name := fmt.Sprintf("companion=%t %s", companion, test.name)
+			escrowResult := &model.TransferEscrow{
+				ContractId:          server.NewId(),
+				CompanionContractId: &originContractId,
+				ExpirationTime:      expirationTime,
+				TransferByteCount:   2 * model.Mib,
+				Priority:            model.PaidPriority,
+			}
+			freeResult := &model.TransferEscrow{
+				ContractId:          server.NewId(),
+				CompanionContractId: &originContractId,
+				ExpirationTime:      expirationTime,
+				TransferByteCount:   capSize,
+				Priority:            model.UnpaidPriority,
+				Balances:            []*model.TransferEscrowBalance{},
+			}
+			calls := &zeroEscrowRoutingCalls{}
+			restore := withZeroEscrowRoutingCreators(server.NewId(), server.NewId(), escrowResult, test.escrowErr, freeResult, test.valveOpen, calls)
+			provideMode := model.ProvideModePublic
+			if companion {
+				provideMode = model.ProvideModeStream
+			}
+			contractId, count, priority, _, _, err := newContract(context.Background(), server.NewId(), server.NewId(), nil,
+				companion, !companion, 128*model.Mib, provideMode, false, 0, connect.DefaultContractManagerSettings())
+			restore()
+
+			if len(calls.escrowRequests) != 1 || calls.escrowRequests[0] != capSize {
+				t.Errorf("%s: escrow requests %v, want one at the %d cap", name, calls.escrowRequests, capSize)
+			}
+			if (calls.valveReads != 0) != test.wantValveRead {
+				t.Errorf("%s: valve read %d times, want read=%t", name, calls.valveReads, test.wantValveRead)
+			}
+			if test.wantErr != nil {
+				if !errors.Is(err, test.wantErr) || len(calls.freeRequests) != 0 {
+					t.Errorf("%s: err=%v free=%v, want %v and no free contract", name, err, calls.freeRequests, test.wantErr)
+				}
+				continue
+			}
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+				continue
+			}
+			want := escrowResult
+			if test.wantFree {
+				want = freeResult
+				if len(calls.freeRequests) != 1 || calls.freeRequests[0] != capSize {
+					t.Errorf("%s: free requests %v, want one at the %d cap", name, calls.freeRequests, capSize)
+				}
+			} else if len(calls.freeRequests) != 0 {
+				t.Errorf("%s: a payer escrow funded was given a free contract", name)
+			}
+			if contractId != want.ContractId || count != want.TransferByteCount || priority != want.Priority || priority == model.TrustedPriority {
+				t.Errorf("%s: contract %s signs %d bytes at priority %d, want %s %d %d", name, contractId, count, priority, want.ContractId, want.TransferByteCount, want.Priority)
+			}
 		}
-		if _, _, _, _, _, err := newContract(context.Background(), server.NewId(), server.NewId(), nil, companion, !companion,
-			model.Mib, provideMode, false, 0, connect.DefaultContractManagerSettings()); err != nil {
-			t.Fatalf("companion=%t: %v", companion, err)
-		}
-	}
-	if escrowCount != 2 {
-		t.Fatalf("escrow creators ran %d times, want 2", escrowCount)
 	}
 }

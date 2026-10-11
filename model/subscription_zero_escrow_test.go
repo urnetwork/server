@@ -1,7 +1,7 @@
-// Zero escrow contract creation, the degradation valve's creation path: no
-// escrow admission, the payer's normal priority, the companion origin rules,
-// the probe shard fence, and settlement with no payout. All tests use
-// synthetic networks and clients.
+// Zero escrow contract creation, the valve's free fallback for an exhausted
+// payer: no escrow admission of its own, the payer's normal priority, the
+// companion origin rules, the probe shard fence, and settlement with no
+// payout. All tests use synthetic networks and clients.
 package model
 
 import (
@@ -117,8 +117,10 @@ func TestZeroEscrowContractRunsNoEscrowAdmission(t *testing.T) {
 		ctx, cancel := context.WithTimeout(WithProviderWorkSessionSource(t.Context(), nil), 60*time.Second)
 		defer cancel()
 		clients := newEscrowSelectionTestClients(t, ctx)
+		// grants start a minute ago: admission rechecks the start against the
+		// database clock, which may trail this process's clock
 		now := server.NowUtc()
-		server.Raise(AddBasicTransferBalance(ctx, clients.payerNetworkId, 64*Mib, now, now.Add(time.Hour)))
+		server.Raise(AddBasicTransferBalance(ctx, clients.payerNetworkId, 64*Mib, now.Add(-time.Minute), now.Add(time.Hour)))
 		balanceId, balanceByteCount := zeroEscrowTestOnlyBalance(t, ctx, clients.payerNetworkId)
 
 		// the reservation token key must be a hash; a string fails every
@@ -198,7 +200,7 @@ func TestZeroEscrowContractPriorityFollowsPayerGrants(t *testing.T) {
 			for _, g := range test.grants {
 				balance := &TransferBalance{
 					NetworkId:             clients.payerNetworkId,
-					StartTime:             now,
+					StartTime:             now.Add(-time.Minute),
 					EndTime:               now.Add(g.lifetime),
 					StartBalanceByteCount: g.byteCount,
 					BalanceByteCount:      g.byteCount,
@@ -233,7 +235,7 @@ func TestZeroEscrowContractSettlesWithoutPayout(t *testing.T) {
 		now := server.NowUtc()
 		AddTransferBalance(ctx, &TransferBalance{
 			NetworkId:             clients.payerNetworkId,
-			StartTime:             now,
+			StartTime:             now.Add(-time.Minute),
 			EndTime:               now.Add(time.Hour),
 			StartBalanceByteCount: 64 * Mib,
 			BalanceByteCount:      64 * Mib,

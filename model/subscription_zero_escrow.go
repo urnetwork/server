@@ -1,20 +1,23 @@
-// Zero escrow contract creation, used while the contract degradation valve
-// makes new contracts zero cost (network_degradation_model.go). While
-// contracts close too slowly, every open contract keeps the escrow it reserved
-// from its payer's balance, and a payer whose balance is held that way is
-// refused new contracts. While the valve is open, public and companion
-// contracts are created the way network contracts are
+// Zero escrow contract creation, the free fallback of the contract degradation
+// valve (network_degradation_model.go). While contracts close too slowly,
+// every open contract keeps the escrow it reserved from its payer's balance,
+// and a payer whose balance is held that way is refused new contracts.
+// Contract creation always tries escrow first, so a payer is charged,
+// shrink-to-fit included, while anything is left. Only when escrow admission
+// refuses with ErrContractBalanceExhausted and the valve is open is the
+// contract created here instead, the way network contracts are
 // (createContractNoEscrowInTx): no transfer_escrow row, no payer_network_id and
-// no change to any transfer_balance. They settle through the existing no-escrow
-// path, which claims a terminal outcome with no sweep, payout, debit or
-// provider earnings, also after the valve closes.
+// no change to any transfer_balance. These contracts settle through the
+// existing no-escrow path, which claims a terminal outcome with no sweep,
+// payout, debit or provider earnings, also after the valve closes.
 //
-// Creation is one short read committed transaction of PostgreSQL statements
-// only. It never enters escrow admission: no transferEscrowTx or payer
-// admission queue, no runRedisContractAdmission or Redis reservation, and no
-// companion escrow transaction, so no transaction is held open across a Redis
-// or network call. Redis is written only after commit, by the contract hole
-// post and the origin notification, as for every contract.
+// Creation here is one short read committed transaction of PostgreSQL
+// statements only. It enters no escrow admission of its own: no
+// transferEscrowTx or payer admission queue, no runRedisContractAdmission or
+// Redis reservation, and no companion escrow transaction, so no transaction
+// is held open across a Redis or network call. Redis is written only after
+// commit, by the contract hole post and the origin notification, as for every
+// contract.
 //
 // What still holds, in that transaction:
 //   - the acceptance-test balance drain and per-client data caps refuse the
@@ -51,9 +54,33 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/server"
 )
+
+// Escrow admission's refusal once a complete census of the payer's active
+// grants finds less available than the shrink floor
+// (grantTransferEscrowByteCount): the payer has nothing left to deduct. It is
+// the only refusal that falls back to a zero escrow contract, and only while
+// the contract degradation valve is open. Data cap and test drain refusals
+// share its message but not its identity, and an incomplete census (a
+// selection capacity limit or an unknown reservation counter) is not it.
+var ErrContractBalanceExhausted = errRedisReservationInsufficient
+
+var zeroEscrowContractsCreated = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_zero_escrow_contracts_total",
+	Help: "Free contracts created without escrow for a payer whose balance was exhausted while the contract degradation valve was open, by kind.",
+}, []string{"kind"})
+
+// Materializes both kinds, so an explicit zero is visible before the first
+// free contract.
+func init() {
+	for _, kind := range []string{"public", "companion"} {
+		zeroEscrowContractsCreated.WithLabelValues(kind)
+	}
+	prometheus.MustRegister(zeroEscrowContractsCreated)
+}
 
 // createCompanionTransferEscrow's plain origin read without its prober
 // reservation column. The two branches are disjoint on open, so the global
@@ -212,6 +239,7 @@ func CreateZeroEscrowContract(
 	leavePosts := server.EnterContractCreationStage(ctx, server.ContractStagePostCommit)
 	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	leavePosts()
+	zeroEscrowContractsCreated.WithLabelValues("public").Inc()
 	defer server.EnterContractCreationStage(ctx, server.ContractStageClientStamp)()
 	// the identity escrow would have charged, as createTransferEscrow stamps it
 	StampTopLevelClientContractTime(ctx, sourceId)
@@ -285,6 +313,7 @@ func CreateZeroEscrowCompanionContract(
 	leavePosts := server.EnterContractCreationStage(ctx, server.ContractStagePostCommit)
 	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	leavePosts()
+	zeroEscrowContractsCreated.WithLabelValues("companion").Inc()
 	defer server.EnterContractCreationStage(ctx, server.ContractStageClientStamp)()
 	StampTopLevelClientContractTime(ctx, stampClientId)
 	return

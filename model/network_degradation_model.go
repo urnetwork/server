@@ -2,27 +2,31 @@
 // they are created, every open contract keeps the escrow it reserved, payers
 // whose balance is held that way are refused new contracts, and escrow
 // admission under the resulting hot payers holds database connections across
-// Redis reservations. The valve then makes new contracts zero cost: public and
-// companion contracts are created without escrow (subscription_zero_escrow.go),
-// no balance is reserved or debited, and no provider is paid for their traffic.
+// Redis reservations. While the valve is open, contract creation still
+// deducts first: public and companion contracts escrow, shrink-to-fit
+// included, while the payer has anything left. Only a payer whose balance
+// escrow admission finds exhausted (ErrContractBalanceExhausted) gets a zero
+// cost contract, created without escrow (subscription_zero_escrow.go): no
+// balance is reserved or debited, and no provider is paid for its traffic.
 //
 // The CheckContractDegradation task owns the decision. Every 15 minutes it
 // counts the contracts created in the last 60 minutes and the contracts whose
 // terminal outcome was claimed in those 60 minutes, and publishes one Redis
 // state with a one hour TTL, four checks. A check is degraded when fewer than
 // 70% as many contracts closed as were created; a window with no creations is
-// healthy. One degraded check turns zero cost on at once. Charging resumes only
-// on the second consecutive healthy check; the state carries the consecutive
+// healthy. One degraded check opens the valve at once. It closes only on the
+// second consecutive healthy check; the state carries the consecutive
 // healthy count. A failed check publishes nothing, so the previous state and
 // its count stand until their TTL ends, and a stopped task lets them expire.
 //
-// Contract creation reads the state through a 15 second in-process cache,
-// never inside a database transaction. A contract is zero cost only when
-// config/<env>/degraded.yml enables the valve and the published state is
-// present, unexpired, well formed and zero cost. Every other case charges
-// normally: a disabled, absent or unreadable config, a missing or expired key,
-// a Redis error, or a malformed or inconsistent value. The valve decides only
-// how a new contract is created; it never changes an existing contract.
+// Contract creation reads the state, after escrow admission has refused an
+// exhausted payer, through a 15 second in-process cache and never inside a
+// database transaction. The valve is open only when config/<env>/degraded.yml
+// enables it and the published state is present, unexpired, well formed and
+// zero cost. Every other case keeps the refusal: a disabled, absent or
+// unreadable config, a missing or expired key, a Redis error, or a malformed
+// or inconsistent value. The valve decides only how a new contract is
+// funded; it never changes an existing contract.
 //
 // Safe for concurrent use.
 package model
@@ -125,7 +129,7 @@ var contractDegradationChecks = prometheus.NewCounterVec(prometheus.CounterOpts{
 
 var contractDegradationZeroCost = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "urnetwork_contract_degradation_zero_cost",
-	Help: "1 while the last state this process published makes new contracts zero cost, else 0.",
+	Help: "1 while the last state this process published opens the valve: payers with an exhausted balance get zero cost contracts. Else 0.",
 })
 
 var contractDegradationContracts = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -135,7 +139,7 @@ var contractDegradationContracts = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 
 var zeroContractCostReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_zero_contract_cost_reads_total",
-	Help: "Contract creation cache refreshes of the degradation state by result; only zero_cost makes new contracts zero cost.",
+	Help: "Contract creation cache refreshes of the degradation state by result; only zero_cost lets an exhausted payer's contract be zero cost.",
 }, []string{"result"})
 
 // Materializes every bounded label, so an explicit zero is visible before the
@@ -532,8 +536,10 @@ func loadZeroContractCostSnapshot(ctx context.Context, now time.Time) *zeroContr
 	return snapshot
 }
 
-// Whether a contract created now is zero cost. At most one Redis read per cache
-// period per process; callers must not hold a database transaction.
+// Whether the valve is open now, so that a contract whose payer escrow
+// admission found exhausted is created at zero cost instead of refused. At
+// most one Redis read per cache period per process; callers must not hold a
+// database transaction.
 func ZeroContractCost(ctx context.Context) bool {
 	now := zeroContractCostNow()
 	return zeroContractCostCache.current(ctx, now).zeroCostAt(now)
