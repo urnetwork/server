@@ -52,6 +52,10 @@ type fakeLedgerV2Chain struct {
 	demands      map[[2]uint64]uint8
 	// fail queues the outcomes of an operation's next calls (nil succeeds).
 	fail map[string][]error
+	// latest is the latest block, where a send's eth_call and eth_estimateGas
+	// run; a close or commit executes in the block after it (R battery). Below
+	// head it reads as head.
+	latest uint64
 	// afterClose moves the head after a close, as a slow inclusion would.
 	afterClose uint64
 	// closeLag hides a close from the funding state, as a lagging head would.
@@ -123,6 +127,18 @@ func (self *fakeLedgerV2Chain) LedgerV2FundedThrough(ctx context.Context, noId u
 	return self.funded[epoch], nil
 }
 
+// The block a close or commit sent now executes in.
+func (self *fakeLedgerV2Chain) executionBlock() uint64 {
+	return max(self.head, self.latest) + 1
+}
+
+func (self *fakeLedgerV2Chain) LedgerV2LatestBlock(ctx context.Context) (uint64, error) {
+	if err := self.failed("latest"); err != nil {
+		return 0, err
+	}
+	return max(self.head, self.latest), nil
+}
+
 func (self *fakeLedgerV2Chain) LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, index uint64) (uint8, error) {
 	if err := self.failed("demand"); err != nil {
 		return 0, err
@@ -138,7 +154,7 @@ func (self *fakeLedgerV2Chain) LedgerV2Close(ctx context.Context, epoch uint64, 
 	if self.paused {
 		return "", errors.New("SettlementPaused")
 	}
-	if self.head < self.end(epoch) || self.end(epoch)+self.window < self.head {
+	if block := self.executionBlock(); block < self.end(epoch) || self.end(epoch)+self.window < block {
 		return "", errors.New("InvalidWindow")
 	}
 	if epoch <= self.lastFunded {
@@ -173,7 +189,7 @@ func (self *fakeLedgerV2Chain) LedgerV2Commit(ctx context.Context, epoch uint64,
 	switch {
 	case self.paused:
 		return "", errors.New("SettlementPaused")
-	case self.head < self.end(epoch) || self.end(epoch)+self.window < self.head:
+	case self.executionBlock() < self.end(epoch) || self.end(epoch)+self.window < self.executionBlock():
 		return "", errors.New("InvalidWindow")
 	case self.pending != nil && self.head < self.end(self.pending.Epoch+1):
 		return "", errors.New("PendingRootLive")

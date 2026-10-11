@@ -8,9 +8,10 @@ package controller
 // Per epoch e, in order: close inside the commit window; finalize the
 // previous root if it can be finalized; read the latest finalized root and
 // the root count; build; publish the chunks, then the header; commit with
-// that root count, never when the total does not grow. Demands are answered
-// with checkPath from a cached tree, finalized roots are recorded for
-// readers, and the §6.4 and §8.1 alerts are raised.
+// that root count, never when the total does not grow. A close or commit is
+// sent only while the block after the latest is inside its window. Demands
+// are answered with checkPath from a cached tree, finalized roots are
+// recorded for readers, and the §6.4 and §8.1 alerts are raised.
 
 import (
 	"context"
@@ -453,6 +454,23 @@ func stLedgerV2Send(ctx context.Context, cfg *StConfig, epoch uint64, kind strin
 	return outcome
 }
 
+// stLedgerV2LateSend holds a close or commit whose window ends at or before
+// the latest block, and returns nil when the block after the latest is still
+// inside the window. A send's eth_call and eth_estimateGas run at the latest
+// block, and the transaction executes in a later one (R battery). A held send
+// waits for the finalized head to pass the window; the step then sees from
+// finalized state whether the epoch was closed or committed, or missed.
+func stLedgerV2LateSend(ctx context.Context, cfg *StConfig, client StLedgerV2Client, state *StLedgerV2State, step string, deadline uint64) *StPublishOutcome {
+	latest, err := client.LedgerV2LatestBlock(ctx)
+	if err != nil {
+		return stLedgerV2Retry(err)
+	}
+	if latest < deadline {
+		return nil
+	}
+	return stLedgerV2Wait(cfg, state, fmt.Sprintf("the %s window ends at block %d and the latest block is %d", step, deadline, latest), deadline+1)
+}
+
 func stLedgerV2Finalizable(state *StLedgerV2State) bool {
 	pending := state.Pending
 	return pending != nil && !state.Paused && pending.CommittedBlock+state.ChallengeBlocks <= state.HeadBlock &&
@@ -486,6 +504,9 @@ func stLedgerV2RunEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2Cli
 		}
 		if state.Paused {
 			return stLedgerV2Wait(cfg, state, "settlement is paused", 0), nil
+		}
+		if outcome := stLedgerV2LateSend(ctx, cfg, client, state, "close", end+window); outcome != nil {
+			return outcome, nil
 		}
 		if outcome := stLedgerV2Send(ctx, cfg, epoch, model.StPublishKindV2Close, func() (string, error) {
 			return client.LedgerV2Close(ctx, epoch, noId)
@@ -582,6 +603,9 @@ func stLedgerV2CommitEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2
 	}
 	if next := state.LastCommitBlock + state.ChallengeBlocks; state.LastCommitBlock != 0 && state.HeadBlock < next {
 		return stLedgerV2Wait(cfg, state, fmt.Sprintf("vault2 accepts the pool's next commit at block %d", next), next), nil
+	}
+	if outcome := stLedgerV2LateSend(ctx, cfg, client, state, "commit", deadline); outcome != nil {
+		return outcome, nil
 	}
 	return stLedgerV2Send(ctx, cfg, epoch, model.StPublishKindV2Commit, func() (string, error) {
 		return client.LedgerV2Commit(ctx, epoch, noId, rootCount, commitment)

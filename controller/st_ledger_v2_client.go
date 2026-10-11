@@ -128,6 +128,9 @@ type StLedgerV2Client interface {
 	// rootCommitWindowBlocks, which is also v2's close window.
 	LedgerV2EpochWindow(ctx context.Context, epoch uint64) (end uint64, window uint64, err error)
 	LedgerV2FundedThrough(ctx context.Context, noId uint64, epoch uint64) (uint256.Int, error)
+	// LedgerV2LatestBlock reads the latest block's number. A send's eth_call
+	// and eth_estimateGas run at it; the transaction executes in a later block.
+	LedgerV2LatestBlock(ctx context.Context) (uint64, error)
 	// LedgerV2Demand reads vault2.demanded(noId, seq, index): a DemandState.
 	LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, index uint64) (uint8, error)
 	// LedgerV2Close sends closeOperatorEpoch under v2close:e:no.
@@ -296,6 +299,29 @@ func (self *CoreStClient) LedgerV2FundedThrough(ctx context.Context, noId uint64
 		return uint256.Int{}, fmt.Errorf("vault2 fundedThrough(%d, %d): %w", noId, epoch, err)
 	}
 	return stUint256(funded)
+}
+
+func (self *CoreStClient) LedgerV2LatestBlock(ctx context.Context) (uint64, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return 0, err
+	}
+	defer stopRead()
+	var latest uint64
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
+		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
+		defer cancel()
+		block, err := readStRPCBlockIdentity(callCtx, client, rpc.LatestBlockNumber.String(), nil)
+		if err != nil {
+			return err
+		}
+		latest = block.Number
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("latest head: %w", err)
+	}
+	return latest, nil
 }
 
 func (self *CoreStClient) LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, index uint64) (uint8, error) {

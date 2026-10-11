@@ -48,6 +48,8 @@ type ledgerV2RPC struct {
 	events         []string
 	reverts        map[string]string
 	results        map[string][]byte
+	// latestBlock answers "latest" when set; otherwise the finalized block does.
+	latestBlock uint64
 }
 
 func newLedgerV2RPC(t testing.TB) *ledgerV2RPC {
@@ -102,7 +104,9 @@ func (self *ledgerV2RPC) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			var selector string
 			json.Unmarshal(call.Params[0], &selector)
 			block := self.finalizedBlock
-			if selector != "latest" && selector != "finalized" {
+			if selector == "latest" && self.latestBlock != 0 {
+				block = self.latestBlock
+			} else if selector != "latest" && selector != "finalized" {
 				block, _ = hexutil.DecodeUint64(selector)
 			}
 			result = stTransactionReconcileBlock(block)
