@@ -216,7 +216,10 @@ func TestSessionAdmissionClientInfoRoundTripsAcrossCarriers(t *testing.T) {
 	})
 }
 
-func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndUnavailable(t *testing.T) {
+// Only definitive answers retire an admitted transport: a confirmed revocation
+// closes with the revoked cause and the credential's horizon with the expired
+// cause. An unavailable store keeps the transport (session package tests).
+func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndExpired(t *testing.T) {
 	environment := server.DefaultTestEnv()
 	environment.RerunCount = 0
 	environment.Run(t, func(t testing.TB) {
@@ -235,7 +238,7 @@ func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndUnavailable(t *testing
 			}
 			defer closeClient()
 			lease := <-leases
-			want := uint32(session.AuthorizationUnavailableCloseCode - 4000)
+			want := uint32(session.AuthorizationExpiredCloseCode - 4000)
 			if revoked {
 				actor := session.NewLocalClientSession(ctx, "192.0.2.1:1", session.NewByJwt(claims.NetworkId, claims.UserId, claims.NetworkName, false, false))
 				_, err := session.RevokeNetworkSession(&session.RevokeSessionArgs{SessionId: *claims.SessionId, OperationId: server.NewId()}, actor)
@@ -246,7 +249,8 @@ func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndUnavailable(t *testing
 				want = uint32(session.AuthorizationRevokedCloseCode - 4000)
 				lease.Recheck()
 			} else {
-				lease.Testing_Expire(time.Now().Add(91 * time.Second))
+				// beyond any credential horizon (exp plus the session grace)
+				lease.Testing_Expire(time.Now().Add(366 * 24 * time.Hour))
 			}
 			_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
 			for {

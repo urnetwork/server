@@ -103,7 +103,9 @@ func testSessionRevocationDataPlane(t *testing.T, mode connectlib.TransportMode)
 		if err != nil || result.Status != "revoked" {
 			t.Fatal(result, err)
 		}
-		attackerLease.Testing_Expire(time.Now().Add(91 * time.Second))
+		// No local event reaches this exchange, so the revocation is found by
+		// the lease's next scheduled authoritative recheck.
+		attackerLease.Recheck()
 		waitForActiveRoutes(ctx, t, writer, 1)
 		// A rogue endpoint ignores logout and keeps sending on the established P2P
 		// connection. Delivery here proves socket closure alone was insufficient.

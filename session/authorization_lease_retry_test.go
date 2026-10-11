@@ -101,50 +101,6 @@ func TestAuthorizationLeaseRetriesUnavailableRecheckBeforeDeadline(t *testing.T)
 	})
 }
 
-// Fail closed is unchanged: retries never renew, so a sustained outage still
-// retires the transport with the unavailable cause at the original deadline,
-// and the retries before it stay bounded.
-func TestAuthorizationLeaseSustainedUnavailabilityRetiresAtDeadline(t *testing.T) {
-	defer Testing_SetRejectExpired(false)()
-	synctest.Test(t, func(t *testing.T) {
-		start := time.Now()
-		check := &scriptedLeaseCheck{
-			results:   []error{nil},
-			otherwise: ErrAuthUnavailable,
-		}
-		lease, closes := startScriptedLease(t, check)
-		defer lease.Close()
-
-		time.Sleep(4 * time.Minute)
-		synctest.Wait()
-
-		var retired leaseClose
-		select {
-		case retired = <-closes:
-		default:
-			t.Fatalf("sustained unavailability never retired the transport: calls=%v", relativeTimes(start, check.calls()))
-		}
-		if retired.code != AuthorizationUnavailableCloseCode {
-			t.Fatalf("close code=%d, want %d", retired.code, AuthorizationUnavailableCloseCode)
-		}
-		if elapsed := retired.at.Sub(start); elapsed != AuthorizationLeaseDuration {
-			t.Fatalf("retired after %s, want the original deadline %s", elapsed, AuthorizationLeaseDuration)
-		}
-		// admission, the scheduled recheck, then two backed-off retries inside
-		// the lease window: 5s and 10s, each stretched by the fixture's quarter
-		calls := relativeTimes(start, check.calls())
-		want := []time.Duration{0, 60 * time.Second, 66250 * time.Millisecond, 78750 * time.Millisecond}
-		if len(calls) != len(want) {
-			t.Fatalf("calls=%v, want %v", calls, want)
-		}
-		for i := range want {
-			if calls[i] != want[i] {
-				t.Fatalf("calls=%v, want %v", calls, want)
-			}
-		}
-	})
-}
-
 // A definitive rejection found by the retry retires the transport at once,
 // with the rejected cause rather than a later unavailable lapse.
 func TestAuthorizationLeaseRetryRejectionRetiresImmediately(t *testing.T) {
@@ -184,9 +140,20 @@ func relativeTimes(start time.Time, times []time.Time) []time.Duration {
 	return durations
 }
 
-// The fixture's rejection must stay a definitive result, not unavailability.
+// The fixture's rejection must stay a definitive result, not unavailability,
+// and the unavailable sentinels must never read as an answer.
 func TestScriptedLeaseCheckRejectionIsNotUnavailable(t *testing.T) {
 	if errors.Is(ErrByJwtInactive, ErrAuthUnavailable) || errors.Is(ErrByJwtInactive, ErrSessionStoreUnavailable) {
 		t.Fatal("fixture rejection is classified as unavailable")
+	}
+	for _, err := range []error{ErrByJwtInactive, ErrSessionRevoked, rejectByJwt(AuthRejectionExpired, "synthetic"), rejectByJwtClaims(AuthRejectionMissingClaims, "synthetic")} {
+		if !authorizationRejectionDefinitive(err) {
+			t.Fatalf("%v is not definitive", err)
+		}
+	}
+	for _, err := range []error{ErrAuthUnavailable, ErrSessionStoreUnavailable, errors.Join(ErrAuthUnavailable, ErrSessionStoreUnavailable)} {
+		if authorizationRejectionDefinitive(err) {
+			t.Fatalf("%v is definitive", err)
+		}
 	}
 }
