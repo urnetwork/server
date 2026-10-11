@@ -2,9 +2,10 @@
 // control dispatcher, whichever escrow kind it holds. The receiver's final is
 // recorded as a final, never a checkpoint, and is not refused or dropped after
 // the sender's final. A receiver checkpoint alone keeps the contract open for
-// the deadline closer, which is the existing settlement rule. Legacy-escrow
-// contracts record the same final and defer settlement to a durable intent;
-// the subscription_legacy_settlement tests cover that path.
+// the deadline closer unless it follows the sender's final (owner decision B,
+// connect_covered_checkpoint_test.go). Legacy-escrow contracts record the same
+// final and defer settlement to a durable intent; the
+// subscription_legacy_settlement tests cover that path.
 package controller
 
 import (
@@ -46,11 +47,12 @@ func newTwoPartyCloseFixture(t testing.TB, sameNetwork bool) *twoPartyCloseFixtu
 		providerNetworkId: server.NewId(),
 		providerId:        server.NewId(),
 	}
-	model.Testing_CreateNetwork(ctx, fixture.windowNetworkId, "synthetic two party window", server.NewId())
+	// network names are unique; several fixtures may share one test database
+	model.Testing_CreateNetwork(ctx, fixture.windowNetworkId, "synthetic two party window "+fixture.windowNetworkId.String(), server.NewId())
 	if sameNetwork {
 		fixture.providerNetworkId = fixture.windowNetworkId
 	} else {
-		model.Testing_CreateNetwork(ctx, fixture.providerNetworkId, "synthetic two party provider", server.NewId())
+		model.Testing_CreateNetwork(ctx, fixture.providerNetworkId, "synthetic two party provider "+fixture.providerNetworkId.String(), server.NewId())
 	}
 	model.Testing_CreateDevice(ctx, fixture.windowNetworkId, server.NewId(), fixture.windowId, "synthetic window", "window")
 	model.Testing_CreateDevice(ctx, fixture.providerNetworkId, server.NewId(), fixture.providerId, "synthetic provider", "provider")
@@ -287,9 +289,11 @@ func TestTwoPartyFinalCloseSettlesNetworkContract(t *testing.T) {
 	})
 }
 
-// The settlement rule for a receiver that only checkpoints (369f1d65): the
-// contract stays open after the sender's final, and the deadline closer owns
-// it. Changing that rule is a settlement decision that must update this test.
+// A receiver that only checkpointed before the sender's final leaves the
+// contract open after that final; the receiver's next report or the deadline
+// closer owns it. Only a receiver report after the sender's final settles a
+// checkpoint (owner decision B, connect_covered_checkpoint_test.go). Changing
+// that rule is a settlement decision that must update this test.
 func TestTwoPartyReceiverCheckpointLeavesContractForCloser(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0

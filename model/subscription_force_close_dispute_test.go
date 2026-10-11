@@ -105,8 +105,12 @@ func newForceCloseDisputeFixtureWithAdmission(t testing.TB, ctx context.Context,
 		}
 	}
 	AddToStream(ctx, contractId, sourceId, destinationId, nil)
-	connect.AssertEqual(t, nil, CloseContract(ctx, contractId, sourceId, sourceByteCount, sourceCheckpoint))
+	// A covering receiver checkpoint reported after the sender's final settles
+	// in that report (owner decision B). Report the receiver first: every shape
+	// then stays open for the expiry sweep, as a sender final whose receiver
+	// checkpoint predates it does.
 	connect.AssertEqual(t, nil, CloseContract(ctx, contractId, destinationId, destinationByteCount, destinationCheckpoint))
+	connect.AssertEqual(t, nil, CloseContract(ctx, contractId, sourceId, sourceByteCount, sourceCheckpoint))
 	createTime := time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx,

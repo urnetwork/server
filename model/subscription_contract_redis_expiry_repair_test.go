@@ -29,8 +29,10 @@ func newRedisExpiryRepairTestContract(t testing.TB, ctx context.Context, f netEs
 		server.Raise(CloseContract(ctx, escrow.ContractId, f.sourceId, 17, false))
 		server.Raise(CloseContract(ctx, escrow.ContractId, f.destinationId, 11, true))
 	case "insufficient":
-		server.Raise(CloseContract(ctx, escrow.ContractId, f.sourceId, 111, false))
+		// The receiver's checkpoint predates the sender's final; a covering one
+		// after it would settle in that report (owner decision B).
 		server.Raise(CloseContract(ctx, escrow.ContractId, f.destinationId, 111, true))
+		server.Raise(CloseContract(ctx, escrow.ContractId, f.sourceId, 111, false))
 	default:
 		t.Fatal("unknown synthetic report shape")
 	}
