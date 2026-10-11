@@ -80,6 +80,37 @@ func readSettlementNetEscrowSnapshots(ctx context.Context, tx server.PgTx, ids [
 	return pending
 }
 
+// A deadline close must commit whatever the optional cache holds. It reads the
+// same locked snapshots as settlement, but drops one whose amount is below the
+// reservation it is about to release instead of failing the close; the refresh
+// post censuses that balance. Before this, every deadline close left its
+// balances' cache a revision behind, so the refresh post and the next locked
+// admission each reread all of the balance's live legacy escrow.
+func readDeadlineNetEscrowSnapshots(ctx context.Context, tx server.PgTx, positive map[server.Id]ByteCount) map[server.Id]netEscrowSnapshot {
+	ids := settlementReservationIds(positive)
+	pending := readCachedNetEscrowSnapshots(ctx, tx, ids)
+	for id, snapshot := range pending {
+		if snapshot.reserved < positive[id] {
+			delete(pending, id)
+		}
+	}
+	netEscrowSettlementSnapshots.WithLabelValues("reused").Add(float64(len(pending)))
+	netEscrowSettlementSnapshots.WithLabelValues("deferred").Add(float64(len(ids) - len(pending)))
+	return pending
+}
+
+// The deadline settled-flag write advances a positive balance only when it
+// writes that balance's escrow row, which is when the balance has a payout.
+func deadlineMetadataReservations(positive map[server.Id]ByteCount, payouts map[server.Id]sweepPayout) map[server.Id]ByteCount {
+	written := make(map[server.Id]ByteCount, len(positive))
+	for id, amount := range positive {
+		if _, ok := payouts[id]; ok {
+			written[id] = amount
+		}
+	}
+	return written
+}
+
 // The caller has made exactly one revision-advancing transition for each
 // locked positive row. Any intervening legacy mutation makes expected+1 stale,
 // so guarded publication skips it. No later durable revision is borrowed.
