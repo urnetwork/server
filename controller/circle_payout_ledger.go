@@ -4,10 +4,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -40,7 +43,8 @@ func SetCirclePayoutLedger(ledger CirclePayoutLedger) {
 
 // Every page of one collection, following only validated Link cursors. A
 // repeated page or more than `maximumPages` pages fails the whole read.
-func circleReadEveryPage[R any](ctx context.Context, client *CoreCircleApiClient, first string, key string, maximumPages int, headers func(http.Header), visit func(R) error) error {
+func circleReadEveryPage[R any](ctx context.Context, client *CoreCircleApiClient, first string, key string, maximumPages int, readNext func(http.Header) (string, error), visit func(R) error) error {
+	headers := client.readHeaders("")
 	seenPages := map[string]bool{}
 	for uri := first; uri != ""; {
 		if seenPages[uri] {
@@ -58,7 +62,7 @@ func circleReadEveryPage[R any](ctx context.Context, client *CoreCircleApiClient
 				return nil, fmt.Errorf("Circle %s page has no pagination Link", key)
 			}
 			var err error
-			if next, err = circleReadNext(first, response.Header); err != nil {
+			if next, err = readNext(response.Header); err != nil {
 				return nil, err
 			}
 			return circleReadPage[R](body, key)
@@ -74,6 +78,53 @@ func circleReadEveryPage[R any](ctx context.Context, client *CoreCircleApiClient
 		uri = next
 	}
 	return nil
+}
+
+// Circle may omit our fixed filters from a next link. circleReadNext accepts
+// a link only when it repeats exactly the base's filters unchanged, so each
+// subset of ours is tried as the base: the link passes under the subset it
+// repeats, and under none when it changes one or adds another. Only its
+// cursor and page size are taken, under every filter of ours.
+func circleReadNextUnderFilters(endpoint string, filters url.Values, header http.Header) (string, error) {
+	keys := []string{}
+	for key := range filters {
+		if key != "pageSize" {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	seen := map[string]bool{}
+	refusals := []error{}
+	for subset := 0; subset < 1<<len(keys); subset++ {
+		base := url.Values{}
+		for i, key := range keys {
+			if subset&(1<<i) != 0 {
+				base[key] = filters[key]
+			}
+		}
+		next, err := circleReadNext(endpoint+"?"+base.Encode(), header)
+		if err != nil {
+			if !seen[err.Error()] {
+				seen[err.Error()] = true
+				refusals = append(refusals, err)
+			}
+			continue
+		}
+		if next == "" {
+			return "", nil
+		}
+		// circleReadNext re-encoded this query, and it holds exactly one cursor.
+		_, query, _ := strings.Cut(next, "?")
+		link := (&url.URL{RawQuery: query}).Query()
+		rebuilt := maps.Clone(filters)
+		for _, key := range []string{"pageSize", "pageAfter", "pageBefore"} {
+			if value := link.Get(key); value != "" {
+				rebuilt.Set(key, value)
+			}
+		}
+		return endpoint + "?" + rebuilt.Encode(), nil
+	}
+	return "", errors.Join(refusals...)
 }
 
 // No state, type or operation filter applies, and `includeAll` also lists
@@ -93,15 +144,19 @@ func (self *CoreCircleApiClient) ListWalletTransactions(ctx context.Context, wal
 		return nil, fmt.Errorf("invalid Circle wallet transaction listing arguments")
 	}
 	since := from.UTC().Truncate(time.Second)
-	first := "https://api.circle.com/v1/w3s/transactions?" + url.Values{
+	endpoint := "https://api.circle.com/v1/w3s/transactions"
+	filters := url.Values{
 		"walletIds":  {walletId},
 		"from":       {since.Format(time.RFC3339)},
 		"includeAll": {"true"},
 		"pageSize":   {strconv.Itoa(circleReadPageSize)},
-	}.Encode()
+	}
+	readNext := func(header http.Header) (string, error) {
+		return circleReadNextUnderFilters(endpoint, filters, header)
+	}
 	seen := map[string]bool{}
 	transactions := []CircleTransaction{}
-	err := circleReadEveryPage(ctx, self, first, "transactions", maximumCirclePayoutLedgerPages, self.readHeaders(""), func(transaction CircleTransaction) error {
+	err := circleReadEveryPage(ctx, self, endpoint+"?"+filters.Encode(), "transactions", maximumCirclePayoutLedgerPages, readNext, func(transaction CircleTransaction) error {
 		created, err := time.Parse(time.RFC3339, transaction.CreateDate)
 		if err != nil || !validCircleReadId(transaction.Id) || seen[transaction.Id] || transaction.WalletId != walletId || created.Before(since) {
 			return fmt.Errorf("Circle wallet %s listing has an invalid, repeated, foreign or early transaction %.64q", walletId, transaction.Id)
@@ -141,9 +196,12 @@ func (self *CoreCircleApiClient) GetWalletTokenBalance(ctx context.Context, wall
 		"includeAll": {"true"},
 		"pageSize":   {strconv.Itoa(circleReadPageSize)},
 	}.Encode()
+	readNext := func(header http.Header) (string, error) {
+		return circleReadNext(first, header)
+	}
 	seen := map[string]bool{}
 	var balance *big.Rat
-	err = circleReadEveryPage(ctx, self, first, "tokenBalances", maximumCircleObservationPages, self.readHeaders(""), func(entry circleLedgerBalance) error {
+	err = circleReadEveryPage(ctx, self, first, "tokenBalances", maximumCircleObservationPages, readNext, func(entry circleLedgerBalance) error {
 		if entry.Token == nil || !validCircleReadId(entry.Token.Id) || seen[entry.Token.Id] || len(seen) == maximumCircleTokens {
 			return fmt.Errorf("Circle balance listing has a missing, repeated or excess token")
 		}
