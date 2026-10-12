@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
@@ -59,6 +60,87 @@ func (self *escrowGrantQueryTestRows) Next() bool {
 	return true
 }
 
+type escrowGrantStatementKind int
+
+const (
+	escrowGrantOther escrowGrantStatementKind = iota
+	// Identity-only discovery of the complete current set before ownership.
+	escrowGrantDiscovery
+	// A candidate or locking read that returns grant rows.
+	escrowGrantRead
+	// An exact reservation snapshot read of the grants it names.
+	escrowGrantReservation
+)
+
+// Positive allocation discovers the ids of every current grant and admits
+// their ownership before its candidate and locking reads (403b9c55). Those
+// discovery reads select only balance_id; every other read returns grants.
+// The exact census and cache publication, like the cache read's primary-key
+// lookup, neither discover grants nor change the candidate/locking budget.
+func escrowGrantStatement(sql string) escrowGrantStatementKind {
+	if sql == netEscrowAdmissionCacheSQL {
+		return escrowGrantReservation
+	}
+	normalized := strings.Join(strings.Fields(sql), " ")
+	switch {
+	case !strings.Contains(normalized, " FROM transfer_balance "),
+		strings.Contains(normalized, "transfer_balance_net_escrow_"):
+		return escrowGrantOther
+	case strings.HasPrefix(normalized, "SELECT balance_id FROM transfer_balance "),
+		strings.HasPrefix(normalized, "SELECT selected.balance_id FROM ("):
+		return escrowGrantDiscovery
+	default:
+		return escrowGrantRead
+	}
+}
+
+// Counts one owned allocation's grant work at the driver, from the rows each
+// statement actually returned. Positive allocation admits transaction
+// ownership only on the server's own transaction (403b9c55), so a wrapper
+// transaction cannot carry these counters; the hook binds to that
+// transaction's connection through the context the allocation uses instead.
+type escrowGrantQueryHook struct {
+	grantQueries     int
+	grantRows        int
+	discoveryQueries int
+	discoveryRows    int
+	reservationReads int
+	reservationRows  int
+	grantSql         string
+	grantArgs        []any
+	// Runs before each candidate or locking read is sent.
+	beforeGrant func(sql string, args []any)
+}
+
+// Bind with withLegacyStatementHooks inside a scope from startLegacyStatementHooks.
+func (self *escrowGrantQueryHook) statementHook() *legacyStatementHook {
+	return &legacyStatementHook{
+		beforeQuery: func(_ context.Context, sql string, args []any) {
+			switch escrowGrantStatement(sql) {
+			case escrowGrantDiscovery:
+				self.discoveryQueries++
+			case escrowGrantRead:
+				self.grantQueries++
+				self.grantSql, self.grantArgs = sql, append([]any(nil), args...)
+				if self.beforeGrant != nil {
+					self.beforeGrant(sql, args)
+				}
+			case escrowGrantReservation:
+				self.reservationReads++
+				self.reservationRows += len(args[0].([]server.Id))
+			}
+		},
+		completed: func(sql string, tag pgconn.CommandTag) {
+			switch escrowGrantStatement(sql) {
+			case escrowGrantDiscovery:
+				self.discoveryRows += int(tag.RowsAffected())
+			case escrowGrantRead:
+				self.grantRows += int(tag.RowsAffected())
+			}
+		},
+	}
+}
+
 // Expired and future grants are active while their durable bytes are positive,
 // but neither may consume the per-contract grant read's wire/decoding work.
 func TestCreateTransferEscrowReadsOnlyCurrentGrants(t *testing.T) {
@@ -88,25 +170,38 @@ func TestCreateTransferEscrowReadsOnlyCurrentGrants(t *testing.T) {
 				add(server.NewId(), server.NewId(), now.Add(-time.Hour), now.Add(time.Hour), 1024, true)
 			})
 		})
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		for _, byteCount := range []ByteCount{0, 1536} {
-			var query *escrowGrantQueryTestTx
+			query := &escrowGrantQueryHook{}
 			var escrow *TransferEscrow
 			var posts []func() any
+			// Positive allocation admits its grants' transaction ownership
+			// (403b9c55), which only the server's own read-committed no-retry
+			// transaction can hold, so the counters observe that transaction.
 			server.Tx(ctx, func(tx server.PgTx) {
-				query = &escrowGrantQueryTestTx{PgTx: tx}
+				hooked, unhook := withLegacyStatementHooks(ctx, tx, query.statementHook())
+				defer unhook()
 				var err error
-				escrow, posts, err = createTransferEscrowInTx(ctx, query, clients.payerNetworkId, clients.payerId,
+				escrow, posts, err = createTransferEscrowInTx(hooked, tx, clients.payerNetworkId, clients.payerId,
 					clients.providerNetworkId, clients.providerId, clients.payerNetworkId, byteCount, nil)
 				server.Raise(err)
-			})
+			}, server.TxReadCommitted, server.OptNoRetry())
 			server.RunPosts(ctx, posts...)
 			wantQueries, wantRows := 1, 1
+			wantDiscoveries, wantDiscoveryRows := 0, 0
 			if byteCount > 0 {
 				wantQueries = 2 // Identity-only discovery, then locked current grants.
 				wantRows = 2
+				// The allocator and its complete locked read each discover
+				// the ids of the two current grants before admitting them.
+				wantDiscoveries, wantDiscoveryRows = 2, 4
 			}
 			if query.grantQueries != wantQueries || query.grantRows != wantRows {
 				t.Errorf("bytes=%d grant queries=%d rows=%d, want %d queries and %d current rows", byteCount, query.grantQueries, query.grantRows, wantQueries, wantRows)
+			}
+			if query.discoveryQueries != wantDiscoveries || query.discoveryRows != wantDiscoveryRows {
+				t.Errorf("bytes=%d ownership discovery queries=%d rows=%d, want %d queries and %d current rows", byteCount, query.discoveryQueries, query.discoveryRows, wantDiscoveries, wantDiscoveryRows)
 			}
 			want := map[server.Id]ByteCount{firstId: 0}
 			wantPriority := Priority(PaidPriority)
