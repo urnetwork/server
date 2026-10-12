@@ -3178,10 +3178,13 @@ func ConnectNetworkClientWithIpFamily(
 		return
 	}
 	// the durable connection history for the onboarding results: one
-	// connect.day event per network per UTC day, its own transaction after
-	// the connection is committed, cached per process, never failing this
-	// connect (RecordConnectDay)
-	RecordConnectDay(ctx, clientId, connectTime)
+	// connect.day event per network per UTC day, deduplicated per network
+	// across the fleet and written after the connection is committed, never
+	// failing this connect (RecordConnectDay). Transports always pass their
+	// authenticated network; a legacy caller that names none records no day.
+	for _, networkId := range authenticatedNetworkIds {
+		RecordConnectDay(ctx, networkId, clientId, connectTime)
+	}
 
 	return
 }
