@@ -559,10 +559,10 @@ func calculateReliabilityPayoutInTx(
 		return networkReliabilitySubsidies
 	}
 
-	reliabilitySubsidyPerPayout := UsdToNanoCents(float64(EnvSubsidyConfig().ReliabilitySubsidyPerPayoutUsd))
-	if transition != nil {
-		reliabilitySubsidyPerPayout = NanoCents(float64(reliabilitySubsidyPerPayout) * subsidyScale)
-	}
+	// the amount is per subsidy period (`days`) like the points, so a plan pays
+	// it for the part of the period its window covers. Paid in full per plan, it
+	// was paid again by every plan that ran more often than once a period.
+	reliabilitySubsidyPerPayout := NanoCents(float64(UsdToNanoCents(float64(EnvSubsidyConfig().ReliabilitySubsidyPerPayoutUsd))) * subsidyScale)
 
 	for networkId, score := range reliabilityScores {
 
