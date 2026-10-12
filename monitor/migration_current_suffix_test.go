@@ -110,6 +110,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"invented identified checkpoint total", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count SET DEFAULT 0`},
 		{"missing ledger epoch rows", 814, `DROP TABLE st_ledger_v2_epoch_rows`},
 		{"epoch rows with both chunks and a declaration", 814, `ALTER TABLE st_ledger_v2_epoch_rows DROP CONSTRAINT st_ledger_v2_epoch_rows_check`},
+		{"epoch rows without rebuild requests", 814, `ALTER TABLE st_ledger_v2_epoch_rows DROP COLUMN rebuild_requested_by`},
 		{"account coldkeys not unique per pool", 814, `ALTER TABLE st_ledger_v2_account DROP CONSTRAINT st_ledger_v2_account_deployment_key_no_id_coldkey_key`},
 		{"missing account coldkey lookup", 814, `DROP INDEX st_ledger_v2_account_coldkey`},
 		{"funding truncates rao", 814, `ALTER TABLE st_ledger_v2_funding ALTER COLUMN funded_through TYPE numeric(38,0)`},

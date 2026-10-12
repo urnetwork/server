@@ -19,11 +19,17 @@ import (
 
 	"github.com/holiman/uint256"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urfoundation/sn/ledger"
 	"github.com/urfoundation/sn/merkle"
 
 	"github.com/urnetwork/server/model"
 )
+
+// ErrStLedgerV2RebuildRefused refuses the operator's rebuild of an epoch
+// whose provider rows cannot be built again.
+var ErrStLedgerV2RebuildRefused = errors.New("st ledger v2: the epoch's provider rows cannot be rebuilt")
 
 // stLedgerV2Builder is the server's LedgerBuilder.
 type stLedgerV2Builder struct{}
@@ -166,4 +172,34 @@ func (stLedgerV2Builder) Accounts(ctx context.Context, ledgerHash [32]byte) ([]m
 		return nil, fmt.Errorf("st ledger v2: ledger 0x%x: %w", ledgerHash, err)
 	}
 	return accounts, nil
+}
+
+// StLedgerV2RebuildEpoch is the operator's explicit command naming an epoch
+// whose recorded provider rows, or null declaration, are to be built again
+// from v1's inputs (§6.4 fixed inputs). It records the request with who made
+// it; the next root built while no pending root that can still finalize lists
+// the epoch's recorded rows builds them again (stLedgerV2CommitEpoch). It is
+// refused for an epoch the latest finalized root covers, whose rows are final,
+// and for an epoch without a record, which the next root builds anyway.
+func StLedgerV2RebuildEpoch(ctx context.Context, epoch uint64, requestedBy string) error {
+	cfg, client, err := stLedgerV2Require()
+	if err != nil {
+		return err
+	}
+	state, err := client.LedgerV2State(ctx, cfg.NoId)
+	if err != nil {
+		return err
+	}
+	if state.Latest != nil && epoch <= state.Latest.Epoch {
+		return fmt.Errorf("%w: epoch %d is covered by finalized root %d", ErrStLedgerV2RebuildRefused, epoch, state.Latest.Index)
+	}
+	requested, err := model.RequestStLedgerV2EpochRebuild(ctx, cfg.DeploymentKey(), cfg.NoId, epoch, requestedBy)
+	if err != nil {
+		return err
+	}
+	if !requested {
+		return fmt.Errorf("%w: epoch %d has no recorded provider rows", ErrStLedgerV2RebuildRefused, epoch)
+	}
+	glog.Infof("[st]v2 epoch %d provider rows to be rebuilt as requested by %s\n", epoch, requestedBy)
+	return nil
 }

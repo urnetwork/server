@@ -709,6 +709,97 @@ func TestStLedgerV2BuilderRefusesClippedWindows(t *testing.T) {
 	})
 }
 
+// §6.4 (fixed inputs): the operator's rebuild command records, naming who
+// made it, a request to build an epoch's recorded rows or null declaration
+// again, and changes nothing else. It is refused without settlement v2, when
+// vault2 cannot be read, for an epoch the latest finalized root covers,
+// without a requester, and for an epoch with nothing recorded. A root built
+// for the request reads the epoch's rows from v1's inputs again, counting
+// usage added since; the wallet resolutions retained for the epoch stay, and
+// the new rows replace the record and end the request.
+func TestStLedgerV2RebuildEpoch(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newLedgerV2BuildFixture(t)
+		chain := newFakeLedgerV2Chain(&[]string{})
+		SetStLedgerV2Client(chain)
+		t.Cleanup(func() { SetStLedgerV2Client(nil) })
+		key := f.cfg.DeploymentKey()
+		p := f.providers()
+		f.contract(ledgerV2BuildAuthority(1).StartTime, ledgerV2BuildUsage{p.own, p.networks[0], 100})
+		input := &StLedgerV2BuildInput{NoId: 1, Epoch: 1, Epochs: []*StLedgerV2CoveredEpoch{ledgerV2Covered(1, 10, nil)}}
+		build, err := stLedgerV2Builder{}.Build(f.ctx, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.publish(input, build, 0)
+		if err := model.DeclareStLedgerV2EpochUnrecoverable(f.ctx, key, 1, 3, "operator@example"); err != nil {
+			t.Fatal(err)
+		}
+		records := func() map[uint64]*model.StLedgerV2EpochRows {
+			return model.GetStLedgerV2EpochRows(f.ctx, key, 1, 1, 3)
+		}
+		before := records()
+
+		off := *f.cfg
+		off.SettlementV2, off.VaultV2 = common.Address{}, common.Address{}
+		SetStConfig(&off)
+		if err := StLedgerV2RebuildEpoch(f.ctx, 1, "rebuilder@example"); !errors.Is(err, errStLedgerV2NotConfigured) {
+			t.Fatalf("v2 off: %v", err)
+		}
+		SetStConfig(f.cfg)
+		chain.failNext("state", errors.New("state unreadable"))
+		if err := StLedgerV2RebuildEpoch(f.ctx, 1, "rebuilder@example"); err == nil || err.Error() != "state unreadable" {
+			t.Fatalf("state: %v", err)
+		}
+		chain.roots = []*StLedgerV2FinalizedRoot{{Index: 0, Epoch: 1}}
+		if err := StLedgerV2RebuildEpoch(f.ctx, 1, "rebuilder@example"); !errors.Is(err, ErrStLedgerV2RebuildRefused) || err.Error() != ErrStLedgerV2RebuildRefused.Error()+": epoch 1 is covered by finalized root 0" {
+			t.Fatalf("finalized: %v", err)
+		}
+		chain.roots = nil
+		if err := StLedgerV2RebuildEpoch(f.ctx, 1, ""); err == nil || err.Error() != "st ledger v2: a rebuild request must name who makes it" {
+			t.Fatalf("no requester: %v", err)
+		}
+		if err := StLedgerV2RebuildEpoch(f.ctx, 2, "rebuilder@example"); !errors.Is(err, ErrStLedgerV2RebuildRefused) || err.Error() != ErrStLedgerV2RebuildRefused.Error()+": epoch 2 has no recorded provider rows" {
+			t.Fatalf("unrecorded: %v", err)
+		}
+		if !reflect.DeepEqual(records(), before) {
+			t.Fatalf("a refused rebuild changed a record: %+v", records())
+		}
+		for _, epoch := range []uint64{1, 3} {
+			if err := StLedgerV2RebuildEpoch(f.ctx, epoch, "rebuilder@example"); err != nil {
+				t.Fatalf("rebuild epoch %d: %v", epoch, err)
+			}
+		}
+		requested := records()
+		for _, epoch := range []uint64{1, 3} {
+			record, earlier := *requested[epoch], *before[epoch]
+			earlier.RebuildRequestedBy = "rebuilder@example"
+			if !reflect.DeepEqual(record, earlier) {
+				t.Fatalf("requested epoch %d %+v", epoch, record)
+			}
+		}
+
+		// the root built for the request reads epoch 1's rows again
+		f.contract(ledgerV2BuildAuthority(1).StartTime.Add(time.Second), ledgerV2BuildUsage{p.network, p.networks[1], 300})
+		calls := f.chain.authorityCalls
+		again := &StLedgerV2BuildInput{NoId: 1, Epoch: 1, Epochs: []*StLedgerV2CoveredEpoch{ledgerV2Covered(1, 8, nil)}}
+		rebuilt, err := stLedgerV2Builder{}.Build(f.ctx, again)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.chain.authorityCalls != calls+1 || !reflect.DeepEqual(rebuilt.Accounts, ledgerV2SortedAccounts(ledgerV2Account(p.ownKey, 2), ledgerV2Account(p.networkKey, 6))) {
+			t.Fatalf("rebuilt accounts %v after %d authority reads", rebuilt.Accounts, f.chain.authorityCalls-calls)
+		}
+		f.publish(again, rebuilt, 0)
+		if record := records()[1]; !reflect.DeepEqual(record.ProviderChunks, rebuilt.Epochs[0].ProviderChunks) || reflect.DeepEqual(record.ProviderChunks, before[1].ProviderChunks) || record.RebuildRequestedBy != "" {
+			t.Fatalf("rebuilt record %+v", record)
+		}
+		if modes := f.resolutionModes(1); !reflect.DeepEqual(modes, map[server.Id]string{p.own: protocol.EarningWalletModeProvider, p.network: protocol.EarningWalletModeNetwork}) {
+			t.Fatalf("retained resolutions %v", modes)
+		}
+	})
+}
+
 // §8.2 (server start): a process installs the builder only when settlement
 // v2 is configured and st is enabled.
 func TestInstallStLedgerBuilder(t *testing.T) {

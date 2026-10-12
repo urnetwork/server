@@ -582,6 +582,7 @@ func stLedgerV2CommitEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2
 	if err != nil {
 		return stLedgerV2Retry(err), nil
 	}
+	stLedgerV2Rebuilds(state, input)
 	builder := stLedgerBuilder()
 	if builder == nil {
 		return stLedgerV2Retry(errors.New("st ledger v2: no ledger builder is installed")), nil
@@ -626,6 +627,22 @@ func stLedgerV2CommitEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2
 	return stLedgerV2Send(ctx, cfg, epoch, model.StPublishKindV2Commit, func() (string, error) {
 		return client.LedgerV2Commit(ctx, epoch, noId, rootCount, commitment)
 	}), nil
+}
+
+// stLedgerV2Rebuilds builds again each covered epoch whose rebuild the operator
+// requested (§6.4 fixed inputs), unless the pending root lists the epoch's
+// recorded rows and can still finalize, which keeps them final. A root for
+// epoch e is built at end(e) or later, when approvals of a pending root for an
+// earlier epoch have closed (ApprovalClosed at end(pending epoch + 1)), so a
+// pending root short of its quorum here never finalizes.
+func stLedgerV2Rebuilds(state *StLedgerV2State, input *StLedgerV2BuildInput) {
+	pending := state.Pending
+	for _, covered := range input.Epochs {
+		mayFinalize := pending != nil && covered.Epoch <= pending.Epoch && 0 < state.Quorum && state.Quorum <= state.Approvals
+		if covered.Rows != nil && covered.Rows.RebuildRequestedBy != "" && !mayFinalize {
+			covered.Rows = nil
+		}
+	}
 }
 
 func stLedgerV2MissedCommit(ctx context.Context, cfg *StConfig, epoch uint64, deadline uint64) *StPublishOutcome {

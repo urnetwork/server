@@ -10,12 +10,15 @@ const stLedgerV2SchemaSql = `
 	-- that covers it (§6.4 fixed inputs): their chunk references ('{}' when
 	-- the epoch has no rows), or the operator's explicit declaration that the
 	-- epoch's inputs are unrecoverable (providers: null) and who made it.
+	-- rebuild_requested_by names who made the operator's explicit request to
+	-- build the epoch's rows again; the rows built for it replace the record.
 	CREATE TABLE st_ledger_v2_epoch_rows (
 		deployment_key varchar(96) NOT NULL,
 		no_id bigint NOT NULL CHECK (no_id > 0),
 		epoch bigint NOT NULL CHECK (epoch > 0),
 		provider_chunks text[] NULL,
 		declared_by varchar(256) NULL,
+		rebuild_requested_by varchar(256) NULL,
 		create_time timestamp NOT NULL,
 
 		PRIMARY KEY (deployment_key, no_id, epoch),
