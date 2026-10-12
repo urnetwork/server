@@ -330,14 +330,31 @@ func TestNetEscrowAdmissionCacheOutcomeDeleteAndIdentityReuse(t *testing.T) {
 	})
 }
 
-type admissionCacheThirdMutationTx struct {
-	server.PgTx
-	balanceId server.Id
+// Whether a batch inserts the admission's escrow rows: its census already ran.
+func admissionEscrowInsertBatch(queued []string) bool {
+	for _, sql := range queued {
+		if strings.Contains(sql, "INSERT INTO transfer_escrow") {
+			return true
+		}
+	}
+	return false
 }
 
-func (tx admissionCacheThirdMutationTx) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
-	server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=balance_byte_count+4 WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-1')::uuid`, tx.balanceId))
-	return tx.PgTx.SendBatch(ctx, b)
+// A third writer's escrow mutation, made by the admission transaction itself
+// between its census and its escrow insert batch, so the insert's predicted
+// revision is one short. Admission owns its grant's transaction ownership
+// (403b9c55), so a statement hook on its connection injects the mutation
+// rather than a wrapper around the transaction. The mutation runs with the
+// unhooked context, so it does not run itself again.
+func admissionCacheThirdMutationHook(ctx context.Context, tx server.PgTx, balanceId server.Id) *legacyStatementHook {
+	return &legacyStatementHook{
+		before: func(_ context.Context, _ string, queued []string) {
+			if !admissionEscrowInsertBatch(queued) {
+				return
+			}
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=balance_byte_count+4 WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-1')::uuid`, balanceId))
+		},
+	}
 }
 
 func TestNetEscrowAdmissionCacheThirdMutationCannotPublishWrongRevision(t *testing.T) {
@@ -347,17 +364,28 @@ func TestNetEscrowAdmissionCacheThirdMutationCannotPublishWrongRevision(t *testi
 		ctx := t.Context()
 		f := seedAdmissionCacheHistory(t, ctx, 3, 20)
 		lockedAdmissionCacheTestRead(ctx, f)
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		var posts []func() any
 		server.Tx(ctx, func(tx server.PgTx) {
+			hooked, release := withLegacyStatementHooks(ctx, tx, admissionCacheThirdMutationHook(ctx, tx, f.balanceId))
+			defer release()
 			var err error
-			_, posts, err = createTransferEscrowInTx(ctx, admissionCacheThirdMutationTx{tx, f.balanceId}, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 1, nil)
+			_, posts, err = createTransferEscrowInTx(hooked, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 1, nil)
 			server.Raise(err)
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		// The unexpected third revision means the predicted+2 amount cannot be
-		// made authoritative. Its delayed mirror must also take the exact fallback.
-		server.RunPosts(ctx, posts...)
+		// made authoritative: the commit's own publication is refused, so the
+		// next locked read misses and takes the exact census.
 		if got, n := lockedAdmissionCacheTestRead(ctx, f); got.reserved != 8 || n != 1 {
 			t.Fatalf("third mutation yielded amount%d reads%d, want8/1", got.reserved, n)
+		}
+		// Its delayed mirror must also take the exact fallback. Since bc98106b
+		// that post also warms the cache from its committed census, so the next
+		// locked read reuses the exact amount at the current revision.
+		server.RunPosts(ctx, posts...)
+		if got, n := lockedAdmissionCacheTestRead(ctx, f); got.reserved != 8 || n != 0 {
+			t.Fatalf("delayed post did not warm the exact cache: amount%d reads%d, want8/0", got.reserved, n)
 		}
 		if mirror := Testing_NetEscrowByteCount(ctx, f.balanceId); mirror != 8 {
 			t.Fatalf("delayed mirror used stale cache publication: %d", mirror)
