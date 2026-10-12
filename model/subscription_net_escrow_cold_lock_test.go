@@ -260,11 +260,13 @@ func TestNetEscrowColdSettlementMirrorSurvivesMetadataFailure(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, f.balanceId))
 		})
 		var posts []func() any
+		// The settlement owner admits transaction ownership only on the
+		// server's own read-committed no-retry transaction (ddad361c).
 		server.Tx(ctx, func(tx server.PgTx) {
 			var err error
 			posts, _, err = settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
 			server.Raise(err)
-		})
+		}, server.TxReadCommitted, server.OptNoRetry())
 		// The owning metadata transaction fails and rolls back, rather than
 		// stranding the committed mirror behind a lost sibling callback.
 		server.Tx(ctx, func(tx server.PgTx) {
