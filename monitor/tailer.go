@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,6 +86,10 @@ type logCanonicalCorrelation struct {
 type logClass struct {
 	name string
 	re   *regexp.Regexp
+	// services restricts the class to the named emitting services; empty
+	// matches every service. A line from another service falls through to
+	// the next matching class.
+	services []string
 	// match adds semantic validation after the cheap shape selector. A fixed
 	// structured event must be valid before it can claim a typed mechanism.
 	match func(string) bool
@@ -550,6 +555,24 @@ var logClasses = []logClass{
 		context:   "This exact class is local Grafana-to-Mimir failure, not Redis §5.2 and not proof of a fleet-wide Mimir outage. On 2026-09-10, bounded Main logs placed each refusal after the same emitting parent's child shutdown/SIGTERM boundary during a fleet rollout; two successive generations on one block reproduced the ordering on alternating internal ports, while the converged fleet's direct Grafana, Mimir, and ingress controls were healthy. Diagnostic line rate counts rejected pushes, not failed parents or incidents. Outside a replacement boundary, the same class can instead expose a child crash or bind failure and must be checked directly.",
 		action:    "Match the emitting parent and local child generation, child shutdown/SIGTERM, HTTP-front shutdown, listener, and rollout boundary. If the artifact predates the drain-before-child-stop correction in Warp commit 6544fe1, deploy a Grafana artifact containing it only after proving ancestry. If it is current or occurs outside drain, diagnose the named generation's Mimir readiness, restart, bind, and OOM evidence. Do not restart Redis, suppress the push error, or treat a healthy replacement as proof that the rejected old-generation samples were delivered.",
 		verify:    "Every active Grafana artifact contains Warp commit 6544fe1; during a controlled rolling replacement every old HTTP front stops accepting and finishes in-flight requests (or is closed at the bounded deadline) before its Mimir/Loki children stop; no grafana-mimir-push-refused line occurs through the full rollout plus 10 steady minutes; every exact child /ready and front /status remains healthy; and fresh pushed metrics remain queryable without a new §11.20 continuity gap.",
+	},
+	// A Proxy device's tun path resolves through the provider its customer
+	// selected, so its legs fail whenever that provider is offline or retired.
+	// Keep this before doh-dial-timeout; platform-owned paths keep that page.
+	{name: "doh-tun-dial-timeout", services: []string{"proxy"},
+		re: regexp.MustCompile(`\[family\]dial tag=doh observable=v1 path=tun [^\r\n]*\bresult=timeout(?:$|[[:space:]])`),
+		match: func(line string) bool {
+			match := parseDohDialObservation(line)
+			return match != nil && match[1] == "tun" && match[3] == "timeout"
+		},
+		sample:        dohDialTimeoutSample,
+		groupBy:       func(string) string { return "doh-tun-attempt" },
+		rateThreshold: 10, tier: tierWarn, playbook: "SIGNALS.md §1.5, §4, and §5.2",
+		meaning:   "a Proxy device's DoH leg through its own tunnel timed out; the tunnel's provider is the one its customer selected",
+		mechanism: "Remote DoH for a hosted device dials through that device's provider window. A device pinned to an offline or retired provider has no route, so every leg it races times out, and its customer's requests keep resolving. The lines are throttled per process and resolver target, so one such device holds a process above the threshold regardless of how many devices are affected.",
+		context:   "This is provider-path evidence, not a platform DNS outage: the line rate measures neither devices nor failed lookups. A losing hedge after another leg answered reports resolver_outcome=answer; a leg whose call never answered reports canceled or pending. Platform-owned host/caller paths still page under doh-dial-timeout.",
+		action:    "Compare fresh same-process [doh]resolver owner_path=tun cumulative deltas (answer, failed, canceled, timeout) and the Proxy ingress dial outcome ratio with their recent baseline before treating this as a platform incident. A platform-wide tunnel failure also shows in Connect handshake, contract creation and ingress dial signals. Do not fall back to host DoH for a customer's lookups or lengthen resolver timeouts from this class.",
+		verify:    "Logical tun resolver deltas show no failed or timeout growth and the ingress dial failure ratio stays at its baseline; host/caller paths have no doh-dial-timeout page.",
 	},
 	// A resolver fanout leg is not a logical lookup outcome. Keep this before
 	// generic TCP timeouts, including the endpoint-free timeout form.
@@ -2231,6 +2254,9 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 	}
 
 	for _, c := range logClasses {
+		if 0 < len(c.services) && !slices.Contains(c.services, self.service) {
+			continue
+		}
 		if c.re.MatchString(line) && (c.match == nil || c.match(line)) {
 			if deduplicate && !(liveStanding && c.countEveryLiveOccurrence) && self.standingReplayLocked(line, now) {
 				return
