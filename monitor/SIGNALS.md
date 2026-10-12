@@ -34317,6 +34317,10 @@ startup cleanup is confined to deliberately absent targets; it does not cover
 live settlement functions. Finished retention admits at most 64 exact finished
 keys before its row locks, rechecks the existing age predicate, and skips busy
 groups or rows for a later sweep. Age alone does not exclude a live Post retry.
+Each cleanup run seeks from a keyset position carried in its arguments, stops
+starting groups after a 30 s budget inside its 2 min max time, and re-arms at
+once from that position; a completed sweep starts again at the oldest row after
+10 minutes, and a failed or timed-out run retries within one minute.
 
 The 2026-10-08 bounded private R44 readiness capture reported taskworker
 initialization failure `invalid database ownership maintenance resource`.
