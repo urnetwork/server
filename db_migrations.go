@@ -10022,4 +10022,47 @@ var migrations = []any{
 			ADD COLUMN price_milliunits bigint NULL,
 			ADD COLUMN currency varchar(3) NULL
 	`),
+
+	// The index drops below were audited on 2026-10-12 like 816-819: Main's
+	// pg_stat_user_indexes (counters since the 2026-08-24 18:24 UTC reset,
+	// kept across the clean 2026-10-01 restart) and every query in this
+	// repository. They reclaim about 25 GB of Main's nearly full disk and a
+	// write on every insert into their tables. Apply them outside a running
+	// pg_dump, as DROP INDEX CONCURRENTLY waits for every lock on the table.
+
+	// 822: provider_work_session_event_transaction (13.3 GB on Main, 0 scans)
+	// serves only providerWorkSignSessionEventsInTx, which runs only when the
+	// optional provider_work_session.json signer is deployed, and it is not.
+	// Every connection open and retirement appends an event that writes it. A
+	// vault-loaded signer refuses to sign while the index is missing, so build
+	// it again concurrently before deploying that signer.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS provider_work_session_event_transaction`,
+		`DROP INDEX IF EXISTS provider_work_session_event_transaction`,
+	),
+	// 823: contract_close_report_evidence_contract (11.1 GB, 14,162 scans)
+	// duplicates contract_close_original_census (768, 3.3 billion scans). The
+	// only contract-keyed reader, the ST epoch original-close census, filters
+	// by contract_id and orders by client_id, report_id, which the census
+	// index matches exactly; every other reader seeks the primary key. Nothing
+	// orders evidence by party or accepted_at.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS contract_close_report_evidence_contract`,
+		`DROP INDEX IF EXISTS contract_close_report_evidence_contract`,
+	),
+	// 824: provider_probe_cycle_completed_waiting (0.23 GB, 0 scans) serves
+	// only the completed-run priority scans, which run only when the egress
+	// rule url_completed_run_priority_since is set, and it is not. If it is
+	// set later, the eligible next-attempt indexes (725, 728) serve the same
+	// reads.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_completed_waiting`,
+		`DROP INDEX IF EXISTS provider_probe_cycle_completed_waiting`,
+	),
+	// 825: provider_probe_cycle_slot_completed_waiting (0.33 GB, 1 scan) is the
+	// per-slot form of 824, with the same single gated reader.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_slot_completed_waiting`,
+		`DROP INDEX IF EXISTS provider_probe_cycle_slot_completed_waiting`,
+	),
 }

@@ -126,6 +126,13 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"App Store transaction price truncates milliunits", 821, `ALTER TABLE apple_subscription_transaction ALTER COLUMN price_milliunits TYPE integer`},
 		{"missing App Store transaction currency", 821, `ALTER TABLE apple_subscription_transaction DROP COLUMN currency`},
 		{"invented App Store transaction currency", 821, `ALTER TABLE apple_subscription_transaction ALTER COLUMN currency SET DEFAULT 'USD'`},
+		{"dropped provider session transaction index rebuilt", 822, `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
+		{"provider session head accepts a zero sequence", 822, snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
+		{"dropped close evidence contract index rebuilt", 823, `CREATE INDEX contract_close_report_evidence_contract ON contract_close_report_evidence (contract_id, party, accepted_at, report_id)`},
+		{"close evidence accepted time nullable", 823, `ALTER TABLE contract_close_report_evidence ALTER COLUMN accepted_at DROP NOT NULL`},
+		{"close evidence census index missing", 823, `DROP INDEX contract_close_original_census`},
+		{"dropped completed waiting probe index rebuilt", 824, `CREATE INDEX provider_probe_cycle_completed_waiting ON provider_egress_probe_cycle (next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
+		{"dropped slot completed waiting probe index rebuilt", 825, `CREATE INDEX provider_probe_cycle_slot_completed_waiting ON provider_egress_probe_cycle (slot_id, next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -206,6 +213,10 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{817, "transfer_contract", "transfer_contract_pair_open_create_time"},
 				{818, "transfer_contract", "transfer_contract_open_destination_partial"},
 				{819, "pending_task", "pending_task_has_reschedule_error"},
+				{822, "provider_work_session_event", "provider_work_session_event_transaction"},
+				{823, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
+				{824, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},
+				{825, "provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool

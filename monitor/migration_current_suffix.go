@@ -245,6 +245,18 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		snMainnetMigrationColumns("apple_subscription_transaction",
 			snMainnetMigrationColumn{name: "price_milliunits", kind: "bigint"},
 			snMainnetMigrationColumn{name: "currency", kind: "character varying(3)"})),
+	// 822 and 823 retire composite artifacts (776, 767-769) that pinned the
+	// dropped index, so each republishes the rest of that custody with the
+	// index required absent instead.
+	migrationCurrentSuffix(822, "provider session custody without the unread transaction index",
+		providerWorkSessionCustodyPredicates(
+			migrationIndexRemoved("provider_work_session_event", "provider_work_session_event_transaction"))...),
+	migrationCurrentSuffix(823, "close evidence custody without the duplicate contract index",
+		contractCloseEvidenceChainWithoutContractIndexArtifactQuery),
+	migrationCurrentSuffix(824, "unread completed waiting probe index removed",
+		migrationIndexRemoved("provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting")),
+	migrationCurrentSuffix(825, "unread slot completed waiting probe index removed",
+		migrationIndexRemoved("provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting")),
 }
 
 // A dropped index stays dropped: a rebuilt copy under the published name would
