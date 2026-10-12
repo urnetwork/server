@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/router"
 )
@@ -273,5 +275,45 @@ func TestTaskworkerRunServesStatusDuringCancelableStartup(t *testing.T) {
 	}
 	if starts.Load() != 0 {
 		t.Fatal("canceled startup launched a runtime")
+	}
+}
+
+// A saturated PgBouncer refuses the startup read with FATAL 08P01 instead of
+// a client timeout once its query_wait_timeout is shorter than the client's
+// own deadline. The owner waits and reads again rather than latching the
+// refusal as a rejected deployment.
+func TestTaskworkerStartupRetriesPgBouncerQueueTimeout(t *testing.T) {
+	taskworkerStartupTestEnvironment(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	refused := &pgconn.PgError{Severity: "FATAL", Code: "08P01", Message: "query_wait_timeout"}
+	reads, initializations, waits, metrics := 0, 0, 0, 0
+	runtime := &taskworkerLifecycleRuntime{drainStarted: make(chan struct{}), handbackDone: make(chan struct{})}
+	result := startTaskworkerAfterReadiness(ctx, ctx, cancel, RunOptions{Port: 8080, Count: 1, BatchSize: 1, WorkloadProfile: WorkloadProfileSubnetOperator},
+		func(context.Context) error {
+			reads++
+			if reads == 1 {
+				return fmt.Errorf("pg: %w", refused)
+			}
+			return nil
+		},
+		func(context.Context) func() { metrics++; return func() {} },
+		func(context.Context, context.Context, context.CancelFunc, RunOptions) (taskworkerRuntime, error) {
+			initializations++
+			return runtime, nil
+		},
+		func(owner context.Context, delay time.Duration) error {
+			waits++
+			if owner != ctx || delay != taskworkerStartupRetryDelay {
+				t.Fatal("pooler refusal changed the retry owner or delay")
+			}
+			return nil
+		},
+	)
+	if result.closeCapture != nil {
+		defer result.closeCapture()
+	}
+	if result.err != nil || result.worker != runtime || reads != 2 || initializations != 1 || waits != 1 || metrics != 1 {
+		t.Fatalf("pooler refusal stranded the taskworker startup: err=%v reads=%d initializations=%d waits=%d metrics=%d", result.err, reads, initializations, waits, metrics)
 	}
 }
