@@ -2559,9 +2559,10 @@ Probe: `redis-rates`
 
 The Redis dashboard and alerts must also respect the collection cadence. Since
 2026-08-26, edge-6 intentionally staggers its 32 exporter scrapes from 61 to 92
-seconds to avoid a remote-write burst. Grafana can resolve `$__rate_interval`
-to one minute, which contains fewer than two samples and makes counter-derived
-panels look empty even while all gauges and raw exporter counters are healthy.
+seconds, and since 2026-10-12 edge-5 its 16 from 93 to 108 seconds, to avoid a
+remote-write burst. Grafana can resolve `$__rate_interval` to one minute, which
+contains fewer than two samples and makes counter-derived panels look empty
+even while all gauges and raw exporter counters are healthy.
 On 2026-09-07, main returned 32 current series for each of
 `redis_commands_processed_total`, `redis_evicted_keys_total`, and
 `redis_expired_keys_total`, but `count(rate(...[1m]))` returned no value while
@@ -16994,7 +16995,7 @@ Probe: `redis-connections`
 
 - connected_clients per node: baseline ~pool_floor × processes; step change
   +50% in 10 min = reconnect storm or pool misconfig (min_connections is PER
-  NODE ×32 — a config of 64 = 2k idle conns per process).
+  NODE ×48 — a config of 64 = ~3k idle conns per process).
 - On a sustained per-node outlier, the probe runs one bounded `CLIENT LIST`
   battery and aggregates on the Redis host by source, flags, last command, and
   client library. The same trip-time battery records blocked clients, local
@@ -23149,13 +23150,15 @@ Signals learned draining `by-us-fmt-5-edge-4` live during a rolling deploy
 ### 10.4 Access recipe (this env)
 `ssh by@172.28.208.175` (edge-4). Orchestrator child: `ps --ppid <MainPID>`.
 Docker (root): `echo by-pass | sudo -S docker ps`. Redis registry lives on
-edge-6 `172.28.208.177`: `redis-cli -c -p 6379` (no auth). Readonly only.
+edge-6 and edge-5; from edge-6 `172.28.208.177`: `redis-cli -c -p 6379` (no
+auth). Readonly only.
 
 ## 11. Grafana / loki / mimir observability stack (the 2026-07-19 outage)
 
 The observability PLANE itself: grafana + loki + mimir behind a Go front
-(`warp/grafana/main.go`), ONE bundled service `warp-main-grafana-*` on 6-of-7
-lb/host_services hosts (edge-0/1/3/4, crisp, fireside; **edge-5 offline**). The
+(`warp/grafana/main.go`), ONE bundled service `warp-main-grafana-*` on all 6
+lb/host_services hosts (edge-0/1/3/4, crisp, fireside; edge-5 left them on
+2026-10-12 and runs MinIO and Redis nodes). The
 front is PID1 and supervises the children via `warp.Child` (restart-on-exit,
 plus restart-on-unready for loki and mimir since 2026-08-18, 11.13).
 **alloy is NOT a container child** — host-managed fluent-bit replaced it, and
@@ -23166,7 +23169,7 @@ Access: `by-pass <secmd-key> by` → per-host sudo pw, then
 `echo "$PW" | ssh by@<ip> 'sudo -S -p "" bash -s' <<'EOS' … EOS` — the `by` user
 is NOT in the docker group, so docker needs sudo. Log driver is now `local`, so
 `sudo docker logs <c>` WORKS (was awslogs → cloudwatch). IPs: edge-0=.173,
-edge-1=.51, edge-3=.174, edge-4=.175, edge-5=.176 (OFFLINE), crisp=.58,
+edge-1=.51, edge-3=.174, edge-4=.175, edge-5=.176 (MinIO, no bundle), crisp=.58,
 fireside=.3 (all 172.28.208.x mgmt). Route-net (eno1) IPs live in
 `config/main/settings.yml` routes.
 
@@ -23266,30 +23269,25 @@ timeout. FIX: pin frontend+scheduler to the external port (loki `frontend.port` 
 `query_scheduler.scheduler_ring.instance_port`=6490; mimir `.../ring.instance_port`=6491).
 
 ### 11.6 minio object-store persistence (edge-5)
-loki chunks + mimir blocks, plus the blob and competition buckets, land in
-minio. Since 2026-10-12 it runs only on edge-5 (`192.168.51.179:23900`,
-management overlay 172.28.208.176): one erasure set at EC:2 over four XFS
-drives, data **`/mnt/blob{1...4}/minio`** (xops `minio_drives`). Until then it
-was a single drive at `/mnt/data/minio` on edge-6, a filesystem shared with
-Redis backups; that shared disk filling is the 2026-10-11 incident in §11.6a.
-Read the data dirs from the host, never from memory — they are
-`MINIO_VOLUMES` in `/etc/default/minio-storage` (world-readable, rendered by
-playbook-minio-clusters.yml; `systemctl cat minio` shows
-`ExecStart=... $MINIO_VOLUMES`). `/etc/default/minio` now holds only the root
-credentials and options and is root-only. This doc said `/data/minio` until
-2026-08-18; that path does not exist, so every recipe below returned empty at
-it and read as "storage is empty" — the exact false alarm this section exists
-to prevent. A `du` that prints NOTHING (rather than `0`) is the tell that you
-have the wrong path, not an empty bucket. Each drive holds one erasure shard
-of every object, so a per-drive `du` is about half the logical size at EC:2.
-The data dirs are `minio:minio 0750`; run the recipe as root.
+loki chunks + mimir blocks land in minio (`192.168.51.179:23900`, on edge-5
+172.28.208.176 since the 2026-10-12 move from edge-6, xops
+`main/ansible/MINIO-MIGRATION.md`). Its data is one erasure set (EC:2) over four
+drives, **`/mnt/blob1/minio`** to **`/mnt/blob4/minio`**. Read the drives from the
+host, never from memory — they are `MINIO_VOLUMES` in `/etc/default/minio-storage`
+(`systemctl cat minio` shows `ExecStart=... $MINIO_VOLUMES`). This doc said
+`/data/minio` until 2026-08-18; that path does not exist, so every recipe below
+returned empty at it and read as "storage is empty" — the exact false alarm
+this section exists to prevent. A `du` that prints NOTHING (rather than `0`)
+is the tell that you have the wrong path, not an empty bucket. Every drive holds
+a share of every object, so the file recipes read the first drive; at EC:2 its
+`du` is about half the logical size that `mc du` reports.
 ```
-minio_volumes=$(sed -n 's/^MINIO_VOLUMES="\(.*\)"$/\1/p' /etc/default/minio-storage)  # do not hardcode
-for v in $minio_volumes; do du -sh $v/loki $v/mimir; done                          # growth = writing
-v=${minio_volumes%% *}                                                              # any one drive
-find $v/loki -name xl.meta -printf '%T+\n' | sort | tail -1                        # fresh mtime = live
-ls $v/loki/fake | wc -l                                                             # loki CHUNK dirs (fake=anon tenant)
-find $v/mimir -name meta.json | wc -l                                               # mimir FINALIZED blocks
+minio_data=$(sed -n 's/^MINIO_VOLUMES="\([^ "]*\).*/\1/p' /etc/default/minio-storage)  # first drive; do not hardcode
+sudo /usr/local/sbin/mc du warpminio/loki warpminio/mimir              # logical size
+du -sh $minio_data/loki $minio_data/mimir                              # growth = writing
+find $minio_data/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
+ls $minio_data/loki/fake | wc -l                                       # loki CHUNK dirs (fake=anon tenant)
+find $minio_data/mimir -name meta.json | wc -l                         # mimir FINALIZED blocks
 ```
 loki flushes on `chunk_idle_period`/shutdown. Mimir normally uploads a complete
 TSDB block at roughly a two-hour boundary, so an empty Mimir bucket immediately
@@ -23313,19 +23311,19 @@ path healthy and refuse the other. Check the configured bind, listening socket,
 and both HTTP health paths together:
 ```
 systemctl show minio -p ActiveState -p SubState -p NRestarts -p ExecMainStatus
-sudo grep -E '^MINIO_OPTS=' /etc/default/minio; grep -E '^MINIO_VOLUMES=' /etc/default/minio-storage
+grep -E '^(MINIO_OPTS|MINIO_VOLUMES)=' /etc/default/minio /etc/default/minio-storage
 ss -lntp | grep ':23900'
 curl -fsS --max-time 5 http://192.168.51.179:23900/minio/health/live
 curl -fsS --max-time 5 http://172.28.208.176:23900/minio/health/live
 ```
 Desired `MINIO_OPTS` binds the S3 API as `--address :23900` and keeps the
 administrative console loopback-only. The Ansible deployment must fail unless
-both health requests return 200. On 2026-08-20 the process was healthy but used
-`--address 192.168.51.193:23900`; LAN health returned 200 while the overlay
-connection was refused. That is a bind/config split, not a route, firewall, or
-data-store failure. Re-run `xops/main/ansible/run-minio-clusters.sh` after
-changing the vault environment; a source-only vault change does not restart the
-service.
+both health requests return 200. On 2026-08-20 the process (then on edge-6) was
+healthy but used `--address 192.168.51.193:23900`; LAN health returned 200 while
+the overlay connection was refused. That is a bind/config split, not a route,
+firewall, or data-store failure. Re-run `xops/main/ansible/run-minio-clusters.sh`
+after changing the vault environment; a source-only vault change does not
+restart the service.
 
 ### 11.6a MinIO capacity, quota and write-path health
 
@@ -23613,7 +23611,7 @@ the exact live DNAT rule.
 12. a whole dashboard is blank (not just some panels), or `count by (host)` on
     any metric is short a host → that host's fluent-bit is dead (11.14).
     Check `systemctl is-active fluent-bit` on the hosts with NO grafana bundle
-    too (edge-6, edge-2) — they appear in no §11.1 reading.
+    too (edge-6, edge-5, edge-2) — they appear in no §11.1 reading.
 13. Grafana UI/health and Mimir are green, the datasource row exists, but
     `/api/ds/query` and every scheduler rule fail with
     `[plugin.notRegistered]` → the datasource implementation is absent from
@@ -23871,10 +23869,10 @@ systemctl restart warp-main-grafana-<block>
 Probe: `log-shipper`
 
 alloy is gone; **host-managed fluent-bit ships every log line and every metric**,
-on every warp host — including edge-6 (redis + minio) and edge-2 (postgres),
-which run no grafana bundle at all and so appear in NO §11.1 reading. §11 had no
-signal for it until 2026-08-18, which is why edge-6 shipped nothing for 2d13h
-without anything noticing.
+on every warp host — including edge-6 (redis), edge-5 (minio + redis) and
+edge-2 (postgres), which run no grafana bundle at all and so appear in NO §11.1
+reading. §11 had no signal for it until 2026-08-18, which is why edge-6 shipped
+nothing for 2d13h without anything noticing.
 ```
 systemctl is-active fluent-bit                                   # per host, ALL warp hosts
 systemctl show fluent-bit -p NRestarts -p ActiveEnterTimestamp -p Result
@@ -28084,10 +28082,11 @@ same sustained campaign passed outside the maintenance boundary.
 Use all three clocks; a log error that appears after the request deadline can
 still name a restart which began before the request:
 ```bash
-# Redis host: simultaneous stop is the decisive full-cluster-outage signal.
+# Each Redis host (edge-6 runs nodes 1-32, edge-5 nodes 33-48): simultaneous
+# stop is the decisive full-cluster-outage signal.
 journalctl --utc --since '<request-start - 15s>' --until '<request-end + 30s>' \
   -u 'redis-cluster@*.service'
-for i in $(seq 1 32); do
+for i in $(seq 1 32); do   # on edge-5: seq 33 48
   systemctl show "redis-cluster@$i.service" \
     -p Id -p ExecMainStartTimestamp -p ActiveEnterTimestamp -p NRestarts
 done

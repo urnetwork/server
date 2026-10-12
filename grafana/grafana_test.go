@@ -615,7 +615,7 @@ func TestRedisClusterCounterRatesCoverStaggeredScrapes(t *testing.T) {
 			}
 		}
 		if strings.Contains(joined, "$__rate_interval") {
-			t.Errorf("Redis panel %d uses $__rate_interval, which can be shorter than the 61–92 second staggered scrape interval: %s", panelID, joined)
+			t.Errorf("Redis panel %d uses $__rate_interval, which can be shorter than the 61–108 second staggered scrape interval: %s", panelID, joined)
 		}
 		if strings.Count(joined, "[5m]") != len(metrics) {
 			t.Errorf("Redis panel %d must use one five-minute range per counter, got: %s", panelID, joined)
