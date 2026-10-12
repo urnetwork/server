@@ -8,6 +8,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Selects one primary-key page, admits its balance owners, then locks the
+// page's orphan rows. Any key the schema allows, including the all-zero key,
+// must page: one key that cannot be admitted would stop every later step.
 func ownedTransferEscrowOrphanPageInTx(ctx context.Context, tx server.PgTx, first bool,
 	cursor []any, limit int) (count int64, locked []string, targets []any, found, admitted bool) {
 	query := `SELECT contract_id,balance_id FROM transfer_escrow ORDER BY contract_id,balance_id LIMIT $1`
@@ -31,7 +34,16 @@ func ownedTransferEscrowOrphanPageInTx(ctx context.Context, tx server.PgTx, firs
 	if count == 0 {
 		return 0, nil, nil, false, true
 	}
-	admitted, err = tryTransferBalanceOwnershipInTx(ctx, tx, balanceIds)
+	// No grant has the zero id (NewId never mints it), so no consumption writer
+	// shares an owner with that row. Its ownership key panics on the zero id,
+	// which would fail this page on every pass at the same cursor.
+	ownedBalanceIds := make([]server.Id, 0, len(balanceIds))
+	for _, balanceId := range balanceIds {
+		if balanceId != (server.Id{}) {
+			ownedBalanceIds = append(ownedBalanceIds, balanceId)
+		}
+	}
+	admitted, err = tryTransferBalanceOwnershipInTx(ctx, tx, ownedBalanceIds)
 	server.Raise(err)
 	if !admitted {
 		return 0, nil, nil, false, false
