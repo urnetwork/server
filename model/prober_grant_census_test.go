@@ -14,6 +14,11 @@ func TestDynamicProberSuccessfulCensusTouchesOnlySelectedGrant(t *testing.T) {
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		// Positive selection admits grant ownership, which only the server's
+		// own transaction can hold (403b9c55); count its reads at the driver
+		// rather than through a wrapper transaction.
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		for _, extended := range []bool{false, true} {
 			clients := newEscrowSelectionTestClients(t, ctx)
 			setDynamicProberIdentityForTest(t, ctx, clients)
@@ -54,8 +59,10 @@ func TestDynamicProberSuccessfulCensusTouchesOnlySelectedGrant(t *testing.T) {
 			}
 			started := time.Now()
 			server.Tx(ctx, func(tx server.PgTx) {
-				counted := &grantHintTestTx{PgTx: tx}
-				selected := loadTransferEscrowBalances(ctx, counted, clients.payerNetworkId, clients.payerId, now, 1024)
+				counted := &escrowGrantQueryHook{}
+				hooked, unhook := withLegacyStatementHooks(ctx, tx, counted.statementHook())
+				defer unhook()
+				selected := loadTransferEscrowBalances(hooked, tx, clients.payerNetworkId, clients.payerId, now, 1024)
 				expected := ByteCount(4096)
 				if !extended {
 					expected -= 512
