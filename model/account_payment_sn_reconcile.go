@@ -34,6 +34,10 @@ func SnReconcileAddress(address string) string {
 	return strings.ToLower(strings.Trim(address, snReconcileAddressSpace))
 }
 
+// A8: until the fix of 2026-08-17 the planner moved every canceled row's
+// sweeps into the network's next plan.
+var SnReconcileReplanFixTime = time.Date(2026, 8, 17, 23, 59, 59, 0, time.UTC)
+
 // A2: a sweep of row `%[1]s` is early when its contract closed at or before
 // this bound: the start of the row's own plan epoch, raised to the latest
 // earlier row of the network whose plan recorded no epoch. A plan without an
@@ -86,9 +90,14 @@ type SnReconcileRow struct {
 	EarliestClose *time.Time
 	// A2: an early sweep, or a bonus that originated in another row.
 	EarlyEarnings bool
-	// A5: a later row of the network holds early sweeps that closed before
-	// this row was created. Read only for a row without sweeps.
+	// A5, A10: a row the network created after this row's cancellation holds
+	// early sweeps that closed before this row was created. Read only for a
+	// row without sweeps.
 	ReplanEvidence bool
+	// A8: the network created a row after this row's cancellation and before
+	// the fix, so the planner moved this row's sweeps. Read only for a row
+	// without sweeps.
+	ReplannedBeforeFix bool
 }
 
 // Circle's observation of the row's own attempt, retained with a revival.
@@ -109,7 +118,10 @@ var snReconcileStuckSql = `SELECT p.payment_id,p.payment_plan_id,p.network_id,p.
 	CASE WHEN EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id) THEN false ELSE EXISTS (
 		SELECT 1 FROM account_payment later CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "later") + ` AS bound) later_bound
 		JOIN transfer_escrow_sweep s ON s.payment_id=later.payment_id JOIN transfer_contract c ON c.contract_id=s.contract_id
-		WHERE later.network_id=p.network_id AND later.create_time>p.create_time AND c.close_time<p.create_time AND c.close_time<=later_bound.bound) END
+		WHERE later.network_id=p.network_id AND later.create_time>COALESCE(p.cancel_time,p.create_time) AND c.close_time<p.create_time AND c.close_time<=later_bound.bound) END,
+	CASE WHEN EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id) THEN false ELSE EXISTS (
+		SELECT 1 FROM account_payment later WHERE later.network_id=p.network_id
+		AND later.create_time>COALESCE(p.cancel_time,p.create_time) AND later.create_time<=$1) END
 	FROM account_payment p
 	CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "p") + ` AS bound) eb
 	LEFT JOIN account_wallet pinned ON pinned.wallet_id=p.wallet_id
@@ -127,7 +139,7 @@ var snReconcileStuckSql = `SELECT p.payment_id,p.payment_plan_id,p.network_id,p.
 func GetSnReconcileStuckRows(ctx context.Context) (rows []*SnReconcileRow, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, returnErr = []*SnReconcileRow{}, nil
-		result, err := conn.Query(ctx, snReconcileStuckSql)
+		result, err := conn.Query(ctx, snReconcileStuckSql, SnReconcileReplanFixTime)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				row := &SnReconcileRow{}
@@ -136,7 +148,7 @@ func GetSnReconcileStuckRows(ctx context.Context) (rows []*SnReconcileRow, retur
 					&row.SubsidyPayout, &row.ReliabilitySubsidy, &row.BonusPayout, &row.AttributionReviewRequired,
 					&row.CreateTime, &row.Canceled, &row.CancelTime, &row.CircleIdempotencyKey, &row.PaymentRecord, &row.TxHash, &row.TokenType, &row.TokenAmount,
 					&row.PaymentTime, &row.PaymentReceipt, &row.PinnedWalletAddress, &row.PayoutWalletId, &row.PayoutWalletAddress, &row.PayoutWalletBlockchain,
-					&row.PayoutWalletActive, &row.SweepCount, &row.EarliestClose, &row.EarlyEarnings, &row.ReplanEvidence))
+					&row.PayoutWalletActive, &row.SweepCount, &row.EarliestClose, &row.EarlyEarnings, &row.ReplanEvidence, &row.ReplannedBeforeFix))
 				if networkId == nil {
 					returnErr = errors.Join(returnErr, fmt.Errorf("stuck payment %s has no network; reconcile it by hand", row.PaymentId))
 					continue
@@ -332,7 +344,8 @@ type SnReconcileRevived struct {
 	PayoutWalletActive     bool
 }
 
-// A7: revived rows that still need funds from the payout wallets.
+// A7, A11: revived rows not yet submitted, which still need funds from the
+// payout wallets.
 func GetSnReconcileRevivedPending(ctx context.Context) (revived []*SnReconcileRevived) {
 	server.Db(ctx, func(conn server.PgConn) {
 		revived = []*SnReconcileRevived{}
@@ -340,7 +353,7 @@ func GetSnReconcileRevivedPending(ctx context.Context) (revived []*SnReconcileRe
 			FROM account_payment p
 			LEFT JOIN payout_wallet pw ON pw.network_id=p.network_id
 			LEFT JOIN account_wallet payout ON payout.wallet_id=pw.wallet_id AND payout.network_id=p.network_id
-			WHERE NOT p.completed AND NOT p.canceled
+			WHERE NOT p.completed AND NOT p.canceled AND p.payment_record IS NULL AND p.tx_hash IS NULL
 			AND EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.payment_id=p.payment_id AND a.event_type='sn_reconcile_revived')
 			ORDER BY p.payment_id`)
 		server.WithPgResult(result, err, func() {

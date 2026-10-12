@@ -1276,11 +1276,11 @@ func TestSnReconcileEndToEnd(t *testing.T) {
 		f.epoch(duplicate, at(4+32*24))
 		f.reserveUnjournaled(duplicate)
 		want[paidReplanned], want[duplicate] = snReconcilePaidReplanned, "unresolved: duplicate_risk"
-		// A failed attempt whose sweeps a later row holds.
+		// A failed attempt whose sweeps the next plan after its cancellation holds.
 		replannedNetwork, replannedWallet, _ := next()
 		replanned := f.legacy(replannedNetwork, &replannedWallet, at(5), model.UsdToNanoCents(1))
 		f.cancelWithRecord(replanned, "FAILED", "")
-		f.moveSweeps(replanned, f.payment(replannedNetwork, &replannedWallet, at(6), 0))
+		f.moveSweeps(replanned, f.payment(replannedNetwork, &replannedWallet, at(5+31*24), 0))
 		want[replanned] = snReconcileReplanned
 		networkId, walletId, _ = next()
 		review := f.legacy(networkId, &walletId, at(7), model.UsdToNanoCents(1))
@@ -1761,11 +1761,12 @@ func TestSnReconcileDestinationNormalisationChecked(t *testing.T) {
 
 // A5: a stuck row without sweeps is `replanned` only as RC-1 with a later
 // early holder; otherwise its sweeps may have been reaped and it may be owed.
+// The later rows here were created after the fix, so A8 does not apply.
 func TestSnReconcileReapedRowIsNotReplanned(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newSnReconcileTestFixture(t)
 		created := snReconcileTestCutoff.Add(-30 * snReconcileTestDay)
-		later := created.Add(31 * snReconcileTestDay)
+		later := model.SnReconcileReplanFixTime.Add(time.Second)
 		reaped := func() (server.Id, server.Id, server.Id) {
 			networkId, walletId, _ := f.network("MATIC")
 			return f.payment(networkId, &walletId, created, model.UsdToNanoCents(2)), networkId, walletId

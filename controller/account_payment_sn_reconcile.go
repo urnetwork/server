@@ -41,6 +41,7 @@ const (
 	snReconcileNoPayoutWallet    = "no_payout_wallet"
 	snReconcileBelowFee          = "below_fee"
 	snReconcileChanged           = "changed"
+	snReconcileUnattributed      = "unattributed_orphan"
 )
 
 // Outcomes of the row's own attempt that do not stop its classification.
@@ -138,11 +139,19 @@ type SnReconcileRowReport struct {
 	Chain           string                     `json:"chain,omitempty"`
 	Evidence        *model.SnReconcileEvidence `json:"circle_evidence,omitempty"`
 	OrphanIds       []string                   `json:"orphan_ids,omitempty"`
+	NotCarriedOver  *SnReconcileNotCarriedOver `json:"not_carried_over,omitempty"`
 
 	row           *model.SnReconcileRow
 	censusExact   bool
 	attempt       string
 	sendNanoCents model.NanoCents
+}
+
+// A8: a re-plan moved a `replanned` row's sweeps but neither its subsidy nor
+// its reliability. The owner decides whether they are owed.
+type SnReconcileNotCarriedOver struct {
+	SubsidyPayout      model.NanoCents `json:"subsidy_payout_nano_cents"`
+	ReliabilitySubsidy model.NanoCents `json:"reliability_subsidy_nano_cents"`
 }
 
 // One network's rows that hold early earnings an earlier payment may already
@@ -157,7 +166,7 @@ type SnReconcileDuplicates struct {
 }
 
 // A payable row `--send` left untouched: changed since the census, or blocked
-// by the re-listing (A1).
+// by the re-listing (A1, A9).
 type SnReconcileSkip struct {
 	PaymentId server.Id `json:"payment_id"`
 	Reason    string    `json:"reason"`
@@ -299,14 +308,24 @@ func SnReconcile(clientSession *session.ClientSession, send bool, expect string)
 	if err != nil {
 		return nil, err
 	}
+	// A9: an unattributed transfer the census did not have may have paid any row.
+	unattributed := []string{}
 	for _, orphan := range orphans {
-		if !slices.ContainsFunc(report.Orphans, func(listed *SnReconcileOrphan) bool { return listed.Id == orphan.Id }) {
-			report.Orphans = append(report.Orphans, orphan)
+		if slices.ContainsFunc(report.Orphans, func(listed *SnReconcileOrphan) bool { return listed.Id == orphan.Id }) {
+			continue
+		}
+		report.Orphans = append(report.Orphans, orphan)
+		if orphan.Unattributed {
+			unattributed = append(unattributed, orphan.Id)
 		}
 	}
 	for _, item := range payable {
 		if !report.Relisting.Complete {
 			report.Skipped = append(report.Skipped, &SnReconcileSkip{PaymentId: item.PaymentId, Reason: snReconcileListingIncomplete})
+			continue
+		}
+		if 0 < len(unattributed) {
+			report.Skipped = append(report.Skipped, &SnReconcileSkip{PaymentId: item.PaymentId, Reason: snReconcileUnattributed, OrphanIds: unattributed})
 			continue
 		}
 		if orphanIds := snReconcileBlockingOrphans(item.row, orphans); 0 < len(orphanIds) {
@@ -325,8 +344,28 @@ func SnReconcile(clientSession *session.ClientSession, send bool, expect string)
 	return report, nil
 }
 
-// The configured developer wallet and USDC token of each payout chain.
+// The circle.yml keys the payout getters read. A getter panics when its key is
+// missing or not a string.
+var snReconcileCircleKeys = []string{"polygon_wallet_id", "polygon_usdc_address", "solana_wallet_id", "solana_usdc_address"}
+
+// The configured developer wallet and USDC token of each payout chain. A12:
+// every key is checked before any getter reads it, so a missing key refuses
+// the command instead of panicking.
 func snReconcileConfiguredFunding() ([]*SnReconcileFunding, error) {
+	var config map[string]any
+	resource, err := server.Vault.SimpleResource("circle.yml")
+	if err == nil {
+		config, err = resource.ParseE()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("sn-reconcile: reading circle.yml: %w", err)
+	}
+	circle, _ := config["circle"].(map[string]any)
+	for _, key := range snReconcileCircleKeys {
+		if _, ok := circle[key].(string); !ok {
+			return nil, fmt.Errorf("sn-reconcile: circle.yml has no string value for circle.%s", key)
+		}
+	}
 	fundings := []*SnReconcileFunding{}
 	for _, chain := range []string{"MATIC", "SOL"} {
 		// Both chain names are supported, so neither lookup can refuse them.
@@ -496,14 +535,17 @@ func snReconcileClassify(item *SnReconcileRowReport, report *SnReconcileReport, 
 		item.Class, item.Reason = snReconcileUnresolved, snReconcileOrphanTransfer
 		return
 	}
-	// RC-8, A5: a row without sweeps is `replanned` only with evidence of the
-	// re-plan, and never as RC-2.
+	// RC-8, A5, A8: a row without sweeps is `replanned` only as RC-1, when its
+	// network created a row after its cancellation and before the fix, or a
+	// later row holds its early sweeps. The re-plan never carried over its
+	// subsidy or reliability.
 	if !item.censusExact {
 		switch {
 		case 0 < row.SweepCount:
 			item.Class, item.Reason = snReconcileUnresolved, snReconcileCensusMismatch
-		case row.Kind == model.SnReconcileCanceledWithEvidence && row.ReplanEvidence:
+		case row.Kind == model.SnReconcileCanceledWithEvidence && (row.ReplannedBeforeFix || row.ReplanEvidence):
 			item.Class = snReconcileReplanned
+			item.NotCarriedOver = &SnReconcileNotCarriedOver{SubsidyPayout: row.SubsidyPayout, ReliabilitySubsidy: row.ReliabilitySubsidy}
 		default:
 			item.Class, item.Reason = snReconcileUnresolved, snReconcileSweepsMissing
 		}
@@ -743,6 +785,10 @@ func (self *SnReconcileReport) Text() string {
 		}
 		if 0 < len(item.OrphanIds) {
 			fmt.Fprintf(b, ", orphans %s", strings.Join(item.OrphanIds, ","))
+		}
+		if item.NotCarriedOver != nil {
+			fmt.Fprintf(b, ", subsidy %s and reliability %s not carried over by the re-plan",
+				snReconcileUsd(item.NotCarriedOver.SubsidyPayout), snReconcileUsd(item.NotCarriedOver.ReliabilitySubsidy))
 		}
 		fmt.Fprintf(b, "\n")
 	}

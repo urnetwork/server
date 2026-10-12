@@ -10,8 +10,10 @@ Only stuck rows:
 
 - `canceled_with_evidence`: canceled, not completed, with a Circle idempotency
   key, a payment record or a tx hash. These were canceled before the
-  2026-08-17 fix and left for manual reconciliation. Their sweeps are never
-  re-planned.
+  2026-08-17 fix and left for manual reconciliation. Since the fix their
+  sweeps are never re-planned. Before it, the planner moved a canceled row's
+  sweeps into its network's next plan, and a completed payout's sweeps were
+  reaped seven days later (see `replanned`).
 - `unretained_key`: not canceled, with a key but no record or hash, and no
   `audit_account_payment` row under the key. The key was reserved before
   request journaling began, so the sender refuses the row forever.
@@ -23,16 +25,21 @@ The command never pays what it cannot prove unpaid. It never POSTs to Circle.
 `--send` revives each payable row and schedules it, and the existing sender
 pays it through every existing guard, from the developer wallets in vault
 `circle.yml` (`circle.solana_wallet_id`, `circle.polygon_wallet_id`). The
-command reads `circle.yml` and `sn.yml` as the sender does, and refuses when
-either payout wallet id or USDC token address is missing.
+command reads `circle.yml` and `sn.yml` as the sender does. It refuses before
+reading Circle when a payout wallet id or USDC token address
+(`circle.polygon_wallet_id`, `circle.polygon_usdc_address`,
+`circle.solana_wallet_id`, `circle.solana_usdc_address`) is missing or empty.
 
-## 1. Wait for every other payout to finish
+## 1. Wait for all other payout work to finish
 
-Run the command only after all other payout work has finished and its payments
-have completed. That includes the payment of the old pending attempts. Nothing
-else may pay, journal or change a payout row, or send to a provider, while the
-command runs and until its revived rows complete. Its checks catch a
-concurrent change only up to the moment each row is revived.
+The weekly planner and the sender may keep running: they never touch stuck
+rows. Every other person's or tool's payout work must have finished, and its
+payments completed, before you run the command. That includes the payment of
+the old pending attempts. Apart from the weekly planner and the sender, no
+person or tool may pay, journal or change a payout row, or send to a
+provider, while the command runs and until its revived rows complete. The
+command's checks catch a concurrent change only up to the moment each row is
+revived.
 
 ## 2. Dry run
 
@@ -69,11 +76,12 @@ return only makes that row `record_unavailable`.
   is `UNATTRIBUTED`. Investigate each one: it is part of the digest.
 - `classes`: the count and the total payout of each class and reason.
 - `funding`: per chain, the payable send total, plus rows earlier runs revived
-  that are not yet completed, against the payout wallet's USDC balance, and
-  any shortfall.
+  that the sender has not yet submitted (no payment record and no tx hash),
+  against the payout wallet's USDC balance, and any shortfall.
 - `rows`: one line per stuck row: the class or reason, what is owed, the send
   amount and chain, Circle's view of the row's own attempt (transaction id,
-  state, hash), and any orphans that block it.
+  state, hash), any orphans that block it, and for a `replanned` row its
+  subsidy and reliability, "not carried over by the re-plan".
 - `duplicates`: see below.
 
 | Class or reason | Meaning | Action |
@@ -81,7 +89,7 @@ return only makes that row `record_unavailable`.
 | `payable` | Exact, unpaid and unblocked. Owed is its payout; the send amount is payout minus the sender's $0.01 fee, on the current payout wallet's chain. | `--send` revives it |
 | `paid` | Circle completed its own attempt, and its sweeps are still its own. | none |
 | `paid_replanned` | Circle completed it, but its earnings were re-planned before the fix. | see duplicates |
-| `replanned` | It has no sweeps, its attempt moved no funds, and a later row of its network holds early sweeps that closed before it was created. | none |
+| `replanned` | It has no sweeps and its attempt moved no funds. Its network created a row after its `cancel_time` (its `create_time` when that is empty), and that row was created on or before 2026-08-17T23:59:59Z or holds early sweeps that closed before the stuck row was created. The re-plan moved its sweeps, even if they were reaped since, but not its subsidy or reliability. | owner decides on its subsidy and reliability; see below |
 | `unresolved: review_required` | Its attribution is flagged for review. | by hand |
 | `unresolved: contradictory` | Circle failed, denied or canceled it with a tx hash, or two listed transfers share its hash. | by hand |
 | `unresolved: in_flight` | Circle has not finished its attempt. | run again later |
@@ -89,10 +97,16 @@ return only makes that row `record_unavailable`.
 | `unresolved: listing_incomplete` | The listing is incomplete. | fix the listing |
 | `unresolved: orphan_transfer` | A hidden transfer to its pinned wallet or to any wallet of its network, from a day before its earliest contract closed, may have paid it. | check the orphan |
 | `unresolved: census_mismatch` | Its amounts do not match its sweeps and corrections exactly. | by hand |
-| `unresolved: sweeps_missing` | It has no sweeps and nothing shows they were re-planned; they may have been reaped, and it may be owed in full. | owner decides |
-| `unresolved: duplicate_risk` | It holds early earnings, which an earlier payment may already have paid. | see duplicates |
+| `unresolved: sweeps_missing` | It has no sweeps and nothing shows they were re-planned; they may have been reaped, and it may be owed in full. | owner decides; see below |
+| `unresolved: duplicate_risk` | The row itself holds early earnings (its own early sweeps, or corrections from another row), which an earlier payment may already have paid. `duplicates` has an entry for its network only when another, non-stuck row there holds early earnings. | by hand, from the row's own early earnings |
 | `unresolved: no_payout_wallet` | Its network has no active Solana or Polygon payout wallet. | wait for a wallet |
 | `unresolved: below_fee` | Its payout does not cover the $0.01 fee. | none |
+
+Never pay a `sweeps_missing` or `replanned` row in full by hand unless the
+byte counts of its network's later rows prove that none of its sweeps was
+re-planned into them. A later row whose `payout_byte_count` exceeds the bytes
+of its own epoch's contracts may hold re-planned sweeps, even after they were
+reaped.
 
 *Early earnings* are a row's sweeps whose contract closed at or before its
 plan's epoch start (the `subsidy_payment` start of its plan), or at or before
@@ -128,9 +142,10 @@ owed, send amount, chain) and the unattributed orphans you reviewed. The
 command runs the same census again and refuses before any write, exiting 1
 with its report, when the digest differs or a chain is short. Otherwise it
 lists every wallet once more, from an hour before the census listing started.
-A payable row that a new transfer may pay is skipped, and every payable row
-is skipped when that listing is incomplete. Each remaining payable row is
-handled in its own transaction:
+A payable row that a new transfer may pay is skipped. Every payable row is
+skipped when that listing is incomplete, or when it holds an unattributed
+transfer the census did not have. Each remaining payable row is handled in
+its own transaction:
 
 1. Lock the row and compare every column with the census snapshot, and check
    that no `audit_account_payment` row has the row's key as its id.
@@ -142,17 +157,19 @@ handled in its own transaction:
    as safely canceled, so no plan can move its sweeps.
 5. Schedule `advance_payment` for the row.
 
-A skipped row (`changed`, `orphan_transfer` or `listing_incomplete`) is not
-written; the run continues. Within 5 to 30 minutes the sender submits each
-revived row with a fresh idempotency key, to the network's current payout
-wallet. The revivals are in `audit_account_payment` under event type
-`sn_reconcile_revived`.
+A skipped row (`changed`, `orphan_transfer`, `listing_incomplete` or
+`unattributed_orphan`) is not written; the run continues. Within 5 to 30
+minutes the sender submits each revived row with a fresh idempotency key, to
+the network's current payout wallet. The revivals are in
+`audit_account_payment` under event type `sn_reconcile_revived`.
 
 ## 6. Confirm
 
-Once the sender has completed the revived rows, run the dry run again. No row
-may be `payable`, and no revived row may appear. The other rows keep their
-classes unless Circle or an operator changed them.
+Once the sender has completed the revived rows, run the dry run again. No
+revived row may appear, and no row may be `payable` except rows the `--send`
+re-listing skipped. Those stay payable for a later run, once you have found
+the cause and reviewed the new digest. The other rows keep their classes
+unless Circle or an operator changed them.
 
 ## Note: hung-payment cancellation
 
