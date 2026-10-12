@@ -68,8 +68,8 @@ the applicable verification window, and record that evidence in the run ledger.
    hosts themselves — not from a side-channel feed or a dashboard. The same
    rule everywhere: pg state from pg_stat_* on the primary, redis state from
    the nodes' own INFO/CLUSTER NODES, host state from the host. Dashboards and
-   inferred aggregates are not probe inputs. The narrow exceptions are §2.12
-   and §11.20:
+   inferred aggregates are not probe inputs. The narrow exceptions are §2.12,
+   §11.20 and §11.6a:
    Go runtime counters are emitted by the process itself and queried from
    Mimir with host/block/instance identity plus a 90-second freshness bound,
    because `/proc` RSS cannot distinguish allocated Go heap from retained
@@ -78,7 +78,11 @@ the applicable verification window, and record that evidence in the run ledger.
    that every sampled byte remains reachable. The Mimir-continuity probe tests
    the metric store itself with the raw range of an always-emitted build-info
    control; it never treats a dashboard rendering or traffic aggregate as the
-   signal.
+   signal. The MinIO probe (§11.6a) reads MinIO's own v3 drive, usage, quota
+   and request series from Mimir with the host's inventory identity and a
+   180-second freshness bound. MinIO's metrics endpoint is authenticated, and
+   its bearer token, like the root `mc` alias, stays root-only on the MinIO
+   host; the monitor holds neither.
 6. **Identity, not volume.** Dedup key = (signal id, class, target, frame)
    per SIGNALS.md §6. Rate is reported; volume is never severity. The current
    cadence gate deduplicates an identity within a batch, counts its consecutive
@@ -434,7 +438,7 @@ Escalation batteries pull incident windows non-interactively with
 
 | cadence | probes (SIGNALS.md ref) |
 |---|---|
-| 60s | contract rate 1.1; canary completions + failing tasks 1.2; idle-in-tx/active split 1.3; cluster_state + per-node PING 1.4; taskworker allocated-heap skew 2.12 |
+| 60s | contract rate 1.1; canary completions + failing tasks 1.2; idle-in-tx/active split 1.3; cluster_state + per-node PING 1.4; taskworker allocated-heap skew 2.12; MinIO drive free space vs its write floor, offline drives, bucket usage vs hard quota, S3 5xx/4xx rates 11.6a |
 | 5m | open-set count 2.6; per-node INFO memory 3.1/3.2; connected_clients 3.5; parked tasks 1.2; pgbouncer 6432 reachability; authoritative/recursive DNS aliases 18.3; control-plane clock (journalctl warp logs + docker container status per host — feeds every ticket's CONTEXT line) |
 | continuous | log tailers §3.7: one `warpctl logs <service> -f` per service plus a 45s bounded overlap reconciliation, §4 classification per line, per-minute rate findings |
 | 15m | pg_stat_statements top-20 mean drift 2.3 |
@@ -502,7 +506,7 @@ hosts:                # only monitor-specific facts; lan ips come
   - name: by-us-fmt-5-edge-5
     # disabled: true           # known offline; excluded from all probes
     overlay_ip: 172.28.208.176
-    roles: [minio, redis-cluster]
+    roles: [minio, redis-cluster]       # minio arms SIGNALS.md §11.6a
     redis: {node_ports: [6412, 6427]}   # nodes only; edge-6 is the entry
   - name: by-us-fmt-5-edge-6
     overlay_ip: 172.28.208.177
@@ -534,6 +538,13 @@ dns_aliases:          # optional; explicit desired state, never learned from DNS
   expected_a: [192.0.2.10, 198.51.100.20]
   expected_aaaa: [2001:db8::10, 2001:db8:1::20]
 ```
+
+The `minio` role needs no other monitor.yml key. SIGNALS.md §11.6a joins
+Fluent Bit's `host` label (the xops inventory name, which must equal the host's
+`name`) to the host and reads MinIO's v3 series through any `services` host's
+loopback Mimir gateway; MinIO's own drive count is the expected denominator. No
+MinIO bearer token, `mc` credentials or drive list belongs here. With no
+enabled `minio` host the probe stays dark.
 
 A Redis cluster may span several `redis-cluster` hosts. Each host lists its
 own `node_ports` (a two-element list is an inclusive range), node ports are
@@ -762,9 +773,10 @@ Decided (2026-07-17):
   *fixer/debugger* working a ticket, not detection. Explicit exceptions are
   bounded application-counter rates whose lossless rate cannot be reconstructed
   after required log sampling, §2.12's fresh process-originated Go heap
-  metrics, and §11.20's raw always-emitted control used to test Mimir
-  continuity. All retain concrete series identity and static bands; none uses
-  a dashboard-derived judgment as the signal.
+  metrics, §11.6a's fresh MinIO-originated storage and request series, and
+  §11.20's raw always-emitted control used to test Mimir continuity. All
+  retain concrete series identity and static bands; none uses a
+  dashboard-derived judgment as the signal.
 - **Runtime**: developed and run locally first (address_mode: overlay,
   ssh_override with the existing workstation access) against main; in-LAN
   deployment as a warp service comes after the probe set stabilizes.
