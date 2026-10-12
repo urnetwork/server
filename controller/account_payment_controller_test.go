@@ -246,7 +246,9 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		// set the mock aws message sender
 		// we don't want to send out messages in our tests
+		previousSender := GetAWSMessageSender()
 		SetMessageSender(mockAWSMessageSender)
+		defer SetMessageSender(previousSender)
 
 		subscriptionYearDuration := 365 * 24 * time.Hour
 
@@ -495,11 +497,13 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 		}
 		SetCircleClient(mockCircleClient)
 
+		previousSender := GetAWSMessageSender()
 		SetMessageSender(&mockAWSMessageSender{
 			SendMessageFunc: func(userAuth string, template Template, sendOpts ...any) error {
 				return nil
 			},
 		})
+		defer SetMessageSender(previousSender)
 
 		balanceCode, err := model.CreateBalanceCode(
 			ctx,
