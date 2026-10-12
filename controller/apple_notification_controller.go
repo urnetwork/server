@@ -3,6 +3,12 @@ package controller
 // Transactional App Store entitlement processing. Inputs are the already
 // verified nested JWS claims produced by api/handlers; notification and
 // transaction ledgers make retries idempotent.
+//
+// A transaction's price is in milliunits of its own ISO 4217 currency, while
+// net revenue (subscription_renewal, transfer_balance) is USD. Only a USD price
+// converts. Any other currency records the paid marker, and the transaction
+// ledger keeps its price and currency. The signed transaction carries no
+// proceeds, and Apple directs revenue accounting to App Store Connect reports.
 
 import (
 	"context"
@@ -10,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -21,13 +28,22 @@ import (
 const appleMaximumSubscriptionDuration = 2 * 366 * 24 * time.Hour
 const appleMaximumPriceMilliunits int64 = 10_000_000
 
+// The only currency whose price is recorded as net revenue.
+const appleUsdCurrency = "USD"
+
 type validatedAppleTransaction struct {
 	networkId     server.Id
 	transactionId string
 	productId     string
 	purchaseTime  time.Time
 	expiresTime   time.Time
-	netRevenue    model.NanoCents
+	// USD. Only a USD price converts; a price in any other currency, or with no
+	// currency, records the paid marker so that the balance stays paid.
+	netRevenue model.NanoCents
+	// the transaction price in milliunits of currency, the three-letter ISO
+	// 4217 code from the claims ("" when they name none or a malformed one)
+	priceMilliunits int64
+	currency        string
 	// storefront is the App Store storefront (ISO alpha-3), which prices the
 	// regional tier; the offer fields say whether the purchase used an offer
 	// (offerType 3 = offer code) and which one
@@ -210,8 +226,10 @@ func appleNetworkExistsInTx(tx server.PgTx, ctx context.Context, networkId serve
 //
 // notificationId is the notification UUID for webhook credits; the reconciler
 // passes a fresh id (the column is only a provenance pointer, unique per row).
-// Returns true only when this call committed a new entitlement. The caller
-// must refresh the pro cache (model.UpdateProNetwork) after commit when true.
+// The ledger row keeps the transaction's price and currency, the only record
+// of what a credit in another currency was paid. Returns true only when this
+// call committed a new entitlement. The caller must refresh the pro cache
+// (model.UpdateProNetwork) after commit when true.
 func appleCreditSubscriptionTransactionInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -225,15 +243,19 @@ func appleCreditSubscriptionTransactionInTx(
 				transaction_id,
 				notification_uuid,
 				network_id,
-				product_id
+				product_id,
+				price_milliunits,
+				currency
 			)
-			VALUES ($1, $2, $3, $4)
+			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''))
 			ON CONFLICT DO NOTHING
 		`,
 		transaction.transactionId,
 		notificationId,
 		transaction.networkId,
 		transaction.productId,
+		transaction.priceMilliunits,
+		transaction.currency,
 	))
 	if transactionTag.RowsAffected() == 0 {
 		return false
@@ -364,14 +386,31 @@ func validateAppleTransactionAccount(
 		return nil, errors.New("implausible App Store subscription period")
 	}
 
-	if priceMilliunits == 0 {
+	// Apple sends the code in upper case; anything that is not three letters
+	// names no currency
+	validated.priceMilliunits = priceMilliunits
+	validated.currency, _ = appleControllerStringClaim(transactionClaims, "currency")
+	validated.currency = strings.ToUpper(validated.currency)
+	if len(validated.currency) != 3 || strings.Trim(validated.currency, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
+		validated.currency = ""
+	}
+
+	switch {
+	case priceMilliunits == 0:
 		// Preserve trial and promotional entitlements while retaining a paid
 		// balance marker, matching the prior App Store behavior.
 		validated.netRevenue = model.UsdToNanoCents(0.01)
-	} else {
+	case validated.currency == appleUsdCurrency:
 		priceUsd := float64(priceMilliunits) / 1000
 		priceNanoCents := model.UsdToNanoCents(priceUsd)
 		validated.netRevenue = model.NanoCents(float64(priceNanoCents) * 0.8)
+	default:
+		// A price in another currency, or with no currency, is not USD, and the
+		// server has no reliable rate to convert it. Record the same paid marker
+		// as a trial: the balance stays paid with its grant and entitlement
+		// unchanged, and revenue accounting counts nothing rather than the
+		// foreign figure as USD. The ledger keeps the price and currency.
+		validated.netRevenue = model.UsdToNanoCents(0.01)
 	}
 	if validated.netRevenue <= 0 {
 		return nil, errors.New("invalid App Store net revenue")

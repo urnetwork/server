@@ -241,6 +241,10 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationIndexRemoved("pending_task", "pending_task_has_reschedule_error")),
 	migrationCurrentSuffix(820, "open connection handler index",
 		migrationFp2Index("network_client_connection", "network_client_connection_connected_handler_id", "handler_id", "connected", false)),
+	migrationCurrentSuffix(821, "App Store transaction price and currency",
+		snMainnetMigrationColumns("apple_subscription_transaction",
+			snMainnetMigrationColumn{name: "price_milliunits", kind: "bigint"},
+			snMainnetMigrationColumn{name: "currency", kind: "character varying(3)"})),
 }
 
 // A dropped index stays dropped: a rebuilt copy under the published name would

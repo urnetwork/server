@@ -10009,4 +10009,17 @@ var migrations = []any{
 	).withIndexCompletion(820, "network_client_connection", "network_client_connection_connected_handler_id",
 		"CREATE INDEX network_client_connection_connected_handler_id ON public.network_client_connection USING btree (handler_id) WHERE connected",
 		"connected"),
+
+	// 821: the price of each credited App Store transaction, in milliunits of
+	// its ISO 4217 currency. Net revenue is USD and only a USD price converts,
+	// so a credit in another currency records the paid marker and its price is
+	// kept here. Rows credited earlier stay NULL: their price survives only as
+	// the net revenue it was misread into, and their currency is unknown.
+	// Nullable columns without a default rewrite nothing. Apply before
+	// deploying the api and taskworker that write them.
+	newSqlMigration(`
+		ALTER TABLE apple_subscription_transaction
+			ADD COLUMN price_milliunits bigint NULL,
+			ADD COLUMN currency varchar(3) NULL
+	`),
 }
