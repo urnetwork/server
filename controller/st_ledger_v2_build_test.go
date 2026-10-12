@@ -802,7 +802,7 @@ func TestStLedgerV2RebuildEpoch(t *testing.T) {
 
 // §8.2 (server start): a process installs the builder only when settlement
 // v2 is configured and st is enabled.
-func TestInstallStLedgerBuilder(t *testing.T) {
+func TestStLedgerV2BuilderInstallsOnlyWithV2(t *testing.T) {
 	defer SetStConfig(nil)
 	defer SetStLedgerBuilder(nil)
 	off := ledgerV2TestConfig()

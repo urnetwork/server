@@ -35,7 +35,7 @@ func TestWorkloadsRunLedgerV2Steps(t *testing.T) {
 // settlement v2 ledger builder when v2 is configured, so the driver's steps
 // build and read ledgers with it: a read of a ledger missing from the store
 // reaches the store. Without v2 it installs none.
-func TestTaskWorkerInstallsTheLedgerBuilder(t *testing.T) {
+func TestWorkloadsRunLedgerV2StepsWithTheBuilder(t *testing.T) {
 	controller.SetStLedgerV2ObjectStore(server.NewLocalBlobStore(t.TempDir(), "test"))
 	t.Cleanup(func() {
 		controller.SetStConfig(nil)
