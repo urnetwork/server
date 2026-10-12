@@ -43,8 +43,8 @@ func stLedgerV2FinalizeOperation(epoch uint64, noId uint64) string {
 	return fmt.Sprintf("v2finalize:%d:%d", epoch, noId)
 }
 
-func stLedgerV2AnswerOperation(noId uint64, seq uint64, index uint64) string {
-	return fmt.Sprintf("v2answer:%d:%d:%d", noId, seq, index)
+func stLedgerV2AnswerOperation(noId uint64, seq uint64, rootIndex uint64, index uint64) string {
+	return fmt.Sprintf("v2answer:%d:%d:%d:%d", noId, seq, rootIndex, index)
 }
 
 // ErrStLedgerV2CommitSpent reports that an epoch's commit intent already ended
@@ -109,14 +109,15 @@ type StLedgerV2Commitment struct {
 	LedgerHash [32]byte
 }
 
-// StLedgerV2Answer opens a pending root's path at an index of the latest
-// finalized root: that root's account and claim proof, and the pending
-// root's top-down path.
+// StLedgerV2Answer opens a pending root's path at an index of the finalized
+// root RootIndex: that root's account and claim proof, and the pending root's
+// top-down path.
 type StLedgerV2Answer struct {
-	Index   uint64
-	Account merkle.LedgerAccount
-	Proof   []merkle.LedgerNode
-	Path    []merkle.LedgerPathNode
+	RootIndex uint64
+	Index     uint64
+	Account   merkle.LedgerAccount
+	Proof     []merkle.LedgerNode
+	Path      []merkle.LedgerPathNode
 }
 
 // StLedgerV2Client is the swappable v2 chain client; CoreStClient implements it.
@@ -128,8 +129,14 @@ type StLedgerV2Client interface {
 	// rootCommitWindowBlocks, which is also v2's close window.
 	LedgerV2EpochWindow(ctx context.Context, epoch uint64) (end uint64, window uint64, err error)
 	LedgerV2FundedThrough(ctx context.Context, noId uint64, epoch uint64) (uint256.Int, error)
-	// LedgerV2Demand reads vault2.demanded(noId, seq, index): a DemandState.
-	LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, index uint64) (uint8, error)
+	// LedgerV2LatestBlock reads the latest block's number. A send's eth_call
+	// and eth_estimateGas run at it; the transaction executes in a later block.
+	LedgerV2LatestBlock(ctx context.Context) (uint64, error)
+	// LedgerV2Root reads vault2.roots(noId, rootIndex), a finalized root.
+	LedgerV2Root(ctx context.Context, noId uint64, rootIndex uint64) (*StLedgerV2FinalizedRoot, error)
+	// LedgerV2Demand reads vault2.demanded(noId, seq, rootIndex, index): a
+	// DemandState.
+	LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, rootIndex uint64, index uint64) (uint8, error)
 	// LedgerV2Close sends closeOperatorEpoch under v2close:e:no.
 	LedgerV2Close(ctx context.Context, epoch uint64, noId uint64) (string, error)
 	// LedgerV2Commit sends commitDistribution under v2commit:e:no.
@@ -137,7 +144,7 @@ type StLedgerV2Client interface {
 	// LedgerV2Finalize sends finalizeDistribution under v2finalize:e:no, e
 	// being the pending root's epoch.
 	LedgerV2Finalize(ctx context.Context, epoch uint64, noId uint64) (string, error)
-	// LedgerV2Answer sends checkPath under v2answer:no:seq:index.
+	// LedgerV2Answer sends checkPath under v2answer:no:seq:rootIndex:index.
 	LedgerV2Answer(ctx context.Context, noId uint64, seq uint64, answer *StLedgerV2Answer) (string, error)
 }
 
@@ -247,11 +254,9 @@ func (self *CoreStClient) LedgerV2State(ctx context.Context, noId uint64) (*StLe
 		if err != nil {
 			return nil, fmt.Errorf("vault2 roots(): %w", err)
 		}
-		total, err := stUint256(root.Total)
-		if err != nil {
+		if state.Latest, err = stLedgerV2FinalizedRootOf(state.RootCount-1, root); err != nil {
 			return nil, err
 		}
-		state.Latest = &StLedgerV2FinalizedRoot{Index: state.RootCount - 1, Root: root.Root, Total: total, LeafCount: root.LeafCount, Epoch: root.Epoch, LedgerHash: root.LedgerHash}
 	}
 	pending, err := stViewAtBlock(self, ctx, vault, block, stLedgerV2VaultAbi.PackPending(no), stLedgerV2VaultAbi.UnpackPending)
 	if err != nil {
@@ -298,10 +303,50 @@ func (self *CoreStClient) LedgerV2FundedThrough(ctx context.Context, noId uint64
 	return stUint256(funded)
 }
 
-func (self *CoreStClient) LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, index uint64) (uint8, error) {
-	demand, err := stViewAt(self, ctx, self.cfg.VaultV2, stLedgerV2VaultAbi.PackDemanded(stBig(noId), seq, stBig(index)), stLedgerV2VaultAbi.UnpackDemanded)
+func (self *CoreStClient) LedgerV2LatestBlock(ctx context.Context) (uint64, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
 	if err != nil {
-		return 0, fmt.Errorf("vault2 demanded(%d, %d, %d): %w", noId, seq, index, err)
+		return 0, err
+	}
+	defer stopRead()
+	var latest uint64
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
+		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
+		defer cancel()
+		block, err := readStRPCBlockIdentity(callCtx, client, rpc.LatestBlockNumber.String(), nil)
+		if err != nil {
+			return err
+		}
+		latest = block.Number
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("latest head: %w", err)
+	}
+	return latest, nil
+}
+
+// The finalized root at an index, as vault2.roots returns it.
+func stLedgerV2FinalizedRootOf(index uint64, root stabi.ISTSettlementVault2Root) (*StLedgerV2FinalizedRoot, error) {
+	total, err := stUint256(root.Total)
+	if err != nil {
+		return nil, err
+	}
+	return &StLedgerV2FinalizedRoot{Index: index, Root: root.Root, Total: total, LeafCount: root.LeafCount, Epoch: root.Epoch, LedgerHash: root.LedgerHash}, nil
+}
+
+func (self *CoreStClient) LedgerV2Root(ctx context.Context, noId uint64, rootIndex uint64) (*StLedgerV2FinalizedRoot, error) {
+	root, err := stViewAt(self, ctx, self.cfg.VaultV2, stLedgerV2VaultAbi.PackRoots(stBig(noId), stBig(rootIndex)), stLedgerV2VaultAbi.UnpackRoots)
+	if err != nil {
+		return nil, fmt.Errorf("vault2 roots(%d, %d): %w", noId, rootIndex, err)
+	}
+	return stLedgerV2FinalizedRootOf(rootIndex, root)
+}
+
+func (self *CoreStClient) LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, rootIndex uint64, index uint64) (uint8, error) {
+	demand, err := stViewAt(self, ctx, self.cfg.VaultV2, stLedgerV2VaultAbi.PackDemanded(stBig(noId), seq, stBig(rootIndex), stBig(index)), stLedgerV2VaultAbi.UnpackDemanded)
+	if err != nil {
+		return 0, fmt.Errorf("vault2 demanded(%d, %d, %d, %d): %w", noId, seq, rootIndex, index, err)
 	}
 	return demand, nil
 }
@@ -363,7 +408,7 @@ func (self *CoreStClient) LedgerV2Finalize(ctx context.Context, epoch uint64, no
 }
 
 func (self *CoreStClient) LedgerV2Answer(ctx context.Context, noId uint64, seq uint64, answer *StLedgerV2Answer) (string, error) {
-	return self.sendLedgerV2(ctx, stLedgerV2AnswerOperation(noId, seq, answer.Index), self.cfg.VaultV2, stLedgerV2PackCheckPath(noId, answer))
+	return self.sendLedgerV2(ctx, stLedgerV2AnswerOperation(noId, seq, answer.RootIndex, answer.Index), self.cfg.VaultV2, stLedgerV2PackCheckPath(noId, answer))
 }
 
 // stLedgerV2ErrorNames names every custom error of the v2 contracts and of
@@ -408,7 +453,7 @@ func stLedgerV2RevertName(err error) string {
 var stLedgerV2SpentErrors = func() map[[4]byte]string {
 	spent := map[[4]byte]string{}
 	for _, name := range []string{
-		"InvalidWindow", "InvalidTransition", "NoPendingRoot", "NoFault", "NoFinalizedRoot", "StaleRootCount",
+		"InvalidWindow", "InvalidTransition", "NoPendingRoot", "NoFault", "UnknownRoot", "StaleRootCount",
 		"EpochOutOfRange", "TotalMismatch", "TotalNotIncreased", "InvalidLeafCount", "InvalidRoot",
 		"IndexOutOfRange", "InvalidProof", "MalformedPath",
 	} {
@@ -470,7 +515,7 @@ func stLedgerV2PackCheckPath(noId uint64, answer *StLedgerV2Answer) []byte {
 	for i, node := range answer.Path {
 		path[i] = stabi.LedgerTreePathNode{LeftHash: node.LeftHash, LeftSum: node.LeftSum.ToBig(), RightHash: node.RightHash, RightSum: node.RightSum.ToBig()}
 	}
-	return stLedgerV2VaultAbi.PackCheckPath(stBig(noId), account, proof, path)
+	return stLedgerV2VaultAbi.PackCheckPath(stBig(noId), stBig(answer.RootIndex), account, proof, path)
 }
 
 // stLedgerV2EventDecoders returns the decoders for a log of a v2 contract,
@@ -507,13 +552,13 @@ func (self *CoreStClient) stLedgerV2EventDecoders(address common.Address) ([]stE
 					"total": e.Total.String(), "leaf_count": fmt.Sprintf("%d", e.LeafCount), "ledger_hash": fmt.Sprintf("0x%x", e.LedgerHash), "replaced_seq": fmt.Sprintf("%d", e.ReplacedSeq)}
 			}),
 			stEvent("V2PathDemanded", v.UnpackPathDemandedEvent, func(e *stabi.STSettlementVault2PathDemanded) map[string]any {
-				return map[string]any{"no_id": e.NoId.String(), "seq": fmt.Sprintf("%d", e.Seq), "index": e.Index.String(), "demander": e.Demander.Hex()}
+				return map[string]any{"no_id": e.NoId.String(), "seq": fmt.Sprintf("%d", e.Seq), "root_index": e.RootIndex.String(), "index": e.Index.String(), "demander": e.Demander.Hex()}
 			}),
 			stEvent("V2PathAnswered", v.UnpackPathAnsweredEvent, func(e *stabi.STSettlementVault2PathAnswered) map[string]any {
-				return map[string]any{"no_id": e.NoId.String(), "seq": fmt.Sprintf("%d", e.Seq), "index": e.Index.String(), "answerer": e.Answerer.Hex()}
+				return map[string]any{"no_id": e.NoId.String(), "seq": fmt.Sprintf("%d", e.Seq), "root_index": e.RootIndex.String(), "index": e.Index.String(), "answerer": e.Answerer.Hex()}
 			}),
 			stEvent("V2DistributionDeleted", v.UnpackDistributionDeletedEvent, func(e *stabi.STSettlementVault2DistributionDeleted) map[string]any {
-				return map[string]any{"no_id": e.NoId.String(), "seq": fmt.Sprintf("%d", e.Seq), "index": e.Index.String(), "fault": fmt.Sprintf("%d", e.Fault), "level": e.Level.String(), "challenger": e.Challenger.Hex()}
+				return map[string]any{"no_id": e.NoId.String(), "seq": fmt.Sprintf("%d", e.Seq), "root_index": e.RootIndex.String(), "index": e.Index.String(), "fault": fmt.Sprintf("%d", e.Fault), "level": e.Level.String(), "challenger": e.Challenger.Hex()}
 			}),
 			stEvent("V2DistributionFinalized", v.UnpackDistributionFinalizedEvent, func(e *stabi.STSettlementVault2DistributionFinalized) map[string]any {
 				return map[string]any{"no_id": e.NoId.String(), "seq": fmt.Sprintf("%d", e.Seq), "root_index": e.RootIndex.String(), "e": fmt.Sprintf("%d", e.Epoch), "root": fmt.Sprintf("0x%x", e.Root),

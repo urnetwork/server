@@ -67,7 +67,7 @@ func ledgerV2Sync(t testing.TB, f *ledgerV2Fixture, epoch uint64) []StLedgerV2St
 	}
 	out := []StLedgerV2Step{}
 	for _, step := range steps {
-		out = append(out, StLedgerV2Step{Kind: step.Kind, Epoch: step.Epoch, Seq: step.Seq, Index: step.Index})
+		out = append(out, StLedgerV2Step{Kind: step.Kind, Epoch: step.Epoch, Seq: step.Seq, RootIndex: step.RootIndex, Index: step.Index})
 	}
 	return out
 }
@@ -278,9 +278,9 @@ func TestStLedgerV2DriverAnswersDemands(t *testing.T) {
 
 		resetLedgerV2Caches()
 		requireLedgerV2Outcome(t, f.run(StLedgerV2StepAnswer, 6, 2, 1), model.StPublishStatusConfirmed, false, "")
-		requireLedgerV2Log(t, f.takeLog(), []string{"accounts " + hexPrefix(hash5), "accounts " + hexPrefix(hash6), "answer 2 1"})
-		if f.chain.demands[[2]uint64{2, 1}] != StLedgerV2DemandAnswered || f.chain.pending.OpenDemands != 0 {
-			t.Fatalf("demand %d open %d", f.chain.demands[[2]uint64{2, 1}], f.chain.pending.OpenDemands)
+		requireLedgerV2Log(t, f.takeLog(), []string{"accounts " + hexPrefix(hash5), "accounts " + hexPrefix(hash6), "answer 2 0 1"})
+		if f.chain.demands[[3]uint64{2, 0, 1}] != StLedgerV2DemandAnswered || f.chain.pending.OpenDemands != 0 {
+			t.Fatalf("demand %d open %d", f.chain.demands[[3]uint64{2, 0, 1}], f.chain.pending.OpenDemands)
 		}
 		if got := f.publishes(6); got[len(got)-1] != "v2answer confirmed" {
 			t.Fatalf("epoch 6 publishes %v", got)
@@ -555,7 +555,7 @@ func TestStLedgerV2DriverRaisesEveryAlert(t *testing.T) {
 		}
 		f.chain.head++
 		ledgerV2Sync(t, f, 8)
-		if !reflect.DeepEqual(*f.alerts, []string{StLedgerV2AlertOpenDemand + " seq 1 index 0"}) {
+		if !reflect.DeepEqual(*f.alerts, []string{StLedgerV2AlertOpenDemand + " seq 1 root 0 index 0"}) {
 			t.Fatalf("alerts %v", *f.alerts)
 		}
 		*f.alerts = nil
@@ -575,7 +575,7 @@ func TestStLedgerV2DriverRaisesEveryAlert(t *testing.T) {
 		stLedgerV2Alerted.Clear()
 		index := uint64(0)
 		model.SetStLedgerV2RootFinalized(f.ctx, key, &model.StLedgerV2Root{NoId: 1, Seq: p.Seq, Epoch: 7, Root: p.Root, Total: p.Total, LeafCount: p.LeafCount, LedgerHash: p.LedgerHash, RootIndex: &index}, f.chain.head)
-		model.SetStLedgerV2DemandAnswered(f.ctx, key, 1, p.Seq, 0, "0xa1", f.chain.head)
+		model.SetStLedgerV2DemandAnswered(f.ctx, key, 1, p.Seq, 0, 0, "0xa1", f.chain.head)
 		ledgerV2Sync(t, f, 8)
 		if len(*f.alerts) != 0 {
 			t.Fatalf("alerts %v for a finalized root", *f.alerts)

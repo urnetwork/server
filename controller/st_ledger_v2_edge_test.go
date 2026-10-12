@@ -18,6 +18,7 @@ import (
 	"github.com/holiman/uint256"
 
 	"github.com/urfoundation/sn/merkle"
+	"github.com/urfoundation/sn/stabi"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -244,7 +245,8 @@ func TestStLedgerV2ObjectsUseTheConfiguredStore(t *testing.T) {
 	})
 }
 
-// Chain amounts convert to uint256 only when they fit.
+// Chain amounts convert to uint256 only when they fit, and so does a
+// finalized root's total.
 // SV-1
 func TestStLedgerV2ChainAmounts(t *testing.T) {
 	for _, value := range []*big.Int{nil, big.NewInt(-1), new(big.Int).Lsh(big.NewInt(1), 256)} {
@@ -254,6 +256,13 @@ func TestStLedgerV2ChainAmounts(t *testing.T) {
 	}
 	if value, err := stUint256(big.NewInt(7)); err != nil || value.Uint64() != 7 {
 		t.Fatalf("7 converted to %s, %v", value.Dec(), err)
+	}
+	if root, err := stLedgerV2FinalizedRootOf(2, stabi.ISTSettlementVault2Root{Total: big.NewInt(-1)}); root != nil || err == nil || err.Error() != "st: chain value -1 is not a uint256" {
+		t.Fatalf("a negative root total converted: %+v %v", root, err)
+	}
+	root, err := stLedgerV2FinalizedRootOf(2, stabi.ISTSettlementVault2Root{Root: [32]byte{1}, Total: big.NewInt(9), LeafCount: 3, Epoch: 5, LedgerHash: [32]byte{2}})
+	if want := (&StLedgerV2FinalizedRoot{Index: 2, Root: [32]byte{1}, Total: *uint256.NewInt(9), LeafCount: 3, Epoch: 5, LedgerHash: [32]byte{2}}); err != nil || !reflect.DeepEqual(root, want) {
+		t.Fatalf("root %+v %v", root, err)
 	}
 }
 
@@ -289,7 +298,7 @@ func TestStLedgerV2FinalizeAndAnswerFailures(t *testing.T) {
 		requireLedgerV2Outcome(t, f.run(StLedgerV2StepAnswer, 6, 2, 1), model.StPublishStatusFailed, true, "state unreadable")
 		f.chain.failNext("demand", errors.New("demand unreadable"))
 		requireLedgerV2Outcome(t, f.run(StLedgerV2StepAnswer, 6, 2, 1), model.StPublishStatusFailed, true, "demand unreadable")
-		f.chain.demands[[2]uint64{2, 5}] = StLedgerV2DemandOpen
+		f.chain.demands[[3]uint64{2, 0, 5}] = StLedgerV2DemandOpen
 		requireLedgerV2Outcome(t, f.run(StLedgerV2StepAnswer, 6, 2, 5), model.StPublishStatusFailed, true, "index 5 is outside the finalized root's 2 accounts")
 
 		resetLedgerV2Caches()

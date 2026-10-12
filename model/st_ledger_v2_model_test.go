@@ -165,14 +165,20 @@ func TestStLedgerV2MirrorRecordsChainState(t *testing.T) {
 			SetStLedgerV2RootFinalized(ctx, key, testLedgerV2Root(5, 9, 50, 4), 160)
 		}()
 
-		AddStLedgerV2Demand(ctx, key, &StLedgerV2Demand{NoId: 1, Seq: 3, Index: 1, Demander: "0xd1", DemandBlock: 142})
-		AddStLedgerV2Demand(ctx, key, &StLedgerV2Demand{NoId: 1, Seq: 3, Index: 0, Demander: "0xd2", DemandBlock: 143})
-		AddStLedgerV2Demand(ctx, key, &StLedgerV2Demand{NoId: 1, Seq: 3, Index: 1, Demander: "0xd3", DemandBlock: 144})
-		SetStLedgerV2DemandAnswered(ctx, key, 1, 3, 0, "0xa1", 145)
-		SetStLedgerV2DemandAnswered(ctx, key, 1, 3, 0, "0xa2", 146)
+		// a demand is keyed by seq, finalized root and account index
+		AddStLedgerV2Demand(ctx, key, &StLedgerV2Demand{NoId: 1, Seq: 3, RootIndex: 1, Index: 1, Demander: "0xd1", DemandBlock: 142})
+		AddStLedgerV2Demand(ctx, key, &StLedgerV2Demand{NoId: 1, Seq: 3, RootIndex: 1, Index: 0, Demander: "0xd2", DemandBlock: 143})
+		AddStLedgerV2Demand(ctx, key, &StLedgerV2Demand{NoId: 1, Seq: 3, RootIndex: 1, Index: 1, Demander: "0xd3", DemandBlock: 144})
+		AddStLedgerV2Demand(ctx, key, &StLedgerV2Demand{NoId: 1, Seq: 3, RootIndex: 0, Index: 1, Demander: "0xd4", DemandBlock: 145})
+		SetStLedgerV2DemandAnswered(ctx, key, 1, 3, 1, 0, "0xa1", 146)
+		SetStLedgerV2DemandAnswered(ctx, key, 1, 3, 1, 0, "0xa2", 147)
 		open := GetOpenStLedgerV2Demands(ctx, key, 1, 3)
-		if len(open) != 1 || !reflect.DeepEqual(open[0], &StLedgerV2Demand{NoId: 1, Seq: 3, Index: 1, Demander: "0xd1", DemandBlock: 142}) {
+		if want := []*StLedgerV2Demand{{NoId: 1, Seq: 3, RootIndex: 0, Index: 1, Demander: "0xd4", DemandBlock: 145}, {NoId: 1, Seq: 3, RootIndex: 1, Index: 1, Demander: "0xd1", DemandBlock: 142}}; !reflect.DeepEqual(open, want) {
 			t.Fatalf("open demands %+v", open)
+		}
+		SetStLedgerV2DemandAnswered(ctx, key, 1, 3, 0, 1, "0xa3", 148)
+		if open := GetOpenStLedgerV2Demands(ctx, key, 1, 3); len(open) != 1 || open[0].RootIndex != 1 || open[0].Index != 1 {
+			t.Fatalf("open demands %+v after answering root 0's", open)
 		}
 	})
 }

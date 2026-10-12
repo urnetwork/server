@@ -563,10 +563,12 @@ func GetStLedgerV2RootsFromEpoch(ctx context.Context, deploymentKey StDeployment
 	return getStLedgerV2Roots(ctx, deploymentKey, `no_id = $2 AND epoch >= $3 ORDER BY seq`, int64(noId), int64(minEpoch))
 }
 
-// StLedgerV2Demand mirrors one demand to open an account's path in a pending root.
+// StLedgerV2Demand mirrors one demand to open, in a pending root, the path of
+// an account of the finalized root RootIndex.
 type StLedgerV2Demand struct {
 	NoId        uint64
 	Seq         uint64
+	RootIndex   uint64
 	Index       uint64
 	Demander    string
 	DemandBlock uint64
@@ -581,31 +583,32 @@ func AddStLedgerV2Demand(ctx context.Context, deploymentKey StDeploymentKey, dem
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				INSERT INTO st_ledger_v2_demand (deployment_key, no_id, seq, account_index, demander, demand_block)
-				VALUES ($1, $2, $3, $4, $5, $6)
-				ON CONFLICT (deployment_key, no_id, seq, account_index) DO NOTHING
+				INSERT INTO st_ledger_v2_demand (deployment_key, no_id, seq, root_index, account_index, demander, demand_block)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
+				ON CONFLICT (deployment_key, no_id, seq, root_index, account_index) DO NOTHING
 			`,
-			key, int64(demand.NoId), int64(demand.Seq), int64(demand.Index), demand.Demander, int64(demand.DemandBlock),
+			key, int64(demand.NoId), int64(demand.Seq), int64(demand.RootIndex), int64(demand.Index), demand.Demander, int64(demand.DemandBlock),
 		))
 	})
 }
 
 // SetStLedgerV2DemandAnswered mirrors a PathAnswered event.
-func SetStLedgerV2DemandAnswered(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, seq uint64, index uint64, answerer string, block uint64) {
+func SetStLedgerV2DemandAnswered(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, seq uint64, rootIndex uint64, index uint64, answerer string, block uint64) {
 	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				UPDATE st_ledger_v2_demand SET answerer = $5, answer_block = $6
-				WHERE deployment_key = $1 AND no_id = $2 AND seq = $3 AND account_index = $4 AND answer_block IS NULL
+				UPDATE st_ledger_v2_demand SET answerer = $6, answer_block = $7
+				WHERE deployment_key = $1 AND no_id = $2 AND seq = $3 AND root_index = $4 AND account_index = $5 AND answer_block IS NULL
 			`,
-			key, int64(noId), int64(seq), int64(index), answerer, int64(block),
+			key, int64(noId), int64(seq), int64(rootIndex), int64(index), answerer, int64(block),
 		))
 	})
 }
 
-// GetOpenStLedgerV2Demands returns a commit seq's unanswered demands, by index.
+// GetOpenStLedgerV2Demands returns a commit seq's unanswered demands, by root
+// index and then account index.
 func GetOpenStLedgerV2Demands(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, seq uint64) []*StLedgerV2Demand {
 	key := requireStDeploymentKey(deploymentKey)
 	demands := []*StLedgerV2Demand{}
@@ -613,19 +616,19 @@ func GetOpenStLedgerV2Demands(ctx context.Context, deploymentKey StDeploymentKey
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT account_index, demander, demand_block
+				SELECT root_index, account_index, demander, demand_block
 				FROM st_ledger_v2_demand
 				WHERE deployment_key = $1 AND no_id = $2 AND seq = $3 AND answer_block IS NULL
-				ORDER BY account_index
+				ORDER BY root_index, account_index
 			`,
 			key, int64(noId), int64(seq),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				demand := &StLedgerV2Demand{NoId: noId, Seq: seq}
-				var index, block int64
-				server.Raise(result.Scan(&index, &demand.Demander, &block))
-				demand.Index, demand.DemandBlock = uint64(index), uint64(block)
+				var rootIndex, index, block int64
+				server.Raise(result.Scan(&rootIndex, &index, &demand.Demander, &block))
+				demand.RootIndex, demand.Index, demand.DemandBlock = uint64(rootIndex), uint64(index), uint64(block)
 				demands = append(demands, demand)
 			}
 		})

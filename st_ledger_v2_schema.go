@@ -77,18 +77,20 @@ const stLedgerV2SchemaSql = `
 	);
 	CREATE INDEX st_ledger_v2_root_status ON st_ledger_v2_root (deployment_key, no_id, status, seq);
 
-	-- vault2 path demands, open until answered.
+	-- vault2 path demands, open until answered. A demand names a pending
+	-- root's seq and an account of the finalized root root_index.
 	CREATE TABLE st_ledger_v2_demand (
 		deployment_key varchar(96) NOT NULL,
 		no_id bigint NOT NULL,
 		seq bigint NOT NULL,
+		root_index bigint NOT NULL,
 		account_index bigint NOT NULL,
 		demander varchar(42) NOT NULL,
 		demand_block bigint NOT NULL,
 		answerer varchar(42) NULL,
 		answer_block bigint NULL,
 
-		PRIMARY KEY (deployment_key, no_id, seq, account_index)
+		PRIMARY KEY (deployment_key, no_id, seq, root_index, account_index)
 	);
 	CREATE INDEX st_ledger_v2_demand_open ON st_ledger_v2_demand (deployment_key, no_id, seq) WHERE answer_block IS NULL;
 

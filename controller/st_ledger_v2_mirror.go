@@ -2,8 +2,9 @@ package controller
 
 // st_ledger_v2_mirror.go — applies mirrored vault2 events to the settlement
 // v2 tables (VERSION2-FINAL.md §8.4): funding snapshots, roots by commit seq,
-// and path demands. Events apply in (block, log) order and every write is
-// idempotent, so the conservative re-scan of a range changes nothing.
+// and path demands by seq, finalized root and account index. Events apply in
+// (block, log) order and every write is idempotent, so the conservative
+// re-scan of a range changes nothing.
 
 import (
 	"context"
@@ -95,17 +96,18 @@ func stApplyLedgerV2Events(ctx context.Context, cfg *StConfig, events []*model.S
 			model.AddStLedgerV2Commit(ctx, deploymentKey, root, block, replacedSeq)
 		case "V2DistributionDeleted", "V2PathDemanded", "V2PathAnswered":
 			seq, seqErr := stParseUint(data.Seq)
+			rootIndex, rootIndexErr := stParseUint(data.RootIndex)
 			index, indexErr := stParseUint(data.Index)
-			if seqErr != nil || indexErr != nil {
+			if seqErr != nil || rootIndexErr != nil || indexErr != nil {
 				continue
 			}
 			switch event.Kind {
 			case "V2DistributionDeleted":
 				model.SetStLedgerV2RootDeleted(ctx, deploymentKey, noId, seq, block)
 			case "V2PathDemanded":
-				model.AddStLedgerV2Demand(ctx, deploymentKey, &model.StLedgerV2Demand{NoId: noId, Seq: seq, Index: index, Demander: data.Demander, DemandBlock: block})
+				model.AddStLedgerV2Demand(ctx, deploymentKey, &model.StLedgerV2Demand{NoId: noId, Seq: seq, RootIndex: rootIndex, Index: index, Demander: data.Demander, DemandBlock: block})
 			default:
-				model.SetStLedgerV2DemandAnswered(ctx, deploymentKey, noId, seq, index, data.Answerer, block)
+				model.SetStLedgerV2DemandAnswered(ctx, deploymentKey, noId, seq, rootIndex, index, data.Answerer, block)
 			}
 		}
 	}

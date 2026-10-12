@@ -45,7 +45,7 @@ func scheduleStLedgerV2Steps(clientSession *session.ClientSession, deploymentKey
 		return
 	}
 	for _, step := range steps {
-		args := &StLedgerV2StepArgs{DeploymentKey: string(deploymentKey), Kind: step.Kind, Epoch: step.Epoch, Seq: step.Seq, Index: step.Index}
+		args := &StLedgerV2StepArgs{DeploymentKey: string(deploymentKey), Kind: step.Kind, Epoch: step.Epoch, Seq: step.Seq, RootIndex: step.RootIndex, Index: step.Index}
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 			task.ScheduleTaskInTxIfAbsent(tx, StLedgerV2Step, args, clientSession, stLedgerV2StepRunOnce(args), task.RunAt(step.RunAt), task.MaxTime(stLedgerV2StepMaxTime))
 		})
@@ -53,16 +53,17 @@ func scheduleStLedgerV2Steps(clientSession *session.ClientSession, deploymentKey
 }
 
 func stLedgerV2StepRunOnce(args *StLedgerV2StepArgs) *task.RunOnceOption {
-	return task.RunOnce("st_ledger_v2_step", args.DeploymentKey, args.Kind, args.Epoch, args.Seq, args.Index)
+	return task.RunOnce("st_ledger_v2_step", args.DeploymentKey, args.Kind, args.Epoch, args.Seq, args.RootIndex, args.Index)
 }
 
-// StLedgerV2Step(kind, epoch, seq, index)
+// StLedgerV2Step(kind, epoch, seq, rootIndex, index)
 
 type StLedgerV2StepArgs struct {
 	DeploymentKey string `json:"deployment_key"`
 	Kind          string `json:"kind"`
 	Epoch         uint64 `json:"epoch"`
 	Seq           uint64 `json:"seq"`
+	RootIndex     uint64 `json:"root_index"`
 	Index         uint64 `json:"index"`
 	Attempt       int    `json:"attempt"`
 }
@@ -80,13 +81,13 @@ func StLedgerV2Step(
 		return &StLedgerV2StepResult{}, nil
 	}
 	outcome, err := controller.StLedgerV2RunStep(clientSession.Ctx, &controller.StLedgerV2Step{
-		Kind: stLedgerV2Step.Kind, Epoch: stLedgerV2Step.Epoch, Seq: stLedgerV2Step.Seq, Index: stLedgerV2Step.Index,
+		Kind: stLedgerV2Step.Kind, Epoch: stLedgerV2Step.Epoch, Seq: stLedgerV2Step.Seq, RootIndex: stLedgerV2Step.RootIndex, Index: stLedgerV2Step.Index,
 	})
 	if err != nil {
-		glog.Infof("[st]v2 %s step epoch %d seq %d index %d failed (attempt %d): %s\n", stLedgerV2Step.Kind, stLedgerV2Step.Epoch, stLedgerV2Step.Seq, stLedgerV2Step.Index, stLedgerV2Step.Attempt, err)
+		glog.Infof("[st]v2 %s step epoch %d seq %d root %d index %d failed (attempt %d): %s\n", stLedgerV2Step.Kind, stLedgerV2Step.Epoch, stLedgerV2Step.Seq, stLedgerV2Step.RootIndex, stLedgerV2Step.Index, stLedgerV2Step.Attempt, err)
 		return &StLedgerV2StepResult{Retry: true}, nil
 	}
-	glog.Infof("[st]v2 %s step epoch %d seq %d index %d: %s\n", stLedgerV2Step.Kind, stLedgerV2Step.Epoch, stLedgerV2Step.Seq, stLedgerV2Step.Index, outcome)
+	glog.Infof("[st]v2 %s step epoch %d seq %d root %d index %d: %s\n", stLedgerV2Step.Kind, stLedgerV2Step.Epoch, stLedgerV2Step.Seq, stLedgerV2Step.RootIndex, stLedgerV2Step.Index, outcome)
 	result := &StLedgerV2StepResult{Retry: outcome.Retry}
 	if outcome.Retry && !outcome.RetryAt.IsZero() {
 		retryAt := outcome.RetryAt

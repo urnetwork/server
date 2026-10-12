@@ -115,6 +115,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"funding truncates rao", 814, `ALTER TABLE st_ledger_v2_funding ALTER COLUMN funded_through TYPE numeric(38,0)`},
 		{"root status not closed", 814, `ALTER TABLE st_ledger_v2_root DROP CONSTRAINT st_ledger_v2_root_status_check`},
 		{"open demand lookup includes answered demands", 814, `DROP INDEX st_ledger_v2_demand_open; CREATE INDEX st_ledger_v2_demand_open ON st_ledger_v2_demand(deployment_key,no_id,seq)`},
+		{"demands not keyed by their finalized root", 814, `ALTER TABLE st_ledger_v2_demand DROP CONSTRAINT st_ledger_v2_demand_pkey; ALTER TABLE st_ledger_v2_demand ADD PRIMARY KEY (deployment_key,no_id,seq,account_index)`},
 		{"amounts allow zero", 814, `ALTER TABLE st_ledger_v2_amount DROP CONSTRAINT st_ledger_v2_amount_amount_check`},
 		{"missing verified consent chains", 815, `DROP TABLE st_verified_wallet_consent`},
 		{"verified consent generations not unique", 815, `ALTER TABLE st_verified_wallet_consent DROP CONSTRAINT st_verified_wallet_consent_pkey`},

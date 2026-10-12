@@ -48,6 +48,8 @@ type ledgerV2RPC struct {
 	events         []string
 	reverts        map[string]string
 	results        map[string][]byte
+	// latestBlock answers "latest" when set; otherwise the finalized block does.
+	latestBlock uint64
 }
 
 func newLedgerV2RPC(t testing.TB) *ledgerV2RPC {
@@ -102,7 +104,9 @@ func (self *ledgerV2RPC) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			var selector string
 			json.Unmarshal(call.Params[0], &selector)
 			block := self.finalizedBlock
-			if selector != "latest" && selector != "finalized" {
+			if selector == "latest" && self.latestBlock != 0 {
+				block = self.latestBlock
+			} else if selector != "latest" && selector != "finalized" {
 				block, _ = hexutil.DecodeUint64(selector)
 			}
 			result = stTransactionReconcileBlock(block)
@@ -218,14 +222,18 @@ func requireLedgerV2Intent(t testing.TB, ctx context.Context, cfg *StConfig, ope
 
 // SV-7: consecutive epochs' finalizes and consecutive roots' answers each
 // broadcast their own transaction, under logical keys that name the epoch or
-// the commit seq; every new operation is preflighted with eth_call before it
-// is sent; a repeated operation broadcasts nothing new.
+// the commit seq, and an answer's key also names its finalized root, so the
+// same account index demanded against two roots is answered twice; every new
+// operation is preflighted with eth_call before it is sent; a repeated
+// operation broadcasts nothing new.
 func TestStLedgerV2SendsEachOperationOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
 		client, _, cfg := newLedgerV2RPCClient(t, fixture)
 		answer := ledgerV2TestAnswer()
+		older := *answer
+		older.RootIndex = 1
 		finalize := hex.EncodeToString(stLedgerV2SettlementAbi.PackFinalizeDistribution(big.NewInt(1))[:4])
 		checkPath := hex.EncodeToString(stLedgerV2PackCheckPath(1, answer)[:4])
 
@@ -236,8 +244,9 @@ func TestStLedgerV2SendsEachOperationOnce(t *testing.T) {
 		}{
 			{"v2finalize:5:1", func() (string, error) { return client.LedgerV2Finalize(ctx, 5, 1) }},
 			{"v2finalize:6:1", func() (string, error) { return client.LedgerV2Finalize(ctx, 6, 1) }},
-			{"v2answer:1:3:0", func() (string, error) { return client.LedgerV2Answer(ctx, 1, 3, answer) }},
-			{"v2answer:1:4:0", func() (string, error) { return client.LedgerV2Answer(ctx, 1, 4, answer) }},
+			{"v2answer:1:3:0:0", func() (string, error) { return client.LedgerV2Answer(ctx, 1, 3, answer) }},
+			{"v2answer:1:3:1:0", func() (string, error) { return client.LedgerV2Answer(ctx, 1, 3, &older) }},
+			{"v2answer:1:4:0:0", func() (string, error) { return client.LedgerV2Answer(ctx, 1, 4, answer) }},
 		} {
 			hash, err := send.call()
 			if err != nil {
@@ -245,10 +254,10 @@ func TestStLedgerV2SendsEachOperationOnce(t *testing.T) {
 			}
 			hashes[send.operation] = hash
 		}
-		if events := fixture.takeEvents(); fmt.Sprint(events) != fmt.Sprint([]string{"call " + finalize, "send " + finalize, "call " + finalize, "send " + finalize, "call " + checkPath, "send " + checkPath, "call " + checkPath, "send " + checkPath}) {
+		if events := fixture.takeEvents(); fmt.Sprint(events) != fmt.Sprint([]string{"call " + finalize, "send " + finalize, "call " + finalize, "send " + finalize, "call " + checkPath, "send " + checkPath, "call " + checkPath, "send " + checkPath, "call " + checkPath, "send " + checkPath}) {
 			t.Fatalf("events %v", events)
 		}
-		if len(fixture.sent) != 4 {
+		if len(fixture.sent) != 5 {
 			t.Fatalf("sent %d transactions", len(fixture.sent))
 		}
 		for i, want := range []struct {
@@ -258,8 +267,9 @@ func TestStLedgerV2SendsEachOperationOnce(t *testing.T) {
 		}{
 			{"v2finalize:5:1", cfg.SettlementV2, stLedgerV2SettlementAbi.PackFinalizeDistribution(big.NewInt(1))},
 			{"v2finalize:6:1", cfg.SettlementV2, stLedgerV2SettlementAbi.PackFinalizeDistribution(big.NewInt(1))},
-			{"v2answer:1:3:0", cfg.VaultV2, stLedgerV2PackCheckPath(1, answer)},
-			{"v2answer:1:4:0", cfg.VaultV2, stLedgerV2PackCheckPath(1, answer)},
+			{"v2answer:1:3:0:0", cfg.VaultV2, stLedgerV2PackCheckPath(1, answer)},
+			{"v2answer:1:3:1:0", cfg.VaultV2, stLedgerV2PackCheckPath(1, &older)},
+			{"v2answer:1:4:0:0", cfg.VaultV2, stLedgerV2PackCheckPath(1, answer)},
 		} {
 			tx := fixture.sent[i]
 			if tx.Nonce() != uint64(7+i) || *tx.To() != want.to || string(tx.Data()) != string(want.data) || tx.Gas() != 60_000 || !strings.EqualFold(hashes[want.operation], tx.Hash().Hex()) {
@@ -271,10 +281,10 @@ func TestStLedgerV2SendsEachOperationOnce(t *testing.T) {
 		if hash, err := client.LedgerV2Finalize(ctx, 5, 1); err != nil || hash != hashes["v2finalize:5:1"] {
 			t.Fatalf("repeated finalize %s, %v", hash, err)
 		}
-		if hash, err := client.LedgerV2Answer(ctx, 1, 3, answer); err != nil || hash != hashes["v2answer:1:3:0"] {
+		if hash, err := client.LedgerV2Answer(ctx, 1, 3, answer); err != nil || hash != hashes["v2answer:1:3:0:0"] {
 			t.Fatalf("repeated answer %s, %v", hash, err)
 		}
-		if events := fixture.takeEvents(); len(events) != 0 || len(fixture.sent) != 4 {
+		if events := fixture.takeEvents(); len(events) != 0 || len(fixture.sent) != 5 {
 			t.Fatalf("a repeated operation was preflighted or sent: %v", events)
 		}
 
@@ -287,14 +297,14 @@ func TestStLedgerV2SendsEachOperationOnce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		requireLedgerV2Intent(t, ctx, cfg, "v2close:7:1", model.StTxFinalized, fixture.sent[4])
-		requireLedgerV2Intent(t, ctx, cfg, "v2commit:7:1", model.StTxFinalized, fixture.sent[5])
-		if !strings.EqualFold(closeHash, fixture.sent[4].Hash().Hex()) || !strings.EqualFold(commitHash, fixture.sent[5].Hash().Hex()) {
+		requireLedgerV2Intent(t, ctx, cfg, "v2close:7:1", model.StTxFinalized, fixture.sent[5])
+		requireLedgerV2Intent(t, ctx, cfg, "v2commit:7:1", model.StTxFinalized, fixture.sent[6])
+		if !strings.EqualFold(closeHash, fixture.sent[5].Hash().Hex()) || !strings.EqualFold(commitHash, fixture.sent[6].Hash().Hex()) {
 			t.Fatal("close or commit returned another transaction")
 		}
 		// A retried commit of the epoch with another root count re-drives the
 		// epoch's one stored commit.
-		if hash, err := client.LedgerV2Commit(ctx, 7, 1, 1, commitment); err != nil || hash != commitHash || len(fixture.sent) != 6 {
+		if hash, err := client.LedgerV2Commit(ctx, 7, 1, 1, commitment); err != nil || hash != commitHash || len(fixture.sent) != 7 {
 			t.Fatalf("second commit of epoch 7: %s, %v, %d sent", hash, err, len(fixture.sent))
 		}
 	})
@@ -302,7 +312,8 @@ func TestStLedgerV2SendsEachOperationOnce(t *testing.T) {
 
 // SPEC A6: a v2 call that someone else already did reverts at its eth_call
 // preflight and takes no nonce. An intent left without a signed attempt whose
-// call now reverts with a spent error is retired by the account reconcile; a
+// call now reverts with a spent error, an answer naming a root vault2 does not
+// hold (UnknownRoot) included, is retired by the account reconcile; a
 // transient or unnamed revert leaves it to execute. A commit whose intent was
 // spent is never sent again.
 func TestStLedgerV2SpentIntentsAreRetired(t *testing.T) {
@@ -316,7 +327,7 @@ func TestStLedgerV2SpentIntentsAreRetired(t *testing.T) {
 		closeCall := stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(9), big.NewInt(1))
 
 		fixture.reverts[string(checkPath)] = "NoFault"
-		if _, err := client.LedgerV2Answer(ctx, 1, 5, answer); err == nil || !strings.Contains(err.Error(), "v2answer:1:5:0 preflight reverts NoFault") {
+		if _, err := client.LedgerV2Answer(ctx, 1, 5, answer); err == nil || !strings.Contains(err.Error(), "v2answer:1:5:0:0 preflight reverts NoFault") {
 			t.Fatalf("front-run answer: %v", err)
 		}
 		fixture.reverts[string(finalize)] = "NoPendingRoot"
@@ -327,7 +338,7 @@ func TestStLedgerV2SpentIntentsAreRetired(t *testing.T) {
 		if _, err := client.LedgerV2Close(ctx, 9, 1); err == nil || !strings.Contains(err.Error(), "v2close:9:1 preflight failed: execution reverted") {
 			t.Fatalf("unnamed revert: %v", err)
 		}
-		for _, operation := range []string{"v2answer:1:5:0", "v2finalize:8:1", "v2close:9:1"} {
+		for _, operation := range []string{"v2answer:1:5:0:0", "v2finalize:8:1", "v2close:9:1"} {
 			logicalKey, _ := stTransactionLogicalKey(cfg, operation)
 			if intent := model.GetStTransactionIntent(ctx, logicalKey); intent != nil {
 				t.Fatalf("a refused preflight reserved %+v", intent)
@@ -347,21 +358,25 @@ func TestStLedgerV2SpentIntentsAreRetired(t *testing.T) {
 			return model.ReserveStTransactionIntent(ctx, logicalKey, cfg.Profile, cfg.DeploymentId, cfg.DeploymentKey(), cfg.ChainId, genesis,
 				strings.ToLower(from.Hex()), strings.ToLower(to.Hex()), strings.ToLower(crypto.Keccak256Hash(calldata).Hex()), calldata, nonce)
 		}
-		spentAnswer := reserve("v2answer:1:6:0", cfg.VaultV2, checkPath, 7)
+		unknown := *answer
+		unknown.RootIndex = 4
+		spentAnswer := reserve("v2answer:1:6:0:0", cfg.VaultV2, checkPath, 7)
 		spentFinalize := reserve("v2finalize:9:1", cfg.SettlementV2, finalize, 8)
-		paused := reserve("v2close:10:1", cfg.SettlementV2, stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(10), big.NewInt(1)), 9)
-		unnamed := reserve("v2close:9:1", cfg.SettlementV2, closeCall, 10)
+		unknownRoot := reserve("v2answer:1:6:4:0", cfg.VaultV2, stLedgerV2PackCheckPath(1, &unknown), 9)
+		paused := reserve("v2close:10:1", cfg.SettlementV2, stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(10), big.NewInt(1)), 10)
+		unnamed := reserve("v2close:9:1", cfg.SettlementV2, closeCall, 11)
+		fixture.reverts[string(unknownRoot.Calldata)] = "UnknownRoot"
 		fixture.reverts[string(paused.Calldata)] = "SettlementPaused"
 		if err := client.reconcileAccountIntents(ctx, rpcClient, cfg.RootKey, from); err != nil {
 			t.Fatal(err)
 		}
-		if len(fixture.sent) != 4 {
+		if len(fixture.sent) != 5 {
 			t.Fatalf("sent %d transactions", len(fixture.sent))
 		}
-		for i, intent := range []*model.StTransactionIntent{spentAnswer, spentFinalize, paused, unnamed} {
+		for i, intent := range []*model.StTransactionIntent{spentAnswer, spentFinalize, unknownRoot, paused, unnamed} {
 			stored := model.GetStTransactionIntent(ctx, intent.LogicalKey)
 			tx := fixture.sent[i]
-			cancelled := i < 2
+			cancelled := i < 3
 			if wantStatus := map[bool]string{true: model.StTxCanceled, false: model.StTxFinalized}[cancelled]; stored.Status != wantStatus || tx.Nonce() != intent.Nonce {
 				t.Fatalf("intent %d status %s nonce %d", i, stored.Status, tx.Nonce())
 			}
@@ -374,14 +389,14 @@ func TestStLedgerV2SpentIntentsAreRetired(t *testing.T) {
 		commitment := &StLedgerV2Commitment{Root: [32]byte{1}, Total: *uint256.NewInt(1000), LeafCount: 2, LedgerHash: [32]byte{2}}
 		commitCall := stLedgerV2SettlementAbi.PackCommitDistribution(big.NewInt(11), big.NewInt(1), big.NewInt(0), stLedgerV2CommitmentArgument(commitment))
 		fixture.reverts[string(commitCall)] = "StaleRootCount"
-		reserve("v2commit:11:1", cfg.SettlementV2, commitCall, 11)
+		reserve("v2commit:11:1", cfg.SettlementV2, commitCall, 12)
 		if err := client.reconcileAccountIntents(ctx, rpcClient, cfg.RootKey, from); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := client.LedgerV2Commit(ctx, 11, 1, 1, commitment); !errors.Is(err, ErrStLedgerV2CommitSpent) {
 			t.Fatalf("spent commit: %v", err)
 		}
-		if len(fixture.sent) != 5 {
+		if len(fixture.sent) != 6 {
 			t.Fatalf("sent %d transactions", len(fixture.sent))
 		}
 	})
@@ -425,7 +440,7 @@ func TestStLedgerV2ClientReadsChainState(t *testing.T) {
 	result(vault.PackRoots(no, big.NewInt(0)), vaultAbi, "roots", stabi.ISTSettlementVault2Root{Root: [32]byte{1}, Total: big.NewInt(1000), LeafCount: 2, Epoch: 5, LedgerHash: [32]byte{2}})
 	result(vault.PackPending(no), vaultAbi, "pending", stabi.ISTSettlementVault2Pending{Seq: 2, Root: [32]byte{3}, Total: big.NewInt(4000), LeafCount: 3, Epoch: 6, LedgerHash: [32]byte{4}, CommittedBlock: 302_410, OpenDemands: 1})
 	result(vault.PackFundedThrough(no, big.NewInt(6)), vaultAbi, "fundedThrough", big.NewInt(4000))
-	result(vault.PackDemanded(no, 2, big.NewInt(1)), vaultAbi, "demanded", StLedgerV2DemandOpen)
+	result(vault.PackDemanded(no, 2, big.NewInt(0), big.NewInt(1)), vaultAbi, "demanded", StLedgerV2DemandOpen)
 	result(coordinator.PackEpochEndBlock(big.NewInt(6)), coordinatorAbi, "epochEndBlock", big.NewInt(352_800))
 	result(coordinator.PackPolicyAt(big.NewInt(6)), coordinatorAbi, "policyAt", stabi.STCoordinatorPolicySnapshot{EpochBlocks: 50_400, RootCommitWindowBlocks: 1_200, EpochDepositCapRao: big.NewInt(0), CampaignDepositCapRao: big.NewInt(0)})
 
@@ -446,8 +461,11 @@ func TestStLedgerV2ClientReadsChainState(t *testing.T) {
 	if funded, err := client.LedgerV2FundedThrough(ctx, 1, 6); err != nil || funded.Uint64() != 4000 {
 		t.Fatalf("funded %s %v", funded.Dec(), err)
 	}
-	if demand, err := client.LedgerV2Demand(ctx, 1, 2, 1); err != nil || demand != StLedgerV2DemandOpen {
+	if demand, err := client.LedgerV2Demand(ctx, 1, 2, 0, 1); err != nil || demand != StLedgerV2DemandOpen {
 		t.Fatalf("demand %d %v", demand, err)
+	}
+	if root, err := client.LedgerV2Root(ctx, 1, 0); err != nil || !reflect.DeepEqual(root, want.Latest) {
+		t.Fatalf("root %+v %v", root, err)
 	}
 	if end, window, err := client.LedgerV2EpochWindow(ctx, 6); err != nil || end != 352_800 || window != 1_200 {
 		t.Fatalf("window %d %d %v", end, window, err)
@@ -498,7 +516,8 @@ func TestStLedgerV2ClientReadsChainState(t *testing.T) {
 		{coordinator.PackPaused(), func() error { _, err := client.LedgerV2State(ctx, 1); return err }, "paused():"},
 		{vault.PackPools(no), func() error { _, _, err := client.LedgerV2Pool(ctx, 1); return err }, "vault2 pools(1):"},
 		{vault.PackFundedThrough(no, big.NewInt(6)), func() error { _, err := client.LedgerV2FundedThrough(ctx, 1, 6); return err }, "vault2 fundedThrough(1, 6):"},
-		{vault.PackDemanded(no, 2, big.NewInt(1)), func() error { _, err := client.LedgerV2Demand(ctx, 1, 2, 1); return err }, "vault2 demanded(1, 2, 1):"},
+		{vault.PackDemanded(no, 2, big.NewInt(0), big.NewInt(1)), func() error { _, err := client.LedgerV2Demand(ctx, 1, 2, 0, 1); return err }, "vault2 demanded(1, 2, 0, 1):"},
+		{vault.PackRoots(no, big.NewInt(0)), func() error { _, err := client.LedgerV2Root(ctx, 1, 0); return err }, "vault2 roots(1, 0):"},
 		{coordinator.PackEpochEndBlock(big.NewInt(6)), func() error { _, _, err := client.LedgerV2EpochWindow(ctx, 6); return err }, "epochEndBlock(6):"},
 		{coordinator.PackPolicyAt(big.NewInt(6)), func() error { _, _, err := client.LedgerV2EpochWindow(ctx, 6); return err }, "policyAt(6):"},
 	} {
@@ -546,8 +565,8 @@ func TestStLedgerV2RevertNames(t *testing.T) {
 	}
 }
 
-// The checkPath calldata carries the account, its proof and the pending
-// path exactly.
+// The checkPath calldata carries the finalized root's index, the account,
+// its proof and the pending path exactly.
 // SV-1 (demand answering)
 func TestStLedgerV2PackCheckPath(t *testing.T) {
 	accounts := ledgerV2Accounts(ledgerV2Coldkey(1), 500, ledgerV2Coldkey(2), 2000, ledgerV2Coldkey(3), 1500)
@@ -557,7 +576,7 @@ func TestStLedgerV2PackCheckPath(t *testing.T) {
 	}
 	proof, _ := tree.Proof(1)
 	path, _ := tree.Path(1)
-	calldata := stLedgerV2PackCheckPath(1, &StLedgerV2Answer{Index: 1, Account: accounts[1], Proof: proof, Path: path})
+	calldata := stLedgerV2PackCheckPath(1, &StLedgerV2Answer{RootIndex: 3, Index: 1, Account: accounts[1], Proof: proof, Path: path})
 	parsed, err := stabi.STSettlementVault2MetaData.ParseABI()
 	if err != nil {
 		t.Fatal(err)
@@ -569,6 +588,7 @@ func TestStLedgerV2PackCheckPath(t *testing.T) {
 	encoded, _ := json.Marshal(values)
 	want, _ := json.Marshal([]any{
 		big.NewInt(1),
+		big.NewInt(3),
 		map[string]any{"index": big.NewInt(1), "coldkey": accounts[1].Coldkey, "cumulative": big.NewInt(2000)},
 		[]map[string]any{{"hash": proof[0].Hash, "sum": proof[0].Sum.ToBig()}, {"hash": proof[1].Hash, "sum": proof[1].Sum.ToBig()}},
 		[]map[string]any{
