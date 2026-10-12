@@ -18,6 +18,10 @@ import (
 const (
 	redisTestEdge5 = "by-us-fmt-5-edge-5"
 	redisTestEdge6 = "by-us-fmt-5-edge-6"
+	// LAN addresses as config settings.yml routes resolves them; each node
+	// announces its host's LAN address in CLUSTER NODES
+	redisTestEdge5LAN = "192.168.51.179"
+	redisTestEdge6LAN = "192.168.51.193"
 )
 
 func redisTestPortRange(lo, hi int) []int {
@@ -29,11 +33,11 @@ func redisTestPortRange(lo, hi int) []int {
 }
 
 func redisTestEdge5Host() HostSettings {
-	return HostSettings{Name: redisTestEdge5, Roles: []string{"minio", "redis-cluster", "vpn-client"}, RedisNodePorts: redisTestPortRange(6412, 6427)}
+	return HostSettings{Name: redisTestEdge5, LANAddress: redisTestEdge5LAN, Roles: []string{"minio", "redis-cluster", "vpn-client"}, RedisNodePorts: redisTestPortRange(6412, 6427)}
 }
 
 func redisTestEdge6Host() HostSettings {
-	return HostSettings{Name: redisTestEdge6, Roles: []string{"redis-cluster", "vpn-client"}, RedisEntryPort: 6379, RedisNodePorts: redisTestPortRange(6380, 6411)}
+	return HostSettings{Name: redisTestEdge6, LANAddress: redisTestEdge6LAN, Roles: []string{"redis-cluster", "vpn-client"}, RedisEntryPort: 6379, RedisNodePorts: redisTestPortRange(6380, 6411)}
 }
 
 func redisTwoHostSettings(source SignalSource) SignalSettings {
@@ -271,11 +275,37 @@ func TestRedisClusterSignalTwoHostsKeepsSweepingPastAnUnreachableHost(t *testing
 	}
 }
 
+// redisTestClusterNodes renders a CLUSTER NODES reply with one master per
+// announced address:port, followed by any raw extra lines.
+func redisTestClusterNodes(members []string, extra ...string) string {
+	lines := []string{}
+	for i, member := range members {
+		_, port, _ := strings.Cut(member, ":")
+		lines = append(lines, fmt.Sprintf("%040x %s@1%s master - 0 0 %d connected %d", i+1, member, port, i+1, i))
+	}
+	return strings.Join(append(lines, extra...), "\n")
+}
+
+// redisTestMembers lists address:port for each port.
+func redisTestMembers(address string, ports []int) []string {
+	members := []string{}
+	for _, port := range ports {
+		members = append(members, fmt.Sprintf("%s:%d", address, port))
+	}
+	return members
+}
+
+// redisTestTwoHostMembers is the Main cluster's membership: edge-6's nodes at
+// its LAN address, edge-5's at its own.
+func redisTestTwoHostMembers() []string {
+	return append(redisTestMembers(redisTestEdge6LAN, redisTestPortRange(6380, 6411)), redisTestMembers(redisTestEdge5LAN, redisTestPortRange(6412, 6427))...)
+}
+
 func TestRedisTopologySignalTwoHostsReadsClusterNodesThroughEntry(t *testing.T) {
 	redisCalls := &redisTestCallLog{}
 	source := &syntheticSource{redisFn: func(host HostSettings, port int, args ...string) (string, error) {
 		redisCalls.add(fmt.Sprintf("%s:%d %s", host.Name, port, strings.Join(args, " ")))
-		return "node-a 192.168.51.193:6380@16380 master - 0 0 1 connected 0-341\nnode-b 192.168.51.179:6412@16412 master - 0 0 2 connected 342-682", nil
+		return redisTestClusterNodes(redisTestTwoHostMembers()), nil
 	}}
 	alerts, err := NewRedisTopologySignal().Run(context.Background(), redisTwoHostSettings(source))
 	if err != nil {

@@ -6,6 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -734,7 +737,8 @@ func redisHostCapacityFinding(observed redisHostMemory) finding {
 	return healthyFinding("redis/host-capacity", tierPage, "redis-host-capacity", h.name)
 }
 
-// redisTopologyProbe is SIGNALS.md 3.6: phantom entries and replica count.
+// redisTopologyProbe is SIGNALS.md 3.6: phantom entries, replica count, and
+// the node inventory against the cluster's membership.
 type redisTopologyProbe struct{}
 
 func (self redisTopologyProbe) id() string             { return "redis/topology" }
@@ -803,5 +807,257 @@ func (self redisTopologyProbe) check(ctx context.Context, env *probeEnv) ([]find
 		findings = append(findings, healthyFinding("redis/replica-cover", tierWarn, "replica-cover", h.name))
 	}
 
+	findings = append(findings, redisNodeInventoryFindings(env.cfg, h, out)...)
 	return findings, nil
+}
+
+// redisClusterMember is one CLUSTER NODES entry that carries an address: the
+// IP it announces (empty if the node never learned one) and its client port.
+type redisClusterMember struct {
+	address string
+	port    int
+}
+
+// parseRedisClusterMembers reads the addressed members of a CLUSTER NODES
+// reply. Phantom entries (noaddr, or port 0) belong to the phantom check and
+// handshake entries have not joined, so neither is a member. A line without
+// the documented shape fails the whole read: a member it hid would otherwise
+// read as a configured node missing from the cluster.
+func parseRedisClusterMembers(out string) ([]redisClusterMember, error) {
+	members := []redisClusterMember{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// <id> <ip:port@cport[,hostname]> <flags> <master> <ping-sent>
+		// <pong-recv> <config-epoch> <link-state> [<slot> ...]
+		if len(fields) < 8 {
+			return nil, fmt.Errorf("invalid response: CLUSTER NODES line has %d fields", len(fields))
+		}
+		flags := strings.Split(fields[2], ",")
+		if slices.Contains(flags, "noaddr") || slices.Contains(flags, "handshake") {
+			continue
+		}
+		address, _, _ := strings.Cut(fields[1], "@")
+		separator := strings.LastIndex(address, ":")
+		if separator < 0 {
+			return nil, fmt.Errorf("invalid response: CLUSTER NODES address without a port")
+		}
+		port, err := strconv.Atoi(address[separator+1:])
+		if err != nil || port < 0 || 65535 < port {
+			return nil, fmt.Errorf("invalid response: CLUSTER NODES address with an invalid port")
+		}
+		if port == 0 {
+			continue
+		}
+		members = append(members, redisClusterMember{address: redisInventoryAddress(address[:separator]), port: port})
+	}
+	return members, nil
+}
+
+// redisInventoryAddress compares numeric addresses by value.
+func redisInventoryAddress(address string) string {
+	address = strings.Trim(strings.TrimSpace(address), "[]")
+	if parsed, err := netip.ParseAddr(address); err == nil {
+		return parsed.Unmap().String()
+	}
+	return address
+}
+
+// redisPortRanges renders ports as sorted inclusive ranges, e.g. 6380-6411,6428.
+func redisPortRanges(ports []int) string {
+	sorted := slices.Compact(slices.Sorted(slices.Values(ports)))
+	if len(sorted) == 0 {
+		return "none"
+	}
+	ranges := []string{}
+	for start := 0; start < len(sorted); {
+		end := start
+		for end+1 < len(sorted) && sorted[end+1] == sorted[end]+1 {
+			end++
+		}
+		if start == end {
+			ranges = append(ranges, strconv.Itoa(sorted[start]))
+		} else {
+			ranges = append(ranges, fmt.Sprintf("%d-%d", sorted[start], sorted[end]))
+		}
+		start = end + 1
+	}
+	return strings.Join(ranges, ",")
+}
+
+// redisNodeInventoryFindings compares the cluster's membership, read through
+// the entry host, with the monitor.yml node inventory. Settings validation can
+// only check the inventory against itself, and two broken layouts pass it: a
+// host whose redis block is missing silently drops its nodes from every
+// per-node probe, and a node_ports range that covers another host's node
+// ports still answers on a host that bridges them (edge-6's nginx forwards
+// 6412-6427 to edge-5), so the other host's nodes are read as this host's.
+// The cluster is the authority: every member must announce the LAN address
+// (config settings.yml routes) of the redis-cluster host that lists its port,
+// and every listed port must be such a member.
+func redisNodeInventoryFindings(cfg *monitorConfig, entryHost *host, clusterNodes string) []finding {
+	members, err := parseRedisClusterMembers(clusterNodes)
+	if err == nil && len(members) == 0 {
+		err = fmt.Errorf("invalid response: CLUSTER NODES listed no addressed member")
+	}
+	if err != nil {
+		return []finding{cannotObserveFinding(entryHost.name+"/node-inventory", err)}
+	}
+
+	// Members are attributed by address. The redis-cluster hosts own their LAN
+	// addresses before any other inventory host, which only names an address.
+	redisHosts := cfg.hostsWithRole("redis-cluster")
+	addressHosts := map[string]*host{}
+	unknown := []finding{}
+	for _, h := range redisHosts {
+		address := redisInventoryAddress(h.lanIp)
+		if address == "" {
+			if 0 < len(h.redisNodePorts()) {
+				unattributed := cannotObserveFinding(h.name+"/node-inventory", fmt.Errorf("no LAN address"))
+				unattributed.symptom = fmt.Sprintf("The monitor cannot compare %s's Redis node inventory with CLUSTER NODES: the host has no LAN address in config settings.yml routes", h.name)
+				unattributed.action = "Restore the host's route in config/<env>/settings.yml (or its monitor.yml lan_ip), then rerun redis-topology."
+				unknown = append(unknown, unattributed)
+			}
+			continue
+		}
+		if owner, ok := addressHosts[address]; ok {
+			shared := cannotObserveFinding(h.name+"/node-inventory", fmt.Errorf("LAN address shared with %s", owner.name))
+			shared.symptom = fmt.Sprintf("The monitor cannot attribute Redis cluster members to %s: %s resolves to the same LAN address %s", h.name, owner.name, address)
+			shared.action = "Correct the routes in config/<env>/settings.yml (or the monitor.yml lan_ip overrides) so every redis-cluster host has its own LAN address, then rerun redis-topology."
+			unknown = append(unknown, shared)
+			continue
+		}
+		addressHosts[address] = h
+	}
+	if len(unknown) > 0 {
+		return unknown
+	}
+	for _, h := range cfg.hosts {
+		if address := redisInventoryAddress(h.lanIp); address != "" && addressHosts[address] == nil {
+			addressHosts[address] = h
+		}
+	}
+
+	memberPorts := map[string]map[int]bool{}
+	portAddresses := map[int][]string{}
+	addresses := []string{}
+	for _, member := range members {
+		if memberPorts[member.address] == nil {
+			memberPorts[member.address] = map[int]bool{}
+			addresses = append(addresses, member.address)
+		}
+		if !memberPorts[member.address][member.port] {
+			memberPorts[member.address][member.port] = true
+			portAddresses[member.port] = append(portAddresses[member.port], member.address)
+		}
+	}
+	sort.Strings(addresses)
+	addressName := func(address string) string {
+		if address == "" {
+			return "no address"
+		}
+		if owner := addressHosts[address]; owner != nil {
+			return address + " (" + owner.name + ")"
+		}
+		return address
+	}
+
+	findings := []finding{}
+	for _, h := range redisHosts {
+		address := redisInventoryAddress(h.lanIp)
+		if address == "" {
+			// lists no node port (or the comparison stopped above), and owns
+			// no address a member could announce
+			continue
+		}
+		configured := map[int]bool{}
+		for _, port := range h.redisNodePorts() {
+			configured[port] = true
+		}
+		missing := []int{}
+		elsewhere := map[string][]int{}
+		for port := range configured {
+			if memberPorts[address][port] {
+				continue
+			}
+			missing = append(missing, port)
+			for _, other := range portAddresses[port] {
+				elsewhere[other] = append(elsewhere[other], port)
+			}
+		}
+		unlisted := []int{}
+		for port := range memberPorts[address] {
+			if !configured[port] {
+				unlisted = append(unlisted, port)
+			}
+		}
+		if len(missing) == 0 && len(unlisted) == 0 {
+			findings = append(findings, healthyFinding("redis/node-inventory", tierWarn, "node-inventory-mismatch", h.name))
+			continue
+		}
+
+		clauses := []string{}
+		if 0 < len(unlisted) {
+			clauses = append(clauses, fmt.Sprintf("cluster members on port(s) %s announce its LAN address %s but are not in its redis.node_ports", redisPortRanges(unlisted), address))
+		}
+		if 0 < len(missing) {
+			clause := fmt.Sprintf("its redis.node_ports %s are not cluster members at its LAN address %s", redisPortRanges(missing), address)
+			otherAddresses := slices.Sorted(maps.Keys(elsewhere))
+			announced := []string{}
+			for _, other := range otherAddresses {
+				announced = append(announced, fmt.Sprintf("%s at %s", redisPortRanges(elsewhere[other]), addressName(other)))
+			}
+			if 0 < len(announced) {
+				clause += "; the cluster announces " + strings.Join(announced, " and ")
+			}
+			clauses = append(clauses, clause)
+		}
+		observed := fmt.Sprintf("host=%s lan_address=%s configured_node_ports=%s member_ports=%s unlisted_member_ports=%s missing_node_ports=%s",
+			h.name, address, redisPortRanges(h.redisNodePorts()), redisPortRanges(slices.Collect(maps.Keys(memberPorts[address]))), redisPortRanges(unlisted), redisPortRanges(missing))
+		for _, other := range slices.Sorted(maps.Keys(elsewhere)) {
+			observed += fmt.Sprintf(" missing_ports_announced_elsewhere=%s@%s", redisPortRanges(elsewhere[other]), other)
+		}
+		findings = append(findings, redisNodeInventoryMismatch(h.name,
+			fmt.Sprintf("Redis node inventory for %s disagrees with CLUSTER NODES: %s", h.name, strings.Join(clauses, "; ")),
+			observed))
+	}
+
+	// members at an address that no redis-cluster host owns
+	for _, address := range addresses {
+		owner := addressHosts[address]
+		if owner != nil && owner.hasRole("redis-cluster") {
+			continue
+		}
+		ports := slices.Collect(maps.Keys(memberPorts[address]))
+		target := address
+		symptom := fmt.Sprintf("CLUSTER NODES members on port(s) %s announce %s, which is no monitor.yml host's LAN address, so no per-node probe observes them", redisPortRanges(ports), address)
+		if address == "" {
+			target = "unannounced-address"
+			symptom = fmt.Sprintf("CLUSTER NODES members on port(s) %s announce no address, so no monitor.yml host can be matched to them", redisPortRanges(ports))
+		} else if owner != nil {
+			target = owner.name
+			symptom = fmt.Sprintf("CLUSTER NODES members on port(s) %s announce %s, the LAN address of %s, which monitor.yml does not give the redis-cluster role, so no per-node probe observes them", redisPortRanges(ports), address, owner.name)
+		}
+		findings = append(findings, redisNodeInventoryMismatch(target, symptom,
+			fmt.Sprintf("announced_address=%s member_ports=%s", addressName(address), redisPortRanges(ports))))
+	}
+	return findings
+}
+
+// redisNodeInventoryMismatch is one host's, or one unowned address's,
+// disagreement between monitor.yml and the cluster's membership.
+func redisNodeInventoryMismatch(target, symptom, observed string) finding {
+	return finding{
+		probeId: "redis/node-inventory", tier: tierWarn,
+		class: "node-inventory-mismatch", target: target, sustain: 1,
+		symptom:   symptom,
+		mechanism: "Per-node Redis probes sweep each redis-cluster host's monitor.yml node_ports over that host's loopback. A cluster member missing from the inventory is never observed for memory, keyspace, latency, or liveness. A listed port the host does not run either fails each sweep or, on a host that bridges other hosts' node ports, answers with another host's node, whose memory is then judged against this host's RAM and whose findings target this host.",
+		baseline:  "Every addressed CLUSTER NODES member (phantom and handshake entries excluded) announces the LAN address, from config settings.yml routes, of the redis-cluster host whose redis.node_ports lists its port, and every listed node port is such a member.",
+		observed:  observed,
+		action:    "Correct vault/<env>/monitor.yml so each redis-cluster host's redis.node_ports lists exactly the members announced at its LAN address. If the cluster itself is wrong (a node announcing the wrong address, a forgotten node, or an unfinished add-node), repair the cluster instead of widening the inventory.",
+		verify:    "redis-topology reports every member on the host that lists it, with no node-inventory-mismatch, and the per-node Redis signals cover every member on its own host.",
+		playbook:  "SIGNALS.md §3.6",
+	}
 }
