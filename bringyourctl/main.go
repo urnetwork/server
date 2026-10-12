@@ -1029,7 +1029,8 @@ func statsRollupTransfer(opts docopt.Opts) {
 }
 
 // statsBackfill reconstructs recent REAL provider history from the
-// client_reliability blocks (reach bounded by that table's ~30 day retention)
+// client_reliability blocks (reach bounded by that table's retention,
+// model.ClientReliabilityRetention)
 // and rolls up the settled-transfer days still present in the contract
 // tables. Explicitly labeled reconstruction (event_details provenance
 // markers), idempotent by replacement — see model.BackfillProviderAuditEvents

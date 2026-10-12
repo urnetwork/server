@@ -36,7 +36,8 @@ import (
 //     provide-public). Only top-level client rows are reconstructed; derivative
 //     clients carry provide keys for return traffic but are not provider
 //     devices. Reach is bounded by that table's retention
-//     (ClientExpiration, ~30 days).
+//     (ClientReliabilityRetention, 14 days, extended up to ClientExpiration
+//     while a payout is behind).
 //
 //   - RollupTransferAuditEvents: one aggregate audit_contract_event per UTC
 //     day, summing settled destination-party bytes from
@@ -529,8 +530,8 @@ func SweepDeviceAuditEvents(ctx context.Context) (addedCount int, removedCount i
 // deployment forward. This is the only recorded per-day evidence —
 // network_client_connection retains disconnected rows for just 8 hours, and
 // network_client.auth_time is a single last-seen marker, not history. The
-// devices backfill reach therefore matches the providers backfill (~30 days,
-// ClientExpiration) but its coverage within those days is narrower.
+// devices backfill reach therefore matches the providers backfill
+// (ClientReliabilityRetention) but its coverage within those days is narrower.
 //
 // Idempotent by replacement of "backfill:v1"-marked rows in the window, which
 // is clamped exactly like the provider backfill (whole UTC days strictly
@@ -735,7 +736,8 @@ func upsertProviderAuditStatesInTx(
 // This is a labeled snapshot reconstruction, NOT recorded history — history
 // that was never recorded cannot be recovered. Stated approximations:
 //
-//   - reach: client_reliability retention is ClientExpiration (~30 days), so
+//   - reach: client_reliability retention is ClientReliabilityRetention (14
+//     days, extended up to ClientExpiration while a payout is behind), so
 //     nothing older is reconstructable, whatever the requested start.
 //   - geo: a client's CURRENT location (network_client_location_reliability)
 //     is applied to its whole reconstructed history; a client that moved is
