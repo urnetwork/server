@@ -793,6 +793,19 @@ func completePaymentInTx(ctx context.Context, tx server.PgTx, paymentId server.I
 		return fmt.Errorf("Invalid payment.")
 	}
 
+	creditCompletedPaymentAccountBalanceInTx(ctx, tx, paymentId)
+
+	// Contract retention is deliberately not fanned out here. A payment can
+	// own hundreds of thousands of sweeps, and updating every contract in the
+	// same transaction made recording an already-sent payment vulnerable to a
+	// statement timeout. contract_retention_pending is a durable queue bit;
+	// RemoveCompletedContracts advances the cursor in bounded transactions.
+	return nil
+}
+
+// Credits a just-completed payment to its network's paid totals. A payment
+// held for attribution review completes without a credit.
+func creditCompletedPaymentAccountBalanceInTx(ctx context.Context, tx server.PgTx, paymentId server.Id) {
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -815,13 +828,6 @@ func completePaymentInTx(ctx context.Context, tx server.PgTx, paymentId server.I
             `,
 		paymentId,
 	))
-
-	// Contract retention is deliberately not fanned out here. A payment can
-	// own hundreds of thousands of sweeps, and updating every contract in the
-	// same transaction made recording an already-sent payment vulnerable to a
-	// statement timeout. contract_retention_pending is a durable queue bit;
-	// RemoveCompletedContracts advances the cursor in bounded transactions.
-	return nil
 }
 
 // A planned payment that has never entered the Circle retry state and remains

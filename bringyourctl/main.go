@@ -92,6 +92,7 @@ Usage:
     bringyourctl payouts plan [--send] [--dry-run] [--max_duration=<max_duration>]
     bringyourctl payouts populate-tx-hashes
     bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
+    bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -170,6 +171,9 @@ Options:
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
     --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, or solana.
     --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
+    --sweep_batch_size=<sweep_batch_size>  Move at most this many sweeps per transaction when correcting legacy attempts; omitted uses 10000.
+    --sweep_batch_limit=<sweep_batch_limit>  Run at most this many sweep transactions in one correction call; omitted or 0 moves every sweep.
+    --count_sweeps  Also count the sweeps a correction would move (dry run).
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {
@@ -317,6 +321,8 @@ func main() {
 			populateTxHashes()
 		} else if reconcileLegacy, _ := opts.Bool("reconcile-legacy-attempts"); reconcileLegacy {
 			os.Exit(reconcileLegacyPayoutAttempts(opts))
+		} else if correctLegacy, _ := opts.Bool("correct-legacy-attempts"); correctLegacy {
+			os.Exit(correctLegacyPayoutAttempts(opts))
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
 		if send, _ := opts.Bool("transfer"); send {
@@ -1624,6 +1630,102 @@ func reconcileLegacyPayoutAttempts(opts docopt.Opts) int {
 		return 1
 	}
 	return 0
+}
+
+// correctLegacyPayoutAttempts replaces each inflated legacy keyed provider
+// payment that Circle shows was never sent with a corrected payment, and
+// records canceled payments that Circle completed
+// (controller/account_payment_legacy_correction.go). Without --apply it is a
+// dry run: the process is read only, so PostgreSQL refuses every write, and it
+// reads Circle. The output carries counts and totals only.
+func correctLegacyPayoutAttempts(opts docopt.Opts) int {
+	apply, _ := opts.Bool("--apply")
+	if !apply {
+		server.RequirePgReadOnly()
+	}
+	settings := controller.DefaultLegacyProviderPaymentCorrectionSettings()
+	settings.DryRun = !apply
+	settings.CountSweeps, _ = opts.Bool("--count_sweeps")
+	for _, option := range []struct {
+		name     string
+		value    *int
+		positive bool
+	}{
+		{name: "--group_limit", value: &settings.GroupLimit},
+		{name: "--sweep_batch_size", value: &settings.SweepBatchSize, positive: true},
+		{name: "--sweep_batch_limit", value: &settings.SweepBatchLimit},
+	} {
+		valueStr, _ := opts.String(option.name)
+		if valueStr == "" {
+			continue
+		}
+		value, err := strconv.Atoi(valueStr)
+		if err != nil || value < 0 || (option.positive && value == 0) {
+			fmt.Printf("invalid %s %q\n", option.name, valueStr)
+			return 2
+		}
+		*option.value = value
+	}
+
+	ctx := context.Background()
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	mode := "dry run (nothing written)"
+	if apply {
+		mode = "applied"
+	}
+	usd := func(nanoCents model.NanoCents) string { return fmt.Sprintf("$%.2f", model.NanoCentsToUsd(nanoCents)) }
+
+	completion, completionErr := controller.CompletePaidCanceledProviderPayments(clientSession, &controller.PaidCanceledProviderPaymentSettings{
+		DryRun:         !apply,
+		LookupInterval: settings.LookupInterval,
+	})
+	if completion != nil {
+		fmt.Printf("canceled payments Circle completed: %s\n", mode)
+		fmt.Printf("  candidates (canceled, record, no hash): %d\n", completion.CandidateCount)
+		fmt.Printf("  complete with exact amount:            %d (%s)\n", completion.CompleteCount, usd(completion.CompletePayout))
+		fmt.Printf("  not complete:                          %d\n", completion.NotCompleteCount)
+		fmt.Printf("  mismatched record or amount:           %d\n", completion.MismatchCount)
+		fmt.Printf("  lookup error:                          %d\n", completion.LookupErrorCount)
+		fmt.Printf("  recorded completed:                    %d (refused %d)\n", completion.RecordedCount, completion.RefusedCount)
+	}
+
+	result, err := controller.CorrectLegacyProviderPaymentAttempts(clientSession, settings)
+	if result != nil {
+		fmt.Printf("legacy provider payment corrections: %s\n", mode)
+		fmt.Printf("  attempts:                 %d\n", result.AttemptCount)
+		fmt.Printf("  destination groups:       %d (looked up %d, deferred %d)\n", result.GroupCount, result.LookedUpGroupCount, result.DeferredGroupCount)
+		fmt.Printf("  found, left to reconcile: %d\n", result.FoundCount)
+		fmt.Printf("  held, ambiguous:          %d\n", result.AmbiguousCount)
+		fmt.Printf("  held, lookup error:       %d\n", result.LookupErrorCount)
+		fmt.Printf("  held, ineligible:         %d\n", result.IneligibleCount)
+		fmt.Printf("  absent:                   %d\n", result.AbsentCount)
+		fmt.Printf("    no subsidy epoch:       %d\n", result.MissingWindowCount)
+		fmt.Printf("    unchanged:              %d (%s, left to reconcile)\n", result.UnchangedCount, usd(result.UnchangedPayout))
+		fmt.Printf("    corrected:              %d (%s -> %s)\n", result.CorrectionCount, usd(result.OriginalPayout), usd(result.CorrectedPayout))
+		fmt.Printf("      subsidy reduction:    %s\n", usd(result.SubsidyReduction))
+		fmt.Printf("      reliability reduction: %s\n", usd(result.ReliabilityReduction))
+		fmt.Printf("      at or below the fee:  %d (%s, held)\n", result.DustCount, usd(result.DustPayout))
+		if settings.CountSweeps {
+			fmt.Printf("      sweeps to move:       %d\n", result.SweepCount)
+		}
+		if apply {
+			fmt.Printf("  replaced:                 %d (refused %d)\n", result.ReplacedCount, result.RefusedCount)
+			fmt.Printf("  sweeps moved:             %d (still moving %d)\n", result.MovedSweepCount, result.MovingCount)
+			fmt.Printf("  released:                 %d (held at or below the fee %d)\n", result.ReleasedCount, result.DustHeldCount)
+			fmt.Printf("  scheduled:                %d\n", result.ScheduledCount)
+		}
+	}
+	exitCode := 0
+	if completionErr != nil {
+		fmt.Printf("canceled payment completion err = %s\n", completionErr)
+		exitCode = 1
+	}
+	if err != nil {
+		fmt.Printf("legacy provider payment correction err = %s\n", err)
+		exitCode = 1
+	}
+	return exitCode
 }
 
 func listPendingPayouts(opts docopt.Opts) {
