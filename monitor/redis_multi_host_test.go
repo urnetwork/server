@@ -18,6 +18,10 @@ import (
 const (
 	redisTestEdge5 = "by-us-fmt-5-edge-5"
 	redisTestEdge6 = "by-us-fmt-5-edge-6"
+	// LAN addresses as config settings.yml routes resolves them; each node
+	// announces its host's LAN address in CLUSTER NODES
+	redisTestEdge5LAN = "192.168.51.179"
+	redisTestEdge6LAN = "192.168.51.193"
 )
 
 func redisTestPortRange(lo, hi int) []int {
@@ -29,11 +33,11 @@ func redisTestPortRange(lo, hi int) []int {
 }
 
 func redisTestEdge5Host() HostSettings {
-	return HostSettings{Name: redisTestEdge5, Roles: []string{"minio", "redis-cluster", "vpn-client"}, RedisNodePorts: redisTestPortRange(6412, 6427)}
+	return HostSettings{Name: redisTestEdge5, LANAddress: redisTestEdge5LAN, Roles: []string{"minio", "redis-cluster", "vpn-client"}, RedisNodePorts: redisTestPortRange(6412, 6427)}
 }
 
 func redisTestEdge6Host() HostSettings {
-	return HostSettings{Name: redisTestEdge6, Roles: []string{"redis-cluster", "vpn-client"}, RedisEntryPort: 6379, RedisNodePorts: redisTestPortRange(6380, 6411)}
+	return HostSettings{Name: redisTestEdge6, LANAddress: redisTestEdge6LAN, Roles: []string{"redis-cluster", "vpn-client"}, RedisEntryPort: 6379, RedisNodePorts: redisTestPortRange(6380, 6411)}
 }
 
 func redisTwoHostSettings(source SignalSource) SignalSettings {
@@ -271,11 +275,37 @@ func TestRedisClusterSignalTwoHostsKeepsSweepingPastAnUnreachableHost(t *testing
 	}
 }
 
+// redisTestClusterNodes renders a CLUSTER NODES reply with one master per
+// announced address:port, followed by any raw extra lines.
+func redisTestClusterNodes(members []string, extra ...string) string {
+	lines := []string{}
+	for i, member := range members {
+		_, port, _ := strings.Cut(member, ":")
+		lines = append(lines, fmt.Sprintf("%040x %s@1%s master - 0 0 %d connected %d", i+1, member, port, i+1, i))
+	}
+	return strings.Join(append(lines, extra...), "\n")
+}
+
+// redisTestMembers lists address:port for each port.
+func redisTestMembers(address string, ports []int) []string {
+	members := []string{}
+	for _, port := range ports {
+		members = append(members, fmt.Sprintf("%s:%d", address, port))
+	}
+	return members
+}
+
+// redisTestTwoHostMembers is the Main cluster's membership: edge-6's nodes at
+// its LAN address, edge-5's at its own.
+func redisTestTwoHostMembers() []string {
+	return append(redisTestMembers(redisTestEdge6LAN, redisTestPortRange(6380, 6411)), redisTestMembers(redisTestEdge5LAN, redisTestPortRange(6412, 6427))...)
+}
+
 func TestRedisTopologySignalTwoHostsReadsClusterNodesThroughEntry(t *testing.T) {
 	redisCalls := &redisTestCallLog{}
 	source := &syntheticSource{redisFn: func(host HostSettings, port int, args ...string) (string, error) {
 		redisCalls.add(fmt.Sprintf("%s:%d %s", host.Name, port, strings.Join(args, " ")))
-		return "node-a 192.168.51.193:6380@16380 master - 0 0 1 connected 0-341\nnode-b 192.168.51.179:6412@16412 master - 0 0 2 connected 342-682", nil
+		return redisTestClusterNodes(redisTestTwoHostMembers()), nil
 	}}
 	alerts, err := NewRedisTopologySignal().Run(context.Background(), redisTwoHostSettings(source))
 	if err != nil {
@@ -646,17 +676,495 @@ func TestRedisLatencyTrackingSumsEveryHostsReduction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observation, err := observeRedisLatencyTracking(context.Background(), env)
+	observation, failures, err := observeRedisLatencyTracking(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observation != (redisLatencyTrackingObservation{expected: 48, enabled: 46, disabled: 1, unreachable: 1}) {
-		t.Fatalf("cluster observation = %+v", observation)
+	if observation != (redisLatencyTrackingObservation{expected: 48, enabled: 46, disabled: 1, unreachable: 1}) || len(failures) != 0 {
+		t.Fatalf("cluster observation = %+v failures = %+v", observation, failures)
 	}
 
-	// each host's reduction must match that host's own inventory
+	// each host's reduction must match that host's own inventory: one counting
+	// another host's nodes is not summed, its own nodes count as unreachable
 	replies[redisTestEdge5] = "expected=32 enabled=32 disabled=0 invalid=0 unreachable=0"
-	if _, err := observeRedisLatencyTracking(context.Background(), env); err == nil {
-		t.Fatal("a reduction counting another host's nodes was accepted")
+	observation, failures, err = observeRedisLatencyTracking(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation != (redisLatencyTrackingObservation{expected: 48, enabled: 30, disabled: 1, unreachable: 17}) {
+		t.Fatalf("a reduction counting another host's nodes was accepted: %+v", observation)
+	}
+	if len(failures) != 1 || failures[0].host.name != redisTestEdge5 {
+		t.Fatalf("failures = %+v, want edge-5's inconsistent reduction", failures)
+	}
+
+	// with no host reduced the census itself fails
+	replies[redisTestEdge6] = "expected=16 enabled=16 disabled=0 invalid=0 unreachable=0"
+	if _, _, err := observeRedisLatencyTracking(context.Background(), env); err == nil {
+		t.Fatal("a census with no consistent host reduction was accepted")
+	}
+}
+
+// redisTestUnreachable is the transport failure of a host the monitor cannot
+// reach over ssh.
+func redisTestUnreachable(host string) error {
+	return fmt.Errorf("ssh: connect to host %s: connection timed out", host)
+}
+
+// redisTestSick marks one node per host that a fixture drives out of its
+// band: 6390 on edge-6 and 6420 on edge-5.
+func redisTestSick(port int) bool {
+	return port == 6390 || port == 6420
+}
+
+// redisTestRows renders one fixture row per node of the host.
+func redisTestRows(host HostSettings, row func(port int) string) string {
+	rows := []string{}
+	for _, port := range host.RedisNodePorts {
+		rows = append(rows, row(port))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// redisTestHasAlert reports whether an alert of class targets target and,
+// when observed is set, carries it in its observed values.
+func redisTestHasAlert(alerts Alerts, class, target, observed string) bool {
+	for _, alert := range alerts {
+		if alert.Class == class && alert.Target == target && strings.Contains(alert.Observed, observed) {
+			return true
+		}
+	}
+	return false
+}
+
+// redisTestAlertsSummary lists class@target for a failure message.
+func redisTestAlertsSummary(alerts Alerts) string {
+	summary := []string{}
+	for _, alert := range alerts {
+		summary = append(summary, alert.Class+"@"+alert.Target)
+	}
+	slices.Sort(summary)
+	return strings.Join(summary, " ")
+}
+
+// One unreadable redis-cluster host must not blank a signal: the host is
+// reported as unobservable on its own target, the readable host's nodes keep
+// raising their own alerts, and a cluster-wide verdict judged without the
+// unread host says so.
+func TestRedisSignalsTwoHostsJudgeTheReadableHostWhenOneIsUnreachable(t *testing.T) {
+	candidateSample, controlSample := redisPersistentProvideFixtures()
+	type wantAlert struct {
+		class, target, observed string
+	}
+	keyEvents := func(host HostSettings, command string) (string, error) {
+		return redisTestRows(host, func(port int) string {
+			classes, pubsubConns := "KE", 12
+			if port == 6391 || port == 6413 {
+				classes = "-"
+			}
+			if redisTestSick(port) {
+				pubsubConns = 1001
+			}
+			return fmt.Sprintf("%d %s %d", port, classes, pubsubConns)
+		}), nil
+	}
+	ttlCensus := func(host HostSettings, command string) (string, error) {
+		if strings.Contains(command, "EVAL_RO") {
+			return "4914\n99\n47\n52\n0\n0\n0\n12694\n185\n28799985310940036\nlegacy-contracts", nil
+		}
+		return redisTestRows(host, func(port int) string {
+			if redisTestSick(port) {
+				return fmt.Sprintf("%d 6450000 4820000 908000000000000", port)
+			}
+			return fmt.Sprintf("%d 100 90 86400000", port)
+		}), nil
+	}
+	reliability := func(host HostSettings, command string) (string, error) {
+		return redisTestRows(host, func(port int) string {
+			latency := "0.1 1.0 0.3 98"
+			if redisTestSick(port) {
+				latency = "0.1 20.0 14.2 98"
+			}
+			return fmt.Sprintf("%d\t9\t%s", port, latency)
+		}), nil
+	}
+	keyspace := func(host HostSettings, command string) (string, error) {
+		if strings.Contains(command, "EVAL_RO") {
+			if strings.Contains(command, "-p 6390 ") || strings.Contains(command, "-p 6420 ") {
+				return candidateSample, nil
+			}
+			return controlSample, nil
+		}
+		return redisTestRows(host, func(port int) string {
+			if redisTestSick(port) {
+				return fmt.Sprintf("%d 5399000 2554000 512", port)
+			}
+			return fmt.Sprintf("%d 4810000 2555000 512", port)
+		}), nil
+	}
+	usage := func(fullUsed, otherUsed, maxmemory int64) func(HostSettings, string) (string, error) {
+		return func(host HostSettings, command string) (string, error) {
+			if strings.Contains(command, "EVAL_RO") {
+				return syntheticRedisByteSample, nil
+			}
+			return redisTestRows(host, func(port int) string {
+				if redisTestSick(port) {
+					return fmt.Sprintf("%d %d %d", port, fullUsed, maxmemory)
+				}
+				return fmt.Sprintf("%d %d %d", port, otherUsed, maxmemory)
+			}), nil
+		}
+	}
+	latencyTracking := func(host HostSettings, command string) (string, error) {
+		if host.Name == "metrics.invalid" {
+			return metricCardinalityFixture(map[string]int{
+				"total": 70_000, "egress_buckets": 0, "egress_sums": 625, "egress_counts": 625, "redis_latency": 0,
+			}, ""), nil
+		}
+		nodes := len(host.RedisNodePorts)
+		return fmt.Sprintf("expected=%d enabled=1 disabled=%d invalid=0 unreachable=0", nodes, nodes-1), nil
+	}
+
+	tests := []struct {
+		name        string
+		signal      Signal
+		down        string
+		observation string
+		hostFn      func(HostSettings, string) (string, error)
+		settings    func(t *testing.T, settings *SignalSettings)
+		want        []wantAlert
+	}{
+		{
+			name: "key events, edge-5 unreachable", signal: NewRedisKeyEventsSignal(),
+			down: redisTestEdge5, observation: "key-events", hostFn: keyEvents,
+			want: []wantAlert{
+				{class: "pubsub-conn-shape", target: redisTestEdge6 + ":6390"},
+				{class: "keyevent-config-drift", target: redisTestEdge6, observed: "unobserved_hosts=" + redisTestEdge5 + " unobserved_nodes=16"},
+			},
+		},
+		{
+			name: "key events, entry host edge-6 unreachable", signal: NewRedisKeyEventsSignal(),
+			down: redisTestEdge6, observation: "key-events", hostFn: keyEvents,
+			want: []wantAlert{
+				{class: "pubsub-conn-shape", target: redisTestEdge5 + ":6420"},
+				{class: "keyevent-config-drift", target: redisTestEdge6, observed: "unobserved_hosts=" + redisTestEdge6 + " unobserved_nodes=32"},
+			},
+		},
+		{
+			name: "ttl leaks, edge-5 unreachable", signal: NewTTLLeaksSignal(),
+			down: redisTestEdge5, observation: "ttl-census", hostFn: ttlCensus,
+			want: []wantAlert{
+				{class: "ttl-leaks", target: redisTestEdge6, observed: "parsed_nodes=32 configured_nodes=48 affected_ports=6390"},
+				{class: "ttl-leaks", target: redisTestEdge6, observed: "unobserved_hosts=" + redisTestEdge5},
+			},
+		},
+		{
+			name: "reliability pipeline, entry host edge-6 unreachable", signal: NewReliabilityPipelineSignal(),
+			down: redisTestEdge6, observation: "reliability-load", hostFn: reliability,
+			want: []wantAlert{
+				{class: "reliability-pipeline-degraded", target: redisTestEdge5 + ":6420"},
+				{class: "reliability-pipeline-degraded", target: redisTestEdge6, observed: "blocks=9 nodes_sampled=16"},
+				{class: "reliability-pipeline-degraded", target: redisTestEdge6, observed: "unobserved_hosts=" + redisTestEdge6},
+			},
+		},
+		{
+			name: "non-expiring skew, edge-5 unreachable", signal: NewRedisNonexpiringSignal(),
+			down: redisTestEdge5, observation: "keyspace-census", hostFn: keyspace,
+			want: []wantAlert{
+				{class: "nonexpiring-key-skew", target: redisTestEdge6 + ":6390", observed: "observed_masters=32 unobserved_hosts=" + redisTestEdge5},
+			},
+		},
+		{
+			name: "key families, edge-5 unreachable", signal: NewKeyFamiliesSignal(),
+			down: redisTestEdge5, observation: "key-families", hostFn: usage(9000000, 4000000, 10000000),
+			settings: func(t *testing.T, settings *SignalSettings) {
+				settings.StateDir = t.TempDir()
+				populateMetric(t, settings.StateDir, "redis/family/ckey_<id>", 1000, 1000, 1000)
+				settings.Source.(*syntheticSource).hostTimeoutFn = func(host HostSettings, command string, _ time.Duration) (string, error) {
+					if !strings.Contains(command, "-p 6390 ") {
+						t.Errorf("key scan on %s was not the fullest readable node: %s", host.Name, command)
+					}
+					return "30000 ckey_<id>", nil
+				}
+			},
+			want: []wantAlert{
+				{class: "family-growth", target: redisTestEdge6 + ":6390", observed: "unobserved_hosts=" + redisTestEdge5},
+			},
+		},
+		{
+			name: "redis bytes, edge-5 unreachable", signal: NewRedisBytesSignal(),
+			down: redisTestEdge5, observation: "byte-families", hostFn: usage(12700000000, 8000000000, 12884901888),
+			want: []wantAlert{
+				{class: "score-byte-dominance", target: redisTestEdge6 + ":6390", observed: "unobserved_hosts=" + redisTestEdge5},
+			},
+		},
+		{
+			name: "cardinality latency-tracking source, edge-5 unreachable", signal: NewCardinalitySignal(),
+			down: redisTestEdge5, observation: "redis-latencystats", hostFn: latencyTracking,
+			settings: func(t *testing.T, settings *SignalSettings) {
+				settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics.invalid", Roles: []string{"services"}})
+			},
+			want: []wantAlert{
+				{class: "redis-latencystats-source-drift", target: "redis-cluster", observed: "source_expected_nodes=48 source_enabled_nodes=1"},
+				{class: "redis-latencystats-source-unobservable", target: "redis-cluster", observed: "source_unreachable_nodes=16"},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := &syntheticSource{
+				hostFn: func(host HostSettings, command string) (string, error) {
+					if host.Name == test.down {
+						return "", redisTestUnreachable(host.Name)
+					}
+					return test.hostFn(host, command)
+				},
+				redisFn: func(HostSettings, int, ...string) (string, error) { return "", nil },
+			}
+			settings := redisTwoHostSettings(source)
+			if test.settings != nil {
+				test.settings(t, &settings)
+			}
+			alerts, err := test.signal.Run(context.Background(), settings)
+			if err != nil {
+				t.Fatalf("an unreachable %s blanked the signal: %v", test.down, err)
+			}
+			if targets := redisTestAlertTargets(alerts, "cannot-observe"); !slices.Equal(targets, []string{test.down + "/" + test.observation}) {
+				t.Fatalf("cannot-observe targets = %v, want only %s/%s", targets, test.down, test.observation)
+			}
+			for _, want := range test.want {
+				if !redisTestHasAlert(alerts, want.class, want.target, want.observed) {
+					t.Fatalf("no %s alert on %s observing %q; alerts: %s", want.class, want.target, want.observed, redisTestAlertsSummary(alerts))
+				}
+			}
+			for _, alert := range alerts {
+				if strings.HasPrefix(alert.Target, test.down+":") {
+					t.Fatalf("an unread node produced an alert: %+v", alert)
+				}
+			}
+		})
+	}
+}
+
+// With no redis-cluster host readable a signal fails as the single-host
+// signal always has; the cardinality signal keeps its Mimir findings and
+// reports its Redis source as unavailable.
+func TestRedisSignalsTwoHostsFailWhenNoHostIsReadable(t *testing.T) {
+	for _, signal := range []Signal{
+		NewRedisKeyEventsSignal(), NewTTLLeaksSignal(), NewReliabilityPipelineSignal(),
+		NewRedisNonexpiringSignal(), NewKeyFamiliesSignal(), NewRedisBytesSignal(),
+	} {
+		t.Run(signal.Key(), func(t *testing.T) {
+			source := &syntheticSource{hostFn: func(host HostSettings, _ string) (string, error) {
+				return "", redisTestUnreachable(host.Name)
+			}}
+			alerts, err := signal.Run(context.Background(), redisTwoHostSettings(source))
+			if err == nil || !strings.Contains(err.Error(), redisTestEdge5) || !strings.Contains(err.Error(), redisTestEdge6) {
+				t.Fatalf("err = %v alerts = %s, want both hosts' failures", err, redisTestAlertsSummary(alerts))
+			}
+		})
+	}
+
+	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
+		if host.Name == "metrics.invalid" {
+			return metricCardinalityFixture(map[string]int{
+				"total": 70_000, "egress_buckets": 0, "egress_sums": 625, "egress_counts": 625, "redis_latency": 0,
+			}, ""), nil
+		}
+		return "", redisTestUnreachable(host.Name)
+	}}
+	settings := redisTwoHostSettings(source)
+	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics.invalid", Roles: []string{"services"}})
+	alerts, err := NewCardinalitySignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !redisTestHasAlert(alerts, "redis-latencystats-source-unobservable", "redis-cluster", "source_observation=unavailable") {
+		t.Fatalf("alerts = %s, want the Redis source unavailable", redisTestAlertsSummary(alerts))
+	}
+	if targets := redisTestAlertTargets(alerts, "cannot-observe"); len(targets) != 0 {
+		t.Fatalf("cannot-observe targets = %v, want the single unavailable-source finding", targets)
+	}
+}
+
+// redisTestProbeFindings runs a probe directly, so healthy findings are
+// visible.
+func redisTestProbeFindings(t *testing.T, check probe, settings SignalSettings) []finding {
+	t.Helper()
+	settings = settings.withDefaults()
+	if err := settings.validate(); err != nil {
+		t.Fatal(err)
+	}
+	env, err := newProbeEnv(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := check.check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return findings
+}
+
+// A cluster-wide healthy verdict needs every host: nodes on an unread host
+// may hold the drift, residue, backlog latency, or skew.
+func TestRedisProbesTwoHostsWithholdClusterHealthWhileAHostIsUnread(t *testing.T) {
+	healthy := func(host HostSettings, command string) (string, error) {
+		switch {
+		case strings.Contains(command, "notify-keyspace-events"):
+			return redisTestRows(host, func(port int) string { return fmt.Sprintf("%d KE 12", port) }), nil
+		case strings.Contains(command, "SCARD client_reliability_stats_blocks"):
+			return redisTestRows(host, func(port int) string { return fmt.Sprintf("%d\t3\t0.1 1.0 0.3 98", port) }), nil
+		case strings.Contains(command, "CLUSTER NODES"):
+			return redisTestRows(host, func(port int) string { return fmt.Sprintf("%d 4810000 2555000 512", port) }), nil
+		case strings.Contains(command, "INFO keyspace"):
+			return redisTestRows(host, func(port int) string { return fmt.Sprintf("%d 100 90 86400000", port) }), nil
+		}
+		return "", fmt.Errorf("unexpected command on %s", host.Name)
+	}
+	tests := []struct {
+		probe probe
+		class string
+	}{
+		{probe: redisKeyEventProbe{}, class: "keyevent-config-drift"},
+		{probe: redisTTLLeaksProbe{}, class: "ttl-leaks"},
+		{probe: redisReliabilityLoadProbe{}, class: "reliability-pipeline-degraded"},
+		{probe: redisNonexpiringProbe{}, class: "nonexpiring-key-skew"},
+	}
+	for _, test := range tests {
+		for _, down := range []string{"", redisTestEdge5} {
+			t.Run(test.class+"/down="+down, func(t *testing.T) {
+				findings := redisTestProbeFindings(t, test.probe, redisTwoHostSettings(&syntheticSource{
+					hostFn: func(host HostSettings, command string) (string, error) {
+						if host.Name == down {
+							return "", redisTestUnreachable(host.Name)
+						}
+						return healthy(host, command)
+					},
+				}))
+				healthyVerdict, unread := false, false
+				for _, finding := range findings {
+					if finding.healthy && finding.class == test.class && finding.target == redisTestEdge6 {
+						healthyVerdict = true
+					} else if !finding.healthy && finding.class == "cannot-observe" && strings.HasPrefix(finding.target, redisTestEdge5+"/") {
+						unread = true
+					} else if !finding.healthy {
+						t.Fatalf("healthy fixture produced %+v", finding)
+					}
+				}
+				if healthyVerdict != (down == "") || unread != (down != "") {
+					t.Fatalf("healthy verdict = %t, unread report = %t with %q unreachable", healthyVerdict, unread, down)
+				}
+			})
+		}
+	}
+
+	// the latency-tracking census counts an unread host's nodes unreachable
+	sample := metricCardinalitySample{totalSeries: 70_000, egressHealthSumSeries: 625, egressHealthCountSeries: 625}
+	for _, test := range []struct {
+		source  redisLatencyTrackingObservation
+		healthy bool
+	}{
+		{source: redisLatencyTrackingObservation{expected: 48, disabled: 48}, healthy: true},
+		{source: redisLatencyTrackingObservation{expected: 48, disabled: 32, unreachable: 16}},
+	} {
+		healthyVerdict := false
+		for _, finding := range evaluateMetricCardinality("metrics.invalid", sample, test.source, nil) {
+			if finding.class == "redis-latencystats-source-drift" {
+				if !finding.healthy {
+					t.Fatalf("disabled nodes reported as drift: %+v", finding)
+				}
+				healthyVerdict = true
+			}
+		}
+		if healthyVerdict != test.healthy {
+			t.Fatalf("source %+v: healthy drift verdict = %t, want %t", test.source, healthyVerdict, test.healthy)
+		}
+	}
+}
+
+// The family series is the fullest node's sample across the fleet. With a
+// host unread the fullest readable node is still judged against that series,
+// but its sample is not recorded into it.
+func TestKeyFamiliesSignalTwoHostsRecordsNoBaselineFromAPartialFleet(t *testing.T) {
+	const metric = "redis/family/ckey_<id>"
+	for _, test := range []struct {
+		name     string
+		down     string
+		recorded int
+	}{
+		{name: "every host read", recorded: 4},
+		{name: "edge-5 unreachable", down: redisTestEdge5, recorded: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			populateMetric(t, stateDir, metric, 1000, 1000, 1000)
+			source := &syntheticSource{
+				hostFn: func(host HostSettings, command string) (string, error) {
+					if host.Name == test.down {
+						return "", redisTestUnreachable(host.Name)
+					}
+					return redisTestRows(host, func(port int) string {
+						if redisTestSick(port) {
+							return fmt.Sprintf("%d 9000000 10000000", port)
+						}
+						return fmt.Sprintf("%d 4000000 10000000", port)
+					}), nil
+				},
+				hostTimeoutFn: func(HostSettings, string, time.Duration) (string, error) {
+					return "30000 ckey_<id>", nil
+				},
+			}
+			settings := redisTwoHostSettings(source)
+			settings.StateDir = stateDir
+			alerts, err := NewKeyFamiliesSignal().Run(context.Background(), settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireAlertClass(t, alerts, "family-growth")
+			store, err := newBaselineStore(stateDir + "/baseline")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if samples := store.trailingWindow(metric, 24*time.Hour); len(samples) != test.recorded {
+				t.Fatalf("family baseline holds %d samples, want %d", len(samples), test.recorded)
+			}
+		})
+	}
+}
+
+// A host excluded by the monitor's host-scope policy is a deliberate pause,
+// not an unreachable host: the readable host's nodes are still judged, the
+// exclusion is reported once as partial scope, and no visibility alert names
+// the excluded host.
+func TestRedisKeyEventsSignalTwoHostsJudgesEdge6WhileEdge5IsExcluded(t *testing.T) {
+	contacted := &redisTestCallLog{}
+	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
+		contacted.add(host.Name)
+		return redisTestRows(host, func(port int) string {
+			pubsubConns := 12
+			if redisTestSick(port) {
+				pubsubConns = 1001
+			}
+			return fmt.Sprintf("%d KE %d", port, pubsubConns)
+		}), nil
+	}}
+	settings, err := ExcludeHosts(redisTwoHostSettings(source), redisTestEdge5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := NewRedisKeyEventsSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hosts := contacted.snapshot(); !slices.Equal(hosts, []string{redisTestEdge6}) {
+		t.Fatalf("contacted hosts = %v, want only edge-6", hosts)
+	}
+	if !redisTestHasAlert(alerts, "pubsub-conn-shape", redisTestEdge6+":6390", "pubsub_conns=1001") {
+		t.Fatalf("alerts = %s, want edge-6's pubsub page", redisTestAlertsSummary(alerts))
+	}
+	requireAlertClass(t, alerts, "monitor-host-scope-partial")
+	if targets := redisTestAlertTargets(alerts, "cannot-observe"); len(targets) != 0 {
+		t.Fatalf("cannot-observe targets = %v, want the exclusion reported only as partial scope", targets)
 	}
 }

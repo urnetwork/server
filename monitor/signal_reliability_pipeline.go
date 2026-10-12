@@ -23,6 +23,8 @@ func (redisReliabilityLoadProbe) cadence() time.Duration { return 5 * time.Minut
 func (redisReliabilityLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	// The block set is cluster-scoped and reported on the entry host; node
 	// latency is sampled on every redis-cluster host over its own node ports.
+	// A host that cannot be read is reported and the other hosts are judged;
+	// any of them reads the one cluster set.
 	entryHost := env.cfg.redisEntryHost()
 	hosts := env.cfg.redisSweepHosts()
 	if entryHost == nil || len(hosts) == 0 {
@@ -39,6 +41,7 @@ func (redisReliabilityLoadProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	blockCount := 0
 	haveBlockCount := false
 	inconsistentBlockCount := false
+	failures := []redisHostFailure{}
 	for _, nodeHost := range hosts {
 		ports := nodeHost.redisNodePorts()
 		if len(ports) == 0 {
@@ -61,7 +64,8 @@ for p in %s; do
   printf '%%s\t%%s\t%%s\n' "$p" "$blocks" "$latency"
 done`, ports[0], strings.Join(portArgs, " ")))
 		if err != nil {
-			return nil, err
+			failures = append(failures, redisHostFailure{host: nodeHost, err: err})
+			continue
 		}
 		hostBlockCount := 0
 		haveHostBlockCount := false
@@ -100,6 +104,13 @@ done`, ports[0], strings.Join(portArgs, " ")))
 			haveBlockCount = true
 		}
 	}
+	if len(failures) == len(hosts) {
+		return nil, redisHostFailuresError(failures)
+	}
+	// a reported host also withholds the healthy verdict below
+	for _, failure := range failures {
+		findings = append(findings, redisHostCannotObserveFinding(failure, "reliability-load"))
+	}
 
 	if haveBlockCount && !inconsistentBlockCount && 5 < blockCount {
 		maxLatency := 0.0
@@ -110,13 +121,18 @@ done`, ports[0], strings.Join(portArgs, " ")))
 				maxLatencyPort = sample.port
 			}
 		}
+		observed := fmt.Sprintf("blocks=%d nodes_sampled=%d max_latency_ms=%.2f max_latency_port=%d", blockCount, len(samples), maxLatency, maxLatencyPort)
+		if len(failures) > 0 {
+			// the block set is still the whole cluster's; the latency maximum is not
+			observed += " " + redisUnobservedHosts(failures)
+		}
 		findings = append(findings, finding{
 			probeId: "redis/reliability-load", tier: tierWarn,
 			class: "reliability-pipeline-degraded", target: entryHost.name, sustain: 2,
 			symptom:   fmt.Sprintf("reliability pipeline has %d pending discovery blocks across the Redis cluster", blockCount),
 			mechanism: "A growing cluster-wide discovery set means the drain cannot keep up or cannot consume the writers' key format. The set occupies one Redis Cluster slot, so it must not be counted once per entry port.",
 			baseline:  "SCARD client_reliability_stats_blocks is about 3 for the cluster; local Redis latency remains below 10ms even while busy.",
-			observed:  fmt.Sprintf("blocks=%d nodes_sampled=%d max_latency_ms=%.2f max_latency_port=%d", blockCount, len(samples), maxLatency, maxLatencyPort),
+			observed:  observed,
 			evidence:  "The SCARD value was collected once with MOVED redirection enabled; node-local latency was sampled independently on every configured Redis process.",
 			action:    "Verify the taskworker rollup understands the active writer format and advances its durable high-water mark; use node-local latency alerts to distinguish backlog from a sick Redis process.",
 			verify:    "The one cluster-scoped block set converges near 3 and UpdateClientScores freshness remains healthy.",

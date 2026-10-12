@@ -111,7 +111,8 @@ func (redisTTLLeaksProbe) cadence() time.Duration { return 15 * time.Minute }
 
 func (redisTTLLeaksProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	// The residue is a cluster-level judgement reported on the entry host; the
-	// census runs on every redis-cluster host over its own node ports.
+	// census runs on every redis-cluster host over its own node ports. A host
+	// that cannot be read is reported and the other hosts' nodes are judged.
 	h := env.cfg.redisEntryHost()
 	hosts := env.cfg.redisSweepHosts()
 	if h == nil || len(hosts) == 0 {
@@ -123,6 +124,7 @@ func (redisTTLLeaksProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 	ports := []int{}
 	censuses := []hostCensus{}
+	failures := []redisHostFailure{}
 	for _, nodeHost := range hosts {
 		hostPorts := nodeHost.redisNodePorts()
 		if len(hostPorts) == 0 {
@@ -142,9 +144,13 @@ func (redisTTLLeaksProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
     END{print keys" "expires" "avg}')"
 done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 		if err != nil {
-			return nil, err
+			failures = append(failures, redisHostFailure{host: nodeHost, err: err})
+			continue
 		}
 		censuses = append(censuses, hostCensus{host: nodeHost, out: hostOut})
+	}
+	if len(failures) == len(hosts) {
+		return nil, redisHostFailuresError(failures)
 	}
 
 	findings := []finding{}
@@ -202,7 +208,10 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 		return nil, fmt.Errorf("no Redis keyspace INFO parsed (unreachable: %s)", strings.Join(unreachable, ","))
 	}
 	if len(affected) == 0 {
-		findings = append(findings, healthyFinding("redis/ttl-leaks", tierWarn, "ttl-leaks", h.name))
+		// an unread host's nodes may hold the residue
+		if len(failures) == 0 {
+			findings = append(findings, healthyFinding("redis/ttl-leaks", tierWarn, "ttl-leaks", h.name))
+		}
 	} else {
 		affectedPorts := make([]string, 0, len(affected))
 		minKeys, maxKeys := affected[0].keys, affected[0].keys
@@ -223,6 +232,15 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 			"affected_nodes=%d parsed_nodes=%d configured_nodes=%d affected_ports=%s keys_range=%d-%d expiring_keys_range=%d-%d max_avg_ttl_ms=%d max_avg_ttl_days=%.0f max_node_port=%d",
 			len(affected), parsed, len(ports), strings.Join(affectedPorts, ","), minKeys, maxKeys, minExpires, maxExpires, maxTTLNode.averageTTLMillis, maxAverageDays, maxTTLNode.port,
 		)
+		symptom := fmt.Sprintf(
+			"%d of %d Redis nodes have an impossible average TTL; the fleet maximum is %.0f days on port %d",
+			len(affected), len(ports), maxAverageDays, maxTTLNode.port,
+		)
+		if len(failures) > 0 {
+			// the count and maximum cover only the read hosts' nodes
+			observed += " " + redisUnobservedHosts(failures)
+			symptom += redisPartialSymptom(failures)
+		}
 		mechanism := "One or more expiring Redis key families have TTLs far beyond any intentional retention window. A fixed writer does not repair the persistent expiry metadata already stored in the keyspace."
 		evidence := "INFO keyspace independently shows the impossible-TTL residue across ports " + strings.Join(affectedPorts, ",") + "."
 		action := "Run a bounded, binary-safe PTTL attribution before changing data. Repair the identified writer and cleanup scope; do not raise maxmemory to conceal effectively immortal residue."
@@ -254,10 +272,7 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 		findings = append(findings, finding{
 			probeId: "redis/ttl-leaks", tier: tierWarn,
 			class: "ttl-leaks", target: h.name, frame: "duration-as-seconds", sustain: 1,
-			symptom: fmt.Sprintf(
-				"%d of %d Redis nodes have an impossible average TTL; the fleet maximum is %.0f days on port %d",
-				len(affected), len(ports), maxAverageDays, maxTTLNode.port,
-			),
+			symptom:   symptom,
 			mechanism: mechanism,
 			baseline:  "Every node's average TTL stays below two years; the longest intentional Redis exception is an annual net-escrow balance plus 30 days.",
 			observed:  observed,
@@ -281,6 +296,9 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 			verify:   "Every node returns keys, expires, and avg_ttl.",
 			playbook: "SIGNALS.md §1.4",
 		})
+	}
+	for _, failure := range failures {
+		findings = append(findings, redisHostCannotObserveFinding(failure, "ttl-census"))
 	}
 	return findings, nil
 }

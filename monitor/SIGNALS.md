@@ -17138,6 +17138,19 @@ Probe: `redis-topology`
 - Replica count: `CLUSTER NODES | grep -c slave` — 0 means no failover
   exists and any single wedge is a partial outage until manual restart.
 - known_nodes drift vs expected = membership event worth a warn.
+- Node inventory (`node-inventory-mismatch`): every addressed `CLUSTER NODES`
+  member (phantom and handshake entries excluded) must announce the LAN
+  address, from config settings.yml `routes`, of the monitor.yml
+  redis-cluster host whose `redis.node_ports` lists its port, and every listed
+  port must be such a member. One warning per host, or per announced address
+  no redis-cluster host owns, names the ports on each side. Settings
+  validation cannot catch either broken layout: a host whose `redis:` block
+  is missing validates and its nodes silently leave every per-node probe, and
+  a range covering another host's ports validates once that host's block is
+  gone, while edge-6's nginx node-port bridge still answers on 6412-6427 with
+  edge-5's nodes, so their memory is judged against edge-6's RAM. A host
+  without a LAN address leaves the comparison unobservable rather than
+  mismatched.
 - 2026-07-17 purge: 5 `slave,noaddr` phantoms (dead old replicas) removed with
   a per-node loop — each node FORGETs the IDs in ITS OWN noaddr list (views
   differ; every FORGET returned OK, "Unknown node" is tolerable). All 32 views
@@ -19459,6 +19472,7 @@ Tier-1 (warn):
 | zombie-tx | pg | idle-in-tx xact age | > 30 min |
 | dead-tuples | pg | n_dead_tup hot tables | > 10M |
 | replica-cover | redis | CLUSTER NODES slave count | < expected |
+| node-inventory-mismatch | redis + monitor.yml | §3.6 CLUSTER NODES members vs each redis-cluster host's `redis.node_ports` at its LAN address | any member or listed port without its counterpart; immediate at the 1h cadence |
 | open-set-size | pg | 2.6 exact open-contract count below scan cap; explicit lower bounds at cap | exact > 150k high/rising, or capped >= 250001 with unknown trend; 3 ticks / 10 min |
 | close-duration-overrun | task logs+pg | 2.6a live heartbeat or completed CloseExpiredContracts duration | >= 120s; retain completed precursor 45 min |
 | reboot-task-collision | host journal+pg | 2.13 fresh non-terminal task heartbeat at previous-boot boundary | >= 120s during a boot in the last 20 min |

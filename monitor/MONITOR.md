@@ -443,7 +443,7 @@ Escalation batteries pull incident windows non-interactively with
 | continuous | log tailers §3.7: one `warpctl logs <service> -f` per service plus a 45s bounded overlap reconciliation, §4 classification per line, per-minute rate findings |
 | 15m | pg_stat_statements top-20 mean drift 2.3 |
 | 30m | Google Play crash issue/version advances plus explicit vitals freshness 20.1 |
-| 1h | vacuum health 2.4; task duration percentiles 2.5; phantom/replica topology 3.6; zombie-tx 1.3 |
+| 1h | vacuum health 2.4; task duration percentiles 2.5; phantom/replica/node-inventory topology 3.6; zombie-tx 1.3 |
 | 6h | Apple App Crashes daily instances, privacy visibility, and replacement corrections 20.2 |
 | 24h | stats-landmine check (pg_stats n_distinct on transfer_contract.open + open-partial reltuples) §7; keyspace family histogram on fullest node 3.3; dmesg OOM scan 3.4 |
 
@@ -554,6 +554,29 @@ INFO/NODES and `-c` reads) go through the entry host, per-node observations
 run on every host over its own ports, and a node finding targets the
 `host:port` that runs it. `expected_replicas` is cluster-wide and is read from
 the entry host.
+
+One unreadable host does not blank a Redis signal. A sweep reports the host
+it cannot read as `cannot-observe` on `<host>/<observation>` (for example
+`by-us-fmt-5-edge-5/key-events`) and keeps judging the other hosts' nodes, so
+edge-6's pages still fire while edge-5 is unreachable. A cluster-wide verdict
+judged without the host is marked partial (`unobserved_hosts=` in its observed
+values, `(partial: …)` in its symptom), a cluster-wide healthy verdict waits
+until every host is read again, and partial data is never recorded as a
+baseline. The signal fails as a whole only when no host can be read, as a
+single host always has.
+
+Validation checks the inventory only against itself, so `redis-topology`
+(SIGNALS.md §3.6) also checks it against the cluster. Every addressed CLUSTER
+NODES member must announce the LAN address of the redis-cluster host whose
+`node_ports` lists its port, and every listed port must be such a member. Any
+mismatch is a `node-inventory-mismatch` warning naming the host and ports. Two
+layouts that validate are caught this way. A missing `redis:` block would drop
+that host's nodes from every per-node probe. A range covering ports that
+edge-6's nginx bridges to edge-5 would read edge-5's nodes as edge-6's and
+judge their memory against edge-6's RAM. A host's LAN address is its
+`config/<env>/settings.yml` route that most hosts' `routes` blocks agree on.
+A host outside the LAN (sille) overrides the Redis hosts to their overlay
+addresses, so no single block can be trusted.
 
 SSH identity paths are optional; when omitted, `~/.ssh/config` supplies the
 IdentityFile per host. Everything else shared is read from its source of
