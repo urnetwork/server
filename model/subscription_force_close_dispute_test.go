@@ -72,9 +72,27 @@ func newLegacyForceCloseDisputeFixture(t testing.TB, ctx context.Context, source
 		sourceByteCount, destinationByteCount, escrowByteCount, true)
 }
 
+// Reports carry an identity, so each checkpoint is an exact count. An id-less
+// checkpoint is only a legacy lower bound (ca4b5c3d), and expiry settles such a
+// bound below its peer at the mean instead of disputing it. A case that needs
+// the sweep to create a real disagreement from checkpoints uses exact reports.
+func newExactForceCloseDisputeFixture(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
+	sourceByteCount, destinationByteCount, escrowByteCount ByteCount) *forceCloseDisputeFixture {
+	return newForceCloseDisputeFixtureWithReports(t, ctx, sourceCheckpoint, destinationCheckpoint,
+		sourceByteCount, destinationByteCount, escrowByteCount, false, true)
+}
+
 // Both modes use the actual transaction owners, close reports and expiry sweep.
 func newForceCloseDisputeFixtureWithAdmission(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
 	sourceByteCount, destinationByteCount, escrowByteCount ByteCount, legacy bool) *forceCloseDisputeFixture {
+	return newForceCloseDisputeFixtureWithReports(t, ctx, sourceCheckpoint, destinationCheckpoint,
+		sourceByteCount, destinationByteCount, escrowByteCount, legacy, false)
+}
+
+// Id-less reports use the legacy CloseContract entry point; exact reports use
+// CloseContractReport with a fresh report identity.
+func newForceCloseDisputeFixtureWithReports(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
+	sourceByteCount, destinationByteCount, escrowByteCount ByteCount, legacy bool, exact bool) *forceCloseDisputeFixture {
 	t.Helper()
 	payerNetworkId := server.NewId()
 	providerNetworkId := server.NewId()
@@ -109,8 +127,17 @@ func newForceCloseDisputeFixtureWithAdmission(t testing.TB, ctx context.Context,
 	// in that report (owner decision B). Report the receiver first: every shape
 	// then stays open for the expiry sweep, as a sender final whose receiver
 	// checkpoint predates it does.
-	connect.AssertEqual(t, nil, CloseContract(ctx, contractId, destinationId, destinationByteCount, destinationCheckpoint))
-	connect.AssertEqual(t, nil, CloseContract(ctx, contractId, sourceId, sourceByteCount, sourceCheckpoint))
+	report := func(clientId server.Id, byteCount ByteCount, checkpoint bool) {
+		if exact {
+			applied, err := CloseContractReport(ctx, contractId, clientId, byteCount, checkpoint, server.NewId())
+			connect.AssertEqual(t, nil, err)
+			connect.AssertEqual(t, true, applied)
+			return
+		}
+		connect.AssertEqual(t, nil, CloseContract(ctx, contractId, clientId, byteCount, checkpoint))
+	}
+	report(destinationId, destinationByteCount, destinationCheckpoint)
+	report(sourceId, sourceByteCount, sourceCheckpoint)
 	createTime := time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx,
@@ -414,6 +441,8 @@ func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 
 // A failed dispute settlement must retain its reservation, including when this
 // sweep created the dispute. Non-disputed malformed quarantine is a separate policy.
+// The reports are exact: an id-less checkpoint of 0 is a legacy lower bound
+// that expiry settles at the mean rather than disputes (ca4b5c3d).
 func TestForceCloseDisputeSettlementFailureRollsBack(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -421,8 +450,8 @@ func TestForceCloseDisputeSettlementFailureRollsBack(t *testing.T) {
 		ctx := t.Context()
 		const escrow = ByteCount(32 * 1024 * 1024)
 		fixtures := []*forceCloseDisputeFixture{
-			newForceCloseDisputeFixture(t, ctx, true, false, 0, 4*escrow, escrow),
-			newForceCloseDisputeFixture(t, ctx, false, false, 0, 4*escrow, escrow),
+			newExactForceCloseDisputeFixture(t, ctx, true, false, 0, 4*escrow, escrow),
+			newExactForceCloseDisputeFixture(t, ctx, false, false, 0, 4*escrow, escrow),
 		}
 		connect.AssertEqual(t, false, fixtures[0].state(t, ctx).dispute)
 		connect.AssertEqual(t, true, fixtures[1].state(t, ctx).dispute)

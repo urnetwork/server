@@ -204,7 +204,9 @@ func TestForceCloseBudgetAccountingAndMixedErrors(t *testing.T) {
 				ctx := t.Context()
 				const escrow = ByteCount(32 * 1024 * 1024)
 				good := newForceCloseDisputeFixture(t, ctx, true, true, 1024, 1024, escrow)
-				bad := newForceCloseDisputeFixture(t, ctx, !mixed, !mixed, 0, 4*escrow, escrow)
+				// Exact reports: an id-less checkpoint of 0 is a legacy lower bound
+				// that expiry settles at the mean rather than disputes (ca4b5c3d).
+				bad := newExactForceCloseDisputeFixture(t, ctx, !mixed, !mixed, 0, 4*escrow, escrow)
 				before := bad.state(t, ctx)
 				server.Tx(ctx, func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=create_time+interval '1 millisecond' WHERE contract_id=$1`, bad.contractId))

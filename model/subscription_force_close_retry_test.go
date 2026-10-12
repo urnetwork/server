@@ -253,11 +253,13 @@ func TestForceCloseAccountingDatabaseFailureKeepsOrdinaryError(t *testing.T) {
 // A dispute created while finalizing checkpoints needs one fresh post-failure
 // verification in the same pass; an already-large error count must not impose
 // another hour-scale global pause while unrelated backlog is draining.
+// The checkpoints are exact: id-less ones are legacy lower bounds, and expiry
+// settles a 0 bound below its peer at the mean instead of disputing (ca4b5c3d).
 func TestForceCloseAccountingNewDisputeRequiresFirstPassVerification(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		const escrow = ByteCount(32 * 1024 * 1024)
-		bad := newForceCloseDisputeFixture(t, ctx, true, true, 0, 4*escrow, escrow)
+		bad := newExactForceCloseDisputeFixture(t, ctx, true, true, 0, 4*escrow, escrow)
 		before := bad.state(t, ctx)
 		if !before.sourceCheckpoint || !before.destinationCheckpoint || !before.open || before.dispute || before.outcome != "" || !before.streamFound {
 			t.Fatal("synthetic initial checkpoint lifecycle or stream precondition failed")
