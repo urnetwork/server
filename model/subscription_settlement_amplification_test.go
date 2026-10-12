@@ -167,6 +167,14 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 				t.Fatal("legacy worker did not atomically retire its terminal intent")
 			}
 		})
+		// Since ac53dc21 the worker commits the exact earnings with one durable
+		// provider-total owner instead of writing the provider's lifetime total
+		// while it holds the payer's grants. The public total catches up when
+		// that owner runs, and only then; its replay must not add it again.
+		if account := readLegacyAmplificationAccount(t, ctx, fixture.providerNetworkId); account != initialAccount {
+			t.Fatalf("provider total was published before its durable owner ran: got=%+v want=%+v", account, initialAccount)
+		}
+		asyncPayoutRecoveryProject(t, ctx, fixture.contractId)
 		wantAccount := initialAccount
 		wantAccount.ProvidedByteCount += used
 		wantAccount.ProvidedNetRevenue += settledRevenue
