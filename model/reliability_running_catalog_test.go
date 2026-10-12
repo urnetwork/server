@@ -119,6 +119,10 @@ func (self *reliabilityCatalogFixture) assertRunningRows(t testing.TB, lookback 
 
 // Exercise the actual client checkpoint/publication and network task stages,
 // including reuse of already committed bounds. Old trigger probes trip here.
+// Each pass plans every lookback's checkpoint once (one maintenance-pressure
+// read each) and each score transaction reads its markers; the score
+// transactions leave the optional re-anchor to the checkpoint, so they read no
+// maintenance pressure.
 func TestReliabilityPublicCheckpointsNeverReadCatalog(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -138,7 +142,7 @@ func TestReliabilityPublicCheckpointsNeverReadCatalog(t *testing.T) {
 			UpdateClientReliabilityScoresCheckpointed(f.ctx, f.maxTime)
 			UpdateNetworkReliabilityRunningCheckpointed(f.ctx, f.maxTime)
 			UpdateNetworkReliabilityWindow(f.ctx, f.maxTime.Add(-ReliabilityBlockDuration), f.maxTime, false)
-			tripwire.assertReads(t, pass*int64(2*(len(ClientLookbacks)+1)), pass*int64(len(ClientLookbacks)+3))
+			tripwire.assertReads(t, pass*int64(len(ClientLookbacks)+1), pass*int64(len(ClientLookbacks)+1))
 			if writes := tripwire.markerWrites.Load(); writes != int64(len(ClientLookbacks)+1) {
 				t.Fatalf("unchanged checkpoint rewrote its current tokens: writes=%d want=%d", writes, len(ClientLookbacks)+1)
 			}
@@ -262,7 +266,9 @@ func TestReliabilityMandatoryMarkerRepairIgnoresMaintenanceWithoutCatalog(t *tes
 			server.MaintenanceTx(ctx, func(tx server.PgTx) {
 				UpdateClientReliabilityRunningInTx(tx, ctx, f.maxTime)
 			}, server.TxReadCommitted, server.OptNoRetry())
-			tripwire.assertReads(t, beforeWindows+int64(len(ClientLookbacks)+1), beforeMaintenance+1)
+			// mandatory repair needs no maintenance read, and the optional
+			// re-anchor is left to the checkpoint
+			tripwire.assertReads(t, beforeWindows+int64(len(ClientLookbacks)+1), beforeMaintenance)
 			if writes := tripwire.markerWrites.Load() - beforeWrites; writes != wantWrites {
 				t.Fatalf("maintenance changed mandatory/optional repair ownership: marker writes=%d want=%d", writes, wantWrites)
 			}
@@ -305,9 +311,21 @@ func TestReliabilityMandatoryMarkerRepairIgnoresMaintenanceWithoutCatalog(t *tes
 		if PostgresLogicalBackupSnapshotActive(ctx) {
 			t.Fatal("joined backup retained maintenance pressure")
 		}
-		update(int64(len(ClientLookbacks) + 1))
+		// without pressure the score transaction still leaves the optional
+		// re-anchor, and the checkpoint runs it for every lookback
+		update(0)
+		beforeWindows, beforeMaintenance, beforeWrites := tripwire.windowReads.Load(), tripwire.maintenanceReads.Load(), tripwire.markerWrites.Load()
+		UpdateClientReliabilityRunningCheckpointed(ctx, f.maxTime)
+		tripwire.assertReads(t, beforeWindows, beforeMaintenance+int64(len(ClientLookbacks)+1))
+		if writes := tripwire.markerWrites.Load() - beforeWrites; writes != int64(len(ClientLookbacks)+1) {
+			t.Fatalf("checkpoint did not run the quiet periodic re-anchor: marker writes=%d want=%d", writes, len(ClientLookbacks)+1)
+		}
 		for _, lb := range reliabilityRunningLookbacks() {
 			f.assertRunningRows(t, lb.lookbackIndex)
+			window := testingReadRunningWindow(ctx, lb.lookbackIndex)
+			if window.lastRecomputeBlock != window.maxBlockNumber {
+				t.Fatalf("lookback %d was not re-anchored: %+v", lb.lookbackIndex, window)
+			}
 		}
 	})
 }
