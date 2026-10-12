@@ -613,6 +613,20 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) e
 	return validateByJwtStateRemembered(ctx, byJwt, nil)
 }
 
+// Every check ValidateByJwtState makes before its state query: the identity
+// shape, the session horizon, the session revocation marker and this
+// process's remembered refusals. A nil result is not authorization, only the
+// absence of a refusal that needs no query.
+func validateByJwtStateBeforeQuery(ctx context.Context, byJwt *ByJwt, requireClient bool) error {
+	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
+		return err
+	}
+	if err := validateSessionAuthority(ctx, byJwt); err != nil {
+		return err
+	}
+	return refuseRememberedByJwtState(ctx, byJwt, nil)
+}
+
 // Checks durable child ownership and live credentials in one primary-key read.
 // The caller still authenticates the token and binds its owning account first.
 func ValidateByJwtStateForParent(ctx context.Context, byJwt *ByJwt, parentClientId server.Id) error {

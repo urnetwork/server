@@ -26,6 +26,10 @@ package model
 // timeout bounds a missing origin's staleness and cannot hold a route that
 // long. A missing row, a refusal from the write boundary's own read, and a
 // missing origin stay in the ring.
+//
+// The api also answers a control request from these refusals before its
+// client state query, for the client they were recorded for
+// (controller/connect_control_refusal_replay.go).
 
 import (
 	"sync"

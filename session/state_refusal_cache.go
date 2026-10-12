@@ -223,12 +223,11 @@ func init() {
 // no-active-row verdict of a completed one. The rejection counter and detail
 // are the same either way.
 func validateByJwtStateRemembered(ctx context.Context, byJwt *ByJwt, parentClientId *server.Id) (returnErr error) {
+	if err := refuseRememberedByJwtState(ctx, byJwt, parentClientId); err != nil {
+		return err
+	}
 	key, rememberable := newStateRefusalKey(byJwt, parentClientId)
 	source := stateQuerySourceFromContext(ctx)
-	if rememberable && stateRefusals.refused(key, time.Now()) {
-		stateRefusalCounters[source][stateRefusalServed].Inc()
-		return rejectNoActiveRow(byJwt)
-	}
 	noActiveRow := false
 	server.Db(ctx, func(conn server.PgConn) {
 		noActiveRow, returnErr = validateByJwtStateQuery(ctx, conn, byJwt, parentClientId)
@@ -243,6 +242,16 @@ func validateByJwtStateRemembered(ctx context.Context, byJwt *ByJwt, parentClien
 		stateRefusalCounters[source][stateRefusalStored].Inc()
 	}
 	return
+}
+
+// Answers a remembered refusal without a query.
+func refuseRememberedByJwtState(ctx context.Context, byJwt *ByJwt, parentClientId *server.Id) error {
+	key, rememberable := newStateRefusalKey(byJwt, parentClientId)
+	if rememberable && stateRefusals.refused(key, time.Now()) {
+		stateRefusalCounters[stateQuerySourceFromContext(ctx)][stateRefusalServed].Inc()
+		return rejectNoActiveRow(byJwt)
+	}
+	return nil
 }
 
 // The attribution samples credentials by the random tail of the client id, so
