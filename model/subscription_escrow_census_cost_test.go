@@ -14,8 +14,10 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// A held positive reservation is an actual PostgreSQL lock barrier. NOWAIT
-// makes accidental zero-byte grant locking fail deterministically.
+// A held positive reservation is an actual PostgreSQL lock barrier: it keeps
+// its grants' ownership keys, row locks and revision write until commit.
+// NOWAIT makes accidental zero-byte grant locking fail deterministically, and
+// the anchor's wrapped transaction could not admit ownership if it tried.
 func TestZeroByteEscrowDoesNotWaitForGrantOrCensus(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
@@ -28,12 +30,12 @@ func TestZeroByteEscrowDoesNotWaitForGrantOrCensus(t *testing.T) {
 					payerNetworkId: f.sourceNetworkId, payerId: f.sourceId,
 				})
 			}
-			conn := acquireContractLifecycleTestConnection(t, ctx)
-			defer conn.Release()
-			held, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-			server.Raise(err)
-			defer held.Rollback(context.Background())
-			_, _, err = createTransferEscrowInTx(ctx, held, f.sourceNetworkId, f.sourceId,
+			// Positive allocation admits its grants' transaction ownership
+			// (403b9c55), which only the server's own read-committed no-retry
+			// transaction can hold, so the test holds that transaction open.
+			held, finish := beginRareGrantTestTx(t, ctx)
+			defer finish(false)
+			_, _, err := createTransferEscrowInTx(ctx, held, f.sourceNetworkId, f.sourceId,
 				f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 600, nil)
 			server.Raise(err)
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -49,7 +51,7 @@ func TestZeroByteEscrowDoesNotWaitForGrantOrCensus(t *testing.T) {
 					t.Fatalf("zero-byte anchor performed %d exact reservation censuses", counted.reservationReads)
 				}
 			}, server.TxReadCommitted, server.OptNoRetry())
-			server.Raise(held.Commit(ctx))
+			server.Raise(finish(true))
 			if got := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId].reserved; got != 600 {
 				t.Fatalf("zero-byte overlap changed reserved credit to %d", got)
 			}

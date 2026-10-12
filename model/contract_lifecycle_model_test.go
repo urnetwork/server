@@ -75,16 +75,58 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 		return ""
 	}
 
+	// The string value of a package constant that holds one writer's statement.
+	constantValue := func(filename string, constantName string) string {
+		for _, source := range sources {
+			if source.filename != filename {
+				continue
+			}
+			for _, declaration := range source.file.Decls {
+				general, ok := declaration.(*ast.GenDecl)
+				if !ok || general.Tok != token.CONST {
+					continue
+				}
+				for _, specification := range general.Specs {
+					value, ok := specification.(*ast.ValueSpec)
+					if !ok || len(value.Names) != 1 || value.Names[0].Name != constantName || len(value.Values) != 1 {
+						continue
+					}
+					literal, ok := value.Values[0].(*ast.BasicLit)
+					if !ok || literal.Kind != token.STRING {
+						t.Fatalf("%s: constant %s is not one string literal", filename, constantName)
+					}
+					unquoted, err := strconv.Unquote(literal.Value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return unquoted
+				}
+			}
+		}
+		t.Fatalf("%s: constant %s not found", filename, constantName)
+		return ""
+	}
+
+	const clockMarker = "clock_timestamp() AT TIME ZONE 'UTC'"
+	// Since 1279af4d each contract writer reads the creation clock in a CTE at
+	// the head of its INSERT, so the clock precedes the INSERT keyword inside
+	// the one statement. The statement head is the write marker, as the
+	// deactivation writers' lifecycle_clock CTE already was.
+	const creationClockMarker = "WITH creation_clock AS MATERIALIZED"
 	boundaries := []struct {
 		filename     string
 		functionName string
 		lockMarker   string
 		writeMarker  string
+		// A writer that queues a named statement; the constant holds its SQL.
+		statementConstant string
 	}{
-		{filename: "subscription_model.go", functionName: "createTransferEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: "INSERT INTO transfer_contract"},
-		{filename: "subscription_model.go", functionName: "createContractNoEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: "INSERT INTO transfer_contract"},
-		{filename: "subscription_redis_admission.go", functionName: "createRedisTransferEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: "INSERT INTO transfer_contract"},
-		{filename: "network_client_model.go", functionName: "deactivateNetworkClientsInTx", lockMarker: "/* network_client_deactivation_write_boundary */", writeMarker: "WITH lifecycle_clock AS MATERIALIZED"},
+		{filename: "subscription_model.go", functionName: "createTransferEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: creationClockMarker},
+		{filename: "subscription_model.go", functionName: "createContractNoEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: creationClockMarker},
+		{filename: "subscription_redis_admission.go", functionName: "createRedisTransferEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: creationClockMarker},
+		// 969bba39's zero escrow contract, the contract degradation valve's
+		// free fallback, is the fourth reviewed transfer_contract writer.
+		{filename: "subscription_zero_escrow.go", functionName: "createZeroEscrowContractInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: "zeroEscrowContractInsertSql", statementConstant: "zeroEscrowContractInsertSql"},
 		{filename: "network_client_model.go", functionName: "RemoveDisconnectedNetworkClients", lockMarker: "FOR UPDATE OF network_client", writeMarker: "WITH lifecycle_clock AS MATERIALIZED"},
 	}
 
@@ -106,14 +148,29 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 			}
 			lockCount = 2
 		}
+		// The statement runs where its write marker is: inline from that
+		// marker on, or as the named constant's complete text.
+		statement := ""
+		clockCount := 1
+		if boundary.statementConstant != "" {
+			statement = constantValue(boundary.filename, boundary.statementConstant)
+			if !strings.HasPrefix(strings.TrimSpace(statement), creationClockMarker) {
+				t.Errorf("%s: statement %s does not begin with its creation clock", boundary.functionName, boundary.statementConstant)
+			}
+			// The function itself must not read another clock.
+			clockCount = 0
+		}
 		for markerName, marker := range map[string]string{
 			"lock":  boundary.lockMarker,
 			"write": boundary.writeMarker,
-			"clock": "clock_timestamp() AT TIME ZONE 'UTC'",
+			"clock": clockMarker,
 		} {
 			want := 1
-			if markerName == "lock" {
+			switch markerName {
+			case "lock":
 				want = lockCount
+			case "clock":
+				want = clockCount
 			}
 			if count := strings.Count(source, marker); count != want {
 				t.Errorf("%s: %s marker count = %d, want %d", boundary.functionName, markerName, count, want)
@@ -121,16 +178,74 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 		}
 		lockIndex := strings.LastIndex(source, boundary.lockMarker)
 		writeIndex := strings.Index(source, boundary.writeMarker)
-		clockIndex := strings.Index(source, "clock_timestamp() AT TIME ZONE 'UTC'")
-		if lockIndex < 0 || writeIndex <= lockIndex || clockIndex <= writeIndex {
+		if boundary.statementConstant == "" && 0 <= writeIndex {
+			statement = source[writeIndex:]
+		}
+		clockIndex := strings.Index(statement, clockMarker)
+		if lockIndex < 0 || writeIndex <= lockIndex || clockIndex < 0 {
 			t.Errorf(
-				"%s: want lock (%d) before write (%d) before database clock (%d)",
+				"%s: want lock (%d) before write (%d) reading the database clock (%d)",
 				boundary.functionName,
 				lockIndex,
 				writeIndex,
 				clockIndex,
 			)
 		}
+		if strings.HasPrefix(boundary.writeMarker, "WITH creation_clock") || boundary.statementConstant != "" {
+			// The clock CTE feeds the INSERT that follows it in one statement.
+			insertIndex := strings.Index(statement, "INSERT INTO transfer_contract")
+			if insertIndex <= clockIndex || !strings.Contains(statement[insertIndex:], "FROM creation_clock") {
+				t.Errorf("%s: want the creation clock (%d) to feed its INSERT (%d)", boundary.functionName, clockIndex, insertIndex)
+			}
+		}
+	}
+
+	// 7b941e32 moved the deactivation write out of deactivateNetworkClientsInTx
+	// into deactivateLockedNetworkClientsInTx, which requires its caller to
+	// hold FOR UPDATE on every target row. The writer reads the database clock
+	// in its single UPDATE, and every reviewed caller locks before calling it.
+	lockedWriter := functionSource("network_client_model.go", "deactivateLockedNetworkClientsInTx")
+	lockedWriteIndex := strings.Index(lockedWriter, "WITH lifecycle_clock AS MATERIALIZED")
+	if strings.Count(lockedWriter, "WITH lifecycle_clock AS MATERIALIZED") != 1 || strings.Count(lockedWriter, clockMarker) != 1 ||
+		lockedWriteIndex < 0 || strings.Index(lockedWriter, clockMarker) <= lockedWriteIndex {
+		t.Errorf("deactivateLockedNetworkClientsInTx: want one write reading the database clock")
+	}
+	deactivation := functionSource("network_client_model.go", "deactivateNetworkClientsInTx")
+	if marked := strings.Index(deactivation, "/* network_client_deactivation_write_boundary */"); marked < 0 ||
+		strings.Index(deactivation, "deactivateLockedNetworkClientsInTx(") <= marked {
+		t.Errorf("deactivateNetworkClientsInTx: want its marked lock before the locked write")
+	}
+	lockedCallers := []string{}
+	for _, source := range sources {
+		for _, declaration := range source.file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Name.Name == "deactivateLockedNetworkClientsInTx" {
+				continue
+			}
+			start := source.fileSet.Position(function.Pos()).Offset
+			end := source.fileSet.Position(function.End()).Offset
+			body := string(source.data[start:end])
+			callIndex := strings.Index(body, "deactivateLockedNetworkClientsInTx(")
+			if callIndex < 0 {
+				continue
+			}
+			lockedCallers = append(lockedCallers, function.Name.Name)
+			lockIndex := strings.Index(body, "FOR UPDATE")
+			if strings.Count(body, "deactivateLockedNetworkClientsInTx(") != 1 || lockIndex < 0 || callIndex <= lockIndex {
+				t.Errorf("%s: want FOR UPDATE (%d) before its one locked deactivation write (%d)", function.Name.Name, lockIndex, callIndex)
+			}
+		}
+	}
+	slices.Sort(lockedCallers)
+	reviewedCallers := []string{
+		"CleanupSessionOperation",
+		"deactivateNetworkClientsInTx",
+		"deactivateOwnedNetworkClientInTx",
+		"drainProberShardInTx",
+		"retireProberNetworkClientInTx",
+	}
+	if !slices.Equal(lockedCallers, reviewedCallers) {
+		t.Errorf("locked deactivation callers = %v, want exactly the reviewed callers %v", lockedCallers, reviewedCallers)
 	}
 
 	contractWriters := []string{}
@@ -155,12 +270,18 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 			return true
 		})
 	}
-	if len(contractWriters) != 3 {
-		t.Fatalf("production transfer_contract INSERT writers = %d, want exactly 3 reviewed writers", len(contractWriters))
+	if len(contractWriters) != 4 {
+		t.Fatalf("production transfer_contract INSERT writers = %d, want exactly 4 reviewed writers", len(contractWriters))
 	}
 	for writerIndex, writer := range contractWriters {
-		if !strings.Contains(writer, "CLOCK_TIMESTAMP() AT TIME ZONE 'UTC'") {
-			t.Errorf("transfer_contract writer %d does not use the primary database clock", writerIndex)
+		for _, want := range []string{
+			"CREATION_CLOCK AS MATERIALIZED",
+			"CLOCK_TIMESTAMP() AT TIME ZONE 'UTC'",
+			"FROM CREATION_CLOCK",
+		} {
+			if !strings.Contains(writer, want) {
+				t.Errorf("transfer_contract writer %d does not take the primary database clock: missing %q", writerIndex, want)
+			}
 		}
 	}
 	if len(deactivationWriters) != 2 {

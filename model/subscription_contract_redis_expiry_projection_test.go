@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,22 +44,70 @@ func (self *redisExpiryProjectionGate) wait(ctx context.Context) error {
 
 func (self *redisExpiryProjectionGate) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, command redis.Cmder) error {
-		// Health checks and the existing live clock increment remain available.
+		// Health checks, a new connection's handshake, the existing live clock
+		// increment and the bounded contract hole delta that every terminal
+		// claim publishes after its commit (3a13e513) remain available.
 		// Reconciliation's actual EVAL is the blocked dependency witness.
-		if self.enabled.Load() && command.Name() != "ping" && command.Name() != "incrby" {
+		if self.enabled.Load() && !redisConnectionSetupCommand(command) && command.Name() != "incrby" && !contractHoleEventCommand(command) {
 			return self.wait(ctx)
 		}
 		return next(ctx, command)
 	}
 }
 
+// A pool that dials during the gated window sends these before any command.
+func redisConnectionSetupCommand(command redis.Cmder) bool {
+	switch command.Name() {
+	case "ping", "hello", "auth", "select", "readonly", "client":
+		return true
+	}
+	return false
+}
+
+// The lifecycle delta revokes transport permission, not grant credit. Its
+// own one-second Redis bound limits what it can cost the repair's budget.
+func contractHoleEventCommand(command redis.Cmder) bool {
+	args := command.Args()
+	return command.Name() == "eval" && 1 < len(args) && args[1] == contractHoleEventScript
+}
+
 func (self *redisExpiryProjectionGate) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return func(ctx context.Context, commands []redis.Cmder) error {
-		if self.enabled.Load() {
+		// The payer client's best-effort data usage meter is a counter
+		// increment like the clock's, posted by each settlement that used
+		// bytes (92206301). A connection handshake also passes; every other
+		// pipeline is a blocked witness.
+		if self.enabled.Load() && !clientDataUsageCommands(commands) && !redisConnectionSetupCommands(commands) {
 			return self.wait(ctx)
 		}
 		return next(ctx, commands)
 	}
+}
+
+// A handshake's pipelined setup, such as SELECT or CLIENT SETNAME.
+func redisConnectionSetupCommands(commands []redis.Cmder) bool {
+	for _, command := range commands {
+		if !redisConnectionSetupCommand(command) {
+			return false
+		}
+	}
+	return 0 < len(commands)
+}
+
+// Exactly RecordClientDataUsage's transaction: one block hash increment and
+// its expiry, and no other key.
+func clientDataUsageCommands(commands []redis.Cmder) bool {
+	names := []string{}
+	for _, command := range commands {
+		names = append(names, command.Name())
+		if command.Name() == "hincrby" || command.Name() == "expire" {
+			key, ok := command.Args()[1].(string)
+			if !ok || !strings.HasPrefix(key, "client_data_usage.") {
+				return false
+			}
+		}
+	}
+	return slices.Equal(names, []string{"multi", "hincrby", "expire", "exec"})
 }
 
 // The public model must observe every selected outcome without entering debit
@@ -138,7 +188,11 @@ func TestRedisExpiryRepairProjectionWaitDoesNotBlockLaterContracts(t *testing.T)
 		neighbor := createRedisAdmissionTest(ctx, f, 37)
 		neighborBefore := readRedisExpiryRepairTestState(ctx, neighbor.ContractId)
 		request := ContractExpiryRepairRequest{ExpectedPayerNetworkId: f.sourceNetworkId, ContractIds: []server.Id{first, second}, Apply: true}
+		// Both sender finals already revoked their contracts' transport
+		// permission; only the active neighbor holds the pair's contract hole.
+		requireContractHoleCount(t, ctx, f.sourceId, f.destinationId, 1)
 		repairRedisExpiryWithProjectionGate(t, ctx, request)
+		requireContractHoleCount(t, ctx, f.sourceId, f.destinationId, 1)
 		proof, snapshot := readContractExpiryTestSnapshot(t, ctx, first)
 		if snapshot.ByteCount != 11 || snapshot.Expiry == nil || len(snapshot.Expiry.Reports) != 2 {
 			t.Fatal("deferred projection changed the original usage proof")
@@ -228,9 +282,14 @@ func TestRedisExpiryRepairFinalReportsDoNotWaitForProjection(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,close_time,checkpoint)
 				VALUES($1,'source',17,$2,false),($1,'destination',11,$2,false)`, id, server.NowUtc().Add(-time.Hour)))
 		})
+		// Final reports inserted directly publish nothing, so the open contract
+		// still holds its pair's transport permission until the repair's
+		// terminal claim publishes the removal.
+		requireContractHoleCount(t, ctx, f.sourceId, f.destinationId, 1)
 		repairRedisExpiryWithProjectionGate(t, ctx, ContractExpiryRepairRequest{
 			ExpectedPayerNetworkId: f.sourceNetworkId, ContractIds: []server.Id{id}, Apply: true,
 		})
+		requireContractHoleCount(t, ctx, f.sourceId, f.destinationId, 0)
 		requireRedisExpiryRepairTestCredit(t, ctx, f, 1000, 100)
 		requireRedisExpiryClock(t, ctx, "11")
 		_, _, _, err := flushTransferDebitBalance(ctx, f.balanceId)

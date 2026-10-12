@@ -51,21 +51,33 @@ func TestDynamicProberGrantBoundsRowsAndDiscoversReplenishment(t *testing.T) {
 		for index := range 80 {
 			addDynamicProberGrantForTest(ctx, clients.payerNetworkId, now.Add(time.Duration(index-100)*time.Minute), now.Add(time.Hour), 256)
 		}
+		// Positive allocation admits grant ownership, which only the server's
+		// own read-committed no-retry transaction can hold (403b9c55); count
+		// its reads at the driver rather than through a wrapper transaction.
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		for round := range 2 {
 			newest := addDynamicProberGrantForTest(ctx, clients.payerNetworkId, now.Add(time.Duration(round-2)*time.Minute), now.Add(2*time.Hour), 1024)
-			var query *escrowGrantQueryTestTx
+			query := &escrowGrantQueryHook{}
 			var escrow *TransferEscrow
 			var posts []func() any
 			server.Tx(ctx, func(tx server.PgTx) {
-				query = &escrowGrantQueryTestTx{PgTx: tx}
+				hooked, unhook := withLegacyStatementHooks(ctx, tx, query.statementHook())
+				defer unhook()
 				var err error
-				escrow, posts, err = createTransferEscrowInTx(ctx, query, clients.payerNetworkId, clients.payerId,
+				escrow, posts, err = createTransferEscrowInTx(hooked, tx, clients.payerNetworkId, clients.payerId,
 					clients.providerNetworkId, clients.providerId, clients.payerNetworkId, 1024, nil)
 				server.Raise(err)
-			})
+			}, server.TxReadCommitted, server.OptNoRetry())
 			server.RunPosts(ctx, posts...)
 			if query.grantQueries != 2 || query.grantRows > 32 {
 				t.Errorf("round %d: grant queries=%d rows=%d, want candidate and lock reads of at most 16 rows each", round, query.grantQueries, query.grantRows)
+			}
+			// Only ids are discovered for ownership, once, over every current
+			// grant: the compatibility allocator may widen its bounded window
+			// to the complete fallback, so it admits that scope up front.
+			if current := 80 + round + 1; query.discoveryQueries != 1 || query.discoveryRows != current {
+				t.Errorf("round %d: ownership discovery queries=%d rows=%d, want one read of the %d current grant ids", round, query.discoveryQueries, query.discoveryRows, current)
 			}
 			if len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != newest.BalanceId || escrow.Balances[0].BalanceByteCount != 1024 || escrow.Priority != UnpaidPriority {
 				t.Fatalf("round %d: newest sufficient internal grant did not fund the unchanged contract", round)
@@ -120,26 +132,40 @@ func TestDynamicProberGrantReservedWindowsAndExactFallback(t *testing.T) {
 				}
 			}
 		})
+		// Positive allocation admits grant ownership, which only the server's
+		// own read-committed no-retry transaction can hold (403b9c55); count
+		// its reads at the driver rather than through a wrapper transaction.
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		for round := range 2 {
-			var query *escrowGrantQueryTestTx
+			query := &escrowGrantQueryHook{}
 			var escrow *TransferEscrow
 			var posts []func() any
 			server.Tx(ctx, func(tx server.PgTx) {
-				query = &escrowGrantQueryTestTx{PgTx: tx}
+				hooked, unhook := withLegacyStatementHooks(ctx, tx, query.statementHook())
+				defer unhook()
 				var err error
-				escrow, posts, err = createTransferEscrowInTx(ctx, query, clients.payerNetworkId, clients.payerId,
+				escrow, posts, err = createTransferEscrowInTx(hooked, tx, clients.payerNetworkId, clients.payerId,
 					clients.providerNetworkId, clients.providerId, clients.payerNetworkId, 1024, nil)
 				server.Raise(err)
-			})
+			}, server.TxReadCommitted, server.OptNoRetry())
 			server.RunPosts(ctx, posts...)
+			// Ownership discovery reads the 65 current grant ids before the
+			// candidate reads, and the complete fallback discovers them again
+			// before its locking read.
 			wantedIndex, wantedQueries, wantedRows := 48, proberGrantAttemptsPerWindow+3, 65+proberGrantAttemptsPerWindow
+			wantedDiscoveries, wantedDiscoveryRows := 1, 65
 			wantedPriority := Priority(UnpaidPriority)
 			if round == 1 {
 				wantedIndex, wantedQueries, wantedRows = 0, 2*proberGrantAttemptsPerWindow+3, 129+2*proberGrantAttemptsPerWindow
+				wantedDiscoveries, wantedDiscoveryRows = 2, 130
 				wantedPriority = PaidPriority
 			}
 			if query.grantQueries != wantedQueries || query.grantRows != wantedRows {
 				t.Fatalf("round %d: queries=%d rows=%d, want %d/%d", round, query.grantQueries, query.grantRows, wantedQueries, wantedRows)
+			}
+			if query.discoveryQueries != wantedDiscoveries || query.discoveryRows != wantedDiscoveryRows {
+				t.Fatalf("round %d: ownership discovery queries=%d rows=%d, want %d/%d", round, query.discoveryQueries, query.discoveryRows, wantedDiscoveries, wantedDiscoveryRows)
 			}
 			if len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != grants[wantedIndex].BalanceId || escrow.Balances[0].BalanceByteCount != 1024 || escrow.Priority != wantedPriority {
 				t.Fatalf("round %d: changed selected grant, reserved bytes, or priority", round)
