@@ -66,6 +66,63 @@ type p2pReceiveCreditSnapshot struct {
 	measurementMaximumPackets int
 }
 
+// Failure-only ownership evidence keeps four existing reservations per pool;
+// the total and omitted count distinguish a bounded sample from full coverage.
+type p2pRouterPendingOwnerSnapshot struct {
+	Generation uint64
+	Address    string
+	Active     bool
+	Closing    bool
+	Closed     bool
+}
+
+// Pool indices retain the caller's forward/reverse physical-hop ordering.
+type p2pRouterPendingPoolSnapshot struct {
+	PoolIndex          int
+	PendingPacketCount int
+	OmittedOwnerCount  int
+	Owners             []p2pRouterPendingOwnerSnapshot
+}
+
+// No payload or per-packet history is retained. Call only on a failed join.
+func snapshotP2pRouterPending(creditPools []*p2pReceiveCredits) []p2pRouterPendingPoolSnapshot {
+	var snapshots []p2pRouterPendingPoolSnapshot
+	for poolIndex, credits := range creditPools {
+		if credits == nil {
+			continue
+		}
+		func() {
+			credits.stateLock.Lock()
+			defer credits.stateLock.Unlock()
+			if credits.routerPendingPacketCount == 0 {
+				return
+			}
+			snapshot := p2pRouterPendingPoolSnapshot{
+				PoolIndex:          poolIndex,
+				PendingPacketCount: credits.routerPendingPacketCount,
+			}
+			for _, reservation := range credits.routerPendingReservations {
+				if !reservation.routerPending || reservation.socket == nil {
+					continue
+				}
+				if len(snapshot.Owners) == 4 {
+					snapshot.OmittedOwnerCount += 1
+					continue
+				}
+				snapshot.Owners = append(snapshot.Owners, p2pRouterPendingOwnerSnapshot{
+					Generation: reservation.socket.generation,
+					Address:    reservation.socket.addressKey,
+					Active:     reservation.active,
+					Closing:    reservation.socket.closing,
+					Closed:     reservation.socket.closed,
+				})
+			}
+			snapshots = append(snapshots, snapshot)
+		}()
+	}
+	return snapshots
+}
+
 // One workload interval records receive-admission high water independently
 // from the pool's lifetime diagnostic maximum.
 type p2pReceiveCreditMaximumEpoch struct {
@@ -356,14 +413,27 @@ func (self *p2pReceiveCredits) socketForTransferWithLock(
 	acceptsSource := func(socket *p2pReceiveCreditSocket) bool {
 		return socket.remoteKey == "" || socket.remoteKey == sourceKey
 	}
+	udpAddress := destinationAddress.(*net.UDPAddr)
+	wildcardKey := net.JoinHostPort("", fmt.Sprintf("%d", udpAddress.Port))
+	if self.generationFramed && addressKey == wildcardKey {
+		return nil
+	}
 	if socket := self.receiveSockets[addressKey]; socket != nil && !socket.closing &&
 		!socket.closed && acceptsSource(socket) {
 		return socket
 	}
-	udpAddress := destinationAddress.(*net.UDPAddr)
-	wildcardKey := net.JoinHostPort("", fmt.Sprintf("%d", udpAddress.Port))
 	if socket := self.receiveSockets[wildcardKey]; socket != nil && !socket.closing &&
 		!socket.closed && acceptsSource(socket) {
+		if self.generationFramed {
+			// A wildcard belongs to this endpoint, not every vnet sharing its port.
+			// Reject before framing: a topology drop cannot complete a router owner.
+			destinationIp, found := netip.AddrFromSlice(udpAddress.IP)
+			if !found || socket.owner == nil ||
+				!socket.owner.sourceIPv4.IsValid() ||
+				destinationIp.Unmap() != socket.owner.sourceIPv4 {
+				return nil
+			}
+		}
 		return socket
 	}
 	return nil
