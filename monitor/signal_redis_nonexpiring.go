@@ -187,17 +187,22 @@ func (self redisNonexpiringProbe) cadence() time.Duration { return 15 * time.Min
 
 // Preserve exact fleet skew even when detailed attribution is unavailable.
 func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	h := env.cfg.hostByRole("redis-cluster")
+	// The fleet census spans every redis-cluster host; the healthy result is
+	// reported on the entry host and an outlier on the host that runs it.
+	h := env.cfg.redisEntryHost()
 	if h == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
-	ports := h.redisNodePorts()
-	if len(ports) < 3 {
+	if len(env.cfg.redisAllNodePorts()) < 3 {
 		return nil, fmt.Errorf("need at least three Redis masters for a fleet skew baseline")
 	}
-	nodes, err := collectRedisKeyspaceNodes(ctx, env, h, ports)
-	if err != nil {
-		return nil, err
+	nodes := []redisKeyspaceNode{}
+	for _, nodeHost := range env.cfg.redisNodeHosts() {
+		hostNodes, err := collectRedisKeyspaceNodes(ctx, env, nodeHost, nodeHost.redisNodePorts())
+		if err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, hostNodes...)
 	}
 
 	medianDensity, outliers := redisNonexpiringOutliers(nodes)
@@ -207,7 +212,8 @@ func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]f
 
 	worst := outliers[0]
 	control := redisNonexpiringControl(nodes, worst.node.port, medianDensity)
-	target := fmt.Sprintf("%s:%d", h.name, worst.node.port)
+	worstHost := env.cfg.redisNodeHostOrEntry(worst.node.port)
+	target := fmt.Sprintf("%s:%d", worstHost.name, worst.node.port)
 	attribution := redisPersistentAttribution{status: "unavailable"}
 	observedParts := []string{
 		fmt.Sprintf("worst_port=%d", worst.node.port),
@@ -224,8 +230,8 @@ func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]f
 	}
 
 	visibility := []finding{}
-	candidateSample, candidateErr := sampleRedisPersistentFamilies(ctx, env, h, worst.node.port)
-	controlSample, controlErr := sampleRedisPersistentFamilies(ctx, env, h, control.port)
+	candidateSample, candidateErr := sampleRedisPersistentFamilies(ctx, env, worstHost, worst.node.port)
+	controlSample, controlErr := sampleRedisPersistentFamilies(ctx, env, env.cfg.redisNodeHostOrEntry(control.port), control.port)
 	if candidateErr == nil && controlErr == nil {
 		attribution = classifyRedisPersistentAttribution(candidateSample, controlSample)
 		observedParts = append(observedParts, redisPersistentSampleSummary("candidate", candidateSample)...)

@@ -35,6 +35,67 @@ type safeRedisClient struct {
 	authentication        bool
 }
 
+type redisDialFunc func(ctx context.Context, network string, addr string) (net.Conn, error)
+
+// redisClusterDialer dials every node address the cluster hands the client
+// (CLUSTER SLOTS, MOVED and ASK) at the address this host reaches it by. The
+// cluster spans more than one host, so the entry host alone no longer reaches
+// every node: nodes announce their own lan ips and each node port is unique
+// across the cluster.
+func redisClusterDialer(authority string, nodeRoutes map[string]string, dial redisDialFunc) redisDialFunc {
+	authorityHost, _, _ := net.SplitHostPort(authority)
+	return func(ctx context.Context, network string, addr string) (net.Conn, error) {
+		return dial(ctx, network, redisNodeDialAddr(authorityHost, nodeRoutes, addr))
+	}
+}
+
+// redisNodeDialAddr maps an announced node address to the address to dial:
+//   - a loopback authority is an ssh tunnel (xops/bin/by-patch-main-data)
+//     that forwards every node port to loopback, so every node is dialed there
+//   - a node that announces no host (`:port`, or `?` for an unknown endpoint)
+//     is dialed on the authority host, as before the cluster spanned hosts
+//   - a node whose announced ip is a settings lan_hosts address is dialed at
+//     this host's route to that lan host. Lan hosts route to the lan ip
+//     itself; hosts outside the lan (sille) route over the management vpn.
+//   - any other address is dialed as announced
+func redisNodeDialAddr(authorityHost string, nodeRoutes map[string]string, addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if redisLoopbackHost(authorityHost) {
+		return net.JoinHostPort(authorityHost, port)
+	}
+	if host == "" || host == "?" {
+		return net.JoinHostPort(authorityHost, port)
+	}
+	if route, ok := nodeRoutes[host]; ok {
+		return net.JoinHostPort(route, port)
+	}
+	return addr
+}
+
+// redisNodeRoutes maps each lan host's lan ip (settings lan_hosts) to this
+// host's route to it (settings routes). Lan hosts without a route are dialed
+// at their announced ip.
+func redisNodeRoutes(lanHosts map[string]string, routes map[string]string) map[string]string {
+	nodeRoutes := map[string]string{}
+	for host, lanIp := range lanHosts {
+		if route, ok := routes[host]; ok && route != "" {
+			nodeRoutes[lanIp] = route
+		}
+	}
+	return nodeRoutes
+}
+
+func redisLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (self *safeRedisClient) open() redis.UniversalClient {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -129,16 +190,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 		dialer := NewDialer(dialTimeout)
 		authority := redisKeys.RequireString("authority")
 		password := localEvaluationCredential("EVALUATION_REDIS_PASSWORD", redisKeys.RequireString("password"))
-		host, _, _ := net.SplitHostPort(authority)
-		dialContext := func(ctx context.Context, network string, addr string) (net.Conn, error) {
-			// always connect to the original host
-			// this is because the cluser is set up with ip endpoints, but the ip is not universally routable
-			// note: this should be the default client behavior when `cluster-preferred-endpoint-type=unknown-endpoint`
-			//       however, go-redis and most other redis clients don't seem to handle the `MOVE :port` commands
-			//       correctly without a host
-			_, portStr, _ := net.SplitHostPort(addr)
-			return dialer.DialContext(ctx, network, net.JoinHostPort(host, portStr))
-		}
+		dialContext := redisClusterDialer(authority, redisNodeRoutes(LanHosts(), Routes()), dialer.DialContext)
 
 		cluster := redisKeys.RequireBool("cluster")
 

@@ -114,11 +114,12 @@ func (redisBytesProbe) tier() string           { return tierWarn }
 func (redisBytesProbe) cadence() time.Duration { return 15 * time.Minute }
 
 func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	h := env.cfg.hostByRole("redis-cluster")
-	if h == nil {
+	entryHost := env.cfg.redisEntryHost()
+	if entryHost == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
-	fullest, err := fullestRedisNodeUsage(ctx, env, h)
+	// the fullest node may be on any redis-cluster host; sample it where it runs
+	h, fullest, err := fullestRedisNodeUsage(ctx, env)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +158,7 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 	if 0.85 <= usedFraction &&
 		redisByteDominanceFraction <= scoreByteFraction &&
 		redisByteDominanceMinimum <= score.bytes {
-		aliasesReady, aliasesReadyErr := redisScoreAliasesReady(ctx, env, h)
+		aliasesReady, aliasesReadyErr := redisScoreAliasesReady(ctx, env, entryHost)
 		action := "Deploy the alias-aware score cache: write one zero-caller baseline per target, one-byte aliases for unchanged callers, and full overrides only for callers whose exclusions intersect the target. Let the first compatibility pass refresh legacy payloads and publish its ready marker; then let duplicates expire naturally. Do not delete cache keys or raise maxmemory to mask the amplification."
 		mechanism := "The client-score cache is keyed by both caller location and target, but most callers do not exclude a network present in a given target. Materializing the same gob counts, filter, and provider samples under every unchanged caller multiplies large values across hundreds of keys; key-count histograms understate this because score keys are fewer but much larger."
 		context := "This is sampled byte attribution, not a full key census. Pair it with node-memory pressure and the five-hour score-cache TTL. Impossible-TTL stream residue is a separate, real defect and must not be assumed to own capacity without its own measured bytes."

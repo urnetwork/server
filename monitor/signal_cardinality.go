@@ -79,10 +79,28 @@ func (metricCardinalityProbe) check(ctx context.Context, env *probeEnv) ([]findi
 }
 
 func observeRedisLatencyTracking(ctx context.Context, env *probeEnv) (redisLatencyTrackingObservation, error) {
-	host := env.cfg.hostByRole("redis-cluster")
-	if host == nil {
+	hosts := env.cfg.redisSweepHosts()
+	if len(hosts) == 0 {
 		return redisLatencyTrackingObservation{}, fmt.Errorf("redis latencystats source: no redis-cluster host")
 	}
+	// Each host reduces its own nodes; the cluster observation is their sum,
+	// and every per-host reduction must itself be consistent.
+	total := redisLatencyTrackingObservation{}
+	for _, host := range hosts {
+		observation, err := observeRedisHostLatencyTracking(ctx, env, host)
+		if err != nil {
+			return observation, err
+		}
+		total.expected += observation.expected
+		total.enabled += observation.enabled
+		total.disabled += observation.disabled
+		total.invalid += observation.invalid
+		total.unreachable += observation.unreachable
+	}
+	return total, nil
+}
+
+func observeRedisHostLatencyTracking(ctx context.Context, env *probeEnv, host *host) (redisLatencyTrackingObservation, error) {
 	ports := host.redisNodePorts()
 	if len(ports) == 0 {
 		return redisLatencyTrackingObservation{}, fmt.Errorf("redis latencystats source: no node ports")

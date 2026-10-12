@@ -488,6 +488,29 @@ func Routes() map[string]string {
 	return routeStrs
 }
 
+// LanHosts maps each host on the lan routers' bridges to its lan ip. It reads
+// the top-level lan_hosts block of the env's settings.yml, which is not part
+// of the per-host settings that GetSettings merges.
+func LanHosts() map[string]string {
+	lanHostIps := map[string]string{}
+	res, err := Config.SimpleResource("settings.yml")
+	if err != nil {
+		return lanHostIps
+	}
+	lanHosts, ok := res.Parse()["lan_hosts"].(map[string]any)
+	if !ok {
+		return lanHostIps
+	}
+	for host, lanHost := range lanHosts {
+		if lanHostObj, ok := lanHost.(map[string]any); ok {
+			if ip, ok := lanHostObj["ip"].(string); ok && ip != "" {
+				lanHostIps[host] = ip
+			}
+		}
+	}
+	return lanHostIps
+}
+
 func Env() (string, error) {
 	env := os.Getenv("WARP_ENV")
 	if env != "" {

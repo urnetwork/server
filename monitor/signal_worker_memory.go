@@ -332,7 +332,7 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			verify = "The exact outlier's exporter capability is independently established, consecutive score runs complete inside their normal band, and the affected executor returns below the heap guards after terminal/collection boundaries. Verify sparse score bytes after the legacy TTL, populated selections, and no Redis capacity error; a global marker alone does not close this process-local finding."
 			if !aliasesReadyLoaded {
 				aliasesReadyLoaded = true
-				redisHost := env.cfg.hostByRole("redis-cluster")
+				redisHost := env.cfg.redisEntryHost()
 				if redisHost == nil {
 					aliasesReadyErr = fmt.Errorf("no redis-cluster host in inventory")
 				} else {
