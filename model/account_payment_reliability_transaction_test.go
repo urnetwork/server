@@ -257,9 +257,11 @@ func requirePaymentReliabilityRollback(t testing.TB, ctx context.Context, networ
 
 // Exercise the real planner and retained earning identity on bounded input.
 // Counts are the performance gate; elapsed aggregation time is evidence only.
-// Every committed step (the window definition, its chunk, its fold, the plan
-// transaction that first reports its window and the one that allocates, and
-// the staged assignment) owns one backend; the window is folded exactly once.
+// Every committed step (the window definition, each of its chunks, its fold,
+// the plan transaction that first reports its window and the one that
+// allocates, and the staged assignment) owns one backend; the window is folded
+// exactly once. Each chunk beyond the first adds one five-statement
+// transaction (lock, window, partials, cursor, commit).
 func TestPaymentPlanReliabilityUsesOneBackendAndOneAggregation(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -288,7 +290,9 @@ func TestPaymentPlanReliabilityUsesOneBackendAndOneAggregation(t *testing.T) {
 			t.Errorf("plan repeated or skipped its refresh/checks: aggregations=%d rows=%d schema=%d boundary=%d error=%v",
 				observer.aggregations, observer.aggregationRows, observer.schemaChecks, observer.boundaryChecks, observer.queryErr)
 		}
-		if observer.minBlock != reliabilityBlockNumber(start) || observer.maxBlock != reliabilityBlockNumber(end)+1 || observer.statements > 96 {
+		windowBlockCount := reliabilityBlockNumber(end) + 1 - reliabilityBlockNumber(start)
+		chunkCount := (windowBlockCount + paymentPlanReliabilityChunkBlockCount - 1) / paymentPlanReliabilityChunkBlockCount
+		if observer.minBlock != reliabilityBlockNumber(start) || observer.maxBlock != reliabilityBlockNumber(end)+1 || int64(observer.statements) > 96+5*(chunkCount-1) {
 			t.Errorf("plan expanded its aggregation window or round trips: blocks=[%d,%d) statements=%d", observer.minBlock, observer.maxBlock, observer.statements)
 		}
 		t.Logf("reliability input_rows=16384 contributing_rows=8192 aggregations=%d changed_rows=%d nested_acquires=%d foreign_statements=%d statements=%d aggregation_duration=%s",

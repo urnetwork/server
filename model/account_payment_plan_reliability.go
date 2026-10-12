@@ -33,9 +33,14 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Blocks per committed chunk: six hours of 60-second blocks, about 44M
-// client_reliability rows on Main, so a chunk commits within minutes.
-var paymentPlanReliabilityChunkBlockCount int64 = 360
+// Blocks per committed chunk: a quarter hour of 60-second blocks, about 1.2M
+// client_reliability rows on Main, so a chunk commits within seconds. Six-hour
+// chunks ran a mean of 396 s and up to 750 s on Main (1.1 s and at worst 2.1 s
+// of history per block), each holding its snapshot and xid throughout, which
+// kept vacuum from removing dead tuples anywhere in the database. Each chunk
+// upserts the partials of the clients it saw, so smaller chunks write more
+// partial rows; at this size a 4-day window upserts about 35M.
+var paymentPlanReliabilityChunkBlockCount int64 = 15
 
 // Observes each committed chunk, after its commit, with the window's next
 // shifted block. Nil in production; tests use it to interrupt a window at an

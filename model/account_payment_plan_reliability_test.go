@@ -200,6 +200,117 @@ func TestPaymentPlanReliabilityChunksMatchSingleStatement(t *testing.T) {
 	})
 }
 
+// blockCount blocks in which three clients share an address in every block
+// (each adds 1/3, so float partial sums would round differently), clients
+// share an address in some blocks, one client has only invalid observations,
+// and clients sit in two countries of two networks.
+func paymentPlanReliabilityLongFixture(t testing.TB, ctx context.Context, blockCount int64) (start time.Time, end time.Time) {
+	t.Helper()
+	firstBlock := reliabilityBlockNumber(server.NowUtc().Add(-7 * 24 * time.Hour))
+	start = time.UnixMilli(firstBlock * int64(ReliabilityBlockDuration/time.Millisecond)).UTC()
+	end = start.Add(time.Duration(blockCount-1) * ReliabilityBlockDuration)
+	networkA, networkB := server.NewId(), server.NewId()
+	countryX, countryY := server.NewId(), server.NewId()
+	t1, t2, t3, a1, a2, b1, b2 := server.NewId(), server.NewId(), server.NewId(), server.NewId(), server.NewId(), server.NewId(), server.NewId()
+	server.Tx(ctx, func(tx server.PgTx) {
+		for _, location := range []struct {
+			clientId  server.Id
+			networkId server.Id
+			countryId server.Id
+		}{
+			{clientId: t1, networkId: networkA, countryId: countryX},
+			{clientId: t2, networkId: networkA, countryId: countryX},
+			{clientId: t3, networkId: networkA, countryId: countryY},
+			{clientId: a1, networkId: networkA, countryId: countryX},
+			{clientId: a2, networkId: networkA, countryId: countryY},
+			{clientId: b1, networkId: networkB, countryId: countryX},
+			{clientId: b2, networkId: networkB, countryId: countryY},
+		} {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_location_reliability
+				(client_id, network_id, country_location_id, update_block_number, client_address_hash_count, location_count)
+				VALUES ($1, $2, $3, $4, 1, 1)`, location.clientId, location.networkId, location.countryId, firstBlock))
+		}
+		insert := func(blockNumber int64, addressHash byte, networkId server.Id, clientId server.Id, valid bool) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_reliability
+				(block_number, client_address_hash, network_id, client_id,
+				connection_established_count, provide_enabled_count, receive_message_count, valid)
+				VALUES ($1, $2, $3, $4, 1, 1, 1, $5)`, blockNumber, []byte{addressHash}, networkId, clientId, valid))
+		}
+		for blockOffset := int64(0); blockOffset < blockCount; blockOffset += 1 {
+			blockNumber := firstBlock + blockOffset
+			for _, clientId := range []server.Id{t1, t2, t3} {
+				insert(blockNumber, 0x10, networkA, clientId, true)
+			}
+			insert(blockNumber, 0x01, networkA, a1, true)
+			if blockOffset%2 == 0 {
+				insert(blockNumber, 0x01, networkA, a2, true)
+			}
+			insert(blockNumber, 0x02, networkB, b1, true)
+			insert(blockNumber, 0x02, networkB, b2, false)
+		}
+	})
+	return
+}
+
+// A chunk transaction aggregates at most half an hour of history, and the
+// scores folded from many chunks equal the single statement exactly. Six-hour
+// chunks ran up to 750 s on Main, each holding its snapshot and xid.
+func TestPaymentPlanReliabilityChunksAggregateBoundedRanges(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		const maxChunkBlockCount = int64(30)
+		start, end := paymentPlanReliabilityLongFixture(t, ctx, 120)
+		minBlockNumber, maxBlockNumber := paymentPlanReliabilityBlockWindow(start, end)
+
+		rollback := errors.New("single statement reference rollback")
+		var reference []paymentPlanReliabilityScoreRow
+		value := server.HandleError(func() {
+			server.MaintenanceTx(ctx, func(tx server.PgTx) {
+				UpdateNetworkReliabilityScoresInTx(tx, ctx, start, end, false)
+				reference = readPaymentPlanReliabilityScores(t, ctx, tx)
+				panic(rollback)
+			}, server.TxReadCommitted, server.OptNoRetry())
+		})
+		// network A in both countries and network B in one: b2 never has a
+		// valid row
+		if value != rollback || len(reference) != 3 {
+			t.Fatal("reference scores did not cover the fixture", value, reference)
+		}
+
+		committed := []int64{}
+		paymentPlanReliabilityChunkCommitted = func(nextBlockNumber int64) {
+			committed = append(committed, nextBlockNumber)
+		}
+		defer func() {
+			paymentPlanReliabilityChunkCommitted = nil
+		}()
+		progress, err := preparePaymentPlanReliabilityWindow(ctx, start, end)
+		if !progress || err != nil {
+			t.Fatal("window was not prepared", progress, err)
+		}
+		previous := minBlockNumber
+		for _, next := range committed {
+			if maxChunkBlockCount < next-previous {
+				t.Fatalf("a chunk transaction aggregated %d blocks [%d,%d), want at most %d", next-previous, previous, next, maxChunkBlockCount)
+			}
+			previous = next
+		}
+		if previous != maxBlockNumber || len(committed) < 2 {
+			t.Fatal("chunks did not cover the window", committed, minBlockNumber, maxBlockNumber)
+		}
+
+		var chunked []paymentPlanReliabilityScoreRow
+		server.Db(ctx, func(conn server.PgConn) {
+			chunked = readPaymentPlanReliabilityScores(t, ctx, conn)
+		})
+		if !slices.Equal(chunked, reference) {
+			t.Fatalf("chunked scores differ from the single statement:\nchunked=%+v\nreference=%+v", chunked, reference)
+		}
+	})
+}
+
 // Another window's fold replaces the scores; the plan transaction then refuses
 // the stale window until it is folded again.
 func TestPaymentPlanReliabilityWindowRefusesReplacedScores(t *testing.T) {
