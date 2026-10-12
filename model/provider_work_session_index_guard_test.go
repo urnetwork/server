@@ -51,9 +51,9 @@ func TestProviderWorkSessionDeployedSignerRequiresTransactionIndex(t *testing.T)
 		// connects a fresh client through the real connection owner, which
 		// appends its session events and signs them when it can
 		connectClient := func(address string) (eventCount int, receiptCount int) {
-			clientId := server.NewId()
-			addContractPayoutTestClients(ctx, map[server.Id]server.Id{clientId: server.NewId()})
-			waitConnectDayWrites(recordConnectDayForTest(ctx, clientId, now))
+			clientId, networkId := server.NewId(), server.NewId()
+			addContractPayoutTestClients(ctx, map[server.Id]server.Id{clientId: networkId})
+			waitConnectDayWrites(recordConnectDayForTest(ctx, networkId, clientId, now))
 			if _, _, _, _, err := ConnectNetworkClientWithIpFamily(ctx, clientId, address, handlerId, 4); err != nil {
 				t.Fatal(err)
 			}
