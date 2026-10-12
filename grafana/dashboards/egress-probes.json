@@ -4591,6 +4591,1556 @@
         "y": 212
       },
       "id": 79
+    },
+    {
+      "type": "row",
+      "title": "URL probe turns, passes, scheduling and census",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 220
+      },
+      "id": 80
+    },
+    {
+      "id": 81,
+      "type": "timeseries",
+      "title": "URL turns, outcomes and sources / min",
+      "description": "Paced provider URL turns by attempted, accepted or local failure outcome; acknowledged measured outcomes by success or error; and measured turns by general, country, security recheck or unavailable country coverage source.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 221
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(urnetwork_url_probe_turns_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "turn {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (outcome) (rate(urnetwork_url_probe_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "acknowledged {{outcome}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (source) (rate(urnetwork_url_probe_sources_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "source {{source}}"
+        }
+      ]
+    },
+    {
+      "id": 82,
+      "type": "timeseries",
+      "title": "URL pass and turn mean duration",
+      "description": "Mean time draining bounded paced turns per pass, and mean worker occupancy for one turn including setup and publication, from the histogram sums and counts.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 221
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum (rate(urnetwork_url_probe_pass_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum (rate(urnetwork_url_probe_pass_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "pass"
+        },
+        {
+          "refId": "B",
+          "expr": "sum (rate(urnetwork_url_probe_turn_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum (rate(urnetwork_url_probe_turn_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "turn"
+        }
+      ]
+    },
+    {
+      "id": 83,
+      "type": "timeseries",
+      "title": "URL task-owner passes / min by shard and result",
+      "description": "Completed URL task-owner passes by shard and returned result.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 229
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (shard, outcome) (rate(urnetwork_url_probe_shard_passes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{shard}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 84,
+      "type": "timeseries",
+      "title": "URL due backlog age and current cohort age",
+      "description": "Age of the oldest eligible URL turn beyond its paced due time, and the age of the oldest durable first-eligibility timestamp in the current cohort. A zero cohort timestamp means no initialized admission and stays empty.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 229
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_url_probe_oldest_due_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "oldest overdue turn"
+        },
+        {
+          "refId": "B",
+          "expr": "time() - max(urnetwork_url_probe_cohort_started_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} > 0)",
+          "legendFormat": "cohort age"
+        }
+      ]
+    },
+    {
+      "id": 85,
+      "type": "timeseries",
+      "title": "URL scheduler owners and phase residence",
+      "description": "Synchronous scheduler owners by phase now, and scheduler wall residence per second by phase including currently owned time. Neither is worker residence or CPU.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 237
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (phase) (urnetwork_url_probe_scheduler_inflight{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "owners {{phase}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (phase) (rate(urnetwork_url_probe_scheduler_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "seconds / s {{phase}}"
+        }
+      ]
+    },
+    {
+      "id": 86,
+      "type": "timeseries",
+      "title": "URL pass stops and claim dispositions / min",
+      "description": "The first reason a pass stopped admitting work, observed after the invocation returns, and claims admitted or left unstarted after the admission boundary with their completion acknowledgments. Neither is a measurement or quota credit.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 237
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (rate(urnetwork_url_probe_scheduler_stops_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "stop {{reason}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (disposition) (rate(urnetwork_url_probe_claim_dispositions_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "claim {{disposition}}"
+        }
+      ]
+    },
+    {
+      "id": 87,
+      "type": "timeseries",
+      "title": "URL due calls / min by result",
+      "description": "Completed synchronous URL due requests by source result. A successful response can still arrive too late for admission.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 245
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(urnetwork_url_probe_due_calls_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 88,
+      "type": "timeseries",
+      "title": "URL due call mean residence",
+      "description": "Completed synchronous due request residence per call by source result.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 245
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(urnetwork_url_probe_due_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (outcome) (rate(urnetwork_url_probe_due_calls_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 89,
+      "type": "timeseries",
+      "title": "URL census refreshes / min and mean duration",
+      "description": "Actual fleet census refresh attempts by result (guard skips are not attempts; failures keep the prior census generation) and the mean monotonic wall time per attempt.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 253
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_url_probe_fleet_refresh_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "refreshes / min {{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (result) (rate(urnetwork_url_probe_fleet_refresh_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (result) (rate(urnetwork_url_probe_fleet_refresh_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "mean seconds {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 90,
+      "type": "timeseries",
+      "title": "latest URL census read",
+      "description": "The latest attempted census only: numeric source clocks, completed acquisition and query counts, client wall seconds and decoded aggregate rows by state, with phase event counts (reset on the next attempt). It is not durable history.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 253
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (state) (urnetwork_url_probe_fleet_read{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "{{state}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (phase) (urnetwork_url_probe_fleet_read_phase_events{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "events {{phase}}"
+        }
+      ]
+    },
+    {
+      "id": 91,
+      "type": "timeseries",
+      "title": "latest URL census phase age",
+      "description": "Age of the latest source UTC clock for each phase of the same attempted census. A zero clock means the phase was not reached and stays empty.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 261
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max by (phase) (urnetwork_url_probe_fleet_read_phase_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} > 0)",
+          "legendFormat": "{{phase}}"
+        }
+      ]
+    },
+    {
+      "id": 92,
+      "type": "timeseries",
+      "title": "mature URL quota deficit diagnostic",
+      "description": "Closed aggregate observations of at most 128 current mature quota-deficient providers. Observations do not establish pacing or causation; see the contract version on the capability panel.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 261
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (state) (urnetwork_url_probe_mature_deficit_diagnostic{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "id": 93,
+      "type": "timeseries",
+      "title": "URL and probe diagnostic capabilities by process",
+      "description": "Executable capabilities and contract versions per taskworker. 1 means the process exports that bounded identity-free observation. An absent capability is no-data, not disabled or healthy.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 269
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (host, block, instance) (urnetwork_url_probe_fleet_read_observation_enabled{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "census read {{host}} {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (host, block, instance) (urnetwork_url_probe_fleet_refresh_observation_enabled{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "census refresh {{host}} {{instance}}"
+        },
+        {
+          "refId": "C",
+          "expr": "max by (host, block, instance) (urnetwork_url_probe_scheduler_observation_enabled{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "scheduler {{host}} {{instance}}"
+        },
+        {
+          "refId": "D",
+          "expr": "max by (host, block, instance) (urnetwork_url_probe_completed_stage_timing_enabled{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "stage timing {{host}} {{instance}}"
+        },
+        {
+          "refId": "E",
+          "expr": "max by (host, block, instance) (urnetwork_url_probe_completed_setup_timing_enabled{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "setup timing {{host}} {{instance}}"
+        },
+        {
+          "refId": "F",
+          "expr": "max(urnetwork_url_probe_mature_deficit_diagnostic_contract{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "deficit diagnostic contract"
+        },
+        {
+          "refId": "G",
+          "expr": "max by (host, block, instance) (urnetwork_egress_probe_blackhole_progress_enabled{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "blackhole progress {{host}} {{instance}}"
+        },
+        {
+          "refId": "H",
+          "expr": "max by (host, block, instance) (urnetwork_egress_probe_blackhole_result_observation_enabled{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "blackhole results {{host}} {{instance}}"
+        },
+        {
+          "refId": "I",
+          "expr": "max by (host, block, instance) (urnetwork_egress_probe_full_progress_enabled{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "full progress {{host}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "completed URL turn stage and tunnel setup timing",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 277
+      },
+      "id": 94
+    },
+    {
+      "id": 95,
+      "type": "timeseries",
+      "title": "completed URL batch stage wall time / s",
+      "description": "Wall-clock stages of the same returned one-provider URL batches. check_and_buffer includes asynchronous route setup; total excludes still-running batches.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 278
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (rate(urnetwork_url_probe_completed_stage_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "id": 96,
+      "type": "timeseries",
+      "title": "completed URL timing coverage / min",
+      "description": "Returned batches with complete stage timing, batches with a closed setup observation, closed owned tunnels by strict admission timing coverage, and matched tunnels with an observed or missing source InEvaluation event. None is a success or durable coverage counter.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 278
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (coverage) (rate(urnetwork_url_probe_completed_stage_turns_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "stage turns {{coverage}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (coverage) (rate(urnetwork_url_probe_completed_setup_turns_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "setup turns {{coverage}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (coverage) (rate(urnetwork_url_probe_completed_setup_tunnels_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "tunnels {{coverage}}"
+        },
+        {
+          "refId": "D",
+          "expr": "sum by (coverage) (rate(urnetwork_url_probe_completed_setup_evaluation_tunnels_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "evaluation {{coverage}}"
+        }
+      ]
+    },
+    {
+      "id": 97,
+      "type": "timeseries",
+      "title": "tunnel setup calls / min",
+      "description": "Returned credential acquisition or processed-registration constructor calls in the completed turn cohort by stage and outcome (calls can overlap and include cleanup), wrapper calls still pending when an owned tunnel froze, and tunnels whose terminal Close returned an error.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 286
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage, outcome) (rate(urnetwork_url_probe_completed_setup_calls_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{stage}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (stage) (rate(urnetwork_url_probe_completed_setup_pending_calls_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "pending at freeze {{stage}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum (rate(urnetwork_url_probe_completed_setup_close_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "close errors"
+        }
+      ]
+    },
+    {
+      "id": 98,
+      "type": "timeseries",
+      "title": "tunnel setup mean residence",
+      "description": "Mean returned setup call residence by stage and outcome (not a wall-time partition), and the mean source InEvaluation-to-Added time for matched tunnels with both events, which includes contract transport and send admission but not ping RTT.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 286
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage, outcome) (rate(urnetwork_url_probe_completed_setup_call_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (stage, outcome) (rate(urnetwork_url_probe_completed_setup_calls_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "call {{stage}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum (rate(urnetwork_url_probe_completed_setup_evaluation_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum (rate(urnetwork_url_probe_completed_setup_evaluation_tunnels_total{env=\"$env\",service=\"taskworker\",instance!=\"\",coverage=\"observed\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "InEvaluation to Added"
+        }
+      ]
+    },
+    {
+      "id": 99,
+      "type": "timeseries",
+      "title": "tunnel setup route stage seconds / s",
+      "description": "Source-time stages from credential entry to the first observed Added for matched unique constructors. All four stages share the matched tunnel denominator.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 294
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (rate(urnetwork_url_probe_completed_setup_route_stage_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "initial ping, DNS waves, probe auth and probe credentials",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 302
+      },
+      "id": 100
+    },
+    {
+      "id": 101,
+      "type": "timeseries",
+      "title": "initial-ping evaluations / min",
+      "description": "Evaluations started after successful construction, and terminal evaluations by outcome and dependency snapshot. acknowledged is not admission, and terminal cells are independent of accepted URL outcomes.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 303
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum (rate(urnetwork_egress_probe_initial_ping_started_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "started"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (outcome, dependency) (rate(urnetwork_egress_probe_initial_ping_evaluations_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{outcome}} {{dependency}}"
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "type": "timeseries",
+      "title": "initial-ping mean terminal residence",
+      "description": "Mean whole terminal residence per evaluation, including contract and carrier work, by outcome and dependency snapshot and by the exact ping path witnesses. These are terminal snapshots, not phase durations.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 303
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome, dependency) (rate(urnetwork_egress_probe_initial_ping_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (outcome, dependency) (rate(urnetwork_egress_probe_initial_ping_evaluations_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "{{outcome}} {{dependency}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (outcome, route_write, ack_callback) (rate(urnetwork_egress_probe_initial_ping_path_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (outcome, route_write, ack_callback) (rate(urnetwork_egress_probe_initial_ping_path_evaluations_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "path {{outcome}} write={{route_write}} ack={{ack_callback}}"
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "type": "timeseries",
+      "title": "initial-ping path evaluations / min",
+      "description": "Terminal evaluations by the exact local route-write and ACK callback witnesses. accepted is not remote receipt, and callback success is not a measured outcome.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 311
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome, route_write, ack_callback) (rate(urnetwork_egress_probe_initial_ping_path_evaluations_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{outcome}} write={{route_write}} ack={{ack_callback}}"
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "type": "timeseries",
+      "title": "private-tunnel DNS waves / min",
+      "description": "Completed waves by local outcome and same-tunnel setup state, by the exact tunnel's end-of-wave contract witness (not_proved is an unknown cause), and by endpoint route snapshot. None is a provider verdict.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 311
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result, path) (rate(urnetwork_egress_probe_dns_waves_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{result}} {{path}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (result, evidence) (rate(urnetwork_egress_probe_dns_contract_waves_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "contract {{result}} {{evidence}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (result, route) (rate(urnetwork_egress_probe_dns_route_waves_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "route {{result}} {{route}}"
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "type": "timeseries",
+      "title": "DNS wave wall seconds / s",
+      "description": "DNS wave residence by contract witness (not contract-acquisition time), and seconds before or after the observed route admission. Before admission is not continuous setup time.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 319
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result, evidence) (rate(urnetwork_egress_probe_dns_contract_wave_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "contract {{result}} {{evidence}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (route, phase) (rate(urnetwork_egress_probe_dns_route_seconds_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "route {{route}} {{phase}}"
+        }
+      ]
+    },
+    {
+      "id": 106,
+      "type": "timeseries",
+      "title": "probe auth, credentials and resident retirement / min",
+      "description": "Logical synchronous probe auth calls by last POST phase and outcome; internal prober credential operations; and owned probe resident capture and conditional removal. None measures provider coverage.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 319
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (phase, result) (rate(urnetwork_egress_probe_auth_requests_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "auth {{phase}} {{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (operation, result) (rate(urnetwork_egress_probe_internal_credentials_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "credential {{operation}} {{result}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (operation, result) (rate(urnetwork_egress_probe_resident_retirement_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "retirement {{operation}} {{result}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "blackhole and full batch progress, and the auxiliary egress tally",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 327
+      },
+      "id": 107
+    },
+    {
+      "id": 108,
+      "type": "timeseries",
+      "title": "blackhole and full batch states in flight",
+      "description": "Currently owned batch and provider states. Blackhole completed_buffered includes unmeasured and guardable results; full queued includes selected work not started and finished_waiting includes failed or unmeasured work before its batch returns.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 328
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state) (urnetwork_egress_probe_blackhole_inflight{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "blackhole {{state}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (state) (urnetwork_egress_probe_full_inflight{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "full {{state}}"
+        }
+      ]
+    },
+    {
+      "id": 109,
+      "type": "timeseries",
+      "title": "blackhole and full worker events / min",
+      "description": "Actual worker lifecycle events. Blackhole completed means retained before guard and publication; full provider_finished is the ProbeOne return including teardown, not a successful or durable measurement.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 328
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event) (rate(urnetwork_egress_probe_blackhole_worker_events_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "blackhole {{event}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (event) (rate(urnetwork_egress_probe_full_worker_events_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "full {{event}}"
+        }
+      ]
+    },
+    {
+      "id": 110,
+      "type": "timeseries",
+      "title": "blackhole submissions and publication rows / min",
+      "description": "Nonempty batch calls by returned outcome (acknowledged is not a measured-row count), and payload rows at submit entry and by returned outcome. Acknowledged can be a replay or no-op; no result proves current eligibility.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 336
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(urnetwork_egress_probe_blackhole_submission_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "batch {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (result, outcome) (rate(urnetwork_egress_probe_blackhole_publication_rows_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "rows {{result}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 111,
+      "type": "timeseries",
+      "title": "blackhole results and negative dispositions",
+      "description": "Completed check callbacks per minute by original result before the cohort guard, ordinary negatives per minute by cohort disposition (guard_eligible is not a durable dark verdict), and negatives awaiting their cohort decision now.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 336
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_egress_probe_blackhole_completed_results_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "result / min {{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (disposition) (rate(urnetwork_egress_probe_blackhole_negative_dispositions_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "negative / min {{disposition}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(urnetwork_egress_probe_blackhole_negative_pending{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "negatives pending"
+        }
+      ]
+    },
+    {
+      "id": 112,
+      "type": "timeseries",
+      "title": "blackhole pipeline decisions and due reads / min",
+      "description": "Pipeline entry, lookup, selection and first admission-stop decisions (not task identities or durable verdicts), and returned cheap due-read attempts by error class including retries.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 344
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (decision) (rate(urnetwork_egress_probe_blackhole_pipeline_decisions_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "decision {{decision}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (result) (rate(urnetwork_egress_probe_blackhole_due_read_attempts_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "due read {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 113,
+      "type": "timeseries",
+      "title": "blackhole site-load retry waits",
+      "description": "Site load attempts sleeping between blackhole retries now (several can belong to one worker), and retry waits started and ended per minute, including cancellation.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 344
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_egress_probe_blackhole_retry_waiting_loads{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "waiting loads"
+        },
+        {
+          "refId": "B",
+          "expr": "sum (rate(urnetwork_egress_probe_blackhole_retry_wait_started_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "started / min"
+        },
+        {
+          "refId": "C",
+          "expr": "sum (rate(urnetwork_egress_probe_blackhole_retry_wait_completed_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "ended / min"
+        }
+      ]
+    },
+    {
+      "id": 114,
+      "type": "timeseries",
+      "title": "full successor selection / min",
+      "description": "Bounded full successor lookahead outcomes. prefix_exhausted means no unseen row in that bounded response, not an empty fleet backlog.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 352
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(urnetwork_egress_probe_full_selection_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 115,
+      "type": "timeseries",
+      "title": "auxiliary egress tally handoffs and rollups / min",
+      "description": "Auxiliary tally handoffs by accepted, unavailable, invalid or full outcome on every service that hands one off (never measured quota credits), and tally rollup page reads by outcome. SQL commitment is recorded by the durable task receipt.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 352
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service, outcome) (rate(urnetwork_provider_egress_tally_handoffs_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "handoff {{service}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (outcome) (rate(urnetwork_provider_egress_tally_rollups_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "rollup {{outcome}}"
+        }
+      ]
     }
   ]
 }
