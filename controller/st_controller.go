@@ -174,6 +174,10 @@ type StConfig struct {
 	ReliabilityAMin       int64
 	BlockSeconds          int64
 	DeployBlock           uint64
+	// PruneAlertPositions is how many of the lowest-priced non-immune subnets
+	// raise the v2 prune-risk alert when the pool's subnet is among them;
+	// 0 reads as stLedgerV2DefaultPruneAlertPositions.
+	PruneAlertPositions uint64
 }
 
 // DeploymentKey is the exact chain/coordinator identity used to namespace
@@ -255,6 +259,7 @@ type stVaultFile struct {
 	ReliabilityAMin        int64                          `yaml:"reliability_a_min"`
 	BlockSeconds           int64                          `yaml:"block_seconds"`
 	DeployBlock            uint64                         `yaml:"deploy_block"`
+	PruneAlertPositions    uint64                         `yaml:"v2_prune_alert_positions"`
 
 	TestnetEnabled                bool                           `yaml:"testnet-enabled"`
 	TestnetAttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"testnet-attempt-upload"`
@@ -288,6 +293,7 @@ type stVaultFile struct {
 	TestnetReliabilityAMin        int64                          `yaml:"testnet-reliability-a-min"`
 	TestnetBlockSeconds           int64                          `yaml:"testnet-block-seconds"`
 	TestnetDeployBlock            uint64                         `yaml:"testnet-deploy-block"`
+	TestnetPruneAlertPositions    uint64                         `yaml:"testnet-v2-prune-alert-positions"`
 }
 
 // stConfigFromVault lazily loads `st.yml`. Unlike verify.yml the resource is
@@ -353,7 +359,7 @@ type stSelectedConfig struct {
 	Enabled                                                                                                        bool
 	ChainId, Netuid, NoId, DepositAlphaRaoPerGib, DepositRateNumerator, DepositRateDenominator, DepositEpochCapRao uint64
 	ReliabilityAMin, BlockSeconds                                                                                  int64
-	DeployBlock                                                                                                    uint64
+	DeployBlock, PruneAlertPositions                                                                               uint64
 	PublicRpcUrl, GenesisHash, DeploymentId, PolicyHash                                                            string
 	ContractAddress, SettlementVault, ReserveSink                                                                  string
 	SettlementV2, VaultV2                                                                                          string
@@ -385,6 +391,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			DepositEpochCapRao:     f.TestnetDepositEpochCapRao, ReliabilityAMin: f.TestnetReliabilityAMin,
 			DepositZeroRateAction: f.TestnetDepositZeroRateAction,
 			BlockSeconds:          f.TestnetBlockSeconds, DeployBlock: f.TestnetDeployBlock,
+			PruneAlertPositions: f.TestnetPruneAlertPositions,
 		}, nil
 	case stconn.ProfileMainnet:
 		return stSelectedConfig{
@@ -404,6 +411,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			DepositEpochCapRao: f.DepositEpochCapRao, ReliabilityAMin: f.ReliabilityAMin,
 			DepositZeroRateAction: f.DepositZeroRateAction,
 			BlockSeconds:          f.BlockSeconds, DeployBlock: f.DeployBlock,
+			PruneAlertPositions: f.PruneAlertPositions,
 		}, nil
 	default:
 		return stSelectedConfig{}, fmt.Errorf("st.yml unknown profile %q", profile)
@@ -423,7 +431,8 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 		DepositRateDenominator: s.DepositRateDenominator, DepositEpochCapRao: s.DepositEpochCapRao,
 		DepositTiers:          append([]StDepositTier(nil), s.DepositTiers...),
 		DepositZeroRateAction: s.DepositZeroRateAction,
-		ReliabilityAMin:       s.ReliabilityAMin, BlockSeconds: s.BlockSeconds, DeployBlock: s.DeployBlock}
+		ReliabilityAMin:       s.ReliabilityAMin, BlockSeconds: s.BlockSeconds, DeployBlock: s.DeployBlock,
+		PruneAlertPositions: s.PruneAlertPositions}
 	if profile == "mainnet" {
 		cfg.LaunchReadinessSha256 = file.LaunchReadinessSha256
 	}
