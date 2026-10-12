@@ -18036,6 +18036,26 @@ limit:
   the canonical verification feature state in `SignalSettings`: in a disabled
   environment it reports the stale ungated RunOnce chain and startup reap,
   while an enabled environment retains the generic deadline diagnosis.
+- `RefreshVerifyProxyEgress`, `Timeout` / `Interrupted: Done` at exactly
+  900s while `st.yml enabled:true` (76 consecutive on 2026-10-12): this was
+  enabled work too large for one run, not disabled work and not a Redis
+  incident. The refresh read every `proxy_client` allocation with an address
+  (823,287) and fed them one at a time, about seven dependent Redis round trips
+  each plus, for a client without provide keys, two `provide_key` reads and a
+  mirror refill; none of 60,000 sampled proxy clients had keys. While the
+  21:44:55Z run fed such clients the `provide_key` fallback statement rose from
+  about 110/s to about 530/s and fell back when the run was cancelled at
+  21:59:55Z. A cancelled run dropped its Post, the generic backoff put the
+  retry 62 minutes later, and every retry started again at the first client,
+  so later allocations were never fed and every proxy lease lapsed after its
+  10 minute ttl. The refresh now walks allocations in client order in chunks of
+  1024, feeds a chunk in a few pipelined waves with its provide keys read by
+  the chunk's own statement, stops starting chunks after a 60s budget, re-arms
+  at once from the last client fed, and retries a failed or cancelled run
+  within one minute. Expect `[verify]proxy egress refresh fed=<n>
+  complete=<bool>` about once per refresh interval with `fed` near the
+  allocation count. A `Timeout` on this row now means one chunk stalled on
+  Redis or PostgreSQL; do not raise the deadline or pull the row forward.
 - `ExportStats`, `Interrupted: context canceled` at **120.1–120.3s** followed
   by a successful 60–80s retry: this is the generic two-minute task deadline,
   not a deploy drain. Confirm in taskworker logs that `eval error` lands at the
