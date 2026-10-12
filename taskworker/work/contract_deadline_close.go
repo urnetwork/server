@@ -36,7 +36,7 @@ import (
 // contract_close.yml can lower), and how long a run keeps starting pages and
 // owners.
 const contractDeadlineClosePageSize = 128
-const contractDeadlineCloseParallel = 8
+const contractDeadlineCloseParallel = 4
 const contractDeadlineCloseBudget = time.Minute
 
 // Started owners finish after the budget, under load within a few batches.

@@ -53,7 +53,7 @@ const scheduledCloseStealCandidateLimit = 64
 // Concurrent steals in one process, an upper limit that contract_close.yml can
 // lower. Each one holds at most one owner turn, on one direct maintenance
 // connection, and closes at most one owner batch.
-const scheduledCloseStealConcurrency = 8
+const scheduledCloseStealConcurrency = 4
 
 // Distinct owners one steal tries when another closer holds the first.
 const scheduledCloseStealOwnerAttempts = 2
