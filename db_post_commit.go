@@ -18,6 +18,12 @@ type postCommitPgTx struct {
 	ownershipAllowed   bool
 	ownership          *pgTransactionOwnership
 	ownershipKeys      []PgOwnershipKey
+	// statements outlive the caller's stop by at most statementStopTimeout
+	// (see db_statement_stop.go); only the transaction owner sets this
+	statementStopBounded bool
+	statementStopTimeout time.Duration
+	// the first caller stop reported to the callback; it forbids the commit
+	statementStopErr error
 }
 
 // Registers one optional projection per key on a server-owned transaction. A
