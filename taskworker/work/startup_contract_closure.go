@@ -273,7 +273,7 @@ func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *ses
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		deferredUntil := server.NowUtc().Add(scheduledCloseOwnerBusyDeferral)
+		deferredUntil := scheduledCloseDeferredUntil(server.NowUtc())
 		return &CloseScheduledContractResult{RetryAt: &args.Deadline, DeferredUntil: &deferredUntil}, nil
 	}
 	defer release()
@@ -291,7 +291,7 @@ func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *ses
 		// A steal holds its own slot.
 		release()
 		stolenClosed := stealScheduledCloseOwner(ctx, now, args.ContractId, state.BalanceIds)
-		deferredUntil := server.NowUtc().Add(scheduledCloseOwnerBusyDeferral)
+		deferredUntil := scheduledCloseDeferredUntil(server.NowUtc())
 		return &CloseScheduledContractResult{RetryAt: &args.Deadline, DeferredUntil: &deferredUntil, StolenClosed: stolenClosed}, nil
 	}
 	return &CloseScheduledContractResult{Reconciliation: closed.Reconciliation, OwnerBatchClosed: closed.SiblingsClosed}, nil

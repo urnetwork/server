@@ -16,6 +16,7 @@ import (
 	// "reflect"
 	// mathrand "math/rand"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
 )
 
@@ -48,14 +49,71 @@ func IsDoneError(r any) bool {
 	}
 }
 
+// A refusal under ordinary contention, such as a business owner another
+// writer holds. Its raiser expects it and leaves the work to the holder or a
+// later attempt, so HandleError counts it instead of reporting an unexpected
+// error with a stack.
+type ContentionError struct {
+	message string
+}
+
+// A refusal identity; callers compare it with errors.Is.
+func NewContentionError(message string) *ContentionError {
+	return &ContentionError{message: message}
+}
+
+// The refusal's message, unchanged from a plain error's.
+func (self *ContentionError) Error() string {
+	return self.message
+}
+
+// Every cause, through wrapping and joins, is a contention refusal.
+func IsContentionError(r any) bool {
+	err, ok := r.(error)
+	if !ok || err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !IsContentionError(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	var contention *ContentionError
+	return errors.As(err, &contention)
+}
+
+var contentionRecoveredCounter = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Name:      "contention_refusals_recovered_total",
+	Help:      "Contention refusals, such as a held balance owner, recovered by HandleError without an unexpected-error report",
+})
+
+// Registers the contention counter with the default registry.
+func init() {
+	prometheus.MustRegister(contentionRecoveredCounter)
+}
+
+// The unexpected-error report; a test observes it.
+var unexpectedErrorLogf = glog.Infof
+
 // this is meant to handle unexpected errors and do some cleanup
 func HandleError(do func(), handlers ...any) (r any) {
 	defer func() {
 		if r = recover(); r != nil {
 			if IsDoneError(r) {
 				// the context was canceled and raised. this is a standard pattern, do not log
+			} else if IsContentionError(r) {
+				// expected backpressure: count it, without a stack
+				contentionRecoveredCounter.Inc()
 			} else {
-				glog.Infof("Unexpected error: %s\n", ErrorJson(r, debug.Stack()))
+				unexpectedErrorLogf("Unexpected error: %s\n", ErrorJson(r, debug.Stack()))
 			}
 			err, ok := r.(error)
 			if !ok {
