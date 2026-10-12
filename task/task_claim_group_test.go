@@ -127,7 +127,7 @@ func TestTaskClaimGroupLostAcquireReplyRetainsAllSessionKeys(t *testing.T) {
 		candidate := GetTasks(ctx, candidateId)[candidateId]
 		lost := errors.New("controlled provider-key acquisition reply loss")
 		query := &taskClaimGroupLostReplyQuery{query: guard.conn, statement: `SELECT pg_try_advisory_lock($1::integer,$2::integer)`, after: 2, err: lost}
-		admitted, err := worker.reserveTaskClaimGroups(ctx, query, guard, candidateId, candidate.FunctionName, candidate.ArgsJson, map[taskClaimGroupKey]bool{})
+		admitted, err := worker.reserveTaskClaimGroups(ctx, query, guard, candidateId, candidate.FunctionName, candidate.ArgsJson, map[taskClaimGroupKey]bool{}, nil)
 		if admitted || !errors.Is(err, lost) || query.calls != 2 {
 			t.Fatal("lost acquisition reply was retried or acknowledged", query.calls, err)
 		}
