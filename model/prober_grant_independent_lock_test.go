@@ -72,16 +72,32 @@ func allocateDynamicProberGrantForTest(ctx context.Context, clients escrowSelect
 	return allocation
 }
 
-func TestDynamicProberDisjointGrantsDoNotSerialize(t *testing.T) {
-	testDynamicProberIndependentGrantLocks(t, false)
-}
-
-func TestDynamicProberBusyPreferredGrantUsesAnotherAvailableGrant(t *testing.T) {
-	testDynamicProberIndependentGrantLocks(t, true)
-}
-
-func testDynamicProberIndependentGrantLocks(t *testing.T, samePreferred bool) {
+// The committed contracts the payer funds and every escrow byte on each grant.
+// A refused or failed allocation must leave both exactly as they were.
+func requireDynamicProberCommittedEscrow(t testing.TB, ctx context.Context, payerNetworkId server.Id, wantContracts int64, wantEscrow map[server.Id]ByteCount) {
 	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		var contracts int64
+		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE payer_network_id=$1`, payerNetworkId).Scan(&contracts))
+		if contracts != wantContracts {
+			t.Fatalf("payer has %d committed contracts, want %d", contracts, wantContracts)
+		}
+		for balanceId, want := range wantEscrow {
+			var escrow ByteCount
+			server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(sum(balance_byte_count),0) FROM transfer_escrow WHERE balance_id=$1`, balanceId).Scan(&escrow))
+			if escrow != want {
+				t.Fatalf("grant escrow=%d, want %d", escrow, want)
+			}
+		}
+	})
+}
+
+// Two payer clients whose bounded preferences start at different grants. One
+// allocation owns every current grant of its payer (403b9c55), so the second,
+// though it wants the other grant, is refused busy at admission instead of
+// joining a lock queue or skipping to its grant. The refusal writes nothing;
+// once the owner commits, a retry keeps its own preferred grant.
+func TestDynamicProberDisjointGrantRefusedBusyThenKeepsPreference(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
@@ -91,13 +107,13 @@ func testDynamicProberIndependentGrantLocks(t *testing.T, samePreferred bool) {
 		second := first
 		for suffix := range 256 {
 			candidate := server.Id{0: 0xf2, 15: byte(suffix)}
-			if (candidate.Hash()%2 == first.payerId.Hash()%2) == samePreferred && candidate != first.payerId {
+			if candidate.Hash()%2 != first.payerId.Hash()%2 {
 				second.payerId = candidate
 				break
 			}
 		}
 		if second.payerId == first.payerId {
-			t.Fatal("fixture did not find distinct grant destinations")
+			t.Fatal("fixture did not find distinct grant preferences")
 		}
 		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{second.payerId: first.payerNetworkId})
 		setDynamicProberIdentityForTest(t, ctx, first)
@@ -106,36 +122,77 @@ func testDynamicProberIndependentGrantLocks(t *testing.T, samePreferred bool) {
 			addDynamicProberGrantForTest(ctx, first.payerNetworkId, now.Add(-time.Minute), now.Add(time.Hour), 4096),
 			addDynamicProberGrantForTest(ctx, first.payerNetworkId, now.Add(-2*time.Minute), now.Add(time.Hour), 4096),
 		}
-		firstConn := acquireContractLifecycleTestConnection(t, ctx)
-		defer firstConn.Release()
-		secondConn := acquireContractLifecycleTestConnection(t, ctx)
-		defer secondConn.Release()
-		firstTx, err := firstConn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer firstTx.Rollback(context.Background())
-		firstEscrow, err := independentGrantTestCreate(ctx, firstTx, first)
-		if err != nil || firstEscrow == nil || len(firstEscrow.Balances) != 1 || firstEscrow.Balances[0].BalanceId != grants[first.payerId.Hash()%2].BalanceId {
-			t.Fatalf("first request did not reserve its selected grant: %v", err)
-		}
-		// Keep the first reservation uncommitted while the distinct payer client
-		// allocates against its different, independently funded grant.
-		secondTx, err := secondConn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer secondTx.Rollback(context.Background())
-		secondEscrow, err := independentGrantTestCreate(ctx, noWaitGrantTestTx{secondTx}, second)
-		if err != nil {
-			t.Fatalf("independent grant allocation contended with another grant's open transaction: %v", err)
-		}
-		if secondEscrow == nil || len(secondEscrow.Balances) != 1 || secondEscrow.Balances[0].BalanceId != grants[(first.payerId.Hash()%2+1)%2].BalanceId {
-			t.Fatal("second request did not use the independently available grant")
-		}
-		if firstEscrow.Balances[0].BalanceId == secondEscrow.Balances[0].BalanceId {
+		firstGrant := grants[first.payerId.Hash()%2]
+		secondGrant := grants[second.payerId.Hash()%2]
+		if firstGrant.BalanceId == secondGrant.BalanceId {
 			t.Fatal("regression did not exercise disjoint grants")
 		}
+		// Keep the first reservation and its payer ownership uncommitted while
+		// the other payer client allocates.
+		firstTx, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
+		firstEscrow, err := independentGrantTestCreate(ctx, firstTx, first)
+		if err != nil || firstEscrow == nil || len(firstEscrow.Balances) != 1 || firstEscrow.Balances[0].BalanceId != firstGrant.BalanceId {
+			t.Fatalf("first request did not reserve its selected grant: %v", err)
+		}
+		refused := allocateDynamicProberGrantForTest(ctx, second)
+		if refused.escrow != nil || !errors.Is(refused.err, errTransferBalanceOwnershipBusy) {
+			t.Fatalf("disjoint grant allocation was not refused busy while its payer was owned: %v", refused.err)
+		}
+		if len(refused.events) != 1 || refused.events[0] != server.PgOwnershipRefused {
+			t.Fatalf("disjoint grant ownership events=%v, want exactly one refusal", refused.events)
+		}
+		server.Raise(finish(true))
+		requireDynamicProberCommittedEscrow(t, ctx, first.payerNetworkId, 1, map[server.Id]ByteCount{
+			firstGrant.BalanceId: 1024, secondGrant.BalanceId: 0,
+		})
+		retried := allocateDynamicProberGrantForTest(ctx, second)
+		if retried.err != nil || retried.escrow == nil || len(retried.escrow.Balances) != 1 || retried.escrow.Balances[0].BalanceId != secondGrant.BalanceId {
+			t.Fatalf("retry after the owner committed did not keep its own preferred grant: %v", retried.err)
+		}
+		requireDynamicProberCommittedEscrow(t, ctx, first.payerNetworkId, 2, map[server.Id]ByteCount{
+			firstGrant.BalanceId: 1024, secondGrant.BalanceId: 1024,
+		})
+	})
+}
+
+// A writer outside grant ownership, such as an older binary during a rolling
+// deploy, can still hold the preferred grant's row lock. The owned allocation
+// then skips that busy grant and funds from another available one. It runs
+// while the lock is held, so waiting for that lock would last until the
+// deadline rather than return.
+func TestDynamicProberBusyPreferredGrantUsesAnotherAvailableGrant(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		clients := newEscrowSelectionTestClients(t, ctx)
+		setDynamicProberIdentityForTest(t, ctx, clients)
+		now := server.NowUtc()
+		grants := []*TransferBalance{
+			addDynamicProberGrantForTest(ctx, clients.payerNetworkId, now.Add(-time.Minute), now.Add(time.Hour), 4096),
+			addDynamicProberGrantForTest(ctx, clients.payerNetworkId, now.Add(-2*time.Minute), now.Add(time.Hour), 4096),
+		}
+		preferred := grants[clients.payerId.Hash()%2]
+		other := grants[(clients.payerId.Hash()%2+1)%2]
+		conn := acquireContractLifecycleTestConnection(t, ctx)
+		defer conn.Release()
+		held, err := conn.Begin(ctx)
+		server.Raise(err)
+		defer held.Rollback(context.Background())
+		server.RaisePgResult(held.Exec(ctx, `SELECT balance_id FROM transfer_balance WHERE balance_id=$1 FOR UPDATE`, preferred.BalanceId))
+		allocation := allocateDynamicProberGrantForTest(ctx, clients)
+		if allocation.err != nil || allocation.escrow == nil || len(allocation.escrow.Balances) != 1 || allocation.escrow.Balances[0].BalanceId != other.BalanceId {
+			t.Fatalf("busy preferred grant did not fund from the other available grant: %v", allocation.err)
+		}
+		if len(allocation.events) == 0 || allocation.events[0] != server.PgOwnershipAdmitted {
+			t.Fatalf("allocation ownership events=%v, want admission first", allocation.events)
+		}
+		server.Raise(held.Rollback(ctx))
+		requireDynamicProberCommittedEscrow(t, ctx, clients.payerNetworkId, 1, map[server.Id]ByteCount{
+			preferred.BalanceId: 0, other.BalanceId: 1024,
+		})
 	})
 }
 
@@ -339,7 +396,12 @@ func TestDynamicProberReservationCensusCountIndependentOfWindow(t *testing.T) {
 	})
 }
 
-func TestDynamicProberSameGrantWaitsAndRechecksCommittedReservation(t *testing.T) {
+// Two clients of the payer compete for its only grant. While the first
+// allocation owns the payer's grants, the second is refused busy at admission
+// rather than waiting for the grant (403b9c55), and writes nothing. Once the
+// first commits, a retry rechecks the committed reservation and finds no
+// credit; no stale hint reuses the bytes the first allocation reserved.
+func TestDynamicProberSameGrantRefusedBusyThenRechecksCommittedReservation(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
@@ -352,69 +414,25 @@ func TestDynamicProberSameGrantWaitsAndRechecksCommittedReservation(t *testing.T
 		setDynamicProberIdentityForTest(t, ctx, first)
 		now := server.NowUtc()
 		grant := addDynamicProberGrantForTest(ctx, first.payerNetworkId, now.Add(-time.Minute), now.Add(time.Hour), 1024)
-		firstConn := acquireContractLifecycleTestConnection(t, ctx)
-		defer firstConn.Release()
-		secondConn := acquireContractLifecycleTestConnection(t, ctx)
-		defer secondConn.Release()
-		firstTx, err := firstConn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer firstTx.Rollback(context.Background())
-		firstPID := contractLifecycleTestBackendPid(t, ctx, firstTx)
+		firstTx, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		firstEscrow, err := independentGrantTestCreate(ctx, firstTx, first)
 		if err != nil || firstEscrow == nil {
 			t.Fatalf("first reservation failed: %v", err)
 		}
-		secondTx, err := secondConn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-		if err != nil {
-			t.Fatal(err)
+		refused := allocateDynamicProberGrantForTest(ctx, second)
+		if refused.escrow != nil || !errors.Is(refused.err, errTransferBalanceOwnershipBusy) {
+			t.Fatalf("same-grant allocation was not refused busy while the first owned it: %v", refused.err)
 		}
-		secondPID := contractLifecycleTestBackendPid(t, ctx, secondTx)
-		type result struct {
-			escrow *TransferEscrow
-			err    error
+		if len(refused.events) != 1 || refused.events[0] != server.PgOwnershipRefused {
+			t.Fatalf("same-grant ownership events=%v, want exactly one refusal", refused.events)
 		}
-		completed := make(chan result, 1)
-		finished := make(chan struct{})
-		go func() {
-			defer close(finished)
-			defer func() {
-				rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer rollbackCancel()
-				secondTx.Rollback(rollbackCtx)
-			}()
-			escrow, err := independentGrantTestCreate(ctx, secondTx, second)
-			completed <- result{escrow, err}
-		}()
-		defer func() {
-			firstTx.Rollback(context.Background())
-			cancel()
-			// Any early assertion must let the blocked transaction unwind
-			// before its connection is returned to the pool.
-			<-finished
-		}()
-		if requireContractLifecycleBlockedBy(t, ctx, firstTx, firstPID) != secondPID {
-			t.Fatal("full fallback did not wait behind the real grant owner")
+		server.Raise(finish(true))
+		retried := allocateDynamicProberGrantForTest(ctx, second)
+		if retried.escrow != nil || retried.err == nil || errors.Is(retried.err, errTransferBalanceOwnershipBusy) ||
+			!strings.Contains(retried.err.Error(), "Insufficient balance") {
+			t.Fatalf("retry reused a stale hint after the first reservation committed: %v", retried.err)
 		}
-		if err := firstTx.Commit(ctx); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case got := <-completed:
-			if got.escrow != nil || got.err == nil {
-				t.Fatal("locked fallback reused a stale hint after the first reservation committed")
-			}
-		case <-ctx.Done():
-			t.Fatal("same-grant fallback failed to finish after lock release")
-		}
-		var contracts, reserved int64
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE payer_network_id=$1`, first.payerNetworkId).Scan(&contracts))
-			server.Raise(conn.QueryRow(ctx, `SELECT sum(balance_byte_count) FROM transfer_escrow WHERE balance_id=$1`, grant.BalanceId).Scan(&reserved))
-		})
-		if contracts != 1 || reserved != 1024 {
-			t.Fatal("failed competing reservation made partial financial writes")
-		}
+		requireDynamicProberCommittedEscrow(t, ctx, first.payerNetworkId, 1, map[server.Id]ByteCount{grant.BalanceId: 1024})
 	})
 }
