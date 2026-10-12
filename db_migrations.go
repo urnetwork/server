@@ -9982,4 +9982,31 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS pending_task_has_reschedule_error`,
 		`DROP INDEX IF EXISTS pending_task_has_reschedule_error`,
 	),
+
+	// 820: open connections keyed by handler, for handler retirement
+	// (model/network_client_handler_retirement.go). Its discovery looked for
+	// the clients of open rows whose handler row is gone by reading every open
+	// row through network_client_connection_connected_client_id and probing the
+	// handler table for each; with few orphans its LIMIT never ended the scan
+	// early. On Main (2026-10-12, about 88k open rows of 3.3M) that averaged
+	// 3.2M buffer hits and 9.8 s per pass, about one pass a minute (5,153
+	// calls, max 448 s), and 1-15 s per pass in that day's slow log. Discovery
+	// now skips from one handler id to the next through this index and reads
+	// only the rows of absent handlers. Each connection adds one entry when it
+	// opens; closing it writes none, and vacuum removes the closed entry.
+	// Building it reads the 6.5 GB heap twice and waits for older snapshots,
+	// without blocking writes. A completed build is kept, so it may be
+	// pre-created out of band with the same statement. Services built with
+	// this migration fail startup readiness until it is applied, so the new
+	// discovery never runs without the index.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS network_client_connection_connected_handler_id`,
+		`CREATE INDEX CONCURRENTLY network_client_connection_connected_handler_id
+		 ON network_client_connection (handler_id) WHERE connected`,
+		`DROP INDEX IF EXISTS network_client_connection_connected_handler_id;
+		 CREATE INDEX network_client_connection_connected_handler_id
+		 ON network_client_connection (handler_id) WHERE connected`,
+	).withIndexCompletion(820, "network_client_connection", "network_client_connection_connected_handler_id",
+		"CREATE INDEX network_client_connection_connected_handler_id ON public.network_client_connection USING btree (handler_id) WHERE connected",
+		"connected"),
 }

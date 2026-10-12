@@ -119,6 +119,9 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"dropped open pair index rebuilt", 817, `CREATE INDEX transfer_contract_pair_open_create_time ON transfer_contract (source_id, destination_id, create_time) WHERE open AND companion_contract_id IS NULL`},
 		{"dropped open destination index rebuilt", 818, `CREATE INDEX transfer_contract_open_destination_partial ON transfer_contract (destination_id) WHERE open`},
 		{"dropped reschedule error index rebuilt", 819, `CREATE INDEX pending_task_has_reschedule_error ON pending_task (has_reschedule_error, task_id)`},
+		{"missing open connection handler index", 820, `DROP INDEX network_client_connection_connected_handler_id`},
+		{"open connection handler index includes closed rows", 820, `DROP INDEX network_client_connection_connected_handler_id; CREATE INDEX network_client_connection_connected_handler_id ON network_client_connection(handler_id)`},
+		{"open connection handler index leads with client", 820, `DROP INDEX network_client_connection_connected_handler_id; CREATE INDEX network_client_connection_connected_handler_id ON network_client_connection(client_id,handler_id) WHERE connected`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -168,6 +171,7 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{808, "auth_code", "auth_code_origin_session"},
 				{809, "pending_task", "pending_task_function_poll_order"},
 				{810, "transfer_contract", "transfer_contract_audit_closed_null_day"},
+				{820, "network_client_connection", "network_client_connection_connected_handler_id"},
 			} {
 				var definition string
 				var predicate *string

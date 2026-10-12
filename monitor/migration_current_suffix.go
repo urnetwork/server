@@ -239,6 +239,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationIndexRemoved("transfer_contract", "transfer_contract_open_destination_partial")),
 	migrationCurrentSuffix(819, "unread task reschedule error index removed",
 		migrationIndexRemoved("pending_task", "pending_task_has_reschedule_error")),
+	migrationCurrentSuffix(820, "open connection handler index",
+		migrationFp2Index("network_client_connection", "network_client_connection_connected_handler_id", "handler_id", "connected", false)),
 }
 
 // A dropped index stays dropped: a rebuilt copy under the published name would
