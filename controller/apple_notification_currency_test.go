@@ -412,3 +412,83 @@ func TestProGrantFromNonUsdAppleSubscriptionCarriesNoUsdRevenue(t *testing.T) {
 		connect.AssertEqual(t, grantSubsidyNetRevenue < appleCurrencyTestMarker, true)
 	})
 }
+
+// The claims of a yearly subscription priced in currency.
+func appleCurrencyTestYearlyClaims(
+	networkId server.Id,
+	transactionId string,
+	priceMilliunits int64,
+	currency string,
+	now time.Time,
+) map[string]any {
+	claims := appleCurrencyTestClaims(networkId, transactionId, priceMilliunits, currency, now)
+	claims["productId"] = "supporter_yearly_26"
+	claims["expiresDate"] = float64(now.Add(365 * 24 * time.Hour).UnixMilli())
+	return claims
+}
+
+// Apple's $10,000 maximum bounds a USD price only. A price in a currency with
+// large units is a valid purchase, which the bound read as dollars and refused
+// (no entitlement for a paid KRW, IDR or VND subscription).
+func TestAppleTransactionPriceBoundAppliesOnlyToUsd(t *testing.T) {
+	now := server.NowUtc().Truncate(time.Millisecond)
+	cases := []struct {
+		currency        string
+		priceMilliunits int64
+		valid           bool
+	}{
+		// a year in KRW, IDR and VND, and a month in VND
+		{currency: "KRW", priceMilliunits: 66_000_000, valid: true},
+		{currency: "IDR", priceMilliunits: 1_199_000_000, valid: true},
+		{currency: "VND", priceMilliunits: 1_290_000_000, valid: true},
+		{currency: "VND", priceMilliunits: 129_000_000, valid: true},
+		// Apple's highest USD price, and a cent above it
+		{currency: "USD", priceMilliunits: 10_000_000, valid: true},
+		{currency: "USD", priceMilliunits: 10_000_010, valid: false},
+	}
+	for _, c := range cases {
+		claims := appleCurrencyTestYearlyClaims(server.NewId(), "apple-currency-"+server.NewId().String(), c.priceMilliunits, c.currency, now)
+		transaction, err := validateAppleTransaction(
+			appleCurrencyTestNotification(claims, now),
+			[]string{"supporter_yearly_26"},
+			true,
+		)
+		if (err == nil) != c.valid {
+			t.Errorf("%q %d: valid = %t, want %t (%v)", c.currency, c.priceMilliunits, err == nil, c.valid, err)
+			continue
+		}
+		if err == nil && c.currency != "USD" && transaction.netRevenue != appleCurrencyTestMarker {
+			t.Errorf("%q %d: net revenue = %d, want the marker", c.currency, c.priceMilliunits, transaction.netRevenue)
+		}
+	}
+}
+
+// A KRW yearly purchase through the notification webhook is entitled, with the
+// marker for revenue and the KRW price on the ledger.
+func TestProcessAppleNotificationLargeUnitPriceIsEntitled(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "apple-currency-krw-yearly", server.NewId())
+
+		now := server.NowUtc().Truncate(time.Millisecond)
+		transactionId := "apple-currency-krw-yearly-" + server.NewId().String()
+		claims := appleCurrencyTestYearlyClaims(networkId, transactionId, 66_000_000, "KRW", now)
+
+		processed, err := ProcessAppleNotification(ctx, appleCurrencyTestNotification(claims, now), []string{"supporter_yearly_26"})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, processed, true)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
+
+		renewalNetRevenue, balance := appleCurrencyTestRevenue(t, ctx, networkId, transactionId)
+		connect.AssertEqual(t, renewalNetRevenue, appleCurrencyTestMarker)
+		connect.AssertEqual(t, balance.SubsidyNetRevenue, appleCurrencyTestMarker)
+		connect.AssertEqual(t, balance.Paid, true)
+		connect.AssertEqual(t, balance.Pro, true)
+		connect.AssertEqual(t, balance.StartBalanceByteCount, RefreshSupporterTransferBalance)
+
+		priceMilliunits, currency := appleCurrencyTestLedger(t, ctx, transactionId)
+		connect.AssertEqual(t, priceMilliunits, int64(66_000_000))
+		connect.AssertEqual(t, currency, "KRW")
+	})
+}

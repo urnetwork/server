@@ -26,7 +26,11 @@ import (
 )
 
 const appleMaximumSubscriptionDuration = 2 * 366 * 24 * time.Hour
-const appleMaximumPriceMilliunits int64 = 10_000_000
+
+// Apple's highest USD price, $10,000. It bounds only a USD price: a price in
+// another currency is not dollars (a year of Pro in KRW is about 66,000 units)
+// and records no USD revenue to bound.
+const appleMaximumUsdPriceMilliunits int64 = 10_000_000
 
 // The only currency whose price is recorded as net revenue.
 const appleUsdCurrency = "USD"
@@ -374,8 +378,15 @@ func validateAppleTransactionAccount(
 	purchaseMillis, purchaseExists := appleControllerInt64Claim(transactionClaims, "purchaseDate")
 	expiresMillis, expiresExists := appleControllerInt64Claim(transactionClaims, "expiresDate")
 	priceMilliunits, priceExists := appleControllerInt64Claim(transactionClaims, "price")
+	// Apple sends the code in upper case; anything that is not three letters
+	// names no currency
+	currency, _ := appleControllerStringClaim(transactionClaims, "currency")
+	currency = strings.ToUpper(currency)
+	if len(currency) != 3 || strings.Trim(currency, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
+		currency = ""
+	}
 	if !purchaseExists || !expiresExists || !priceExists || priceMilliunits < 0 ||
-		priceMilliunits > appleMaximumPriceMilliunits {
+		(currency == appleUsdCurrency && appleMaximumUsdPriceMilliunits < priceMilliunits) {
 		return nil, errors.New("invalid App Store purchase dates or price")
 	}
 	validated.purchaseTime = time.UnixMilli(purchaseMillis)
@@ -385,15 +396,8 @@ func validateAppleTransactionAccount(
 		validated.purchaseTime.After(time.UnixMilli(notification.SignedDate).Add(5*time.Minute)) {
 		return nil, errors.New("implausible App Store subscription period")
 	}
-
-	// Apple sends the code in upper case; anything that is not three letters
-	// names no currency
 	validated.priceMilliunits = priceMilliunits
-	validated.currency, _ = appleControllerStringClaim(transactionClaims, "currency")
-	validated.currency = strings.ToUpper(validated.currency)
-	if len(validated.currency) != 3 || strings.Trim(validated.currency, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
-		validated.currency = ""
-	}
+	validated.currency = currency
 
 	switch {
 	case priceMilliunits == 0:
