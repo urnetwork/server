@@ -35,15 +35,26 @@ func TestForceCloseAccountingRejectionReportsVerifiedProgress(t *testing.T) {
 		if bad.state(t, ctx) != before {
 			t.Fatal("isolated rejection changed disputed accounting or stream state")
 		}
-		if state := good.state(t, ctx); state.outcome != ContractOutcomeSettled || state.dispute || state.open || !state.escrowSettled || state.streamFound {
+		// The Redis close commits its outcome, consumption journal and earnings.
+		// Since 7c7c55a4 the separate debit owner settles the escrow metadata and
+		// releases the reservation, so the sibling's escrow is settled only then.
+		if state := good.state(t, ctx); state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.escrowSettled || state.streamFound {
 			t.Fatal("valid sibling failed terminal verification or stream cleanup")
 		}
+		requireForceCloseDebitJournal(t, ctx, good, 1, 1024)
 		var progress forceCloseAccountingProgress
 		if !errors.As(err, &progress) {
 			t.Fatal("completed accounting-only rejection lacks positive typed progress authority")
 		}
 		if progress.VerifiedCloseCount() != 1 || progress.AccountingRejectionCount() != 1 {
 			t.Fatal("selected candidates were confused with verified completed siblings")
+		}
+		drainForceCloseDebitCustody(t, ctx, good, escrow, 1024)
+		if state := good.state(t, ctx); !state.escrowSettled || state.escrowPayoutByteCount != 1024 {
+			t.Fatal("verified sibling's debit owner did not settle its escrow")
+		}
+		if bad.state(t, ctx) != before {
+			t.Fatal("sibling debit changed the rejected dispute's retained state")
 		}
 	})
 }
