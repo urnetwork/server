@@ -184,8 +184,10 @@ var providerWorkSessionIndexRefusalLogUnixMilli atomic.Int64
 // migration 822 dropped while no signer was deployed. Without it every call
 // reads each client's whole event history. A deployed (vault-loaded) signer
 // therefore refuses to sign until the index is built again, leaving the same
-// permanent unsigned gap as an unavailable source. Build the index
-// concurrently before deploying provider_work_session.json.
+// permanent unsigned gap as an unavailable source. Before deploying
+// provider_work_session.json, add a migration that builds the index again
+// concurrently and supersedes 822 in the migration signal; the signal pages
+// on a copy built by hand.
 func providerWorkSignSessionEventsInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id) error {
 	source := providerWorkSessionSourceFromContext(ctx)
 	if source == nil {
@@ -201,7 +203,7 @@ func providerWorkSignSessionEventsInTx(ctx context.Context, tx server.PgTx, clie
 			nowUnixMilli := time.Now().UnixMilli()
 			lastUnixMilli := providerWorkSessionIndexRefusalLogUnixMilli.Load()
 			if lastUnixMilli+60*1000 <= nowUnixMilli && providerWorkSessionIndexRefusalLogUnixMilli.CompareAndSwap(lastUnixMilli, nowUnixMilli) {
-				glog.Errorf("[pws]provider work session signer refused: index provider_work_session_event_transaction (dropped by migration 822) is missing or invalid; build it concurrently before deploying provider_work_session.json\n")
+				glog.Errorf("[pws]provider work session signer refused: index provider_work_session_event_transaction (dropped by migration 822) is missing or invalid; restore it with a migration before deploying provider_work_session.json\n")
 			}
 			return errProviderWorkEvidenceUnavailable
 		}

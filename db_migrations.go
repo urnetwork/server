@@ -10034,8 +10034,10 @@ var migrations = []any{
 	// serves only providerWorkSignSessionEventsInTx, which runs only when the
 	// optional provider_work_session.json signer is deployed, and it is not.
 	// Every connection open and retirement appends an event that writes it. A
-	// vault-loaded signer refuses to sign while the index is missing, so build
-	// it again concurrently before deploying that signer.
+	// vault-loaded signer refuses to sign while the index is missing. Before
+	// deploying that signer, add a migration that builds the index again
+	// concurrently and supersedes this one in the migration signal, which pages
+	// on a copy built by hand.
 	newOnlineSqlMigration(
 		`DROP INDEX CONCURRENTLY IF EXISTS provider_work_session_event_transaction`,
 		`DROP INDEX IF EXISTS provider_work_session_event_transaction`,
