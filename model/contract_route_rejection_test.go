@@ -480,3 +480,56 @@ func TestContractTerminalRouteRejectionClosedOwnerKeepsNothing(t *testing.T) {
 		}
 	})
 }
+
+// Old sdks retry a route without an origin every 5s, and a load balancer
+// spreads the retries so one api process sees the route only every 25-40s.
+// The ring keeps the refusal for 60s.
+func TestContractRouteRejectionMissingOriginLastsSixtySeconds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		settings := DefaultContractOriginNotificationSettings()
+		if settings.RouteRejectionTimeout != 60*time.Second {
+			t.Fatalf("the ring keeps a refusal for %s, want 60s", settings.RouteRejectionTimeout)
+		}
+		owner := testContractOriginOwner(t.Context(), settings, opened)
+		defer owner.Close()
+		sourceId, destinationId := server.NewId(), server.NewId()
+		missing := ContractRouteRejection{Cause: ContractRouteMissingOrigin, ResolutionPath: "stream_fallback"}
+		if !owner.RecordRouteRejection(sourceId, destinationId, false, missing, nil) {
+			t.Fatal("refusal was not stored")
+		}
+		time.Sleep(60*time.Second - time.Millisecond)
+		if _, ok := owner.RouteRejection(sourceId, destinationId, false); !ok {
+			t.Fatal("a missing-origin refusal expired before 60s")
+		}
+		time.Sleep(time.Millisecond)
+		if _, ok := owner.RouteRejection(sourceId, destinationId, false); ok {
+			t.Fatal("a missing-origin refusal was replayed at 60s")
+		}
+	})
+}
+
+// A refusal kept past the retry another process brings is still removed at
+// once by an origin edge for its pair.
+func TestContractRouteRejectionOriginEdgeClearsWithinTheTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		owner := testContractOriginOwner(t.Context(), DefaultContractOriginNotificationSettings(), opened)
+		defer owner.Close()
+		sourceId, destinationId := server.NewId(), server.NewId()
+		watch, connection := testWatchRouteBucket(t, owner, opened, sourceId, destinationId)
+		defer watch.Close()
+		missing := ContractRouteRejection{Cause: ContractRouteMissingOrigin, ResolutionPath: "stream_fallback"}
+		owner.RecordRouteRejection(sourceId, destinationId, false, missing, nil)
+		time.Sleep(40 * time.Second)
+		if _, ok := owner.RouteRejection(sourceId, destinationId, false); !ok {
+			t.Fatal("a missing-origin refusal expired before the retry another process brings")
+		}
+		key := contractOriginPairHash(destinationId, sourceId)
+		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
+		synctest.Wait()
+		if _, ok := owner.RouteRejection(sourceId, destinationId, false); ok {
+			t.Fatal("an origin edge left the route refused")
+		}
+	})
+}
