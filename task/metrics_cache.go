@@ -1,12 +1,15 @@
 // One non-waiting Redis admission owns each queue sampling interval. All
 // taskworkers publish the completed observation with its original source time;
 // unavailable coordination never falls back to a per-process database scan.
+// The admission expires with its interval, so PostgreSQL itself bounds and
+// fences the owner's statements (see taskQueueMetricsQuery).
 package task
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"strings"
@@ -22,8 +25,10 @@ const (
 	taskMetricsClockSkew = 5 * time.Second
 	taskMetricsWireBytes = 512
 	// Version both the schema and the aggregate semantics, including availability.
-	taskMetricsCacheKey = "task_queue_metrics:v1:{available_block}:snapshot"
-	taskMetricsOwnerKey = "task_queue_metrics:v1:{available_block}:owner"
+	// v2 bounds each side of the availability boundary and marks estimates.
+	taskMetricsWireVersion = 2
+	taskMetricsCacheKey    = "task_queue_metrics:v2:{available_block}:snapshot"
+	taskMetricsOwnerKey    = "task_queue_metrics:v2:{available_block}:owner"
 )
 
 var errTaskQueueMetricsUnavailable = errors.New("task queue metrics snapshot unavailable")
@@ -81,12 +86,14 @@ redis.call('SET',KEYS[1],ARGV[2],'PX',ARGV[3]); return 1`
 	return
 }
 
-// A count list of exactly four entries and a required age preserve real zeros
-// while rejecting absent fields; all clocks retain nanosecond source precision.
+// Count and estimate lists of exactly four entries and a required age preserve
+// real zeros while rejecting absent fields; all clocks retain nanosecond
+// source precision.
 type taskQueueMetricsWire struct {
 	Version             int      `json:"v"`
 	ObservedAt          int64    `json:"t"`
 	Counts              []*int64 `json:"n"`
+	Estimated           []*bool  `json:"e"`
 	OldestOverdueSecond *float64 `json:"o"`
 }
 
@@ -113,11 +120,12 @@ func decodeTaskQueueMetricsSample(value string, now time.Time) (*taskQueueMetric
 	decoder := json.NewDecoder(strings.NewReader(value))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&wire) != nil || decoder.Decode(new(any)) != io.EOF ||
-		wire.Version != 1 || len(wire.Counts) != 4 || wire.OldestOverdueSecond == nil {
+		wire.Version != taskMetricsWireVersion || len(wire.Counts) != 4 || len(wire.Estimated) != 4 ||
+		wire.OldestOverdueSecond == nil {
 		return nil, errTaskQueueMetricsUnavailable
 	}
-	for _, count := range wire.Counts {
-		if count == nil {
+	for index := range 4 {
+		if wire.Counts[index] == nil || wire.Estimated[index] == nil {
 			return nil, errTaskQueueMetricsUnavailable
 		}
 	}
@@ -126,6 +134,8 @@ func decodeTaskQueueMetricsSample(value string, now time.Time) (*taskQueueMetric
 		snapshot: taskQueueMetricsSnapshot{
 			Total: *wire.Counts[0], Available: *wire.Counts[1], Claimed: *wire.Counts[2], RescheduleError: *wire.Counts[3],
 			OldestOverdueSecond: *wire.OldestOverdueSecond,
+			TotalEstimated:      *wire.Estimated[0], AvailableEstimated: *wire.Estimated[1],
+			ClaimedEstimated: *wire.Estimated[2], RescheduleErrorEstimated: *wire.Estimated[3],
 		},
 	}
 	if !validTaskQueueMetricsSample(sample, now) {
@@ -175,9 +185,13 @@ func (self taskQueueMetricsCache) get(ctx context.Context) (retained *taskQueueM
 	queryCtx, cancel := context.WithTimeout(ctx, taskMetricsQueryTimeout)
 	defer cancel()
 	snapshot, err := self.load(queryCtx, observedAt)
+	if err != nil {
+		// Keeps the cause, such as a server statement timeout, for the refresh log.
+		return retained, fmt.Errorf("%w: %w", errTaskQueueMetricsUnavailable, err)
+	}
 	completedAt := self.now()
 	deadline, _ := queryCtx.Deadline()
-	if err != nil || queryCtx.Err() != nil || !time.Now().Before(deadline) ||
+	if queryCtx.Err() != nil || !time.Now().Before(deadline) ||
 		completedAt.Before(observedAt) || completedAt.Sub(observedAt) > taskMetricsQueryTimeout ||
 		completedAt.Sub(admittedAt) >= taskMetricsRefreshInterval {
 		return retained, errTaskQueueMetricsUnavailable
@@ -187,8 +201,12 @@ func (self taskQueueMetricsCache) get(ctx context.Context) (retained *taskQueueM
 		return retained, errTaskQueueMetricsUnavailable
 	}
 	wire, err := json.Marshal(taskQueueMetricsWire{
-		Version: 1, ObservedAt: observedAt.UnixNano(),
-		Counts:              []*int64{&snapshot.Total, &snapshot.Available, &snapshot.Claimed, &snapshot.RescheduleError},
+		Version: taskMetricsWireVersion, ObservedAt: observedAt.UnixNano(),
+		Counts: []*int64{&snapshot.Total, &snapshot.Available, &snapshot.Claimed, &snapshot.RescheduleError},
+		Estimated: []*bool{
+			&snapshot.TotalEstimated, &snapshot.AvailableEstimated,
+			&snapshot.ClaimedEstimated, &snapshot.RescheduleErrorEstimated,
+		},
 		OldestOverdueSecond: &snapshot.OldestOverdueSecond,
 	})
 	if err != nil || len(wire) > taskMetricsWireBytes {
