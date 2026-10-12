@@ -676,3 +676,208 @@ func TestCirclePayoutLedgerDefaultsToCoreClient(t *testing.T) {
 		t.Fatal("ledger substitution was ignored")
 	}
 }
+
+func circlePayoutLedgerTestDeveloperWallet(id, blockchain, state, custody string) map[string]any {
+	return map[string]any{"id": id, "address": "synthetic-address-" + id, "blockchain": blockchain, "state": state, "custodyType": custody, "walletSetId": "synthetic-wallet-set", "accountType": "EOA", "createDate": "2026-01-01T00:00:00Z", "updateDate": "2026-10-01T00:00:00Z"}
+}
+
+func circlePayoutLedgerTestWalletIds(wallets []CircleWallet) []string {
+	ids := []string{}
+	for _, wallet := range wallets {
+		ids = append(ids, wallet.ID)
+	}
+	return ids
+}
+
+// RC-5 Every developer wallet is listed, on every blockchain and in every
+// state, across pages whose next links omit or change the page size; a
+// user-controlled wallet in the response is left out.
+func TestCirclePayoutLedgerListsEveryDeveloperWallet(t *testing.T) {
+	pages := map[string]struct {
+		pageSize string
+		items    []any
+		next     string
+	}{
+		"": {"50", []any{
+			circlePayoutLedgerTestDeveloperWallet("wallet-sol", "SOL", "LIVE", "DEVELOPER"),
+			circlePayoutLedgerTestDeveloperWallet("wallet-user", "MATIC", "LIVE", "ENDUSER"),
+			circlePayoutLedgerTestDeveloperWallet("wallet-matic", "MATIC", "FROZEN", "DEVELOPER"),
+		}, "<https://api.circle.com/v1/w3s/wallets?pageAfter=opaque-second>; rel=\"next\""},
+		"opaque-second": {"50", []any{circlePayoutLedgerTestDeveloperWallet("wallet-eth", "ETH", "LIVE", "DEVELOPER")}, "<https://api.circle.com/v1/w3s/wallets?pageAfter=opaque-third&pageSize=20>; rel=\"next\""},
+		"opaque-third":  {"20", []any{circlePayoutLedgerTestDeveloperWallet("wallet-base", "BASE", "LIVE", "DEVELOPER")}, ""},
+	}
+	calls, closed, tokens := 0, 0, 0
+	client := paymentReadTestCircle(paymentReadHooks{do: func(request *http.Request) (*http.Response, error) {
+		calls++
+		page, ok := pages[request.URL.Query().Get("pageAfter")]
+		if !ok {
+			t.Fatal("cursor was not taken from the response Link", request.URL)
+		}
+		requireCirclePayoutLedgerRequest(t, request, "/v1/w3s/wallets", map[string]string{"pageSize": page.pageSize})
+		return circlePayoutLedgerTestResponse(t, request, "wallets", page.items, page.next, &closed), nil
+	}})
+	client.readToken = func() string {
+		tokens++
+		return "synthetic-read-token"
+	}
+	wallets, err := client.ListDeveloperWallets(context.Background())
+	if err != nil || !slices.Equal(circlePayoutLedgerTestWalletIds(wallets), []string{"wallet-sol", "wallet-matic", "wallet-eth", "wallet-base"}) || calls != 3 || closed != calls || tokens != 1 {
+		t.Fatalf("developer wallets were not all listed: %v err=%v calls=%d closed=%d tokens=%d", circlePayoutLedgerTestWalletIds(wallets), err, calls, closed, tokens)
+	}
+	frozen := wallets[1]
+	if frozen.State != "FROZEN" || frozen.Blockchain != "MATIC" || frozen.Address != "synthetic-address-wallet-matic" || frozen.CustodyType != "DEVELOPER" || !frozen.CreateDate.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("listed wallet lost its fields: %+v", frozen)
+	}
+}
+
+// RC-5 One invalid, repeated or unclassified wallet fails the whole listing;
+// the valid pages before it are discarded, never returned short.
+func TestCirclePayoutLedgerDeveloperWalletsRefuseInvalidWallets(t *testing.T) {
+	for _, defect := range []string{"missing-id", "invalid-id", "missing-address", "missing-blockchain", "missing-date", "missing-custody", "unknown-custody", "null", "duplicate"} {
+		calls, closed, waits := 0, 0, 0
+		client := paymentReadTestCircle(paymentReadHooks{
+			wait: func(context.Context, time.Duration) error { waits++; return errors.New("unexpected retry") },
+			do: func(request *http.Request) (*http.Response, error) {
+				calls++
+				valid := circlePayoutLedgerTestDeveloperWallet("wallet-valid", "SOL", "LIVE", "DEVELOPER")
+				if calls == 1 {
+					return circlePayoutLedgerTestResponse(t, request, "wallets", []any{valid}, circleReadTestNext(request, "opaque-next"), &closed), nil
+				}
+				wallet := circlePayoutLedgerTestDeveloperWallet("wallet-defect", "SOL", "LIVE", "DEVELOPER")
+				items := []any{wallet}
+				switch defect {
+				case "missing-id":
+					delete(wallet, "id")
+				case "invalid-id":
+					wallet["id"] = "synthetic/wallet"
+				case "missing-address":
+					delete(wallet, "address")
+				case "missing-blockchain":
+					delete(wallet, "blockchain")
+				case "missing-date":
+					delete(wallet, "createDate")
+				case "missing-custody":
+					delete(wallet, "custodyType")
+				case "unknown-custody":
+					wallet["custodyType"] = "SYNTHETIC"
+				case "null":
+					items = []any{nil}
+				case "duplicate":
+					items = []any{valid}
+				}
+				return circlePayoutLedgerTestResponse(t, request, "wallets", items, "", &closed), nil
+			},
+		})
+		wallets, err := client.ListDeveloperWallets(context.Background())
+		id, ok := map[string]string{"missing-id": "", "null": "", "invalid-id": "synthetic/wallet", "duplicate": "wallet-valid"}[defect]
+		if !ok {
+			id = "wallet-defect"
+		}
+		requireCirclePayoutLedgerRefusal(t, defect, err, fmt.Sprintf("Circle wallet listing has an invalid, repeated or unclassified wallet %q", id))
+		if wallets != nil || calls != 2 || closed != calls || waits != 0 {
+			t.Fatal("invalid listed wallet was accepted, skipped or retried", defect, err, calls, closed, waits)
+		}
+	}
+}
+
+// RC-5 A refused GET, a malformed page, a page without the documented Link,
+// or a next link that adds a filter, holds both cursors or cycles fails the
+// listing without a retry.
+func TestCirclePayoutLedgerDeveloperWalletsRefuseHttpJsonAndPagination(t *testing.T) {
+	refusals := map[string]string{
+		"unauthorized":     "Bad status: 401",
+		"malformed":        "invalid character",
+		"missing-array":    "Circle GET is missing wallets",
+		"object":           "Circle GET wallets is not an array",
+		"oversized":        "Circle GET wallets exceeds requested page bound",
+		"unparseable-date": "parsing time",
+		"missing-link":     "wallets page has no pagination Link",
+		"foreign-filter":   "pagination changed fixed filters",
+		"both-cursors":     "pagination requires one opaque cursor",
+		"cycle":            "wallets pagination repeated a page",
+	}
+	for _, defect := range []string{"unauthorized", "malformed", "missing-array", "object", "oversized", "unparseable-date", "missing-link", "foreign-filter", "both-cursors", "cycle"} {
+		calls, closed, waits := 0, 0, 0
+		client := paymentReadTestCircle(paymentReadHooks{
+			wait: func(context.Context, time.Duration) error { waits++; return errors.New("unexpected retry") },
+			do: func(request *http.Request) (*http.Response, error) {
+				calls++
+				items := []any{circlePayoutLedgerTestDeveloperWallet(fmt.Sprint("wallet-", calls), "SOL", "LIVE", "DEVELOPER")}
+				next := ""
+				switch defect {
+				case "unauthorized":
+					return paymentReadTestResponse(http.StatusUnauthorized, `{"code":401,"message":"synthetic unauthorized"}`, &closed), nil
+				case "malformed":
+					return circlePayoutLedgerTestPayload(request, "synthetic-not-json", "", &closed), nil
+				case "missing-array":
+					return circlePayoutLedgerTestPayload(request, `{"data":{}}`, "", &closed), nil
+				case "object":
+					return circlePayoutLedgerTestPayload(request, `{"data":{"wallets":{}}}`, "", &closed), nil
+				case "missing-link":
+					return paymentReadTestResponse(http.StatusOK, circleReadTestPage(t, "wallets", items), &closed), nil
+				case "oversized":
+					for i := 0; i < circleReadPageSize; i++ {
+						items = append(items, circlePayoutLedgerTestDeveloperWallet(fmt.Sprint("wallet-extra-", i), "SOL", "LIVE", "DEVELOPER"))
+					}
+				case "unparseable-date":
+					items[0].(map[string]any)["createDate"] = "2026-01-01 00:00:00"
+				case "foreign-filter":
+					next = "<https://api.circle.com/v1/w3s/wallets?blockchain=SOL&pageAfter=opaque-next&pageSize=50>; rel=\"next\""
+				case "both-cursors":
+					next = "<https://api.circle.com/v1/w3s/wallets?pageAfter=opaque-next&pageBefore=opaque-previous>; rel=\"next\""
+				case "cycle":
+					next = "<https://api.circle.com/v1/w3s/wallets?pageAfter=opaque-next>; rel=\"next\""
+				}
+				return circlePayoutLedgerTestResponse(t, request, "wallets", items, next, &closed), nil
+			},
+		})
+		wallets, err := client.ListDeveloperWallets(context.Background())
+		expectedCalls := 1
+		if defect == "cycle" {
+			expectedCalls = 2
+		}
+		requireCirclePayoutLedgerRefusal(t, defect, err, refusals[defect])
+		if wallets != nil || calls != expectedCalls || closed != calls || waits != 0 {
+			t.Fatal("refused wallet listing was accepted or retried", defect, err, calls, closed, waits)
+		}
+	}
+}
+
+// RC-5 More wallet pages than the bound is an error, never a truncated listing.
+func TestCirclePayoutLedgerDeveloperWalletPageBoundIsAnError(t *testing.T) {
+	calls, closed := 0, 0
+	client := paymentReadTestCircle(paymentReadHooks{do: func(request *http.Request) (*http.Response, error) {
+		calls++
+		next := fmt.Sprintf("<https://api.circle.com/v1/w3s/wallets?pageAfter=opaque-%d&pageSize=50>; rel=\"next\"", calls)
+		return circlePayoutLedgerTestPayload(request, `{"data":{"wallets":[]}}`, next, &closed), nil
+	}})
+	wallets, err := client.ListDeveloperWallets(context.Background())
+	requireCirclePayoutLedgerRefusal(t, "page-bound", err, "wallets exceed 50000 pages")
+	if wallets != nil || calls != maximumCirclePayoutLedgerPages || closed != calls {
+		t.Fatal("wallet listing beyond the page bound looked complete", err, calls, closed)
+	}
+}
+
+// RC-5 A missing or canceled context is refused before the configuration is
+// read or any GET is made.
+func TestCirclePayoutLedgerDeveloperWalletsRefuseDeadContext(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	var missing context.Context
+	for _, defect := range []string{"nil-context", "canceled"} {
+		calls, tokens := 0, 0
+		client := &CoreCircleApiClient{
+			readHooks: paymentReadHooks{do: func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("unexpected request") }},
+			readToken: func() string { tokens++; return "synthetic-read-token" },
+		}
+		ctx, expected := missing, "wallets listing requires a context"
+		if defect == "canceled" {
+			ctx, expected = canceled, context.Canceled.Error()
+		}
+		wallets, err := client.ListDeveloperWallets(ctx)
+		requireCirclePayoutLedgerRefusal(t, defect, err, expected)
+		if wallets != nil || calls != 0 || tokens != 0 {
+			t.Fatal("dead context reached Circle or the configuration", defect, err, calls, tokens)
+		}
+	}
+}
