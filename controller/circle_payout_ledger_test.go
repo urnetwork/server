@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -280,55 +281,97 @@ func TestCirclePayoutLedgerListingRefusesInvalidTransactions(t *testing.T) {
 	}
 }
 
-// RC-5 A page without the documented Link, a cursor cycle, or a Link that
-// changes the endpoint or a fixed filter fails the listing before any further
-// page is requested.
+// RC-5 Circle may omit our fixed filters from a next link, wholly or in part:
+// the link's cursor and page size are taken and every filter of ours is
+// re-applied, so each page is requested under the first page's filters.
+func TestCirclePayoutLedgerListingReappliesOmittedFilters(t *testing.T) {
+	pages := map[string]struct{ pageSize, next string }{
+		// The documented shape: only the cursor and page size.
+		"": {"50", "<https://api.circle.com/v1/w3s/transactions?pageAfter=opaque-second&pageSize=50>; rel=\"next\""},
+		// One filter repeated unchanged, the others omitted, a smaller page.
+		"opaque-second": {"50", "<https://api.circle.com/v1/w3s/transactions?pageAfter=opaque-third&pageSize=20&walletIds=" + circlePayoutLedgerTestWallet + ">; rel=\"next\""},
+		// Only the cursor: our own page size is re-applied.
+		"opaque-third":  {"20", "<https://api.circle.com/v1/w3s/transactions?pageAfter=opaque-fourth>; rel=\"next\""},
+		"opaque-fourth": {"50", ""},
+	}
+	calls, closed := 0, 0
+	client := paymentReadTestCircle(paymentReadHooks{do: func(request *http.Request) (*http.Response, error) {
+		calls++
+		page, ok := pages[request.URL.Query().Get("pageAfter")]
+		if !ok {
+			t.Fatal("cursor was not taken from the response Link", request.URL)
+		}
+		requireCirclePayoutLedgerRequest(t, request, "/v1/w3s/transactions", map[string]string{"walletIds": circlePayoutLedgerTestWallet, "from": "2026-08-01T10:00:00Z", "includeAll": "true", "pageSize": page.pageSize})
+		return circlePayoutLedgerTestResponse(t, request, "transactions", []any{circlePayoutLedgerTestTransaction(fmt.Sprint("transaction-", calls), "COMPLETE", "2026-09-01T00:00:00Z")}, page.next, &closed), nil
+	}})
+	transactions, err := client.ListWalletTransactions(context.Background(), circlePayoutLedgerTestWallet, circlePayoutLedgerTestFrom)
+	if err != nil || !slices.Equal(circlePayoutLedgerTestIds(transactions), []string{"transaction-1", "transaction-2", "transaction-3", "transaction-4"}) || calls != 4 || closed != calls {
+		t.Fatalf("omitted filters were not re-applied: %v err=%v calls=%d closed=%d", circlePayoutLedgerTestIds(transactions), err, calls, closed)
+	}
+}
+
+// RC-5 A page without the documented Link, a cursor cycle, or a next link
+// that changes the endpoint, the page bound or a filter it carries, adds a
+// filter, or holds both or neither cursor fails the listing before any
+// further page is requested, whether the link repeats our filters or omits
+// them.
 func TestCirclePayoutLedgerListingRefusesUnsafePagination(t *testing.T) {
 	refusals := map[string]string{
-		"missing-link":     "transactions page has no pagination Link",
-		"cycle":            "transactions pagination repeated a page",
-		"changed-from":     "pagination changed fixed filters",
-		"changed-wallet":   "pagination changed fixed filters",
-		"lost-include-all": "pagination lost fixed filters",
-		"host":             "pagination changed the authenticated endpoint",
-		"page-size":        "pagination changed the page bound",
+		"missing-link":   "transactions page has no pagination Link",
+		"cycle":          "transactions pagination repeated a page",
+		"changed-from":   "pagination changed fixed filters",
+		"changed-wallet": "pagination changed fixed filters",
+		"foreign-filter": "pagination changed fixed filters",
+		"host":           "pagination changed the authenticated endpoint",
+		"page-size":      "pagination changed the page bound",
+		"both-cursors":   "pagination requires one opaque cursor",
+		"no-cursor":      "pagination requires one opaque cursor",
 	}
-	for _, defect := range []string{"missing-link", "cycle", "changed-from", "changed-wallet", "lost-include-all", "host", "page-size"} {
-		calls, closed := 0, 0
-		client := paymentReadTestCircle(paymentReadHooks{do: func(request *http.Request) (*http.Response, error) {
-			calls++
-			items := []any{circlePayoutLedgerTestTransaction(fmt.Sprint("transaction-", calls), "COMPLETE", "2026-09-01T00:00:00Z")}
-			if defect == "missing-link" {
-				return paymentReadTestResponse(http.StatusOK, circleReadTestPage(t, "transactions", items), &closed), nil
+	for _, shape := range []string{"repeated", "omitted"} {
+		for _, defect := range []string{"missing-link", "cycle", "changed-from", "changed-wallet", "foreign-filter", "host", "page-size", "both-cursors", "no-cursor"} {
+			calls, closed := 0, 0
+			client := paymentReadTestCircle(paymentReadHooks{do: func(request *http.Request) (*http.Response, error) {
+				calls++
+				items := []any{circlePayoutLedgerTestTransaction(fmt.Sprint("transaction-", calls), "COMPLETE", "2026-09-01T00:00:00Z")}
+				if defect == "missing-link" {
+					return paymentReadTestResponse(http.StatusOK, circleReadTestPage(t, "transactions", items), &closed), nil
+				}
+				uri := *request.URL
+				query := url.Values{"pageSize": {"50"}}
+				if shape == "repeated" {
+					query = uri.Query()
+				}
+				query.Set("pageAfter", "opaque-next")
+				switch defect {
+				case "cycle":
+					// The second page links to itself.
+				case "changed-from":
+					query.Set("from", "2026-07-01T00:00:00Z")
+				case "changed-wallet":
+					query.Set("walletIds", "different-wallet")
+				case "foreign-filter":
+					query.Set("order", "ASC")
+				case "host":
+					uri.Host = "different.example"
+				case "page-size":
+					query.Set("pageSize", "51")
+				case "both-cursors":
+					query.Set("pageBefore", "opaque-previous")
+				case "no-cursor":
+					query.Del("pageAfter")
+				}
+				uri.RawQuery = query.Encode()
+				return circlePayoutLedgerTestResponse(t, request, "transactions", items, "<"+uri.String()+">; rel=\"next\"", &closed), nil
+			}})
+			transactions, err := client.ListWalletTransactions(context.Background(), circlePayoutLedgerTestWallet, circlePayoutLedgerTestFrom)
+			expectedCalls := 1
+			if defect == "cycle" {
+				expectedCalls = 2
 			}
-			uri := *request.URL
-			query := uri.Query()
-			query.Set("pageAfter", "opaque-next")
-			switch defect {
-			case "cycle":
-				// The second page links to itself.
-			case "changed-from":
-				query.Set("from", "2026-07-01T00:00:00Z")
-			case "changed-wallet":
-				query.Set("walletIds", "different-wallet")
-			case "lost-include-all":
-				query.Del("includeAll")
-			case "host":
-				uri.Host = "different.example"
-			case "page-size":
-				query.Set("pageSize", "51")
+			requireCirclePayoutLedgerRefusal(t, shape+"/"+defect, err, refusals[defect])
+			if transactions != nil || calls != expectedCalls || closed != calls {
+				t.Fatal("unsafe pagination was followed or looked complete", shape, defect, err, calls, closed)
 			}
-			uri.RawQuery = query.Encode()
-			return circlePayoutLedgerTestResponse(t, request, "transactions", items, "<"+uri.String()+">; rel=\"next\"", &closed), nil
-		}})
-		transactions, err := client.ListWalletTransactions(context.Background(), circlePayoutLedgerTestWallet, circlePayoutLedgerTestFrom)
-		expectedCalls := 1
-		if defect == "cycle" {
-			expectedCalls = 2
-		}
-		requireCirclePayoutLedgerRefusal(t, defect, err, refusals[defect])
-		if transactions != nil || calls != expectedCalls || closed != calls {
-			t.Fatal("unsafe pagination was followed or looked complete", defect, err, calls, closed)
 		}
 	}
 }
@@ -338,7 +381,8 @@ func TestCirclePayoutLedgerListingPageBoundIsAnError(t *testing.T) {
 	calls, closed := 0, 0
 	client := paymentReadTestCircle(paymentReadHooks{do: func(request *http.Request) (*http.Response, error) {
 		calls++
-		return circlePayoutLedgerTestPayload(request, `{"data":{"transactions":[]}}`, circleReadTestNext(request, fmt.Sprint("opaque-", calls)), &closed), nil
+		next := fmt.Sprintf("<https://api.circle.com/v1/w3s/transactions?pageAfter=opaque-%d&pageSize=50>; rel=\"next\"", calls)
+		return circlePayoutLedgerTestPayload(request, `{"data":{"transactions":[]}}`, next, &closed), nil
 	}})
 	transactions, err := client.ListWalletTransactions(context.Background(), circlePayoutLedgerTestWallet, circlePayoutLedgerTestFrom)
 	requireCirclePayoutLedgerRefusal(t, "page-bound", err, "transactions exceed 50000 pages")
