@@ -9,7 +9,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The connect.day writer's per-process memory: one write per client per UTC
+// The connect.day writer's per-process memory: one check per network per UTC
 // day, reset when the day changes, retried after a failure.
 func TestConnectDayCache(t *testing.T) {
 	day1 := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
@@ -57,15 +57,15 @@ func TestRecordConnectDayPersistsOncePerNetworkUtcDay(t *testing.T) {
 
 		connectAt := time.Date(2026, 9, 10, 12, 30, 0, 0, time.UTC)
 		writes := []<-chan struct{}{
-			recordConnectDayForTest(ctx, clientId, connectAt),
-			recordConnectDayForTest(ctx, clientId, connectAt.Add(time.Hour)),
-			recordConnectDayForTest(ctx, secondClientId, connectAt.Add(2*time.Hour)),
+			recordConnectDayForTest(ctx, networkId, clientId, connectAt),
+			recordConnectDayForTest(ctx, networkId, clientId, connectAt.Add(time.Hour)),
+			recordConnectDayForTest(ctx, networkId, secondClientId, connectAt.Add(2*time.Hour)),
 		}
 		defer func() { waitConnectDayWrites(writes...) }()
 		waitConnectDayWrites(writes...)
 		connect.AssertEqual(t, 1, connectDayEventCount(t, ctx, networkId))
 
-		writes = append(writes, recordConnectDayForTest(ctx, clientId, connectAt.Add(24*time.Hour)))
+		writes = append(writes, recordConnectDayForTest(ctx, networkId, clientId, connectAt.Add(24*time.Hour)))
 		waitConnectDayWrites(writes...)
 		connect.AssertEqual(t, 2, connectDayEventCount(t, ctx, networkId))
 	})
@@ -92,20 +92,21 @@ func TestRecordConnectDayPersistsOnceAfterCallerCancellation(t *testing.T) {
 		cancelCaller()
 		connectAt := time.Date(2026, 9, 11, 12, 30, 0, 0, time.UTC)
 		writes := []<-chan struct{}{
-			recordConnectDayForTest(callerCtx, clientId, connectAt),
-			recordConnectDayForTest(callerCtx, clientId, connectAt.Add(time.Hour)),
+			recordConnectDayForTest(callerCtx, networkId, clientId, connectAt),
+			recordConnectDayForTest(callerCtx, networkId, clientId, connectAt.Add(time.Hour)),
 		}
 		defer waitConnectDayWrites(writes...)
 		waitConnectDayWrites(writes...)
 		connect.AssertEqual(t, 1, connectDayEventCount(t, queryCtx, networkId))
-		if connectDaySeen.remember(clientId, ConnectDayStart(connectAt)) {
+		if connectDaySeen.remember(networkId, ConnectDayStart(connectAt)) {
 			t.Fatal("successful canceled-parent write was forgotten from the daily cache")
 		}
 	})
 }
 
-// A failed optional write still completes its job and forgets the cache entry,
-// allowing the same client's next connection to persist the missing day.
+// A failed optional write still completes its job, forgets the cache entry and
+// releases its claim, allowing the same client's next connection to persist
+// the missing day.
 func TestRecordConnectDayFailedWriteCompletesAndCanRetry(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -129,22 +130,22 @@ func TestRecordConnectDayFailedWriteCompletesAndCanRetry(t *testing.T) {
 		})
 
 		connectAt := time.Date(2026, 9, 10, 12, 30, 0, 0, time.UTC)
-		waitConnectDayWrites(recordConnectDayForTest(ctx, clientId, connectAt))
+		waitConnectDayWrites(recordConnectDayForTest(ctx, networkId, clientId, connectAt))
 		connect.AssertEqual(t, 0, connectDayEventCount(t, ctx, networkId))
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx,
 				`DROP TRIGGER synthetic_reject_connect_day ON network_onboarding_event`,
 			))
 		})
-		waitConnectDayWrites(recordConnectDayForTest(ctx, clientId, connectAt))
+		waitConnectDayWrites(recordConnectDayForTest(ctx, networkId, clientId, connectAt))
 		connect.AssertEqual(t, 1, connectDayEventCount(t, ctx, networkId))
 	})
 }
 
 // Uses the real nonblocking admission path with a per-call completion signal.
-func recordConnectDayForTest(ctx context.Context, clientId server.Id, connectTime time.Time) <-chan struct{} {
+func recordConnectDayForTest(ctx context.Context, networkId server.Id, clientId server.Id, connectTime time.Time) <-chan struct{} {
 	done := make(chan struct{})
-	recordConnectDay(ctx, clientId, connectTime, done)
+	recordConnectDay(ctx, networkId, clientId, connectTime, done)
 	return done
 }
 

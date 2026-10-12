@@ -76,13 +76,6 @@ func newReliabilityCatalogFixture(t testing.TB) *reliabilityCatalogFixture {
 	for _, clientId := range []server.Id{f.validId, f.invalidId} {
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 	}
-	// Complete optional analytics before connecting, so later admissions
-	// deduplicate without leaving an independent owner beside the traced pools.
-	connectTime := server.NowUtc()
-	waitConnectDayWrites(
-		recordConnectDayForTest(ctx, f.validId, connectTime),
-		recordConnectDayForTest(ctx, f.invalidId, connectTime),
-	)
 	connectWithLocation := func(clientId server.Id, address string) [32]byte {
 		handlerId := CreateNetworkClientHandler(ctx)
 		connectionId, _, _, addressHash, err := ConnectNetworkClient(ctx, clientId, address, handlerId)

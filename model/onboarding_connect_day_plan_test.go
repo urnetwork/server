@@ -96,7 +96,7 @@ func TestRecordConnectDayProbeReadsOnlyItsNetworkDay(t *testing.T) {
 					t.Error(err)
 				}
 			}()
-			waitConnectDayWrites(recordConnectDayForTest(ctx, probeClientId, day.Add(23*time.Hour)))
+			waitConnectDayWrites(recordConnectDayForTest(ctx, probeNetworkId, probeClientId, day.Add(23*time.Hour)))
 		}()
 		if capture.sql == "" {
 			t.Fatal("the connect.day writer did not send its conditional insert")

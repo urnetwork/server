@@ -3,12 +3,9 @@ package model
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
@@ -308,24 +305,37 @@ func PruneOnboardingEvents(ctx context.Context, now time.Time, limit int) (remov
 // (RemoveDisconnectedNetworkClients), so they cover days, not the 31-day
 // window the outcomes need. History starts at the deploy of this writer.
 //
-// The hot path pays nothing for a client whose day is already recorded (an
-// in-process set, reset when the UTC day changes) and one index-backed
-// conditional insert otherwise.
+// Clients reconnect about twice an hour, each time to any of the fleet's
+// Connect processes, and a network can have many clients. The day is
+// deduplicated per network in three layers:
+//   - each process remembers the networks it saw recorded or admitted today,
+//     so a repeated connect costs nothing;
+//   - a Redis claim per network day admits one writer across the fleet, and
+//     becomes a recorded marker once the event is durable;
+//   - the conditional insert under the network day's insert lock stays the
+//     exact guard (see lockOnboardingEventInsertInTx), so a lost claim, an
+//     unavailable Redis or a concurrent retry never stores a second event.
+// PostgreSQL then sees about one write per network per day. Remembering
+// clients per process instead cost one write transaction per client per
+// process per day, about 300 for every event stored.
 
 // ConnectDayStart is the UTC day a connection time falls in.
 func ConnectDayStart(at time.Time) time.Time {
 	return at.UTC().Truncate(24 * time.Hour)
 }
 
-// connectDayMaxCached bounds the per-process set of clients already recorded
-// today; past it the set is cleared and a repeated connect pays the
-// conditional insert again (which then matches zero rows).
+// connectDayMaxCached bounds the per-process set of networks seen today. Past
+// it, a network is not remembered and each of its connects reads the Redis
+// marker instead. The set is never cleared mid-day: clearing it made every
+// remembered entry pay its database write again.
 const connectDayMaxCached = 250_000
 
+// Process memory of the network days already recorded or admitted to a writer.
+// Safe for concurrent use.
 type connectDayCache struct {
-	mutex sync.Mutex
-	day   time.Time
-	seen  map[server.Id]struct{}
+	stateLock      sync.Mutex
+	day            time.Time
+	seenNetworkIds map[server.Id]struct{}
 }
 
 var connectDaySeen = &connectDayCache{}
@@ -337,6 +347,20 @@ var connectDaySeen = &connectDayCache{}
 // the connection goroutine indefinitely.
 const connectDayPostCommitTimeout = 10 * time.Second
 
+// A claim outlives the bounded write and expires soon after a writer that
+// stopped without releasing it, so a later connect retries the day.
+const connectDayClaimTtl = time.Minute
+
+// The recorded marker covers the rest of its UTC day from any write time, with
+// an hour for clock skew between processes.
+const connectDayRecordedTtl = 25 * time.Hour
+
+const connectDayRecordedValue = "recorded"
+
+// Releasing a claim after a failed write runs on its own budget, since the
+// failure may be the write budget itself.
+const connectDayReleaseTimeout = time.Second
+
 // Connect traffic can arrive in large cohorts. Keep optional analytics writes
 // off that path and bound their pressure on the operator's PostgreSQL pool.
 const (
@@ -346,6 +370,7 @@ const (
 
 type connectDayWriteJob struct {
 	ctx         context.Context
+	networkId   server.Id
 	clientId    server.Id
 	connectTime time.Time
 	day         time.Time
@@ -367,65 +392,147 @@ func startConnectDayWriteWorkers() {
 	})
 }
 
-// remember returns false when the client's connection for this UTC day is
-// already recorded, true (and remembers it) when it still has to be written.
-func (c *connectDayCache) remember(clientId server.Id, day time.Time) bool {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if !c.day.Equal(day) || c.seen == nil || connectDayMaxCached <= len(c.seen) {
-		c.day = day
-		c.seen = map[server.Id]struct{}{}
+// Returns false when the network's day is already recorded or admitted in this
+// process, true (remembering it while there is room) when it still has to be
+// checked. Another day replaces the set.
+func (self *connectDayCache) remember(networkId server.Id, day time.Time) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if !self.day.Equal(day) || self.seenNetworkIds == nil {
+		self.day = day
+		self.seenNetworkIds = map[server.Id]struct{}{}
 	}
-	if _, ok := c.seen[clientId]; ok {
+	if _, ok := self.seenNetworkIds[networkId]; ok {
 		return false
 	}
-	c.seen[clientId] = struct{}{}
+	if len(self.seenNetworkIds) < connectDayMaxCached {
+		self.seenNetworkIds[networkId] = struct{}{}
+	}
 	return true
 }
 
-// forget drops a client from the day's set, so a failed write is retried on
-// the next connect.
-func (c *connectDayCache) forget(clientId server.Id, day time.Time) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if c.day.Equal(day) && c.seen != nil {
-		delete(c.seen, clientId)
+// Drops a network from the day's set, so the next connect checks the day again.
+func (self *connectDayCache) forget(networkId server.Id, day time.Time) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.day.Equal(day) && self.seenNetworkIds != nil {
+		delete(self.seenNetworkIds, networkId)
 	}
 }
 
-// RecordConnectDay writes the client's network's connect.day event for the
-// day of `connectTime` unless one exists. Its own short transaction after the
-// connection is committed, so a failure here never fails or delays the
-// connection: it is logged and retried on the client's next connect.
-func RecordConnectDay(ctx context.Context, clientId server.Id, connectTime time.Time) {
-	recordConnectDay(ctx, clientId, connectTime, nil)
+// RecordConnectDay writes the network's connect.day event for the day of
+// `connectTime` unless one exists. `networkId` is the connecting client's
+// authenticated network. Runs after the connection is committed, off the
+// connection path: a failure never fails or delays the connection, and is
+// logged and retried on a later connect of the network.
+func RecordConnectDay(ctx context.Context, networkId server.Id, clientId server.Id, connectTime time.Time) {
+	recordConnectDay(ctx, networkId, clientId, connectTime, nil)
 }
 
 // Owns an optional completion signal, transferring it to the worker only when
 // admitted. Tests can join queued writes before destroying their database.
-func recordConnectDay(ctx context.Context, clientId server.Id, connectTime time.Time, done chan<- struct{}) {
+func recordConnectDay(ctx context.Context, networkId server.Id, clientId server.Id, connectTime time.Time, done chan<- struct{}) {
 	defer func() {
 		if done != nil {
 			close(done)
 		}
 	}()
 	day := ConnectDayStart(connectTime)
-	if !connectDaySeen.remember(clientId, day) {
+	if !connectDaySeen.remember(networkId, day) {
 		return
 	}
 	startConnectDayWriteWorkers()
-	job := connectDayWriteJob{ctx: context.WithoutCancel(ctx), clientId: clientId, connectTime: connectTime, day: day, done: done}
+	job := connectDayWriteJob{
+		ctx:         context.WithoutCancel(ctx),
+		networkId:   networkId,
+		clientId:    clientId,
+		connectTime: connectTime,
+		day:         day,
+		done:        done,
+	}
 	select {
 	case connectDayWriteJobs <- job:
 		done = nil
 	default:
-		// No durable write was admitted; a later connection may retry it.
-		connectDaySeen.forget(clientId, day)
+		// No write was admitted; a later connection may retry it.
+		connectDaySeen.forget(networkId, day)
 	}
 }
 
-// Completes the admitted job after committing or forgetting a failed write,
-// including any retries the transaction needs.
+// One key per network and UTC day holds a writer's claim token or the
+// recorded marker.
+func connectDayKey(networkId server.Id, day time.Time) string {
+	return fmt.Sprintf("{ocd_%s}%s", networkId, day.UTC().Format("20060102"))
+}
+
+// Returns the key's holder after the call: the caller's token when the claim is
+// now the caller's, the recorded marker, or another writer's token.
+const connectDayClaimScript = `
+local holder = redis.call('GET', KEYS[1])
+if holder then return holder end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+return ARGV[1]
+`
+
+// Replaces any claim with the recorded marker once the event is durable.
+const connectDayMarkScript = `
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+return 1
+`
+
+// Claims the network day across the fleet. Returns the token the caller now
+// holds, else the current holder: the recorded marker or another writer's token.
+func claimConnectDay(ctx context.Context, networkId server.Id, day time.Time) (token string, holder string, err error) {
+	candidate := server.NewId().String()
+	err = server.RedisWithDeadline(ctx, func(client server.RedisClient) error {
+		var claimErr error
+		holder, claimErr = client.Eval(
+			ctx,
+			connectDayClaimScript,
+			[]string{connectDayKey(networkId, day)},
+			candidate,
+			connectDayClaimTtl.Milliseconds(),
+		).Text()
+		return claimErr
+	})
+	if err == nil && holder == candidate {
+		token = candidate
+	}
+	return
+}
+
+// Lets every process skip the day. A lost marker costs each process at most
+// one more locked conditional insert that finds the event.
+func markConnectDayRecorded(ctx context.Context, networkId server.Id, day time.Time) error {
+	return server.RedisWithDeadline(ctx, func(client server.RedisClient) error {
+		return client.Eval(
+			ctx,
+			connectDayMarkScript,
+			[]string{connectDayKey(networkId, day)},
+			connectDayRecordedValue,
+			connectDayRecordedTtl.Milliseconds(),
+		).Err()
+	})
+}
+
+// Drops only the caller's own claim, so the next connect of the network in any
+// process retries at once rather than after the claim expires.
+func releaseConnectDayClaim(job connectDayWriteJob, token string) {
+	if token == "" {
+		return
+	}
+	releaseCtx, releaseCancel := context.WithTimeout(job.ctx, connectDayReleaseTimeout)
+	defer releaseCancel()
+	err := server.RedisWithDeadline(releaseCtx, func(client server.RedisClient) error {
+		return server.RedisRemoveIfEqual(client, releaseCtx, connectDayKey(job.networkId, job.day), []byte(token)).Err()
+	})
+	if err != nil && glog.V(1) {
+		glog.Infof("[onboarding]connect.day claim release failed, it expires in %s: %s\n", connectDayClaimTtl, err)
+	}
+}
+
+// Completes the admitted job after the day is recorded, found recorded, or left
+// for a later connect, including any retries the transaction needs.
 func recordConnectDayWrite(job connectDayWriteJob) {
 	if job.done != nil {
 		defer close(job.done)
@@ -435,36 +542,83 @@ func recordConnectDayWrite(job connectDayWriteJob) {
 		connectDayPostCommitTimeout,
 	)
 	defer writeCancel()
+	claimToken := ""
 	defer func() {
 		if r := recover(); r != nil {
-			connectDaySeen.forget(job.clientId, job.day)
+			releaseConnectDayClaim(job, claimToken)
+			connectDaySeen.forget(job.networkId, job.day)
 			glog.Warningf("[onboarding]connect.day write failed for client %s: %v\n", job.clientId, r)
 		}
 	}()
-	// The cache deduplicates clients, not networks: two clients of one network
-	// can both find its day empty. The network's connect.day insert lock for
-	// the day makes them take turns (see lockOnboardingEventInsertInTx).
-	server.Tx(writeCtx, func(tx server.PgTx) {
-		var networkId server.Id
-		err := tx.QueryRow(
-			writeCtx,
-			`SELECT network_id FROM network_client WHERE client_id = $1`,
-			job.clientId,
-		).Scan(&networkId)
-		if errors.Is(err, pgx.ErrNoRows) {
+
+	claimToken, holder, claimErr := claimConnectDay(writeCtx, job.networkId, job.day)
+	switch {
+	case claimErr != nil:
+		// The locked conditional insert alone keeps the day exact without Redis.
+		if glog.V(1) {
+			glog.Infof("[onboarding]connect.day claim unavailable, writing unclaimed: %s\n", claimErr)
+		}
+	case holder == connectDayRecordedValue:
+		return
+	case claimToken == "":
+		// Another process is writing the day. A later connect checks again,
+		// after that write is marked or its claim expires.
+		connectDaySeen.forget(job.networkId, job.day)
+		return
+	}
+
+	if !recordConnectDayEvent(writeCtx, job) {
+		// The client is not in the network; another client may still record the day.
+		releaseConnectDayClaim(job, claimToken)
+		connectDaySeen.forget(job.networkId, job.day)
+		return
+	}
+	if err := markConnectDayRecorded(writeCtx, job.networkId, job.day); err != nil && glog.V(1) {
+		glog.Infof("[onboarding]connect.day mark failed, the claim expires in %s: %s\n", connectDayClaimTtl, err)
+	}
+}
+
+// Writes the day's event in one read committed transaction under the network
+// day's insert lock, unless the network already has one. Returns whether the
+// network's day is recorded, which is false only when the client is not in
+// the network. Concurrent writers of the network day take turns on the lock
+// (see lockOnboardingEventInsertInTx), so at most one event is stored.
+func recordConnectDayEvent(ctx context.Context, job connectDayWriteJob) (recorded bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		recorded = false
+		lockOnboardingEventInsertInTx(tx, ctx, EventConnectDay, job.networkId, job.day.Format(time.DateOnly))
+		if insertConnectDayInTx(tx, ctx, job.clientId, job.networkId, job.connectTime, job.day) {
+			recorded = true
 			return
 		}
-		server.Raise(err)
-		lockOnboardingEventInsertInTx(tx, writeCtx, EventConnectDay, networkId, job.day.Format(time.DateOnly))
-		insertConnectDayInTx(tx, writeCtx, job.clientId, networkId, job.connectTime, job.day)
+		server.Raise(tx.QueryRow(
+			ctx,
+			`
+				SELECT EXISTS (
+					SELECT 1
+					FROM network_onboarding_event e
+					WHERE
+						e.network_id = $1::uuid AND
+						(e.network_id, e.at) >= ($1::uuid, $2::timestamp) AND
+						(e.network_id, e.at) < ($1::uuid, $3::timestamp) AND
+						e.name = $4::varchar(64)
+				)
+			`,
+			job.networkId,
+			job.day,
+			job.day.Add(24*time.Hour),
+			EventConnectDay,
+		).Scan(&recorded))
 	}, server.TxReadCommitted)
+	return
 }
 
 // The conditional insert alone: the network's connect.day for the day of
 // `connectTime` (`day`), unless the day already has one, while the client still
-// belongs to `networkId`. Two concurrent transactions can both find the day
-// empty and both insert, so callers hold the network's connect.day insert lock
-// for the day first, and the network filter keeps the insert inside that lock.
+// belongs to `networkId`. Returns whether it inserted the event. Two concurrent
+// transactions can both find the day empty and both insert, so callers hold the
+// network's connect.day insert lock for the day first, and the network filter
+// keeps the insert inside that lock.
 //
 // The day bound is a row comparison on (network_id, at), which only the
 // network's own index can use. A new UTC day lies past the last ANALYZE of
@@ -478,8 +632,8 @@ func insertConnectDayInTx(
 	networkId server.Id,
 	connectTime time.Time,
 	day time.Time,
-) {
-	server.RaisePgResult(tx.Exec(
+) (inserted bool) {
+	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 			INSERT INTO network_onboarding_event (
@@ -529,4 +683,5 @@ func insertConnectDayInTx(
 		day.Add(24*time.Hour),
 		networkId,
 	))
+	return tag.RowsAffected() == 1
 }
