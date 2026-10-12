@@ -406,3 +406,57 @@ func TestCreateContractMissingOriginAcrossItsCommitIsNotRecorded(t *testing.T) {
 		}
 	})
 }
+
+// An old provider keeps replying to a retired prober window every 5s, and the
+// load balancer spreads its retries over several api processes, so a process
+// sees the route again only after the short ring has expired the refusal.
+// The ring is disabled here, which is that retry deterministically. A refusal
+// of an inactive destination row is terminal and still answers it without a
+// read; a missing destination row is not terminal and reads again.
+func TestCreateContractInactiveDestinationRefusalOutlivesTheRing(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		settings := model.DefaultContractOriginNotificationSettings()
+		settings.RouteRejectionTimeout = 0
+		owner := model.NewContractOriginNotifications(context.Background(), settings)
+		defer owner.Close()
+		ctx := model.WithContractOriginNotifications(context.Background(), owner)
+		sourceId, retiredId := server.NewId(), server.NewId()
+		model.Testing_CreateDevice(ctx, server.NewId(), server.NewId(), sourceId, "synthetic-provider", "synthetic")
+		model.Testing_CreateDevice(ctx, server.NewId(), server.NewId(), retiredId, "synthetic-retired-window", "synthetic")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE network_client
+				SET active = false, deactivate_time = clock_timestamp() AT TIME ZONE 'UTC'
+				WHERE client_id = $1
+			`, retiredId))
+		})
+
+		observed, statements, closeScope := observeRouteRejectionStatements(t, ctx)
+		defer closeScope()
+		for _, companion := range []bool{false, true} {
+			first := createRouteRejectionContract(t, observed, sourceId, retiredId, companion)
+			firstReads := statements.take()
+			retry := createRouteRejectionContract(t, observed, sourceId, retiredId, companion)
+			retryReads := statements.take()
+			if !isRouteReliabilityRefusal(first) || !isRouteReliabilityRefusal(retry) {
+				t.Fatalf("inactive destination (companion=%t) was not refused as an unreliable route: %+v, %+v", companion, first, retry)
+			}
+			if len(firstReads) == 0 {
+				t.Fatal("the first request to an inactive destination read nothing")
+			}
+			if len(retryReads) != 0 {
+				t.Fatalf("a retry to an inactive destination after the ring timeout (companion=%t) used %d statements, want 0 (the first used %d): %q", companion, len(retryReads), len(firstReads), retryReads)
+			}
+		}
+
+		missingId := server.NewId()
+		createRouteRejectionContract(t, observed, sourceId, missingId, false)
+		statements.take()
+		if retry := createRouteRejectionContract(t, observed, sourceId, missingId, false); !isRouteReliabilityRefusal(retry) {
+			t.Fatalf("missing destination was not refused as an unreliable route: %+v", retry)
+		}
+		if retryReads := statements.take(); len(retryReads) == 0 {
+			t.Fatal("a missing destination row was kept past the ring timeout")
+		}
+	})
+}
