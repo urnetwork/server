@@ -341,7 +341,9 @@ func TestRedisAdmissionDurableUsageAndLostSettlementPost(t *testing.T) {
 			if !closed {
 				t.Fatal("settlement not claimed")
 			}
-		}, server.TxReadCommitted)
+			// Settlement admits its provider-total queue owner (ddad361c), which
+			// needs the read-committed no-retry transaction every caller uses.
+		}, server.TxReadCommitted, server.OptNoRetry())
 		var credit ByteCount
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1`, f.balanceId).Scan(&credit))
