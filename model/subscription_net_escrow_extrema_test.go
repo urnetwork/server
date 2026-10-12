@@ -30,7 +30,9 @@ func TestNetEscrowAdmissionRejectsUnderflowingBalance(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "Insufficient balance") || contract != nil || len(posts) != 0 {
 					t.Errorf("historical balance %d admitted nonexistent credit: contract=%+v posts=%d error=%v", balance, contract, len(posts), err)
 				}
-			}, server.TxReadCommitted)
+				// The legacy allocator admits its grant owners (403b9c55), which
+				// needs a read-committed transaction without retry.
+			}, server.TxReadCommitted, server.OptNoRetry())
 			if reserved := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId].reserved; reserved != 600 {
 				t.Errorf("historical balance %d changed reservation to %d", balance, reserved)
 			}
