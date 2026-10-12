@@ -10057,13 +10057,11 @@ var migrations = []any{
 			public_key bytea NOT NULL,
 			chain_pem text NOT NULL,
 			serial_hex varchar NOT NULL,
-			ari_cert_id varchar NOT NULL DEFAULT '',
 			not_before timestamp NOT NULL,
 			not_after timestamp NOT NULL,
 			issue_time timestamp NOT NULL,
 			cap_counted bool NOT NULL,
 			renew_time timestamp NOT NULL,
-			ari_check_time timestamp NULL,
 			renew_failure_count int NOT NULL DEFAULT 0,
 			renewed_time timestamp NULL,
 			withdraw_time timestamp NULL,
@@ -10074,8 +10072,8 @@ var migrations = []any{
 		);
 		CREATE INDEX network_extender_measurement_cert_extender_id_issue_time
 		ON network_extender_measurement_cert (extender_id, issue_time);
-		CREATE INDEX network_extender_measurement_cert_names_issue_time
-		ON network_extender_measurement_cert (names, issue_time);
+		CREATE INDEX network_extender_measurement_cert_names_not_after
+		ON network_extender_measurement_cert (names, not_after);
 		CREATE INDEX network_extender_measurement_cert_counted_issue_time
 		ON network_extender_measurement_cert (issue_time)
 		WHERE cap_counted;
