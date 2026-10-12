@@ -52,6 +52,7 @@ const (
 	StLedgerV2AlertMissedCommitWindow = "v2_missed_commit_window"
 	StLedgerV2AlertOpenDemand         = "v2_open_demand_over_one_day"
 	StLedgerV2AlertUnfinalizedRoot    = "v2_root_not_finalized"
+	StLedgerV2AlertPruneRisk          = "v2_sn25_prune_risk"
 )
 
 // The v2 driver's steps, for the task layer.
@@ -303,11 +304,17 @@ func stLedgerV2Outcome(ctx context.Context, deploymentKey model.StDeploymentKey,
 
 // StLedgerV2Sync plans one sync turn's steps from the epoch clock and the
 // mirror, and raises the alerts. Chain reads are limited to the pool's
-// registration and epoch windows, both cached.
+// registration and epoch windows, both cached, and the subnet census, read
+// at most once per stLedgerV2PruneCheckInterval.
 func StLedgerV2Sync(ctx context.Context, state *StEpochState) ([]*StLedgerV2Step, error) {
 	cfg, client, err := stLedgerV2Require()
 	if errors.Is(err, errStLedgerV2NotConfigured) {
 		return nil, nil
+	}
+	// Dissolution strands v1 and v2 custody alike, so the check does not wait
+	// for the pool's registration.
+	if err := stLedgerV2CheckPrune(ctx, cfg, client, server.NowUtc()); err != nil {
+		glog.Infof("[st]v2 prune check failed: %s\n", err)
 	}
 	firstEpoch, registered, err := stLedgerV2FirstEpoch(ctx, cfg, client)
 	if err != nil || !registered {

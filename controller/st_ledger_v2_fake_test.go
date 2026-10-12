@@ -452,6 +452,7 @@ func newLedgerV2Fixture(t testing.TB) *ledgerV2Fixture {
 func resetLedgerV2Caches() {
 	stLedgerV2Pools.Clear()
 	stLedgerV2Windows.Clear()
+	stLedgerV2PruneChecks.Clear()
 	stLedgerV2TreeLock.Lock()
 	stLedgerV2Trees, stLedgerV2TreeOrder = map[[32]byte]*stLedgerV2Tree{}, nil
 	stLedgerV2TreeLock.Unlock()
