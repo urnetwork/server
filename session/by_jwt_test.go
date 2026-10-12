@@ -382,13 +382,8 @@ func TestByJwtKid(t *testing.T) {
 			return NewByJwt(server.NewId(), server.NewId(), "test", false, false)
 		}
 
-		// the key sign() uses: ecdsa first, else rsa
-		var signingKey crypto.PrivateKey
-		if k := byEcdsaSigningKey(); k != nil {
-			signingKey = k
-		} else {
-			signingKey = byRsaSigningKey()
-		}
+		// the key sign() uses
+		var signingKey crypto.PrivateKey = defaultByJwtKeyring.signingKey().privateKey
 		connect.AssertNotEqual(t, signingKey, nil)
 
 		// signWithoutKid mirrors sign()'s method selection but omits the kid header
@@ -423,7 +418,7 @@ func TestByJwtKid(t *testing.T) {
 		expectedKid, err := jwtKid(publicKey(signingKey))
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, kid, expectedKid)
-		_, ok := byPublicKeysByKid()[kid]
+		_, ok := defaultByJwtKeyring.heldKeys().kidPublicKeys[kid]
 		connect.AssertEqual(t, ok, true)
 
 		parsed, err := ParseByJwt(ctx, signed)
@@ -478,13 +473,7 @@ func TestByJwtKidUnawareParser(t *testing.T) {
 		connect.AssertNotEqual(t, kid, "")
 
 		// the key sign() used, supplied to the parser out-of-band
-		var signingKey crypto.PrivateKey
-		if k := byEcdsaSigningKey(); k != nil {
-			signingKey = k
-		} else {
-			signingKey = byRsaSigningKey()
-		}
-		signingPublicKey := publicKey(signingKey)
+		signingPublicKey := publicKey(defaultByJwtKeyring.signingKey().privateKey)
 
 		// a kid-unaware parser: the keyfunc verifies with the key directly and
 		// never consults token.Header["kid"]

@@ -36,7 +36,9 @@ State as of 2026-10-09.
 
 ## 2. The token (`by_jwt`)
 
-**Signing.** Tokens are signed with the newest ECDSA key under the vault `tls` directories, or the newest RSA key when there is no ECDSA key, and the header names its `kid`. Verification tries the key that `kid` names first, then every key, newest first. The signing method is pinned.
+**Signing.** The keys are the versions of the vault `jwt.yml` `tls_key_paths`, the domain TLS keys. Tokens are signed with the newest ECDSA key version whose file was written to the vault at least 2 hours ago (`byJwtKeySigningDelay`), else the newest such RSA key, and the header names its `kid`. With no version that old, the newest key signs. Verification tries the key that `kid` names first, then every held key. The signing method is pinned.
+
+**Key rotation.** A certificate rotation adds a key version to the vault. A running process reads the vault again when a token names a `kid` it does not hold, or names none and fails every held key, at most once per 10 seconds, so it verifies the new version without a restart. The signing delay lets the vault push reach every host before any host signs with the version. Keys are only added while a process runs: a version removed from the vault keeps verifying until restart, and stops signing. Before 2026-10-12 a process read its keys once, and verifiers started before a rotation refused every token signed with the new version until they restarted (`session/by_jwt_keyring.go`).
 
 **Registered claims:**
 
@@ -218,6 +220,7 @@ After the flip, a network token that expired unrenewed needs a new sign-in. Turn
 | Concern | Code | Tests |
 |---|---|---|
 | Claims, parsing, the gates, state validation | `session/by_jwt.go`, `session/session_state.go` | `session/*_test.go` |
+| Signing and verification keys, rereads, the signing delay | `session/by_jwt_keyring.go` | `session/by_jwt_keyring_test.go`, `session/by_jwt_rotation_test.go` |
 | API authentication, API keys, the unsigned and API-key markers | `session/client_session.go`, `apikey/apikey.go`, `mcp/auth.go` | `session/client_session_*_test.go` |
 | Session mint, renewal, revocation | `session/session_mint.go`, `session/session_operation.go` | `session/session_*_test.go` |
 | Route classes and the gate | `api/route_authz.go`, `router/client_credential.go` | `api/route_authz_test.go`, `api/route_authz_db_test.go` |
