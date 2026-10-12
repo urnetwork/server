@@ -159,6 +159,13 @@ The database follow-up adds §1.3a (`pg-capacity`) and a typed
 `pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
 generic panic amplification and records the validated legacy-reindex, WAL
 stall, client-deadline, and PgBouncer replacement chain.
+Updated 2026-10-12 after two MinIO incidents the monitor had no probe for. On
+2026-10-11 edge-6's shared `/mnt/data` reached MinIO's free-space floor and
+every Loki, Mimir and blob write returned 507 `XMinioStorageFull`, leaving the
+Mimir bucket index stale. On 2026-10-12 a 400GiB hard quota applied to a loki
+bucket holding about 673GiB rejected Loki's chunk flushes. §11.6a adds the
+`minio-storage` probe (drive free space against MinIO's floor, offline drives,
+bucket usage against hard quotas, S3 error rates).
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -211,12 +218,12 @@ active missing capability and must not be read as green.
 | 11.3 | Runbook | `grafana-node`, `log-errors` |
 | 11.4 | Runbook | `log-errors`, `grafana-node` |
 | 11.5 | Shared contract | `grafana-node`, `mimir-balance`, `mimir-index` |
-| 11.6 | Shared contract | `mimir-index`, `grafana-node`, `backup-archives` |
+| 11.6 | Shared contract | `minio-storage`, `mimir-index`, `grafana-node`, `backup-archives` |
 | 11.7 | Runbook | `rollout-guard`, `log-errors` |
 | 11.7b | Runbook | `grafana-node`, `mimir-balance`, `log-errors` |
 | 11.7c | Runbook | `rollout-guard`, `provenance` |
 | 11.8 | Shared contract | `provenance`, `grafana-node` |
-| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper` |
+| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper`, `minio-storage` |
 | 11.10 | Runbook | `log-errors`, `credentials`, `provenance` |
 | 11.11 | Shared contract | `grafana-datasources`, `grafana-node` |
 | 11.12 | Runbook | `grafana-node`, `hostpower`, `log-errors`; direct conntrack inspection remains incident evidence |
@@ -19412,6 +19419,7 @@ Tier-0 (page):
 | journal-buffer-retention-rotation | host | §8.5b source-audited affected package plus enabled retention, or exact bounded journald reason | known unsafe combination or any exact retention-triggered rotation in five minutes; immediate | fixed build/state enums and count; capped evidence also retains visibility loss; never infer hash pressure or reader loss |
 | log-shipper-down | host | §11.14 Fluent Bit active/sub state | any non-running managed host; immediate | result, restart count, soft/hard fd limits |
 | log-shipper-journal-read-loss | host | §11.14 bounded Fluent Bit unit journal | any exact `sd_journal_next()` loss event in ten minutes; immediate | privacy-reduced total and errno-74 counts only; live unit state cannot clear it |
+| minio-drive-capacity / minio-drive-offline / minio-bucket-quota / minio-write-errors | Mimir MinIO v3 metrics | §11.6a fresh per-drive free/total/health, erasure-set write tolerance, bucket usage against the hard quota and its five-minute minimum, five-minute write-API 5xx | set free space minus 1 GiB at or under 1% of the set total, immediate; worst drive under 5% free for 2 probes (warn under 15%); any offline drive for 2 probes, immediate once write tolerance is negative (healing warns); usage at or over the quota or its five-minute minimum, immediate (warn at 90%); write 5xx at least 5% and 10 per five minutes for 2 probes (warn at 1%) | per-drive free/total, set floor, offline/healing drives, bucket usage/quota/quota minimum and usage snapshot age, request and error counts |
 | host-cpu-saturation / host-io-saturation | Mimir node metrics | §8.14 fresh normalized load plus five-minute CPU-mode ratios | non-idle/non-I/O-wait execution >=90% or I/O wait >=20%, respectively, with load1/logical CPUs >=1.25 for 2 probes | exact host; load/core, CPU execution, I/O wait, and memory-available ratios |
 | service-runtime-runaway | Mimir process metrics | §8.15 fresh exact host/service/block/instance runtime tuple | 16GiB RSS plus bounded CPU/goroutine/allocation pressure, or a 64GiB/500k-goroutine/1GiB-s hard ceiling for 2 probes | process age, same-block generation count, RSS/heap/objects/goroutines and five-minute CPU/allocation/GC rates |
 | connect-resident-ingress-capability-unobservable | Mimir process metrics | §8.15 executable-owned lazy resident-forward-ingress gauge joined to each newest fresh Connect process | any configured newest Connect generation is absent/unselectable, lacks the gauge, or reports a value other than exactly one; immediate | fleet counts only; provenance remains independent |
@@ -19426,6 +19434,7 @@ Tier-1 (warn):
 |---|---|---|---|
 | settings-generation-stale / settings-generation-unobservable | local effective settings loader | §1.6 complete in-memory comparison with the immutable startup snapshot | warn immediately; page after 5 consecutive one-minute cadences; never render contents or fingerprints |
 | host-metrics-missing / host-memory-pressure | Mimir node metrics + enabled host inventory | §8.14 complete <=90s node tuple; MemAvailable/MemTotal | missing family for 2 probes, page after 3; available memory <=10% for 2 probes, page after 5 |
+| minio-read-errors / minio-write-rejected / minio-metrics-unobservable | Mimir MinIO v3 metrics + `minio` inventory | §11.6a non-write 5xx, write-API 4xx, complete <=180s drive family and bucket usage snapshot | read 5xx at least 5% and 10 per five minutes for 2 probes, page at 25%; write 4xx at least 10% and 20 per five minutes for 2 probes; drive family missing/stale/incomplete for 2 probes, page after 3; no bucket usage snapshot for 2 probes |
 | service-runtime-metrics-incomplete / service-runtime-metrics-invalid | Mimir process metrics + managed service inventory | §8.15 complete exact raw runtime tuple and bounded labels | any fresh incomplete process or rejected unowned/malformed series for 2 probes; raw labels discarded |
 | egress-probe-config-drift / egress-probe-config-unobservable | active monitor Config resource + PostgreSQL durable task arguments | §2.19 complete desired execution settings compared in memory with one coherent shard snapshot | explicit mismatch, or a present desired resource that cannot be compared, for 2 probes; endpoints and raw configuration never leave the process |
 | redis-latencystats-source-drift / redis-latencystats-source-unobservable | bounded host-local Redis source-state reducer | §11.20d exact configured-node census for `CONFIG GET latency-tracking` | any enabled node, or any missing/malformed/unreachable node; immediate; only fixed counts leave the host |
@@ -23292,6 +23301,151 @@ connection was refused. That is a bind/config split, not a route, firewall, or
 data-store failure. Re-run `xops/main/ansible/run-minio.sh` after changing the
 vault environment; a source-only vault change does not restart the service.
 
+### 11.6a MinIO capacity, quota and write-path health
+
+Probe: `minio-storage`
+
+Every minute, for each enabled monitor-inventory host with the `minio` role,
+read MinIO's own v3 metrics from Mimir through one bounded loopback gateway
+(`curl ... 127.0.0.1:3100/prometheus/api/v1/query` on the first reachable
+`services` host). Fluent Bit scrapes the authenticated `/minio/metrics/v3`
+endpoint every 15 seconds and remote-writes it with `job="minio"` and
+`host=<xops inventory name>` (xops `files/fluent-bit/minio.conf`). The monitor
+therefore never holds the metrics bearer token (generated by
+playbook-minio-clusters.yml into the root-only Fluent Bit environment file) or
+the root `mc` alias; neither belongs in monitor.yml. The series are MinIO's own
+statfs, usage, quota and request state — the same inputs its free-space floor
+and quota enforcement use — not a dashboard aggregate.
+
+One query returns fixed `monitor_check` partitions. Every source selector must
+have a raw sample no older than 180 seconds; the evaluation timestamp of an
+instant query or `increase` is not source freshness:
+
+- per drive: `minio_system_drive_free_bytes`, `minio_system_drive_total_bytes`,
+  `minio_system_drive_health` (0 offline, 1 healthy, 2 healing), plus the
+  node's `minio_system_drive_count` and `minio_system_drive_offline_count`;
+- the weakest erasure set's `minio_cluster_erasure_set_write_tolerance`;
+- per bucket: `minio_cluster_usage_buckets_total_bytes`,
+  `minio_cluster_usage_buckets_quota_total_bytes`, and that quota's
+  five-minute `min_over_time`; plus the usage snapshot age from
+  `minio_cluster_usage_objects_since_last_update_seconds`;
+- five-minute `increase` of `minio_api_requests_total` and its
+  `_5xx_errors_total`/`_4xx_errors_total`, summed by host over the write APIs
+  (`PutObject`, `PutObjectPart`, `CopyObject`, `CopyObjectPart`,
+  `NewMultipartUpload`, `CompleteMultipartUpload`, `PostPolicyBucket`,
+  `PutObjectExtract`) and, for 5xx, over every other API.
+
+Series from hosts outside the `minio` inventory, such as a retired store whose
+Fluent Bit still ships, are discarded. An unknown partition, a non-success or
+non-vector response, or an unparsable sample fails the whole observation.
+
+Classes, all targeted at the inventory host name (`<host>/<bucket>` for quota):
+
+- `minio-drive-capacity`. MinIO RELEASE.2025-10-15T17-29-55Z (`hasSpaceFor`)
+  refuses a new object with 507 `XMinioStorageFull` once the erasure set's free
+  space after the write would be at most 1% of the set's total
+  (`diskFillFraction` 0.99), or one drive cannot hold its share; an upload of
+  unknown size, and any object of 512 MiB or more, needs 1 GiB above that
+  floor. `band=floor` (set free space minus 1 GiB at or under 1% of the set's
+  total) pages immediately; the worst online drive under 5% free pages after two
+  observations; under 15% (MinIO's own `diskReserveFraction`) warns after two.
+  The observation lists every online drive's free/total and the set floor.
+- `minio-drive-offline`. One erasure set at EC:2 over four drives needs three
+  drives to write and two to read. Any drive with health 0, or a node offline
+  count above zero, pages after two observations (a restart brings drives back
+  within about a minute); a negative erasure-set write tolerance means writes
+  are already failing and pages immediately. A healing drive warns after two.
+- `minio-bucket-quota`. MinIO rejects every PUT once the scanner's usage figure
+  plus the object reaches the hard quota, with 400
+  `XMinioAdminBucketQuotaExceeded`, which raises no 5xx. Usage at or over the
+  quota pages immediately. So does usage at or over the quota's five-minute
+  minimum: a quota below usage that was raised again between two one-minute
+  observations still rejected writes. Usage at 90% of the quota warns after
+  two, the headroom xops `minio-set-quota` requires before it sets a quota.
+  Buckets without a quota never alert here; they are bounded by drive capacity.
+- `minio-write-errors`. Write-API 5xx: at least 10 in five minutes and 1% of
+  write requests warns, 5% pages, each after two observations. MinIO counts 5xx
+  per API without the status: 507 is one, write-quorum loss, 503 `SlowDown`
+  from a full request queue and internal errors are the others.
+  `minio-drive-capacity` at `band=floor` identifies 507.
+- `minio-read-errors`. Non-write 5xx: at least 10 in five minutes and 5% warns,
+  25% pages, each after two. Missing objects are 4xx and are not counted.
+- `minio-write-rejected`. Write-API 4xx: at least 20 in five minutes and 10% of
+  write requests warns after two. This is the symptom-side control for
+  `minio-bucket-quota`; it cannot name the bucket because the per-bucket API
+  counters (`/minio/metrics/v3/bucket/api`) need `?buckets=` and are not
+  scraped.
+- `minio-metrics-unobservable`. Frame `drives`: no complete fresh drive family
+  (missing, stale, a drive series count unequal to `minio_system_drive_count`,
+  a missing health gauge, an online drive without coherent free/total, or a
+  duplicate or invalid series) warns after two and pages after three; capacity,
+  quota and error state are then unknown and none of those classes is
+  evaluated. Frame `bucket-usage`: the drive family is complete but MinIO
+  exports no bucket usage snapshot (or a quota without its usage); warns after
+  two.
+
+Root-cause fixtures. On 2026-10-11 edge-6's shared `/mnt/data` filled; MinIO
+reached its floor, every Loki, Mimir and blob write returned 507, and the Mimir
+bucket index went stale behind them (§11.18 detected only that downstream
+symptom). The synthetic replay pages `minio-drive-capacity` at `band=floor`
+and `minio-write-errors`. On 2026-10-12 from 15:35:06Z a 400GiB hard quota sat
+on a loki bucket holding about 673GiB and MinIO rejected Loki's chunk flushes
+until it was raised back to 1TiB. The replay pages `minio-bucket-quota`, both
+while the quota is in force and within five minutes after it is raised.
+
+Source facts, verified in the pinned MinIO and mc sources rather than assumed:
+the quota gauge is emitted only for buckets in the usage snapshot and only when
+the stored config's `quota` field is positive. Enforcement reads `size` first
+and then `quota`; the pinned mc's `mc quota set --size` writes `quota` only,
+so the gauge equals the enforced limit. The buckets-path gauge
+`minio_cluster_usage_buckets_since_last_update_seconds` is written in
+nanoseconds by this release; the probe reads the objects-path gauge of the same
+name, which is in seconds. The data-usage, drive and erasure-set figures sit
+behind one-minute MinIO caches.
+
+- **False-positive qualifier:** drive gauges are filesystem statfs, so they
+  count non-MinIO data on the same filesystem; a filling drive with flat bucket
+  usage is foreign data (edge-6's shared `/mnt/data`), not bucket growth.
+  Offline drives export zero free/total and are excluded from capacity. Usage
+  is the scanner's snapshot and stays high after retention deletes until the
+  next cycle, but MinIO enforces against the same figure, so a quota page then
+  still describes rejected writes. The five-minute quota minimum keeps a page up
+  to five minutes after a quota is raised: compare `quota_bytes` with
+  `quota_min_5m_bytes`. A MinIO restart can briefly show drives offline (hence
+  two observations) and can extrapolate a counter increase. Write 4xx include
+  403 credential/policy failures and malformed or conditional requests. The
+  healthy control is a four-drive store at about 60% free with no quota near
+  usage, while a retired host's failing series are ignored.
+- **False-negative qualifier:** a stopped MinIO, Fluent Bit, bearer token or
+  Mimir ingestion path is `minio-metrics-unobservable`, never green; correlate
+  §11.14 `log-shipper` and check `/minio/health/live` on the host. A bucket the
+  scanner has not counted yet, and a quota written only in the `size` field by
+  another client, are enforced but export no quota gauge; `minio-write-rejected`
+  remains the symptom-side control, and `mc quota info --json` as root is the
+  direct check. Growth between scanner cycles is invisible to both MinIO's
+  enforcement and this probe (`usage_snapshot_age_s` is reported). A quota or
+  error episode that ends more than five minutes before the next observation,
+  as can happen under `-min-probe-cadence=15m`, is outside both windows. An
+  inventory without an enabled `minio` host (role removed or host
+  `disabled: true`) leaves this probe dark without a visibility alert. The
+  thresholds are initial static bands from MinIO's own floor and the incident
+  shapes, not a learned production baseline; record the healthy 4xx/5xx
+  background from the first live passes.
+
+Configuration: `vault/<env>/monitor.yml` needs only `roles: [minio]` on the
+MinIO host, whose `name` must equal Fluent Bit's `host` label (the xops
+inventory name), plus at least one `services` host for the loopback Mimir
+gateway. There are no other keys, no credentials and no drive list: MinIO's own
+`minio_system_drive_count` is the expected drive denominator.
+
+Implementation convention: SIGNALS.md §11.6a (`minio-storage`) maps to
+`signal_minio_storage.go` and `signal_minio_storage_test.go`. Synthetic tests
+replay both incidents and cover capacity bands, offline/healing drives and
+lost write quorum, quota bands including a quota raised within the window,
+request-error bands, missing/stale/incomplete drive and usage layers,
+malformed Mimir responses, foreign-host series, a dark inventory, and the
+query's freshness bounds.
+
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
 loops the poll, the old container is Up for HOURS, new containers `Exited(0)` churn:
@@ -23445,6 +23599,12 @@ the exact live DNAT rule.
     correlate gap endpoints with Mimir starts. Do not zero-fill, span-null, or
     rewrite the throughput query: those treatments turn missing observations
     into false traffic measurements.
+15. Loki flushes or Mimir block uploads fail while Grafana, Loki and Mimir are
+    all up, and Mimir's bucket index goes stale → MinIO refuses the writes
+    (11.6a): 507 `XMinioStorageFull` when its drives reach the free-space
+    floor, 400 `XMinioAdminBucketQuotaExceeded` when a bucket's hard quota is at
+    or under its usage. Read `minio-storage` before restarting anything in the
+    Grafana bundle.
 
 ### 11.10 grafana.yml `{{ env: }}` → fleet-wide startup panic (2026-08-11)
 A config value may thread `{{ env:KEY }}`, but the KEYs live in settings.yml
