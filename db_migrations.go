@@ -10099,8 +10099,9 @@ var migrations = []any{
 	// kept per dot per track (decision 17), with its load and the statistics
 	// derived when it was stored. No table holds the raw client address:
 	// lag_track keeps its peppered hash, its /24 (/48) and what GeoLite2 says
-	// about it, and lag_ticket.ip is the extender's address. Tracks and
-	// results are kept for result_retention (lag.yml, 180 days).
+	// about it, and lag_result keeps only which family the browser reached
+	// the extender on. Tracks and results are kept for result_retention
+	// (lag.yml, 180 days).
 	newSqlMigration(`
 		CREATE TABLE lag_guest (
 			network_id uuid NOT NULL PRIMARY KEY,
@@ -10135,7 +10136,6 @@ var migrations = []any{
 			client_id uuid NOT NULL,
 			network_id uuid NOT NULL,
 			extender_id uuid NOT NULL,
-			ip inet NOT NULL,
 			issued_at timestamp NOT NULL,
 			expires_at timestamp NOT NULL
 		);

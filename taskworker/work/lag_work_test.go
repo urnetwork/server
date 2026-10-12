@@ -2,7 +2,6 @@ package work
 
 import (
 	"context"
-	"net/netip"
 	"testing"
 	"time"
 
@@ -75,7 +74,6 @@ func TestSweepLagAppliesRetention(t *testing.T) {
 				ClientId:   track.ClientId,
 				NetworkId:  track.NetworkId,
 				ExtenderId: server.NewId(),
-				Ip:         netip.MustParseAddr("203.0.113.7"),
 				IssuedAt:   startedAt,
 				ExpiresAt:  startedAt.Add(settings.TicketTtl),
 			}

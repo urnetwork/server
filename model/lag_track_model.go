@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"net/netip"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -33,7 +32,8 @@ type LagTrack struct {
 	StartedAt time.Time
 }
 
-// One admitted session (A6).
+// One admitted session (A6). A ticket admits a session on an extender, by
+// its measurement name, which serves both of its address families (N3).
 type LagTicket struct {
 	TicketId server.Id
 	TrackId  server.Id
@@ -42,10 +42,8 @@ type LagTicket struct {
 	ClientId   server.Id
 	NetworkId  server.Id
 	ExtenderId server.Id
-	// the extender address the ticket admits a session on
-	Ip        netip.Addr
-	IssuedAt  time.Time
-	ExpiresAt time.Time
+	IssuedAt   time.Time
+	ExpiresAt  time.Time
 }
 
 // Stores a track and its tickets in one transaction.
@@ -73,11 +71,10 @@ func CreateLagTrack(ctx context.Context, track *LagTrack, tickets []*LagTicket) 
 						client_id,
 						network_id,
 						extender_id,
-						ip,
 						issued_at,
 						expires_at
 					)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 					`,
 					ticket.TicketId,
 					ticket.TrackId,
@@ -85,7 +82,6 @@ func CreateLagTrack(ctx context.Context, track *LagTrack, tickets []*LagTicket) 
 					ticket.ClientId,
 					ticket.NetworkId,
 					ticket.ExtenderId,
-					ticket.Ip,
 					ticket.IssuedAt.UTC(),
 					ticket.ExpiresAt.UTC(),
 				)
@@ -107,7 +103,6 @@ func GetLagTicket(ctx context.Context, ticketId server.Id) *LagTicket {
 				client_id,
 				network_id,
 				extender_id,
-				ip,
 				issued_at,
 				expires_at
 			FROM lag_ticket
@@ -124,7 +119,6 @@ func GetLagTicket(ctx context.Context, ticketId server.Id) *LagTicket {
 					&ticket.ClientId,
 					&ticket.NetworkId,
 					&ticket.ExtenderId,
-					&ticket.Ip,
 					&ticket.IssuedAt,
 					&ticket.ExpiresAt,
 				))
@@ -158,7 +152,8 @@ type LagResult struct {
 	TrackPosition int
 	TicketId      server.Id
 	ExtenderId    server.Id
-	// 4 or 6
+	// 4 or 6: the family the browser reached the extender on, which is the
+	// family of the address the report saw it from
 	ExtenderIpFamily int
 	// the minute
 	WindowStartTime time.Time

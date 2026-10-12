@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"net/netip"
 	"testing"
 	"time"
 
@@ -29,7 +28,6 @@ func testLagTrack(ctx context.Context, startedAt time.Time, positions int) (*Lag
 			ClientId:   track.ClientId,
 			NetworkId:  track.NetworkId,
 			ExtenderId: server.NewId(),
-			Ip:         netip.AddrFrom4([4]byte{203, 0, 113, byte(position + 1)}),
 			IssuedAt:   startedAt,
 			ExpiresAt:  startedAt.Add(2 * time.Minute),
 		})
@@ -106,7 +104,6 @@ func TestLagTrackTickets(t *testing.T) {
 			connect.AssertEqual(t, stored.ClientId, ticket.ClientId)
 			connect.AssertEqual(t, stored.NetworkId, ticket.NetworkId)
 			connect.AssertEqual(t, stored.ExtenderId, ticket.ExtenderId)
-			connect.AssertEqual(t, stored.Ip, ticket.Ip)
 			connect.AssertEqual(t, stored.IssuedAt.Equal(ticket.IssuedAt), true)
 			connect.AssertEqual(t, stored.ExpiresAt.Equal(ticket.ExpiresAt), true)
 		}
