@@ -171,11 +171,13 @@ type StLedgerV2Account struct {
 }
 
 // GetStLedgerV2AccountCount returns the number of accounts recorded for a pool.
+// Positions are recorded contiguously from 0, so the count is the highest
+// position plus one, which the primary key answers without a scan.
 func GetStLedgerV2AccountCount(ctx context.Context, deploymentKey StDeploymentKey, noId uint64) uint64 {
 	key := requireStDeploymentKey(deploymentKey)
 	var count int64
 	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM st_ledger_v2_account WHERE deployment_key = $1 AND no_id = $2`, key, int64(noId)).Scan(&count))
+		server.Raise(conn.QueryRow(ctx, `SELECT coalesce(max(account_index) + 1, 0) FROM st_ledger_v2_account WHERE deployment_key = $1 AND no_id = $2`, key, int64(noId)).Scan(&count))
 	})
 	return uint64(count)
 }

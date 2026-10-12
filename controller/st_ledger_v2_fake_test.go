@@ -51,6 +51,8 @@ type fakeLedgerV2Chain struct {
 	quorum       uint64
 	// demands holds DemandState by (seq, rootIndex, index).
 	demands map[[3]uint64]uint8
+	// claimed is vault2's claimed by (noId, index).
+	claimed map[[2]uint64]uint256.Int
 	// fail queues the outcomes of an operation's next calls (nil succeeds).
 	fail map[string][]error
 	// latest is the latest block, where a send's eth_call and eth_estimateGas
@@ -67,7 +69,7 @@ func newFakeLedgerV2Chain(log *[]string) *fakeLedgerV2Chain {
 	return &fakeLedgerV2Chain{
 		log: log, registered: true, firstEpoch: 5, epochBlocks: 50_400, window: 1_200, challenge: 14_400, quorum: 1,
 		lastFunded: 4, lastCaptured: 4, emission: map[uint64]uint64{}, funded: map[uint64]uint256.Int{},
-		demands: map[[3]uint64]uint8{}, fail: map[string][]error{},
+		demands: map[[3]uint64]uint8{}, claimed: map[[2]uint64]uint256.Int{}, fail: map[string][]error{},
 	}
 }
 
@@ -156,6 +158,13 @@ func (self *fakeLedgerV2Chain) LedgerV2Demand(ctx context.Context, noId uint64, 
 		return 0, err
 	}
 	return self.demands[[3]uint64{seq, rootIndex, index}], nil
+}
+
+func (self *fakeLedgerV2Chain) LedgerV2Claimed(ctx context.Context, noId uint64, index uint64) (uint256.Int, error) {
+	if err := self.failed("claimed"); err != nil {
+		return uint256.Int{}, err
+	}
+	return self.claimed[[2]uint64{noId, index}], nil
 }
 
 func (self *fakeLedgerV2Chain) LedgerV2Close(ctx context.Context, epoch uint64, noId uint64) (string, error) {

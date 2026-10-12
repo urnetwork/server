@@ -960,6 +960,7 @@ func stLedgerV2RunRecord(ctx context.Context, cfg *StConfig, client StLedgerV2Cl
 	if err := model.RecordStLedgerV2Root(ctx, deploymentKey, noId, seq, firstIndex, newColdkeys, build.Amounts); err != nil {
 		return stLedgerV2Retry(err), nil
 	}
+	stLedgerV2Finalized(ctx, deploymentKey, input.Epochs)
 	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("root %d recorded", *root.RootIndex)}, nil
 }
 
