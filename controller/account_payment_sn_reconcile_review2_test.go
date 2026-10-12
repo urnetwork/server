@@ -16,9 +16,11 @@ import (
 
 // A8: before the fix the planner moved a canceled row's sweeps into its
 // network's next plan, whose completed payout's sweeps were reaped later. Such
-// a row is `replanned`, never owed in full, and its subsidy and reliability are
-// reported as not carried over. Without a row created after the cancellation
-// and before the fix, or as RC-2, the row stays `sweeps_missing`.
+// a row is `replanned` and never paid. Its subsidy and its reliability are
+// listed separately, each with its guidance: the re-plan's epoch already
+// weighted the bytes in its subsidy pool, and reliability is the owner's
+// decision. Without a row created after the cancellation and before the fix,
+// or as RC-2, the row stays `sweeps_missing`.
 func TestSnReconcileReplannedThenReapedIsNotOwedInFull(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newSnReconcileTestFixture(t)
@@ -48,17 +50,25 @@ func TestSnReconcileReplannedThenReapedIsNotOwedInFull(t *testing.T) {
 		before := f.tables()
 		report := f.send()
 		f.expect(report, map[server.Id]string{reaped: snReconcileReplanned, afterFix: "unresolved: sweeps_missing", unretained: "unresolved: sweeps_missing"})
+		subsidyGuidance := "the re-plan's epoch already weighted these bytes in its subsidy pool; paying this by hand would reward them twice"
+		reliabilityGuidance := "per-window, not paid by the re-plan; owner decides"
 		item := snReconcileTestRow(t, report, reaped)
-		if item.NotCarriedOver == nil || *item.NotCarriedOver != (SnReconcileNotCarriedOver{SubsidyPayout: subsidy, ReliabilitySubsidy: reliability}) || item.OwedNanoCents != 0 ||
-			snReconcileTestRow(t, report, afterFix).NotCarriedOver != nil || snReconcileTestRow(t, report, unretained).NotCarriedOver != nil {
-			t.Fatal("not carried over", item.NotCarriedOver)
+		if item.Subsidy == nil || *item.Subsidy != (SnReconcileReplannedAmount{NanoCents: subsidy, Guidance: subsidyGuidance}) ||
+			item.Reliability == nil || *item.Reliability != (SnReconcileReplannedAmount{NanoCents: reliability, Guidance: reliabilityGuidance}) || item.OwedNanoCents != 0 {
+			t.Fatal("replanned subsidy and reliability", item.Subsidy, item.Reliability)
+		}
+		for _, paymentId := range []server.Id{afterFix, unretained} {
+			if other := snReconcileTestRow(t, report, paymentId); other.Subsidy != nil || other.Reliability != nil {
+				t.Fatal("a sweeps_missing row listed subsidy or reliability", paymentId)
+			}
 		}
 		if len(report.Revived) != 0 || len(report.Skipped) != 0 || f.tables() != before {
 			t.Fatal("a replanned or sweeps_missing row was revived", report.Revived)
 		}
-		line := "  " + reaped.String() + " network " + networkId.String() + " canceled_with_evidence replanned, owed 0.000000 USD, circle " + record +
-			" FAILED -, subsidy 2.000000 USD and reliability 1.000000 USD not carried over by the re-plan\n"
-		if !strings.Contains(report.Text(), line) || strings.Count(report.Text(), "not carried over") != 1 {
+		lines := "  " + reaped.String() + " network " + networkId.String() + " canceled_with_evidence replanned, owed 0.000000 USD, circle " + record + " FAILED -\n" +
+			"    subsidy 2.000000 USD: " + subsidyGuidance + "\n" +
+			"    reliability 1.000000 USD: " + reliabilityGuidance + "\n"
+		if !strings.Contains(report.Text(), lines) || strings.Count(report.Text(), "    subsidy ") != 1 || strings.Count(report.Text(), "    reliability ") != 1 {
 			t.Fatalf("report text:\n%s", report.Text())
 		}
 		data, err := json.Marshal(report)
@@ -72,9 +82,12 @@ func TestSnReconcileReplannedThenReapedIsNotOwedInFull(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, row := range document.Rows {
-			notCarriedOver, ok := row["not_carried_over"].(map[string]any)
-			if (row["payment_id"] == reaped.String()) != ok ||
-				(ok && (notCarriedOver["subsidy_payout_nano_cents"] != float64(subsidy) || notCarriedOver["reliability_subsidy_nano_cents"] != float64(reliability))) {
+			subsidyField, hasSubsidy := row["subsidy"].(map[string]any)
+			reliabilityField, hasReliability := row["reliability"].(map[string]any)
+			replanned := row["payment_id"] == reaped.String()
+			if hasSubsidy != replanned || hasReliability != replanned || (replanned &&
+				(len(subsidyField) != 2 || subsidyField["nano_cents"] != float64(subsidy) || subsidyField["guidance"] != subsidyGuidance ||
+					len(reliabilityField) != 2 || reliabilityField["nano_cents"] != float64(reliability) || reliabilityField["guidance"] != reliabilityGuidance)) {
 				t.Fatal("JSON row", row)
 			}
 		}

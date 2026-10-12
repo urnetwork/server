@@ -139,7 +139,9 @@ type SnReconcileRowReport struct {
 	Chain           string                     `json:"chain,omitempty"`
 	Evidence        *model.SnReconcileEvidence `json:"circle_evidence,omitempty"`
 	OrphanIds       []string                   `json:"orphan_ids,omitempty"`
-	NotCarriedOver  *SnReconcileNotCarriedOver `json:"not_carried_over,omitempty"`
+	// A8: a `replanned` row's subsidy and reliability, each with its guidance.
+	Subsidy     *SnReconcileReplannedAmount `json:"subsidy,omitempty"`
+	Reliability *SnReconcileReplannedAmount `json:"reliability,omitempty"`
 
 	row           *model.SnReconcileRow
 	censusExact   bool
@@ -147,12 +149,20 @@ type SnReconcileRowReport struct {
 	sendNanoCents model.NanoCents
 }
 
-// A8: a re-plan moved a `replanned` row's sweeps but neither its subsidy nor
-// its reliability. The owner decides whether they are owed.
-type SnReconcileNotCarriedOver struct {
-	SubsidyPayout      model.NanoCents `json:"subsidy_payout_nano_cents"`
-	ReliabilitySubsidy model.NanoCents `json:"reliability_subsidy_nano_cents"`
+// A8: the subsidy or the reliability of a `replanned` row, with what the owner
+// must know before deciding on it.
+type SnReconcileReplannedAmount struct {
+	NanoCents model.NanoCents `json:"nano_cents"`
+	Guidance  string          `json:"guidance"`
 }
+
+// A8: the re-plan paid a `replanned` row's sweeps, and its epoch counted their
+// bytes in its subsidy pool. Reliability is earned per window and the re-plan
+// paid none of it.
+const (
+	snReconcileSubsidyGuidance     = "the re-plan's epoch already weighted these bytes in its subsidy pool; paying this by hand would reward them twice"
+	snReconcileReliabilityGuidance = "per-window, not paid by the re-plan; owner decides"
+)
 
 // One network's rows that hold early earnings an earlier payment may already
 // have paid, with the network's RC-1 rows (§6, A2). Read only.
@@ -537,15 +547,16 @@ func snReconcileClassify(item *SnReconcileRowReport, report *SnReconcileReport, 
 	}
 	// RC-8, A5, A8: a row without sweeps is `replanned` only as RC-1, when its
 	// network created a row after its cancellation and before the fix, or a
-	// later row holds its early sweeps. The re-plan never carried over its
-	// subsidy or reliability.
+	// later row holds its early sweeps. Its subsidy and reliability are listed
+	// with their guidance.
 	if !item.censusExact {
 		switch {
 		case 0 < row.SweepCount:
 			item.Class, item.Reason = snReconcileUnresolved, snReconcileCensusMismatch
 		case row.Kind == model.SnReconcileCanceledWithEvidence && (row.ReplannedBeforeFix || row.ReplanEvidence):
 			item.Class = snReconcileReplanned
-			item.NotCarriedOver = &SnReconcileNotCarriedOver{SubsidyPayout: row.SubsidyPayout, ReliabilitySubsidy: row.ReliabilitySubsidy}
+			item.Subsidy = &SnReconcileReplannedAmount{NanoCents: row.SubsidyPayout, Guidance: snReconcileSubsidyGuidance}
+			item.Reliability = &SnReconcileReplannedAmount{NanoCents: row.ReliabilitySubsidy, Guidance: snReconcileReliabilityGuidance}
 		default:
 			item.Class, item.Reason = snReconcileUnresolved, snReconcileSweepsMissing
 		}
@@ -786,11 +797,13 @@ func (self *SnReconcileReport) Text() string {
 		if 0 < len(item.OrphanIds) {
 			fmt.Fprintf(b, ", orphans %s", strings.Join(item.OrphanIds, ","))
 		}
-		if item.NotCarriedOver != nil {
-			fmt.Fprintf(b, ", subsidy %s and reliability %s not carried over by the re-plan",
-				snReconcileUsd(item.NotCarriedOver.SubsidyPayout), snReconcileUsd(item.NotCarriedOver.ReliabilitySubsidy))
-		}
 		fmt.Fprintf(b, "\n")
+		if item.Subsidy != nil {
+			fmt.Fprintf(b, "    subsidy %s: %s\n", snReconcileUsd(item.Subsidy.NanoCents), item.Subsidy.Guidance)
+		}
+		if item.Reliability != nil {
+			fmt.Fprintf(b, "    reliability %s: %s\n", snReconcileUsd(item.Reliability.NanoCents), item.Reliability.Guidance)
+		}
 	}
 	fmt.Fprintf(b, "duplicates: %d network(s)\n", len(self.Duplicates))
 	for _, duplicates := range self.Duplicates {

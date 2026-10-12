@@ -80,8 +80,9 @@ return only makes that row `record_unavailable`.
   against the payout wallet's USDC balance, and any shortfall.
 - `rows`: one line per stuck row: the class or reason, what is owed, the send
   amount and chain, Circle's view of the row's own attempt (transaction id,
-  state, hash), any orphans that block it, and for a `replanned` row its
-  subsidy and reliability, "not carried over by the re-plan".
+  state, hash), and any orphans that block it. Under a `replanned` row, its
+  subsidy and its reliability each follow on their own line, with their
+  guidance.
 - `duplicates`: see below.
 
 | Class or reason | Meaning | Action |
@@ -89,7 +90,7 @@ return only makes that row `record_unavailable`.
 | `payable` | Exact, unpaid and unblocked. Owed is its payout; the send amount is payout minus the sender's $0.01 fee, on the current payout wallet's chain. | `--send` revives it |
 | `paid` | Circle completed its own attempt, and its sweeps are still its own. | none |
 | `paid_replanned` | Circle completed it, but its earnings were re-planned before the fix. | see duplicates |
-| `replanned` | It has no sweeps and its attempt moved no funds. Its network created a row after its `cancel_time` (its `create_time` when that is empty), and that row was created on or before 2026-08-17T23:59:59Z or holds early sweeps that closed before the stuck row was created. The re-plan moved its sweeps, even if they were reaped since, but not its subsidy or reliability. | owner decides on its subsidy and reliability; see below |
+| `replanned` | It has no sweeps and its attempt moved no funds. Its network created a row after its `cancel_time` (its `create_time` when that is empty), and that row was created on or before 2026-08-17T23:59:59Z or holds early sweeps that closed before the stuck row was created. The re-plan moved its sweeps, even if they were reaped since. Subsidy: the re-plan's epoch already weighted these bytes in its subsidy pool; paying it by hand would reward them twice. Reliability: earned per window, and the re-plan paid none of it. | never pay by hand; the owner may decide its reliability separately |
 | `unresolved: review_required` | Its attribution is flagged for review. | by hand |
 | `unresolved: contradictory` | Circle failed, denied or canceled it with a tx hash, or two listed transfers share its hash. | by hand |
 | `unresolved: in_flight` | Circle has not finished its attempt. | run again later |
@@ -97,16 +98,24 @@ return only makes that row `record_unavailable`.
 | `unresolved: listing_incomplete` | The listing is incomplete. | fix the listing |
 | `unresolved: orphan_transfer` | A hidden transfer to its pinned wallet or to any wallet of its network, from a day before its earliest contract closed, may have paid it. | check the orphan |
 | `unresolved: census_mismatch` | Its amounts do not match its sweeps and corrections exactly. | by hand |
-| `unresolved: sweeps_missing` | It has no sweeps and nothing shows they were re-planned; they may have been reaped, and it may be owed in full. | owner decides; see below |
+| `unresolved: sweeps_missing` | It has no sweeps and nothing shows they were re-planned; they may have been reaped, and it may be owed. | never pay by hand; the owner may decide its reliability separately |
 | `unresolved: duplicate_risk` | The row itself holds early earnings (its own early sweeps, or corrections from another row), which an earlier payment may already have paid. `duplicates` has an entry for its network only when another, non-stuck row there holds early earnings. | by hand, from the row's own early earnings |
 | `unresolved: no_payout_wallet` | Its network has no active Solana or Polygon payout wallet. | wait for a wallet |
 | `unresolved: below_fee` | Its payout does not cover the $0.01 fee. | none |
 
-Never pay a `sweeps_missing` or `replanned` row in full by hand unless the
-byte counts of its network's later rows prove that none of its sweeps was
-re-planned into them. A later row whose `payout_byte_count` exceeds the bytes
-of its own epoch's contracts may hold re-planned sweeps, even after they were
-reaped.
+Never pay a `sweeps_missing` or `replanned` row by hand. Once a network's
+later rows are reaped, nothing can show whether its sweeps were re-planned.
+The owner may decide a row's reliability separately: it is earned per window,
+and no re-plan paid it. The report lists it under a `replanned` row; for a
+`sweeps_missing` row it is the row's `reliability_subsidy_nano_cents`.
+
+The rule that a row created after the cancellation and on or before
+2026-08-17T23:59:59Z makes a row `replanned` uses timing alone. Such a row
+proves that a plan ran for the network, not that the stuck row's sweeps still
+existed then, and 2026-08-17T23:59:59Z only approximates when the fix was
+deployed. Its errors can only under-state what is owed: the row stays
+`replanned` or `sweeps_missing`, which are never paid, and never becomes
+`payable`.
 
 *Early earnings* are a row's sweeps whose contract closed at or before its
 plan's epoch start (the `subsidy_payment` start of its plan), or at or before
