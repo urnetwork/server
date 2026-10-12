@@ -967,6 +967,48 @@ func TestNetEscrowReconcileUnsettledCoveringIndex(t *testing.T) {
 	})
 }
 
+// account_feedback is read by network in the onboarding campaign, the results
+// job and the onboarding email tracker. Without this index each of those
+// reads scans the whole table. The build must stay online and restartable,
+// and appended after the published history.
+func TestAccountFeedbackNetworkIndex(t *testing.T) {
+	index := migrationIndex(t, "CREATE INDEX CONCURRENTLY account_feedback_network_id_feedback_time")
+	if index < publishedMigrationPrefixCount {
+		t.Fatalf("account_feedback network index = %d is inside the published prefix %d", index, publishedMigrationPrefixCount)
+	}
+	migration, ok := migrations[index].(*OnlineSqlMigration)
+	if !ok {
+		t.Fatalf("account_feedback network index is %T, want *OnlineSqlMigration", migrations[index])
+	}
+	if !strings.Contains(migration.sql, "ON account_feedback (network_id, feedback_time)") {
+		t.Fatalf("account_feedback network index = %q", migration.sql)
+	}
+	if !strings.Contains(migration.recoverySql, "DROP INDEX CONCURRENTLY IF EXISTS account_feedback_network_id_feedback_time") {
+		t.Fatalf("account_feedback network index recovery = %q", migration.recoverySql)
+	}
+
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var indexDefinition string
+		MaintenanceDb(ctx, func(conn PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT indexdef
+				FROM pg_indexes
+				WHERE schemaname = current_schema()
+				  AND indexname = 'account_feedback_network_id_feedback_time'
+			`)
+			WithPgResult(result, err, func() {
+				if result.Next() {
+					Raise(result.Scan(&indexDefinition))
+				}
+			})
+		}, OptReadOnly())
+		if !strings.Contains(indexDefinition, "ON public.account_feedback USING btree (network_id, feedback_time)") {
+			t.Fatalf("account_feedback network index definition = %q", indexDefinition)
+		}
+	})
+}
+
 func TestApplyDbMigrations(t *testing.T) {
 	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()

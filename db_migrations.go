@@ -9982,4 +9982,22 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS pending_task_has_reschedule_error`,
 		`DROP INDEX IF EXISTS pending_task_has_reschedule_error`,
 	),
+
+	// 820: account_feedback is keyed only by feedback_id, so every read by
+	// network scans the whole table: NetworkHasFeedback in the onboarding
+	// campaign (15,804 calls at 9 ms each from the 2026-08-24 stats reset to
+	// 2026-10-12), the results job's first feedback, and the onboarding email
+	// tracker's feedback match, which since 89aa5103 reads the table once per
+	// rebuild rather than once per send. About 18 feedback rows are written a
+	// day, so the index adds no meaningful write load.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS account_feedback_network_id_feedback_time
+	`, `
+		CREATE INDEX CONCURRENTLY account_feedback_network_id_feedback_time
+		ON account_feedback (network_id, feedback_time)
+	`, `
+		DROP INDEX IF EXISTS account_feedback_network_id_feedback_time;
+		CREATE INDEX account_feedback_network_id_feedback_time
+		ON account_feedback (network_id, feedback_time)
+	`),
 }
