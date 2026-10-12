@@ -3,8 +3,12 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
@@ -127,18 +131,28 @@ const AppOpenAttributionWindow = 48 * time.Hour
 
 // AttributeAppOpen writes one app.opened event attributed to the network's most
 // recent landing click inside the attribution window, unless that click already
-// has one. One statement, index-backed on (network_id, at), so the auth-client
-// path pays one cheap query. Returns true when an event was written.
+// has one. The network's insert lock, then one statement index-backed on
+// (network_id, at), so the auth-client path pays two cheap queries. Returns true
+// when an event was written.
 func AttributeAppOpen(ctx context.Context, networkId server.Id, now time.Time) (attributed bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		attributed = AttributeAppOpenInTx(tx, ctx, networkId, now)
-	}, server.TxSerializable)
+	}, server.TxReadCommitted)
 	return
 }
 
-// Requires serializable isolation so concurrent missing-event reads conflict
-// and the transaction retry observes the attribution that already committed.
+// Requires a read committed transaction. The network's app.opened insert lock
+// makes concurrent attributions take turns, and the later one observes the
+// attribution the earlier one committed (see lockOnboardingEventInsertInTx).
 func AttributeAppOpenInTx(tx server.PgTx, ctx context.Context, networkId server.Id, now time.Time) bool {
+	lockOnboardingEventInsertInTx(tx, ctx, EventAppOpened, networkId, "")
+	return insertAppOpenAttributionInTx(tx, ctx, networkId, now)
+}
+
+// The conditional insert alone. Two concurrent transactions can both find the
+// click unattributed and both insert, so callers hold the network's app.opened
+// insert lock first.
+func insertAppOpenAttributionInTx(tx server.PgTx, ctx context.Context, networkId server.Id, now time.Time) bool {
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -197,6 +211,40 @@ func AttributeAppOpenInTx(tx server.PgTx, ctx context.Context, networkId server.
 		now.Add(-AppOpenAttributionWindow),
 	))
 	return tag.RowsAffected() == 1
+}
+
+// Orders the conditional inserts that keep one event per key: app.opened per
+// network (scope ""), connect.day per network and UTC day (scope the day).
+// Each insert reads that its event is missing and writes it in one statement,
+// so two concurrent writers of a key can both read it missing and both insert.
+// Writers that hold this transaction-scoped advisory lock take turns instead.
+// Both names are server-only and written only after this lock, so every writer
+// of a key takes it.
+//
+// The caller's transaction must be read committed. The insert is a later
+// statement than the lock, so its snapshot is taken after the lock is granted,
+// and PostgreSQL makes a commit visible before it releases the committing
+// transaction's locks, so the insert observes an event that an earlier holder
+// committed. Repeatable read and serializable keep the snapshot of their first
+// statement, this one or an earlier one, which precedes the wait and could miss
+// that event, so any isolation but read committed is refused.
+//
+// This replaced serializable isolation. On the primary every serializable
+// transaction registers in the shared SSI state (waits on LWLock
+// SerializableXactHash) and takes predicate locks at page and relation
+// granularity, which also conflict across networks and fail writers as
+// pivots. The lock touches one key, and waits only for other writers of that
+// key, each a short insert transaction.
+func lockOnboardingEventInsertInTx(tx server.PgTx, ctx context.Context, name string, networkId server.Id, scope string) {
+	var isolation string
+	server.Raise(tx.QueryRow(
+		ctx,
+		`SELECT current_setting('transaction_isolation') FROM pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"network-onboarding-event-insert/v1:"+name+":"+networkId.String()+":"+scope,
+	).Scan(&isolation))
+	if isolation != "read committed" {
+		panic(fmt.Errorf("%s insert lock requires read committed isolation, not %s", name, isolation))
+	}
 }
 
 // HasOnboardingEvent reports whether the network has at least one event of the
@@ -377,7 +425,7 @@ func recordConnectDay(ctx context.Context, clientId server.Id, connectTime time.
 }
 
 // Completes the admitted job after committing or forgetting a failed write,
-// including any retries needed to resolve competing network/day inserts.
+// including any retries the transaction needs.
 func recordConnectDayWrite(job connectDayWriteJob) {
 	if job.done != nil {
 		defer close(job.done)
@@ -393,62 +441,92 @@ func recordConnectDayWrite(job connectDayWriteJob) {
 			glog.Warningf("[onboarding]connect.day write failed for client %s: %v\n", job.clientId, r)
 		}
 	}()
-	// The cache deduplicates clients, not networks. Serializable isolation makes
-	// competing empty network/day reads conflict and retry after one commits.
-	//
-	// The day bound is a row comparison on (network_id, at), which only the
-	// network's own index can use. A new UTC day lies past the last ANALYZE of
-	// `at`, and a plain range let PostgreSQL estimate the whole day at one row
-	// under (name, at), so each probe read every network's connect.day row of
-	// the day. The row comparison's estimate depends only on network_id.
+	// The cache deduplicates clients, not networks: two clients of one network
+	// can both find its day empty. The network's connect.day insert lock for
+	// the day makes them take turns (see lockOnboardingEventInsertInTx).
 	server.Tx(writeCtx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		var networkId server.Id
+		err := tx.QueryRow(
 			writeCtx,
-			`
-				INSERT INTO network_onboarding_event (
-					event_id,
-					network_id,
-					name,
-					at,
-					received_at,
-					platform,
-					app_version,
-					locale,
-					tier,
-					path,
-					experiment,
-					variant,
-					session,
-					props
-				)
-				SELECT
-					$1::uuid,
-					nc.network_id,
-					$3::varchar(64),
-					$4::timestamp,
-					$5::timestamp,
-					'', '', '', '', '', '', '', '',
-					NULL
-				FROM network_client nc
-				WHERE
-					nc.client_id = $2::uuid AND
-					NOT EXISTS (
-						SELECT 1
-						FROM network_onboarding_event e
-						WHERE
-							e.network_id = nc.network_id AND
-							(e.network_id, e.at) >= (nc.network_id, $6::timestamp) AND
-							(e.network_id, e.at) < (nc.network_id, $7::timestamp) AND
-							e.name = $3::varchar(64)
-					)
-			`,
-			server.NewId(),
+			`SELECT network_id FROM network_client WHERE client_id = $1`,
 			job.clientId,
-			EventConnectDay,
-			job.connectTime,
-			server.NowUtc(),
-			job.day,
-			job.day.Add(24*time.Hour),
-		))
-	}, server.TxSerializable)
+		).Scan(&networkId)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return
+		}
+		server.Raise(err)
+		lockOnboardingEventInsertInTx(tx, writeCtx, EventConnectDay, networkId, job.day.Format(time.DateOnly))
+		insertConnectDayInTx(tx, writeCtx, job.clientId, networkId, job.connectTime, job.day)
+	}, server.TxReadCommitted)
+}
+
+// The conditional insert alone: the network's connect.day for the day of
+// `connectTime` (`day`), unless the day already has one, while the client still
+// belongs to `networkId`. Two concurrent transactions can both find the day
+// empty and both insert, so callers hold the network's connect.day insert lock
+// for the day first, and the network filter keeps the insert inside that lock.
+//
+// The day bound is a row comparison on (network_id, at), which only the
+// network's own index can use. A new UTC day lies past the last ANALYZE of
+// `at`, and a plain range let PostgreSQL estimate the whole day at one row
+// under (name, at), so each probe read every network's connect.day row of
+// the day. The row comparison's estimate depends only on network_id.
+func insertConnectDayInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	clientId server.Id,
+	networkId server.Id,
+	connectTime time.Time,
+	day time.Time,
+) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO network_onboarding_event (
+				event_id,
+				network_id,
+				name,
+				at,
+				received_at,
+				platform,
+				app_version,
+				locale,
+				tier,
+				path,
+				experiment,
+				variant,
+				session,
+				props
+			)
+			SELECT
+				$1::uuid,
+				nc.network_id,
+				$3::varchar(64),
+				$4::timestamp,
+				$5::timestamp,
+				'', '', '', '', '', '', '', '',
+				NULL
+			FROM network_client nc
+			WHERE
+				nc.client_id = $2::uuid AND
+				nc.network_id = $8::uuid AND
+				NOT EXISTS (
+					SELECT 1
+					FROM network_onboarding_event e
+					WHERE
+						e.network_id = nc.network_id AND
+						(e.network_id, e.at) >= (nc.network_id, $6::timestamp) AND
+						(e.network_id, e.at) < (nc.network_id, $7::timestamp) AND
+						e.name = $3::varchar(64)
+				)
+		`,
+		server.NewId(),
+		clientId,
+		EventConnectDay,
+		connectTime,
+		server.NowUtc(),
+		day,
+		day.Add(24*time.Hour),
+		networkId,
+	))
 }
