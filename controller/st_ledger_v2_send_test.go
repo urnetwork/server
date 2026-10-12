@@ -49,7 +49,9 @@ type ledgerV2RPC struct {
 	reverts        map[string]string
 	results        map[string][]byte
 	// latestBlock answers "latest" when set; otherwise the finalized block does.
-	latestBlock uint64
+	// latestUnavailable fails every read of "latest".
+	latestBlock       uint64
+	latestUnavailable bool
 }
 
 func newLedgerV2RPC(t testing.TB) *ledgerV2RPC {
@@ -104,7 +106,9 @@ func (self *ledgerV2RPC) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			var selector string
 			json.Unmarshal(call.Params[0], &selector)
 			block := self.finalizedBlock
-			if selector == "latest" && self.latestBlock != 0 {
+			if selector == "latest" && self.latestUnavailable {
+				response["error"] = map[string]any{"code": -32000, "message": "latest block unavailable"}
+			} else if selector == "latest" && self.latestBlock != 0 {
 				block = self.latestBlock
 			} else if selector != "latest" && selector != "finalized" {
 				block, _ = hexutil.DecodeUint64(selector)
