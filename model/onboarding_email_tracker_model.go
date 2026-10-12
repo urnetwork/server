@@ -99,6 +99,12 @@ func (t *OnboardingEmailTrackerTotals) Outcomes() map[string]int64 {
 // E3/E5 template is counted as attribution_ambiguous rather than guessed.
 // Product outcomes belong to the most recent email until the next send, with a
 // 14-day ceiling. Delivery events retain a 30-day correction window.
+//
+// Feedback and subscription starts are matched to sends by one semi join each,
+// never by a correlated probe per send. account_feedback has no network_id
+// index, so a probe scanned the whole table for every send, and the inlined
+// classified CTE repeated it inside engaged: on 2026-10-12 one rebuild of the
+// 31-day window scanned account_feedback 22,463 times (568M rows) in 60 s.
 const onboardingEmailTrackerRebuildSql = `
 	WITH candidate_sends AS MATERIALIZED (
 		SELECT
@@ -153,6 +159,26 @@ const onboardingEmailTrackerRebuildSql = `
 		FROM sequenced AS email
 		LEFT JOIN network_onboarding AS campaign USING (network_id)
 	),
+	feedback_sends AS MATERIALIZED (
+		SELECT sends.message_id
+		FROM sends
+		WHERE EXISTS (
+			SELECT 1 FROM account_feedback AS feedback
+			WHERE feedback.network_id = sends.network_id
+				AND feedback.feedback_time >= sends.sent_at
+				AND feedback.feedback_time < sends.engagement_ends_at
+		)
+	),
+	renewal_sends AS MATERIALIZED (
+		SELECT sends.message_id
+		FROM sends
+		WHERE EXISTS (
+			SELECT 1 FROM subscription_renewal AS renewal
+			WHERE renewal.network_id = sends.network_id
+				AND renewal.start_time >= sends.sent_at
+				AND renewal.start_time < sends.engagement_ends_at
+		)
+	),
 	classified AS (
 		SELECT
 			sends.*,
@@ -163,23 +189,15 @@ const onboardingEmailTrackerRebuildSql = `
 			events.app_opened,
 			events.connected,
 			events.widget_added,
-			(events.feedback_submitted OR EXISTS (
-				SELECT 1 FROM account_feedback AS feedback
-				WHERE feedback.network_id = sends.network_id
-					AND feedback.feedback_time >= sends.sent_at
-					AND feedback.feedback_time < sends.engagement_ends_at
-			)) AS feedback_submitted,
-			(events.pro_started OR EXISTS (
-				SELECT 1 FROM subscription_renewal AS renewal
-				WHERE renewal.network_id = sends.network_id
-					AND renewal.start_time >= sends.sent_at
-					AND renewal.start_time < sends.engagement_ends_at
-			)) AS pro_started,
+			(events.feedback_submitted OR feedback_send.message_id IS NOT NULL) AS feedback_submitted,
+			(events.pro_started OR renewal_send.message_id IS NOT NULL) AS pro_started,
 			events.bounced,
 			events.unsubscribed,
 			events.complained,
 			events.attribution_ambiguous
 		FROM sends
+		LEFT JOIN feedback_sends AS feedback_send ON feedback_send.message_id = sends.message_id
+		LEFT JOIN renewal_sends AS renewal_send ON renewal_send.message_id = sends.message_id
 		CROSS JOIN LATERAL (
 			SELECT
 				COALESCE(BOOL_OR(event.name = 'email.delivered' AND event.step_attributed), false) AS delivered,
