@@ -2887,6 +2887,9 @@ func SetProvide(
 	UpdateNetworkPeerProvideModes(ctx, clientId, provideModes)
 }
 
+// Every connected client's announce loop calls this on each sync. The count is
+// one statement, so it runs without a transaction: BEGIN and COMMIT would add
+// two round trips during which its pooled server sits idle in transaction.
 func GetProvideKeyChanges(
 	ctx context.Context,
 	clientId server.Id,
@@ -2895,8 +2898,8 @@ func GetProvideKeyChanges(
 	changedCount int,
 	provideModes map[ProvideMode]bool,
 ) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
 			SELECT
