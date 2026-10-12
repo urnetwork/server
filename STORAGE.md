@@ -289,6 +289,20 @@ of each run and before and after each rebuild (after a failed or canceled one on
 a bounded context detached from the canceled one), so an interrupted attempt
 cannot strand or accumulate numbered retry debris.
 
+The high-churn partial indexes of the skipped `transfer_contract` and
+`transfer_escrow` tables (`priorityReindexIndexes`: open, outcome-less,
+unresolved, reap-pending contracts and unsettled escrows) are rebuilt one by
+one with `REINDEX INDEX CONCURRENTLY`. Their rows leave the predicate soon after
+insert while a few stay for days, so nearly every leaf page keeps a few live
+entries, vacuum can free none, and the index grows with its churn: on
+2026-10-12 they held about 310 GB beyond 55 GB of live entries. Each run
+measures every one against a compact size estimated from its entry count and
+column widths, and before the table rotation rebuilds, smallest first and at
+most three per run, those at least twice that estimate whose reclaimable bytes
+are at least 1% of the heap the rebuild reads twice. A priority rebuild starts
+behind, and waits out, transactions up to an hour old, since the payout and
+reliability transactions that defer the rotation run that long.
+
 ### Watch items carried out of 2026-07 (update as resolved)
 - [ ] `contract_close`, `transfer_contract`, `transfer_escrow`: one-time
   `pg_repack` to reclaim existing bloat (autovacuum now tuned going forward).

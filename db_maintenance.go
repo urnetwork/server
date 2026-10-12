@@ -1,7 +1,8 @@
 // Scheduled database maintenance: a hash rotation rebuilds each public table's
-// indexes once per DbReindexEpochs epochs with REINDEX CONCURRENTLY, removes the
-// invalid copies an interrupted concurrent rebuild leaves behind, and refreshes
-// planner statistics.
+// indexes once per DbReindexEpochs epochs with REINDEX CONCURRENTLY, rebuilds
+// each named high-churn partial index of a table too large for the rotation
+// whenever it is bloated, removes the invalid copies an interrupted concurrent
+// rebuild leaves behind, and refreshes planner statistics.
 //
 // A concurrent rebuild first adds an invalid _ccnew copy of every index, builds
 // and validates each copy while waiting for older transactions, then swaps the
@@ -18,11 +19,13 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"math"
 	mathrand "math/rand"
 	"regexp"
 	"slices"
@@ -74,30 +77,299 @@ const dbMaintenanceReindexTimeout = 2 * time.Hour
 // cancel window.
 const dbMaintenanceFailedReindexCleanupTimeout = 20 * time.Second
 
-// transfer_contract is too large to rebuild wholesale, but these small
-// high-churn partial indexes accumulate deleted pages as contracts flip from
-// open to closed. Maintain them individually so the planner's relpages cost
-// stays representative without rebuilding the table's multi-hundred-GB index
-// set.
+// Partial indexes of tables too large to rebuild whole, whose predicate admits
+// a row at insert and drops it soon after: a contract is open, unresolved and
+// without an outcome until it closes and settles, its reap time is set until it
+// is reaped, and an escrow is unsettled until its contract settles. Each exit
+// is a non-HOT update or a delete that leaves a dead entry, and vacuum frees a
+// btree page only once every entry on it is gone. Rows that stay in the
+// predicate for days pin nearly every leaf page with a few live entries, and
+// new entries land at the right edge of time-ordered keys, so freed space is
+// not reused and the index grows with its churn rather than its live rows (on
+// 2026-10-12 these held about 310 GB beyond their 55 GB of live entries). Each
+// is rebuilt on its own whenever it is bloated; see
+// dbMaintenancePriorityIndex.bloated.
 var priorityReindexIndexes = []string{
 	"transfer_contract_open_partial_create_time",
+	"transfer_contract_outcome_null",
+	"transfer_contract_reap_time",
+	"transfer_contract_unresolved_destination_pair_create_time",
+	"transfer_contract_unresolved_payer_transfer_byte_count",
+	"transfer_contract_unresolved_source_pair_create_time",
+	"transfer_escrow_unsettled_balance_contract",
 }
 
-// The table that owns every priority index; its debris is cleaned around each
-// individual rebuild.
-const priorityReindexTableName = "transfer_contract"
+// A priority index is bloated once it is at least this many times its
+// estimated compact size, i.e. at least half of it is reclaimable.
+const dbMaintenancePriorityIndexBloatFactor = 2
 
-func priorityReindexIndexesForEpoch(epoch uint64) []string {
-	names := []string{}
+// A rebuild reads its table's heap twice, so a bloated index is rebuilt only
+// when the bytes it reclaims are at least the heap's bytes divided by this,
+// and at least dbMaintenancePriorityIndexMinReclaimBytes.
+const dbMaintenancePriorityIndexHeapDivisor = 100
+
+const dbMaintenancePriorityIndexMinReclaimBytes = int64(1024 * 1024)
+
+// Each priority rebuild reads its table's heap twice (about 1 TB for
+// transfer_contract), so a run rebuilds at most this many; the rest wait for
+// the next run.
+const DefaultDbMaintenanceMaxPriorityRebuilds = 3
+
+// A priority rebuild reclaims tens of GB, so it starts behind, and waits out,
+// transactions up to this old: the hour-long payout and reliability
+// transactions that defer the table rotation would otherwise defer every
+// priority rebuild too.
+const DefaultDbMaintenancePriorityMaxTransactionAge = time.Hour
+
+const DefaultDbMaintenancePriorityReindexLockTimeout = time.Hour
+
+// Whether indexName is a priority index or a transient copy that a concurrent
+// rebuild makes of one, so a monitor can tell the bounded rebuild of one
+// partial index from a whole-table rebuild of its table. A schema-qualified
+// public name is accepted.
+func IsDbMaintenancePriorityIndex(indexName string) bool {
+	indexName = strings.TrimPrefix(indexName, "public.")
 	for _, name := range priorityReindexIndexes {
-		h := fnv.New64()
-		_, _ = h.Write([]byte(name))
-		if h.Sum64()%DbReindexEpochs == epoch%DbReindexEpochs {
-			names = append(names, name)
+		if indexName == name || isReindexArtifactOf(indexName, name) {
+			return true
 		}
 	}
-	slices.Sort(names)
-	return names
+	return false
+}
+
+// One column of a btree index, in index column order.
+type dbMaintenanceIndexColumn struct {
+	// pg_attribute.attlen of the index column: its fixed width, or negative for
+	// a variable width
+	length int
+	// pg_attribute.attalign: c, s, i or d
+	align byte
+	// from pg_stats for the indexed table column, or for the index itself when
+	// the column is an expression; false when it has not been analyzed
+	analyzed     bool
+	averageWidth int
+	nullFraction float64
+}
+
+// Estimates the bytes of a fresh build of entryCount entries: leaf pages filled
+// to fillfactor with the average leaf tuple (its header, a null bitmap when a
+// column can be null, the aligned column data less the expected width of null
+// columns, and its line pointer) plus the metapage. Internal pages add under
+// 2% and are left out. False when the entry count is unknown (a never vacuumed
+// or analyzed index has reltuples -1) or a variable-width column has not been
+// analyzed.
+func dbMaintenanceEstimateBtreeBytes(
+	columns []dbMaintenanceIndexColumn,
+	entryCount float64,
+	fillfactor int,
+	blockSize int64,
+) (int64, bool) {
+	if len(columns) == 0 || entryCount < 0 || fillfactor <= 0 || 100 < fillfactor || blockSize <= 0 {
+		return 0, false
+	}
+	alignUp := func(n int, alignment int) int {
+		return (n + alignment - 1) / alignment * alignment
+	}
+	dataBytes := 0
+	expectedNullBytes := 0.0
+	nullable := false
+	for _, column := range columns {
+		width := column.length
+		if width <= 0 {
+			if !column.analyzed {
+				return 0, false
+			}
+			width = column.averageWidth
+		}
+		alignment := 1
+		switch column.align {
+		case 's':
+			alignment = 2
+		case 'i':
+			alignment = 4
+		case 'd':
+			alignment = 8
+		}
+		dataBytes = alignUp(dataBytes, alignment) + width
+		if 0 < column.nullFraction {
+			nullable = true
+			expectedNullBytes += column.nullFraction * float64(width)
+		}
+	}
+	// IndexTupleData; a null bitmap moves the data to the next 8-byte boundary
+	headerBytes := 8
+	if nullable {
+		headerBytes = 16
+	}
+	tupleBytes := alignUp(headerBytes+int(math.Ceil(float64(dataBytes)-expectedNullBytes)), 8)
+	// plus its line pointer
+	entryBytes := int64(tupleBytes + 4)
+	// less the page header and the btree special space
+	usableBytes := (blockSize - 24 - 16) * int64(fillfactor) / 100
+	entriesPerPage := max(usableBytes/entryBytes, 1)
+	leafPages := int64(math.Ceil(entryCount / float64(entriesPerPage)))
+	return (leafPages + 1) * blockSize, true
+}
+
+// A priority index's size against its estimated compact size.
+type dbMaintenancePriorityIndex struct {
+	indexName  string
+	tableName  string
+	indexBytes int64
+	// the main fork of the owning table, which a rebuild reads twice
+	heapBytes int64
+	// zero when the compact size cannot be estimated
+	compactBytes int64
+}
+
+// Whether a rebuild is due: the index is at least the bloat factor times its
+// compact estimate, and the bytes it would reclaim justify reading the heap
+// twice.
+func (self *dbMaintenancePriorityIndex) bloated() bool {
+	if self.compactBytes <= 0 {
+		return false
+	}
+	reclaimableBytes := self.indexBytes - self.compactBytes
+	return dbMaintenancePriorityIndexBloatFactor*self.compactBytes <= self.indexBytes &&
+		dbMaintenancePriorityIndexMinReclaimBytes <= reclaimableBytes &&
+		self.heapBytes <= reclaimableBytes*dbMaintenancePriorityIndexHeapDivisor
+}
+
+// The bloated indexes not yet done this epoch, smallest first, at most
+// maxRebuilds of them.
+func dbMaintenanceSelectPriorityIndexes(
+	priorityIndexes []dbMaintenancePriorityIndex,
+	doneIndexNames []string,
+	maxRebuilds int,
+) []dbMaintenancePriorityIndex {
+	selectedIndexes := []dbMaintenancePriorityIndex{}
+	for _, priorityIndex := range priorityIndexes {
+		if priorityIndex.bloated() && !slices.Contains(doneIndexNames, priorityIndex.indexName) {
+			selectedIndexes = append(selectedIndexes, priorityIndex)
+		}
+	}
+	slices.SortFunc(selectedIndexes, func(a dbMaintenancePriorityIndex, b dbMaintenancePriorityIndex) int {
+		return cmp.Or(cmp.Compare(a.indexBytes, b.indexBytes), strings.Compare(a.indexName, b.indexName))
+	})
+	if maxRebuilds < len(selectedIndexes) {
+		selectedIndexes = selectedIndexes[:max(maxRebuilds, 0)]
+	}
+	return selectedIndexes
+}
+
+// One row per column of each named index that is a valid btree index on an
+// ordinary public table, in index column order. A column's statistics come
+// from its table column, or from the index for an expression column.
+const dbMaintenancePriorityIndexColumnsQuery = `
+	SELECT
+		index_class.relname,
+		table_class.relname,
+		pg_relation_size(index_class.oid),
+		pg_relation_size(table_class.oid),
+		index_class.reltuples::float8,
+		coalesce((
+			SELECT index_option.option_value::int
+			FROM pg_options_to_table(index_class.reloptions) index_option
+			WHERE index_option.option_name = 'fillfactor'
+		), 90),
+		current_setting('block_size')::bigint,
+		index_attribute.attlen::int,
+		index_attribute.attalign::text,
+		column_stats.avg_width::int,
+		column_stats.null_frac::float8
+	FROM pg_class index_class
+	INNER JOIN pg_namespace index_namespace ON index_namespace.oid = index_class.relnamespace
+	INNER JOIN pg_am index_am ON index_am.oid = index_class.relam
+	INNER JOIN pg_index index_state ON index_state.indexrelid = index_class.oid
+	INNER JOIN pg_class table_class ON table_class.oid = index_state.indrelid
+	INNER JOIN pg_attribute index_attribute
+		ON index_attribute.attrelid = index_class.oid
+		AND 0 < index_attribute.attnum
+	LEFT JOIN pg_attribute table_attribute
+		ON table_attribute.attrelid = table_class.oid
+		AND table_attribute.attnum = index_state.indkey[index_attribute.attnum - 1]
+		AND 0 < table_attribute.attnum
+	LEFT JOIN pg_stats column_stats
+		ON column_stats.schemaname = 'public'
+		AND NOT column_stats.inherited
+		AND (
+			(column_stats.tablename = table_class.relname AND column_stats.attname = table_attribute.attname)
+			OR (table_attribute.attname IS NULL AND column_stats.tablename = index_class.relname AND column_stats.attname = index_attribute.attname)
+		)
+	WHERE index_namespace.nspname = 'public'
+	  AND index_class.relname = ANY($1::text[])
+	  AND index_am.amname = 'btree'
+	  AND index_state.indisvalid
+	  AND table_class.relkind = 'r'
+	ORDER BY index_class.relname, index_attribute.attnum
+`
+
+// The size and compact estimate of each named index that exists as a valid
+// btree index on an ordinary public table; a dropped or renamed name is
+// skipped. An index whose compact size cannot be estimated has compactBytes 0
+// and is never bloated.
+func dbMaintenancePriorityIndexSizes(ctx context.Context, indexNames []string) (priorityIndexes []dbMaintenancePriorityIndex, returnErr error) {
+	type indexState struct {
+		priorityIndex dbMaintenancePriorityIndex
+		entryCount    float64
+		fillfactor    int
+		blockSize     int64
+		columns       []dbMaintenanceIndexColumn
+	}
+	indexStates := []*indexState{}
+	HandleError(func() {
+		MaintenanceDb(ctx, func(conn PgConn) {
+			result, err := conn.Query(ctx, dbMaintenancePriorityIndexColumnsQuery, indexNames)
+			WithPgResult(result, err, func() {
+				for result.Next() {
+					var state indexState
+					var column dbMaintenanceIndexColumn
+					var align string
+					var averageWidth *int32
+					var nullFraction *float64
+					Raise(result.Scan(
+						&state.priorityIndex.indexName,
+						&state.priorityIndex.tableName,
+						&state.priorityIndex.indexBytes,
+						&state.priorityIndex.heapBytes,
+						&state.entryCount,
+						&state.fillfactor,
+						&state.blockSize,
+						&column.length,
+						&align,
+						&averageWidth,
+						&nullFraction,
+					))
+					if align != "" {
+						column.align = align[0]
+					}
+					if averageWidth != nil && nullFraction != nil {
+						column.analyzed = true
+						column.averageWidth = int(*averageWidth)
+						column.nullFraction = *nullFraction
+					}
+					n := len(indexStates)
+					if n == 0 || indexStates[n-1].priorityIndex.indexName != state.priorityIndex.indexName {
+						indexStates = append(indexStates, &state)
+					}
+					last := indexStates[len(indexStates)-1]
+					last.columns = append(last.columns, column)
+				}
+			})
+		}, OptNoRetry())
+	}, func(recovered error) {
+		returnErr = recovered
+	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	for _, state := range indexStates {
+		if compactBytes, ok := dbMaintenanceEstimateBtreeBytes(state.columns, state.entryCount, state.fillfactor, state.blockSize); ok {
+			state.priorityIndex.compactBytes = compactBytes
+		}
+		priorityIndexes = append(priorityIndexes, state.priorityIndex)
+	}
+	return priorityIndexes, nil
 }
 
 // These tables are too large or too frequently updated to rebuild as a whole;
@@ -202,6 +474,10 @@ type DbMaintenanceOptions struct {
 	MaxRunningBackends   int
 	ReindexLockTimeout   time.Duration
 	CleanupLockTimeout   time.Duration
+	// bounds of the bloat-triggered priority index rebuilds
+	MaxPriorityRebuilds        int
+	PriorityMaxTransactionAge  time.Duration
+	PriorityReindexLockTimeout time.Duration
 	// finished by an earlier interrupted or deferred run of the same epoch
 	DoneTables  []string
 	DoneIndexes []string
@@ -242,6 +518,27 @@ func (self *DbMaintenanceOptions) cleanupLockTimeout() time.Duration {
 	return DefaultDbMaintenanceCleanupLockTimeout
 }
 
+func (self *DbMaintenanceOptions) maxPriorityRebuilds() int {
+	if 0 < self.MaxPriorityRebuilds {
+		return self.MaxPriorityRebuilds
+	}
+	return DefaultDbMaintenanceMaxPriorityRebuilds
+}
+
+func (self *DbMaintenanceOptions) priorityMaxTransactionAge() time.Duration {
+	if 0 < self.PriorityMaxTransactionAge {
+		return self.PriorityMaxTransactionAge
+	}
+	return DefaultDbMaintenancePriorityMaxTransactionAge
+}
+
+func (self *DbMaintenanceOptions) priorityReindexLockTimeout() time.Duration {
+	if 0 < self.PriorityReindexLockTimeout {
+		return self.PriorityReindexLockTimeout
+	}
+	return DefaultDbMaintenancePriorityReindexLockTimeout
+}
+
 // Why a run stopped before finishing its epoch.
 type DbMaintenanceStop string
 
@@ -272,12 +569,13 @@ type dbMaintenanceLoad struct {
 // Returns why a rebuild must not start now, or "" when it may. Another index
 // build would contend with it for the same old snapshots and cpu, an old
 // transaction would hold it in a snapshot wait, and saturation means it would
-// take cpu from user traffic.
-func dbMaintenanceDeferReason(load dbMaintenanceLoad, opts *DbMaintenanceOptions) string {
+// take cpu from user traffic. A table rebuild and a priority index rebuild
+// pass different transaction age bounds.
+func dbMaintenanceDeferReason(load dbMaintenanceLoad, maxTransactionAge time.Duration, maxRunningBackends int) string {
 	if 0 < load.otherIndexBuilds {
 		return fmt.Sprintf("%d other index build(s) in progress", load.otherIndexBuilds)
 	}
-	if maxAge := opts.maxTransactionAge(); maxAge <= load.oldestTransactionAge {
+	if maxTransactionAge <= load.oldestTransactionAge {
 		precision := time.Second
 		if load.oldestTransactionAge < time.Second {
 			precision = time.Millisecond
@@ -285,11 +583,11 @@ func dbMaintenanceDeferReason(load dbMaintenanceLoad, opts *DbMaintenanceOptions
 		return fmt.Sprintf(
 			"a transaction has been open for %s (limit %s)",
 			load.oldestTransactionAge.Round(precision),
-			maxAge,
+			maxTransactionAge,
 		)
 	}
-	if maxRunning := opts.maxRunningBackends(); maxRunning <= load.runningBackends {
-		return fmt.Sprintf("%d backends running on cpu (limit %d)", load.runningBackends, maxRunning)
+	if maxRunningBackends <= load.runningBackends {
+		return fmt.Sprintf("%d backends running on cpu (limit %d)", load.runningBackends, maxRunningBackends)
 	}
 	return ""
 }
@@ -367,6 +665,35 @@ func dbMaintenanceTableBytes(ctx context.Context, tableName string) (bytes int64
 	HandleError(func() {
 		MaintenanceDb(ctx, func(conn PgConn) {
 			Raise(conn.QueryRow(ctx, dbMaintenanceTableBytesQuery, tableName).Scan(&bytes))
+		}, OptNoRetry())
+	}, func(recovered error) {
+		err = recovered
+	})
+	return
+}
+
+// Whether another backend holds or awaits the table's ShareUpdateExclusiveLock:
+// a vacuum or analyze (autovacuum included, running or queued for the lock) or
+// another concurrent index build. A rebuild requests the same lock, so it would
+// cancel a regular autovacuum after deadlock_timeout, throwing away hours of
+// its work on these tables and pushing them toward an anti-wraparound vacuum,
+// and it would wait behind an anti-wraparound one, which is never canceled.
+const dbMaintenanceTableLockedQuery = `
+	SELECT EXISTS (
+		SELECT 1
+		FROM pg_locks lock_state
+		WHERE lock_state.locktype = 'relation'
+		  AND lock_state.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+		  AND lock_state.relation = format('%I.%I', 'public', $1::text)::regclass
+		  AND lock_state.mode = 'ShareUpdateExclusiveLock'
+		  AND lock_state.pid <> pg_backend_pid()
+	)
+`
+
+func dbMaintenanceTableLocked(ctx context.Context, tableName string) (locked bool, err error) {
+	HandleError(func() {
+		MaintenanceDb(ctx, func(conn PgConn) {
+			Raise(conn.QueryRow(ctx, dbMaintenanceTableLockedQuery, tableName).Scan(&locked))
 		}, OptNoRetry())
 	}, func(recovered error) {
 		err = recovered
@@ -692,8 +1019,9 @@ func DbMaintenanceWithDefaults(ctx context.Context, epoch uint64) *DbMaintenance
 	return DbMaintenance(ctx, epoch, DefaultDbMaintenanceOptions())
 }
 
-// Runs one epoch of the rotation (see the file comment). A context that is
-// already done panics at the first query, as before, so a canceled task is not
+// Runs one epoch of the rotation (see the file comment), after first rebuilding
+// up to MaxPriorityRebuilds bloated priority indexes. A context that is already
+// done panics at the first query, as before, so a canceled task is not
 // acknowledged; once the run has started it returns an outcome instead, whose
 // Stopped field says whether the epoch finished.
 func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions) *DbMaintenanceOutcome {
@@ -749,24 +1077,41 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 	})
 
 	slices.Sort(reindexTableNames)
-	reindexIndexNames := []string{}
+
+	// Every run rebuilds the priority indexes that are bloated now, whatever
+	// the epoch; an unmeasurable index is left alone.
+	priorityIndexes := []dbMaintenancePriorityIndex{}
 	if opts.Reindex {
-		reindexIndexNames = priorityReindexIndexesForEpoch(epoch)
+		measuredIndexes, err := dbMaintenancePriorityIndexSizes(ctx, priorityReindexIndexes)
+		if err != nil {
+			glog.Infof("[db]maintenance priority index sizes unavailable: %s\n", err)
+		}
+		for _, measuredIndex := range measuredIndexes {
+			glog.Infof(
+				"[db]maintenance priority index %s on %s is %d bytes (compact estimate %d bytes, heap %d bytes)\n",
+				measuredIndex.indexName,
+				measuredIndex.tableName,
+				measuredIndex.indexBytes,
+				measuredIndex.compactBytes,
+				measuredIndex.heapBytes,
+			)
+		}
+		priorityIndexes = dbMaintenanceSelectPriorityIndexes(measuredIndexes, opts.DoneIndexes, opts.maxPriorityRebuilds())
+	}
+	priorityIndexNames := []string{}
+	for _, priorityIndex := range priorityIndexes {
+		priorityIndexNames = append(priorityIndexNames, priorityIndex.indexName)
 	}
 	glog.Infof(
 		"[db]maintenance %d/%d tables (in random order): %s; priority indexes: %s\n",
 		len(reindexTableNames),
 		len(tableNames),
 		strings.Join(reindexTableNames, ", "),
-		strings.Join(reindexIndexNames, ", "),
+		strings.Join(priorityIndexNames, ", "),
 	)
-	isDone := func(done []string) func(string) bool {
-		return func(name string) bool {
-			return slices.Contains(done, name)
-		}
-	}
-	reindexTableNames = slices.DeleteFunc(reindexTableNames, isDone(opts.DoneTables))
-	reindexIndexNames = slices.DeleteFunc(reindexIndexNames, isDone(opts.DoneIndexes))
+	reindexTableNames = slices.DeleteFunc(reindexTableNames, func(tableName string) bool {
+		return slices.Contains(opts.DoneTables, tableName)
+	})
 	if 0 < len(opts.DoneTables) || 0 < len(opts.DoneIndexes) {
 		glog.Infof(
 			"[db]maintenance continuing epoch %d: %d table(s) and %d priority index(es) already done\n",
@@ -822,7 +1167,15 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 	// Runs one object's ordered steps. The guard decides before the object's
 	// steps start, so a deferral leaves the object for the continuation. It
 	// returns false when the run must stop before this object finished.
-	runObject := func(prefix string, objectName string, cleanupTableName string, reindexStatement string) bool {
+	// maxTransactionAge and lockTimeout bound the rebuild's start and waits.
+	runObject := func(
+		prefix string,
+		objectName string,
+		cleanupTableName string,
+		reindexStatement string,
+		maxTransactionAge time.Duration,
+		lockTimeout time.Duration,
+	) bool {
 		if ctx.Err() != nil {
 			interrupted()
 			return false
@@ -838,7 +1191,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 				}
 				return false
 			}
-			if reason := dbMaintenanceDeferReason(load, opts); reason != "" {
+			if reason := dbMaintenanceDeferReason(load, maxTransactionAge, opts.maxRunningBackends()); reason != "" {
 				stop(DbMaintenanceDeferred, reason)
 				return false
 			}
@@ -862,7 +1215,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 				}
 			case dbMaintenanceReindex:
 				var err error
-				reindexPid, err = dbMaintenanceRunReindex(ctx, reindexStatement, opts.reindexLockTimeout())
+				reindexPid, err = dbMaintenanceRunReindex(ctx, reindexStatement, lockTimeout)
 				if err != nil {
 					glog.Infof("[db]maintenance %s %s %s failed: %s\n", prefix, step, objectName, err)
 					reindexFailed = true
@@ -907,11 +1260,65 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		return true
 	}
 
+	// The bloated priority indexes go first, smallest first: a long table
+	// rotation that ends in a deferral must not starve them. One whose table is
+	// being vacuumed is left for a later run rather than cancel or queue behind
+	// the vacuum (an autovacuum that starts between this check and the rebuild's
+	// lock request is still canceled). Each keeps its debris cleanup adjacent to
+	// its own rebuild on the table that owns it, and its size afterwards is
+	// logged against its estimate, so an estimate that would keep an index
+	// selected shows up in the log.
+	for i, priorityIndex := range priorityIndexes {
+		prefix := fmt.Sprintf("priority index[%d/%d]", i+1, len(priorityIndexes))
+		if locked, err := dbMaintenanceTableLocked(ctx, priorityIndex.tableName); err != nil || locked {
+			if ctx.Err() != nil {
+				interrupted()
+				break
+			}
+			glog.Infof(
+				"[db]maintenance %s skip %s: its table %s is being vacuumed, analyzed or indexed (err %v)\n",
+				prefix,
+				priorityIndex.indexName,
+				priorityIndex.tableName,
+				err,
+			)
+			continue
+		}
+		reindexStatement := `REINDEX INDEX CONCURRENTLY ` + pgx.Identifier{"public", priorityIndex.indexName}.Sanitize()
+		if !runObject(
+			prefix,
+			priorityIndex.indexName,
+			priorityIndex.tableName,
+			reindexStatement,
+			opts.priorityMaxTransactionAge(),
+			opts.priorityReindexLockTimeout(),
+		) {
+			break
+		}
+		outcome.DoneIndexes = append(outcome.DoneIndexes, priorityIndex.indexName)
+		if rebuiltIndexes, err := dbMaintenancePriorityIndexSizes(ctx, []string{priorityIndex.indexName}); err == nil {
+			for _, rebuiltIndex := range rebuiltIndexes {
+				glog.Infof(
+					"[db]maintenance %s %s is %d bytes, was %d (compact estimate %d bytes, still bloated %t)\n",
+					prefix,
+					rebuiltIndex.indexName,
+					rebuiltIndex.indexBytes,
+					priorityIndex.indexBytes,
+					rebuiltIndex.compactBytes,
+					rebuiltIndex.bloated(),
+				)
+			}
+		}
+	}
+
 	// Cleanup and reindex each selected table as one ordered unit. In
 	// particular, a failed rebuild gets its cleanup attempt before maintenance
 	// advances to the next table, and a failed prerequisite cleanup prevents a
 	// new numbered _ccnew sibling from being created.
 	for i, tableName := range reindexTableNames {
+		if outcome.Stopped != "" {
+			break
+		}
 		reindexStatement := ""
 		if opts.Reindex && dbMaintenanceShouldReindexTable(tableName) {
 			reindexStatement = `REINDEX TABLE CONCURRENTLY ` + pgx.Identifier{"public", tableName}.Sanitize()
@@ -935,25 +1342,17 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 			}
 		}
 		prefix := fmt.Sprintf("table[%d/%d]", i+1, len(reindexTableNames))
-		if !runObject(prefix, tableName, tableName, reindexStatement) {
+		if !runObject(
+			prefix,
+			tableName,
+			tableName,
+			reindexStatement,
+			opts.maxTransactionAge(),
+			opts.reindexLockTimeout(),
+		) {
 			break
 		}
 		outcome.DoneTables = append(outcome.DoneTables, tableName)
-	}
-
-	for i, indexName := range reindexIndexNames {
-		if outcome.Stopped != "" {
-			break
-		}
-		// Every priority index belongs to transfer_contract. Keep its debris
-		// cleanup adjacent to the individual rebuild just as it is for a table
-		// rebuild; the table's hash-selected epoch may differ.
-		prefix := fmt.Sprintf("priority index[%d/%d]", i+1, len(reindexIndexNames))
-		reindexStatement := `REINDEX INDEX CONCURRENTLY ` + pgx.Identifier{"public", indexName}.Sanitize()
-		if !runObject(prefix, indexName, priorityReindexTableName, reindexStatement) {
-			break
-		}
-		outcome.DoneIndexes = append(outcome.DoneIndexes, indexName)
 	}
 
 	if outcome.Stopped == DbMaintenanceInterrupted {
