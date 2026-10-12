@@ -45,6 +45,21 @@ func seedAdmissionCacheHistory(t testing.TB, ctx context.Context, count, credit 
 	return f
 }
 
+// The cache read with its revision match removed, so every read misses.
+func admissionCacheMissSql() string {
+	return strings.Replace(netEscrowAdmissionCacheSQL, "snapshot.revision = COALESCE(revision.revision, 0)", "false", 1)
+}
+
+// Runs real admission through the legacy payer path's own transaction owner,
+// transferEscrowTx: its per-payer turn and read-committed no-retry
+// transaction. Since 403b9c55 that path admits transaction ownership, which a
+// wrapper around the transaction can never hold, and refuses rather than
+// waits inside a transaction, so concurrent callers take the payer's turn
+// first as production does. A counting caller starts statement hooks first:
+// census reads are counted by a hook bound to the transaction's connection. A
+// forced miss replaces the cache read through a prepared statement named by
+// its exact text, deallocated before the transaction ends (a Close message
+// is accepted even in a failed transaction).
 func cacheTestCreate(ctx context.Context, f netEscrowOrderingTestFixture, count *atomic.Int64, forceMiss bool) (escrow *TransferEscrow, err error) {
 	defer func() {
 		if v := recover(); v != nil {
@@ -55,9 +70,29 @@ func cacheTestCreate(ctx context.Context, f netEscrowOrderingTestFixture, count 
 			}
 		}
 	}()
-	server.Tx(ctx, func(tx server.PgTx) {
-		escrow, _, err = createTransferEscrowInTx(ctx, admissionCacheTestTx{tx, count, forceMiss}, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 1, nil)
-	}, server.TxReadCommitted, server.OptNoRetry())
+	queueErr := transferEscrowTx(ctx, f.sourceNetworkId, 1, func(tx server.PgTx) {
+		hooked := ctx
+		if forceMiss {
+			_, prepareErr := tx.Conn().Prepare(ctx, netEscrowAdmissionCacheSQL, admissionCacheMissSql())
+			server.Raise(prepareErr)
+			defer tx.Conn().Deallocate(context.WithoutCancel(ctx), netEscrowAdmissionCacheSQL)
+		}
+		if count != nil {
+			var release func()
+			hooked, release = withLegacyStatementHooks(ctx, tx, &legacyStatementHook{
+				before: func(_ context.Context, sql string, _ []string) {
+					if sql == netEscrowReservationPageSQL {
+						count.Add(1)
+					}
+				},
+			})
+			defer release()
+		}
+		escrow, _, err = createTransferEscrowInTx(hooked, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 1, nil)
+	})
+	if queueErr != nil {
+		return nil, queueErr
+	}
 	return
 }
 
@@ -67,6 +102,8 @@ func TestNetEscrowAdmissionCacheContendedOpenHistory(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 		defer cancel()
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		for _, forceMiss := range []bool{true, false} {
 			f := seedAdmissionCacheHistory(t, ctx, 10001, 8)
 			var census atomic.Int64
@@ -167,6 +204,8 @@ func TestNetEscrowAdmissionCacheLegacyMutationAndRollback(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 		defer cancel()
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		f := seedAdmissionCacheHistory(t, ctx, 3, 20)
 		if _, err := cacheTestCreate(ctx, f, nil, false); err != nil {
 			t.Fatal(err)
