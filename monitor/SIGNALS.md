@@ -23280,14 +23280,16 @@ returned empty at it and read as "storage is empty" — the exact false alarm
 this section exists to prevent. A `du` that prints NOTHING (rather than `0`)
 is the tell that you have the wrong path, not an empty bucket. Every drive holds
 a share of every object, so the file recipes read the first drive; at EC:2 its
-`du` is about half the logical size that `mc du` reports.
+`du` is about half the logical size that `mc du` reports. The drive directories
+are `minio:minio` 0750, so the file recipes need root: without it they print
+nothing, the same false "empty" as a wrong path.
 ```
 minio_data=$(sed -n 's/^MINIO_VOLUMES="\([^ "]*\).*/\1/p' /etc/default/minio-storage)  # first drive; do not hardcode
 sudo /usr/local/sbin/mc du warpminio/loki warpminio/mimir              # logical size
-du -sh $minio_data/loki $minio_data/mimir                              # growth = writing
-find $minio_data/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
-ls $minio_data/loki/fake | wc -l                                       # loki CHUNK dirs (fake=anon tenant)
-find $minio_data/mimir -name meta.json | wc -l                         # mimir FINALIZED blocks
+sudo du -sh $minio_data/loki $minio_data/mimir                         # growth = writing
+sudo find $minio_data/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
+sudo ls $minio_data/loki/fake | wc -l                                  # loki CHUNK dirs (fake=anon tenant)
+sudo find $minio_data/mimir -name meta.json | wc -l                    # mimir FINALIZED blocks
 ```
 loki flushes on `chunk_idle_period`/shutdown. Mimir normally uploads a complete
 TSDB block at roughly a two-hour boundary, so an empty Mimir bucket immediately
@@ -23311,7 +23313,7 @@ path healthy and refuse the other. Check the configured bind, listening socket,
 and both HTTP health paths together:
 ```
 systemctl show minio -p ActiveState -p SubState -p NRestarts -p ExecMainStatus
-grep -E '^(MINIO_OPTS|MINIO_VOLUMES)=' /etc/default/minio /etc/default/minio-storage
+sudo grep -E '^(MINIO_OPTS|MINIO_VOLUMES)=' /etc/default/minio /etc/default/minio-storage   # /etc/default/minio is root-only
 ss -lntp | grep ':23900'
 curl -fsS --max-time 5 http://192.168.51.179:23900/minio/health/live
 curl -fsS --max-time 5 http://172.28.208.176:23900/minio/health/live
