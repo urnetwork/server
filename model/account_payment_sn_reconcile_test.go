@@ -130,7 +130,7 @@ func TestSnReconcileStuckRowsCanceledWithEvidence(t *testing.T) {
 		row := rows[0]
 		if *row.CircleIdempotencyKey != key || !row.CancelTime.Equal(cancelTime) || row.PaymentRecord != nil || row.TxHash != nil ||
 			row.NetworkId != f.network || *row.WalletId != *wallet || row.Payout != UsdToNanoCents(1) || row.PayoutByteCount != 10 ||
-			!row.CreateTime.Equal(created) || row.SweepCount != 1 || row.AttributionReviewRequired {
+			!row.CreateTime.Equal(created) || row.SweepCount != 1 || row.AttributionReviewRequired || !row.EarliestClose.Equal(closed) {
 			t.Fatalf("key-only snapshot = %+v", row)
 		}
 		if *row.PinnedWalletAddress != "0x0000000000000000000000000000000000000012" || *row.PayoutWalletId != *wallet ||
@@ -146,7 +146,8 @@ func TestSnReconcileStuckRowsCanceledWithEvidence(t *testing.T) {
 			t.Fatalf("hash-only snapshot = %+v", row)
 		}
 		row = rows[3]
-		if row.PayoutWalletId != nil || row.PayoutWalletAddress != nil || row.PayoutWalletBlockchain != nil || row.PayoutWalletActive || row.SweepCount != 0 || row.NetworkId != otherNetwork {
+		if row.PayoutWalletId != nil || row.PayoutWalletAddress != nil || row.PayoutWalletBlockchain != nil || row.PayoutWalletActive || row.SweepCount != 0 || row.NetworkId != otherNetwork ||
+			row.EarliestClose != nil {
 			t.Fatalf("payout wallet of another network was joined: %+v", row)
 		}
 	})
@@ -266,7 +267,7 @@ func TestSnReconcileReferencedIds(t *testing.T) {
 	})
 }
 
-// RC-7
+// RC-7, A4
 func TestSnReconcileAddressNetworks(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -282,10 +283,14 @@ func TestSnReconcileAddressNetworks(t *testing.T) {
 				VALUES($1,$2,'external','MATIC',$3,$4,'USDC')`, server.NewId(), networks[i], wallet.address, wallet.active)
 		}
 		snReconcileTestExec(t, ctx, `INSERT INTO account_wallet(wallet_id,network_id,wallet_type,blockchain,wallet_address,active,default_token_type)
-			VALUES($1,$2,'external','MATIC','0xABC',true,'USDC')`, server.NewId(), networks[0])
+			VALUES($1,$2,'external','MATIC',E'\t0xABC \n',true,'USDC')`, server.NewId(), networks[0])
 		got := GetSnReconcileAddressNetworks(ctx, []string{"0xabc", "0x999"})
 		if len(got) != 1 || !slices.Equal(got["0xabc"], networks[:2]) {
 			t.Fatalf("address networks = %v, want 0xabc -> %v", got, networks[:2])
+		}
+		// A4: Go and SQL strip the same characters.
+		if address := SnReconcileAddress("\t\n\v\f\r 0xAbC \r\n"); address != "0xabc" || SnReconcileAddress("0x\u00a0") != "0x\u00a0" {
+			t.Fatal("address form", address)
 		}
 	})
 }
@@ -320,88 +325,6 @@ func TestSnReconcileCensusExact(t *testing.T) {
 			t.Fatal("policy not loaded", err)
 		}
 		check(policy, map[server.Id]bool{exact: true, mismatched: false, lateClose: false})
-	})
-}
-
-// RC-21
-func TestSnReconcileHoldsEarlierEarnings(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		f := newPayoutTransitionCohort(t, ctx)
-		wallet := GetPayoutWalletId(ctx, f.network)
-		closed := payoutTestCutoff.Add(-24 * time.Hour)
-		created := payoutTestCutoff.Add(-time.Hour)
-		zeroRevenue := snReconcileTestPayment(t, ctx, f.network, wallet, created, f.insert(t, ctx, closed.Add(-time.Hour), &closed, closed, 1024, 0))
-		source := snReconcileTestPayment(t, ctx, f.network, wallet, created.Add(-48*time.Hour))
-		bonusOnly := snReconcileTestPayment(t, ctx, f.network, wallet, created)
-		snReconcileTestMoveBonus(t, ctx, source, bonusOnly, UsdToNanoCents(2))
-		other := server.NewId()
-		for _, check := range []struct {
-			name      string
-			paymentId server.Id
-			before    time.Time
-			sources   []server.Id
-			want      bool
-		}{
-			{"zero-revenue sweep closed before", zeroRevenue, closed.Add(time.Microsecond), []server.Id{other}, true},
-			{"sweep closed at the bound", zeroRevenue, closed, []server.Id{other}, false},
-			{"bonus from a source", bonusOnly, closed, []server.Id{other, source}, true},
-			{"bonus from another row", bonusOnly, closed, []server.Id{other}, false},
-		} {
-			if got := SnReconcileHoldsEarlierEarnings(ctx, check.paymentId, check.before, check.sources); got != check.want {
-				t.Fatalf("%s: holds = %v, want %v", check.name, got, check.want)
-			}
-		}
-	})
-}
-
-// RC-17
-func TestSnReconcileQueueRows(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		f := newPayoutTransitionCohort(t, ctx)
-		wallet := GetPayoutWalletId(ctx, f.network)
-		early := payoutTestCutoff.Add(-10 * 24 * time.Hour)
-		late := payoutTestCutoff.Add(-time.Hour)
-		after := payoutTestCutoff.Add(-5 * 24 * time.Hour)
-		before := payoutTestCutoff.Add(-3 * 24 * time.Hour)
-		contract := func(closed time.Time, revenue NanoCents) server.Id {
-			return f.insert(t, ctx, closed.Add(-time.Hour), &closed, closed, 10, revenue)
-		}
-		source := snReconcileTestPayment(t, ctx, f.network, wallet, early)
-		planned := snReconcileTestPayment(t, ctx, f.network, wallet, after.Add(time.Hour), contract(early, UsdToNanoCents(3)), contract(late, UsdToNanoCents(5)))
-		reserved := snReconcileTestPayment(t, ctx, f.network, wallet, after.Add(2*time.Hour), contract(late, UsdToNanoCents(1)))
-		snReconcileTestMoveBonus(t, ctx, source, reserved, UsdToNanoCents(7))
-		submitted := snReconcileTestPayment(t, ctx, f.network, wallet, after.Add(3*time.Hour), contract(early, UsdToNanoCents(4)))
-		onChain := snReconcileTestPayment(t, ctx, f.network, wallet, after.Add(4*time.Hour))
-		canceled := snReconcileTestPayment(t, ctx, f.network, wallet, after.Add(5*time.Hour), contract(early, UsdToNanoCents(6)))
-		completed := snReconcileTestPayment(t, ctx, f.network, wallet, after.Add(6*time.Hour), contract(early, UsdToNanoCents(6)))
-		// Created exactly at the window start, and in another network: neither is queued.
-		snReconcileTestPayment(t, ctx, f.network, wallet, after, contract(early, UsdToNanoCents(6)))
-		snReconcileTestPayment(t, ctx, server.NewId(), wallet, after.Add(time.Hour))
-		snReconcileTestExec(t, ctx, `UPDATE account_payment SET circle_idempotency_key=$2 WHERE payment_id=$1`, reserved, server.NewId())
-		snReconcileTestExec(t, ctx, `UPDATE account_payment SET circle_idempotency_key=$2,payment_record='submitted' WHERE payment_id=$1`, submitted, server.NewId())
-		snReconcileTestExec(t, ctx, `UPDATE account_payment SET circle_idempotency_key=$2,payment_record='on-chain',tx_hash='0xon-chain' WHERE payment_id=$1`, onChain, server.NewId())
-		snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true WHERE payment_id=$1`, canceled)
-		snReconcileTestExec(t, ctx, `UPDATE account_payment SET completed=true WHERE payment_id=$1`, completed)
-
-		queue := GetSnReconcileQueueRows(ctx, f.network, after, before, []server.Id{source})
-		want := []SnReconcileQueueRow{
-			{PaymentId: planned, State: "planned", Payout: UsdToNanoCents(8), Candidate: UsdToNanoCents(3)},
-			{PaymentId: reserved, State: "reserved", Payout: UsdToNanoCents(8), Candidate: UsdToNanoCents(7)},
-			{PaymentId: submitted, State: "submitted", Payout: UsdToNanoCents(4), Candidate: UsdToNanoCents(4)},
-			{PaymentId: onChain, State: "on_chain", Payout: 0, Candidate: 0},
-		}
-		if len(queue) != len(want) {
-			t.Fatalf("queue = %d rows, want %d", len(queue), len(want))
-		}
-		for i, row := range queue {
-			plan := row.PaymentPlanId
-			row.PaymentPlanId = server.Id{}
-			if *row != want[i] || plan == (server.Id{}) {
-				t.Fatalf("queue[%d] = %+v, want %+v", i, *row, want[i])
-			}
-		}
 	})
 }
 
@@ -605,5 +528,400 @@ func TestSnReconcileReviveLostUpdateRollsBack(t *testing.T) {
 			t.Fatalf("lost update left writes: %s", after)
 		}
 		snReconcileTestExec(t, ctx, `DROP TRIGGER synthetic_skip_revive ON account_payment; DROP FUNCTION synthetic_skip_revive()`)
+	})
+}
+
+// The subsidy epoch of the payment's plan starts at `start`.
+func snReconcileTestEpoch(t testing.TB, ctx context.Context, paymentId server.Id, start time.Time) {
+	t.Helper()
+	snReconcileTestExec(t, ctx, `INSERT INTO subsidy_payment(payment_plan_id,start_time,end_time,active_user_count,paid_user_count,
+		net_payout_byte_count_paid,net_payout_byte_count_unpaid,net_revenue_nano_cents,net_payout_nano_cents)
+		SELECT payment_plan_id,$2::timestamp,$2::timestamp+INTERVAL '1 microsecond',0,0,0,0,0,0 FROM account_payment WHERE payment_id=$1`, paymentId, start)
+}
+
+// A correction the row itself earned, not moved from another row.
+func snReconcileTestOwnBonus(t testing.TB, ctx context.Context, paymentId server.Id, amount NanoCents) {
+	t.Helper()
+	snReconcileTestExec(t, ctx, `INSERT INTO account_payment_bonus(operation_id,origin_payment_id,payment_id,payment_plan_id,network_id,amount_nano_cents,reason,latest_contract_close_time,policy_sha256)
+		SELECT $1,payment_id,payment_id,payment_plan_id,network_id,$2,'own correction',$3,'' FROM account_payment WHERE payment_id=$4`,
+		server.NewId(), amount, payoutTestCutoff.Add(-time.Hour), paymentId)
+	snReconcileTestExec(t, ctx, `UPDATE account_payment SET payout_nano_cents=payout_nano_cents+$2,bonus_payout_nano_cents=bonus_payout_nano_cents+$2 WHERE payment_id=$1`, paymentId, amount)
+}
+
+func snReconcileTestStuckById(t testing.TB, ctx context.Context) map[server.Id]*SnReconcileRow {
+	t.Helper()
+	rows := map[server.Id]*SnReconcileRow{}
+	for _, row := range snReconcileTestStuck(t, ctx) {
+		rows[row.PaymentId] = row
+	}
+	return rows
+}
+
+// A revenue-only planner configuration whose subsidy epochs need `minimum`.
+func snReconcileTestPlanConfig(minimum time.Duration) *SubsidyConfig {
+	config := payoutTransitionRevenueConfig()
+	config.Days = 30
+	config.MinDaysFraction = minimum.Hours() / (30 * 24)
+	return config
+}
+
+// A2: early sweeps and bonuses of stuck rows, RC-2 included.
+func TestSnReconcileStuckRowsEarlyEarnings(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		closed := payoutTestCutoff.Add(-10 * 24 * time.Hour)
+		created := payoutTestCutoff.Add(-5 * 24 * time.Hour)
+		f := newPayoutTransitionCohort(t, ctx)
+		wallet := GetPayoutWalletId(ctx, f.network)
+		row := func(cohort *payoutTransitionCohort, offset time.Duration, epoch *time.Time) server.Id {
+			paymentId := snReconcileTestPayment(t, ctx, cohort.network, wallet, created.Add(offset), cohort.insert(t, ctx, closed.Add(-time.Hour), &closed, closed, 10, UsdToNanoCents(1)))
+			if epoch != nil {
+				snReconcileTestEpoch(t, ctx, paymentId, *epoch)
+			}
+			return paymentId
+		}
+		at := func(value time.Time) *time.Time {
+			return &value
+		}
+		cancelWithKey := func(paymentId server.Id) {
+			snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true,circle_idempotency_key=$2 WHERE payment_id=$1`, paymentId, server.NewId())
+		}
+		explained := row(f, 0, at(closed.Add(-time.Microsecond)))
+		atStart := row(f, time.Hour, at(closed))
+		ownBonus := row(f, 2*time.Hour, at(closed.Add(-time.Hour)))
+		snReconcileTestOwnBonus(t, ctx, ownBonus, UsdToNanoCents(1))
+		movedBonus := row(f, 3*time.Hour, at(closed.Add(-time.Hour)))
+		origin := snReconcileTestPayment(t, ctx, f.network, wallet, created.Add(-24*time.Hour))
+		snReconcileTestEpoch(t, ctx, origin, closed.Add(-time.Hour))
+		snReconcileTestMoveBonus(t, ctx, origin, movedBonus, UsdToNanoCents(2))
+		unretained := row(f, 4*time.Hour, at(closed))
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET circle_idempotency_key=$2 WHERE payment_id=$1`, unretained, server.NewId())
+		// Without its own epoch every sweep is early. Created last, it cannot
+		// raise the bound of an earlier row.
+		withoutEpoch := row(f, 10*time.Hour, nil)
+		for _, paymentId := range []server.Id{explained, atStart, ownBonus, movedBonus, withoutEpoch} {
+			cancelWithKey(paymentId)
+		}
+		// An earlier row of the network whose plan recorded no epoch raises the
+		// bound to its creation; an earlier row with an epoch, or a later one
+		// without, does not.
+		g, h := newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx)
+		snReconcileTestPayment(t, ctx, g.network, nil, closed.Add(time.Hour))
+		raised := row(g, 0, at(closed.Add(-time.Hour)))
+		earlier := snReconcileTestPayment(t, ctx, h.network, nil, closed.Add(time.Hour))
+		snReconcileTestEpoch(t, ctx, earlier, closed.Add(-48*time.Hour))
+		notRaised := row(h, 0, at(closed.Add(-time.Hour)))
+		snReconcileTestPayment(t, ctx, h.network, nil, created.Add(time.Hour))
+		cancelWithKey(raised)
+		cancelWithKey(notRaised)
+
+		rows := snReconcileTestStuckById(t, ctx)
+		for paymentId, want := range map[server.Id]bool{explained: false, atStart: true, ownBonus: false, movedBonus: true, unretained: true,
+			withoutEpoch: true, raised: true, notRaised: false} {
+			if rows[paymentId] == nil || rows[paymentId].EarlyEarnings != want {
+				t.Fatal("early earnings", paymentId, rows[paymentId], want)
+			}
+		}
+		if !rows[explained].EarliestClose.Equal(closed) {
+			t.Fatal("earliest close", rows[explained].EarliestClose)
+		}
+	})
+}
+
+// A5: the evidence that a stuck row's missing sweeps were re-planned.
+func TestSnReconcileStuckRowsReplanEvidence(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		created := payoutTestCutoff.Add(-5 * 24 * time.Hour)
+		day := 24 * time.Hour
+		// Every row records an epoch so no bound is raised by a missing one.
+		row := func(cohort *payoutTransitionCohort, at time.Time, epoch time.Time, closes ...time.Time) server.Id {
+			contracts := []server.Id{}
+			for _, closed := range closes {
+				contracts = append(contracts, cohort.insert(t, ctx, closed.Add(-time.Hour), &closed, closed, 10, UsdToNanoCents(1)))
+			}
+			paymentId := snReconcileTestPayment(t, ctx, cohort.network, nil, at, contracts...)
+			snReconcileTestEpoch(t, ctx, paymentId, epoch)
+			return paymentId
+		}
+		reaped := func(cohort *payoutTransitionCohort) server.Id {
+			paymentId := row(cohort, created, created.Add(-30*day))
+			snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true,payment_record=$2 WHERE payment_id=$1`, paymentId, "record-"+paymentId.String())
+			return paymentId
+		}
+		a, b, c, d := newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx)
+		// A later row holds an early sweep that closed before this row was created.
+		replanned := reaped(a)
+		row(a, created.Add(day), created, created.Add(-day))
+		// A row that holds sweeps itself never reads the evidence.
+		withSweeps := row(a, created.Add(-time.Hour), created.Add(-3*day), created.Add(-2*day))
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true,circle_idempotency_key=$2 WHERE payment_id=$1`, withSweeps, server.NewId())
+		// The later early sweep closed after this row was created.
+		closedAfter := reaped(b)
+		row(b, created.Add(2*day), created.Add(2*time.Hour), created.Add(time.Hour))
+		// Only an earlier row holds the early sweep.
+		laterThanHolder := reaped(c)
+		row(c, created.Add(-day), created.Add(-day), created.Add(-2*day))
+		// The later row's sweep is explained by its own epoch.
+		explained := reaped(d)
+		row(d, created.Add(day), created.Add(-2*day), created.Add(-day))
+
+		rows := snReconcileTestStuckById(t, ctx)
+		for paymentId, want := range map[server.Id]bool{replanned: true, withSweeps: false, closedAfter: false, laterThanHolder: false, explained: false} {
+			if rows[paymentId] == nil || rows[paymentId].ReplanEvidence != want {
+				t.Fatal("replan evidence", paymentId, rows[paymentId], want)
+			}
+		}
+		if rows[replanned].EarliestClose != nil || rows[replanned].SweepCount != 0 {
+			t.Fatal("reaped row", rows[replanned])
+		}
+	})
+}
+
+// A2 (§6): pending and safely canceled rows with early earnings.
+func TestSnReconcileEarlyHolders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		f := newPayoutTransitionCohort(t, ctx)
+		wallet := GetPayoutWalletId(ctx, f.network)
+		closed := payoutTestCutoff.Add(-10 * 24 * time.Hour)
+		late := payoutTestCutoff.Add(-6 * 24 * time.Hour)
+		created := payoutTestCutoff.Add(-5 * 24 * time.Hour)
+		contract := func(at time.Time, revenue NanoCents) server.Id {
+			return f.insert(t, ctx, at.Add(-time.Hour), &at, at, 10, revenue)
+		}
+		holder := func(offset time.Duration, contracts ...server.Id) server.Id {
+			paymentId := snReconcileTestPayment(t, ctx, f.network, wallet, created.Add(offset), contracts...)
+			snReconcileTestEpoch(t, ctx, paymentId, closed)
+			return paymentId
+		}
+		planned := holder(0, contract(closed, UsdToNanoCents(3)), contract(late, UsdToNanoCents(5)))
+		reserved := holder(time.Hour, contract(closed, UsdToNanoCents(1)))
+		key := server.NewId()
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET circle_idempotency_key=$2 WHERE payment_id=$1`, reserved, key)
+		snReconcileTestExec(t, ctx, `INSERT INTO audit_account_payment(event_id,payment_id,event_type,event_details) VALUES($1,$2,'circle_attempt_request','{}')`, key, reserved)
+		submitted := holder(2*time.Hour, contract(closed, UsdToNanoCents(1)))
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET circle_idempotency_key=$2,payment_record='submitted' WHERE payment_id=$1`, submitted, server.NewId())
+		onChain := holder(3*time.Hour, contract(closed, UsdToNanoCents(1)))
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET circle_idempotency_key=$2,payment_record='on-chain',tx_hash='0xon-chain' WHERE payment_id=$1`, onChain, server.NewId())
+		safelyCanceled := holder(4*time.Hour, contract(closed, UsdToNanoCents(1)))
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true WHERE payment_id=$1`, safelyCanceled)
+		bonusOnly := holder(5*time.Hour, contract(late, UsdToNanoCents(1)))
+		origin := holder(-24 * time.Hour)
+		snReconcileTestMoveBonus(t, ctx, origin, bonusOnly, UsdToNanoCents(2))
+		// Completed and stuck rows, and rows without early earnings, are not listed.
+		completed := holder(6*time.Hour, contract(closed, UsdToNanoCents(1)))
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET completed=true WHERE payment_id=$1`, completed)
+		canceledWithKey := holder(7*time.Hour, contract(closed, UsdToNanoCents(1)))
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true,circle_idempotency_key=$2 WHERE payment_id=$1`, canceledWithKey, server.NewId())
+		unretained := holder(8*time.Hour, contract(closed, UsdToNanoCents(1)))
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET circle_idempotency_key=$2 WHERE payment_id=$1`, unretained, server.NewId())
+		holder(9*time.Hour, contract(late, UsdToNanoCents(1)))
+
+		want := []SnReconcileHolder{
+			{PaymentId: planned, State: "planned", Payout: UsdToNanoCents(8), PayoutByteCount: 20, EarlyRevenue: UsdToNanoCents(3), EarlyByteCount: 10},
+			{PaymentId: reserved, State: "reserved", Payout: UsdToNanoCents(1), PayoutByteCount: 10, EarlyRevenue: UsdToNanoCents(1), EarlyByteCount: 10},
+			{PaymentId: submitted, State: "submitted", Payout: UsdToNanoCents(1), PayoutByteCount: 10, EarlyRevenue: UsdToNanoCents(1), EarlyByteCount: 10},
+			{PaymentId: onChain, State: "on_chain", Payout: UsdToNanoCents(1), PayoutByteCount: 10, EarlyRevenue: UsdToNanoCents(1), EarlyByteCount: 10},
+			{PaymentId: safelyCanceled, State: "safely_canceled", Payout: UsdToNanoCents(1), PayoutByteCount: 10, EarlyRevenue: UsdToNanoCents(1), EarlyByteCount: 10},
+			{PaymentId: bonusOnly, State: "planned", Payout: UsdToNanoCents(3), PayoutByteCount: 10, EarlyBonus: UsdToNanoCents(2)},
+		}
+		holders := GetSnReconcileEarlyHolders(ctx)
+		if len(holders) != len(want) {
+			t.Fatalf("holders = %d, want %d", len(holders), len(want))
+		}
+		for i, holder := range holders {
+			plan, network := holder.PaymentPlanId, holder.NetworkId
+			holder.PaymentPlanId, holder.NetworkId = server.Id{}, server.Id{}
+			if *holder != want[i] || plan == (server.Id{}) || network != f.network {
+				t.Fatalf("holder[%d] = %+v, want %+v", i, *holder, want[i])
+			}
+		}
+	})
+}
+
+// A2: the epoch rule follows the real planner. Consecutive plans leave no
+// early sweep, and every sweep of a canceled row is early in the row that
+// re-plans it, including the one that closed exactly at the clamped start.
+func TestSnReconcileEarlyEarningsFollowThePlanner(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		f := newPayoutTransitionCohort(t, ctx)
+		at := func(hours int) time.Time {
+			return payoutTestCutoff.Add(time.Duration(hours) * time.Hour)
+		}
+		contract := func(created int, closed int, revenue NanoCents) {
+			closeTime := at(closed)
+			f.insert(t, ctx, at(created), &closeTime, closeTime, 10, revenue)
+		}
+		plan := func() *PaymentPlan {
+			plan, err := CreatePaymentPlan(ctx, snReconcileTestPlanConfig(0), false, 0)
+			if err != nil || plan.SubsidyPayment == nil || plan.NetworkPayments[f.network] == nil {
+				t.Fatal("plan", plan, err)
+			}
+			return plan
+		}
+		contract(0, 1, UsdToNanoCents(1))
+		contract(1, 2, UsdToNanoCents(1))
+		plan()
+		contract(3, 4, UsdToNanoCents(2))
+		contract(4, 5, UsdToNanoCents(3))
+		canceled := plan().NetworkPayments[f.network]
+		if holders := GetSnReconcileEarlyHolders(ctx); len(holders) != 0 {
+			t.Fatal("consecutive plans left early sweeps", holders)
+		}
+		if err := CancelPayment(ctx, canceled.PaymentId); err != nil {
+			t.Fatal(err)
+		}
+		contract(6, 7, UsdToNanoCents(4))
+		third := plan()
+		if !third.SubsidyPayment.StartTime.Equal(at(5)) {
+			t.Fatal("the re-plan's epoch did not start at the canceled plan's end", third.SubsidyPayment.StartTime)
+		}
+		holders := GetSnReconcileEarlyHolders(ctx)
+		if len(holders) != 1 || holders[0].PaymentId != third.NetworkPayments[f.network].PaymentId || holders[0].State != "planned" ||
+			holders[0].EarlyRevenue != UsdToNanoCents(5) || holders[0].EarlyByteCount != 20 {
+			t.Fatal("re-planned sweeps are not early in their new row", holders)
+		}
+	})
+}
+
+// A2: a plan that recorded no epoch does not clamp the next one, so the row
+// that re-plans its sweeps finds them early through the earlier row.
+func TestSnReconcileEarlyEarningsAfterPlanWithoutEpoch(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		f := newPayoutTransitionCohort(t, ctx)
+		now := server.NowUtc().Truncate(time.Microsecond)
+		contract := func(created time.Time, closed time.Time, revenue NanoCents) {
+			f.insert(t, ctx, created, &closed, closed, 10, revenue)
+		}
+		contract(now.Add(-7*time.Hour), now.Add(-6*time.Hour), UsdToNanoCents(2))
+		short, err := CreatePaymentPlan(ctx, snReconcileTestPlanConfig(30*24*time.Hour), false, 0)
+		if err != nil || short.SubsidyPayment != nil || short.NetworkPayments[f.network] == nil {
+			t.Fatal("a short plan recorded an epoch", short, err)
+		}
+		if err := CancelPayment(ctx, short.NetworkPayments[f.network].PaymentId); err != nil {
+			t.Fatal(err)
+		}
+		contract(now.Add(time.Hour), now.Add(2*time.Hour), UsdToNanoCents(4))
+		replan, err := CreatePaymentPlan(ctx, snReconcileTestPlanConfig(0), false, 0)
+		if err != nil || replan.SubsidyPayment == nil || !replan.SubsidyPayment.StartTime.Equal(now.Add(-7*time.Hour)) {
+			t.Fatal("the re-plan's epoch was clamped", replan, err)
+		}
+		holders := GetSnReconcileEarlyHolders(ctx)
+		if len(holders) != 1 || holders[0].PaymentId != replan.NetworkPayments[f.network].PaymentId || holders[0].EarlyRevenue != UsdToNanoCents(2) || holders[0].EarlyByteCount != 10 {
+			t.Fatal("the sweep re-planned from a plan without an epoch is not early", holders)
+		}
+	})
+}
+
+// A2: a bounded multi-slice drain shows no false early sweep, also for a
+// contract that opened in one slice and closed in a later one.
+func TestSnReconcileEarlyEarningsNotInDrainSlices(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		f := newPayoutTransitionCohort(t, ctx)
+		base := server.NowUtc().Truncate(time.Microsecond).Add(-4 * 24 * time.Hour)
+		contract := func(created int, closed int) {
+			closeTime := base.Add(time.Duration(closed) * time.Hour)
+			f.insert(t, ctx, base.Add(time.Duration(created)*time.Hour), &closeTime, closeTime, 10, UsdToNanoCents(1))
+		}
+		contract(0, 1)
+		if _, err := CreatePaymentPlan(ctx, snReconcileTestPlanConfig(0), false, 0); err != nil {
+			t.Fatal(err)
+		}
+		contract(2, 10)
+		contract(3, 50)
+		contract(20, 30)
+		contract(40, 45)
+		rows := 1
+		for slice := 0; slice < 3; slice++ {
+			plan, err := CreatePaymentPlan(ctx, snReconcileTestPlanConfig(0), false, 24*time.Hour)
+			if err != nil || plan.SubsidyPayment == nil {
+				t.Fatal("slice", slice, plan, err)
+			}
+			rows += len(plan.NetworkPayments)
+		}
+		var unpaid int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM transfer_escrow_sweep WHERE payment_id IS NULL`).Scan(&unpaid))
+		})
+		if rows != 4 || unpaid != 0 {
+			t.Fatal("the drain did not plan one row per slice", rows, unpaid)
+		}
+		if holders := GetSnReconcileEarlyHolders(ctx); len(holders) != 0 {
+			t.Fatal("drain slices show early sweeps", holders)
+		}
+	})
+}
+
+// A4: the wallet address of each row holding a listed record.
+func TestSnReconcileRecordAddresses(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		walletId := server.NewId()
+		snReconcileTestExec(t, ctx, `INSERT INTO account_wallet(wallet_id,network_id,wallet_type,blockchain,wallet_address,active,default_token_type)
+			VALUES($1,$2,'external','MATIC',E' 0xAA\t',false,'USDC')`, walletId, networkId)
+		withWallet := snReconcileTestBareRow(t, ctx, nil, nil, nil)
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET payment_record='rec-1',wallet_id=$2 WHERE payment_id=$1`, withWallet, walletId)
+		withoutWallet := snReconcileTestBareRow(t, ctx, nil, nil, nil)
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET payment_record='rec-2' WHERE payment_id=$1`, withoutWallet)
+		unlisted := "unlisted"
+		snReconcileTestBareRow(t, ctx, &unlisted, nil, nil)
+		got := GetSnReconcileRecordAddresses(ctx, []string{"rec-1", "rec-2", "rec-3"})
+		if len(got) != 2 || got[0].Record != "rec-1" || *got[0].WalletAddress != " 0xAA\t" || got[1].Record != "rec-2" || got[1].WalletAddress != nil {
+			t.Fatal("record addresses", got)
+		}
+	})
+}
+
+// A7: revived rows that are not yet completed, with their network's payout wallet.
+func TestSnReconcileRevivedPending(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		f := newPayoutTransitionCohort(t, ctx)
+		wallet := GetPayoutWalletId(ctx, f.network)
+		revived := func(networkId server.Id, eventType string, payout NanoCents) server.Id {
+			paymentId := snReconcileTestPaymentPlus(t, ctx, payout, networkId, wallet, payoutTestCutoff)
+			snReconcileTestExec(t, ctx, `INSERT INTO audit_account_payment(event_id,payment_id,event_type,event_details) VALUES($1,$2,$3,'{}')`, server.NewId(), paymentId, eventType)
+			return paymentId
+		}
+		pending := revived(f.network, "sn_reconcile_revived", UsdToNanoCents(3))
+		walletless := revived(server.NewId(), "sn_reconcile_revived", UsdToNanoCents(2))
+		completed := revived(f.network, "sn_reconcile_revived", UsdToNanoCents(1))
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET completed=true WHERE payment_id=$1`, completed)
+		canceled := revived(f.network, "sn_reconcile_revived", UsdToNanoCents(1))
+		snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true WHERE payment_id=$1`, canceled)
+		revived(f.network, "circle_attempt_request", UsdToNanoCents(1))
+		snReconcileTestPayment(t, ctx, f.network, wallet, payoutTestCutoff)
+
+		got := map[server.Id]*SnReconcileRevived{}
+		for _, row := range GetSnReconcileRevivedPending(ctx) {
+			got[row.PaymentId] = row
+		}
+		if len(got) != 2 || got[pending].Payout != UsdToNanoCents(3) || *got[pending].PayoutWalletBlockchain != "MATIC" || !got[pending].PayoutWalletActive ||
+			got[walletless].Payout != UsdToNanoCents(2) || got[walletless].PayoutWalletBlockchain != nil || got[walletless].PayoutWalletActive {
+			t.Fatal("revived pending", got)
+		}
+	})
+}
+
+// A1: a request journaled under the key after the census leaves the row
+// untouched, whatever its payment or type.
+func TestSnReconcileReviveRefusesJournaledKey(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		_, row := snReconcileTestRevivable(t, ctx)
+		snReconcileTestExec(t, ctx, `INSERT INTO audit_account_payment(event_id,payment_id,event_type,event_details) VALUES($1,$2,'circle_attempt_request','{}')`,
+			*row.CircleIdempotencyKey, server.NewId())
+		before := snReconcileTestFingerprint(t, ctx, row.PaymentId)
+		if ReviveSnReconcileRow(ctx, row, nil, server.NewId(), nil, func(server.PgTx) { t.Fatal("journaled row scheduled") }) {
+			t.Fatal("a row whose key was journaled was revived")
+		}
+		if after := snReconcileTestFingerprint(t, ctx, row.PaymentId); after != before {
+			t.Fatalf("journaled revive wrote: %s", after)
+		}
 	})
 }

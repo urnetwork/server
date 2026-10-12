@@ -13,8 +13,8 @@ import (
 
 // Prints the report, as text or as one JSON document, and returns the exit
 // code. A refusal prints its report too, then its error, and exits non-zero.
-func runSnReconcile(stdout io.Writer, stderr io.Writer, send bool, asJson bool, reconcile func(bool) (*controller.SnReconcileReport, error)) int {
-	report, err := reconcile(send)
+func runSnReconcile(stdout io.Writer, stderr io.Writer, send bool, expect string, asJson bool, reconcile func(bool, string) (*controller.SnReconcileReport, error)) int {
+	report, err := reconcile(send, expect)
 	if report != nil {
 		if asJson {
 			data, jsonErr := json.MarshalIndent(report, "", "  ")

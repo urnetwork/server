@@ -91,7 +91,7 @@ Usage:
     bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd> --adjustment_id=<adjustment_id> --reason=<reason>
     bringyourctl payouts plan [--send] [--dry-run] [--max_duration=<max_duration>]
     bringyourctl payouts populate-tx-hashes
-    bringyourctl payouts sn-reconcile [--send] [--json]
+    bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -168,6 +168,7 @@ Options:
     --blockchain=<blockchain>  Blockchain.
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
     --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, or solana.
+    --expect=<digest>  The digest the sn-reconcile dry run printed; --send refuses any other census.
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {
@@ -315,10 +316,11 @@ func main() {
 			populateTxHashes()
 		} else if snReconcile, _ := opts.Bool("sn-reconcile"); snReconcile {
 			send, _ := opts.Bool("--send")
+			expect, _ := opts.String("--expect")
 			asJson, _ := opts.Bool("--json")
 			clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
-			os.Exit(runSnReconcile(os.Stdout, os.Stderr, send, asJson, func(send bool) (*controller.SnReconcileReport, error) {
-				return controller.SnReconcile(clientSession, send)
+			os.Exit(runSnReconcile(os.Stdout, os.Stderr, send, expect, asJson, func(send bool, expect string) (*controller.SnReconcileReport, error) {
+				return controller.SnReconcile(clientSession, send, expect)
 			}))
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {

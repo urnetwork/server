@@ -5,6 +5,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -25,7 +27,7 @@ const (
 	snReconcileUnresolved    = "unresolved"
 )
 
-// Reasons of an unresolved row.
+// Reasons of an unresolved row, and of a payable row skipped by `--send`.
 const (
 	snReconcileReviewRequired    = "review_required"
 	snReconcileContradictory     = "contradictory"
@@ -34,9 +36,11 @@ const (
 	snReconcileListingIncomplete = "listing_incomplete"
 	snReconcileOrphanTransfer    = "orphan_transfer"
 	snReconcileCensusMismatch    = "census_mismatch"
+	snReconcileSweepsMissing     = "sweeps_missing"
 	snReconcileDuplicateRisk     = "duplicate_risk"
 	snReconcileNoPayoutWallet    = "no_payout_wallet"
 	snReconcileBelowFee          = "below_fee"
+	snReconcileChanged           = "changed"
 )
 
 // Outcomes of the row's own attempt that do not stop its classification.
@@ -45,13 +49,14 @@ const (
 	snReconcileAttemptNoFunds  = "no_funds"
 )
 
-// An orphan may pay a row created up to this long after it, and the listing
-// starts this long before the oldest stuck row.
+// An orphan may pay a row from a day before the row's earliest contract closed.
 const snReconcileOrphanWindow = 24 * time.Hour
 
-// Records stored this close to either end of the listing need not appear yet.
+// Records stored this close to either end of a listing need not appear yet,
+// and the send's re-listing starts this long before the census listing did.
 const snReconcileCompletenessMargin = time.Hour
 
+var ErrSnReconcileDigestMismatch = errors.New("sn-reconcile: --expect does not match the digest of this census; nothing was revived")
 var ErrSnReconcileUnfunded = errors.New("sn-reconcile: a chain's payable send total exceeds its payout wallet's USDC balance; nothing was revived")
 
 type SnReconcileReport struct {
@@ -59,14 +64,16 @@ type SnReconcileReport struct {
 	Time         time.Time                `json:"time"`
 	Mode         string                   `json:"mode"`
 	PolicySha256 string                   `json:"policy_sha256"`
+	Digest       string                   `json:"digest"`
 	Listing      *SnReconcileListing      `json:"listing"`
 	Orphans      []*SnReconcileOrphan     `json:"orphans"`
 	Classes      []*SnReconcileClassTotal `json:"classes"`
 	Funding      []*SnReconcileFunding    `json:"funding"`
 	Rows         []*SnReconcileRowReport  `json:"rows"`
 	Duplicates   []*SnReconcileDuplicates `json:"duplicates"`
+	Relisting    *SnReconcileListing      `json:"relisting"`
 	Revived      []server.Id              `json:"revived"`
-	Skipped      []server.Id              `json:"skipped"`
+	Skipped      []*SnReconcileSkip       `json:"skipped"`
 }
 
 // With no stuck row nothing is listed and `From` and `Start` are nil.
@@ -77,6 +84,7 @@ type SnReconcileListing struct {
 	TransactionCount int        `json:"transaction_count"`
 	Complete         bool       `json:"complete"`
 	MissingIds       []string   `json:"missing_ids"`
+	MismatchedIds    []string   `json:"mismatched_ids"`
 }
 
 // A listed transfer that no payment record or receipt names, in a state other
@@ -90,6 +98,8 @@ type SnReconcileOrphan struct {
 	CreateDate      string      `json:"create_date"`
 	Destination     string      `json:"destination"`
 	NetworkIds      []server.Id `json:"network_ids"`
+	// A4: no network registered the destination, and it is not our own wallet.
+	Unattributed bool `json:"unattributed"`
 
 	created time.Time
 }
@@ -101,12 +111,15 @@ type SnReconcileClassTotal struct {
 	PayoutNanoCents model.NanoCents `json:"payout_nano_cents"`
 }
 
-// The payable send total of one chain against its payout wallet (RC-13).
+// The payable send total of one chain, with the rows earlier runs revived that
+// are not yet completed, against its payout wallet (RC-13, A7).
 type SnReconcileFunding struct {
 	Chain              string          `json:"chain"`
 	WalletId           string          `json:"wallet_id"`
 	PayableCount       int             `json:"payable_count"`
 	SendNanoCents      model.NanoCents `json:"send_nano_cents"`
+	RevivedCount       int             `json:"revived_count"`
+	RevivedNanoCents   model.NanoCents `json:"revived_nano_cents"`
 	BalanceNanoCents   model.NanoCents `json:"balance_nano_cents"`
 	ShortfallNanoCents model.NanoCents `json:"shortfall_nano_cents"`
 
@@ -132,32 +145,41 @@ type SnReconcileRowReport struct {
 	sendNanoCents model.NanoCents
 }
 
-// One network's possibly re-paid earnings (§6). Read only.
+// One network's rows that hold early earnings an earlier payment may already
+// have paid, with the network's RC-1 rows (§6, A2). Read only.
 type SnReconcileDuplicates struct {
-	NetworkId              server.Id                    `json:"network_id"`
-	Sources                []*SnReconcileRowReport      `json:"sources"`
-	PaidTwiceRiskNanoCents model.NanoCents              `json:"paid_twice_risk_nano_cents"`
-	Queue                  []*model.SnReconcileQueueRow `json:"queue"`
-	CandidateNanoCents     model.NanoCents              `json:"candidate_nano_cents"`
-	AtRiskNanoCents        model.NanoCents              `json:"at_risk_nano_cents"`
+	NetworkId             server.Id                  `json:"network_id"`
+	Canceled              []*SnReconcileRowReport    `json:"canceled"`
+	CanceledByClass       []*SnReconcileClassTotal   `json:"canceled_by_class"`
+	Holders               []*model.SnReconcileHolder `json:"holders"`
+	EarlyRevenueNanoCents model.NanoCents            `json:"early_revenue_nano_cents"`
+	EarlyByteCount        model.ByteCount            `json:"early_byte_count"`
+}
+
+// A payable row `--send` left untouched: changed since the census, or blocked
+// by the re-listing (A1).
+type SnReconcileSkip struct {
+	PaymentId server.Id `json:"payment_id"`
+	Reason    string    `json:"reason"`
+	OrphanIds []string  `json:"orphan_ids,omitempty"`
 }
 
 // SnReconcile runs the census and, with `send`, revives the payable rows for
 // the existing sender. The dry run writes nothing and calls only Circle GET
-// endpoints (RC-18). A funding refusal still returns its report.
-func SnReconcile(clientSession *session.ClientSession, send bool) (*SnReconcileReport, error) {
+// endpoints (RC-18). `--send` needs the digest of the dry run it executes
+// (A7). A refusal still returns its report.
+func SnReconcile(clientSession *session.ClientSession, send bool, expect string) (*SnReconcileReport, error) {
 	ctx := clientSession.Ctx
 	report := &SnReconcileReport{
 		RunId:      server.NewId(),
 		Time:       server.NowUtc(),
 		Mode:       "dry_run",
-		Listing:    &SnReconcileListing{Wallets: []string{}, Complete: true, MissingIds: []string{}},
+		Listing:    &SnReconcileListing{Wallets: []string{}, Complete: true, MissingIds: []string{}, MismatchedIds: []string{}},
 		Orphans:    []*SnReconcileOrphan{},
-		Classes:    []*SnReconcileClassTotal{},
 		Rows:       []*SnReconcileRowReport{},
 		Duplicates: []*SnReconcileDuplicates{},
 		Revived:    []server.Id{},
-		Skipped:    []server.Id{},
+		Skipped:    []*SnReconcileSkip{},
 	}
 	if send {
 		report.Mode = "send"
@@ -194,15 +216,39 @@ func SnReconcile(clientSession *session.ClientSession, send bool) (*SnReconcileR
 	}
 	ledger := NewCirclePayoutLedger()
 	transactions := []CircleTransaction{}
+	own := map[string]bool{}
 	if 0 < len(rows) {
-		transactions, err = snReconcileListing(ctx, ledger, report, rows[0].CreateTime.Add(-snReconcileOrphanWindow), walletIds)
+		// A4: every developer wallet is listed, and a transfer to one is ours.
+		developerWallets, err := ledger.ListDeveloperWallets(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("sn-reconcile: listing the Circle developer wallets: %w", err)
+		}
+		for _, wallet := range developerWallets {
+			walletIds = append(walletIds, wallet.ID)
+			own[model.SnReconcileAddress(wallet.Address)] = true
+		}
+		// A3: the listing reaches every row's orphan window.
+		from := snReconcileWindowStart(rows[0])
+		for _, row := range rows {
+			from = server.MinTime(from, snReconcileWindowStart(row))
+		}
+		walletIds = append(walletIds, model.GetSnReconcileReceiptWalletIds(ctx, from)...)
+		report.Listing, transactions, err = snReconcileList(ctx, ledger, walletIds, from)
+		if err != nil {
+			return nil, err
+		}
+		report.Orphans, err = snReconcileOrphans(ctx, transactions, own)
 		if err != nil {
 			return nil, err
 		}
 	}
-	snReconcileClassify(ctx, report, transactions)
+	for _, item := range report.Rows {
+		snReconcileClassify(item, report, transactions)
+	}
+	report.Digest = snReconcileDigest(report)
 	snReconcileDuplicates(ctx, report)
-	snReconcileClassTotals(report)
+	report.Classes = snReconcileTotals(report.Rows)
+	revived := model.GetSnReconcileRevivedPending(ctx)
 	for _, funding := range report.Funding {
 		funding.BalanceNanoCents, err = ledger.GetWalletTokenBalance(ctx, funding.WalletId, funding.tokenAddress)
 		if err != nil {
@@ -214,29 +260,66 @@ func SnReconcile(clientSession *session.ClientSession, send bool) (*SnReconcileR
 				funding.SendNanoCents += item.sendNanoCents
 			}
 		}
-		funding.ShortfallNanoCents = max(0, funding.SendNanoCents-funding.BalanceNanoCents)
+		for _, row := range revived {
+			if chain, ok := snReconcilePayoutChain(row.PayoutWalletBlockchain, row.PayoutWalletActive); ok && chain == funding.Chain {
+				_, sendNanoCents := snReconcileSendAmount(row.Payout)
+				funding.RevivedCount += 1
+				funding.RevivedNanoCents += sendNanoCents
+			}
+		}
+		funding.ShortfallNanoCents = max(0, funding.SendNanoCents+funding.RevivedNanoCents-funding.BalanceNanoCents)
 	}
 	if !send {
 		return report, nil
 	}
-	// RC-13: refuse before any write.
+	// A7, RC-13: refuse before any write.
+	if expect != report.Digest {
+		return report, ErrSnReconcileDigestMismatch
+	}
 	for _, funding := range report.Funding {
 		if 0 < funding.ShortfallNanoCents {
 			return report, ErrSnReconcileUnfunded
 		}
 	}
+	payable := []*SnReconcileRowReport{}
 	for _, item := range report.Rows {
-		if item.Class != snReconcilePayable {
+		if item.Class == snReconcilePayable {
+			payable = append(payable, item)
+		}
+	}
+	if len(payable) == 0 {
+		return report, nil
+	}
+	// A1: list again just before reviving; the re-listing may only skip rows.
+	report.Relisting, transactions, err = snReconcileList(ctx, ledger, report.Listing.Wallets, report.Listing.Start.Add(-snReconcileCompletenessMargin))
+	if err != nil {
+		return nil, err
+	}
+	orphans, err := snReconcileOrphans(ctx, transactions, own)
+	if err != nil {
+		return nil, err
+	}
+	for _, orphan := range orphans {
+		if !slices.ContainsFunc(report.Orphans, func(listed *SnReconcileOrphan) bool { return listed.Id == orphan.Id }) {
+			report.Orphans = append(report.Orphans, orphan)
+		}
+	}
+	for _, item := range payable {
+		if !report.Relisting.Complete {
+			report.Skipped = append(report.Skipped, &SnReconcileSkip{PaymentId: item.PaymentId, Reason: snReconcileListingIncomplete})
+			continue
+		}
+		if orphanIds := snReconcileBlockingOrphans(item.row, orphans); 0 < len(orphanIds) {
+			report.Skipped = append(report.Skipped, &SnReconcileSkip{PaymentId: item.PaymentId, Reason: snReconcileOrphanTransfer, OrphanIds: orphanIds})
 			continue
 		}
 		paymentId := item.PaymentId
-		revived := model.ReviveSnReconcileRow(ctx, item.row, policy, report.RunId, item.Evidence, func(tx server.PgTx) {
+		if model.ReviveSnReconcileRow(ctx, item.row, policy, report.RunId, item.Evidence, func(tx server.PgTx) {
 			ScheduleAdvancePayment(&AdvancePaymentArgs{PaymentId: paymentId}, clientSession, tx)
-		})
-		if revived {
+		}) {
 			report.Revived = append(report.Revived, paymentId)
 		} else {
-			report.Skipped = append(report.Skipped, paymentId)
+			report.Skipped = append(report.Skipped, &SnReconcileSkip{PaymentId: paymentId, Reason: snReconcileChanged})
 		}
 	}
 	return report, nil
@@ -286,37 +369,66 @@ func snReconcileJudge(row *model.SnReconcileRow, transaction *CircleTransaction)
 	}
 }
 
-// RC-5 to RC-7: list every wallet of the wallet set from `from`, check the
-// listing holds every record stored inside its margins, and report the
-// transfers that no payment names. A listing error fails the command.
-func snReconcileListing(ctx context.Context, ledger CirclePayoutLedger, report *SnReconcileReport, from time.Time, walletIds []string) ([]CircleTransaction, error) {
-	walletIds = append(walletIds, model.GetSnReconcileReceiptWalletIds(ctx, from)...)
+// A3: a row's orphan window opens a day before its earliest contract closed,
+// or before the row was created when that is earlier.
+func snReconcileWindowStart(row *model.SnReconcileRow) time.Time {
+	start := row.CreateTime
+	if row.EarliestClose != nil && row.EarliestClose.Before(start) {
+		start = *row.EarliestClose
+	}
+	return start.Add(-snReconcileOrphanWindow)
+}
+
+// RC-5 and RC-6: list every wallet from `from`. The listing must hold every
+// record stored inside its margins, and a listed transaction a record names
+// must reach that row's wallet under the A4 address rule. A listing error
+// fails the command; it is never a short result.
+func snReconcileList(ctx context.Context, ledger CirclePayoutLedger, walletIds []string, from time.Time) (*SnReconcileListing, []CircleTransaction, error) {
+	walletIds = slices.Clone(walletIds)
 	slices.Sort(walletIds)
 	walletIds = slices.Compact(walletIds)
 	start := server.NowUtc()
-	report.Listing.Wallets, report.Listing.From, report.Listing.Start = walletIds, &from, &start
+	listing := &SnReconcileListing{Wallets: walletIds, From: &from, Start: &start, MissingIds: []string{}, MismatchedIds: []string{}}
 	transactions := []CircleTransaction{}
 	for _, walletId := range walletIds {
 		listed, err := ledger.ListWalletTransactions(ctx, walletId, from)
 		if err != nil {
-			return nil, fmt.Errorf("sn-reconcile: listing Circle wallet %s: %w", walletId, err)
+			return nil, nil, fmt.Errorf("sn-reconcile: listing Circle wallet %s: %w", walletId, err)
 		}
 		transactions = append(transactions, listed...)
 	}
-	report.Listing.TransactionCount = len(transactions)
+	listing.TransactionCount = len(transactions)
 	ids := []string{}
-	listed := map[string]bool{}
-	for _, transaction := range transactions {
-		ids = append(ids, transaction.Id)
-		listed[transaction.Id] = true
+	byId := map[string]*CircleTransaction{}
+	for i := range transactions {
+		ids = append(ids, transactions[i].Id)
+		byId[transactions[i].Id] = &transactions[i]
 	}
 	for _, record := range model.GetSnReconcileRecordsPaidBetween(ctx, from.Add(snReconcileCompletenessMargin), start.Add(-snReconcileCompletenessMargin)) {
-		if !listed[record] {
-			report.Listing.MissingIds = append(report.Listing.MissingIds, record)
+		if byId[record] == nil {
+			listing.MissingIds = append(listing.MissingIds, record)
 		}
 	}
-	report.Listing.Complete = len(report.Listing.MissingIds) == 0
+	for _, address := range model.GetSnReconcileRecordAddresses(ctx, ids) {
+		if address.WalletAddress == nil || model.SnReconcileAddress(*address.WalletAddress) != model.SnReconcileAddress(byId[address.Record].DestinationAddress) {
+			listing.MismatchedIds = append(listing.MismatchedIds, address.Record)
+		}
+	}
+	listing.MismatchedIds = slices.Compact(listing.MismatchedIds)
+	listing.Complete = len(listing.MissingIds) == 0 && len(listing.MismatchedIds) == 0
+	return listing, transactions, nil
+}
+
+// RC-7 and A4: the listed transfers no payment names, with the networks that
+// registered each destination. A transfer to no network's address and to none
+// of our own developer wallets is unattributed.
+func snReconcileOrphans(ctx context.Context, transactions []CircleTransaction, own map[string]bool) ([]*SnReconcileOrphan, error) {
+	ids := []string{}
+	for _, transaction := range transactions {
+		ids = append(ids, transaction.Id)
+	}
 	referenced := model.GetSnReconcileReferencedIds(ctx, ids)
+	orphans := []*SnReconcileOrphan{}
 	destinations := []string{}
 	for _, transaction := range transactions {
 		// Only a deposit into the payout wallet is never a payment; an empty or
@@ -328,16 +440,18 @@ func snReconcileListing(ctx context.Context, ledger CirclePayoutLedger, report *
 		if err != nil {
 			return nil, fmt.Errorf("sn-reconcile: Circle transaction %s has an unreadable createDate %q", transaction.Id, transaction.CreateDate)
 		}
-		report.Orphans = append(report.Orphans, &SnReconcileOrphan{Id: transaction.Id, WalletId: transaction.WalletId,
+		orphans = append(orphans, &SnReconcileOrphan{Id: transaction.Id, WalletId: transaction.WalletId,
 			TransactionType: transaction.TransactionType, State: transaction.State, Amounts: transaction.Amounts,
 			CreateDate: transaction.CreateDate, Destination: transaction.DestinationAddress, created: created})
-		destinations = append(destinations, strings.ToLower(transaction.DestinationAddress))
+		destinations = append(destinations, model.SnReconcileAddress(transaction.DestinationAddress))
 	}
 	networks := model.GetSnReconcileAddressNetworks(ctx, destinations)
-	for _, orphan := range report.Orphans {
-		orphan.NetworkIds = networks[strings.ToLower(orphan.Destination)]
+	for _, orphan := range orphans {
+		destination := model.SnReconcileAddress(orphan.Destination)
+		orphan.NetworkIds = networks[destination]
+		orphan.Unattributed = len(orphan.NetworkIds) == 0 && !own[destination]
 	}
-	return transactions, nil
+	return orphans, nil
 }
 
 func snReconcileFailedState(state string) bool {
@@ -349,23 +463,8 @@ func snReconcileFailedState(state string) bool {
 	}
 }
 
-// §5 in order. Steps 1 to 5 decide every row a source could be; RC-21 then
-// reads the sources of the rows that passed RC-8, before RC-10 to RC-12.
-func snReconcileClassify(ctx context.Context, report *SnReconcileReport, transactions []CircleTransaction) {
-	for _, item := range report.Rows {
-		snReconcileClassifyAttempt(item, report, transactions)
-	}
-	sources := snReconcileSources(report)
-	for _, item := range report.Rows {
-		if item.Class == "" {
-			snReconcileClassifyPayable(ctx, item, sources[item.NetworkId])
-		}
-	}
-}
-
-// Steps 1 to 5 of §5. A row whose census is exact and that nothing blocked
-// keeps an empty class.
-func snReconcileClassifyAttempt(item *SnReconcileRowReport, report *SnReconcileReport, transactions []CircleTransaction) {
+// §5 in order, as amended by A2 and A5; the first match decides.
+func snReconcileClassify(item *SnReconcileRowReport, report *SnReconcileReport, transactions []CircleTransaction) {
 	row := item.row
 	// RC-9
 	if row.AttributionReviewRequired {
@@ -397,13 +496,38 @@ func snReconcileClassifyAttempt(item *SnReconcileRowReport, report *SnReconcileR
 		item.Class, item.Reason = snReconcileUnresolved, snReconcileOrphanTransfer
 		return
 	}
-	// RC-8
+	// RC-8, A5: a row without sweeps is `replanned` only with evidence of the
+	// re-plan, and never as RC-2.
 	if !item.censusExact {
-		item.Class, item.Reason = snReconcileUnresolved, snReconcileCensusMismatch
-		if row.SweepCount == 0 {
-			item.Class, item.Reason = snReconcileReplanned, ""
+		switch {
+		case 0 < row.SweepCount:
+			item.Class, item.Reason = snReconcileUnresolved, snReconcileCensusMismatch
+		case row.Kind == model.SnReconcileCanceledWithEvidence && row.ReplanEvidence:
+			item.Class = snReconcileReplanned
+		default:
+			item.Class, item.Reason = snReconcileUnresolved, snReconcileSweepsMissing
 		}
+		return
 	}
+	// A2
+	if row.EarlyEarnings {
+		item.Class, item.Reason = snReconcileUnresolved, snReconcileDuplicateRisk
+		return
+	}
+	// RC-10
+	chain, ok := snReconcilePayoutChain(row.PayoutWalletBlockchain, row.PayoutWalletActive)
+	if !ok {
+		item.Class, item.Reason = snReconcileUnresolved, snReconcileNoPayoutWallet
+		return
+	}
+	// RC-11
+	sendUsd, sendNanoCents := snReconcileSendAmount(row.Payout)
+	if sendNanoCents <= 0 {
+		item.Class, item.Reason = snReconcileUnresolved, snReconcileBelowFee
+		return
+	}
+	// RC-12
+	item.Class, item.OwedNanoCents, item.SendUsd, item.Chain, item.sendNanoCents = snReconcilePayable, row.Payout, sendUsd, chain, sendNanoCents
 }
 
 // RC-4: the listed transaction with the row's hash, judged by RC-3's rules.
@@ -427,15 +551,16 @@ func snReconcileHashAttempt(item *SnReconcileRowReport, transactions []CircleTra
 	}
 }
 
-// RC-7: the orphans created at or after the row's create time less the window
-// whose destination is the pinned wallet or any wallet of the row's network.
+// RC-7: the orphans created inside the row's A3 window whose destination is the
+// pinned wallet or any wallet of the row's network.
 func snReconcileBlockingOrphans(row *model.SnReconcileRow, orphans []*SnReconcileOrphan) []string {
+	start := snReconcileWindowStart(row)
 	ids := []string{}
 	for _, orphan := range orphans {
-		if orphan.created.Before(row.CreateTime.Add(-snReconcileOrphanWindow)) {
+		if orphan.created.Before(start) {
 			continue
 		}
-		if (row.PinnedWalletAddress != nil && strings.EqualFold(*row.PinnedWalletAddress, orphan.Destination)) ||
+		if (row.PinnedWalletAddress != nil && model.SnReconcileAddress(*row.PinnedWalletAddress) == model.SnReconcileAddress(orphan.Destination)) ||
 			slices.Contains(orphan.NetworkIds, row.NetworkId) {
 			ids = append(ids, orphan.Id)
 		}
@@ -443,111 +568,99 @@ func snReconcileBlockingOrphans(row *model.SnReconcileRow, orphans []*SnReconcil
 	return ids
 }
 
-// RC-21 sources by network: RC-1 rows whose census is not exact and that are
-// not proven unpaid.
-func snReconcileSources(report *SnReconcileReport) map[server.Id][]*SnReconcileRowReport {
-	sources := map[server.Id][]*SnReconcileRowReport{}
+// RC-10: the chain of an active payout wallet on a chain the sender supports.
+func snReconcilePayoutChain(blockchain *string, active bool) (string, bool) {
+	if blockchain == nil || !active {
+		return "", false
+	}
+	chain, err := formatBlockchain(*blockchain)
+	return chain, err == nil
+}
+
+// RC-11: the sender's own fresh-attempt amount.
+func snReconcileSendAmount(payout model.NanoCents) (float64, model.NanoCents) {
+	sendUsd := model.NanoCentsToUsd(payout) - providerPaymentFeeUsd
+	return sendUsd, model.UsdToNanoCents(sendUsd)
+}
+
+// A7: what `--send` must find again: each payable row with its owed and send
+// amounts and chain, and each unattributed orphan.
+func snReconcileDigest(report *SnReconcileReport) string {
+	lines := []string{}
 	for _, item := range report.Rows {
-		if item.Kind == model.SnReconcileCanceledWithEvidence && !item.censusExact &&
-			(item.Class == snReconcilePaidReplanned || item.Class == snReconcileUnresolved) {
-			sources[item.NetworkId] = append(sources[item.NetworkId], item)
+		if item.Class == snReconcilePayable {
+			lines = append(lines, fmt.Sprintf("payable %s %d %d %s", item.PaymentId, item.OwedNanoCents, item.sendNanoCents, item.Chain))
 		}
 	}
-	return sources
+	for _, orphan := range report.Orphans {
+		if orphan.Unattributed {
+			lines = append(lines, "unattributed "+orphan.Id)
+		}
+	}
+	slices.Sort(lines)
+	digest := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+	return hex.EncodeToString(digest[:])
 }
 
-// The earliest COALESCE(cancel_time, create_time) and latest create_time of a
-// network's sources, and their ids.
-func snReconcileSourceWindow(sources []*SnReconcileRowReport) (after time.Time, before time.Time, ids []server.Id) {
-	for i, source := range sources {
-		start := source.row.CreateTime
-		if source.row.CancelTime != nil {
-			start = *source.row.CancelTime
-		}
-		if i == 0 || start.Before(after) {
-			after = start
-		}
-		if i == 0 || source.row.CreateTime.After(before) {
-			before = source.row.CreateTime
-		}
-		ids = append(ids, source.PaymentId)
-	}
-	return
-}
-
-// Steps 5 (RC-21) to 8 of §5 for a row whose census is exact.
-func snReconcileClassifyPayable(ctx context.Context, item *SnReconcileRowReport, sources []*SnReconcileRowReport) {
-	row := item.row
-	// RC-21
-	if 0 < len(sources) {
-		after, before, ids := snReconcileSourceWindow(sources)
-		if row.CreateTime.After(after) && model.SnReconcileHoldsEarlierEarnings(ctx, row.PaymentId, before, ids) {
-			item.Class, item.Reason = snReconcileUnresolved, snReconcileDuplicateRisk
-			return
-		}
-	}
-	// RC-10
-	if row.PayoutWalletId == nil || !row.PayoutWalletActive {
-		item.Class, item.Reason = snReconcileUnresolved, snReconcileNoPayoutWallet
-		return
-	}
-	chain, err := formatBlockchain(*row.PayoutWalletBlockchain)
-	if err != nil {
-		item.Class, item.Reason = snReconcileUnresolved, snReconcileNoPayoutWallet
-		return
-	}
-	// RC-11: the sender's own fresh-attempt amount and threshold.
-	sendUsd := model.NanoCentsToUsd(row.Payout) - providerPaymentFeeUsd
-	if model.UsdToNanoCents(sendUsd) <= 0 {
-		item.Class, item.Reason = snReconcileUnresolved, snReconcileBelowFee
-		return
-	}
-	// RC-12
-	item.Class, item.OwedNanoCents, item.SendUsd, item.Chain = snReconcilePayable, row.Payout, sendUsd, chain
-	item.sendNanoCents = model.UsdToNanoCents(sendUsd)
-}
-
-// RC-17: each network with sources, with its pending rows that may re-pay them.
+// §6 (A2): the rows holding early earnings, by network, with each network's
+// RC-1 rows. Networks with a paid RC-1 row or an orphan come first.
 func snReconcileDuplicates(ctx context.Context, report *SnReconcileReport) {
-	sources := snReconcileSources(report)
-	networkIds := []server.Id{}
-	for networkId := range sources {
-		networkIds = append(networkIds, networkId)
+	byNetwork := map[server.Id]*SnReconcileDuplicates{}
+	for _, holder := range model.GetSnReconcileEarlyHolders(ctx) {
+		duplicates := byNetwork[holder.NetworkId]
+		if duplicates == nil {
+			duplicates = &SnReconcileDuplicates{NetworkId: holder.NetworkId, Canceled: []*SnReconcileRowReport{}}
+			byNetwork[holder.NetworkId] = duplicates
+			report.Duplicates = append(report.Duplicates, duplicates)
+		}
+		duplicates.Holders = append(duplicates.Holders, holder)
+		duplicates.EarlyRevenueNanoCents += holder.EarlyRevenue
+		duplicates.EarlyByteCount += holder.EarlyByteCount
 	}
-	slices.SortFunc(networkIds, func(a server.Id, b server.Id) int {
-		return a.Cmp(b)
+	first := map[server.Id]bool{}
+	for _, item := range report.Rows {
+		if duplicates := byNetwork[item.NetworkId]; duplicates != nil && item.Kind == model.SnReconcileCanceledWithEvidence {
+			duplicates.Canceled = append(duplicates.Canceled, item)
+			first[item.NetworkId] = first[item.NetworkId] || item.Class == snReconcilePaid || item.Class == snReconcilePaidReplanned
+		}
+	}
+	for _, orphan := range report.Orphans {
+		for _, networkId := range orphan.NetworkIds {
+			first[networkId] = true
+		}
+	}
+	for _, duplicates := range report.Duplicates {
+		duplicates.CanceledByClass = snReconcileTotals(duplicates.Canceled)
+	}
+	slices.SortStableFunc(report.Duplicates, func(a *SnReconcileDuplicates, b *SnReconcileDuplicates) int {
+		if first[a.NetworkId] != first[b.NetworkId] {
+			if first[a.NetworkId] {
+				return -1
+			}
+			return 1
+		}
+		return a.NetworkId.Cmp(b.NetworkId)
 	})
-	for _, networkId := range networkIds {
-		group := sources[networkId]
-		after, before, ids := snReconcileSourceWindow(group)
-		duplicates := &SnReconcileDuplicates{NetworkId: networkId, Sources: group,
-			Queue: model.GetSnReconcileQueueRows(ctx, networkId, after, before, ids)}
-		for _, source := range group {
-			duplicates.PaidTwiceRiskNanoCents += source.row.Payout - source.row.SubsidyPayout - source.row.ReliabilitySubsidy
-		}
-		for _, queued := range duplicates.Queue {
-			duplicates.CandidateNanoCents += queued.Candidate
-		}
-		duplicates.AtRiskNanoCents = min(duplicates.PaidTwiceRiskNanoCents, duplicates.CandidateNanoCents)
-		report.Duplicates = append(report.Duplicates, duplicates)
-	}
 }
 
-func snReconcileClassTotals(report *SnReconcileReport) {
-	for _, item := range report.Rows {
-		index := slices.IndexFunc(report.Classes, func(total *SnReconcileClassTotal) bool {
+// The count and total payout of each class and reason.
+func snReconcileTotals(items []*SnReconcileRowReport) []*SnReconcileClassTotal {
+	totals := []*SnReconcileClassTotal{}
+	for _, item := range items {
+		index := slices.IndexFunc(totals, func(total *SnReconcileClassTotal) bool {
 			return total.Class == item.Class && total.Reason == item.Reason
 		})
 		if index < 0 {
-			report.Classes = append(report.Classes, &SnReconcileClassTotal{Class: item.Class, Reason: item.Reason})
-			index = len(report.Classes) - 1
+			totals = append(totals, &SnReconcileClassTotal{Class: item.Class, Reason: item.Reason})
+			index = len(totals) - 1
 		}
-		report.Classes[index].Count += 1
-		report.Classes[index].PayoutNanoCents += item.PayoutNanoCents
+		totals[index].Count += 1
+		totals[index].PayoutNanoCents += item.PayoutNanoCents
 	}
-	slices.SortFunc(report.Classes, func(a *SnReconcileClassTotal, b *SnReconcileClassTotal) int {
+	slices.SortFunc(totals, func(a *SnReconcileClassTotal, b *SnReconcileClassTotal) int {
 		return strings.Compare(a.Class+":"+a.Reason, b.Class+":"+b.Reason)
 	})
+	return totals
 }
 
 func snReconcileUsd(nanoCents model.NanoCents) string {
@@ -561,26 +674,40 @@ func snReconcileOr(value string, empty string) string {
 	return value
 }
 
+func snReconcileClassText(class string, reason string) string {
+	if reason == "" {
+		return class
+	}
+	return class + ": " + reason
+}
+
+func snReconcileListingText(b *strings.Builder, name string, listing *SnReconcileListing) {
+	completeness := "complete"
+	if !listing.Complete {
+		completeness = fmt.Sprintf("INCOMPLETE, %d record(s) missing, %d record(s) at another address", len(listing.MissingIds), len(listing.MismatchedIds))
+	}
+	fmt.Fprintf(b, "%s: from %s, started %s, %d wallet(s), %d transaction(s), %s\n", name,
+		listing.From.Format(time.RFC3339), listing.Start.Format(time.RFC3339), len(listing.Wallets), listing.TransactionCount, completeness)
+	for _, walletId := range listing.Wallets {
+		fmt.Fprintf(b, "  wallet %s\n", walletId)
+	}
+	for _, id := range listing.MissingIds {
+		fmt.Fprintf(b, "  missing %s\n", id)
+	}
+	for _, id := range listing.MismatchedIds {
+		fmt.Fprintf(b, "  mismatched %s\n", id)
+	}
+}
+
 // Text renders the report for an operator, with the same content as its JSON.
 func (self *SnReconcileReport) Text() string {
 	b := &strings.Builder{}
 	fmt.Fprintf(b, "sn-reconcile run %s at %s, mode %s, policy %s\n", self.RunId, self.Time.Format(time.RFC3339), self.Mode, snReconcileOr(self.PolicySha256, "none"))
-	listing := self.Listing
-	if listing.From == nil {
+	fmt.Fprintf(b, "digest %s\n", self.Digest)
+	if self.Listing.From == nil {
 		fmt.Fprintf(b, "listing: none, no stuck rows\n")
 	} else {
-		completeness := "complete"
-		if !listing.Complete {
-			completeness = fmt.Sprintf("INCOMPLETE, %d record(s) missing", len(listing.MissingIds))
-		}
-		fmt.Fprintf(b, "listing: from %s, started %s, %d wallet(s), %d transaction(s), %s\n",
-			listing.From.Format(time.RFC3339), listing.Start.Format(time.RFC3339), len(listing.Wallets), listing.TransactionCount, completeness)
-		for _, walletId := range listing.Wallets {
-			fmt.Fprintf(b, "  wallet %s\n", walletId)
-		}
-		for _, id := range listing.MissingIds {
-			fmt.Fprintf(b, "  missing %s\n", id)
-		}
+		snReconcileListingText(b, "listing", self.Listing)
 	}
 	fmt.Fprintf(b, "orphans: %d\n", len(self.Orphans))
 	for _, orphan := range self.Orphans {
@@ -588,29 +715,26 @@ func (self *SnReconcileReport) Text() string {
 		for _, networkId := range orphan.NetworkIds {
 			networkIds = append(networkIds, networkId.String())
 		}
+		attribution := snReconcileOr(strings.Join(networkIds, ","), "none")
+		if orphan.Unattributed {
+			attribution += ", UNATTRIBUTED"
+		}
 		fmt.Fprintf(b, "  %s %s %s %s created %s from wallet %s to %s, networks %s\n", orphan.Id, orphan.TransactionType, orphan.State,
-			strings.Join(orphan.Amounts, ","), orphan.CreateDate, orphan.WalletId, orphan.Destination, snReconcileOr(strings.Join(networkIds, ","), "none"))
+			strings.Join(orphan.Amounts, ","), orphan.CreateDate, orphan.WalletId, orphan.Destination, attribution)
 	}
 	fmt.Fprintf(b, "classes:\n")
 	for _, total := range self.Classes {
-		class := total.Class
-		if total.Reason != "" {
-			class += ": " + total.Reason
-		}
-		fmt.Fprintf(b, "  %-32s %5d %s\n", class, total.Count, snReconcileUsd(total.PayoutNanoCents))
+		fmt.Fprintf(b, "  %-32s %5d %s\n", snReconcileClassText(total.Class, total.Reason), total.Count, snReconcileUsd(total.PayoutNanoCents))
 	}
 	fmt.Fprintf(b, "funding:\n")
 	for _, funding := range self.Funding {
-		fmt.Fprintf(b, "  %-5s wallet %s: %d payable, send %s, balance %s, shortfall %s\n", funding.Chain, funding.WalletId, funding.PayableCount,
-			snReconcileUsd(funding.SendNanoCents), snReconcileUsd(funding.BalanceNanoCents), snReconcileUsd(funding.ShortfallNanoCents))
+		fmt.Fprintf(b, "  %-5s wallet %s: %d payable, send %s, %d revived pending, %s, balance %s, shortfall %s\n", funding.Chain, funding.WalletId,
+			funding.PayableCount, snReconcileUsd(funding.SendNanoCents), funding.RevivedCount, snReconcileUsd(funding.RevivedNanoCents),
+			snReconcileUsd(funding.BalanceNanoCents), snReconcileUsd(funding.ShortfallNanoCents))
 	}
 	fmt.Fprintf(b, "rows: %d\n", len(self.Rows))
 	for _, item := range self.Rows {
-		class := item.Class
-		if item.Reason != "" {
-			class += ": " + item.Reason
-		}
-		fmt.Fprintf(b, "  %s network %s %s %s, owed %s", item.PaymentId, item.NetworkId, item.Kind, class, snReconcileUsd(item.OwedNanoCents))
+		fmt.Fprintf(b, "  %s network %s %s %s, owed %s", item.PaymentId, item.NetworkId, item.Kind, snReconcileClassText(item.Class, item.Reason), snReconcileUsd(item.OwedNanoCents))
 		if item.Class == snReconcilePayable {
 			fmt.Fprintf(b, ", send %.6f USD on %s", item.SendUsd, item.Chain)
 		}
@@ -624,24 +748,34 @@ func (self *SnReconcileReport) Text() string {
 	}
 	fmt.Fprintf(b, "duplicates: %d network(s)\n", len(self.Duplicates))
 	for _, duplicates := range self.Duplicates {
-		fmt.Fprintf(b, "  network %s: paid twice risk %s, candidates %s, at risk %s\n", duplicates.NetworkId,
-			snReconcileUsd(duplicates.PaidTwiceRiskNanoCents), snReconcileUsd(duplicates.CandidateNanoCents), snReconcileUsd(duplicates.AtRiskNanoCents))
-		for _, source := range duplicates.Sources {
-			fmt.Fprintf(b, "    source %s %s, payout %s\n", source.PaymentId, snReconcileOr(source.Reason, source.Class), snReconcileUsd(source.PayoutNanoCents))
+		fmt.Fprintf(b, "  network %s: early revenue %s, early bytes %d\n", duplicates.NetworkId, snReconcileUsd(duplicates.EarlyRevenueNanoCents), duplicates.EarlyByteCount)
+		for _, total := range duplicates.CanceledByClass {
+			fmt.Fprintf(b, "    canceled %s: %d row(s), payout %s\n", snReconcileClassText(total.Class, total.Reason), total.Count, snReconcileUsd(total.PayoutNanoCents))
 		}
-		for _, queued := range duplicates.Queue {
-			fmt.Fprintf(b, "    queue %s plan %s %s, payout %s, candidate %s\n", queued.PaymentId, queued.PaymentPlanId, queued.State,
-				snReconcileUsd(queued.Payout), snReconcileUsd(queued.Candidate))
+		for _, item := range duplicates.Canceled {
+			fmt.Fprintf(b, "    canceled %s %s, payout %s\n", item.PaymentId, snReconcileClassText(item.Class, item.Reason), snReconcileUsd(item.PayoutNanoCents))
+		}
+		for _, holder := range duplicates.Holders {
+			fmt.Fprintf(b, "    holder %s plan %s %s, early revenue %s, early bytes %d, early bonus %s, bytes %d, subsidy %s, reliability %s\n",
+				holder.PaymentId, holder.PaymentPlanId, holder.State, snReconcileUsd(holder.EarlyRevenue), holder.EarlyByteCount, snReconcileUsd(holder.EarlyBonus),
+				holder.PayoutByteCount, snReconcileUsd(holder.SubsidyPayout), snReconcileUsd(holder.ReliabilitySubsidy))
 		}
 	}
 	if self.Mode == "send" {
+		if self.Relisting != nil {
+			snReconcileListingText(b, "relisting", self.Relisting)
+		}
 		fmt.Fprintf(b, "revived: %d\n", len(self.Revived))
 		for _, paymentId := range self.Revived {
 			fmt.Fprintf(b, "  %s\n", paymentId)
 		}
 		fmt.Fprintf(b, "skipped: %d\n", len(self.Skipped))
-		for _, paymentId := range self.Skipped {
-			fmt.Fprintf(b, "  %s changed\n", paymentId)
+		for _, skip := range self.Skipped {
+			fmt.Fprintf(b, "  %s %s", skip.PaymentId, skip.Reason)
+			if 0 < len(skip.OrphanIds) {
+				fmt.Fprintf(b, ", orphans %s", strings.Join(skip.OrphanIds, ","))
+			}
+			fmt.Fprintf(b, "\n")
 		}
 	}
 	return b.String()

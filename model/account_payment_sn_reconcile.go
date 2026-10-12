@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -23,6 +24,30 @@ const (
 // Receipts need not be valid JSON. Each pattern captures one quoted string value.
 const snReconcileReceiptWalletIdPattern = `"walletId"\s*:\s*"([^"]+)"`
 const snReconcileReceiptIdPattern = `"id"\s*:\s*"([^"]+)"`
+
+// A4: addresses compare without surrounding ASCII whitespace, case-insensitively.
+// The SQL form strips exactly the same characters.
+const snReconcileAddressSpace = " \t\n\r\f\v"
+const snReconcileAddressSql = `lower(btrim(%s,E' \t\n\r\f\v'))`
+
+func SnReconcileAddress(address string) string {
+	return strings.ToLower(strings.Trim(address, snReconcileAddressSpace))
+}
+
+// A2: a sweep of row `%[1]s` is early when its contract closed at or before
+// this bound: the start of the row's own plan epoch, raised to the latest
+// earlier row of the network whose plan recorded no epoch. A plan without an
+// epoch explains none of its sweeps. An early sweep may have been paid by an
+// earlier row.
+const snReconcileEarlyBoundSql = `CASE WHEN NOT EXISTS (SELECT 1 FROM subsidy_payment epoch WHERE epoch.payment_plan_id=%[1]s.payment_plan_id) THEN 'infinity'::timestamp
+	ELSE GREATEST((SELECT epoch.start_time FROM subsidy_payment epoch WHERE epoch.payment_plan_id=%[1]s.payment_plan_id),
+		(SELECT MAX(earlier.create_time) FROM account_payment earlier WHERE earlier.network_id=%[1]s.network_id AND earlier.create_time<%[1]s.create_time
+		AND NOT EXISTS (SELECT 1 FROM subsidy_payment earlier_epoch WHERE earlier_epoch.payment_plan_id=earlier.payment_plan_id))) END`
+
+// The sweeps (alias s, contract alias c) of row `%[1]s` that are early against
+// the row's bound `%[2]s`. An unknown close time counts as early.
+const snReconcileEarlySweepsSql = `transfer_escrow_sweep s LEFT JOIN transfer_contract c ON c.contract_id=s.contract_id
+	WHERE s.payment_id=%[1]s.payment_id AND COALESCE(c.close_time<=%[2]s,true)`
 
 // One stuck row as the census read it. The revive compares every column it
 // read or clears against the locked row before writing anything.
@@ -57,6 +82,13 @@ type SnReconcileRow struct {
 	PayoutWalletBlockchain *string
 	PayoutWalletActive     bool
 	SweepCount             int64
+	// A3: the earliest close time of the row's contracts.
+	EarliestClose *time.Time
+	// A2: an early sweep, or a bonus that originated in another row.
+	EarlyEarnings bool
+	// A5: a later row of the network holds early sweeps that closed before
+	// this row was created. Read only for a row without sweeps.
+	ReplanEvidence bool
 }
 
 // Circle's observation of the row's own attempt, retained with a revival.
@@ -66,26 +98,36 @@ type SnReconcileEvidence struct {
 	TxHash        string `json:"tx_hash,omitempty"`
 }
 
+var snReconcileStuckSql = `SELECT p.payment_id,p.payment_plan_id,p.network_id,p.wallet_id,p.payout_byte_count,p.payout_nano_cents,
+	p.subsidy_payout_nano_cents,p.reliability_subsidy_nano_cents,p.bonus_payout_nano_cents,p.attribution_review_required,
+	p.create_time,p.canceled,p.cancel_time,p.circle_idempotency_key,p.payment_record,p.tx_hash,p.token_type,p.token_amount,
+	p.payment_time,p.payment_receipt,pinned.wallet_address,payout.wallet_id,payout.wallet_address,payout.blockchain,
+	COALESCE(payout.active,false),(SELECT COUNT(*) FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id),
+	(SELECT MIN(c.close_time) FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id WHERE s.payment_id=p.payment_id),
+	EXISTS (SELECT 1 FROM ` + fmt.Sprintf(snReconcileEarlySweepsSql, "p", "eb.bound") + `)
+	OR EXISTS (SELECT 1 FROM account_payment_bonus b WHERE b.payment_id=p.payment_id AND b.origin_payment_id<>p.payment_id),
+	CASE WHEN EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id) THEN false ELSE EXISTS (
+		SELECT 1 FROM account_payment later CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "later") + ` AS bound) later_bound
+		JOIN transfer_escrow_sweep s ON s.payment_id=later.payment_id JOIN transfer_contract c ON c.contract_id=s.contract_id
+		WHERE later.network_id=p.network_id AND later.create_time>p.create_time AND c.close_time<p.create_time AND c.close_time<=later_bound.bound) END
+	FROM account_payment p
+	CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "p") + ` AS bound) eb
+	LEFT JOIN account_wallet pinned ON pinned.wallet_id=p.wallet_id
+	LEFT JOIN payout_wallet pw ON pw.network_id=p.network_id
+	LEFT JOIN account_wallet payout ON payout.wallet_id=pw.wallet_id AND payout.network_id=p.network_id
+	WHERE NOT p.completed AND (
+		(p.canceled AND (p.circle_idempotency_key IS NOT NULL OR p.payment_record IS NOT NULL OR p.tx_hash IS NOT NULL)) OR
+		(NOT p.canceled AND p.circle_idempotency_key IS NOT NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
+		AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key)))
+	ORDER BY p.create_time,p.payment_id`
+
 // RC-1 and RC-2 rows, oldest first. A request journaled under the key, valid or
 // not, may have been POSTed, so that row is out of scope. A stuck row without a
 // network cannot be attributed to later rows; the census refuses it.
 func GetSnReconcileStuckRows(ctx context.Context) (rows []*SnReconcileRow, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, returnErr = []*SnReconcileRow{}, nil
-		result, err := conn.Query(ctx, `SELECT p.payment_id,p.payment_plan_id,p.network_id,p.wallet_id,p.payout_byte_count,p.payout_nano_cents,
-			p.subsidy_payout_nano_cents,p.reliability_subsidy_nano_cents,p.bonus_payout_nano_cents,p.attribution_review_required,
-			p.create_time,p.canceled,p.cancel_time,p.circle_idempotency_key,p.payment_record,p.tx_hash,p.token_type,p.token_amount,
-			p.payment_time,p.payment_receipt,pinned.wallet_address,payout.wallet_id,payout.wallet_address,payout.blockchain,
-			COALESCE(payout.active,false),(SELECT COUNT(*) FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id)
-			FROM account_payment p
-			LEFT JOIN account_wallet pinned ON pinned.wallet_id=p.wallet_id
-			LEFT JOIN payout_wallet pw ON pw.network_id=p.network_id
-			LEFT JOIN account_wallet payout ON payout.wallet_id=pw.wallet_id AND payout.network_id=p.network_id
-			WHERE NOT p.completed AND (
-				(p.canceled AND (p.circle_idempotency_key IS NOT NULL OR p.payment_record IS NOT NULL OR p.tx_hash IS NOT NULL)) OR
-				(NOT p.canceled AND p.circle_idempotency_key IS NOT NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
-				AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key)))
-			ORDER BY p.create_time,p.payment_id`)
+		result, err := conn.Query(ctx, snReconcileStuckSql)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				row := &SnReconcileRow{}
@@ -94,7 +136,7 @@ func GetSnReconcileStuckRows(ctx context.Context) (rows []*SnReconcileRow, retur
 					&row.SubsidyPayout, &row.ReliabilitySubsidy, &row.BonusPayout, &row.AttributionReviewRequired,
 					&row.CreateTime, &row.Canceled, &row.CancelTime, &row.CircleIdempotencyKey, &row.PaymentRecord, &row.TxHash, &row.TokenType, &row.TokenAmount,
 					&row.PaymentTime, &row.PaymentReceipt, &row.PinnedWalletAddress, &row.PayoutWalletId, &row.PayoutWalletAddress, &row.PayoutWalletBlockchain,
-					&row.PayoutWalletActive, &row.SweepCount))
+					&row.PayoutWalletActive, &row.SweepCount, &row.EarliestClose, &row.EarlyEarnings, &row.ReplanEvidence))
 				if networkId == nil {
 					returnErr = errors.Join(returnErr, fmt.Errorf("stuck payment %s has no network; reconcile it by hand", row.PaymentId))
 					continue
@@ -168,13 +210,38 @@ func GetSnReconcileReferencedIds(ctx context.Context, ids []string) (referenced 
 	return
 }
 
-// RC-7: the networks whose wallets, active or not, registered each lower-cased
-// address.
-func GetSnReconcileAddressNetworks(ctx context.Context, lowerAddresses []string) (networks map[string][]server.Id) {
+// The wallet address of a row whose payment record names a listed transaction.
+type SnReconcileRecordAddress struct {
+	Record        string
+	WalletAddress *string
+}
+
+// A4: for each listed transaction a payment record names, the wallet address of
+// every row holding that record. A row without a wallet has no address.
+func GetSnReconcileRecordAddresses(ctx context.Context, ids []string) (addresses []*SnReconcileRecordAddress) {
+	server.Db(ctx, func(conn server.PgConn) {
+		addresses = []*SnReconcileRecordAddress{}
+		result, err := conn.Query(ctx, `SELECT p.payment_record,w.wallet_address FROM account_payment p
+			LEFT JOIN account_wallet w ON w.wallet_id=p.wallet_id WHERE p.payment_record=ANY($1::text[]) ORDER BY 1,2`, ids)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				address := &SnReconcileRecordAddress{}
+				server.Raise(result.Scan(&address.Record, &address.WalletAddress))
+				addresses = append(addresses, address)
+			}
+		})
+	})
+	return
+}
+
+// RC-7: the networks whose wallets, active or not, registered each address.
+// Addresses are given and keyed in their `SnReconcileAddress` form.
+func GetSnReconcileAddressNetworks(ctx context.Context, addresses []string) (networks map[string][]server.Id) {
+	address := fmt.Sprintf(snReconcileAddressSql, "wallet_address")
 	server.Db(ctx, func(conn server.PgConn) {
 		networks = map[string][]server.Id{}
-		result, err := conn.Query(ctx, `SELECT lower(wallet_address),network_id FROM account_wallet
-			WHERE lower(wallet_address)=ANY($1::text[]) GROUP BY 1,2 ORDER BY 1,2`, lowerAddresses)
+		result, err := conn.Query(ctx, `SELECT `+address+`,network_id FROM account_wallet
+			WHERE `+address+`=ANY($1::text[]) GROUP BY 1,2 ORDER BY 1,2`, addresses)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var address string
@@ -205,47 +272,82 @@ func snReconcileCensusExactIn(ctx context.Context, query server.PgCanQuery, paym
 	return true
 }
 
-// RC-21: whether the row holds a sweep of any amount whose contract closed
-// before `before`, or a bonus whose origin is one of `sources`.
-func SnReconcileHoldsEarlierEarnings(ctx context.Context, paymentId server.Id, before time.Time, sources []server.Id) (holds bool) {
+// A row that is neither completed nor stuck and holds early earnings, which an
+// earlier payment may already have paid.
+type SnReconcileHolder struct {
+	PaymentId          server.Id `json:"payment_id"`
+	PaymentPlanId      server.Id `json:"payment_plan_id"`
+	NetworkId          server.Id `json:"network_id"`
+	State              string    `json:"state"`
+	Payout             NanoCents `json:"payout_nano_cents"`
+	PayoutByteCount    ByteCount `json:"payout_byte_count"`
+	SubsidyPayout      NanoCents `json:"subsidy_payout_nano_cents"`
+	ReliabilitySubsidy NanoCents `json:"reliability_subsidy_nano_cents"`
+	EarlyRevenue       NanoCents `json:"early_revenue_nano_cents"`
+	EarlyByteCount     ByteCount `json:"early_byte_count"`
+	EarlyBonus         NanoCents `json:"early_bonus_nano_cents"`
+}
+
+var snReconcileHoldersSql = `SELECT p.payment_id,p.payment_plan_id,p.network_id,
+	CASE WHEN p.canceled THEN 'safely_canceled' WHEN p.tx_hash IS NOT NULL THEN 'on_chain' WHEN p.payment_record IS NOT NULL THEN 'submitted'
+		WHEN p.circle_idempotency_key IS NOT NULL THEN 'reserved' ELSE 'planned' END,
+	p.payout_nano_cents,p.payout_byte_count,p.subsidy_payout_nano_cents,p.reliability_subsidy_nano_cents,early.revenue,early.bytes,bonus.amount
+	FROM account_payment p
+	CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "p") + ` AS bound) eb
+	CROSS JOIN LATERAL (SELECT COUNT(*) n,COALESCE(SUM(s.payout_net_revenue_nano_cents),0)::bigint revenue,COALESCE(SUM(s.payout_byte_count),0)::bigint bytes
+		FROM ` + fmt.Sprintf(snReconcileEarlySweepsSql, "p", "eb.bound") + `) early
+	CROSS JOIN LATERAL (SELECT COUNT(*) n,COALESCE(SUM(b.amount_nano_cents),0)::bigint amount FROM account_payment_bonus b
+		WHERE b.payment_id=p.payment_id AND b.origin_payment_id<>p.payment_id) bonus
+	WHERE NOT p.completed AND (
+		(p.canceled AND p.circle_idempotency_key IS NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL) OR
+		(NOT p.canceled AND NOT (p.circle_idempotency_key IS NOT NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
+		AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key))))
+	AND 0<early.n+bonus.n
+	ORDER BY p.network_id,p.create_time,p.payment_id`
+
+// A2 (§6): every pending or safely canceled row with early earnings, by
+// network. Read only.
+func GetSnReconcileEarlyHolders(ctx context.Context) (holders []*SnReconcileHolder) {
 	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id
-			WHERE s.payment_id=$1 AND c.close_time<$2)
-			OR EXISTS (SELECT 1 FROM account_payment_bonus b WHERE b.payment_id=$1 AND b.origin_payment_id=ANY($3))`,
-			paymentId, before, sources).Scan(&holds))
+		holders = []*SnReconcileHolder{}
+		result, err := conn.Query(ctx, snReconcileHoldersSql)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				holder := &SnReconcileHolder{}
+				server.Raise(result.Scan(&holder.PaymentId, &holder.PaymentPlanId, &holder.NetworkId, &holder.State, &holder.Payout, &holder.PayoutByteCount,
+					&holder.SubsidyPayout, &holder.ReliabilitySubsidy, &holder.EarlyRevenue, &holder.EarlyByteCount, &holder.EarlyBonus))
+				holders = append(holders, holder)
+			}
+		})
 	})
 	return
 }
 
-// A pending row that may re-pay earnings moved from a possibly paid source.
-type SnReconcileQueueRow struct {
-	PaymentId     server.Id `json:"payment_id"`
-	PaymentPlanId server.Id `json:"payment_plan_id"`
-	State         string    `json:"state"`
-	Payout        NanoCents `json:"payout_nano_cents"`
-	Candidate     NanoCents `json:"candidate_nano_cents"`
+// A row an earlier run revived that is not yet completed, with the network's
+// current payout wallet.
+type SnReconcileRevived struct {
+	PaymentId              server.Id
+	Payout                 NanoCents
+	PayoutWalletBlockchain *string
+	PayoutWalletActive     bool
 }
 
-// RC-17: the network's pending rows created after `after`. The candidate is the
-// revenue of their sweeps that closed before `before` plus their bonus from
-// `sources`. Read only.
-func GetSnReconcileQueueRows(ctx context.Context, networkId server.Id, after time.Time, before time.Time, sources []server.Id) (queue []*SnReconcileQueueRow) {
+// A7: revived rows that still need funds from the payout wallets.
+func GetSnReconcileRevivedPending(ctx context.Context) (revived []*SnReconcileRevived) {
 	server.Db(ctx, func(conn server.PgConn) {
-		queue = []*SnReconcileQueueRow{}
-		result, err := conn.Query(ctx, `SELECT p.payment_id,p.payment_plan_id,
-			CASE WHEN p.tx_hash IS NOT NULL THEN 'on_chain' WHEN p.payment_record IS NOT NULL THEN 'submitted'
-				WHEN p.circle_idempotency_key IS NOT NULL THEN 'reserved' ELSE 'planned' END,
-			p.payout_nano_cents,
-			(SELECT COALESCE(SUM(s.payout_net_revenue_nano_cents),0) FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id
-				WHERE s.payment_id=p.payment_id AND c.close_time<$3)::bigint +
-			(SELECT COALESCE(SUM(b.amount_nano_cents),0) FROM account_payment_bonus b WHERE b.payment_id=p.payment_id AND b.origin_payment_id=ANY($4))::bigint
-			FROM account_payment p WHERE p.network_id=$1 AND NOT p.completed AND NOT p.canceled AND p.create_time>$2
-			ORDER BY p.create_time,p.payment_id`, networkId, after, before, sources)
+		revived = []*SnReconcileRevived{}
+		result, err := conn.Query(ctx, `SELECT p.payment_id,p.payout_nano_cents,payout.blockchain,COALESCE(payout.active,false)
+			FROM account_payment p
+			LEFT JOIN payout_wallet pw ON pw.network_id=p.network_id
+			LEFT JOIN account_wallet payout ON payout.wallet_id=pw.wallet_id AND payout.network_id=p.network_id
+			WHERE NOT p.completed AND NOT p.canceled
+			AND EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.payment_id=p.payment_id AND a.event_type='sn_reconcile_revived')
+			ORDER BY p.payment_id`)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				row := &SnReconcileQueueRow{}
-				server.Raise(result.Scan(&row.PaymentId, &row.PaymentPlanId, &row.State, &row.Payout, &row.Candidate))
-				queue = append(queue, row)
+				row := &SnReconcileRevived{}
+				server.Raise(result.Scan(&row.PaymentId, &row.Payout, &row.PayoutWalletBlockchain, &row.PayoutWalletActive))
+				revived = append(revived, row)
 			}
 		})
 	})
@@ -286,10 +388,11 @@ type snReconcileRevival struct {
 }
 
 // RC-14: revive one payable row in its own transaction, then run `schedule`
-// in that transaction. A row that differs from its snapshot, or whose census
-// is no longer exact, is left untouched (RC-15). One UPDATE clears the
-// markers and the cancellation together, so the row never reads as safely
-// canceled; amounts, plan, points, sweeps and `cancel_time` are unchanged.
+// in that transaction. A row that differs from its snapshot, whose key now has
+// a journal row (A1), or whose census is no longer exact, is left untouched
+// (RC-15). One UPDATE clears the markers and the cancellation together, so the
+// row never reads as safely canceled; amounts, plan, points, sweeps and
+// `cancel_time` are unchanged.
 func ReviveSnReconcileRow(ctx context.Context, row *SnReconcileRow, policy *server.ProviderPayoutTransition, runId server.Id, evidence *SnReconcileEvidence, schedule func(server.PgTx)) (revived bool) {
 	revival := &snReconcileRevival{RunId: runId, Evidence: evidence, Canceled: row.Canceled, CancelTime: row.CancelTime,
 		CircleIdempotencyKey: row.CircleIdempotencyKey, PaymentRecord: row.PaymentRecord, TxHash: row.TxHash, TokenType: row.TokenType,
@@ -306,7 +409,15 @@ func ReviveSnReconcileRow(ctx context.Context, row *SnReconcileRow, policy *serv
 		server.WithPgResult(result, err, func() {
 			locked = result.Next()
 		})
-		if !locked || !snReconcileCensusExactIn(ctx, tx, row.PaymentId, policy) {
+		if !locked {
+			return
+		}
+		// A1: a request journaled under the key since the census may have been POSTed.
+		journaled := false
+		if row.CircleIdempotencyKey != nil {
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_account_payment WHERE event_id=$1)`, *row.CircleIdempotencyKey).Scan(&journaled))
+		}
+		if journaled || !snReconcileCensusExactIn(ctx, tx, row.PaymentId, policy) {
 			return
 		}
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO audit_account_payment(event_id,payment_id,event_type,event_details)
