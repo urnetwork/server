@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -13,6 +14,8 @@ import (
 
 // NOWAIT makes accidental contention an explicit PostgreSQL error rather than
 // an elapsed-time assertion. It changes only the test's locking grant read.
+// Only zero-byte anchors can run through it: a positive allocation admits
+// grant ownership, which requires the server's own transaction (403b9c55).
 type noWaitGrantTestTx struct{ server.PgTx }
 
 func (tx noWaitGrantTestTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
@@ -36,6 +39,37 @@ func independentGrantTestCreate(ctx context.Context, tx server.PgTx, clients esc
 	escrow, _, err = createTransferEscrowInTx(ctx, tx, clients.payerNetworkId, clients.payerId,
 		clients.providerNetworkId, clients.providerId, clients.payerNetworkId, 1024, nil)
 	return
+}
+
+// One owned allocation's result and the transaction-scoped ownership events
+// its admission reported, in order.
+type dynamicProberAllocation struct {
+	escrow *TransferEscrow
+	err    error
+	events []server.PgOwnershipEventKind
+}
+
+// Allocates in the server's own read-committed no-retry transaction, the only
+// transaction that can admit grant ownership (403b9c55). A refused or failed
+// allocation rolls back. The caller's goroutine runs it to completion, so a
+// return while a competitor still holds its locks proves it did not wait.
+func allocateDynamicProberGrantForTest(ctx context.Context, clients escrowSelectionTestClients) dynamicProberAllocation {
+	allocation := dynamicProberAllocation{}
+	observed := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+		if event.TransactionScoped {
+			allocation.events = append(allocation.events, event.Kind)
+		}
+	})
+	transactionErr := rareGrantModelError(func() {
+		server.Tx(observed, func(tx server.PgTx) {
+			allocation.escrow, allocation.err = independentGrantTestCreate(observed, tx, clients)
+			server.Raise(allocation.err)
+		}, server.TxReadCommitted, server.OptNoRetry())
+	})
+	if allocation.err == nil {
+		allocation.err = transactionErr
+	}
+	return allocation
 }
 
 func TestDynamicProberDisjointGrantsDoNotSerialize(t *testing.T) {
@@ -105,29 +139,26 @@ func testDynamicProberIndependentGrantLocks(t *testing.T, samePreferred bool) {
 	})
 }
 
+// Identifies the allocator's grant locks by their SQL: a bounded speculative
+// candidate lock skips busy rows, while the complete fallback blocks.
+func dynamicProberGrantLock(sql string) (locking bool, speculative bool) {
+	normalized := strings.Join(strings.Fields(sql), " ")
+	return strings.Contains(normalized, " FOR UPDATE"), strings.Contains(normalized, " SKIP LOCKED")
+}
+
+// Counts exact reservation snapshot attempts; a matching durable revision
+// avoids a historical census within an attempt. Zero-byte anchors take no
+// ownership, so this wrapper can still observe them.
 type grantHintTestTx struct {
 	server.PgTx
 	reservationReads int
 	reservationRows  int
-	beforeLock       func([]any)
-	beforeFallback   func()
 }
 
 func (tx *grantHintTestTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	// Count authoritative snapshot attempts; a matching durable revision
-	// now avoids a historical census within an attempt.
 	if query == netEscrowAdmissionCacheSQL {
 		tx.reservationReads++
 		tx.reservationRows += len(args[0].([]server.Id))
-	}
-	normalized := strings.Join(strings.Fields(query), " ")
-	if strings.Contains(normalized, " FROM transfer_balance ") && strings.Contains(normalized, " FOR UPDATE") {
-		if len(args) == 4 && tx.beforeLock != nil {
-			tx.beforeLock(args)
-		}
-		if len(args) == 2 && tx.beforeFallback != nil {
-			tx.beforeFallback()
-		}
 	}
 	return tx.PgTx.Query(ctx, query, args...)
 }
@@ -146,34 +177,48 @@ func TestDynamicProberOptimisticCreditRechecksAndReleasesBeforeAlternative(t *te
 		}
 		preferred := grants[clients.payerId.Hash()%2]
 		other := grants[(clients.payerId.Hash()%2+1)%2]
+		// Observe the owned allocation at the driver; positive allocation
+		// admits grant ownership only on the server's own transaction (403b9c55).
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		observer := acquireContractLifecycleTestConnection(t, ctx)
 		defer observer.Release()
 		locks := 0
+		fallback := false
+		var lockErrs []error
 		server.Tx(ctx, func(tx server.PgTx) {
-			controlled := &grantHintTestTx{PgTx: tx}
-			controlled.beforeLock = func(args []any) {
+			controlled := &escrowGrantQueryHook{beforeGrant: func(sql string, args []any) {
+				locking, speculative := dynamicProberGrantLock(sql)
+				if !locking {
+					return
+				}
+				if !speculative {
+					fallback = true
+					return
+				}
 				locks++
 				switch locks {
 				case 1:
 					if args[2].([]server.Id)[0] != preferred.BalanceId {
-						t.Fatal("optimistic selection changed payer order")
+						lockErrs = append(lockErrs, errors.New("optimistic selection changed payer order"))
 					}
 					// Reserve AFTER discovery and BEFORE its lock. Durable credit
 					// must never stand in for fresh locked reservation authority.
 					clients.reserve(ctx, preferred.BalanceId, 1024)
 				case 2:
 					if ids := args[2].([]server.Id); len(ids) != 1 || ids[0] != other.BalanceId {
-						t.Fatal("rejected grant was retried or alternative was skipped")
+						lockErrs = append(lockErrs, errors.New("rejected grant was retried or alternative was skipped"))
 					}
 					if _, err := observer.Exec(ctx, `SELECT balance_id FROM transfer_balance WHERE balance_id=$1 FOR UPDATE NOWAIT`, preferred.BalanceId); err != nil {
-						t.Fatal("rejected candidate retained a lock before alternative")
+						lockErrs = append(lockErrs, fmt.Errorf("rejected candidate retained a lock before alternative: %w", err))
 					}
 				default:
-					t.Fatal("candidate attempts were not bounded by available grants")
+					lockErrs = append(lockErrs, errors.New("candidate attempts were not bounded by available grants"))
 				}
-			}
-			controlled.beforeFallback = func() { t.Fatal("available adjacent grant unnecessarily joined full locking fallback") }
-			escrow, err := independentGrantTestCreate(ctx, controlled, clients)
+			}}
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, controlled.statementHook())
+			defer unhook()
+			escrow, err := independentGrantTestCreate(hooked, tx, clients)
 			if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != other.BalanceId {
 				t.Fatalf("optimistic hint authorized reserved credit or lost alternative: %v", err)
 			}
@@ -181,12 +226,24 @@ func TestDynamicProberOptimisticCreditRechecksAndReleasesBeforeAlternative(t *te
 				t.Fatalf("selected-grant census was amplified: reads=%d rows=%d", controlled.reservationReads, controlled.reservationRows)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
+		if err := errors.Join(lockErrs...); err != nil {
+			t.Fatal(err)
+		}
+		if fallback {
+			t.Fatal("available adjacent grant unnecessarily joined full locking fallback")
+		}
 		if locks != 2 {
 			t.Fatal("optimistic credit control did not exercise both grant locks")
 		}
 	})
 }
 
+// The speculative attempt finds the grant fully reserved; the reservation is
+// released before the complete fallback, which must re-read funding rather
+// than trust the stale hint. While the allocation owns the payer's grants an
+// owned settlement is refused busy (403b9c55), so the release comes from a
+// writer outside grant ownership, such as an older binary during a rolling
+// deploy, ending the prior contract.
 func TestDynamicProberRejectedCandidateStillUsesCreditReleasedBeforeFallback(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
@@ -196,21 +253,33 @@ func TestDynamicProberRejectedCandidateStillUsesCreditReleasedBeforeFallback(t *
 		setDynamicProberIdentityForTest(t, ctx, clients)
 		now := server.NowUtc()
 		grant := addDynamicProberGrantForTest(ctx, clients.payerNetworkId, now.Add(-time.Minute), now.Add(time.Hour), 1024)
-		prior, err := clients.create(ctx, 1024, false)
-		if err != nil || prior == nil {
-			t.Fatalf("initial reservation failed: %v", err)
+		prior := allocateDynamicProberGrantForTest(ctx, clients)
+		if prior.err != nil || prior.escrow == nil {
+			t.Fatalf("initial reservation failed: %v", prior.err)
 		}
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		fallback := false
+		var settleErr error
 		server.Tx(ctx, func(tx server.PgTx) {
-			controlled := &grantHintTestTx{PgTx: tx}
-
-			controlled.beforeFallback = func() {
+			controlled := &escrowGrantQueryHook{beforeGrant: func(sql string, _ []any) {
+				locking, speculative := dynamicProberGrantLock(sql)
+				if !locking || speculative || fallback {
+					return
+				}
 				fallback = true
-				// Release the prior reservation through real zero-use settlement
-				// after the locked attempt. Full fallback must re-read funding.
-				server.RunPosts(ctx, settleNetEscrowOrderingTestContract(ctx, prior.ContractId)...)
-			}
-			escrow, err := independentGrantTestCreate(ctx, controlled, clients)
+				// The owned zero-use settlement needs the grant this allocation
+				// owns, and is refused without waiting or writing.
+				settleErr = rareGrantModelError(func() {
+					server.RunPosts(ctx, settleNetEscrowOrderingTestContract(ctx, prior.escrow.ContractId)...)
+				})
+				server.Db(ctx, func(conn server.PgConn) {
+					server.RaisePgResult(conn.Exec(ctx, `UPDATE transfer_contract SET outcome='canceled',close_time=now() WHERE contract_id=$1`, prior.escrow.ContractId))
+				})
+			}}
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, controlled.statementHook())
+			defer unhook()
+			escrow, err := independentGrantTestCreate(hooked, tx, clients)
 			if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != grant.BalanceId {
 				t.Fatalf("stale reserved hint falsely rejected released credit: %v", err)
 			}
@@ -221,6 +290,16 @@ func TestDynamicProberRejectedCandidateStillUsesCreditReleasedBeforeFallback(t *
 		if !fallback {
 			t.Fatal("pessimistic-hint control never reached complete fallback")
 		}
+		if !errors.Is(settleErr, errTransferBalanceOwnershipBusy) {
+			t.Fatalf("owned settlement inside the payer's allocation was not refused busy: %v", settleErr)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var reports int
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM contract_close WHERE contract_id=$1`, prior.escrow.ContractId).Scan(&reports))
+			if reports != 0 {
+				t.Fatal("refused settlement committed its close reports")
+			}
+		})
 		if got := openEscrowReservedForBalances(ctx, []server.Id{grant.BalanceId})[grant.BalanceId].reserved; got != 1024 {
 			t.Fatalf("released credit did not leave exactly one funded reservation: %d", got)
 		}
@@ -240,11 +319,15 @@ func TestDynamicProberReservationCensusCountIndependentOfWindow(t *testing.T) {
 				now.Add(-time.Duration(index+1)*time.Minute), now.Add(time.Hour), 1024)
 			clients.reserve(ctx, grant.BalanceId, 1024)
 		}
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		server.Tx(ctx, func(tx server.PgTx) {
-			controlled := &grantHintTestTx{PgTx: tx}
-			escrow, err := independentGrantTestCreate(ctx, controlled, clients)
-			if escrow != nil || err == nil {
-				t.Fatal("fully reserved windows did not retain authoritative shortfall")
+			controlled := &escrowGrantQueryHook{}
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, controlled.statementHook())
+			defer unhook()
+			escrow, err := independentGrantTestCreate(hooked, tx, clients)
+			if escrow != nil || err == nil || !strings.Contains(err.Error(), "Insufficient balance") {
+				t.Fatalf("fully reserved windows did not retain authoritative shortfall: %v", err)
 			}
 			// At most four selected-grant attempts per window, then one
 			// complete fallback. Never census every speculative candidate.
