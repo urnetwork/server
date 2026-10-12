@@ -110,64 +110,92 @@ func (redisTTLLeaksProbe) tier() string           { return tierWarn }
 func (redisTTLLeaksProbe) cadence() time.Duration { return 15 * time.Minute }
 
 func (redisTTLLeaksProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	h := env.cfg.hostByRole("redis-cluster")
-	if h == nil {
+	// The residue is a cluster-level judgement reported on the entry host; the
+	// census runs on every redis-cluster host over its own node ports.
+	h := env.cfg.redisEntryHost()
+	hosts := env.cfg.redisSweepHosts()
+	if h == nil || len(hosts) == 0 {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
-	ports := h.redisNodePorts()
-	if len(ports) == 0 {
-		return nil, fmt.Errorf("no redis node ports configured")
+	type hostCensus struct {
+		host *host
+		out  string
 	}
+	ports := []int{}
+	censuses := []hostCensus{}
+	for _, nodeHost := range hosts {
+		hostPorts := nodeHost.redisNodePorts()
+		if len(hostPorts) == 0 {
+			return nil, fmt.Errorf("no redis node ports configured")
+		}
+		ports = append(ports, hostPorts...)
 
-	// One SSH round trip obtains the local DB key count, expiring-key count,
-	// and Redis' average TTL in milliseconds for every node.
-	out, err := env.runner.shell(ctx, h, fmt.Sprintf(`for p in $(seq %d %d); do
+		// One SSH round trip per host obtains the local DB key count,
+		// expiring-key count, and Redis' average TTL in milliseconds for every
+		// node.
+		hostOut, err := env.runner.shell(ctx, nodeHost, fmt.Sprintf(`for p in $(seq %d %d); do
   k=$(timeout 3 redis-cli -p $p INFO keyspace 2>/dev/null | tr -d '\r')
   [ -z "$k" ] && { echo "$p unreachable"; continue; }
   echo "$p $(echo "$k" | awk -F'[:,=]' '
     BEGIN{keys=0;expires=0;avg=0}
     /^db0:/{keys=$3; expires=$5; avg=$7}
     END{print keys" "expires" "avg}')"
-done`, ports[0], ports[len(ports)-1]))
-	if err != nil {
-		return nil, err
+done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
+		if err != nil {
+			return nil, err
+		}
+		censuses = append(censuses, hostCensus{host: nodeHost, out: hostOut})
 	}
 
 	findings := []finding{}
 	parsed := 0
 	unreachable := []string{}
+	type hostUnreachable struct {
+		host  *host
+		ports []string
+	}
+	unreachableHosts := []hostUnreachable{}
 	limitMillis := redisImpossibleAverageTTL.Milliseconds()
 	type residueNode struct {
+		host             *host
 		port             int
 		keys             int64
 		expires          int64
 		averageTTLMillis int64
 	}
 	affected := []residueNode{}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 2 && fields[1] == "unreachable" {
-			unreachable = append(unreachable, fields[0])
-			continue
+	for _, census := range censuses {
+		hostUnreachablePorts := []string{}
+		for _, line := range strings.Split(strings.TrimSpace(census.out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 2 && fields[1] == "unreachable" {
+				unreachable = append(unreachable, fields[0])
+				hostUnreachablePorts = append(hostUnreachablePorts, fields[0])
+				continue
+			}
+			if len(fields) < 4 {
+				continue
+			}
+			port := atoi(fields[0])
+			keys := atoi64(fields[1])
+			expires := atoi64(fields[2])
+			averageTTLMillis := atoi64(fields[3])
+			if port == 0 {
+				continue
+			}
+			parsed++
+			if limitMillis < averageTTLMillis {
+				affected = append(affected, residueNode{
+					host:             census.host,
+					port:             port,
+					keys:             keys,
+					expires:          expires,
+					averageTTLMillis: averageTTLMillis,
+				})
+			}
 		}
-		if len(fields) < 4 {
-			continue
-		}
-		port := atoi(fields[0])
-		keys := atoi64(fields[1])
-		expires := atoi64(fields[2])
-		averageTTLMillis := atoi64(fields[3])
-		if port == 0 {
-			continue
-		}
-		parsed++
-		if limitMillis < averageTTLMillis {
-			affected = append(affected, residueNode{
-				port:             port,
-				keys:             keys,
-				expires:          expires,
-				averageTTLMillis: averageTTLMillis,
-			})
+		if len(hostUnreachablePorts) > 0 {
+			unreachableHosts = append(unreachableHosts, hostUnreachable{host: census.host, ports: hostUnreachablePorts})
 		}
 	}
 	if parsed == 0 {
@@ -199,7 +227,7 @@ done`, ports[0], ports[len(ports)-1]))
 		evidence := "INFO keyspace independently shows the impossible-TTL residue across ports " + strings.Join(affectedPorts, ",") + "."
 		action := "Run a bounded, binary-safe PTTL attribution before changing data. Repair the identified writer and cleanup scope; do not raise maxmemory to conceal effectively immortal residue."
 		context := "INFO keyspace is read-only and aggregate. The attribution sample runs SCAN and raw-integer PTTL inside Redis through EVAL_RO, so binary keys never cross a shell variable and multi-century TTLs never overflow a Go time.Duration."
-		attribution, attributionErr := sampleRedisTTLAttribution(ctx, env, h, maxTTLNode.port)
+		attribution, attributionErr := sampleRedisTTLAttribution(ctx, env, maxTTLNode.host, maxTTLNode.port)
 		if attributionErr != nil {
 			observed += " sample_status=unavailable"
 			context += " The bounded sample was unavailable during this tick: " + attributionErr.Error()
@@ -240,10 +268,12 @@ done`, ports[0], ports[len(ports)-1]))
 			playbook:  "SIGNALS.md §3.3a, §3.3b, and §4",
 		})
 	}
-	if len(unreachable) > 0 {
+	// unreachable nodes are reported on the host that runs them
+	for _, hostUnreachable := range unreachableHosts {
+		unreachable := hostUnreachable.ports
 		findings = append(findings, finding{
 			probeId: "redis/ttl-leaks", tier: tierWarn,
-			class: "cannot-observe", target: h.name, frame: strings.Join(unreachable, ","), sustain: 2,
+			class: "cannot-observe", target: hostUnreachable.host.name, frame: strings.Join(unreachable, ","), sustain: 2,
 			symptom:  fmt.Sprintf("TTL distribution unavailable from Redis port(s) %s", strings.Join(unreachable, ",")),
 			baseline: "INFO keyspace returns from every configured Redis node.",
 			observed: "unreachable_ports=" + strings.Join(unreachable, ","),

@@ -500,12 +500,13 @@ hosts:                # only monitor-specific facts; lan ips come
     overlay_ip: 172.28.208.182
     roles: [pg-primary]
   - name: by-us-fmt-5-edge-5
-    disabled: true             # known offline; excluded from all probes
+    # disabled: true           # known offline; excluded from all probes
     overlay_ip: 172.28.208.176
-    roles: [services]
+    roles: [minio, redis-cluster]
+    redis: {node_ports: [6412, 6427]}   # nodes only; edge-6 is the entry
   - name: by-us-fmt-5-edge-6
     overlay_ip: 172.28.208.177
-    roles: [redis-cluster, minio]
+    roles: [redis-cluster]
     redis: {entry_port: 6379, node_ports: [6380, 6411], expected_replicas: 0}
   - name: snow
     overlay_ip: 172.28.208.185
@@ -533,6 +534,15 @@ dns_aliases:          # optional; explicit desired state, never learned from DNS
   expected_a: [192.0.2.10, 198.51.100.20]
   expected_aaaa: [2001:db8::10, 2001:db8:1::20]
 ```
+
+A Redis cluster may span several `redis-cluster` hosts. Each host lists its
+own `node_ports` (a two-element list is an inclusive range), node ports are
+unique across hosts, and exactly one host sets `entry_port`; settings
+validation rejects any other layout. Cluster-wide observations (CLUSTER
+INFO/NODES and `-c` reads) go through the entry host, per-node observations
+run on every host over its own ports, and a node finding targets the
+`host:port` that runs it. `expected_replicas` is cluster-wide and is read from
+the entry host.
 
 SSH identity paths are optional; when omitted, `~/.ssh/config` supplies the
 IdentityFile per host. Everything else shared is read from its source of

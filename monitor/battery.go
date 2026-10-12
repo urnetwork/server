@@ -299,8 +299,7 @@ func planWallBattery(ctx context.Context, env *probeEnv) string {
 // node: memory attribution (dataset vs client buffers, the discriminator for
 // why a node is growing), top client output buffers, and the accept-queue
 // state on its port (recv-q pegged = event loop too busy to accept = wedge).
-func redisNodeBattery(ctx context.Context, env *probeEnv, port int) string {
-	h := env.cfg.hostByRole("redis-cluster")
+func redisNodeBattery(ctx context.Context, env *probeEnv, h *host, port int) string {
 	if h == nil {
 		return ""
 	}
@@ -344,8 +343,7 @@ func redisNodeBattery(ctx context.Context, env *probeEnv, port int) string {
 // sockets are one source/process cohort repeatedly touching one hot slot or a
 // fleet-wide reconnect storm without transferring thousands of raw client
 // rows to the monitor.
-func redisConnectionBattery(ctx context.Context, env *probeEnv, port int) string {
-	h := env.cfg.hostByRole("redis-cluster")
+func redisConnectionBattery(ctx context.Context, env *probeEnv, h *host, port int) string {
 	if h == nil {
 		return ""
 	}

@@ -60,16 +60,15 @@ func (self redisFamilyProbe) tier() string           { return tierWarn }
 func (self redisFamilyProbe) cadence() time.Duration { return 24 * time.Hour }
 
 func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	h := env.cfg.hostByRole("redis-cluster")
-	if h == nil {
+	if env.cfg.redisEntryHost() == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
-	ports := h.redisNodePorts()
-	if len(ports) == 0 {
+	if len(env.cfg.redisAllNodePorts()) == 0 {
 		return nil, fmt.Errorf("no redis node ports configured")
 	}
 
-	fullest, err := fullestRedisNodeUsage(ctx, env, h)
+	// the sampled node may be on any redis-cluster host; scan it where it runs
+	h, fullest, err := fullestRedisNodeUsage(ctx, env)
 	if err != nil {
 		return nil, err
 	}

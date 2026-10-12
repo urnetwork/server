@@ -628,7 +628,7 @@ func queryDerivedLocationsState(ctx context.Context, env *probeEnv, settings *De
 // unobservable rather than empty: the comparisons across runs then report
 // nothing, neither a fault nor health.
 func readDerivedLocationsHistory(ctx context.Context, env *probeEnv, depth int) derivedLocationsHistory {
-	redisHost := env.cfg.hostByRole("redis-cluster")
+	redisHost := env.cfg.redisEntryHost()
 	if redisHost == nil {
 		return derivedLocationsHistory{reason: "no-redis-cluster-host"}
 	}

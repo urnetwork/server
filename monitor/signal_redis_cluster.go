@@ -31,7 +31,9 @@ func (self redisClusterProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	h := env.cfg.hostByRole("redis-cluster")
+	// Cluster-wide state is read once through the entry host; node liveness is
+	// swept on every redis-cluster host over that host's own node ports.
+	h := env.cfg.redisEntryHost()
 	if h == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
@@ -67,46 +69,48 @@ func (self redisClusterProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	ports, validPorts := redisClusterPorts(h.redisNodePorts())
-	if !validPorts {
-		findings = append(findings, cannotObserveFinding(h.name+"/node-ping", fmt.Errorf("invalid response: missing or invalid node port inventory")))
-	} else {
-		out, sourceErr := env.runner.shell(ctx, h, redisClusterPingCommand(ports))
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		sweep := parseRedisClusterPing(out, ports)
-		if sourceErr != nil {
-			findings = append(findings, cannotObserveFinding(h.name+"/node-ping", sourceErr))
-		} else if !sweep.complete || sweep.unknownCount > 0 {
-			observationErr := fmt.Errorf("invalid response: incomplete or invalid node PING observation")
-			if sweep.deniedCount > 0 {
-				observationErr = fmt.Errorf("access denied during node PING observation")
-			} else if sweep.commandFailedCount > 0 {
-				observationErr = fmt.Errorf("exit status failure during node PING observation")
+	for _, h := range env.cfg.redisSweepHosts() {
+		ports, validPorts := redisClusterPorts(h.redisNodePorts())
+		if !validPorts {
+			findings = append(findings, cannotObserveFinding(h.name+"/node-ping", fmt.Errorf("invalid response: missing or invalid node port inventory")))
+		} else {
+			out, sourceErr := env.runner.shell(ctx, h, redisClusterPingCommand(ports))
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
-			unknown := cannotObserveFinding(h.name+"/node-ping", observationErr)
-			unknown.observed += fmt.Sprintf(" configured=%d literal_pong=%d timeouts=%d unknown=%d complete=%t", len(ports), sweep.pongCount, len(sweep.timeoutPorts), sweep.unknownCount, sweep.complete)
-			findings = append(findings, unknown)
-		}
-		if len(sweep.timeoutPorts) > 0 {
-			timeoutPorts := strings.Join(sweep.timeoutPorts, ",")
-			findings = append(findings, finding{
-				probeId: "redis/node-unreachable", tier: tierPage,
-				class: "node-unreachable", target: h.name,
-				frame:   timeoutPorts,
-				sustain: 1,
-				symptom: fmt.Sprintf("redis (%s) %d node PING attempt(s) timed out on host loopback: ports %s",
-					h.name, len(sweep.timeoutPorts), timeoutPorts),
-				mechanism: "A bounded redis-cli PING attempt timed out on the Redis host. This is not proof of an event-loop wedge, a missing listener, or failure of a remote LAN/VPN client path.",
-				baseline:  "Every exactly configured node port returns literal PONG before its two-second command timeout; no latency below that bound is measured.",
-				observed:  fmt.Sprintf("timeout_ports=%s configured=%d literal_pong=%d unknown=%d complete=%t", timeoutPorts, len(ports), sweep.pongCount, sweep.unknownCount, sweep.complete && sourceErr == nil),
-				evidence:  "The framed sweep establishes only the listed completed timeout observations; use §5.2 to distinguish event-loop, process, listener and resource causes.",
-				context:   "host-loopback-only: direct shard client paths and the bootstrap proxy are separate observations",
-				playbook:  "SIGNALS.md 5.2",
-			})
-		} else if sourceErr == nil && sweep.complete && sweep.pongCount == len(ports) {
-			findings = append(findings, healthyFinding("redis/node-unreachable", tierPage, "node-unreachable", h.name))
+			sweep := parseRedisClusterPing(out, ports)
+			if sourceErr != nil {
+				findings = append(findings, cannotObserveFinding(h.name+"/node-ping", sourceErr))
+			} else if !sweep.complete || sweep.unknownCount > 0 {
+				observationErr := fmt.Errorf("invalid response: incomplete or invalid node PING observation")
+				if sweep.deniedCount > 0 {
+					observationErr = fmt.Errorf("access denied during node PING observation")
+				} else if sweep.commandFailedCount > 0 {
+					observationErr = fmt.Errorf("exit status failure during node PING observation")
+				}
+				unknown := cannotObserveFinding(h.name+"/node-ping", observationErr)
+				unknown.observed += fmt.Sprintf(" configured=%d literal_pong=%d timeouts=%d unknown=%d complete=%t", len(ports), sweep.pongCount, len(sweep.timeoutPorts), sweep.unknownCount, sweep.complete)
+				findings = append(findings, unknown)
+			}
+			if len(sweep.timeoutPorts) > 0 {
+				timeoutPorts := strings.Join(sweep.timeoutPorts, ",")
+				findings = append(findings, finding{
+					probeId: "redis/node-unreachable", tier: tierPage,
+					class: "node-unreachable", target: h.name,
+					frame:   timeoutPorts,
+					sustain: 1,
+					symptom: fmt.Sprintf("redis (%s) %d node PING attempt(s) timed out on host loopback: ports %s",
+						h.name, len(sweep.timeoutPorts), timeoutPorts),
+					mechanism: "A bounded redis-cli PING attempt timed out on the Redis host. This is not proof of an event-loop wedge, a missing listener, or failure of a remote LAN/VPN client path.",
+					baseline:  "Every exactly configured node port returns literal PONG before its two-second command timeout; no latency below that bound is measured.",
+					observed:  fmt.Sprintf("timeout_ports=%s configured=%d literal_pong=%d unknown=%d complete=%t", timeoutPorts, len(ports), sweep.pongCount, sweep.unknownCount, sweep.complete && sourceErr == nil),
+					evidence:  "The framed sweep establishes only the listed completed timeout observations; use §5.2 to distinguish event-loop, process, listener and resource causes.",
+					context:   "host-loopback-only: direct shard client paths and the bootstrap proxy are separate observations",
+					playbook:  "SIGNALS.md 5.2",
+				})
+			} else if sourceErr == nil && sweep.complete && sweep.pongCount == len(ports) {
+				findings = append(findings, healthyFinding("redis/node-unreachable", tierPage, "node-unreachable", h.name))
+			}
 		}
 	}
 	if ctx.Err() != nil {

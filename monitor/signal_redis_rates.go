@@ -209,8 +209,9 @@ func (p redisRatesProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 }
 
 func observeRedisRateCoverage(ctx context.Context, env *probeEnv) (redisRateCoverage, string, error) {
-	redisHost := env.cfg.hostByRole("redis-cluster")
-	if redisHost == nil || len(redisHost.redisNodePorts()) == 0 {
+	// one exporter series per node, across every redis-cluster host
+	nodeCount := len(env.cfg.redisAllNodePorts())
+	if env.cfg.redisEntryHost() == nil || nodeCount == 0 {
 		return redisRateCoverage{}, "", fmt.Errorf("no Redis node inventory is configured")
 	}
 	metricHosts := env.cfg.hostsWithRole("services")
@@ -227,7 +228,7 @@ func observeRedisRateCoverage(ctx context.Context, env *probeEnv) (redisRateCove
 	if err != nil {
 		return redisRateCoverage{}, "", fmt.Errorf("query Mimir through service gateways: %w", err)
 	}
-	coverage, err := parseRedisRateCoverage(out, len(redisHost.redisNodePorts()))
+	coverage, err := parseRedisRateCoverage(out, nodeCount)
 	if err != nil {
 		return redisRateCoverage{}, metricHost.name, err
 	}

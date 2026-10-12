@@ -35,7 +35,7 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	redisHost := env.cfg.hostByRole("redis-cluster")
+	redisHost := env.cfg.redisEntryHost()
 	if redisHost == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
