@@ -113,6 +113,10 @@ func TestExpiryDeadlineRawPagesKeepBothBoundsAndNullFallback(t *testing.T) {
 
 // An expired row that already has a settlement owner cannot contribute a past
 // hint on every new scan, which would turn the recurring sweep into a hot loop.
+// Since 65190bed the sweep reconciles an arrived deadline itself, before it
+// looks for an intent, and retires the intent in the same commit. So the first
+// scan closes the expired rows of its epoch, and the next scan finds nothing
+// to close and no deadline to wake for.
 func TestExpiryDeadlineExpiredOwnedRowsDoNotRepeatImmediateWake(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -126,7 +130,28 @@ func TestExpiryDeadlineExpiredOwnedRowsDoNotRepeatImmediateWake(t *testing.T) {
 				SELECT id,get_byte(uuid_send(id),15)%16,'settled' FROM unnest($1::uuid[]) row(id)
 				ON CONFLICT(contract_id) DO NOTHING`, fixture.ids))
 		})
+		// The last fixture row was created after the scan epoch.
+		epochIds, laterIds := fixture.ids[:len(fixture.ids)-1], fixture.ids[len(fixture.ids)-1:]
+		readCustody := func(ids []server.Id) (terminal int, intents int) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT
+					(SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1::uuid[]) AND outcome IS NOT NULL),
+					(SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=ANY($1::uuid[]))`, ids).Scan(&terminal, &intents))
+			})
+			return
+		}
 		count, next, deadline, err := forceCloseOpenContractIdsPage(ctx, fixture.now.Add(-12*time.Minute), 32, 1, 1, 0,
+			&ContractExpiryCursor{ScanBefore: fixture.now})
+		if err != nil || count != int64(len(epochIds)) || next != nil || deadline != nil {
+			t.Fatal("expired intent-owned rows were not reconciled at their deadline", count, err)
+		}
+		if terminal, intents := readCustody(epochIds); terminal != len(epochIds) || intents != 0 {
+			t.Fatal("deadline reconciliation did not close the rows and retire their intents together", terminal, intents)
+		}
+		if terminal, intents := readCustody(laterIds); terminal != 0 || intents != len(laterIds) {
+			t.Fatal("the scan epoch reconciled a row created after it", terminal, intents)
+		}
+		count, next, deadline, err = forceCloseOpenContractIdsPage(ctx, fixture.now.Add(-12*time.Minute), 32, 1, 1, 0,
 			&ContractExpiryCursor{ScanBefore: fixture.now})
 		if err != nil || count != 0 || next != nil || deadline != nil {
 			t.Fatal("expired intent-owned rows repeatedly requested an immediate sweep", count, err)

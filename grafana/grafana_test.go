@@ -2,10 +2,14 @@ package grafana
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -2036,6 +2040,22 @@ func TestCircleAdmissionDashboardPreservesPerWorkerCapability(t *testing.T) {
 // test failure instead of a silent observability gap.
 func registeredApplicationMetrics(t *testing.T) []string {
 	t.Helper()
+	metrics, err := inventoryApplicationMetrics("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return metrics
+}
+
+// Sorted urnetwork_ metric names registered by the module's own Go sources
+// under root, as git sees them: tracked files plus untracked ones that are not
+// ignored, so a new file is inventoried before it is added. Ignored scratch
+// (temp/*) and nested repositories or linked worktrees (an agent worktree under
+// .claude/worktrees) are not this module's source; a walk of the directory read
+// them, so the inventory depended on whatever was lying in the checkout. The
+// user's global and system git configuration are not read either. The excluded
+// paths share RUN-ALL's source ownership boundary.
+func inventoryApplicationMetrics(root string) ([]string, error) {
 	metrics := map[string]bool{}
 	stringLiteral := func(expression ast.Expr) (string, bool) {
 		literal, ok := expression.(*ast.BasicLit)
@@ -2046,36 +2066,27 @@ func registeredApplicationMetrics(t *testing.T) []string {
 		return value, err == nil
 	}
 
-	err := filepath.WalkDir("..", func(path string, entry fs.DirEntry, walkErr error) error {
-		// The local metric inventory shares RUN-ALL's source ownership boundary.
-		if slices.Contains([]string{"../proxy/acceptance", "../proxy/cmd/acceptance-main"}, filepath.ToSlash(path)) {
-			return filepath.SkipDir
+	command := exec.Command("git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.go")
+	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("the metric inventory reads the module's git file list: %w", err)
+	}
+	for _, name := range strings.Split(string(output), "\x00") {
+		if name == "" || strings.HasSuffix(name, "_test.go") ||
+			strings.HasPrefix(name, "proxy/acceptance/") || strings.HasPrefix(name, "proxy/cmd/acceptance-main/") ||
+			strings.HasPrefix(name, "connect/sim-latency/eval-") ||
+			strings.HasPrefix(name, "vendor/") || strings.Contains(name, "/vendor/") {
+			continue
 		}
-		if walkErr != nil {
-			if strings.HasPrefix(
-				filepath.ToSlash(path),
-				"../connect/sim-latency/eval-",
-			) {
-				return filepath.SkipDir
-			}
-			return walkErr
+		path := filepath.Join(root, filepath.FromSlash(name))
+		// a tracked file deleted in the working tree is no longer source
+		if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+			continue
 		}
-		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "vendor" || strings.HasPrefix(
-				filepath.ToSlash(path),
-				"../connect/sim-latency/eval-",
-			) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			if call, ok := node.(*ast.CallExpr); ok {
@@ -2128,10 +2139,6 @@ func registeredApplicationMetrics(t *testing.T) []string {
 			}
 			return true
 		})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 
 	names := make([]string, 0, len(metrics))
@@ -2139,7 +2146,7 @@ func registeredApplicationMetrics(t *testing.T) []string {
 		names = append(names, metric)
 	}
 	slices.Sort(names)
-	return names
+	return names, nil
 }
 
 // Keeps custom collector descriptors in the same inventory as direct gauges.

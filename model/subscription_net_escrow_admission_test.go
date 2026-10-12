@@ -4,20 +4,22 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/urnetwork/server"
 )
 
-// Observe an actual database lock wait before releasing the first transaction.
-// The pre-fix writer waits on its revision insert only after admitting stale
-// credit; the corrected writer waits before its reservation census.
+// While the first creator's transaction is open, a competitor is refused before
+// it reads any credit. The pre-fix writer admitted stale credit before waiting
+// on its revision insert; since 403b9c55 the legacy allocator admits every
+// eligible grant's owner first, so the competitor is refused instead of
+// waiting on the first creator's rows.
 func TestNetEscrowAdmissionSerializesCompetingCreators(t *testing.T) {
 	testNetEscrowAdmissionWait(t, false, false)
 }
@@ -27,8 +29,8 @@ func TestNetEscrowAdmissionWaiterUsesRolledBackCredit(t *testing.T) {
 	testNetEscrowAdmissionWait(t, true, false)
 }
 
-// Bounded prober discovery must wait before its durable reservation census.
-// The first creator deliberately commits without publishing its cache post.
+// Bounded prober discovery must be refused before its durable reservation
+// census. The first creator deliberately commits without publishing its cache post.
 func TestDynamicProberGrantSerializesCompetingCreators(t *testing.T) {
 	testNetEscrowAdmissionWait(t, false, true)
 }
@@ -39,7 +41,8 @@ func TestDynamicProberGrantWaiterUsesRolledBackCredit(t *testing.T) {
 	testNetEscrowAdmissionWait(t, true, true)
 }
 
-// Own both transaction lifetimes and force the database-visible ordering.
+// Hold the first creator's no-retry transaction open at a barrier, refuse a
+// competitor inside it, then retry the competitor after commit or rollback.
 func testNetEscrowAdmissionWait(t *testing.T, rollback, internalProber bool) {
 	t.Helper()
 	testEnv := server.DefaultTestEnv()
@@ -59,59 +62,72 @@ func testNetEscrowAdmissionWait(t *testing.T, rollback, internalProber bool) {
 					SET start_balance_byte_count=$2 WHERE balance_id=$1`, f.balanceId, ProberTransferBalanceTopUp))
 			}, server.TxReadCommitted)
 		}
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-		if err != nil {
-			t.Fatal(err)
+		create := func(tx server.PgTx) (*TransferEscrow, error) {
+			contract, _, err := createTransferEscrowInTx(ctx, tx,
+				f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId,
+				f.sourceNetworkId, 600, nil)
+			return contract, err
 		}
-		defer tx.Rollback(context.Background())
-		_, _, err = createTransferEscrowInTx(ctx, tx,
-			f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId,
-			f.sourceNetworkId, 600, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		blockerPid := contractLifecycleTestBackendPid(t, ctx, tx)
-		type admissionResult struct {
-			contract *TransferEscrow
-			err      error
-		}
-		finished := make(chan admissionResult, 1)
-		go func() {
-			result := admissionResult{}
-			defer func() {
-				if value := recover(); value != nil {
-					result.err = fmt.Errorf("admission panic: %v", value)
+		compete := func() (contract *TransferEscrow, err error) {
+			recovered := server.HandleError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					contract, err = create(tx)
+				}, server.TxReadCommitted, server.OptNoRetry())
+			})
+			if recovered != nil {
+				contract, err = nil, fmt.Errorf("admission panic: %v", recovered)
+				if recoveredErr, ok := recovered.(error); ok {
+					err = recoveredErr
 				}
-				finished <- result
-			}()
-			server.Tx(ctx, func(waiter server.PgTx) {
-				result.contract, _, result.err = createTransferEscrowInTx(ctx, waiter,
-					f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId,
-					f.sourceNetworkId, 600, nil)
-			}, server.TxReadCommitted, server.OptNoRetry())
-		}()
-		requireContractLifecycleBlockedBy(t, ctx, tx, blockerPid)
-		if rollback {
-			err = tx.Rollback(ctx)
-		} else {
-			err = tx.Commit(ctx)
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case result := <-finished:
-			if rollback {
-				if result.err != nil || result.contract == nil {
-					t.Fatalf("rollback did not release credit: %+v", result)
-				}
-			} else if result.contract != nil || result.err == nil || !strings.Contains(result.err.Error(), "Insufficient balance") {
-				t.Fatalf("competing creator re-admitted committed credit: %+v", result)
 			}
+			return
+		}
+		errRollback := errors.New("synthetic first creator rollback")
+		held := make(chan struct{})
+		finish := make(chan struct{})
+		firstDone := make(chan any, 1)
+		go func() {
+			firstDone <- server.HandleError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					if _, err := create(tx); err != nil {
+						server.Raise(err)
+					}
+					close(held)
+					select {
+					case <-finish:
+					case <-ctx.Done():
+						server.Raise(ctx.Err())
+					}
+					if rollback {
+						server.Raise(errRollback)
+					}
+				}, server.TxReadCommitted, server.OptNoRetry())
+			})
+		}()
+		select {
+		case <-held:
+		case recovered := <-firstDone:
+			t.Fatalf("first creator did not reserve: %v", recovered)
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
+		}
+		if contract, err := compete(); contract != nil || !errors.Is(err, errTransferBalanceOwnershipBusy) {
+			close(finish)
+			<-firstDone
+			t.Fatalf("competing creator entered while the first owned the grant: contract=%+v error=%v", contract, err)
+		}
+		close(finish)
+		recovered := <-firstDone
+		if recoveredErr, _ := recovered.(error); (rollback && !errors.Is(recoveredErr, errRollback)) || (!rollback && recovered != nil) {
+			t.Fatalf("first creator outcome=%v, rollback=%t", recovered, rollback)
+		}
+		contract, err := compete()
+		if rollback {
+			if err != nil || contract == nil {
+				t.Fatalf("rollback did not release credit: contract=%+v error=%v", contract, err)
+			}
+		} else if contract != nil || err == nil || !strings.Contains(err.Error(), "Insufficient balance") {
+			t.Fatalf("competing creator re-admitted committed credit: contract=%+v error=%v", contract, err)
 		}
 		if got := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId].reserved; got != 600 {
 			t.Fatalf("durable reserved credit=%d, want exactly one 600-byte reservation", got)
@@ -135,7 +151,7 @@ func TestNetEscrowAdmissionSurvivesMissingCreatePost(t *testing.T) {
 			admitted, _, admissionErr = createTransferEscrowInTx(ctx, tx,
 				f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId,
 				f.sourceNetworkId, 600, nil)
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if admissionErr == nil || admitted != nil || !strings.Contains(admissionErr.Error(), "Insufficient balance") {
 			t.Fatalf("missing cache admitted the same credit twice: contract=%+v error=%v", admitted, admissionErr)
 		}
@@ -164,7 +180,7 @@ func TestNetEscrowAdmissionSurvivesMissingSettlementPost(t *testing.T) {
 			if !closed {
 				t.Fatal("settlement did not claim terminal outcome")
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		var balance ByteCount
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1`, f.balanceId).Scan(&balance))
@@ -179,7 +195,7 @@ func TestNetEscrowAdmissionSurvivesMissingSettlementPost(t *testing.T) {
 			admitted, _, admissionErr = createTransferEscrowInTx(ctx, tx,
 				f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId,
 				f.sourceNetworkId, 600, nil)
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if admissionErr == nil || admitted != nil {
 			t.Fatalf("lost settlement post re-admitted spent credit: contract=%+v error=%v", admitted, admissionErr)
 		}
@@ -206,7 +222,7 @@ func TestNetEscrowAdmissionIgnoresRestoredCache(t *testing.T) {
 				admitted, _, err = createTransferEscrowInTx(ctx, tx,
 					f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId,
 					f.sourceNetworkId, 1, nil)
-			}, server.TxReadCommitted)
+			}, server.TxReadCommitted, server.OptNoRetry())
 			if admitted != nil || err == nil || !strings.Contains(err.Error(), "Insufficient balance") {
 				t.Fatalf("cache %q authorized nonexistent credit: admitted=%+v error=%v", value, admitted, err)
 			}
@@ -219,6 +235,8 @@ func TestNetEscrowAdmissionIgnoresRestoredCache(t *testing.T) {
 
 // A retry after both writes rolls back the outcome and debit together; the
 // terminal claim also prevents a later settlement call from charging twice.
+// Settlement admits its grant owners (403b9c55), so it runs only in a no-retry
+// transaction and its caller retries with a fresh one, as modeled here.
 func TestNetEscrowSettlementRetryDebitsOnce(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
@@ -231,20 +249,35 @@ func TestNetEscrowSettlementRetryDebitsOnce(t *testing.T) {
 				(contract_id,party,used_transfer_byte_count,close_time,checkpoint)
 				VALUES($1,'source',600,$2,false),($1,'destination',600,$2,false)`, contract.ContractId, server.NowUtc()))
 		}, server.TxReadCommitted)
-		attempts := 0
-		server.Tx(ctx, func(tx server.PgTx) {
-			attempts++
-			_, closed, err := settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
-			server.Raise(err)
-			if !closed {
-				t.Fatal("retry lost terminal outcome ownership")
+		readSettlement := func() (outcome *string, balance ByteCount) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT
+					(SELECT outcome FROM transfer_contract WHERE contract_id=$1),
+					(SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2)`,
+					contract.ContractId, f.balanceId).Scan(&outcome, &balance))
+			})
+			return
+		}
+		for attempt := 1; attempt <= 2; attempt++ {
+			recovered := server.HandleError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					_, closed, err := settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
+					server.Raise(err)
+					if !closed {
+						t.Fatal("retry lost terminal outcome ownership")
+					}
+					if attempt == 1 {
+						server.Raise(&pgconn.PgError{Code: "40001", Message: "synthetic retry after outcome and debit"})
+					}
+				}, server.TxReadCommitted, server.OptNoRetry())
+			})
+			if attempt == 1 {
+				if outcome, balance := readSettlement(); recovered == nil || outcome != nil || balance != 1000 {
+					t.Fatalf("failed attempt kept its outcome or debit: recovered=%v balance=%d", recovered, balance)
+				}
+			} else if recovered != nil {
+				t.Fatalf("retried settlement failed: %v", recovered)
 			}
-			if attempts == 1 {
-				server.Raise(&pgconn.PgError{Code: "40001", Message: "synthetic retry after outcome and debit"})
-			}
-		}, server.TxReadCommitted)
-		if attempts != 2 {
-			t.Fatalf("transaction attempts=%d, want exactly two", attempts)
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			posts, closed, err := settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
@@ -257,7 +290,7 @@ func TestNetEscrowSettlementRetryDebitsOnce(t *testing.T) {
 			if balance != 400 {
 				t.Fatalf("retry/replay debit balance=%d, want 400", balance)
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 	})
 }
 

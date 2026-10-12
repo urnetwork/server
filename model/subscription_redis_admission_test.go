@@ -17,6 +17,20 @@ func createRedisAdmissionTest(ctx context.Context, f netEscrowOrderingTestFixtur
 	server.Raise(err)
 	return escrow
 }
+
+// A settled Redis admission keeps its whole reservation until the durable debit
+// worker applies the journal entry its settlement committed; since 403b9c55 no
+// settlement post releases it. Run that worker's per-balance step, as the
+// FlushTransferDebits shard task does every few seconds in production.
+func flushRedisAdmissionTestDebits(t testing.TB, ctx context.Context, balanceId server.Id, wantApplied, wantReleased int) {
+	t.Helper()
+	applied, released, busy, err := flushTransferDebitBalance(ctx, balanceId)
+	if err != nil || busy || applied != wantApplied || released != wantReleased {
+		t.Fatalf("debit worker applied=%d released=%d busy=%t err=%v, want applied=%d released=%d",
+			applied, released, busy, err, wantApplied, wantReleased)
+	}
+}
+
 func TestRedisAdmissionMixedSettlementReplay(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -33,6 +47,17 @@ func TestRedisAdmissionMixedSettlementReplay(t *testing.T) {
 		released := settleNetEscrowOrderingTestContract(ctx, first.ContractId)
 		server.RunPosts(ctx, released...)
 		server.RunPosts(ctx, released...)
+		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 600 {
+			t.Fatalf("settlement post released a worker-owned reservation=%d", got)
+		}
+		flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 1, 1)
+		// An unacknowledged journal deletion leaves the applied entry. The next
+		// worker pass skips its debit, replays the same release and deletes it.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_debit_journal(contract_id,balance_id,debit_byte_count,shard,applied)
+				VALUES($1,$2,0,$3,true)`, first.ContractId, f.balanceId, transferDebitShard(f.balanceId)))
+		}, server.TxReadCommitted, server.OptNoRetry())
+		flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 0, 1)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 400 {
 			t.Fatalf("replay removed neighbor reservation=%d", got)
 		}
@@ -206,6 +231,10 @@ func TestRedisAdmissionCompanionUsesSamePayerAndCredit(t *testing.T) {
 			t.Fatal("companion payer reservation", got)
 		}
 		server.RunPosts(ctx, settleNetEscrowOrderingTestContract(ctx, companion.ContractId)...)
+		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 200 {
+			t.Fatal("companion settlement post released a worker-owned reservation", got)
+		}
+		flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 1, 1)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 100 {
 			t.Fatal("companion release changed origin", got)
 		}
@@ -259,6 +288,7 @@ func TestRedisAdmissionLegacyPolicyValueDoesNotDisableCreation(t *testing.T) {
 		}
 		next := createRedisAdmissionTest(ctx, f, 100)
 		server.RunPosts(ctx, settleNetEscrowOrderingTestContract(ctx, next.ContractId)...)
+		flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 1, 1)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 900 {
 			t.Fatal("legacy policy value changed approximate debt", got)
 		}
@@ -311,7 +341,9 @@ func TestRedisAdmissionDurableUsageAndLostSettlementPost(t *testing.T) {
 			if !closed {
 				t.Fatal("settlement not claimed")
 			}
-		}, server.TxReadCommitted)
+			// Settlement admits its provider-total queue owner (ddad361c), which
+			// needs the read-committed no-retry transaction every caller uses.
+		}, server.TxReadCommitted, server.OptNoRetry())
 		var credit ByteCount
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1`, f.balanceId).Scan(&credit))

@@ -35,15 +35,26 @@ func TestForceCloseAccountingRejectionReportsVerifiedProgress(t *testing.T) {
 		if bad.state(t, ctx) != before {
 			t.Fatal("isolated rejection changed disputed accounting or stream state")
 		}
-		if state := good.state(t, ctx); state.outcome != ContractOutcomeSettled || state.dispute || state.open || !state.escrowSettled || state.streamFound {
+		// The Redis close commits its outcome, consumption journal and earnings.
+		// Since 7c7c55a4 the separate debit owner settles the escrow metadata and
+		// releases the reservation, so the sibling's escrow is settled only then.
+		if state := good.state(t, ctx); state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.escrowSettled || state.streamFound {
 			t.Fatal("valid sibling failed terminal verification or stream cleanup")
 		}
+		requireForceCloseDebitJournal(t, ctx, good, 1, 1024)
 		var progress forceCloseAccountingProgress
 		if !errors.As(err, &progress) {
 			t.Fatal("completed accounting-only rejection lacks positive typed progress authority")
 		}
 		if progress.VerifiedCloseCount() != 1 || progress.AccountingRejectionCount() != 1 {
 			t.Fatal("selected candidates were confused with verified completed siblings")
+		}
+		drainForceCloseDebitCustody(t, ctx, good, escrow, 1024)
+		if state := good.state(t, ctx); !state.escrowSettled || state.escrowPayoutByteCount != 1024 {
+			t.Fatal("verified sibling's debit owner did not settle its escrow")
+		}
+		if bad.state(t, ctx) != before {
+			t.Fatal("sibling debit changed the rejected dispute's retained state")
 		}
 	})
 }
@@ -253,11 +264,13 @@ func TestForceCloseAccountingDatabaseFailureKeepsOrdinaryError(t *testing.T) {
 // A dispute created while finalizing checkpoints needs one fresh post-failure
 // verification in the same pass; an already-large error count must not impose
 // another hour-scale global pause while unrelated backlog is draining.
+// The checkpoints are exact: id-less ones are legacy lower bounds, and expiry
+// settles a 0 bound below its peer at the mean instead of disputing (ca4b5c3d).
 func TestForceCloseAccountingNewDisputeRequiresFirstPassVerification(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		const escrow = ByteCount(32 * 1024 * 1024)
-		bad := newForceCloseDisputeFixture(t, ctx, true, true, 0, 4*escrow, escrow)
+		bad := newExactForceCloseDisputeFixture(t, ctx, true, true, 0, 4*escrow, escrow)
 		before := bad.state(t, ctx)
 		if !before.sourceCheckpoint || !before.destinationCheckpoint || !before.open || before.dispute || before.outcome != "" || !before.streamFound {
 			t.Fatal("synthetic initial checkpoint lifecycle or stream precondition failed")

@@ -72,9 +72,27 @@ func newLegacyForceCloseDisputeFixture(t testing.TB, ctx context.Context, source
 		sourceByteCount, destinationByteCount, escrowByteCount, true)
 }
 
+// Reports carry an identity, so each checkpoint is an exact count. An id-less
+// checkpoint is only a legacy lower bound (ca4b5c3d), and expiry settles such a
+// bound below its peer at the mean instead of disputing it. A case that needs
+// the sweep to create a real disagreement from checkpoints uses exact reports.
+func newExactForceCloseDisputeFixture(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
+	sourceByteCount, destinationByteCount, escrowByteCount ByteCount) *forceCloseDisputeFixture {
+	return newForceCloseDisputeFixtureWithReports(t, ctx, sourceCheckpoint, destinationCheckpoint,
+		sourceByteCount, destinationByteCount, escrowByteCount, false, true)
+}
+
 // Both modes use the actual transaction owners, close reports and expiry sweep.
 func newForceCloseDisputeFixtureWithAdmission(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
 	sourceByteCount, destinationByteCount, escrowByteCount ByteCount, legacy bool) *forceCloseDisputeFixture {
+	return newForceCloseDisputeFixtureWithReports(t, ctx, sourceCheckpoint, destinationCheckpoint,
+		sourceByteCount, destinationByteCount, escrowByteCount, legacy, false)
+}
+
+// Id-less reports use the legacy CloseContract entry point; exact reports use
+// CloseContractReport with a fresh report identity.
+func newForceCloseDisputeFixtureWithReports(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
+	sourceByteCount, destinationByteCount, escrowByteCount ByteCount, legacy bool, exact bool) *forceCloseDisputeFixture {
 	t.Helper()
 	payerNetworkId := server.NewId()
 	providerNetworkId := server.NewId()
@@ -109,8 +127,17 @@ func newForceCloseDisputeFixtureWithAdmission(t testing.TB, ctx context.Context,
 	// in that report (owner decision B). Report the receiver first: every shape
 	// then stays open for the expiry sweep, as a sender final whose receiver
 	// checkpoint predates it does.
-	connect.AssertEqual(t, nil, CloseContract(ctx, contractId, destinationId, destinationByteCount, destinationCheckpoint))
-	connect.AssertEqual(t, nil, CloseContract(ctx, contractId, sourceId, sourceByteCount, sourceCheckpoint))
+	report := func(clientId server.Id, byteCount ByteCount, checkpoint bool) {
+		if exact {
+			applied, err := CloseContractReport(ctx, contractId, clientId, byteCount, checkpoint, server.NewId())
+			connect.AssertEqual(t, nil, err)
+			connect.AssertEqual(t, true, applied)
+			return
+		}
+		connect.AssertEqual(t, nil, CloseContract(ctx, contractId, clientId, byteCount, checkpoint))
+	}
+	report(destinationId, destinationByteCount, destinationCheckpoint)
+	report(sourceId, sourceByteCount, sourceCheckpoint)
 	createTime := time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx,
@@ -205,6 +232,9 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
 // Both orientations and both-checkpoint pairs finalize in one bounded sweep.
 // Redis-backed debt remains reserved until its durable debit worker commits;
 // repeats before and after that boundary must not duplicate accounting.
+// Each pair is reported both id-less and exact. An id-less checkpoint is a
+// legacy lower bound, so the sweep settles one below its peer at the mean
+// without a dispute (ca4b5c3d); exact reports dispute every unequal pair.
 func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -230,22 +260,31 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 			{name: "destination-higher", source: low, destination: high},
 			{name: "source-higher", source: high, destination: low},
 		}
+		const escrow = ByteCount(1024 * 1024 * 1024)
 		fixtures := []*forceCloseDisputeFixture{}
 		caseNames := []string{}
-		for _, orientation := range orientations {
-			for _, usage := range usages {
-				fixture := newForceCloseDisputeFixture(t, ctx,
-					orientation.sourceCheckpoint, orientation.destinationCheckpoint,
-					usage.source, usage.destination, ByteCount(1024*1024*1024))
-				state := fixture.state(t, ctx)
-				if !state.open || state.dispute || state.outcome != "" || !state.streamFound {
-					t.Fatal("checkpoint fixture is not initially open and non-disputed")
+		for _, exact := range []bool{false, true} {
+			kind := "id-less"
+			if exact {
+				kind = "exact"
+			}
+			for _, orientation := range orientations {
+				for _, usage := range usages {
+					fixture := newForceCloseDisputeFixtureWithReports(t, ctx,
+						orientation.sourceCheckpoint, orientation.destinationCheckpoint,
+						usage.source, usage.destination, escrow, false, exact)
+					state := fixture.state(t, ctx)
+					if !state.open || state.dispute || state.outcome != "" || !state.streamFound {
+						t.Fatal("checkpoint fixture is not initially open and non-disputed")
+					}
+					fixtures = append(fixtures, fixture)
+					caseNames = append(caseNames, kind+"/"+orientation.name+"/"+usage.name)
 				}
-				fixtures = append(fixtures, fixture)
-				caseNames = append(caseNames, orientation.name+"/"+usage.name)
 			}
 		}
-		closeCount, err := ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
+		// One page holds every fixture.
+		const pageSize = 32
+		closeCount, err := ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, pageSize, 1, 0, 0)
 		if err != nil {
 			t.Error("first sweep returned an error for valid checkpoint totals")
 		}
@@ -255,12 +294,15 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 			state := fixture.state(t, ctx)
 			pendingStates = append(pendingStates, state)
 			mean := (fixture.sourceByteCount + fixture.destinationByteCount) / 2
+			// The close commits its outcome, consumption journal and earnings.
+			// Since 7c7c55a4 the escrow metadata and the whole reservation stay
+			// with the debit worker until it applies that consumption.
 			if state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.streamFound ||
-				!state.escrowSettled || !state.redisReserved || state.sourceCheckpoint || state.destinationCheckpoint ||
+				state.escrowSettled || !state.redisReserved || state.sourceCheckpoint || state.destinationCheckpoint ||
 				state.sourceByteCount != fixture.sourceByteCount || state.destinationByteCount != fixture.destinationByteCount ||
-				state.escrowPayoutByteCount != mean || state.providerEarnedByteCount != mean ||
+				state.escrowPayoutByteCount != 0 || state.providerEarnedByteCount != mean ||
 				state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.legacyEscrowByteCount != 0 ||
-				state.netEscrowByteCount != mean || state.requestTokenByteCount != mean || state.redisEscrowByteCount != mean {
+				state.netEscrowByteCount != escrow || state.requestTokenByteCount != escrow || state.redisEscrowByteCount != escrow {
 				t.Errorf("%s: first sweep did not finalize with conserved pending debt", caseNames[index])
 			}
 			var pending, applied int
@@ -275,7 +317,7 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 				t.Errorf("%s: first sweep did not retain exactly one unapplied debit", caseNames[index])
 			}
 		}
-		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
+		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, pageSize, 1, 0, 0)
 		if err != nil || closeCount != 0 {
 			t.Error("repeat sweep performed work while finalized debits awaited their worker")
 		}
@@ -303,7 +345,7 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 				t.Errorf("%s: debit completion did not preserve exact settlement accounting", caseNames[index])
 			}
 		}
-		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
+		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, pageSize, 1, 0, 0)
 		if err != nil || closeCount != 0 {
 			t.Error("second sweep performed work after the required one-pass convergence")
 		}
@@ -414,6 +456,8 @@ func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 
 // A failed dispute settlement must retain its reservation, including when this
 // sweep created the dispute. Non-disputed malformed quarantine is a separate policy.
+// The reports are exact: an id-less checkpoint of 0 is a legacy lower bound
+// that expiry settles at the mean rather than disputes (ca4b5c3d).
 func TestForceCloseDisputeSettlementFailureRollsBack(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -421,8 +465,8 @@ func TestForceCloseDisputeSettlementFailureRollsBack(t *testing.T) {
 		ctx := t.Context()
 		const escrow = ByteCount(32 * 1024 * 1024)
 		fixtures := []*forceCloseDisputeFixture{
-			newForceCloseDisputeFixture(t, ctx, true, false, 0, 4*escrow, escrow),
-			newForceCloseDisputeFixture(t, ctx, false, false, 0, 4*escrow, escrow),
+			newExactForceCloseDisputeFixture(t, ctx, true, false, 0, 4*escrow, escrow),
+			newExactForceCloseDisputeFixture(t, ctx, false, false, 0, 4*escrow, escrow),
 		}
 		connect.AssertEqual(t, false, fixtures[0].state(t, ctx).dispute)
 		connect.AssertEqual(t, true, fixtures[1].state(t, ctx).dispute)

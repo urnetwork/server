@@ -29,12 +29,17 @@ func (h *committedIdentityCacheCancelHook) DialHook(next redis.DialHook) redis.D
 func (h *committedIdentityCacheCancelHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return next
 }
+
+// Cancels the caller at its first Redis command once the child is durable.
+// Ordinary Redis callbacks no longer send a preflight PING (d6996eaf), so the
+// hook matches every command on the call's context rather than only PING; a
+// PING-only hook never fires and the post-commit failure goes untested.
 func (h *committedIdentityCacheCancelHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, command redis.Cmder) error {
-		if h.enabled.Load() && ctx.Value(committedIdentityCacheContextKey{}) == h && command.Name() == "ping" && !h.fired.Load() {
+		if h.enabled.Load() && ctx.Value(committedIdentityCacheContextKey{}) == h && !h.fired.Load() {
 			// This separate primary connection observes only committed rows.
 			// Redis calls before the transaction are allowed through; the first
-			// cache acquisition after the child becomes durable cancels the caller.
+			// command after the child becomes durable cancels the caller.
 			checkCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var committed int64
@@ -53,7 +58,7 @@ func (h *committedIdentityCacheCancelHook) ProcessHook(next redis.ProcessHook) r
 }
 
 func TestAuthClientCommittedIdentitySurvivesCacheCancellation(t *testing.T) {
-	for _, scenario := range []string{"healthy", "before_transaction", "after_commit_before_cache"} {
+	for _, scenario := range []string{"healthy", "before_transaction", "after_commit_before_cache", "parent_after_commit_before_cache"} {
 		t.Run(scenario, func(t *testing.T) {
 			server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 				rootCtx := context.Background()
@@ -64,7 +69,8 @@ func TestAuthClientCommittedIdentitySurvivesCacheCancellation(t *testing.T) {
 				callCtx, cancel := context.WithCancel(rootCtx)
 				defer cancel()
 				hook := &committedIdentityCacheCancelHook{cancel: cancel, source: parentClient}
-				hook.enabled.Store(scenario == "after_commit_before_cache")
+				afterCommit := scenario == "after_commit_before_cache" || scenario == "parent_after_commit_before_cache"
+				hook.enabled.Store(afterCommit)
 				defer hook.enabled.Store(false)
 				callCtx = context.WithValue(callCtx, committedIdentityCacheContextKey{}, hook)
 				server.Redis(rootCtx, func(client server.RedisClient) { client.AddHook(hook) })
@@ -74,6 +80,10 @@ func TestAuthClientCommittedIdentitySurvivesCacheCancellation(t *testing.T) {
 				clientSession := session.NewLocalClientSession(callCtx, "0.0.0.0:0", claims)
 				defer clientSession.Cancel()
 				result, err := server.HandleError2(func() (*AuthNetworkClientResult, error) {
+					if scenario == "parent_after_commit_before_cache" {
+						// the hosted proxy's derived-client mint (localclient authority)
+						return AuthNetworkClientFromParent(&AuthNetworkClientArgs{SourceClientId: &parentClient}, clientSession)
+					}
 					return AuthNetworkClient(&AuthNetworkClientArgs{SourceClientId: &parentClient}, clientSession)
 				}, func(err error) (*AuthNetworkClientResult, error) { return nil, err })
 				hook.enabled.Store(false)
@@ -90,7 +100,7 @@ func TestAuthClientCommittedIdentitySurvivesCacheCancellation(t *testing.T) {
 				if committed != 1 || active != 1 {
 					tb.Fatalf("durable mint control: committed=%d active=%d", committed, active)
 				}
-				if scenario == "after_commit_before_cache" {
+				if afterCommit {
 					if !hook.fired.Load() || hook.committed.Load() != 1 || !errors.Is(callCtx.Err(), context.Canceled) {
 						tb.Fatal("cancellation failed to cross the committed-child/cache boundary")
 					}
