@@ -23,18 +23,35 @@ import (
 var ErrCircleTransferRequestId = errors.New("customer transfer requires a caller-retained request_id; reuse it for every retry")
 var ErrCircleTransferUnknown = errors.New("customer challenge outcome is unknown; original request is retained, retry only with the same request_id")
 
-type circleTransferClientKey struct{}
+type circleUserClientKey struct{}
 
-// Immutable request-owner hooks use the real transport and token creator when
-// omitted. Tests bind them to one session; unrelated sessions share no state.
-type circleTransferClient struct {
+// The session's Circle client for wallet initialization, balances and customer
+// transfers. Immutable request-owner hooks use the real transport, token
+// creator and configuration when omitted. Tests bind them to one session;
+// unrelated sessions share no state.
+type circleUserClient struct {
 	core         CoreCircleApiClient
 	tokenSource  func(*session.ClientSession) (*CircleUserToken, error)
 	defaultName  string
 	defaultChain string
 }
 
-func (self *circleTransferClient) transfer(args *WalletCircleTransferOutArgs, owner *session.ClientSession) (*WalletCircleTransferOutResult, error) {
+func circleUserClientOf(ctx context.Context) *circleUserClient {
+	if client, _ := ctx.Value(circleUserClientKey{}).(*circleUserClient); client != nil {
+		return client
+	}
+	return &circleUserClient{}
+}
+
+// The configured blockchain's name and symbol unless the owner supplies both.
+func (self *circleUserClient) blockchain() (string, string) {
+	if self.defaultName == "" || self.defaultChain == "" {
+		return fmt.Sprint(circleConfig()["blockchain_name"]), fmt.Sprint(circleConfig()["blockchain"])
+	}
+	return self.defaultName, self.defaultChain
+}
+
+func (self *circleUserClient) transfer(args *WalletCircleTransferOutArgs, owner *session.ClientSession) (*WalletCircleTransferOutResult, error) {
 	if err := owner.Ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -82,10 +99,7 @@ func (self *circleTransferClient) transfer(args *WalletCircleTransferOutArgs, ow
 		return nil, err
 	}
 	if request == nil {
-		name, chain := self.defaultName, self.defaultChain
-		if name == "" || chain == "" {
-			name, chain = fmt.Sprint(circleConfig()["blockchain_name"]), fmt.Sprint(circleConfig()["blockchain"])
-		}
+		name, chain := self.blockchain()
 		wallets, err := self.core.findCircleWallets(&borrowed, func(*session.ClientSession) (*CircleUserToken, error) { return userToken, nil }, name, chain)
 		if err != nil {
 			return nil, err
@@ -139,7 +153,7 @@ func circleChallengeId(value string) bool {
 
 // One explicit submit/reconciliation attempt per public call. There is no
 // automatic POST retry, redirect forwarding, fresh key, or unbounded body.
-func (self *circleTransferClient) submitChallenge(ctx context.Context, request *model.CircleTransferRequest, userToken string) (*model.CircleTransferRequest, error) {
+func (self *circleUserClient) submitChallenge(ctx context.Context, request *model.CircleTransferRequest, userToken string) (*model.CircleTransferRequest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -204,7 +218,7 @@ func (self *circleTransferClient) submitChallenge(ctx context.Context, request *
 
 // A known challenge never falls back to a write on an outage, 404, changed
 // identity, or cancellation. COMPLETE describes the challenge, not payment.
-func (self *circleTransferClient) readChallenge(ctx context.Context, request *model.CircleTransferRequest, userToken string) (*model.CircleTransferRequest, error) {
+func (self *circleUserClient) readChallenge(ctx context.Context, request *model.CircleTransferRequest, userToken string) (*model.CircleTransferRequest, error) {
 	id := *request.ChallengeId
 	if !circleChallengeId(id) {
 		return nil, model.ErrCircleTransferObservation
