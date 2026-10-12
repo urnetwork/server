@@ -623,6 +623,35 @@ func TestRedisClusterCounterRatesCoverStaggeredScrapes(t *testing.T) {
 	}
 }
 
+// The cluster spans edge-6 (6380-6411 behind the 6379 entry) and edge-5
+// (6412-6427), so the Redis panels must stay label-driven: no query may pin a
+// host, an address or a node port, and the host and node pickers must default
+// to every value instead of the first host.
+func TestRedisClusterDashboardSpansEveryHost(t *testing.T) {
+	dashboard := readTestDashboard(t, "redis-cluster.json")
+	pinned := regexp.MustCompile(`\b(host|node|instance)\s*=\s*"|\b6[34]\d\d\b|by-us-fmt-5-edge-\d|192\.168\.|172\.28\.`)
+	for _, expr := range dashboardExpressions(dashboard) {
+		if pinned.MatchString(expr) {
+			t.Errorf("Redis panel query pins a host, address or node: %s", expr)
+		}
+	}
+	for _, name := range []string{"host", "node"} {
+		var found map[string]any
+		for _, raw := range dashboard.Templating.List {
+			if variable, ok := raw.(map[string]any); ok && variable["name"] == name {
+				found = variable
+			}
+		}
+		if found == nil {
+			t.Errorf("Redis dashboard is missing the %s variable", name)
+			continue
+		}
+		if found["multi"] != true || found["includeAll"] != true {
+			t.Errorf("Redis %s variable must be multi-select with All so every host shows by default: %v", name, found)
+		}
+	}
+}
+
 type testTarget struct {
 	RefId        string `json:"refId"`
 	Expr         string `json:"expr"`
