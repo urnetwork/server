@@ -5781,7 +5781,11 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					contractIds = append(contractIds, id)
 				}
 			})
-			admitted, err := tryContractTransferBalanceOwnershipInTx(ctx, tx, contractIds)
+			// A zero balance id on a due contract's escrow would fail this
+			// head-of-index slice on every pass and stop all reaping behind it.
+			balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, contractIds)
+			server.Raise(err)
+			admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ownableTransferBalanceIds(balanceIds))
 			server.Raise(err)
 			if !admitted || len(contractIds) == 0 {
 				return

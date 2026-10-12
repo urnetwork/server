@@ -34,16 +34,8 @@ func ownedTransferEscrowOrphanPageInTx(ctx context.Context, tx server.PgTx, firs
 	if count == 0 {
 		return 0, nil, nil, false, true
 	}
-	// No grant has the zero id (NewId never mints it), so no consumption writer
-	// shares an owner with that row. Its ownership key panics on the zero id,
-	// which would fail this page on every pass at the same cursor.
-	ownedBalanceIds := make([]server.Id, 0, len(balanceIds))
-	for _, balanceId := range balanceIds {
-		if balanceId != (server.Id{}) {
-			ownedBalanceIds = append(ownedBalanceIds, balanceId)
-		}
-	}
-	admitted, err = tryTransferBalanceOwnershipInTx(ctx, tx, ownedBalanceIds)
+	// A zero balance id would fail this page on every pass at the same cursor.
+	admitted, err = tryTransferBalanceOwnershipInTx(ctx, tx, ownableTransferBalanceIds(balanceIds))
 	server.Raise(err)
 	if !admitted {
 		return 0, nil, nil, false, false
