@@ -18,8 +18,9 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// 2.5M transactions at circleReadPageSize per page, far beyond the weekly
-// payout history since the earliest stuck row. More pages is an error.
+// 2.5M items at circleReadPageSize per page, far beyond the weekly payout
+// history since the earliest stuck row or the entity's wallets. More pages is
+// an error.
 const maximumCirclePayoutLedgerPages = 50_000
 
 type CirclePayoutLedger interface {
@@ -28,6 +29,9 @@ type CirclePayoutLedger interface {
 	ListWalletTransactions(ctx context.Context, walletId string, from time.Time) ([]CircleTransaction, error)
 	// The wallet's balance of the token at `tokenAddress`; zero when absent.
 	GetWalletTokenBalance(ctx context.Context, walletId string, tokenAddress string) (model.NanoCents, error)
+	// Every developer-controlled wallet of the entity, on every blockchain and
+	// in every state. An incomplete listing is an error, never a short result.
+	ListDeveloperWallets(ctx context.Context) ([]CircleWallet, error)
 }
 
 var circlePayoutLedgerInstance CirclePayoutLedger = &CoreCircleApiClient{}
@@ -42,8 +46,15 @@ func SetCirclePayoutLedger(ledger CirclePayoutLedger) {
 }
 
 // Every page of one collection, following only validated Link cursors. A
-// repeated page or more than `maximumPages` pages fails the whole read.
+// repeated page or more than `maximumPages` pages fails the whole read, and a
+// dead context fails it before the configuration is read.
 func circleReadEveryPage[R any](ctx context.Context, client *CoreCircleApiClient, first string, key string, maximumPages int, readNext func(http.Header) (string, error), visit func(R) error) error {
+	if ctx == nil {
+		return fmt.Errorf("Circle %s listing requires a context", key)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	headers := client.readHeaders("")
 	seenPages := map[string]bool{}
 	for uri := first; uri != ""; {
@@ -133,12 +144,6 @@ func circleReadNextUnderFilters(endpoint string, filters url.Values, header http
 // One read budget cannot span the payout history: each page is its own read,
 // and the page bound limits the listing.
 func (self *CoreCircleApiClient) ListWalletTransactions(ctx context.Context, walletId string, from time.Time) ([]CircleTransaction, error) {
-	if ctx == nil {
-		return nil, fmt.Errorf("Circle wallet transaction listing requires a context")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	// `walletIds` is a comma-separated list; the filter must name one wallet.
 	if !validCircleReadId(walletId) || strings.Contains(walletId, ",") || from.IsZero() {
 		return nil, fmt.Errorf("invalid Circle wallet transaction listing arguments")
@@ -171,6 +176,34 @@ func (self *CoreCircleApiClient) ListWalletTransactions(ctx context.Context, wal
 		return nil, err
 	}
 	return transactions, nil
+}
+
+// The API key alone lists the entity's wallets. Circle documents no custody
+// filter, so a user-controlled wallet in the response is validated like every
+// other and left out: it is never one of our own destinations. Each page is
+// its own read, as in the transaction listing.
+func (self *CoreCircleApiClient) ListDeveloperWallets(ctx context.Context) ([]CircleWallet, error) {
+	endpoint := "https://api.circle.com/v1/w3s/wallets"
+	filters := url.Values{"pageSize": {strconv.Itoa(circleReadPageSize)}}
+	readNext := func(header http.Header) (string, error) {
+		return circleReadNextUnderFilters(endpoint, filters, header)
+	}
+	seen := map[string]bool{}
+	wallets := []CircleWallet{}
+	err := circleReadEveryPage(ctx, self, endpoint+"?"+filters.Encode(), "wallets", maximumCirclePayoutLedgerPages, readNext, func(wallet CircleWallet) error {
+		if !validCircleReadWallet(&wallet) || seen[wallet.ID] || (wallet.CustodyType != "DEVELOPER" && wallet.CustodyType != "ENDUSER") {
+			return fmt.Errorf("Circle wallet listing has an invalid, repeated or unclassified wallet %.64q", wallet.ID)
+		}
+		seen[wallet.ID] = true
+		if wallet.CustodyType == "DEVELOPER" {
+			wallets = append(wallets, wallet)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return wallets, nil
 }
 
 type circleLedgerBalance struct {
