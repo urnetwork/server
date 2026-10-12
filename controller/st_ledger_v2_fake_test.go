@@ -49,7 +49,8 @@ type fakeLedgerV2Chain struct {
 	lastCommit   uint64
 	approvals    uint64
 	quorum       uint64
-	demands      map[[2]uint64]uint8
+	// demands holds DemandState by (seq, rootIndex, index).
+	demands map[[3]uint64]uint8
 	// fail queues the outcomes of an operation's next calls (nil succeeds).
 	fail map[string][]error
 	// latest is the latest block, where a send's eth_call and eth_estimateGas
@@ -66,7 +67,7 @@ func newFakeLedgerV2Chain(log *[]string) *fakeLedgerV2Chain {
 	return &fakeLedgerV2Chain{
 		log: log, registered: true, firstEpoch: 5, epochBlocks: 50_400, window: 1_200, challenge: 14_400, quorum: 1,
 		lastFunded: 4, lastCaptured: 4, emission: map[uint64]uint64{}, funded: map[uint64]uint256.Int{},
-		demands: map[[2]uint64]uint8{}, fail: map[string][]error{},
+		demands: map[[3]uint64]uint8{}, fail: map[string][]error{},
 	}
 }
 
@@ -139,11 +140,22 @@ func (self *fakeLedgerV2Chain) LedgerV2LatestBlock(ctx context.Context) (uint64,
 	return max(self.head, self.latest), nil
 }
 
-func (self *fakeLedgerV2Chain) LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, index uint64) (uint8, error) {
+func (self *fakeLedgerV2Chain) LedgerV2Root(ctx context.Context, noId uint64, rootIndex uint64) (*StLedgerV2FinalizedRoot, error) {
+	if err := self.failed("root"); err != nil {
+		return nil, err
+	}
+	if uint64(len(self.roots)) <= rootIndex {
+		return nil, errors.New("roots reverts")
+	}
+	root := *self.roots[rootIndex]
+	return &root, nil
+}
+
+func (self *fakeLedgerV2Chain) LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, rootIndex uint64, index uint64) (uint8, error) {
 	if err := self.failed("demand"); err != nil {
 		return 0, err
 	}
-	return self.demands[[2]uint64{seq, index}], nil
+	return self.demands[[3]uint64{seq, rootIndex, index}], nil
 }
 
 func (self *fakeLedgerV2Chain) LedgerV2Close(ctx context.Context, epoch uint64, noId uint64) (string, error) {
@@ -237,21 +249,36 @@ func (self *fakeLedgerV2Chain) LedgerV2Finalize(ctx context.Context, epoch uint6
 	return fmt.Sprintf("0xfinalize%d", epoch), nil
 }
 
-// demand opens a demand on the pending root.
+// demand opens a demand on the pending root for an account of the latest
+// finalized root.
 func (self *fakeLedgerV2Chain) demand(index uint64) {
-	self.demands[[2]uint64{self.pending.Seq, index}] = StLedgerV2DemandOpen
+	self.demandAt(uint64(len(self.roots)-1), index)
+}
+
+// demandAt opens a demand on the pending root for an account of the finalized
+// root rootIndex.
+func (self *fakeLedgerV2Chain) demandAt(rootIndex uint64, index uint64) {
+	self.demands[[3]uint64{self.pending.Seq, rootIndex, index}] = StLedgerV2DemandOpen
 	self.pending.OpenDemands++
 }
 
+// The revert vault2 returns for a named error, with its selector as data.
+func fakeLedgerV2Revert(name string) error {
+	return ledgerV2DataError{ledgerV2ErrorData(name)}
+}
+
 func (self *fakeLedgerV2Chain) LedgerV2Answer(ctx context.Context, noId uint64, seq uint64, answer *StLedgerV2Answer) (string, error) {
-	*self.log = append(*self.log, fmt.Sprintf("answer %d %d", seq, answer.Index))
+	*self.log = append(*self.log, fmt.Sprintf("answer %d %d %d", seq, answer.RootIndex, answer.Index))
 	if err := self.failed("answer"); err != nil {
 		return "", err
 	}
 	if self.pending == nil || len(self.roots) == 0 {
-		return "", errors.New("NoPendingRoot")
+		return "", fakeLedgerV2Revert("NoPendingRoot")
 	}
-	f, p := self.roots[len(self.roots)-1], self.pending
+	if uint64(len(self.roots)) <= answer.RootIndex {
+		return "", errors.New("UnknownRoot")
+	}
+	f, p := self.roots[answer.RootIndex], self.pending
 	if !merkle.VerifyLedgerProof(f.Root, &f.Total, f.LeafCount, answer.Index, answer.Account.Coldkey, &answer.Account.Cumulative, answer.Proof) {
 		return "", errors.New("InvalidProof")
 	}
@@ -263,9 +290,9 @@ func (self *fakeLedgerV2Chain) LedgerV2Answer(ctx context.Context, noId uint64, 
 		self.pending = nil
 		return fmt.Sprintf("0xdeleted%d", seq), nil
 	}
-	key := [2]uint64{p.Seq, answer.Index}
+	key := [3]uint64{p.Seq, answer.RootIndex, answer.Index}
 	if self.demands[key] != StLedgerV2DemandOpen {
-		return "", errors.New("NoFault")
+		return "", fakeLedgerV2Revert("NoFault")
 	}
 	self.demands[key] = StLedgerV2DemandAnswered
 	p.OpenDemands--

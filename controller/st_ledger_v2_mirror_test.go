@@ -99,12 +99,12 @@ func TestStLedgerV2EventDecodersExactFields(t *testing.T) {
 			"V2EmissionDeferred", map[string]any{"e": "6", "no_id": "1", "funded_through": "3000"}},
 		{ledgerV2EventLog(t, vault, cfg.VaultV2, "DistributionCommitted", []common.Hash{ledgerV2Word(1), ledgerV2Word(3)}, uint64(5), root, big.NewInt(3000), uint64(2), ledgerHash, uint64(2)),
 			"V2DistributionCommitted", map[string]any{"no_id": "1", "seq": "3", "e": "5", "root": root.Hex(), "total": "3000", "leaf_count": "2", "ledger_hash": ledgerHash.Hex(), "replaced_seq": "2"}},
-		{ledgerV2EventLog(t, vault, cfg.VaultV2, "PathDemanded", []common.Hash{ledgerV2Word(1), ledgerV2Word(3)}, big.NewInt(4), actor),
-			"V2PathDemanded", map[string]any{"no_id": "1", "seq": "3", "index": "4", "demander": actor.Hex()}},
-		{ledgerV2EventLog(t, vault, cfg.VaultV2, "PathAnswered", []common.Hash{ledgerV2Word(1), ledgerV2Word(3)}, big.NewInt(4), other),
-			"V2PathAnswered", map[string]any{"no_id": "1", "seq": "3", "index": "4", "answerer": other.Hex()}},
-		{ledgerV2EventLog(t, vault, cfg.VaultV2, "DistributionDeleted", []common.Hash{ledgerV2Word(1), ledgerV2Word(3)}, big.NewInt(4), uint8(2), big.NewInt(1), actor),
-			"V2DistributionDeleted", map[string]any{"no_id": "1", "seq": "3", "index": "4", "fault": "2", "level": "1", "challenger": actor.Hex()}},
+		{ledgerV2EventLog(t, vault, cfg.VaultV2, "PathDemanded", []common.Hash{ledgerV2Word(1), ledgerV2Word(3)}, big.NewInt(2), big.NewInt(4), actor),
+			"V2PathDemanded", map[string]any{"no_id": "1", "seq": "3", "root_index": "2", "index": "4", "demander": actor.Hex()}},
+		{ledgerV2EventLog(t, vault, cfg.VaultV2, "PathAnswered", []common.Hash{ledgerV2Word(1), ledgerV2Word(3)}, big.NewInt(2), big.NewInt(4), other),
+			"V2PathAnswered", map[string]any{"no_id": "1", "seq": "3", "root_index": "2", "index": "4", "answerer": other.Hex()}},
+		{ledgerV2EventLog(t, vault, cfg.VaultV2, "DistributionDeleted", []common.Hash{ledgerV2Word(1), ledgerV2Word(3)}, big.NewInt(2), big.NewInt(4), uint8(2), big.NewInt(1), actor),
+			"V2DistributionDeleted", map[string]any{"no_id": "1", "seq": "3", "root_index": "2", "index": "4", "fault": "2", "level": "1", "challenger": actor.Hex()}},
 		{ledgerV2EventLog(t, vault, cfg.VaultV2, "DistributionFinalized", []common.Hash{ledgerV2Word(1), ledgerV2Word(3)}, big.NewInt(0), uint64(5), root, big.NewInt(3000), uint64(2), ledgerHash),
 			"V2DistributionFinalized", map[string]any{"no_id": "1", "seq": "3", "root_index": "0", "e": "5", "root": root.Hex(), "total": "3000", "leaf_count": "2", "ledger_hash": ledgerHash.Hex()}},
 		{ledgerV2EventLog(t, vault, cfg.VaultV2, "Claimed", []common.Hash{ledgerV2Word(1), ledgerV2Word(4), coldkey}, big.NewInt(0), big.NewInt(2000), big.NewInt(1500), other),
@@ -222,7 +222,8 @@ func ledgerV2MirrorEvent(t testing.TB, block uint64, index int, kind string, dat
 }
 
 // The mirror applies funding, roots and demands in block order, idempotently,
-// and alerts on a deferred epoch of this pool.
+// keys each demand by its seq, finalized root and account index, and alerts
+// on a deferred epoch of this pool.
 // SV-5 (mirror), SV-1 (missed-close alert)
 func TestStLedgerV2MirrorAppliesEvents(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -235,18 +236,22 @@ func TestStLedgerV2MirrorAppliesEvents(t *testing.T) {
 			ledgerV2MirrorEvent(t, 30, 1, "V2DistributionFinalized", map[string]any{"no_id": "1", "seq": "1", "root_index": "0", "e": "5", "root": root, "total": "3000", "leaf_count": "2", "ledger_hash": hash}),
 			ledgerV2MirrorEvent(t, 10, 0, "V2EmissionCaptured", map[string]any{"e": "5", "no_id": "1", "observed": "3001", "amount": "3000", "funded_through": "3000"}),
 			ledgerV2MirrorEvent(t, 11, 0, "V2DistributionCommitted", map[string]any{"no_id": "1", "seq": "1", "e": "5", "root": root, "total": "3000", "leaf_count": "2", "ledger_hash": hash, "replaced_seq": "0"}),
-			ledgerV2MirrorEvent(t, 12, 0, "V2PathDemanded", map[string]any{"no_id": "1", "seq": "1", "index": "1", "demander": "0xd1"}),
-			ledgerV2MirrorEvent(t, 13, 0, "V2PathAnswered", map[string]any{"no_id": "1", "seq": "1", "index": "1", "answerer": "0xa1"}),
+			ledgerV2MirrorEvent(t, 12, 0, "V2PathDemanded", map[string]any{"no_id": "1", "seq": "1", "root_index": "0", "index": "1", "demander": "0xd1"}),
+			ledgerV2MirrorEvent(t, 13, 0, "V2PathAnswered", map[string]any{"no_id": "1", "seq": "1", "root_index": "0", "index": "1", "answerer": "0xa1"}),
 			ledgerV2MirrorEvent(t, 40, 0, "V2EmissionDeferred", map[string]any{"e": "6", "no_id": "1", "funded_through": "3000"}),
 			ledgerV2MirrorEvent(t, 41, 0, "V2EmissionDeferred", map[string]any{"e": "6", "no_id": "2", "funded_through": "0"}),
 			ledgerV2MirrorEvent(t, 42, 0, "V2DistributionCommitted", map[string]any{"no_id": "1", "seq": "2", "e": "7", "root": root, "total": "5000", "leaf_count": "3", "ledger_hash": hash, "replaced_seq": "0"}),
-			ledgerV2MirrorEvent(t, 43, 0, "V2PathDemanded", map[string]any{"no_id": "1", "seq": "2", "index": "0", "demander": "0xd1"}),
+			// the same account index demanded against two finalized roots
+			ledgerV2MirrorEvent(t, 43, 0, "V2PathDemanded", map[string]any{"no_id": "1", "seq": "2", "root_index": "0", "index": "0", "demander": "0xd1"}),
+			ledgerV2MirrorEvent(t, 43, 1, "V2PathDemanded", map[string]any{"no_id": "1", "seq": "2", "root_index": "1", "index": "0", "demander": "0xd2"}),
+			ledgerV2MirrorEvent(t, 43, 2, "V2PathAnswered", map[string]any{"no_id": "1", "seq": "2", "root_index": "1", "index": "0", "answerer": "0xa1"}),
 			ledgerV2MirrorEvent(t, 44, 0, "V2DistributionCommitted", map[string]any{"no_id": "1", "seq": "3", "e": "8", "root": root, "total": "6000", "leaf_count": "3", "ledger_hash": hash, "replaced_seq": "2"}),
-			ledgerV2MirrorEvent(t, 45, 0, "V2DistributionDeleted", map[string]any{"no_id": "1", "seq": "3", "index": "0", "fault": "1", "level": "1", "challenger": "0xc1"}),
+			ledgerV2MirrorEvent(t, 45, 0, "V2DistributionDeleted", map[string]any{"no_id": "1", "seq": "3", "root_index": "0", "index": "0", "fault": "1", "level": "1", "challenger": "0xc1"}),
 			// malformed and foreign rows are skipped
-			ledgerV2MirrorEvent(t, 46, 0, "V2PathDemanded", map[string]any{"no_id": "x", "seq": "3", "index": "0"}),
-			ledgerV2MirrorEvent(t, 46, 1, "V2PathDemanded", map[string]any{"no_id": "1", "seq": "3", "index": "-1"}),
-			ledgerV2MirrorEvent(t, 46, 9, "V2PathDemanded", map[string]any{"no_id": "1", "seq": "x", "index": "0"}),
+			ledgerV2MirrorEvent(t, 46, 0, "V2PathDemanded", map[string]any{"no_id": "x", "seq": "3", "root_index": "0", "index": "0"}),
+			ledgerV2MirrorEvent(t, 46, 1, "V2PathDemanded", map[string]any{"no_id": "1", "seq": "3", "root_index": "0", "index": "-1"}),
+			ledgerV2MirrorEvent(t, 46, 9, "V2PathDemanded", map[string]any{"no_id": "1", "seq": "x", "root_index": "0", "index": "0"}),
+			ledgerV2MirrorEvent(t, 46, 10, "V2PathDemanded", map[string]any{"no_id": "1", "seq": "3", "root_index": "x", "index": "0"}),
 			ledgerV2MirrorEvent(t, 46, 2, "V2EmissionCaptured", map[string]any{"e": "x", "no_id": "1", "observed": "1", "amount": "1", "funded_through": "1"}),
 			ledgerV2MirrorEvent(t, 46, 3, "V2EmissionCaptured", map[string]any{"e": "9", "no_id": "1", "observed": "1", "amount": "1", "funded_through": "-1"}),
 			ledgerV2MirrorEvent(t, 46, 4, "V2DistributionCommitted", map[string]any{"no_id": "1", "seq": "4", "e": "9", "root": root, "total": "x", "leaf_count": "3", "ledger_hash": hash, "replaced_seq": "0"}),
@@ -283,7 +288,7 @@ func TestStLedgerV2MirrorAppliesEvents(t *testing.T) {
 		if open := model.GetOpenStLedgerV2Demands(ctx, key, 1, 1); len(open) != 0 {
 			t.Fatalf("answered demand still open: %+v", open)
 		}
-		if open := model.GetOpenStLedgerV2Demands(ctx, key, 1, 2); len(open) != 1 || open[0].Index != 0 || open[0].Demander != "0xd1" || open[0].DemandBlock != 43 {
+		if open := model.GetOpenStLedgerV2Demands(ctx, key, 1, 2); len(open) != 1 || open[0].RootIndex != 0 || open[0].Index != 0 || open[0].Demander != "0xd1" || open[0].DemandBlock != 43 {
 			t.Fatalf("open demands %+v", open)
 		}
 		if got := model.GetStLedgerV2RootsFromEpoch(ctx, key, 1, 9); len(got) != 0 || model.GetStLedgerV2Funding(ctx, key, 1, 9) != nil || len(model.GetOpenStLedgerV2Demands(ctx, key, 1, 3)) != 0 {

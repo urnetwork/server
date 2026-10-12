@@ -63,13 +63,15 @@ const (
 	StLedgerV2StepRecord   = "record"
 )
 
-// StLedgerV2Step is one planned driver step.
+// StLedgerV2Step is one planned driver step. An answer names its demand: the
+// pending root's seq, the finalized root RootIndex and the account Index.
 type StLedgerV2Step struct {
-	Kind  string
-	Epoch uint64
-	Seq   uint64
-	Index uint64
-	RunAt time.Time
+	Kind      string
+	Epoch     uint64
+	Seq       uint64
+	RootIndex uint64
+	Index     uint64
+	RunAt     time.Time
 }
 
 var errStLedgerV2NotConfigured = errors.New("st ledger v2: not configured")
@@ -357,9 +359,9 @@ func StLedgerV2Sync(ctx context.Context, state *StEpochState) ([]*StLedgerV2Step
 		}
 		oneDay := uint64(24*time.Hour/time.Second) / uint64(stLedgerV2BlockSeconds(cfg))
 		for _, demand := range model.GetOpenStLedgerV2Demands(ctx, deploymentKey, noId, pending.Seq) {
-			steps = append(steps, &StLedgerV2Step{Kind: StLedgerV2StepAnswer, Epoch: pending.Epoch, Seq: demand.Seq, Index: demand.Index, RunAt: now})
+			steps = append(steps, &StLedgerV2Step{Kind: StLedgerV2StepAnswer, Epoch: pending.Epoch, Seq: demand.Seq, RootIndex: demand.RootIndex, Index: demand.Index, RunAt: now})
 			if demand.DemandBlock+oneDay < head {
-				stLedgerV2Alert(cfg, StLedgerV2AlertOpenDemand, fmt.Sprintf("seq %d index %d", demand.Seq, demand.Index), "demanded at block %d and still open at block %d", demand.DemandBlock, head)
+				stLedgerV2Alert(cfg, StLedgerV2AlertOpenDemand, fmt.Sprintf("seq %d root %d index %d", demand.Seq, demand.RootIndex, demand.Index), "demanded at block %d and still open at block %d", demand.DemandBlock, head)
 			}
 		}
 	}
@@ -405,7 +407,7 @@ func StLedgerV2RunStep(ctx context.Context, step *StLedgerV2Step) (*StPublishOut
 	case StLedgerV2StepFinalize:
 		return stLedgerV2RunFinalize(ctx, cfg, client, step.Epoch)
 	case StLedgerV2StepAnswer:
-		return stLedgerV2RunAnswer(ctx, cfg, client, step.Seq, step.Index)
+		return stLedgerV2RunAnswer(ctx, cfg, client, step.Seq, step.RootIndex, step.Index)
 	case StLedgerV2StepRecord:
 		return stLedgerV2RunRecord(ctx, cfg, client, step.Seq)
 	}
@@ -440,13 +442,16 @@ func stLedgerV2Conclude(ctx context.Context, cfg *StConfig, epoch uint64, kind s
 }
 
 // Records one chain write as a publish row. A send error is retried, except a
-// spent commit intent, which ends the epoch's commit.
+// spent commit intent, which ends the epoch's commit, and a revert showing the
+// write already done by another sender (SPEC A6).
 func stLedgerV2Send(ctx context.Context, cfg *StConfig, epoch uint64, kind string, send func() (string, error)) *StPublishOutcome {
 	publishId := model.AddStPublish(ctx, cfg.DeploymentKey(), epoch, kind)
 	txHash, err := send()
 	outcome := &StPublishOutcome{Status: model.StPublishStatusConfirmed, TxHash: txHash}
 	if errors.Is(err, ErrStLedgerV2CommitSpent) {
 		outcome = &StPublishOutcome{Status: model.StPublishStatusMissed, TxHash: txHash, Reason: err.Error()}
+	} else if name, done := stLedgerV2AlreadyDone(err); done {
+		outcome = &StPublishOutcome{Status: model.StPublishStatusSkipped, TxHash: txHash, Reason: "already done: " + name}
 	} else if err != nil {
 		outcome = &StPublishOutcome{Status: model.StPublishStatusFailed, TxHash: txHash, Reason: err.Error(), Retry: true}
 	}
@@ -469,6 +474,17 @@ func stLedgerV2LateSend(ctx context.Context, cfg *StConfig, client StLedgerV2Cli
 		return nil
 	}
 	return stLedgerV2Wait(cfg, state, fmt.Sprintf("the %s window ends at block %d and the latest block is %d", step, deadline, latest), deadline+1)
+}
+
+// stLedgerV2AlreadyDone reports a revert that shows a write already done by
+// another sender (SPEC A6): NoFault, the demand is answered, or
+// NoPendingRoot, the root was finalized, replaced or deleted.
+func stLedgerV2AlreadyDone(err error) (string, bool) {
+	selector, reverted := stLedgerV2RevertSelector(err)
+	if name := stLedgerV2ErrorNames[selector]; reverted && (name == "NoFault" || name == "NoPendingRoot") {
+		return name, true
+	}
+	return "", false
 }
 
 func stLedgerV2Finalizable(state *StLedgerV2State) bool {
@@ -738,24 +754,31 @@ func stLedgerV2RunFinalize(ctx context.Context, cfg *StConfig, client StLedgerV2
 }
 
 // stLedgerV2RunAnswer answers a demand on the pending root with a clean
-// opening of the path at the demanded index.
-func stLedgerV2RunAnswer(ctx context.Context, cfg *StConfig, client StLedgerV2Client, seq uint64, index uint64) (*StPublishOutcome, error) {
+// opening of the path at the demanded account of the finalized root
+// rootIndex, the latest or an older one.
+func stLedgerV2RunAnswer(ctx context.Context, cfg *StConfig, client StLedgerV2Client, seq uint64, rootIndex uint64, index uint64) (*StPublishOutcome, error) {
 	state, err := client.LedgerV2State(ctx, cfg.NoId)
 	if err != nil {
 		return stLedgerV2Retry(err), nil
 	}
 	pending := state.Pending
-	if pending == nil || pending.Seq != seq || state.Latest == nil {
-		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("seq %d is not pending", seq)}, nil
+	if pending == nil || pending.Seq != seq || state.RootCount <= rootIndex {
+		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("seq %d is not pending over finalized root %d", seq, rootIndex)}, nil
 	}
-	demand, err := client.LedgerV2Demand(ctx, cfg.NoId, seq, index)
+	demand, err := client.LedgerV2Demand(ctx, cfg.NoId, seq, rootIndex, index)
 	if err != nil {
 		return stLedgerV2Retry(err), nil
 	}
 	if demand != StLedgerV2DemandOpen {
-		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("seq %d index %d has no open demand", seq, index)}, nil
+		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("seq %d root %d index %d has no open demand", seq, rootIndex, index)}, nil
 	}
-	answer, err := stLedgerV2Opening(ctx, state.Latest, pending, index)
+	root := state.Latest
+	if rootIndex != root.Index {
+		if root, err = client.LedgerV2Root(ctx, cfg.NoId, rootIndex); err != nil {
+			return stLedgerV2Retry(err), nil
+		}
+	}
+	answer, err := stLedgerV2Opening(ctx, root, pending, index)
 	if err != nil {
 		return stLedgerV2Retry(err), nil
 	}
@@ -827,13 +850,14 @@ func StLedgerV2Tree(ctx context.Context, ledgerHash [32]byte, root [32]byte, tot
 	return cached.tree, cached.accounts, nil
 }
 
-// stLedgerV2Opening is the checkPath argument set for an index of the latest
-// finalized root. It refuses to send an opening that shows a fault.
-func stLedgerV2Opening(ctx context.Context, latest *StLedgerV2FinalizedRoot, pending *StLedgerV2Pending, index uint64) (*StLedgerV2Answer, error) {
-	if latest.LeafCount <= index {
-		return nil, fmt.Errorf("st ledger v2: index %d is outside the finalized root's %d accounts", index, latest.LeafCount)
+// stLedgerV2Opening is the checkPath argument set for an index of a finalized
+// root, whose accounts the builder reads back from its ledger. It refuses to
+// send an opening that shows a fault.
+func stLedgerV2Opening(ctx context.Context, root *StLedgerV2FinalizedRoot, pending *StLedgerV2Pending, index uint64) (*StLedgerV2Answer, error) {
+	if root.LeafCount <= index {
+		return nil, fmt.Errorf("st ledger v2: index %d is outside the finalized root's %d accounts", index, root.LeafCount)
 	}
-	old, err := stLedgerV2CachedTree(ctx, latest.LedgerHash, latest.Root, &latest.Total, latest.LeafCount)
+	old, err := stLedgerV2CachedTree(ctx, root.LedgerHash, root.Root, &root.Total, root.LeafCount)
 	if err != nil {
 		return nil, err
 	}
@@ -851,7 +875,7 @@ func stLedgerV2Opening(ctx context.Context, latest *StLedgerV2FinalizedRoot, pen
 	if err != nil || fault != merkle.LedgerFaultNone {
 		return nil, fmt.Errorf("st ledger v2: the pending root opens index %d with fault %s at level %d: %v", index, fault, level, err)
 	}
-	return &StLedgerV2Answer{Index: index, Account: account, Proof: proof, Path: path}, nil
+	return &StLedgerV2Answer{RootIndex: root.Index, Index: index, Account: account, Proof: proof, Path: path}, nil
 }
 
 // stLedgerV2RunRecord writes a finalized root's new accounts and per-epoch
