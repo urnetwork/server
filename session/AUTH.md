@@ -34,6 +34,13 @@ State as of 2026-10-09.
 - **SSO.** Google and Apple id tokens are inputs to `/auth/login`, not credentials. Their audience must be one of our OAuth client ids: the `client_id` key of vault `google.yml` and `apple.yml`. An empty value skips the audience check (`session/sso_jwt.go`). The OAuth callbacks (`/auth/apple/callback`, `/auth/google/callback`) only hand the provider's answer back to the app; they mint nothing.
 - **Internal credentials.** Hosted proxy devices run on hosted session credentials (`MintHostedSession`) and never hold a network credential. Internal probes (`SignInternalProbe`) carry no session and their real client root, with the normal lifetime.
 
+**No cookies.** Every credential above is sent by the caller in the `Authorization` header. No server reads a cookie, sets one or keeps state in one. This is enforced in code, not left to convention (`session/cookies.go`):
+
+- The router drops `Cookie` and the obsolete `Cookie2` from every request before any route runs. `NewClientSessionFromRequest` drops them again, so neither a handler nor `ClientSession.Header` sees one.
+- The router's response writer drops `Set-Cookie` and `Set-Cookie2`, in any letter case, before the header is sent. That includes the header of an informational (1xx) response.
+
+The reason is the shared domain. Any host under `bringyour.com` can set a cookie for the whole domain and receives every cookie scoped to it, and hosts the operator does not run may be named under it (the planned extender names). A browser's login lives in storage on the ur.io origin ([IDP.md §1](../IDP.md)). A feature that seems to need a cookie needs a different design.
+
 ## 2. The token (`by_jwt`)
 
 **Signing.** Tokens are signed with the newest ECDSA key under the vault `tls` directories, or the newest RSA key when there is no ECDSA key, and the header names its `kid`. Verification tries the key that `kid` names first, then every key, newest first. The signing method is pinned.
@@ -226,5 +233,6 @@ After the flip, a network token that expired unrenewed needs a new sign-in. Turn
 | Refresh routes | `controller/auth_controller.go` | `api/auth_refresh_db_test.go` |
 | Connect transport auth and leases | `connect/transport.go`, `connect/transport_authentication.go`, `session/authorization_lease.go` | `connect/*_test.go` |
 | SSO id tokens | `session/sso_jwt.go`, `session/google_jwt.go`, `session/apple_jwt.go` | `session/*_jwt_test.go` |
+| No cookies: dropped from requests and responses | `session/cookies.go`, `router/router.go`, `router/metrics.go` | `session/cookies_test.go`, `router/router_cookies_test.go` |
 
 Keep this document current when a class, a credential or a gate changes.
