@@ -92,7 +92,7 @@ Usage:
     bringyourctl payouts plan [--send] [--dry-run] [--max_duration=<max_duration>]
     bringyourctl payouts populate-tx-hashes
     bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
-    bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
+    bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -171,8 +171,9 @@ Options:
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
     --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, or solana.
     --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
-    --sweep_batch_size=<sweep_batch_size>  Move at most this many sweeps per transaction when correcting legacy attempts; omitted uses 10000.
-    --sweep_batch_limit=<sweep_batch_limit>  Run at most this many sweep transactions in one correction call; omitted or 0 moves every sweep.
+    --move_all_sweeps  Move every sweep of a corrected legacy attempt to its replacement instead of one anchor sweep.
+    --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
+    --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
     -c --count=<count>	Number to process [default: 1000].`
 
@@ -1645,6 +1646,8 @@ func correctLegacyPayoutAttempts(opts docopt.Opts) int {
 	}
 	settings := controller.DefaultLegacyProviderPaymentCorrectionSettings()
 	settings.DryRun = !apply
+	moveAllSweeps, _ := opts.Bool("--move_all_sweeps")
+	settings.AnchorSweeps = !moveAllSweeps
 	settings.CountSweeps, _ = opts.Bool("--count_sweeps")
 	for _, option := range []struct {
 		name     string
@@ -1707,11 +1710,18 @@ func correctLegacyPayoutAttempts(opts docopt.Opts) int {
 		fmt.Printf("      reliability reduction: %s\n", usd(result.ReliabilityReduction))
 		fmt.Printf("      at or below the fee:  %d (%s, held)\n", result.DustCount, usd(result.DustPayout))
 		if settings.CountSweeps {
-			fmt.Printf("      sweeps to move:       %d\n", result.SweepCount)
+			fmt.Printf("      sweeps they own:      %d\n", result.SweepCount)
+		}
+		if settings.AnchorSweeps && !apply {
+			fmt.Printf("      anchor sweeps:        %d (no admissible sweep, held: %d)\n", result.AnchorCount, result.AnchorMissingCount)
 		}
 		if apply {
 			fmt.Printf("  replaced:                 %d (refused %d)\n", result.ReplacedCount, result.RefusedCount)
-			fmt.Printf("  sweeps moved:             %d (still moving %d)\n", result.MovedSweepCount, result.MovingCount)
+			if settings.AnchorSweeps {
+				fmt.Printf("  anchor sweeps moved:      %d (no admissible sweep, held: %d)\n", result.AnchorCount, result.AnchorMissingCount)
+			} else {
+				fmt.Printf("  sweeps moved:             %d (still moving %d)\n", result.MovedSweepCount, result.MovingCount)
+			}
 			fmt.Printf("  released:                 %d (held at or below the fee %d)\n", result.ReleasedCount, result.DustHeldCount)
 			fmt.Printf("  scheduled:                %d\n", result.ScheduledCount)
 		}

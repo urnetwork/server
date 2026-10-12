@@ -10,14 +10,19 @@
 // the reconciliation exactly as they are.
 //
 // A dry run reads Circle and the database and writes nothing. An applied run
-// replaces each absent, reduced attempt, moves the original's sweeps to its
-// replacement in bounded transactions, releases the replacement's review hold
-// once the move is complete, and schedules the ordinary AdvancePayment for it.
-// Every step is resumable: a later run continues from the journaled pairs.
+// replaces each absent, reduced attempt, gives the replacement its earning
+// authority, releases the replacement's review hold and schedules the ordinary
+// AdvancePayment for it. By default the replacement takes one anchor sweep and
+// the canceled original keeps the rest, journaled on both payments for a later
+// reattribution; a full move instead moves every sweep in bounded
+// transactions. Every step is resumable: a later run continues from the
+// journaled pairs.
 package controller
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -36,9 +41,11 @@ type LegacyProviderPaymentCorrectionSettings struct {
 	GroupLimit int
 	// pause between Circle lookups, well under Circle's GET limit
 	LookupInterval time.Duration
-	// sweeps moved per transaction
+	// move one anchor sweep per replacement; otherwise every sweep
+	AnchorSweeps bool
+	// full move: sweeps moved per transaction
 	SweepBatchSize int
-	// sweep transactions in this call; 0 moves every sweep
+	// full move: sweep transactions in this call; 0 moves every sweep
 	SweepBatchLimit int
 	// a dry run also counts the sweeps the replacements would take
 	CountSweeps bool
@@ -51,6 +58,7 @@ func DefaultLegacyProviderPaymentCorrectionSettings() *LegacyProviderPaymentCorr
 		DryRun:          true,
 		GroupLimit:      0,
 		LookupInterval:  500 * time.Millisecond,
+		AnchorSweeps:    true,
 		SweepBatchSize:  10000,
 		SweepBatchLimit: 0,
 		CountSweeps:     false,
@@ -87,6 +95,11 @@ type LegacyProviderPaymentCorrectionResult struct {
 	DustPayout model.NanoCents
 	// sweeps the corrected attempts own (CountSweeps)
 	SweepCount int64
+	// anchored: corrections whose original owns a sweep the earning admission
+	// accepts (a dry run), or anchors moved (applied)
+	AnchorCount int
+	// anchored: corrections without such a sweep, held
+	AnchorMissingCount int
 	// applied
 	ReplacedCount   int
 	RefusedCount    int
@@ -303,7 +316,29 @@ func correctLegacyProviderPaymentGroups(
 		}
 		result.SweepCount = sweepCount
 	}
+	if settings.DryRun && settings.AnchorSweeps && 0 < len(correctedPaymentIds) {
+		cutoff, err := legacyProviderPaymentEarningCutoff(ctx)
+		if err != nil {
+			return err
+		}
+		anchorCount, err := model.CountLegacyProviderPaymentAnchors(ctx, correctedPaymentIds, cutoff)
+		if err != nil {
+			return err
+		}
+		result.AnchorCount = anchorCount
+		result.AnchorMissingCount = len(correctedPaymentIds) - anchorCount
+	}
 	return nil
+}
+
+// The earning admission's cutoff; nil without an earning policy.
+func legacyProviderPaymentEarningCutoff(ctx context.Context) (*time.Time, error) {
+	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
+	if err != nil || policy == nil {
+		return nil, err
+	}
+	cutoff := policy.Cutoff
+	return &cutoff, nil
 }
 
 // Moves, releases and schedules every journaled replacement, including those
@@ -319,6 +354,12 @@ func advanceLegacyProviderPaymentReplacements(
 	if err != nil {
 		return err
 	}
+	var cutoff *time.Time
+	if settings.AnchorSweeps {
+		if cutoff, err = legacyProviderPaymentEarningCutoff(ctx); err != nil {
+			return err
+		}
+	}
 	batches := 0
 	for _, replacement := range replacements {
 		if err := ctx.Err(); err != nil {
@@ -327,7 +368,32 @@ func advanceLegacyProviderPaymentReplacements(
 		if replacement.Completed || replacement.Canceled {
 			continue
 		}
-		if replacement.ReviewHeld {
+		if replacement.ReviewHeld && settings.AnchorSweeps {
+			if !replacement.ReplacementOwnsSweeps {
+				anchored, err := model.MoveLegacyProviderPaymentReplacementAnchor(ctx, replacement, cutoff)
+				if err != nil {
+					if errors.Is(err, model.ErrLegacyProviderPaymentAnchorUnavailable) {
+						result.AnchorMissingCount += 1
+					} else {
+						result.RefusedCount += 1
+					}
+					continue
+				}
+				if anchored {
+					result.AnchorCount += 1
+				}
+			}
+			released, err := model.ReleaseLegacyProviderPaymentReplacement(ctx, replacement, policy, true)
+			if err != nil {
+				result.RefusedCount += 1
+				continue
+			}
+			if !released {
+				result.DustHeldCount += 1
+				continue
+			}
+			result.ReleasedCount += 1
+		} else if replacement.ReviewHeld {
 			for replacement.OriginalOwnsSweeps {
 				if 0 < settings.SweepBatchLimit && settings.SweepBatchLimit <= batches {
 					break
@@ -348,7 +414,7 @@ func advanceLegacyProviderPaymentReplacements(
 				result.MovingCount += 1
 				continue
 			}
-			released, err := model.ReleaseLegacyProviderPaymentReplacement(ctx, replacement, policy)
+			released, err := model.ReleaseLegacyProviderPaymentReplacement(ctx, replacement, policy, false)
 			if err != nil {
 				result.RefusedCount += 1
 				continue

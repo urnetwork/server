@@ -17,21 +17,30 @@
 //     the pair. The replacement starts with attribution_review_required, which
 //     the earning admission refuses, so it cannot be paid before its sweeps are
 //     its own.
-//  2. the original's sweeps move to the replacement in bounded transactions
-//  3. once the original owns no sweep, the review hold is released. A
+//  2. the replacement takes earning authority from the original's sweeps:
+//     either one anchor sweep (the first, in contract order, that satisfies the
+//     earning admission), or every sweep, in bounded transactions
+//  3. the review hold is then released: with an anchor once the replacement
+//     owns it, journaling on both payments the sweeps the original keeps
+//     pending reattribution; with a full move once the original owns none. A
 //     replacement that cannot cover the transfer fee keeps its hold.
 //
 // The canceled original keeps its key and has no retained request: it is never
 // advanced (it is canceled), never re-planned or restored (both require a null
 // key) and no longer a legacy attempt, so the legacy reconciliation never
-// releases its key. Only the replacement can be submitted, once, through the
-// ordinary fresh attempt with its own key.
+// releases its key. Its remaining sweeps are therefore never selected by a plan
+// (only a null owner or a canceled owner without a key is unpaid), and contract
+// retention keeps their contracts while the keyed owner is not completed. Only
+// the replacement can be submitted, once, through the ordinary fresh attempt
+// with its own key. The replacement carries the original's payout byte count,
+// so transfer statistics count those bytes exactly once.
 package model
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -45,7 +54,22 @@ const (
 	legacyProviderPaymentReplacedEventType    = "legacy_payment_replaced"
 	legacyProviderPaymentReplacementEventType = "legacy_payment_replacement"
 	legacyProviderPaymentHeldEventType        = "legacy_payment_replacement_held"
+	// journaled on both payments of an anchored pair
+	legacyProviderPaymentPendingReattributionEventType = "legacy_payment_sweeps_pending_reattribution"
 )
+
+// The earning admission's per-sweep conditions (inspectProviderUsdcPaymentAttribution)
+// for sweep `s` and contract `c`, given the owner's network expression and the
+// position of the earning cutoff parameter.
+func legacyProviderPaymentAnchorSweepSql(networkExpression string, cutoffParam int) string {
+	return fmt.Sprintf(`
+		s.network_id = %s AND s.payout_net_revenue_nano_cents >= 0 AND
+		c.close_time IS NOT NULL AND ($%d::timestamp IS NULL OR c.close_time < $%d::timestamp) AND
+		c.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')`,
+		networkExpression, cutoffParam, cutoffParam)
+}
+
+var ErrLegacyProviderPaymentAnchorUnavailable = errors.New("legacy provider payment has no sweep the earning admission accepts; replacement held")
 
 // The configured subsidy floor and the period over which the reliability
 // subsidy per payout is paid. Corrections never increase an amount.
@@ -355,6 +379,8 @@ type LegacyProviderPaymentReplacement struct {
 	Canceled   bool
 	// the original still owns a sweep
 	OriginalOwnsSweeps bool
+	// the replacement owns a sweep (its anchor, or moved sweeps)
+	ReplacementOwnsSweeps bool
 }
 
 // Every journaled replacement, ordered by its original payment.
@@ -373,7 +399,8 @@ func GetLegacyProviderPaymentReplacements(ctx context.Context) (replacements []*
 				EXISTS (
 					SELECT 1 FROM transfer_escrow_sweep s
 					WHERE s.payment_id = (a.event_details::jsonb->>'original_payment_id')::uuid
-				)
+				),
+				EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id = r.payment_id)
 			FROM audit_account_payment a
 			JOIN account_payment r ON r.payment_id = a.payment_id
 			WHERE a.event_type = $1
@@ -392,6 +419,7 @@ func GetLegacyProviderPaymentReplacements(ctx context.Context) (replacements []*
 					&replacement.Completed,
 					&replacement.Canceled,
 					&replacement.OriginalOwnsSweeps,
+					&replacement.ReplacementOwnsSweeps,
 				))
 				replacements = append(replacements, replacement)
 			}
@@ -482,10 +510,94 @@ func MoveLegacyProviderPaymentReplacementSweeps(ctx context.Context, replacement
 	return
 }
 
-// ReleaseLegacyProviderPaymentReplacement releases the review hold once the
-// original owns no sweep and the replacement owns at least one. A replacement
-// at or below the transfer fee keeps its hold; the hold is journaled once.
-func ReleaseLegacyProviderPaymentReplacement(ctx context.Context, replacement *LegacyProviderPaymentReplacement, policy *LegacyProviderPaymentCorrectionPolicy) (released bool, returnErr error) {
+// The payments of the given ids that own a sweep the earning admission
+// accepts, so an anchored replacement can take one.
+func CountLegacyProviderPaymentAnchors(ctx context.Context, paymentIds []server.Id, cutoff *time.Time) (anchoredCount int, returnErr error) {
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+			SELECT COUNT(*)
+			FROM unnest($1::uuid[]) AS payment(payment_id)
+			JOIN account_payment p ON p.payment_id = payment.payment_id
+			WHERE EXISTS (
+				SELECT 1 FROM transfer_escrow_sweep s
+				JOIN transfer_contract c ON c.contract_id = s.contract_id
+				WHERE s.payment_id = p.payment_id AND `+legacyProviderPaymentAnchorSweepSql("p.network_id", 2)+`
+			)
+			`,
+			paymentIds,
+			cutoff,
+		).Scan(&anchoredCount))
+	})
+	return
+}
+
+// MoveLegacyProviderPaymentReplacementAnchor gives the replacement the
+// original's first sweep, in contract order, that the earning admission
+// accepts. A replacement that already owns a sweep is unchanged. The original
+// keeps every other sweep.
+func MoveLegacyProviderPaymentReplacementAnchor(ctx context.Context, replacement *LegacyProviderPaymentReplacement, cutoff *time.Time) (anchored bool, returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		returnErr = nil
+		anchored = false
+		if !lockLegacyProviderPaymentReplacementInTx(ctx, tx, replacement) {
+			returnErr = ErrLegacyProviderPaymentReplacementChanged
+			return
+		}
+		var owns bool
+		server.Raise(tx.QueryRow(
+			ctx,
+			`SELECT EXISTS (SELECT 1 FROM transfer_escrow_sweep WHERE payment_id = $1)`,
+			replacement.ReplacementPaymentId,
+		).Scan(&owns))
+		if owns {
+			return
+		}
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE transfer_escrow_sweep moved
+			SET payment_id = $2
+			FROM (
+				SELECT s.contract_id, s.balance_id, s.network_id
+				FROM transfer_escrow_sweep s
+				JOIN transfer_contract c ON c.contract_id = s.contract_id
+				WHERE s.payment_id = $1 AND `+legacyProviderPaymentAnchorSweepSql("(SELECT network_id FROM account_payment WHERE payment_id = $1)", 3)+`
+				ORDER BY s.contract_id, s.balance_id, s.network_id
+				LIMIT 1
+			) anchor
+			WHERE moved.contract_id = anchor.contract_id AND moved.balance_id = anchor.balance_id AND
+				moved.network_id = anchor.network_id AND moved.payment_id = $1
+			`,
+			replacement.OriginalPaymentId,
+			replacement.ReplacementPaymentId,
+			cutoff,
+		))
+		if tag.RowsAffected() != 1 {
+			returnErr = ErrLegacyProviderPaymentAnchorUnavailable
+			return
+		}
+		anchored = true
+	}, server.TxReadCommitted)
+	return
+}
+
+type legacyProviderPaymentReattributionDetails struct {
+	OriginalPaymentId        server.Id `json:"original_payment_id"`
+	ReplacementPaymentId     server.Id `json:"replacement_payment_id"`
+	RemainingSweepCount      int64     `json:"remaining_sweep_count"`
+	RemainingPayoutByteCount int64     `json:"remaining_payout_byte_count"`
+	ReplacementSweepCount    int64     `json:"replacement_sweep_count"`
+	Reason                   string    `json:"reason"`
+}
+
+// ReleaseLegacyProviderPaymentReplacement releases the review hold. An anchored
+// replacement needs its anchor, and journals on both payments, once, the sweeps
+// the original keeps pending reattribution. A fully moved replacement needs
+// every sweep of the original. A replacement at or below the transfer fee
+// keeps its hold; the hold is journaled once.
+func ReleaseLegacyProviderPaymentReplacement(ctx context.Context, replacement *LegacyProviderPaymentReplacement, policy *LegacyProviderPaymentCorrectionPolicy, anchored bool) (released bool, returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		returnErr = nil
 		released = false
@@ -493,22 +605,51 @@ func ReleaseLegacyProviderPaymentReplacement(ctx context.Context, replacement *L
 			returnErr = ErrLegacyProviderPaymentReplacementChanged
 			return
 		}
-		var moved bool
+		// counted from the (network, payment, bytes) index
+		var remainingSweepCount, remainingByteCount, replacementSweepCount int64
 		var payout NanoCents
 		server.Raise(tx.QueryRow(
 			ctx,
 			`
 			SELECT
-				NOT EXISTS (SELECT 1 FROM transfer_escrow_sweep WHERE payment_id = $1) AND
-				EXISTS (SELECT 1 FROM transfer_escrow_sweep WHERE payment_id = $2),
-				(SELECT payout_nano_cents FROM account_payment WHERE payment_id = $2)
+				(SELECT COUNT(*) FROM transfer_escrow_sweep s WHERE s.network_id = o.network_id AND s.payment_id = o.payment_id),
+				(SELECT COALESCE(SUM(s.payout_byte_count), 0)::bigint FROM transfer_escrow_sweep s WHERE s.network_id = o.network_id AND s.payment_id = o.payment_id),
+				(SELECT COUNT(*) FROM transfer_escrow_sweep s WHERE s.network_id = r.network_id AND s.payment_id = r.payment_id),
+				r.payout_nano_cents
+			FROM account_payment o, account_payment r
+			WHERE o.payment_id = $1 AND r.payment_id = $2
 			`,
 			replacement.OriginalPaymentId,
 			replacement.ReplacementPaymentId,
-		).Scan(&moved, &payout))
-		if !moved {
+		).Scan(&remainingSweepCount, &remainingByteCount, &replacementSweepCount, &payout))
+		if replacementSweepCount == 0 || (!anchored && remainingSweepCount != 0) {
 			returnErr = ErrLegacyProviderPaymentReplacementChanged
 			return
+		}
+		if anchored {
+			details, err := json.Marshal(&legacyProviderPaymentReattributionDetails{
+				OriginalPaymentId:        replacement.OriginalPaymentId,
+				ReplacementPaymentId:     replacement.ReplacementPaymentId,
+				RemainingSweepCount:      remainingSweepCount,
+				RemainingPayoutByteCount: remainingByteCount,
+				ReplacementSweepCount:    replacementSweepCount,
+				Reason:                   "anchored replacement; the canceled original keeps these sweeps pending reattribution",
+			})
+			server.Raise(err)
+			for _, paymentId := range []server.Id{replacement.OriginalPaymentId, replacement.ReplacementPaymentId} {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					INSERT INTO audit_account_payment (event_id, payment_id, event_type, event_details)
+					SELECT $1::uuid, $2::uuid, $3::varchar, $4::text
+					WHERE NOT EXISTS (SELECT 1 FROM audit_account_payment WHERE payment_id = $2::uuid AND event_type = $3::varchar)
+					`,
+					server.NewId(),
+					paymentId,
+					legacyProviderPaymentPendingReattributionEventType,
+					string(details),
+				))
+			}
 		}
 		if payout <= policy.TransferFee {
 			server.RaisePgResult(tx.Exec(

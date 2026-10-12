@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -29,10 +30,26 @@ func legacyCorrectionTestPolicy() *model.LegacyProviderPaymentCorrectionPolicy {
 	}
 }
 
+// The synthetic identities of a legacy correction fixture.
+type legacyCorrectionTestIdentity struct {
+	network       server.Id
+	client        server.Id
+	sourceNetwork server.Id
+	source        server.Id
+	balance       server.Id
+	closed        time.Time
+}
+
 // A legacy attempt of a plan whose 4-day subsidy epoch took the revenue term
 // (0.2 x $50,000 above the $4,000 floor), owning sweepCount settled contracts
 // closed before the cutoff, and holding a legacy key with no retained request.
 func legacyCorrectionTestFixture(t testing.TB, sweepCount int, subsidy model.NanoCents, reliability model.NanoCents) (*session.ClientSession, *model.AccountPayment, server.Id) {
+	t.Helper()
+	owner, payment, legacyKey, _ := legacyCorrectionTestFixtureWithIdentity(t, sweepCount, subsidy, reliability)
+	return owner, payment, legacyKey
+}
+
+func legacyCorrectionTestFixtureWithIdentity(t testing.TB, sweepCount int, subsidy model.NanoCents, reliability model.NanoCents) (*session.ClientSession, *model.AccountPayment, server.Id, *legacyCorrectionTestIdentity) {
 	t.Helper()
 	ctx := context.Background()
 	cutoff := time.Date(2020, 1, 7, 0, 0, 0, 0, time.UTC)
@@ -83,13 +100,15 @@ func legacyCorrectionTestFixture(t testing.TB, sweepCount int, subsidy model.Nan
 	if err != nil || payment == nil || payment.CircleIdempotencyKey == nil || *payment.CircleIdempotencyKey != legacyKey {
 		t.Fatal("legacy correction fixture lost its key", payment, err)
 	}
-	return owner, payment, legacyKey
+	identity := &legacyCorrectionTestIdentity{network: network, client: client, sourceNetwork: sourceNetwork, source: source, balance: balances[0].BalanceId, closed: closed}
+	return owner, payment, legacyKey, identity
 }
 
-func legacyCorrectionTestRun(t testing.TB, owner *session.ClientSession, lister *legacyReconcileTestLister, dryRun bool, batchSize int, batchLimit int) *LegacyProviderPaymentCorrectionResult {
+func legacyCorrectionTestRun(t testing.TB, owner *session.ClientSession, lister *legacyReconcileTestLister, dryRun bool, anchor bool, batchSize int, batchLimit int) *LegacyProviderPaymentCorrectionResult {
 	t.Helper()
 	settings := &LegacyProviderPaymentCorrectionSettings{
 		DryRun:          dryRun,
+		AnchorSweeps:    anchor,
 		SweepBatchSize:  batchSize,
 		SweepBatchLimit: batchLimit,
 		CountSweeps:     true,
@@ -206,7 +225,7 @@ func TestLegacyProviderPaymentCorrectionInPlaceUpdateIsRefused(t *testing.T) {
 	})
 }
 
-func TestLegacyProviderPaymentCorrectionReplacesAndPaysOnce(t *testing.T) {
+func TestLegacyProviderPaymentCorrectionFullMoveReplacesAndPaysOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		owner, original, legacyKey := legacyCorrectionTestFixture(t, 5, model.UsdToNanoCents(1), model.UsdToNanoCents(0.3))
 		sends := []legacyCorrectionTestSend{}
@@ -217,7 +236,7 @@ func TestLegacyProviderPaymentCorrectionReplacesAndPaysOnce(t *testing.T) {
 		}
 		lister := &legacyReconcileTestLister{}
 
-		preview := legacyCorrectionTestRun(t, owner, lister, true, 2, 0)
+		preview := legacyCorrectionTestRun(t, owner, lister, true, false, 2, 0)
 		if preview.AttemptCount != 1 || preview.AbsentCount != 1 || preview.CorrectionCount != 1 || preview.ReplacedCount != 0 ||
 			preview.OriginalPayout != model.UsdToNanoCents(1.3) || preview.CorrectedPayout != model.UsdToNanoCents(0.44) ||
 			preview.SubsidyReduction != model.UsdToNanoCents(0.6) || preview.ReliabilityReduction != model.UsdToNanoCents(0.26) ||
@@ -229,7 +248,7 @@ func TestLegacyProviderPaymentCorrectionReplacesAndPaysOnce(t *testing.T) {
 			t.Fatal("dry run journaled a replacement", n)
 		}
 
-		result := legacyCorrectionTestRun(t, owner, lister, false, 2, 0)
+		result := legacyCorrectionTestRun(t, owner, lister, false, false, 2, 0)
 		if result.ReplacedCount != 1 || result.RefusedCount != 0 || result.MovedSweepCount != 5 || result.MovingCount != 0 ||
 			result.ReleasedCount != 1 || result.DustHeldCount != 0 || result.ScheduledCount != 1 {
 			t.Fatalf("correction was not applied: %+v", result)
@@ -286,9 +305,9 @@ func TestLegacyProviderPaymentCorrectionReplacesAndPaysOnce(t *testing.T) {
 	})
 }
 
-// A bounded call leaves the replacement held until its move completes, and a
-// completed correction is a no-op when run again.
-func TestLegacyProviderPaymentCorrectionResumesAndIsIdempotent(t *testing.T) {
+// A bounded full move leaves the replacement held until its move completes,
+// and a completed correction is a no-op when run again.
+func TestLegacyProviderPaymentCorrectionFullMoveResumesAndIsIdempotent(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		owner, original, legacyKey := legacyCorrectionTestFixture(t, 5, model.UsdToNanoCents(1), model.UsdToNanoCents(0.3))
 		sends := []legacyCorrectionTestSend{}
@@ -296,7 +315,7 @@ func TestLegacyProviderPaymentCorrectionResumesAndIsIdempotent(t *testing.T) {
 		sweepKeys, _ := legacyCorrectionTestSweeps(t, owner.Ctx, original.PaymentId)
 		lister := &legacyReconcileTestLister{}
 
-		first := legacyCorrectionTestRun(t, owner, lister, false, 2, 1)
+		first := legacyCorrectionTestRun(t, owner, lister, false, false, 2, 1)
 		if first.ReplacedCount != 1 || first.MovedSweepCount != 2 || first.MovingCount != 1 || first.ReleasedCount != 0 || first.ScheduledCount != 0 {
 			t.Fatalf("first bounded call: %+v", first)
 		}
@@ -312,11 +331,11 @@ func TestLegacyProviderPaymentCorrectionResumesAndIsIdempotent(t *testing.T) {
 			t.Fatal("a moving replacement reserved a key", moving, err)
 		}
 
-		second := legacyCorrectionTestRun(t, owner, lister, false, 2, 1)
+		second := legacyCorrectionTestRun(t, owner, lister, false, false, 2, 1)
 		if second.AttemptCount != 0 || second.ReplacedCount != 0 || second.MovedSweepCount != 2 || second.MovingCount != 1 || second.ReleasedCount != 0 {
 			t.Fatalf("second bounded call: %+v", second)
 		}
-		third := legacyCorrectionTestRun(t, owner, lister, false, 2, 1)
+		third := legacyCorrectionTestRun(t, owner, lister, false, false, 2, 1)
 		if third.MovedSweepCount != 1 || third.MovingCount != 0 || third.ReleasedCount != 1 || third.ScheduledCount != 1 {
 			t.Fatalf("third bounded call: %+v", third)
 		}
@@ -328,7 +347,7 @@ func TestLegacyProviderPaymentCorrectionResumesAndIsIdempotent(t *testing.T) {
 		if journaled["legacy_payment_replaced"] != 1 || journaled["legacy_payment_replacement"] != 1 || journaled["circle_attempt_outcome"] != 1 {
 			t.Fatal("replacement journal", journaled)
 		}
-		fourth := legacyCorrectionTestRun(t, owner, lister, false, 2, 1)
+		fourth := legacyCorrectionTestRun(t, owner, lister, false, false, 2, 1)
 		if fourth.ReplacedCount != 0 || fourth.MovedSweepCount != 0 || fourth.ReleasedCount != 0 || fourth.RefusedCount != 0 || fourth.MovingCount != 0 {
 			t.Fatalf("a completed correction changed again: %+v", fourth)
 		}
@@ -345,7 +364,7 @@ func TestLegacyProviderPaymentCorrectionResumesAndIsIdempotent(t *testing.T) {
 	})
 }
 
-// A correction that cannot cover the transfer fee is moved and then held.
+// A correction that cannot cover the transfer fee is anchored and then held.
 func TestLegacyProviderPaymentCorrectionHoldsDust(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		owner, original, legacyKey := legacyCorrectionTestFixture(t, 2, model.UsdToNanoCents(0.02), 0)
@@ -353,9 +372,9 @@ func TestLegacyProviderPaymentCorrectionHoldsDust(t *testing.T) {
 		legacyCorrectionTestMock(t, legacyKey, &sends)
 		lister := &legacyReconcileTestLister{}
 
-		result := legacyCorrectionTestRun(t, owner, lister, false, 10, 0)
+		result := legacyCorrectionTestRun(t, owner, lister, false, true, 10, 0)
 		if result.ReplacedCount != 1 || result.DustCount != 1 || result.DustPayout != model.UsdToNanoCents(0.008) ||
-			result.MovedSweepCount != 2 || result.ReleasedCount != 0 || result.DustHeldCount != 1 || result.ScheduledCount != 0 {
+			result.AnchorCount != 1 || result.ReleasedCount != 0 || result.DustHeldCount != 1 || result.ScheduledCount != 0 {
 			t.Fatalf("dust correction: %+v", result)
 		}
 		replacement := legacyCorrectionTestReplacement(t, owner.Ctx, original.PaymentId)
@@ -365,8 +384,10 @@ func TestLegacyProviderPaymentCorrectionHoldsDust(t *testing.T) {
 		if _, err := AdvancePayment(&AdvancePaymentArgs{PaymentId: replacement.PaymentId}, owner); err == nil || len(sends) != 0 {
 			t.Fatal("dust replacement was submitted", err, len(sends))
 		}
-		again := legacyCorrectionTestRun(t, owner, lister, false, 10, 0)
-		if again.DustHeldCount != 1 || again.ReleasedCount != 0 || again.ScheduledCount != 0 || legacyCorrectionTestEventCount(t, owner.Ctx, "legacy_payment_replacement_held") != 1 {
+		again := legacyCorrectionTestRun(t, owner, lister, false, true, 10, 0)
+		if again.DustHeldCount != 1 || again.ReleasedCount != 0 || again.ScheduledCount != 0 || again.AnchorCount != 0 ||
+			legacyCorrectionTestEventCount(t, owner.Ctx, "legacy_payment_replacement_held") != 1 ||
+			legacyCorrectionTestEventCount(t, owner.Ctx, "legacy_payment_sweeps_pending_reattribution") != 2 {
 			t.Fatalf("dust hold was not stable: %+v", again)
 		}
 	})
@@ -394,7 +415,7 @@ func TestLegacyProviderPaymentCorrectionRequiresCircleAbsence(t *testing.T) {
 			{lister: &legacyReconcileTestLister{err: errors.New("synthetic Circle listing outage")}, lookup: 1},
 		}
 		for _, c := range cases {
-			result := legacyCorrectionTestRun(t, owner, c.lister, false, 10, 0)
+			result := legacyCorrectionTestRun(t, owner, c.lister, false, true, 10, 0)
 			if result.FoundCount != c.found || result.AmbiguousCount != c.ambiguous || result.LookupErrorCount != c.lookup ||
 				result.AbsentCount != 0 || result.ReplacedCount != 0 || result.CorrectionCount != 0 {
 				t.Errorf("a correction was decided without absence: %+v", result)
@@ -490,6 +511,179 @@ func TestCompletePaidCanceledProviderPaymentFromCircle(t *testing.T) {
 		}
 		if again := run(false); again.CandidateCount != 2 || again.RecordedCount != 0 || paidBalance() != paid.payment.Payout {
 			t.Fatalf("a recorded completion was considered again: %+v", again)
+		}
+	})
+}
+
+type legacyCorrectionTestReattributionDetails struct {
+	OriginalPaymentId        server.Id `json:"original_payment_id"`
+	ReplacementPaymentId     server.Id `json:"replacement_payment_id"`
+	RemainingSweepCount      int64     `json:"remaining_sweep_count"`
+	RemainingPayoutByteCount int64     `json:"remaining_payout_byte_count"`
+	ReplacementSweepCount    int64     `json:"replacement_sweep_count"`
+}
+
+// The pending reattribution journaled on one payment.
+func legacyCorrectionTestReattribution(t testing.TB, ctx context.Context, paymentId server.Id) (detailsList []*legacyCorrectionTestReattributionDetails) {
+	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `SELECT event_details FROM audit_account_payment WHERE payment_id=$1 AND event_type='legacy_payment_sweeps_pending_reattribution'`, paymentId)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var text string
+				server.Raise(result.Scan(&text))
+				details := &legacyCorrectionTestReattributionDetails{}
+				server.Raise(json.Unmarshal([]byte(text), details))
+				detailsList = append(detailsList, details)
+			}
+		})
+	})
+	return
+}
+
+// The owner's mode: the replacement takes one deterministic anchor sweep, the
+// canceled original keeps the rest, journaled on both payments, and only the
+// replacement is ever sent, once.
+func TestLegacyProviderPaymentCorrectionAnchorsOneSweepAndPaysOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		owner, original, legacyKey := legacyCorrectionTestFixture(t, 5, model.UsdToNanoCents(1), model.UsdToNanoCents(0.3))
+		sends := []legacyCorrectionTestSend{}
+		legacyCorrectionTestMock(t, legacyKey, &sends)
+		sweepKeys, _ := legacyCorrectionTestSweeps(t, owner.Ctx, original.PaymentId)
+		lister := &legacyReconcileTestLister{}
+
+		preview := legacyCorrectionTestRun(t, owner, lister, true, true, 10, 0)
+		if preview.CorrectionCount != 1 || preview.AnchorCount != 1 || preview.AnchorMissingCount != 0 ||
+			preview.CorrectedPayout != model.UsdToNanoCents(0.44) || preview.ReplacedCount != 0 {
+			t.Fatalf("anchored dry run: %+v", preview)
+		}
+		if remaining, _ := legacyCorrectionTestSweeps(t, owner.Ctx, original.PaymentId); !slices.Equal(remaining, sweepKeys) {
+			t.Fatal("dry run moved a sweep")
+		}
+
+		result := legacyCorrectionTestRun(t, owner, lister, false, true, 10, 0)
+		if result.ReplacedCount != 1 || result.AnchorCount != 1 || result.AnchorMissingCount != 0 || result.ReleasedCount != 1 ||
+			result.ScheduledCount != 1 || result.RefusedCount != 0 || result.MovedSweepCount != 0 {
+			t.Fatalf("anchored correction: %+v", result)
+		}
+		replacement := legacyCorrectionTestReplacement(t, owner.Ctx, original.PaymentId)
+		anchorKeys, anchorBytes := legacyCorrectionTestSweeps(t, owner.Ctx, replacement.PaymentId)
+		remainingKeys, remainingBytes := legacyCorrectionTestSweeps(t, owner.Ctx, original.PaymentId)
+		// the first sweep in contract order moves, and every other sweep stays
+		if len(anchorKeys) != 1 || anchorKeys[0] != sweepKeys[0] || anchorBytes != 100 || !slices.Equal(remainingKeys, sweepKeys[1:]) || remainingBytes != 400 {
+			t.Fatal("anchor is not the first sweep, or the original lost sweeps", anchorKeys, len(remainingKeys))
+		}
+		if replacement.AttributionReviewRequired || replacement.PayoutByteCount != original.PayoutByteCount || replacement.Payout != model.UsdToNanoCents(0.44) {
+			t.Fatal("anchored replacement", replacement)
+		}
+		for _, paymentId := range []server.Id{original.PaymentId, replacement.PaymentId} {
+			detailsList := legacyCorrectionTestReattribution(t, owner.Ctx, paymentId)
+			if len(detailsList) != 1 || detailsList[0].RemainingSweepCount != 4 || detailsList[0].RemainingPayoutByteCount != 400 ||
+				detailsList[0].ReplacementSweepCount != 1 || detailsList[0].OriginalPaymentId != original.PaymentId ||
+				detailsList[0].ReplacementPaymentId != replacement.PaymentId {
+				t.Fatal("pending reattribution was not journaled", paymentId, detailsList)
+			}
+		}
+
+		// only the replacement is sent, once, with a fresh key
+		if advanced, err := AdvancePayment(&AdvancePaymentArgs{PaymentId: original.PaymentId}, owner); err != nil || !advanced.Canceled {
+			t.Fatal("canceled original advanced", advanced, err)
+		}
+		for range 2 {
+			if _, err := AdvancePayment(&AdvancePaymentArgs{PaymentId: replacement.PaymentId}, owner); err != nil {
+				t.Fatal("anchored replacement did not submit", err)
+			}
+		}
+		if len(sends) != 1 || sends[0].key == legacyKey || fmt.Sprintf("%f", sends[0].amount) != "0.430000" {
+			t.Fatal("anchored replacement was not sent exactly once at the corrected amount", sends)
+		}
+
+		again := legacyCorrectionTestRun(t, owner, lister, false, true, 10, 0)
+		if again.ReplacedCount != 0 || again.AnchorCount != 0 || again.ReleasedCount != 0 || again.RefusedCount != 0 ||
+			legacyCorrectionTestEventCount(t, owner.Ctx, "legacy_payment_sweeps_pending_reattribution") != 2 {
+			t.Fatalf("anchored correction changed again: %+v", again)
+		}
+		if anchorAgain, _ := legacyCorrectionTestSweeps(t, owner.Ctx, replacement.PaymentId); !slices.Equal(anchorAgain, anchorKeys) {
+			t.Fatal("a repeated correction moved another sweep")
+		}
+	})
+}
+
+// The canceled original keeps its remaining sweeps and its key. A real plan
+// selects only unpaid sweeps (a null owner, or a canceled owner without a key)
+// and restores only keyless canceled payments, so the remainder is never paid
+// again; the reconciliation and the advance ignore the original, and transfer
+// statistics count its bytes once, through the replacement.
+func TestLegacyProviderPaymentCorrectionAnchorRemainderIsNeverPickedUp(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		owner, original, legacyKey, identity := legacyCorrectionTestFixtureWithIdentity(t, 3, model.UsdToNanoCents(1), model.UsdToNanoCents(0.3))
+		sends := []legacyCorrectionTestSend{}
+		legacyCorrectionTestMock(t, legacyKey, &sends)
+		lister := &legacyReconcileTestLister{}
+		result := legacyCorrectionTestRun(t, owner, lister, false, true, 10, 0)
+		if result.ReplacedCount != 1 || result.AnchorCount != 1 || result.ReleasedCount != 1 {
+			t.Fatalf("anchored correction: %+v", result)
+		}
+		replacement := legacyCorrectionTestReplacement(t, owner.Ctx, original.PaymentId)
+		remainingKeys, _ := legacyCorrectionTestSweeps(t, owner.Ctx, original.PaymentId)
+		anchorKeys, _ := legacyCorrectionTestSweeps(t, owner.Ctx, replacement.PaymentId)
+		if len(remainingKeys) != 2 || len(anchorKeys) != 1 {
+			t.Fatal("anchored fixture", len(remainingKeys), len(anchorKeys))
+		}
+
+		// a positive control: an unpaid sweep of the same network a plan must select
+		control := server.NewId()
+		usage := fmt.Sprintf(`{"version":1,"byte_count":7,"providers":[{"client_id":%q,"network_id":%q,"byte_count":7}]}`, identity.client.String(), identity.network.String())
+		server.Tx(owner.Ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(owner.Ctx, `INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,close_time,outcome,provider_usage,usage_origin_is_source)
+				VALUES($1,$2,$3,$4,$5,7,$6,$7,'settled',$8,true)`, control, identity.sourceNetwork, identity.source, identity.network, identity.client, identity.closed.Add(-time.Hour), identity.closed, usage))
+			server.RaisePgResult(tx.Exec(owner.Ctx, `INSERT INTO transfer_escrow_sweep(contract_id,balance_id,network_id,destination_id,payout_byte_count,payout_net_revenue_nano_cents,sweep_time)
+				VALUES($1,$2,$3,$4,7,$5,$6)`, control, identity.balance, identity.network, identity.client, model.UsdToNanoCents(1), identity.closed))
+		})
+		config := *model.EnvSubsidyConfig()
+		config.MinPayoutUsd = 0
+		config.UsdPerActiveUser = 0
+		config.SubscriptionNetRevenueFraction = 0
+		config.MinWalletPayoutUsd = 0
+		plan, err := model.CreatePaymentPlan(owner.Ctx, &config, false, 0)
+		if err != nil || plan.NetworkPayments[identity.network] == nil || plan.NetworkPayments[identity.network].PayoutByteCount != 7 || plan.RestoredLegacyPaymentCount != 0 {
+			t.Fatal("a plan selected the canceled original's sweeps or restored it", plan, err)
+		}
+		if after, _ := legacyCorrectionTestSweeps(t, owner.Ctx, original.PaymentId); !slices.Equal(after, remainingKeys) {
+			t.Fatal("the remainder left the canceled original", len(after))
+		}
+		if anchorAfter, _ := legacyCorrectionTestSweeps(t, owner.Ctx, replacement.PaymentId); !slices.Equal(anchorAfter, anchorKeys) {
+			t.Fatal("the anchor left the replacement")
+		}
+		canceled, err := model.GetPayment(owner.Ctx, original.PaymentId)
+		if err != nil || !canceled.Canceled || canceled.Completed || canceled.CircleIdempotencyKey == nil || *canceled.CircleIdempotencyKey != legacyKey {
+			t.Fatal("the original was restored or lost its key", canceled, err)
+		}
+
+		if again := legacyReconcileTestRun(t, owner, lister, false); again.AttemptCount != 0 || again.AbsentCount != 0 {
+			t.Fatalf("the reconciliation listed the canceled original: %+v", again)
+		}
+		if advanced, err := AdvancePayment(&AdvancePaymentArgs{PaymentId: original.PaymentId}, owner); err != nil || !advanced.Canceled || len(sends) != 0 {
+			t.Fatal("the canceled original advanced", advanced, err, len(sends))
+		}
+
+		// unpaid: the replacement's full bytes and the control, never the remainder again
+		stats := model.GetTransferStats(owner.Ctx, identity.network)
+		if stats == nil || stats.UnpaidBytesProvided != replacement.PayoutByteCount+7 || stats.PaidBytesProvided != 0 {
+			t.Fatal("transfer statistics counted the remainder again", stats)
+		}
+		// the payment history lists the replaced original as canceled beside its pending replacement
+		payments, err := model.GetNetworkPayments(owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		listed := map[server.Id]*model.AccountPayment{}
+		for _, payment := range payments {
+			listed[payment.PaymentId] = payment
+		}
+		if listed[original.PaymentId] == nil || !listed[original.PaymentId].Canceled || listed[replacement.PaymentId] == nil ||
+			listed[replacement.PaymentId].Canceled || listed[replacement.PaymentId].Completed {
+			t.Fatal("payment history", len(payments))
 		}
 	})
 }
