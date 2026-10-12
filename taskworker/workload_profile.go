@@ -148,6 +148,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(model.RemoveNetworkClientsTask)},
 		{target: model.NewLegacyProviderTotalsTaskTarget()},
 		{target: model.NewLegacyNetEscrowMirrorTaskTarget()},
+		// Queued by a contract quarantine in its commit.
+		{target: model.NewQuarantineReservationReleaseTaskTarget()},
 		{target: task.NewTaskTarget(work.SweepOrphanContractData), schedule: work.ScheduleSweepOrphanContractData},
 		// Drain a previously queued retired refresher; startup never seeds it.
 		{target: task.NewTaskTarget(work.RefreshContractHoles)},

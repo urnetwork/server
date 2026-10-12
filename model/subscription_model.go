@@ -4493,6 +4493,10 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 				contractHoleEventInTx(ctx, tx, openContract.contractId, openContract.sourceId, openContract.destinationId, "remove")
 				_, err := removeScheduledContractClosesInTx(ctx, tx, []server.Id{openContract.contractId})
 				server.Raise(err)
+				// The release below is best effort; a lost one would hold the
+				// payer's Redis credit until its lease ends. A durable task in
+				// this commit retries it, without settling the escrow.
+				queueQuarantineReservationReleaseInTx(ctx, tx, openContract.contractId)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
 
@@ -5781,7 +5785,11 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					contractIds = append(contractIds, id)
 				}
 			})
-			admitted, err := tryContractTransferBalanceOwnershipInTx(ctx, tx, contractIds)
+			// A zero balance id on a due contract's escrow would fail this
+			// head-of-index slice on every pass and stop all reaping behind it.
+			balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, contractIds)
+			server.Raise(err)
+			admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ownableTransferBalanceIds(balanceIds))
 			server.Raise(err)
 			if !admitted || len(contractIds) == 0 {
 				return

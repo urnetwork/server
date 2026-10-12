@@ -266,19 +266,23 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 		if !exists {
 			continue
 		}
-		if payout.payoutByteCount > 0 {
-			if redisDebits[balanceId] {
+		if redisDebits[balanceId] {
+			if payout.payoutByteCount > 0 || payout.escrowBalanceByteCount > 0 {
 				// Preserve the existing native reservation until the batched
 				// debit commits. The unique journal and terminal outcome share
 				// this commit; losing any post cannot lose or repeat the charge.
+				// A zero charge on a held reservation is journaled too: as for
+				// a zero-use ordinary settlement, the debit worker's release of
+				// its row frees the reservation if the post is lost.
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_debit_journal
 					(contract_id,balance_id,debit_byte_count,shard) VALUES($1,$2,$3,$4)`,
 					contractId, balanceId, payout.payoutByteCount, transferDebitShard(balanceId)))
-			} else {
-				// Legacy admission subtracts live escrow, not pending journals.
-				// Keep its existing atomic debit before releasing that escrow.
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1`, balanceId, payout.payoutByteCount))
+				result.Charged += payout.payoutByteCount
 			}
+		} else if payout.payoutByteCount > 0 {
+			// Legacy admission subtracts live escrow, not pending journals.
+			// Keep its existing atomic debit before releasing that escrow.
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1`, balanceId, payout.payoutByteCount))
 			result.Charged += payout.payoutByteCount
 		}
 	}
