@@ -224,6 +224,9 @@ func TestEscrowSettlementZeroUseOmitsEmptyPosts(t *testing.T) {
 				beforeMirror, beforeMirrorErr = r.Get(ctx, netEscrowKey(fixture.balanceId)).Result()
 			})
 			var posts []func() any
+			// The legacy owner admits transaction ownership first, which the
+			// server grants only to its own read-committed no-retry transaction
+			// (ddad361c), the shape every production caller uses.
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET checkpoint=false WHERE contract_id=$1`, fixture.contractId))
 				var closed bool
@@ -232,7 +235,7 @@ func TestEscrowSettlementZeroUseOmitsEmptyPosts(t *testing.T) {
 				if err != nil || !closed {
 					t.Fatalf("zero-use settlement closed=%t error=%v", closed, err)
 				}
-			}, server.TxReadCommitted)
+			}, server.TxReadCommitted, server.OptNoRetry())
 			if len(posts) != test.posts {
 				t.Fatalf("grant=%d zero-use posts=%d, want %d without empty debit/release work", test.grant, len(posts), test.posts)
 			}
