@@ -10009,4 +10009,9 @@ var migrations = []any{
 	).withIndexCompletion(820, "network_client_connection", "network_client_connection_connected_handler_id",
 		"CREATE INDEX network_client_connection_connected_handler_id ON public.network_client_connection USING btree (handler_id) WHERE connected",
 		"connected"),
+
+	// 826: staged running-window steps (db_reliability_running_stage.go). New
+	// tables; nothing is rewritten. Apply before deploying taskworkers that
+	// advance the reliability running windows in bounded committed chunks.
+	newSqlMigration(reliabilityRunningStageSchemaSql),
 }
