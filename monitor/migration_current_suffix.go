@@ -244,6 +244,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(826, "connection tables keep emptied pages",
 		migrationVacuumTruncateOff("network_client_connection"),
 		migrationVacuumTruncateOff("network_client_handler")),
+	migrationCurrentSuffix(827, "device network index",
+		migrationFp2Index("device", "device_network_id", "network_id", "", false)),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
