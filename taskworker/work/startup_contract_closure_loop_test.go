@@ -248,7 +248,6 @@ func TestStartupContractClosureFindsAppendAfterShortPage(t *testing.T) {
 		var stateLock sync.Mutex
 		appended := false
 		var addedId server.Id
-		var addedDeadline time.Time
 		var appendErr error
 		ctx := server.Testing_WithPgOwnershipObservation(baseCtx, func(event server.PgOwnershipEvent) {
 			if event.Kind != server.PgOwnershipReleased || startupCheckpointObservedChildren(event, keys) != len(ids) {
@@ -261,15 +260,14 @@ func TestStartupContractClosureFindsAppendAfterShortPage(t *testing.T) {
 			if !create {
 				return
 			}
+			// A legacy contract: one with a stored deadline gets no queued close.
 			var id server.Id
-			var deadline time.Time
 			var err error
 			server.HandleError(func() {
-				id, deadline, err = model.CreateContractNoEscrowWithExpiration(baseCtx, networkId, sourceId, networkId, destinationId, 100, true)
-				server.Raise(err)
+				id = newStartupClosureScanContracts(baseCtx, networkId, sourceId, destinationId, 1)[0]
 			}, func(cause error) { err = cause })
 			stateLock.Lock()
-			addedId, addedDeadline, appendErr = id, deadline, err
+			addedId, appendErr = id, err
 			stateLock.Unlock()
 		})
 		owner := session.NewLocalClientSession(ctx, "", nil)
@@ -281,11 +279,14 @@ func TestStartupContractClosureFindsAppendAfterShortPage(t *testing.T) {
 		defer worker.Close()
 		evalStartupClosureTask(t, ctx, worker, initial.id)
 		stateLock.Lock()
-		created, id, deadline, err := appended, addedId, addedDeadline, appendErr
+		created, id, err := appended, addedId, appendErr
 		stateLock.Unlock()
-		if !created || err != nil || id.Cmp(ids[len(ids)-1]) <= 0 || deadline.IsZero() {
-			t.Fatal("short-page fixture did not commit a new greater public contract", created, err)
+		if !created || err != nil || id.Cmp(ids[len(ids)-1]) <= 0 {
+			t.Fatal("short-page fixture did not commit a new greater contract", created, err)
 		}
+		var startup ScheduleOpenContractClosuresArgs
+		server.Raise(json.Unmarshal([]byte(initial.args), &startup))
+		deadline := startup.StartedAt.Add(model.DefaultContractExpiration)
 		queue := readExpiryRecoveryQueue(t, ctx)
 		child, found := queue[task.RunOnce("close_scheduled_contract", id).String()]
 		var args CloseScheduledContractArgs

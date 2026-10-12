@@ -3305,6 +3305,10 @@ func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx,
 		return false, err
 	}
 	server.AddTxCommitCount(tx, &contractClosedCounter, 1)
+	// The terminal commit also retires the contract's queued scheduled close.
+	if _, err := removeScheduledContractClosesInTx(ctx, tx, []server.Id{contractId}); err != nil {
+		return false, err
+	}
 	providerWorkRetainOutcomeWithEvidencePolicyInTx(ctx, tx, contractId, outcome, closedAt, reconcile)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
 	return true, nil
@@ -4487,6 +4491,8 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 			if claimed {
 				server.AddTxCommitCount(tx, &contractClosedCounter, 1)
 				contractHoleEventInTx(ctx, tx, openContract.contractId, openContract.sourceId, openContract.destinationId, "remove")
+				_, err := removeScheduledContractClosesInTx(ctx, tx, []server.Id{openContract.contractId})
+				server.Raise(err)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
 

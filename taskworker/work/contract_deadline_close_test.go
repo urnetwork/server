@@ -146,6 +146,8 @@ func TestScheduledContractCloseTerminalClaimRetiresRecentlyDueOwnerFirst(t *test
 		if closed, err := model.ReconcileContractAtDeadline(t.Context(), settled.contractIds[0], deadline); err != nil || closed.AlreadyClosed {
 			t.Fatal("fixture did not settle the head contract before its queued close", err)
 		}
+		// The retained queue still holds closes that outlived their contracts.
+		requeueRetiredScheduledClose(t, ctx, settled.contractIds[0], deadline)
 
 		// Issued after the startup pass, so none has a queued close.
 		mintedAt := server.NowUtc().Truncate(time.Millisecond).Add(-90 * time.Minute)
@@ -198,6 +200,8 @@ func TestScheduledContractCloseTerminalClaimRetiresDeadlineBacklogBeforeQueue(t 
 		if closed, err := model.ReconcileContractAtDeadline(t.Context(), settled.contractIds[0], deadline); err != nil || closed.AlreadyClosed {
 			t.Fatal("fixture did not settle the head contract before its queued close", err)
 		}
+		// The retained queue still holds closes that outlived their contracts.
+		requeueRetiredScheduledClose(t, ctx, settled.contractIds[0], deadline)
 
 		// Issued two days ago, after the startup pass's position, without queued closes.
 		mintedAt := server.NowUtc().Truncate(time.Millisecond).Add(-48 * time.Hour)
