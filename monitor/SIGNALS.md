@@ -2551,9 +2551,10 @@ Probe: `redis-rates`
 
 The Redis dashboard and alerts must also respect the collection cadence. Since
 2026-08-26, edge-6 intentionally staggers its 32 exporter scrapes from 61 to 92
-seconds to avoid a remote-write burst. Grafana can resolve `$__rate_interval`
-to one minute, which contains fewer than two samples and makes counter-derived
-panels look empty even while all gauges and raw exporter counters are healthy.
+seconds, and since 2026-10-12 edge-5 its 16 from 93 to 108 seconds, to avoid a
+remote-write burst. Grafana can resolve `$__rate_interval` to one minute, which
+contains fewer than two samples and makes counter-derived panels look empty
+even while all gauges and raw exporter counters are healthy.
 On 2026-09-07, main returned 32 current series for each of
 `redis_commands_processed_total`, `redis_evicted_keys_total`, and
 `redis_expired_keys_total`, but `count(rate(...[1m]))` returned no value while
