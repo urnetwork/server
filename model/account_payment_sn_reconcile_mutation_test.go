@@ -133,3 +133,47 @@ func TestSnReconcileReviveHoldsRowLockUntilCommit(t *testing.T) {
 		snReconcileTestExec(t, ctx, `DROP TRIGGER synthetic_pause_revive ON audit_account_payment; DROP FUNCTION synthetic_pause_revive()`)
 	})
 }
+
+// A1: a sender that locked the row and journaled a request under its key
+// commits while the revive waits for that lock. The revive's re-check after
+// FOR UPDATE must see the journal and leave the row untouched.
+//
+// This fails on v2/sn-reconcile ab9a187b: the revive runs in the default
+// REPEATABLE READ transaction, whose snapshot is taken by its first statement,
+// the SELECT ... FOR UPDATE that waits for the sender, so the re-check never
+// sees a journal the lock holder commits. A READ COMMITTED revive passes.
+func TestSnReconcileReviveSeesJournalOfLockHolder(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		_, row := snReconcileTestRevivable(t, ctx)
+		payment := func() (payment string) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT row_to_json(p)::text FROM account_payment p WHERE payment_id=$1`, row.PaymentId).Scan(&payment))
+			})
+			return
+		}
+		before := payment()
+		var done <-chan snReconcileTestRevival
+		waited := false
+		// As the sender's retainProviderPaymentRequestInTx does: lock the row,
+		// then journal the request under its key.
+		server.Tx(ctx, func(tx server.PgTx) {
+			result, err := tx.Query(ctx, `SELECT payment_id FROM account_payment WHERE payment_id=$1 FOR UPDATE`, row.PaymentId)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+				}
+			})
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO audit_account_payment(event_id,payment_id,event_type,event_details) VALUES($1,$2,'circle_attempt_request','{}')`,
+				*row.CircleIdempotencyKey, row.PaymentId))
+			done = snReconcileTestReviveAsync(ctx, row)
+			waited = snReconcileTestAwait(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND pid<>pg_backend_pid())`)
+		}, server.TxReadCommitted)
+		outcome := <-done
+		if !waited || outcome.panicked != nil {
+			t.Fatal("the revive did not wait for the sender's lock", waited, outcome.panicked)
+		}
+		if outcome.revived || outcome.scheduled != 0 || payment() != before {
+			t.Fatalf("a row whose key its lock holder journaled was revived: revived=%v scheduled=%d\n%s", outcome.revived, outcome.scheduled, payment())
+		}
+	})
+}
