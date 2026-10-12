@@ -538,8 +538,9 @@ func TestClientReliabilityRunningRollingEquivalence(t *testing.T) {
 		}
 
 		// FORCE FULL RECOMPUTE of the same final window: push the recompute marker
-		// far enough back that the next maintenance re-anchors every lookback with a
-		// fresh full scan of [min, max) instead of rolling.
+		// far enough back that the next checkpoint re-anchors every lookback with a
+		// fresh full scan of [min, max) instead of rolling. The score transactions
+		// leave that optional re-anchor to the checkpoint.
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
@@ -547,7 +548,8 @@ func TestClientReliabilityRunningRollingEquivalence(t *testing.T) {
 				ReliabilityRunningRecomputeBlocks+1000,
 			))
 		})
-		UpdateClientReliabilityScores(ctx, finalMaxTime, false)
+		UpdateClientReliabilityScoresCheckpointed(ctx, finalMaxTime)
+		UpdateNetworkReliabilityRunningCheckpointed(ctx, finalMaxTime)
 		UpdateNetworkReliabilityWindowScores(ctx, finalMaxTime, false)
 
 		// the marker moved forward again to the window max -> that pass recomputed
@@ -695,7 +697,8 @@ func TestReliabilityRunningKeepsDegradedClassificationAcrossMedianFlip(t *testin
 				ReliabilityRunningRecomputeBlocks+1000,
 			))
 		})
-		UpdateClientReliabilityScores(ctx, blockTime(71), false)
+		// the checkpoint owns the optional re-anchor
+		UpdateClientReliabilityScoresCheckpointed(ctx, blockTime(71))
 		recomputed := testingSnapshotClientScores(ctx)[fmt.Sprintf("1:%s", clientId)]
 		testingAssertScoreEq(t, "median-flip rolling/recompute", rolling, recomputed)
 	})
