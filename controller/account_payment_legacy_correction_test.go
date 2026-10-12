@@ -51,6 +51,11 @@ func legacyCorrectionTestFixture(t testing.TB, sweepCount int, subsidy model.Nan
 
 func legacyCorrectionTestFixtureWithIdentity(t testing.TB, sweepCount int, subsidy model.NanoCents, reliability model.NanoCents) (*session.ClientSession, *model.AccountPayment, server.Id, *legacyCorrectionTestIdentity) {
 	t.Helper()
+	return legacyCorrectionTestFixtureWithBytes(t, sweepCount, 100, subsidy, reliability)
+}
+
+func legacyCorrectionTestFixtureWithBytes(t testing.TB, sweepCount int, sweepByteCount int64, subsidy model.NanoCents, reliability model.NanoCents) (*session.ClientSession, *model.AccountPayment, server.Id, *legacyCorrectionTestIdentity) {
+	t.Helper()
 	ctx := context.Background()
 	cutoff := time.Date(2020, 1, 7, 0, 0, 0, 0, time.UTC)
 	controllerPayoutSchedule(t, cutoff)
@@ -78,17 +83,17 @@ func legacyCorrectionTestFixtureWithIdentity(t testing.TB, sweepCount int, subsi
 	paymentId, planId := server.NewId(), server.NewId()
 	closed := cutoff.Add(-time.Hour)
 	epochEnd := cutoff.Add(-2 * time.Hour)
-	usage := fmt.Sprintf(`{"version":1,"byte_count":100,"providers":[{"client_id":%q,"network_id":%q,"byte_count":100}]}`, client.String(), network.String())
+	usage := fmt.Sprintf(`{"version":1,"byte_count":%d,"providers":[{"client_id":%q,"network_id":%q,"byte_count":%d}]}`, sweepByteCount, client.String(), network.String(), sweepByteCount)
 	server.Tx(ctx, func(tx server.PgTx) {
 		for range sweepCount {
 			contract := server.NewId()
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,close_time,outcome,provider_usage,usage_origin_is_source)
-				VALUES($1,$2,$3,$4,$5,100,$6,$7,'settled',$8,true)`, contract, sourceNetwork, source, network, client, closed.Add(-time.Hour), closed, usage))
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8,'settled',$9,true)`, contract, sourceNetwork, source, network, client, sweepByteCount, closed.Add(-time.Hour), closed, usage))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow_sweep(contract_id,balance_id,network_id,destination_id,payout_byte_count,payout_net_revenue_nano_cents,sweep_time,payment_id)
-				VALUES($1,$2,$3,$4,100,0,$5,$6)`, contract, balances[0].BalanceId, network, client, closed, paymentId))
+				VALUES($1,$2,$3,$4,$5,0,$6,$7)`, contract, balances[0].BalanceId, network, client, sweepByteCount, closed, paymentId))
 		}
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_payment(payment_id,payment_plan_id,network_id,wallet_id,payout_byte_count,payout_nano_cents,subsidy_payout_nano_cents,reliability_subsidy_nano_cents,min_sweep_time)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, paymentId, planId, network, *wallet, int64(100*sweepCount), subsidy+reliability, subsidy, reliability, closed))
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, paymentId, planId, network, *wallet, sweepByteCount*int64(sweepCount), subsidy+reliability, subsidy, reliability, closed))
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO subsidy_payment(payment_plan_id,start_time,end_time,active_user_count,paid_user_count,net_payout_byte_count_paid,net_payout_byte_count_unpaid,net_revenue_nano_cents,net_payout_nano_cents)
 			VALUES($1,$2,$3,100,10,0,0,$4,$5)`, planId, epochEnd.Add(-4*24*time.Hour), epochEnd, model.UsdToNanoCents(50000), subsidy))
 	})
@@ -672,7 +677,7 @@ func TestLegacyProviderPaymentCorrectionAnchorRemainderIsNeverPickedUp(t *testin
 		if stats == nil || stats.UnpaidBytesProvided != replacement.PayoutByteCount+7 || stats.PaidBytesProvided != 0 {
 			t.Fatal("transfer statistics counted the remainder again", stats)
 		}
-		// the payment history lists the replaced original as canceled beside its pending replacement
+		// the payment history shows only the replacement of the pair
 		payments, err := model.GetNetworkPayments(owner)
 		if err != nil {
 			t.Fatal(err)
@@ -681,9 +686,86 @@ func TestLegacyProviderPaymentCorrectionAnchorRemainderIsNeverPickedUp(t *testin
 		for _, payment := range payments {
 			listed[payment.PaymentId] = payment
 		}
-		if listed[original.PaymentId] == nil || !listed[original.PaymentId].Canceled || listed[replacement.PaymentId] == nil ||
-			listed[replacement.PaymentId].Canceled || listed[replacement.PaymentId].Completed {
+		if listed[original.PaymentId] != nil || listed[replacement.PaymentId] == nil || listed[replacement.PaymentId].Canceled {
 			t.Fatal("payment history", len(payments))
+		}
+	})
+}
+
+// Providers never see the canceled, inflated original: the payment history
+// lists only the replacement of a corrected pair, at the corrected amount with
+// the full bytes, naming the payment it replaces. Other payments are unchanged.
+func TestLegacyProviderPaymentCorrectionHistoryShowsOnlyReplacement(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		owner, original, legacyKey := legacyCorrectionTestFixture(t, 3, model.UsdToNanoCents(1), model.UsdToNanoCents(0.3))
+		sends := []legacyCorrectionTestSend{}
+		legacyCorrectionTestMock(t, legacyKey, &sends)
+		before, err := model.GetNetworkPayments(owner)
+		if err != nil || len(before) != 1 || before[0].PaymentId != original.PaymentId || before[0].ReplacesPaymentId != nil {
+			t.Fatal("history before the correction", before, err)
+		}
+
+		result := legacyCorrectionTestRun(t, owner, &legacyReconcileTestLister{}, false, true, 10, 0)
+		if result.ReplacedCount != 1 || result.ReleasedCount != 1 {
+			t.Fatalf("anchored correction: %+v", result)
+		}
+		replacement := legacyCorrectionTestReplacement(t, owner.Ctx, original.PaymentId)
+		after, err := model.GetNetworkPayments(owner)
+		if err != nil || len(after) != 1 {
+			t.Fatal("the history shows more than the replacement of the pair", len(after), err)
+		}
+		shown := after[0]
+		if shown.PaymentId != replacement.PaymentId || shown.Payout != model.UsdToNanoCents(0.44) || shown.PayoutByteCount != original.PayoutByteCount ||
+			shown.Canceled || shown.ReplacesPaymentId == nil || *shown.ReplacesPaymentId != original.PaymentId {
+			t.Fatal("the history does not show the corrected replacement", shown)
+		}
+		// the added field is omitted for every other payment, so old clients see the same shape
+		encodedOriginal, err := json.Marshal(before[0])
+		if err != nil || strings.Contains(string(encodedOriginal), "replaces_payment_id") {
+			t.Fatal("an unreplaced payment gained a field", string(encodedOriginal), err)
+		}
+		encodedReplacement, err := json.Marshal(shown)
+		if err != nil || !strings.Contains(string(encodedReplacement), `"replaces_payment_id":"`+original.PaymentId.String()+`"`) {
+			t.Fatal("the replacement does not name the payment it replaces", string(encodedReplacement), err)
+		}
+	})
+}
+
+// The public leaderboard counts a corrected pair's bytes once, as the replacement.
+func TestLegacyProviderPaymentCorrectionLeaderboardCountsOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		owner, original, legacyKey, identity := legacyCorrectionTestFixtureWithBytes(t, 3, 1024*1024, model.UsdToNanoCents(1), model.UsdToNanoCents(0.3))
+		sends := []legacyCorrectionTestSend{}
+		legacyCorrectionTestMock(t, legacyKey, &sends)
+		// a public network keeps its id in the public leaderboard
+		if err := legacyCorrectionTestExec(owner.Ctx, `UPDATE network SET leaderboard_public = true WHERE network_id = $1`, identity.network); err != nil {
+			t.Fatal(err)
+		}
+		mib := func() (rankingMib float32, earnerMib float32) {
+			rankings, err := model.GetNetworkLeaderboardRankings(owner.Ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			earners, err := model.GetLeaderboard(owner.Ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, earner := range earners {
+				if earner.NetworkId == identity.network.String() {
+					earnerMib = earner.NetMiBCount
+				}
+			}
+			return rankings[identity.network].NetMiBCount, earnerMib
+		}
+		if rankingMib, earnerMib := mib(); rankingMib != 3 || earnerMib != 3 {
+			t.Fatal("leaderboard before the correction", rankingMib, earnerMib)
+		}
+		result := legacyCorrectionTestRun(t, owner, &legacyReconcileTestLister{}, false, true, 10, 0)
+		if result.ReplacedCount != 1 || result.ReleasedCount != 1 || legacyCorrectionTestReplacement(t, owner.Ctx, original.PaymentId).PayoutByteCount != 3*1024*1024 {
+			t.Fatalf("anchored correction: %+v", result)
+		}
+		if rankingMib, earnerMib := mib(); rankingMib != 3 || earnerMib != 3 {
+			t.Fatal("the leaderboard counted a corrected pair twice", rankingMib, earnerMib)
 		}
 	})
 }

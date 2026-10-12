@@ -49,7 +49,9 @@ import (
 
 var ErrLegacyProviderPaymentReplacementChanged = errors.New("legacy provider payment replacement changed; nothing written")
 
-// Journaled on the original and on its replacement in the replacing transaction.
+// Journaled on the original and on its replacement in the replacing
+// transaction. The two link events take the payment id as their event id, so
+// provider-facing listings find them with a primary key probe.
 const (
 	legacyProviderPaymentReplacedEventType    = "legacy_payment_replaced"
 	legacyProviderPaymentReplacementEventType = "legacy_payment_replacement"
@@ -67,6 +69,21 @@ func legacyProviderPaymentAnchorSweepSql(networkExpression string, cutoffParam i
 		c.close_time IS NOT NULL AND ($%d::timestamp IS NULL OR c.close_time < $%d::timestamp) AND
 		c.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')`,
 		networkExpression, cutoffParam, cutoffParam)
+}
+
+// The payment of the expression is a legacy original that a corrected
+// replacement superseded; provider-facing listings show only the replacement.
+func legacyProviderPaymentReplacedSql(paymentIdExpression string) string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM audit_account_payment replaced
+		WHERE replaced.event_id = %s AND replaced.payment_id = %s AND replaced.event_type = '%s')`,
+		paymentIdExpression, paymentIdExpression, legacyProviderPaymentReplacedEventType)
+}
+
+// The legacy original that the payment of the expression replaces, or null.
+func legacyProviderPaymentReplacesSql(paymentIdExpression string) string {
+	return fmt.Sprintf(`(SELECT (replacement.event_details::jsonb->>'original_payment_id')::uuid FROM audit_account_payment replacement
+		WHERE replacement.event_id = %s AND replacement.payment_id = %s AND replacement.event_type = '%s')`,
+		paymentIdExpression, paymentIdExpression, legacyProviderPaymentReplacementEventType)
 }
 
 var ErrLegacyProviderPaymentAnchorUnavailable = errors.New("legacy provider payment has no sweep the earning admission accepts; replacement held")
@@ -352,10 +369,10 @@ func ReplaceLegacyProviderPayment(ctx context.Context, correction *LegacyProvide
 			{paymentId: original.PaymentId, eventType: legacyProviderPaymentReplacedEventType},
 			{paymentId: replacementPaymentId, eventType: legacyProviderPaymentReplacementEventType},
 		} {
+			// keyed by the payment id; see legacyProviderPaymentReplacedSql
 			server.RaisePgResult(tx.Exec(
 				ctx,
-				`INSERT INTO audit_account_payment (event_id, payment_id, event_type, event_details) VALUES ($1, $2, $3, $4)`,
-				server.NewId(),
+				`INSERT INTO audit_account_payment (event_id, payment_id, event_type, event_details) VALUES ($1, $1, $2, $3)`,
 				event.paymentId,
 				event.eventType,
 				string(details),

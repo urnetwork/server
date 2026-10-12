@@ -86,8 +86,10 @@ type AccountPayment struct {
 	ReliabilitySubsidy        NanoCents `json:"reliability_subsidy_nano_cents"`
 	BonusPayout               NanoCents `json:"bonus_payout_nano_cents"`
 	AttributionReviewRequired bool      `json:"attribution_review_required"`
-	MinSweepTime              time.Time `json:"min_sweep_time"`
-	CreateTime                time.Time `json:"create_time"`
+	// a corrected replacement: the hidden legacy payment it replaces
+	ReplacesPaymentId *server.Id `json:"replaces_payment_id,omitempty"`
+	MinSweepTime      time.Time  `json:"min_sweep_time"`
+	CreateTime        time.Time  `json:"create_time"`
 
 	PaymentRecord        *string    `json:"payment_record"`
 	CircleIdempotencyKey *server.Id `json:"-"`
@@ -1002,7 +1004,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_payment.canceled,
                 account_payment.cancel_time,
 				account_wallet.wallet_address,
-				account_wallet.blockchain
+				account_wallet.blockchain,
+				`+legacyProviderPaymentReplacesSql("account_payment.payment_id")+` AS replaces_payment_id
             FROM account_payment
 
             LEFT JOIN account_wallet ON
@@ -1010,6 +1013,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 
             WHERE
                 account_payment.network_id = $1 AND
+                -- a corrected legacy payment shows only as its replacement
+                NOT `+legacyProviderPaymentReplacedSql("account_payment.payment_id")+` AND
                 (
                     NOT account_payment.canceled OR
                     account_payment.payment_record IS NOT NULL OR
@@ -1053,6 +1058,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 					&payment.CancelTime,
 					&payment.WalletAddress,
 					&payment.Blockchain,
+					&payment.ReplacesPaymentId,
 				))
 
 				networkPayments = append(networkPayments, payment)
