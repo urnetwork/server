@@ -50,8 +50,9 @@ const scheduledCloseStealPageTuples = 64
 // Sampled candidates whose custody one read covers.
 const scheduledCloseStealCandidateLimit = 64
 
-// Concurrent steals in one process. Each one holds at most one owner turn,
-// on one direct maintenance connection, and closes at most one owner batch.
+// Concurrent steals in one process, an upper limit that contract_close.yml can
+// lower. Each one holds at most one owner turn, on one direct maintenance
+// connection, and closes at most one owner batch.
 const scheduledCloseStealConcurrency = 8
 
 // Distinct owners one steal tries when another closer holds the first.
@@ -249,12 +250,13 @@ func sampleDueScheduledCloses(ctx context.Context, now time.Time, excludeContrac
 // effort: a busy process, the steal bound or any failure closes nothing and
 // never fails the caller's own close.
 func stealScheduledCloseOwner(ctx context.Context, now time.Time, excludeContractId server.Id, heldBalanceIds []server.Id) (stolenClosed int) {
-	select {
-	case scheduledCloseStealSlots <- struct{}{}:
-		defer func() { <-scheduledCloseStealSlots }()
-	default:
+	// contract_close.yml can lower the concurrent steals below the slots
+	_, stealConcurrency := contractCloseConcurrencyLimits()
+	release, admitted := admitScheduledCloseSteal(scheduledCloseStealSlots, stealConcurrency)
+	if !admitted {
 		return 0
 	}
+	defer release()
 	ctx, cancel := context.WithTimeout(ctx, scheduledCloseStealTimeout)
 	defer cancel()
 	server.HandleError(func() {
