@@ -12,6 +12,7 @@ func TestDataOnlyProbeSettingsAreExplicit(t *testing.T) {
 		want := connect.DefaultMultiClientSettings()
 		want.ProviderProbe = false
 		want.DataOnlyProviderProbe = enabled
+		want.FixedDestinationRetryMin = 0
 		if reflect.ValueOf(got.SecurityPolicyGenerator).Pointer() != reflect.ValueOf(want.SecurityPolicyGenerator).Pointer() {
 			t.Fatal("security generator changed")
 		}

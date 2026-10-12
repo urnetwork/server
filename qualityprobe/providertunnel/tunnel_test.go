@@ -868,6 +868,9 @@ func TestProviderTunnelMultiClientSettingsDisableNestedProviderProbe(t *testing.
 		t.Fatal("test precondition: shared defaults no longer enable ProviderProbe")
 	}
 	expected.ProviderProbe = false
+	// the measured re-dial cadence of a bounded probe (see
+	// TestOpenRetiresEveryProbeIdentity)
+	expected.FixedDestinationRetryMin = 0
 
 	settings := providerTunnelMultiClientSettings()
 	if settings.SecurityPolicyGenerator == nil || expected.SecurityPolicyGenerator == nil {
@@ -885,7 +888,7 @@ func TestProviderTunnelMultiClientSettingsDisableNestedProviderProbe(t *testing.
 	actualComparable.SecurityPolicyGenerator = nil
 	expectedComparable.SecurityPolicyGenerator = nil
 	if !reflect.DeepEqual(actualComparable, expectedComparable) {
-		t.Fatal("provider tunnel settings must preserve every default except ProviderProbe=false")
+		t.Fatal("provider tunnel settings must preserve every default except ProviderProbe=false and an unpaced re-dial")
 	}
 	settings.ProviderProbe = true
 	if !connect.DefaultMultiClientSettings().ProviderProbe {

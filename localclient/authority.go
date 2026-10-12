@@ -38,11 +38,27 @@ type Authority struct {
 	// the hosting process's appearance counter, nil when it has none; the
 	// process owns and closes it
 	appearances *model.ProviderAppearances
+	// the owner's concurrent registration bound; nil admits everything
+	mintAdmission *MintAdmission
+}
+
+// Owner-supplied bounds. The owner constructs them once and shares them with
+// every authority it creates; nil keeps the unbounded legacy behavior.
+type AuthoritySettings struct {
+	MintAdmission *MintAdmission
 }
 
 // Signature, audience, current client and credential rotation are checked now
 // and again on every operation. A local address is never an authentication.
 func New(ctx context.Context, token, apiUrl string) (*Authority, error) {
+	return NewWithSettings(ctx, token, apiUrl, nil)
+}
+
+// New with the owner's shared bounds.
+func NewWithSettings(ctx context.Context, token, apiUrl string, settings *AuthoritySettings) (*Authority, error) {
+	if settings == nil {
+		settings = &AuthoritySettings{}
+	}
 	ctx = session.WithStateQuerySource(ctx, session.StateQueryHostedBootstrap)
 	return server.HandleError2(func() (*Authority, error) {
 		claims, err := session.ParseByJwtForAudience(ctx, token, session.ByJwtAudienceApi)
@@ -58,7 +74,7 @@ func New(ctx context.Context, token, apiUrl string) (*Authority, error) {
 		}
 		publisherCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		return &Authority{networkId: claims.NetworkId, userId: claims.UserId, clientId: *claims.ClientId, deviceId: *claims.DeviceId, apiUrl: strings.TrimRight(apiUrl, "/"), parentJwt: token,
-			notifications: model.NewContractOriginNotifications(publisherCtx, model.DefaultContractOriginNotificationSettings()), appearances: model.GetProviderAppearances(ctx), cancel: cancel}, nil
+			notifications: model.NewContractOriginNotifications(publisherCtx, model.DefaultContractOriginNotificationSettings()), appearances: model.GetProviderAppearances(ctx), mintAdmission: settings.MintAdmission, cancel: cancel}, nil
 	}, func(err error) (*Authority, error) { return nil, err })
 }
 
@@ -166,6 +182,14 @@ func (self *Authority) AuthNetworkClient(ctx context.Context, args *connect.Auth
 		if args == nil || args.ClientId != nil || args.SourceClientId == nil || server.Id(*args.SourceClientId) != self.clientId {
 			return nil, errors.New("local mint requires its owning parent")
 		}
+		if self.closed.Load() {
+			return nil, context.Canceled
+		}
+		// refused before any credential or database read
+		if !self.mintAdmission.tryAcquire() {
+			return nil, mintAdmissionRefusedError()
+		}
+		defer self.mintAdmission.release()
 		claims, err := self.parseClaimsPreflight(ctx, self.token(), true)
 		if err != nil {
 			return nil, err
