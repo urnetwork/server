@@ -165,7 +165,8 @@ every Loki, Mimir and blob write returned 507 `XMinioStorageFull`, leaving the
 Mimir bucket index stale. On 2026-10-12 a 400GiB hard quota applied to a loki
 bucket holding about 673GiB rejected Loki's chunk flushes. §11.6a adds the
 `minio-storage` probe (drive free space against MinIO's floor, offline drives,
-bucket usage against hard quotas, S3 error rates).
+bucket usage against hard quotas, S3 error rates), and §11.6 now records
+MinIO's move to edge-5's four-drive erasure set.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -23250,21 +23251,31 @@ have no local logs). Discriminator: `conn <peer> 6490` OK vs `conn <peer> 14609`
 timeout. FIX: pin frontend+scheduler to the external port (loki `frontend.port` +
 `query_scheduler.scheduler_ring.instance_port`=6490; mimir `.../ring.instance_port`=6491).
 
-### 11.6 minio object-store persistence (edge-6)
-loki chunks + mimir blocks land in minio (`192.168.51.193:23900`, data
-**`/mnt/data/minio`**, on edge-6 172.28.208.177). Read the data dir from the
-host, never from memory — it is `MINIO_VOLUMES` in `/etc/default/minio`
-(`systemctl cat minio` shows `ExecStart=... $MINIO_VOLUMES`). This doc said
-`/data/minio` until 2026-08-18; that path does not exist, so every recipe below
-returned empty at it and read as "storage is empty" — the exact false alarm
-this section exists to prevent. A `du` that prints NOTHING (rather than `0`)
-is the tell that you have the wrong path, not an empty bucket.
+### 11.6 minio object-store persistence (edge-5)
+loki chunks + mimir blocks, plus the blob and competition buckets, land in
+minio. Since 2026-10-12 it runs only on edge-5 (`192.168.51.179:23900`,
+management overlay 172.28.208.176): one erasure set at EC:2 over four XFS
+drives, data **`/mnt/blob{1...4}/minio`** (xops `minio_drives`). Until then it
+was a single drive at `/mnt/data/minio` on edge-6, a filesystem shared with
+Redis backups; that shared disk filling is the 2026-10-11 incident in §11.6a.
+Read the data dirs from the host, never from memory — they are
+`MINIO_VOLUMES` in `/etc/default/minio-storage` (world-readable, rendered by
+playbook-minio-clusters.yml; `systemctl cat minio` shows
+`ExecStart=... $MINIO_VOLUMES`). `/etc/default/minio` now holds only the root
+credentials and options and is root-only. This doc said `/data/minio` until
+2026-08-18; that path does not exist, so every recipe below returned empty at
+it and read as "storage is empty" — the exact false alarm this section exists
+to prevent. A `du` that prints NOTHING (rather than `0`) is the tell that you
+have the wrong path, not an empty bucket. Each drive holds one erasure shard
+of every object, so a per-drive `du` is about half the logical size at EC:2.
+The data dirs are `minio:minio 0750`; run the recipe as root.
 ```
-minio_data=$(grep ^MINIO_VOLUMES= /etc/default/minio | cut -d= -f2)     # do not hardcode
-du -sh $minio_data/loki $minio_data/mimir                              # growth = writing
-find $minio_data/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
-ls $minio_data/loki/fake | wc -l                                       # loki CHUNK dirs (fake=anon tenant)
-find $minio_data/mimir -name meta.json | wc -l                         # mimir FINALIZED blocks
+minio_volumes=$(sed -n 's/^MINIO_VOLUMES="\(.*\)"$/\1/p' /etc/default/minio-storage)  # do not hardcode
+for v in $minio_volumes; do du -sh $v/loki $v/mimir; done                          # growth = writing
+v=${minio_volumes%% *}                                                              # any one drive
+find $v/loki -name xl.meta -printf '%T+\n' | sort | tail -1                        # fresh mtime = live
+ls $v/loki/fake | wc -l                                                             # loki CHUNK dirs (fake=anon tenant)
+find $v/mimir -name meta.json | wc -l                                               # mimir FINALIZED blocks
 ```
 loki flushes on `chunk_idle_period`/shutdown. Mimir normally uploads a complete
 TSDB block at roughly a two-hour boundary, so an empty Mimir bucket immediately
@@ -23281,25 +23292,26 @@ repair this by sharing one TSDB mount between overlapping containers. See §11.2
 An empty/stale Loki bucket while Loki is crash-looping = writes stopped
 (11.2/11.4), not a storage bug.
 
-The S3 API must be reachable on both edge-6 addresses: LAN
-`192.168.51.193:23900` and management overlay `172.28.208.177:23900`. Do not
+The S3 API must be reachable on both edge-5 addresses: LAN
+`192.168.51.179:23900` and management overlay `172.28.208.176:23900`. Do not
 infer this from `minio.service=active`; an address-specific bind can leave one
 path healthy and refuse the other. Check the configured bind, listening socket,
 and both HTTP health paths together:
 ```
 systemctl show minio -p ActiveState -p SubState -p NRestarts -p ExecMainStatus
-grep -E '^(MINIO_OPTS|MINIO_VOLUMES)=' /etc/default/minio
+sudo grep -E '^MINIO_OPTS=' /etc/default/minio; grep -E '^MINIO_VOLUMES=' /etc/default/minio-storage
 ss -lntp | grep ':23900'
-curl -fsS --max-time 5 http://192.168.51.193:23900/minio/health/live
-curl -fsS --max-time 5 http://172.28.208.177:23900/minio/health/live
+curl -fsS --max-time 5 http://192.168.51.179:23900/minio/health/live
+curl -fsS --max-time 5 http://172.28.208.176:23900/minio/health/live
 ```
 Desired `MINIO_OPTS` binds the S3 API as `--address :23900` and keeps the
 administrative console loopback-only. The Ansible deployment must fail unless
 both health requests return 200. On 2026-08-20 the process was healthy but used
 `--address 192.168.51.193:23900`; LAN health returned 200 while the overlay
 connection was refused. That is a bind/config split, not a route, firewall, or
-data-store failure. Re-run `xops/main/ansible/run-minio.sh` after changing the
-vault environment; a source-only vault change does not restart the service.
+data-store failure. Re-run `xops/main/ansible/run-minio-clusters.sh` after
+changing the vault environment; a source-only vault change does not restart the
+service.
 
 ### 11.6a MinIO capacity, quota and write-path health
 
