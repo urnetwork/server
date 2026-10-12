@@ -44,12 +44,12 @@ import (
 // retention up to this horizon, never past it, so it bounds the table's size.
 const ClientExpiration = 30 * 24 * time.Hour
 
-// Steady-state client_reliability retention. Recurring readers reach about 7
-// days back (the network window, and a weekly payout that is on time), which
-// leaves a week of margin for a stalled reliability task. A payout that is
-// behind reads from the last subsidy epoch end instead, and retention extends
-// to cover it (clientReliabilityRetentionCutoffBlock).
-const ClientReliabilityRetention = 14 * 24 * time.Hour
+// Steady-state client_reliability retention. Recurring readers reach at most 7
+// days back (the running network window), and payout reliability windows have
+// reached about 15 days back while payouts were behind, which leaves about a
+// week of margin. A payout further behind reads from the last subsidy epoch
+// end, and retention extends to cover it (clientReliabilityRetentionCutoffBlock).
+const ClientReliabilityRetention = 21 * 24 * time.Hour
 
 // blocks kept before the last subsidy epoch end, so a payout window that starts
 // inside a day never reaches a dropped block

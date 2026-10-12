@@ -2566,7 +2566,9 @@ func modelMigrateProxyDeviceConfig(opts docopt.Opts) {
 }
 
 // Converts client_reliability to daily block-range partitions, retaining only
-// the last 30 days (see xops/db/client_reliability_partition_plan.md). Safe to
+// the retention window (model.ClientReliabilityRetention, extended up to
+// model.ClientExpiration while a payout is behind; see
+// xops/db/client_reliability_partition_plan.md). Safe to
 // rerun: resumes an interrupted copy, no-ops once converted. After validating,
 // rerun with --finalize to drop the old table and reclaim its disk.
 //

@@ -36,7 +36,7 @@ import (
 //     provide-public). Only top-level client rows are reconstructed; derivative
 //     clients carry provide keys for return traffic but are not provider
 //     devices. Reach is bounded by that table's retention
-//     (ClientReliabilityRetention, 14 days, extended up to ClientExpiration
+//     (ClientReliabilityRetention, 21 days, extended up to ClientExpiration
 //     while a payout is behind).
 //
 //   - RollupTransferAuditEvents: one aggregate audit_contract_event per UTC
@@ -736,7 +736,7 @@ func upsertProviderAuditStatesInTx(
 // This is a labeled snapshot reconstruction, NOT recorded history — history
 // that was never recorded cannot be recovered. Stated approximations:
 //
-//   - reach: client_reliability retention is ClientReliabilityRetention (14
+//   - reach: client_reliability retention is ClientReliabilityRetention (21
 //     days, extended up to ClientExpiration while a payout is behind), so
 //     nothing older is reconstructable, whatever the requested start.
 //   - geo: a client's CURRENT location (network_client_location_reliability)
