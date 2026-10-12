@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -884,6 +885,11 @@ func ListRescheduledTasks(ctx context.Context) []server.Id {
 	return taskIds
 }
 
+// Bounds the read of CountAvailableByFunctionName, which HTTP requests
+// reach. The index read takes milliseconds; a read that cannot finish in
+// this bound fails rather than holding the request and its connection.
+var countAvailableByFunctionNameStatementTimeout = 2 * time.Second
+
 // CountAvailableByFunctionName reports how many pending_task rows targeting
 // the given task function are currently available to run (run_at has
 // passed), across all run_once keys -- this excludes rows scheduled for a
@@ -894,7 +900,14 @@ func ListRescheduledTasks(ctx context.Context) []server.Id {
 // run_once key. Counting future-scheduled rows here would make a large
 // backlog of merely-queued work block admission of brand new requests, even
 // though nothing is actually running yet.
-func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunction TaskFunction[T, R]) int {
+//
+// No index covers the bare function name, and the queue holds tens of
+// millions of rows, so a bare `function_name = $1` filter scans the whole
+// table. The read leads with the function poll index's canonical-name
+// expression, then filters the exact name and run_at, in a read-only
+// transaction whose statement is bounded. A failed or timed-out read returns
+// its error, so an admission caller can refuse and release its reservation.
+func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunction TaskFunction[T, R]) (count int, returnErr error) {
 	functionName := NewTaskTarget(taskFunction).TargetFunctionName()
 	// computed in Go, not `now()` in SQL: run_at is a naive `timestamp`
 	// column holding UTC values, and comparing it against `now()`
@@ -903,20 +916,36 @@ func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunctio
 	// model/account_action_rate_limit.go and avoided in
 	// model.ReserveBulkClientRemovalSlot.
 	asOf := server.NowUtc()
-	count := 0
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`SELECT COUNT(*) FROM pending_task WHERE function_name = $1 AND run_at <= $2`,
-			functionName, asOf,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&count))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			count = 0
+			if err, ok := recovered.(error); ok {
+				returnErr = err
+			} else {
+				returnErr = fmt.Errorf("count available %s: %v", functionName, recovered)
 			}
-		})
-	})
-	return count
+		}
+	}()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`SELECT set_config('statement_timeout', $1, true)`,
+			strconv.FormatInt(countAvailableByFunctionNameStatementTimeout.Milliseconds(), 10),
+		))
+		server.Raise(tx.QueryRow(
+			ctx,
+			`
+				SELECT COUNT(*) FROM pending_task
+				WHERE
+					regexp_replace(function_name, '/v[0-9]+', '', 'g') = regexp_replace($1::text, '/v[0-9]+', '', 'g') AND
+					function_name = $1 AND
+					run_at <= $2
+			`,
+			functionName,
+			asOf,
+		).Scan(&count))
+	}, server.TxReadCommitted, pgx.ReadOnly)
+	return
 }
 
 func ListClaimedTasks(ctx context.Context) []server.Id {
