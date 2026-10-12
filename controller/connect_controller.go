@@ -1307,6 +1307,15 @@ func newContract(
 	) * model.ByteCount(len(intermediaryIds)+1)
 
 	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
+		// the insert writes the stream the contract joins below
+		// (model/contract_stream_binding.go)
+		if streamVersion != 0 {
+			if 0 < len(intermediaryIds) {
+				ctx = model.WithAddStreamBinding(ctx, sourceId, destinationId, intermediaryIds)
+			} else {
+				ctx = model.WithPairStreamBinding(ctx, sourceId, destinationId, forceStream)
+			}
+		}
 		contractId, expirationTime, err = model.CreateContractNoEscrowWithExpiration(
 			ctx,
 			sourceNetworkId,
@@ -1360,6 +1369,9 @@ func newContract(
 						return
 					}
 					streamId = &streamId_
+				} else {
+					// the pair stream the insert bound ended before the join
+					model.ClearContractStreamBinding(ctx, contractId)
 				}
 			}
 		}
@@ -1396,6 +1408,12 @@ func newContract(
 		// only for the client library's linger after its close. The reply path
 		// therefore outlives a forward contract that settled early.
 		originCloseLinger := max(contractManagerSettings.OriginContractLinger, model.CompanionOriginCloseLinger)
+		// the insert writes the pair's stream, read before each attempt's
+		// transaction, which the companion joins below with its origin
+		// (model/contract_stream_binding.go)
+		if streamVersion != 0 {
+			ctx = model.WithCompanionStreamBinding(ctx, sourceId, destinationId)
+		}
 		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
 		escrow, err := waitForCompanionOrigin(ctx, originWatch, func() (*model.TransferEscrow, error) {
 			escrow, err := createCompanionTransferEscrow(
@@ -1458,9 +1476,17 @@ func newContract(
 					return
 				}
 				streamId = &streamId_
+			} else {
+				// the stream the insert bound ended before the join
+				model.ClearContractStreamBinding(ctx, contractId)
 			}
 		}
 	} else {
+		// the insert writes the stream the contract is added to below
+		// (model/contract_stream_binding.go)
+		if streamVersion != 0 && (forceStream || 0 < len(intermediaryIds)) {
+			ctx = model.WithAddStreamBinding(ctx, sourceId, destinationId, intermediaryIds)
+		}
 		escrow, err := createTransferEscrow(
 			ctx,
 			sourceNetworkId,

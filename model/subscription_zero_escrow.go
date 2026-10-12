@@ -191,7 +191,8 @@ const zeroEscrowChainedOriginSql = `
 // The escrow insert of createTransferEscrowInTx without a payer. A null
 // payer_network_id and no transfer_escrow row are what settle the contract on
 // the no-escrow path (validateContractFreeSettlementOwnerInTx). $7 is the
-// companion origin, which also decides the usage origin.
+// companion origin, which also decides the usage origin. $10 is the stream id
+// bound at insert (see contract_stream_binding.go), or null.
 const zeroEscrowContractInsertSql = `
 	WITH creation_clock AS MATERIALIZED (
 		SELECT clock_timestamp() AT TIME ZONE 'UTC' AS create_time
@@ -207,12 +208,14 @@ const zeroEscrowContractInsertSql = `
 		usage_origin_is_source,
 		create_time,
 		priority,
-		expiration_time
+		expiration_time,
+		stream_id
 	)
 	SELECT
 		$1, $2, $3, $4, $5, $6, $7, ($7::uuid IS NULL),
 		create_time, $8,
-		date_trunc('milliseconds', create_time) + $9 * INTERVAL '1 millisecond'
+		date_trunc('milliseconds', create_time) + $9 * INTERVAL '1 millisecond',
+		$10
 	FROM creation_clock
 	RETURNING expiration_time
 `
@@ -229,6 +232,9 @@ func CreateZeroEscrowContract(
 ) (transferEscrow *TransferEscrow, returnErr error) {
 	// Pin before acquisition, as the other creation paths do.
 	ctx = providerWorkSessionContext(ctx)
+	// the stream state the insert binds is read before the transaction
+	// (contract_stream_binding.go)
+	resolveContractStreamBinding(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	server.Tx(ctx, func(tx server.PgTx) {
 		transferEscrow, returnErr = createZeroEscrowContractInTx(
@@ -275,6 +281,9 @@ func CreateZeroEscrowCompanionContract(
 	// Pin before acquisition, as the other creation paths do.
 	ctx = providerWorkSessionContext(ctx)
 	stampClientId := destinationId
+	// the stream state the insert binds is read before the transaction
+	// (contract_stream_binding.go)
+	resolveContractStreamBinding(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	server.Tx(ctx, func(tx server.PgTx) {
 		transferEscrow, returnErr, stampClientId = nil, nil, destinationId
@@ -385,6 +394,7 @@ func createZeroEscrowContractInTx(
 	}
 
 	contractId := server.NewId()
+	streamId := bindContractStreamAtInsert(ctx, contractId)
 	var expirationTime time.Time
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		batch.Queue(
@@ -398,6 +408,7 @@ func createZeroEscrowContractInTx(
 			companionContractId,
 			priority,
 			DefaultContractExpiration.Milliseconds(),
+			streamId,
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
 		batch.Queue(
 			contractExtenderInsertSql,
