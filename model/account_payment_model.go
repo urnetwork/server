@@ -86,8 +86,10 @@ type AccountPayment struct {
 	ReliabilitySubsidy        NanoCents `json:"reliability_subsidy_nano_cents"`
 	BonusPayout               NanoCents `json:"bonus_payout_nano_cents"`
 	AttributionReviewRequired bool      `json:"attribution_review_required"`
-	MinSweepTime              time.Time `json:"min_sweep_time"`
-	CreateTime                time.Time `json:"create_time"`
+	// a corrected replacement: the hidden legacy payment it replaces
+	ReplacesPaymentId *server.Id `json:"replaces_payment_id,omitempty"`
+	MinSweepTime      time.Time  `json:"min_sweep_time"`
+	CreateTime        time.Time  `json:"create_time"`
 
 	PaymentRecord        *string    `json:"payment_record"`
 	CircleIdempotencyKey *server.Id `json:"-"`
@@ -793,6 +795,19 @@ func completePaymentInTx(ctx context.Context, tx server.PgTx, paymentId server.I
 		return fmt.Errorf("Invalid payment.")
 	}
 
+	creditCompletedPaymentAccountBalanceInTx(ctx, tx, paymentId)
+
+	// Contract retention is deliberately not fanned out here. A payment can
+	// own hundreds of thousands of sweeps, and updating every contract in the
+	// same transaction made recording an already-sent payment vulnerable to a
+	// statement timeout. contract_retention_pending is a durable queue bit;
+	// RemoveCompletedContracts advances the cursor in bounded transactions.
+	return nil
+}
+
+// Credits a just-completed payment to its network's paid totals. A payment
+// held for attribution review completes without a credit.
+func creditCompletedPaymentAccountBalanceInTx(ctx context.Context, tx server.PgTx, paymentId server.Id) {
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -815,13 +830,6 @@ func completePaymentInTx(ctx context.Context, tx server.PgTx, paymentId server.I
             `,
 		paymentId,
 	))
-
-	// Contract retention is deliberately not fanned out here. A payment can
-	// own hundreds of thousands of sweeps, and updating every contract in the
-	// same transaction made recording an already-sent payment vulnerable to a
-	// statement timeout. contract_retention_pending is a durable queue bit;
-	// RemoveCompletedContracts advances the cursor in bounded transactions.
-	return nil
 }
 
 // A planned payment that has never entered the Circle retry state and remains
@@ -996,7 +1004,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_payment.canceled,
                 account_payment.cancel_time,
 				account_wallet.wallet_address,
-				account_wallet.blockchain
+				account_wallet.blockchain,
+				`+legacyProviderPaymentReplacesSql("account_payment.payment_id")+` AS replaces_payment_id
             FROM account_payment
 
             LEFT JOIN account_wallet ON
@@ -1004,6 +1013,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 
             WHERE
                 account_payment.network_id = $1 AND
+                -- a corrected legacy payment shows only as its replacement
+                NOT `+legacyProviderPaymentReplacedSql("account_payment.payment_id")+` AND
                 (
                     NOT account_payment.canceled OR
                     account_payment.payment_record IS NOT NULL OR
@@ -1047,6 +1058,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 					&payment.CancelTime,
 					&payment.WalletAddress,
 					&payment.Blockchain,
+					&payment.ReplacesPaymentId,
 				))
 
 				networkPayments = append(networkPayments, payment)
