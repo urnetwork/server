@@ -233,7 +233,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExportProvidersMap,
 			work.ExportProvidersMapPost,
 		),
-		task.NewTaskTarget(work.BackfillClock),
+		task.NewTaskTargetWithPost(
+			work.BackfillClock,
+			work.BackfillClockPost,
+		),
 		work.NewMaintainNetworkSessionsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.WebSearchAnalytics,
