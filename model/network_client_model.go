@@ -33,6 +33,7 @@ import (
 	"github.com/urnetwork/server/task"
 	// "github.com/urnetwork/server/ulid"
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
 )
 
 const NetworkClientHandlerHeartbeatTimeout = 60 * time.Second
@@ -2278,8 +2279,8 @@ func GetClientIdentity(ctx context.Context, clientId server.Id) (identity *Clien
 // The mirrors are caches over the postgres source of truth (`provide_key`,
 // `network_client`/`network_client_role`). `SetProvide` rewrites them on every
 // change, and a read that misses refills them from one postgres read, which a
-// second read confirms when the client has keys (see `refillProvideMirror`;
-// the identity read-through refills its own key), so
+// second read confirms (see `refillProvideMirror`; the identity read-through
+// refills its own key), so
 // the ttl only bounds how long an unused client's keys stay resident. A client
 // provides when its settings change, not periodically: a multi-client window
 // provides once when it is created, so its mirror expired 72h later while the
@@ -2289,6 +2290,23 @@ func GetClientIdentity(ctx context.Context, clientId server.Id) (identity *Clien
 // volatile-ttl eviction cannot touch.
 const provideMirrorTtl = 72 * time.Hour
 
+// Bounds how long an empty mode list is mirrored. A lookup that misses mirrors
+// a client without keys as the empty list, which is usually a new client
+// before its first provide. If that provide's mirror write fails after its
+// commit while redis was also unavailable for its hold (see `SetProvide`), the
+// empty list hides the new keys until it expires. The cost is one confirmed
+// refill per keyless client per ttl.
+const provideMirrorEmptyTtl = 1 * time.Minute
+
+// Bounds the hold `SetProvide` places on the mirror before its commit. It
+// must outlast the provide's transaction, and after a mirror write that
+// failed it keeps refills off for this long while reads use postgres.
+const provideMirrorHoldTtl = 5 * time.Minute
+
+// Bounds how long `SetProvide` waits to place its hold before it commits
+// without one.
+const provideMirrorHoldTimeout = 5 * time.Second
+
 func provideModesKey(clientId server.Id) string {
 	return fmt.Sprintf("{pm_%s}pms", clientId)
 }
@@ -2296,6 +2314,50 @@ func provideModesKey(clientId server.Id) string {
 func provideModeSecretKeyKey(clientId server.Id, provideMode ProvideMode) string {
 	return fmt.Sprintf("{pm_%s}sk_%d", clientId, provideMode)
 }
+
+func provideMirrorHoldKey(clientId server.Id) string {
+	return fmt.Sprintf("{pm_%s}hold", clientId)
+}
+
+// Every mode a client can provide, which `SetProvide` stores as sent, and the
+// default mode.
+var provideMirrorProvideModes = func() []ProvideMode {
+	provideModes := []ProvideMode{ProvideModeDefault}
+	for provideMode := range protocol.ProvideMode_name {
+		provideModes = append(provideModes, ProvideMode(provideMode))
+	}
+	slices.Sort(provideModes)
+	return provideModes
+}()
+
+// The mirror's mode list and the secret keys of every mode, in that order.
+func provideMirrorKeys(clientId server.Id) []string {
+	keys := []string{provideModesKey(clientId)}
+	for _, provideMode := range provideMirrorProvideModes {
+		keys = append(keys, provideModeSecretKeyKey(clientId, provideMode))
+	}
+	return keys
+}
+
+// Places a provide's hold and clears the mirror, so that no refill writes the
+// keys from before the provide and a provide whose mirror write fails leaves
+// no mirror. KEYS[1] is the hold and KEYS[2..] the mirror; ARGV[1] is the
+// hold token and ARGV[2] its ttl in ms.
+var provideMirrorHoldScript = redis.NewScript(`
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('DEL', unpack(KEYS, 2))
+return 1
+`)
+
+// Releases a provide's hold unless a later provide holds the mirror. It runs
+// inside the provide's mirror write, so it is evaluated by source. KEYS[1] is
+// the hold and ARGV[1] the hold token.
+const provideMirrorUnholdScriptSource = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+	return redis.call('DEL', KEYS[1])
+end
+return 0
+`
 
 // MigrateProvideMode backfills the redis provide-key state from postgres for
 // clients whose provide_key rows predate the redis layer. The db is the source
@@ -2410,13 +2472,19 @@ func MigrateProvideMode(ctx context.Context, blockSize int) {
 // secret together, and never overwrites a mirror that exists. `SetProvide`
 // writes its whole mirror unconditionally after it commits, so a refill whose
 // snapshot predates that commit either finds the newer list and writes
-// nothing, or lands first and is replaced. A removal deletes the mirror
-// instead, which this script cannot tell from an expired one (see
-// `refillProvideMirror`). Returns 1 when it wrote, 0 when another list is
-// mirrored, and 2 when this list is: a command retried after its reply was
-// lost finds its own write. KEYS[1] is the mode list and KEYS[2..] the
-// secrets, in the order of ARGV[3..]; ARGV[2] is the ttl in ms.
+// nothing, or lands first and is replaced. While a provide holds the mirror
+// it writes nothing, since its snapshot may predate the provide's commit and
+// the provide's own write may fail. A removal deletes the mirror instead,
+// which this script cannot tell from an expired one (see
+// `refillProvideMirror`). Returns 1 when it wrote, 0 when it was held or
+// another list is mirrored, and 2 when this list is: a command retried after
+// its reply was lost finds its own write. KEYS[1] is the mode list, KEYS[2]
+// the hold and KEYS[3..] the secrets, in the order of ARGV[3..]; ARGV[2] is
+// the ttl in ms.
 var provideMirrorRefillScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[2]) == 1 then
+	return 0
+end
 local provideModesListJson = redis.call('GET', KEYS[1])
 if provideModesListJson then
 	if provideModesListJson == ARGV[1] then
@@ -2425,8 +2493,8 @@ if provideModesListJson then
 	return 0
 end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-for i = 2, #KEYS do
-	redis.call('SET', KEYS[i], ARGV[i + 1], 'PX', ARGV[2])
+for i = 3, #KEYS do
+	redis.call('SET', KEYS[i], ARGV[i], 'PX', ARGV[2])
 end
 return 1
 `)
@@ -2479,37 +2547,45 @@ func loadProvideSecretKeys(ctx context.Context, clientId server.Id) (secretKeys 
 // delete of the keys and then deletes the mirror. A fill whose snapshot
 // predates that commit but lands after the mirror delete put the removed
 // client's modes and secrets back until the ttl, so a fill that may have
-// written keys reads them again and keeps itself only if they are unchanged.
+// written reads the keys again and keeps itself only if they are unchanged.
 // A removal that commits after that read deletes the mirror after the fill
-// landed. A fill that cannot be confirmed is taken back, and the next read
-// refills. An empty list needs no check: a removal leaves no keys, and
-// `SetProvide` writes its list after it commits.
+// landed. A provide holds the mirror from before its commit until its own
+// write (see `SetProvide`), and a fill whose read comes after a provide's
+// commit sees the new keys, so a stale fill cannot outlive a provide whose
+// write fails. Every fill is confirmed, the empty list too, and the empty
+// list carries the short `provideMirrorEmptyTtl`. A fill that cannot be
+// confirmed is taken back, and the next read refills.
 func refillProvideMirror(ctx context.Context, clientId server.Id, secretKeys map[ProvideMode][]byte) {
 	provideModes := slices.Sorted(maps.Keys(secretKeys))
+	ttl := provideMirrorTtl
 	if provideModes == nil {
 		// `[]`, not `null`: an empty list is a cached "provides nothing"
 		provideModes = []ProvideMode{}
+		ttl = provideMirrorEmptyTtl
 	}
 	provideModesListJson, err := json.Marshal(provideModes)
 	if err != nil {
 		return
 	}
+	// the mirror this fill writes, and the same with the hold for the fill
 	keys := []string{provideModesKey(clientId)}
-	args := []any{provideModesListJson, provideMirrorTtl.Milliseconds()}
+	fillKeys := []string{provideModesKey(clientId), provideMirrorHoldKey(clientId)}
+	fillArgs := []any{provideModesListJson, ttl.Milliseconds()}
 	for _, provideMode := range provideModes {
 		keys = append(keys, provideModeSecretKeyKey(clientId, provideMode))
-		args = append(args, secretKeys[provideMode])
+		fillKeys = append(fillKeys, provideModeSecretKeyKey(clientId, provideMode))
+		fillArgs = append(fillArgs, secretKeys[provideMode])
 	}
 	// whether this fill may have written, including a lost reply
 	filled := false
 	server.HandleError(func() {
 		server.Redis(ctx, func(r server.RedisClient) {
 			// all keys share the {pm_<clientId>} hash tag (one slot)
-			fillResult, err := provideMirrorRefillScript.Run(ctx, r, keys, args...).Int64()
+			fillResult, err := provideMirrorRefillScript.Run(ctx, r, fillKeys, fillArgs...).Int64()
 			filled = err != nil || fillResult != 0
 		})
 	})
-	if !filled || len(provideModes) == 0 {
+	if !filled {
 		return
 	}
 
@@ -2696,6 +2772,29 @@ func SetProvide(
 ) {
 	var removedProvideModes []ProvideMode
 
+	// The mirror is written after the commit, and that write can fail (redis
+	// unavailable, or the caller canceled). Before the commit, hold the mirror
+	// and clear it, so a failed write leaves no mirror and reads use postgres,
+	// rather than the mirror from before this provide, such as the empty list
+	// a lookup caches before a new client's first provide. The hold keeps
+	// refills, whose snapshot may predate the commit, from filling until the
+	// write below releases it or it expires. Placing it is best effort: the
+	// provide still commits when redis is unavailable, since postgres is the
+	// source of truth and a client does not resend an in-band provide that
+	// failed. A stale empty list then lasts at most `provideMirrorEmptyTtl`.
+	holdToken := server.NewId().String()
+	func() {
+		holdCtx, holdCancel := context.WithTimeout(ctx, provideMirrorHoldTimeout)
+		defer holdCancel()
+		server.HandleError(func() {
+			server.Redis(holdCtx, func(r server.RedisClient) {
+				// all keys share the {pm_<clientId>} hash tag (one slot)
+				holdKeys := append([]string{provideMirrorHoldKey(clientId)}, provideMirrorKeys(clientId)...)
+				server.Raise(provideMirrorHoldScript.Run(holdCtx, r, holdKeys, holdToken, provideMirrorHoldTtl.Milliseconds()).Err())
+			})
+		})
+	}()
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		// reset in case the tx is retried on a transient error
 		removedProvideModes = nil
@@ -2760,7 +2859,11 @@ func SetProvide(
 
 		provideModesList := slices.Collect(maps.Keys(secretKeys))
 		provideModesListJson, _ := json.Marshal(provideModesList)
-		pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, provideMirrorTtl)
+		provideModesListTtl := provideMirrorTtl
+		if len(provideModesList) == 0 {
+			provideModesListTtl = provideMirrorEmptyTtl
+		}
+		pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, provideModesListTtl)
 
 		for provideMode, secretKey := range secretKeys {
 			pipe.Set(ctx, provideModeSecretKeyKey(clientId, provideMode), secretKey, provideMirrorTtl)
@@ -2770,6 +2873,7 @@ func SetProvide(
 				pipe.Del(ctx, provideModeSecretKeyKey(clientId, provideMode))
 			}
 		}
+		pipe.Eval(ctx, provideMirrorUnholdScriptSource, []string{provideMirrorHoldKey(clientId)}, holdToken)
 
 		_, err := pipe.Exec(ctx)
 		server.Raise(err)
