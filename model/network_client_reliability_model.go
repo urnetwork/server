@@ -40,7 +40,20 @@ import (
 //     must be updated by at most one caller at a time
 //     a serial task is expected to update this
 
+// The longest client_reliability retention. A payout that is behind can extend
+// retention up to this horizon, never past it, so it bounds the table's size.
 const ClientExpiration = 30 * 24 * time.Hour
+
+// Steady-state client_reliability retention. Recurring readers reach at most 7
+// days back (the running network window), and payout reliability windows have
+// reached about 15 days back while payouts were behind, which leaves about a
+// week of margin. A payout further behind reads from the last subsidy epoch
+// end, and retention extends to cover it (clientReliabilityRetentionCutoffBlock).
+const ClientReliabilityRetention = 21 * 24 * time.Hour
+
+// blocks kept before the last subsidy epoch end, so a payout window that starts
+// inside a day never reaches a dropped block
+const clientReliabilityPayoutFrontierMargin = 24 * time.Hour
 
 var ClientLookbacks = []time.Duration{
 	5 * time.Minute,
@@ -690,9 +703,33 @@ func upsertClientReliabilityStatsBlock(
 	}
 }
 
+// Returns the first block number that client_reliability retention keeps at
+// now; earlier blocks may be removed.
+//
+// The cutoff is now-ClientReliabilityRetention, moved back to cover the next
+// payout's reliability window, which starts at the last subsidy epoch end
+// (predictPaymentPlanReliabilityWindow). A block missing from that window is
+// not an error: the score counts it as covered with no valid rows, which
+// silently cuts provider credit. The cutoff never moves back past
+// now-ClientExpiration, so a stalled payout cannot grow the table without
+// bound.
+func clientReliabilityRetentionCutoffBlock(ctx context.Context, now time.Time) int64 {
+	cutoffBlock := reliabilityBlockNumber(now.Add(-ClientReliabilityRetention))
+
+	var lastSubsidyEndTime *time.Time
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT MAX(end_time) FROM subsidy_payment`).Scan(&lastSubsidyEndTime))
+	})
+	if lastSubsidyEndTime != nil {
+		frontierBlock := reliabilityBlockNumber(lastSubsidyEndTime.Add(-clientReliabilityPayoutFrontierMargin))
+		cutoffBlock = min(cutoffBlock, frontierBlock)
+	}
+
+	return max(cutoffBlock, reliabilityBlockNumber(now.Add(-ClientExpiration)))
+}
+
 func RemoveOldClientReliabilityStats(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
-	minTime := maxTime.Add(-ClientExpiration)
-	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
+	minBlockNumber := clientReliabilityRetentionCutoffBlock(ctx, maxTime) - 1
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		tag, err := tx.Exec(
