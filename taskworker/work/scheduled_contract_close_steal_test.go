@@ -78,7 +78,7 @@ func requireScheduledClosesQueued(t testing.TB, ctx context.Context, payer *sche
 
 // Production shape: the queue head is a held payer's run, two other payers
 // with a full owner batch each are queued behind it, and a fourth payer's
-// closes are not yet due. Three claims at the head all refuse on the held
+// contracts carry a stored deadline that has not passed. Three claims at the head all refuse on the held
 // grant. Each refusal now closes one other owner's due batch, so the three
 // claims retire both owners' contracts with exact accounting, two owner turns
 // each, while the held payer and the not-yet-due payer stay untouched and
@@ -159,13 +159,18 @@ func TestScheduledContractCloseHeadRefusalsCloseOtherOwners(t *testing.T) {
 			t.Fatal("an owner whose closes are not due was admitted", admitted, waiting, refused)
 		}
 		requireScheduledClosesQueued(t, ctx, head, deadline)
-		requireScheduledClosesQueued(t, ctx, future, futureDeadline)
+		// A stored deadline closes through the deadline pass, not a queued close.
+		for contractId := range readQueuedScheduledCloseContracts(t, ctx) {
+			if slices.Contains(future.contractIds, contractId) {
+				t.Fatal("a contract with a stored deadline was queued a close")
+			}
+		}
 	})
 }
 
-// A queued close whose contract another closer already settled finishes from
-// one unlocked read. That claim now also closes another owner's due batch; on
-// the unchanged worker it retires nothing.
+// A retained queued close whose contract another closer already settled
+// finishes from one unlocked read. That claim now also closes another owner's
+// due batch; on the unchanged worker it retires nothing.
 func TestScheduledContractCloseTerminalClaimClosesAnotherOwner(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -181,6 +186,7 @@ func TestScheduledContractCloseTerminalClaimClosesAnotherOwner(t *testing.T) {
 		if closed, err := model.ReconcileContractAtDeadline(t.Context(), settled.contractIds[0], deadline); err != nil || closed.AlreadyClosed {
 			t.Fatal("fixture did not settle the head contract before its queued close", err)
 		}
+		requeueRetiredScheduledClose(t, ctx, settled.contractIds[0], deadline)
 
 		worker := startupClosureWorker(ctx, NewScheduledContractClosureTaskTarget())
 		defer worker.Close()

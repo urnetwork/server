@@ -1,6 +1,7 @@
 // The real max-time adapter interrupts only after an observed committed page.
 // Five bounded attempts must cover one logical4103-row pass without extending
-// its120s budget or replacing its pending identity or original lifetime.
+// its120s budget or replacing its pending identity or original lifetime. Two
+// contracts carry a stored deadline; they are read but never queued.
 package work
 
 import (
@@ -40,6 +41,10 @@ func TestStartupContractClosureBudgetResumesCommittedPass(t *testing.T) {
 		bodyContexts := make(chan context.Context, 1)
 		budgets := make(chan time.Duration, 8)
 		published := 0
+		// Each full page publishes its legacy contracts: the first and third
+		// pages each hold one contract with a stored deadline.
+		pagePublished := []int{1023, 1024, 1023, 1024}
+		pageTarget := 0
 		ctx := task.Testing_WithTaskRunAfter(baseCtx, func(bodyCtx context.Context, budget time.Duration) <-chan time.Time {
 			bodyContexts <- bodyCtx
 			budgets <- budget
@@ -61,7 +66,7 @@ func TestStartupContractClosureBudgetResumesCommittedPass(t *testing.T) {
 				return
 			}
 			published += count
-			if published == 1024 {
+			if published == pageTarget {
 				// Released follows COMMIT and physical cleanup. The adapter's
 				// own timer cancels its actual body before this callback joins.
 				bodyCtx := <-bodyContexts
@@ -90,6 +95,9 @@ func TestStartupContractClosureBudgetResumesCommittedPass(t *testing.T) {
 		for attempt := range 5 {
 			timer = make(chan time.Time)
 			published = 0
+			if attempt < len(pagePublished) {
+				pageTarget = pagePublished[attempt]
+			}
 			makeCloseRetryTaskDue(baseCtx, parent)
 			finished, retried, posts, err := worker.EvalTasks(1)
 			if err != nil || len(posts) != 0 {
@@ -106,7 +114,7 @@ func TestStartupContractClosureBudgetResumesCommittedPass(t *testing.T) {
 				<-bodyContexts
 				break
 			}
-			if len(finished) != 0 || len(retried) != 1 || retried[0] != parent || published != 1024 {
+			if len(finished) != 0 || len(retried) != 1 || retried[0] != parent || published != pageTarget {
 				t.Fatal("scanner did not retain one actual max-time interruption after its committed page", attempt)
 			}
 			current := task.GetTasks(baseCtx, parent)[parent]
@@ -117,16 +125,19 @@ func TestStartupContractClosureBudgetResumesCommittedPass(t *testing.T) {
 			retries = append(retries, current)
 		}
 		queued := readExpiryRecoveryQueue(t, baseCtx)
-		if finishedCount != 1 || len(queued) != len(ids) {
-			t.Fatalf("STARTUP_BUDGET_PREFIX_REPLAY: bounded claims omitted late contracts; finished=%d children=%d want=%d", finishedCount, len(queued)-1, len(ids))
+		if finishedCount != 1 || len(queued) != len(ids)-2 {
+			t.Fatalf("STARTUP_BUDGET_PREFIX_REPLAY: bounded claims omitted late contracts; finished=%d children=%d want=%d", finishedCount, len(queued), len(ids)-2)
 		}
 		for index, id := range ids {
 			row, exists := queued[task.RunOnce("close_scheduled_contract", id).String()]
+			if index == 500 || index == 2500 {
+				if exists {
+					t.Fatal("a contract with a stored deadline was queued a close", index)
+				}
+				continue
+			}
 			var child CloseScheduledContractArgs
 			deadline := started.Add(model.DefaultContractExpiration)
-			if index == 500 || index == 2500 {
-				deadline = explicit
-			}
 			if !exists || json.Unmarshal([]byte(row.args), &child) != nil || child.ContractId != id ||
 				!child.Deadline.Equal(deadline) || !row.runAt.Equal(deadline) {
 				t.Fatal("logical pass omitted a tail child or changed its original deadline", index)

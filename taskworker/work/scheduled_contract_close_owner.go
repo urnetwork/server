@@ -119,7 +119,7 @@ func dueScheduledCloses(now time.Time) model.ContractDeadlineDueFunc {
 		keys := make([]string, 0, len(contractIds))
 		for _, contractId := range contractIds {
 			candidates[contractId] = true
-			keys = append(keys, task.RunOnce("close_scheduled_contract", contractId).String())
+			keys = append(keys, model.ScheduledContractCloseRunOnce(contractId).String())
 		}
 		rows, err := query.Query(ctx, `SELECT function_name,args_json,run_at FROM pending_task WHERE run_once_key=ANY($1::text[])`, keys)
 		server.WithPgResult(rows, err, func() {

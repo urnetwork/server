@@ -207,9 +207,9 @@ func readScheduledCloseResults(t testing.TB, ctx context.Context) []CloseSchedul
 // One grant owner admitted once per queued contract on the old worker, so a
 // backlog serialized behind its own owner. The owner is now admitted twice per
 // bounded batch: once for the primary and its sibling read, once for the
-// siblings. The other queued closes finish through the terminal read, and a
-// terminal claim may close a later batch for the same owner instead of the
-// next open queued close.
+// siblings. The batch also removes its siblings' queued closes, so one claim
+// retires each batch; those queued closes used to outlive their contracts and
+// each was claimed again only to finish through the terminal read.
 func TestScheduledContractCloseOwnerBatchBoundsAdmissions(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -226,9 +226,12 @@ func TestScheduledContractCloseOwnerBatchBoundsAdmissions(t *testing.T) {
 		executions := drainScheduledCloses(t, worker, count)
 		admitted, waiting, refused := events.counts(payer.balanceId)
 		batches := (count + model.ContractDeadlineOwnerBatchLimit - 1) / model.ContractDeadlineOwnerBatchLimit
-		if executions != count || admitted != 2*batches || waiting != 0 || refused != 0 {
-			t.Fatalf("owner admissions=%d waiting=%d refused=%d executions=%d; want %d admissions for %d queued closes",
+		if executions != batches || admitted != 2*batches || waiting != 0 || refused != 0 {
+			t.Fatalf("owner admissions=%d waiting=%d refused=%d executions=%d; want %d admissions and claims for %d queued closes",
 				admitted, waiting, refused, executions, 2*batches, count)
+		}
+		if queued := readQueuedScheduledCloseContracts(t, ctx); len(queued) != 0 {
+			t.Fatal("owner batches left their siblings' queued closes", len(queued))
 		}
 		requireScheduledCloseOwnerSettled(t, ctx, payer, count)
 		closing, siblings, terminal, stealing, stolen := 0, 0, 0, 0, 0
@@ -247,7 +250,7 @@ func TestScheduledContractCloseOwnerBatchBoundsAdmissions(t *testing.T) {
 				stolen += result.StolenClosed
 			}
 		}
-		if closing+stealing != batches || closing+siblings+stolen != count || terminal != count-closing {
+		if closing != batches || closing+siblings != count || terminal != 0 || stealing != 0 || stolen != 0 {
 			t.Fatalf("results closing=%d siblings=%d stealing=%d stolen=%d terminal=%d; want %d batches covering %d contracts",
 				closing, siblings, stealing, stolen, terminal, batches, count)
 		}
@@ -257,7 +260,8 @@ func TestScheduledContractCloseOwnerBatchBoundsAdmissions(t *testing.T) {
 // Another owner holds the payer's grant. Every queued close for that payer
 // refuses once and defers with its deadline unchanged, never waiting out the
 // admission budget, while other payers' contracts close in the same claim.
-// After release the deferred closes drain in bounded owner batches.
+// After release the deferred closes drain in bounded owner batches, each
+// removing its siblings' deferred closes.
 func TestScheduledContractCloseHeldOwnerDefersWithoutWaiting(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -351,8 +355,8 @@ func TestScheduledContractCloseHeldOwnerDefersWithoutWaiting(t *testing.T) {
 		executions := drainScheduledCloses(t, worker, heldCount)
 		admitted, waiting, _ = events.counts(held.balanceId)
 		batches := (heldCount + model.ContractDeadlineOwnerBatchLimit - 1) / model.ContractDeadlineOwnerBatchLimit
-		if executions != heldCount || admitted != 2*batches || waiting != 0 {
-			t.Fatalf("released owner admissions=%d waiting=%d executions=%d; want %d admissions", admitted, waiting, executions, 2*batches)
+		if executions != batches || admitted != 2*batches || waiting != 0 {
+			t.Fatalf("released owner admissions=%d waiting=%d executions=%d; want %d admissions and claims", admitted, waiting, executions, 2*batches)
 		}
 		requireScheduledCloseOwnerSettled(t, ctx, held, heldCount)
 	})
@@ -413,9 +417,10 @@ func (self *scheduledCloseLockTrace) TraceBatchQuery(_ context.Context, _ *pgx.C
 func (self *scheduledCloseLockTrace) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {
 }
 
-// Queued closes outlive their contracts: other closers settle them and
-// retention can remove them. Each queued payload, exactly as the startup pass
-// stored it, finishes as a no-op without an owner admission or a locked read.
+// Queued closes retained from before closers removed them, and those a close
+// skipped while leased or held, outlive their contracts; retention can remove
+// a contract too. Each queued payload, exactly as the startup pass stored it,
+// finishes as a no-op without an owner admission or a locked read.
 func TestScheduledContractCloseTerminalQueuedTasksFinishWithoutLocks(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -431,15 +436,12 @@ func TestScheduledContractCloseTerminalQueuedTasksFinishWithoutLocks(t *testing.
 			if closed, err := model.ReconcileContractAtDeadline(t.Context(), id, deadline); err != nil || closed.AlreadyClosed {
 				t.Fatal("fixture did not close its contract before the queued task", err)
 			}
+			// A close now removes its queued close; the retained queue still
+			// holds those that outlived their contracts.
+			requeueRetiredScheduledClose(t, ctx, id, deadline)
 		}
 		missingId := server.NewId()
-		owner := session.NewLocalClientSession(ctx, "", nil)
-		defer owner.Cancel()
-		key := task.RunOnce("close_scheduled_contract", missingId)
-		server.OwnedTx(ctx, []server.PgOwnershipKey{task.RunOnceOwnershipKey(key)}, func(tx server.PgTx) {
-			scheduleContractClose(owner, tx, &CloseScheduledContractArgs{Private: true,
-				ScheduledContractClose: ScheduledContractClose{ContractId: missingId, Deadline: deadline}})
-		}, server.TxReadCommitted, server.OptNoRetry())
+		requeueRetiredScheduledClose(t, ctx, missingId, deadline)
 		requireScheduledCloseOwnerSettled(t, ctx, payer, count)
 		baseline, _, _ := events.counts(payer.balanceId)
 

@@ -66,8 +66,10 @@ func evalStartupClosureTask(t testing.TB, ctx context.Context, worker *task.Task
 	}
 }
 
-// Generated open is false for disputes. Reports, legacy intent presence,
-// missing expiration and future explicit expiration must not hide any row.
+// Generated open is false for disputes. Reports, legacy intent presence and a
+// missing expiration must not hide any legacy row. Each shape's twin with a
+// stored deadline, past or future, gets no queued close: the deadline pass
+// closes it at that deadline.
 func TestStartupContractClosureSchedulesEveryNonterminalShape(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -78,8 +80,9 @@ func TestStartupContractClosureSchedulesEveryNonterminalShape(t *testing.T) {
 		defer owner.Cancel()
 		started := server.NowUtc().Truncate(time.Microsecond)
 		wanted := map[server.Id]time.Time{}
+		stored := []server.Id{}
 		var closedId server.Id
-		for index := range 8 {
+		shape := func(index int) server.Id {
 			id, err := model.CreateContractNoEscrow(ctx, networkId, sourceId, networkId, destinationId, 100)
 			server.Raise(err)
 			if index > 0 {
@@ -93,25 +96,10 @@ func TestStartupContractClosureSchedulesEveryNonterminalShape(t *testing.T) {
 			}
 			if index == 7 {
 				server.Raise(model.CloseContract(ctx, id, destinationId, 17, false))
-				closedId = id
-				continue
 			}
-			var expiration *time.Time
-			deadline := started.Add(model.DefaultContractExpiration)
-			switch index % 4 {
-			case 1:
-				value := started.Add(-time.Minute)
-				expiration = &value
-				deadline = value
-			case 2:
-				value := started.Add(10 * time.Minute)
-				expiration = &value
-				deadline = value
-			case 3:
-				value := started.Add(3 * time.Hour)
-				expiration = &value
-				deadline = value
-			}
+			return id
+		}
+		retain := func(id server.Id, index int, expiration *time.Time) {
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, expiration))
 				if index == 5 {
@@ -121,7 +109,25 @@ func TestStartupContractClosureSchedulesEveryNonterminalShape(t *testing.T) {
 						VALUES($1,$2,'settled')`, id, int(id[15])%model.LegacySettlementShardCount))
 				}
 			})
-			wanted[id] = deadline
+		}
+		for index := range 8 {
+			if index == 7 {
+				closedId = shape(index)
+				continue
+			}
+			legacyId := shape(index)
+			retain(legacyId, index, nil)
+			wanted[legacyId] = started.Add(model.DefaultContractExpiration)
+			expiration := started.Add(-time.Minute)
+			switch index % 4 {
+			case 2:
+				expiration = started.Add(10 * time.Minute)
+			case 3:
+				expiration = started.Add(3 * time.Hour)
+			}
+			storedId := shape(index)
+			retain(storedId, index, &expiration)
+			stored = append(stored, storedId)
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			task.ScheduleTaskInTx(tx, ScheduleOpenContractClosures, &ScheduleOpenContractClosuresArgs{PageSize: 1024, StartedAt: started}, owner,
@@ -148,10 +154,15 @@ func TestStartupContractClosureSchedulesEveryNonterminalShape(t *testing.T) {
 		if _, found := queue[task.RunOnce("close_scheduled_contract", closedId).String()]; found {
 			t.Fatal("startup scheduled a terminal contract")
 		}
+		for _, id := range stored {
+			if _, found := queue[task.RunOnce("close_scheduled_contract", id).String()]; found {
+				t.Fatal("startup scheduled a contract with a stored deadline")
+			}
+		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var untouched int
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE outcome IS NULL AND NOT usage_unverified AND provider_usage IS NULL`).Scan(&untouched))
-			if untouched != len(wanted) {
+			if untouched != len(wanted)+len(stored) {
 				t.Fatal("enumeration changed contract proof or outcomes")
 			}
 		})
@@ -224,7 +235,9 @@ func TestStartupContractClosurePagesKeepCapAndEarliestWake(t *testing.T) {
 			first := readExpiryRecoveryQueue(t, ctx)[key]
 			evalStartupClosureTask(t, ctx, worker, first.id)
 			queue := readExpiryRecoveryQueue(t, ctx)
-			if _, found := queue[key]; found || len(queue) != count {
+			// The two contracts closed at the page boundary took their queued
+			// closes with them.
+			if _, found := queue[key]; found || len(queue) != count-2 {
 				t.Fatal("single startup invocation left a page task or omitted children", count, len(queue))
 			}
 			stateLock.Lock()
@@ -240,8 +253,14 @@ func TestStartupContractClosurePagesKeepCapAndEarliestWake(t *testing.T) {
 					t.Fatal("public report owners did not close the earlier page rows")
 				}
 			}
-			for _, id := range ids {
+			for index, id := range ids {
 				row, found := queue[task.RunOnce("close_scheduled_contract", id).String()]
+				if index < 2 {
+					if found {
+						t.Fatal("a closed contract kept its queued close")
+					}
+					continue
+				}
 				var args CloseScheduledContractArgs
 				if !found || json.Unmarshal([]byte(row.args), &args) != nil || args.ContractId != id ||
 					!args.Deadline.Equal(started.Add(model.DefaultContractExpiration)) || !row.runAt.Equal(args.Deadline) {
@@ -268,6 +287,9 @@ func TestStartupContractClosurePagesKeepCapAndEarliestWake(t *testing.T) {
 			if after.id != prior.id || after.args != prior.args || !after.runAt.Equal(prior.runAt) {
 				t.Fatal("later startup replaced a stable child or postponed its earlier wake")
 			}
+			// A stored deadline earlier than the queued close is closed at that
+			// deadline by the deadline pass; a later pass still leaves the queued
+			// close as it was.
 			earlier := started.Add(30 * time.Minute)
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, lastId, earlier))
@@ -275,8 +297,8 @@ func TestStartupContractClosurePagesKeepCapAndEarliestWake(t *testing.T) {
 			_, err = ScheduleOpenContractClosures(&ScheduleOpenContractClosuresArgs{PageSize: 1024, StartedAt: started.Add(40 * time.Minute)}, owner)
 			server.Raise(err)
 			after = readExpiryRecoveryQueue(t, ctx)[task.RunOnce("close_scheduled_contract", lastId).String()]
-			if after.id != prior.id || after.args != prior.args || !after.runAt.Equal(earlier) {
-				t.Fatal("earlier explicit expiry did not advance the same child's wake")
+			if after.id != prior.id || after.args != prior.args || !after.runAt.Equal(prior.runAt) || after.generation != prior.generation {
+				t.Fatal("a later pass rewrote a queued close")
 			}
 		})
 	}

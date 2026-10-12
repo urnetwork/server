@@ -85,6 +85,8 @@ func queueLegacyFinancialCohortOutcomes(batch *pgx.Batch, contracts []*legacyFin
 		}
 		return nil
 	})
+	// Every owner closed above; their queued scheduled closes retire with them.
+	queueRemoveScheduledContractCloses(batch, ids)
 	return nil
 }
 
