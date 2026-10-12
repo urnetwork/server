@@ -45,6 +45,10 @@ func (self *testContractOriginSubscription) ReceiveTimeout(ctx context.Context, 
 
 func (self *testContractOriginSubscription) Ping(context.Context, ...string) error { return nil }
 
+// A re-assertion is never acknowledged here, so an unexpected one would
+// replace the socket.
+func (self *testContractOriginSubscription) SSubscribe(context.Context, ...string) error { return nil }
+
 func (self *testContractOriginSubscription) Close() error {
 	self.closeOnce.Do(func() {
 		if self.closeBarrier != nil {
