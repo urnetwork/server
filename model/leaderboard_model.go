@@ -60,6 +60,9 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 									ORDER BY end_time DESC
 									LIMIT 4) t ON t.payment_plan_id = account_payment.payment_plan_id
 
+							-- a corrected legacy payment counts once, as its replacement
+							WHERE NOT `+legacyProviderPaymentReplacedSql("account_payment.payment_id")+`
+
 							GROUP BY account_payment.network_id
 							ORDER BY net_mib_count DESC
 							LIMIT 100
@@ -129,6 +132,8 @@ func GetNetworkLeaderboardRankings(ctx context.Context) (map[server.Id]NetworkRa
 					row_number() OVER (ORDER BY sum(account_payment.payout_byte_count) DESC) AS leaderboard_rank
 				FROM account_payment
 				INNER JOIN (SELECT * FROM subsidy_payment ORDER BY end_time DESC LIMIT 4) t ON t.payment_plan_id = account_payment.payment_plan_id
+				-- a corrected legacy payment counts once, as its replacement
+				WHERE NOT `+legacyProviderPaymentReplacedSql("account_payment.payment_id")+`
 				GROUP BY account_payment.network_id
 			) t
 			INNER JOIN network ON network.network_id = t.network_id

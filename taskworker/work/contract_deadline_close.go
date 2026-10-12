@@ -32,10 +32,11 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// Contracts read per page, the owner batches run at once, and how long a run
-// keeps starting pages and owners.
+// Contracts read per page, the owner batches run at once (an upper limit that
+// contract_close.yml can lower), and how long a run keeps starting pages and
+// owners.
 const contractDeadlineClosePageSize = 128
-const contractDeadlineCloseParallel = 8
+const contractDeadlineCloseParallel = 4
 const contractDeadlineCloseBudget = time.Minute
 
 // Started owners finish after the budget, under load within a few batches.
@@ -239,50 +240,37 @@ func closeContractDeadlines(ctx context.Context, args *CloseContractDeadlinesArg
 			owner.members = append(owner.members, deadline)
 		}
 		var stateLock sync.Mutex
-		var waitGroup sync.WaitGroup
-		slots := make(chan struct{}, contractDeadlineCloseParallel)
-		complete = true
-		for _, owner := range owners {
-			if !more() {
-				complete = false
-				break
-			}
-			slots <- struct{}{}
-			waitGroup.Add(1)
-			go func() {
-				defer waitGroup.Done()
-				defer func() { <-slots }()
-				closed := 0
-				server.HandleError(func() {
-					primary := owner.members[0]
-					newlyClosed := func(reconciliation *model.ContractDeadlineReconciliation) bool {
-						return reconciliation != nil && !reconciliation.AlreadyClosed && !reconciliation.Missing
-					}
-					if len(owner.balanceIds) == 0 {
-						reconciliation, err := model.ReconcileContractAtDeadline(ctx, primary.ContractId, primary.Deadline)
-						server.Raise(err)
-						if newlyClosed(reconciliation) {
-							closed++
-						}
-						return
-					}
-					batch, err := model.ReconcileContractOwnerAtDeadline(ctx, owner.balanceIds, primary, dueContractDeadlines(now))
+		parallel, _ := contractCloseConcurrencyLimits()
+		complete = runContractOwnerBatches(owners, parallel, more, func(owner *contractOwner) {
+			closed := 0
+			server.HandleError(func() {
+				primary := owner.members[0]
+				newlyClosed := func(reconciliation *model.ContractDeadlineReconciliation) bool {
+					return reconciliation != nil && !reconciliation.AlreadyClosed && !reconciliation.Missing
+				}
+				if len(owner.balanceIds) == 0 {
+					reconciliation, err := model.ReconcileContractAtDeadline(ctx, primary.ContractId, primary.Deadline)
 					server.Raise(err)
-					if newlyClosed(batch.Reconciliation) {
+					if newlyClosed(reconciliation) {
 						closed++
 					}
-					closed += batch.SiblingsClosed
-				}, func(err error) {
-					glog.Infof("[close-deadline]owner of %s failed: %v\n", owner.members[0].ContractId, err)
-				})
-				func() {
-					stateLock.Lock()
-					defer stateLock.Unlock()
-					result.Closed += closed
-				}()
+					return
+				}
+				batch, err := model.ReconcileContractOwnerAtDeadline(ctx, owner.balanceIds, primary, dueContractDeadlines(now))
+				server.Raise(err)
+				if newlyClosed(batch.Reconciliation) {
+					closed++
+				}
+				closed += batch.SiblingsClosed
+			}, func(err error) {
+				glog.Infof("[close-deadline]owner of %s failed: %v\n", owner.members[0].ContractId, err)
+			})
+			func() {
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				result.Closed += closed
 			}()
-		}
-		waitGroup.Wait()
+		})
 		if !complete {
 			return false, nil
 		}

@@ -101,8 +101,8 @@ func TestProvideSecretKeyExpiryCostsOneRefill(t *testing.T) {
 }
 
 // A destination without provide keys is mirrored as an empty mode list, so
-// repeated lookups of it stop reading postgres too. A later provide replaces
-// the empty list.
+// repeated lookups of it stop reading postgres too, after the refill and its
+// confirmation. A later provide replaces the empty list.
 func TestProvideMirrorCachesNoProvideKeys(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -119,8 +119,8 @@ func TestProvideMirrorCachesNoProvideKeys(t *testing.T) {
 				t.Fatalf("a client without keys returned a stream secret %x", secretKey)
 			}
 		}
-		if reads := statements.take(); len(reads) != 1 {
-			t.Fatalf("two mode and secret lookups of a client without keys used %d statements, want 1: %q", len(reads), reads)
+		if reads := statements.take(); len(reads) != 2 {
+			t.Fatalf("two mode and secret lookups of a client without keys used %d statements, want 2 (the refill and its confirmation): %q", len(reads), reads)
 		}
 
 		streamKey := bytes.Repeat([]byte{0x54}, 32)

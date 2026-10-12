@@ -16,6 +16,15 @@ package model
 // origin edge this owner never receives, or a destination that starts to
 // advertise the relationship mode, refuses an identical request for at most
 // the timeout. The client then asks again and reads PostgreSQL as before.
+//
+// A refusal whose lifecycle read found the destination row present and
+// inactive is terminal, so it is kept apart in two bounded generations with a
+// long timeout instead of the short ring (see `contractTerminalRouteRejections`).
+// Old sdks retry such a route every 5s for as long as they hold return
+// traffic, and a load balancer spreads the retries over several api
+// processes, so a process sees one route less often than the short timeout
+// and the ring rarely answered it. A missing row, a refusal from the write
+// boundary's own read, and a missing origin stay in the ring.
 
 import (
 	"sync"
@@ -39,6 +48,24 @@ type ContractRouteRejection struct {
 	Cause          ContractRouteRejectionCause
 	ResolutionPath string
 	Relationship   ProvideRelationshipDetails
+}
+
+// Whether the lifecycle read found the destination row present and inactive.
+// No production path sets network_client.active back to true and client ids
+// are never reused (session/state_refusal_cache.go relies on the same
+// invariant), so the route stays refused. A missing row is not terminal here,
+// and neither is a write-boundary refusal, whose labels carry the earlier
+// read's active lifecycle.
+func (self ContractRouteRejection) terminal() bool {
+	if self.Cause != ContractRouteDestinationInactive {
+		return false
+	}
+	switch self.Relationship.DestinationLifecycle {
+	case NetworkClientLifecycleInactiveTop, NetworkClientLifecycleInactiveDerived:
+		return true
+	default:
+		return false
+	}
 }
 
 type contractRouteRejectionKey struct {
@@ -198,9 +225,101 @@ func (self *contractRouteRejections) close() {
 	self.count = 0
 }
 
-// Returns a refusal recorded for an identical request whose timeout has not
-// passed and whose reverse pair has had no origin edge since. A nil owner has
-// no registry.
+type contractTerminalRouteRejection struct {
+	rejection  ContractRouteRejection
+	validUntil time.Time
+}
+
+// Terminal refusals (see `ContractRouteRejection.terminal`), keyed like the
+// ring. An origin edge cannot open such a route, so edges and acknowledgements
+// leave these entries alone. Two bounded generations: a refusal enters the
+// current generation; a full current generation becomes the previous one and
+// the old previous one is dropped whole. A refusal served from the previous
+// generation moves back to the current one with its original expiry, so a
+// route an old client keeps retrying survives the turnover while one it
+// stopped retrying ages out. The timeout only bounds the cost of a mistake.
+// Safe for concurrent use. No method performs I/O while holding the lock.
+type contractTerminalRouteRejections struct {
+	stateLock             sync.Mutex
+	generationCount       int
+	timeout               time.Duration
+	closed                bool
+	currentKeyRejections  map[contractRouteRejectionKey]contractTerminalRouteRejection
+	previousKeyRejections map[contractRouteRejectionKey]contractTerminalRouteRejection
+}
+
+// A zero generation bound or timeout disables the registry. At most twice the
+// generation bound is held.
+func newContractTerminalRouteRejections(generationCount int, timeout time.Duration) *contractTerminalRouteRejections {
+	return &contractTerminalRouteRejections{
+		generationCount:       generationCount,
+		timeout:               timeout,
+		currentKeyRejections:  map[contractRouteRejectionKey]contractTerminalRouteRejection{},
+		previousKeyRejections: map[contractRouteRejectionKey]contractTerminalRouteRejection{},
+	}
+}
+
+func (self *contractTerminalRouteRejections) get(key contractRouteRejectionKey) (ContractRouteRejection, bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.closed {
+		return ContractRouteRejection{}, false
+	}
+	now := time.Now()
+	if entry, ok := self.currentKeyRejections[key]; ok {
+		if now.Before(entry.validUntil) {
+			return entry.rejection, true
+		}
+		delete(self.currentKeyRejections, key)
+		return ContractRouteRejection{}, false
+	}
+	entry, ok := self.previousKeyRejections[key]
+	if !ok {
+		return ContractRouteRejection{}, false
+	}
+	delete(self.previousKeyRejections, key)
+	if !now.Before(entry.validUntil) {
+		return ContractRouteRejection{}, false
+	}
+	self.putWithLock(key, entry)
+	return entry.rejection, true
+}
+
+func (self *contractTerminalRouteRejections) put(key contractRouteRejectionKey, rejection ContractRouteRejection) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.closed || self.generationCount <= 0 || self.timeout <= 0 {
+		return false
+	}
+	delete(self.previousKeyRejections, key)
+	self.putWithLock(key, contractTerminalRouteRejection{
+		rejection:  rejection,
+		validUntil: time.Now().Add(self.timeout),
+	})
+	return true
+}
+
+func (self *contractTerminalRouteRejections) putWithLock(key contractRouteRejectionKey, entry contractTerminalRouteRejection) {
+	if _, ok := self.currentKeyRejections[key]; !ok && self.generationCount <= len(self.currentKeyRejections) {
+		self.previousKeyRejections = self.currentKeyRejections
+		self.currentKeyRejections = map[contractRouteRejectionKey]contractTerminalRouteRejection{}
+	}
+	self.currentKeyRejections[key] = entry
+}
+
+// A closed owner neither stores nor replays, as for the ring.
+func (self *contractTerminalRouteRejections) close() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.closed = true
+	clear(self.currentKeyRejections)
+	clear(self.previousKeyRejections)
+}
+
+// Returns a refusal recorded for an identical request: a terminal one whose
+// timeout has not passed, or one from the ring whose timeout has not passed
+// and whose reverse pair has had no origin edge since. A nil owner has no
+// registry.
 func (self *ContractOriginNotifications) RouteRejection(
 	sourceId server.Id,
 	destinationId server.Id,
@@ -209,13 +328,18 @@ func (self *ContractOriginNotifications) RouteRejection(
 	if self == nil {
 		return ContractRouteRejection{}, false
 	}
-	return self.routeRejections.get(newContractRouteRejectionKey(sourceId, destinationId, companion))
+	key := newContractRouteRejectionKey(sourceId, destinationId, companion)
+	if rejection, ok := self.routeRejections.get(key); ok {
+		return rejection, true
+	}
+	return self.terminalRouteRejections.get(key)
 }
 
 // Records a deterministic refusal for identical requests. A missing-origin
 // verdict passes the update channel its watch armed immediately before the
 // final origin read (see `waitForCompanionOrigin`); a destination verdict has
-// no fence. Returns whether the refusal was stored.
+// no fence. A terminal refusal goes to its own registry, everything else to
+// the ring. Returns whether the refusal was stored.
 func (self *ContractOriginNotifications) RecordRouteRejection(
 	sourceId server.Id,
 	destinationId server.Id,
@@ -226,5 +350,9 @@ func (self *ContractOriginNotifications) RecordRouteRejection(
 	if self == nil {
 		return false
 	}
-	return self.routeRejections.put(newContractRouteRejectionKey(sourceId, destinationId, companion), rejection, fence)
+	key := newContractRouteRejectionKey(sourceId, destinationId, companion)
+	if rejection.terminal() {
+		return self.terminalRouteRejections.put(key, rejection)
+	}
+	return self.routeRejections.put(key, rejection, fence)
 }

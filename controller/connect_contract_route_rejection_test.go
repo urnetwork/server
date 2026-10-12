@@ -247,14 +247,20 @@ func TestCreateContractRepeatedMissingOriginReadsNothing(t *testing.T) {
 
 // A destination retired between the lifecycle read and the write boundary is
 // refused by the write boundary's own active read. That refusal is kept too,
-// so an identical repeat reaches neither read.
+// so an identical repeat reaches neither read. The Stream fallback's origin
+// lookup still found the window's forward contract.
 func TestCreateContractRecordsDestinationRetiredAtTheWriteBoundary(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, closeOwner := newRouteRejectionOwnerContext(context.Background())
 		defer closeOwner()
 		sourceId, destinationId := newCompanionFallbackPair(t, ctx)
-		previousPairNetworks := findActiveClientPairNetworks
-		defer func() { findActiveClientPairNetworks = previousPairNetworks }()
+		previousPairNetworks, previousOriginExists := findActiveClientPairNetworks, companionOriginExists
+		defer func() {
+			findActiveClientPairNetworks, companionOriginExists = previousPairNetworks, previousOriginExists
+		}()
+		companionOriginExists = func(context.Context, server.Id, server.Id, time.Duration) bool {
+			return true
+		}
 		pairReads := 0
 		findActiveClientPairNetworks = func(ctx context.Context, sourceId server.Id, destinationId server.Id) (*server.Id, *server.Id) {
 			pairReads += 1
@@ -315,10 +321,15 @@ func TestCreateContractRouteRefusalEndsWhenItsOriginCommits(t *testing.T) {
 // with another failure, an operational failure, and a created contract all
 // repeat their authoritative work on an identical request. Each case owns an
 // acknowledged bucket, so a verdict that was wrongly recorded would be kept.
+// The Stream fallback's origin lookup finds an origin, so the write path
+// decides each case.
 func TestCreateContractRecordsOnlyExactRouteRefusals(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		previousCompanion := createCompanionTransferEscrow
-		defer func() { createCompanionTransferEscrow = previousCompanion }()
+		previousCompanion, previousOriginExists := createCompanionTransferEscrow, companionOriginExists
+		defer func() { createCompanionTransferEscrow, companionOriginExists = previousCompanion, previousOriginExists }()
+		companionOriginExists = func(context.Context, server.Id, server.Id, time.Duration) bool {
+			return true
+		}
 		originId := server.NewId()
 		for _, outcome := range []struct {
 			name   string
@@ -374,9 +385,10 @@ func TestCreateContractMissingOriginAcrossItsCommitIsNotRecorded(t *testing.T) {
 		})
 		awaitRouteRejectionBucket(t, ctx, sourceId, destinationId)
 
-		previousCompanion := createCompanionTransferEscrow
-		defer func() { createCompanionTransferEscrow = previousCompanion }()
-		createCompanionTransferEscrow = func(ctx context.Context, _ server.Id, _ server.Id, _ server.Id, _ server.Id, _ model.ByteCount, _ time.Duration) (*model.TransferEscrow, error) {
+		// the Stream fallback's origin lookup is the read that decides
+		previousOriginExists := companionOriginExists
+		defer func() { companionOriginExists = previousOriginExists }()
+		companionOriginExists = func(ctx context.Context, _ server.Id, _ server.Id, _ time.Duration) bool {
 			watch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 			defer watch.Close()
 			edge := watch.Update()
@@ -391,7 +403,8 @@ func TestCreateContractMissingOriginAcrossItsCommitIsNotRecorded(t *testing.T) {
 			case <-time.After(time.Minute):
 				t.Error("the origin edge did not arrive")
 			}
-			return nil, model.ErrMissingCompanionOrigin
+			// the read's snapshot predates the commit
+			return false
 		}
 		if result := createRouteRejectionContract(t, ctx, sourceId, destinationId, false); !isRouteReliabilityRefusal(result) {
 			t.Fatalf("the refusal read before its origin committed was not reported: %+v", result)
@@ -400,9 +413,112 @@ func TestCreateContractMissingOriginAcrossItsCommitIsNotRecorded(t *testing.T) {
 			t.Fatal("a refusal read across its origin's commit was recorded")
 		}
 
-		createCompanionTransferEscrow = previousCompanion
+		companionOriginExists = previousOriginExists
 		if result := createRouteRejectionContract(t, ctx, sourceId, destinationId, false); result.Contract == nil {
 			t.Fatalf("the request after its origin committed was refused: %+v", result)
+		}
+	})
+}
+
+// An old provider keeps replying to a retired prober window every 5s, and the
+// load balancer spreads its retries over several api processes, so a process
+// sees the route again only after the short ring has expired the refusal.
+// The ring is disabled here, which is that retry deterministically. A refusal
+// of an inactive destination row is terminal and still answers it without a
+// read; a missing destination row is not terminal and reads again.
+func TestCreateContractInactiveDestinationRefusalOutlivesTheRing(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		settings := model.DefaultContractOriginNotificationSettings()
+		settings.RouteRejectionTimeout = 0
+		owner := model.NewContractOriginNotifications(context.Background(), settings)
+		defer owner.Close()
+		ctx := model.WithContractOriginNotifications(context.Background(), owner)
+		sourceId, retiredId := server.NewId(), server.NewId()
+		model.Testing_CreateDevice(ctx, server.NewId(), server.NewId(), sourceId, "synthetic-provider", "synthetic")
+		model.Testing_CreateDevice(ctx, server.NewId(), server.NewId(), retiredId, "synthetic-retired-window", "synthetic")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE network_client
+				SET active = false, deactivate_time = clock_timestamp() AT TIME ZONE 'UTC'
+				WHERE client_id = $1
+			`, retiredId))
+		})
+
+		observed, statements, closeScope := observeRouteRejectionStatements(t, ctx)
+		defer closeScope()
+		for _, companion := range []bool{false, true} {
+			first := createRouteRejectionContract(t, observed, sourceId, retiredId, companion)
+			firstReads := statements.take()
+			retry := createRouteRejectionContract(t, observed, sourceId, retiredId, companion)
+			retryReads := statements.take()
+			if !isRouteReliabilityRefusal(first) || !isRouteReliabilityRefusal(retry) {
+				t.Fatalf("inactive destination (companion=%t) was not refused as an unreliable route: %+v, %+v", companion, first, retry)
+			}
+			if len(firstReads) == 0 {
+				t.Fatal("the first request to an inactive destination read nothing")
+			}
+			if len(retryReads) != 0 {
+				t.Fatalf("a retry to an inactive destination after the ring timeout (companion=%t) used %d statements, want 0 (the first used %d): %q", companion, len(retryReads), len(firstReads), retryReads)
+			}
+		}
+
+		missingId := server.NewId()
+		createRouteRejectionContract(t, observed, sourceId, missingId, false)
+		statements.take()
+		if retry := createRouteRejectionContract(t, observed, sourceId, missingId, false); !isRouteReliabilityRefusal(retry) {
+			t.Fatalf("missing destination was not refused as an unreliable route: %+v", retry)
+		}
+		if retryReads := statements.take(); len(retryReads) == 0 {
+			t.Fatal("a missing destination row was kept past the ring timeout")
+		}
+	})
+}
+
+// An old provider returns traffic to a window whose forward contract passed
+// its deadline, as a non-companion request the destination settles as a
+// Stream companion. Its one origin lookup decides the refusal before the
+// destination's metadata and the endpoint lifecycle reads, which only a
+// contract needs.
+func TestCreateContractStreamFallbackDecidesMissingOriginBeforeContractReads(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, closeOwner := newRouteRejectionOwnerContext(context.Background())
+		defer closeOwner()
+		sourceId, destinationId := newCompanionFallbackPair(t, ctx)
+		awaitRouteRejectionBucket(t, ctx, sourceId, destinationId)
+		previousSecret := getProvideSecretKey
+		defer func() { getProvideSecretKey = previousSecret }()
+		secretReads := 0
+		getProvideSecretKey = func(ctx context.Context, clientId server.Id, provideMode model.ProvideMode) ([]byte, error) {
+			secretReads += 1
+			return previousSecret(ctx, clientId, provideMode)
+		}
+
+		observed, statements, closeScope := observeRouteRejectionStatements(t, ctx)
+		defer closeScope()
+		result := createRouteRejectionContract(t, observed, sourceId, destinationId, false)
+		reads := statements.take()
+		if !isRouteReliabilityRefusal(result) {
+			t.Fatalf("a Stream fallback without an origin was not refused as an unreliable route: %+v", result)
+		}
+		originReads := 0
+		for _, statement := range reads {
+			switch {
+			case strings.Contains(statement, "tls_certificate_pem"):
+				t.Fatalf("the refusal read the destination's contract metadata: %q", reads)
+			case strings.Contains(statement, "WHERE client_id = $1 AND active), (SELECT network_id"):
+				t.Fatalf("the refusal read the endpoint lifecycle for a contract it never creates: %q", reads)
+			case strings.Contains(statement, "SELECT EXISTS ( SELECT 1 FROM transfer_contract"):
+				originReads += 1
+			}
+		}
+		if originReads != 1 {
+			t.Fatalf("the refusal made %d origin reads, want 1: %q", originReads, reads)
+		}
+		if secretReads != 0 {
+			t.Fatalf("the refusal read the provide secret %d times, want 0", secretReads)
+		}
+		if _, ok := model.GetContractOriginNotifications(ctx).RouteRejection(sourceId, destinationId, false); !ok {
+			t.Fatal("the missing-origin refusal was not recorded")
 		}
 	})
 }
