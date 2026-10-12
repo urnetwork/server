@@ -4,6 +4,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -84,21 +85,81 @@ type redisNodeUsage struct {
 	maxmemoryBytes int64
 }
 
+// redisHostFailure is a redis-cluster host that a probe could not read. A
+// probe that sweeps every host keeps judging the hosts it could read, reports
+// each failed host on its own target, and fails as a whole only when no host
+// could be read, as the single-host probe always has.
+type redisHostFailure struct {
+	host *host
+	err  error
+}
+
+// redisHostFailuresError is the probe error once no host could be read. One
+// host keeps its own error; several are joined, so a host-scope exclusion of
+// one host cannot stand in for another host's real failure.
+func redisHostFailuresError(failures []redisHostFailure) error {
+	if len(failures) == 1 {
+		return failures[0].err
+	}
+	errs := make([]error, 0, len(failures))
+	for _, failure := range failures {
+		errs = append(errs, failure.err)
+	}
+	return errors.Join(errs...)
+}
+
+// redisHostCannotObserveFinding reports one host a sweep could not read. The
+// host/observation target is the one the memory, process, and cluster sweeps
+// use, so host-scope reduction and per-host identity treat it the same way.
+func redisHostCannotObserveFinding(failure redisHostFailure, observation string) finding {
+	unknown := cannotObserveFinding(failure.host.name+"/"+observation, failure.err)
+	unknown.observed += fmt.Sprintf(" unobserved_nodes=%d", len(failure.host.redisNodePorts()))
+	return unknown
+}
+
+// redisUnobservedScope names the hosts a partial verdict was judged without
+// and counts their configured nodes.
+func redisUnobservedScope(failures []redisHostFailure) (string, int) {
+	names := make([]string, 0, len(failures))
+	nodes := 0
+	for _, failure := range failures {
+		names = append(names, failure.host.name)
+		nodes += len(failure.host.redisNodePorts())
+	}
+	return strings.Join(names, ","), nodes
+}
+
+// redisUnobservedHosts marks the observed values of a cluster-wide verdict
+// that was judged without the failed hosts' nodes.
+func redisUnobservedHosts(failures []redisHostFailure) string {
+	hosts, nodes := redisUnobservedScope(failures)
+	return fmt.Sprintf("unobserved_hosts=%s unobserved_nodes=%d", hosts, nodes)
+}
+
+// redisPartialSymptom marks the symptom of such a verdict.
+func redisPartialSymptom(failures []redisHostFailure) string {
+	hosts, nodes := redisUnobservedScope(failures)
+	return fmt.Sprintf(" (partial: %d node(s) on %s not read)", nodes, hosts)
+}
+
 // fullestRedisNodeUsage samples every node on every redis-cluster host and
-// returns the fullest node with the host that runs it.
-func fullestRedisNodeUsage(ctx context.Context, env *probeEnv) (*host, redisNodeUsage, error) {
+// returns the fullest node with the host that runs it. A host that cannot be
+// read is returned as a failure and the fullest node is chosen from the other
+// hosts; with no host readable the sample fails.
+func fullestRedisNodeUsage(ctx context.Context, env *probeEnv) (*host, redisNodeUsage, []redisHostFailure, error) {
 	hosts := env.cfg.redisSweepHosts()
 	if len(hosts) == 0 {
-		return nil, redisNodeUsage{}, fmt.Errorf("no redis-cluster host in inventory")
+		return nil, redisNodeUsage{}, nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
 	var fullestHost *host
 	fullest := redisNodeUsage{}
 	fullestRatio := -1.0
 	outputs := []string{}
+	failures := []redisHostFailure{}
 	for _, h := range hosts {
 		ports := h.redisNodePorts()
 		if len(ports) == 0 {
-			return nil, redisNodeUsage{}, fmt.Errorf("no redis node ports configured")
+			return nil, redisNodeUsage{}, nil, fmt.Errorf("no redis node ports configured")
 		}
 		portNames := make([]string, len(ports))
 		for i, port := range ports {
@@ -110,7 +171,8 @@ func fullestRedisNodeUsage(ctx context.Context, env *probeEnv) (*host, redisNode
   echo "$p $(echo "$m" | awk -F: 'BEGIN{u=0;x=0}/^used_memory:/{u=$2}/^maxmemory:/{x=$2}END{print u" "x}')"
 done`, strings.Join(portNames, " ")))
 		if err != nil {
-			return nil, redisNodeUsage{}, err
+			failures = append(failures, redisHostFailure{host: h, err: err})
+			continue
 		}
 		outputs = append(outputs, strings.TrimSpace(out))
 
@@ -135,10 +197,13 @@ done`, strings.Join(portNames, " ")))
 			}
 		}
 	}
-	if fullest.port == 0 {
-		return nil, redisNodeUsage{}, fmt.Errorf("could not determine fullest Redis node from %q", strings.Join(outputs, "\n"))
+	if len(failures) == len(hosts) {
+		return nil, redisNodeUsage{}, nil, redisHostFailuresError(failures)
 	}
-	return fullestHost, fullest, nil
+	if fullest.port == 0 {
+		return nil, redisNodeUsage{}, nil, fmt.Errorf("could not determine fullest Redis node from %q", strings.Join(outputs, "\n"))
+	}
+	return fullestHost, fullest, failures, nil
 }
 
 type redisConnectionDiagnosis struct {

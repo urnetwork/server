@@ -544,6 +544,16 @@ run on every host over its own ports, and a node finding targets the
 `host:port` that runs it. `expected_replicas` is cluster-wide and is read from
 the entry host.
 
+One unreadable host does not blank a Redis signal. A sweep reports the host
+it cannot read as `cannot-observe` on `<host>/<observation>` (for example
+`by-us-fmt-5-edge-5/key-events`) and keeps judging the other hosts' nodes, so
+edge-6's pages still fire while edge-5 is unreachable. A cluster-wide verdict
+judged without the host is marked partial (`unobserved_hosts=` in its observed
+values, `(partial: …)` in its symptom), a cluster-wide healthy verdict waits
+until every host is read again, and partial data is never recorded as a
+baseline. The signal fails as a whole only when no host can be read, as a
+single host always has.
+
 SSH identity paths are optional; when omitted, `~/.ssh/config` supplies the
 IdentityFile per host. Everything else shared is read from its source of
 truth, never duplicated here (§2): pg credentials from `vault/<env>/pg.yml`

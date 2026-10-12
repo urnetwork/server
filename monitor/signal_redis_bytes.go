@@ -118,10 +118,15 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 	if entryHost == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
-	// the fullest node may be on any redis-cluster host; sample it where it runs
-	h, fullest, err := fullestRedisNodeUsage(ctx, env)
+	// the fullest node may be on any redis-cluster host; sample it where it runs.
+	// An unreadable host is reported and the fullest node of the others sampled.
+	h, fullest, failures, err := fullestRedisNodeUsage(ctx, env)
 	if err != nil {
 		return nil, err
+	}
+	visibility := []finding{}
+	for _, failure := range failures {
+		visibility = append(visibility, redisHostCannotObserveFinding(failure, "byte-families"))
 	}
 	sample, err := sampleRedisByteFamilies(ctx, env, h, fullest.port)
 	if err != nil {
@@ -153,6 +158,10 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			fmt.Sprintf("%s_bytes=%d", name, family.bytes),
 		)
 	}
+	if len(failures) > 0 {
+		// the sampled node is the fullest of the readable hosts only
+		observedParts = append(observedParts, redisUnobservedHosts(failures))
+	}
 	glog.Infof("[monitor]redis byte families on %s: %s\n", target, strings.Join(observedParts, " "))
 
 	if 0.85 <= usedFraction &&
@@ -175,7 +184,7 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		default:
 			observedParts = append(observedParts, "alias_schema_ready=false")
 		}
-		return []finding{{
+		return append([]finding{{
 			probeId: "redis/byte-families", tier: tierWarn,
 			class: "score-byte-dominance", target: target, frame: "score", sustain: 1,
 			symptom: fmt.Sprintf(
@@ -190,10 +199,10 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			action:    action,
 			verify:    "After one complete alias-aware export plus the five-hour legacy TTL, sampled score bytes fall below 50% or the node falls below 85%; aliases resolve to the same provider sets, excluded callers still use overrides, and OOM/error counters remain flat.",
 			playbook:  "SIGNALS.md §3.3b and §5.4",
-		}}, nil
+		}}, visibility...), nil
 	}
 
-	return []finding{healthyFinding("redis/byte-families", tierWarn, "score-byte-dominance", target)}, nil
+	return append([]finding{healthyFinding("redis/byte-families", tierWarn, "score-byte-dominance", target)}, visibility...), nil
 }
 
 func redisScoreAliasesReady(ctx context.Context, env *probeEnv, h *host) (bool, error) {

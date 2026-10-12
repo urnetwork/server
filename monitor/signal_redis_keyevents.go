@@ -58,7 +58,8 @@ func normalizeEventClasses(flags string) string {
 
 func (self redisKeyEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	// Drift is a cluster-wide judgement reported on the entry host; each node's
-	// subscriber shape is reported on the host that runs it.
+	// subscriber shape is reported on the host that runs it. A host that cannot
+	// be read is reported and the other hosts' nodes are still judged.
 	h := env.cfg.redisEntryHost()
 	hosts := env.cfg.redisSweepHosts()
 	if h == nil || len(hosts) == 0 {
@@ -73,6 +74,7 @@ func (self redisKeyEventProbe) check(ctx context.Context, env *probeEnv) ([]find
 	}
 	nodeStates := []nodeState{}
 	classCounts := map[string]int{}
+	failures := []redisHostFailure{}
 	for _, nodeHost := range hosts {
 		ports := nodeHost.redisNodePorts()
 		if len(ports) == 0 {
@@ -88,7 +90,8 @@ func (self redisKeyEventProbe) check(ctx context.Context, env *probeEnv) ([]find
 done`, lo, hi)
 		out, err := env.runner.shell(ctx, nodeHost, script)
 		if err != nil {
-			return nil, err
+			failures = append(failures, redisHostFailure{host: nodeHost, err: err})
+			continue
 		}
 
 		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -110,16 +113,25 @@ done`, lo, hi)
 			classCounts[state.classes] += 1
 		}
 	}
+	if len(failures) == len(hosts) {
+		return nil, redisHostFailuresError(failures)
+	}
 	if len(nodeStates) == 0 {
 		return nil, fmt.Errorf("no node config parsed")
 	}
 
 	findings := []finding{}
+	for _, failure := range failures {
+		findings = append(findings, redisHostCannotObserveFinding(failure, "key-events"))
+	}
 
 	// config uniformity: every node must carry the same class set. All-empty
 	// is the healthy dark state (feature not rolled out); a MIX is drift —
 	// events silently missing for the divergent nodes' slots only, which
 	// presents as slot-striped staleness (some networks update, others don't).
+	// Without a host's nodes a mix is still drift, but the majority is only
+	// the read nodes' majority, and agreement does not prove the cluster
+	// uniform.
 	majorityClasses, majorityCount := "", 0
 	for classes, count := range classCounts {
 		if count > majorityCount {
@@ -133,19 +145,25 @@ done`, lo, hi)
 				divergent = append(divergent, fmt.Sprintf("%d=%q", state.port, state.classes))
 			}
 		}
+		symptom := fmt.Sprintf("notify-keyspace-events differs across nodes: majority %q (%d/%d), divergent: %s",
+			majorityClasses, majorityCount, len(nodeStates), strings.Join(divergent, " "))
+		observed := fmt.Sprintf("class_sets=%d majority=%q", len(classCounts), majorityClasses)
+		if len(failures) > 0 {
+			symptom += redisPartialSymptom(failures)
+			observed += " " + redisUnobservedHosts(failures)
+		}
 		findings = append(findings, finding{
 			probeId: "redis/keyevent-config-drift", tier: tierWarn,
 			class: "keyevent-config-drift", target: h.name,
-			frame:   fmt.Sprintf("%d nodes", len(divergent)),
-			sustain: 1,
-			symptom: fmt.Sprintf("notify-keyspace-events differs across nodes: majority %q (%d/%d), divergent: %s",
-				majorityClasses, majorityCount, len(nodeStates), strings.Join(divergent, " ")),
+			frame:    fmt.Sprintf("%d nodes", len(divergent)),
+			sustain:  1,
+			symptom:  symptom,
 			baseline: "identical class set on every node (compared as a set — redis normalizes flag order/expansion); a node missing classes emits NO events for its slots only = slot-striped staleness (9.1)",
-			observed: fmt.Sprintf("class_sets=%d majority=%q", len(classCounts), majorityClasses),
+			observed: observed,
 			context:  "drift source: a node restarted/provisioned outside the templated conf — rerun xops/redis-set-notify-keyspace-events.sh (idempotent)",
 			playbook: "SIGNALS.md 9.1",
 		})
-	} else {
+	} else if len(failures) == 0 {
 		findings = append(findings, healthyFinding("redis/keyevent-config-drift", tierWarn, "keyevent-config-drift", h.name))
 	}
 
