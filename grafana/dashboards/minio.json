@@ -167,14 +167,17 @@
     },
     {
       "id": 11,
-      "title": "host data disk used",
-      "description": "Host filesystem utilization for the MinIO data mount.",
+      "title": "host drive space used",
+      "description": "Space used on each MinIO drive's filesystem (/mnt/blobN) and on all of them together, from host metrics. Everything on a drive counts, not only MinIO's objects. MinIO refuses writes once any one drive is full or the drives together are down to about 1% free, so the fullest drive matters more than the total. Threshold lines at 70% and 85% leave room to act before then.",
       "type": "timeseries",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 70}, {"color": "red", "value": 85}]}, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}, "thresholdsStyle": {"mode": "line"}}}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
-      "targets": [{"refId": "A", "expr": "100 * (1 - node_filesystem_avail_bytes{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=\"/mnt/data\"} / node_filesystem_size_bytes{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=\"/mnt/data\"})", "legendFormat": "{{host}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [
+        {"refId": "A", "expr": "100 * (1 - max by (host, mountpoint) (node_filesystem_avail_bytes{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=~\"/mnt/blob[0-9]+\"}) / max by (host, mountpoint) (node_filesystem_size_bytes{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=~\"/mnt/blob[0-9]+\"}))", "legendFormat": "{{host}} {{mountpoint}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "100 * (1 - sum by (host) (max by (host, mountpoint) (node_filesystem_avail_bytes{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=~\"/mnt/blob[0-9]+\"})) / sum by (host) (max by (host, mountpoint) (node_filesystem_size_bytes{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=~\"/mnt/blob[0-9]+\"})))", "legendFormat": "{{host}} total", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
     },
     {
       "id": 12,

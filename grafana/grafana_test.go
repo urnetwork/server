@@ -51,6 +51,11 @@ type testPanel struct {
 					Value *float64 `json:"value"`
 				} `json:"steps"`
 			} `json:"thresholds"`
+			Custom struct {
+				ThresholdsStyle struct {
+					Mode string `json:"mode"`
+				} `json:"thresholdsStyle"`
+			} `json:"custom"`
 		} `json:"defaults"`
 		Overrides []struct {
 			Matcher struct {
@@ -1363,12 +1368,12 @@ func TestServiceLogsLinksToLogsDrilldown(t *testing.T) {
 func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
 	tests := []struct {
 		name           string
-		diskMountpoint string
+		diskMatcher    string
 		serviceMetrics []string
 	}{
 		{
-			name:           "minio.json",
-			diskMountpoint: "/mnt/data",
+			name:        "minio.json",
+			diskMatcher: `mountpoint=~"` + minioDriveMountpoints + `"`,
 			serviceMetrics: []string{
 				"minio_cluster_health_nodes_online_count",
 				"minio_cluster_health_drives_offline_count",
@@ -1378,8 +1383,8 @@ func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
 			},
 		},
 		{
-			name:           "subtensor.json",
-			diskMountpoint: "/",
+			name:        "subtensor.json",
+			diskMatcher: `mountpoint="/"`,
 			serviceMetrics: []string{
 				"substrate_block_height",
 				"substrate_sub_libp2p_peers_count",
@@ -1389,8 +1394,8 @@ func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
 			},
 		},
 		{
-			name:           "postgres.json",
-			diskMountpoint: "/",
+			name:        "postgres.json",
+			diskMatcher: `mountpoint="/"`,
 			serviceMetrics: []string{
 				"pg_up",
 				"pg_stat_activity_count",
@@ -1417,8 +1422,8 @@ func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
 				t.Error("dashboard must include host CPU and memory context")
 			}
 			if !strings.Contains(queries, "node_filesystem_avail_bytes") ||
-				!strings.Contains(queries, `mountpoint="`+test.diskMountpoint+`"`) {
-				t.Errorf("dashboard must include host disk context for %s", test.diskMountpoint)
+				!strings.Contains(queries, test.diskMatcher) {
+				t.Errorf("dashboard must include host disk context for %s", test.diskMatcher)
 			}
 			if !strings.Contains(queries, `{env="$env"`) ||
 				!strings.Contains(queries, `host=~"$host"`) {
