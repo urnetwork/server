@@ -2,12 +2,17 @@ package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
@@ -17,7 +22,15 @@ import (
 const (
 	taskMetricsRefreshInterval = 15 * time.Second
 	taskMetricsQueryTimeout    = 5 * time.Second
-	taskMetricsMaxInterval     = time.Minute
+	// Ends each refresh statement on the server inside the owner's client
+	// budget, so a refresh never outlives the interval that admitted it.
+	taskMetricsStatementTimeout = 3 * time.Second
+	// Rows counted exactly on each side of the availability boundary.
+	taskMetricsBoundRows   = 10000
+	taskMetricsMaxInterval = time.Minute
+	// Names the transaction-scoped advisory key a refresh holds until the
+	// server has finished its statements.
+	taskMetricsAdvisoryLockName = "urnetwork:task_queue_metrics"
 )
 
 var taskExecutionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -87,6 +100,7 @@ type taskQueueMetricsSample struct {
 // Before the first successful database query it emits no business series.
 type taskQueueMetricsCollector struct {
 	depthDesc         *prometheus.Desc
+	estimatedDesc     *prometheus.Desc
 	oldestOverdueDesc *prometheus.Desc
 	timestampDesc     *prometheus.Desc
 	stateLock         sync.Mutex
@@ -98,12 +112,17 @@ func newTaskQueueMetricsCollector() *taskQueueMetricsCollector {
 	return &taskQueueMetricsCollector{
 		depthDesc: prometheus.NewDesc(
 			"urnetwork_taskworker_queue_depth",
-			"Pending task rows by bounded overlapping state at the latest successful queue snapshot.",
+			fmt.Sprintf("Pending task rows by overlapping state at the latest successful queue snapshot. Exact up to %d rows on each side of the availability boundary; past that, a planner estimate (see queue_depth_estimated).", taskMetricsBoundRows),
+			[]string{"state"}, nil,
+		),
+		estimatedDesc: prometheus.NewDesc(
+			"urnetwork_taskworker_queue_depth_estimated",
+			fmt.Sprintf("1 when the queue_depth state at the latest successful snapshot is a planner estimate, or for claimed a lower bound, because its side of the availability boundary held more than %d rows; 0 when exact.", taskMetricsBoundRows),
 			[]string{"state"}, nil,
 		),
 		oldestOverdueDesc: prometheus.NewDesc(
 			"urnetwork_taskworker_queue_oldest_overdue_seconds",
-			"Age past run_at of the oldest available pending task at the latest successful queue snapshot.",
+			fmt.Sprintf("Age past run_at of the oldest available pending task at the latest successful queue snapshot, read from the first %d available rows in poll order.", taskMetricsBoundRows),
 			nil, nil,
 		),
 		timestampDesc: prometheus.NewDesc(
@@ -175,6 +194,7 @@ func init() {
 // Describe implements prometheus.Collector.
 func (self *taskQueueMetricsCollector) Describe(descriptions chan<- *prometheus.Desc) {
 	descriptions <- self.depthDesc
+	descriptions <- self.estimatedDesc
 	descriptions <- self.oldestOverdueDesc
 	descriptions <- self.timestampDesc
 }
@@ -193,15 +213,21 @@ func (self *taskQueueMetricsCollector) Collect(metrics chan<- prometheus.Metric)
 		return
 	}
 	for _, state := range []struct {
-		name  string
-		value int64
+		name      string
+		value     int64
+		estimated bool
 	}{
-		{name: "total", value: sample.snapshot.Total},
-		{name: "available", value: sample.snapshot.Available},
-		{name: "claimed", value: sample.snapshot.Claimed},
-		{name: "reschedule_error", value: sample.snapshot.RescheduleError},
+		{name: "total", value: sample.snapshot.Total, estimated: sample.snapshot.TotalEstimated},
+		{name: "available", value: sample.snapshot.Available, estimated: sample.snapshot.AvailableEstimated},
+		{name: "claimed", value: sample.snapshot.Claimed, estimated: sample.snapshot.ClaimedEstimated},
+		{name: "reschedule_error", value: sample.snapshot.RescheduleError, estimated: sample.snapshot.RescheduleErrorEstimated},
 	} {
 		metrics <- prometheus.MustNewConstMetric(self.depthDesc, prometheus.GaugeValue, float64(state.value), state.name)
+		estimated := 0.0
+		if state.estimated {
+			estimated = 1
+		}
+		metrics <- prometheus.MustNewConstMetric(self.estimatedDesc, prometheus.GaugeValue, estimated, state.name)
 	}
 	metrics <- prometheus.MustNewConstMetric(
 		self.oldestOverdueDesc,
@@ -311,56 +337,197 @@ func recordTaskExecution(taskName string, attribution string, argsBytes int, res
 	taskExecutionMaximum.observe(taskName, attribution, duration)
 }
 
-// taskQueueMetricsSnapshot is one identity-free database aggregate.
+// taskQueueMetricsSnapshot is one identity-free database aggregate. States
+// overlap and must not be summed. An estimated state is a planner estimate,
+// or for claimed a lower bound (see taskQueueMetricsBound.snapshot).
 type taskQueueMetricsSnapshot struct {
 	Total               int64
 	Available           int64
 	Claimed             int64
 	RescheduleError     int64
 	OldestOverdueSecond float64
+
+	TotalEstimated           bool
+	AvailableEstimated       bool
+	ClaimedEstimated         bool
+	RescheduleErrorEstimated bool
 }
 
-// loadTaskQueueMetricsSnapshot executes one bounded aggregate over pending
-// tasks. States intentionally overlap and therefore must not be summed.
+// Another refresh still holds the database key, so this one did no work.
+var errTaskQueueMetricsBusy = errors.New("task queue metrics snapshot already running")
+
+// Planner predicates for a saturated side. $1 is the availability block.
+const (
+	taskQueueMetricsDuePredicate     = `available_block <= $1`
+	taskQueueMetricsWaitingPredicate = `$1 < available_block`
+	taskQueueMetricsErrorPredicate   = ` AND has_reschedule_error`
+)
+
+// Production refresh bounds. The caller's context bounds the client wait.
 func loadTaskQueueMetricsSnapshot(ctx context.Context, now time.Time) (taskQueueMetricsSnapshot, error) {
-	snapshot := taskQueueMetricsSnapshot{}
-	queryCtx, cancel := context.WithTimeout(ctx, taskMetricsQueryTimeout)
-	defer cancel()
-	returnErr := error(nil)
+	return taskQueueMetricsQuery{
+		statementTimeout: taskMetricsStatementTimeout,
+		boundRows:        taskMetricsBoundRows,
+	}.load(ctx, now)
+}
+
+// One refresh reads at most boundRows+1 rows on each side of the availability
+// boundary, in poll order through pending_task_poll_order, instead of the
+// whole table. Due rows (available_block <= now) give available, their
+// reschedule errors and the oldest overdue run_at. Waiting rows give the rest
+// of the total and of the reschedule errors, and every claim: a claim's
+// release_time puts its available_block past now.
+//
+// The work is bounded by the server itself. A client that stops waiting does
+// not stop PostgreSQL, since its cancel request does not reliably cross the
+// transaction pooler, so every statement runs under a transaction-scoped
+// statement_timeout, without parallel workers or JIT. The transaction-scoped
+// advisory key stays held until the server finishes, even after its client
+// has gone, so a later owner skips instead of starting a second scan beside
+// it. Transaction-scoped settings and keys are safe through the pooler.
+type taskQueueMetricsQuery struct {
+	statementTimeout time.Duration
+	boundRows        int64
+}
+
+// The caller's context bounds only the client wait. The server ends every
+// statement at the statement timeout whether or not the client still waits.
+func (self taskQueueMetricsQuery) load(ctx context.Context, now time.Time) (snapshot taskQueueMetricsSnapshot, returnErr error) {
+	availableBlock := now.Unix() / BlockSizeSeconds
 	if recovered := server.HandleError(func() {
-		server.ReplicaDb(queryCtx, func(conn server.PgConn) {
-			returnErr = conn.QueryRow(
-				queryCtx,
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
 				`/* taskworker-queue-metrics */
-				 SELECT count(*)::bigint,
-				        count(*) FILTER (WHERE available_block <= $2)::bigint,
-				        count(*) FILTER (WHERE $1 < release_time)::bigint,
-				        count(*) FILTER (WHERE has_reschedule_error)::bigint,
-				        COALESCE(EXTRACT(EPOCH FROM ($1 - min(run_at) FILTER (WHERE available_block <= $2))), 0)::double precision
-				 FROM pending_task`,
-				now,
-				now.Unix()/BlockSizeSeconds,
-			).Scan(
-				&snapshot.Total,
-				&snapshot.Available,
-				&snapshot.Claimed,
-				&snapshot.RescheduleError,
-				&snapshot.OldestOverdueSecond,
-			)
-		})
+				 SELECT set_config('statement_timeout', $1, true),
+				        set_config('max_parallel_workers_per_gather', '0', true),
+				        set_config('jit', 'off', true)`,
+				strconv.FormatInt(self.statementTimeout.Milliseconds(), 10),
+			))
+			admitted := false
+			server.Raise(tx.QueryRow(
+				ctx,
+				`/* taskworker-queue-metrics */
+				 SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))`,
+				taskMetricsAdvisoryLockName,
+			).Scan(&admitted))
+			if !admitted {
+				returnErr = errTaskQueueMetricsBusy
+				return
+			}
+			bound := taskQueueMetricsBound{}
+			server.Raise(tx.QueryRow(ctx, self.boundedSql(), now, availableBlock).Scan(
+				&bound.dueRows,
+				&bound.dueErrors,
+				&bound.oldestOverdueSecond,
+				&bound.waitingRows,
+				&bound.waitingClaimed,
+				&bound.waitingErrors,
+			))
+			snapshot = bound.snapshot(self.boundRows, func(predicate string) int64 {
+				var planJson []byte
+				server.Raise(tx.QueryRow(
+					ctx,
+					`/* taskworker-queue-metrics */
+					 EXPLAIN (FORMAT JSON) SELECT 1 FROM pending_task WHERE `+predicate,
+					availableBlock,
+				).Scan(&planJson))
+				plans := []struct {
+					Plan struct {
+						Rows *float64 `json:"Plan Rows"`
+					} `json:"Plan"`
+				}{}
+				if err := json.Unmarshal(planJson, &plans); err != nil || len(plans) != 1 || plans[0].Plan.Rows == nil ||
+					!(0 <= *plans[0].Plan.Rows && *plans[0].Plan.Rows < 1e15) {
+					server.Raise(errors.New("task queue estimate has no plan row count"))
+				}
+				return int64(math.Round(*plans[0].Plan.Rows))
+			})
+		}, server.TxReadCommitted, pgx.ReadOnly, server.OptNoRetry())
 	}); recovered != nil {
 		if err, ok := recovered.(error); ok {
-			return snapshot, err
+			return taskQueueMetricsSnapshot{}, err
 		}
-		return snapshot, errors.New("task queue snapshot failed")
+		return taskQueueMetricsSnapshot{}, errors.New("task queue snapshot failed")
 	}
 	if returnErr != nil {
-		return snapshot, returnErr
-	}
-	if snapshot.OldestOverdueSecond < 0 {
-		snapshot.OldestOverdueSecond = 0
+		return taskQueueMetricsSnapshot{}, returnErr
 	}
 	return snapshot, nil
+}
+
+// Each side stops at boundRows+1 rows, which marks it saturated. The limit is
+// a literal so a cached generic plan still knows how few rows it needs.
+func (self taskQueueMetricsQuery) boundedSql() string {
+	limit := strconv.FormatInt(self.boundRows+1, 10)
+	return `/* taskworker-queue-metrics */
+		SELECT due.row_count, due.error_count, due.oldest_overdue_seconds,
+		       waiting.row_count, waiting.claimed_count, waiting.error_count
+		FROM (
+			SELECT count(*)::bigint AS row_count,
+			       count(*) FILTER (WHERE has_reschedule_error)::bigint AS error_count,
+			       COALESCE(EXTRACT(EPOCH FROM ($1 - min(run_at))), 0)::double precision AS oldest_overdue_seconds
+			FROM (
+				SELECT run_at, has_reschedule_error
+				FROM pending_task
+				WHERE available_block <= $2
+				ORDER BY available_block
+				LIMIT ` + limit + `
+			) AS head
+		) AS due, (
+			SELECT count(*)::bigint AS row_count,
+			       count(*) FILTER (WHERE $1 < release_time)::bigint AS claimed_count,
+			       count(*) FILTER (WHERE has_reschedule_error)::bigint AS error_count
+			FROM (
+				SELECT release_time, has_reschedule_error
+				FROM pending_task
+				WHERE $2 < available_block
+				ORDER BY available_block
+				LIMIT ` + limit + `
+			) AS head
+		) AS waiting`
+}
+
+// Rows read by one bounded refresh, before any estimate.
+type taskQueueMetricsBound struct {
+	dueRows             int64
+	dueErrors           int64
+	oldestOverdueSecond float64
+	waitingRows         int64
+	waitingClaimed      int64
+	waitingErrors       int64
+}
+
+// A side holding more than boundRows rows reports planner estimates, which are
+// requested only then and never lower what the bounded read proved. Every
+// claim is a waiting row, so claimed is exact while the waiting side fits the
+// bound and a lower bound otherwise. The oldest overdue age always comes from
+// the earliest-available rows read, which cover every due row unless the due
+// side is saturated.
+func (self taskQueueMetricsBound) snapshot(boundRows int64, estimate func(predicate string) int64) taskQueueMetricsSnapshot {
+	dueRows, dueErrors := self.dueRows, self.dueErrors
+	dueEstimated := boundRows < dueRows
+	if dueEstimated {
+		dueRows = max(dueRows, estimate(taskQueueMetricsDuePredicate))
+		dueErrors = min(dueRows, max(dueErrors, estimate(taskQueueMetricsDuePredicate+taskQueueMetricsErrorPredicate)))
+	}
+	waitingRows, waitingErrors := self.waitingRows, self.waitingErrors
+	waitingEstimated := boundRows < waitingRows
+	if waitingEstimated {
+		waitingRows = max(waitingRows, estimate(taskQueueMetricsWaitingPredicate))
+		waitingErrors = min(waitingRows, max(waitingErrors, estimate(taskQueueMetricsWaitingPredicate+taskQueueMetricsErrorPredicate)))
+	}
+	return taskQueueMetricsSnapshot{
+		Total:                    dueRows + waitingRows,
+		Available:                dueRows,
+		Claimed:                  self.waitingClaimed,
+		RescheduleError:          dueErrors + waitingErrors,
+		OldestOverdueSecond:      max(0, self.oldestOverdueSecond),
+		TotalEstimated:           dueEstimated || waitingEstimated,
+		AvailableEstimated:       dueEstimated,
+		ClaimedEstimated:         waitingEstimated,
+		RescheduleErrorEstimated: dueEstimated || waitingEstimated,
+	}
 }
 
 // Shares one database observation per interval across taskworkers. The initial

@@ -342,10 +342,17 @@ func TestTaskQueueMetricsDelayedAdmissionDoesNotStartExpiredWork(t *testing.T) {
 // not decode into plausible fresh zeros. Genuine zeros and original time survive.
 func TestTaskQueueMetricsWireRejectsIncompleteOrInvalidSnapshots(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 123456789, time.UTC)
-	valid := fmt.Sprintf(`{"v":1,"t":%d,"n":[0,0,0,0],"o":0}`, now.UnixNano())
+	valid := fmt.Sprintf(`{"v":2,"t":%d,"n":[0,0,0,0],"e":[false,false,false,false],"o":0}`, now.UnixNano())
 	for _, value := range []string{
 		`{}`, `null`, `[]`, valid + `{}`, strings.Repeat(" ", taskMetricsWireBytes+1),
-		strings.Replace(valid, `"v":1`, `"v":2`, 1),
+		strings.Replace(valid, `"v":2`, `"v":1`, 1), strings.Replace(valid, `"v":2`, `"v":3`, 1),
+		fmt.Sprintf(`{"v":1,"t":%d,"n":[0,0,0,0],"o":0}`, now.UnixNano()),
+		strings.Replace(valid, `,"e":[false,false,false,false]`, ``, 1),
+		strings.Replace(valid, `"e":[false,false,false,false]`, `"e":null`, 1),
+		strings.Replace(valid, `"e":[false,false,false,false]`, `"e":[false,false,false]`, 1),
+		strings.Replace(valid, `"e":[false,false,false,false]`, `"e":[false,null,false,false]`, 1),
+		strings.Replace(valid, `"e":[false,false,false,false]`, `"e":[false,false,false,false,false]`, 1),
+		strings.Replace(valid, `"e":[false,false,false,false]`, `"e":[0,false,false,false]`, 1),
 		strings.Replace(valid, `"t":`+fmt.Sprint(now.UnixNano()), `"t":0`, 1),
 		strings.Replace(valid, `"t":`+fmt.Sprint(now.UnixNano()), `"t":`+fmt.Sprint(now.Add(taskMetricsClockSkew+time.Nanosecond).UnixNano()), 1),
 		strings.Replace(valid, `"n":[0,0,0,0]`, `"n":[0,0,0]`, 1),
@@ -364,6 +371,15 @@ func TestTaskQueueMetricsWireRejectsIncompleteOrInvalidSnapshots(t *testing.T) {
 	sample, err := decodeTaskQueueMetricsSample(valid, now.Add(time.Second))
 	if err != nil || sample == nil || sample.snapshot != (taskQueueMetricsSnapshot{}) || !sample.observedAt.Equal(now) {
 		t.Fatal("valid zero or nanosecond source clock was lost")
+	}
+	estimated := fmt.Sprintf(`{"v":2,"t":%d,"n":[9,7,1,2],"e":[true,true,false,true],"o":3}`, now.UnixNano())
+	sample, err = decodeTaskQueueMetricsSample(estimated, now)
+	want := taskQueueMetricsSnapshot{
+		Total: 9, Available: 7, Claimed: 1, RescheduleError: 2, OldestOverdueSecond: 3,
+		TotalEstimated: true, AvailableEstimated: true, ClaimedEstimated: false, RescheduleErrorEstimated: true,
+	}
+	if err != nil || sample == nil || sample.snapshot != want {
+		t.Fatal("per-state estimate marks were not carried with their counts", err)
 	}
 }
 
@@ -418,7 +434,7 @@ func TestTaskQueueMetricsRefreshFailureRetainsSourceTimestamp(t *testing.T) {
 		return &taskQueueMetricsSample{snapshot: uniformTaskQueueSnapshot(6), observedAt: observedAt}, errTaskQueueMetricsUnavailable
 	}, collector, func(error) { errorCount++; cancel() })
 	<-done
-	metrics := make(chan prometheus.Metric, 6)
+	metrics := make(chan prometheus.Metric, 10)
 	collector.Collect(metrics)
 	close(metrics)
 	values := []prometheus.Metric{}
