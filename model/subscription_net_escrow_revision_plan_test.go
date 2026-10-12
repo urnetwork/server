@@ -27,7 +27,26 @@ func TestNetEscrowRevisionTriggerUsesContractKeyAfterUpgrade(t *testing.T) {
 		// Schema 753 changed this trigger. Keep its historical baseline fixed
 		// when later, unrelated migrations are appended.
 		server.ApplyDbMigrationsUpTo(ctx, 752)
-		f := newNetEscrowOrderingTestFixture(t, ctx)
+		// The fixture's active-balance reader selects grant_kind, which a
+		// later migration adds (e41e350f). Read the one grant's id with the
+		// same eligibility predicate in SQL valid at the pinned schema.
+		f := addNetEscrowOrderingTestParties(ctx)
+		balanceIds := []server.Id{}
+		server.Db(ctx, func(conn server.PgConn) {
+			rows, err := conn.Query(ctx, `SELECT balance_id FROM transfer_balance
+				WHERE network_id=$1 AND active AND start_time<=$2 AND $2<end_time`, f.sourceNetworkId, server.NowUtc())
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var balanceId server.Id
+					server.Raise(rows.Scan(&balanceId))
+					balanceIds = append(balanceIds, balanceId)
+				}
+			})
+		})
+		if len(balanceIds) != 1 {
+			t.Fatalf("payer balances = %d, want one", len(balanceIds))
+		}
+		f.balanceId = balanceIds[0]
 		contractID, unrelatedBalanceID := server.NewId(), server.NewId()
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE transfer_escrow SET (autovacuum_enabled=false)`))
