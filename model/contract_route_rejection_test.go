@@ -14,7 +14,24 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// A missing destination row, which the ring keeps for its timeout.
 func testDestinationRejection() ContractRouteRejection {
+	return ContractRouteRejection{
+		Cause:          ContractRouteDestinationInactive,
+		ResolutionPath: "rejected",
+		Relationship: ProvideRelationshipDetails{
+			Mode:                 ProvideModePublic,
+			SourceLifecycle:      NetworkClientLifecycleActiveTop,
+			DestinationLifecycle: NetworkClientLifecycleMissing,
+			SourceOwner:          NetworkClientSourceOwnerOther,
+			DestinationOwner:     NetworkClientSourceOwnerUnknown,
+		},
+	}
+}
+
+// The production shape: an old provider replying to a retired prober window,
+// whose row is present and inactive.
+func testTerminalDestinationRejection() ContractRouteRejection {
 	return ContractRouteRejection{
 		Cause:          ContractRouteDestinationInactive,
 		ResolutionPath: "rejected",
@@ -241,6 +258,225 @@ func TestContractRouteRejectionZeroBoundDisables(t *testing.T) {
 		sourceId, destinationId := server.NewId(), server.NewId()
 		if owner.RecordRouteRejection(sourceId, destinationId, false, testDestinationRejection(), nil) {
 			t.Fatal("a zero bound stored a refusal")
+		}
+	})
+}
+
+// An old provider retries a reply to a retired window every 5s, and the load
+// balancer spreads the retries over several api processes, so one process
+// sees the route again only after the ring's timeout. A refusal of an
+// inactive destination row is terminal and must still answer that retry.
+func TestContractTerminalRouteRejectionOutlivesTheRingTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		settings := DefaultContractOriginNotificationSettings()
+		owner := testContractOriginOwner(t.Context(), settings, opened)
+		defer owner.Close()
+		sourceId, destinationId := server.NewId(), server.NewId()
+		rejection := testTerminalDestinationRejection()
+		if !owner.RecordRouteRejection(sourceId, destinationId, false, rejection, nil) {
+			t.Fatal("terminal refusal was not stored")
+		}
+		// the retry this process sees next, after the ring would have expired it
+		time.Sleep(settings.RouteRejectionTimeout + 40*time.Second)
+		if replayed, ok := owner.RouteRejection(sourceId, destinationId, false); !ok || replayed != rejection {
+			t.Fatalf("retry after the ring timeout replay = %+v, %t", replayed, ok)
+		}
+		if _, ok := owner.RouteRejection(sourceId, destinationId, true); ok {
+			t.Fatal("a companion request replayed a non-companion refusal")
+		}
+		if _, ok := owner.RouteRejection(destinationId, sourceId, false); ok {
+			t.Fatal("the reverse route replayed the refusal")
+		}
+	})
+}
+
+// The timeout only bounds the cost of a mistake; a replay never extends it.
+func TestContractTerminalRouteRejectionExpiresAtItsTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		settings := DefaultContractOriginNotificationSettings()
+		owner := testContractOriginOwner(t.Context(), settings, opened)
+		defer owner.Close()
+		sourceId, destinationId := server.NewId(), server.NewId()
+		owner.RecordRouteRejection(sourceId, destinationId, false, testTerminalDestinationRejection(), nil)
+		time.Sleep(settings.TerminalRouteRejectionTimeout - time.Millisecond)
+		if _, ok := owner.RouteRejection(sourceId, destinationId, false); !ok {
+			t.Fatal("terminal refusal expired before its timeout")
+		}
+		time.Sleep(time.Millisecond)
+		if _, ok := owner.RouteRejection(sourceId, destinationId, false); ok {
+			t.Fatal("terminal refusal was replayed at its timeout")
+		}
+	})
+}
+
+// An origin edge or a subscription acknowledgement cannot open a route whose
+// destination row is inactive, so neither removes its refusal.
+func TestContractTerminalRouteRejectionSurvivesOriginEdges(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		owner := testContractOriginOwner(t.Context(), DefaultContractOriginNotificationSettings(), opened)
+		defer owner.Close()
+		sourceId, destinationId := server.NewId(), server.NewId()
+		watch, connection := testWatchRouteBucket(t, owner, opened, sourceId, destinationId)
+		defer watch.Close()
+		owner.RecordRouteRejection(sourceId, destinationId, false, testTerminalDestinationRejection(), nil)
+		key := contractOriginPairHash(destinationId, sourceId)
+		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
+		synctest.Wait()
+		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
+		synctest.Wait()
+		notifyCommittedContractOrigin(WithContractOriginNotifications(t.Context(), owner), destinationId, sourceId)
+		if _, ok := owner.RouteRejection(sourceId, destinationId, false); !ok {
+			t.Fatal("an origin edge removed the refusal of an inactive destination")
+		}
+	})
+}
+
+// Only a refusal that found the destination row present and inactive is
+// terminal. A missing row, a write-boundary refusal (whose labels carry the
+// earlier read's active lifecycle) and a missing origin stay in the ring:
+// they expire at its timeout and an acknowledgement clears them.
+func TestContractTerminalRouteRejectionOnlyForInactiveRows(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		settings := DefaultContractOriginNotificationSettings()
+		owner := testContractOriginOwner(t.Context(), settings, opened)
+		defer owner.Close()
+		writeBoundary := testTerminalDestinationRejection()
+		writeBoundary.Relationship.DestinationLifecycle = NetworkClientLifecycleActiveDerived
+		timed := []ContractRouteRejection{
+			testDestinationRejection(),
+			writeBoundary,
+			{Cause: ContractRouteMissingOrigin, ResolutionPath: "stream_fallback"},
+		}
+		terminal := []ContractRouteRejection{
+			testTerminalDestinationRejection(),
+			func() ContractRouteRejection {
+				rejection := testTerminalDestinationRejection()
+				rejection.Relationship.DestinationLifecycle = NetworkClientLifecycleInactiveTop
+				rejection.Relationship.DestinationOwner = NetworkClientSourceOwnerOther
+				return rejection
+			}(),
+		}
+		destinationId := server.NewId()
+		timedSourceIds := map[server.Id]ContractRouteRejection{}
+		for _, rejection := range timed {
+			sourceId := server.NewId()
+			timedSourceIds[sourceId] = rejection
+			if !owner.RecordRouteRejection(sourceId, destinationId, false, rejection, nil) {
+				t.Fatalf("refusal %+v was not stored", rejection)
+			}
+		}
+		terminalSourceIds := map[server.Id]ContractRouteRejection{}
+		for _, rejection := range terminal {
+			sourceId := server.NewId()
+			terminalSourceIds[sourceId] = rejection
+			if !owner.RecordRouteRejection(sourceId, destinationId, false, rejection, nil) {
+				t.Fatalf("refusal %+v was not stored", rejection)
+			}
+		}
+		time.Sleep(settings.RouteRejectionTimeout)
+		for sourceId, rejection := range timedSourceIds {
+			if _, ok := owner.RouteRejection(sourceId, destinationId, false); ok {
+				t.Fatalf("refusal %+v outlived the ring timeout", rejection)
+			}
+		}
+		for sourceId, rejection := range terminalSourceIds {
+			if _, ok := owner.RouteRejection(sourceId, destinationId, false); !ok {
+				t.Fatalf("terminal refusal %+v expired at the ring timeout", rejection)
+			}
+		}
+	})
+}
+
+// A route an old client keeps retrying survives the generation turnover; one
+// it stopped retrying ages out with its generation.
+func TestContractTerminalRouteRejectionKeepsRetriedRoutesAcrossGenerations(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		settings := DefaultContractOriginNotificationSettings()
+		settings.TerminalRouteRejectionCount = 2
+		owner := testContractOriginOwner(t.Context(), settings, opened)
+		defer owner.Close()
+		destinationId := server.NewId()
+		retriedId, abandonedId, thirdId, fourthId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
+		record := func(sourceId server.Id) {
+			if !owner.RecordRouteRejection(sourceId, destinationId, false, testTerminalDestinationRejection(), nil) {
+				t.Fatal("terminal refusal was not stored")
+			}
+		}
+		replayed := func(sourceId server.Id) bool {
+			_, ok := owner.RouteRejection(sourceId, destinationId, false)
+			return ok
+		}
+		record(retriedId)
+		record(abandonedId)
+		// a full generation turns over: both move to the previous generation
+		record(thirdId)
+		if !replayed(retriedId) {
+			t.Fatal("a refusal in the previous generation was not replayed")
+		}
+		// the retried route moved back, so this turnover drops only the abandoned one
+		record(fourthId)
+		if replayed(abandonedId) {
+			t.Fatal("a route no longer retried survived two generations")
+		}
+		for _, sourceId := range []server.Id{retriedId, thirdId, fourthId} {
+			if !replayed(sourceId) {
+				t.Fatal("a retried or recent refusal was dropped")
+			}
+		}
+		owner.terminalRouteRejections.stateLock.Lock()
+		held := len(owner.terminalRouteRejections.currentKeyRejections) + len(owner.terminalRouteRejections.previousKeyRejections)
+		owner.terminalRouteRejections.stateLock.Unlock()
+		if 2*settings.TerminalRouteRejectionCount < held {
+			t.Fatalf("generation bound of %d holds %d refusals", settings.TerminalRouteRejectionCount, held)
+		}
+	})
+}
+
+func TestContractTerminalRouteRejectionZeroBoundDisables(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		for _, settings := range []ContractOriginNotificationSettings{
+			func() ContractOriginNotificationSettings {
+				settings := DefaultContractOriginNotificationSettings()
+				settings.TerminalRouteRejectionCount = 0
+				return settings
+			}(),
+			func() ContractOriginNotificationSettings {
+				settings := DefaultContractOriginNotificationSettings()
+				settings.TerminalRouteRejectionTimeout = 0
+				return settings
+			}(),
+		} {
+			owner := testContractOriginOwner(t.Context(), settings, opened)
+			sourceId, destinationId := server.NewId(), server.NewId()
+			if owner.RecordRouteRejection(sourceId, destinationId, false, testTerminalDestinationRejection(), nil) {
+				t.Fatalf("a disabled terminal registry (%d, %s) stored a refusal", settings.TerminalRouteRejectionCount, settings.TerminalRouteRejectionTimeout)
+			}
+			if _, ok := owner.RouteRejection(sourceId, destinationId, false); ok {
+				t.Fatal("a disabled terminal registry replayed a refusal")
+			}
+			owner.Close()
+		}
+	})
+}
+
+func TestContractTerminalRouteRejectionClosedOwnerKeepsNothing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		owner := testContractOriginOwner(t.Context(), DefaultContractOriginNotificationSettings(), opened)
+		sourceId, destinationId := server.NewId(), server.NewId()
+		owner.RecordRouteRejection(sourceId, destinationId, false, testTerminalDestinationRejection(), nil)
+		owner.Close()
+		if _, ok := owner.RouteRejection(sourceId, destinationId, false); ok {
+			t.Fatal("a closed owner replayed a terminal refusal")
+		}
+		if owner.RecordRouteRejection(sourceId, destinationId, false, testTerminalDestinationRejection(), nil) {
+			t.Fatal("a closed owner stored a terminal refusal")
 		}
 	})
 }

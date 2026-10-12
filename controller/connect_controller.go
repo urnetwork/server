@@ -899,8 +899,52 @@ func CreateContract(
 		}
 	}
 
+	// Old providers keep returning traffic to windows whose forward contract
+	// passed its deadline, and a Stream fallback decides its origin with one
+	// lookup. Look it up before the secret, metadata and endpoint reads, which
+	// only a contract needs; the write path still selects the origin again.
+	// The watch stays registered until the verdict is recorded, so an origin
+	// edge during the lookup still closes the fence it armed.
+	if companionOriginSingleLookup(ctx) {
+		originWatch := notifications.Watch(destinationId, clientId)
+		defer originWatch.Close()
+		originCloseLinger := max(contractManagerSettings.OriginContractLinger, model.CompanionOriginCloseLinger)
+		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
+		companionOriginLookupCounter.WithLabelValues("initial").Inc()
+		// armed immediately before the read
+		fence := originWatch.Update()
+		originExists := companionOriginExists(ctx, clientId, destinationId, originCloseLinger)
+		leaveOrigin()
+		if originExists {
+			originWatch.Close()
+		} else {
+			companionOriginLookupHistogram.Observe(1)
+			server.RecordContractCompanionOriginOutcome(ctx, server.ContractCompanionOriginMissing)
+			rejectionCause = "missing_companion_origin"
+			recordContractFailureResolved(
+				clientId,
+				destinationId,
+				createContract.Companion,
+				model.ByteCount(createContract.TransferByteCount),
+				model.ErrMissingCompanionOrigin,
+				resolution,
+			)
+			// a watch the owner declined armed nothing to fence the verdict
+			if fence != nil {
+				recordRouteRejection(model.ContractRouteMissingOrigin, fence)
+			}
+			contractError := contractResultError(model.ErrMissingCompanionOrigin)
+			frame, err := connect.ToFrame(&protocol.CreateContractResult{Error: &contractError}, connect.DefaultProtocolVersion)
+			if err != nil {
+				return nil, err
+			}
+			timingResult = server.ContractCreationRejected
+			return []*protocol.Frame{frame}, nil
+		}
+	}
+
 	leaveSecret := server.EnterContractCreationStage(ctx, server.ContractStageProvideSecret)
-	provideSecretKey, err := model.GetProvideSecretKey(ctx, destinationId, provideMode)
+	provideSecretKey, err := getProvideSecretKey(ctx, destinationId, provideMode)
 	leaveSecret()
 	if err != nil {
 		rejectionCause = "provide_secret_unavailable"
@@ -1122,11 +1166,14 @@ func nextContract(
 	)
 }
 
-// The lifecycle lookup, degradation valve, escrow and zero escrow creation and
-// payer plan lookup newContract performs. Tests replace them to check, without
+// The lifecycle lookup, Stream fallback origin lookup, provide secret read,
+// degradation valve, escrow and zero escrow creation and payer plan lookup
+// CreateContract and newContract perform. Tests replace them to check, without
 // a database, which byte count the controller requests and signs for a given
-// escrow, and which creation path it takes.
+// escrow, which creation path it takes, and which reads a refusal skips.
 var findActiveClientPairNetworks = model.FindActiveClientPairNetworks
+var companionOriginExists = model.CompanionOriginExists
+var getProvideSecretKey = model.GetProvideSecretKey
 var zeroContractCost = model.ZeroContractCost
 var createTransferEscrow = model.CreateTransferEscrow
 var createCompanionTransferEscrow = model.CreateCompanionTransferEscrow

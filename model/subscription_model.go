@@ -2110,6 +2110,18 @@ func companionOriginExists(
 	return
 }
 
+// One read-only statement, the one the companion write path starts with, for
+// a caller that decides an absent origin before its other reads. A true result
+// is only a hint: the write path selects the origin again.
+func CompanionOriginExists(
+	ctx context.Context,
+	sourceId server.Id,
+	destinationId server.Id,
+	originContractTimeout time.Duration,
+) bool {
+	return companionOriginExists(ctx, sourceId, destinationId, originContractTimeout)
+}
+
 // The internal prober owns its return-path reservation ramp as well as its
 // outgoing ramp. A provider's defaults must not reserve a larger companion
 // against that account than the probe's own origin ramp. The earliest origin

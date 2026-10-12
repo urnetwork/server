@@ -43,25 +43,38 @@ func init() {
 // These budgets belong to one lifecycle owner, never to the process. Exhausting
 // them loses only an optimization: the request's bounded PostgreSQL wait remains.
 // Route rejections (contract_route_rejection.go) are bounded by count and by a
-// timeout; zero disables them.
+// timeout; zero disables them. Terminal route rejections have their own
+// generation bound and timeout.
 type ContractOriginNotificationSettings struct {
-	MaxWaiters            int
-	PublishQueueSize      int
-	PublishWorkers        int
-	MaxRouteRejections    int
-	RouteRejectionTimeout time.Duration
+	MaxWaiters                    int
+	PublishQueueSize              int
+	PublishWorkers                int
+	MaxRouteRejections            int
+	RouteRejectionTimeout         time.Duration
+	TerminalRouteRejectionCount   int
+	TerminalRouteRejectionTimeout time.Duration
 }
 
 // The route rejection bound holds about 6 MiB. The timeout is not exactly
 // 10s: old sdks retry a refused route every 5s, and a refusal kept for
 // exactly two retry intervals expires just before the second retry.
+//
+// Terminal refusals hold at most two generations of 32768, about 21 MiB. On
+// Main old sdks keep about 48k stale routes alive, retrying each every 5-6s
+// for hours, and an edge host's load balancer spreads a client's retries over
+// its 4-5 api processes. A process therefore holds roughly the 12k routes of
+// its host's clients and sees each about every 30s, which keeps that route's
+// refusal in the current generation. The hour matches the client state
+// refusal cache (session/state_refusal_cache.go).
 func DefaultContractOriginNotificationSettings() ContractOriginNotificationSettings {
 	return ContractOriginNotificationSettings{
-		MaxWaiters:            8192,
-		PublishQueueSize:      1024,
-		PublishWorkers:        2,
-		MaxRouteRejections:    16384,
-		RouteRejectionTimeout: 12 * time.Second,
+		MaxWaiters:                    8192,
+		PublishQueueSize:              1024,
+		PublishWorkers:                2,
+		MaxRouteRejections:            16384,
+		RouteRejectionTimeout:         12 * time.Second,
+		TerminalRouteRejectionCount:   32768,
+		TerminalRouteRejectionTimeout: time.Hour,
 	}
 }
 
@@ -98,8 +111,9 @@ type ContractOriginNotifications struct {
 	closed    bool
 	waiters   int
 	buckets   [contractOriginBucketCount]contractOriginBucket
-	// Owns its own lock; never taken while holding stateLock.
-	routeRejections *contractRouteRejections
+	// Each owns its own lock; never taken while holding stateLock.
+	routeRejections         *contractRouteRejections
+	terminalRouteRejections *contractTerminalRouteRejections
 }
 
 // The constructor starts the owner loops, but no subscription is opened until a
@@ -115,14 +129,16 @@ func newContractOriginNotifications(
 	publish func(context.Context, string, string) error,
 ) *ContractOriginNotifications {
 	if settings.MaxWaiters <= 0 || settings.PublishQueueSize <= 0 || settings.PublishWorkers <= 0 || settings.PublishWorkers > contractOriginBucketCount ||
-		settings.MaxRouteRejections < 0 || settings.RouteRejectionTimeout < 0 {
+		settings.MaxRouteRejections < 0 || settings.RouteRejectionTimeout < 0 ||
+		settings.TerminalRouteRejectionCount < 0 || settings.TerminalRouteRejectionTimeout < 0 {
 		panic("invalid contract origin notification budgets")
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	notifications := &ContractOriginNotifications{
 		ctx: ctx, cancel: cancel, settings: settings, subscribe: subscribe, publish: publish,
-		queue:           make(chan [32]byte, settings.PublishQueueSize),
-		routeRejections: newContractRouteRejections(settings.MaxRouteRejections, settings.RouteRejectionTimeout),
+		queue:                   make(chan [32]byte, settings.PublishQueueSize),
+		routeRejections:         newContractRouteRejections(settings.MaxRouteRejections, settings.RouteRejectionTimeout),
+		terminalRouteRejections: newContractTerminalRouteRejections(settings.TerminalRouteRejectionCount, settings.TerminalRouteRejectionTimeout),
 	}
 	for i := range notifications.buckets {
 		notifications.buckets[i] = contractOriginBucket{needed: make(chan struct{}), pairs: map[[32]byte]*contractOriginPair{}}
@@ -424,6 +440,7 @@ func (self *ContractOriginNotifications) Close() {
 		self.stateLock.Unlock()
 		// no edge can remove a route rejection once the readers stop
 		self.routeRejections.close()
+		self.terminalRouteRejections.close()
 		self.cancel()
 		self.workers.Wait()
 		var pairs []*contractOriginPair
