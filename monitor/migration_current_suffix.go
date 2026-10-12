@@ -241,6 +241,17 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationIndexRemoved("pending_task", "pending_task_has_reschedule_error")),
 	migrationCurrentSuffix(820, "open connection handler index",
 		migrationFp2Index("network_client_connection", "network_client_connection_connected_handler_id", "handler_id", "connected", false)),
+	migrationCurrentSuffix(826, "connection tables keep emptied pages",
+		migrationVacuumTruncateOff("network_client_connection"),
+		migrationVacuumTruncateOff("network_client_handler")),
+}
+
+// Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
+// from shared_buffers, which queues every statement on these tables.
+func migrationVacuumTruncateOff(table string) string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM pg_class relation
+		WHERE relation.oid = to_regclass('public.%s')
+		AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY['vacuum_truncate=false']::text[])`, table)
 }
 
 // A dropped index stays dropped: a rebuilt copy under the published name would

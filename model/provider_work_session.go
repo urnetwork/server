@@ -71,7 +71,7 @@ func providerWorkLockSessionMutationHeadInTx(ctx context.Context, tx server.PgTx
 		return
 	}
 	server.Raise(ctx.Err())
-	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`)
+	_, err := tx.Exec(ctx, providerWorkSessionMutationBridgeSql)
 	server.Raise(errors.Join(err, ctx.Err()))
 	if lockHead {
 		err = providerWorkLockEndpointRowsInTx(ctx, tx, clientIds)
@@ -82,6 +82,15 @@ func providerWorkLockSessionMutationHeadInTx(ctx context.Context, tx server.PgTx
 	_, err = tx.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)
 	server.Raise(errors.Join(err, ctx.Err()))
 }
+
+// Every session mutation owner writes network_client_connection under its
+// endpoint fences, so it takes that table's row-exclusive lock before them,
+// in the bridge's round trip. A strong table lock (autovacuum truncation,
+// DDL) then parks the owner before it holds an endpoint, instead of parking
+// it holding one while every later mutation of that endpoint queues behind
+// it on the fence.
+const providerWorkSessionMutationBridgeSql = `LOCK TABLE network_client_connection IN ROW EXCLUSIVE MODE;
+SELECT pg_advisory_xact_lock_shared(-776::bigint)`
 
 var providerWorkEndpointWriteLockSQL = server.TaggedDatabaseStatement(`SELECT pg_advisory_xact_lock(776,lock_key) FROM
    (SELECT DISTINCT ('x'||substr(md5(client_id::text),1,8))::bit(32)::int AS lock_key

@@ -10009,4 +10009,17 @@ var migrations = []any{
 	).withIndexCompletion(820, "network_client_connection", "network_client_connection_connected_handler_id",
 		"CREATE INDEX network_client_connection_connected_handler_id ON public.network_client_connection USING btree (handler_id) WHERE connected",
 		"connected"),
+	// 826: autovacuum's end-of-vacuum truncation holds AccessExclusiveLock on
+	// the table while it drops the cut pages from all of shared_buffers (256 GB
+	// on Main), so every connect, disconnect and handler heartbeat queues
+	// behind it. On 2026-10-12 it parked 361 backends for up to 4 s on
+	// network_client_connection (18:33Z, then 18:59Z, 19:04Z and 19:06Z).
+	// Space freed by the retention deletes is reused in place instead, whatever
+	// the server-wide vacuum_truncate setting. The option takes
+	// ShareUpdateExclusiveLock, which blocks no reader or writer.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_client_connection SET (vacuum_truncate = false);
+		ALTER TABLE network_client_handler SET (vacuum_truncate = false);
+	`),
 }

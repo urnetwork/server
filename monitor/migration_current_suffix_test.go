@@ -122,6 +122,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing open connection handler index", 820, `DROP INDEX network_client_connection_connected_handler_id`},
 		{"open connection handler index includes closed rows", 820, `DROP INDEX network_client_connection_connected_handler_id; CREATE INDEX network_client_connection_connected_handler_id ON network_client_connection(handler_id)`},
 		{"open connection handler index leads with client", 820, `DROP INDEX network_client_connection_connected_handler_id; CREATE INDEX network_client_connection_connected_handler_id ON network_client_connection(client_id,handler_id) WHERE connected`},
+		{"connection table truncates on vacuum", 826, `ALTER TABLE network_client_connection RESET (vacuum_truncate)`},
+		{"handler table truncates on vacuum", 826, `ALTER TABLE network_client_handler SET (vacuum_truncate = true)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
