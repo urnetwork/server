@@ -331,11 +331,12 @@ func dropClientReliabilityPartition(ctx context.Context, name string) (dropped b
 
 // MaintainClientReliabilityPartitions is the partition-mode retention pass:
 // create partitions from the retention cutoff through now+ahead (idempotent,
-// self-healing after outages), drop partitions entirely older than
-// ClientExpiration, and trim the small companion tables to the same horizon.
-// A lock-busy create or drop is skipped and retried on the next run.
+// self-healing after outages), drop partitions entirely older than the
+// retention cutoff (clientReliabilityRetentionCutoffBlock), and trim the small
+// companion tables to the same horizon. A lock-busy create or drop is skipped
+// and retried on the next run.
 func MaintainClientReliabilityPartitions(ctx context.Context, now time.Time) (created []string, dropped []string) {
-	cutoffBlock := reliabilityBlockNumber(now.Add(-ClientExpiration))
+	cutoffBlock := clientReliabilityRetentionCutoffBlock(ctx, now)
 	fromDay := reliabilityPartitionDay(cutoffBlock)
 	toDay := reliabilityPartitionDay(reliabilityBlockNumber(now)) + reliabilityPartitionAheadDays
 
@@ -658,13 +659,13 @@ func maxClientReliabilitySourceBlock(ctx context.Context) (maxBlock int64, ok bo
 }
 
 // MigrateClientReliabilityToPartitions converts client_reliability from a
-// plain table to a range-partitioned table, retaining only the last
-// ClientExpiration of blocks. The bulk of the retained window is copied
-// without any lock (rows at or below the drain high-water mark are immutable),
-// then a short ACCESS EXCLUSIVE window copies the tail and rename-swaps the
-// tables. The old table is kept as client_reliability_old for validation;
-// drop it with FinalizeClientReliabilityPartitionMigration (--finalize) to
-// reclaim its disk.
+// plain table to a range-partitioned table, retaining only the blocks that
+// retention keeps (clientReliabilityRetentionCutoffBlock). The bulk of the
+// retained window is copied without any lock (rows at or below the drain
+// high-water mark are immutable), then a short ACCESS EXCLUSIVE window copies
+// the tail and rename-swaps the tables. The old table is kept as
+// client_reliability_old for validation; drop it with
+// FinalizeClientReliabilityPartitionMigration (--finalize) to reclaim its disk.
 //
 // The bulk copy runs `parallelism` concurrent workers on the maintenance pool
 // (size it >= parallelism in db_maintenance.yml); the drain and app pool are
@@ -709,7 +710,7 @@ func MigrateClientReliabilityToPartitions(
 	}
 
 	now := server.NowUtc()
-	cutoffBlock := reliabilityBlockNumber(now.Add(-ClientExpiration))
+	cutoffBlock := clientReliabilityRetentionCutoffBlock(ctx, now)
 	fromDay := reliabilityPartitionDay(cutoffBlock)
 	toDay := reliabilityPartitionDay(reliabilityBlockNumber(now)) + reliabilityPartitionAheadDays
 
@@ -724,8 +725,9 @@ func MigrateClientReliabilityToPartitions(
 
 	mark, markOk := clientReliabilityMaxDrainedBlock(ctx)
 	logf(
-		"plan: retain blocks >= %d (30 days), partitions %s..%s (%d days), drain mark %v, %d copy workers",
+		"plan: retain blocks >= %d (%.1f days), partitions %s..%s (%d days), drain mark %v, %d copy workers",
 		cutoffBlock,
+		float64(reliabilityBlockNumber(now)-cutoffBlock)/float64(reliabilityBlocksPerDay),
 		reliabilityPartitionName(fromDay),
 		reliabilityPartitionName(toDay),
 		toDay-fromDay+1,

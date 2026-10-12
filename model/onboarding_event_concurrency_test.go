@@ -1,7 +1,7 @@
 // Conditional onboarding inserts must remain idempotent across concurrent
-// transactions, independently of the per-client connect.day cache. They run
-// read committed under a per-key advisory lock, never serializable, so they
-// add no SSI work to the primary.
+// transactions, independently of the connect.day process memory and claim.
+// They run read committed under a per-key advisory lock, never serializable,
+// so they add no SSI work to the primary.
 package model
 
 import (
@@ -17,8 +17,10 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Two different clients can both pass the cache and observe an empty network
-// day before either inserts. Both writes must complete with exactly one event.
+// Two clients of one network, admitted by two processes, both reach the
+// database when the fleet's claim cannot admit one writer, here because Redis
+// cannot answer for the day, and can observe an empty network day before
+// either inserts. Both writes must complete with exactly one event.
 func TestRecordConnectDayConcurrentClientsPersistOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -35,18 +37,29 @@ func TestRecordConnectDayConcurrentClientsPersistOnce(t *testing.T) {
 				))
 			}
 		})
+		// a value of another type makes every claim of the day fail
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.HSet(ctx, connectDayKey(networkId, day), "synthetic", "1").Err())
+		})
+		defer useConnectDayProcess()()
+		// as admission leaves it; a failed write forgets the day
+		connectDaySeen.remember(networkId, day)
 
 		writers := []func(context.Context){}
 		for _, clientId := range clientIds {
 			writers = append(writers, func(writeCtx context.Context) {
-				waitConnectDayWrites(recordConnectDayForTest(writeCtx, clientId, connectAt))
+				recordConnectDayWrite(connectDayWriteJob{
+					ctx:         writeCtx,
+					networkId:   networkId,
+					clientId:    clientId,
+					connectTime: connectAt,
+					day:         day,
+				})
 			})
 		}
 		runConcurrentOnboardingInserts(t, ctx, writers)
-		for _, clientId := range clientIds {
-			if connectDaySeen.remember(clientId, day) {
-				t.Fatal("concurrent connect.day write failed and forgot the client")
-			}
+		if connectDaySeen.remember(networkId, day) {
+			t.Fatal("concurrent connect.day write failed and forgot the network")
 		}
 		if count := connectDayEventCount(t, ctx, networkId); count != 1 {
 			t.Fatalf("concurrent connect.day writes stored %d events, want 1", count)

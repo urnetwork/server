@@ -218,11 +218,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 	// 2024.11.15 migration from "bringyour.com" to new package
 
 	addProfileTargets(taskWorker, profile,
-		task.NewTaskTargetWithPost(
-			task.TaskCleanup,
-			task.TaskCleanupPost,
-			"main.TaskCleanup",
-		),
+		task.NewTaskCleanupTaskTarget(),
 		// task.NewTaskTargetWithPost(work.WarmEmail, work.WarmEmailPost),
 		task.NewTaskTargetWithPost(
 			work.ExportStats,
@@ -233,7 +229,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExportProvidersMap,
 			work.ExportProvidersMapPost,
 		),
-		task.NewTaskTarget(work.BackfillClock),
+		task.NewTaskTargetWithPost(
+			work.BackfillClock,
+			work.BackfillClockPost,
+		),
 		work.NewMaintainNetworkSessionsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.WebSearchAnalytics,

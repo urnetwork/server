@@ -1085,6 +1085,13 @@ type RemoveNetworkClientError struct {
 	Message string `json:"message"`
 }
 
+// Read committed. Clients can send duplicate removals of one client that arrive
+// together. A duplicate waits on the first removal's row lock and then locks
+// the committed row. A repeatable read snapshot taken before the wait would
+// instead fail the whole transaction ("could not serialize access due to
+// concurrent update") and rerun it after a backoff. The transaction reads and
+// writes only the rows it locks, so a fresh snapshot per statement observes
+// nothing that a repeatable read snapshot would have hidden.
 func RemoveNetworkClient(
 	removeClient *RemoveNetworkClientArgs,
 	clientSession *session.ClientSession,
@@ -1094,12 +1101,12 @@ func RemoveNetworkClient(
 
 	// important: must check `network_id = session network_id`
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-		var rowCount int64
+		var removed bool
 		var err error
 		if callerClientId := clientSession.ByJwt.ClientId; callerClientId != nil {
 			// a client token removes only its own client and its children
 			// (AUTHZ1.md); any other client answers as one that does not exist
-			rowCount, err = deactivateOwnedNetworkClientInTx(
+			removed, err = deactivateOwnedNetworkClientInTx(
 				clientSession.Ctx,
 				tx,
 				removeClient.ClientId,
@@ -1107,15 +1114,17 @@ func RemoveNetworkClient(
 				*callerClientId,
 			)
 		} else {
+			var rowCount int64
 			rowCount, err = deactivateNetworkClientsInTx(
 				clientSession.Ctx,
 				tx,
 				[]server.Id{removeClient.ClientId},
 				clientSession.ByJwt.NetworkId,
 			)
+			removed = rowCount == 1
 		}
 		server.Raise(err)
-		if rowCount != 1 {
+		if !removed {
 			removeClientResult = &RemoveNetworkClientResult{
 				Error: &RemoveNetworkClientError{
 					Message: "Client does not exist.",
@@ -1125,7 +1134,7 @@ func RemoveNetworkClient(
 		}
 
 		removeClientResult = &RemoveNetworkClientResult{}
-	})
+	}, server.TxReadCommitted)
 
 	return removeClientResult, removeClientErr
 }
@@ -1221,21 +1230,30 @@ func deactivateNetworkClientsInTx(
 	return deactivateLockedNetworkClientsInTx(ctx, tx, lockedClientIds, networkId)
 }
 
-// deactivateOwnedNetworkClientInTx deactivates the client only when it is the
-// owner client itself or a child the owner created, and returns the rows
-// deactivated (0 when the client is not the owner's).
+// Deactivates the client only when it is the owner client itself or a child the
+// owner created. Returns true when the client is the owner's and is inactive
+// after the call, false when it is not the owner's.
+//
+// Deactivation is terminal, so an owned client that is already inactive is not
+// written again: the client is deactivated exactly once, and duplicate removals
+// keep its first deactivate_time. In a read committed transaction, a removal
+// that waits on a concurrent removal's row lock reads the committed row, finds
+// it inactive and writes nothing; when that removal rolls back, it reads the
+// row still active and deactivates it. The owner predicate reads only columns
+// that no statement updates, so evaluating it on the committed row matches
+// exactly the client it matched before the wait.
 func deactivateOwnedNetworkClientInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	clientId server.Id,
 	networkId server.Id,
 	ownerClientId server.Id,
-) (int64, error) {
-	var lockedClientId server.Id
+) (bool, error) {
+	var active bool
 	err := tx.QueryRow(
 		ctx,
 		`
-			SELECT client_id
+			SELECT active
 			FROM network_client
 			WHERE
 				client_id = $1 AND
@@ -1246,14 +1264,18 @@ func deactivateOwnedNetworkClientInTx(
 		clientId,
 		networkId,
 		ownerClientId,
-	).Scan(&lockedClientId)
+	).Scan(&active)
 	if err == pgx.ErrNoRows {
-		return 0, nil
+		return false, nil
 	}
 	if err != nil {
-		return 0, err
+		return false, err
 	}
-	return deactivateLockedNetworkClientsInTx(ctx, tx, []server.Id{lockedClientId}, networkId)
+	if !active {
+		return true, nil
+	}
+	rowCount, err := deactivateLockedNetworkClientsInTx(ctx, tx, []server.Id{clientId}, networkId)
+	return rowCount == 1, err
 }
 
 // The caller must hold FOR UPDATE on every client in this exact owned set.
@@ -3178,10 +3200,13 @@ func ConnectNetworkClientWithIpFamily(
 		return
 	}
 	// the durable connection history for the onboarding results: one
-	// connect.day event per network per UTC day, its own transaction after
-	// the connection is committed, cached per process, never failing this
-	// connect (RecordConnectDay)
-	RecordConnectDay(ctx, clientId, connectTime)
+	// connect.day event per network per UTC day, deduplicated per network
+	// across the fleet and written after the connection is committed, never
+	// failing this connect (RecordConnectDay). Transports always pass their
+	// authenticated network; a legacy caller that names none records no day.
+	for _, networkId := range authenticatedNetworkIds {
+		RecordConnectDay(ctx, networkId, clientId, connectTime)
+	}
 
 	return
 }
