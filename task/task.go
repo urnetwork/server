@@ -991,18 +991,25 @@ func RemovePendingTask(ctx context.Context, taskId server.Id) {
 // function that has been removed from the codebase. Such rows can never run
 // again: the runner fails them with ErrTargetNotFound and reschedules on the
 // clamped skew backoff forever, because at claim time deploy version skew is
-// indistinguishable from permanent removal. Call this from the startup
-// seeding (taskworker InitTasks) for each deliberately removed target. The
+// indistinguishable from permanent removal. Call this from the startup reap
+// (taskworker reapRetiredTasks) for each deliberately removed target. The
 // delete ignores claims on purpose — a row for a removed target is claimed
 // and re-errored every few seconds, so a claim filter would race with that
 // cycle. A rollback to a build that still schedules the function re-seeds
 // it, and the next roll-forward cleans it again.
+//
+// No index covers the bare function name, so `function_name = $1` alone scans
+// the whole queue, which in production is tens of millions of rows and takes
+// minutes. The canonical-name expression leads the function poll index; the
+// exact name then filters only that function's rows.
 func RemovePendingTasksForFunctionInTx(ctx context.Context, tx server.PgTx, functionName string) (removedCount int64) {
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 			DELETE FROM pending_task
-			WHERE function_name = $1
+			WHERE
+				regexp_replace(function_name, '/v[0-9]+', '', 'g') = regexp_replace($1::text, '/v[0-9]+', '', 'g') AND
+				function_name = $1
 		`,
 		functionName,
 	))
