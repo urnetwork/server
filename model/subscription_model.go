@@ -4493,6 +4493,10 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 				contractHoleEventInTx(ctx, tx, openContract.contractId, openContract.sourceId, openContract.destinationId, "remove")
 				_, err := removeScheduledContractClosesInTx(ctx, tx, []server.Id{openContract.contractId})
 				server.Raise(err)
+				// The release below is best effort; a lost one would hold the
+				// payer's Redis credit until its lease ends. A durable task in
+				// this commit retries it, without settling the escrow.
+				queueQuarantineReservationReleaseInTx(ctx, tx, openContract.contractId)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
 
