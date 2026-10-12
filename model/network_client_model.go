@@ -1450,8 +1450,15 @@ func RemoveNetworkClients(
 	// gets this generic "too many concurrent runs" signal here instead of
 	// the more specific AlreadyInProgress a few lines down. Both are the
 	// same instruction to the caller (retry later), so this is a deliberate
-	// simplification rather than tracking per-network exclusions.
-	if concurrentRuns := task.CountAvailableByFunctionName(clientSession.Ctx, RemoveNetworkClientsTask); MaxConcurrentBulkClientRemovalRuns <= concurrentRuns {
+	// simplification rather than tracking per-network exclusions. A count
+	// that fails or exceeds its statement bound admits nothing: the
+	// reservation is released and the error returned.
+	concurrentRuns, err := task.CountAvailableByFunctionName(clientSession.Ctx, RemoveNetworkClientsTask)
+	if err != nil {
+		CancelBulkClientRemovalReservation(clientSession.Ctx, reservationId)
+		return nil, err
+	}
+	if MaxConcurrentBulkClientRemovalRuns <= concurrentRuns {
 		CancelBulkClientRemovalReservation(clientSession.Ctx, reservationId)
 		return &RemoveNetworkClientsResult{TooManyConcurrentRuns: true}, nil
 	}
