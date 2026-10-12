@@ -59,7 +59,8 @@ const (
 )
 
 // ExtenderMeasurementName is an extender's measurement name (N1): its id
-// under the zone.
+// under the zone. The zero id is no extender's and has no name, "": nothing
+// is issued, published or signed for it.
 func ExtenderMeasurementName(extenderId server.Id, zone string) string {
 	return connect.ExtenderMeasurementName(connect.Id(extenderId), zone)
 }
@@ -133,6 +134,9 @@ func ParseExtenderMeasurementCsrDer(csr []byte, extenderId server.Id, zone strin
 		return nil, fmt.Errorf("the measurement certificate request may name the extender's measurement name only")
 	}
 	name := ExtenderMeasurementName(extenderId, zone)
+	if name == "" {
+		return nil, fmt.Errorf("the extender has no measurement name")
+	}
 	if len(request.DNSNames) != 1 || request.DNSNames[0] != name {
 		return nil, fmt.Errorf(
 			"the measurement certificate request names %v, not only the extender's measurement name %s",
@@ -246,7 +250,7 @@ func GetExtenderMeasurementHosts(ctx context.Context, config *ExtenderConfig, no
 			continue
 		}
 		name := ExtenderMeasurementName(target.Extender.ExtenderId, zone)
-		if !slices.Contains(target.Cert.Names, name) {
+		if name == "" || !slices.Contains(target.Cert.Names, name) {
 			// a certificate for another zone's name
 			continue
 		}
@@ -280,7 +284,9 @@ func extenderMeasurementId(
 	addresses []*model.NetworkExtenderAddress,
 	issueTime time.Time,
 ) []byte {
-	if !config.Measurement.Enabled {
+	if !config.Measurement.Enabled || extender.ExtenderId == (server.Id{}) {
+		// the zero id names no extender, and a reader would compute no name
+		// from it
 		return nil
 	}
 	if extender.MeasurementCertNotAfter == nil || !issueTime.Before(*extender.MeasurementCertNotAfter) {

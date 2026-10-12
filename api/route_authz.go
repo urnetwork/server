@@ -124,6 +124,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/extender-release":                routeAccessClient,
 	"POST /network/extender-block-report":           routeAccessClient,
 	"POST /network/ping-report":                     routeAccessClient,
+	"GET /network/extender-measurement-cert":        routeAccessClient, // the caller's own extender's certificate (lag.dev/PLAN.md A8)
 	"POST /network/provider-egress-location":        routeAccessPublic,
 	"GET /network/provider-egress-due":              routeAccessPublic,
 	"GET /network/provider-blackhole-due":           routeAccessPublic,
@@ -278,6 +279,10 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /connect":                                 routeAccessPublic,
 	"POST /apple/notification":                      routeAccessPublic,
 	"GET /my-ip-info":                               routeAccessPublic,
+	"POST /lag/session":                             routeAccessPublic, // creates a lag.dev guest network and its one client (lag.dev/PLAN.md A1)
+	"GET /lag/extenders":                            routeAccessClient,
+	"POST /lag/track":                               routeAccessClient,
+	"POST /network/extender-lag-report":             routeAccessClient,
 	"POST /updates/brevo":                           routeAccessPublic,
 	"POST /log/([^/]+)/upload":                      routeAccessClient,
 	"GET /\\.well-known/oauth-authorization-server": routeAccessPublic,

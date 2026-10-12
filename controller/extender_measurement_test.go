@@ -203,6 +203,19 @@ func TestExtenderMeasurementCsrRefusesWhatC5Refuses(t *testing.T) {
 			t.Errorf("%q...: the text was accepted", csrBase64[:min(len(csrBase64), 8)])
 		}
 	}
+
+	// the zero id has no name, so no request is for it, not even one whose
+	// name is empty or the zero id's spelling
+	connect.AssertEqual(t, ExtenderMeasurementName(server.Id{}, testMeasurementZone), "")
+	for _, zeroName := range []string{"", server.Id{}.String() + "." + testMeasurementZone} {
+		csr := testMeasurementCsr(t, key, &x509.CertificateRequest{DNSNames: []string{zeroName}})
+		if _, err := ParseExtenderMeasurementCsrDer(csr, server.Id{}, testMeasurementZone); err == nil {
+			t.Errorf("%q: a request for the zero id was accepted", zeroName)
+		}
+	}
+	if _, ok := ParseExtenderMeasurementName(server.Id{}.String()+"."+testMeasurementZone, testMeasurementZone); ok {
+		t.Errorf("the zero id's spelling parsed as a measurement name")
+	}
 }
 
 func testMeasurementAddress(ip string, carriers ...string) *model.NetworkExtenderAddress {
@@ -383,6 +396,17 @@ func TestSignExtenderRecordCarriesTheMeasurementId(t *testing.T) {
 			t.Errorf("%s: the record carries a measurement id", c.name)
 		}
 	}
+
+	// a record signed for the zero id, which names no extender, carries none
+	zeroExtender := testMeasurementExtender()
+	zeroExtender.ExtenderId = server.Id{}
+	zeroExtender.MeasurementCertNotAfter = &notAfter
+	connect.AssertEqual(t, len(extenderMeasurementId(
+		&ExtenderConfig{Measurement: ExtenderMeasurementConfig{Enabled: true}},
+		zeroExtender,
+		tcpAddresses,
+		issueTime,
+	)), 0)
 }
 
 // Installs the fixture's `extender.yml` with a measurement block, enabled,

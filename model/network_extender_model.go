@@ -81,8 +81,9 @@ type NetworkExtender struct {
 	CanaryChannel string
 	// The latest expiry of the extender's live measurement certificates, nil
 	// while it holds none (lag.dev/PLAN.md C10). Read where a record is
-	// signed, in the signing transaction, so the record's MeasurementId
-	// describes the same state the record does.
+	// signed, in the signing transaction, so the record's MeasurementId --
+	// the extender's 16-byte id, or empty -- describes the same state the
+	// record does.
 	MeasurementCertNotAfter *time.Time
 }
 
