@@ -226,6 +226,7 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "epoch", kind: "bigint", notNull: true},
 			snMainnetMigrationColumn{name: "provider_chunks", kind: "text[]"},
 			snMainnetMigrationColumn{name: "declared_by", kind: "character varying(256)"},
+			snMainnetMigrationColumn{name: "rebuild_requested_by", kind: "character varying(256)"},
 			snMainnetMigrationColumn{name: "create_time", kind: "timestamp without time zone", notNull: true}),
 		snMainnetMigrationConstraints("st_ledger_v2_epoch_rows",
 			"PRIMARY KEY (deployment_key, no_id, epoch)",

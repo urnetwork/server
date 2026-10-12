@@ -50,12 +50,14 @@ var (
 // StLedgerV2EpochRows is the record of one covered epoch's provider rows: the
 // chunk references of its rows (empty when it has none), or, when DeclaredBy
 // is set, the operator's declaration that its inputs are unrecoverable, which
-// the header shows as providers: null.
+// the header shows as providers: null. RebuildRequestedBy names who made the
+// operator's explicit request to build the epoch's rows again.
 type StLedgerV2EpochRows struct {
-	Epoch          uint64
-	ProviderChunks []string
-	DeclaredBy     string
-	CreateTime     time.Time
+	Epoch              uint64
+	ProviderChunks     []string
+	DeclaredBy         string
+	RebuildRequestedBy string
+	CreateTime         time.Time
 }
 
 // Null reports the explicit unrecoverable declaration.
@@ -64,8 +66,9 @@ func (self *StLedgerV2EpochRows) Null() bool {
 }
 
 // RecordStLedgerV2EpochRows records an epoch's provider chunk references once
-// (§6.4 fixed inputs). Recording the same references again is a no-op; any
-// other existing record is ErrStLedgerV2EpochRowsFixed.
+// (§6.4 fixed inputs). Recording the same references again is a no-op; a
+// record whose rebuild the operator requested is replaced, which ends the
+// request; any other existing record is ErrStLedgerV2EpochRowsFixed.
 func RecordStLedgerV2EpochRows(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64, providerChunks []string) error {
 	if providerChunks == nil {
 		providerChunks = []string{}
@@ -92,7 +95,8 @@ func DeclareStLedgerV2EpochUnrecoverable(ctx context.Context, deploymentKey StDe
 	return nil
 }
 
-// Inserts the record when absent and otherwise returns the existing one.
+// Inserts the record when absent, replaces with rows a record whose rebuild
+// was requested, and otherwise returns the existing one.
 func recordStLedgerV2EpochRows(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64, providerChunks []string, declaredBy string) (existing *StLedgerV2EpochRows) {
 	key := requireStDeploymentKey(deploymentKey)
 	var declared *string
@@ -105,7 +109,9 @@ func recordStLedgerV2EpochRows(ctx context.Context, deploymentKey StDeploymentKe
 			`
 				INSERT INTO st_ledger_v2_epoch_rows (deployment_key, no_id, epoch, provider_chunks, declared_by, create_time)
 				VALUES ($1, $2, $3, $4, $5, $6)
-				ON CONFLICT (deployment_key, no_id, epoch) DO NOTHING
+				ON CONFLICT (deployment_key, no_id, epoch) DO UPDATE
+				SET provider_chunks = EXCLUDED.provider_chunks, declared_by = NULL, rebuild_requested_by = NULL, create_time = EXCLUDED.create_time
+				WHERE st_ledger_v2_epoch_rows.rebuild_requested_by IS NOT NULL AND EXCLUDED.declared_by IS NULL
 			`,
 			key, int64(noId), int64(epoch), providerChunks, declared, server.NowUtc(),
 		))
@@ -131,7 +137,7 @@ func getStLedgerV2EpochRowsInTx(ctx context.Context, tx server.PgTx, key string,
 	result, err := tx.Query(
 		ctx,
 		`
-			SELECT epoch, provider_chunks, declared_by, create_time
+			SELECT epoch, provider_chunks, declared_by, rebuild_requested_by, create_time
 			FROM st_ledger_v2_epoch_rows
 			WHERE deployment_key = $1 AND no_id = $2 AND epoch BETWEEN $3 AND $4
 		`,
@@ -141,11 +147,14 @@ func getStLedgerV2EpochRowsInTx(ctx context.Context, tx server.PgTx, key string,
 		for result.Next() {
 			record := &StLedgerV2EpochRows{}
 			var epoch int64
-			var declaredBy *string
-			server.Raise(result.Scan(&epoch, &record.ProviderChunks, &declaredBy, &record.CreateTime))
+			var declaredBy, rebuildRequestedBy *string
+			server.Raise(result.Scan(&epoch, &record.ProviderChunks, &declaredBy, &rebuildRequestedBy, &record.CreateTime))
 			record.Epoch = uint64(epoch)
 			if declaredBy != nil {
 				record.DeclaredBy = *declaredBy
+			}
+			if rebuildRequestedBy != nil {
+				record.RebuildRequestedBy = *rebuildRequestedBy
 			}
 			records[record.Epoch] = record
 		}

@@ -125,8 +125,8 @@ func TestStLedgerV2DriverRetriesTheLatestBlockRead(t *testing.T) {
 }
 
 // SV-1 (latest block): the client reads the latest block's number, which runs
-// ahead of the finalized head; a canceled read and a client without an
-// endpoint fail.
+// ahead of the finalized head; an endpoint that fails the read, a canceled
+// read and a client without an endpoint fail.
 func TestStLedgerV2ClientReadsTheLatestBlock(t *testing.T) {
 	ctx := context.Background()
 	fixture := newLedgerV2RPC(t)
@@ -135,6 +135,11 @@ func TestStLedgerV2ClientReadsTheLatestBlock(t *testing.T) {
 	if latest, err := client.LedgerV2LatestBlock(ctx); err != nil || latest != 103 {
 		t.Fatalf("latest %d %v", latest, err)
 	}
+	fixture.latestUnavailable = true
+	if latest, err := client.LedgerV2LatestBlock(ctx); latest != 0 || err == nil || !strings.HasPrefix(err.Error(), "latest head: ") || !strings.Contains(err.Error(), "latest block unavailable") {
+		t.Fatalf("a failed read: %d %v", latest, err)
+	}
+	fixture.latestUnavailable = false
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := client.LedgerV2LatestBlock(canceled); !errors.Is(err, context.Canceled) {

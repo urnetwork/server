@@ -280,6 +280,8 @@ func startReservedAttemptUpload(ctx context.Context, start func(context.Context)
 // validator staging cache, whose refresh loop stops when a drain begins while
 // the routes stay served until the close joins its leases.
 func NewRouter(routeCtx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
+	// The settlement v2 ledger routes read committed trees through the builder.
+	controller.InstallStLedgerBuilder()
 	reservedUpload := startReservedAttemptUpload(uploadCtx, controller.NewStReservedAttemptUpload)
 	notifications := model.NewContractOriginNotifications(routeCtx, model.DefaultContractOriginNotificationSettings())
 	// FindProviders2 answers served here count toward each provider's
