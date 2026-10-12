@@ -10,10 +10,20 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// A request whose every frame repeats a route already refused for the
+// credential's own client is answered from that refusal before the client
+// state query (controller/connect_control_refusal_replay.go); every other
+// request authenticates as before.
 func ConnectControl(w http.ResponseWriter, r *http.Request) {
 	r, finish := router.ObserveConnectControl(r)
 	defer finish()
-	router.WrapWithInputRequireClient(controller.ConnectControl, w, r)
+	router.WrapWithInputRequireClientUnlessAnswered(
+		controller.PrepareConnectControlRefusals,
+		controller.ReplayConnectControlRefusals,
+		controller.ConnectControl,
+		w,
+		r,
+	)
 }
 
 // Bind the router-owned notifier without creating a request-owned subscription

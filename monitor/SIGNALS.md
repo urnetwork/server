@@ -10716,8 +10716,13 @@ The API-side active-lifecycle guard exports the bounded counter cause
 `urnetwork_connect_contract_failures_total{cause="inactive_destination"}`.
 Unlike §2.17, this is not an inferred role or fallback: the contract boundary
 itself found the requested destination missing or inactive and refused to
-create the route. Query both initialized original-companion partitions and the
-traffic-created joint diagnostic family over five minutes:
+create the route. A repeat of a refused route is counted again with the
+recorded labels when the owner's route rejection registry answers it: an
+inactive destination row for up to an hour, a missing row for 60 seconds. On
+`/connect/control` that answer can come before the client state query
+(`urnetwork_connect_control_refusal_replays_total`), so the rate counts
+retries, not lifecycle reads. Query both initialized original-companion
+partitions and the traffic-created joint diagnostic family over five minutes:
 
 ```promql
 label_replace((sum by (companion) (rate(
@@ -13791,12 +13796,34 @@ The opt-in API instrumentation adds only fixed cells:
   `urnetwork_connect_control_http_phase_seconds_{sum,count}{phase}` measure
   `prepare` (session/body/JSON), `authenticate` (normal session auth),
   `controller` (pack decode, frame handlers and pack encode), and `response`
-  (HTTP result formatting/writing). The matching
+  (HTTP result formatting/writing). For a request answered from recorded
+  route refusals (below), `authenticate` covers the signature, claims,
+  session horizon, session revocation marker and remembered state refusals
+  but no client state query, and `controller` the replay of those refusals. The matching
   `urnetwork_connect_control_http_phase_completions_total{phase,outcome}` has
   exactly 16 cells: four phases by `ok|rejected|canceled|panic`. Successful
   transitions count the phase exited, not another logical request. Canceled
   context takes precedence over panic. Early rejection remains in its owning
   phase; all gauges release during normal return or panic unwind.
+- `urnetwork_connect_control_refusal_replays_total{cause}` counts API
+  `/connect/control` requests answered from route refusals that the
+  router's origin notification owner recorded for the credential's own
+  client, after the signature, claims, session horizon, session revocation
+  marker and remembered state refusals and without the client state query.
+  Every frame of such a request is a CreateContract whose exact route
+  (verified client, destination, companion flag) has a recorded refusal:
+  terminal inactive-destination refusals for up to an hour, ring refusals
+  for up to 60 seconds or until an origin edge. `cause` is
+  `inactive_destination`, `missing_companion_origin` or `mixed`; the three
+  children exist at zero. Each answered request runs no
+  `urnetwork_jwt_state_queries_total` query and records no
+  `urnetwork_session_auth_attempts_total` attempt, while its frames count
+  exactly as route rejection cache hits in the frame, rejection, failure,
+  detail and creation families. A request with any other frame, or any
+  route without a recorded refusal, authenticates normally. Until a request
+  of its own reaches the state query, a removed or rotated client is told
+  only the refusals recorded for it; a revoked session marker or a
+  remembered state refusal still answers 401 first.
 - `urnetwork_connect_control_frames_total{ingress,message,outcome}` has 64
   cells: `http|internal`, eight fixed message kinds (`create_contract`,
   `close_contract`, `provide`, `encrypted_key`, `client_key`, `control_ping`,
@@ -13850,7 +13877,11 @@ or deadline only when that attempt's context supplies the corresponding error;
 other query failures remain `query_error`.
 
 The multiplicity control is per authenticated operation, not per frame or
-unique credential. A hosted child control pack makes one combined durable
+unique credential. An API `/connect/control` request answered from recorded
+route refusals is not authenticated by the state query and makes none; such
+requests are counted by `urnetwork_connect_control_refusal_replays_total`, so
+`api/control` queries plus those replays, plus refusals and failures before
+the query, account for the route's requests. A hosted child control pack makes one combined durable
 parent-ownership and JWT-state query, even when it contains 16 frames; its frames use
 the existing `http` wrapper label. Direct prober control makes one JWT-state
 query per pack and uses `internal` frames. Verified resident in-band control
@@ -17332,7 +17363,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
 | `payout-invalid-destination-reset-failed` — composed `Payment create transaction error: ...; invalid destination reset error: ...`, or the legacy form with ` = ` at both separators | The controller reported a destination rejection followed by an unsuccessful guarded attempt reset. The shared complete marker requires nonempty reset detail and precedes ordinary processor/network classes. Concurrent, terminal, or on-chain state can block reset, as can persistence failure; it does not prove unchanged wallet configuration. The Alert retains a fixed sample and `phase=guarded-reset`, never the processor/persistence suffix or inferred address. An older equals-only watcher or incomplete log window cannot establish a healthy reset window. | Reconcile the current payment/processor state privately and distinguish guarded state rejection from persistence failure. Preserve the key; do not change wallets solely from this class or clear/replay rows. Verify an eligible reset succeeds or the existing attempt reaches a safe terminal outcome, with no duplicate transfer and stable keys for ambiguous submits. Require zero reset-failure events and durable `invalid-destination-reset-failed` rows through the natural 90-minute retry window plus ingestion delay, using a containing watcher and complete observations. See §1.2/§5.7. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The ordinary processor response rejects the destination before transfer creation. Historically the chain-blind validator admitted Solana keys declared as `MATIC`; after a successful guarded reset, an unchanged wallet selection can repeat that rejection. An ordinary Circle-client line can accompany a later reset failure and is not a reset-success witness. | Confirm typed rejection, guarded reset success, current artifact, and current wallet selection before correcting a proven chain mismatch through the supported account API under account-owner/operations authority. Resolve a concurrent `payout-invalid-destination-reset-failed` boundary first. Preserve keys for ambiguous submits; never edit/delete payment/task rows. Verify the next natural retry selects the corrected wallet with the safely renewed key, no duplicate transfer, and zero durable/logical errors within 90 minutes plus ingestion delay. See §5.7. |
-| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`, or for a Stream fallback by its one origin lookup in `CreateContract`, before the provide secret, metadata and endpoint reads. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
+| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`, or for a Stream fallback by its one origin lookup in `CreateContract`, before the provide secret, metadata and endpoint reads, and again with the recorded labels when a refusal kept by the route rejection ring (60 seconds, or until an origin edge) is replayed, including before the client state query. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
 | Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | No matching request was observed on those captured fronts. This excludes a server arrival only when the capture covers every route the shipped client can choose: Alt serves its own API over H3/WhoDis without the ordinary LB/API path (§16.9). In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path and embedded client transport revision. Bind the ordinary API and Alt API/Connect handler generations and public carrier paths before assigning an absent request to the client. If a complete capture excludes arrival, inspect `[net]http serial`/`[net]http parallel` route selection and require the bounded preferred-route and cold-route discovery controls. Missing Alt coverage is unknown; it does not authorize a server restart, longer UI wait or app-level retry. |

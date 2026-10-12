@@ -2,6 +2,7 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -380,6 +381,47 @@ func WrapWithInputBodyFormatterRequireClient[T any, R any](
 				return empty, authenticationHttpError(err)
 			}
 			advanceControlHttpPhase(req, controlHttpController)
+			return impl(arg, clientSession)
+		},
+		w,
+		req,
+		formatters...,
+	)
+}
+
+// WrapWithInputRequireClient, except that a client credential's request may be
+// answered after the checks that need no client state query and before that
+// query (session.ClientSession.AuthUnlessAnswered). prepare decides from the
+// credential's verified client id and the input whether to answer, and reads
+// nothing; reply then produces the answer. Both must grant nothing: only a
+// refusal already recorded for that client may be reported again. Every other
+// request authenticates and runs impl exactly as WrapWithInputRequireClient.
+func WrapWithInputRequireClientUnlessAnswered[T any, A any, R any](
+	prepare func(context.Context, server.Id, T) (A, bool),
+	reply func(context.Context, A) (R, error),
+	impl ImplWithInputFunction[T, R],
+	w http.ResponseWriter,
+	req *http.Request,
+	formatters ...FormatFunction[R],
+) {
+	wrapWithInput(
+		RequestBodyFormatter,
+		func(arg T, clientSession *session.ClientSession) (R, error) {
+			advanceControlHttpPhase(req, controlHttpAuthenticate)
+			var prepared A
+			answered, err := clientSession.AuthUnlessAnswered(req, func(ctx context.Context, clientId server.Id) bool {
+				var ok bool
+				prepared, ok = prepare(ctx, clientId, arg)
+				return ok
+			})
+			if err != nil || !answered && clientSession.ByJwt.ClientId == nil {
+				var empty R
+				return empty, authenticationHttpError(err)
+			}
+			advanceControlHttpPhase(req, controlHttpController)
+			if answered {
+				return reply(clientSession.Ctx, prepared)
+			}
 			return impl(arg, clientSession)
 		},
 		w,

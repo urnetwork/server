@@ -55,9 +55,13 @@ type ContractOriginNotificationSettings struct {
 	TerminalRouteRejectionTimeout time.Duration
 }
 
-// The route rejection bound holds about 6 MiB. The timeout is not exactly
-// 10s: old sdks retry a refused route every 5s, and a refusal kept for
-// exactly two retry intervals expires just before the second retry.
+// The route rejection bound holds about 6 MiB. Old sdks retry a refused
+// route every 5s, and an edge host's load balancer spreads the retries over
+// its 4-5 api processes, so a process sees one route only every 25-40s. At
+// 12s the ring answered about a quarter of those retries; 60s answers most.
+// An origin edge or a subscription acknowledgement still removes a refusal at
+// once, so only an edge this owner never receives refuses an identical
+// request for up to the full 60s.
 //
 // Terminal refusals hold at most two generations of 32768, about 21 MiB. On
 // Main old sdks keep about 48k stale routes alive, retrying each every 5-6s
@@ -72,7 +76,7 @@ func DefaultContractOriginNotificationSettings() ContractOriginNotificationSetti
 		PublishQueueSize:              1024,
 		PublishWorkers:                2,
 		MaxRouteRejections:            16384,
-		RouteRejectionTimeout:         12 * time.Second,
+		RouteRejectionTimeout:         60 * time.Second,
 		TerminalRouteRejectionCount:   32768,
 		TerminalRouteRejectionTimeout: time.Hour,
 	}
