@@ -3250,20 +3250,25 @@ func claimContractOutcomeInTx(
 // The usage came from this transaction's locked contract and original reports.
 // Keep the guarded outcome write, signed provenance and commit event together.
 func claimContractOutcomeWithUsageInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, usage *contractUsageSnapshot) (bool, error) {
-	return claimContractOutcomeWithUsageValueInTx(ctx, tx, contractId, outcome, usage, false)
+	return claimContractOutcomeWithUsageValueInTx(ctx, tx, contractId, outcome, usage, false, nil)
 }
 
 // Forced reconciliation can retain an existing raw snapshot exactly, including
 // damaged historical evidence. It never replaces immutable attribution.
-func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, usage any, reconcile bool) (bool, error) {
+//
+// A deadline close passes its retirement time. The outcome write then also
+// clears the dispute, marks the usage unverified and caps the stored expiration
+// at that time, in the same row version. Retiring with a separate UPDATE first
+// wrote one more full row version per close: by its deadline a contract's page
+// is usually full, so that version moved page and added an entry to every
+// transfer_contract index, only to be replaced by the outcome before commit.
+func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, usage any, reconcile bool, retirementTime *time.Time) (bool, error) {
 	ctx = providerWorkSessionContext(ctx)
 	// Return the database clock from the outcome write, avoiding another round
 	// trip while grants are held. The signed original uses this exact stored time.
 	var closedAt time.Time
 	var sourceId, destinationId server.Id
-	err := tx.QueryRow(
-		ctx,
-		`
+	claimSql := `
             UPDATE transfer_contract
             SET
                 outcome = $2,
@@ -3273,11 +3278,26 @@ func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx,
                 contract_id = $1 AND
                 outcome IS NULL
             RETURNING close_time, source_id, destination_id
-        `,
-		contractId,
-		outcome,
-		usage,
-	).Scan(&closedAt, &sourceId, &destinationId)
+        `
+	claimArgs := []any{contractId, outcome, usage}
+	if retirementTime != nil {
+		claimSql = `
+            UPDATE transfer_contract
+            SET
+                outcome = $2,
+                close_time = clock_timestamp() AT TIME ZONE 'UTC',
+                provider_usage = $3,
+                dispute = false,
+                usage_unverified = true,
+                expiration_time = LEAST(COALESCE(expiration_time, $4), $4)
+            WHERE
+                contract_id = $1 AND
+                outcome IS NULL
+            RETURNING close_time, source_id, destination_id
+        `
+		claimArgs = append(claimArgs, *retirementTime)
+	}
+	err := tx.QueryRow(ctx, claimSql, claimArgs...).Scan(&closedAt, &sourceId, &destinationId)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

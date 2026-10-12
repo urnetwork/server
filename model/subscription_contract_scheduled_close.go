@@ -247,10 +247,10 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 	usage := deadlineUsageSnapshot(owner, usageParticipants, &result.Adjustments)
 	// Accepted adjudication survives. Retirement clears the dispute only
 	// with its best funded settlement. The intent guard remains intact.
+	// Retirement (dispute, usage_unverified, expiration_time) is written by
+	// the outcome claim itself, so the close writes one contract row version.
 	server.RaisePgResult(tx.Exec(ctx, `DELETE FROM legacy_settlement_intent WHERE contract_id=$1`, contractId))
-	server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET dispute=false,usage_unverified=true,
-				expiration_time=LEAST(COALESCE(expiration_time,$2),$2) WHERE contract_id=$1`, contractId, deadline))
-	claimed, err := claimContractOutcomeWithUsageValueInTx(ctx, tx, contractId, result.Outcome, usage, true)
+	claimed, err := claimContractOutcomeWithUsageValueInTx(ctx, tx, contractId, result.Outcome, usage, true, &deadline)
 	server.Raise(err)
 	if !claimed {
 		server.Raise(fmt.Errorf("deadline reconciliation did not close locked contract"))
