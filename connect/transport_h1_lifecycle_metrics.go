@@ -33,6 +33,9 @@ const (
 	connectH1ResultStateRefused
 	connectH1ResultClientMissing
 	connectH1ResultAuthDependency
+	// the client left before admission (its request context ended); this is
+	// neither a dependency outage nor the authorization deadline
+	connectH1ResultClientCanceled
 	connectH1ResultAccepted
 )
 
@@ -40,7 +43,8 @@ var connectH1ResultLabels = [...]string{
 	"unclassified", "handler_closed", "draining", "address_refused",
 	"rate_limit_init", "rate_limit", "auth_deadline", "upgrade_unavailable",
 	"upgrade_invalid", "upgrade_error", "auth_read", "auth_frame", "auth_echo",
-	"jwt_refused", "state_refused", "client_missing", "auth_dependency", "accepted",
+	"jwt_refused", "state_refused", "client_missing", "auth_dependency",
+	"client_canceled", "accepted",
 }
 
 type connectH1CloseReason uint32

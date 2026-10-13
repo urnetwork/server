@@ -14,12 +14,14 @@ import (
 // while totals are due.
 const legacyProviderTotalsClaimSharePeriod = 2
 
-// One provider-probe shard per instance prevents several polling loops from
-// co-locating long-lived tunnel pools. One legacy mirror repair bounds cold
-// history work moved off the financial page. Each worker has independent
-// capacity, and caller-owned settings and maps remain unchanged. A saturated
-// limit makes every claim filter that target's rows out of the oldest-first
-// candidate scan, so only targets that never dominate the queue are limited.
+// Provider-probe shard passes per instance follow the configured URL geometry,
+// so co-located tunnel pools stay within one instance's URL concurrency while
+// every configured shard can run on fewer instances than shards. One legacy
+// mirror repair bounds cold history work moved off the financial page. Each
+// worker has independent capacity, and caller-owned settings and maps remain
+// unchanged. A saturated limit makes every claim filter that target's rows out
+// of the oldest-first candidate scan, so only targets that never dominate the
+// queue are limited.
 func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile WorkloadProfile) *task.TaskWorkerSettings {
 	if settings == nil {
 		settings = task.DefaultTaskWorkerSettings()
@@ -46,7 +48,7 @@ func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile Wor
 	ownerSettings.TargetClaimShares[task.NewTaskTarget(model.ApplyLegacyProviderTotals).TargetFunctionName()] = legacyProviderTotalsClaimSharePeriod
 	if profile == WorkloadProfileProduction {
 		name := task.NewTaskTarget(work.ProviderEgressProbe).TargetFunctionName()
-		ownerSettings.TargetClaimLimits[name] = 1
+		ownerSettings.TargetClaimLimits[name] = work.ProviderEgressProbeInstancePassLimit()
 	} else if profile == WorkloadProfileSubnetOperator {
 		ownerSettings.ClaimRegisteredTargetsOnly = true
 	}
