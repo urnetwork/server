@@ -127,15 +127,18 @@ var snReconcileStuckSql = `SELECT p.payment_id,p.payment_plan_id,p.network_id,p.
 	LEFT JOIN account_wallet pinned ON pinned.wallet_id=p.wallet_id
 	LEFT JOIN payout_wallet pw ON pw.network_id=p.network_id
 	LEFT JOIN account_wallet payout ON payout.wallet_id=pw.wallet_id AND payout.network_id=p.network_id
-	WHERE NOT p.completed AND (
+	WHERE NOT p.completed AND NOT ` + legacyProviderPaymentReplacedSql("p.payment_id") + ` AND (
 		(p.canceled AND (p.circle_idempotency_key IS NOT NULL OR p.payment_record IS NOT NULL OR p.tx_hash IS NOT NULL)) OR
 		(NOT p.canceled AND p.circle_idempotency_key IS NOT NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
 		AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key)))
 	ORDER BY p.create_time,p.payment_id`
 
 // RC-1 and RC-2 rows, oldest first. A request journaled under the key, valid or
-// not, may have been POSTed, so that row is out of scope. A stuck row without a
-// network cannot be attributed to later rows; the census refuses it.
+// not, may have been POSTed, so that row is out of scope. So is an original
+// that the legacy correction replaced (account_payment_legacy_correction.go):
+// it stays canceled with its key, and its replacement carries the obligation.
+// A stuck row without a network cannot be attributed to later rows; the census
+// refuses it.
 func GetSnReconcileStuckRows(ctx context.Context) (rows []*SnReconcileRow, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, returnErr = []*SnReconcileRow{}, nil

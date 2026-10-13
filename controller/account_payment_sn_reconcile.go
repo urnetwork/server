@@ -42,6 +42,7 @@ const (
 	snReconcileBelowFee          = "below_fee"
 	snReconcileChanged           = "changed"
 	snReconcileUnattributed      = "unattributed_orphan"
+	snReconcileInflated          = "inflated"
 )
 
 // Outcomes of the row's own attempt that do not stop its classification.
@@ -139,6 +140,8 @@ type SnReconcileRowReport struct {
 	Chain           string                     `json:"chain,omitempty"`
 	Evidence        *model.SnReconcileEvidence `json:"circle_evidence,omitempty"`
 	OrphanIds       []string                   `json:"orphan_ids,omitempty"`
+	// An `inflated` row's payout under the legacy correction.
+	CorrectedPayoutNanoCents *model.NanoCents `json:"corrected_payout_nano_cents,omitempty"`
 	// A8: a `replanned` row's subsidy and reliability, each with its guidance.
 	Subsidy     *SnReconcileReplannedAmount `json:"subsidy,omitempty"`
 	Reliability *SnReconcileReplannedAmount `json:"reliability,omitempty"`
@@ -147,6 +150,7 @@ type SnReconcileRowReport struct {
 	censusExact   bool
 	attempt       string
 	sendNanoCents model.NanoCents
+	correction    *model.LegacyProviderPaymentCorrection
 }
 
 // A8: the subsidy or the reliability of a `replanned` row, with what the owner
@@ -222,10 +226,11 @@ func SnReconcile(clientSession *session.ClientSession, send bool, expect string)
 	for _, funding := range report.Funding {
 		walletIds = append(walletIds, funding.WalletId)
 	}
+	corrections := snReconcileCorrections(ctx, rows)
 	circleClient := NewCircleClient()
 	for _, row := range rows {
 		item := &SnReconcileRowReport{PaymentId: row.PaymentId, NetworkId: row.NetworkId, Kind: row.Kind, PayoutNanoCents: row.Payout,
-			row: row, censusExact: model.SnReconcileCensusExact(ctx, row.PaymentId, policy)}
+			row: row, censusExact: model.SnReconcileCensusExact(ctx, row.PaymentId, policy), correction: corrections[row.PaymentId]}
 		if row.PaymentRecord != nil {
 			if walletId := snReconcileRecordAttempt(ctx, circleClient, item); walletId != "" {
 				walletIds = append(walletIds, walletId)
@@ -387,6 +392,34 @@ func snReconcileConfiguredFunding() ([]*SnReconcileFunding, error) {
 		fundings = append(fundings, &SnReconcileFunding{Chain: chain, WalletId: walletId, tokenAddress: tokenAddress})
 	}
 	return fundings, nil
+}
+
+// The legacy correction (account_payment_legacy_correction.go) of each stuck
+// row with a subsidy or reliability subsidy whose plan has its subsidy epoch.
+// The exact census requires that epoch for such a row, and a plan has at most
+// one.
+func snReconcileCorrections(ctx context.Context, rows []*model.SnReconcileRow) map[server.Id]*model.LegacyProviderPaymentCorrection {
+	paymentIds := []server.Id{}
+	for _, row := range rows {
+		if 0 < row.SubsidyPayout || 0 < row.ReliabilitySubsidy {
+			paymentIds = append(paymentIds, row.PaymentId)
+		}
+	}
+	corrections := map[server.Id]*model.LegacyProviderPaymentCorrection{}
+	if len(paymentIds) == 0 {
+		// the policy reads subsidy.yml, which only such a row needs
+		return corrections
+	}
+	windows, err := model.GetLegacyProviderPaymentSubsidyWindows(ctx, paymentIds)
+	server.Raise(err)
+	policy := model.DefaultLegacyProviderPaymentCorrectionPolicy()
+	for _, row := range rows {
+		if window := windows[row.PaymentId]; window != nil {
+			corrections[row.PaymentId] = model.CorrectLegacyProviderPayment(&model.AccountPayment{PaymentId: row.PaymentId, Payout: row.Payout,
+				SubsidyPayout: row.SubsidyPayout, ReliabilitySubsidy: row.ReliabilitySubsidy}, window, policy)
+		}
+	}
+	return corrections
 }
 
 // RC-3: Circle's record of the row's own attempt. Returns the record's wallet.
@@ -565,6 +598,13 @@ func snReconcileClassify(item *SnReconcileRowReport, report *SnReconcileReport, 
 	// A2
 	if row.EarlyEarnings {
 		item.Class, item.Reason = snReconcileUnresolved, snReconcileDuplicateRisk
+		return
+	}
+	// RC-12: the July to September planner inflated subsidies and reliability
+	// subsidies, and a payout is immutable, so a row the legacy correction
+	// lowers is never paid as recorded.
+	if item.correction != nil && item.correction.Changed() {
+		item.Class, item.Reason, item.CorrectedPayoutNanoCents = snReconcileUnresolved, snReconcileInflated, &item.correction.Payout
 		return
 	}
 	// RC-10
@@ -796,6 +836,9 @@ func (self *SnReconcileReport) Text() string {
 		}
 		if 0 < len(item.OrphanIds) {
 			fmt.Fprintf(b, ", orphans %s", strings.Join(item.OrphanIds, ","))
+		}
+		if item.CorrectedPayoutNanoCents != nil {
+			fmt.Fprintf(b, ", corrected payout %s", snReconcileUsd(*item.CorrectedPayoutNanoCents))
 		}
 		fmt.Fprintf(b, "\n")
 		if item.Subsidy != nil {
