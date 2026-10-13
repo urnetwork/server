@@ -4801,10 +4801,21 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 	// finds them closed.
 	rowBatches := forceCloseDeadlineOwnerBatches(ctx, openContracts, rowTurns, server.NowUtc())
 	batchSlots := make(chan struct{}, forceCloseOwnerBatchParallel)
-	// Visits every row of one batch in a single owned turn. A held owner
-	// defers each row as a row refused alone is deferred. A failed turn
+	// Visits every row of one batch in a single owned turn. A held balance,
+	// found by this batch or earlier by a row of the page, leaves every row
+	// to its holder, as it leaves a row tried alone. A failed turn
 	// acknowledged no close, so each row then takes its own visit.
 	visitBatch := func(batch *forceCloseOwnerBatch) {
+		owner := forceCloseOwnerKey([]server.Id{batch.balanceId})
+		leaveToHolder := func() {
+			for _, j := range batch.indexes {
+				ownerBusy[j], contractVisited[j] = true, true
+			}
+		}
+		if busyOwners.held(owner) {
+			leaveToHolder()
+			return
+		}
 		select {
 		case batchSlots <- struct{}{}:
 		case <-ctx.Done():
@@ -4826,13 +4837,16 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 			}
 			glog.Infof("[close-expired]owner batch of %d rows failed, each row closes alone: %v\n", len(batch.indexes), batchErr)
 		}
+		if busy {
+			busyOwners.add(owner)
+			leaveToHolder()
+			return
+		}
 		for _, j := range batch.indexes {
 			result := results[openContracts[j].contractId]
 			switch {
-			case batchErr != nil || !busy && result == nil:
+			case batchErr != nil || result == nil:
 				visit(j)
-			case busy:
-				contractErrors[j], leftOpen[j], contractVisited[j] = errTransferBalanceOwnershipBusy, true, true
 			case result.AlreadyClosed || result.Missing:
 				// Retired by another owner first, as a row that left the selection.
 				eligibilitySkipped[j], contractVisited[j] = true, true

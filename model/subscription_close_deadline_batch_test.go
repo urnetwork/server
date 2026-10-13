@@ -135,11 +135,11 @@ func TestForceClosePageClosesSingleBalanceDeadlineRowsInOwnerBatches(t *testing.
 	})
 }
 
-// Another owner holds the balance for the whole page. The batch is refused
-// once, and each of its rows is deferred as a busy row: open with its custody,
-// in the receipt, behind a cursor the walk keeps moving. The next pass closes
-// them once the balance is free; none is dropped.
-func TestForceClosePageDefersHeldOwnerBatchRows(t *testing.T) {
+// Another owner holds the balance for the whole page. The batch tries it once
+// and leaves every row to the holder as an owner_busy visit, as a held row
+// tried alone is left: the rows stay open, the page succeeds and its cursor
+// passes them, and the next pass closes them once the balance is free.
+func TestForceClosePageLeavesHeldOwnerBatchRowsToHolder(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -147,23 +147,20 @@ func TestForceClosePageDefersHeldOwnerBatchRows(t *testing.T) {
 		defer cancel()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		now := server.NowUtc()
-		// An older free row on no balance closes, so the page progresses.
+		// An older free row on no balance closes beside the held rows.
 		freeIds := newForceCloseDeferredRows(t, ctx, 1)
 		count := 3
 		contractIds := newForceCloseOwnerBatchRows(t, ctx, f, count, now)
 		release := holdTransferBalanceTestOwner(t, ctx, []server.Id{f.balanceId})
 		observed, turns := observeForceCloseOwnerTurns(ctx, f.balanceId, contractIds)
 
+		busyBefore := forceCloseCount("owner_busy")
 		closed, cursor, _, err := forceCloseOpenContractIdsPage(observed, now, 2*count+2, 4, 0, 0, nil)
-		visited, ok := err.(*ForceCloseVisitError)
-		if !ok || !visited.CanCheckpoint() || !forceClosePageCanAdvance(err) || !visited.Progressed() || !visited.ownershipBusyOnly() {
-			t.Fatal("the held batch did not leave a busy-only receipt the walk continues past", err)
+		if err != nil || closed != 1 || cursor != nil {
+			t.Fatal("the held batch failed the page or kept its cursor", closed, cursor, err)
 		}
-		if closed != 1 || visited.AttemptedCloseCount() != 1 || cursor != nil {
-			t.Fatal("the page did not close its free row and pass its held rows", closed, cursor)
-		}
-		if !slices.Equal(visited.DeferredContractIds(), contractIds) {
-			t.Fatal("the receipt did not defer exactly the held rows in page order", visited.DeferredContractIds())
+		if busy := forceCloseCount("owner_busy") - busyBefore; busy != float64(count) {
+			t.Fatal("the held batch's rows were not left to the holder as owner_busy visits", busy)
 		}
 		admitted, refused := turns.snapshot()
 		if len(admitted) != 0 || len(refused) != 1 || len(refused[0]) != count {
@@ -175,7 +172,7 @@ func TestForceClosePageDefersHeldOwnerBatchRows(t *testing.T) {
 		release()
 		closed, cursor, _, err = forceCloseOpenContractIdsPage(ctx, server.NowUtc(), 2*count+2, 4, 0, 0, nil)
 		if err != nil || closed != int64(count) || cursor != nil {
-			t.Fatal("the next pass did not close the deferred rows", closed, cursor, err)
+			t.Fatal("the next pass did not close the rows left to the holder", closed, cursor, err)
 		}
 		requireForceCloseOwnerBatchTerminal(t, ctx, contractIds, []bool{true, true, true})
 	})
@@ -254,20 +251,21 @@ func TestForceClosePageOwnerBatchFailureClosesRowsAlone(t *testing.T) {
 			t.Fatal("the other rows did not close alone around the failed member", closed, visited.DeferredContractIds())
 		}
 		requireForceCloseOwnerBatchTerminal(t, ctx, contractIds, []bool{true, false, true})
+		// The failed member's own turn, if its close admits before failing, rolls back too.
 		admitted, _ := turns.snapshot()
-		batchTurns, aloneTurns := 0, 0
+		batchTurns, aloneTurns := 0, map[server.Id]int{}
 		for _, members := range admitted {
-			switch {
-			case len(members) == len(contractIds):
+			switch len(members) {
+			case len(contractIds):
 				batchTurns += 1
-			case len(members) == 1 && members[0] != victim:
-				aloneTurns += 1
+			case 1:
+				aloneTurns[members[0]] += 1
 			default:
 				t.Fatal("an unexpected owned turn", members)
 			}
 		}
-		if batchTurns != 1 || aloneTurns != 2 {
-			t.Fatalf("the page took %d batch turns and %d turns alone, want one batch then two alone", batchTurns, aloneTurns)
+		if batchTurns != 1 || aloneTurns[contractIds[0]] != 1 || aloneTurns[contractIds[2]] != 1 || 1 < aloneTurns[victim] {
+			t.Fatalf("the page took %d batch turns and %v turns alone, want one batch then each row alone", batchTurns, aloneTurns)
 		}
 
 		release()
