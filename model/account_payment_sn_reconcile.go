@@ -405,7 +405,10 @@ type snReconcileRevival struct {
 // a journal row (A1), or whose census is no longer exact, is left untouched
 // (RC-15). One UPDATE clears the markers and the cancellation together, so the
 // row never reads as safely canceled; amounts, plan, points, sweeps and
-// `cancel_time` are unchanged.
+// `cancel_time` are unchanged. The transaction is READ COMMITTED, so every
+// statement after FOR UPDATE reads what committed while it waited for the row
+// lock: a request the lock holder journaled under the key is seen (A1). Under
+// REPEATABLE READ the snapshot would date from before that wait.
 func ReviveSnReconcileRow(ctx context.Context, row *SnReconcileRow, policy *server.ProviderPayoutTransition, runId server.Id, evidence *SnReconcileEvidence, schedule func(server.PgTx)) (revived bool) {
 	revival := &snReconcileRevival{RunId: runId, Evidence: evidence, Canceled: row.Canceled, CancelTime: row.CancelTime,
 		CircleIdempotencyKey: row.CircleIdempotencyKey, PaymentRecord: row.PaymentRecord, TxHash: row.TxHash, TokenType: row.TokenType,
@@ -442,6 +445,6 @@ func ReviveSnReconcileRow(ctx context.Context, row *SnReconcileRow, policy *serv
 		}
 		schedule(tx)
 		revived = true
-	})
+	}, server.TxReadCommitted)
 	return
 }
