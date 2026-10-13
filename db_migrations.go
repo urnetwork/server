@@ -10166,4 +10166,23 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS audit_device_event_stats_device_id`,
 		`DROP INDEX IF EXISTS audit_device_event_stats_device_id`,
 	),
+	// 832: settlement v2 activation (SV-9). st_ledger_v2_activation holds the
+	// configured pool's registration in vault2.pools as the server first
+	// observed it, with the vault2 and STSettlement2 it was configured with
+	// (model/st_ledger_v2_activation.go). Registration is permanent on chain,
+	// so the row is never updated. Once it exists, the st subsystem of its
+	// deployment runs only while st.yml names that pair
+	// (controller/st_ledger_v2_activation.go). A new table: nothing is
+	// rewritten. Apply before deploying a server with v2 addresses; a
+	// deployment without them reads the table only if it exists.
+	newSqlMigration(`
+		CREATE TABLE st_ledger_v2_activation (
+			deployment_key varchar(96) NOT NULL PRIMARY KEY,
+			no_id bigint NOT NULL CHECK (no_id > 0),
+			first_epoch bigint NOT NULL CHECK (first_epoch > 0),
+			vault_v2_address varchar(42) NOT NULL,
+			settlement_v2_address varchar(42) NOT NULL,
+			create_time timestamp NOT NULL
+		);
+	`),
 }

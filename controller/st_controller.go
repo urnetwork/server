@@ -4226,6 +4226,11 @@ func StSyncChainState(ctx context.Context) (*StEpochState, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Without its recorded v2 pair an activated deployment's turn stops here,
+	// before the event mirror and any scheduling (SV-9).
+	if err := stLedgerV2ActivationAdmission(ctx, cfg); err != nil {
+		return nil, err
+	}
 	state, err := client.Epoch(ctx)
 	if err != nil {
 		return nil, err
@@ -4291,6 +4296,11 @@ func stBoundedInclusiveRangeEnd(fromBlock uint64, headBlock uint64, blockCount u
 func StSyncChainEvents(ctx context.Context, _ uint64) (int, error) {
 	cfg, client, err := stRequire()
 	if err != nil {
+		return 0, err
+	}
+	// The checkpoint is shared with the v2 logs, so it never moves without
+	// the recorded v2 pair (SV-9).
+	if err := stLedgerV2ActivationAdmission(ctx, cfg); err != nil {
 		return 0, err
 	}
 

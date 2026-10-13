@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/holiman/uint256"
 
 	"github.com/urfoundation/sn/merkle"
@@ -34,6 +35,8 @@ type fakeLedgerV2Chain struct {
 	paused     bool
 	registered bool
 	firstEpoch uint64
+	// coordinator is the STSettlement2 the vault is bound to.
+	coordinator common.Address
 	// emission[e] reaches the pool hotkey at end(e); a close captures all of it.
 	emission     map[uint64]uint64
 	epochBlocks  uint64
@@ -67,7 +70,8 @@ type fakeLedgerV2Chain struct {
 
 func newFakeLedgerV2Chain(log *[]string) *fakeLedgerV2Chain {
 	return &fakeLedgerV2Chain{
-		log: log, registered: true, firstEpoch: 5, epochBlocks: 50_400, window: 1_200, challenge: 14_400, quorum: 1,
+		log: log, registered: true, firstEpoch: 5, coordinator: common.HexToAddress(testLedgerV2Settlement),
+		epochBlocks: 50_400, window: 1_200, challenge: 14_400, quorum: 1,
 		lastFunded: 4, lastCaptured: 4, emission: map[uint64]uint64{}, funded: map[uint64]uint256.Int{},
 		demands: map[[3]uint64]uint8{}, claimed: map[[2]uint64]uint256.Int{}, fail: map[string][]error{},
 	}
@@ -96,6 +100,13 @@ func (self *fakeLedgerV2Chain) LedgerV2Pool(ctx context.Context, noId uint64) (b
 		return false, 0, err
 	}
 	return self.registered, self.firstEpoch, nil
+}
+
+func (self *fakeLedgerV2Chain) LedgerV2Coordinator(ctx context.Context) (common.Address, error) {
+	if err := self.failed("coordinator"); err != nil {
+		return common.Address{}, err
+	}
+	return self.coordinator, nil
 }
 
 func (self *fakeLedgerV2Chain) LedgerV2State(ctx context.Context, noId uint64) (*StLedgerV2State, error) {

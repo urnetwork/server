@@ -122,3 +122,24 @@ func TestStLedgerV2MigrationAppendsSchema(t *testing.T) {
 		}
 	}
 }
+
+// The activation record is one migration appended after both settlement v2
+// migrations, and so after the published history, installing only its table;
+// no other migration touches it.
+// SV-9
+func TestStLedgerV2ActivationMigrationAppendsTheRecord(t *testing.T) {
+	index := sqlMigrationIndex(t, "CREATE TABLE st_ledger_v2_activation (")
+	for _, marker := range []string{"CREATE TABLE st_ledger_v2_epoch_rows (", "CREATE TABLE st_verified_wallet_consent ("} {
+		if earlier := sqlMigrationIndex(t, marker); index <= earlier {
+			t.Fatalf("the activation migration %d is not after the v2 migration %d", index, earlier)
+		}
+	}
+	if current := migrations[index].(*SqlMigration); strings.Count(current.sql, "CREATE TABLE") != 1 {
+		t.Fatal("the activation migration installs more than its record")
+	}
+	for i, migration := range migrations {
+		if sql, ok := migration.(*SqlMigration); ok && i != index && strings.Contains(sql.sql, "st_ledger_v2_activation") {
+			t.Fatalf("migration %d also touches the activation record", i)
+		}
+	}
+}

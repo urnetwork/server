@@ -649,6 +649,17 @@ func TestStV1DriverStopsAtFirstV2Epoch(t *testing.T) {
 		SetStClient(newStubStClient(state))
 		defer SetStClient(nil)
 
+		// Until the registration has been read once its cutoff is unknown; from
+		// then on the recorded activation answers without vault2 (SV-9).
+		f.chain.failNext("pool", errors.New("vault2 unreadable"))
+		if _, err := StV1EpochAllowed(f.ctx, 4); err == nil || err.Error() != "vault2 unreadable" {
+			t.Fatalf("unknown registration: %v", err)
+		}
+		f.chain.failNext("pool", errors.New("vault2 unreadable"))
+		if _, err := StCloseOperatorEpoch(f.ctx, 4); err == nil || err.Error() != "vault2 unreadable" {
+			t.Fatalf("close with unknown registration: %v", err)
+		}
+
 		for _, test := range []struct {
 			name       string
 			registered bool
@@ -684,16 +695,6 @@ func TestStV1DriverStopsAtFirstV2Epoch(t *testing.T) {
 			}
 		}
 
-		resetLedgerV2Caches()
-		f.chain.failNext("pool", errors.New("vault2 unreadable"))
-		if _, err := StV1EpochAllowed(f.ctx, 4); err == nil || err.Error() != "vault2 unreadable" {
-			t.Fatalf("unknown registration: %v", err)
-		}
-		f.chain.failNext("pool", errors.New("vault2 unreadable"))
-		if _, err := StCloseOperatorEpoch(f.ctx, 4); err == nil || err.Error() != "vault2 unreadable" {
-			t.Fatalf("close with unknown registration: %v", err)
-		}
-
 		// Without v2 every epoch stays with v1.
 		SetStConfig(&StConfig{Enabled: true, ChainId: 945, ContractAddress: f.cfg.ContractAddress})
 		if allowed, err := StV1EpochAllowed(f.ctx, 50); err != nil || !allowed {
@@ -703,38 +704,32 @@ func TestStV1DriverStopsAtFirstV2Epoch(t *testing.T) {
 }
 
 // The pool's registration is read until vault2 reports it, then cached; an
-// unregistered answer is read again after a minute.
+// unregistered answer is read again after a minute. The registered answer is
+// also recorded (SV-9), so this runs with the database.
 // SV-4
 func TestStLedgerV2FirstEpochCache(t *testing.T) {
-	f := newLedgerV2FixtureWithoutDb(t)
-	f.chain.registered = false
-	if _, registered, err := stLedgerV2FirstEpoch(f.ctx, f.cfg, f.chain); err != nil || registered {
-		t.Fatalf("registered %t, %v", registered, err)
-	}
-	f.chain.registered = true
-	if _, registered, _ := stLedgerV2FirstEpoch(f.ctx, f.cfg, f.chain); registered {
-		t.Fatal("an unregistered answer was read again within a minute")
-	}
-	stLedgerV2Pools.Range(func(key, value any) bool {
-		pool := value.(stLedgerV2Pool)
-		pool.checked = pool.checked.Add(-time.Minute)
-		stLedgerV2Pools.Store(key, pool)
-		return true
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newLedgerV2Fixture(t)
+		f.chain.registered = false
+		if _, registered, err := stLedgerV2FirstEpoch(f.ctx, f.cfg, f.chain); err != nil || registered {
+			t.Fatalf("registered %t, %v", registered, err)
+		}
+		f.chain.registered = true
+		if _, registered, _ := stLedgerV2FirstEpoch(f.ctx, f.cfg, f.chain); registered {
+			t.Fatal("an unregistered answer was read again within a minute")
+		}
+		stLedgerV2Pools.Range(func(key, value any) bool {
+			pool := value.(stLedgerV2Pool)
+			pool.checked = pool.checked.Add(-time.Minute)
+			stLedgerV2Pools.Store(key, pool)
+			return true
+		})
+		if first, registered, err := stLedgerV2FirstEpoch(f.ctx, f.cfg, f.chain); err != nil || !registered || first != 5 {
+			t.Fatalf("after a minute: %d %t %v", first, registered, err)
+		}
+		f.chain.failNext("pool", errors.New("unreadable"))
+		if _, registered, err := stLedgerV2FirstEpoch(f.ctx, f.cfg, f.chain); err != nil || !registered {
+			t.Fatalf("a registered pool was read again: %t %v", registered, err)
+		}
 	})
-	if first, registered, err := stLedgerV2FirstEpoch(f.ctx, f.cfg, f.chain); err != nil || !registered || first != 5 {
-		t.Fatalf("after a minute: %d %t %v", first, registered, err)
-	}
-	f.chain.failNext("pool", errors.New("unreadable"))
-	if _, registered, err := stLedgerV2FirstEpoch(f.ctx, f.cfg, f.chain); err != nil || !registered {
-		t.Fatalf("a registered pool was read again: %t %v", registered, err)
-	}
-}
-
-// A fixture for tests that need no database.
-func newLedgerV2FixtureWithoutDb(t *testing.T) *ledgerV2Fixture {
-	f := &ledgerV2Fixture{t: t, ctx: context.Background(), cfg: ledgerV2TestConfig()}
-	f.chain, f.builder = newFakeLedgerV2Chain(&f.log), newFakeLedgerBuilder(&f.log)
-	resetLedgerV2Caches()
-	t.Cleanup(resetLedgerV2Caches)
-	return f
 }

@@ -160,6 +160,11 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"device-leading audit index leads with time", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(event_time,device_id,event_id) INCLUDE (event_type)`},
 		{"device-leading audit index is partial", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(device_id,event_time,event_id) INCLUDE (event_type) WHERE event_type = 'device_added'`},
 		{"dropped time-leading device stats index rebuilt", 831, `CREATE INDEX audit_device_event_stats_device_id ON audit_device_event (event_time, device_id, event_id) INCLUDE (event_type)`},
+		{"missing v2 activation record", 832, `DROP TABLE st_ledger_v2_activation`},
+		{"v2 activations not one per deployment", 832, `ALTER TABLE st_ledger_v2_activation DROP CONSTRAINT st_ledger_v2_activation_pkey`},
+		{"v2 activation without a first epoch", 832, `ALTER TABLE st_ledger_v2_activation DROP CONSTRAINT st_ledger_v2_activation_first_epoch_check`},
+		{"nullable v2 activation vault", 832, `ALTER TABLE st_ledger_v2_activation ALTER COLUMN vault_v2_address DROP NOT NULL`},
+		{"v2 activation settlement truncates", 832, `ALTER TABLE st_ledger_v2_activation ALTER COLUMN settlement_v2_address TYPE varchar(41)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

@@ -184,10 +184,14 @@ func (stLedgerV2Builder) Accounts(ctx context.Context, ledgerHash [32]byte) ([]m
 // it; the next root built while no pending root that can still finalize lists
 // the epoch's recorded rows builds them again (stLedgerV2CommitEpoch). It is
 // refused for an epoch the latest finalized root covers, whose rows are final,
-// and for an epoch without a record, which the next root builds anyway.
+// for an epoch without a record, which the next root builds anyway, and under
+// a v2 pair other than the recorded activation's (SV-9).
 func StLedgerV2RebuildEpoch(ctx context.Context, epoch uint64, requestedBy string) error {
 	cfg, client, err := stLedgerV2Require()
 	if err != nil {
+		return err
+	}
+	if err := stLedgerV2ActivationAdmission(ctx, cfg); err != nil {
 		return err
 	}
 	state, err := client.LedgerV2State(ctx, cfg.NoId)
@@ -214,9 +218,10 @@ func StLedgerV2RebuildEpoch(ctx context.Context, epoch uint64, requestedBy strin
 // §8.6). Like the request, it names who makes it and is logged; any operator
 // may withdraw any request. It returns who made the request. It is refused for
 // an epoch without a record in this deployment's pool, for one without a
-// pending request, as when its rows were already rebuilt for the request, and
+// pending request, as when its rows were already rebuilt for the request,
 // when its rows are rebuilt, or its request changes, between reading the
-// request and withdrawing it.
+// request and withdrawing it, and under a v2 pair other than the recorded
+// activation's (SV-9).
 func StLedgerV2WithdrawRebuild(ctx context.Context, epoch uint64, withdrawnBy string) (string, error) {
 	cfg := stConfig()
 	if !cfg.LedgerV2Enabled() {
@@ -224,6 +229,9 @@ func StLedgerV2WithdrawRebuild(ctx context.Context, epoch uint64, withdrawnBy st
 	}
 	if withdrawnBy == "" {
 		return "", errors.New("st ledger v2: a rebuild withdrawal must name who makes it")
+	}
+	if err := stLedgerV2ActivationAdmission(ctx, cfg); err != nil {
+		return "", err
 	}
 	key := cfg.DeploymentKey()
 	record := model.GetStLedgerV2EpochRows(ctx, key, cfg.NoId, epoch, epoch)[epoch]

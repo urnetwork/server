@@ -455,6 +455,7 @@ func TestStLedgerV2ClientReadsChainState(t *testing.T) {
 	no := big.NewInt(1)
 	result(coordinator.PackPaused(), coordinatorAbi, "paused", true)
 	result(vault.PackPools(no), vaultAbi, "pools", stabi.ISTSettlementVault2Pool{Hotkey: [32]byte{9}, FirstEpoch: 5, Registered: true})
+	result(vault.PackCoordinator(), vaultAbi, "coordinator", client.cfg.SettlementV2)
 	result(vault.PackCHALLENGEBLOCKS(), vaultAbi, "CHALLENGE_BLOCKS", uint64(14_400))
 	result(vault.PackLastCommitBlock(no), vaultAbi, "lastCommitBlock", uint64(302_410))
 	result(vault.PackLastFundedEpoch(no), vaultAbi, "lastFundedEpoch", big.NewInt(6))
@@ -481,6 +482,9 @@ func TestStLedgerV2ClientReadsChainState(t *testing.T) {
 	}
 	if registered, first, err := client.LedgerV2Pool(ctx, 1); err != nil || !registered || first != 5 {
 		t.Fatalf("pool %t %d %v", registered, first, err)
+	}
+	if bound, err := client.LedgerV2Coordinator(ctx); err != nil || bound != client.cfg.SettlementV2 || bound == (common.Address{}) {
+		t.Fatalf("coordinator %s %v", bound, err)
 	}
 	if funded, err := client.LedgerV2FundedThrough(ctx, 1, 6); err != nil || funded.Uint64() != 4000 {
 		t.Fatalf("funded %s %v", funded.Dec(), err)
@@ -539,6 +543,7 @@ func TestStLedgerV2ClientReadsChainState(t *testing.T) {
 	}{
 		{coordinator.PackPaused(), func() error { _, err := client.LedgerV2State(ctx, 1); return err }, "paused():"},
 		{vault.PackPools(no), func() error { _, _, err := client.LedgerV2Pool(ctx, 1); return err }, "vault2 pools(1):"},
+		{vault.PackCoordinator(), func() error { _, err := client.LedgerV2Coordinator(ctx); return err }, "vault2 coordinator():"},
 		{vault.PackFundedThrough(no, big.NewInt(6)), func() error { _, err := client.LedgerV2FundedThrough(ctx, 1, 6); return err }, "vault2 fundedThrough(1, 6):"},
 		{vault.PackDemanded(no, 2, big.NewInt(0), big.NewInt(1)), func() error { _, err := client.LedgerV2Demand(ctx, 1, 2, 0, 1); return err }, "vault2 demanded(1, 2, 0, 1):"},
 		{vault.PackRoots(no, big.NewInt(0)), func() error { _, err := client.LedgerV2Root(ctx, 1, 0); return err }, "vault2 roots(1, 0):"},

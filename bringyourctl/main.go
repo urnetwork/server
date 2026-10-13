@@ -137,6 +137,8 @@ Usage:
     bringyourctl st v2-unrecoverable --epoch=<epoch> --by=<operator>
     bringyourctl st v2-rebuild --epoch=<epoch> --by=<operator>
     bringyourctl st v2-rebuild-withdraw --epoch=<epoch> --by=<operator>
+    bringyourctl st v2-activation
+    bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
 
 Options:
@@ -471,6 +473,10 @@ func main() {
 			stV2Rebuild(opts)
 		} else if rebuildWithdraw, _ := opts.Bool("v2-rebuild-withdraw"); rebuildWithdraw {
 			stV2RebuildWithdraw(opts)
+		} else if activation, _ := opts.Bool("v2-activation"); activation {
+			stV2Activation(opts)
+		} else if activationClear, _ := opts.Bool("v2-activation-clear"); activationClear {
+			stV2ActivationClear(opts)
 		}
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {

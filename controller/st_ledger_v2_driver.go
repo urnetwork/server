@@ -195,8 +195,11 @@ type stLedgerV2Pool struct {
 var stLedgerV2Pools sync.Map
 
 // stLedgerV2FirstEpoch reads the pool's first v2 epoch from vault2.pools.
-// Registration is permanent, so a registered pool is cached for good; an
-// unregistered answer is read again after a minute.
+// Registration is permanent, so a registered pool is recorded durably as the
+// deployment's activation (SV-9) and cached for good; an unregistered answer
+// is read again after a minute. A registration that cannot be recorded, under
+// an STSettlement2 that is not vault2's coordinator or against a different
+// record, is an error.
 func stLedgerV2FirstEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2Client) (uint64, bool, error) {
 	key := fmt.Sprintf("%s|%s|%d", cfg.DeploymentKey(), cfg.VaultV2.Hex(), cfg.NoId)
 	if value, ok := stLedgerV2Pools.Load(key); ok {
@@ -208,6 +211,11 @@ func stLedgerV2FirstEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2C
 	registered, firstEpoch, err := client.LedgerV2Pool(ctx, cfg.NoId)
 	if err != nil {
 		return 0, false, err
+	}
+	if registered {
+		if err := stLedgerV2RecordActivation(ctx, cfg, client, firstEpoch); err != nil {
+			return 0, false, err
+		}
 	}
 	stLedgerV2Pools.Store(key, stLedgerV2Pool{registered: registered, firstEpoch: firstEpoch, checked: server.NowUtc()})
 	return firstEpoch, registered, nil
@@ -255,7 +263,9 @@ var stLedgerV1SweepEpoch = func(ctx context.Context, cfg *StConfig) (uint64, boo
 // StV1EpochAllowed reports whether the v1 driver may close or commit an
 // epoch: always without settlement v2 or before vault2 registers the pool,
 // and afterwards only below the pool's first v2 epoch, or for the phase C
-// sweep epoch.
+// sweep epoch. Once the pool's activation is recorded, its first epoch is the
+// cutoff whatever vault2 is read to answer, and a close or commit without the
+// recorded v2 pair is refused before this is asked (SV-9).
 func StV1EpochAllowed(ctx context.Context, epoch uint64) (bool, error) {
 	return stV1EpochAllowed(ctx, stConfig(), epoch)
 }
@@ -264,13 +274,20 @@ func stV1EpochAllowed(ctx context.Context, cfg *StConfig, epoch uint64) (bool, e
 	if !cfg.LedgerV2Enabled() {
 		return true, nil
 	}
-	client := stLedgerV2Client()
-	if client == nil {
-		return false, errStLedgerV2NotConfigured
-	}
-	firstEpoch, registered, err := stLedgerV2FirstEpoch(ctx, cfg, client)
-	if err != nil {
-		return false, err
+	firstEpoch, registered := uint64(0), false
+	if activation := stLedgerV2RecordedActivation(ctx, cfg); activation != nil {
+		// A read that lags behind the registration, or its cached answer,
+		// cannot return the recorded v2 epochs to v1.
+		firstEpoch, registered = activation.FirstEpoch, true
+	} else {
+		client := stLedgerV2Client()
+		if client == nil {
+			return false, errStLedgerV2NotConfigured
+		}
+		var err error
+		if firstEpoch, registered, err = stLedgerV2FirstEpoch(ctx, cfg, client); err != nil {
+			return false, err
+		}
 	}
 	if !registered || epoch < firstEpoch {
 		return true, nil
@@ -967,11 +984,15 @@ func stLedgerV2RunRecord(ctx context.Context, cfg *StConfig, client StLedgerV2Cl
 // StLedgerV2DeclareUnrecoverable is the operator's explicit command naming an
 // epoch whose inputs are unrecoverable, so roots list it as providers: null
 // (§6.4). It records who declared it, and it is refused once the epoch's
-// provider rows are recorded. The driver never declares null itself.
+// provider rows are recorded, and under a v2 pair other than the recorded
+// activation's (SV-9). The driver never declares null itself.
 func StLedgerV2DeclareUnrecoverable(ctx context.Context, epoch uint64, declaredBy string) error {
 	cfg := stConfig()
 	if !cfg.LedgerV2Enabled() {
 		return errStLedgerV2NotConfigured
+	}
+	if err := stLedgerV2ActivationAdmission(ctx, cfg); err != nil {
+		return err
 	}
 	return model.DeclareStLedgerV2EpochUnrecoverable(ctx, cfg.DeploymentKey(), cfg.NoId, epoch, declaredBy)
 }

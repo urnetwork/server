@@ -31,6 +31,10 @@ func stPayoutAdmissionAt(ctx context.Context, cfg *StConfig, now time.Time) erro
 	if cfg == nil {
 		return errStNotConfigured
 	}
+	// Once settlement v2 is active, every send needs its recorded pair (SV-9).
+	if err := stLedgerV2ActivationAdmission(ctx, cfg); err != nil {
+		return err
+	}
 	if cfg.Profile != "mainnet" {
 		// A main environment cannot accidentally run the testnet payout writer.
 		if env, _ := server.Env(); env == "main" {
@@ -71,6 +75,8 @@ type ProviderPayoutTransitionStatus struct {
 	RetrospectiveClaimGuaranteed         bool                             `json:"retrospective_claim_guaranteed"`
 	PayoutSchemaReady                    bool                             `json:"payout_schema_ready"`
 	PayoutSchemaReason                   string                           `json:"payout_schema_reason"`
+	// The selected deployment's settlement v2 activation latch (SV-9).
+	LedgerV2Activation *StLedgerV2ActivationStatus `json:"ledger_v2_activation"`
 }
 
 func GetProviderPayoutTransitionStatus(ctx context.Context) (*ProviderPayoutTransitionStatus, error) {
@@ -106,6 +112,7 @@ func GetProviderPayoutTransitionStatus(ctx context.Context) (*ProviderPayoutTran
 		identity := stPayoutIdentity(cfg)
 		status.Selected = &identity
 	}
+	status.LedgerV2Activation = GetStLedgerV2ActivationStatus(ctx)
 	if err := stPayoutAdmissionAt(ctx, cfg, now); err != nil {
 		status.ReadinessReason = err.Error()
 	} else if cfg.Profile == "mainnet" {
