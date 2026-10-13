@@ -16,6 +16,13 @@
 // overload it, leaves tables above a size bound to cleanup unless an operator
 // opts in, and stops at the first interruption or deferral with a record of
 // what finished, so its task continues the same epoch instead of skipping it.
+//
+// No rebuild, drop, vacuum or analyze queues behind a lock that an autovacuum
+// holds: after deadlock_timeout PostgreSQL cancels an autovacuum that blocks
+// another session, and a large table's vacuum then starts over. The vacuum
+// and analyze skip a locked table (SKIP_LOCKED); a rebuild or drop waits for
+// its table to clear without taking a place in the lock queue, then leaves the
+// table for the continuation or a later cleanup.
 package server
 
 import (
@@ -68,6 +75,22 @@ const DefaultDbMaintenanceReindexLockTimeout = 10 * time.Minute
 // Bounds each lock wait of a debris drop. DROP INDEX CONCURRENTLY waits for
 // every transaction holding a lock on the table; a later cleanup retries.
 const DefaultDbMaintenanceCleanupLockTimeout = 10 * time.Second
+
+// How often a rebuild or drop rereads the locks it waits to clear; see
+// dbMaintenanceAwaitTableUnlocked.
+const dbMaintenanceLockPollInterval = time.Second
+
+// The daily pending_task vacuum and the final analyze take each table's
+// ShareUpdateExclusiveLock only when it is free. Either one, queued for
+// deadlock_timeout (1s) behind an autovacuum's lock, made PostgreSQL cancel
+// that autovacuum, and a large table's vacuum then starts over: from
+// 2026-10-13 07:11:59 to 07:12:12Z the maintenance session cancelled the
+// autovacuums of transfer_escrow (while it vacuumed transfer_escrow_pkey),
+// transfer_contract (at heap block 51.2M of 62.7M) and pending_task. A skipped
+// table is being vacuumed or analyzed by the session that holds it, or is
+// analyzed by the next run.
+const dbMaintenanceVacuumPendingTaskStatement = `VACUUM (ANALYZE, SKIP_LOCKED) pending_task`
+const dbMaintenanceAnalyzeStatement = `ANALYZE (SKIP_LOCKED)`
 
 // Bounds a single rebuild statement.
 const dbMaintenanceReindexTimeout = 2 * time.Hour
@@ -545,7 +568,8 @@ type DbMaintenanceStop string
 const (
 	// the context ended (drain, deadline, or caller)
 	DbMaintenanceInterrupted DbMaintenanceStop = "interrupted"
-	// the load guard refused the next rebuild
+	// the load guard refused the next rebuild, or a rebuild's table stayed
+	// locked by another session
 	DbMaintenanceDeferred DbMaintenanceStop = "deferred"
 )
 
@@ -619,6 +643,145 @@ const dbMaintenanceLoadQuery = `
 			  AND activity.wait_event_type IS NULL
 		)::int
 `
+
+// Lock modes that conflict with the ShareUpdateExclusiveLock that REINDEX
+// CONCURRENTLY and DROP INDEX CONCURRENTLY take on the table first.
+var dbMaintenanceShareUpdateExclusiveConflicts = map[string]bool{
+	"ShareUpdateExclusiveLock": true,
+	"ShareLock":                true,
+	"ShareRowExclusiveLock":    true,
+	"ExclusiveLock":            true,
+	"AccessExclusiveLock":      true,
+}
+
+// One granted relation lock that another backend holds in a table's scope (see
+// dbMaintenanceTableLocksQuery). pid is zero for a prepared transaction.
+type dbMaintenanceHeldLock struct {
+	pid         int32
+	backendType string
+	relation    string
+	mode        string
+}
+
+// Returns why a REINDEX CONCURRENTLY or DROP INDEX CONCURRENTLY must not queue
+// for its table's lock now, or "" when nothing it would wait for is held. A
+// statement that waits for deadlock_timeout (1s) behind a lock an autovacuum
+// worker holds makes PostgreSQL cancel that autovacuum, and a vacuum of a large
+// table then starts over, so any lock of an autovacuum worker in the scope
+// defers, whatever its mode; another backend's lock defers when its mode
+// conflicts.
+func dbMaintenanceLockConflictReason(heldLocks []dbMaintenanceHeldLock) string {
+	for _, heldLock := range heldLocks {
+		if heldLock.backendType == "autovacuum worker" {
+			return fmt.Sprintf("autovacuum pid %d holds %s on %s", heldLock.pid, heldLock.mode, heldLock.relation)
+		}
+	}
+	for _, heldLock := range heldLocks {
+		if dbMaintenanceShareUpdateExclusiveConflicts[heldLock.mode] {
+			backendType := heldLock.backendType
+			if backendType == "" {
+				backendType = "prepared transaction"
+			}
+			return fmt.Sprintf("%s pid %d holds %s on %s", backendType, heldLock.pid, heldLock.mode, heldLock.relation)
+		}
+	}
+	return ""
+}
+
+// The granted relation locks that other backends hold on a public table ($1),
+// the members of its partition tree, their toast tables, and the indexes of all
+// of those: everything REINDEX TABLE CONCURRENTLY locks, and a superset of what
+// REINDEX INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY lock.
+const dbMaintenanceTableLocksQuery = `
+	WITH member AS (
+		SELECT format('%I.%I', 'public', $1::text)::regclass::oid AS relid
+		UNION
+		SELECT tree.relid
+		FROM pg_partition_tree(format('%I.%I', 'public', $1::text)::regclass) tree
+	), scoped_relation AS (
+		SELECT member.relid
+		FROM member
+		UNION
+		SELECT table_class.reltoastrelid
+		FROM member
+		INNER JOIN pg_class table_class ON table_class.oid = member.relid
+		WHERE table_class.reltoastrelid <> 0
+	), scoped AS (
+		SELECT scoped_relation.relid
+		FROM scoped_relation
+		UNION
+		SELECT index_state.indexrelid
+		FROM scoped_relation
+		INNER JOIN pg_index index_state ON index_state.indrelid = scoped_relation.relid
+	)
+	SELECT coalesce(held.pid, 0),
+	       coalesce(activity.backend_type, ''),
+	       held.relation::regclass::text,
+	       held.mode
+	FROM pg_locks held
+	INNER JOIN scoped ON scoped.relid = held.relation
+	LEFT JOIN pg_stat_activity activity ON activity.pid = held.pid
+	WHERE held.locktype = 'relation'
+	  AND held.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+	  AND held.granted
+	  AND held.pid IS DISTINCT FROM pg_backend_pid()
+	ORDER BY 1, 3, 4
+`
+
+// Waits, without queuing on any lock, until no lock in tableName's scope would
+// make a REINDEX CONCURRENTLY or DROP INDEX CONCURRENTLY wait or cancel an
+// autovacuum, rereading pg_locks on conn every dbMaintenanceLockPollInterval
+// for at most bound. Returns "" once the scope is clear, or the last reason
+// when bound passes first. A lock taken between the last read and the caller's
+// statement still makes that statement queue (an autovacuum that starts in that
+// gap is cancelled as before); the read is one round trip before the statement,
+// and an autovacuum never waits for a lock the statement already holds.
+func dbMaintenanceAwaitTableUnlocked(ctx context.Context, conn PgConn, tableName string, bound time.Duration) (string, error) {
+	readHeldLocks := func() ([]dbMaintenanceHeldLock, error) {
+		rows, err := conn.Query(ctx, dbMaintenanceTableLocksQuery, tableName)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		heldLocks := []dbMaintenanceHeldLock{}
+		for rows.Next() {
+			var heldLock dbMaintenanceHeldLock
+			if err := rows.Scan(&heldLock.pid, &heldLock.backendType, &heldLock.relation, &heldLock.mode); err != nil {
+				return nil, err
+			}
+			heldLocks = append(heldLocks, heldLock)
+		}
+		return heldLocks, rows.Err()
+	}
+
+	deadline := time.Now().Add(bound)
+	for {
+		heldLocks, err := readHeldLocks()
+		if err != nil {
+			return "", err
+		}
+		reason := dbMaintenanceLockConflictReason(heldLocks)
+		remaining := time.Until(deadline)
+		if reason == "" || remaining <= 0 {
+			return reason, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", context.Cause(ctx)
+		case <-time.After(min(remaining, dbMaintenanceLockPollInterval)):
+		}
+	}
+}
+
+// A rebuild or drop that did not start because the lock it would take was held
+// past its bound; see dbMaintenanceLockConflictReason.
+type dbMaintenanceLockConflict struct {
+	reason string
+}
+
+func (self *dbMaintenanceLockConflict) Error() string {
+	return self.reason
+}
 
 // One reading of dbMaintenanceLoadQuery on a pooled maintenance session.
 func dbMaintenanceSampleLoad(ctx context.Context) (load dbMaintenanceLoad, err error) {
@@ -841,10 +1004,13 @@ func listDbMaintenanceReindexDebris(
 // empty) on a direct session of its own, so its lock timeout never returns to
 // the pool. Only an index listed by listDbMaintenanceReindexDebris is dropped,
 // and only if a recheck just before its drop still lists it; a valid index
-// never qualifies. A drop that times out on a lock leaves the rest of that
-// table's debris for a later cleanup, since the same lock holder would block
-// it; any other failed drop is counted and the next one proceeds. Returns how
-// much listed debris remains.
+// never qualifies. A drop does not queue behind an autovacuum, which the wait
+// would cancel, or behind any lock that conflicts with the table's
+// ShareUpdateExclusiveLock: it waits for the scope to clear for at most
+// lockTimeout (see dbMaintenanceAwaitTableUnlocked). A drop that times out on
+// that or on a lock leaves the rest of that table's debris for a later
+// cleanup, since the same lock holder would block it; any other failed drop is
+// counted and the next one proceeds. Returns how much listed debris remains.
 func dbMaintenanceDropReindexDebris(ctx context.Context, tableName string, lockTimeout time.Duration) (remaining int, returnErr error) {
 	conn, err := AcquireMaintenanceDbConn(ctx)
 	if err != nil {
@@ -886,6 +1052,16 @@ func dbMaintenanceDropReindexDebris(ctx context.Context, tableName string, lockT
 			candidate.tableName,
 			candidate.original,
 		)
+		reason, err := dbMaintenanceAwaitTableUnlocked(ctx, conn, candidate.tableName, lockTimeout)
+		if err != nil {
+			return remaining + len(debris) - i, err
+		}
+		if reason != "" {
+			glog.Infof("[db]maintenance left %s for a later cleanup: %s\n", indexName, reason)
+			remaining += 1
+			lockedTables[candidate.tableName] = true
+			continue
+		}
 		if _, err := conn.Exec(ctx, `DROP INDEX CONCURRENTLY IF EXISTS `+indexName); err != nil {
 			glog.Infof("[db]maintenance drop %s failed: %s\n", indexName, err)
 			remaining += 1
@@ -901,12 +1077,17 @@ func dbMaintenanceDropReindexDebris(ctx context.Context, tableName string, lockT
 	return remaining, nil
 }
 
-// Runs one REINDEX ... CONCURRENTLY statement on a direct session of its own,
-// so its bounded settings never return to the pool. Parallel maintenance
-// workers are disabled so a rebuild takes one cpu, not up to
-// max_parallel_maintenance_workers more. pid names the server backend for the
-// cleanup after a failure; it is zero when the statement never started.
-func dbMaintenanceRunReindex(ctx context.Context, statement string, lockTimeout time.Duration) (pid int32, err error) {
+// Runs one REINDEX ... CONCURRENTLY statement on tableName (or one of its
+// indexes) on a direct session of its own, so its bounded settings never
+// return to the pool. Parallel maintenance workers are disabled so a rebuild
+// takes one cpu, not up to max_parallel_maintenance_workers more. The rebuild
+// does not queue for the table's ShareUpdateExclusiveLock behind an autovacuum,
+// which the wait would cancel, or behind a conflicting lock: it waits for the
+// scope to clear for at most lockTimeout and otherwise returns a
+// *dbMaintenanceLockConflict without starting. lockTimeout still bounds each
+// lock and snapshot wait of the later phases. pid names the server backend for
+// the cleanup after a failure; it is zero when the statement never started.
+func dbMaintenanceRunReindex(ctx context.Context, tableName string, statement string, lockTimeout time.Duration) (pid int32, err error) {
 	conn, err := AcquireMaintenanceDbConn(ctx)
 	if err != nil {
 		return 0, err
@@ -919,9 +1100,19 @@ func dbMaintenanceRunReindex(ctx context.Context, statement string, lockTimeout 
 	if _, err = conn.Exec(ctx, "SET max_parallel_maintenance_workers = 0"); err != nil {
 		return
 	}
-	if err = conn.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid); err != nil {
+	var backendPid int32
+	if err = conn.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&backendPid); err != nil {
 		return
 	}
+	// the last read before the statement, to keep the race window one round trip
+	reason, err := dbMaintenanceAwaitTableUnlocked(ctx, conn, tableName, lockTimeout)
+	if err != nil {
+		return 0, err
+	}
+	if reason != "" {
+		return 0, &dbMaintenanceLockConflict{reason: reason}
+	}
+	pid = backendPid
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, dbMaintenanceReindexTimeout)
 	defer timeoutCancel()
 	_, err = conn.Exec(timeoutCtx, statement)
@@ -1164,10 +1355,19 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		}
 	}
 
+	// Set by runObject when the object's rebuild did not start because its
+	// table stayed locked (see dbMaintenanceRunReindex); the object is left for
+	// the continuation and the run goes on with the next one.
+	objectLocked := false
+	// The objects left that way, in order.
+	lockedObjectNames := []string{}
+
 	// Runs one object's ordered steps. The guard decides before the object's
 	// steps start, so a deferral leaves the object for the continuation. It
 	// returns false when the run must stop before this object finished.
-	// maxTransactionAge and lockTimeout bound the rebuild's start and waits.
+	// maxTransactionAge bounds the transactions the rebuild starts behind, and
+	// lockTimeout bounds both its wait for cleanupTableName to clear and each
+	// lock and snapshot wait of the rebuild itself.
 	runObject := func(
 		prefix string,
 		objectName string,
@@ -1176,6 +1376,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		maxTransactionAge time.Duration,
 		lockTimeout time.Duration,
 	) bool {
+		objectLocked = false
 		if ctx.Err() != nil {
 			interrupted()
 			return false
@@ -1215,8 +1416,13 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 				}
 			case dbMaintenanceReindex:
 				var err error
-				reindexPid, err = dbMaintenanceRunReindex(ctx, reindexStatement, lockTimeout)
-				if err != nil {
+				reindexPid, err = dbMaintenanceRunReindex(ctx, cleanupTableName, reindexStatement, lockTimeout)
+				var lockConflict *dbMaintenanceLockConflict
+				if errors.As(err, &lockConflict) {
+					// nothing started, so nothing to clean up after
+					glog.Infof("[db]maintenance %s %s %s deferred: %s\n", prefix, step, objectName, lockConflict.reason)
+					objectLocked = true
+				} else if err != nil {
 					glog.Infof("[db]maintenance %s %s %s failed: %s\n", prefix, step, objectName, err)
 					reindexFailed = true
 					ok = false
@@ -1262,12 +1468,18 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 
 	// The bloated priority indexes go first, smallest first: a long table
 	// rotation that ends in a deferral must not starve them. One whose table is
-	// being vacuumed is left for a later run rather than cancel or queue behind
-	// the vacuum (an autovacuum that starts between this check and the rebuild's
-	// lock request is still canceled). Each keeps its debris cleanup adjacent to
-	// its own rebuild on the table that owns it, and its size afterwards is
-	// logged against its estimate, so an estimate that would keep an index
-	// selected shows up in the log.
+	// being vacuumed is skipped at once, without deferring the run, rather than
+	// cancel, queue behind or wait out a vacuum that can run for hours; every run
+	// measures the priority indexes again. A lock this check misses that the
+	// rebuild must not queue behind (one taken after the check, a conflicting
+	// lock in another mode, or an autovacuum's lock on the toast table or an
+	// index) makes the rebuild wait for the table to clear, without queuing, for
+	// at most the priority lock bound (see dbMaintenanceRunReindex). An index
+	// still locked then is left out of the done list and defers the run, as a
+	// locked table does, so the continuation retries it. Each keeps its debris
+	// cleanup adjacent to its own rebuild on the table that owns it, and its size
+	// afterwards is logged against its estimate, so an estimate that would keep
+	// an index selected shows up in the log.
 	for i, priorityIndex := range priorityIndexes {
 		prefix := fmt.Sprintf("priority index[%d/%d]", i+1, len(priorityIndexes))
 		if locked, err := dbMaintenanceTableLocked(ctx, priorityIndex.tableName); err != nil || locked {
@@ -1294,6 +1506,10 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 			opts.priorityReindexLockTimeout(),
 		) {
 			break
+		}
+		if objectLocked {
+			lockedObjectNames = append(lockedObjectNames, priorityIndex.indexName)
+			continue
 		}
 		outcome.DoneIndexes = append(outcome.DoneIndexes, priorityIndex.indexName)
 		if rebuiltIndexes, err := dbMaintenancePriorityIndexSizes(ctx, []string{priorityIndex.indexName}); err == nil {
@@ -1352,11 +1568,18 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		) {
 			break
 		}
+		if objectLocked {
+			lockedObjectNames = append(lockedObjectNames, tableName)
+			continue
+		}
 		outcome.DoneTables = append(outcome.DoneTables, tableName)
 	}
 
 	if outcome.Stopped == DbMaintenanceInterrupted {
 		return outcome
+	}
+	if outcome.Stopped == "" && 0 < len(lockedObjectNames) {
+		stop(DbMaintenanceDeferred, fmt.Sprintf("locked by another session: %s", strings.Join(lockedObjectNames, ", ")))
 	}
 
 	// A deferred run still analyzes, so the daily pending_task vacuum keeps
@@ -1369,7 +1592,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		HandleError(func() {
 			MaintenanceDb(ctx, func(conn PgConn) {
 				glog.Infof("[db]maintenance vacuum analyze pending_task\n")
-				RaisePgResult(conn.Exec(ctx, `VACUUM (ANALYZE) pending_task`))
+				RaisePgResult(conn.Exec(ctx, dbMaintenanceVacuumPendingTaskStatement))
 			}, OptNoRetry())
 		})
 
@@ -1380,7 +1603,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 				startTime := time.Now()
 				RaisePgResult(conn.Exec(
 					ctx,
-					`ANALYZE`,
+					dbMaintenanceAnalyzeStatement,
 				))
 				endTime := time.Now()
 				glog.Infof(
