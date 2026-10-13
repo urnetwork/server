@@ -567,7 +567,8 @@ func TestVerifyControllerPoisonAndFailurePaths(t *testing.T) {
 		ctx := context.Background()
 		testVerifyInstallServerKey()
 		settings := model.DefaultVerifySettings()
-		settings.SeedRateHardLimit = 2
+		// two poison seeds after the retryable attempts, which the meters count
+		settings.SeedRateHardLimit = 2 + model.VerifyUnattributedAttemptLimit
 		SetVerifySettings(settings)
 		defer SetVerifySettings(model.DefaultVerifySettings())
 
@@ -578,10 +579,19 @@ func TestVerifyControllerPoisonAndFailurePaths(t *testing.T) {
 			p1: "203.0.113.10", p2: "203.0.113.20", p3: "203.0.113.30",
 		}
 
-		// --- V2: an unresolved-source SEED poisons with a deterministic
-		// synthetic trail[0], stable across identical seeds
+		// --- IPV6.md C7: the first attempts of an unresolved-source SEED are
+		// answered as retryable with no trail; past them, V2: it poisons with
+		// a deterministic synthetic trail[0], stable across identical seeds
 		poisonValidator, poisonVpk, poisonKey := testVerifyValidator(ctx)
 		unresolvedIp := "198.18.0.9" // never fed to the egress index
+		for attempt := 0; attempt < model.VerifyUnattributedAttemptLimit; attempt++ {
+			if _, err := Verify(
+				testVerifySeedArgs(t, poisonValidator, poisonVpk, poisonKey, connect.VerifyMMin),
+				testVerifySession(ctx, unresolvedIp),
+			); err == nil || err.Error() != "421 source-egress-unresolved" {
+				t.Fatalf("unresolved seed attempt %d = %v, want the retryable answer", attempt+1, err)
+			}
+		}
 		seedOnce := func() *connect.VerifyAssignResult {
 			result, err := Verify(
 				testVerifySeedArgs(t, poisonValidator, poisonVpk, poisonKey, connect.VerifyMMin),
@@ -627,26 +637,32 @@ func TestVerifyControllerPoisonAndFailurePaths(t *testing.T) {
 		if server.Id(realAssign.NextHop) == p2 {
 			wrongIp = providerIps[p3]
 		}
-		_, realExtendErr := Verify(
-			testVerifyExtendArgs(t, realValidator, realVpk, realKey, realAssign),
-			testVerifySession(ctx, wrongIp),
-		)
-		if realExtendErr == nil {
-			t.Fatal("wrong-source EXTEND must fail")
-		}
 
 		// --- V1: extending a poison trail from a real provider's ip fails with
-		// the IDENTICAL error (no observable branch on poison)
+		// the IDENTICAL error (no observable branch on poison), at each attempt:
+		// the retryable answers (N4), then the failure
 		poisonWrongIp := providerIps[p1]
 		if server.Id(poison1.NextHop) == p1 {
 			poisonWrongIp = providerIps[p2]
 		}
-		_, poisonExtendErr := Verify(
-			testVerifyExtendArgs(t, poisonValidator, poisonVpk, poisonKey, poison1),
-			testVerifySession(ctx, poisonWrongIp),
-		)
-		if poisonExtendErr == nil || poisonExtendErr.Error() != realExtendErr.Error() {
-			t.Fatalf("poison extend err %q must equal real wrong-source err %q", poisonExtendErr, realExtendErr)
+		for attempt := 0; attempt <= model.VerifyUnattributedAttemptLimit; attempt++ {
+			_, realExtendErr := Verify(
+				testVerifyExtendArgs(t, realValidator, realVpk, realKey, realAssign),
+				testVerifySession(ctx, wrongIp),
+			)
+			if realExtendErr == nil {
+				t.Fatal("wrong-source EXTEND must fail")
+			}
+			_, poisonExtendErr := Verify(
+				testVerifyExtendArgs(t, poisonValidator, poisonVpk, poisonKey, poison1),
+				testVerifySession(ctx, poisonWrongIp),
+			)
+			if poisonExtendErr == nil || poisonExtendErr.Error() != realExtendErr.Error() {
+				t.Fatalf("attempt %d: poison extend err %q must equal real wrong-source err %q", attempt+1, poisonExtendErr, realExtendErr)
+			}
+			if wantRetry := attempt < model.VerifyUnattributedAttemptLimit; wantRetry != (realExtendErr.Error() == "421 source-egress-unresolved") {
+				t.Fatalf("attempt %d: wrong-source EXTEND = %v", attempt+1, realExtendErr)
+			}
 		}
 
 		// the failed REAL trail is durably recorded as expired; the poison

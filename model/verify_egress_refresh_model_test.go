@@ -5,7 +5,6 @@ package model
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"testing"
@@ -56,9 +55,11 @@ func testVerifyInsertProxyClients(ctx context.Context, clientIds []server.Id, ip
 // and from proxy_client by the refresh. A provider and a client without keys
 // with their own addresses, two providers sharing one address, a provider with
 // a second live address from a connection, and a provider with an expired
-// reverse field must each end resolved, eligible and pruned alike. Both ways
-// run twice, so the single feeds have seen each other's leases as the waves of
-// one chunk do.
+// reverse field must each end resolved, eligible and pruned alike. So must
+// the per-family rule (§8.2): a provider with an IPv6 connection beside its
+// allocation stays eligible, and so does one sharing its allocation's address
+// while its own IPv6 /64 attributes. Both ways run twice, so the single feeds
+// have seen each other's leases as the waves of one chunk do.
 func TestRefreshVerifyProxyEgressMatchesSingleFeeds(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -78,6 +79,9 @@ func TestRefreshVerifyProxyEgressMatchesSingleFeeds(t *testing.T) {
 			{provider: true, address: 12},
 			{provider: true, address: 13, connectionIp: "203.0.113.%d"},
 			{provider: true, address: 14, expiredField: true},
+			{provider: true, address: 15, connectionIp: "2001:db8:%d::1"},
+			{provider: true, address: 16, connectionIp: "2001:db8:%d::1"},
+			{provider: true, address: 16},
 		}
 		expected := []testVerifyProxyEgressState{
 			{resolved: true, eligible: true, reverseFieldCount: 1},
@@ -86,6 +90,9 @@ func TestRefreshVerifyProxyEgressMatchesSingleFeeds(t *testing.T) {
 			{resolved: false, eligible: false, reverseFieldCount: 1},
 			{resolved: false, eligible: false, reverseFieldCount: 2},
 			{resolved: true, eligible: true, reverseFieldCount: 1},
+			{resolved: true, eligible: true, reverseFieldCount: 2},
+			{resolved: false, eligible: true, reverseFieldCount: 2},
+			{resolved: false, eligible: false, reverseFieldCount: 1},
 		}
 
 		// The first network is fed singly, the second by the refresh.
@@ -105,10 +112,11 @@ func TestRefreshVerifyProxyEgressMatchesSingleFeeds(t *testing.T) {
 					FeedVerifyConnectionEgress(ctx, clientId, server.NewId(), connectionIp, settings)
 				}
 				if allocation.expiredField {
-					staleHash := VerifyEgressIndexHashWithSettings(netip.MustParseAddr(fmt.Sprintf("203.0.113.%d", 100+10*networkIndex+index)), settings)
+					staleIp := netip.MustParseAddr(fmt.Sprintf("203.0.113.%d", 100+10*networkIndex+index))
+					staleField, _ := verifyClientEgressField(staleIp, settings)
 					server.Redis(ctx, func(r server.RedisClient) {
-						server.Raise(r.HSet(ctx, verifyClientEgressKey(clientId), hex.EncodeToString(staleHash[:]),
-							server.NowUtc().Add(-time.Minute).UnixMilli()).Err())
+						server.Raise(r.HSet(ctx, verifyClientEgressKey(clientId), staleField,
+							fmt.Sprintf("%d%s", server.NowUtc().Add(-time.Minute).UnixMilli(), verifyClientEgressValueSuffix(staleIp, settings))).Err())
 					})
 				}
 			}

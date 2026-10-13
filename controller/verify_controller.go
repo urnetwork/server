@@ -25,6 +25,16 @@ package controller
 // unresolved seed or when the routable population is empty.
 // Only past the hard rate limits (the DoS bound on state creation) is a
 // request refused outright.
+//
+// Retry on the other family (§8.2, IPV6.md C7): the first attempts of a step
+// whose source the step cannot attribute are answered
+// `421 source-egress-unresolved` with nothing changed, so the validator can
+// resend through the provider's other family: a registered validator's SEED
+// whose source resolves to no provider, and a valid EXTEND whose source
+// resolves to no provider or to another than the pending one. Past
+// VerifyUnattributedAttemptLimit the seed is poisoned and the EXTEND fails.
+// Any other SEED gets the answer it always got, so the 421 tells only a
+// registered key whether its source is attributed (§9).
 
 import (
 	"context"
@@ -34,6 +44,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -220,8 +231,9 @@ func parseVerifySettings(res *server.SimpleResource) *model.VerifySettings {
 			HardExtendPerMinutePerSource int64  `yaml:"hard_extend_per_minute_per_source"`
 			HardActiveTrailsPerSource    int64  `yaml:"hard_active_trails_per_source"`
 			// server-only keys, absent from the policy's verify section
-			CohortSize          *int `yaml:"cohort_size"`
-			CohortLifetimeLimit *int `yaml:"cohort_lifetime_limit"`
+			CohortSize                      *int `yaml:"cohort_size"`
+			CohortLifetimeLimit             *int `yaml:"cohort_lifetime_limit"`
+			HopLatencyFromAttributedAttempt bool `yaml:"hop_latency_from_attributed_attempt"`
 		} `yaml:"settings"`
 	}
 	res.UnmarshalYaml(&conf)
@@ -256,6 +268,7 @@ func parseVerifySettings(res *server.SimpleResource) *model.VerifySettings {
 	s.EgressHashV4Prefix, s.EgressHashV6Prefix = v.EgressIpv4Prefix, v.EgressIpv6Prefix
 	s.EgressHashKey, s.EgressHashKeyId = append([]byte(nil), key...), v.EgressHashKeyId
 	s.SoftLimitsEnabled = v.SoftGuardrailsEnabled
+	s.HopLatencyFromAttributedAttempt = v.HopLatencyFromAttributedAttempt
 	s.SeedRateHardLimit, s.ExtendRateHardLimit, s.ActiveTrailsHardLimit = v.HardSeedPerMinutePerSource, v.HardExtendPerMinutePerSource, v.HardActiveTrailsPerSource
 	if s.CohortSize, s.CohortLifetimeLimit, err = verifyCohortSettings(conf.Profile, v.CohortSize, v.CohortLifetimeLimit); err != nil {
 		panic(fmt.Errorf("verify.yml %w", err))
@@ -521,7 +534,7 @@ func verifySeedWithAdmission(
 		return verifyDecodeCachedResponse(body.ResponseJson)
 	}
 
-	// §4.1 step 1: resolve source ip → seed hop (§8.1); unresolved → poison
+	// §4.1 step 1: resolve source ip → seed hop (§8.1)
 	var seedClientId *server.Id
 	if sourceIpOk {
 		seedClientId = model.ResolveVerifyEgress(ctx, sourceIp, settings)
@@ -533,6 +546,22 @@ func verifySeedWithAdmission(
 		return nil, err
 	}
 	keyOk := len(registeredKey) == ed25519.PublicKeySize && slices.Equal(registeredKey, verify.Vpk)
+
+	// Only a registered key learns anything of resolution (§9). Its resolved
+	// seeds also count against the provider, whose source ips in the two
+	// families share one budget, and its unresolved ones are answered as
+	// retryable while the step allows (IPV6.md C7: the validator resends on
+	// the other family), then poisoned. Any other caller is poisoned as
+	// always, through a synthetic seed hop below.
+	var providerCount int64
+	if keyOk && seedClientId != nil {
+		providerCount = model.IncrVerifySeedProviderRate(ctx, sourceIpStr, *seedClientId, settings)
+		if settings.SeedRateHardLimit < providerCount {
+			return nil, fmt.Errorf("429 rate limit exceeded")
+		}
+	} else if keyOk && model.IncrVerifyUnattributedSeed(ctx, verify.SeedSig, settings) <= model.VerifyUnattributedAttemptLimit {
+		return nil, errVerifySourceUnresolved
+	}
 	var assignmentExclusions []server.Id
 	if keyOk {
 		assignmentExclusions, err = verifySimulationAssignmentExclusions(verify.Vpk)
@@ -550,7 +579,7 @@ func verifySeedWithAdmission(
 	// (SoftLimitsEnabled=false) so each validator drives its own trail rate; the
 	// hard per-source-ip reject above stays as the DoS backstop.
 	rateOver := settings.SoftLimitsEnabled &&
-		(settings.SeedRateSoftLimit < ipCount || settings.SeedRateSoftLimit < vpkCount)
+		(settings.SeedRateSoftLimit < ipCount || settings.SeedRateSoftLimit < vpkCount || settings.SeedRateSoftLimit < providerCount)
 
 	// §9: concurrent active trail cap per vpk (soft → poison, hard → refuse).
 	// The hard cap always applies; D26 gates only the soft → poison tier.
@@ -586,13 +615,17 @@ func verifySeedWithAdmission(
 
 	var seedHopClientId server.Id
 	var seedHopEgressHash [32]byte
-	if seedClientId != nil {
+	if keyOk && seedClientId != nil {
 		// use the resolved hop even when poisoned for another reason, so a
-		// caller probing with its own known client_id cannot distinguish
+		// caller probing with its own known client_id cannot distinguish.
+		// trail[0] names a client only to a registered key: anyone else gets
+		// the synthetic hop wherever its source resolves, so an address in a
+		// provider's /64 learns nothing of the provider
 		seedHopClientId = *seedClientId
 		// the seed request's source ip is the seed provider's egress ip;
 		// record its egress-IP-hash at the configured granularity (§8.1, D27).
-		// sourceIp is valid here — seedClientId resolved from it.
+		// sourceIp is valid here — seedClientId resolved from it. The seed hop
+		// never scores (§7.6), so it is not pinned to the scoring window.
 		seedHopEgressHash = model.VerifyEgressIpHashWithSettings(sourceIp, settings)
 	} else {
 		// synthetic: never touches a real provider (§9). deterministic per
@@ -707,6 +740,8 @@ func verifySeedWithAdmission(
 	} else {
 		model.CreateVerifyTrail(ctx, trail, responseJson, settings)
 	}
+	// every hop of the trail pins in its SEED's scoring window (§8.1)
+	model.SetVerifyTrailHeadWindow(ctx, trailId, m, settings)
 
 	if glog.V(2) {
 		glog.Infof("[verify]seed trail %s depth 1/%d (poison=%t)\n", trailId, m, poison)
@@ -754,6 +789,17 @@ func verifyExtend(
 	var sourceClientId *server.Id
 	if sourceIpOk {
 		sourceClientId = model.ResolveVerifyEgress(ctx, sourceIp, settings)
+	}
+	// V4: a resolved source also counts against its provider, whose source ips
+	// in the two families share one EXTEND budget. An unresolved source pays
+	// the same on a scratch counter, so the work before the trail loads does
+	// not depend on resolution (§9).
+	if sourceClientId != nil {
+		if settings.ExtendRateHardLimit < model.IncrVerifyExtendProviderRate(ctx, sourceIpStr, *sourceClientId, settings) {
+			return nil, fmt.Errorf("429 rate limit exceeded")
+		}
+	} else {
+		model.PadVerifyExtendProviderRate(ctx, sourceIpStr, settings)
 	}
 
 	// §4.2 step 2: load the trail
@@ -881,29 +927,53 @@ func verifyExtend(
 	}
 
 	// §4.2 step 5: the request truly egressed from the assigned provider. This
-	// check applies identically to normal and poison shadow routes.
-	if sourceClientId == nil {
-		return nil, rejectVerifyExtend(ctx, trail, "source-egress-unresolved")
-	}
-	if *sourceClientId != trail.Pending.ClientId {
-		return nil, rejectVerifyExtend(ctx, trail, "source-egress-mismatch")
+	// check applies identically to normal and poison shadow routes. A source
+	// that resolves to no provider, or to another one (co-located providers
+	// behind one NAT or in one /64 that indexed different families), is
+	// answered as retryable, with nothing changed, while the step allows: the
+	// validator resends the identical body on the other family (IPV6.md C7).
+	// Then the trail fails as before, a genuine misroute included.
+	if sourceClientId == nil || *sourceClientId != trail.Pending.ClientId {
+		reason := "source-egress-unresolved"
+		if sourceClientId != nil {
+			reason = "source-egress-mismatch"
+		}
+		if attempt := model.IncrVerifyUnattributedExtend(ctx, trailId, len(trail.Hops), nowMs, settings); attempt <= model.VerifyUnattributedAttemptLimit {
+			glog.Infof("[verify]EXTEND retryable trail=%s depth=%d pending=%s reason=%s attempt=%d\n", trail.TrailId, len(trail.Hops)+1, trail.Pending.ClientId, reason, attempt)
+			return nil, errVerifySourceUnresolved
+		}
+		return nil, rejectVerifyExtend(ctx, trail, reason)
 	}
 
 	// §4.2 step 6: confirm the hop, stamp server time (§3.4), record
-	// per-step latency at the instant of confirmation (§7.5)
+	// per-step latency at the instant of confirmation (§7.5). With
+	// HopLatencyFromAttributedAttempt the latency counts from the server's
+	// last answer on the step: the ASSIGN, or the step's last retryable
+	// answer, after which the attributed resend went. The hop's AssignedMs
+	// carries that start, so every reader of ConfirmedMs − AssignedMs (the
+	// stats, the published percentiles, the receipts) counts the attributed
+	// attempt only. Off, and for a step with no retryable answer, the hop
+	// keeps its ASSIGN time; the step deadline is always the pending hop's.
+	startMs := trail.Pending.AssignedMs
+	if settings.HopLatencyFromAttributedAttempt {
+		if answeredMs := model.GetVerifyUnattributedExtendAnsweredMs(ctx, trailId, len(trail.Hops)); startMs < answeredMs {
+			startMs = min(answeredMs, nowMs)
+		}
+	}
 	confirmedHop := &model.VerifyTrailHop{
 		ClientId:     trail.Pending.ClientId,
 		NetworkId:    trail.Pending.NetworkId,
 		NetworkIssue: trail.Pending.NetworkIssue,
-		AssignedMs:   trail.Pending.AssignedMs,
+		AssignedMs:   startMs,
 		ConfirmedMs:  nowMs,
 		AssignN:      trail.Pending.AssignN,
 		// §4.2 step 5 passed, so the confirming request's source ip is this
-		// provider's egress ip — record its egress-IP-hash at the configured
-		// granularity (§8.1, §3.3, D27). Computed unconditionally: a poison
-		// trail's synthetic pending fails step 5 before here, so there is no
-		// observable branch on poison.
-		EgressIpHash: model.VerifyEgressIpHashWithSettings(sourceIp, settings),
+		// provider's egress ip — record the egress-IP-hash at the configured
+		// granularity (§8.1, §3.3, D27) the provider pinned for the trail's
+		// scoring window, so it scores one prefix a window. Computed
+		// unconditionally with the same Redis work: a poison trail only
+		// reads the pin, never sets it.
+		EgressIpHash: model.PinVerifyHopEgressIpHash(ctx, trail.Pending.ClientId, sourceIp, model.GetVerifyTrailHeadWindow(ctx, trailId, settings), trail.Poison, settings),
 	}
 	if trail.Poison {
 		model.IncrVerifyPoisonCounter(ctx, "confirm")
@@ -1102,6 +1172,14 @@ func verifyFailTrail(ctx context.Context, trail *model.VerifyTrail) {
 		glog.Infof("[verify]failed trail %s depth %d (poison=%t)\n", trail.TrailId, len(trail.Hops), trail.Poison)
 	}
 }
+
+// The answer to a registered validator's SEED whose source resolves to no
+// provider, or to a valid EXTEND whose source resolves to no provider or to
+// another than the pending one (§8.1), while its step allows another
+// attempt: nothing changed, and the caller resends the identical body
+// through the same hop, its tunnel trying the other family first (IPV6.md
+// C7). 421 Misdirected Request marks it retryable; the body is the reason.
+var errVerifySourceUnresolved = errors.New("421 source-egress-unresolved")
 
 // Internal diagnosis cannot reveal which failure branch a remote caller hit.
 // Error retains the protocol's identical HTTP status and response text.

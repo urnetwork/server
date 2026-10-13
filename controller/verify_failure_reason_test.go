@@ -45,9 +45,21 @@ func TestVerifyControllerExtendFailureReasonsStayPrivate(t *testing.T) {
 				source := ips[pending]
 				switch reason {
 				case "source-egress-unresolved":
+					// the retryable answers first (IPV6.md C7), then the failure
 					model.ClearVerifyEgress(ctx, pending, netip.MustParseAddr(source), settings)
+					for attempt := 0; attempt < model.VerifyUnattributedAttemptLimit; attempt++ {
+						if _, err := Verify(extend, testVerifySession(ctx, source)); err == nil || err.Error() != "421 source-egress-unresolved" {
+							t.Fatalf("unresolved attempt %d = %v, want the retryable answer", attempt+1, err)
+						}
+					}
 				case "source-egress-mismatch":
+					// another provider's address is retryable first too (N4)
 					source = ips[seedProvider]
+					for attempt := 0; attempt < model.VerifyUnattributedAttemptLimit; attempt++ {
+						if _, err := Verify(extend, testVerifySession(ctx, source)); err == nil || err.Error() != "421 source-egress-unresolved" {
+							t.Fatalf("mismatched attempt %d = %v, want the retryable answer", attempt+1, err)
+						}
+					}
 				case "signature-mismatch":
 					extend.ExtendSig[0] ^= 1
 				case "path-mismatch":
