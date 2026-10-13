@@ -120,20 +120,6 @@ func testEvalProviderEgressProbeTasks(t testing.TB, ctx context.Context, n int) 
 	return
 }
 
-// Runs one claimed pass and its post-step as the task system does.
-func testRunProbeWithPost(t testing.TB, ctx context.Context, clientSession *session.ClientSession, args *ProviderEgressProbeArgs) {
-	t.Helper()
-	result, err := ProviderEgressProbe(args, clientSession)
-	if err != nil {
-		t.Fatalf("shard %d pass failed: %v", args.ShardIndex, err)
-	}
-	server.Tx(ctx, func(tx server.PgTx) {
-		if err := ProviderEgressProbePost(args, result, clientSession, tx); err != nil {
-			t.Fatalf("shard %d post failed: %v", args.ShardIndex, err)
-		}
-	})
-}
-
 // Runs the pending pass of one shard and finishes it in the task worker's
 // order, through the taskworker's registration of the probe: the pass, a
 // finishing transaction that deletes the claimed row and runs the post-step,
@@ -314,12 +300,17 @@ func TestProviderEgressProbeOlderConfigHandsBackWhileAnyNewerShardIsLive(t *test
 	})
 }
 
-// The newest config still converges older snapshots: an in-range shard takes
-// its geometry, and a shard it removed is retired.
+// The newest config still converges older snapshots, through the real task
+// evaluator. Shard 2's own post-step must replace its claimed row with one of
+// the newest geometry, and a shard that geometry removed is retired. The
+// recreation after each pass creates the newest geometry's missing shards,
+// but never the claimed shard's successor: that is a new row only its own
+// post-step writes, since a pending row keeps its arguments under a merge.
 func TestProviderEgressProbeNewerConfigConvergesOlderShards(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		t.Setenv("WARP_CONFIG_VERSION", testNewerConfigVersion)
-		withProviderEgressProbeSettings(t, testUrlGeometrySettings(6, 96))
+		newest := testUrlGeometrySettings(6, 96)
+		withProviderEgressProbeSettings(t, newest)
 		driftTaskRunner(t, func(context.Context, *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
 			t.Error("a stale older geometry ran a pass")
 			return &ProviderEgressProbeResult{}, nil
@@ -328,16 +319,49 @@ func TestProviderEgressProbeNewerConfigConvergesOlderShards(t *testing.T) {
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 		older := testUrlGeometrySettings(8, 64)
-		testRunProbeWithPost(t, ctx, clientSession, testStampedGeometryArgs(t, older, 7, testOlderConfigVersion, server.NowUtc()))
+		server.Tx(ctx, func(tx server.PgTx) {
+			due := testStampedGeometryArgs(t, older, 2, testOlderConfigVersion, server.NowUtc())
+			scheduleProviderEgressProbeAt(clientSession, tx, due, server.NowUtc().Add(-time.Minute))
+			removed := testStampedGeometryArgs(t, older, 7, testOlderConfigVersion, server.NowUtc())
+			scheduleProviderEgressProbeAt(clientSession, tx, removed, server.NowUtc().Add(time.Hour))
+		})
+		claimed := testPendingProbeRow(t, ctx, 2)
+
+		before := server.NowUtc()
+		if finishedCount, retriedCount := testEvalProviderEgressProbeTasks(t, ctx, 1); finishedCount != 1 || retriedCount != 0 {
+			t.Fatalf("the newer config finished %d and retried %d claims of shard 2", finishedCount, retriedCount)
+		}
+		after := server.NowUtc()
+		next := testPendingProbeRow(t, ctx, 2)
+		if next == nil || next.taskId == claimed.taskId {
+			t.Fatalf("shard 2's post-step did not replace its claimed row: %+v", next)
+		}
+		wantArgs := testStoredArgsFields(t, providerEgressProbeArgs(newest, 2))
+		wantArgs["geometry_generation"] = testNewerConfigVersion
+		wantArgs["geometry_written_at"] = next.args["geometry_written_at"]
+		writtenAtText, _ := next.args["geometry_written_at"].(string)
+		writtenAt, err := time.Parse(time.RFC3339Nano, writtenAtText)
+		if err != nil || !reflect.DeepEqual(next.args, wantArgs) ||
+			writtenAt.Before(before.Add(-time.Second)) || after.Add(time.Second).Before(writtenAt) {
+			t.Fatalf("shard 2's post-step did not converge it to the newest geometry: shard_count=%v url_probe=%v generation=%v",
+				next.args["shard_count"], next.args["url_probe"], next.args["geometry_generation"])
+		}
+
+		// Only shard 7 is due; the recreation made the newest geometry's other shards due at once.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at = $2 WHERE function_name = $1`,
+				ProviderEgressProbeTaskFunctionNames()[0], server.NowUtc().Add(time.Hour)))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at = $2 WHERE run_once_key = $1`,
+				task.RunOnce("provider_egress_probe", 7).String(), server.NowUtc().Add(-time.Minute)))
+		})
+		if finishedCount, retriedCount := testEvalProviderEgressProbeTasks(t, ctx, 1); finishedCount != 1 || retriedCount != 0 {
+			t.Fatalf("the newer config finished %d and retried %d claims of shard 7", finishedCount, retriedCount)
+		}
 		if next := testPendingProbeRow(t, ctx, 7); next != nil {
 			t.Fatalf("the newer 6-shard config kept removed shard 7 with shard_count=%v", next.args["shard_count"])
 		}
-		testRunProbeWithPost(t, ctx, clientSession, testStampedGeometryArgs(t, older, 2, testOlderConfigVersion, server.NowUtc()))
-		next := testPendingProbeRow(t, ctx, 2)
-		if next == nil || next.args["shard_count"] != float64(6) || !reflect.DeepEqual(next.args["url_probe"], map[string]any{
-			"limit": float64(96), "concurrency": float64(96), "probe_timeout_seconds": float64(60),
-		}) {
-			t.Fatalf("the newer config did not converge shard 2: %+v", next)
+		if count := testPendingProbeRowCount(t, ctx); count != newest.ShardCount {
+			t.Fatalf("%d probe rows, want the newest geometry's %d", count, newest.ShardCount)
 		}
 	})
 }
