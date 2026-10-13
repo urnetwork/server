@@ -49,8 +49,10 @@ func TestLagDevDashboardAnswersEachQuestion(t *testing.T) {
 		"opted-out extenders":     "urnetwork_stats_lag_extenders_opted_out",
 		"visitors by country":     "urnetwork_stats_lag_visitors_24h_by_country",
 		"rows the sweep removed":  "urnetwork_lag_sweep_deleted_total",
-		// amendment 12: what every other panel leaves out
+		// amendment 12: what every other panel leaves out, and which client
+		// ran what counts
 		"automated measurements": "urnetwork_stats_lag_automated_results_1h",
+		"measurements by source": "urnetwork_stats_lag_results_1h_by_source",
 	} {
 		found := false
 		for _, expression := range expressions {
@@ -100,8 +102,9 @@ func TestLagDevDashboardReadsAreInstanceSafe(t *testing.T) {
 
 // No query groups by a label outside the bounded enums the lag metrics carry:
 // end reason, family, outcome, state, a country among the top 10 or other,
-// the sweep's kind, and why a track is automated. Nothing names a visitor, an
-// address, an extender or an agent (amendments 9 and 12).
+// the sweep's kind, why a track is automated, and which client ran it.
+// Nothing names a visitor, an address, an extender or an agent (amendments 9
+// and 12).
 func TestLagDevDashboardGroupsOnlyByBoundedLabels(t *testing.T) {
 	dashboard := readTestDashboard(t, "lag-dev.json")
 
@@ -113,6 +116,7 @@ func TestLagDevDashboardGroupsOnlyByBoundedLabels(t *testing.T) {
 		"country_code": true,
 		"kind":         true,
 		"reason":       true,
+		"source":       true,
 	}
 	byClause := regexp.MustCompile(`by \(([^)]*)\)`)
 	for _, expression := range dashboardExpressions(dashboard) {

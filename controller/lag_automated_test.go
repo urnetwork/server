@@ -216,3 +216,120 @@ func TestStatsRefreshLagLeavesOutAutomated(t *testing.T) {
 		connect.AssertEqual(t, testutil.ToFloat64(statsLagAutomatedResults1hGauge.gauge.WithLabelValues(model.LagAutomatedReasonSignatureAgent)), float64(1))
 	})
 }
+
+// A track's source is cli or mcp when X-Lag-Client names one of them, in any
+// case, and web otherwise, a browser's missing header included.
+func TestLagTrackSourceHeader(t *testing.T) {
+	for _, c := range []struct {
+		value string
+		want  string
+	}{
+		{"", model.LagSourceWeb},
+		{"cli", model.LagSourceCli},
+		{"mcp", model.LagSourceMcp},
+		{" MCP ", model.LagSourceMcp},
+		{"CLI", model.LagSourceCli},
+		{"browser", model.LagSourceWeb},
+		{"web", model.LagSourceWeb},
+	} {
+		header := http.Header{}
+		if c.value != "" {
+			header.Set("X-Lag-Client", c.value)
+		}
+		connect.AssertEqual(t, lagTrackSource(header), c.want)
+	}
+}
+
+// Each X-Lag-Client value stores its source with the track, and the results
+// per hour split by source, automated tracks left out.
+func TestLagTrackSourceStoredAndCounted(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installLagTestExtenderConfig(t, true)
+		settings := DefaultLagSettings()
+		defer Testing_SetLagSettings(settings)()
+		places := map[string]*model.LagPlace{}
+		useLagAddressPlaces(t, places)
+		useIpAsnDb(t, writeTestIpAsnDb(t, geoLite2AsnDatabaseType, map[string]IpAsn{
+			"198.51.100.0/24": {Number: 7922, Organization: "Example Access"},
+		}))
+		extender := newLagServingTestExtender(t, ctx, places, lagTestPlace("Hamburg", "de", 53.5, 10.0), "192.0.2.1")
+
+		issue := func(clientAddress string, client string) server.Id {
+			clientSession := newLagTestGuestSession(t, ctx, clientAddress)
+			if client != "" {
+				clientSession.Header = map[string][]string{"X-Lag-Client": {client}}
+			}
+			result, err := lagTrack(&LagTrackArgs{Extenders: []*LagTrackExtenderArgs{
+				{ExtenderId: extender.extenderId},
+			}}, clientSession, server.NowUtc(), settings)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, result.Error, (*LagError)(nil))
+			return *result.TrackId
+		}
+		for _, c := range []struct {
+			address string
+			client  string
+			want    string
+		}{
+			{"198.51.100.30:1234", "", model.LagSourceWeb},
+			{"198.51.100.31:1234", "cli", model.LagSourceCli},
+			{"198.51.100.32:1234", "mcp", model.LagSourceMcp},
+			{"198.51.100.33:1234", "something else", model.LagSourceWeb},
+		} {
+			trackId := issue(c.address, c.client)
+			connect.AssertEqual(t, model.GetLagTrack(ctx, trackId).Source, c.want)
+			// a cli or mcp track is a visitor's own run, never automated
+			connect.AssertEqual(t, model.GetLagTrack(ctx, trackId).Automated(), false)
+		}
+
+		// results by source, an automated track's left out
+		now := server.NowUtc()
+		addResult := func(source string, automatedReason string) {
+			trackId := server.NewId()
+			model.CreateLagTrack(ctx, &model.LagTrack{
+				TrackId:         trackId,
+				NetworkId:       server.NewId(),
+				ClientId:        server.NewId(),
+				StartedAt:       now.Add(-20 * time.Minute),
+				AutomatedReason: automatedReason,
+				Source:          source,
+			}, []*model.LagTicket{})
+			connect.AssertEqual(t, model.AddLagResult(ctx, &model.LagResult{
+				LagResultId:           server.NewId(),
+				TrackId:               trackId,
+				TicketId:              server.NewId(),
+				ExtenderId:            server.NewId(),
+				ExtenderIpFamily:      4,
+				SessionStartTime:      now.Add(-11 * time.Minute),
+				WindowStartTime:       now.Add(-11 * time.Minute),
+				PingOffsetMs:          []int32{0},
+				PingMicros:            []int32{12000},
+				IntervalMs:            250,
+				DownloadReceivedBytes: []int64{},
+				DownloadSentBytes:     []int64{},
+				UploadBytes:           []int64{},
+				EndReason:             "no_load",
+				CreatedAt:             now.Add(-10 * time.Minute),
+			}), true)
+		}
+		addResult(model.LagSourceWeb, "")
+		addResult(model.LagSourceWeb, "")
+		addResult(model.LagSourceCli, "")
+		addResult(model.LagSourceMcp, "")
+		addResult(model.LagSourceMcp, "")
+		addResult(model.LagSourceMcp, "")
+		addResult(model.LagSourceCli, model.LagAutomatedReasonDatacenterAsn)
+
+		connect.AssertEqual(t, model.CountLagResultsBySourceSince(ctx, now.Add(-time.Hour)), map[string]int64{
+			model.LagSourceWeb: 2,
+			model.LagSourceCli: 1,
+			model.LagSourceMcp: 3,
+		})
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagResults1hBySourceGauge.gauge.WithLabelValues(model.LagSourceWeb)), float64(2))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagResults1hBySourceGauge.gauge.WithLabelValues(model.LagSourceCli)), float64(1))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagResults1hBySourceGauge.gauge.WithLabelValues(model.LagSourceMcp)), float64(3))
+		connect.AssertEqual(t, testutil.CollectAndCount(statsLagResults1hBySourceGauge.gauge), len(model.LagSources))
+	})
+}

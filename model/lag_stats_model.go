@@ -87,6 +87,35 @@ func CountLagAutomatedResultsSince(ctx context.Context, since time.Time) map[str
 	return counts
 }
 
+// CountLagResultsBySourceSince counts the results stored at or after `since`
+// by their track's source (web, cli, mcp), leaving out automated tracks'
+// results as CountLagResultsSince does.
+func CountLagResultsBySourceSince(ctx context.Context, since time.Time) map[string]int64 {
+	counts := map[string]int64{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT coalesce(lag_track.source, 'web'), count(*)
+			FROM lag_result
+			LEFT JOIN lag_track ON lag_track.track_id = lag_result.track_id
+			WHERE lag_result.created_at >= $1 AND lag_track.automated IS NOT TRUE
+			GROUP BY 1
+			`,
+			since.UTC(),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var source string
+				var count int64
+				server.Raise(result.Scan(&source, &count))
+				counts[source] += count
+			}
+		})
+	})
+	return counts
+}
+
 // CountLagTracksSince counts the tracks started at or after `since`, leaving
 // out automated ones.
 func CountLagTracksSince(ctx context.Context, since time.Time) (count int64) {

@@ -216,6 +216,63 @@
    "description": "The same trailing-hour results split by the family the browser reached its extender on (ipv4 or ipv6). Only the family is ever stored, never an address (amendment 9). The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
   },
   {
+   "id": 24,
+   "type": "timeseries",
+   "title": "measurements per hour by source",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 10
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (source) (urnetwork_stats_lag_results_1h_by_source{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{source}}"
+    }
+   ],
+   "description": "The headline's measurements by the client that ran them: web is lag.dev in a browser, cli and mcp the lagdev command line and MCP server, which name themselves with an X-Lag-Client header. All three count in every panel; automated tracks are left out here as there. A database count every taskworker publishes, read with max across hosts."
+  },
+  {
    "id": 5,
    "type": "row",
    "title": "traffic",
@@ -224,7 +281,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 10
+    "y": 18
    },
    "panels": []
   },
@@ -240,7 +297,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 11
+    "y": 19
    },
    "fieldConfig": {
     "defaults": {
@@ -302,7 +359,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 11
+    "y": 19
    },
    "fieldConfig": {
     "defaults": {
@@ -359,7 +416,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 19
+    "y": 27
    },
    "fieldConfig": {
     "defaults": {
@@ -430,7 +487,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 19
+    "y": 27
    },
    "fieldConfig": {
     "defaults": {
@@ -501,7 +558,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 27
+    "y": 35
    },
    "fieldConfig": {
     "defaults": {
@@ -555,7 +612,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 35
+    "y": 43
    },
    "panels": []
   },
@@ -571,7 +628,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 36
+    "y": 44
    },
    "fieldConfig": {
     "defaults": {
@@ -624,7 +681,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 36
+    "y": 44
    },
    "fieldConfig": {
     "defaults": {
@@ -677,7 +734,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 36
+    "y": 44
    },
    "fieldConfig": {
     "defaults": {
@@ -727,7 +784,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 44
+    "y": 52
    },
    "panels": []
   },
@@ -743,7 +800,7 @@
     "h": 6,
     "w": 6,
     "x": 0,
-    "y": 45
+    "y": 53
    },
    "fieldConfig": {
     "defaults": {
@@ -799,7 +856,7 @@
     "h": 6,
     "w": 12,
     "x": 6,
-    "y": 45
+    "y": 53
    },
    "fieldConfig": {
     "defaults": {
@@ -863,7 +920,7 @@
     "h": 6,
     "w": 6,
     "x": 18,
-    "y": 45
+    "y": 53
    },
    "fieldConfig": {
     "defaults": {
@@ -919,7 +976,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 51
+    "y": 59
    },
    "fieldConfig": {
     "defaults": {
@@ -978,7 +1035,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 59
+    "y": 67
    },
    "panels": []
   },
@@ -994,7 +1051,7 @@
     "h": 9,
     "w": 24,
     "x": 0,
-    "y": 60
+    "y": 68
    },
    "fieldConfig": {
     "defaults": {
@@ -1055,7 +1112,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 69
+    "y": 77
    },
    "panels": []
   },
@@ -1071,7 +1128,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 70
+    "y": 78
    },
    "fieldConfig": {
     "defaults": {

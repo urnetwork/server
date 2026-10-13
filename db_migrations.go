@@ -10104,10 +10104,13 @@ var migrations = []any{
 	// which family the browser reached the extender on. A track from an agent
 	// browser or a hosting network is flagged automated, with which of the two
 	// it was, and nothing more: never the address or the agent's name
-	// (amendment 12). A result's session and window start times are the
-	// extender's clock and its created_at is the report's arrival on the
-	// operator's, so an extender's offset can be estimated. Tracks and
-	// results are kept for result_retention (lag.yml, 7 days).
+	// (amendment 12). A track's source is the client that ran it: lag.dev in
+	// a browser (web), or the lagdev command line or MCP server (cli, mcp),
+	// whose tracks still count in the stats. A result's session and window
+	// start times are the extender's clock and its created_at is the
+	// report's arrival on the operator's, so an extender's offset can be
+	// estimated. Tracks and results are kept for result_retention (lag.yml,
+	// 7 days).
 	newSqlMigration(`
 		CREATE TABLE lag_guest (
 			network_id uuid NOT NULL PRIMARY KEY,
@@ -10131,7 +10134,8 @@ var migrations = []any{
 			client_latitude double precision NULL,
 			client_longitude double precision NULL,
 			automated boolean NOT NULL DEFAULT false,
-			automated_reason varchar(32) NULL
+			automated_reason varchar(32) NULL,
+			source varchar(8) NOT NULL DEFAULT 'web'
 		);
 		CREATE INDEX lag_track_started_at ON lag_track (started_at, track_id);
 

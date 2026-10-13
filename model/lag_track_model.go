@@ -43,6 +43,22 @@ var LagAutomatedReasons = []string{
 	LagAutomatedReasonDatacenterAsn,
 }
 
+// The client that ran a track: lag.dev in a browser, or the lagdev command
+// line or MCP server, which name themselves in their requests. Every source
+// counts in the stats; the stats also split by it.
+const (
+	LagSourceWeb = "web"
+	LagSourceCli = "cli"
+	LagSourceMcp = "mcp"
+)
+
+// Every source, in the order the stats publish them.
+var LagSources = []string{
+	LagSourceWeb,
+	LagSourceCli,
+	LagSourceMcp,
+}
+
 // One track as issued (A6).
 type LagTrack struct {
 	TrackId   server.Id
@@ -56,11 +72,23 @@ type LagTrack struct {
 	// one of LagAutomatedReasons when the track came from an agent browser
 	// or a hosting network, else "": its results count in no aggregate
 	AutomatedReason string
+	// one of LagSources; "" stores web
+	Source string
 }
 
 // Whether the track came from an agent browser or a hosting network.
 func (self *LagTrack) Automated() bool {
 	return self.AutomatedReason != ""
+}
+
+// The source a track is stored with: web unless it names another known one.
+func lagTrackSource(source string) string {
+	switch source {
+	case LagSourceCli, LagSourceMcp:
+		return source
+	default:
+		return LagSourceWeb
+	}
 }
 
 // One admitted session (A6). A ticket admits a session on an extender, by
@@ -100,9 +128,10 @@ func CreateLagTrack(ctx context.Context, track *LagTrack, tickets []*LagTicket) 
 				client_latitude,
 				client_longitude,
 				automated,
-				automated_reason
+				automated_reason,
+				source
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 			`,
 			track.TrackId,
 			track.NetworkId,
@@ -117,6 +146,7 @@ func CreateLagTrack(ctx context.Context, track *LagTrack, tickets []*LagTicket) 
 			client.Longitude,
 			track.Automated(),
 			nullString(track.AutomatedReason),
+			lagTrackSource(track.Source),
 		))
 		insertLagTicketsInTx(ctx, tx, tickets)
 	})
@@ -159,7 +189,7 @@ func GetLagTrack(ctx context.Context, trackId server.Id) *LagTrack {
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT network_id, client_id, started_at, reissue_count, automated_reason
+			SELECT network_id, client_id, started_at, reissue_count, automated_reason, source
 			FROM lag_track
 			WHERE track_id = $1
 			`,
@@ -175,6 +205,7 @@ func GetLagTrack(ctx context.Context, trackId server.Id) *LagTrack {
 					&track.StartedAt,
 					&track.ReissueCount,
 					&automatedReason,
+					&track.Source,
 				))
 				if automatedReason != nil {
 					track.AutomatedReason = *automatedReason

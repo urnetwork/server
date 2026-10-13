@@ -240,5 +240,7 @@ func TestLagStatsLeaveOutAutomated(t *testing.T) {
 		track := GetLagTrack(ctx, cloud)
 		connect.AssertEqual(t, track.AutomatedReason, LagAutomatedReasonDatacenterAsn)
 		connect.AssertEqual(t, GetLagTrack(ctx, visitor).Automated(), false)
+		// a track stored with no source is web's
+		connect.AssertEqual(t, GetLagTrack(ctx, visitor).Source, LagSourceWeb)
 	})
 }

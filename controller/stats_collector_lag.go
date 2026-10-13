@@ -26,13 +26,14 @@ import (
 //	urnetwork_stats_lag_extenders_opted_out      extenders whose owner opted out of measurement (db)
 //	urnetwork_stats_lag_visitors_24h_by_country  visitors who started a track in the trailing day, the top 10 countries and "other" {country_code} (db)
 //	urnetwork_stats_lag_automated_results_1h     results stored in the trailing hour from automated tracks {reason} (db)
+//	urnetwork_stats_lag_results_1h_by_source     results stored in the trailing hour, by the client that ran their track: web, cli or mcp {source} (db)
 //
 // The results and tracks are read from the database, not counted by the
 // handlers, so the hourly figures are exact across restarts and replicas: the
 // dashboard reads each gauge with max across hosts, as for every stats gauge.
 // No query reads an address; the tables hold none (amendment 9). Every label
-// is a bounded enum: end reasons, states and automated reasons are fixed
-// sets, families are two, and countries are capped at the top 10 plus
+// is a bounded enum: end reasons, states, automated reasons and sources are
+// fixed sets, families are two, and countries are capped at the top 10 plus
 // "other".
 //
 // Tracks from agent browsers and hosting networks are automated (amendment
@@ -95,6 +96,12 @@ var statsLagVisitors24hByCountryGauge = newStatsGaugeVec(
 	"lag_visitors_24h_by_country",
 	"lag.dev visitors who started a track in the trailing day, by the country of the track's place: the top 10 and \"other\"",
 	"country_code",
+)
+
+var statsLagResults1hBySourceGauge = newStatsGaugeVec(
+	"lag_results_1h_by_source",
+	"lag.dev results stored in the trailing hour, automated tracks left out, by the client that ran their track: lag.dev in a browser (web), or the lagdev command line or MCP server (cli, mcp)",
+	"source",
 )
 
 var statsLagAutomatedResults1hGauge = newStatsGaugeVec(
@@ -181,21 +188,35 @@ func statsRefreshLag(ctx context.Context, now time.Time) {
 	statsLagVisitors24hByCountryGauge.replace(statsLagVisitorValues(model.CountLagVisitorsByCountrySince(ctx, now.Add(-24*time.Hour))))
 
 	statsLagAutomatedResults1hGauge.replace(statsLagAutomatedValues(model.CountLagAutomatedResultsSince(ctx, now.Add(-time.Hour))))
+	statsLagResults1hBySourceGauge.replace(statsLagSourceValues(model.CountLagResultsBySourceSince(ctx, now.Add(-time.Hour))))
+}
+
+// Every source, zero included, so a source's series never goes stale between
+// its results. A stored source this server does not know counts under
+// "other".
+func statsLagSourceValues(counts map[string]int64) []statsLabeledValue {
+	return statsLagEnumValues(model.LagSources, counts)
 }
 
 // Every automated reason, zero included, so a reason's series never goes
 // stale between automated results. A stored reason this server does not know
 // counts under "other".
 func statsLagAutomatedValues(counts map[string]int64) []statsLabeledValue {
+	return statsLagEnumValues(model.LagAutomatedReasons, counts)
+}
+
+// One value per known name, zero included, and "other" for every name the
+// server does not know, published only while it has a count.
+func statsLagEnumValues(names []string, counts map[string]int64) []statsLabeledValue {
 	known := map[string]bool{}
 	values := []statsLabeledValue{}
-	for _, reason := range model.LagAutomatedReasons {
-		known[reason] = true
-		values = append(values, statsLabeledValue{labelValues: []string{reason}, value: float64(counts[reason])})
+	for _, name := range names {
+		known[name] = true
+		values = append(values, statsLabeledValue{labelValues: []string{name}, value: float64(counts[name])})
 	}
 	var other int64
-	for reason, count := range counts {
-		if !known[reason] {
+	for name, count := range counts {
+		if !known[name] {
 			other += count
 		}
 	}

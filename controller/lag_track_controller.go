@@ -44,6 +44,12 @@ import (
 // The tracks counted per client, per /24 (/48) and per signing agent.
 const lagTrackRateLimitName = "track"
 
+// The header the lagdev command line and MCP server name themselves with,
+// `cli` or `mcp`. A browser sends none and needs none: no header is web, as
+// is any other value. It is not among the API's allowed CORS headers, so a
+// page cannot set it.
+const lagClientHeader = "X-Lag-Client"
+
 // One extender a track asks for, in track order: the dots, then the spares.
 type LagTrackExtenderArgs struct {
 	ExtenderId server.Id `json:"extender_id"`
@@ -323,10 +329,24 @@ func lagTrack(
 			StartedAt:       now,
 			Client:          client,
 			AutomatedReason: lagTrackAutomatedReason(header, client.Asn),
+			Source:          lagTrackSource(header),
 		},
 		tickets,
 	)
 	return result, nil
+}
+
+// The client that ran a track, from its X-Lag-Client header: cli or mcp when
+// it names one of them, otherwise web.
+func lagTrackSource(header http.Header) string {
+	switch strings.ToLower(strings.TrimSpace(header.Get(lagClientHeader))) {
+	case model.LagSourceCli:
+		return model.LagSourceCli
+	case model.LagSourceMcp:
+		return model.LagSourceMcp
+	default:
+		return model.LagSourceWeb
+	}
 }
 
 // The track's client fields (A5): the autonomous system and the GeoLite2 City
