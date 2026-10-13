@@ -2028,3 +2028,49 @@ func TestTaskCanariesSignalExplainsUnfundedPayoutWallet(t *testing.T) {
 		}
 	}
 }
+
+// Maintenance rebuilds a bloated transfer_escrow partial index on its own; the
+// overdue alert must not call that the whole-table rebuild the rotation skips.
+func TestTaskCanariesSignalDoesNotCallAPriorityIndexRebuildAWholeTableRebuild(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return []Row{{"DbMaintenance", "9120", "1800", "f", "86400"}}, nil
+		case strings.Contains(query, "pg_stat_progress_create_index"):
+			return []Row{{
+				"transfer_escrow", "transfer_escrow_unsettled_balance_contract_ccnew",
+				"building index: scanning table", "190", "IO", "DataFileRead", "0", "none", "-",
+				"-1", "-1", "-", "-", "false", "48213", "1081742992",
+			}}, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return nil, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-overdue").Markdown()
+	for _, want := range []string{
+		"actively executing REINDEX CONCURRENTLY",
+		"index=transfer_escrow_unsettled_balance_contract_ccnew",
+		"blocks_done=48213 blocks_total=1081742992",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("priority index rebuild diagnosis missing %q: %s", want, markdown)
+		}
+	}
+	for _, stale := range []string{
+		"selected transfer_escrow for REINDEX TABLE CONCURRENTLY",
+		"excludes transfer_escrow from full-table reindex",
+	} {
+		if strings.Contains(markdown, stale) {
+			t.Fatalf("priority index rebuild called a whole-table rebuild with %q: %s", stale, markdown)
+		}
+	}
+}
