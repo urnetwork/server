@@ -397,6 +397,52 @@ func TestLagResultDerivedStatistics(t *testing.T) {
 	connect.AssertEqual(t, result.UploadP95Mbps, (*float32)(nil))
 }
 
+// Only the intervals inside a direction's load count toward its statistics:
+// the first ceil(load / interval) of the series. Intervals past the window,
+// however fast they claim to be, are stored with the series and change no
+// statistic. Pure.
+func TestLagResultStatisticsCountOnlyTheLoad(t *testing.T) {
+	now := time.Unix(1790000000, 0).UTC()
+	extender := &lagTestExtender{extenderId: server.NewId()}
+	extender.publicKey, extender.privateKey, _ = ed25519.GenerateKey(rand.Reader)
+	ticket := &model.LagTicket{TicketId: server.NewId(), TrackId: server.NewId(), ExtenderId: extender.extenderId, IssuedAt: now.Add(-time.Minute)}
+	body := newLagTestReportBody(extender, ticket, "203.0.113.77", now.Add(-time.Minute))
+	// 5 s of 250 ms intervals is 20; five more at 9 Gbps claimed past it
+	for range 5 {
+		body.DownloadReceivedBytes = append(body.DownloadReceivedBytes, 281_250_000)
+		body.DownloadSentBytes = append(body.DownloadSentBytes, 281_250_000)
+		body.UploadBytes = append(body.UploadBytes, 281_250_000)
+	}
+	result := newLagResult(body, ticket, netip.MustParseAddr("203.0.113.77"), now)
+	connect.AssertEqual(t, *result.DownloadP50Mbps, float32(100))
+	connect.AssertEqual(t, *result.DownloadP95Mbps, float32(100))
+	connect.AssertEqual(t, *result.UploadP50Mbps, float32(20))
+	connect.AssertEqual(t, *result.UploadP95Mbps, float32(20))
+	// stored whole
+	connect.AssertEqual(t, len(result.DownloadReceivedBytes), 25)
+	connect.AssertEqual(t, len(result.DownloadSentBytes), 25)
+	connect.AssertEqual(t, len(result.UploadBytes), 25)
+	connect.AssertEqual(t, result.DownloadReceivedBytes[24], int64(281_250_000))
+
+	// a part interval counts: 1.1 s of 250 ms intervals is 5
+	connect.AssertEqual(t, len(lagLoadIntervals(body.DownloadReceivedBytes, 1100, 250)), 5)
+	connect.AssertEqual(t, len(lagLoadIntervals(body.DownloadReceivedBytes, 1000, 250)), 4)
+	// a series shorter than its load is counted whole
+	connect.AssertEqual(t, len(lagLoadIntervals(body.DownloadReceivedBytes[:3], 5000, 250)), 3)
+	// no load, or no interval length, counts nothing
+	connect.AssertEqual(t, len(lagLoadIntervals(body.DownloadReceivedBytes, 0, 250)), 0)
+	connect.AssertEqual(t, len(lagLoadIntervals(body.DownloadReceivedBytes, 5000, 0)), 0)
+
+	// a session whose load was refused has a series and no load: no speeds
+	body.DownloadMs = 0
+	body.UploadMs = 0
+	body.EndReason = protocol.LagEndReason_LAG_END_BUSY
+	result = newLagResult(body, ticket, netip.MustParseAddr("203.0.113.77"), now)
+	connect.AssertEqual(t, result.DownloadP50Mbps, (*float32)(nil))
+	connect.AssertEqual(t, result.UploadP95Mbps, (*float32)(nil))
+	connect.AssertEqual(t, len(result.DownloadReceivedBytes), 25)
+}
+
 // Percentiles are by nearest rank, as the browser computes them (S5). Pure.
 func TestLagNearestRank(t *testing.T) {
 	connect.AssertEqual(t, lagNearestRank([]float64{}, 50), (*float32)(nil))

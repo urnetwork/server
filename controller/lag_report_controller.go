@@ -390,6 +390,18 @@ func lagNearestRank(values []float64, p float64) *float32 {
 	return &value
 }
 
+// The intervals of a series that fall inside its load: the first
+// ceil(loadMs / intervalMs), or as many as there are. An interval past the
+// window, from a buggy or hostile browser, is stored with the series but
+// never counted in its statistics (A5).
+func lagLoadIntervals(byteCounts []uint64, loadMs uint32, intervalMs uint32) []uint64 {
+	if loadMs == 0 || intervalMs == 0 {
+		return []uint64{}
+	}
+	count := int((uint64(loadMs) + uint64(intervalMs) - 1) / uint64(intervalMs))
+	return byteCounts[:min(count, len(byteCounts))]
+}
+
 // The Mbps of each interval of a series.
 func lagIntervalMbps(byteCounts []uint64, intervalMs uint32) []float64 {
 	mbps := []float64{}
@@ -405,8 +417,8 @@ func lagIntervalMbps(byteCounts []uint64, intervalMs uint32) []float64 {
 // The row of a verified, bounded report, with what is derived at insert
 // (A5): latency p50/p95 during the session's own load and outside it, over
 // the pings that came back; download and upload p50/p95 in Mbps over the
-// intervals, the download from what the browser reported receiving; and the
-// lost pings. Of the browser's address it keeps only the family, which is the
+// intervals inside each direction's load, the download from what the
+// browser reported receiving; and the lost pings. Of the browser's address it keeps only the family, which is the
 // family the browser reached the extender's name on (N3).
 func newLagResult(
 	body *protocol.LagReportBody,
@@ -483,10 +495,10 @@ func newLagResult(
 	result.OutsideLoadLatencyP50Ms = lagNearestRank(outsideLoadMs, 50)
 	result.OutsideLoadLatencyP95Ms = lagNearestRank(outsideLoadMs, 95)
 
-	downloadMbps := lagIntervalMbps(body.DownloadReceivedBytes, body.IntervalMs)
+	downloadMbps := lagIntervalMbps(lagLoadIntervals(body.DownloadReceivedBytes, body.DownloadMs, body.IntervalMs), body.IntervalMs)
 	result.DownloadP50Mbps = lagNearestRank(downloadMbps, 50)
 	result.DownloadP95Mbps = lagNearestRank(downloadMbps, 95)
-	uploadMbps := lagIntervalMbps(body.UploadBytes, body.IntervalMs)
+	uploadMbps := lagIntervalMbps(lagLoadIntervals(body.UploadBytes, body.UploadMs, body.IntervalMs), body.IntervalMs)
 	result.UploadP50Mbps = lagNearestRank(uploadMbps, 50)
 	result.UploadP95Mbps = lagNearestRank(uploadMbps, 95)
 	return result
