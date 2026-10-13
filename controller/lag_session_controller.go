@@ -54,7 +54,11 @@ type LagSessionResult struct {
 // The jwt is an ordinary client token. Nothing about it expires at
 // `expires_at`; the guest sweep (A2) removes the network then, and a removed
 // network fails ValidateByJwtState on the token's next use.
-func LagSession(clientSession *session.ClientSession) (*LagSessionResult, error) {
+func LagSession(clientSession *session.ClientSession) (result *LagSessionResult, err error) {
+	// every answer counts by its outcome (X9, lag_metrics.go)
+	defer func() {
+		countLagSession(result, err)
+	}()
 	settings := GetLagSettings()
 	ctx := clientSession.Ctx
 

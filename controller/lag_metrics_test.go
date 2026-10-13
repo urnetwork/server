@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -9,6 +10,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/connect"
+
+	"github.com/urnetwork/server/session"
 )
 
 // Each answer of the lag routes counts under one bounded outcome (X9): a
@@ -88,4 +91,25 @@ func TestLagSweepCounts(t *testing.T) {
 	connect.AssertEqual(t, read("tickets")-tickets, float64(0))
 	connect.AssertEqual(t, read("results")-results, float64(5))
 	connect.AssertEqual(t, read("tracks")-tracks, float64(1))
+}
+
+// The handlers count their own answers: a session whose caller address
+// cannot be read is an error, and a track or report post without a client
+// token is the caller's fault. None of these reaches the database.
+func TestLagHandlersCountTheirAnswers(t *testing.T) {
+	ctx := context.Background()
+	sessionErrors := testutil.ToFloat64(lagSessionsCounter.WithLabelValues(lagOutcomeError))
+	trackRejections := testutil.ToFloat64(lagTracksCounter.WithLabelValues(lagOutcomeRejected))
+	postRejections := testutil.ToFloat64(lagReportPostsCounter.WithLabelValues(lagOutcomeRejected))
+
+	_, err := LagSession(session.NewLocalClientSession(ctx, "", nil))
+	connect.AssertNotEqual(t, err, nil)
+	_, err = LagTrack(&LagTrackArgs{}, session.NewLocalClientSession(ctx, "192.0.2.10:443", nil))
+	connect.AssertNotEqual(t, err, nil)
+	_, err = ExtenderLagReport(&ExtenderLagReportArgs{}, session.NewLocalClientSession(ctx, "192.0.2.10:443", nil))
+	connect.AssertNotEqual(t, err, nil)
+
+	connect.AssertEqual(t, testutil.ToFloat64(lagSessionsCounter.WithLabelValues(lagOutcomeError))-sessionErrors, float64(1))
+	connect.AssertEqual(t, testutil.ToFloat64(lagTracksCounter.WithLabelValues(lagOutcomeRejected))-trackRejections, float64(1))
+	connect.AssertEqual(t, testutil.ToFloat64(lagReportPostsCounter.WithLabelValues(lagOutcomeRejected))-postRejections, float64(1))
 }

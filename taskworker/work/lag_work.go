@@ -60,7 +60,10 @@ func SweepLag(
 	_ *SweepLagArgs,
 	clientSession *session.ClientSession,
 ) (*SweepLagResult, error) {
-	return sweepLag(clientSession.Ctx, server.NowUtc(), controller.GetLagSettings(), lagSweepGuestBatchSize, lagSweepTimeout), nil
+	result := sweepLag(clientSession.Ctx, server.NowUtc(), controller.GetLagSettings(), lagSweepGuestBatchSize, lagSweepTimeout)
+	// what the sweep removed counts by kind (X9)
+	controller.CountLagSweep(result.RemovedGuests, result.RemovedTickets, result.RemovedResults, result.RemovedTracks)
+	return result, nil
 }
 
 // The sweep as the clock reads `now`; a test moves the clock past an expiry.

@@ -128,7 +128,11 @@ func ExtenderLagReport(
 	args *ExtenderLagReportArgs,
 	clientSession *session.ClientSession,
 ) (*ExtenderLagReportResult, error) {
-	return extenderLagReport(args, clientSession, server.NowUtc(), GetLagSettings())
+	result, err := extenderLagReport(args, clientSession, server.NowUtc(), GetLagSettings())
+	// the post counts by its outcome, and each report in it (X9,
+	// lag_metrics.go)
+	countLagReports(result, err)
+	return result, err
 }
 
 // The report as the operator's clock reads now, under settings.

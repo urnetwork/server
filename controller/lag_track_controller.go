@@ -78,7 +78,11 @@ type LagTrackResult struct {
 
 // Answers `POST /lag/track` (A6).
 func LagTrack(args *LagTrackArgs, clientSession *session.ClientSession) (*LagTrackResult, error) {
-	return lagTrack(args, clientSession, server.NowUtc(), GetLagSettings())
+	result, err := lagTrack(args, clientSession, server.NowUtc(), GetLagSettings())
+	// every answer counts by its outcome, a reissue apart from a new track
+	// (X9, lag_metrics.go)
+	countLagTrack(args != nil && args.TrackId != nil, result, err)
+	return result, err
 }
 
 func lagTrackLimited(limit model.LagRateLimitResult, message string) *LagTrackResult {
