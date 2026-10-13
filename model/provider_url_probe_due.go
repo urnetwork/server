@@ -170,19 +170,27 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 		result.CompletedRunPrioritySince = &since
 	}
 	result.CompletedRunPriorityReady = providerUrlProbeCompletedPriorityReady(now)
+	// Ordinary admission orders by due time alone, so it retires expired
+	// completed runs once per shard interval rather than on every claim.
+	ordinaryExpiry := !result.CompletedRunPriorityReady && providerUrlProbeOrdinaryExpiryDue(ctx, now, shardIndex, shardCount)
+	ordinaryExpiryComplete := false
 	observation.measure(ProviderUrlProbeDueClaimTransaction, func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			observation.measure(ProviderUrlProbeDueClaimBody, func() {
 				// A serialization/deadlock retry must discard the rolled-back result.
 				result.Providers = []ProviderUrlProbeDue{}
 				result.PriorityMaintenancePending = false
+				ordinaryExpiryComplete = false
 				// Retry admission once after a bounded repair of an old, idle,
 				// completed quota deadline. Never widen the ordinary due cutoff.
 				for pass := 0; pass < 2; pass++ {
-					maintained := maintainProviderUrlProbeCompletedPriority(ctx, tx, now, shardIndex, shardCount, result.CompletedRunPriorityReady, observation)
-					if result.CompletedRunPriorityReady && !maintained {
-						result.PriorityMaintenancePending = true
-						return
+					if result.CompletedRunPriorityReady || ordinaryExpiry {
+						maintained, expired := maintainProviderUrlProbeCompletedPriority(ctx, tx, now, shardIndex, shardCount, result.CompletedRunPriorityReady, observation)
+						if result.CompletedRunPriorityReady && !maintained {
+							result.PriorityMaintenancePending = true
+							return
+						}
+						ordinaryExpiryComplete = ordinaryExpiry && expired < providerUrlProbeExpiryClients
 					}
 					observation.measure(ProviderUrlProbeDueClaimQueryRows, func() {
 						rows, err := tx.Query(ctx, providerUrlProbeDueSql(shardIndex, shardCount, result.CompletedRunPriorityReady),
@@ -208,9 +216,15 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 			})
 		}, observation.database(false))
 	})
+	// Only a committed partial page closes the interval: a full page may leave
+	// more, and a failed write also leaves the next admission to sweep.
+	if ordinaryExpiryComplete {
+		_ = writeProviderUrlProbeOrdinaryExpiry(ctx, providerUrlProbeOrdinaryExpiryKey(shardIndex, shardCount), now)
+	}
 	// Seven-day receipt storage cleanup has a durable Taskworker owner. Current
 	// completion expiry above and measured-history clock predicates retain all
-	// admission authority even when that independent cleanup is delayed.
+	// admission authority even when that independent cleanup is delayed;
+	// ordinary admission reads neither completed counts nor their expiry.
 	return result
 }
 

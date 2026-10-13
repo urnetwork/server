@@ -56,6 +56,8 @@ func TestClientSessionRejectsInactiveAndRotatedJwt(t *testing.T) {
 				server.NowUtc().Add(time.Minute),
 			))
 		})
+		// the fixture reactivates the client, which production never does
+		session.Testing_ForgetStateRefusals()
 		connect.AssertEqual(t, authenticate() != nil, true)
 	})
 }

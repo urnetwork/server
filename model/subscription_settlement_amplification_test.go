@@ -167,6 +167,14 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 				t.Fatal("legacy worker did not atomically retire its terminal intent")
 			}
 		})
+		// Since ac53dc21 the worker commits the exact earnings with one durable
+		// provider-total owner instead of writing the provider's lifetime total
+		// while it holds the payer's grants. The public total catches up when
+		// that owner runs, and only then; its replay must not add it again.
+		if account := readLegacyAmplificationAccount(t, ctx, fixture.providerNetworkId); account != initialAccount {
+			t.Fatalf("provider total was published before its durable owner ran: got=%+v want=%+v", account, initialAccount)
+		}
+		asyncPayoutRecoveryProject(t, ctx, fixture.contractId)
 		wantAccount := initialAccount
 		wantAccount.ProvidedByteCount += used
 		wantAccount.ProvidedNetRevenue += settledRevenue
@@ -224,6 +232,9 @@ func TestEscrowSettlementZeroUseOmitsEmptyPosts(t *testing.T) {
 				beforeMirror, beforeMirrorErr = r.Get(ctx, netEscrowKey(fixture.balanceId)).Result()
 			})
 			var posts []func() any
+			// The legacy owner admits transaction ownership first, which the
+			// server grants only to its own read-committed no-retry transaction
+			// (ddad361c), the shape every production caller uses.
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET checkpoint=false WHERE contract_id=$1`, fixture.contractId))
 				var closed bool
@@ -232,7 +243,7 @@ func TestEscrowSettlementZeroUseOmitsEmptyPosts(t *testing.T) {
 				if err != nil || !closed {
 					t.Fatalf("zero-use settlement closed=%t error=%v", closed, err)
 				}
-			}, server.TxReadCommitted)
+			}, server.TxReadCommitted, server.OptNoRetry())
 			if len(posts) != test.posts {
 				t.Fatalf("grant=%d zero-use posts=%d, want %d without empty debit/release work", test.grant, len(posts), test.posts)
 			}

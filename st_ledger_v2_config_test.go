@@ -110,8 +110,8 @@ func TestLedgerV2AddressesRefuseMalformed(t *testing.T) {
 // §8 data model (SV-5)
 func TestStLedgerV2MigrationAppendsSchema(t *testing.T) {
 	index := sqlMigrationIndex(t, "CREATE TABLE st_ledger_v2_epoch_rows")
-	if index < 813 {
-		t.Fatalf("v2 migration index %d is not after migration 813 (index 812)", index)
+	if index < 820 {
+		t.Fatalf("v2 migration index %d is not after migration 820 (index 819)", index)
 	}
 	if current, ok := migrations[index].(*SqlMigration); !ok || current.sql != stLedgerV2SchemaSql {
 		t.Fatal("v2 migration does not install its complete schema")

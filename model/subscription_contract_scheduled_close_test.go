@@ -37,11 +37,13 @@ func TestScheduledContractCloseCapsEveryFreeReportShape(t *testing.T) {
 			id, err := CreateContractNoEscrow(ctx, f.networkId, f.sourceId, f.networkId, f.destinationId, 100)
 			server.Raise(err)
 			deadline := server.NowUtc().Add(-time.Minute)
-			if sample.source {
-				server.Raise(CloseContract(ctx, id, f.sourceId, 17, sample.sourceCheckpoint))
-			}
+			// The receiver reports first: its covering checkpoint after the
+			// sender's final would settle in that report (owner decision B).
 			if sample.destination {
 				server.Raise(CloseContract(ctx, id, f.destinationId, 17, sample.destinationCheckpoint))
+			}
+			if sample.source {
+				server.Raise(CloseContract(ctx, id, f.sourceId, 17, sample.sourceCheckpoint))
 			}
 			if sample.disputed {
 				SetContractDispute(ctx, id, true)

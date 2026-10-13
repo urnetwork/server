@@ -155,11 +155,19 @@ func SweepProviderAuditEventsPost(
 // in audit_contract_event (one aggregate row per complete UTC day, from
 // transfer_contract x contract_close). Re-rolling the last few days each run
 // picks up late closes; each day is idempotent by replacement.
+//
+// One run reads at most transferAuditRollupChunkCount bounded chunks of one
+// day (see model.TransferCloseByteSum). A day that needs more runs is
+// checkpointed in the args and continued immediately, so no run, statement or
+// transaction holds a snapshot for the day's scan, and a canceled run resumes
+// from its last checkpoint instead of rescanning the day.
 
 type RollupTransferAuditEventsArgs struct {
 	// Carry the first deferred lower bound across backup delays so a day cannot
 	// age out of the ordinary three-day refresh window without being rolled up.
 	MinTime *time.Time `json:"min_time,omitempty"`
+	// The partial sum of the day at MinTime when an earlier run did not finish it.
+	Day *model.TransferCloseByteSum `json:"day,omitempty"`
 }
 
 type RollupTransferAuditEventsResult struct {
@@ -167,9 +175,16 @@ type RollupTransferAuditEventsResult struct {
 	Deferred bool `json:"deferred,omitempty"`
 	// Earliest remaining day after a backup deferral or bounded catch-up batch.
 	MinTime *time.Time `json:"min_time,omitempty"`
+	// The partial sum of the day at MinTime, resumed by the continuation.
+	Day *model.TransferCloseByteSum `json:"day,omitempty"`
 }
 
 const transferAuditBackupRetry = 30 * time.Minute
+
+// One run reads at most this many chunks, a million contracts: under ten
+// minutes at the slowest daily rate observed on Main (3,469 s for about seven
+// million contracts), well inside the one-hour task budget.
+const transferAuditRollupChunkCount = 500
 
 func ScheduleRollupTransferAuditEvents(clientSession *session.ClientSession, tx server.PgTx) {
 	scheduleRollupTransferAuditEvents(clientSession, tx, &RollupTransferAuditEventsArgs{}, server.NowUtc().Add(6*time.Hour))
@@ -198,50 +213,69 @@ func RollupTransferAuditEvents(
 ) (*RollupTransferAuditEventsResult, error) {
 	return rollupTransferAuditEvents(
 		clientSession.Ctx, args, server.NowUtc(),
-		model.PostgresLogicalBackupSnapshotActive, model.RollupTransferAuditEvents,
+		model.PostgresLogicalBackupSnapshotActive, model.AdvanceTransferAuditRollupDay,
 	), nil
 }
 
-// Gate only the recurring refresh before its first write transaction. Explicit
-// model/CLI backfills keep their requested behavior, and this never interrupts
-// a rollup or backup already running. Keep the range durable through the post
-// hook rather than reporting skipped days as completed work.
+// Gate only the recurring refresh before its first read. Explicit model/CLI
+// backfills keep their requested behavior, and this never interrupts a rollup
+// or backup already running. Keep the range and the partial day durable
+// through the post hook rather than reporting skipped work as completed.
 func rollupTransferAuditEvents(
 	ctx context.Context,
 	args *RollupTransferAuditEventsArgs,
 	now time.Time,
 	backupActive func(context.Context) bool,
-	rollup func(context.Context, time.Time, time.Time) int,
+	advanceDay func(context.Context, *model.TransferCloseByteSum, int) bool,
 ) *RollupTransferAuditEventsResult {
 	minTime := now.Add(-3 * 24 * time.Hour)
 	if args != nil && args.MinTime != nil && args.MinTime.Before(now) {
 		minTime = *args.MinTime
 	}
+	dayStart := minTime.UTC().Truncate(24 * time.Hour)
+	// resume only a checkpoint of this exact day
+	var day *model.TransferCloseByteSum
+	if args != nil && model.IsTransferAuditRollupDay(args.Day, dayStart) {
+		checkpoint := *args.Day
+		day = &checkpoint
+	}
 	if backupActive(ctx) {
 		glog.Infof("[audit]defer optional transfer rollup while logical-backup snapshot is active; preserving lower bound %s\n", minTime.UTC().Format(time.RFC3339))
-		return &RollupTransferAuditEventsResult{Deferred: true, MinTime: &minTime}
+		return &RollupTransferAuditEventsResult{Deferred: true, MinTime: &minTime, Day: day}
 	}
 	// Commit and hand off one completed UTC day per task. A later day's
-	// cancellation must not replay an already committed prefix under the same
-	// one-hour task budget. Explicit model/CLI ranges keep their own owner.
-	maxTime := now
-	batchEnd := minTime.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
-	result := &RollupTransferAuditEventsResult{}
-	if batchEnd.Before(now.UTC().Truncate(24 * time.Hour)) {
-		maxTime = batchEnd
-		result.MinTime = &batchEnd
+	// cancellation must not replay an already committed prefix, and a day's
+	// cancellation resumes from its last checkpoint.
+	today := now.UTC().Truncate(24 * time.Hour)
+	if !dayStart.Before(today) {
+		// still accumulating
+		return &RollupTransferAuditEventsResult{}
 	}
-	result.DayCount = rollup(ctx, minTime, maxTime)
+	if day == nil {
+		day = model.NewTransferAuditRollupDay(dayStart)
+	}
+	if !advanceDay(ctx, day, transferAuditRollupChunkCount) {
+		return &RollupTransferAuditEventsResult{MinTime: &dayStart, Day: day}
+	}
+	result := &RollupTransferAuditEventsResult{DayCount: 1}
+	if nextDay := dayStart.Add(24 * time.Hour); nextDay.Before(today) {
+		result.MinTime = &nextDay
+	}
 	return result
 }
 
 func nextTransferAuditRollup(now time.Time, result *RollupTransferAuditEventsResult) (*RollupTransferAuditEventsArgs, time.Time) {
 	if result.MinTime != nil {
 		minTime := *result.MinTime
-		if result.Deferred {
-			return &RollupTransferAuditEventsArgs{MinTime: &minTime}, now.Add(transferAuditBackupRetry)
+		args := &RollupTransferAuditEventsArgs{MinTime: &minTime}
+		if result.Day != nil {
+			day := *result.Day
+			args.Day = &day
 		}
-		return &RollupTransferAuditEventsArgs{MinTime: &minTime}, now
+		if result.Deferred {
+			return args, now.Add(transferAuditBackupRetry)
+		}
+		return args, now
 	}
 	return &RollupTransferAuditEventsArgs{}, now.Add(6 * time.Hour)
 }

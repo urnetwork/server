@@ -195,48 +195,80 @@ func clockBackfillRollupPrefix(ctx context.Context, since time.Time, now time.Ti
 	return clockContiguousRollupPrefix(since, today, rollups)
 }
 
-// clockBackfillTail recomputes only the portion not already represented by a
-// contiguous daily rollup. The marker makes the bounded tail distinguishable
-// from the former full-retained-history query in pg_stat_activity.
-func clockBackfillTail(ctx context.Context, since time.Time) ByteCount {
-	var byteCount ByteCount
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				/* clock_unrolled_tail */
-				SELECT COALESCE(SUM(contract_close.used_transfer_byte_count), 0)
-				FROM transfer_contract
-				INNER JOIN contract_close ON
-					contract_close.contract_id = transfer_contract.contract_id AND
-					contract_close.party = $1
-				WHERE
-					transfer_contract.outcome IS NOT NULL AND
-					$2 <= transfer_contract.close_time
-			`,
-			ContractPartyDestination,
-			since,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&byteCount))
-			}
-		})
-	})
-	return byteCount
+// Marks the raw tail's chunk statements in pg_stat_activity: the marker the
+// operator runbook attributes to the bounded clock tail.
+const clockUnrolledTailMarker = "clock_unrolled_tail"
+
+// The resumable state of one block-9 aggregate reconciliation: the contiguous
+// daily-rollup prefix plus a bounded walk of the still-unrolled raw tail (see
+// TransferCloseByteSum). It does not try to decide whether individual
+// contracts were already counted; a scalar Redis value contains no such
+// membership information. The json form is a task checkpoint. Not safe for
+// concurrent use.
+type ClockBackfill struct {
+	// the rollup days before the tail start, fixed when the backfill begins
+	PrefixByteCount ByteCount `json:"prefix_byte_count"`
+	// finalized contracts from the first unrolled UTC day onward
+	Tail TransferCloseByteSum `json:"tail"`
 }
 
-// clockBackfillCandidate recomputes the block-9 aggregate from the durable
-// daily-rollup prefix plus the still-unrolled raw tail. It does not try to
-// decide whether individual contracts were already counted; a scalar Redis
-// value contains no such membership information.
-func clockBackfillCandidate(ctx context.Context) ByteCount {
-	prefixByteCount, tailStart := clockBackfillRollupPrefix(ctx, ClockSinceTime, server.NowUtc())
-	tailByteCount := clockBackfillTail(ctx, tailStart)
-	if tailByteCount < 0 || ByteCount(math.MaxInt64)-prefixByteCount < tailByteCount {
+// Fixes the rollup prefix and starts the raw tail at the first unrolled UTC
+// day. The tail ends when the backfill begins; contracts that settle later
+// already advance the live counter.
+func NewClockBackfill(ctx context.Context) *ClockBackfill {
+	now := server.NowUtc().Truncate(time.Microsecond)
+	prefixByteCount, tailStart := clockBackfillRollupPrefix(ctx, ClockSinceTime, now)
+	return &ClockBackfill{
+		PrefixByteCount: prefixByteCount,
+		Tail: TransferCloseByteSum{
+			Start:        tailStart,
+			End:          now,
+			TerminalOnly: true,
+		},
+	}
+}
+
+// Moves the tail end forward, so a resumed walk also covers the contracts
+// finalized since the backfill began. The walk is in key order: the contracts
+// it already read stay behind the cursor and none is read twice.
+func (self *ClockBackfill) ExtendTo(end time.Time) {
+	end = end.UTC().Truncate(time.Microsecond)
+	if self.Tail.End.Before(end) {
+		self.Tail.End = end
+		self.Tail.Complete = false
+	}
+}
+
+// Continues the raw tail walk by up to chunkCount chunks and reports whether
+// it is complete.
+func (self *ClockBackfill) Advance(ctx context.Context, chunkCount int) bool {
+	return self.Tail.advance(ctx, clockUnrolledTailMarker, chunkCount)
+}
+
+// Raises the Redis clock to the completed candidate when the clock is behind
+// it, and returns the reconciled clock.
+func (self *ClockBackfill) Reconcile(ctx context.Context) ByteCount {
+	return reconcileClockCandidate(ctx, self.candidate())
+}
+
+// The block-9 aggregate of a completed walk.
+func (self *ClockBackfill) candidate() ByteCount {
+	if !self.Tail.Complete {
+		server.Raise(fmt.Errorf("incomplete clock backfill tail"))
+	}
+	if self.PrefixByteCount < 0 || self.Tail.ByteCount < 0 ||
+		ByteCount(math.MaxInt64)-self.PrefixByteCount < self.Tail.ByteCount {
 		server.Raise(fmt.Errorf("invalid clock backfill total"))
 	}
-	return prefixByteCount + tailByteCount
+	return self.PrefixByteCount + self.Tail.ByteCount
+}
+
+// Recomputes the block-9 aggregate from the durable daily-rollup prefix plus
+// the still-unrolled raw tail, walked to completion in bounded chunks.
+func clockBackfillCandidate(ctx context.Context) ByteCount {
+	backfill := NewClockBackfill(ctx)
+	backfill.Advance(ctx, math.MaxInt)
+	return backfill.candidate()
 }
 
 func reconcileClockCandidate(ctx context.Context, candidate ByteCount) ByteCount {
@@ -257,15 +289,16 @@ func reconcileClockCandidate(ctx context.Context, candidate ByteCount) ByteCount
 	return ByteCount(byteCount)
 }
 
-// BackfillClock performs a best-effort block-9 aggregate reconciliation. The
-// destination close is the canonical transfer count, matching
-// RollupTransferAuditEvents. The Lua max can fill an aggregate gap without
-// overwriting a newer live value.
+// Performs a best-effort block-9 aggregate reconciliation in one call, walking
+// the raw tail to completion. The destination close is the canonical transfer
+// count, matching RollupTransferAuditEvents. The Lua max can fill an aggregate
+// gap without overwriting a newer live value. The task checkpoints the same
+// walk across bounded runs with ClockBackfill instead.
 //
-// Live settlement increments that commit during the SQL snapshot already
-// advance Redis; the monotonic reconcile preserves that newer value. Repeating
-// the same aggregate cannot make PostgreSQL and Redis atomic and formerly
-// doubled a multi-billion-row production scan, so one bounded candidate is the
+// Live settlement increments that commit during the walk already advance
+// Redis; the monotonic reconcile preserves that newer value. Repeating the
+// same aggregate cannot make PostgreSQL and Redis atomic and formerly doubled
+// a multi-billion-row production scan, so one bounded candidate is the
 // intentional work unit.
 //
 // This compares aggregates; it does not establish per-contract membership or

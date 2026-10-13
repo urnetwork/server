@@ -64,11 +64,30 @@ return latest`
 // Guards forward deletion with the same connection ownership as the reverse
 // index. Conflicting clients still poison the address for the original TTL;
 // cleanup never selects another claimant or shortens that ambiguity window.
+//
+// Only a feed to an unmarked address and a clear by the attributed client can
+// change the forward entry, so only they rescan the owners. Any other update
+// records or withdraws just its own owner: every connect, refresh and close
+// behind a marked shared address (many clients behind one NAT), and a close
+// while another client or nobody is attributed. Rescanning on every update made
+// one shared address quadratic work on its one cluster slot. The deferred path
+// only grows the owner hash TTL, so it still covers every recorded owner;
+// expired owners leave at the next rescan (the first feed after the marker
+// lapses) or with the hash. Returns the caller's latest live deadline, or 0
+// when not rescanned.
 const verifyForwardEgressLeaseScript = `
 local client = ARGV[1]
 local owner = client .. '/' .. ARGV[2]
 local now = tonumber(ARGV[3])
 local expires = tonumber(ARGV[4])
+local cur = redis.call('GET', KEYS[1])
+if (expires > now and cur == ARGV[5]) or (expires <= now and cur ~= client) then
+  if expires > now then
+    redis.call('HSET', KEYS[2], owner, ARGV[4])
+    if redis.call('PTTL', KEYS[2]) < expires-now then redis.call('PEXPIRE', KEYS[2], expires-now) end
+  else redis.call('HDEL', KEYS[2], owner) end
+  return 0
+end
 if expires > now then redis.call('HSET', KEYS[2], owner, ARGV[4])
 else redis.call('HDEL', KEYS[2], owner) end
 local entries = redis.call('HGETALL', KEYS[2])
@@ -87,13 +106,10 @@ for i = 1, #entries, 2 do
 end
 if latest > now then redis.call('PEXPIRE', KEYS[2], latest-now)
 else redis.call('DEL', KEYS[2]) end
-local cur = redis.call('GET', KEYS[1])
 if expires > now then
-  if cur ~= ARGV[5] then
-    if otherLive or (cur ~= false and cur ~= client) then
-      redis.call('SET', KEYS[1], ARGV[5], 'PX', expires-now)
-    else redis.call('SET', KEYS[1], client, 'PX', clientLatest-now) end
-  end
+  if otherLive or (cur ~= false and cur ~= client) then
+    redis.call('SET', KEYS[1], ARGV[5], 'PX', expires-now)
+  else redis.call('SET', KEYS[1], client, 'PX', clientLatest-now) end
 elseif cur == client then
   if clientLatest > now then redis.call('PEXPIRE', KEYS[1], clientLatest-now)
   else redis.call('DEL', KEYS[1]) end

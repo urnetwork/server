@@ -68,8 +68,8 @@ the applicable verification window, and record that evidence in the run ledger.
    hosts themselves — not from a side-channel feed or a dashboard. The same
    rule everywhere: pg state from pg_stat_* on the primary, redis state from
    the nodes' own INFO/CLUSTER NODES, host state from the host. Dashboards and
-   inferred aggregates are not probe inputs. The narrow exceptions are §2.12
-   and §11.20:
+   inferred aggregates are not probe inputs. The narrow exceptions are §2.12,
+   §11.20 and §11.6a:
    Go runtime counters are emitted by the process itself and queried from
    Mimir with host/block/instance identity plus a 90-second freshness bound,
    because `/proc` RSS cannot distinguish allocated Go heap from retained
@@ -78,7 +78,11 @@ the applicable verification window, and record that evidence in the run ledger.
    that every sampled byte remains reachable. The Mimir-continuity probe tests
    the metric store itself with the raw range of an always-emitted build-info
    control; it never treats a dashboard rendering or traffic aggregate as the
-   signal.
+   signal. The MinIO probe (§11.6a) reads MinIO's own v3 drive, usage, quota
+   and request series from Mimir with the host's inventory identity and a
+   180-second freshness bound. MinIO's metrics endpoint is authenticated, and
+   its bearer token, like the root `mc` alias, stays root-only on the MinIO
+   host; the monitor holds neither.
 6. **Identity, not volume.** Dedup key = (signal id, class, target, frame)
    per SIGNALS.md §6. Rate is reported; volume is never severity. The current
    cadence gate deduplicates an identity within a batch, counts its consecutive
@@ -434,12 +438,12 @@ Escalation batteries pull incident windows non-interactively with
 
 | cadence | probes (SIGNALS.md ref) |
 |---|---|
-| 60s | contract rate 1.1; canary completions + failing tasks 1.2; idle-in-tx/active split 1.3; cluster_state + per-node PING 1.4; taskworker allocated-heap skew 2.12 |
+| 60s | contract rate 1.1; canary completions + failing tasks 1.2; idle-in-tx/active split 1.3; cluster_state + per-node PING 1.4; taskworker allocated-heap skew 2.12; MinIO drive free space vs its write floor, offline drives, bucket usage vs hard quota, S3 5xx/4xx rates 11.6a |
 | 5m | open-set count 2.6; per-node INFO memory 3.1/3.2; connected_clients 3.5; parked tasks 1.2; pgbouncer 6432 reachability; authoritative/recursive DNS aliases 18.3; control-plane clock (journalctl warp logs + docker container status per host — feeds every ticket's CONTEXT line) |
 | continuous | log tailers §3.7: one `warpctl logs <service> -f` per service plus a 45s bounded overlap reconciliation, §4 classification per line, per-minute rate findings |
 | 15m | pg_stat_statements top-20 mean drift 2.3 |
 | 30m | Google Play crash issue/version advances plus explicit vitals freshness 20.1 |
-| 1h | vacuum health 2.4; task duration percentiles 2.5; phantom/replica topology 3.6; zombie-tx 1.3 |
+| 1h | vacuum health 2.4; task duration percentiles 2.5; phantom/replica/node-inventory topology 3.6; zombie-tx 1.3 |
 | 6h | Apple App Crashes daily instances, privacy visibility, and replacement corrections 20.2 |
 | 24h | stats-landmine check (pg_stats n_distinct on transfer_contract.open + open-partial reltuples) §7; keyspace family histogram on fullest node 3.3; dmesg OOM scan 3.4 |
 
@@ -500,12 +504,13 @@ hosts:                # only monitor-specific facts; lan ips come
     overlay_ip: 172.28.208.182
     roles: [pg-primary]
   - name: by-us-fmt-5-edge-5
-    disabled: true             # known offline; excluded from all probes
+    # disabled: true           # known offline; excluded from all probes
     overlay_ip: 172.28.208.176
-    roles: [services]
+    roles: [minio, redis-cluster]       # minio arms SIGNALS.md §11.6a
+    redis: {node_ports: [6412, 6427]}   # nodes only; edge-6 is the entry
   - name: by-us-fmt-5-edge-6
     overlay_ip: 172.28.208.177
-    roles: [redis-cluster, minio]
+    roles: [redis-cluster]
     redis: {entry_port: 6379, node_ports: [6380, 6411], expected_replicas: 0}
   - name: snow
     overlay_ip: 172.28.208.185
@@ -533,6 +538,45 @@ dns_aliases:          # optional; explicit desired state, never learned from DNS
   expected_a: [192.0.2.10, 198.51.100.20]
   expected_aaaa: [2001:db8::10, 2001:db8:1::20]
 ```
+
+The `minio` role needs no other monitor.yml key. SIGNALS.md §11.6a joins
+Fluent Bit's `host` label (the xops inventory name, which must equal the host's
+`name`) to the host and reads MinIO's v3 series through any `services` host's
+loopback Mimir gateway; MinIO's own drive count is the expected denominator. No
+MinIO bearer token, `mc` credentials or drive list belongs here. With no
+enabled `minio` host the probe stays dark.
+
+A Redis cluster may span several `redis-cluster` hosts. Each host lists its
+own `node_ports` (a two-element list is an inclusive range), node ports are
+unique across hosts, and exactly one host sets `entry_port`; settings
+validation rejects any other layout. Cluster-wide observations (CLUSTER
+INFO/NODES and `-c` reads) go through the entry host, per-node observations
+run on every host over its own ports, and a node finding targets the
+`host:port` that runs it. `expected_replicas` is cluster-wide and is read from
+the entry host.
+
+One unreadable host does not blank a Redis signal. A sweep reports the host
+it cannot read as `cannot-observe` on `<host>/<observation>` (for example
+`by-us-fmt-5-edge-5/key-events`) and keeps judging the other hosts' nodes, so
+edge-6's pages still fire while edge-5 is unreachable. A cluster-wide verdict
+judged without the host is marked partial (`unobserved_hosts=` in its observed
+values, `(partial: …)` in its symptom), a cluster-wide healthy verdict waits
+until every host is read again, and partial data is never recorded as a
+baseline. The signal fails as a whole only when no host can be read, as a
+single host always has.
+
+Validation checks the inventory only against itself, so `redis-topology`
+(SIGNALS.md §3.6) also checks it against the cluster. Every addressed CLUSTER
+NODES member must announce the LAN address of the redis-cluster host whose
+`node_ports` lists its port, and every listed port must be such a member. Any
+mismatch is a `node-inventory-mismatch` warning naming the host and ports. Two
+layouts that validate are caught this way. A missing `redis:` block would drop
+that host's nodes from every per-node probe. A range covering ports that
+edge-6's nginx bridges to edge-5 would read edge-5's nodes as edge-6's and
+judge their memory against edge-6's RAM. A host's LAN address is its
+`config/<env>/settings.yml` route that most hosts' `routes` blocks agree on.
+A host outside the LAN (sille) overrides the Redis hosts to their overlay
+addresses, so no single block can be trusted.
 
 SSH identity paths are optional; when omitted, `~/.ssh/config` supplies the
 IdentityFile per host. Everything else shared is read from its source of
@@ -752,9 +796,10 @@ Decided (2026-07-17):
   *fixer/debugger* working a ticket, not detection. Explicit exceptions are
   bounded application-counter rates whose lossless rate cannot be reconstructed
   after required log sampling, §2.12's fresh process-originated Go heap
-  metrics, and §11.20's raw always-emitted control used to test Mimir
-  continuity. All retain concrete series identity and static bands; none uses
-  a dashboard-derived judgment as the signal.
+  metrics, §11.6a's fresh MinIO-originated storage and request series, and
+  §11.20's raw always-emitted control used to test Mimir continuity. All
+  retain concrete series identity and static bands; none uses a
+  dashboard-derived judgment as the signal.
 - **Runtime**: developed and run locally first (address_mode: overlay,
   ssh_override with the existing workstation access) against main; in-LAN
   deployment as a warp service comes after the probe set stabilizes.

@@ -1112,13 +1112,15 @@ func TestP2pLinkPacketConnReadFromStripsGenerationFrame(t *testing.T) {
 	credits := newP2pVnetReceiveCredits(1)
 	defer credits.close()
 	localAddress := &net.UDPAddr{IP: net.IPv4zero, Port: 5761}
-	remoteAddress := &net.UDPAddr{IP: net.IPv4(10, 240, 0, 1), Port: 5762}
-	socket := credits.registerSocket(localAddress, nil, nil)
+	remoteAddress := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5762}
+	owner := newP2pLinkNet(nil, nil, nil, credits)
+	owner.setSourceIPv4ForWildcardBinds(netip.MustParseAddr("192.0.2.2"))
+	socket := credits.registerSocket(localAddress, nil, owner)
 	defer socket.close()
 	reservation, hasDestination, admitted := credits.reserveForTransfer(
 		ctx,
 		remoteAddress,
-		&net.UDPAddr{IP: net.IPv4(10, 240, 0, 2), Port: localAddress.Port},
+		&net.UDPAddr{IP: net.IPv4(192, 0, 2, 2), Port: localAddress.Port},
 	)
 	if !hasDestination || !admitted || reservation == nil {
 		t.Fatal("PacketConn generation-frame reservation was not admitted")
@@ -1152,6 +1154,113 @@ func TestP2pLinkPacketConnReadFromStripsGenerationFrame(t *testing.T) {
 	if snapshot.ReadPacketCount != 1 || snapshot.OutstandingPacketCount != 0 ||
 		snapshot.TrackedReservationCount != 0 || !snapshot.isExactLiveTerminal() {
 		t.Fatalf("PacketConn generation credits=%+v", snapshot)
+	}
+}
+
+// Both packet listener surfaces publish their real endpoint owner before a
+// generation-framed wildcard can reserve local traffic; foreign traffic cannot.
+func TestP2pLinkNetWildcardConstructorsRetainEndpointOwnership(t *testing.T) {
+	cases := []struct {
+		name    string
+		packet  bool
+		generic bool
+	}{
+		{name: "generic PacketConn", packet: true, generic: true},
+		{name: "UDPConn through PacketConn", packet: true},
+		{name: "UDPConn listener"},
+	}
+	for caseIndex, testCase := range cases {
+		func() {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			credits := newP2pVnetReceiveCredits(1)
+			defer credits.close()
+			localAddress := &net.UDPAddr{IP: net.IPv4zero, Port: 5791 + caseIndex}
+			remoteAddress := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5790}
+			releaseClose := make(chan struct{})
+			close(releaseClose)
+			udpDelegate := &p2pCloseReadUDPConn{
+				localAddress: localAddress,
+				closeEntered: make(chan struct{}),
+				releaseClose: releaseClose,
+			}
+			delegate := &p2pSurfaceDelegateNet{
+				packetConnection: udpDelegate,
+				udpConnection:    udpDelegate,
+			}
+			if testCase.generic {
+				delegate.packetConnection = &p2pCloseBarrierPacketConn{
+					localAddress: localAddress,
+					closeEntered: make(chan struct{}),
+					releaseClose: releaseClose,
+				}
+			}
+			network := newP2pLinkNet(delegate, nil, nil, credits)
+			network.setSourceIPv4ForWildcardBinds(netip.MustParseAddr("192.0.2.2"))
+			var connection io.Closer
+			var socket *p2pReceiveCreditSocket
+			if testCase.packet {
+				packetConnection, err := network.ListenPacket("udp4", localAddress.String())
+				if err != nil {
+					t.Fatalf("%s listen: %v", testCase.name, err)
+				}
+				connection = packetConnection
+				defer connection.Close()
+				switch wrapper := packetConnection.(type) {
+				case *p2pLinkPacketConn:
+					if !testCase.generic {
+						t.Fatalf("%s lost the UDPConn surface", testCase.name)
+					}
+					socket = wrapper.receiveSocket
+				case *p2pLinkUDPConn:
+					if testCase.generic {
+						t.Fatalf("%s invented a UDPConn surface", testCase.name)
+					}
+					socket = wrapper.receiveSocket
+				default:
+					t.Fatalf("%s wrapper type %T", testCase.name, packetConnection)
+				}
+			} else {
+				udpConnection, err := network.ListenUDP("udp4", localAddress)
+				if err != nil {
+					t.Fatalf("%s listen: %v", testCase.name, err)
+				}
+				connection = udpConnection
+				defer connection.Close()
+				wrapper, ok := udpConnection.(*p2pLinkUDPConn)
+				if !ok {
+					t.Fatalf("%s wrapper type %T", testCase.name, udpConnection)
+				}
+				socket = wrapper.receiveSocket
+			}
+			if socket == nil || socket.owner != network {
+				t.Fatalf("%s did not register its endpoint owner", testCase.name)
+			}
+			reservation, hasDestination, admitted := credits.reserveForTransfer(
+				ctx, remoteAddress,
+				&net.UDPAddr{IP: net.IPv4(192, 0, 2, 3), Port: localAddress.Port},
+			)
+			if reservation != nil || hasDestination || !admitted {
+				t.Fatalf("%s foreign destination reservation=%p destination=%t admitted=%t",
+					testCase.name, reservation, hasDestination, admitted)
+			}
+			reservation, hasDestination, admitted = credits.reserveForTransfer(
+				ctx, remoteAddress,
+				&net.UDPAddr{IP: net.IPv4(192, 0, 2, 2), Port: localAddress.Port},
+			)
+			if reservation == nil || !hasDestination || !admitted || reservation.socket != socket {
+				t.Fatalf("%s local destination reservation=%p destination=%t admitted=%t",
+					testCase.name, reservation, hasDestination, admitted)
+			}
+			if err := connection.Close(); err != nil {
+				t.Fatalf("%s close: %v", testCase.name, err)
+			}
+			snapshot := credits.snapshot()
+			if snapshot.AdmittedPacketCount != 1 || snapshot.CanceledPacketCount != 1 ||
+				snapshot.ReadPacketCount != 0 || !snapshot.isExactLiveTerminal() {
+				t.Fatalf("%s terminal credits=%+v", testCase.name, snapshot)
+			}
+		}()
 	}
 }
 

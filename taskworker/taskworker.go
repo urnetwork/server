@@ -2,6 +2,7 @@ package taskworker
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -16,30 +17,53 @@ import (
 )
 
 // removedTaskTargets lists scheduled task functions that have been deleted
-// or renamed in the codebase. InitTasks reaps their pending rows on every
-// start: at claim time deploy version skew is indistinguishable from
-// permanent removal, so the runner never gives up on them and cleanup must
-// be explicit. Add the full function name whenever a scheduled function is
-// deleted or renamed; TestRemovedTaskTargetsAreNotRegistered keeps live
+// or renamed in the codebase. Every start reaps their pending rows (see
+// reapRetiredTasks): at claim time deploy version skew is indistinguishable
+// from permanent removal, so the runner never gives up on them and cleanup
+// must be explicit. Add the full function name whenever a scheduled function
+// is deleted or renamed; TestRemovedTaskTargetsAreNotRegistered keeps live
 // names off this list.
 var removedTaskTargets = []string{
 	// split into ScheduleRefreshFree/Pro/ReferralTransferBalances
 	"github.com/urnetwork/server/controller.RefreshTransferBalances",
 }
 
-// InitTasks schedules the recurring tasks. It is invoked at startup by the
-// taskworkercli command (and by the `init-tasks` subcommand).
+// Every statement of a startup scheduling or reap transaction ends on the
+// server within this bound. Stopping a candidate, as warp does when its
+// readiness poll times out, only closes its socket, and PostgreSQL notices
+// that only after the running statement ends. An unbounded statement thus
+// outlives its process while it holds, or queues for, the run-once rows that
+// later candidates and live workers share. A timed-out scheduling attempt
+// fails with a retryable startup read error, which the startup owner retries.
+var taskworkerStartupStatementTimeout = 10 * time.Second
+
+// Applies the bound to the caller's transaction only.
+func boundStartupStatementsInTx(ctx context.Context, tx server.PgTx) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`SELECT set_config('statement_timeout', $1, true)`,
+		strconv.FormatInt(taskworkerStartupStatementTimeout.Milliseconds(), 10),
+	))
+}
+
+// InitTasks schedules the recurring tasks, then reaps retired rows. It backs
+// the `init-tasks` subcommand. A serving worker schedules before readiness and
+// reaps after admission instead (see startTaskworkerRuntime).
 func InitTasks(ctx context.Context) {
 	initTaskSchedule(ctx)
+	reapRetiredTasks(ctx)
 	controller.ApplyBlobRetention(ctx)
 }
 
-// Scheduling is bounded startup work. Long-lived retention observers are
-// activated separately after the process acquires its runtime owner.
+// Scheduling is the bounded startup work that readiness waits on. Its
+// transaction holds every shared run-once row it upserts until commit, so it
+// runs nothing else: retired-row cleanup is reapRetiredTasks, and long-lived
+// retention observers start after the process acquires its runtime owner.
 func initTaskSchedule(ctx context.Context) {
 	// Run-once upserts merge independently with live claim updates. A fixed
 	// snapshot needlessly retries the entire initializer whenever a claim wins.
 	server.Tx(ctx, func(tx server.PgTx) {
+		boundStartupStatementsInTx(ctx, tx)
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 
@@ -61,6 +85,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleCancelHungAccountPayments(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
+		work.ScheduleCloseContractDeadlines(clientSession, tx)
+		// idle until contract_close.yml enables it
+		work.ScheduleReapScheduledContractCloses(clientSession, tx)
 		for i := range work.DefaultCloseExpiredContractsBlockSize {
 			work.ScheduleCloseExpiredContracts(clientSession, tx, i, false)
 		}
@@ -128,26 +155,46 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 		work.ScheduleStSyncChain(clientSession, tx)
 		work.SchedulePaymentReconcile(clientSession, tx)
-
-		// pending rows for targets removed from the codebase can never run
-		// again and reschedule on the skew backoff forever; reap them here so
-		// a deploy self-heals the task table.
-		for _, functionName := range removedTaskTargets {
-			if removedCount := task.RemovePendingTasksForFunctionInTx(ctx, tx, functionName); 0 < removedCount {
-				glog.Infof("[taskworker]reaped %d pending tasks for removed target %s\n", removedCount, functionName)
-			}
-		}
-		if removedCount := work.RemoveDisabledVerifyTasks(ctx, tx); 0 < removedCount {
-			glog.Infof("[taskworker]reaped %d pending verification tasks while the subnet is disabled\n", removedCount)
-		}
-		if removedCount := work.RemoveDisabledProviderEgressProbeTasks(ctx, tx); 0 < removedCount {
-			glog.Infof("[taskworker]reaped %d pending provider egress probe tasks while probing is disabled\n", removedCount)
-		}
-		if removedCount := work.RemoveDisabledContractDegradationTasks(ctx, tx); 0 < removedCount {
-			glog.Infof("[taskworker]reaped %d pending contract degradation checks while degraded.yml disables them\n", removedCount)
-		}
 	}, server.TxReadCommitted)
 	work.ScheduleSettlementAccountingTasks(ctx)
+}
+
+// Removes pending rows that can never run again: removed targets, which
+// otherwise reschedule on the skew backoff forever, and the chains of
+// subsystems that configuration disables. Each family deletes in its own
+// bounded transaction after scheduling has committed, so a slow or blocked
+// reap holds no run-once row, and a serving worker runs it after admission.
+// The consistency tradeoff: a retired row can be claimed before its reap. A
+// removed target then fails with target-not-found and a disabled family's
+// post does not reseed; the delete ignores claims either way. A family that
+// fails or times out keeps its rows until the next start reaps them again.
+func reapRetiredTasks(ctx context.Context) {
+	reap := func(description string, remove func(server.PgTx) int64) {
+		server.HandleError(func() {
+			var removedCount int64
+			server.Tx(ctx, func(tx server.PgTx) {
+				boundStartupStatementsInTx(ctx, tx)
+				removedCount = remove(tx)
+			}, server.TxReadCommitted)
+			if 0 < removedCount {
+				glog.Infof("[taskworker]reaped %d pending %s\n", removedCount, description)
+			}
+		})
+	}
+	for _, functionName := range removedTaskTargets {
+		reap("tasks for removed target "+functionName, func(tx server.PgTx) int64 {
+			return task.RemovePendingTasksForFunctionInTx(ctx, tx, functionName)
+		})
+	}
+	reap("verification tasks while the subnet is disabled", func(tx server.PgTx) int64 {
+		return work.RemoveDisabledVerifyTasks(ctx, tx)
+	})
+	reap("provider egress probe tasks while probing is disabled", func(tx server.PgTx) int64 {
+		return work.RemoveDisabledProviderEgressProbeTasks(ctx, tx)
+	})
+	reap("contract degradation checks while degraded.yml disables them", func(tx server.PgTx) int64 {
+		return work.RemoveDisabledContractDegradationTasks(ctx, tx)
+	})
 }
 
 // InitTaskWorker preserves the historical exact Go signature, including
@@ -171,11 +218,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 	// 2024.11.15 migration from "bringyour.com" to new package
 
 	addProfileTargets(taskWorker, profile,
-		task.NewTaskTargetWithPost(
-			task.TaskCleanup,
-			task.TaskCleanupPost,
-			"main.TaskCleanup",
-		),
+		task.NewTaskCleanupTaskTarget(),
 		// task.NewTaskTargetWithPost(work.WarmEmail, work.WarmEmailPost),
 		task.NewTaskTargetWithPost(
 			work.ExportStats,
@@ -186,7 +229,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExportProvidersMap,
 			work.ExportProvidersMapPost,
 		),
-		task.NewTaskTarget(work.BackfillClock),
+		task.NewTaskTargetWithPost(
+			work.BackfillClock,
+			work.BackfillClockPost,
+		),
 		work.NewMaintainNetworkSessionsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.WebSearchAnalytics,
@@ -197,11 +243,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveExpiredAuthCodesPost,
 			"bringyour.com/service/taskworker/work.RemoveExpiredAuthCodes",
 		),
-		task.NewTaskTargetWithPost(
-			work.Payout,
-			work.PayoutPost,
-			"bringyour.com/service/taskworker/work.Payout",
-		),
+		work.NewPayoutTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.ProcessPendingPayouts,
 			work.ProcessPendingPayoutsPost,
@@ -233,6 +275,8 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		),
 		work.NewStartupContractClosureTaskTarget(),
 		work.NewScheduledContractClosureTaskTarget(),
+		work.NewContractDeadlineCloseTaskTarget(),
+		work.NewScheduledContractCloseReapTaskTarget(),
 		work.NewCloseExpiredContractsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.CloseExpiredNetworkClientHandlers,
@@ -251,6 +295,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		),
 		model.NewLegacyProviderTotalsTaskTarget(),
 		model.NewLegacyNetEscrowMirrorTaskTarget(),
+		model.NewQuarantineReservationReleaseTaskTarget(),
 		task.NewTaskTargetWithPost(
 			model.RemoveNetworkClientsTask,
 			model.RemoveNetworkClientsTaskPost,

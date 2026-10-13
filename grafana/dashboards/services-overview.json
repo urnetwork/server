@@ -186,6 +186,154 @@
                     "instant": true
                 }
             ]
+        },
+        {
+            "id": 7,
+            "type": "timeseries",
+            "title": "PostgreSQL constructor startup phases",
+            "description": "Constructors inside the initial Ping or failed-startup cleanup now, completed phases per second by outcome (cleanup ok requires an observed CleanupDone), and completed phase seconds per second for each pool generation.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 30
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, pool, phase) (urnetwork_pg_pool_startup_phases_active{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"})",
+                    "legendFormat": "active {{service}} {{pool}} {{phase}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, pool, phase, outcome) (rate(urnetwork_pg_pool_startup_phases_completed_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "completed / s {{service}} {{pool}} {{phase}} {{outcome}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (service, pool, phase) (rate(urnetwork_pg_pool_startup_phase_duration_seconds_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "seconds / s {{service}} {{pool}} {{phase}}"
+                }
+            ]
+        },
+        {
+            "id": 8,
+            "type": "timeseries",
+            "title": "PostgreSQL wrapper ownership",
+            "description": "Observed Db and Tx wrapper ownership, release and pending disposal by state (excludes raw leases and pool-internal disposal), and cleanup observations per second dropped because a generation's bounded registry was full.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 30
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, pool, state) (urnetwork_pg_pool_wrapper_connections{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"})",
+                    "legendFormat": "{{service}} {{pool}} {{state}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, pool) (rate(urnetwork_pg_pool_wrapper_cleanup_tracking_dropped_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "tracking dropped / s {{service}} {{pool}}"
+                }
+            ]
+        },
+        {
+            "id": 9,
+            "type": "timeseries",
+            "title": "aborted transactions, rerun decisions and statement stops / s",
+            "description": "Transactions a callback went on with after a failed statement, by the statement's failure class; decisions about rerunning a callback after a rerunnable failure; and transaction statements in flight when their caller stopped, by whether they completed on the connection (which keeps the session) or the stop bound interrupted them.",
+            "gridPos": {
+                "h": 8,
+                "w": 24,
+                "x": 0,
+                "y": 38
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, class) (rate(urnetwork_db_aborted_transactions_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "aborted {{service}} {{class}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, class, decision) (rate(urnetwork_db_rerun_decisions_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "rerun {{service}} {{class}} {{decision}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (service, outcome) (rate(urnetwork_db_transaction_statement_stops_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "statement stop {{service}} {{outcome}}"
+                }
+            ]
         }
     ]
 }

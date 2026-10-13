@@ -31,7 +31,9 @@ func TestMainnetCompositionSettlementArchiveRetainsDebitAndUsage(t *testing.T) {
 			if !closed {
 				t.Fatal("settlement did not claim its terminal outcome")
 			}
-		}, server.TxReadCommitted)
+			// The financial owner admits ownership only in the server's own
+			// read-committed no-retry transaction (ddad361c).
+		}, server.TxReadCommitted, server.OptNoRetry())
 		var originalUsage []byte
 		var closedAt time.Time
 		server.Db(ctx, func(conn server.PgConn) {
@@ -78,7 +80,7 @@ func TestMainnetCompositionSettlementArchiveRetainsDebitAndUsage(t *testing.T) {
 			admitted, _, admissionErr = createTransferEscrowInTx(ctx, tx,
 				fixture.sourceNetworkId, fixture.sourceId, fixture.destinationNetworkId, fixture.destinationId,
 				fixture.sourceNetworkId, 401, nil)
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if admissionErr == nil || admitted != nil {
 			t.Fatalf("archival and delayed callbacks re-admitted consumed credit: contract=%+v error=%v", admitted, admissionErr)
 		}

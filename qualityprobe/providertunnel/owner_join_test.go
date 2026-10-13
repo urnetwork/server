@@ -104,7 +104,7 @@ func TestCloseTunnelPartsRetainsActualGeneratorAfterDeadline(t *testing.T) {
 		defer closeCancel()
 		closed := make(chan error, 1)
 		go func() {
-			closed <- closeTunnelParts(closeCtx, func() {}, func() error { return nil }, pumpDone, multiClient, generator,
+			closed <- closeTunnelParts(closeCtx, func() {}, func(context.Context) {}, func() {}, func() error { return nil }, pumpDone, multiClient, generator,
 				func() { strategy.Close(); close(strategyClosed) }, cancelLifecycle)
 		}()
 		<-strategyClosed
@@ -237,7 +237,7 @@ func TestCloseTunnelPartsOwnersRemainIndependent(t *testing.T) {
 		cancelClose()
 		firstClosed := make(chan error, 1)
 		go func() {
-			firstClosed <- closeTunnelParts(closeCtx, func() {}, func() error { return nil }, pumpDone,
+			firstClosed <- closeTunnelParts(closeCtx, func() {}, func(context.Context) {}, func() {}, func() error { return nil }, pumpDone,
 				&recordingCloseWaiter{name: "first", order: &firstOrder}, first, firstStrategy.Close,
 				func() { cancelFirst(); close(canceled) })
 		}()
@@ -250,7 +250,7 @@ func TestCloseTunnelPartsOwnersRemainIndependent(t *testing.T) {
 			return &connect.RemoveNetworkClientResult{}, nil
 		})
 		second.RemoveClientArgs(&connect.MultiClientGeneratorClientArgs{ClientId: connect.NewId()})
-		if err := closeTunnelParts(t.Context(), func() {}, func() error { return nil }, pumpDone,
+		if err := closeTunnelParts(t.Context(), func() {}, func(context.Context) {}, func() {}, func() error { return nil }, pumpDone,
 			&recordingCloseWaiter{name: "second", order: &secondOrder}, second, secondStrategy.Close, cancelSecond); err != nil {
 			t.Fatal(err)
 		}

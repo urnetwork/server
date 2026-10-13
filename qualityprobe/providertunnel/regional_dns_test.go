@@ -11,7 +11,6 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -140,29 +139,34 @@ func TestProbeRegionalDnsUsesConfiguredServerFallback(t *testing.T) {
 // An unavailable regional configuration remains bounded and nonauthoritative;
 // it cannot fall back to the host's resolver or certify a synthetic answer.
 func TestProbeRegionalDnsFailureKeepsHardDeadline(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		resolver, err := providerDnsResolverSettings(Config{ProviderCountry: "cn"})
-		if err != nil {
-			t.Fatal(err)
+	// Even an injected net.Resolver dial initializes process-global DNS state.
+	// Keep this actual plaintext lookup outside any synctest bubble.
+	resolver, err := providerDnsResolverSettings(Config{ProviderCountry: "cn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolver.EnableRemoteDns || resolver.EnableRemoteDoh || resolver.EnableLocalDns || resolver.EnableLocalDoh {
+		t.Fatal("regional deadline fixture must use only private plaintext DNS")
+	}
+	settings := connect.DefaultDohSettings()
+	settings.IpVersion, settings.DnsResolverSettings = 4, resolver
+	var calls atomic.Int32
+	settings.DialContextSettings = &connect.DialContextSettings{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil || network != "udp" || port != "53" || !slices.Contains(resolver.RemoteDnsIpv4, host) {
+			t.Error("regional failure escaped the private remote UDP path")
+			return nil, errors.New("unexpected regional DNS dial")
 		}
-		settings := connect.DefaultDohSettings()
-		settings.IpVersion, settings.DnsResolverSettings = 4, resolver
-		settings.DialContextSettings = &connect.DialContextSettings{DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(address)
-			if err != nil || port != "53" || !slices.Contains(resolver.RemoteDnsIpv4, host) {
-				t.Error("regional failure escaped the private remote path")
-			}
-			<-ctx.Done()
-			return nil, ctx.Err()
-		}}
-		cache := connect.NewDohCache(settings)
-		defer cache.Close()
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-		defer cancel()
-		start := time.Now()
-		addrs, authoritative := cache.QueryResult(ctx, "A", "regional-probe.example")
-		if authoritative || len(addrs) != 0 || time.Since(start) != 10*time.Second {
-			t.Fatalf("regional failure escaped deadline: authoritative=%t elapsed=%s", authoritative, time.Since(start))
-		}
-	})
+		calls.Add(1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	cache := connect.NewDohCache(settings)
+	defer cache.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	addrs, authoritative := cache.QueryResult(ctx, "A", "regional-probe.example")
+	if authoritative || len(addrs) != 0 || ctx.Err() != context.DeadlineExceeded || calls.Load() == 0 {
+		t.Fatalf("regional failure escaped deadline: authoritative=%t calls=%d err=%v", authoritative, calls.Load(), ctx.Err())
+	}
 }

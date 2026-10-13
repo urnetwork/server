@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"math"
 	"sort"
 	"time"
 
@@ -36,7 +37,8 @@ import (
 //     provide-public). Only top-level client rows are reconstructed; derivative
 //     clients carry provide keys for return traffic but are not provider
 //     devices. Reach is bounded by that table's retention
-//     (ClientExpiration, ~30 days).
+//     (ClientReliabilityRetention, 21 days, extended up to ClientExpiration
+//     while a payout is behind).
 //
 //   - RollupTransferAuditEvents: one aggregate audit_contract_event per UTC
 //     day, summing settled destination-party bytes from
@@ -529,8 +531,8 @@ func SweepDeviceAuditEvents(ctx context.Context) (addedCount int, removedCount i
 // deployment forward. This is the only recorded per-day evidence —
 // network_client_connection retains disconnected rows for just 8 hours, and
 // network_client.auth_time is a single last-seen marker, not history. The
-// devices backfill reach therefore matches the providers backfill (~30 days,
-// ClientExpiration) but its coverage within those days is narrower.
+// devices backfill reach therefore matches the providers backfill
+// (ClientReliabilityRetention) but its coverage within those days is narrower.
 //
 // Idempotent by replacement of "backfill:v1"-marked rows in the window, which
 // is clamped exactly like the provider backfill (whole UTC days strictly
@@ -735,7 +737,8 @@ func upsertProviderAuditStatesInTx(
 // This is a labeled snapshot reconstruction, NOT recorded history — history
 // that was never recorded cannot be recovered. Stated approximations:
 //
-//   - reach: client_reliability retention is ClientExpiration (~30 days), so
+//   - reach: client_reliability retention is ClientReliabilityRetention (21
+//     days, extended up to ClientExpiration while a payout is behind), so
 //     nothing older is reconstructable, whatever the requested start.
 //   - geo: a client's CURRENT location (network_client_location_reliability)
 //     is applied to its whole reconstructed history; a client that moved is
@@ -983,25 +986,6 @@ func startOfUtcDay(t time.Time) time.Time {
 	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 }
 
-// Keep both outcome branches explicit so PostgreSQL can combine the terminal
-// and NULL-outcome close-day partial indexes for a selective day. The latter
-// avoids scanning unrelated unsettled contracts. The disjunction includes every
-// outcome, including closed contracts whose outcome is still NULL. A dense day
-// can retain a sequential scan and ordinary join.
-// The work reduction depends on those indexes being installed, valid and ready;
-// this query does not create or repair them, or force report PK lookups.
-const transferAuditDailyBytesSQL = `
-SELECT COALESCE(SUM(contract_close.used_transfer_byte_count), 0)
-FROM transfer_contract
-INNER JOIN contract_close ON
-    contract_close.contract_id = transfer_contract.contract_id AND
-    contract_close.party = 'destination'
-WHERE
-    $1 <= transfer_contract.close_time AND
-    transfer_contract.close_time < $2 AND
-    (transfer_contract.outcome IS NULL OR transfer_contract.outcome IS NOT NULL)
-`
-
 // RollupTransferAuditEvents writes one aggregate audit_contract_event per
 // complete UTC day in [minTime, maxTime), summing settled destination-party
 // bytes from transfer_contract x contract_close — the same settled-bytes join
@@ -1015,7 +999,9 @@ WHERE
 // and this feed does not fabricate one (the packets series reads zero).
 //
 // Idempotent by replacement per day. Days on/after today are skipped (still
-// accumulating); rerun a recent day to pick up late closes.
+// accumulating); rerun a recent day to pick up late closes. Each day is read
+// in bounded chunks and runs to completion here; the task checkpoints a day
+// across runs with AdvanceTransferAuditRollupDay instead.
 func RollupTransferAuditEvents(
 	ctx context.Context,
 	minTime time.Time,
@@ -1028,75 +1014,103 @@ func RollupTransferAuditEvents(
 		end = today
 	}
 	for dayStart := startOfUtcDay(minTime); dayStart.Before(end); dayStart = dayStart.Add(24 * time.Hour) {
-		dayEnd := dayStart.Add(24 * time.Hour)
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				DELETE FROM audit_contract_event
-				WHERE
-					event_details = $1 AND
-					$2 <= event_time AND event_time < $3
-				`,
-				AuditEventDetailsTransferRollup,
-				dayStart,
-				dayEnd,
-			))
-
-			var settledByteCount int64
-			result, err := tx.Query(
-				ctx,
-				transferAuditDailyBytesSQL,
-				dayStart,
-				dayEnd,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&settledByteCount))
-				}
-			})
-
-			zeroId := server.Id{}
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				INSERT INTO audit_contract_event (
-					event_id,
-					event_time,
-					contract_id,
-					client_network_id,
-					client_device_id,
-					provider_network_id,
-					provider_device_id,
-					extender_network_id,
-					extender_id,
-					event_type,
-					event_details,
-					transfer_byte_count,
-					transfer_packets
-				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-				`,
-				server.NewId(),
-				// noon keeps the row unambiguously inside the day for the
-				// per-day stats grouping
-				dayStart.Add(12*time.Hour),
-				zeroId,
-				zeroId,
-				zeroId,
-				zeroId,
-				zeroId,
-				nil,
-				nil,
-				AuditEventTypeContractClosedSuccess,
-				AuditEventDetailsTransferRollup,
-				settledByteCount,
-				0,
-			))
-		})
+		AdvanceTransferAuditRollupDay(ctx, NewTransferAuditRollupDay(dayStart), math.MaxInt)
 		dayCount += 1
 	}
 	return
+}
+
+// Marks the rollup's chunk statements in pg_stat_activity.
+const transferAuditRollupDayMarker = "transfer_audit_rollup_day"
+
+// Starts the sum of the UTC day that contains dayStart. Every contract closed
+// in the day counts, including closed contracts whose outcome is still NULL.
+func NewTransferAuditRollupDay(dayStart time.Time) *TransferCloseByteSum {
+	dayStart = startOfUtcDay(dayStart)
+	return &TransferCloseByteSum{
+		Start: dayStart,
+		End:   dayStart.Add(24 * time.Hour),
+	}
+}
+
+// Reports whether a checkpoint is the all-outcome sum of the UTC day that
+// contains dayStart, so a task never resumes a sum for another window.
+func IsTransferAuditRollupDay(day *TransferCloseByteSum, dayStart time.Time) bool {
+	want := NewTransferAuditRollupDay(dayStart)
+	return day != nil &&
+		day.Start.Equal(want.Start) &&
+		day.End.Equal(want.End) &&
+		!day.TerminalOnly
+}
+
+// Reads up to chunkCount more chunks of the day and, once its sum is complete,
+// replaces the day's rollup row in one short transaction. Reports whether the
+// row was written. The chunks run outside any transaction, so neither the
+// scan nor the replacement holds a snapshot across the day.
+func AdvanceTransferAuditRollupDay(
+	ctx context.Context,
+	day *TransferCloseByteSum,
+	chunkCount int,
+) bool {
+	if !day.advance(ctx, transferAuditRollupDayMarker, chunkCount) {
+		return false
+	}
+
+	dayStart := day.Start
+	dayEnd := day.End
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM audit_contract_event
+			WHERE
+				event_details = $1 AND
+				$2 <= event_time AND event_time < $3
+			`,
+			AuditEventDetailsTransferRollup,
+			dayStart,
+			dayEnd,
+		))
+
+		zeroId := server.Id{}
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO audit_contract_event (
+				event_id,
+				event_time,
+				contract_id,
+				client_network_id,
+				client_device_id,
+				provider_network_id,
+				provider_device_id,
+				extender_network_id,
+				extender_id,
+				event_type,
+				event_details,
+				transfer_byte_count,
+				transfer_packets
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			`,
+			server.NewId(),
+			// noon keeps the row unambiguously inside the day for the
+			// per-day stats grouping
+			dayStart.Add(12*time.Hour),
+			zeroId,
+			zeroId,
+			zeroId,
+			zeroId,
+			zeroId,
+			nil,
+			nil,
+			AuditEventTypeContractClosedSuccess,
+			AuditEventDetailsTransferRollup,
+			day.ByteCount,
+			0,
+		))
+	})
+	return true
 }
 
 // PurgeSampleAuditEvents deletes fake sample-generator rows from the provider

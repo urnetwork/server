@@ -38,9 +38,14 @@ func (self WorkloadProfile) Validate() error {
 // InitTasksForProfile arms only the chosen workload. A subnet operator leaves
 // retained retail, external probing, and removed-target rows untouched; its
 // claim filter also covers jobs independently enqueued by API/controller calls.
+// Production then reaps retired rows, as a serving production worker does
+// after admission.
 func InitTasksForProfile(ctx context.Context, profile WorkloadProfile) error {
 	if err := initTaskScheduleForProfile(ctx, profile); err != nil {
 		return err
+	}
+	if profile == WorkloadProfileProduction {
+		reapRetiredTasks(ctx)
 	}
 	controller.ApplyBlobRetention(ctx)
 	return nil
@@ -56,9 +61,11 @@ func initTaskScheduleForProfile(ctx context.Context, profile WorkloadProfile) er
 		initTaskSchedule(ctx)
 		return nil
 	}
-	// Match production's per-statement conflict handling for live queue rows;
-	// startup scheduling does not require a shared snapshot across tasks.
+	// Match production's per-statement conflict handling and statement bound
+	// for live queue rows; startup scheduling does not require a shared
+	// snapshot across tasks.
 	server.Tx(ctx, func(tx server.PgTx) {
+		boundStartupStatementsInTx(ctx, tx)
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 		debitName := work.NewTransferDebitTaskTarget().TargetFunctionName()
@@ -130,6 +137,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: work.NewMaintainNetworkSessionsTaskTarget(), schedule: work.ScheduleMaintainNetworkSessions},
 		{target: work.NewStartupContractClosureTaskTarget(), schedule: work.ScheduleOpenContractClosuresOnStartup},
 		{target: work.NewScheduledContractClosureTaskTarget()},
+		{target: work.NewContractDeadlineCloseTaskTarget(), schedule: work.ScheduleCloseContractDeadlines},
+		{target: work.NewScheduledContractCloseReapTaskTarget(), schedule: work.ScheduleReapScheduledContractCloses},
 		{target: work.NewCloseExpiredContractsTaskTarget(), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
 			for i := range work.DefaultCloseExpiredContractsBlockSize {
 				work.ScheduleCloseExpiredContracts(clientSession, tx, i, false)
@@ -141,6 +150,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(model.RemoveNetworkClientsTask)},
 		{target: model.NewLegacyProviderTotalsTaskTarget()},
 		{target: model.NewLegacyNetEscrowMirrorTaskTarget()},
+		// Queued by a contract quarantine in its commit.
+		{target: model.NewQuarantineReservationReleaseTaskTarget()},
 		{target: task.NewTaskTarget(work.SweepOrphanContractData), schedule: work.ScheduleSweepOrphanContractData},
 		// Drain a previously queued retired refresher; startup never seeds it.
 		{target: task.NewTaskTarget(work.RefreshContractHoles)},

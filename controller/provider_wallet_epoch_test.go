@@ -74,8 +74,8 @@ func TestProviderWalletEpochRetainedRefusesUnusableSubnet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wallets, err := stRetainedProviderWalletsForEpoch(context.Background(), &StConfig{RootKey: key}, &StPayoutEpochAuthority{}, nil)
-	if wallets != nil || !errors.Is(err, protocol.ErrWalletMappingIntegrity) {
-		t.Fatal("an unusable subnet selected wallets", wallets, err)
+	selection, err := stRetainedProviderWalletSelectionForEpoch(context.Background(), &StConfig{RootKey: key}, &StPayoutEpochAuthority{}, nil)
+	if selection != nil || !errors.Is(err, protocol.ErrWalletMappingIntegrity) {
+		t.Fatal("an unusable subnet selected wallets", selection, err)
 	}
 }

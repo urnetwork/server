@@ -250,6 +250,14 @@ func sendPaymentsWithPlanner(clientSession *session.ClientSession, planner payme
 		},
 		nil,
 	)
+	if err := clientSession.Ctx.Err(); err != nil {
+		// a drain or max time stopped the run; every follow-up below needs the
+		// same context. The next run resumes the committed steps and repeats them.
+		if planErr != nil {
+			return planErr
+		}
+		return err
+	}
 
 	// Several slices can include the same network. Release one notice per
 	// network carrying the total withheld across every slice in this run, also
@@ -384,6 +392,21 @@ func AdvancePayment(
 			Complete: false,
 			Canceled: false,
 		}, fmt.Errorf("payment retained pending a payout wallet")
+	}
+
+	if payment.PaymentRecord == nil && payment.CircleIdempotencyKey == nil {
+		// a payment becomes payable only after its plan's staged sweeps are all
+		// assigned to it; the payout run schedules it again when they are
+		pending, err := model.PaymentPlanAssignmentPending(clientSession.Ctx, payment.PaymentPlanId)
+		if err != nil {
+			return &AdvancePaymentResult{}, err
+		}
+		if pending {
+			return &AdvancePaymentResult{
+				Complete: false,
+				Canceled: false,
+			}, fmt.Errorf("payment retained pending its plan's sweep assignment")
+		}
 	}
 
 	complete, canceled, err := advancePayment(payment, clientSession)

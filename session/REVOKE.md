@@ -348,6 +348,12 @@ added to the rejection counter (`jwt/by_jwt.go:383-395`, :427-435).
 
 ### 5.3 Redis errors: fail closed with 503, never 401
 
+This section governs admission and requests. Already admitted transports
+follow the owner decision of 2026-10-11 in REVOKE-FINAL.md (Platform
+connection guarantee): only a definitive answer retires them, and an
+unavailable store keeps them connected, unverified, until a recheck is
+answered.
+
 **Why closed:**
 
 - **Precedent:** Postgres failures already become `ErrAuthUnavailable`
@@ -761,7 +767,9 @@ and hooks, and no sleeps.
    expires soonest without revoking it, and record a metric.
 9. **Deactivate a revoked session's clients.** Recommended: yes.
 10. **Fail mode.** Recommended: fail closed with 503, plus the kill switch
-    (§5.3).
+    (§5.3). Decided 2026-10-11 for already admitted transports: an
+    unavailable store never retires them; only a definitive answer does
+    (REVOKE-FINAL.md, Platform connection guarantee).
 11. **ur.io and devices without a live connection.** Recommended: refetch
     when the screen opens or regains focus, and poll every 30s while it is
     visible.

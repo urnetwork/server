@@ -140,9 +140,17 @@ func NewToken(claims *TokenClaims) (string, error) {
 	return SignToken(keys[0], claims)
 }
 
-// Parse verifies a token against every key the deployment has.
+// Parse verifies a token against every key the deployment has. A token no held
+// key verifies is checked again after the keys are reread: it may be signed
+// with a key version the vault gained after this process read its keys (see
+// session.RereadKeys).
 func Parse(token string, now time.Time) (*TokenClaims, error) {
-	return ParseToken(session.DerivedKeys(TokenKeyPurpose), token, now)
+	claims, err := ParseToken(session.DerivedKeys(TokenKeyPurpose), token, now)
+	if errors.Is(err, ErrTokenInvalid) {
+		session.RereadKeys()
+		claims, err = ParseToken(session.DerivedKeys(TokenKeyPurpose), token, now)
+	}
+	return claims, err
 }
 
 // In-app destinations a landing page routes to (mmm/onboarding/PLAN.md

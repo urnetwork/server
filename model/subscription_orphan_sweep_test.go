@@ -346,6 +346,34 @@ func TestSweepOrphanContractAllFiveCursorRoundTrips(t *testing.T) {
 	})
 }
 
+// The zero id cannot form a balance ownership key, and no grant has it. An
+// orphan escrow row carrying it is still retired, and the later orphan behind
+// it in the same step is reached instead of failing at that cursor each pass.
+func TestSweepOrphanContractRetiresZeroBalanceEscrow(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		zeroOrphanId, laterOrphanId := orphanSweepTestId(7), orphanSweepTestId(8)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count)
+				VALUES($1,$2,0),($3,$4,0)`, zeroOrphanId, server.Id{}, laterOrphanId, orphanSweepTestId(1)))
+		}, server.TxReadCommitted, server.OptNoRetry())
+		removed, cursor, done := SweepOrphanContractData(ctx, SweepOrphanCursor{}, 0, 1)
+		if !done || removed != 2 || !reflect.DeepEqual(cursor, SweepOrphanCursor{}) {
+			t.Fatalf("zero-balance orphan stopped its step: removed=%d done=%t", removed, done)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var count int
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_escrow WHERE contract_id=ANY($1)`,
+				[]server.Id{zeroOrphanId, laterOrphanId}).Scan(&count))
+			if count != 0 {
+				t.Fatalf("orphan escrow rows remain: %d", count)
+			}
+		})
+	})
+}
+
 // A waited non-key update must still be deleted by the ordinary model path.
 // This caught the rejected SELECT FOR UPDATE/ctid candidate: it returned one
 // selected row but zero deletes after the updater committed a new tuple.

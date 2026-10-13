@@ -39,6 +39,18 @@ func TestOpenMarksPrivateControlTelemetry(t *testing.T) {
 	}
 }
 
+// A probe identity keeps its teardown retirement and residency cleanup; the
+// fixed-destination identity reuse of long-lived windows is off.
+func TestOpenRetiresEveryProbeIdentity(t *testing.T) {
+	settings := captureProbeTransportSettings(t, []Config{probeTransportBudgetTestConfig()})
+	if settings[0].ReuseFixedDestinationIdentities {
+		t.Fatal("a probe tunnel parks identities for reuse")
+	}
+	if providerTunnelMultiClientSettings().FixedDestinationRetryMin != 0 {
+		t.Fatal("a probe tunnel paces its re-dial")
+	}
+}
+
 // Exercise Open's real generator context, but stop before TUN creation. Each
 // synthetic auth is canceled before a route can dial, so this test needs no
 // socket, host resolution, provider, or control-plane service.

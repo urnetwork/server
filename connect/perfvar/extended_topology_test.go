@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -2124,19 +2125,31 @@ func (self *splitExchangeEnvironment) newClient(
 // Teardown waits for both independent resident sets and their exchange
 // connections before closing the shared userspace network.
 func (self *splitExchangeEnvironment) close() {
+	_ = self.closeWithError()
+}
+
+// Return the same reported lifecycle errors to measured-run callers without
+// changing the close wrapper, deadline, ordering, or independent cleanup joins.
+func (self *splitExchangeEnvironment) closeWithError() error {
+	var closeErr error
+	recordError := func(format string, args ...any) {
+		err := fmt.Errorf(format, args...)
+		closeErr = errors.Join(closeErr, err)
+		self.t.Errorf("%v", err)
+	}
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer closeCancel()
 	if err := closeRouteClientLifecyclesAndWait(
 		closeCtx,
 		routeClientLifecycles(self.clients),
 	); err != nil {
-		self.t.Errorf("split exchange clients did not close: %v", err)
+		recordError("split exchange clients did not close: %v", err)
 	}
 	// Client close submits its final contract controls. Join them while the
 	// fixture context is still live; canceling first turns valid database
 	// cleanup into a teardown-only timeout under race instrumentation.
 	if !self.controls.closeAndWait(closeCtx) {
-		self.t.Errorf("split exchange out-of-band controls did not become idle")
+		recordError("split exchange out-of-band controls did not become idle")
 	}
 	for _, edge := range self.edges {
 		edge.apiServer.Close()
@@ -2147,27 +2160,28 @@ func (self *splitExchangeEnvironment) close() {
 	self.cancel()
 	for _, edge := range self.edges {
 		if !edge.handler.WaitForIdle(closeCtx) {
-			self.t.Errorf("%s handler did not become idle", edge.name)
+			recordError("%s handler did not become idle", edge.name)
 		}
 	}
 	if !self.announces.closeAndWait(closeCtx) {
-		self.t.Errorf("split exchange connection announcements did not become idle")
+		recordError("split exchange connection announcements did not become idle")
 	}
 	for _, edge := range self.edges {
 		if !edge.exchange.WaitForIdle(closeCtx) {
-			self.t.Errorf("%s exchange did not become idle", edge.name)
+			recordError("%s exchange did not become idle", edge.name)
 		}
 	}
 	self.network.close()
 	poolSnapshotAfter, poolBalanced := routeMessagePoolBalance(self.poolOutstandingBefore)
 	if !poolBalanced {
-		self.t.Errorf(
+		recordError(
 			"split exchange message-pool ownership did not reconcile: %d -> %d classes=%v",
 			self.poolOutstandingBefore,
 			poolSnapshotAfter.outstanding,
 			poolSnapshotAfter.classes,
 		)
 	}
+	return closeErr
 }
 
 // Exact delivery is accepted only when the separately named internal link

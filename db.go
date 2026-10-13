@@ -124,6 +124,36 @@ func PgReset() {
 	safeMaintenancePool.reset()
 }
 
+// Set only by a read-only operator process, such as a dry run against
+// production data.
+var pgReadOnly atomic.Bool
+
+// Every session this process opens starts with default_transaction_read_only,
+// no callback escalates it and every transaction begins read only, so
+// PostgreSQL refuses any write the process attempts. Sessions connect directly
+// with the maintenance resource (pg_maintenance.yml) when it exists, since a
+// transaction pooler refuses the startup parameter. Pools opened earlier are
+// reset.
+func RequirePgReadOnly() {
+	pgReadOnly.Store(true)
+	PgReset()
+}
+
+// Returns a test process to ordinary sessions after RequirePgReadOnly.
+func Testing_ReleasePgReadOnly() {
+	pgReadOnly.Store(false)
+	PgReset()
+}
+
+// The startup parameter binds the whole session; an ordinary process's
+// sessions are unchanged.
+func configurePgPoolReadOnly(config *pgxpool.Config) {
+	if pgReadOnly.Load() {
+		config.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
+		glog.Infof("[db]read-only process: every session and transaction is read only\n")
+	}
+}
+
 const DefaultPgVaultResourceName = "pg.yml"
 const DefaultPgConfigResourceName = "db.yml"
 
@@ -153,8 +183,15 @@ type safePgPool struct {
 // ARE the defaults, so its resolution is unchanged.
 func (self *safePgPool) resolveResources() (vaultKeys *SimpleResource, configKeys *SimpleResource) {
 	vaultKeys = Vault.RequireSimpleResource(DefaultPgVaultResourceName)
-	if self.vaultResourceName != DefaultPgVaultResourceName {
-		if r, err := Vault.SimpleResource(self.vaultResourceName); err == nil {
+	vaultResourceName := self.vaultResourceName
+	if pgReadOnly.Load() {
+		// A transaction pooler refuses the read-only startup parameter, and a
+		// session SET through it would reach other clients' sessions, so a
+		// read-only process connects directly where that resource exists.
+		vaultResourceName = MaintenancePgVaultResourceName
+	}
+	if vaultResourceName != DefaultPgVaultResourceName {
+		if r, err := Vault.SimpleResource(vaultResourceName); err == nil {
 			vaultKeys = r
 		}
 	}
@@ -252,6 +289,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		if err != nil {
 			panic(fmt.Sprintf("Unable to parse url: %s", err))
 		}
+		configurePgPoolReadOnly(config)
 		glog.Infof("[db]statement_tag = %s\n", processPgStatementTag())
 		self.startupMetrics = configurePgPoolLiveness(config)
 		configurePgPoolWriteTracking(config)
@@ -676,6 +714,10 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			// 	debugOptions = v
 		}
 	}
+	if pgReadOnly.Load() {
+		// never escalate the read-only session default
+		rwOptions = OptReadOnly()
+	}
 	if ownedConnection != nil {
 		phase.enter(DbOperationSessionSetup)
 		ownedConnection.run(ctx, callback, rwOptions.readOnly)
@@ -918,6 +960,7 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 		DeferrableMode: pgx.NotDeferrable,
 	}
 	beginTimeout := PgBeginTimeout
+	statementStopTimeout := PgStatementStopTimeout
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -927,6 +970,8 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			timing = v
 		case txBeginTimeout:
 			beginTimeout = time.Duration(v)
+		case txStatementStopTimeout:
+			statementStopTimeout = time.Duration(v)
 		case pgx.TxOptions:
 			txOptions = v
 		case pgx.TxIsoLevel:
@@ -938,6 +983,10 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			// case DbDebugOptions:
 			// 	debugOptions = v
 		}
+	}
+	if pgReadOnly.Load() {
+		// an explicit read-write BEGIN would override the session default
+		txOptions.AccessMode = pgx.ReadOnly
 	}
 
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
@@ -971,7 +1020,12 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			}
 			tx := &postCommitPgTx{PgTx: rawTx,
 				ownershipAllowed: txOptions.IsoLevel == pgx.ReadCommitted &&
-					!retryOptions.rerunOnCommitError && !retryOptions.rerunOnTransientError && !retryOptions.rerunOnConnectionError}
+					!retryOptions.rerunOnCommitError && !retryOptions.rerunOnTransientError && !retryOptions.rerunOnConnectionError,
+				// a caller's stop must not interrupt a statement mid round trip
+				// (see db_statement_stop.go)
+				statementStopBounded: true,
+				statementStopTimeout: statementStopTimeout,
+			}
 			// if debugOptions.txCommitSeparately {
 			// 	tx = newDebugTx(tx, conn, txOptions)
 			// }
@@ -1009,6 +1063,11 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 				phase.enter(DbOperationCallback)
 				callback(tx)
 			}()
+			if pgErr == nil && tx.statementStopErr != nil {
+				// A statement reported the caller's stop and the callback
+				// went on. Its work is incomplete, so roll back above.
+				panic(tx.statementStopErr)
+			}
 			if pgErr == nil {
 				// Logger().Printf("Db commit\n")
 				// Commit on a context detached from the caller. The

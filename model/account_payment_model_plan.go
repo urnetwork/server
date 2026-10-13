@@ -15,7 +15,18 @@ import (
 	// "github.com/urnetwork/server/session"
 )
 
-// the payment planner computes a payout in one large transaction
+// the payment planner computes a payout's financial decisions in one
+// transaction, and commits the expensive parts around it in bounded steps:
+//   - the network reliability scores of the payout window are folded from
+//     committed block chunks before the plan transaction
+//     (account_payment_plan_reliability.go)
+//   - the plan transaction selects the sweeps and commits the payments, the
+//     subsidy epoch and the points, staging the selected sweeps
+//   - the staged sweeps are assigned to their payments in bounded batches, and
+//     the payments become payable only after the last batch
+//     (account_payment_plan_assignment.go)
+//
+// A drain or restart loses at most the step in flight; the next run resumes.
 // the coponents of the payout are:
 // 1. escrow net revenue share (the `NetRevenue` part of the escrow is 100% transferred to the provider)
 //    note all `NetRevenue` will be zero when fully migrated to points/token,
@@ -28,6 +39,11 @@ type PaymentPlanner struct {
 	unresolvedLegacyPaymentCount int
 	ctx                          context.Context
 	subsidyConfig                *SubsidyConfig
+	// a dry run assigns sweeps and computes reliability scores inline, since
+	// its transaction rolls back; a real plan stages both
+	dryRun bool
+	// selected sweeps left for the batched assignment after the plan commits
+	stagedSweepCount int64
 
 	// when > 0, bound this plan to at most maxDuration of the oldest unpaid
 	// sweeps so a large backlog is drained in bounded slices instead of one
@@ -85,6 +101,10 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 	return createPaymentPlan(ctx, subsidyConfig, dryRun, maxDuration, true, nil)
 }
 
+// A plan whose selected window differs from the predicted window commits that
+// window's reliability scores and plans again, at most this many times in all.
+const paymentPlanReliabilityAttempts = 3
+
 // createPaymentPlan is CreatePaymentPlan with explicit control over whether the
 // shared reliability inputs are refreshed at the top of the plan.
 //
@@ -105,52 +125,155 @@ func createPaymentPlan(
 	refreshReliabilityInputs bool,
 	writeInTx func(server.PgTx, *PaymentPlan),
 ) (paymentPlan *PaymentPlan, returnErr error) {
+	paymentPlan, _, returnErr = createPaymentPlanWithProgress(ctx, subsidyConfig, dryRun, maxDuration, refreshReliabilityInputs, writeInTx)
+	return
+}
+
+// A real plan runs as committed steps:
+//  1. finish the staged sweep assignment of an earlier plan, whose unassigned
+//     sweeps still look unpaid to a new selection
+//  2. refresh the client location reliabilities (first slice only)
+//  3. commit the reliability scores of the predicted window in block chunks
+//  4. the plan transaction: select, allocate, and commit the payments with
+//     their sweeps staged. A selected window that differs from the prediction
+//     commits that window's scores (3) and plans again.
+//  5. assign the staged sweeps in bounded batches; the payments become payable
+//     with the last batch
+//
+// An interruption loses only the step in flight. committedProgress reports
+// whether this call committed any step, so a caller can retry promptly; a
+// progress observer in ctx (WithPaymentPlanProgress) also learns of it when a
+// later step panics. A plan whose transaction committed is returned even when
+// its assignment was interrupted; the next call resumes the assignment. A dry
+// run commits nothing.
+func createPaymentPlanWithProgress(
+	ctx context.Context,
+	subsidyConfig *SubsidyConfig,
+	dryRun bool,
+	maxDuration time.Duration,
+	refreshReliabilityInputs bool,
+	writeInTx func(server.PgTx, *PaymentPlan),
+) (paymentPlan *PaymentPlan, committedProgress bool, returnErr error) {
+	// runs on a panic too, with the steps committed before it
 	defer func() {
-		if value := recover(); value != nil {
-			if err, ok := value.(error); ok && (errors.Is(err, ErrProviderLegacyReliabilityWindow) || errors.Is(err, errPaymentPlanSelectionChanged) ||
-				errors.Is(err, server.ErrProviderEarningBoundaryUnavailable) || errors.Is(err, server.ErrProviderEarningBoundaryMismatch) ||
-				errors.Is(err, server.ErrProviderEarningBoundaryUnprepared) || errors.Is(err, server.ErrProviderEarningBoundarySchema)) {
-				paymentPlan = nil
-				returnErr = err
-				return
-			}
-			panic(value)
+		if committedProgress {
+			notePaymentPlanProgress(ctx)
 		}
 	}()
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if dryRun {
-		// recover the rollback sentinel so a dry run returns the computed plan
-		// normally. Any other panic (e.g. a real db error) still propagates.
-		defer func() {
-			if r := recover(); r != nil {
-				if r == errPaymentPlanDryRun {
-					return
-				}
-				panic(r)
-			}
-		}()
-	} else if refreshReliabilityInputs {
-		// refresh the reliability inputs used by this plan. This is a persistent
-		// write, so it is skipped for a dry run; a dry run then previews using
-		// the reliability values from the last refresh.
-		now := server.NowUtc()
-		if transition != nil {
-			now = server.MinTime(now, transition.Cutoff)
+	if !dryRun {
+		progress, err := completePaymentPlanAssignments(ctx)
+		committedProgress = committedProgress || progress
+		if err != nil {
+			return nil, committedProgress, err
 		}
-		UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
+		if refreshReliabilityInputs {
+			// refresh the reliability inputs used by this plan. This is a persistent
+			// write, so it is skipped for a dry run; a dry run then previews using
+			// the reliability values from the last refresh.
+			now := server.NowUtc()
+			if transition != nil {
+				now = server.MinTime(now, transition.Cutoff)
+			}
+			UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
+		}
+		if minTime, maxTime, ok := predictPaymentPlanReliabilityWindow(ctx, subsidyConfig, transition, maxDuration); ok {
+			progress, err := preparePaymentPlanReliabilityWindow(ctx, minTime, maxTime)
+			committedProgress = committedProgress || progress
+			if err != nil {
+				return nil, committedProgress, err
+			}
+		}
 	}
 
 	// network_id -> list of child referral networks
 	networkReferrals := GetNetworkReferralsMap(ctx)
 	seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
 
-	// Reliability aggregation already occupies the plan's advisory-lock window.
-	// One maintenance owner retains its direct-postgres budget without holding
-	// an idle primary connection or committing scores before allocation succeeds.
+	for attempt := 1; ; attempt += 1 {
+		paymentPlan, returnErr = planPaymentsInTx(
+			ctx,
+			subsidyConfig,
+			dryRun,
+			maxDuration,
+			refreshReliabilityInputs,
+			transition,
+			networkReferrals,
+			seekerHolderNetworkIds,
+			writeInTx,
+		)
+		var pending *paymentPlanReliabilityPendingError
+		if dryRun || paymentPlanReliabilityAttempts <= attempt || !errors.As(returnErr, &pending) {
+			break
+		}
+		progress, err := preparePaymentPlanReliabilityWindow(ctx, pending.minTime, pending.maxTime)
+		committedProgress = committedProgress || progress
+		if err != nil {
+			return nil, committedProgress, err
+		}
+	}
+	if returnErr != nil || dryRun {
+		return
+	}
+	committedProgress = true
+
+	if 0 < paymentPlan.PendingSweepAssignmentCount {
+		if _, err := completePaymentPlanAssignments(ctx); err != nil {
+			return paymentPlan, committedProgress, err
+		}
+	}
+	return
+}
+
+// Retained planner refusals return as errors; the plan rolls back and the
+// payout task retries. Any other panic propagates.
+func paymentPlanRetainedError(err error) bool {
+	var pending *paymentPlanReliabilityPendingError
+	return errors.Is(err, ErrProviderLegacyReliabilityWindow) || errors.Is(err, errPaymentPlanSelectionChanged) ||
+		errors.Is(err, server.ErrProviderEarningBoundaryUnavailable) || errors.Is(err, server.ErrProviderEarningBoundaryMismatch) ||
+		errors.Is(err, server.ErrProviderEarningBoundaryUnprepared) || errors.Is(err, server.ErrProviderEarningBoundarySchema) ||
+		errors.As(err, &pending)
+}
+
+// The plan transaction. It allocates the plan's payments, subsidy epoch and
+// points, and for a real plan stages the selected sweeps instead of updating
+// them inline. A pending staged assignment refuses a new selection.
+func planPaymentsInTx(
+	ctx context.Context,
+	subsidyConfig *SubsidyConfig,
+	dryRun bool,
+	maxDuration time.Duration,
+	inspectUnresolved bool,
+	transition *server.ProviderPayoutTransition,
+	networkReferrals map[server.Id][]server.Id,
+	seekerHolderNetworkIds map[server.Id]bool,
+	writeInTx func(server.PgTx, *PaymentPlan),
+) (paymentPlan *PaymentPlan, returnErr error) {
+	defer func() {
+		if value := recover(); value != nil {
+			if err, ok := value.(error); ok {
+				// the dry run sentinel rolls the transaction back after the plan
+				// was computed; the caller still receives the computed plan
+				if errors.Is(err, errPaymentPlanDryRun) {
+					return
+				}
+				if paymentPlanRetainedError(err) {
+					paymentPlan = nil
+					returnErr = err
+					return
+				}
+			}
+			panic(value)
+		}
+	}()
+
+	// Reliability aggregation is committed before this transaction; it only
+	// reads the scores of its window (calculateReliabilityPayoutInTx).
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		paymentPlan, returnErr = nil, nil
 		configurePaymentPlanTransaction(ctx, tx)
 		// ReadCommitted takes the sweep/frontier snapshot only after the prior
 		// planner commits. A process-local lock cannot serialize CLI and workers.
@@ -169,12 +292,20 @@ func createPaymentPlan(
 			}()
 		}
 
+		// the unassigned sweeps of a staged plan still look unpaid, so no
+		// selection (or preview) can run until that assignment completes
+		if paymentPlanAssignmentPendingInTx(ctx, tx) {
+			returnErr = ErrPaymentPlanAssignmentPending
+			return
+		}
+
 		planner := &PaymentPlanner{
 			ctx:                    ctx,
 			subsidyConfig:          subsidyConfig,
+			dryRun:                 dryRun,
 			maxDuration:            maxDuration,
 			transition:             transition,
-			inspectUnresolved:      refreshReliabilityInputs,
+			inspectUnresolved:      inspectUnresolved,
 			tx:                     tx,
 			paymentPlanId:          server.NewId(),
 			networkReferrals:       networkReferrals,
@@ -229,6 +360,7 @@ func createPaymentPlan(
 			RestoredLegacyPaymentCount:   planner.restoredLegacyPaymentCount,
 			UnresolvedLegacyPaymentCount: planner.unresolvedLegacyPaymentCount,
 			LegacyRecoveryScanLimit:      legacyPaymentRecoveryLimit,
+			PendingSweepAssignmentCount:  planner.stagedSweepCount,
 		}
 
 		// set the bonus weights for next payout
@@ -335,7 +467,15 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	// bounded path the close-time join/bound is applied once to the union of
 	// both arms, so it filters the unpaid and canceled sweeps identically (the
 	// same single close-time join the old anti-join query used).
-	closeTimeJoin := ""
+	//
+	// Every plan carries its selected contracts' create, close and reap times,
+	// so the subsidy range and the staging retention check read the selection
+	// instead of joining the 2B-row transfer_contract a second time (that join
+	// ran for up to 36 minutes inside the plan transaction). An unbounded plan
+	// keeps contract-less sweeps with NULL times, as before.
+	closeTimeJoin := `
+        LEFT JOIN transfer_contract ON
+            transfer_contract.contract_id = u.contract_id`
 	closeTimeBound := ""
 	closeTimeArgs := []any{}
 	if self.bounded {
@@ -388,7 +528,10 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 			u.payout_byte_count,
 			u.payout_net_revenue_nano_cents,
 			u.sweep_time,
-			u.payment_id AS previous_payment_id
+			u.payment_id AS previous_payment_id,
+			transfer_contract.create_time AS contract_create_time,
+			transfer_contract.close_time AS contract_close_time,
+			transfer_contract.reap_time AS contract_reap_time
 
         FROM (
             SELECT
@@ -519,20 +662,64 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 // paymentPlanSubsidyRangeSQL derives the subsidy epoch from the exact sweep set
 // selected by planPayments. temp_account_payment has already applied the
 // unpaid/safely-canceled predicate and, for bounded plans, the close-time
-// upper bound. Reading transfer_escrow_sweep again would both broaden the
-// epoch to historical paid sweeps and force PostgreSQL to rescan the full
-// sweep history. Duplicate selected rows for one contract do not affect
-// MIN/MAX.
+// upper bound, and it carries each selected contract's times. Reading
+// transfer_escrow_sweep again would both broaden the epoch to historical paid
+// sweeps and force PostgreSQL to rescan the full sweep history; joining
+// transfer_contract again re-reads millions of contract rows in the plan
+// transaction. Duplicate selected rows for one contract do not affect MIN/MAX,
+// and contract-less rows carry NULL times, which MIN/MAX ignore.
 const paymentPlanSubsidyRangeSQL = `
 	SELECT
-		MIN(transfer_contract.create_time) AS subsidy_start_time,
-		MAX(transfer_contract.close_time) AS subsidy_end_time
+		MIN(temp_account_payment.contract_create_time) AS subsidy_start_time,
+		MAX(temp_account_payment.contract_close_time) AS subsidy_end_time
 
 	FROM temp_account_payment
-
-	INNER JOIN transfer_contract ON
-		transfer_contract.contract_id = temp_account_payment.contract_id
 `
+
+// No product nets more than this in one purchase; a year of Pro nets about $40.
+// A balance claiming more holds a misrecorded price, such as an App Store price
+// from a non-USD storefront read as USD, and adds nothing to the subsidy revenue.
+const maxPlausibleBalanceSubsidyNetRevenueUsd = 100.0
+
+// A balance that funded a selected sweep, with the subscription revenue it carries.
+type subsidyRevenueBalance struct {
+	startTime         time.Time
+	endTime           time.Time
+	subsidyNetRevenue NanoCents
+}
+
+// The subscription revenue rate per subsidy period (`days`) over the subsidy
+// window, so that `subscription_net_revenue_fraction` of it compares with
+// `min_payout_usd`, which is also per period, before both scale to the window.
+// Each balance adds its revenue pro-rated to the part of the window it covers:
+// a balance spans many plan windows (a month of Pro, a year's purchase), and
+// adding its full revenue to each plan that drew from it counted it many times
+// over. A balance above a plausible price adds nothing.
+func subsidyNetRevenuePerPeriod(
+	subsidyRevenueBalances []*subsidyRevenueBalance,
+	windowStartTime time.Time,
+	windowEndTime time.Time,
+	period time.Duration,
+) NanoCents {
+	window := windowEndTime.Sub(windowStartTime)
+	if window <= 0 {
+		return 0
+	}
+	maxBalanceSubsidyNetRevenue := UsdToNanoCents(maxPlausibleBalanceSubsidyNetRevenueUsd)
+	windowSubsidyNetRevenue := 0.0
+	for _, revenueBalance := range subsidyRevenueBalances {
+		if revenueBalance.subsidyNetRevenue <= 0 || maxBalanceSubsidyNetRevenue < revenueBalance.subsidyNetRevenue {
+			continue
+		}
+		balanceDuration := revenueBalance.endTime.Sub(revenueBalance.startTime)
+		overlap := server.MinTime(revenueBalance.endTime, windowEndTime).Sub(server.MaxTime(revenueBalance.startTime, windowStartTime))
+		if balanceDuration <= 0 || overlap <= 0 {
+			continue
+		}
+		windowSubsidyNetRevenue += float64(revenueBalance.subsidyNetRevenue) * float64(overlap) / float64(balanceDuration)
+	}
+	return NanoCents(windowSubsidyNetRevenue * float64(period) / float64(window))
+}
 
 // this assumes the table `temp_account_payment` exists in the transaction
 func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
@@ -548,7 +735,7 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	}
 
 	payerPayeeNetworkSweeps := map[server.Id]map[server.Id]*networkSweep{}
-	payerSubsidyNetRevenues := map[server.Id]NanoCents{}
+	subsidyRevenueBalances := []*subsidyRevenueBalance{}
 
 	result, err := self.tx.Query(
 		self.ctx,
@@ -599,12 +786,14 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		}
 	})
 
+	// the revenue counts once the window is known (see subsidyNetRevenuePerPeriod)
 	result, err = self.tx.Query(
 		self.ctx,
 		`
 			SELECT
-	    		transfer_balance.network_id AS payer_network_id,
-	    		SUM(transfer_balance.subsidy_net_revenue_nano_cents) AS subsidy_net_revenue_nano_cents
+	    		transfer_balance.start_time,
+	    		transfer_balance.end_time,
+	    		transfer_balance.subsidy_net_revenue_nano_cents
 	    	FROM (
 	    		SELECT
 	    			DISTINCT balance_id
@@ -612,15 +801,18 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	    	) b
 	    	INNER JOIN transfer_balance ON
 	    		transfer_balance.balance_id = b.balance_id
-	    	GROUP BY transfer_balance.network_id
+	    	WHERE 0 < transfer_balance.subsidy_net_revenue_nano_cents
 	    `,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
-			var payerNetworkId server.Id
-			var subscriptionNetRevenue NanoCents
-			server.Raise(result.Scan(&payerNetworkId, &subscriptionNetRevenue))
-			payerSubsidyNetRevenues[payerNetworkId] = subscriptionNetRevenue
+			revenueBalance := &subsidyRevenueBalance{}
+			server.Raise(result.Scan(
+				&revenueBalance.startTime,
+				&revenueBalance.endTime,
+				&revenueBalance.subsidyNetRevenue,
+			))
+			subsidyRevenueBalances = append(subsidyRevenueBalances, revenueBalance)
 		}
 	})
 
@@ -631,8 +823,7 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	// the subsidy weighs all traffic equally regardless of paid status.
 	paidUserCount := 0
 	trafficUserCount := 0
-	netRevenue := NanoCents(0)
-	for payerNetworkId, payeeNetworkSweeps := range payerPayeeNetworkSweeps {
+	for _, payeeNetworkSweeps := range payerPayeeNetworkSweeps {
 		payerNetPayoutByteCountPaid := ByteCount(0)
 		payerNetPayoutByteCountUnpaid := ByteCount(0)
 		for _, sweep := range payeeNetworkSweeps {
@@ -652,7 +843,6 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		if 0 < payerNetPayoutByteCountPaid+payerNetPayoutByteCountUnpaid {
 			trafficUserCount += 1
 		}
-		netRevenue += payerSubsidyNetRevenues[payerNetworkId]
 	}
 
 	// note the aggregates are NULL when no swept contracts exist
@@ -740,6 +930,12 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		return
 	}
 
+	netRevenue := subsidyNetRevenuePerPeriod(
+		subsidyRevenueBalances,
+		subsidyStartTime,
+		subsidyEndTime,
+		self.subsidyConfig.Duration(),
+	)
 	subsidyPayoutUsd := max(
 		self.subsidyConfig.MinPayoutUsd,
 		self.subsidyConfig.UsdPerActiveUser*float64(activeUserCount),
@@ -816,7 +1012,9 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	/**
 	 * reliability payout
 	 */
-	// Refresh and allocate the selected window on the same transaction owner.
+	// A real plan reads the scores committed for exactly this window before the
+	// transaction began; a missing window rolls the plan back so the caller can
+	// commit it in chunks and plan again. A dry run computes them inline.
 	reliabilityEnd := subsidyEndTime
 	if self.transition != nil && !reliabilityEnd.Before(self.transition.Cutoff) {
 		reliabilityEnd = self.transition.Cutoff.Add(-time.Nanosecond)
@@ -827,6 +1025,7 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		subsidyStartTime,
 		reliabilityEnd,
 		subsidyScale,
+		self.dryRun,
 	)
 	self.networkReliabilitySubsidies = networkReliabilitySubsidies
 
@@ -1047,7 +1246,14 @@ func (self *PaymentPlanner) finalizePayments() {
 
 	self.assignPaymentBonuses()
 
-	self.assignSweeps(paymentSweepAssignmentMetrics)
+	if self.dryRun {
+		// the dry run transaction rolls back; preview the full assignment
+		self.assignSweeps(paymentSweepAssignmentMetrics)
+	} else {
+		// one UPDATE of a slice's ~11M sweeps ran for up to 2.2h inside this
+		// transaction; stage them for bounded batches after it commits
+		self.stageSweeps()
+	}
 
 	// The leaderboard's per-week paid-traffic attribution is processed by a
 	// separate bounded task after this payout transaction commits. A full plan

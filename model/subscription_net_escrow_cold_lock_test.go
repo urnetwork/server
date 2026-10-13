@@ -7,48 +7,69 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
-type coldSettlementCensusTestTx struct {
-	server.PgTx
-	exact        *atomic.Int64
-	beforeCensus func()
-}
-
-func (tx coldSettlementCensusTestTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	if sql == netEscrowReservationPageSQL {
-		tx.exact.Add(1)
-		if tx.beforeCensus != nil {
-			tx.beforeCensus()
+// Counts the exact census statements one owned settlement sends, alone or
+// queued in a batch, and runs beforeCensus first, while that settlement still
+// holds its financial locks. Settlement admits transaction ownership only on
+// the server's own transaction (ddad361c), so this binds to its connection
+// rather than wrapping it.
+func coldSettlementCensusHook(exact *atomic.Int64, beforeCensus func()) *legacyStatementHook {
+	return &legacyStatementHook{before: func(_ context.Context, sql string, queued []string) {
+		if queued == nil {
+			queued = []string{sql}
 		}
-	}
-	return tx.PgTx.Query(ctx, sql, args...)
+		for _, statement := range queued {
+			if statement == netEscrowReservationPageSQL {
+				exact.Add(1)
+				if beforeCensus != nil {
+					beforeCensus()
+				}
+			}
+		}
+	}}
 }
 
 // A cold cache is optional settlement bookkeeping: the exact locked escrow and
 // both close reports already authorize the debit. Prove the actual cold census
 // seam owns a contested balance on the baseline, then require no such seam.
+// After commit the mirror refresh censuses a grant only within
+// netEscrowRefreshCensusRowBound live legacy rows (086180a7, 1d9b237d): within
+// it the refresh publishes the exact surviving reservation and warms the cache;
+// past it the refresh defers, leaving the published mirror and the cold or
+// stale cache as they were.
 func TestNetEscrowColdSettlementKeepsCensusOutsideFinancialLocks(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 		defer cancel()
-		for _, stale := range []bool{false, true} {
-			f := seedAdmissionCacheHistory(t, ctx, 10001, 100)
+		for _, test := range []struct {
+			history int
+			stale   bool
+		}{
+			{history: 10001},
+			{history: 10001, stale: true},
+			// The refresh follows its close's metadata, so it counts only the
+			// seeded history and stays within the bound.
+			{history: netEscrowRefreshCensusRowBound - 1},
+			{history: netEscrowRefreshCensusRowBound - 1, stale: true},
+		} {
+			refreshed := test.history <= netEscrowRefreshCensusRowBound
+			f := seedAdmissionCacheHistory(t, ctx, test.history, 100)
 			contract, _ := createNetEscrowOrderingTestContract(ctx, f, 17)
 			settlementCacheCloseReports(ctx, contract.ContractId)
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET used_transfer_byte_count=8 WHERE contract_id=$1`, contract.ContractId))
-				if stale {
+				if test.stale {
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=balance_byte_count+4 WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-1')::uuid`, f.balanceId))
 				} else {
 					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, f.balanceId))
 				}
 			})
+			mirrorBefore := Testing_NetEscrowByteCount(ctx, f.balanceId)
 			var reads atomic.Int64
 			blockedDuringCensus := 0
 			probeBalance := func(wantBlocked bool) {
@@ -68,42 +89,56 @@ func TestNetEscrowColdSettlementKeepsCensusOutsideFinancialLocks(t *testing.T) {
 					blockedDuringCensus++
 				}
 			}
+			// Start observation before the probe borrows any connection.
+			stopHooks := startLegacyStatementHooks(t, ctx)
+			defer stopHooks()
 			var posts []func() any
 			server.Tx(ctx, func(tx server.PgTx) {
 				var closed bool
 				var err error
-				posts, closed, err = settleEscrowInTx(ctx, coldSettlementCensusTestTx{tx, &reads, func() { probeBalance(true) }}, contract.ContractId, ContractOutcomeSettled)
+				hooked, unhook := withLegacyStatementHooks(ctx, tx, coldSettlementCensusHook(&reads, func() { probeBalance(true) }))
+				defer unhook()
+				posts, closed, err = settleEscrowInTx(hooked, tx, contract.ContractId, ContractOutcomeSettled)
 				server.Raise(err)
 				if !closed {
 					t.Fatal("cold settlement did not claim outcome")
 				}
 			}, server.TxReadCommitted, server.OptNoRetry())
+			stopHooks()
 			probeBalance(false)
 			var credit ByteCount
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1`, f.balanceId).Scan(&credit))
 			})
-			if credit != 10093 {
-				t.Fatalf("cold settlement credit=%d want10093", credit)
+			// The seeded credit less the eight bytes both parties reported.
+			if wantCredit := ByteCount(test.history + 100 - 8); credit != wantCredit {
+				t.Fatalf("history=%d cold settlement credit=%d want%d", test.history, credit, wantCredit)
 			}
-			t.Logf("stale=%t financial_census=%d observed_balance_waits_at_census=%d", stale, reads.Load(), blockedDuringCensus)
+			t.Logf("history=%d stale=%t financial_census=%d observed_balance_waits_at_census=%d", test.history, test.stale, reads.Load(), blockedDuringCensus)
 			if reads.Load() != 0 {
-				t.Errorf("cold settlement performed %d exact history scans while holding financial locks", reads.Load())
+				t.Errorf("history=%d stale=%t cold settlement performed %d exact history scans while holding financial locks", test.history, test.stale, reads.Load())
 			}
 			server.RunPosts(ctx, posts...)
-			want := ByteCount(10001)
-			if stale {
+			want := ByteCount(test.history)
+			if test.stale {
 				want += 4
 			}
-			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != want {
-				t.Fatalf("mirror=%d want%d", got, want)
+			if !refreshed {
+				want = mirrorBefore
 			}
-			if got, ok := settlementCacheSnapshot(ctx, []server.Id{f.balanceId})[f.balanceId]; !ok || got.reserved != want {
-				t.Fatal("committed mirror did not leave exact current reservation authority")
+			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != want {
+				t.Fatalf("history=%d stale=%t mirror=%d want%d", test.history, test.stale, got, want)
+			}
+			got, ok := settlementCacheSnapshot(ctx, []server.Id{f.balanceId})[f.balanceId]
+			if refreshed && (!ok || got.reserved != want) {
+				t.Fatalf("history=%d stale=%t committed mirror did not leave exact current reservation authority", test.history, test.stale)
+			}
+			if !refreshed && ok {
+				t.Fatalf("history=%d stale=%t deferred refresh published cache authority", test.history, test.stale)
 			}
 			server.RunPosts(ctx, posts...)
 			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != want {
-				t.Fatal("replay changed surviving reservations")
+				t.Fatalf("history=%d stale=%t replay changed surviving reservations", test.history, test.stale)
 			}
 		}
 	})
@@ -260,11 +295,13 @@ func TestNetEscrowColdSettlementMirrorSurvivesMetadataFailure(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, f.balanceId))
 		})
 		var posts []func() any
+		// The settlement owner admits transaction ownership only on the
+		// server's own read-committed no-retry transaction (ddad361c).
 		server.Tx(ctx, func(tx server.PgTx) {
 			var err error
 			posts, _, err = settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
 			server.Raise(err)
-		})
+		}, server.TxReadCommitted, server.OptNoRetry())
 		// The owning metadata transaction fails and rolls back, rather than
 		// stranding the committed mirror behind a lost sibling callback.
 		server.Tx(ctx, func(tx server.PgTx) {

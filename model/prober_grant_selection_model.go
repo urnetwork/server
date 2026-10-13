@@ -319,5 +319,8 @@ func loadTransferEscrowBalances(
 		outcome = "fallback"
 	}
 
-	return lockTransferEscrowBalances(ctx, tx, payerNetworkId, server.NowUtc(), nil, requestedBytes > 0)
+	// Rediscover at the admission clock. A grant that became current since is
+	// outside the admitted set, and naming it would fail admission closed; the
+	// next allocation's clock includes it. Expiry is rechecked after the locks.
+	return lockTransferEscrowBalances(ctx, tx, payerNetworkId, now, nil, requestedBytes > 0)
 }

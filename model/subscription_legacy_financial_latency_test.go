@@ -7,17 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
 // Charge one fixed client round trip before each statement after the real grant
 // acquisition. Barriers establish contention; wall time is diagnostic only.
 // This models latency outside PostgreSQL without substituting any financial SQL.
-type legacyFinancialLatencyTx struct {
-	server.PgTx
-	owner                  *legacyGrantOwnerDiagnosticTx
+type legacyFinancialLatency struct {
+	owner                  *legacyGrantOwnerDiagnostic
 	roundTrip              time.Duration
 	ownedRoundTrips        int
 	clockReads             int
@@ -28,27 +25,32 @@ type legacyFinancialLatencyTx struct {
 	participantHeaderReads int
 }
 
-// The same instance is used by one transaction and read after it completes.
-func (self *legacyFinancialLatencyTx) before(ctx context.Context, sql string) {
-	if self.owner.acquiredAt.IsZero() {
-		return
-	}
-	self.ownedRoundTrips++
-	self.recordStatement(sql)
-	if self.roundTrip > 0 {
-		select {
-		case <-time.After(self.roundTrip):
-		case <-ctx.Done():
-			server.Raise(ctx.Err())
+// One statement or batch after the grant is one modeled round trip; a batch
+// still counts the SQL work of each queued statement.
+func (self *legacyFinancialLatency) hook() *legacyStatementHook {
+	return &legacyStatementHook{before: func(ctx context.Context, sql string, queued []string) {
+		if self.owner.acquiredAt.IsZero() {
+			return
 		}
-	}
+		self.ownedRoundTrips++
+		if queued == nil {
+			self.recordStatement(sql)
+		}
+		for _, query := range queued {
+			self.recordStatement(query)
+		}
+		if self.roundTrip > 0 {
+			select {
+			case <-time.After(self.roundTrip):
+			case <-ctx.Done():
+				server.Raise(ctx.Err())
+			}
+		}
+	}}
 }
 
 // Count SQL work separately from protocol sends, including queued statements.
-func (self *legacyFinancialLatencyTx) recordStatement(sql string) {
-	if self.owner.acquiredAt.IsZero() {
-		return
-	}
+func (self *legacyFinancialLatency) recordStatement(sql string) {
 	if strings.Contains(sql, "FROM contract_close") {
 		self.reportReads++
 	}
@@ -67,33 +69,6 @@ func (self *legacyFinancialLatencyTx) recordStatement(sql string) {
 	if strings.Contains(sql, "INSERT INTO pending_task") && strings.Contains(sql, "DO UPDATE") {
 		self.mirrorOwnerWrites++
 	}
-}
-
-// Keep each execution on the original transaction.
-func (self *legacyFinancialLatencyTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	self.before(ctx, sql)
-	return self.PgTx.Exec(ctx, sql, args...)
-}
-
-// The wrapped recorder owns result consumption and the grant barrier.
-func (self *legacyFinancialLatencyTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	self.before(ctx, sql)
-	return self.PgTx.Query(ctx, sql, args...)
-}
-
-// The real scan retains ordinary errors and transaction ownership.
-func (self *legacyFinancialLatencyTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	self.before(ctx, sql)
-	return self.PgTx.QueryRow(ctx, sql, args...)
-}
-
-// One batch receives one modeled client round trip.
-func (self *legacyFinancialLatencyTx) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
-	self.before(ctx, "batch")
-	for _, query := range batch.QueuedQueries {
-		self.recordStatement(query.SQL)
-	}
-	return self.PgTx.SendBatch(ctx, batch)
 }
 
 // A real owner makes a full 64-visit page refuse its shared grant. Another payer
@@ -134,19 +109,24 @@ func TestLegacySettlementFinancialLatencyDenseSharedGrant(t *testing.T) {
 			t.Fatal("warm synthetic reservation is incomplete", before)
 		}
 		independent, independentId := legacySettlementTestIntent(t, ctx)
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		var busyPage LegacySettlementFlushResult
-		var traces []*legacyFinancialLatencyTx
+		var traces []*legacyFinancialLatency
 		var ownerResidence time.Duration
 		first := true
 		settle := func(ctx context.Context, id server.Id, wait *legacySettlementGrantWait) (completed, busy bool, gate legacySettlementBusyGate, returnErr error) {
-			owner := &legacyGrantOwnerDiagnosticTx{afterGrant: func() {}}
+			owner := &legacyGrantOwnerDiagnostic{afterGrant: func() {}}
 			if first {
 				first = false
 				owner.afterGrant = func() {
 					var err error
 					busyPage, err = FlushLegacySettlements(ctx, 1, nil, 64)
+					// The owner admitted the grant's financial ownership keys before
+					// its grant lock, so each cohort of the page yields at admission,
+					// including the one holding the owner's own intent.
 					if err != nil || busyPage.Visited != 64 || busyPage.Completed != 0 || busyPage.Failed != 0 ||
-						busyPage.BusyIntentUnavailable != 1 || busyPage.BusyGrantSetMismatch != 63 || busyPage.Cursor == nil {
+						busyPage.BusyAdmissionDeferred != 64 || busyPage.BusyOrGone != 64 || busyPage.Cursor == nil {
 						t.Fatalf("owned grant did not refuse the exact dense prefix: %+v err=%v", busyPage, err)
 					}
 					complete, blocked, _, err := flushLegacySettlement(ctx, independentId)
@@ -155,14 +135,15 @@ func TestLegacySettlementFinancialLatencyDenseSharedGrant(t *testing.T) {
 					}
 				}
 			}
-			latency := &legacyFinancialLatencyTx{PgTx: owner, owner: owner, roundTrip: time.Millisecond}
+			latency := &legacyFinancialLatency{owner: owner, roundTrip: time.Millisecond}
 			server.HandleError(func() {
 				var posts []func() any
 				server.Tx(ctx, func(tx server.PgTx) {
-					owner.PgTx = tx
 					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
 					var err error
-					posts, completed, busy, gate, err = flushLegacySettlementWithGrantWaitInTx(ctx, latency, id, wait)
+					hooked, unhook := withLegacyStatementHooks(ctx, tx, latency.hook(), owner.hook())
+					defer unhook()
+					posts, completed, busy, gate, err = flushLegacySettlementWithGrantWaitInTx(hooked, tx, id, wait)
 					server.Raise(err)
 				}, server.TxReadCommitted, server.OptNoRetry())
 				if !owner.acquiredAt.IsZero() {

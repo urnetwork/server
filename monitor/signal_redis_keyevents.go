@@ -57,61 +57,81 @@ func normalizeEventClasses(flags string) string {
 }
 
 func (self redisKeyEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	h := env.cfg.hostByRole("redis-cluster")
-	if h == nil {
+	// Drift is a cluster-wide judgement reported on the entry host; each node's
+	// subscriber shape is reported on the host that runs it. A host that cannot
+	// be read is reported and the other hosts' nodes are still judged.
+	h := env.cfg.redisEntryHost()
+	hosts := env.cfg.redisSweepHosts()
+	if h == nil || len(hosts) == 0 {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
-	}
-	ports := h.redisNodePorts()
-	if len(ports) == 0 {
-		return nil, fmt.Errorf("no redis node ports configured")
-	}
-	lo, hi := ports[0], ports[len(ports)-1]
-
-	// one ssh round: per node, the config flags and the pubsub conn count
-	script := fmt.Sprintf(`for p in $(seq %d %d); do
-  f=$(timeout 3 redis-cli -p $p CONFIG GET notify-keyspace-events 2>/dev/null | tail -1)
-  n=$(timeout 3 redis-cli -p $p CLIENT LIST TYPE pubsub 2>/dev/null | grep -c .)
-  echo "$p ${f:--} ${n:-0}"
-done`, lo, hi)
-	out, err := env.runner.shell(ctx, h, script)
-	if err != nil {
-		return nil, err
 	}
 
 	type nodeState struct {
+		host        *host
 		port        int
 		classes     string
 		pubsubConns int
 	}
 	nodeStates := []nodeState{}
 	classCounts := map[string]int{}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
+	failures := []redisHostFailure{}
+	for _, nodeHost := range hosts {
+		ports := nodeHost.redisNodePorts()
+		if len(ports) == 0 {
+			return nil, fmt.Errorf("no redis node ports configured")
+		}
+		lo, hi := ports[0], ports[len(ports)-1]
+
+		// one ssh round per host: per node, the config flags and the pubsub conn count
+		script := fmt.Sprintf(`for p in $(seq %d %d); do
+  f=$(timeout 3 redis-cli -p $p CONFIG GET notify-keyspace-events 2>/dev/null | tail -1)
+  n=$(timeout 3 redis-cli -p $p CLIENT LIST TYPE pubsub 2>/dev/null | grep -c .)
+  echo "$p ${f:--} ${n:-0}"
+done`, lo, hi)
+		out, err := env.runner.shell(ctx, nodeHost, script)
+		if err != nil {
+			failures = append(failures, redisHostFailure{host: nodeHost, err: err})
 			continue
 		}
-		flags := fields[1]
-		if flags == "-" {
-			flags = ""
+
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 {
+				continue
+			}
+			flags := fields[1]
+			if flags == "-" {
+				flags = ""
+			}
+			state := nodeState{
+				host:        nodeHost,
+				port:        atoi(fields[0]),
+				classes:     normalizeEventClasses(flags),
+				pubsubConns: atoi(fields[2]),
+			}
+			nodeStates = append(nodeStates, state)
+			classCounts[state.classes] += 1
 		}
-		state := nodeState{
-			port:        atoi(fields[0]),
-			classes:     normalizeEventClasses(flags),
-			pubsubConns: atoi(fields[2]),
-		}
-		nodeStates = append(nodeStates, state)
-		classCounts[state.classes] += 1
+	}
+	if len(failures) == len(hosts) {
+		return nil, redisHostFailuresError(failures)
 	}
 	if len(nodeStates) == 0 {
 		return nil, fmt.Errorf("no node config parsed")
 	}
 
 	findings := []finding{}
+	for _, failure := range failures {
+		findings = append(findings, redisHostCannotObserveFinding(failure, "key-events"))
+	}
 
 	// config uniformity: every node must carry the same class set. All-empty
 	// is the healthy dark state (feature not rolled out); a MIX is drift —
 	// events silently missing for the divergent nodes' slots only, which
 	// presents as slot-striped staleness (some networks update, others don't).
+	// Without a host's nodes a mix is still drift, but the majority is only
+	// the read nodes' majority, and agreement does not prove the cluster
+	// uniform.
 	majorityClasses, majorityCount := "", 0
 	for classes, count := range classCounts {
 		if count > majorityCount {
@@ -125,26 +145,32 @@ done`, lo, hi)
 				divergent = append(divergent, fmt.Sprintf("%d=%q", state.port, state.classes))
 			}
 		}
+		symptom := fmt.Sprintf("notify-keyspace-events differs across nodes: majority %q (%d/%d), divergent: %s",
+			majorityClasses, majorityCount, len(nodeStates), strings.Join(divergent, " "))
+		observed := fmt.Sprintf("class_sets=%d majority=%q", len(classCounts), majorityClasses)
+		if len(failures) > 0 {
+			symptom += redisPartialSymptom(failures)
+			observed += " " + redisUnobservedHosts(failures)
+		}
 		findings = append(findings, finding{
 			probeId: "redis/keyevent-config-drift", tier: tierWarn,
 			class: "keyevent-config-drift", target: h.name,
-			frame:   fmt.Sprintf("%d nodes", len(divergent)),
-			sustain: 1,
-			symptom: fmt.Sprintf("notify-keyspace-events differs across nodes: majority %q (%d/%d), divergent: %s",
-				majorityClasses, majorityCount, len(nodeStates), strings.Join(divergent, " ")),
+			frame:    fmt.Sprintf("%d nodes", len(divergent)),
+			sustain:  1,
+			symptom:  symptom,
 			baseline: "identical class set on every node (compared as a set — redis normalizes flag order/expansion); a node missing classes emits NO events for its slots only = slot-striped staleness (9.1)",
-			observed: fmt.Sprintf("class_sets=%d majority=%q", len(classCounts), majorityClasses),
+			observed: observed,
 			context:  "drift source: a node restarted/provisioned outside the templated conf — rerun xops/redis-set-notify-keyspace-events.sh (idempotent)",
 			playbook: "SIGNALS.md 9.1",
 		})
-	} else {
+	} else if len(failures) == 0 {
 		findings = append(findings, healthyFinding("redis/keyevent-config-drift", tierWarn, "keyevent-config-drift", h.name))
 	}
 
 	// pubsub subscriber boundedness per node: O(processes) is healthy;
 	// O(clients) is the v1 outage shape and an incident even mid-rollout
 	for _, state := range nodeStates {
-		target := fmt.Sprintf("%s:%d", h.name, state.port)
+		target := fmt.Sprintf("%s:%d", state.host.name, state.port)
 		switch {
 		case state.pubsubConns > pubsubConnsPage:
 			findings = append(findings, finding{

@@ -54,9 +54,9 @@ func newProviderWorkSessionFixture(t testing.TB) *providerWorkSessionFixture {
 	// Complete independent analytics before admission. The real connection
 	// owners reuse the recorded day without leaving a worker in a query scope.
 	waitConnectDayWrites(
-		recordConnectDayForTest(ctx, f.sourceId, now),
-		recordConnectDayForTest(ctx, f.destinationId, now),
-		recordConnectDayForTest(ctx, f.intermediaryId, now),
+		recordConnectDayForTest(ctx, f.sourceNetworkId, f.sourceId, now),
+		recordConnectDayForTest(ctx, f.destinationNetworkId, f.destinationId, now),
+		recordConnectDayForTest(ctx, f.intermediaryNetworkId, f.intermediaryId, now),
 	)
 	f.handlerId = CreateNetworkClientHandler(ctx)
 	f.sourceConnectionId, _, _, _, err = ConnectNetworkClientWithIpFamily(ctx, f.sourceId, "192.0.2.10:10001", f.handlerId, 4)

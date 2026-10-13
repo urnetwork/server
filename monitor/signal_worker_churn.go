@@ -212,7 +212,7 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			verify = "The exact outlier's exporter capability is independently established, consecutive score runs complete inside their normal band, and the executor returns below the CPU/allocation guards for two consecutive probes after terminal/collection boundaries without selection loss or Redis capacity pressure. A global marker alone does not close this process-local finding."
 			if !aliasesReadyLoaded {
 				aliasesReadyLoaded = true
-				redisHost := env.cfg.hostByRole("redis-cluster")
+				redisHost := env.cfg.redisEntryHost()
 				if redisHost == nil {
 					aliasesReadyErr = fmt.Errorf("no redis-cluster host in inventory")
 				} else {
