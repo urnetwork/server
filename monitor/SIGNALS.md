@@ -18077,6 +18077,19 @@ limit:
   confirms the task is not deterministically slow, but does not erase the
   observed load-sensitive 120-second cancellation; retain the task-specific
   ceiling and verify it after rollout across multiple hourly cycles.
+- `ExportStats`, `Timeout` at its **600s** `MaxTime` (2026-10-12): the
+  devices series, not the deadline. One statement read every retained
+  `audit_device_event` row (87.6M since 2026-08-10), grouped it by device and
+  day, wrote 7.5 GB of temp files per run on the primary and streamed 37M rows
+  into a Go replay: 427s on average over 93 runs (221-526s), with the other
+  passes about a minute. The series is now span counts computed in SQL a chunk
+  of devices at a time over the device-leading index (migration 828), four
+  chains at once, each statement on its own connection, bounded to 250,000
+  events and sorted in memory, with the same days, counts and summary. Its
+  cost still grows with the retained events (about 1.4M a day), so
+  `audit_device_event` retention sets the export's steady-state runtime. A new
+  `Timeout` here means a chunk statement stalled; compare its statement time
+  with the chunk bound before changing `MaxTime`.
 - `RemoveDisconnectedNetworkClients`, completed in **6,530.6s** (108.8m)
   versus a 7-day
   p95 of 2,754s (four-hour task ceiling): distinguish PostgreSQL backlog from

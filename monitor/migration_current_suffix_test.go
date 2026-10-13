@@ -137,6 +137,11 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"handler table truncates on vacuum", 826, `ALTER TABLE network_client_handler SET (vacuum_truncate = true)`},
 		{"missing device network index", 827, `DROP INDEX device_network_id`},
 		{"device network index leads with device", 827, `DROP INDEX device_network_id; CREATE INDEX device_network_id ON device(device_id,network_id)`},
+		{"missing device-leading audit index", 828, `DROP INDEX audit_device_event_device_id_event_time`},
+		{"device-leading audit index lacks the covered event type", 828, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(device_id,event_time,event_id)`},
+		{"device-leading audit index leads with time", 828, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(event_time,device_id,event_id) INCLUDE (event_type)`},
+		{"device-leading audit index is partial", 828, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(device_id,event_time,event_id) INCLUDE (event_type) WHERE event_type = 'device_added'`},
+		{"dropped time-leading device stats index rebuilt", 829, `CREATE INDEX audit_device_event_stats_device_id ON audit_device_event (event_time, device_id, event_id) INCLUDE (event_type)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -188,6 +193,7 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{810, "transfer_contract", "transfer_contract_audit_closed_null_day"},
 				{820, "network_client_connection", "network_client_connection_connected_handler_id"},
 				{827, "device", "device_network_id"},
+				{828, "audit_device_event", "audit_device_event_device_id_event_time"},
 			} {
 				var definition string
 				var predicate *string
@@ -222,6 +228,7 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{823, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
 				{824, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},
 				{825, "provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting"},
+				{829, "audit_device_event", "audit_device_event_stats_device_id"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool

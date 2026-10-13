@@ -10094,4 +10094,38 @@ var migrations = []any{
 		`DROP INDEX IF EXISTS device_network_id;
 		 CREATE INDEX device_network_id ON device (network_id)`,
 	),
+
+	// 828: audit_device_event by device, for the public devices series
+	// (model/audit_model.go computeStatsDevice). The hourly export read every
+	// retained event through the time-leading stats index, grouped them all by
+	// device and day, and streamed one row per device-day to the taskworker. On
+	// Main (read 2026-10-13, 87.6M events since 2026-08-10) that one statement
+	// averaged 427 s over 93 runs (221-526 s), wrote 7.5 GB of temp files per
+	// run and returned 37M rows, and the export reached its 600 s max time.
+	// The series is now computed one chunk of devices at a time, each chunk
+	// one statement over a bounded range of this index that sorts and hashes
+	// in memory and returns only span counts. The index covers every column
+	// those statements read. Building it reads the 9 GB heap twice and waits
+	// for older snapshots, including a running pg_dump's, without blocking the
+	// device sweep's inserts. A completed build is kept, so it may be
+	// pre-created out of band with the same statement. Services built with
+	// this migration fail startup readiness until it is applied.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS audit_device_event_device_id_event_time`,
+		`CREATE INDEX CONCURRENTLY audit_device_event_device_id_event_time
+		 ON audit_device_event (device_id, event_time, event_id) INCLUDE (event_type)`,
+		`DROP INDEX IF EXISTS audit_device_event_device_id_event_time;
+		 CREATE INDEX audit_device_event_device_id_event_time
+		 ON audit_device_event (device_id, event_time, event_id) INCLUDE (event_type)`,
+	).withIndexCompletion(828, "audit_device_event", "audit_device_event_device_id_event_time",
+		"CREATE INDEX audit_device_event_device_id_event_time ON public.audit_device_event USING btree (device_id, event_time, event_id) INCLUDE (event_type)",
+		""),
+	// 829: the time-leading stats index (7.4 GB on Main) has no reader left; it
+	// served only the devices series. The primary key keeps the same time order
+	// for retention and backfill. Like 822-825, apply it outside a running
+	// pg_dump.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS audit_device_event_stats_device_id`,
+		`DROP INDEX IF EXISTS audit_device_event_stats_device_id`,
+	),
 }

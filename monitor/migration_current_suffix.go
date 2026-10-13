@@ -262,6 +262,9 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationVacuumTruncateOff("network_client_handler")),
 	migrationCurrentSuffix(827, "device network index",
 		migrationFp2Index("device", "device_network_id", "network_id", "", false)),
+	migrationCurrentSuffix(828, "device-leading audit device event index", auditDeviceEventDeviceIndexArtifactQuery),
+	migrationCurrentSuffix(829, "time-leading audit device stats index removed",
+		migrationIndexRemoved("audit_device_event", "audit_device_event_stats_device_id")),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
@@ -271,6 +274,13 @@ func migrationVacuumTruncateOff(table string) string {
 		WHERE relation.oid = to_regclass('public.%s')
 		AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY['vacuum_truncate=false']::text[])`, table)
 }
+
+// The devices series reads event_type from this index, so the covering column
+// is pinned with the keys: without it every chunk would visit the heap.
+const auditDeviceEventDeviceIndexArtifactQuery = `EXISTS (SELECT 1 FROM index_artifact
+		WHERE table_name = 'audit_device_event' AND index_name = 'audit_device_event_device_id_event_time'
+		AND definition = 'CREATE INDEX audit_device_event_device_id_event_time ON public.audit_device_event USING btree (device_id, event_time, event_id) INCLUDE (event_type)'
+		AND predicate_definition IS NULL AND indisvalid AND indisready)`
 
 // A dropped index stays dropped: a rebuilt copy under the published name would
 // again be maintained on every write without a reader.
