@@ -81,6 +81,8 @@ func initTaskScheduleForProfile(ctx context.Context, profile WorkloadProfile) er
 		}
 	}, server.TxReadCommitted)
 	work.ScheduleSettlementAccountingTasks(ctx)
+	// After the commit, in its own bounded transactions.
+	startCloseExpiredContractsFreshPass(ctx)
 	return nil
 }
 
