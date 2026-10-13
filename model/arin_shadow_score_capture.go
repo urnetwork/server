@@ -220,8 +220,17 @@ func (c *ArinShadowScoreCapture) Snapshot() *ArinShadowScoreSnapshot {
 	return c.current
 }
 
+// The exporter commits the census minutes after its source completes (186 to
+// 374 seconds on Main), and a snapshot exists only after that commit. A lease
+// therefore starts within ArinShadowCaptureMaxAge of the committed publication,
+// while the source stays within the native census reader's 900-second limit,
+// which publication never renews.
+const arinShadowScoreSourceMaxAge = 900 * time.Second
+
 // Validate checks both local replacement and the actual committed Redis
 // publication. Scrape time or a same-sized newer cohort cannot satisfy it.
+// The observer sees only publications made in its own process, so source,
+// publication and validation clocks are one clock and need no skew allowance.
 func (s *ArinShadowScoreSnapshot) Validate(ctx context.Context) bool {
 	if s == nil || ctx == nil || ctx.Err() != nil {
 		return false
@@ -230,7 +239,8 @@ func (s *ArinShadowScoreSnapshot) Validate(ctx context.Context) bool {
 	current := !s.owner.closed && s.owner.current == s && currentArinShadowScoreCapture.Load() == s.owner
 	s.owner.mu.Unlock()
 	now := s.owner.clock()
-	if !current || now.Before(s.sourceCompletedAt) || now.Sub(s.sourceCompletedAt) > server.ArinShadowCaptureMaxAge {
+	if !current || s.publishedAt.IsZero() || s.publishedAt.Before(s.sourceCompletedAt) || now.Before(s.publishedAt) ||
+		now.Sub(s.publishedAt) > server.ArinShadowCaptureMaxAge || now.Sub(s.sourceCompletedAt) > arinShadowScoreSourceMaxAge {
 		return false
 	}
 	census, err := s.owner.latest(ctx)
