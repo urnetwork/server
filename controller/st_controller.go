@@ -1085,9 +1085,14 @@ func (self *CoreStClient) buildTransactionAttempt(
 		}
 		gasLimit = estimated + (estimated+4)/5
 	}
-	// A v2 stake move is never signed below its floor, whatever its estimate
-	// or an earlier attempt's limit.
-	gasFloor := self.ledgerV2GasFloor(intent, kind)
+	// A stake move is never signed below its floor, whatever its estimate or
+	// an earlier attempt's limit. The floor is capped at the operator gas
+	// policy's maximum_gas, so that it alone never makes the policy refuse an
+	// attempt the estimate's limit would pass.
+	gasFloor, floorName := self.stakeMoveGasFloor(intent, kind)
+	if gasPolicy != nil {
+		gasFloor = min(gasFloor, gasPolicy.MaximumGas)
+	}
 	gasLimit = max(gasLimit, gasFloor)
 
 	var unsigned *types.Transaction
@@ -1129,7 +1134,7 @@ func (self *CoreStClient) buildTransactionAttempt(
 		reservation, err := model.ReserveStTransactionGasAttempt(ctx, gasPolicy, gasAuthority, intent.IntentId, attempt.Attempt, kind, unsigned)
 		if err != nil {
 			if gasLimit == gasFloor {
-				err = fmt.Errorf("st: gas limit %d is the v2 stake-move floor (operator gas policy maximum_gas %d): %w", gasLimit, gasPolicy.MaximumGas, err)
+				err = fmt.Errorf("st: gas limit %d is the %s's stake-move floor (operator gas policy maximum_gas %d): %w", gasLimit, floorName, gasPolicy.MaximumGas, err)
 			}
 			return nil, err
 		}
@@ -1877,6 +1882,40 @@ func (self *CoreStClient) RollEpochs(ctx context.Context) (string, error) {
 		return "", nil // release 1.0 epochs are a pure block-clock function
 	}
 	return self.send(ctx, "legacy:roll", self.cfg.OpsKey, self.cfg.ContractAddress, self.st.PackRollEpochs())
+}
+
+// stV1CloseGasFloor is the least gas limit the engine signs a v1 close with,
+// for stLedgerV2StakeMoveGasFloor's reason: the v1 vault's capture moves
+// stake, runtime 478 admits the move with gas that grows with the vault's
+// own StakingHotkeys list, and third parties can lengthen that list between
+// the close's estimate and its inclusion. Measured on 2026-10-13 on the
+// runtime 477 rehearsal node (scripts/runtime-rehearsal), whose admission is
+// 475's, a v1 close capturing 200 TAO of stake needed a gas limit of
+// 2,657,271 and eth_estimateGas gave 2,662,786, which the engine signed 20%
+// above, at 3,195,344. The floor is that size, rounded up. On runtime 478 the
+// same close estimated 361,258 and needed 336,422.
+const stV1CloseGasFloor = 3_200_000
+
+// stCloseSelector is the selector of closeOperatorEpoch(uint256,uint256),
+// which the v1 coordinator and STSettlement2 share.
+var stCloseSelector = crypto.Keccak256([]byte("closeOperatorEpoch(uint256,uint256)"))[:4]
+
+// stakeMoveGasFloor is the least gas limit an attempt of the intent is signed
+// with, and the name of the send it is the floor of: the floor of a v1 or v2
+// close for its execution, and 0 for any other attempt. Every close can
+// capture, since emission reaches the pool hotkey between a close's estimate
+// and its inclusion.
+func (self *CoreStClient) stakeMoveGasFloor(intent *model.StTransactionIntent, kind string) (uint64, string) {
+	if kind != model.StTxAttemptExecution || !bytes.HasPrefix(intent.Calldata, stCloseSelector) {
+		return 0, ""
+	}
+	switch to := common.HexToAddress(intent.ToAddress); {
+	case self.cfg.LedgerV2Enabled() && to == self.cfg.SettlementV2:
+		return stLedgerV2StakeMoveGasFloor, "v2 close"
+	case to == self.cfg.ContractAddress:
+		return stV1CloseGasFloor, "v1 close"
+	}
+	return 0, ""
 }
 
 func (self *CoreStClient) CloseOperatorEpoch(ctx context.Context, epoch uint64, noId uint64) (string, error) {

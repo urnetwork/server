@@ -10,7 +10,6 @@ import (
 	"crypto/ecdsa"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"math"
 	"math/big"
 	"os"
@@ -21,8 +20,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
-
-	"github.com/urfoundation/sn/stabi"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -132,22 +129,16 @@ func TestStLedgerV2CloseIsSignedAtTheGasFloor(t *testing.T) {
 }
 
 // SV-7 (§8.1 gas floor): commit, finalize and answer move no stake and keep
-// their estimate plus 20%, here from R-6's limits. So does the v1
-// coordinator's close, whose selector is the v2 close's. A spent close is
-// retired by the same 21,000-gas cancellation as any other intent.
+// their estimate plus 20%, here from R-6's limits. A spent close is retired
+// by the same 21,000-gas cancellation as any other intent.
 func TestStLedgerV2GasFloorLeavesOtherSendsUnchanged(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
 		client, rpcClient, cfg := newLedgerV2RPCClient(t, fixture)
-		client.coordinator = stabi.NewSTCoordinator()
 		from := crypto.PubkeyToAddress(cfg.RootKey.PublicKey)
 		commitment := &StLedgerV2Commitment{Root: [32]byte{1}, Total: *uint256.NewInt(1000), LeafCount: 2, LedgerHash: [32]byte{2}}
 		answer := ledgerV2TestAnswer()
-		closeCall := stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))
-		if string(client.coordinator.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))) != string(closeCall) {
-			t.Fatal("the v1 and v2 closes pack differently")
-		}
 
 		for i, send := range []struct {
 			name     string
@@ -163,8 +154,6 @@ func TestStLedgerV2GasFloorLeavesOtherSendsUnchanged(t *testing.T) {
 				func() (string, error) { return client.LedgerV2Finalize(ctx, 7, 1) }},
 			{"answer", cfg.VaultV2, stLedgerV2PackCheckPath(1, answer), 154_089, 184_907,
 				func() (string, error) { return client.LedgerV2Answer(ctx, 1, 3, answer) }},
-			{"v1 close", cfg.ContractAddress, closeCall, 246_899, 296_279,
-				func() (string, error) { return client.CloseOperatorEpoch(ctx, 7, 1) }},
 		} {
 			fixture.estimates[string(send.calldata)] = send.estimate
 			hash, err := send.call()
@@ -177,31 +166,31 @@ func TestStLedgerV2GasFloorLeavesOtherSendsUnchanged(t *testing.T) {
 			}
 		}
 
-		spent := ledgerV2Reserve(t, ctx, cfg, "v2close:8:1", cfg.SettlementV2, stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(8), big.NewInt(1)), 11)
+		spent := ledgerV2Reserve(t, ctx, cfg, "v2close:8:1", cfg.SettlementV2, stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(8), big.NewInt(1)), 10)
 		fixture.reverts[string(spent.Calldata)] = "InvalidWindow"
 		if err := client.reconcileAccountIntents(ctx, rpcClient, cfg.RootKey, from); err != nil {
 			t.Fatal(err)
 		}
-		if len(fixture.sent) != 5 {
+		if len(fixture.sent) != 4 {
 			t.Fatalf("sent %d transactions", len(fixture.sent))
 		}
-		tx := fixture.sent[4]
-		if tx.Gas() != 21_000 || *tx.To() != from || len(tx.Data()) != 0 || tx.Nonce() != 11 {
+		tx := fixture.sent[3]
+		if tx.Gas() != 21_000 || *tx.To() != from || len(tx.Data()) != 0 || tx.Nonce() != 10 {
 			t.Fatalf("cancellation of a spent close: %d gas to %s data %x nonce %d", tx.Gas(), tx.To(), tx.Data(), tx.Nonce())
 		}
 		requireLedgerV2Intent(t, ctx, cfg, "v2close:8:1", model.StTxCanceled, tx)
 	})
 }
 
-// SV-7 (§8.1 gas floor): the operator gas policy still caps the floor. Under
-// today's maximum_gas of 1,000,000 a close is refused as any send above the
-// maximum is: before any signature, with its nonce kept, so that the root
-// key's other sends stop at it. The refusal names the floor and the policy's
-// maximum, and the driver records it as the close's failed publish, which it
-// retries. A close is refused the same way under a per-intent liability one
-// wei short of the floor's gas at the signed fee. The policy re-signed with
-// both lets the retained intent through, with the floor's gas.
-func TestStLedgerV2GasFloorAboveThePolicyIsRefused(t *testing.T) {
+// SV-7 (§8.1 gas floor): the floor is capped at the operator gas policy's
+// maximum_gas, so that it alone never makes the policy refuse a close. Under
+// today's maximum_gas of 1,000,000 a capturing close that estimates 246,899
+// is signed with 1,000,000, where it was signed with 296,279 before the
+// floor, and only a close whose own estimate plus 20% is above the maximum
+// is refused, as it was before the floor: before any signature, with its
+// nonce kept. Under the policy re-signed with a maximum_gas of 3,500,000 the
+// whole floor applies again, to the retained close too.
+func TestStLedgerV2GasFloorIsCappedAtThePolicyMaximum(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
@@ -212,51 +201,47 @@ func TestStLedgerV2GasFloorAboveThePolicyIsRefused(t *testing.T) {
 			signs++
 			return types.SignTx(tx, signer, key)
 		}
-		closeCall := stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))
-		fixture.estimates[string(closeCall)] = 246_899
-
-		unsigned := func(step string) {
+		for epoch, estimate := range map[uint64]uint64{7: 246_899, 8: 900_000, 9: 246_899} {
+			fixture.estimates[string(stLedgerV2SettlementAbi.PackCloseOperatorEpoch(stBig(epoch), big.NewInt(1)))] = estimate
+		}
+		// The account's nonces start at 7, so each close here takes its
+		// epoch's number as its nonce.
+		sent := func(step string, index int, epoch uint64, gas uint64, hash string) {
 			t.Helper()
-			intent := ledgerV2Intent(t, ctx, cfg, "v2close:7:1")
-			pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
-			if intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.Nonce != 7 || pending != nil || err != nil || signs != 0 || len(fixture.sent) != 0 {
-				t.Fatalf("%s: intent %+v, reservation %+v, %v, %d signatures, %d sent", step, intent, pending, err, signs, len(fixture.sent))
+			if len(fixture.sent) <= index {
+				t.Fatalf("%s: %d sent", step, len(fixture.sent))
 			}
-		}
-		refusal := func(maximumGas uint64) string {
-			return fmt.Sprintf("st: gas limit 3200000 is the v2 stake-move floor (operator gas policy maximum_gas %d): %s: unsigned gas/fee/tip/intent envelope exceeds approval", maximumGas, model.ErrStOperatorGasAllowance)
-		}
-		refused := func(step string, reason string, send func() (string, error)) {
-			t.Helper()
-			if _, err := send(); !errors.Is(err, model.ErrStOperatorGasAllowance) || err.Error() != reason {
-				t.Fatalf("%s: %v", step, err)
+			tx := fixture.sent[index]
+			if tx.Gas() != gas || tx.Nonce() != epoch || string(tx.Data()) != string(stLedgerV2SettlementAbi.PackCloseOperatorEpoch(stBig(epoch), big.NewInt(1))) || hash != "" && !strings.EqualFold(hash, tx.Hash().Hex()) {
+				t.Fatalf("%s: sent nonce %d gas %d, want nonce %d gas %d", step, tx.Nonce(), tx.Gas(), epoch, gas)
 			}
-			unsigned(step)
+			requireLedgerV2Intent(t, ctx, cfg, stLedgerV2CloseOperation(epoch, 1), model.StTxFinalized, tx)
 		}
-		sendClose := func() (string, error) { return client.LedgerV2Close(ctx, 7, 1) }
-		refused("maximum_gas below the floor", refusal(1_000_000), sendClose)
-		refused("a finalize behind the refused close", refusal(1_000_000), func() (string, error) { return client.LedgerV2Finalize(ctx, 6, 1) })
-		outcome := stLedgerV2Send(ctx, cfg, 7, model.StPublishKindV2Close, sendClose)
-		publishes := model.GetStPublishes(ctx, cfg.DeploymentKey(), 7)
-		if outcome.Status != model.StPublishStatusFailed || !outcome.Retry || outcome.Reason != refusal(1_000_000) || len(publishes) != 1 || publishes[0].Kind != model.StPublishKindV2Close ||
-			publishes[0].Status != model.StPublishStatusFailed || publishes[0].Error == nil || *publishes[0].Error != refusal(1_000_000) {
-			t.Fatalf("the driver's close: outcome %+v, publishes %+v", outcome, publishes)
-		}
-		unsigned("the driver's close")
 
-		// 3,200,000 gas at the fixture's 100 wei is 320,000,000 wei.
-		revise(func(policy *server.StOperatorGasPolicy) {
-			policy.MaximumGas, policy.MaximumIntentLiabilityWei = 3_200_000, "319999999"
-		})
-		refused("liability below the floor's", refusal(3_200_000), sendClose)
-
-		revise(func(policy *server.StOperatorGasPolicy) { policy.MaximumIntentLiabilityWei = "320000000" })
 		hash, err := client.LedgerV2Close(ctx, 7, 1)
-		if err != nil || signs != 1 || len(fixture.sent) != 1 || fixture.sent[0].Gas() != stLedgerV2StakeMoveGasFloor || fixture.sent[0].Nonce() != 7 || !strings.EqualFold(hash, fixture.sent[0].Hash().Hex()) {
-			t.Fatalf("close under the re-signed policy: %s, %v, %d signatures, %d sent", hash, err, signs, len(fixture.sent))
+		if err != nil || signs != 1 {
+			t.Fatalf("capturing close under maximum_gas 1,000,000: %v, %d signatures", err, signs)
 		}
-		requireLedgerV2Intent(t, ctx, cfg, "v2close:7:1", model.StTxFinalized, fixture.sent[0])
-		stGasFixtureSnapshot(t, policy, "320000000", 1)
+		sent("capturing close under maximum_gas 1,000,000", 0, 7, 1_000_000, hash)
+
+		_, err = client.LedgerV2Close(ctx, 8, 1)
+		if !errors.Is(err, model.ErrStOperatorGasAllowance) || err.Error() != model.ErrStOperatorGasAllowance.Error()+": unsigned gas/fee/tip/intent envelope exceeds approval" {
+			t.Fatalf("close whose own limit is 1,080,000 under maximum_gas 1,000,000: %v", err)
+		}
+		intent := ledgerV2Intent(t, ctx, cfg, "v2close:8:1")
+		if intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.Nonce != 8 || signs != 1 || len(fixture.sent) != 1 {
+			t.Fatalf("refused close: intent %+v, %d signatures, %d sent", intent, signs, len(fixture.sent))
+		}
+
+		revise(func(policy *server.StOperatorGasPolicy) { policy.MaximumGas = 3_500_000 })
+		hash, err = client.LedgerV2Close(ctx, 9, 1)
+		if err != nil || signs != 3 || len(fixture.sent) != 3 {
+			t.Fatalf("close under maximum_gas 3,500,000: %v, %d signatures, %d sent", err, signs, len(fixture.sent))
+		}
+		sent("the retained close under maximum_gas 3,500,000", 1, 8, stLedgerV2StakeMoveGasFloor, "")
+		sent("capturing close under maximum_gas 3,500,000", 2, 9, stLedgerV2StakeMoveGasFloor, hash)
+		// 100 wei for each unit of the three limits.
+		stGasFixtureSnapshot(t, policy, "740000000", 3)
 	})
 }
 
