@@ -27,12 +27,14 @@ package controller
 // request refused outright.
 //
 // Retry on the other family (§8.2, IPV6.md C7): the first attempts of a step
-// whose source resolves to no provider, a registered validator's SEED or a
-// valid EXTEND, are answered `421 source-egress-unresolved` with nothing
-// changed, so the validator can resend through the provider's other family.
-// Past VerifyUnattributedAttemptLimit the seed is poisoned and the EXTEND
-// fails. Any other SEED gets the answer it always got, so the 421 tells only
-// a registered key whether its source is attributed (§9).
+// whose source the step cannot attribute are answered
+// `421 source-egress-unresolved` with nothing changed, so the validator can
+// resend through the provider's other family: a registered validator's SEED
+// whose source resolves to no provider, and a valid EXTEND whose source
+// resolves to no provider or to another than the pending one. Past
+// VerifyUnattributedAttemptLimit the seed is poisoned and the EXTEND fails.
+// Any other SEED gets the answer it always got, so the 421 tells only a
+// registered key whether its source is attributed (§9).
 
 import (
 	"context"
@@ -736,6 +738,8 @@ func verifySeedWithAdmission(
 	} else {
 		model.CreateVerifyTrail(ctx, trail, responseJson, settings)
 	}
+	// every hop of the trail pins in its SEED's scoring window (§8.1)
+	model.SetVerifyTrailHeadWindow(ctx, trailId, m, settings)
 
 	if glog.V(2) {
 		glog.Infof("[verify]seed trail %s depth 1/%d (poison=%t)\n", trailId, m, poison)
@@ -922,18 +926,21 @@ func verifyExtend(
 
 	// §4.2 step 5: the request truly egressed from the assigned provider. This
 	// check applies identically to normal and poison shadow routes. A source
-	// that resolves to no provider is answered as retryable, with nothing
-	// changed, while the step allows: the validator resends the identical
-	// body on the other family (IPV6.md C7). Then the trail fails as before.
-	if sourceClientId == nil {
+	// that resolves to no provider, or to another one (co-located providers
+	// behind one NAT or in one /64 that indexed different families), is
+	// answered as retryable, with nothing changed, while the step allows: the
+	// validator resends the identical body on the other family (IPV6.md C7).
+	// Then the trail fails as before, a genuine misroute included.
+	if sourceClientId == nil || *sourceClientId != trail.Pending.ClientId {
+		reason := "source-egress-unresolved"
+		if sourceClientId != nil {
+			reason = "source-egress-mismatch"
+		}
 		if attempt := model.IncrVerifyUnattributedExtend(ctx, trailId, len(trail.Hops), settings); attempt <= model.VerifyUnattributedAttemptLimit {
-			glog.Infof("[verify]EXTEND retryable trail=%s depth=%d pending=%s reason=source-egress-unresolved attempt=%d\n", trail.TrailId, len(trail.Hops)+1, trail.Pending.ClientId, attempt)
+			glog.Infof("[verify]EXTEND retryable trail=%s depth=%d pending=%s reason=%s attempt=%d\n", trail.TrailId, len(trail.Hops)+1, trail.Pending.ClientId, reason, attempt)
 			return nil, errVerifySourceUnresolved
 		}
-		return nil, rejectVerifyExtend(ctx, trail, "source-egress-unresolved")
-	}
-	if *sourceClientId != trail.Pending.ClientId {
-		return nil, rejectVerifyExtend(ctx, trail, "source-egress-mismatch")
+		return nil, rejectVerifyExtend(ctx, trail, reason)
 	}
 
 	// §4.2 step 6: confirm the hop, stamp server time (§3.4), record
@@ -946,12 +953,12 @@ func verifyExtend(
 		ConfirmedMs:  nowMs,
 		AssignN:      trail.Pending.AssignN,
 		// §4.2 step 5 passed, so the confirming request's source ip is this
-		// provider's egress ip — record its egress-IP-hash at the configured
-		// granularity (§8.1, §3.3, D27), pinned to the provider's first in
-		// the scoring window so it scores one prefix a window. Computed
-		// unconditionally: a poison trail's synthetic pending fails step 5
-		// before here, so there is no observable branch on poison.
-		EgressIpHash: model.PinVerifyHopEgressIpHash(ctx, trail.Pending.ClientId, model.VerifyEgressIpHashWithSettings(sourceIp, settings), settings),
+		// provider's egress ip — record the egress-IP-hash at the configured
+		// granularity (§8.1, §3.3, D27) the provider pinned for the trail's
+		// scoring window, so it scores one prefix a window. Computed
+		// unconditionally with the same Redis work: a poison trail only
+		// reads the pin, never sets it.
+		EgressIpHash: model.PinVerifyHopEgressIpHash(ctx, trail.Pending.ClientId, sourceIp, model.GetVerifyTrailHeadWindow(ctx, trailId, settings), trail.Poison, settings),
 	}
 	if trail.Poison {
 		model.IncrVerifyPoisonCounter(ctx, "confirm")
@@ -1151,11 +1158,12 @@ func verifyFailTrail(ctx context.Context, trail *model.VerifyTrail) {
 	}
 }
 
-// The answer to a registered validator's SEED, or to a valid EXTEND, whose
-// source resolves to no provider (§8.1) while its step allows another
-// attempt: nothing changed, and the caller resends the identical body through
-// the same hop, its tunnel trying the other family first (IPV6.md C7). 421
-// Misdirected Request marks it retryable; the body is the reason.
+// The answer to a registered validator's SEED whose source resolves to no
+// provider, or to a valid EXTEND whose source resolves to no provider or to
+// another than the pending one (§8.1), while its step allows another
+// attempt: nothing changed, and the caller resends the identical body
+// through the same hop, its tunnel trying the other family first (IPV6.md
+// C7). 421 Misdirected Request marks it retryable; the body is the reason.
 var errVerifySourceUnresolved = errors.New("421 source-egress-unresolved")
 
 // Internal diagnosis cannot reveal which failure branch a remote caller hit.

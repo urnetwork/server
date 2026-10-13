@@ -637,26 +637,32 @@ func TestVerifyControllerPoisonAndFailurePaths(t *testing.T) {
 		if server.Id(realAssign.NextHop) == p2 {
 			wrongIp = providerIps[p3]
 		}
-		_, realExtendErr := Verify(
-			testVerifyExtendArgs(t, realValidator, realVpk, realKey, realAssign),
-			testVerifySession(ctx, wrongIp),
-		)
-		if realExtendErr == nil {
-			t.Fatal("wrong-source EXTEND must fail")
-		}
 
 		// --- V1: extending a poison trail from a real provider's ip fails with
-		// the IDENTICAL error (no observable branch on poison)
+		// the IDENTICAL error (no observable branch on poison), at each attempt:
+		// the retryable answers (N4), then the failure
 		poisonWrongIp := providerIps[p1]
 		if server.Id(poison1.NextHop) == p1 {
 			poisonWrongIp = providerIps[p2]
 		}
-		_, poisonExtendErr := Verify(
-			testVerifyExtendArgs(t, poisonValidator, poisonVpk, poisonKey, poison1),
-			testVerifySession(ctx, poisonWrongIp),
-		)
-		if poisonExtendErr == nil || poisonExtendErr.Error() != realExtendErr.Error() {
-			t.Fatalf("poison extend err %q must equal real wrong-source err %q", poisonExtendErr, realExtendErr)
+		for attempt := 0; attempt <= model.VerifyUnattributedAttemptLimit; attempt++ {
+			_, realExtendErr := Verify(
+				testVerifyExtendArgs(t, realValidator, realVpk, realKey, realAssign),
+				testVerifySession(ctx, wrongIp),
+			)
+			if realExtendErr == nil {
+				t.Fatal("wrong-source EXTEND must fail")
+			}
+			_, poisonExtendErr := Verify(
+				testVerifyExtendArgs(t, poisonValidator, poisonVpk, poisonKey, poison1),
+				testVerifySession(ctx, poisonWrongIp),
+			)
+			if poisonExtendErr == nil || poisonExtendErr.Error() != realExtendErr.Error() {
+				t.Fatalf("attempt %d: poison extend err %q must equal real wrong-source err %q", attempt+1, poisonExtendErr, realExtendErr)
+			}
+			if wantRetry := attempt < model.VerifyUnattributedAttemptLimit; wantRetry != (realExtendErr.Error() == "421 source-egress-unresolved") {
+				t.Fatalf("attempt %d: wrong-source EXTEND = %v", attempt+1, realExtendErr)
+			}
 		}
 
 		// the failed REAL trail is durably recorded as expired; the poison

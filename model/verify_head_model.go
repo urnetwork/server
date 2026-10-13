@@ -10,7 +10,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -67,16 +69,17 @@ func GetVerifyLiveEgressHashes(ctx context.Context, clientIds []server.Id) map[s
 				server.Raise(err)
 			}
 			for i, clientCmds := range cmds {
-				versions := [][]string{}
+				versions := []map[string]string{}
 				for _, cmd := range clientCmds {
 					fields, _ := cmd.Result()
 					live, _ := splitVerifyEgressFields(fields, nowMs)
 					versions = append(versions, live)
 				}
 				live := newVerifyLiveEgress(versions[0], versions[1])
-				for _, addresses := range [][]string{live.byFamily[4], live.byFamily[6], live.legacy} {
-					if 0 < len(addresses) {
-						hashes[chunk[i]] = []string{slices.Min(addresses)}
+				// each list is sorted: its first is the least
+				for _, egresses := range [][]string{live.networks(4), live.networks(6), live.legacy} {
+					if 0 < len(egresses) {
+						hashes[chunk[i]] = []string{egresses[0]}
 						break
 					}
 				}
@@ -90,15 +93,28 @@ func GetVerifyLiveEgressHashes(ctx context.Context, clientIds []server.Id) map[s
 // unknown: no st deployment, or a stalled mirror.
 const verifyHeadHashFallbackWindow = time.Hour
 
-// Outlives any scoring window; each window has a key of its own.
-const verifyHeadHashTtl = 24 * time.Hour
+// A settlement epoch's length when the st mirror does not carry it: sn
+// deploy/mainnet/policy-v1.yml settles every 50400 subtensor blocks of 12
+// seconds, seven days.
+const (
+	verifyHeadHashBlockTime   = 12 * time.Second
+	verifyHeadHashEpochBlocks = 50400
+)
+
+// A pin outlives its window by this much, past every hop of a trail seeded in
+// the window and a stalled mirror's last epoch.
+const verifyHeadHashGrace = 24 * time.Hour
 
 func verifyHeadHashKey(clientId server.Id, window string) string {
 	return fmt.Sprintf("{vhead_%s}%s", clientId, window)
 }
 
-// The scoring window: the settlement epoch the validators score head prefixes
-// by, from the st mirror, else a UTC hour.
+func verifyTrailHeadWindowKey(trailId server.Id) string {
+	return fmt.Sprintf("{vtr_%s}window", trailId)
+}
+
+// The scoring window in effect now: the settlement epoch the validators score
+// head prefixes by, from the st mirror, else a UTC hour.
 func verifyHeadHashWindow(ctx context.Context, settings *VerifySettings) string {
 	if epoch, ok := verifyCohortEpoch(ctx, settings.CohortDeploymentKey); ok {
 		return fmt.Sprintf("e%d", epoch)
@@ -106,26 +122,109 @@ func verifyHeadHashWindow(ctx context.Context, settings *VerifySettings) string 
 	return fmt.Sprintf("h%d", server.NowUtc().Unix()/int64(verifyHeadHashFallbackWindow/time.Second))
 }
 
-// PinVerifyHopEgressIpHash returns the egress-IP-hash a confirmed hop of the
-// provider records (§8.1, D27): that of the first hop it confirmed in the
-// current scoring window. The validators union a fleet's hop hashes per
+// How long a pin of the window lives: the window, an epoch of the mirror's
+// TEpochBlocks subtensor blocks (a mainnet epoch when it does not say), or an
+// hour, and the grace.
+func verifyHeadHashLifetime(ctx context.Context, window string, settings *VerifySettings) time.Duration {
+	if !strings.HasPrefix(window, "e") {
+		return verifyHeadHashFallbackWindow + verifyHeadHashGrace
+	}
+	blocks := uint64(verifyHeadHashEpochBlocks)
+	if settings.CohortDeploymentKey != "" {
+		if summary := GetStEpochSummaryCache(ctx, settings.CohortDeploymentKey); summary != nil && 0 < summary.TEpochBlocks {
+			blocks = summary.TEpochBlocks
+		}
+	}
+	return time.Duration(blocks)*verifyHeadHashBlockTime + verifyHeadHashGrace
+}
+
+// SetVerifyTrailHeadWindow keeps the scoring window in effect at a trail's
+// SEED for as long as the trail can live, so every hop of the trail pins in
+// one window however long it takes (§8.1).
+func SetVerifyTrailHeadWindow(ctx context.Context, trailId server.Id, m int, settings *VerifySettings) {
+	window := verifyHeadHashWindow(ctx, settings)
+	server.Redis(ctx, func(r server.RedisClient) {
+		server.Raise(r.Set(ctx, verifyTrailHeadWindowKey(trailId), window, settings.TrailTtl(m)).Err())
+	})
+}
+
+// GetVerifyTrailHeadWindow is the scoring window the trail was seeded in, or
+// the one in effect now for a trail whose SEED kept none.
+func GetVerifyTrailHeadWindow(ctx context.Context, trailId server.Id, settings *VerifySettings) (window string) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		var err error
+		window, err = r.Get(ctx, verifyTrailHeadWindowKey(trailId)).Result()
+		if errors.Is(err, redis.Nil) {
+			window, err = "", nil
+		}
+		server.Raise(err)
+	})
+	if window == "" {
+		window = verifyHeadHashWindow(ctx, settings)
+	}
+	return
+}
+
+// The hash a provider's first hop of a window pins: the egress-IP-hash its
+// feeder stored for its IPv4 address while that family attributes to it,
+// else for its IPv6 address, the least when a /64 holds several, else the
+// hop's own source's. It is a rule of the provider's index, not of the family
+// a hop landed on, so no caller steers which prefix the provider scores.
+func verifyHeadHashCandidate(ctx context.Context, r server.RedisClient, clientId server.Id, sourceIp netip.Addr, settings *VerifySettings, nowMs uint64) [32]byte {
+	live := readVerifyLiveEgress(ctx, r, clientId, nowMs)
+	for _, family := range []int{4, 6} {
+		if !verifyFamilyAttributes(ctx, r, clientId, live, family) {
+			continue
+		}
+		scores := []string{}
+		for _, address := range live.byFamily[family] {
+			if address.score != "" {
+				scores = append(scores, address.score)
+			}
+		}
+		if 0 < len(scores) {
+			return decodeVerifyHeadHash(slices.Min(scores), "stored egress-IP-hash")
+		}
+	}
+	return VerifyEgressIpHashWithSettings(sourceIp, settings)
+}
+
+// A head hash is 32 bytes as hex; anything else is refused, like every
+// malformed verify state read.
+func decodeVerifyHeadHash(hashHex string, what string) [32]byte {
+	decoded, err := hex.DecodeString(hashHex)
+	if err == nil && len(decoded) != 32 {
+		err = fmt.Errorf("verify %s %q holds %d bytes", what, hashHex, len(decoded))
+	}
+	server.Raise(err)
+	return [32]byte(decoded)
+}
+
+// PinVerifyHopEgressIpHash returns the egress-IP-hash a hop the provider
+// confirms from sourceIp records (§8.1, D27): the provider's pin for the
+// trail's scoring window. The validators union a fleet's hop hashes per
 // window, so a provider whose families come and go (an IPv4 transport that
 // reconnects or lapses, overlapping leases) still scores one prefix a window.
-func PinVerifyHopEgressIpHash(ctx context.Context, clientId server.Id, egressIpHash [32]byte, settings *VerifySettings) (pinned [32]byte) {
-	key := verifyHeadHashKey(clientId, verifyHeadHashWindow(ctx, settings))
+// The first hop of a window pins the provider's candidate
+// (verifyHeadHashCandidate). A poison trail's hop reads the pin, or the
+// candidate, but never sets it, with the same Redis work as a real one's.
+func PinVerifyHopEgressIpHash(ctx context.Context, clientId server.Id, sourceIp netip.Addr, window string, poison bool, settings *VerifySettings) (pinned [32]byte) {
+	key := verifyHeadHashKey(clientId, window)
+	lifetime := verifyHeadHashLifetime(ctx, window, settings)
+	setPin := "1"
+	if poison {
+		setPin = "0"
+	}
+	nowMs := uint64(server.NowUtc().UnixMilli())
 	server.Redis(ctx, func(r server.RedisClient) {
+		candidate := verifyHeadHashCandidate(ctx, r, clientId, sourceIp, settings, nowMs)
 		pinnedHex, err := r.Eval(ctx, `
 local pinned = redis.call('GET', KEYS[1])
 if pinned then return pinned end
-redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-return ARGV[1]`, []string{key}, hex.EncodeToString(egressIpHash[:]), verifyHeadHashTtl.Milliseconds()).Text()
+if ARGV[3] == '1' then redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2]) end
+return ARGV[1]`, []string{key}, hex.EncodeToString(candidate[:]), lifetime.Milliseconds(), setPin).Text()
 		server.Raise(err)
-		decoded, err := hex.DecodeString(pinnedHex)
-		if err == nil && len(decoded) != len(pinned) {
-			err = fmt.Errorf("verify head hash %s holds %d bytes", key, len(decoded))
-		}
-		server.Raise(err)
-		pinned = [32]byte(decoded)
+		pinned = decodeVerifyHeadHash(pinnedHex, "head hash "+key)
 	})
 	return
 }

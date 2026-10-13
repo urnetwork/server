@@ -1,6 +1,6 @@
 // Providers with an address in each family (VALIDATOR.md §8.2, IPV6.md C7):
 // hops confirm from either family, a provider scores one prefix a window, the
-// per-source budgets stay one per provider, and a source the index cannot
+// per-source budgets stay one per provider, and a source the step cannot
 // attribute is answered as retryable before it fails the step. Only a
 // registered key learns anything of attribution.
 package controller
@@ -50,9 +50,10 @@ func requireVerifyTrailAtSeed(t testing.TB, ctx context.Context, trailId server.
 
 // §8.1, D27, IPV6.md C7: a provider with an address in each family confirms
 // its hop from either, and every hop it serves in a scoring window records
-// the egress-IP-hash of its first confirmed one, so it scores one prefix,
-// not two. Providers with one family record their own; the seed hop, which
-// never scores, records its source's.
+// the egress-IP-hash it pinned, its IPv4 address's by the rule of its index
+// though its first hop lands on IPv6, so it scores one prefix, not two.
+// Providers with one family record their own; the seed hop, which never
+// scores, records its source's.
 func TestVerifyDualStackHopsRecordOnePrefixPerProvider(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -115,7 +116,7 @@ func TestVerifyDualStackHopsRecordOnePrefixPerProvider(t *testing.T) {
 				case clientId == seedProvider:
 					want = seedIp
 				case clientId == dualId:
-					want = dual.v6
+					want = dual.v4
 				case providers[clientId].v4.IsValid():
 					want = providers[clientId].v4
 				default:
@@ -333,7 +334,7 @@ func TestVerifyControllerUnattributedSourceKeepsTheUnresolvedReason(t *testing.T
 
 // §9, §4.2 step 1: an EXTEND for an unknown trail does the same Redis work
 // whether or not its source resolves: before the trail loads, a resolved
-// source counts on its provider meter and an unresolved one on the scratch
+// source counts on its provider meter and an unresolved one on its scratch
 // counter, one increment each.
 func TestVerifyExtendWorkDoesNotDependOnResolution(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -359,10 +360,11 @@ func TestVerifyExtendWorkDoesNotDependOnResolution(t *testing.T) {
 			}
 		}
 		// each counter took exactly one increment: the next is its second
-		for name, counter := range map[string]server.Id{"provider": provider, "scratch": {}} {
-			if got := model.IncrVerifyExtendProviderRate(ctx, fmt.Sprint(providerIp), counter, settings); got != 2 {
-				t.Fatalf("the %s counter took %d increments, want 1", name, got-1)
-			}
+		if got := model.IncrVerifyExtendProviderRate(ctx, fmt.Sprint(providerIp), provider, settings); got != 2 {
+			t.Fatalf("the provider counter took %d increments, want 1", got-1)
+		}
+		if got := model.PadVerifyExtendProviderRate(ctx, fmt.Sprint(strangerIp), settings); got != 2 {
+			t.Fatalf("the scratch counter took %d increments, want 1", got-1)
 		}
 	})
 }
@@ -412,6 +414,149 @@ func TestVerifySeedDoesNotRevealAttribution(t *testing.T) {
 		validatorId, vpk, vpkKey := testVerifyValidator(ctx)
 		if _, err := Verify(testVerifySeedArgs(t, validatorId, vpk, vpkKey, connect.VerifyMMin), testVerifyAddrSession(ctx, far)); err == nil || err.Error() != testVerifyRetryableAnswer {
 			t.Fatalf("control: a registered validator's SEED from an unattributed source = %v, want the retryable answer", err)
+		}
+	})
+}
+
+// §4.4, §8.2 (probe TestProbeVerifyExtendFromACoLocatedProvidersAddressIsRetried,
+// N4): two providers in one household share its NAT IPv4 and its /64, and
+// each legacy transport indexed one family. A hop through one that lands on
+// the family only the other indexed resolves to the other. It is answered as
+// retryable with the trail unchanged, and the resend from the provider's own
+// indexed address confirms the hop, in both directions.
+func TestVerifyExtendFromACoLocatedProvidersAddressIsRetried(t *testing.T) {
+	natV4 := netip.MustParseAddr("198.51.100.110")
+	pendingV6, neighborV6 := netip.MustParseAddr("2001:db8:d0::2"), netip.MustParseAddr("2001:db8:d0::1")
+	for _, c := range []struct {
+		name                            string
+		neighborIndexed, pendingIndexed netip.Addr
+		landing, retry                  netip.Addr
+	}{
+		{name: "IPv6 lands in the neighbor's /64", neighborIndexed: neighborV6, pendingIndexed: natV4, landing: pendingV6, retry: natV4},
+		{name: "IPv4 lands on the NAT the neighbor indexed", neighborIndexed: natV4, pendingIndexed: pendingV6, landing: natV4, retry: pendingV6},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx := context.Background()
+				testVerifyInstallServerKey()
+				settings := model.DefaultVerifySettings()
+				SetVerifySettings(settings)
+				seedIp := netip.MustParseAddr("192.0.2.110")
+				testVerifyProvider(ctx, seedIp, settings)
+				// the neighbor holds its lease but is not sampled (no provide modes)
+				neighbor := server.NewId()
+				model.FeedVerifyEgress(ctx, neighbor, c.neighborIndexed, settings)
+				pending := testVerifyProvider(ctx, c.pendingIndexed, settings)
+				if got := model.ResolveVerifyEgress(ctx, c.landing, settings); got == nil || *got != neighbor {
+					t.Fatalf("control: %s resolved to %v, want the neighbor", c.landing, got)
+				}
+				validatorId, vpk, vpkKey := testVerifyValidator(ctx)
+				result, err := Verify(testVerifySeedArgs(t, validatorId, vpk, vpkKey, connect.VerifyMMin), testVerifyAddrSession(ctx, seedIp))
+				if err != nil {
+					t.Fatal(err)
+				}
+				assign := result.(*connect.VerifyAssignResult)
+				if server.Id(assign.NextHop) != pending {
+					t.Fatalf("assigned %s, want the only eligible non-seed provider", server.Id(assign.NextHop))
+				}
+				extend := testVerifyExtendArgs(t, validatorId, vpk, vpkKey, assign)
+				// the next assignment after the confirmed hop
+				testVerifyProvider(ctx, netip.MustParseAddr("192.0.2.112"), settings)
+				if _, err := Verify(extend, testVerifyAddrSession(ctx, c.landing)); err == nil || err.Error() != testVerifyRetryableAnswer {
+					t.Fatalf("EXTEND landing on %s = %v, want the retryable answer", c.landing, err)
+				}
+				requireVerifyTrailAtSeed(t, ctx, server.Id(assign.TrailId), pending)
+				result, err = Verify(extend, testVerifyAddrSession(ctx, c.retry))
+				if err != nil {
+					t.Fatalf("the resend from the provider's own indexed %s = %v, want its hop confirmed", c.retry, err)
+				}
+				if _, ok := result.(*connect.VerifyAssignResult); !ok {
+					t.Fatalf("the resend = %T, want the next assignment", result)
+				}
+			})
+		})
+	}
+}
+
+// §8.1, §9 (probe TestProbeVerifyPoisonTrailDoesNotPinTheHeadHash, N3):
+// poison trails replace provider-state writes with pads, so a poison trail's
+// confirmed hop sets no head-hash pin. Anyone (no registered key) can seed a
+// poison trail and route its EXTEND to an assigned dual-stack provider on the
+// family of its choice; the provider's scored prefix for the window stays
+// its own choice. A real trail's hop pins it.
+func TestVerifyPoisonTrailDoesNotPinTheHeadHash(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		testVerifyInstallServerKey()
+		settings := model.DefaultVerifySettings()
+		SetVerifySettings(settings)
+		v4, v6 := netip.MustParseAddr("203.0.113.121"), netip.MustParseAddr("2001:db8:121::1")
+		provider := testVerifyDualStackProvider(ctx, v4, v6, settings)
+		pinKey := func(trailId connect.Id) string {
+			return fmt.Sprintf("{vhead_%s}%s", provider, model.GetVerifyTrailHeadWindow(ctx, server.Id(trailId), settings))
+		}
+		requirePinned := func(trailId connect.Id, want bool) {
+			t.Helper()
+			server.Redis(ctx, func(r server.RedisClient) {
+				count, err := r.Exists(ctx, pinKey(trailId)).Result()
+				server.Raise(err)
+				if (count == 1) != want {
+					t.Fatalf("the provider's pin exists=%t, want %t", count == 1, want)
+				}
+			})
+		}
+		strangerVpk, strangerKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stranger := server.NewId()
+		// an unattributed seed source: the provider is the only next hop
+		seedIp := netip.MustParseAddr("192.0.2.120")
+		result, err := Verify(testVerifySeedArgs(t, stranger, strangerVpk, strangerKey, connect.VerifyMMin), testVerifyAddrSession(ctx, seedIp))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assign := result.(*connect.VerifyAssignResult)
+		if server.Id(assign.NextHop) != provider {
+			t.Fatalf("assigned %s, want the dual-stack provider", server.Id(assign.NextHop))
+		}
+		if _, err := Verify(testVerifyExtendArgs(t, stranger, strangerVpk, strangerKey, assign), testVerifyAddrSession(ctx, v6)); err != nil {
+			t.Fatalf("control: the poison trail's EXTEND = %v", err)
+		}
+		requirePinned(assign.TrailId, false)
+
+		// a real trail of M = 4 through three more providers reaches it
+		sources := map[server.Id]netip.Addr{provider: v6}
+		realSeedIp := netip.MustParseAddr("192.0.2.122")
+		testVerifyProvider(ctx, realSeedIp, settings)
+		for _, ip := range []netip.Addr{netip.MustParseAddr("192.0.2.123"), netip.MustParseAddr("192.0.2.124")} {
+			sources[testVerifyProvider(ctx, ip, settings)] = ip
+		}
+		validatorId, vpk, vpkKey := testVerifyValidator(ctx)
+		result, err = Verify(testVerifySeedArgs(t, validatorId, vpk, vpkKey, connect.VerifyMMin), testVerifyAddrSession(ctx, realSeedIp))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assign = result.(*connect.VerifyAssignResult)
+		for {
+			next := server.Id(assign.NextHop)
+			source, ok := sources[next]
+			if !ok {
+				t.Fatalf("assigned %s, not a registered provider", next)
+			}
+			result, err = Verify(testVerifyExtendArgs(t, validatorId, vpk, vpkKey, assign), testVerifyAddrSession(ctx, source))
+			if err != nil {
+				t.Fatalf("the real trail's EXTEND from %s = %v", source, err)
+			}
+			if next == provider {
+				break
+			}
+			assign = result.(*connect.VerifyAssignResult)
+		}
+		requirePinned(assign.TrailId, true)
+		own := model.VerifyEgressIpHashWithSettings(v4, settings)
+		if got := model.PinVerifyHopEgressIpHash(ctx, provider, v4, model.GetVerifyTrailHeadWindow(ctx, server.Id(assign.TrailId), settings), false, settings); got != own {
+			t.Errorf("an IPv4 hop after the provider's IPv6 hops recorded %x, not its IPv4 prefix", got)
 		}
 	})
 }

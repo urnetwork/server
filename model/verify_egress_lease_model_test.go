@@ -67,14 +67,15 @@ func TestVerifyConnectionEgressInterleavedCleanup(t *testing.T) {
 		settings.EgressHashKey = []byte("interleaved-connection-egress-test")
 		clientId, oldId, nextId := server.NewId(), server.NewId(), server.NewId()
 		ip := netip.MustParseAddr("192.0.2.11")
-		field, hashHex := verifyClientEgressField(ip, settings)
+		field, parsed := verifyClientEgressField(ip, settings)
+		hashHex := parsed.address
 		testVerifySetProvideModes(ctx, clientId)
 		FeedVerifyConnectionEgress(ctx, clientId, oldId, ip, settings)
 		server.Redis(ctx, func(r server.RedisClient) {
 			now := server.NowUtc().UnixMilli()
 			server.Raise(r.Eval(ctx, verifyReverseEgressLeaseScript,
 				[]string{verifyClientEgressKey(clientId), verifyClientEgressLeaseKey(verifyClientEgressKey(clientId), hashHex)},
-				oldId.String(), now, 0, field).Err())
+				oldId.String(), now, 0, field, "").Err())
 		})
 		FeedVerifyConnectionEgress(ctx, clientId, nextId, ip, settings)
 		server.Redis(ctx, func(r server.RedisClient) {
@@ -98,15 +99,16 @@ func TestVerifyConnectionEgressExpiryAndRefresh(t *testing.T) {
 		settings.EgressHashKey = []byte("expiry-connection-egress-test")
 		clientId, oldId, nextId := server.NewId(), server.NewId(), server.NewId()
 		ip := netip.MustParseAddr("192.0.2.12")
-		field, hashHex := verifyClientEgressField(ip, settings)
+		field, parsed := verifyClientEgressField(ip, settings)
+		hashHex := parsed.address
 		reverseKey := verifyClientEgressKey(clientId)
 		testVerifySetProvideModes(ctx, clientId)
 		now := server.NowUtc()
 		server.Redis(ctx, func(r server.RedisClient) {
-			updateVerifyEgressLease(ctx, r, reverseKey, clientId, field, oldId.String(), now, now.Add(time.Minute))
+			updateVerifyEgressLease(ctx, r, reverseKey, clientId, field, verifyClientEgressValueSuffix(ip, settings), oldId.String(), now, now.Add(time.Minute))
 			staleExpiry, err := r.HGet(ctx, reverseKey, field).Result()
 			server.Raise(err)
-			updateVerifyEgressLease(ctx, r, reverseKey, clientId, field, nextId.String(), now.Add(2*time.Minute), now.Add(10*time.Minute))
+			updateVerifyEgressLease(ctx, r, reverseKey, clientId, field, verifyClientEgressValueSuffix(ip, settings), nextId.String(), now.Add(2*time.Minute), now.Add(10*time.Minute))
 			pruneVerifyExpiredEgressHashes(ctx, r, clientId, map[string]string{field: staleExpiry})
 			owners, err := r.HGetAll(ctx, verifyClientEgressLeaseKey(reverseKey, hashHex)).Result()
 			server.Raise(err)

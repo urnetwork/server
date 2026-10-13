@@ -49,6 +49,8 @@ func TestReapedClientRedisCleanupPreservesReassignedEgress(t *testing.T) {
 		targetA, targetB, targetC, survivor := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 		targets := []server.Id{targetA, targetB, targetC}
 		hashA, hashB, hashC := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+		// targetB's IPv6 address is in the /64 hashD
+		hashD := strings.Repeat("d", 64)
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -57,13 +59,14 @@ func TestReapedClientRedisCleanupPreservesReassignedEgress(t *testing.T) {
 				pipe.Set(ctx, clientPublicKeyRedisKey(targetC), []byte("target-c"), 0)
 				pipe.Set(ctx, clientPublicKeyRedisKey(survivor), []byte("survivor"), 0)
 				pipe.HSet(ctx, verifyClientEgressKey(targetA), hashA+"_4", "1")
-				pipe.HSet(ctx, verifyClientEgressKey(targetB), hashB+"_6", "1")
-				// targetC's entry was left in the v2 index by a pre-v3 writer
+				pipe.HSet(ctx, verifyClientEgressKey(targetB), hashB+"_6_"+hashD, "1")
+				// targetC's entry was left in the v2 index by a v2 writer
 				pipe.HSet(ctx, verifyClientEgressV2Key(targetC), hashC, "1")
 				pipe.Set(ctx, verifyEgressKeyFromHex(hashA), targetA.String(), 0)
 				// targetB's stale reverse entry now points at an address that was
 				// reassigned; compare-delete must preserve the new owner.
 				pipe.Set(ctx, verifyEgressKeyFromHex(hashB), survivor.String(), 0)
+				pipe.Set(ctx, verifyEgressKeyFromHex(hashD), targetB.String(), 0)
 				pipe.Set(ctx, verifyEgressKeyFromHex(hashC), targetC.String(), 0)
 				pipe.SAdd(ctx, verifyEligibleKey, targetA.String(), targetB.String(), targetC.String(), survivor.String())
 				return nil
@@ -85,7 +88,7 @@ func TestReapedClientRedisCleanupPreservesReassignedEgress(t *testing.T) {
 				}
 			}
 
-			for _, hash := range []string{hashA, hashC} {
+			for _, hash := range []string{hashA, hashC, hashD} {
 				if _, err := r.Get(ctx, verifyEgressKeyFromHex(hash)).Result(); !errors.Is(err, redis.Nil) {
 					t.Fatalf("target-owned forward entry %s survived: %v", hash, err)
 				}
