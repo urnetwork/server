@@ -415,16 +415,18 @@ func ScheduleProviderEgressProbeTasks(clientSession *session.ClientSession, tx s
 
 // Recreates each configured shard that has no pending row, stamped from this
 // instance's settings and due at once, so a shard lost since the last
-// taskworker start returns on the next pass of any other shard. A row that
+// taskworker start returns after the next pass of any other shard. A row that
 // exists, claimed or waiting, keeps its arguments, run time and backoff.
 //
-// Rows are found by a plain snapshot read. A finishing pass holds its own
-// shard's key until it commits, so a row that another pass is finishing counts
-// as present and this post-step never waits on that pass; inserting into its
-// key would make two finishing passes wait on each other. Only keys missing
-// from the snapshot are inserted, in shard order. While a newer config's
-// geometry is live in a configured shard, the shard set is that config's and
-// nothing is recreated.
+// It runs in a read committed transaction of its own after a pass's
+// finishing transaction commits, so it holds no shard's key but the ones it
+// inserts. Rows are found by a plain snapshot read first, so a row that a
+// pass is finishing counts as present and is never waited on. Only keys
+// missing from the snapshot are inserted, in shard order; an insert can wait
+// only for another writer inserting the same key, the startup schedule or
+// another recreation, and those take keys in shard order too, so the waits
+// form no cycle. While a newer config's geometry is live in a configured
+// shard, the shard set is that config's and nothing is recreated.
 func ensureProviderEgressProbeShardsInTx(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
@@ -608,8 +610,8 @@ func ProviderEgressProbe(
 // ProviderEgressProbePost checkpoints one batch before scheduling its
 // successor. Backlog drains immediately; a partial batch waits its idle cadence.
 // A handed-back pass keeps its newer arguments; otherwise the successor takes
-// this instance's settings, stamped with its config version, and every
-// configured shard that has lost its row is recreated.
+// this instance's settings, stamped with its config version. It writes only
+// its own shard's key, whose claimed row the finishing transaction deleted.
 func ProviderEgressProbePost(
 	args *ProviderEgressProbeArgs,
 	result *ProviderEgressProbeResult,
@@ -630,18 +632,62 @@ func ProviderEgressProbePost(
 	if !settings.Enabled {
 		return nil
 	}
-	if 0 <= args.ShardIndex && args.ShardIndex < settings.ShardCount {
-		nextArgs := stampProviderEgressProbeArgs(providerEgressProbeArgs(settings, args.ShardIndex), now)
-		runAt := now
-		if !result.Stale && !result.Backlog && !result.Full {
-			runAt = runAt.Add(time.Duration(nextArgs.IdleDelaySeconds) * time.Second)
-		}
-		scheduleProviderEgressProbeAt(clientSession, tx, nextArgs, runAt)
+	if args.ShardIndex < 0 || settings.ShardCount <= args.ShardIndex {
+		return nil
 	}
-	// The startup schedule again, for missing rows only: a shard lost since the
-	// last taskworker start returns without a restart.
-	ensureProviderEgressProbeShardsInTx(clientSession, tx, settings, now)
+
+	nextArgs := stampProviderEgressProbeArgs(providerEgressProbeArgs(settings, args.ShardIndex), now)
+	runAt := now
+	if !result.Stale && !result.Backlog && !result.Full {
+		runAt = runAt.Add(time.Duration(nextArgs.IdleDelaySeconds) * time.Second)
+	}
+	scheduleProviderEgressProbeAt(clientSession, tx, nextArgs, runAt)
 	return nil
+}
+
+// The registered post-step: ProviderEgressProbePost in the finishing
+// transaction, then, once that commits, the startup schedule again for missing
+// rows only, so a shard lost since the last taskworker start returns without
+// a restart. A handed-back pass recreates nothing. A recreation that fails or
+// never runs loses nothing that the next pass's post-step does not repeat.
+func ProviderEgressProbeCommitPost(
+	args *ProviderEgressProbeArgs,
+	result *ProviderEgressProbeResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) ([]server.PostFunction, error) {
+	if err := ProviderEgressProbePost(args, result, clientSession, tx); err != nil {
+		return nil, err
+	}
+	if result != nil && result.HandedBack {
+		return nil, nil
+	}
+	// The post's session ends with the post; the recreation keeps only its values.
+	ctx := context.WithoutCancel(clientSession.Ctx)
+	return []server.PostFunction{func() any {
+		recreateMissingProviderEgressProbeShards(ctx)
+		return nil
+	}}, nil
+}
+
+// The probe's task target as the taskworker registers it.
+func NewProviderEgressProbeTaskTarget() task.Target {
+	return task.NewTaskTargetWithCommitPost(ProviderEgressProbe, ProviderEgressProbeCommitPost)
+}
+
+// One bounded recreation, after a finishing transaction committed.
+func recreateMissingProviderEgressProbeShards(ctx context.Context) {
+	settings, err := getProviderEgressProbeSettings()
+	if err != nil || !settings.Enabled {
+		return
+	}
+	recreateCtx, cancel := context.WithTimeout(ctx, task.DefaultTaskFinalizeTimeout)
+	defer cancel()
+	clientSession := session.NewLocalClientSession(recreateCtx, "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	server.Tx(recreateCtx, func(tx server.PgTx) {
+		ensureProviderEgressProbeShardsInTx(clientSession, tx, settings, server.NowUtc())
+	}, server.TxReadCommitted)
 }
 
 // The ingest credential stays in Vault and is never copied into task JSON.

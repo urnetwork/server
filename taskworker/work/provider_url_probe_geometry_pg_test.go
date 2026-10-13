@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
@@ -100,13 +98,14 @@ func testPendingProbeRowCount(t testing.TB, ctx context.Context) (count int) {
 }
 
 // Claims and runs up to n due passes with their post-steps through the real
-// task evaluator, as a taskworker does. A pass outlasts the default task max
-// time, so each evaluation claims it alone.
+// task evaluator and the taskworker's registration of the probe. A pass
+// outlasts the default task max time, so each evaluation claims it alone, and
+// the post-step's work after the commit has run when an evaluation returns.
 func testEvalProviderEgressProbeTasks(t testing.TB, ctx context.Context, n int) (finishedCount int, retriedCount int) {
 	t.Helper()
 	worker := task.NewTaskWorkerWithDefaults(ctx)
 	defer worker.Close()
-	worker.AddTargets(task.NewTaskTargetWithPost(ProviderEgressProbe, ProviderEgressProbePost))
+	worker.AddTargets(NewProviderEgressProbeTaskTarget())
 	for range n {
 		finished, retried, postRetried, err := worker.EvalTasks(1)
 		if err != nil {
@@ -133,6 +132,80 @@ func testRunProbeWithPost(t testing.TB, ctx context.Context, clientSession *sess
 			t.Fatalf("shard %d post failed: %v", args.ShardIndex, err)
 		}
 	})
+}
+
+// Runs the pending pass of one shard and finishes it in the task worker's
+// order, through the taskworker's registration of the probe: the pass, a
+// finishing transaction that deletes the claimed row and runs the post-step,
+// then the post-step's work for after the commit. between runs inside the
+// finishing transaction after the deletion, while the transaction holds the
+// shard's key. Neither transaction retries, so a deadlock or serialization
+// failure is returned rather than repeated. Safe to call from a goroutine.
+func testFinishProbePass(ctx context.Context, shardIndex int, between func()) (failure any) {
+	return server.HandleError(func() {
+		var taskId server.Id
+		var argsJson string
+		var maxTimeSeconds int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT task_id, args_json, run_max_time_seconds FROM pending_task WHERE run_once_key = $1`,
+				task.RunOnce("provider_egress_probe", shardIndex).String()).Scan(&taskId, &argsJson, &maxTimeSeconds))
+		})
+		_, runPost, err := NewProviderEgressProbeTaskTarget().Run(ctx, &task.Task{
+			TaskId:            taskId,
+			ArgsJson:          argsJson,
+			ClientAddress:     "192.0.2.1:1234",
+			RunMaxTimeSeconds: maxTimeSeconds,
+		})
+		server.Raise(err)
+		var posts []server.PostFunction
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE task_id = $1`, taskId))
+			if between != nil {
+				between()
+			}
+			var postErr error
+			posts, postErr = runPost(tx)
+			server.Raise(postErr)
+		}, server.OptNoRetry())
+		server.RunPosts(ctx, posts...)
+	})
+}
+
+// Returns once PostgreSQL reports the backend waiting on a lock. The barrier is
+// the server's own report of the wait, not a sleep.
+func testAwaitLockWait(t testing.TB, ctx context.Context, pid int32) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for {
+		waiting := false
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx,
+				`SELECT coalesce(bool_or(wait_event_type = 'Lock'), false) FROM pg_stat_activity WHERE pid = $1`, pid).Scan(&waiting))
+		})
+		if waiting {
+			return
+		}
+		if deadline.Before(time.Now()) {
+			t.Fatalf("backend %d never waited on a lock", pid)
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+}
+
+// The outcome of a background step, or a failure when it does not end.
+func testAwaitOutcome(t testing.TB, done chan any, name string) any {
+	t.Helper()
+	select {
+	case failure := <-done:
+		return failure
+	case <-time.After(time.Minute):
+		t.Fatalf("%s neither finished nor failed", name)
+		return nil
+	}
 }
 
 // A taskworker that rejoined a rollout on the previous day's config, 4 shards
@@ -326,64 +399,133 @@ func TestProviderEgressProbePassRecreatesDeletedShard(t *testing.T) {
 	})
 }
 
-// A finishing pass deletes its claimed row and inserts its successor in one
-// transaction, so it holds its shard's key until it commits. A post-step that
-// inserted into that key would wait for the pass, and two finishing passes
-// doing so would wait on each other until PostgreSQL aborted one as a
-// deadlock. Here a pass of shard 2 has deleted its row and stays open while
-// shard 1's post-step runs, which must finish without waiting on it. The lock
-// timeout only turns such a wait, which would last until the holder ends after
-// the post-step, into a failure.
-func TestProviderEgressProbePostDoesNotWaitOnAnotherFinishingShard(t *testing.T) {
+// The startup schedule upserts every shard's key in shard order, and a
+// finishing pass holds its own shard's key until it commits. A post-step that
+// inserted a missing shard inside its finishing transaction waited for a
+// startup that had already inserted that shard, while the startup waited for
+// the pass's key, and PostgreSQL aborted one of them as a deadlock. Here the
+// startup inserts missing shard 1 and waits on the finishing pass of shard 2
+// before that pass runs its post-step. Both must commit.
+func TestProviderEgressProbeRecreationDoesNotDeadlockWithStartup(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		t.Setenv("WARP_CONFIG_VERSION", testNewerConfigVersion)
-		settings := testUrlGeometrySettings(3, 8)
-		withProviderEgressProbeSettings(t, settings)
+		withProviderEgressProbeSettings(t, testUrlGeometrySettings(3, 8))
+		driftTaskRunner(t, func(context.Context, *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+			return &ProviderEgressProbeResult{}, nil
+		})
 		ctx := context.Background()
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 		server.Tx(ctx, func(tx server.PgTx) {
 			ScheduleProviderEgressProbeTasks(clientSession, tx)
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key = $1`,
+				task.RunOnce("provider_egress_probe", 1).String()))
 		})
 
-		holder, err := server.AcquireMaintenanceDbConn(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		holderTx, err := holder.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadWrite})
-		if err != nil {
-			holder.Release()
-			t.Fatal(err)
-		}
+		passHolding := make(chan struct{})
+		startupWaiting := make(chan struct{})
 		released := false
 		release := func() {
 			if !released {
 				released = true
-				_ = holderTx.Rollback(context.Background())
-				holder.Release()
+				close(startupWaiting)
 			}
 		}
 		defer release()
-		tag, err := holderTx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key = $1`, task.RunOnce("provider_egress_probe", 2).String())
-		if err != nil || tag.RowsAffected() != 1 {
-			t.Fatalf("the finishing pass of shard 2 did not hold its row: rows=%d err=%v", tag.RowsAffected(), err)
-		}
-
-		failure := server.HandleError(func() {
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`))
-				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key = $1`, task.RunOnce("provider_egress_probe", 1).String()))
-				server.Raise(ProviderEgressProbePost(providerEgressProbeArgs(settings, 1), &ProviderEgressProbeResult{}, clientSession, tx))
-			}, server.OptNoRetry())
-		})
+		passDone := make(chan any, 1)
+		go func() {
+			passDone <- testFinishProbePass(ctx, 2, func() {
+				close(passHolding)
+				<-startupWaiting
+			})
+		}()
+		<-passHolding
+		startupPids := make(chan int32, 1)
+		startupDone := make(chan any, 1)
+		go func() {
+			startupDone <- server.HandleError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					var pid int32
+					server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid))
+					startupPids <- pid
+					ScheduleProviderEgressProbeTasks(clientSession, tx)
+				}, server.TxReadCommitted, server.OptNoRetry())
+			})
+		}()
+		testAwaitLockWait(t, ctx, <-startupPids)
 		release()
-		if failure != nil {
-			t.Fatalf("shard 1's post-step waited on the finishing pass of shard 2: %v", failure)
+
+		if failure := testAwaitOutcome(t, passDone, "the finishing pass of shard 2"); failure != nil {
+			t.Errorf("the finishing pass of shard 2 failed beside the startup schedule: %v", failure)
 		}
-		for shardIndex := range settings.ShardCount {
+		if failure := testAwaitOutcome(t, startupDone, "the startup schedule"); failure != nil {
+			t.Errorf("the startup schedule failed beside the finishing pass of shard 2: %v", failure)
+		}
+		for shardIndex := range 3 {
 			if testPendingProbeRow(t, ctx, shardIndex) == nil {
 				t.Errorf("shard %d has no row", shardIndex)
 			}
+		}
+	})
+}
+
+// Two passes finishing together both found shard 1 missing. At repeatable
+// read, the later post-step's insert met the row the earlier one had committed
+// after the later transaction's snapshot, and failed to serialize. Here the
+// pass of shard 2 takes its snapshot, holding its key, before the pass of
+// shard 0 finishes, and runs its post-step after. The pass of shard 0 must
+// recreate shard 1 without waiting on the held key, both must commit, and
+// shard 1 is recreated once.
+func TestProviderEgressProbeRecreationByTwoPassesDoesNotFailToSerialize(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		t.Setenv("WARP_CONFIG_VERSION", testNewerConfigVersion)
+		withProviderEgressProbeSettings(t, testUrlGeometrySettings(3, 8))
+		driftTaskRunner(t, func(context.Context, *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+			return &ProviderEgressProbeResult{}, nil
+		})
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		server.Tx(ctx, func(tx server.PgTx) {
+			ScheduleProviderEgressProbeTasks(clientSession, tx)
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key = $1`,
+				task.RunOnce("provider_egress_probe", 1).String()))
+		})
+
+		secondHolding := make(chan struct{})
+		firstFinished := make(chan struct{})
+		released := false
+		release := func() {
+			if !released {
+				released = true
+				close(firstFinished)
+			}
+		}
+		defer release()
+		secondDone := make(chan any, 1)
+		go func() {
+			secondDone <- testFinishProbePass(ctx, 2, func() {
+				close(secondHolding)
+				<-firstFinished
+			})
+		}()
+		<-secondHolding
+		firstDone := make(chan any, 1)
+		go func() {
+			firstDone <- testFinishProbePass(ctx, 0, nil)
+		}()
+		if failure := testAwaitOutcome(t, firstDone, "the pass of shard 0 beside the held key of shard 2"); failure != nil {
+			t.Errorf("the pass of shard 0 failed: %v", failure)
+		}
+		if testPendingProbeRow(t, ctx, 1) == nil {
+			t.Errorf("the pass of shard 0 did not recreate shard 1")
+		}
+		release()
+		if failure := testAwaitOutcome(t, secondDone, "the pass of shard 2"); failure != nil {
+			t.Errorf("the pass of shard 2 failed after shard 1 was recreated: %v", failure)
+		}
+		if count := testPendingProbeRowCount(t, ctx); count != 3 {
+			t.Errorf("%d probe rows, want one for each of 3 shards", count)
 		}
 	})
 }
