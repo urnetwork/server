@@ -12,6 +12,21 @@ import (
 
 type connectAuthFinalReadTestKey struct{}
 
+// The cause an H1 handler context ends with when its request context ends:
+// the client hung up (or its proxy closed the upstream) before admission.
+// net/http ends that context only when the connection's read fails, never
+// for its read timeout while the handler runs, and not after a hijack.
+// Before the 101, H1+ authorizes under that context, so the departure cancels
+// the step in flight, and the step reports it as an unavailable dependency.
+var errConnectRequestCanceled = errors.New("connect request canceled")
+
+// Whether ctx ended because its client left. A deadline or a server-side
+// cancel that ended ctx first keeps its own cause, so only a departure that
+// actually ended the work is reported.
+func connectRequestCanceled(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), errConnectRequestCanceled)
+}
+
 // Parse the instance without publishing an admission, then perform the full
 // live authorization at the final read boundary. That query already binds the
 // active client, device and network to the current administrator and credential
