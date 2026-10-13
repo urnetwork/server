@@ -303,9 +303,11 @@ func lagTrack(
 }
 
 // The track's client fields (A5): the autonomous system and the GeoLite2 City
-// place of the address the track is issued to, looked up in memory. The
-// address itself, a prefix of it or a hash of it is never kept (amendment 9).
-// A lookup that cannot answer leaves its fields empty.
+// place of the address the track is issued to, looked up in memory, with the
+// city's coordinates as GeoLite2 gives them when the place names a city; a
+// place resolved only to a region or country has none. The address itself, a
+// prefix of it or a hash of it is never kept (amendment 9). A lookup that
+// cannot answer leaves its fields empty.
 func newLagTrackClient(addr netip.Addr) *model.LagTrackClient {
 	addr = addr.Unmap().WithZone("")
 	client := &model.LagTrackClient{}
@@ -318,6 +320,11 @@ func newLagTrackClient(addr netip.Addr) *model.LagTrackClient {
 		client.CountryCode = place.CountryCode
 		client.Region = place.Region
 		client.City = place.City
+		if place.City != "" {
+			latitude, longitude := place.Latitude, place.Longitude
+			client.Latitude = &latitude
+			client.Longitude = &longitude
+		}
 	}
 	return client
 }

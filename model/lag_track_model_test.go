@@ -72,6 +72,8 @@ type testLagTrackRow struct {
 	countryCode *string
 	region      *string
 	city        *string
+	latitude    *float64
+	longitude   *float64
 }
 
 func testGetLagTrackRow(t testing.TB, ctx context.Context, trackId server.Id) *testLagTrackRow {
@@ -81,12 +83,12 @@ func testGetLagTrackRow(t testing.TB, ctx context.Context, trackId server.Id) *t
 		server.Raise(conn.QueryRow(
 			ctx,
 			`
-			SELECT client_asn, client_asn_org, client_country_code, client_region, client_city
+			SELECT client_asn, client_asn_org, client_country_code, client_region, client_city, client_latitude, client_longitude
 			FROM lag_track
 			WHERE track_id = $1
 			`,
 			trackId,
-		).Scan(&row.asn, &row.asnOrg, &row.countryCode, &row.region, &row.city))
+		).Scan(&row.asn, &row.asnOrg, &row.countryCode, &row.region, &row.city, &row.latitude, &row.longitude))
 	})
 	return row
 }
@@ -119,6 +121,8 @@ func TestCreateLagTrackClientFields(t *testing.T) {
 		now := server.NowUtc().Truncate(time.Millisecond)
 
 		asn := int64(64500)
+		latitude := 45.7485
+		longitude := 4.8467
 		track := &LagTrack{
 			TrackId:   server.NewId(),
 			NetworkId: server.NewId(),
@@ -130,6 +134,8 @@ func TestCreateLagTrackClientFields(t *testing.T) {
 				CountryCode: "gb",
 				Region:      "England",
 				City:        "London",
+				Latitude:    &latitude,
+				Longitude:   &longitude,
 			},
 		}
 		CreateLagTrack(ctx, track, nil)
@@ -139,6 +145,8 @@ func TestCreateLagTrackClientFields(t *testing.T) {
 		connect.AssertEqual(t, *row.countryCode, "gb")
 		connect.AssertEqual(t, *row.region, "England")
 		connect.AssertEqual(t, *row.city, "London")
+		connect.AssertEqual(t, *row.latitude, 45.7485)
+		connect.AssertEqual(t, *row.longitude, 4.8467)
 
 		bare, _ := testLagTrack(ctx, now, 0)
 		row = testGetLagTrackRow(t, ctx, bare.TrackId)
@@ -147,6 +155,8 @@ func TestCreateLagTrackClientFields(t *testing.T) {
 		connect.AssertEqual(t, row.countryCode, (*string)(nil))
 		connect.AssertEqual(t, row.region, (*string)(nil))
 		connect.AssertEqual(t, row.city, (*string)(nil))
+		connect.AssertEqual(t, row.latitude, (*float64)(nil))
+		connect.AssertEqual(t, row.longitude, (*float64)(nil))
 	})
 }
 

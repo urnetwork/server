@@ -10100,8 +10100,8 @@ var migrations = []any{
 	// when it was stored. No table holds a client address, a prefix of one or
 	// a hash of one (amendment 9): lag_track keeps only the network and the
 	// city-level place GeoLite2 gives for the address the track was issued
-	// to, and lag_result only which family the browser reached the extender
-	// on. A result's session and window start times are the
+	// to, with that city's coordinates when it names one, and lag_result only
+	// which family the browser reached the extender on. A result's session and window start times are the
 	// extender's clock and its created_at is the report's arrival on the
 	// operator's, so an extender's offset can be estimated. Tracks and
 	// results are kept for result_retention (lag.yml, 180 days).
@@ -10124,7 +10124,9 @@ var migrations = []any{
 			client_asn_org varchar(256) NULL,
 			client_country_code varchar(2) NULL,
 			client_region varchar(256) NULL,
-			client_city varchar(256) NULL
+			client_city varchar(256) NULL,
+			client_latitude double precision NULL,
+			client_longitude double precision NULL
 		);
 		CREATE INDEX lag_track_started_at ON lag_track (started_at, track_id);
 

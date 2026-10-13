@@ -21,8 +21,10 @@ import (
 // table.
 
 // A new track's client fields are the autonomous system and the GeoLite2
-// City place of the address it is issued to, looked up when it is issued; a
-// lookup that cannot answer leaves its fields empty.
+// City place of the address it is issued to, looked up when it is issued,
+// with the city's coordinates as GeoLite2 gives them. A place that names no
+// city keeps no coordinates, and a lookup that cannot answer leaves its
+// fields empty.
 func TestLagTrackClientFields(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -38,6 +40,9 @@ func TestLagTrackClientFields(t *testing.T) {
 		place := lagTestPlace("Lyon", "fr", 45.7485, 4.8467)
 		place.Region = "Auvergne-Rhone-Alpes"
 		places["198.51.100.30"] = place
+		// GeoLite2 knows only the country here, and gives the country's
+		// coordinates with it
+		places["198.51.100.40"] = &model.LagPlace{CountryCode: "fr", CountryName: "France", Latitude: 46.0, Longitude: 2.0}
 
 		issue := func(clientAddress string) *testLagTrackClientRow {
 			clientSession := newLagTestGuestSession(t, ctx, clientAddress)
@@ -55,6 +60,15 @@ func TestLagTrackClientFields(t *testing.T) {
 		connect.AssertEqual(t, *row.countryCode, "fr")
 		connect.AssertEqual(t, *row.region, "Auvergne-Rhone-Alpes")
 		connect.AssertEqual(t, *row.city, "Lyon")
+		connect.AssertEqual(t, *row.latitude, 45.7485)
+		connect.AssertEqual(t, *row.longitude, 4.8467)
+
+		// a country alone keeps no coordinates
+		row = issue("198.51.100.40:1234")
+		connect.AssertEqual(t, *row.countryCode, "fr")
+		connect.AssertEqual(t, row.city, (*string)(nil))
+		connect.AssertEqual(t, row.latitude, (*float64)(nil))
+		connect.AssertEqual(t, row.longitude, (*float64)(nil))
 
 		// neither lookup knows this address
 		row = issue("203.0.113.9:1234")
@@ -63,6 +77,8 @@ func TestLagTrackClientFields(t *testing.T) {
 		connect.AssertEqual(t, row.countryCode, (*string)(nil))
 		connect.AssertEqual(t, row.region, (*string)(nil))
 		connect.AssertEqual(t, row.city, (*string)(nil))
+		connect.AssertEqual(t, row.latitude, (*float64)(nil))
+		connect.AssertEqual(t, row.longitude, (*float64)(nil))
 	})
 }
 
@@ -72,6 +88,8 @@ type testLagTrackClientRow struct {
 	countryCode *string
 	region      *string
 	city        *string
+	latitude    *float64
+	longitude   *float64
 }
 
 func getTestLagTrackClientRow(t testing.TB, ctx context.Context, trackId server.Id) *testLagTrackClientRow {
@@ -81,12 +99,12 @@ func getTestLagTrackClientRow(t testing.TB, ctx context.Context, trackId server.
 		server.Raise(conn.QueryRow(
 			ctx,
 			`
-			SELECT client_asn, client_asn_org, client_country_code, client_region, client_city
+			SELECT client_asn, client_asn_org, client_country_code, client_region, client_city, client_latitude, client_longitude
 			FROM lag_track
 			WHERE track_id = $1
 			`,
 			trackId,
-		).Scan(&row.asn, &row.asnOrg, &row.countryCode, &row.region, &row.city))
+		).Scan(&row.asn, &row.asnOrg, &row.countryCode, &row.region, &row.city, &row.latitude, &row.longitude))
 	})
 	return row
 }

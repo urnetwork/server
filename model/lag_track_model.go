@@ -71,9 +71,11 @@ func CreateLagTrack(ctx context.Context, track *LagTrack, tickets []*LagTicket) 
 				client_asn_org,
 				client_country_code,
 				client_region,
-				client_city
+				client_city,
+				client_latitude,
+				client_longitude
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			`,
 			track.TrackId,
 			track.NetworkId,
@@ -84,6 +86,8 @@ func CreateLagTrack(ctx context.Context, track *LagTrack, tickets []*LagTicket) 
 			nullString(client.CountryCode),
 			nullString(client.Region),
 			nullString(client.City),
+			client.Latitude,
+			client.Longitude,
 		))
 		insertLagTicketsInTx(ctx, tx, tickets)
 	})
@@ -304,15 +308,18 @@ func GetLagTicket(ctx context.Context, ticketId server.Id) *LagTicket {
 }
 
 // The client fields of a track (A5): the network and the city-level place of
-// the address the track was issued to, looked up when it was issued. Never
-// the address, a prefix of it or a hash of it (amendment 9). Each is nil or
-// empty when the lookup did not reach it.
+// the address the track was issued to, looked up when it was issued, with
+// the city's coordinates as GeoLite2 City gives them. Never the address, a
+// prefix of it or a hash of it (amendment 9). Each is nil or empty when the
+// lookup did not reach it; the coordinates are nil unless it named a city.
 type LagTrackClient struct {
 	Asn         *int64
 	AsnOrg      string
 	CountryCode string
 	Region      string
 	City        string
+	Latitude    *float64
+	Longitude   *float64
 }
 
 // One report as stored (A5, A7).
