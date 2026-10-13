@@ -8,9 +8,11 @@
 // holds, in for the autovacuum (the priority index test holds SHARE, which the
 // vacuum check before the priority rebuilds does not see), and fail as soon as
 // a maintenance statement takes a place in that lock's queue, which is what
-// triggers the cancel. They use only DbMaintenance and SQL, so they run
-// unchanged on the code before the fix and fail there. Every wait is a barrier
-// on an observed PostgreSQL state.
+// triggers the cancel. They use only DbMaintenance and SQL, so they ran
+// unchanged on the code before the fix and failed there; the priority index
+// test now also sets PriorityReindex, added later, since the priority rebuilds
+// stay off until enabled. Every wait is a barrier on an observed PostgreSQL
+// state.
 package server
 
 import (
@@ -402,8 +404,9 @@ func TestDbMaintenanceDefersAPriorityIndexWhoseTableStaysLocked(t *testing.T) {
 		const indexName = "transfer_escrow_unsettled_balance_contract"
 		testDbMaintenanceCreateEscrowFixture(ctx, true)
 		opts := &DbMaintenanceOptions{
-			Reindex: true,
-			Cleanup: true,
+			Reindex:         true,
+			Cleanup:         true,
+			PriorityReindex: true,
 			// how long the priority rebuild waits for its table to clear
 			PriorityReindexLockTimeout: 200 * time.Millisecond,
 		}

@@ -3,11 +3,12 @@
 // name with the production partial index, and churns it the way contracts and
 // escrows churn: every row enters the predicate at insert and all but one in
 // fifty leave it, so every leaf page keeps a few live entries and vacuum can
-// free none of them. The root-cause tests use only DbMaintenance, its existing
-// options and SQL, so they run unchanged on the code before the fix and fail
-// there: transfer_escrow is never rebuilt as a whole and its partial index was
-// not a priority index, and the one priority index was rebuilt only in its
-// hash epoch and only when no transaction was ten minutes old.
+// free none of them. The root-cause tests use only DbMaintenance, its options
+// and SQL, so they ran unchanged on the code before the fix and failed there:
+// transfer_escrow is never rebuilt as a whole and its partial index was not a
+// priority index, and the one priority index was rebuilt only in its hash
+// epoch and only when no transaction was ten minutes old. They now also set
+// PriorityReindex, added later, since the rebuilds stay off until enabled.
 package server
 
 import (
@@ -124,8 +125,9 @@ func TestDbMaintenanceRebuildsBloatedEscrowPartialIndex(t *testing.T) {
 		beforePkeyOid := testDbMaintenanceIndexOid(ctx, "transfer_escrow_pkey")
 		for epoch := uint64(0); epoch < DbReindexEpochs; epoch += 1 {
 			outcome := DbMaintenance(ctx, epoch, &DbMaintenanceOptions{
-				Reindex: true,
-				Cleanup: true,
+				Reindex:         true,
+				Cleanup:         true,
+				PriorityReindex: true,
 			})
 			if outcome.Stopped != "" {
 				t.Fatalf("epoch %d outcome = %+v, want finished", epoch, *outcome)
@@ -180,6 +182,7 @@ func TestDbMaintenanceRebuildsBloatedPriorityIndexBehindATableDeferral(t *testin
 		outcome := DbMaintenance(ctx, epoch, &DbMaintenanceOptions{
 			Reindex:           true,
 			Cleanup:           true,
+			PriorityReindex:   true,
 			MaxTransactionAge: time.Millisecond,
 		})
 		release()
@@ -210,8 +213,9 @@ func TestDbMaintenanceLeavesCompactPriorityIndex(t *testing.T) {
 		beforeOid := testDbMaintenanceIndexOid(ctx, indexName)
 		for epoch := uint64(0); epoch < DbReindexEpochs; epoch += 1 {
 			outcome := DbMaintenance(ctx, epoch, &DbMaintenanceOptions{
-				Reindex: true,
-				Cleanup: true,
+				Reindex:         true,
+				Cleanup:         true,
+				PriorityReindex: true,
 			})
 			if outcome.Stopped != "" || 0 < len(outcome.DoneIndexes) {
 				t.Fatalf("epoch %d outcome = %+v, want finished with no priority rebuild", epoch, *outcome)
