@@ -632,22 +632,31 @@ func TestVerifyProviderRateMetersCountPerProvider(t *testing.T) {
 }
 
 // §8.2, IPV6.md C7: retryable answers to an unattributed source are counted
-// per step: per trail and depth for an EXTEND, per signature for a SEED, each
-// for as long as a step can last.
+// per step: per trail and depth for an EXTEND, with the last answer's time,
+// per signature for a SEED, each for as long as a step can last.
 func TestVerifyUnattributedAttemptsCountPerStep(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		settings := DefaultVerifySettings()
 		trailId := server.NewId()
 		for i := int64(1); i <= 3; i++ {
-			if got := IncrVerifyUnattributedExtend(ctx, trailId, 1, settings); got != i {
+			if got := IncrVerifyUnattributedExtend(ctx, trailId, 1, uint64(100*i), settings); got != i {
 				t.Fatalf("depth 1 attempt %d counted %d", i, got)
 			}
 		}
-		if got := IncrVerifyUnattributedExtend(ctx, trailId, 2, settings); got != 1 {
+		if got := GetVerifyUnattributedExtendAnsweredMs(ctx, trailId, 1); got != 300 {
+			t.Fatalf("depth 1's last answer = %d, want 300", got)
+		}
+		if got := IncrVerifyUnattributedExtend(ctx, trailId, 2, 400, settings); got != 1 {
 			t.Fatalf("the next step shared the count: %d", got)
 		}
-		if got := IncrVerifyUnattributedExtend(ctx, server.NewId(), 1, settings); got != 1 {
+		if got := GetVerifyUnattributedExtendAnsweredMs(ctx, trailId, 2); got != 400 {
+			t.Fatalf("depth 2's last answer = %d, want its own", got)
+		}
+		if got := GetVerifyUnattributedExtendAnsweredMs(ctx, trailId, 3); got != 0 {
+			t.Fatalf("a step without a retryable answer answered at %d", got)
+		}
+		if got := IncrVerifyUnattributedExtend(ctx, server.NewId(), 1, 500, settings); got != 1 {
 			t.Fatalf("another trail shared the count: %d", got)
 		}
 		seedSig, otherSig := []byte("seed-signature"), []byte("other-signature")

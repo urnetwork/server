@@ -31,7 +31,8 @@ package model
 //	verify_seed_vpk_<vpk>_<window> seed fixed-window counter per vpk (§9)
 //	verify_{seed,extend}_provider_<clientId>_<window> counters per resolved provider (§9)
 //	verify_extend_pad_<ip hash>_<window> scratch counter an unresolved EXTEND source pays (§9)
-//	{vtr_<trailId>}unattributed_<depth> retryable answers to one step's unattributed source
+//	{vtr_<trailId>}unattributed_<depth> retryable answers to one step's unattributed
+//	                        source: their count, and the last one's unix ms
 //	verify_seed_unattributed_<sig hash> retryable answers to one SEED's unresolved source
 //	verify_trails_<vpk>     active trail count per vpk (concurrent-trail cap, §9)
 //	{verify_cohort:<deployment>}e<epoch>       providers admitted for one settlement epoch
@@ -214,7 +215,10 @@ func (self *VerifySettings) TrailTtl(m int) time.Duration {
 
 // VerifyTrailHop is one hop record of a trail. `AssignedMs`/`AssignN` are zero
 // for the validator-chosen seed hop, which is never a server assignment and is
-// excluded from statistics (§7.6). `ConfirmedMs` is zero while pending.
+// excluded from statistics (§7.6). A confirmed hop's `AssignedMs` is the start
+// of the attempt that was attributed: its ASSIGN time, or the step's last
+// retryable answer (§8.2), so `ConfirmedMs − AssignedMs` is that attempt's
+// latency (§7.5). `ConfirmedMs` is zero while pending.
 // `EgressIpHash` is the hop's egress-IP-hash at the configured subnet
 // granularity (§8.1, §3.3, D27) — the head routable-IP-score input, set at
 // confirmation (zero while pending) and carried verbatim into the published
@@ -1191,32 +1195,62 @@ func verifyUnattributedSeedKey(seedSig []byte) string {
 }
 
 // IncrVerifyUnattributedExtend counts an EXTEND of the step at `depth` whose
-// source resolved to no provider or to another than the pending one, and
-// returns the count. The count lives as long as the step can.
+// source resolved to no provider or to another than the pending one, notes
+// `answeredMs` as the step's last such answer, and returns the count. Both
+// live as long as the step can. Past the limit the trail fails, so the time a
+// later confirmation reads is always a retryable answer's.
 func IncrVerifyUnattributedExtend(
 	ctx context.Context,
 	trailId server.Id,
 	depth int,
+	answeredMs uint64,
 	settings *VerifySettings,
-) int64 {
-	return incrVerifyUnattributed(ctx, verifyUnattributedExtendKey(trailId, depth), settings)
+) (count int64) {
+	key := verifyUnattributedExtendKey(trailId, depth)
+	server.Redis(ctx, func(r server.RedisClient) {
+		var countCmd *redis.IntCmd
+		_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			countCmd = pipe.HIncrBy(ctx, key, "attempts", 1)
+			pipe.HSet(ctx, key, "answered_ms", answeredMs)
+			pipe.PExpire(ctx, key, settings.StepTimeout+settings.StepTimeoutGrace)
+			return nil
+		})
+		server.Raise(err)
+		count = countCmd.Val()
+	})
+	return
+}
+
+// GetVerifyUnattributedExtendAnsweredMs is when the step at `depth` last
+// answered an EXTEND as retryable, or 0 when it never did. The attributed
+// resend started from that answer, as a first attempt starts from the ASSIGN,
+// so the hop's latency counts from it (§7.5).
+func GetVerifyUnattributedExtendAnsweredMs(
+	ctx context.Context,
+	trailId server.Id,
+	depth int,
+) (answeredMs uint64) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		value, err := r.HGet(ctx, verifyUnattributedExtendKey(trailId, depth), "answered_ms").Result()
+		if errors.Is(err, redis.Nil) {
+			return
+		}
+		server.Raise(err)
+		answeredMs, err = strconv.ParseUint(value, 10, 64)
+		server.Raise(err)
+	})
+	return
 }
 
 // IncrVerifyUnattributedSeed is IncrVerifyUnattributedExtend for a SEED,
-// identified by its signature: the validator resends the identical body.
+// identified by its signature: the validator resends the identical body. A
+// seed hop has no latency, so no time is noted.
 func IncrVerifyUnattributedSeed(
 	ctx context.Context,
 	seedSig []byte,
 	settings *VerifySettings,
-) int64 {
-	return incrVerifyUnattributed(ctx, verifyUnattributedSeedKey(seedSig), settings)
-}
-
-func incrVerifyUnattributed(
-	ctx context.Context,
-	key string,
-	settings *VerifySettings,
 ) (count int64) {
+	key := verifyUnattributedSeedKey(seedSig)
 	server.Redis(ctx, func(r server.RedisClient) {
 		var countCmd *redis.IntCmd
 		_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {

@@ -936,7 +936,7 @@ func verifyExtend(
 		if sourceClientId != nil {
 			reason = "source-egress-mismatch"
 		}
-		if attempt := model.IncrVerifyUnattributedExtend(ctx, trailId, len(trail.Hops), settings); attempt <= model.VerifyUnattributedAttemptLimit {
+		if attempt := model.IncrVerifyUnattributedExtend(ctx, trailId, len(trail.Hops), nowMs, settings); attempt <= model.VerifyUnattributedAttemptLimit {
 			glog.Infof("[verify]EXTEND retryable trail=%s depth=%d pending=%s reason=%s attempt=%d\n", trail.TrailId, len(trail.Hops)+1, trail.Pending.ClientId, reason, attempt)
 			return nil, errVerifySourceUnresolved
 		}
@@ -944,12 +944,22 @@ func verifyExtend(
 	}
 
 	// §4.2 step 6: confirm the hop, stamp server time (§3.4), record
-	// per-step latency at the instant of confirmation (§7.5)
+	// per-step latency at the instant of confirmation (§7.5). The latency
+	// counts from the server's last answer on the step: the ASSIGN, or the
+	// step's last retryable answer, after which the attributed resend went.
+	// The hop's AssignedMs carries that start, so every reader of
+	// ConfirmedMs − AssignedMs (the stats, the published percentiles, the
+	// receipts) counts the attributed attempt only. A step with no retryable
+	// answer keeps its ASSIGN time, and the step deadline its pending hop's.
+	startMs := trail.Pending.AssignedMs
+	if answeredMs := model.GetVerifyUnattributedExtendAnsweredMs(ctx, trailId, len(trail.Hops)); startMs < answeredMs {
+		startMs = min(answeredMs, nowMs)
+	}
 	confirmedHop := &model.VerifyTrailHop{
 		ClientId:     trail.Pending.ClientId,
 		NetworkId:    trail.Pending.NetworkId,
 		NetworkIssue: trail.Pending.NetworkIssue,
-		AssignedMs:   trail.Pending.AssignedMs,
+		AssignedMs:   startMs,
 		ConfirmedMs:  nowMs,
 		AssignN:      trail.Pending.AssignN,
 		// §4.2 step 5 passed, so the confirming request's source ip is this

@@ -1,8 +1,9 @@
 // Providers with an address in each family (VALIDATOR.md §8.2, IPV6.md C7):
 // hops confirm from either family, a provider scores one prefix a window, the
 // per-source budgets stay one per provider, and a source the step cannot
-// attribute is answered as retryable before it fails the step. Only a
-// registered key learns anything of attribution.
+// attribute is answered as retryable before it fails the step, its hop's
+// latency counting from the attributed resend. Only a registered key learns
+// anything of attribution.
 package controller
 
 import (
@@ -559,4 +560,93 @@ func TestVerifyPoisonTrailDoesNotPinTheHeadHash(t *testing.T) {
 			t.Errorf("an IPv4 hop after the provider's IPv6 hops recorded %x, not its IPv4 prefix", got)
 		}
 	})
+}
+
+// §7.5, §8.2 (N6; the validator's counterpart is sn probe
+// TestProbeTrailHopLatencyExcludesTheUnattributedAttempt): a hop's recorded
+// latency, and so the published percentiles, count from the attempt that was
+// attributed. A hop answered 421 once or twice records the step's last
+// retryable answer as its start, when its resend went, so its latency
+// excludes the unattributed attempts; the 421s leave the pending hop, and so
+// the step's deadline, unchanged. A hop with no 421 keeps its ASSIGN time.
+func TestVerifyHopLatencyExcludesTheUnattributedAttempts(t *testing.T) {
+	const unattributedDelay = 300 * time.Millisecond
+	for _, retries := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("%d retryable answers", retries), func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx := context.Background()
+				testVerifyInstallServerKey()
+				settings := model.DefaultVerifySettings()
+				SetVerifySettings(settings)
+				seedIp := netip.MustParseAddr("192.0.2.130")
+				testVerifyProvider(ctx, seedIp, settings)
+				indexed, unindexed := netip.MustParseAddr("203.0.113.131"), netip.MustParseAddr("2001:db8:131::1")
+				pending := testVerifyProvider(ctx, indexed, settings)
+				validatorId, vpk, vpkKey := testVerifyValidator(ctx)
+				result, err := Verify(testVerifySeedArgs(t, validatorId, vpk, vpkKey, connect.VerifyMMin), testVerifyAddrSession(ctx, seedIp))
+				if err != nil {
+					t.Fatal(err)
+				}
+				assign := result.(*connect.VerifyAssignResult)
+				if server.Id(assign.NextHop) != pending {
+					t.Fatalf("assigned %s, want the only other provider", server.Id(assign.NextHop))
+				}
+				trailId := server.Id(assign.TrailId)
+				assignedMs := model.GetVerifyTrail(ctx, trailId).Pending.AssignedMs
+				extend := testVerifyExtendArgs(t, validatorId, vpk, vpkKey, assign)
+				// the next assignment after the confirmed hop
+				testVerifyProvider(ctx, netip.MustParseAddr("192.0.2.132"), settings)
+
+				var answeredMs uint64
+				for attempt := 0; attempt < retries; attempt++ {
+					time.Sleep(unattributedDelay)
+					if _, err := Verify(extend, testVerifyAddrSession(ctx, unindexed)); err == nil || err.Error() != testVerifyRetryableAnswer {
+						t.Fatalf("attempt %d from the unindexed family = %v, want the retryable answer", attempt+1, err)
+					}
+					if trail := model.GetVerifyTrail(ctx, trailId); trail.Pending.AssignedMs != assignedMs {
+						t.Fatalf("a retryable answer moved the pending hop's ASSIGN time to %d", trail.Pending.AssignedMs)
+					}
+					answeredMs = model.GetVerifyUnattributedExtendAnsweredMs(ctx, trailId, 1)
+				}
+				if _, err := Verify(extend, testVerifyAddrSession(ctx, indexed)); err != nil {
+					t.Fatalf("the attributed attempt = %v", err)
+				}
+				hop := model.GetVerifyTrail(ctx, trailId).Hops[1]
+				wantStart := assignedMs
+				if 0 < retries {
+					wantStart = answeredMs
+				}
+				if hop.ClientId != pending || hop.AssignedMs != wantStart {
+					t.Fatalf("the confirmed hop starts at %d, want %d (ASSIGN at %d)", hop.AssignedMs, wantStart, assignedMs)
+				}
+				latencyMs := hop.ConfirmedMs - hop.AssignedMs
+				delayMs := uint64(unattributedDelay.Milliseconds())
+				if 0 < retries {
+					if hop.ConfirmedMs-assignedMs < uint64(retries)*delayMs {
+						t.Fatalf("control: the step took %d ms, less than its unattributed attempts", hop.ConfirmedMs-assignedMs)
+					}
+					if delayMs <= latencyMs {
+						t.Fatalf("the recorded latency %d ms includes an unattributed attempt", latencyMs)
+					}
+				}
+
+				// the published percentile is the attributed attempt's
+				model.RollupVerifyProviderStats(ctx, server.NowUtc(), settings)
+				want := model.VerifyLatencyBucketMs(model.VerifyLatencyBucketIndex(int64(latencyMs)))
+				published := false
+				for _, row := range model.GetVerifyProviderStats(ctx, pending) {
+					if row.Confirmations == 0 {
+						continue
+					}
+					published = true
+					if row.Confirmations != 1 || row.LatencyP50Ms == nil || *row.LatencyP50Ms != want {
+						t.Fatalf("the provider's published row = %+v, want one confirmation at p50 %d ms", row, want)
+					}
+				}
+				if !published {
+					t.Fatal("the confirmation was not published")
+				}
+			})
+		})
+	}
 }
