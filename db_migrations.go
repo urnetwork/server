@@ -10009,4 +10009,42 @@ var migrations = []any{
 	).withIndexCompletion(820, "network_client_connection", "network_client_connection_connected_handler_id",
 		"CREATE INDEX network_client_connection_connected_handler_id ON public.network_client_connection USING btree (handler_id) WHERE connected",
 		"connected"),
+
+	// 821: settlement v2 ledger records and vault2 mirror (st_ledger_v2_schema.go).
+	// New tables only. Apply before deploying a server with v2 addresses.
+	newSqlMigration(stLedgerV2SchemaSql),
+	// 822: settlement v2 ledger inputs at a million providers
+	// (VERSION2-FINAL.md §8.2). st_verified_wallet_consent holds each
+	// generation of a retained consent chain that verified completely through
+	// some head, so epoch wallet selection verifies a chain once per head
+	// (model/st_wallet_consent_verified.go). A column a kind does not carry
+	// is zero; epochs and blocks are uint64 stored by bit pattern.
+	// st_fleet_bound_sync is the next block the FleetBound scan has mirrored
+	// into st_event, which bounds the head-exclusion candidates
+	// (controller/st_head_exclusion.go). New tables: nothing is rewritten,
+	// and v1 settlement reads neither.
+	newSqlMigration(`
+		CREATE TABLE st_verified_wallet_consent (
+			scope_hash bytea NOT NULL CHECK (octet_length(scope_hash) = 32),
+			kind varchar(16) NOT NULL CHECK (kind IN ('provider', 'network', 'delegation', 'hotkey')),
+			owner bytea NOT NULL CHECK (octet_length(owner) IN (16, 32)),
+			generation bigint NOT NULL CHECK (generation BETWEEN 1 AND 4096),
+			original_hash bytea NOT NULL CHECK (octet_length(original_hash) = 32),
+			from_epoch bigint NOT NULL,
+			through_epoch bigint NOT NULL,
+			wallet bytea NOT NULL CHECK (octet_length(wallet) = 32),
+			network_id bytea NOT NULL CHECK (octet_length(network_id) = 16),
+			consent_head_hash bytea NOT NULL CHECK (octet_length(consent_head_hash) = 32),
+			consent_generation bigint NOT NULL,
+			prospective_signer bytea NOT NULL CHECK (octet_length(prospective_signer) = 20),
+			prospective_block bigint NOT NULL,
+			prospective_epoch bigint NOT NULL,
+			expires_at bigint NOT NULL,
+			PRIMARY KEY (scope_hash, kind, owner, generation)
+		);
+		CREATE TABLE st_fleet_bound_sync (
+			deployment_key varchar(96) NOT NULL PRIMARY KEY,
+			next_block bigint NOT NULL
+		);
+	`),
 }

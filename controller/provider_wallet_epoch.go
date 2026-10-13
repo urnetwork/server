@@ -190,16 +190,25 @@ func stCountPayoutWalletSources(selection *StPayoutWalletSelection) map[string]i
 // borrow the current directory, a legacy login or a later projection; startup
 // and the existing account-display and legacy-payment APIs remain separate.
 func stProviderWalletsForEpoch(ctx context.Context, cfg *StConfig, approved *stProviderWorkAuthority, epoch *StPayoutEpochAuthority) (map[server.Id]*model.StProviderWallet, error) {
-	if ctx == nil || cfg == nil || cfg.RootKey == nil || approved == nil || epoch == nil {
-		return nil, protocol.ErrWalletMappingUnavailable
-	}
-	if err := ctx.Err(); err != nil {
+	if err := stProviderWalletRosterAdmission(ctx, cfg, approved, epoch); err != nil {
 		return nil, err
 	}
-	if cfg.Netuid == 0 || cfg.Netuid > 65535 || cfg.PolicyHash != epoch.PolicyHash || approved.Expectation.ClientKeyRootSigner != crypto.PubkeyToAddress(cfg.RootKey.PublicKey) {
-		return nil, protocol.ErrWalletMappingIntegrity
-	}
 	return model.GetStProviderWalletsForEpoch(ctx, approved.Raw, approved.Expectation, stProviderWalletEpochScope(cfg, epoch))
+}
+
+// The roster selection's preconditions, shared with settlement v2's bulk
+// selection.
+func stProviderWalletRosterAdmission(ctx context.Context, cfg *StConfig, approved *stProviderWorkAuthority, epoch *StPayoutEpochAuthority) error {
+	if ctx == nil || cfg == nil || cfg.RootKey == nil || approved == nil || epoch == nil {
+		return protocol.ErrWalletMappingUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if cfg.Netuid == 0 || cfg.Netuid > 65535 || cfg.PolicyHash != epoch.PolicyHash || approved.Expectation.ClientKeyRootSigner != crypto.PubkeyToAddress(cfg.RootKey.PublicKey) {
+		return protocol.ErrWalletMappingIntegrity
+	}
+	return nil
 }
 
 // Before provider_work.yml is provisioned there is no roster to pin heads. The
@@ -208,6 +217,16 @@ func stProviderWalletsForEpoch(ctx context.Context, cfg *StConfig, approved *stP
 // precedence, verification and prospective gate. A provider without accepted
 // evidence is reported absent or refused rather than holding the payout.
 func stRetainedProviderWalletSelectionForEpoch(ctx context.Context, cfg *StConfig, epoch *StPayoutEpochAuthority, usages []*model.StProviderUsage) (*model.StRetainedProviderWalletSelection, error) {
+	providers, err := stRetainedProviderWalletIdentities(ctx, cfg, epoch, usages)
+	if err != nil {
+		return nil, err
+	}
+	return model.GetStRetainedProviderWalletSelectionForEpoch(ctx, crypto.PubkeyToAddress(cfg.RootKey.PublicKey), stProviderWalletEpochScope(cfg, epoch), providers)
+}
+
+// The retained selection's preconditions and the observed providers' wallet
+// identities, shared with settlement v2's bulk selection.
+func stRetainedProviderWalletIdentities(ctx context.Context, cfg *StConfig, epoch *StPayoutEpochAuthority, usages []*model.StProviderUsage) ([]model.StProviderWalletIdentity, error) {
 	if ctx == nil || cfg == nil || cfg.RootKey == nil || epoch == nil {
 		return nil, protocol.ErrWalletMappingUnavailable
 	}
@@ -224,7 +243,7 @@ func stRetainedProviderWalletSelectionForEpoch(ctx context.Context, cfg *StConfi
 		}
 		providers[index] = model.StProviderWalletIdentity{ClientId: usage.ClientId, NetworkId: usage.NetworkId}
 	}
-	return model.GetStRetainedProviderWalletSelectionForEpoch(ctx, crypto.PubkeyToAddress(cfg.RootKey.PublicKey), stProviderWalletEpochScope(cfg, epoch), providers)
+	return providers, nil
 }
 
 // The configured operator domain under the authenticated epoch's policy and

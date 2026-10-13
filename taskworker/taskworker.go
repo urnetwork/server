@@ -579,6 +579,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.StFinalizePokePost,
 		),
 		task.NewTaskTargetWithPost(
+			work.StLedgerV2Step,
+			work.StLedgerV2StepPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.PaymentReconcile,
 			work.PaymentReconcilePost,
 		),

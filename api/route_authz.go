@@ -245,6 +245,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sn/pool/claim":                            routeAccessClient,
 	"GET /sn/epoch":                                 routeAccessPublic,
 	"GET /sn/artifact":                              routeAccessPublic,
+	"GET /sn/ledger/object":                         routeAccessPublic,
+	"GET /sn/ledger/account":                        routeAccessPublic,
 	"GET /sn/attempt-artifact":                      routeAccessPublic,
 	"POST /sn/attempt-artifact":                     routeAccessClient,
 	"GET /sn/artifacts":                             routeAccessPublic,

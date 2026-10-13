@@ -133,6 +133,9 @@ Usage:
     bringyourctl st commit --epoch=<epoch>
     bringyourctl st finalize --epoch=<epoch>
     bringyourctl st payout-dry-run --epoch=<epoch> [--out=<path>]
+    bringyourctl st v2-unrecoverable --epoch=<epoch> --by=<operator>
+    bringyourctl st v2-rebuild --epoch=<epoch> --by=<operator>
+    bringyourctl st v2-rebuild-withdraw --epoch=<epoch> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
 
 Options:
@@ -452,6 +455,12 @@ func main() {
 			stFinalize(opts)
 		} else if payoutDryRun, _ := opts.Bool("payout-dry-run"); payoutDryRun {
 			stPayoutDryRun(opts)
+		} else if unrecoverable, _ := opts.Bool("v2-unrecoverable"); unrecoverable {
+			stV2Unrecoverable(opts)
+		} else if rebuild, _ := opts.Bool("v2-rebuild"); rebuild {
+			stV2Rebuild(opts)
+		} else if rebuildWithdraw, _ := opts.Bool("v2-rebuild-withdraw"); rebuildWithdraw {
+			stV2RebuildWithdraw(opts)
 		}
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
