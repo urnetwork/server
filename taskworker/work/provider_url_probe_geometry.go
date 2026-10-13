@@ -36,7 +36,11 @@ var providerEgressProbeConfigVersion = func() string {
 }
 
 // Whether candidate is a strictly newer config version than reference. An
-// empty or unparsable version on either side has no order.
+// empty or unparsable version on either side has no order. Within a release
+// only build metadata orders versions, as in warp. A docker tag form such as
+// 2026.10.13-host-1071053750 carries the build code in the prerelease
+// instead, so a release without build metadata on either side has no order
+// rather than losing to any version that has it.
 func providerEgressProbeGenerationNewer(candidate string, reference string) bool {
 	if candidate == "" || reference == "" {
 		return false
@@ -51,6 +55,9 @@ func providerEgressProbeGenerationNewer(candidate string, reference string) bool
 	}
 	if candidateVersion.Major == referenceVersion.Major && candidateVersion.Minor == referenceVersion.Minor &&
 		candidateVersion.Patch == referenceVersion.Patch {
+		if candidateVersion.Metadata == "" || referenceVersion.Metadata == "" {
+			return false
+		}
 		return referenceVersion.Metadata < candidateVersion.Metadata
 	}
 	return referenceVersion.LessThan(*candidateVersion)

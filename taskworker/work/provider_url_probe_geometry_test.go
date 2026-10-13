@@ -15,7 +15,9 @@ func withTestConfigVersion(t testing.TB, version string) {
 }
 
 // Release order first, then build metadata within a release, as warp picks
-// the latest config; unknown versions have no order in either direction.
+// the latest config; unknown versions have no order in either direction. A
+// docker tag form, with the build code in the prerelease, has no order within
+// its release, and a '+' form does not outrank it there.
 func TestProviderEgressProbeGenerationOrdersLikeWarp(t *testing.T) {
 	cases := []struct {
 		candidate string
@@ -33,6 +35,12 @@ func TestProviderEgressProbeGenerationOrdersLikeWarp(t *testing.T) {
 		{candidate: testNewerConfigVersion, reference: "", want: false},
 		{candidate: "not-a-version", reference: testOlderConfigVersion, want: false},
 		{candidate: testNewerConfigVersion, reference: "0.0.0-local", want: true},
+		{candidate: "2026.10.13-synthetic-1000000200", reference: "2026.10.13-synthetic-1000000100", want: false},
+		{candidate: "2026.10.13-synthetic-1000000100", reference: "2026.10.13-synthetic-1000000200", want: false},
+		{candidate: "2026.10.13-synthetic+1000000100", reference: "2026.10.13-synthetic-1000000200", want: false},
+		{candidate: "2026.10.13-synthetic-1000000200", reference: "2026.10.13-synthetic+1000000100", want: false},
+		{candidate: "2026.10.13-synthetic-1000000100", reference: "2026.10.12-synthetic+1000000000", want: true},
+		{candidate: "2026.10.12-synthetic+1000000000", reference: "2026.10.13-synthetic-1000000100", want: false},
 	}
 	for _, c := range cases {
 		if got := providerEgressProbeGenerationNewer(c.candidate, c.reference); got != c.want {
