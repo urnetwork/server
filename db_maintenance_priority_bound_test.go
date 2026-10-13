@@ -38,6 +38,7 @@ func TestDbMaintenancePriorityRebuildsAreBoundedSmallestFirst(t *testing.T) {
 		outcome := DbMaintenance(ctx, 0, &DbMaintenanceOptions{
 			Reindex:             true,
 			Cleanup:             true,
+			PriorityReindex:     true,
 			MaxPriorityRebuilds: 1,
 		})
 		if !slices.Equal(outcome.DoneIndexes, []string{smallerIndexName}) {
@@ -54,6 +55,7 @@ func TestDbMaintenancePriorityRebuildsAreBoundedSmallestFirst(t *testing.T) {
 		outcome = DbMaintenance(ctx, 0, &DbMaintenanceOptions{
 			Reindex:             true,
 			Cleanup:             true,
+			PriorityReindex:     true,
 			MaxPriorityRebuilds: 1,
 			DoneIndexes:         outcome.DoneIndexes,
 		})
@@ -104,8 +106,9 @@ func TestDbMaintenanceSkipsPriorityRebuildWhileItsTableIsVacuumed(t *testing.T) 
 		RaisePgResult(tx.Exec(ctx, `LOCK TABLE `+pgx.Identifier{"public", "transfer_escrow"}.Sanitize()+` IN SHARE UPDATE EXCLUSIVE MODE`))
 
 		outcome := DbMaintenance(ctx, 0, &DbMaintenanceOptions{
-			Reindex: true,
-			Cleanup: true,
+			Reindex:         true,
+			Cleanup:         true,
+			PriorityReindex: true,
 		})
 		release()
 		if outcome.Stopped != "" || slices.Contains(outcome.DoneIndexes, indexName) {
@@ -116,8 +119,9 @@ func TestDbMaintenanceSkipsPriorityRebuildWhileItsTableIsVacuumed(t *testing.T) 
 		}
 
 		outcome = DbMaintenance(ctx, 0, &DbMaintenanceOptions{
-			Reindex: true,
-			Cleanup: true,
+			Reindex:         true,
+			Cleanup:         true,
+			PriorityReindex: true,
 		})
 		if !slices.Equal(outcome.DoneIndexes, []string{indexName}) {
 			t.Fatalf("outcome after the release = %+v, want %s done", *outcome, indexName)

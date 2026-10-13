@@ -1,8 +1,9 @@
 // Scheduled database maintenance: a hash rotation rebuilds each public table's
-// indexes once per DbReindexEpochs epochs with REINDEX CONCURRENTLY, rebuilds
+// indexes once per DbReindexEpochs epochs with REINDEX CONCURRENTLY, measures
 // each named high-churn partial index of a table too large for the rotation
-// whenever it is bloated, removes the invalid copies an interrupted concurrent
-// rebuild leaves behind, and refreshes planner statistics.
+// and, once an operator enables it, rebuilds it whenever it is bloated, removes
+// the invalid copies an interrupted concurrent rebuild leaves behind, and
+// refreshes planner statistics.
 //
 // A concurrent rebuild first adds an invalid _ccnew copy of every index, builds
 // and validates each copy while waiting for older transactions, then swaps the
@@ -145,6 +146,30 @@ const DefaultDbMaintenanceMaxPriorityRebuilds = 3
 const DefaultDbMaintenancePriorityMaxTransactionAge = time.Hour
 
 const DefaultDbMaintenancePriorityReindexLockTimeout = time.Hour
+
+// A priority rebuild reads all of transfer_contract's or transfer_escrow's heap
+// twice, so the rebuilds stay off until an operator enables them in
+// db_maintenance.yml, the maintenance pool's config resource:
+//
+//	priority_reindex_enabled: true
+//
+// Until then each run measures and logs the priority indexes and rebuilds
+// none. The scheduled task reads the value when a run starts, so a change
+// applies to the next run. An absent or unreadable resource, or an absent or
+// malformed value, keeps the rebuilds off.
+func DbMaintenancePriorityReindexEnabled() bool {
+	resource, err := Config.SimpleResource(MaintenancePgConfigResourceName)
+	if err != nil {
+		return false
+	}
+	var config struct {
+		PriorityReindexEnabled *bool `yaml:"priority_reindex_enabled"`
+	}
+	if err := resource.UnmarshalYamlE(&config); err != nil {
+		return false
+	}
+	return config.PriorityReindexEnabled != nil && *config.PriorityReindexEnabled
+}
 
 // Whether indexName is a priority index or a transient copy that a concurrent
 // rebuild makes of one, so a monitor can tell the bounded rebuild of one
@@ -497,6 +522,9 @@ type DbMaintenanceOptions struct {
 	MaxRunningBackends   int
 	ReindexLockTimeout   time.Duration
 	CleanupLockTimeout   time.Duration
+	// Rebuild the bloated priority indexes. Without it a run measures and logs
+	// them and rebuilds none; see DbMaintenancePriorityReindexEnabled.
+	PriorityReindex bool
 	// bounds of the bloat-triggered priority index rebuilds
 	MaxPriorityRebuilds        int
 	PriorityMaxTransactionAge  time.Duration
@@ -1211,10 +1239,10 @@ func DbMaintenanceWithDefaults(ctx context.Context, epoch uint64) *DbMaintenance
 }
 
 // Runs one epoch of the rotation (see the file comment), after first rebuilding
-// up to MaxPriorityRebuilds bloated priority indexes. A context that is already
-// done panics at the first query, as before, so a canceled task is not
-// acknowledged; once the run has started it returns an outcome instead, whose
-// Stopped field says whether the epoch finished.
+// up to MaxPriorityRebuilds bloated priority indexes when PriorityReindex is
+// set. A context that is already done panics at the first query, as before, so
+// a canceled task is not acknowledged; once the run has started it returns an
+// outcome instead, whose Stopped field says whether the epoch finished.
 func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions) *DbMaintenanceOutcome {
 
 	// regularly reindex tables to avoid bloat:
@@ -1269,8 +1297,10 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 
 	slices.Sort(reindexTableNames)
 
-	// Every run rebuilds the priority indexes that are bloated now, whatever
-	// the epoch; an unmeasurable index is left alone.
+	// Every run measures the priority indexes and logs their sizes. With
+	// PriorityReindex it rebuilds those bloated now, whatever the epoch; an
+	// unmeasurable index is left alone. Without it the run logs which are
+	// bloated and rebuilds none, so none is recorded done.
 	priorityIndexes := []dbMaintenancePriorityIndex{}
 	if opts.Reindex {
 		measuredIndexes, err := dbMaintenancePriorityIndexSizes(ctx, priorityReindexIndexes)
@@ -1287,7 +1317,21 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 				measuredIndex.heapBytes,
 			)
 		}
-		priorityIndexes = dbMaintenanceSelectPriorityIndexes(measuredIndexes, opts.DoneIndexes, opts.maxPriorityRebuilds())
+		if opts.PriorityReindex {
+			priorityIndexes = dbMaintenanceSelectPriorityIndexes(measuredIndexes, opts.DoneIndexes, opts.maxPriorityRebuilds())
+		} else {
+			bloatedIndexNames := []string{}
+			for _, measuredIndex := range measuredIndexes {
+				if measuredIndex.bloated() {
+					bloatedIndexNames = append(bloatedIndexNames, measuredIndex.indexName)
+				}
+			}
+			glog.Infof(
+				"[db]maintenance priority index rebuilds are off (priority_reindex_enabled in %s); bloated, not rebuilt: %s\n",
+				MaintenancePgConfigResourceName,
+				strings.Join(bloatedIndexNames, ", "),
+			)
+		}
 	}
 	priorityIndexNames := []string{}
 	for _, priorityIndex := range priorityIndexes {

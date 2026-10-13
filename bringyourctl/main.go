@@ -667,6 +667,9 @@ func dbMaintenance(opts docopt.Opts) {
 	// the explicit opt-in that lets this run rebuild tables above the
 	// automatic rotation's size bound
 	includeLarge, _ := opts.Bool("--include-large")
+	// bloated priority indexes are rebuilt only when db_maintenance.yml
+	// enables it, as for the scheduled task
+	priorityReindex := server.DbMaintenancePriorityReindexEnabled()
 
 	// a stopped run prints why; the load guard applies to operator runs too
 	report := func(outcome *server.DbMaintenanceOutcome) bool {
@@ -697,6 +700,7 @@ func dbMaintenance(opts docopt.Opts) {
 				Cleanup:            cleanup,
 				Analyze:            analyze && epoch == server.DbReindexEpochs-1,
 				IncludeLargeTables: includeLarge,
+				PriorityReindex:    priorityReindex,
 			})
 			if !report(outcome) {
 				return
@@ -711,6 +715,7 @@ func dbMaintenance(opts docopt.Opts) {
 		Cleanup:            cleanup,
 		Analyze:            analyze,
 		IncludeLargeTables: includeLarge,
+		PriorityReindex:    priorityReindex,
 	}
 
 	fmt.Printf("Running DB maintenance ...\n")
