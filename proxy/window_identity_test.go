@@ -24,7 +24,7 @@ func TestProxyWindowIdentityReuse(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyWindowIdentityReuse\n")
-		h := setupProxyTest(t)
+		h := setupProxyTargetTest(t)
 		defer h.close(t)
 
 		// the device is ready (setup warmed it), so its window has formed and

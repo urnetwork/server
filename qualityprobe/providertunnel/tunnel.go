@@ -270,6 +270,11 @@ func providerTunnelMultiClientSettingsForConfig(cfg Config) *connect.MultiClient
 	return settings
 }
 
+// newProviderTunnelClientSettings builds the settings of each client the
+// tunnel generates. It is a variable so a test can keep WebRTC candidate
+// gathering on this machine; production never replaces it.
+var newProviderTunnelClientSettings = providerTunnelClientSettings
+
 // Each generated client owns fresh settings. Full and bandwidth probes leave
 // the reservation target unset and retain the shared contract ramp.
 func providerTunnelClientSettings(reservationByteCount connect.ByteCount) *connect.ClientSettings {
@@ -421,7 +426,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		cfg.Version,
 		&cfg.ClientId,
 		func() *connect.ClientSettings {
-			return providerTunnelClientSettings(cfg.ContractReservationByteCount)
+			return newProviderTunnelClientSettings(cfg.ContractReservationByteCount)
 		},
 		generatorSettings,
 	)

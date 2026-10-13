@@ -111,7 +111,7 @@ func (p *deadlineRedisPeer) dial(context.Context, string, string) (net.Conn, err
 				reply = "+PONG\r\n"
 			case "get":
 				if p.redirect {
-					reply = "-MOVED 42 other-retirement.invalid:6379\r\n"
+					reply = "-MOVED 42 192.0.2.2:6379\r\n"
 				} else {
 					reply = "$-1\r\n"
 				}
@@ -130,8 +130,12 @@ func (p *deadlineRedisPeer) dial(context.Context, string, string) (net.Conn, err
 	return client, nil
 }
 
+// The synthetic peers are reached only through their dialers. Their addresses
+// are literals because go-redis resolves a host name when it builds a client.
+const deadlineTestRedisAddress = "192.0.2.1:6379"
+
 func deadlineTestRedisOptions(p *deadlineRedisPeer) *redis.Options {
-	return &redis.Options{Addr: "retirement.invalid:6379", Protocol: 2, DisableIdentity: true, ContextTimeoutEnabled: true, MaxRetries: -1, DialerRetries: 1,
+	return &redis.Options{Addr: deadlineTestRedisAddress, Protocol: 2, DisableIdentity: true, ContextTimeoutEnabled: true, MaxRetries: -1, DialerRetries: 1,
 		ReadTimeout: time.Second, WriteTimeout: time.Second, PoolTimeout: time.Second, DialTimeout: time.Second, PoolSize: 8, MaxActiveConns: 8, Dialer: p.dial}
 }
 func installDeadlineTestClient(t *testing.T, client RedisClient) {
@@ -308,9 +312,10 @@ func TestRedisWithDeadlineDialAndResolverFaults(t *testing.T) {
 					<-ctx.Done()
 					return nil, ctx.Err()
 				}}
-				options.Dialer = func(ctx context.Context, network, address string) (net.Conn, error) {
+				options.Dialer = func(ctx context.Context, network, _ string) (net.Conn, error) {
 					dials.Add(1)
-					return dialer.DialContext(ctx, network, address)
+					// a host name, so the dial resolves through the synthetic resolver
+					return dialer.DialContext(ctx, network, "retirement.invalid:6379")
 				}
 			}
 			client := redis.NewClient(options)
@@ -393,8 +398,8 @@ func deadlineTestClusterOptions(t *testing.T, peer *deadlineRedisPeer) *redis.Cl
 	options.Dialer = peer.dial
 	// PING has no key and can select a bootstrap node. Use the same synthetic
 	// node for bootstrap and slots so one logical node owns both PING and GET.
-	// A non-loopback name also avoids slot-origin loopback rewriting.
-	const address = "retirement.invalid:6379"
+	// A non-loopback address also avoids slot-origin loopback rewriting.
+	const address = deadlineTestRedisAddress
 	options.Addrs = []string{address}
 	options.ClusterSlots = func(context.Context) ([]redis.ClusterSlot, error) {
 		return []redis.ClusterSlot{{Start: 0, End: 16383, Nodes: []redis.ClusterNode{{Addr: address}}}}, nil
@@ -473,7 +478,7 @@ func TestRedisWithDeadlineResetStopsOwnedDialMaintenance(t *testing.T) {
 	// Closing fixture admission is idempotent and cannot admit a late native
 	// recovery dial, even when a prior assertion exits through t.Cleanup.
 	peer.close()
-	if conn, err := peer.dial(context.Background(), "tcp", "retirement.invalid:6379"); conn != nil || !errors.Is(err, net.ErrClosed) || peer.dials.Load() != 0 {
+	if conn, err := peer.dial(context.Background(), "tcp", deadlineTestRedisAddress); conn != nil || !errors.Is(err, net.ErrClosed) || peer.dials.Load() != 0 {
 		t.Fatal("closed fixture admitted a late dial")
 	}
 	peer.close()

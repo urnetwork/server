@@ -186,6 +186,11 @@ func TestSignedInDataPurchaseLandsTheData(t *testing.T) {
 
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// account messages go to a recording sender, not to the AWS sender
+		messages := newOutboxTestSender()
+		previousSender := GetAWSMessageSender()
+		SetMessageSender(messages)
+		defer SetMessageSender(previousSender)
 		networkId := server.NewId()
 		testingCreatePaymentNetworkRow(ctx, networkId)
 
@@ -203,6 +208,7 @@ func TestSignedInDataPurchaseLandsTheData(t *testing.T) {
 			&networkId, // signed in: we know the network
 		)
 		connect.AssertEqual(t, err, nil)
+		requireDataPurchaseMessages(t, messages, 1)
 
 		// the data is simply THERE -- no code to redeem by hand
 		after := model.GetActiveTransferBalances(ctx, networkId)
@@ -223,6 +229,11 @@ func TestWebhookRetryDoesNotDoubleCredit(t *testing.T) {
 
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// account messages go to a recording sender, not to the AWS sender
+		messages := newOutboxTestSender()
+		previousSender := GetAWSMessageSender()
+		SetMessageSender(messages)
+		defer SetMessageSender(previousSender)
 		networkId := server.NewId()
 		testingCreatePaymentNetworkRow(ctx, networkId)
 
@@ -241,6 +252,9 @@ func TestWebhookRetryDoesNotDoubleCredit(t *testing.T) {
 			)
 			connect.AssertEqual(t, err, nil)
 		}
+
+		// a retried event re-sends the same code, but credits once
+		requireDataPurchaseMessages(t, messages, 3)
 
 		// exactly one credit, not three
 		balances := model.GetActiveTransferBalances(ctx, networkId)
@@ -373,4 +387,25 @@ func TestStripeCheckoutFulfillsEveryLineAndQuantity(t *testing.T) {
 		_, err = model.GetBalanceCodeIdForPurchaseEventId(ctx, "cs_test_multiline_1/1")
 		connect.AssertEqual(t, err, nil)
 	})
+}
+
+// A data purchase emails its buyer the balance code, once per delivered
+// purchase event: a retried event re-sends the same code.
+func requireDataPurchaseMessages(t testing.TB, messages *outboxTestSender, count int) {
+	sends := messages.sent()
+	if len(sends) != count {
+		t.Fatalf("data purchase sent %d messages, want %d", len(sends), count)
+	}
+	secret := ""
+	for _, send := range sends {
+		template, ok := send.template.(*SubscriptionTransferBalanceCodeTemplate)
+		if !ok || send.userAuth != "buyer@example.invalid" || template.BalanceByteCount != 1*model.Tib {
+			t.Fatalf("data purchase sent %T to %s, want the 1 TiB code to the buyer", send.template, send.userAuth)
+		}
+		if secret == "" {
+			secret = template.Secret
+		} else if template.Secret != secret {
+			t.Fatal("a retried data purchase sent a different code")
+		}
+	}
 }
