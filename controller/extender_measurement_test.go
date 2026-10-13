@@ -59,6 +59,17 @@ func testMeasurementCsr(t testing.TB, key any, template *x509.CertificateRequest
 	return csr
 }
 
+// What A8 names a public key by: the hex SHA-256 of its SubjectPublicKeyInfo.
+func testMeasurementKeySha256(t testing.TB, publicKey any) string {
+	t.Helper()
+	spki, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(spki)
+	return hex.EncodeToString(digest[:])
+}
+
 // The name is the extender's id under the zone (N1), and parses back to it.
 func TestExtenderMeasurementNameIsTheIdUnderTheZone(t *testing.T) {
 	extenderId := server.NewId()
@@ -453,12 +464,14 @@ func installTestExtenderMeasurementConfig(t testing.TB, api *testExtenderApi) ed
 // request rides a later activation: a successful one stores it as the
 // extender's pending request, and an activation without one leaves it as it
 // is. A request that cannot be read, or that names another extender, is
-// stored refused, with the reason naming the extender's own name.
+// stored refused, with the reason naming the extender's own name, and A8
+// answers the refusal with the key and names of as much of the request as
+// could be read (key_sha256).
 //
 // The activations offer the tcp carrier alone, a challenge and a forward
 // each, so three of them stay under the fixture extender's admission limit
-// of eight actions a minute from one subnet; the refusals go through the
-// storage the activation calls.
+// of eight actions a minute from one subnet; the refusals, and the request
+// after them, go through the storage the activation calls.
 func TestExtenderActivateReturnsTheIdAndStoresTheMeasurementRequest(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -502,7 +515,8 @@ func TestExtenderActivateReturnsTheIdAndStoresTheMeasurementRequest(t *testing.T
 
 		// the request for that id's name rides the next activation
 		name := ExtenderMeasurementName(extenderId, testMeasurementZone)
-		csr := testMeasurementCsr(t, testMeasurementKey(t), &x509.CertificateRequest{DNSNames: []string{name}})
+		requestKey := testMeasurementKey(t)
+		csr := testMeasurementCsr(t, requestKey, &x509.CertificateRequest{DNSNames: []string{name}})
 		second := activate(csr)
 		connect.AssertEqual(t, *second.ExtenderId, extenderId)
 		measurement := model.Testing_GetNetworkExtenderMeasurement(ctx, extenderId)
@@ -532,7 +546,8 @@ func TestExtenderActivateReturnsTheIdAndStoresTheMeasurementRequest(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		// an unreadable request is refused with the reason, and names no key
+		// an unreadable request is refused with the reason; it has no key or
+		// names to answer with
 		storeExtenderMeasurementRequest(ctx, config, extenderId, base64.StdEncoding.EncodeToString([]byte("not a certificate request")), server.NowUtc())
 		refused := poll()
 		connect.AssertEqual(t, refused.State, model.NetworkExtenderMeasurementStateRefused)
@@ -540,25 +555,56 @@ func TestExtenderActivateReturnsTheIdAndStoresTheMeasurementRequest(t *testing.T
 			t.Fatalf("a refusal carries no reason")
 		}
 		connect.AssertEqual(t, refused.KeySha256, "")
+		connect.AssertEqual(t, len(refused.Names), 0)
 
-		// and so is a request for another extender's name
+		// and so is a request for another extender's name. The answer names
+		// the request's key and names, so the extender knows the refusal is of
+		// its own request rather than reading it as nothing held (C4)
 		otherName := ExtenderMeasurementName(server.NewId(), testMeasurementZone)
-		otherCsr := testMeasurementCsr(t, testMeasurementKey(t), &x509.CertificateRequest{DNSNames: []string{otherName}})
+		otherKey := testMeasurementKey(t)
+		otherCsr := testMeasurementCsr(t, otherKey, &x509.CertificateRequest{DNSNames: []string{otherName}})
 		storeExtenderMeasurementRequest(ctx, config, extenderId, base64.StdEncoding.EncodeToString(otherCsr), server.NowUtc())
 		refused = poll()
 		connect.AssertEqual(t, refused.State, model.NetworkExtenderMeasurementStateRefused)
 		if !strings.Contains(refused.Reason, name) {
 			t.Fatalf("the refusal does not name the extender's own name: %q", refused.Reason)
 		}
+		connect.AssertEqual(t, refused.KeySha256, testMeasurementKeySha256(t, &otherKey.PublicKey))
+		if !slices.Equal(refused.Names, []string{otherName}) {
+			t.Fatalf("refused names = %v", refused.Names)
+		}
+
+		// and a request under a key that is not P-256, for the right name: its
+		// key is named all the same
+		p384Key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p384Csr := testMeasurementCsr(t, p384Key, &x509.CertificateRequest{DNSNames: []string{name}})
+		storeExtenderMeasurementRequest(ctx, config, extenderId, base64.StdEncoding.EncodeToString(p384Csr), server.NowUtc())
+		refused = poll()
+		connect.AssertEqual(t, refused.State, model.NetworkExtenderMeasurementStateRefused)
+		connect.AssertEqual(t, refused.KeySha256, testMeasurementKeySha256(t, &p384Key.PublicKey))
+		if !slices.Equal(refused.Names, []string{name}) {
+			t.Fatalf("refused names = %v", refused.Names)
+		}
+
+		// a valid request after a refusal waits for a certificate again
+		storeExtenderMeasurementRequest(ctx, config, extenderId, base64.StdEncoding.EncodeToString(csr), server.NowUtc())
+		pending = poll()
+		connect.AssertEqual(t, pending.State, model.NetworkExtenderMeasurementStatePending)
+		connect.AssertEqual(t, pending.KeySha256, testMeasurementKeySha256(t, &requestKey.PublicKey))
 	})
 }
 
 // The extender's poll (A8) over the life of a request: none before any;
-// pending; issued with the chain once a certificate answers it; withdrawn,
+// pending; refused when the issuance refuses it, until the extender asks
+// again; issued with the chain once a certificate answers it; withdrawn,
 // with the certificate's name, from the withdrawal until the extender asks
-// again; then pending once more. A request for the name and key already held
-// changes nothing. While the operator does not issue, a pending request reads
-// as refused and keeps its row. Another client's poll never reads it, a key
+// again; then pending once more. Every answer but none names the key it is
+// for (key_sha256). A request for the name and key already held changes
+// nothing. While the operator does not issue, a pending request reads as
+// refused and keeps its row. Another client's poll never reads it, a key
 // picks the extender, and without a key the client's active extender answers
 // rather than one it left behind.
 func TestExtenderMeasurementCertAnswersThePoll(t *testing.T) {
@@ -679,6 +725,21 @@ func TestExtenderMeasurementCertAnswersThePoll(t *testing.T) {
 		connect.AssertEqual(t, notIssuing.KeySha256, keySha256)
 		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, extenderId).State, model.NetworkExtenderMeasurementStatePending)
 		installTestExtenderMeasurementConfig(t, nil)
+		connect.AssertEqual(t, answer("").State, model.NetworkExtenderMeasurementStatePending)
+
+		// the issuance refuses the request (C5): refused, for its name and key
+		pendingCsr := model.Testing_GetNetworkExtenderMeasurement(ctx, extenderId).Csr
+		connect.AssertEqual(t, model.RefusePendingNetworkExtenderMeasurement(ctx, extenderId, pendingCsr, "the extender has no public inbound address", server.NowUtc()), true)
+		refused := answer("")
+		connect.AssertEqual(t, refused.State, model.NetworkExtenderMeasurementStateRefused)
+		if !slices.Equal(refused.Names, []string{name}) {
+			t.Fatalf("refused names = %v", refused.Names)
+		}
+		connect.AssertEqual(t, refused.KeySha256, keySha256)
+		connect.AssertEqual(t, refused.Reason, "the extender has no public inbound address")
+		// a refusal holds nothing, so the extender's next activation carries
+		// its request again, and it waits once more
+		ask()
 		connect.AssertEqual(t, answer("").State, model.NetworkExtenderMeasurementStatePending)
 
 		now := server.NowUtc()

@@ -41,7 +41,7 @@ import (
 // shape is a change of those: the two name functions here, which are the only
 // callers of connect's; the request validation,
 // ParseExtenderMeasurementCsrDer; and the record set,
-// GetExtenderMeasurementHosts.
+// GetExtenderMeasurementHostsToPublish.
 //
 // Whether an extender may be measured is one rule everywhere,
 // ExtenderMeasurementEligibleAddresses: an active extender in the open tier
@@ -90,6 +90,15 @@ type ExtenderMeasurementRequest struct {
 // carries it: standard base64 of the DER (C4). The unpadded and url forms
 // are read too.
 func ParseExtenderMeasurementCsr(csrBase64 string, extenderId server.Id, zone string) (*ExtenderMeasurementRequest, error) {
+	csr, err := decodeExtenderMeasurementCsr(csrBase64)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExtenderMeasurementCsrDer(csr, extenderId, zone)
+}
+
+// The DER of a certificate request as an activation carries it.
+func decodeExtenderMeasurementCsr(csrBase64 string) ([]byte, error) {
 	csrBase64 = strings.TrimSpace(csrBase64)
 	if csrBase64 == "" {
 		return nil, fmt.Errorf("the measurement certificate request is empty")
@@ -97,22 +106,33 @@ func ParseExtenderMeasurementCsr(csrBase64 string, extenderId server.Id, zone st
 	if ExtenderMeasurementCsrMaxLength < len(csrBase64) {
 		return nil, fmt.Errorf("the measurement certificate request is longer than %d characters", ExtenderMeasurementCsrMaxLength)
 	}
-	var csr []byte
 	for _, encoding := range []*base64.Encoding{
 		base64.StdEncoding,
 		base64.RawStdEncoding,
 		base64.URLEncoding,
 		base64.RawURLEncoding,
 	} {
-		if decoded, err := encoding.DecodeString(csrBase64); err == nil {
-			csr = decoded
-			break
+		if csr, err := encoding.DecodeString(csrBase64); err == nil {
+			return csr, nil
 		}
 	}
-	if csr == nil {
-		return nil, fmt.Errorf("the measurement certificate request is not base64")
+	return nil, fmt.Errorf("the measurement certificate request is not base64")
+}
+
+// What can be read of a certificate request that is refused: its DER, its key
+// and the names it asks for, each nil when the request cannot be read that
+// far. A refusal keeps them, so A8 names the refused request's key
+// (key_sha256); a request that cannot be parsed has no key to name.
+func readRefusedExtenderMeasurementCsr(csrBase64 string) (csr []byte, publicKey []byte, names []string) {
+	csr, err := decodeExtenderMeasurementCsr(csrBase64)
+	if err != nil {
+		return nil, nil, nil
 	}
-	return ParseExtenderMeasurementCsrDer(csr, extenderId, zone)
+	request, err := x509.ParseCertificateRequest(csr)
+	if err != nil {
+		return nil, nil, nil
+	}
+	return csr, request.RawSubjectPublicKeyInfo, request.DNSNames
 }
 
 // ParseExtenderMeasurementCsrDer validates an extender's certificate request
@@ -224,8 +244,8 @@ func ExtenderMeasurementWithdrawReason(extender *model.NetworkExtender) string {
 	return ""
 }
 
-// One extender that serves the measurement api now (C8, A4): its name and the
-// addresses the name resolves to.
+// One extender that may serve the measurement api now (C8, A4): its name, the
+// addresses the name resolves to, and since when it does.
 type ExtenderMeasurementHost struct {
 	ExtenderId server.Id
 	// the extender's ed25519 identity key
@@ -234,15 +254,18 @@ type ExtenderMeasurementHost struct {
 	Name string
 	// its active public inbound addresses, IPv4 first (N3)
 	Ips []netip.Addr
+	// when the dns reconcile found the name published, in sync on every
+	// authoritative server; nil while it is not yet (C8)
+	PublishTime *time.Time
 }
 
-// GetExtenderMeasurementHosts reads every extender that serves the
-// measurement api at `now` (C8): one that may be measured and holds a live,
-// already valid certificate for its measurement name, with the addresses it
-// is measured at. The dns reconcile publishes exactly these -- each name's A
-// records its IPv4 addresses and its AAAA records its IPv6 addresses -- and
-// the lag.dev sample (A4) draws from them. Ordered by name.
-func GetExtenderMeasurementHosts(ctx context.Context, config *ExtenderConfig, now time.Time) []*ExtenderMeasurementHost {
+// GetExtenderMeasurementHostsToPublish reads every extender that may serve
+// the measurement api at `now` (C8): one that may be measured and holds a
+// live, already valid certificate for its measurement name, with the
+// addresses it is measured at, whether or not its name is published yet. The
+// dns reconcile publishes exactly these -- each name's A records its IPv4
+// addresses and its AAAA records its IPv6 addresses. Ordered by name.
+func GetExtenderMeasurementHostsToPublish(ctx context.Context, config *ExtenderConfig, now time.Time) []*ExtenderMeasurementHost {
 	zone := config.Measurement.MeasurementZone()
 	nameHosts := map[string]*ExtenderMeasurementHost{}
 	for _, target := range model.GetLiveNetworkExtenderMeasurementCerts(ctx, now) {
@@ -258,12 +281,20 @@ func GetExtenderMeasurementHosts(ctx context.Context, config *ExtenderConfig, no
 			// a certificate for another zone's name
 			continue
 		}
-		// a renewal overlaps the certificate it replaces; either serves
-		nameHosts[name] = &ExtenderMeasurementHost{
-			ExtenderId: target.Extender.ExtenderId,
-			PublicKey:  target.Extender.PublicKey,
-			Name:       name,
-			Ips:        ips,
+		// a renewal overlaps the certificate it replaces; either serves, and
+		// the name is published since the earliest of them says
+		host, ok := nameHosts[name]
+		if !ok {
+			host = &ExtenderMeasurementHost{
+				ExtenderId: target.Extender.ExtenderId,
+				PublicKey:  target.Extender.PublicKey,
+				Name:       name,
+				Ips:        ips,
+			}
+			nameHosts[name] = host
+		}
+		if publishTime := target.Cert.PublishTime; publishTime != nil && (host.PublishTime == nil || publishTime.Before(*host.PublishTime)) {
+			host.PublishTime = publishTime
 		}
 	}
 	hosts := []*ExtenderMeasurementHost{}
@@ -273,6 +304,25 @@ func GetExtenderMeasurementHosts(ctx context.Context, config *ExtenderConfig, no
 	slices.SortFunc(hosts, func(a *ExtenderMeasurementHost, b *ExtenderMeasurementHost) int {
 		return strings.Compare(a.Name, b.Name)
 	})
+	return hosts
+}
+
+// GetExtenderMeasurementHosts reads every extender that serves the
+// measurement api at `now`: one the dns reconcile publishes
+// (GetExtenderMeasurementHostsToPublish) whose name it has published (C8).
+// The lag.dev sample (A4) draws from these. A name is offered only once it
+// resolves on every authoritative server: a resolver asked for it before
+// would cache that it does not exist for the zone's negative ttl, and the
+// browser that asked could not reach the extender until that ran out (C1). An
+// extender whose certificate was just issued is left out until the reconcile
+// that runs right after the issuance has published it. Ordered by name.
+func GetExtenderMeasurementHosts(ctx context.Context, config *ExtenderConfig, now time.Time) []*ExtenderMeasurementHost {
+	hosts := []*ExtenderMeasurementHost{}
+	for _, host := range GetExtenderMeasurementHostsToPublish(ctx, config, now) {
+		if host.PublishTime != nil {
+			hosts = append(hosts, host)
+		}
+	}
 	return hosts
 }
 
@@ -304,11 +354,12 @@ func extenderMeasurementId(
 
 // Stores the certificate request an activation carried (A10, C4). A request
 // that cannot be read, or that names anything but this extender's measurement
-// name, is stored refused with the reason, which the extender reads from A8;
-// either way the activation's own answer does not change. An activation that
-// carries no request never reaches here, so a stored request stands through
-// every activation without one. The issuance task takes a pending request on
-// its next pass (C5).
+// name, is stored refused with the reason, which the extender reads from A8,
+// and with the key and names of as much of it as could be read, which A8
+// answers with; either way the activation's own answer does not change. An
+// activation that carries no request never reaches here, so a stored request
+// stands through every activation without one. The issuance task takes a
+// pending request on its next pass (C5).
 func storeExtenderMeasurementRequest(
 	ctx context.Context,
 	config *ExtenderConfig,
@@ -318,7 +369,8 @@ func storeExtenderMeasurementRequest(
 ) {
 	request, err := ParseExtenderMeasurementCsr(csrBase64, extenderId, config.Measurement.MeasurementZone())
 	if err != nil {
-		model.RefuseNetworkExtenderMeasurementRequest(ctx, extenderId, err.Error(), now)
+		csr, publicKey, names := readRefusedExtenderMeasurementCsr(csrBase64)
+		model.RefuseNetworkExtenderMeasurementRequest(ctx, extenderId, csr, publicKey, names, err.Error(), now)
 		if glog.V(1) {
 			glog.Infof("[extendermeasurement]%s refused: %s\n", extenderId, err)
 		}
@@ -372,8 +424,12 @@ type ExtenderMeasurementCertResult struct {
 	// when withdrawn
 	Names []string `json:"names"`
 	// the hex SHA-256 of the SubjectPublicKeyInfo of the key the answer is
-	// for: the certificate's when issued, else the request's. An extender
-	// whose key changed tells by it that what is held is not for its key
+	// for: the certificate's when issued, else the request's. Every answer
+	// with a request or certificate behind it carries one -- pending, issued,
+	// refused and withdrawn -- save a refusal of a request that could not be
+	// parsed, which has no key. An extender whose key changed tells by it
+	// that what is held is not for its key, and it reads a pending answer
+	// without one as nothing held (C4)
 	KeySha256 string `json:"key_sha256,omitempty"`
 	// the leaf first, then the issuers; only when issued
 	ChainPem string `json:"chain_pem,omitempty"`

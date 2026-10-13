@@ -29,6 +29,7 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 // The lag.dev measurement certificate tasks end to end (lag.dev/PLAN.md T2):
@@ -503,32 +504,39 @@ func TestExtenderMeasurementIssuesAgainstTheCa(t *testing.T) {
 }
 
 // A request is refused when its extender may not be measured, or when it is
-// not a request for exactly its extender's own name (C5).
+// not a request for exactly its extender's own name (C5). A refused request
+// keeps its key, which A8 names (key_sha256), so the extender knows the
+// refusal is of its own request.
 func TestExtenderMeasurementRefusesWhatMayNotBeIssued(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		env := newTestMeasurementEnv(t, testMeasurementEnvSettings{})
 		now := server.NowUtc()
+		publicKeys := map[server.Id][]byte{}
+		request := func(extenderId server.Id) {
+			_, request := requestTestMeasurementCert(t, ctx, extenderId, now)
+			publicKeys[extenderId] = request.PublicKey
+		}
 
 		gated := createTestMeasurementExtender(t, ctx, 1, "203.0.113.1")
 		if err := model.SetNetworkExtenderDirectoryTier(ctx, gated, connect.ExtenderDirectoryTierGated, false); err != nil {
 			t.Fatal(err)
 		}
-		requestTestMeasurementCert(t, ctx, gated, now)
+		request(gated)
 
 		canary := createTestMeasurementExtender(t, ctx, 2, "203.0.113.2")
 		if err := model.SetNetworkExtenderCanaryChannel(ctx, canary, connect.ExtenderChannelDns, false); err != nil {
 			t.Fatal(err)
 		}
-		requestTestMeasurementCert(t, ctx, canary, now)
+		request(canary)
 
 		// no public inbound address (decision 14)
 		webRtcOnly := createTestMeasurementExtenderWith(t, ctx, 3, controller.ExtenderMeasurementPort, connect.ExtenderCarrierWebRtc, "203.0.113.3")
-		requestTestMeasurementCert(t, ctx, webRtcOnly, now)
+		request(webRtcOnly)
 
 		// tcp where no browser connects (decision 4)
 		otherPort := createTestMeasurementExtenderWith(t, ctx, 4, 8443, connect.ExtenderCarrierTcp, "203.0.113.4")
-		requestTestMeasurementCert(t, ctx, otherPort, now)
+		request(otherPort)
 
 		// a stored request for another extender's name
 		otherName := createTestMeasurementExtender(t, ctx, 5, "203.0.113.5")
@@ -538,6 +546,7 @@ func TestExtenderMeasurementRefusesWhatMayNotBeIssued(t *testing.T) {
 			t.Fatal(err)
 		}
 		model.SetNetworkExtenderMeasurementRequest(ctx, otherName, otherCsr, otherPublicKey, []string{testMeasurementName(gated)}, now)
+		publicKeys[otherName] = otherPublicKey
 
 		result := runTestMeasurementIssue(t, ctx)
 		connect.AssertEqual(t, result.Issued, 0)
@@ -549,6 +558,7 @@ func TestExtenderMeasurementRefusesWhatMayNotBeIssued(t *testing.T) {
 			if measurement.Reason == "" {
 				t.Fatalf("a refusal carries no reason")
 			}
+			connect.AssertEqual(t, bytes.Equal(measurement.PublicKey, publicKeys[extenderId]), true)
 			everIssued, _ := model.Testing_GetNetworkExtenderMeasurementExposure(ctx, extenderId)
 			connect.AssertEqual(t, everIssued, false)
 		}
@@ -723,8 +733,10 @@ func TestExtenderMeasurementReissuesACertificateThatRanOut(t *testing.T) {
 			t.Fatal(err)
 		}
 		// the pass as it runs after the certificate's ninety days
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
 		result := &ExtenderMeasurementIssueResult{}
-		issueExtenderMeasurementCerts(ctx, config, server.NowUtc().Add(100*24*time.Hour), result)
+		issueExtenderMeasurementCerts(clientSession, config, server.NowUtc().Add(100*24*time.Hour), result)
 		connect.AssertEqual(t, result.Issued, 1)
 		connect.AssertEqual(t, result.Renewed, 0)
 		connect.AssertEqual(t, env.ca.issuedCount(), 2)
@@ -1257,5 +1269,249 @@ func TestExtenderMeasurementReplacesAPendingRequestsKey(t *testing.T) {
 		connect.AssertEqual(t, leaf.PublicKey.(*ecdsa.PublicKey).Equal(&newKey.PublicKey), true)
 		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderMeasurementCerts(ctx, second)), 0)
 		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, second).State, model.NetworkExtenderMeasurementStatePending)
+	})
+}
+
+// The zone with no change ever known to be in sync, as when Route 53 throttles
+// the reads of a change: a change is made, and dns may not answer with it yet.
+type testUnsyncedMeasurementRoute53 struct {
+	*testMeasurementRoute53
+}
+
+func (self *testUnsyncedMeasurementRoute53) GetChangeWithContext(
+	_ aws.Context,
+	_ *route53.GetChangeInput,
+	_ ...request.Option,
+) (*route53.GetChangeOutput, error) {
+	return nil, fmt.Errorf("throttled")
+}
+
+// Puts `api` in place of the zone for what follows.
+func useTestMeasurementRoute53(t testing.TB, api extenderMeasurementRoute53Api) {
+	t.Helper()
+	previousApi := newExtenderMeasurementRoute53Api
+	newExtenderMeasurementRoute53Api = func(_ *controller.ExtenderConfig) (extenderMeasurementRoute53Api, error) {
+		return api, nil
+	}
+	t.Cleanup(func() { newExtenderMeasurementRoute53Api = previousApi })
+}
+
+// The extenders the lag.dev sample may offer now (A4).
+func testMeasurementOfferedIds(t testing.TB, ctx context.Context) []server.Id {
+	t.Helper()
+	config, err := controller.EnvExtenderConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	extenderIds := []server.Id{}
+	for _, host := range controller.GetExtenderMeasurementHosts(ctx, config, server.NowUtc()) {
+		if host.PublishTime == nil {
+			t.Fatalf("%s is offered unpublished", host.Name)
+		}
+		extenderIds = append(extenderIds, host.ExtenderId)
+	}
+	return extenderIds
+}
+
+// The dns chain's pending pass.
+type testMeasurementDnsTask struct {
+	taskId         server.Id
+	runAt          time.Time
+	maxTimeSeconds int
+}
+
+func getTestMeasurementDnsTask(t testing.TB, ctx context.Context) *testMeasurementDnsTask {
+	t.Helper()
+	var dnsTask *testMeasurementDnsTask
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT task_id, run_at, run_max_time_seconds FROM pending_task WHERE run_once_key = $1`,
+			task.RunOnce("extender_measurement_dns").String(),
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				dnsTask = &testMeasurementDnsTask{}
+				server.Raise(result.Scan(&dnsTask.taskId, &dnsTask.runAt, &dnsTask.maxTimeSeconds))
+			}
+		})
+	})
+	if dnsTask == nil {
+		t.Fatalf("no dns pass is pending")
+	}
+	return dnsTask
+}
+
+// Runs the dns chain's pending pass as a worker does, post included.
+func runTestMeasurementPendingDnsTask(t testing.TB, ctx context.Context) {
+	t.Helper()
+	dnsTask := getTestMeasurementDnsTask(t, ctx)
+	// a claim admits a run a whole second after its run_at; the test moves
+	// the run back rather than sleeping
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE pending_task SET run_at = $2 WHERE task_id = $1`,
+			dnsTask.taskId,
+			time.Unix(1, 0).UTC(),
+		))
+	})
+	settings := task.DefaultTaskWorkerSettings()
+	settings.ClaimRegisteredTargetsOnly = true
+	worker := task.NewTaskWorker(ctx, settings)
+	defer worker.Close()
+	worker.AddTargets(task.NewTaskTargetWithPost(ExtenderMeasurementDns, ExtenderMeasurementDnsPost))
+	finished, retried, posts, err := worker.EvalTasks(1)
+	if err != nil || len(finished) != 1 || finished[0] != dnsTask.taskId || 0 < len(retried)+len(posts) {
+		t.Fatalf("the dns pass did not run: %v %v %v %v", finished, retried, posts, err)
+	}
+}
+
+// An extender whose certificate was just issued is not offered until its name
+// is published (lag.dev/PLAN.md C8, A4): a browser that looked the name up
+// before every authoritative server answered for it would be told the name
+// does not exist, and its resolver would keep that answer. A name whose
+// records are written but not known to be in sync is not offered either, nor
+// one whose records went another way until they are written again and in
+// sync, nor one that is going.
+func TestExtenderMeasurementOffersOnlyPublishedNames(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newTestMeasurementEnv(t, testMeasurementEnvSettings{})
+		config, err := controller.EnvExtenderConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		extenderId := createTestMeasurementExtender(t, ctx, 1, "203.0.113.7", "2001:db8::7")
+		name := testMeasurementName(extenderId)
+		requestTestMeasurementCert(t, ctx, extenderId, server.NowUtc())
+
+		// issued, and not yet published: the reconcile is to publish it, and
+		// the sample does not offer it
+		connect.AssertEqual(t, runTestMeasurementIssue(t, ctx).Issued, 1)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, extenderId).State, model.NetworkExtenderMeasurementStateIssued)
+		toPublish := controller.GetExtenderMeasurementHostsToPublish(ctx, config, server.NowUtc())
+		connect.AssertEqual(t, len(toPublish), 1)
+		connect.AssertEqual(t, toPublish[0].Name, name)
+		connect.AssertEqual(t, toPublish[0].PublishTime == nil, true)
+		connect.AssertEqual(t, len(testMeasurementOfferedIds(t, ctx)), 0)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)[0].PublishTime == nil, true)
+
+		// written, but Route 53 cannot say the change is in sync, and dns
+		// does not answer with it yet: still not offered
+		useTestMeasurementRoute53(t, &testUnsyncedMeasurementRoute53{testMeasurementRoute53: env.zone})
+		dnsResult := runTestMeasurementDns(t, ctx)
+		connect.AssertEqual(t, dnsResult.Upserted, 2)
+		connect.AssertEqual(t, dnsResult.Published, 0)
+		assertTestMeasurementAddressRecords(t, env, map[string][]string{
+			name + " A":    {"203.0.113.7"},
+			name + " AAAA": {"2001:db8::7"},
+		})
+		connect.AssertEqual(t, len(env.zone.servedAddresses(name)), 0)
+		connect.AssertEqual(t, len(testMeasurementOfferedIds(t, ctx)), 0)
+
+		// the next pass writes the records again and waits for that change
+		// to be in sync: published, answered everywhere, and offered
+		useTestMeasurementRoute53(t, env.zone)
+		dnsResult = runTestMeasurementDns(t, ctx)
+		connect.AssertEqual(t, dnsResult.Upserted, 2)
+		connect.AssertEqual(t, dnsResult.Published, 1)
+		connect.AssertEqual(t, env.zone.servedAddresses(name), map[string][]string{
+			route53.RRTypeA:    {"203.0.113.7"},
+			route53.RRTypeAaaa: {"2001:db8::7"},
+		})
+		connect.AssertEqual(t, testMeasurementOfferedIds(t, ctx), []server.Id{extenderId})
+		publishTime := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)[0].PublishTime
+		if publishTime == nil {
+			t.Fatalf("the certificate does not say its name is published")
+		}
+
+		// a published name that matches is left as it is
+		allowedBefore, _ := env.zone.batches()
+		dnsResult = runTestMeasurementDns(t, ctx)
+		connect.AssertEqual(t, dnsResult.Upserted+dnsResult.Deleted+dnsResult.Published, 0)
+		allowedAfter, _ := env.zone.batches()
+		connect.AssertEqual(t, len(allowedAfter), len(allowedBefore))
+		connect.AssertEqual(t, *model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)[0].PublishTime, *publishTime)
+
+		// its records go another way: the next pass stops offering it before
+		// writing them again, and offers it again once that is in sync
+		env.zone.remove(env.hostedZoneId, name)
+		useTestMeasurementRoute53(t, &testUnsyncedMeasurementRoute53{testMeasurementRoute53: env.zone})
+		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Upserted, 2)
+		connect.AssertEqual(t, len(testMeasurementOfferedIds(t, ctx)), 0)
+		useTestMeasurementRoute53(t, env.zone)
+		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Published, 1)
+		connect.AssertEqual(t, testMeasurementOfferedIds(t, ctx), []server.Id{extenderId})
+
+		// the owner opts out: the name stops being published, and its records go
+		connect.AssertEqual(t, model.OptOutNetworkExtenderMeasurement(ctx, testMeasurementExtenderPublicKey(1), controller.ExtenderMeasurementOptOutReason, server.NowUtc()), 1)
+		dnsResult = runTestMeasurementDns(t, ctx)
+		connect.AssertEqual(t, dnsResult.Deleted, 2)
+		connect.AssertEqual(t, dnsResult.Names, 0)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)[0].PublishTime == nil, true)
+		connect.AssertEqual(t, len(testMeasurementOfferedIds(t, ctx)), 0)
+		assertTestMeasurementAddressRecords(t, env, map[string][]string{})
+		assertTestMeasurementForeignRecordSets(t, env, testMeasurementForeignApexRecordSets())
+		assertTestMeasurementBatches(t, env)
+	})
+}
+
+// An issuance wakes the dns chain (lag.dev/PLAN.md C8): the pass that
+// publishes the new name is due at once rather than at the chain's next
+// minute, the sample offers the extender as soon as it has run, and its post
+// arms the next pass a minute out as usual. A renewal keeps the name offered
+// throughout, wakes the chain too, and that pass marks the renewal published.
+func TestExtenderMeasurementPublishesRightAfterIssuance(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newTestMeasurementEnv(t, testMeasurementEnvSettings{})
+		env.zone.pollsUntilInsync = 2
+		extenderId := createTestMeasurementExtender(t, ctx, 1, "203.0.113.7")
+		name := testMeasurementName(extenderId)
+		requestTestMeasurementCert(t, ctx, extenderId, server.NowUtc())
+
+		connect.AssertEqual(t, runTestMeasurementIssue(t, ctx).Issued, 1)
+		dnsTask := getTestMeasurementDnsTask(t, ctx)
+		if server.NowUtc().Before(dnsTask.runAt) {
+			t.Fatalf("the dns pass runs at %s, after the issuance", dnsTask.runAt)
+		}
+		if dnsTask.maxTimeSeconds < int(ExtenderMeasurementInsyncTimeout/time.Second) {
+			t.Fatalf("the dns pass may run %d s, less than a wait for sync", dnsTask.maxTimeSeconds)
+		}
+		connect.AssertEqual(t, len(testMeasurementOfferedIds(t, ctx)), 0)
+
+		runTestMeasurementPendingDnsTask(t, ctx)
+		connect.AssertEqual(t, testMeasurementOfferedIds(t, ctx), []server.Id{extenderId})
+		connect.AssertEqual(t, env.zone.servedAddresses(name), map[string][]string{
+			route53.RRTypeA: {"203.0.113.7"},
+		})
+		nextTask := getTestMeasurementDnsTask(t, ctx)
+		if nextTask.runAt.Before(server.NowUtc().Add(ExtenderMeasurementDnsTimeout / 2)) {
+			t.Fatalf("the next dns pass runs at %s, not a minute out", nextTask.runAt)
+		}
+
+		// a renewal: offered throughout, since the name stays published
+		certs := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)
+		publishTime := certs[0].PublishTime
+		if publishTime == nil {
+			t.Fatalf("the certificate does not say its name is published")
+		}
+		model.Testing_SetNetworkExtenderMeasurementCertRenewTime(ctx, certs[0].CertId, server.NowUtc().Add(-time.Second))
+		connect.AssertEqual(t, runTestMeasurementIssue(t, ctx).Renewed, 1)
+		connect.AssertEqual(t, testMeasurementOfferedIds(t, ctx), []server.Id{extenderId})
+		dnsTask = getTestMeasurementDnsTask(t, ctx)
+		if server.NowUtc().Before(dnsTask.runAt) {
+			t.Fatalf("the dns pass runs at %s, after the renewal", dnsTask.runAt)
+		}
+		runTestMeasurementPendingDnsTask(t, ctx)
+		certs = model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)
+		connect.AssertEqual(t, len(certs), 2)
+		connect.AssertEqual(t, *certs[0].PublishTime, *publishTime)
+		if certs[1].PublishTime == nil {
+			t.Fatalf("the renewal does not say its name is published")
+		}
+		connect.AssertEqual(t, testMeasurementOfferedIds(t, ctx), []server.Id{extenderId})
+		assertTestMeasurementBatches(t, env)
 	})
 }

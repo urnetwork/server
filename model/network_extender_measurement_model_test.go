@@ -107,11 +107,26 @@ func TestNetworkExtenderMeasurementRequestStates(t *testing.T) {
 		state = SetNetworkExtenderMeasurementRequest(ctx, extenderId, []byte("csr-a"), []byte("key-a"), names, now.Add(3*time.Hour))
 		connect.AssertEqual(t, state, NetworkExtenderMeasurementStateIssued)
 
-		RefuseNetworkExtenderMeasurementRequest(ctx, extenderId, "the request is not readable", now.Add(4*time.Hour))
+		// a request refused as it arrives keeps what could be read of it, so
+		// A8 names its key
+		otherNames := []string{"other." + testMeasurementZone}
+		RefuseNetworkExtenderMeasurementRequest(ctx, extenderId, []byte("csr-c"), []byte("key-c"), otherNames, "the request names another extender", now.Add(4*time.Hour))
+		measurement = Testing_GetNetworkExtenderMeasurement(ctx, extenderId)
+		connect.AssertEqual(t, measurement.State, NetworkExtenderMeasurementStateRefused)
+		connect.AssertEqual(t, measurement.Reason, "the request names another extender")
+		connect.AssertEqual(t, bytes.Equal(measurement.Csr, []byte("csr-c")), true)
+		connect.AssertEqual(t, bytes.Equal(measurement.PublicKey, []byte("key-c")), true)
+		if !slices.Equal(measurement.Names, otherNames) {
+			t.Fatalf("names = %v", measurement.Names)
+		}
+
+		// one that could not be read at all has nothing to keep
+		RefuseNetworkExtenderMeasurementRequest(ctx, extenderId, nil, nil, nil, "the request is not readable", now.Add(5*time.Hour))
 		measurement = Testing_GetNetworkExtenderMeasurement(ctx, extenderId)
 		connect.AssertEqual(t, measurement.State, NetworkExtenderMeasurementStateRefused)
 		connect.AssertEqual(t, measurement.Reason, "the request is not readable")
 		connect.AssertEqual(t, len(measurement.Csr), 0)
+		connect.AssertEqual(t, len(measurement.PublicKey), 0)
 		connect.AssertEqual(t, len(measurement.Names), 0)
 	})
 }

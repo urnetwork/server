@@ -10183,4 +10183,14 @@ var migrations = []any{
 		CREATE INDEX lag_result_track_id_position ON lag_result (track_id, track_position);
 		CREATE INDEX lag_result_created_at ON lag_result (created_at, lag_result_id);
 	`),
+	// 823: when the measurement dns reconcile published each certificate's
+	// name (lag.dev/PLAN.md C8, A4). The lag.dev sample offers an extender
+	// only once its name resolves on every authoritative server: a resolver
+	// asked for a name before it exists caches that it does not. A nullable
+	// column on a small table: nothing is rewritten.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_extender_measurement_cert
+			ADD COLUMN publish_time timestamp NULL;
+	`),
 }

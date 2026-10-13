@@ -38,6 +38,12 @@ import (
 // under one statement and challenge records under another, and denies one
 // that mixes them or names the apex.
 //
+// A name is published once the change that wrote its records is in sync on
+// every authoritative server, and only then does the reconcile record it so
+// (C8). The lag.dev sample offers only published names (A4): a resolver asked
+// for a name before it exists caches that it does not, for the lesser of the
+// SOA's ttl and minimum (C1).
+//
 // The zone is named like the dns block's, by zone_name with hosted_zone_id as
 // the override, through the same resolution (resolveExtenderDnsHostedZoneId)
 // and the same aws session rules (newExtenderRoute53Api). The scoped identity
@@ -242,38 +248,65 @@ func (self *extenderMeasurementZone) listRecordSets(ctx context.Context) ([]*rou
 	return recordSets, nil
 }
 
-// What one reconcile changed.
-type extenderMeasurementDnsChanges struct {
-	upserted int
-	deleted  int
-}
-
 // One address record set: a measurement name and a family.
 type extenderMeasurementRecordKey struct {
 	name       string
 	recordType string
 }
 
-// reconcile makes the address records of the zone exactly `hosts` (C8): for
-// each serving extender, an A record of its IPv4 addresses and an AAAA record
-// of its IPv6 addresses at its measurement name, at the configured ttl and
-// with no routing policy. An address record at a measurement name that no
-// host wants is deleted, and nothing else in the zone is read as anything but
-// an obstacle: a name that holds a CNAME, which cannot share a name, is left
-// out with an error rather than failing every other name's batch.
+// What one reconcile is to change (C8), as plan reads it from the zone.
+type extenderMeasurementDnsPlan struct {
+	// the names with changes, in order, and each name's changes: deletions,
+	// then upserts
+	names       []string
+	nameChanges map[string][]*route53.Change
+	// published names whose records are in place, or are only updated: they
+	// stay published whatever becomes of this plan's changes
+	published []string
+	// names to publish once the change that writes their records is in sync:
+	// a name not yet published, or one that holds none of its records now.
+	// Records already in place are written again, since Route 53 tells
+	// whether a change is in sync, not whether a record is
+	publishing map[string]bool
+	// published names that hold none of their records now: they must not be
+	// offered until their records are written again and in sync
+	absent []string
+}
+
+// What one reconcile changed.
+type extenderMeasurementDnsChanges struct {
+	upserted int
+	deleted  int
+	// the names published now, each in sync on every authoritative server
+	published []string
+	// how many of those this reconcile published
+	newlyPublished int
+}
+
+// plan reads the zone and works out the changes that make its address records
+// exactly `hosts` (C8): for each serving extender, an A record of its IPv4
+// addresses and an AAAA record of its IPv6 addresses at its measurement name,
+// at the configured ttl and with no routing policy. An address record at a
+// measurement name that no host wants is deleted, and nothing else in the
+// zone is read as anything but an obstacle: a name that holds a CNAME, which
+// cannot share a name, is left out with an error rather than failing every
+// other name's batch.
 //
-// Every change is an A or AAAA change at a measurement name, deletions before
-// upserts, and nothing is sent when the zone already matches.
-func (self *extenderMeasurementZone) reconcile(
+// Every change is an A or AAAA change at a measurement name. A name already
+// published whose records match gets none, so a pass over a zone that matches
+// and is published sends nothing.
+func (self *extenderMeasurementZone) plan(
 	ctx context.Context,
 	hosts []*controller.ExtenderMeasurementHost,
-) (*extenderMeasurementDnsChanges, error) {
+) (*extenderMeasurementDnsPlan, error) {
 	desiredValues := map[extenderMeasurementRecordKey][]string{}
+	hostNames := map[string]*controller.ExtenderMeasurementHost{}
 	for _, host := range hosts {
 		if _, ok := controller.ParseExtenderMeasurementName(host.Name, self.measurementZone); !ok {
 			// only measurement names are written, as only they are deleted
 			return nil, fmt.Errorf("%s is not a measurement name in %s", host.Name, self.measurementZone)
 		}
+		hostNames[host.Name] = host
 		for _, ip := range host.Ips {
 			key := extenderMeasurementRecordKey{name: host.Name, recordType: extenderMeasurementRecordType(ip)}
 			if value := ip.String(); !slices.Contains(desiredValues[key], value) {
@@ -290,8 +323,23 @@ func (self *extenderMeasurementZone) reconcile(
 		return nil, err
 	}
 
-	deletes := []*route53.Change{}
+	plan := &extenderMeasurementDnsPlan{
+		names:       []string{},
+		nameChanges: map[string][]*route53.Change{},
+		published:   []string{},
+		publishing:  map[string]bool{},
+		absent:      []string{},
+	}
+	addChange := func(name string, change *route53.Change) {
+		if _, ok := plan.nameChanges[name]; !ok {
+			plan.names = append(plan.names, name)
+		}
+		plan.nameChanges[name] = append(plan.nameChanges[name], change)
+	}
+
 	unchangedKeys := map[extenderMeasurementRecordKey]bool{}
+	// names that hold an address record of the reconcile's now
+	presentNames := map[string]bool{}
 	blockedNames := map[string]bool{}
 	for _, recordSet := range recordSets {
 		name := extenderMeasurementRecordName(recordSet)
@@ -301,6 +349,7 @@ func (self *extenderMeasurementZone) reconcile(
 			}
 			continue
 		}
+		presentNames[name] = true
 		key := extenderMeasurementRecordKey{name: name, recordType: aws.StringValue(recordSet.Type)}
 		values, wanted := desiredValues[key]
 		if wanted && recordSet.SetIdentifier == nil && recordSet.AliasTarget == nil {
@@ -315,10 +364,15 @@ func (self *extenderMeasurementZone) reconcile(
 			}
 			continue
 		}
-		deletes = append(deletes, &route53.Change{
+		addChange(name, &route53.Change{
 			Action:            aws.String(route53.ChangeActionDelete),
 			ResourceRecordSet: recordSet,
 		})
+	}
+
+	// a published name keeps being published while it holds a record
+	stays := func(name string) bool {
+		return hostNames[name].PublishTime != nil && presentNames[name]
 	}
 
 	keys := []extenderMeasurementRecordKey{}
@@ -331,9 +385,8 @@ func (self *extenderMeasurementZone) reconcile(
 		}
 		return strings.Compare(a.recordType, b.recordType)
 	})
-	upserts := []*route53.Change{}
 	for _, key := range keys {
-		if unchangedKeys[key] {
+		if unchangedKeys[key] && stays(key.name) {
 			continue
 		}
 		if blockedNames[key.name] {
@@ -344,7 +397,7 @@ func (self *extenderMeasurementZone) reconcile(
 		for _, value := range desiredValues[key] {
 			resourceRecords = append(resourceRecords, &route53.ResourceRecord{Value: aws.String(value)})
 		}
-		upserts = append(upserts, &route53.Change{
+		addChange(key.name, &route53.Change{
 			Action: aws.String(route53.ChangeActionUpsert),
 			ResourceRecordSet: &route53.ResourceRecordSet{
 				Name:            aws.String(extenderDnsFqdn(key.name)),
@@ -355,23 +408,120 @@ func (self *extenderMeasurementZone) reconcile(
 		})
 	}
 
-	changes := slices.Concat(deletes, upserts)
-	for start := 0; start < len(changes); start += ExtenderMeasurementDnsBatchSize {
-		batch := changes[start:min(start+ExtenderMeasurementDnsBatchSize, len(changes))]
-		if _, err := self.api.ChangeResourceRecordSetsWithContext(ctx, &route53.ChangeResourceRecordSetsInput{
+	for _, host := range hosts {
+		if host.PublishTime != nil && !presentNames[host.Name] {
+			plan.absent = append(plan.absent, host.Name)
+		}
+		switch {
+		case blockedNames[host.Name]:
+		case stays(host.Name):
+			plan.published = append(plan.published, host.Name)
+		case 0 < len(plan.nameChanges[host.Name]):
+			plan.publishing[host.Name] = true
+		}
+	}
+	slices.Sort(plan.names)
+	return plan, nil
+}
+
+// apply sends a plan's changes, and waits until each batch that publishes a
+// name is in sync, which is when every authoritative server answers for it
+// (C8). A name's changes always share a batch, so dns never answers for it
+// with only part of them: a deleted record without the one that replaces it.
+// A batch that fails, or is not in sync in time, does not keep the others;
+// the first error is returned with what was changed.
+func (self *extenderMeasurementZone) apply(ctx context.Context, plan *extenderMeasurementDnsPlan) (*extenderMeasurementDnsChanges, error) {
+	changes := &extenderMeasurementDnsChanges{
+		published: slices.Clone(plan.published),
+	}
+
+	// whole names to a batch, up to the batch size
+	batches := [][]string{}
+	batchSize := 0
+	for _, name := range plan.names {
+		size := len(plan.nameChanges[name])
+		if 0 < len(batches) && batchSize+size <= ExtenderMeasurementDnsBatchSize {
+			batches[len(batches)-1] = append(batches[len(batches)-1], name)
+			batchSize += size
+		} else {
+			batches = append(batches, []string{name})
+			batchSize = size
+		}
+	}
+
+	type publishingBatch struct {
+		changeId string
+		status   string
+		names    []string
+	}
+	publishingBatches := []*publishingBatch{}
+	var firstErr error
+	for _, names := range batches {
+		batchChanges := []*route53.Change{}
+		upserted := 0
+		deleted := 0
+		publishingNames := []string{}
+		for _, name := range names {
+			for _, change := range plan.nameChanges[name] {
+				batchChanges = append(batchChanges, change)
+				if aws.StringValue(change.Action) == route53.ChangeActionDelete {
+					deleted += 1
+				} else {
+					upserted += 1
+				}
+			}
+			if plan.publishing[name] {
+				publishingNames = append(publishingNames, name)
+			}
+		}
+		output, err := self.api.ChangeResourceRecordSetsWithContext(ctx, &route53.ChangeResourceRecordSetsInput{
 			HostedZoneId: aws.String(self.hostedZoneId),
 			ChangeBatch: &route53.ChangeBatch{
 				Comment: aws.String("lag.dev measurement names"),
-				Changes: batch,
+				Changes: batchChanges,
 			},
-		}); err != nil {
-			return nil, err
+		})
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
+		changes.upserted += upserted
+		changes.deleted += deleted
+		if len(publishingNames) == 0 {
+			continue
+		}
+		if output.ChangeInfo == nil || output.ChangeInfo.Id == nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("the change of %v has no id", publishingNames)
+			}
+			continue
+		}
+		publishingBatches = append(publishingBatches, &publishingBatch{
+			changeId: aws.StringValue(output.ChangeInfo.Id),
+			status:   aws.StringValue(output.ChangeInfo.Status),
+			names:    publishingNames,
+		})
 	}
-	return &extenderMeasurementDnsChanges{
-		upserted: len(upserts),
-		deleted:  len(deletes),
-	}, nil
+
+	// Route 53 brings the batches in sync together, so the waits share one
+	// limit, which keeps the pass within its task's
+	insyncCtx, insyncCancel := context.WithTimeout(ctx, ExtenderMeasurementInsyncTimeout)
+	defer insyncCancel()
+	for _, batch := range publishingBatches {
+		if err := self.waitInsync(insyncCtx, batch.changeId, batch.status); err != nil {
+			// written but not known to be answered everywhere: the next pass
+			// writes the names again and waits again
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		changes.published = append(changes.published, batch.names...)
+		changes.newlyPublished += len(batch.names)
+	}
+	return changes, firstErr
 }
 
 func extenderMeasurementRecordType(ip netip.Addr) string {

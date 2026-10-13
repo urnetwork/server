@@ -372,6 +372,39 @@ func (self *testMeasurementRoute53) servedTxt(name string) []string {
 	return values
 }
 
+// The address values dns answers for a name, sorted, by record type.
+func (self *testMeasurementRoute53) servedAddresses(name string) map[string][]string {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	addresses := map[string][]string{}
+	for _, recordSets := range self.served {
+		for _, recordSet := range recordSets {
+			recordType := aws.StringValue(recordSet.Type)
+			if extenderDnsFqdn(aws.StringValue(recordSet.Name)) != extenderDnsFqdn(name) ||
+				(recordType != route53.RRTypeA && recordType != route53.RRTypeAaaa) {
+				continue
+			}
+			addresses[recordType] = append(addresses[recordType], testMeasurementRecordSetValues(recordSet)...)
+		}
+	}
+	for recordType := range addresses {
+		slices.Sort(addresses[recordType])
+	}
+	return addresses
+}
+
+// Takes every record set at a name out of both planes, as an operator's hand
+// in the console would.
+func (self *testMeasurementRoute53) remove(hostedZoneId string, name string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	atName := func(recordSet *route53.ResourceRecordSet) bool {
+		return extenderDnsFqdn(aws.StringValue(recordSet.Name)) == extenderDnsFqdn(name)
+	}
+	self.listed[hostedZoneId] = slices.DeleteFunc(slices.Clone(self.listed[hostedZoneId]), atName)
+	self.served[hostedZoneId] = slices.DeleteFunc(slices.Clone(self.served[hostedZoneId]), atName)
+}
+
 // The record sets the api lists for one zone, in the zone's order.
 func (self *testMeasurementRoute53) listedRecordSets(hostedZoneId string) []*route53.ResourceRecordSet {
 	self.stateLock.Lock()

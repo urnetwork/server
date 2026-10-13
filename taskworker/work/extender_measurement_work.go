@@ -21,14 +21,22 @@ import (
 //   - ExtenderMeasurementDns withdraws the live certificates of extenders that
 //     were deactivated or moved to the gated tier or a canary channel (C9),
 //     then makes the zone's address records exactly the extenders that serve,
-//     each name at its extender's active addresses (C8). It is quick -- reads
-//     and one Route 53 listing -- so a deactivation leaves dns, and an address
-//     change reaches it, within about a minute.
+//     each name at its extender's active addresses, and records which names
+//     are published (C8). It is quick -- reads and one Route 53 listing -- so
+//     a deactivation leaves dns, and an address change reaches it, within
+//     about a minute. Only a pass that publishes a name waits, until Route 53
+//     reports the name's change in sync, since the lag.dev sample offers a
+//     name only once it is published (A4).
 //   - ExtenderMeasurementIssue revokes what was withdrawn (C9), renews what is
 //     due (C6) and issues for pending requests under the weekly cap (C5,
 //     C7). An order waits on Route 53 and the CA for a minute or more, so this
 //     chain is apart from the dns one, runs alone with a longer limit, and
-//     starts no new order once its budget is spent.
+//     starts no new order once its budget is spent. Each certificate it
+//     stores wakes the dns chain, so the name is published right after its
+//     issuance rather than at the dns chain's next minute (C8).
+//
+// The reconcile runs only in the dns chain, whose run-once key keeps one pass
+// at a time: two at once could each delete what the other just wrote.
 //
 // Activation does not wake the issuance chain: the pending request is the
 // queue, and the next pass, at most a minute away, takes it (A10).
@@ -47,6 +55,9 @@ const (
 	// within ExtenderMeasurementOrderTimeout.
 	ExtenderMeasurementIssueMaxTime = 20 * time.Minute
 	ExtenderMeasurementIssueBudget  = 8 * time.Minute
+
+	// The dns task's limit, past the longest wait for a change to be in sync.
+	ExtenderMeasurementDnsMaxTime = ExtenderMeasurementInsyncTimeout + 2*time.Minute
 
 	// Orders one pass places at most, new and renewal together.
 	ExtenderMeasurementMaxOrdersPerPass = 8
@@ -119,7 +130,7 @@ func ExtenderMeasurementIssue(
 	if err != nil || !config.Measurement.Enabled {
 		return result, nil
 	}
-	issueExtenderMeasurementCerts(clientSession.Ctx, config, server.NowUtc(), result)
+	issueExtenderMeasurementCerts(clientSession, config, server.NowUtc(), result)
 	if 0 < result.Revoked+result.Renewed+result.Issued+result.Refused+result.Failed {
 		glog.Infof(
 			"[extendermeasurement]revoked %d, renewed %d, issued %d, refused %d, waiting %d, failed %d\n",
@@ -147,12 +158,14 @@ func ExtenderMeasurementIssuePost(
 // One pass of the issuance chain at `now`, into `result`: revocations first,
 // since a withdrawn certificate should stop being valid as soon as it can,
 // then renewals, which keep serving extenders serving, then new certificates.
+// Each live certificate stored wakes the dns chain.
 func issueExtenderMeasurementCerts(
-	ctx context.Context,
+	clientSession *session.ClientSession,
 	config *controller.ExtenderConfig,
 	now time.Time,
 	result *ExtenderMeasurementIssueResult,
 ) {
+	ctx := clientSession.Ctx
 	acmeClient, err := extenderMeasurementAcmeForConfig(config)
 	if err != nil {
 		glog.Errorf("[extendermeasurement]no acme account, nothing is issued: %s\n", err)
@@ -173,8 +186,16 @@ func issueExtenderMeasurementCerts(
 		return orders < ExtenderMeasurementMaxOrdersPerPass && server.NowUtc().Before(budgetEnd) && ctx.Err() == nil
 	}
 
-	renewExtenderMeasurementCerts(ctx, config, acmeClient, zone, now, mayOrder, &orders, result)
-	issuePendingExtenderMeasurementCerts(ctx, config, acmeClient, zone, now, mayOrder, &orders, result)
+	// a stored certificate's name is published by the dns chain, woken at
+	// once rather than at its next minute (C8)
+	stored := func(cert *model.NetworkExtenderMeasurementCert) {
+		if model.AddNetworkExtenderMeasurementCert(ctx, cert) {
+			wakeExtenderMeasurementDns(clientSession)
+		}
+	}
+
+	renewExtenderMeasurementCerts(ctx, config, acmeClient, zone, now, mayOrder, &orders, stored, result)
+	issuePendingExtenderMeasurementCerts(ctx, config, acmeClient, zone, now, mayOrder, &orders, stored, result)
 }
 
 // Revokes withdrawn certificates (C9). A failure backs off on the
@@ -227,6 +248,7 @@ func renewExtenderMeasurementCerts(
 	now time.Time,
 	mayOrder func() bool,
 	orders *int,
+	stored func(*model.NetworkExtenderMeasurementCert),
 	result *ExtenderMeasurementIssueResult,
 ) {
 	measurementZone := config.Measurement.MeasurementZone()
@@ -267,7 +289,7 @@ func renewExtenderMeasurementCerts(
 			result.Failed += 1
 			continue
 		}
-		model.AddNetworkExtenderMeasurementCert(ctx, newCert)
+		stored(newCert)
 		result.Renewed += 1
 	}
 }
@@ -289,6 +311,7 @@ func issuePendingExtenderMeasurementCerts(
 	now time.Time,
 	mayOrder func() bool,
 	orders *int,
+	stored func(*model.NetworkExtenderMeasurementCert),
 	result *ExtenderMeasurementIssueResult,
 ) {
 	measurementZone := config.Measurement.MeasurementZone()
@@ -358,7 +381,7 @@ func issuePendingExtenderMeasurementCerts(
 			result.Failed += 1
 			continue
 		}
-		model.AddNetworkExtenderMeasurementCert(ctx, cert)
+		stored(cert)
 		if capCounted {
 			issuedThisWeek += 1
 		}
@@ -396,6 +419,8 @@ type ExtenderMeasurementDnsResult struct {
 	Names    int `json:"names"`
 	Upserted int `json:"upserted"`
 	Deleted  int `json:"deleted"`
+	// names this pass published
+	Published int `json:"published"`
 }
 
 func ScheduleExtenderMeasurementDns(clientSession *session.ClientSession, tx server.PgTx) {
@@ -410,7 +435,17 @@ func scheduleExtenderMeasurementDnsAt(clientSession *session.ClientSession, tx s
 		clientSession,
 		task.RunOnce("extender_measurement_dns"),
 		task.RunAt(runAt),
+		task.MaxTime(ExtenderMeasurementDnsMaxTime),
 	)
+}
+
+// Wakes the dns chain to run now rather than at its next minute (C8). The
+// pending pass moves to now, or, when a pass is running, another follows it at
+// once; either way one pass runs at a time.
+func wakeExtenderMeasurementDns(clientSession *session.ClientSession) {
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		scheduleExtenderMeasurementDnsAt(clientSession, tx, server.NowUtc())
+	})
 }
 
 // ExtenderMeasurementDns is one pass of the dns chain (C9, C8).
@@ -430,13 +465,14 @@ func ExtenderMeasurementDns(
 		// revoked whatever dns does
 		glog.Errorf("[extendermeasurement]the measurement zone was not reconciled: %s\n", err)
 	}
-	if 0 < result.Withdrawn+result.Upserted+result.Deleted {
+	if 0 < result.Withdrawn+result.Upserted+result.Deleted+result.Published {
 		glog.Infof(
-			"[extendermeasurement]withdrew %d; %d names, upserted %d, deleted %d\n",
+			"[extendermeasurement]withdrew %d; %d names, upserted %d, deleted %d, published %d\n",
 			result.Withdrawn,
 			result.Names,
 			result.Upserted,
 			result.Deleted,
+			result.Published,
 		)
 	}
 	return result, nil
@@ -471,24 +507,43 @@ func withdrawExtenderMeasurementCerts(ctx context.Context, now time.Time) int {
 	return withdrawn
 }
 
-// Makes the zone's address records the extenders that serve (C8).
+// Makes the zone's address records the extenders that serve, and records
+// which names are published (C8). A name stops being published before its
+// records are deleted, and is published only once the change that wrote them
+// is in sync, so the lag.dev sample (A4) never offers a name that dns does not
+// answer for everywhere.
 func reconcileExtenderMeasurementDns(
 	ctx context.Context,
 	config *controller.ExtenderConfig,
 	now time.Time,
 	result *ExtenderMeasurementDnsResult,
 ) error {
-	hosts := controller.GetExtenderMeasurementHosts(ctx, config, now)
+	hosts := controller.GetExtenderMeasurementHostsToPublish(ctx, config, now)
 	result.Names = len(hosts)
+	names := []string{}
+	for _, host := range hosts {
+		names = append(names, host.Name)
+	}
+	// every other name is going, or gone
+	model.UnpublishNetworkExtenderMeasurementNamesExcept(ctx, names)
+
 	zone, err := openExtenderMeasurementZone(ctx, config)
 	if err != nil {
 		return err
 	}
-	changes, err := zone.reconcile(ctx, hosts)
+	plan, err := zone.plan(ctx, hosts)
 	if err != nil {
 		return err
 	}
+	// a published name whose records went another way is written again,
+	// and is not offered until that is in sync
+	model.UnpublishNetworkExtenderMeasurementNames(ctx, plan.absent)
+
+	changes, err := zone.apply(ctx, plan)
 	result.Upserted = changes.upserted
 	result.Deleted = changes.deleted
-	return nil
+	result.Published = changes.newlyPublished
+	// also marks a renewal of a name that stayed published
+	model.PublishNetworkExtenderMeasurementNames(ctx, changes.published, server.NowUtc())
+	return err
 }

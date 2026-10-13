@@ -28,6 +28,11 @@ import (
 //     is live until it expires or is withdrawn (C9), and a renewal (C6) marks
 //     the certificate it replaces as renewed without withdrawing it, since
 //     the replaced one is still valid for the same names until it expires.
+//     publish_time is when the dns reconcile found its names published, in
+//     sync on every authoritative server, and is cleared when they stop being
+//     published (C8). A name is published while any live certificate for it
+//     says so, which carries a name across a renewal; the lag.dev sample
+//     offers only published names (A4).
 //   - network_extender.measurement_ever_issued is set before an order is
 //     placed and never cleared, and measurement_exposure_accepted is an
 //     operator's override (A9). A check constraint keeps every writer from
@@ -65,9 +70,11 @@ var ErrNetworkExtenderMeasurementExposure = errors.New(
 // One extender's latest certificate request (A10).
 type NetworkExtenderMeasurement struct {
 	ExtenderId server.Id
-	// the CSR, DER; nil for a request refused as unreadable
+	// the CSR, DER; nil for a request refused as unreadable, and after an
+	// owner's opt-out
 	Csr []byte
 	// the CSR's SubjectPublicKeyInfo, DER, which a certificate is matched to
+	// and A8 names (key_sha256); nil only for a request refused as unreadable
 	PublicKey []byte
 	// sorted
 	Names       []string
@@ -109,6 +116,9 @@ type NetworkExtenderMeasurementCert struct {
 	RevokeTime        *time.Time
 	// failed revocations so far, which space the next attempt (C9)
 	RevokeFailureCount int
+	// when the dns reconcile found its names published, in sync on every
+	// authoritative server; nil while they are not (C8, A4)
+	PublishTime *time.Time
 }
 
 // A request or a certificate with the extender it belongs to, which is what
@@ -198,7 +208,8 @@ const networkExtenderMeasurementCertColumns = `
 	withdraw_time,
 	withdraw_reason,
 	revoke_time,
-	revoke_failure_count
+	revoke_failure_count,
+	publish_time
 `
 
 func scanNetworkExtenderMeasurementCert(result server.PgResult) *NetworkExtenderMeasurementCert {
@@ -223,6 +234,7 @@ func scanNetworkExtenderMeasurementCert(result server.PgResult) *NetworkExtender
 		&cert.WithdrawReason,
 		&cert.RevokeTime,
 		&cert.RevokeFailureCount,
+		&cert.PublishTime,
 	))
 	cert.Names = splitNetworkExtenderMeasurementNames(names)
 	return cert
@@ -412,16 +424,30 @@ func SetNetworkExtenderMeasurementRequest(
 	return
 }
 
-// RefuseNetworkExtenderMeasurementRequest stores a request that could not be
-// read at all (A10), so the extender learns why from A8 rather than waiting.
-// A live certificate is not touched: it stays until it is withdrawn or
-// expires.
+// RefuseNetworkExtenderMeasurementRequest stores a request an activation
+// carried that is refused as it arrives (A10): one that is not a valid request
+// for the extender's own name, so the extender learns why from A8 rather than
+// waiting. What could be read of it is kept -- its DER, its key and the names
+// it asks for, each nil for a request that could not be read that far -- so
+// A8 names the key it answers for (key_sha256), and the extender knows the
+// refusal is of its own request rather than taking it for nothing held and
+// asking again at once (C4). A live certificate is not touched: it stays
+// until it is withdrawn or expires.
 func RefuseNetworkExtenderMeasurementRequest(
 	ctx context.Context,
 	extenderId server.Id,
+	csr []byte,
+	publicKey []byte,
+	names []string,
 	reason string,
 	requestTime time.Time,
 ) {
+	if len(csr) == 0 {
+		csr = nil
+	}
+	if len(publicKey) == 0 {
+		publicKey = nil
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -439,21 +465,24 @@ func RefuseNetworkExtenderMeasurementRequest(
 				failure_count,
 				update_time
 			)
-			VALUES ($1, NULL, NULL, '', $2, $3, $4, NULL, NULL, 0, $4)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, 0, $7)
 			ON CONFLICT (extender_id) DO UPDATE
 			SET
-				csr = NULL,
-				public_key = NULL,
-				names = '',
-				state = $2,
-				reason = $3,
-				request_time = $4,
+				csr = $2,
+				public_key = $3,
+				names = $4,
+				state = $5,
+				reason = $6,
+				request_time = $7,
 				pending_time = NULL,
 				retry_time = NULL,
 				failure_count = 0,
-				update_time = $4
+				update_time = $7
 			`,
 			extenderId,
+			csr,
+			publicKey,
+			joinNetworkExtenderMeasurementNames(names),
 			NetworkExtenderMeasurementStateRefused,
 			reason,
 			requestTime.UTC(),
@@ -1111,8 +1140,9 @@ func ReopenExpiredNetworkExtenderMeasurements(ctx context.Context, now time.Time
 
 // GetLiveNetworkExtenderMeasurementCerts reads every certificate that is
 // neither withdrawn nor expired at `now`, renewed ones included, each with its
-// extender. The dns reconcile publishes from these (C8) and the withdrawal
-// sweep judges them (C9). The chain is not read.
+// extender. The dns reconcile publishes from these (C8), the lag.dev sample
+// offers the ones published (A4), and the withdrawal sweep judges them (C9).
+// The chain is not read.
 func GetLiveNetworkExtenderMeasurementCerts(ctx context.Context, now time.Time) []*NetworkExtenderMeasurementTarget {
 	targets := []*NetworkExtenderMeasurementTarget{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -1126,7 +1156,8 @@ func GetLiveNetworkExtenderMeasurementCerts(ctx context.Context, now time.Time) 
 				not_before,
 				not_after,
 				issue_time,
-				renewed_time
+				renewed_time,
+				publish_time
 			FROM network_extender_measurement_cert
 			WHERE withdraw_time IS NULL AND $1 < not_after
 			ORDER BY extender_id, issue_time
@@ -1145,6 +1176,7 @@ func GetLiveNetworkExtenderMeasurementCerts(ctx context.Context, now time.Time) 
 					&cert.NotAfter,
 					&cert.IssueTime,
 					&cert.RenewedTime,
+					&cert.PublishTime,
 				))
 				cert.Names = splitNetworkExtenderMeasurementNames(names)
 				targets = append(targets, &NetworkExtenderMeasurementTarget{Cert: cert})
@@ -1153,6 +1185,98 @@ func GetLiveNetworkExtenderMeasurementCerts(ctx context.Context, now time.Time) 
 		fillNetworkExtenderMeasurementTargetsInConn(ctx, conn, targets)
 	})
 	return targets
+}
+
+// The column form of each of several single names.
+func networkExtenderMeasurementNameValues(names []string) []string {
+	values := []string{}
+	for _, name := range names {
+		if value := joinNetworkExtenderMeasurementNames([]string{name}); value != "" && !slices.Contains(values, value) {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+// PublishNetworkExtenderMeasurementNames records that the dns reconcile found
+// these names published, in sync on every authoritative server (C8): each
+// live certificate for one of them that does not say so yet takes
+// `publishTime`, and one that does keeps its own. That includes a renewal
+// that arrived while its name was published. Returns how many certificates it
+// marked.
+//
+// Only the reconcile calls this, and only after Route 53 reported the change
+// that wrote the name's records in sync, so a name is never marked published
+// before dns answers for it everywhere.
+func PublishNetworkExtenderMeasurementNames(ctx context.Context, names []string, publishTime time.Time) (published int) {
+	values := networkExtenderMeasurementNameValues(names)
+	if len(values) == 0 {
+		return 0
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_extender_measurement_cert
+			SET publish_time = $2
+			WHERE
+				names = ANY($1) AND
+				publish_time IS NULL AND
+				withdraw_time IS NULL AND
+				$2 < not_after
+			`,
+			values,
+			publishTime.UTC(),
+		))
+		published = int(tag.RowsAffected())
+	})
+	return
+}
+
+// UnpublishNetworkExtenderMeasurementNames records that these names are not
+// published (C8): the reconcile found that they hold none of their records,
+// and is about to write them again. Returns how many certificates it changed.
+func UnpublishNetworkExtenderMeasurementNames(ctx context.Context, names []string) (unpublished int) {
+	values := networkExtenderMeasurementNameValues(names)
+	if len(values) == 0 {
+		return 0
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_extender_measurement_cert
+			SET publish_time = NULL
+			WHERE names = ANY($1) AND publish_time IS NOT NULL
+			`,
+			values,
+		))
+		unpublished = int(tag.RowsAffected())
+	})
+	return
+}
+
+// UnpublishNetworkExtenderMeasurementNamesExcept records that every name but
+// `keepNames` is not published (C8). The reconcile calls it with the names it
+// is to publish before it deletes any record, so a name that is to go stops
+// being offered before its records do (A4), whatever certificate it was
+// published for: one withdrawn or expired since, or one whose extender may not
+// be measured now. Returns how many certificates it changed.
+func UnpublishNetworkExtenderMeasurementNamesExcept(ctx context.Context, keepNames []string) (unpublished int) {
+	values := networkExtenderMeasurementNameValues(keepNames)
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_extender_measurement_cert
+			SET publish_time = NULL
+			WHERE publish_time IS NOT NULL AND NOT (names = ANY($1))
+			`,
+			values,
+		))
+		unpublished = int(tag.RowsAffected())
+	})
+	return
 }
 
 // WithdrawNetworkExtenderMeasurementCert withdraws one live certificate (C9):
