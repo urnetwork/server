@@ -92,9 +92,11 @@ func testUrlPass() *egresshealth.Result {
 	})
 }
 
-// One claimed URL turn: the provider and what its URL measured.
+// One claimed URL turn: the provider, its network (empty, as from a server
+// that predates it, stands as the provider's own) and what its URL measured.
 type testUrlCommonModeTurn struct {
 	providerClientId string
+	networkId        string
 	run              *egresshealth.Result
 }
 
@@ -103,6 +105,16 @@ func testUrlCommonModeTurns(prefix string, first int, count int, run *egressheal
 	turns := make([]testUrlCommonModeTurn, 0, count)
 	for i := first; i < first+count; i++ {
 		turns = append(turns, testUrlCommonModeTurn{providerClientId: fmt.Sprintf("%s-%02d", prefix, i), run: run})
+	}
+	return turns
+}
+
+// Count distinct providers of one network, prefix-first onwards, that each
+// measure run.
+func testUrlCommonModeNetworkTurns(networkId string, prefix string, first int, count int, run *egresshealth.Result) []testUrlCommonModeTurn {
+	turns := testUrlCommonModeTurns(prefix, first, count, run)
+	for i := range turns {
+		turns[i].networkId = networkId
 	}
 	return turns
 }
@@ -133,6 +145,7 @@ func testRunUrlCommonModeTurns(t *testing.T, concurrency int, turns []testUrlCom
 		for ; claimed < len(turns) && len(due) < limit; claimed++ {
 			due = append(due, ingest.DueProvider{
 				ClientId:       turns[claimed].providerClientId,
+				NetworkId:      turns[claimed].networkId,
 				ClaimOrdinal:   int64(claimed + 1),
 				ClaimedAt:      testUrlCommonModeMeasuredAt,
 				CycleStartedAt: testUrlCommonModeMeasuredAt,
@@ -457,19 +470,114 @@ func TestUrlProbeCommonModeNeverHoldsABatchWithAPass(t *testing.T) {
 	commonMode := newProviderUrlProbeCommonMode(0, 1)
 	failure := testUrlPreResponseFailure("dial_dns")
 	batch := map[string]*egresshealth.Result{"synthetic-a-pass": testUrlPass()}
-	for i := range providerUrlProbeCommonModeProviderCount {
+	for i := range providerUrlProbeCommonModeNetworkCount {
 		batch[fmt.Sprintf("synthetic-b-failure-%02d", i)] = failure
 	}
-	if share, held := commonMode.judge(batch); held || share != 1 {
+	if share, held := commonMode.judge(batch, nil); held || share != 1 {
 		t.Fatalf("a batch with a pass: share %v held %t, want the window's share 1 and not held", share, held)
 	}
-	if share, held := commonMode.judge(map[string]*egresshealth.Result{"synthetic-c-failure": failure}); !held || share != 1 {
+	if share, held := commonMode.judge(map[string]*egresshealth.Result{"synthetic-c-failure": failure}, nil); !held || share != 1 {
 		t.Fatalf("the next pre-response failure: share %v held %t, want held", share, held)
 	}
-	if share, held := commonMode.judge(map[string]*egresshealth.Result{"synthetic-d-unmeasured": {}}); held || share != 1 {
+	if share, held := commonMode.judge(map[string]*egresshealth.Result{"synthetic-d-unmeasured": {}}, nil); held || share != 1 {
 		t.Fatalf("a turn that measured nothing: share %v held %t, want the window unchanged and not held", share, held)
 	}
-	if share, held := commonMode.judge(map[string]*egresshealth.Result{"synthetic-e-pass": testUrlPass()}); held || share != 15.0/16.0 {
+	if share, held := commonMode.judge(map[string]*egresshealth.Result{"synthetic-e-pass": testUrlPass()}, nil); held || share != 15.0/16.0 {
 		t.Fatalf("a pass: share %v held %t, want 15/16 and not held", share, held)
+	}
+}
+
+// The defect of 2026-10-13: the providers of one network, admitted together
+// with bunched due times, all failed before any destination answered.
+// Counted per provider they filled the window by themselves, so each was held
+// back, re-offered beside the others and held again, and none of their
+// genuine failures ever counted toward quota. One network is one turn of the
+// window however many of its providers fail, so every failure is published.
+func TestUrlProbeCommonModePublishesOneNetworksFailures(t *testing.T) {
+	for _, concurrency := range []int{1, 16} {
+		turns := testUrlCommonModeNetworkTurns("synthetic-network", "synthetic-provider", 0, 48, testUrlPreResponseFailure("dial_dns"))
+		trips := testutil.ToFloat64(egressProbeBatchGuardTripsTotal.WithLabelValues("full"))
+		result, releases := testRunUrlCommonModeTurns(t, concurrency, turns)
+		publishedCount, heldCount, unexpected := testUrlCommonModeCount(releases, testUrlCommonModeNoneHeld)
+		if publishedCount != 48 || len(unexpected) != 0 || result.Submitted != 48 || result.Failed != 0 {
+			t.Errorf("one network at concurrency %d: published %d held %d (unexpected turns %v) result %+v, want all 48 published",
+				concurrency, publishedCount, heldCount, unexpected, result)
+		}
+		if tripped := testutil.ToFloat64(egressProbeBatchGuardTripsTotal.WithLabelValues("full")) - trips; tripped != 0 {
+			t.Errorf("one network at concurrency %d: batch guard trips = %v, want none", concurrency, tripped)
+		}
+	}
+}
+
+// Fifteen networks are not the fleet, however many of their providers fail
+// together and whether their claims interleave or come bunched by network.
+func TestUrlProbeCommonModePublishesFewerThanSixteenNetworks(t *testing.T) {
+	for _, order := range []struct {
+		name    string
+		network func(index int) int
+	}{
+		{name: "interleaved", network: func(index int) int { return index % 15 }},
+		{name: "bunched", network: func(index int) int { return index / 4 }},
+	} {
+		turns := []testUrlCommonModeTurn{}
+		for i := range 60 {
+			turns = append(turns, testUrlCommonModeTurn{
+				providerClientId: fmt.Sprintf("synthetic-provider-%02d", i),
+				networkId:        fmt.Sprintf("synthetic-network-%02d", order.network(i)),
+				run:              testUrlPreResponseFailure("dial_dns"),
+			})
+		}
+		result, releases := testRunUrlCommonModeTurns(t, 1, turns)
+		publishedCount, heldCount, unexpected := testUrlCommonModeCount(releases, testUrlCommonModeNoneHeld)
+		if publishedCount != 60 || len(unexpected) != 0 || result.Submitted != 60 || result.Failed != 0 {
+			t.Errorf("fifteen networks %s: published %d held %d (unexpected turns %v) result %+v, want all 60 published",
+				order.name, publishedCount, heldCount, unexpected, result)
+		}
+	}
+}
+
+// A platform failure fails every network. Twenty providers of one network
+// admitted together count once, so the window fills at the fifteenth other
+// network's turn; from there every pre-response failure is held back, the
+// rest of that first network's providers among them.
+func TestUrlProbeCommonModeHoldsBackAPlatformFailureAcrossNetworks(t *testing.T) {
+	failure := testUrlPreResponseFailure("dial_dns")
+	turns := testUrlCommonModeNetworkTurns("synthetic-network-bunched", "synthetic-bunched-provider", 0, 20, failure)
+	for i := range 28 {
+		turns = append(turns, testUrlCommonModeNetworkTurns(fmt.Sprintf("synthetic-network-%02d", i), "synthetic-provider", i, 1, failure)...)
+	}
+	turns = append(turns, testUrlCommonModeNetworkTurns("synthetic-network-bunched", "synthetic-bunched-provider", 20, 8, failure)...)
+	trips := testutil.ToFloat64(egressProbeBatchGuardTripsTotal.WithLabelValues("full"))
+	result, releases := testRunUrlCommonModeTurns(t, 1, turns)
+	publishedCount, heldCount, unexpected := testUrlCommonModeCount(releases, func(index int) bool { return 34 <= index })
+	if publishedCount != 34 || heldCount != 22 || len(unexpected) != 0 {
+		t.Fatalf("platform failure across networks: published %d held %d (unexpected turns %v), want the 34 turns that fill the window with sixteen networks published and the other 22 held",
+			publishedCount, heldCount, unexpected)
+	}
+	if result.Attempted != 56 || result.Submitted != 34 || result.Failed != 22 || result.UrlNotMeasured != 0 {
+		t.Fatalf("held turns were counted as accepted outcomes: %+v", result)
+	}
+	if tripped := testutil.ToFloat64(egressProbeBatchGuardTripsTotal.WithLabelValues("full")) - trips; tripped != 22 {
+		t.Fatalf("batch guard trips = %v, want one per held turn", tripped)
+	}
+}
+
+// A batch's providers of one network are one turn of it: a pass from any of
+// them is the network's, even when a failure of its network sorts after it.
+func TestUrlProbeCommonModeCountsABatchsNetworkOnce(t *testing.T) {
+	commonMode := newProviderUrlProbeCommonMode(0, 1)
+	failure := testUrlPreResponseFailure("dial_dns")
+	for i := range providerUrlProbeCommonModeNetworkCount - 1 {
+		if _, held := commonMode.judge(map[string]*egresshealth.Result{fmt.Sprintf("synthetic-a-failure-%02d", i): failure}, nil); held {
+			t.Fatalf("turn %d was held before the window held sixteen networks", i)
+		}
+	}
+	batch := map[string]*egresshealth.Result{"synthetic-b-pass": testUrlPass(), "synthetic-c-failure": failure}
+	networks := map[string]string{"synthetic-b-pass": "synthetic-network", "synthetic-c-failure": "synthetic-network"}
+	if share, held := commonMode.judge(batch, networks); held || share != 15.0/16.0 {
+		t.Fatalf("a network's pass and failure in one batch: share %v held %t, want the network passing at 15/16 and not held", share, held)
+	}
+	if share, held := commonMode.judge(map[string]*egresshealth.Result{"synthetic-d-failure": failure}, nil); held || share != 15.0/16.0 {
+		t.Fatalf("the next pre-response failure: share %v held %t, want the network's pass still in the window and not held", share, held)
 	}
 }
