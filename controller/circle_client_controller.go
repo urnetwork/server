@@ -312,6 +312,7 @@ type CircleTransaction struct {
 	TransactionType    string       `json:"transactionType"`
 	TxHash             string       `json:"txHash"`
 	WalletId           string       `json:"walletId"`
+	CreateDate         string       `json:"createDate"`
 }
 
 type GetTransactionResult struct {

@@ -93,6 +93,7 @@ Usage:
     bringyourctl payouts populate-tx-hashes
     bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
     bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
+    bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -178,6 +179,7 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
+    --expect=<digest>  The digest the sn-reconcile dry run printed; --send refuses any other census.
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {
@@ -327,6 +329,14 @@ func main() {
 			os.Exit(reconcileLegacyPayoutAttempts(opts))
 		} else if correctLegacy, _ := opts.Bool("correct-legacy-attempts"); correctLegacy {
 			os.Exit(correctLegacyPayoutAttempts(opts))
+		} else if snReconcile, _ := opts.Bool("sn-reconcile"); snReconcile {
+			send, _ := opts.Bool("--send")
+			expect, _ := opts.String("--expect")
+			asJson, _ := opts.Bool("--json")
+			clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
+			os.Exit(runSnReconcile(os.Stdout, os.Stderr, send, expect, asJson, func(send bool, expect string) (*controller.SnReconcileReport, error) {
+				return controller.SnReconcile(clientSession, send, expect)
+			}))
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
 		if send, _ := opts.Bool("transfer"); send {

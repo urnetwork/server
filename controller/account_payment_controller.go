@@ -325,6 +325,10 @@ func ProcessPendingPayoutsPost(
 
 // Advance payment handles a single payment until completion
 
+// The fixed transfer fee a fresh attempt deducts from the payout. The
+// sn-reconcile census deducts the same fee to report each send amount.
+const providerPaymentFeeUsd = 0.01
+
 type AdvancePaymentArgs struct {
 	PaymentId server.Id `json:"payment_id"`
 }
@@ -560,7 +564,7 @@ func advancePayment(
 			// if err != nil {
 			// just choose a reasonable value
 			// glog.Infof("[payout][%s]fee estimate failed. Using default fee. err = %s\n", payment.PaymentId, err)
-			feeInUSDC := 0.01
+			feeInUSDC := providerPaymentFeeUsd
 			// }
 
 			payoutAmount = payoutAmount - feeInUSDC
