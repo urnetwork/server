@@ -2,7 +2,8 @@
 // (connect/GEOMAP.md §11.4): once a day it judges every active site by our own
 // load tally, retires the sites that fail exits known to work, promotes
 // candidates in their place, and learns the places a working site is blocked
-// from.
+// from. Only exits the probe reached are evidence: a run that never reached
+// its provider is in no site's tally and in no prober-fault share.
 package work
 
 import (
@@ -31,7 +32,7 @@ var egressSiteFailureShare = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "egress_site",
 	Name:      "failure_share",
-	Help:      "The latest pool refresh's failure share of each active site, over healthy exits where enough qualified, else over all exits; per site name and class, both bounded by the pool",
+	Help:      "The latest pool refresh's failure share of each active site, over healthy exits where enough qualified, else over every exit the probe reached; per site name and class, both bounded by the pool",
 }, []string{"site", "class"})
 
 var egressSitePoolSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -52,7 +53,7 @@ var egressSiteRefreshRunsTotal = prometheus.NewCounterVec(prometheus.CounterOpts
 	Namespace: "urnetwork",
 	Subsystem: "egress_site",
 	Name:      "refresh_runs_total",
-	Help:      "Pool refreshes by result: refreshed, skipped (the fleet-wide failure share was above the prober-fault line), failed",
+	Help:      "Pool refreshes by result: refreshed, skipped (the fleet-wide failure share of the loads that reached their provider was above the prober-fault line), failed",
 }, []string{"result"})
 
 var egressSiteRefreshLastRunTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -211,16 +212,20 @@ type egressSiteJudgement struct {
 	class   string
 	share   *float64
 	samples int
-	// basis is healthy (enough healthy exits), all (too few healthy exits,
-	// judged on every exit and logged as such), or too_few (no judgement)
+	// basis is healthy (enough healthy exits), contacted (too few healthy
+	// exits, judged on every exit the probe reached and logged as such), or
+	// too_few (no judgement)
 	basis string
 }
 
 // The share a site is judged on: its failure share among healthy exits when at
 // least minSamples qualify, else -- when the bad sites themselves drag every
-// exit under the healthy line -- its share over all exits, which the caller
-// logs. Under minSamples either way there is no judgement.
-func judgeEgressSite(healthyLoads, healthyFailures, loads, failures, minSamples int) (share *float64, samples int, basis string) {
+// exit under the healthy line, or every run loads one URL and so has no other
+// sites to pass -- its share over every exit the probe reached, which the
+// caller logs. The tally holds no run that never reached its provider, so an
+// offline exit is in neither share. Under minSamples either way there is no
+// judgement.
+func judgeEgressSite(healthyLoads, healthyFailures, contactedLoads, contactedFailures, minSamples int) (share *float64, samples int, basis string) {
 	ratio := func(failed int, total int) *float64 {
 		value := float64(failed) / float64(total)
 		return &value
@@ -228,12 +233,12 @@ func judgeEgressSite(healthyLoads, healthyFailures, loads, failures, minSamples 
 	switch {
 	case minSamples <= healthyLoads:
 		return ratio(healthyFailures, healthyLoads), healthyLoads, "healthy"
-	case minSamples <= loads:
-		return ratio(failures, loads), loads, "all"
+	case minSamples <= contactedLoads:
+		return ratio(contactedFailures, contactedLoads), contactedLoads, "contacted"
 	case 0 < healthyLoads:
 		return ratio(healthyFailures, healthyLoads), healthyLoads, "too_few"
-	case 0 < loads:
-		return ratio(failures, loads), loads, "too_few"
+	case 0 < contactedLoads:
+		return ratio(contactedFailures, contactedLoads), contactedLoads, "too_few"
 	default:
 		return nil, 0, "too_few"
 	}
@@ -269,8 +274,9 @@ type egressRefreshInput struct {
 	// probationTotals are the per-day totals of the sites on probation, from
 	// their earliest promotion day on
 	probationTotals []model.ProviderEgressSiteDayTotal
-	// recent is the fleet's scored loads within the prober-fault window
-	recent model.ProviderEgressClassTotal
+	// recent is the fleet's scored loads within the prober-fault window that
+	// reached their provider, and the no-contact failures left out
+	recent model.ProviderEgressContactedTotal
 }
 
 // What one refresh changes. rows holds a copy of every row it changes, keyed
@@ -323,13 +329,17 @@ func (self *egressPlaceCounts) add(t model.ProviderEgressSiteTally) {
 
 // Decides one refresh (GEOMAP §11.4), with no I/O, in this order:
 //
-//  1. skip everything while the fleet-wide failure share -- recent, or over
-//     the window -- is above the prober-fault line: a prober fault fails every
-//     site at once, and retiring sites then would empty the pool for nothing;
-//  2. judge every active site on its failure share among healthy exits
-//     (judgeEgressSite), and every site on probation on its loads since its
-//     promotion: past SiteProbationShare of SiteMinSamples it counts from
-//     now on, under it it is retired;
+//  1. skip everything while the fleet-wide failure share of the loads that
+//     reached their provider -- recent, or over the window -- is above the
+//     prober-fault line: a prober fault fails every site at once on the exits
+//     it reaches, and retiring sites then would empty the pool for nothing. A
+//     run that never reached its provider is in neither share, as it is in no
+//     site's: an offline exit is a structural part of every hour's runs, and
+//     says nothing about the prober or the sites;
+//  2. judge every active site on its failure share among healthy exits, else
+//     among every exit the probe reached (judgeEgressSite), and every site on
+//     probation on its loads since its promotion: past SiteProbationShare of
+//     SiteMinSamples it counts from now on, under it it is retired;
 //  3. retire, per class, at most SiteMaxRetirePerRun of the scored sites above
 //     SiteRetireShare over at least SiteMinSamples, worst first, each opening
 //     a promotion of its own category;
@@ -349,13 +359,14 @@ func planEgressDestinationRefresh(input egressRefreshInput) *egressRefreshPlan {
 	plan := &egressRefreshPlan{rows: map[string]*model.ProviderEgressDestination{}}
 	// what a judgement's samples were, for the log
 	exitsJudged := func(basis string) string {
-		if basis == "all" {
-			return "exits, healthy or not (too few healthy exits to judge on)"
+		if basis == "contacted" {
+			return "contacted exits, healthy or not (too few healthy exits to judge on)"
 		}
 		return "healthy exits"
 	}
 
-	// 1. the prober-fault line
+	// 1. the prober-fault line, over the loads that reached their provider:
+	// the window's tally holds no others
 	windowLoads, windowFailures := 0, 0
 	for _, t := range input.windowTallies {
 		windowLoads += t.LoadCount
@@ -364,7 +375,10 @@ func planEgressDestinationRefresh(input egressRefreshInput) *egressRefreshPlan {
 	if 0 < input.recent.Total {
 		share := float64(input.recent.Total-input.recent.Ok) / float64(input.recent.Total)
 		if settings.SiteProberFaultShare < share {
-			plan.skipped = fmt.Sprintf("the fleet-wide failure share of the last %s is %.3f, above the prober-fault line %.3f", settings.SiteProberFaultWindow(), share, settings.SiteProberFaultShare)
+			plan.skipped = fmt.Sprintf(
+				"the fleet-wide failure share of the last %s is %.3f over %d loads that reached their provider (%d no-contact failures left out), above the prober-fault line %.3f",
+				settings.SiteProberFaultWindow(), share, input.recent.Total, input.recent.NoContactFailures, settings.SiteProberFaultShare,
+			)
 			return plan
 		}
 	}
@@ -438,7 +452,7 @@ func planEgressDestinationRefresh(input egressRefreshInput) *egressRefreshPlan {
 		share, samples, basis := judgeEgressSite(counts.healthyLoads, counts.healthyFailures, counts.loads, counts.failures, settings.SiteMinSamples)
 		judgement := egressSiteJudgement{name: d.Name, class: d.Class, share: share, samples: samples, basis: basis}
 		plan.judgements = append(plan.judgements, judgement)
-		if basis == "all" {
+		if basis == "contacted" {
 			plan.fallbacks = append(plan.fallbacks, d.Name)
 		}
 		row := plan.row(d)
@@ -796,7 +810,11 @@ func refreshEgressDestinations(ctx context.Context, now time.Time, check egressC
 	if result.TallyExcludedPlaceDays > 0 || result.TallyUnknownShards > 0 {
 		glog.Warningf("[egresssites]refresh evidence excludes %d known incomplete day/places; %d rollup shards have unknown coverage; unaffected evidence continues\n", result.TallyExcludedPlaceDays, result.TallyUnknownShards)
 	}
-	recent := model.GetProviderEgressHealthClassTotals(ctx, now.Add(-settings.SiteProberFaultWindow()))[""]
+	recent := model.GetProviderEgressHealthContactedTotal(ctx, now.Add(-settings.SiteProberFaultWindow()))
+	glog.Infof(
+		"[egresssites]the last %s: %d of %d loads that reached their provider failed; %d no-contact failures left out\n",
+		settings.SiteProberFaultWindow(), recent.Total-recent.Ok, recent.Total, recent.NoContactFailures,
+	)
 	plan := planEgressDestinationRefresh(egressRefreshInput{
 		now:             now,
 		settings:        settings,
@@ -940,7 +958,7 @@ func refreshEgressDestinations(ctx context.Context, now time.Time, check egressC
 		egressSiteChangesTotal.WithLabelValues("unmarked", change.class).Inc()
 	}
 	if 0 < len(plan.fallbacks) {
-		glog.Infof("[egresssites]too few healthy exits to judge %s; judged on the share over all exits\n", strings.Join(plan.fallbacks, ","))
+		glog.Infof("[egresssites]too few healthy exits to judge %s; judged on the share over every exit the probe reached\n", strings.Join(plan.fallbacks, ","))
 	}
 
 	final := model.GetProviderEgressDestinations(ctx)

@@ -858,7 +858,7 @@
     {
       "type": "stat",
       "title": "fleet failure share by class",
-      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them (all). Over the 20 % prober-fault line in every class is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the site pool refresh skips its run while the all share is over the line. Read from the one fresh taskworker snapshot like the rest of this row.",
+      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them (all). Over the 20 % prober-fault line in every class is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the site pool refresh skips its run while the share of the loads that reached their provider is over the line (this panel counts every failure, a provider that was never reached included). Read from the one fresh taskworker snapshot like the rest of this row.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"

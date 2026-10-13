@@ -26,24 +26,11 @@ const (
 	providerUrlProbeCommonModePassShare = 0.02
 )
 
-// Final stages of a URL attempt that ended before any destination answered:
-// the target's DNS lookup through the tunnel, or a TCP connect through it that
-// never completed. A platform failure on the tunnel path ends here, e.g.
-// contract setup on both tunnel legs consuming the URL DNS phase
-// (url_phase_timeout.go). TLS, policy, write, response and generic timeout
-// stages are left out: a peer answered, or the phase is unknown.
-var providerUrlProbePreResponseStages = map[string]bool{
-	"dial_dns":             true,
-	"dial_dns_or_socket":   true,
-	"request_dns_timeout":  true,
-	"dial_tcp":             true,
-	"request_dial_timeout": true,
-}
-
-// A failed run that no destination answered: every counted load ended in a
-// pre-response stage with no status, response byte, redirect or TLS verdict,
-// and the run carries no security evidence. A run whose counted loads do not
-// add up to its total is not evidence either way.
+// A failed run that no destination answered: every counted load is a
+// no-contact failure (egresshealth.CheckResult.NoContactFailure), with no
+// status, response byte, redirect or TLS verdict, and the run carries no
+// security evidence. A run whose counted loads do not add up to its total is
+// not evidence either way.
 func providerUrlProbePreResponseFailure(run *egresshealth.Result) bool {
 	if run == nil || run.Total < 1 || run.OkCount != 0 || run.TlsAuthenticationFailure ||
 		(run.UrlProbeEvidence != nil && len(run.UrlProbeEvidence.Security) != 0) {
@@ -54,9 +41,7 @@ func providerUrlProbePreResponseFailure(run *egresshealth.Result) bool {
 		if check.NotMeasured || check.Canary {
 			continue
 		}
-		if check.Ok || check.StatusCode != 0 || check.FirstByteReceived || check.RedirectCount != 0 ||
-			check.TlsAuthenticationFailure || len(check.UrlProbeSecurity) != 0 ||
-			!providerUrlProbePreResponseStages[check.FailureStage] {
+		if !check.NoContactFailure() {
 			return false
 		}
 		countedLoadCount++

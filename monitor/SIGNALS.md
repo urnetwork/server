@@ -13718,7 +13718,11 @@ GROUP BY d.name, d.class;
 ```
 
 When fewer than `SiteMinSamples` (200) healthy loads exist for a site, the
-refresh judges it on all of its loads and says so in its log line. The
+refresh judges it on all of its loads and says so in its log line. Either way
+only runs that reached their provider are tallied: a URL that failed before
+any destination answered (`dial_dns`, `dial_tcp` and their timeout and
+combined stages, with no status, response byte, redirect or TLS verdict) is an
+offline or unreachable exit, which says nothing about the site. The
 refresh records its judgement on the row (`failure_share`, `sample_count`,
 `judged_time`, and `above_retire_since` while the share stands above the
 retire line with enough samples), and the signal reads that record together
@@ -13869,8 +13873,10 @@ for that class and place in `egress-sites.yml` (a site retired for good
 returns by raising its entry's `revision`); if the fleet-wide share is high,
 check the prober's request profile and capacity before touching the pool,
 because retiring sites during a prober fault empties the pool for nothing —
-the refresh skips its run while the share is above the prober-fault line for
-that reason. Verify: the site's failure share on healthy exits falls under
+the refresh skips its run while the failure share of the loads that reached
+their provider is above the prober-fault line for that reason (a run that
+never reached its provider is no evidence of a prober fault, and is counted
+apart in the refresh's `[egresssites]` log line). Verify: the site's failure share on healthy exits falls under
 the retire line within one refresh cadence after the swap, and the
 quality-bucket count of §2.9a stops falling.
 
