@@ -105,7 +105,7 @@ Every API request (`ClientSession.Auth`) and every connect transport (`connect/t
 
 ## 4. Route authorization: admin, client, Embed
 
-Every route has a class in `api/route_authz.go`: 240 routes as of 2026-10-13.
+Every route has a class in `api/route_authz.go`: 241 routes as of 2026-10-13.
 
 - `TestEveryRouteIsClassified` fails for any route without a class.
 - At runtime, an unclassified route refuses client tokens.
@@ -113,7 +113,7 @@ Every route has a class in `api/route_authz.go`: 240 routes as of 2026-10-13.
 
 | Class | Routes | Network credential | Client token, ordinary network | Client token, Embed network |
 |---|---|---|---|---|
-| Public | 114 | Not needed | Not needed | Not needed |
+| Public | 115 | Not needed | Not needed | Not needed |
 | Client | 47 | Yes | Yes | Yes |
 | OwnClient | 5 | Yes, any client | Its own client and children | Its own client and children |
 | OwnClientPayout | 4 | Yes | Its own client | **403** |

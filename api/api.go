@@ -57,6 +57,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
 		router.NewRoute("GET", "/terms.txt", router.Txt),
 		router.NewRoute("GET", "/vdp.txt", router.Txt),
+		router.NewRoute("GET", "/robots.txt", router.RobotsTxt),
 		router.NewRoute("GET", "/status", router.WarpStatus),
 		router.NewRoute("GET", "/clock", handlers.Clock),
 		// The sim-latency competition is a separate, fail-closed security
