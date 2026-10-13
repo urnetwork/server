@@ -151,21 +151,40 @@ func TestUrlProbeMatureDeficitSelectsAfterQuota(t *testing.T) {
 	})
 }
 
+// The head's stable hash order, computed independently of the census.
+func testingUrlMatureDeficitHashOrder(t testing.TB, ctx context.Context) []server.Id {
+	t.Helper()
+	clientIds := []server.Id{}
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, `SELECT client_id FROM provider_egress_probe_cycle ORDER BY hashtext(client_id::text),client_id`)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var clientId server.Id
+				server.Raise(rows.Scan(&clientId))
+				clientIds = append(clientIds, clientId)
+			}
+		})
+	})
+	return clientIds
+}
+
 func TestUrlProbeMatureDeficitCapAndEmpty(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		now := server.NowUtc().Truncate(time.Microsecond)
-		ids := testingUrlCompletionClients(t, now.Add(-5*time.Hour), 129)
+		testingUrlCompletionClients(t, now.Add(-5*time.Hour), 129)
+		// The cap keeps the first 128 in stable hash order; the last is excluded.
+		excludedId := testingUrlMatureDeficitHashOrder(t, ctx)[128]
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET eligible=false WHERE client_id=$1`, ids[128]))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET eligible=false WHERE client_id=$1`, excludedId))
 		})
 		d := GetProviderUrlProbeFleet(ctx, now).MatureDeficitDiagnostics
-		if d.ContractVersion != 1 || d.PolicyVersion != 1 || d.SampleLimit != 128 || d.Selected != 128 ||
+		if d.ContractVersion != ProviderUrlProbeMatureDeficitContractVersion || d.PolicyVersion != 1 || d.SampleLimit != 128 || d.Selected != 128 ||
 			d.TotalMatureDeficient != 129 || d.Capped != 1 || d.RunsNeeded != 1280 || d.HintFalse != 0 || d.Claim != [4]int{128, 0, 0, 0} {
 			t.Fatalf("cap did not follow deterministic qualified IDs: %+v", d)
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active=false WHERE client_id=$1`, ids[128]))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active=false WHERE client_id=$1`, excludedId))
 		})
 		if equal := GetProviderUrlProbeFleet(ctx, now).MatureDeficitDiagnostics; equal.Selected != 128 || equal.TotalMatureDeficient != 128 || equal.Capped != 0 {
 			t.Fatalf("exactly128 was mislabeled as truncated: %+v", equal)
@@ -174,8 +193,56 @@ func TestUrlProbeMatureDeficitCapAndEmpty(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active=false`))
 		})
 		d = GetProviderUrlProbeFleet(ctx, now).MatureDeficitDiagnostics
-		if d.ContractVersion != 1 || d.PolicyVersion != 1 || d.Selected != 0 || d.TotalMatureDeficient != 0 || d.Capped != 0 {
+		if d.ContractVersion != ProviderUrlProbeMatureDeficitContractVersion || d.PolicyVersion != 1 || d.Selected != 0 || d.TotalMatureDeficient != 0 || d.Capped != 0 {
 			t.Fatalf("empty census is absent or stale: %+v", d)
+		}
+	})
+}
+
+// Ids are ULIDs, so identifier order is creation order. On Main the capped
+// head in that order held only the oldest deficits: 1 success in 179 runs,
+// while a hash-ordered head of the same census held 92 in 180. Here the 128
+// lowest identifiers fail every run and the rest succeed, so a creation-ordered
+// head reports no success at all.
+func TestUrlProbeMatureDeficitSampleIndependentOfIdentifierOrder(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc().Truncate(time.Microsecond)
+		clientIds := testingUrlCompletionClients(t, now.Add(-5*time.Hour), 256)
+		server.Tx(ctx, func(tx server.PgTx) {
+			// Three accepted runs per provider keep every provider deficient.
+			server.RaisePgResult(tx.Exec(ctx, `WITH ordered AS (
+				SELECT client_id,row_number() OVER (ORDER BY client_id) AS n FROM provider_egress_probe_cycle
+			) INSERT INTO provider_egress_health_history
+				(run_id,client_id,measured_at,ok_count,total_count,class_results,tls_authentication_failure,url_probe,url_probe_policy_version)
+				SELECT md5(client_id::text||'-sample-'||i)::uuid,client_id,$1::timestamp-i*interval '1 minute',
+					CASE WHEN n<=128 THEN 0 ELSE 1 END,1,'{}',false,true,1
+				FROM ordered CROSS JOIN generate_series(1,3) AS i`, now))
+		})
+		failingClientIds := map[server.Id]bool{}
+		for _, clientId := range clientIds[:128] {
+			failingClientIds[clientId] = true
+		}
+		wantSuccesses, wantFailures := 0, 0
+		for _, clientId := range testingUrlMatureDeficitHashOrder(t, ctx)[:128] {
+			if failingClientIds[clientId] {
+				wantFailures += 3
+			} else {
+				wantSuccesses += 3
+			}
+		}
+		fleet := GetProviderUrlProbeFleet(ctx, now)
+		d := fleet.MatureDeficitDiagnostics
+		if fleet.MatureEligible != 256 || fleet.MatureQuotaComplete != 0 || d.TotalMatureDeficient != 256 ||
+			d.Selected != 128 || d.Capped != 1 || d.RunsNeeded != 128*7 {
+			t.Fatalf("sample population changed: fleet=%+v diagnostic=%+v", fleet, d)
+		}
+		if d.AcceptedSuccesses == 0 || d.AcceptedFailures == 0 {
+			t.Fatalf("head follows identifier (creation) order: successes=%d failures=%d", d.AcceptedSuccesses, d.AcceptedFailures)
+		}
+		if d.AcceptedSuccesses != wantSuccesses || d.AcceptedFailures != wantFailures {
+			t.Fatalf("head is not the stable hash sample: successes=%d/%d failures=%d/%d",
+				d.AcceptedSuccesses, wantSuccesses, d.AcceptedFailures, wantFailures)
 		}
 	})
 }
