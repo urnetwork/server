@@ -12,6 +12,7 @@ import (
 	"errors"
 	"math"
 	"math/big"
+	"os"
 	"strings"
 	"testing"
 
@@ -401,6 +402,32 @@ func TestStLedgerV2ThreeFailedClosesStrandTheRootKey(t *testing.T) {
 		hash, err := client.LedgerV2Finalize(ctx, 6, 1)
 		if err != nil || len(fixture.sent) != 4 || fixture.sent[3].Nonce() != 11 {
 			t.Fatalf("finalize on the freed key: %s, %v, %d sent", hash, err, len(fixture.sent))
+		}
+		requireLedgerV2Intent(t, ctx, cfg, "v2finalize:6:1", model.StTxFinalized, fixture.sent[3])
+	})
+}
+
+// SV-1 (retries): a known defect, which TestStLedgerV2ThreeFailedClosesStrandTheRootKey
+// pins as it stands. This test states what the engine owes instead and fails
+// until it does it, so it runs only on request. A close whose three signatures
+// are spent has nothing left to sign, so its next try must not keep a nonce,
+// and the root key's next send must go out with it.
+func TestStLedgerV2SpentCloseLeavesTheRootKeyFree(t *testing.T) {
+	if os.Getenv("ST_LEDGER_V2_KNOWN_DEFECTS") == "" {
+		t.Skip("fails while a close whose signatures are spent still keeps a nonce; set ST_LEDGER_V2_KNOWN_DEFECTS=1 to run it")
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		client, _, cfg := newLedgerV2RPCClient(t, fixture)
+		ledgerV2SpendCloseSignatures(t, ctx, fixture, client, cfg)
+
+		if _, err := client.LedgerV2Close(ctx, 7, 1); !errors.Is(err, model.ErrStOperatorGasAllowance) {
+			t.Fatalf("fourth close: %v", err)
+		}
+		hash, err := client.LedgerV2Finalize(ctx, 6, 1)
+		if err != nil || len(fixture.sent) != 4 || fixture.sent[3].Nonce() != 10 {
+			t.Fatalf("finalize after the spent close, whose intent is %+v: %s, %v, %d sent", ledgerV2Intent(t, ctx, cfg, "v2close:7:1"), hash, err, len(fixture.sent))
 		}
 		requireLedgerV2Intent(t, ctx, cfg, "v2finalize:6:1", model.StTxFinalized, fixture.sent[3])
 	})
