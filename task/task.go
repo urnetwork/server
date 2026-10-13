@@ -1510,6 +1510,14 @@ type TaskWorkerSettings struct {
 	// Aliases share their target's limit; RunPost wrappers do not borrow it.
 	// Nil leaves every target unlimited. Construction snapshots this map.
 	TargetClaimLimits map[string]int
+	// Opt-in minimum lane shares, keyed by canonical target function name.
+	// The value k gives the target's indexed lane one of every k turns that
+	// would otherwise claim from the ordinary queue (a quarter of all claims
+	// for k=2); rotation turns are unchanged. An empty, busy or saturated
+	// share lane falls back to the ordinary queue as any lane does. Shares
+	// together take at most half of the ordinary turns. Nil adds no share.
+	// Construction snapshots this map.
+	TargetClaimShares map[string]int
 	// how long `Drain` waits for in-flight tasks to finish naturally before
 	// canceling their contexts
 	DrainFinishTimeout time.Duration
@@ -1567,6 +1575,11 @@ type TaskWorker struct {
 	claimFunctionNames   []string
 	claimCheckpointNames []string
 	claimFunctionTurn    uint64
+	// Registered share lanes in lane name order, the ordinary turns each has
+	// earned toward its next turn, and where its claims start reading it.
+	claimShares       []taskClaimShare
+	claimShareCredits map[string]int
+	claimShareFloors  map[string]*taskClaimShareFloor
 
 	inflightCount      atomic.Int64
 	drainCanceledCount atomic.Int64
@@ -1599,6 +1612,8 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 		refreshTaskTimestampLeases: refreshTaskTimestampLeases,
 		drainLogf:                  glog.Infof,
 		claimTargetCounts:          map[string]int{},
+		claimShareCredits:          map[string]int{},
+		claimShareFloors:           map[string]*taskClaimShareFloor{},
 	}
 
 	taskWorker.AddTargets(
@@ -1808,6 +1823,19 @@ func (self *TaskWorker) AddTargets(taskTargets ...Target) {
 		self.claimFunctionNames = append(self.claimFunctionNames, name)
 	}
 	slices.Sort(self.claimFunctionNames)
+	// A share names a registered canonical target; its lane is that name's.
+	self.claimShares = self.claimShares[:0]
+	for name, period := range self.settings.TargetClaimShares {
+		if target := self.targets[name]; target != nil && target.TargetFunctionName() == name {
+			self.claimShares = append(self.claimShares, taskClaimShare{laneName: updateFunctionName(name), targetName: name, period: period})
+		}
+	}
+	slices.SortFunc(self.claimShares, func(a, b taskClaimShare) int { return strings.Compare(a.laneName, b.laneName) })
+	for _, share := range self.claimShares {
+		if self.claimShareFloors[share.laneName] == nil {
+			self.claimShareFloors[share.laneName] = &taskClaimShareFloor{}
+		}
+	}
 	self.claimCheckpointNames = self.claimCheckpointNames[:0]
 	for name, target := range self.targets {
 		if _, ok := target.(TaskClaimCheckpointTarget); ok {
@@ -2032,13 +2060,24 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	candidateLimit := n + 64
 	includeGroupArgs := self.hasTaskClaimGroups()
 	claimFunction := self.nextClaimFunction(options)
+	// A Run cohort lane reads a wider window and passes rows of groups it has
+	// no slot for, so each slot's cohort can fill from rows of its group that
+	// other groups' rows interleave. Passed rows stay unowned for later claims.
+	_, cohortLane := self.targets[claimFunction].(TaskRunCohortTarget)
+	cohortLane = cohortLane && options.runCohorts && claimFunction != ""
+	if cohortLane {
+		candidateLimit = n + taskRunCohortLaneCandidateLimit
+	}
+	shareFloor, floorBlock, floorReset := self.claimShareFloor(claimFunction, now)
 	openCursor := func() error {
 		bound := throughBlock
+		floor := int64(0)
 		if claimFunction != "" {
 			// Only ordinary discovery supplies a future eligibility alarm.
 			bound = nowBlock
+			floor = floorBlock
 		}
-		query, queryArgs := self.taskFunctionCandidatesQuery(bound, candidateLimit, true, claimFunction, includeGroupArgs)
+		query, queryArgs := self.taskLaneCandidatesQuery(bound, floor, candidateLimit, true, claimFunction, includeGroupArgs)
 		_, err := tx.Exec(ctx, `DECLARE pending_task_claim_candidates NO SCROLL CURSOR FOR `+query, queryArgs...)
 		return err
 	}
@@ -2050,6 +2089,9 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	taskIds := []server.Id{}
 	taskIdPriorities := map[server.Id]taskPriority{}
 	passGroupKeys := map[taskClaimGroupKey]bool{}
+	// Groups this pass was refused. Their later rows are passed without a
+	// statement; another owner or a full batch holds them.
+	refusedGroupKeys := map[taskClaimGroupKey]bool{}
 	cohorts := map[taskRunCohortKey]*taskRunCohort{}
 	taskCohorts := map[server.Id]*taskRunCohort{}
 	claimedSlots := 0
@@ -2104,6 +2146,14 @@ claimCandidates:
 		if candidateCount == 0 && self.claimCandidatesReady != nil {
 			self.claimCandidatesReady()
 		}
+		if shareFloor && claimFunction != "" && candidateCount == 0 {
+			// The first due row of the lane at or past its floor, if any.
+			var firstBlock *int64
+			if 0 < len(candidates) {
+				firstBlock = &candidates[0].availableBlock
+			}
+			self.observeClaimShareFloor(claimFunction, firstBlock, nowBlock, floorReset)
+		}
 		candidateCount += len(candidates)
 		for _, candidate := range candidates {
 			// The same bounded cursor can retain an eligibility wake hint.
@@ -2117,6 +2167,11 @@ claimCandidates:
 			// Session advisory locks are reentrant: a reset timestamp must not
 			// let this same Run start a second execution of its live task.
 			if guard.taskIds[candidate.taskId] {
+				continue
+			}
+			// An invalid group still fails the claim at reservation below.
+			if groupKeys, _, err := self.taskClaimGroupKeys(candidate.functionName, candidate.argsJson); err == nil &&
+				slices.ContainsFunc(groupKeys, func(key taskClaimGroupKey) bool { return refusedGroupKeys[key] }) {
 				continue
 			}
 			var cohort *taskRunCohort
@@ -2136,6 +2191,10 @@ claimCandidates:
 				}
 			}
 			if claimedSlots >= n && (cohort == nil || cohort.count == 0) {
+				if cohortLane && cohort != nil {
+					// Within its own lane a cohort passes another group's row.
+					continue
+				}
 				// Never skip an earlier ordinary candidate to expand a later
 				// cohort, and never take an owner for an unneeded new slot.
 				break claimCandidates
@@ -2168,7 +2227,7 @@ claimCandidates:
 				}
 				continue
 			}
-			grouped, err := self.reserveTaskClaimGroups(ctx, tx, guard, candidate.taskId, candidate.functionName, candidate.argsJson, passGroupKeys)
+			grouped, err := self.reserveTaskClaimGroups(ctx, tx, guard, candidate.taskId, candidate.functionName, candidate.argsJson, passGroupKeys, refusedGroupKeys)
 			if err != nil {
 				return nil, guard, false, err
 			}
@@ -2239,6 +2298,8 @@ claimCandidates:
 					return nil, guard, false, err
 				}
 				claimFunction = ""
+				candidateLimit = n + 64
+				cohortLane = false
 				candidateCount = 0
 				if err := openCursor(); err != nil {
 					return nil, guard, false, err

@@ -368,7 +368,46 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "deployment_key", kind: "character varying(96)", notNull: true},
 			snMainnetMigrationColumn{name: "next_block", kind: "bigint", notNull: true}),
 		snMainnetMigrationConstraints("st_fleet_bound_sync", "PRIMARY KEY (deployment_key)")),
+	migrationCurrentSuffix(823, "App Store transaction price and currency",
+		snMainnetMigrationColumns("apple_subscription_transaction",
+			snMainnetMigrationColumn{name: "price_milliunits", kind: "bigint"},
+			snMainnetMigrationColumn{name: "currency", kind: "character varying(3)"})),
+	// 824 and 825 retire composite artifacts (776, 767-769) that pinned the
+	// dropped index, so each republishes the rest of that custody with the
+	// index required absent instead.
+	migrationCurrentSuffix(824, "provider session custody without the unread transaction index",
+		providerWorkSessionCustodyPredicates(
+			migrationIndexRemoved("provider_work_session_event", "provider_work_session_event_transaction"))...),
+	migrationCurrentSuffix(825, "close evidence custody without the duplicate contract index",
+		contractCloseEvidenceChainWithoutContractIndexArtifactQuery),
+	migrationCurrentSuffix(826, "unread completed waiting probe index removed",
+		migrationIndexRemoved("provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting")),
+	migrationCurrentSuffix(827, "unread slot completed waiting probe index removed",
+		migrationIndexRemoved("provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting")),
+	migrationCurrentSuffix(828, "connection tables keep emptied pages",
+		migrationVacuumTruncateOff("network_client_connection"),
+		migrationVacuumTruncateOff("network_client_handler")),
+	migrationCurrentSuffix(829, "device network index",
+		migrationFp2Index("device", "device_network_id", "network_id", "", false)),
+	migrationCurrentSuffix(830, "device-leading audit device event index", auditDeviceEventDeviceIndexArtifactQuery),
+	migrationCurrentSuffix(831, "time-leading audit device stats index removed",
+		migrationIndexRemoved("audit_device_event", "audit_device_event_stats_device_id")),
 }
+
+// Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
+// from shared_buffers, which queues every statement on these tables.
+func migrationVacuumTruncateOff(table string) string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM pg_class relation
+		WHERE relation.oid = to_regclass('public.%s')
+		AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY['vacuum_truncate=false']::text[])`, table)
+}
+
+// The devices series reads event_type from this index, so the covering column
+// is pinned with the keys: without it every chunk would visit the heap.
+const auditDeviceEventDeviceIndexArtifactQuery = `EXISTS (SELECT 1 FROM index_artifact
+		WHERE table_name = 'audit_device_event' AND index_name = 'audit_device_event_device_id_event_time'
+		AND definition = 'CREATE INDEX audit_device_event_device_id_event_time ON public.audit_device_event USING btree (device_id, event_time, event_id) INCLUDE (event_type)'
+		AND predicate_definition IS NULL AND indisvalid AND indisready)`
 
 // A dropped index stays dropped: a rebuilt copy under the published name would
 // again be maintained on every write without a reader.

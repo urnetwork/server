@@ -81,7 +81,7 @@ func newProviderUrlProbeFleetCollector() *providerUrlProbeFleetCollector {
 		deficit: prometheus.NewDesc("urnetwork_url_probe_mature_deficit_diagnostic",
 			"Closed aggregate observations of at most 128 current mature quota-deficient providers; accepted credits include measured success and failure, setup failures are separate, and lag maxima describe completion receipt or attempt projection rather than health-history arrival", []string{"state"}, nil),
 		deficitContract: prometheus.NewDesc("urnetwork_url_probe_mature_deficit_diagnostic_contract",
-			"Atomic census diagnostic version: 1 selects mature quota deficits before a deterministic limit of 128 providers; observations do not establish pacing, writer identity, or first deficit onset", nil, nil),
+			"Atomic census diagnostic version: 2 selects mature quota deficits in stable client-hash order before a deterministic limit of 128 providers (version 1 selected the oldest-created clients); observations do not establish pacing, writer identity, or first deficit onset", nil, nil),
 	}
 }
 

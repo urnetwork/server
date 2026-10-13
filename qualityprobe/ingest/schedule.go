@@ -152,6 +152,9 @@ type DueProvider struct {
 	// The lower-case ISO 3166-1 alpha-2 country.
 	CountryCode string `json:"country_code,omitempty"`
 	Region      string `json:"region,omitempty"`
+	// The provider's network, empty from a server that predates it. It only
+	// groups providers for the URL common-mode guard and is never reported.
+	NetworkId string `json:"network_id,omitempty"`
 }
 
 // Mirrors the server's due results. A server that knows where its

@@ -21,6 +21,10 @@ const ProviderWorkSessionSourceSchema = "urnetwork-provider-work-session-source-
 type ProviderWorkSessionSource struct {
 	authority protocol.ProviderWorkSourceAuthority
 	key       ed25519.PrivateKey
+	// loaded from the deployed provider_work_session.json rather than handed
+	// over by an explicit owner. Only a deployed source must find the
+	// transaction lookup index that migration 824 dropped before it signs.
+	vaultLoaded bool
 }
 
 type providerWorkSessionSourceContextKey struct{}
@@ -92,6 +96,9 @@ func loadProviderWorkSessionSource() (*ProviderWorkSessionSource, error) {
 			return providerWorkSessionSourceLoad{err: err}, false
 		}
 		source, err := providerWorkSessionSourceFromBytes(raw)
+		if source != nil {
+			source.vaultLoaded = true
+		}
 		return providerWorkSessionSourceLoad{source: source, err: err}, true
 	})
 	if load.err != nil {
@@ -104,7 +111,7 @@ func loadProviderWorkSessionSource() (*ProviderWorkSessionSource, error) {
 func (self *ProviderWorkSessionSource) clone() *ProviderWorkSessionSource {
 	authority := self.authority
 	authority.DirectoryPublicKeys = append([][32]byte(nil), self.authority.DirectoryPublicKeys...)
-	return &ProviderWorkSessionSource{authority: authority, key: bytes.Clone(self.key)}
+	return &ProviderWorkSessionSource{authority: authority, key: bytes.Clone(self.key), vaultLoaded: self.vaultLoaded}
 }
 
 // Return only public source identity after the same finite parsing and signer

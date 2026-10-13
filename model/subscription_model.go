@@ -4672,6 +4672,9 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 	contractCompleted := make([]bool, len(openContracts))
 	contractVisited := make([]bool, len(openContracts))
 	eligibilitySkipped := make([]bool, len(openContracts))
+	// A row past its deadline whose payer grant another closer held.
+	ownerBusy := make([]bool, len(openContracts))
+	busyOwners := newForceCloseBusyOwners()
 	deferredSettlements := make([]bool, len(openContracts))
 	accountingRejections := make([]bool, len(openContracts))
 	quarantinedAccountingRejections := make([]bool, len(openContracts))
@@ -4687,6 +4690,29 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 		var fresh *OpenContract
 		var reconciled *ContractDeadlineReconciliation
 		var reconciliationPosts []server.PostFunction
+		// A row past its stored deadline tries its payer's grant before any
+		// lock; a held grant leaves it to the holder (subscription_close_owner_busy.go).
+		handled, dueBusy := false, false
+		dueErr := runForceClose(func() error {
+			var err error
+			handled, reconciled, dueBusy, err = forceCloseDueRowByOwner(ctx, openContract.contractId, busyOwners)
+			return err
+		})
+		if dueErr != nil && !errors.Is(dueErr, errContractAlreadySettled) {
+			contractErrors[j] = dueErr
+			leftOpen[j] = true
+			contractVisited[j] = true
+			return
+		}
+		if dueBusy {
+			ownerBusy[j] = true
+			contractVisited[j] = true
+			return
+		}
+		if handled && dueErr == nil {
+			attempted[j], contractCompleted[j], contractVisited[j] = true, true, true
+			return
+		}
 		prepareErr := runForceClose(func() error {
 			var err error
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -4894,10 +4920,17 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 	failedIndexes := []int{}
 	deferredContractIds := []server.Id{}
 	deferredContractIdSet := map[server.Id]bool{}
-	var verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount int64
+	var verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount, ownerBusyCount int64
 	for index, contractErr := range contractErrors[:started] {
 		if !contractVisited[index] {
 			allVisited = false
+		}
+		if ownerBusy[index] {
+			// Another closer held this payer's grant and retires its due
+			// contracts. A completed visit left open to it, not a failure.
+			forceCloseContractCounter.WithLabelValues("owner_busy").Inc()
+			ownerBusyCount++
+			continue
 		}
 		if eligibilitySkipped[index] {
 			// A current eligibility rejection is a completed scan visit, not
@@ -5007,9 +5040,9 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 			ownerBatchRowCount += len(batch.indexes)
 		}
 	}
-	glog.Infof("[close-expired]page returned success=%t raw_open=%d raw_disputed=%d selected=%d terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d has_more=%t started=%d deferred=%d owner_batches=%d owner_batch_rows=%d\n",
+	glog.Infof("[close-expired]page returned success=%t raw_open=%d raw_disputed=%d selected=%d terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d has_more=%t started=%d deferred=%d owner_busy=%d owner_batches=%d owner_batch_rows=%d\n",
 		err == nil, rawOpen, rawDisputed, len(openContracts), verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount, next != nil,
-		started, len(deferredContractIds), ownerBatchCount, ownerBatchRowCount)
+		started, len(deferredContractIds), ownerBusyCount, ownerBatchCount, ownerBatchRowCount)
 
 	return
 }

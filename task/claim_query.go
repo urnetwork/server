@@ -22,6 +22,12 @@ func (self *TaskWorker) taskCandidatesQuery(nowBlock int64, candidateLimit int, 
 }
 
 func (self *TaskWorker) taskFunctionCandidatesQuery(nowBlock int64, candidateLimit int, ownershipFirst bool, claimFunction string, includeGroupArgs ...bool) (string, []any) {
+	return self.taskLaneCandidatesQuery(nowBlock, 0, candidateLimit, ownershipFirst, claimFunction, includeGroupArgs...)
+}
+
+// A lane's floor bounds its scan below, so the scan starts past the dead index
+// entries of rows its claims already drained. Zero reads the lane from its start.
+func (self *TaskWorker) taskLaneCandidatesQuery(nowBlock int64, floorBlock int64, candidateLimit int, ownershipFirst bool, claimFunction string, includeGroupArgs ...bool) (string, []any) {
 	groupArgsColumn := ""
 	if len(includeGroupArgs) != 0 && includeGroupArgs[0] {
 		groupArgsColumn = ", args_json"
@@ -76,6 +82,13 @@ func (self *TaskWorker) taskFunctionCandidatesQuery(nowBlock int64, candidateLim
 		`, len(queryArgs)+1)
 		queryArgs = append(queryArgs, claimFunction)
 		orderSuffix = ", task_id"
+		if 0 < floorBlock {
+			// An execution parameter, as the eligibility bound is.
+			claimPredicate += fmt.Sprintf(`
+			AND available_block >= (SELECT $%d::bigint)
+		`, len(queryArgs)+1)
+			queryArgs = append(queryArgs, floorBlock)
+		}
 	}
 	return `
 			SELECT

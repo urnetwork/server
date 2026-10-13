@@ -1,10 +1,13 @@
 // Tests for the daily destination pool refresh of connect/GEOMAP.md §11.4:
-// the pure decision over a pool and its tally, the promotion order, and one
-// refresh against the database.
+// the pure decision over a pool and its tally, the promotion order, and
+// refreshes against the database, including over URL turns recorded the way
+// the probe task records them.
 package work
 
 import (
 	"context"
+	"math"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -37,6 +40,104 @@ settings:
   site_pool_size: {dns: 1, connectivity: 1, cdn: 1, site: 2}
   site_sample_size: {dns: 1, connectivity: 1, cdn: 1, site: 1}
 `
+
+// The catalog with a sample floor a test fills in a few hundred URL turns, and
+// no candidates from a workstation's qualityprobe.yml.
+const testRefreshUrlTurnCatalog = testRefreshCatalog + `
+settings:
+  site_pool_size: {dns: 1, connectivity: 1, cdn: 1, site: 2}
+  site_sample_size: {dns: 1, connectivity: 1, cdn: 1, site: 1}
+  site_min_samples: 20
+candidates: []
+`
+
+// One provider's URL turn on site from place, recorded the way the probe
+// task's is: accepted into the health history through the model write the
+// health ingest makes, and tallied through the site tally's own reading of the
+// run. outcome is pass (a small complete document), refused (the site
+// answered with a failing status) or unreached (the URL's DNS lookup through
+// the tunnel never answered: the provider was not reached).
+func testRefreshUrlTurn(ctx context.Context, at time.Time, site string, place model.ProviderEgressPlace, outcome string) {
+	destination := egresshealth.Destination{Name: site, Class: egresshealth.ClassSite, Url: "https://" + site + ".example/"}
+	check := egresshealth.CheckResult{Name: site, Class: egresshealth.ClassSite, Attempts: 1, UrlProbeSecurity: []egresshealth.UrlProbeSecurityEvent{}}
+	switch outcome {
+	case "pass":
+		check.Ok, check.StatusCode, check.RequestWritten, check.FirstByteReceived = true, http.StatusOK, true, true
+		check.ContentClassification, check.PerformanceClassification = "content", "insufficient_sample"
+		check.ByteCount, check.WireByteCount, check.WireSampleByteCount, check.BodyComplete = 32, 32, 31, true
+	case "refused":
+		check.StatusCode, check.RequestWritten, check.FirstByteReceived = http.StatusForbidden, true, true
+		check.ContentClassification, check.FailureStage = "unexpected_status", "response_content"
+	case "unreached":
+		check.FailureStage, check.DnsMeasured = "dial_dns", true
+	default:
+		panic("unknown synthetic URL outcome " + outcome)
+	}
+	if check.StatusCode != 0 {
+		check.UrlProbeSecurity = []egresshealth.UrlProbeSecurityEvent{{Destination: destination, MeasuredAt: at, TlsAuthenticated: true}}
+	}
+	okCount, failedNames := 0, site
+	if check.Ok {
+		okCount, failedNames = 1, ""
+	}
+	evidence := &egresshealth.UrlProbeEvidence{
+		PolicyVersion: egresshealth.UrlProbePolicyVersion, Policy: egresshealth.DefaultUrlProbePolicy(),
+		Destination: destination, MeasuredAt: at, Security: check.UrlProbeSecurity,
+		ContentClassification: check.ContentClassification, PerformanceClassification: check.PerformanceClassification,
+		FailureStage: check.FailureStage, ContentMatcherVersion: egresshealth.UrlProbeContentMatcherVersion,
+		StatusCode: check.StatusCode, ByteCount: check.ByteCount, WireByteCount: check.WireByteCount,
+		WireSampleByteCount: check.WireSampleByteCount, BodyComplete: check.BodyComplete,
+		RequestWritten: check.RequestWritten, FirstByteReceived: check.FirstByteReceived,
+	}
+	if check.Ok {
+		evidence.TtfbMillis, evidence.BodyMillis, evidence.BodyBitsPerSecond = 10, 1, 248000
+	}
+	model.SetProviderEgressHealth(ctx, &model.ProviderEgressHealth{
+		RunId:            server.NewId(),
+		ClientId:         server.NewId(),
+		MeasuredAt:       at,
+		UrlProbeEvidence: evidence,
+		OKCount:          okCount,
+		Total:            1,
+		ClassResults:     map[string]model.ProviderEgressHealthClassResult{string(egresshealth.ClassSite): {OK: okCount, Total: 1}},
+		FailedNames:      failedNames,
+	})
+	run := &egresshealth.Result{Checks: []egresshealth.CheckResult{check}, UrlProbeEvidence: evidence, OkCount: okCount, Total: 1}
+	loads, healthy := egressHealthSiteLoads(run, place, nil, model.DefaultProviderEgressSiteSettings().SiteHealthyExitShare)
+	model.AddProviderEgressRunTally(ctx, at, model.ProviderEgressRunTally{Place: place, Healthy: healthy}, loads)
+}
+
+// Count URL turns on site from place, the first ones unreached, then refused,
+// then passing.
+func testRefreshUrlTurns(ctx context.Context, at time.Time, site string, place model.ProviderEgressPlace, unreached int, refused int, passes int) {
+	for i := range unreached + refused + passes {
+		outcome := "pass"
+		switch {
+		case i < unreached:
+			outcome = "unreached"
+		case i < unreached+refused:
+			outcome = "refused"
+		}
+		testRefreshUrlTurn(ctx, at, site, place, outcome)
+	}
+}
+
+// The pool rows by name.
+func testRefreshDestinationsByName(ctx context.Context) map[string]*model.ProviderEgressDestination {
+	byName := map[string]*model.ProviderEgressDestination{}
+	for _, d := range model.GetProviderEgressDestinations(ctx) {
+		byName[d.Name] = d
+	}
+	return byName
+}
+
+// A host check for a refresh with no candidates listed: none may run.
+func testRefreshNoCandidateCheck(t testing.TB) egressCandidateCheck {
+	return func(_ context.Context, candidate egresshealth.Destination, _ egresshealth.RequestProfile, _ int, _ time.Duration) error {
+		t.Errorf("a refresh with no candidates listed checked %s", candidate.Name)
+		return nil
+	}
+}
 
 // The default rules over a pool of one class: the other classes are empty,
 // and the site class is sized to the fixture, so no test gets an opening it
@@ -81,20 +182,20 @@ func testChangeNames(changes []egressRefreshChange) []string {
 }
 
 // The share a site is judged on, and what it stands on.
-func TestJudgeEgressSiteFallsBackToAllExitsAndNeedsEnoughSamples(t *testing.T) {
+func TestJudgeEgressSiteFallsBackToContactedExitsAndNeedsEnoughSamples(t *testing.T) {
 	for _, test := range []struct {
-		name                                           string
-		healthyLoads, healthyFailures, loads, failures int
-		share                                          float64
-		samples                                        int
-		basis                                          string
+		name                                                             string
+		healthyLoads, healthyFailures, contactedLoads, contactedFailures int
+		share                                                            float64
+		samples                                                          int
+		basis                                                            string
 	}{
-		{name: "healthy exits", healthyLoads: 250, healthyFailures: 150, loads: 400, failures: 300, share: 0.6, samples: 250, basis: "healthy"},
-		{name: "too few healthy", healthyLoads: 100, healthyFailures: 90, loads: 300, failures: 150, share: 0.5, samples: 300, basis: "all"},
-		{name: "too few either way", healthyLoads: 100, healthyFailures: 90, loads: 150, failures: 100, share: 0.9, samples: 100, basis: "too_few"},
-		{name: "only unhealthy exits", loads: 150, failures: 15, share: 0.1, samples: 150, basis: "too_few"},
+		{name: "healthy exits", healthyLoads: 250, healthyFailures: 150, contactedLoads: 400, contactedFailures: 300, share: 0.6, samples: 250, basis: "healthy"},
+		{name: "too few healthy", healthyLoads: 100, healthyFailures: 90, contactedLoads: 300, contactedFailures: 150, share: 0.5, samples: 300, basis: "contacted"},
+		{name: "too few either way", healthyLoads: 100, healthyFailures: 90, contactedLoads: 150, contactedFailures: 100, share: 0.9, samples: 100, basis: "too_few"},
+		{name: "only unhealthy exits", contactedLoads: 150, contactedFailures: 15, share: 0.1, samples: 150, basis: "too_few"},
 	} {
-		share, samples, basis := judgeEgressSite(test.healthyLoads, test.healthyFailures, test.loads, test.failures, 200)
+		share, samples, basis := judgeEgressSite(test.healthyLoads, test.healthyFailures, test.contactedLoads, test.contactedFailures, 200)
 		if share == nil || *share != test.share || samples != test.samples || basis != test.basis {
 			t.Errorf("%s: judged %v over %d (%s), want %v over %d (%s)", test.name, share, samples, basis, test.share, test.samples, test.basis)
 		}
@@ -181,9 +282,9 @@ func TestPlanEgressDestinationRefreshRetiresTheWorstOnePerClass(t *testing.T) {
 	}
 }
 
-// With too few healthy exits to judge on, a site is judged on every exit, and
-// the plan says it was.
-func TestPlanEgressDestinationRefreshJudgesOnAllExitsWhenTooFewAreHealthy(t *testing.T) {
+// With too few healthy exits to judge on, a site is judged on every exit the
+// probe reached, and the plan says it was.
+func TestPlanEgressDestinationRefreshJudgesOnContactedExitsWhenTooFewAreHealthy(t *testing.T) {
 	tally := model.ProviderEgressSiteTally{
 		Name:                "bad-site",
 		Place:               model.ProviderEgressPlace{CountryCode: "de"},
@@ -202,15 +303,16 @@ func TestPlanEgressDestinationRefreshJudgesOnAllExitsWhenTooFewAreHealthy(t *tes
 		t.Fatalf("retired = %v, want bad-site on its share over all exits", names)
 	}
 	if !slices.Equal(plan.fallbacks, []string{"bad-site"}) {
-		t.Fatalf("fallbacks = %v, want the judgement on all exits reported", plan.fallbacks)
+		t.Fatalf("fallbacks = %v, want the judgement on contacted exits reported", plan.fallbacks)
 	}
-	if !strings.Contains(plan.rows["bad-site"].RetireReason, "healthy or not") {
-		t.Errorf("retire reason does not say what it was judged on: %q", plan.rows["bad-site"].RetireReason)
+	if reason := plan.rows["bad-site"].RetireReason; !strings.HasPrefix(reason, "failed 75.0% of 400 contacted exits, healthy or not") {
+		t.Errorf("retire reason does not say what it was judged on: %q", reason)
 	}
 }
 
-// Nothing is judged while the fleet fails too much at once, whether the
-// recent runs or the window show it; on the line itself the refresh runs.
+// Nothing is judged while the fleet fails too much at once on the exits it
+// reaches, whether the recent runs or the window show it; on the line itself
+// the refresh runs, and the runs that reached no provider are no part of it.
 func TestPlanEgressDestinationRefreshSkipsDuringAProberFault(t *testing.T) {
 	destinations := func() []*model.ProviderEgressDestination {
 		return []*model.ProviderEgressDestination{testRefreshSite("bad-site", "news"), testRefreshSite("fine-site", "news")}
@@ -222,13 +324,15 @@ func TestPlanEgressDestinationRefreshSkipsDuringAProberFault(t *testing.T) {
 	quietWindow := append(slices.Clone(faultyWindow), testHealthyTally("steady-site", "de", "", 5000, 0))
 	for _, test := range []struct {
 		name    string
-		recent  model.ProviderEgressClassTotal
+		recent  model.ProviderEgressContactedTotal
 		window  []model.ProviderEgressSiteTally
 		skipped bool
 	}{
-		{name: "recent runs", recent: model.ProviderEgressClassTotal{Ok: 70, Total: 100}, window: quietWindow, skipped: true},
+		{name: "recent runs", recent: model.ProviderEgressContactedTotal{Ok: 70, Total: 100}, window: quietWindow, skipped: true},
+		{name: "recent runs beside as many no-contact failures", recent: model.ProviderEgressContactedTotal{Ok: 70, Total: 100, NoContactFailures: 100}, window: quietWindow, skipped: true},
 		{name: "the window", window: faultyWindow, skipped: true},
-		{name: "on the line", recent: model.ProviderEgressClassTotal{Ok: 80, Total: 100}, window: quietWindow, skipped: false},
+		{name: "on the line", recent: model.ProviderEgressContactedTotal{Ok: 80, Total: 100}, window: quietWindow, skipped: false},
+		{name: "half the runs reaching no provider", recent: model.ProviderEgressContactedTotal{Ok: 95, Total: 100, NoContactFailures: 100}, window: quietWindow, skipped: false},
 	} {
 		plan := planEgressDestinationRefresh(egressRefreshInput{
 			now:           testRefreshNow,
@@ -736,6 +840,107 @@ func TestRefreshEgressDestinationsRefusesAnUnrunnableCandidateBeforeChecking(t *
 				if d.Active {
 					t.Fatalf("an unrunnable candidate was promoted: %+v", d)
 				}
+			}
+		}
+	})
+}
+
+// Half of the hour's URL runs reach no provider -- an offline exit fails its
+// URL's DNS lookup through the tunnel -- and that is no prober fault: the
+// refresh runs, an offline exit is in no site's tally, and the steady site is
+// judged on the exits the probe reached. Counted over every run, the steady
+// site's failure share would be over the retire line.
+func TestRefreshEgressDestinationsJudgesBesideHalfTheRunsReachingNoProvider(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(testRefreshUrlTurnCatalog)))
+		now := server.NowUtc()
+		at := now.Add(-time.Minute)
+		place := model.ProviderEgressPlace{CountryCode: "de"}
+		testRefreshUrlTurns(ctx, at, "synthetic-steady-news", place, 100, 2, 98)
+
+		result, err := refreshEgressDestinations(ctx, now, testRefreshNoCandidateCheck(t))
+		if err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+		if result.Skipped != "" {
+			t.Fatalf("a fleet whose offline exits fail half the runs skipped its refresh: %s", result.Skipped)
+		}
+		if result.Retired != 0 {
+			t.Fatalf("refresh result = %+v, want nothing retired", result)
+		}
+		steady := testRefreshDestinationsByName(ctx)["synthetic-steady-news"]
+		if !steady.Active || steady.SampleCount != 100 || steady.FailureShare == nil || 1e-6 < math.Abs(*steady.FailureShare-0.02) ||
+			steady.JudgedTime == nil || steady.AboveRetireSince != nil {
+			t.Fatalf("the steady site after the refresh = %+v, want judged at 2%% over the 100 exits the probe reached", steady)
+		}
+		for _, tally := range model.GetProviderEgressSiteTallies(ctx, at) {
+			if tally.Name == "synthetic-steady-news" && (tally.LoadCount != 100 || tally.FailureCount != 2) {
+				t.Fatalf("the steady site's tally = %+v, want only the 100 runs that reached their provider", tally)
+			}
+		}
+	})
+}
+
+// A site that refuses nearly every provider the probe reaches is retired on
+// those exits, beside a steady site and half the runs reaching no provider.
+// Counted over every run, the offline exits would have held the refresh back,
+// and put the steady site over the retire line beside it.
+func TestRefreshEgressDestinationsRetiresASiteRefusingNearlyEveryContactedExit(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(testRefreshUrlTurnCatalog)))
+		now := server.NowUtc()
+		at := now.Add(-time.Minute)
+		place := model.ProviderEgressPlace{CountryCode: "de"}
+		testRefreshUrlTurns(ctx, at, "synthetic-retiring-news", place, 30, 29, 1)
+		testRefreshUrlTurns(ctx, at, "synthetic-steady-news", place, 170, 3, 167)
+
+		result, err := refreshEgressDestinations(ctx, now, testRefreshNoCandidateCheck(t))
+		if err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+		if result.Skipped != "" || result.Retired != 1 {
+			t.Fatalf("refresh result = %+v, want the refusing site retired", result)
+		}
+		byName := testRefreshDestinationsByName(ctx)
+		refusing := byName["synthetic-retiring-news"]
+		if refusing.Active || refusing.RetireCount != 1 || !strings.HasPrefix(refusing.RetireReason, "failed 96.7% of 30 contacted exits, healthy or not") {
+			t.Fatalf("the refusing site after the refresh = %+v, want retired on the 30 exits the probe reached", refusing)
+		}
+		steady := byName["synthetic-steady-news"]
+		if !steady.Active || steady.SampleCount != 170 || steady.AboveRetireSince != nil {
+			t.Fatalf("the steady site after the refresh = %+v, want kept, judged on the 170 exits the probe reached", steady)
+		}
+	})
+}
+
+// A real prober fault fails the exits it reaches broadly, across the sites:
+// the refresh skips its run and retires nothing on that evidence, however
+// many runs beside it reach no provider.
+func TestRefreshEgressDestinationsSkipsWhileContactedExitsFailBroadly(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(testRefreshUrlTurnCatalog)))
+		now := server.NowUtc()
+		at := now.Add(-time.Minute)
+		place := model.ProviderEgressPlace{CountryCode: "de"}
+		testRefreshUrlTurns(ctx, at, "synthetic-retiring-news", place, 30, 30, 0)
+		testRefreshUrlTurns(ctx, at, "synthetic-steady-news", place, 100, 40, 60)
+
+		result, err := refreshEgressDestinations(ctx, now, testRefreshNoCandidateCheck(t))
+		if err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+		if !strings.Contains(result.Skipped, "is 0.538 over 130 loads that reached their provider (130 no-contact failures left out), above the prober-fault line 0.200") {
+			t.Fatalf("skipped = %q, want the prober-fault line held over the loads that reached their provider", result.Skipped)
+		}
+		if result.Judged != 0 || result.Retired != 0 {
+			t.Fatalf("a skipped refresh judged or retired: %+v", result)
+		}
+		for name, d := range testRefreshDestinationsByName(ctx) {
+			if !d.Active || d.RetireCount != 0 || d.JudgedTime != nil {
+				t.Fatalf("%s was judged or retired during a prober fault: %+v", name, d)
 			}
 		}
 	})

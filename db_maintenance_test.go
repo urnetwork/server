@@ -33,28 +33,187 @@ func TestDbMaintenanceSkipsWholeReindexForLargeHighChurnTables(t *testing.T) {
 	}
 }
 
-func TestPriorityReindexIndexesAreCoveredExactlyOncePerCycle(t *testing.T) {
-	seen := map[string]int{}
-	for epoch := uint64(0); epoch < DbReindexEpochs; epoch++ {
-		for _, name := range priorityReindexIndexesForEpoch(epoch) {
-			seen[name]++
+// The compact estimate follows the btree leaf layout: header, null bitmap,
+// aligned column data less expected nulls, line pointer, fillfactor, and the
+// metapage. Each expected size is worked out by hand from that layout.
+func TestDbMaintenanceEstimateBtreeBytesFollowsTheLeafLayout(t *testing.T) {
+	uuidColumn := dbMaintenanceIndexColumn{length: 16, align: 'c', analyzed: true, averageWidth: 16}
+	timestampColumn := dbMaintenanceIndexColumn{length: 8, align: 'd', analyzed: true, averageWidth: 8}
+	bigintColumn := dbMaintenanceIndexColumn{length: 8, align: 'd', analyzed: true, averageWidth: 8}
+	integerColumn := dbMaintenanceIndexColumn{length: 4, align: 'i', analyzed: true, averageWidth: 4}
+	halfNullUuidColumn := dbMaintenanceIndexColumn{length: 16, align: 'c', analyzed: true, averageWidth: 16, nullFraction: 0.5}
+	for _, c := range []struct {
+		name       string
+		columns    []dbMaintenanceIndexColumn
+		entryCount float64
+		fillfactor int
+		wantBytes  int64
+		wantOk     bool
+	}{
+		// 8 + 16 + 16 + 8 = 48 + 4: 141 entries per 7336 usable bytes, 7093 leaves
+		{
+			name:       "two uuids and an included bigint",
+			columns:    []dbMaintenanceIndexColumn{uuidColumn, uuidColumn, bigintColumn},
+			entryCount: 1000000,
+			fillfactor: 90,
+			wantBytes:  (7093 + 1) * 8192,
+			wantOk:     true,
+		},
+		// 8 + 8 + 4 = 20: 366 per page
+		{
+			name:       "one timestamp",
+			columns:    []dbMaintenanceIndexColumn{timestampColumn},
+			entryCount: 146982096,
+			fillfactor: 90,
+			wantBytes:  (401591 + 1) * 8192,
+			wantOk:     true,
+		},
+		// at fillfactor 100: 8152 / 20 = 407 per page
+		{
+			name:       "one timestamp packed",
+			columns:    []dbMaintenanceIndexColumn{timestampColumn},
+			entryCount: 1000,
+			fillfactor: 100,
+			wantBytes:  (3 + 1) * 8192,
+			wantOk:     true,
+		},
+		// 84 data bytes less 8 expected null bytes, 16 with the null bitmap:
+		// 92 aligns to 96, + 4 = 100: 73 per page, 27398 leaves
+		{
+			name: "nullable pair layout",
+			columns: []dbMaintenanceIndexColumn{
+				uuidColumn,
+				uuidColumn,
+				timestampColumn,
+				uuidColumn,
+				halfNullUuidColumn,
+				bigintColumn,
+				integerColumn,
+			},
+			entryCount: 2000000,
+			fillfactor: 90,
+			wantBytes:  (27398 + 1) * 8192,
+			wantOk:     true,
+		},
+		// an analyzed variable width uses its average: 8 + 20 = 28 aligns to 32, + 4 = 36
+		{
+			name:       "analyzed variable width",
+			columns:    []dbMaintenanceIndexColumn{{length: -1, align: 'i', analyzed: true, averageWidth: 20}},
+			entryCount: 1000000,
+			fillfactor: 90,
+			wantBytes:  (4927 + 1) * 8192,
+			wantOk:     true,
+		},
+		{
+			name:       "empty index",
+			columns:    []dbMaintenanceIndexColumn{uuidColumn},
+			entryCount: 0,
+			fillfactor: 90,
+			wantBytes:  8192,
+			wantOk:     true,
+		},
+		{
+			name:       "variable width never analyzed",
+			columns:    []dbMaintenanceIndexColumn{uuidColumn, {length: -1, align: 'i'}},
+			entryCount: 1000,
+			fillfactor: 90,
+			wantOk:     false,
+		},
+		{
+			name:       "never vacuumed or analyzed",
+			columns:    []dbMaintenanceIndexColumn{uuidColumn},
+			entryCount: -1,
+			fillfactor: 90,
+			wantOk:     false,
+		},
+	} {
+		gotBytes, gotOk := dbMaintenanceEstimateBtreeBytes(c.columns, c.entryCount, c.fillfactor, 8192)
+		if gotOk != c.wantOk || gotBytes != c.wantBytes {
+			t.Errorf("%s: estimate = (%d, %t), want (%d, %t)", c.name, gotBytes, gotOk, c.wantBytes, c.wantOk)
+		}
+	}
+}
+
+// A priority index is rebuilt when at least half of it is reclaimable and the
+// reclaim pays for reading its heap twice; the rebuilds go smallest first,
+// skip the indexes done earlier in the epoch, and stop at the per-run bound.
+func TestDbMaintenanceSelectPriorityIndexesRebuildsBloatedSmallestFirst(t *testing.T) {
+	const gib = int64(1024 * 1024 * 1024)
+	const mib = int64(1024 * 1024)
+	priorityIndexes := []dbMaintenancePriorityIndex{
+		// below the bloat factor
+		{indexName: "synthetic_compact", indexBytes: 39 * gib, compactBytes: 20 * gib, heapBytes: 400 * gib},
+		// reclaims less than a hundredth of the heap it reads twice
+		{indexName: "synthetic_heap_bound", indexBytes: 10 * gib, compactBytes: 1 * gib, heapBytes: 1000 * gib},
+		// reclaims less than the absolute floor
+		{indexName: "synthetic_tiny", indexBytes: 768 * 1024, compactBytes: 8192},
+		{indexName: "synthetic_unknown", indexBytes: 50 * gib, compactBytes: 0, heapBytes: 400 * gib},
+		{indexName: "synthetic_large", indexBytes: 125 * gib, compactBytes: 8 * gib, heapBytes: 437 * gib},
+		{indexName: "synthetic_medium", indexBytes: 38 * gib, compactBytes: 7 * gib, heapBytes: 481 * gib},
+		{indexName: "synthetic_small", indexBytes: 15 * gib, compactBytes: 3 * gib, heapBytes: 481 * gib},
+		{indexName: "synthetic_done", indexBytes: 19 * gib, compactBytes: 4 * gib, heapBytes: 481 * gib},
+		// exactly at both bounds
+		{indexName: "synthetic_boundary", indexBytes: 4 * mib, compactBytes: 2 * mib, heapBytes: 200 * mib},
+	}
+	names := func(selectedIndexes []dbMaintenancePriorityIndex) []string {
+		selectedNames := []string{}
+		for _, selectedIndex := range selectedIndexes {
+			selectedNames = append(selectedNames, selectedIndex.indexName)
+		}
+		return selectedNames
+	}
+	done := []string{"synthetic_done"}
+	for _, c := range []struct {
+		maxRebuilds int
+		want        []string
+	}{
+		{maxRebuilds: 10, want: []string{"synthetic_boundary", "synthetic_small", "synthetic_medium", "synthetic_large"}},
+		{maxRebuilds: 2, want: []string{"synthetic_boundary", "synthetic_small"}},
+		{maxRebuilds: 0, want: []string{}},
+	} {
+		got := names(dbMaintenanceSelectPriorityIndexes(priorityIndexes, done, c.maxRebuilds))
+		if !slices.Equal(got, c.want) {
+			t.Errorf("at most %d: selected %v, want %v", c.maxRebuilds, got, c.want)
 		}
 	}
 
+	// equal sizes go in name order
+	tied := []dbMaintenancePriorityIndex{
+		{indexName: "synthetic_b", indexBytes: 40 * gib, compactBytes: 4 * gib, heapBytes: 100 * gib},
+		{indexName: "synthetic_a", indexBytes: 40 * gib, compactBytes: 4 * gib, heapBytes: 100 * gib},
+	}
+	if got := names(dbMaintenanceSelectPriorityIndexes(tied, nil, 10)); !slices.Equal(got, []string{"synthetic_a", "synthetic_b"}) {
+		t.Errorf("tied sizes selected %v, want name order", got)
+	}
+}
+
+// The monitor tells a priority rebuild from a whole-table rebuild by the index
+// in progress: a priority index or the transient copy of one.
+func TestIsDbMaintenancePriorityIndexMatchesPriorityIndexesAndTheirCopies(t *testing.T) {
+	longest := ""
 	for _, name := range priorityReindexIndexes {
-		if seen[name] != 1 {
-			t.Fatalf("priority index %s selected %d times in one cycle, want 1", name, seen[name])
+		if len(longest) < len(name) {
+			longest = name
 		}
 	}
-	if len(seen) != len(priorityReindexIndexes) {
-		extra := slices.Collect(func(yield func(string) bool) {
-			for name := range seen {
-				if !slices.Contains(priorityReindexIndexes, name) && !yield(name) {
-					return
-				}
-			}
-		})
-		t.Fatalf("unexpected priority indexes selected: %v", extra)
+	for _, c := range []struct {
+		indexName string
+		want      bool
+	}{
+		{indexName: "transfer_escrow_unsettled_balance_contract", want: true},
+		{indexName: "public.transfer_escrow_unsettled_balance_contract", want: true},
+		{indexName: "transfer_escrow_unsettled_balance_contract_ccnew", want: true},
+		{indexName: "transfer_escrow_unsettled_balance_contract_ccold2", want: true},
+		{indexName: reindexArtifactName(longest, "ccnew"), want: true},
+		{indexName: reindexArtifactName(longest, "ccnew12"), want: true},
+		{indexName: "transfer_escrow_pkey_ccnew36", want: false},
+		{indexName: "transfer_escrow_pkey", want: false},
+		{indexName: "transfer_escrow", want: false},
+		{indexName: "transfer_escrow_unsettled_balance_contract_ccnew0", want: false},
+	} {
+		if got := IsDbMaintenancePriorityIndex(c.indexName); got != c.want {
+			t.Errorf("IsDbMaintenancePriorityIndex(%q) = %t, want %t", c.indexName, got, c.want)
+		}
 	}
 }
 

@@ -10,6 +10,10 @@ import (
 
 const ProviderUrlProbeMatureDeficitSampleLimit = 128
 
+// Version 2 samples the head in stable client-hash order. Version 1 ordered
+// the ULID identifiers, which selected only the oldest-created deficits.
+const ProviderUrlProbeMatureDeficitContractVersion = 2
+
 // Only fixed aggregate values leave the query decoder. Each array has a closed
 // vocabulary shared with the collector; no identity or stored error is exposed.
 type ProviderUrlProbeMatureDeficitDiagnostics struct {
@@ -102,12 +106,15 @@ func providerUrlProbeMatureDeficitFailureSql(expression string) string {
 // All cohort gates and rolling counts were computed by the existing census.
 // Only maturity and measured deficit select the head. In particular, hints,
 // deadlines, failures, and issued/completed claims never restrict membership.
+// Ids are ULIDs, so identifier order is creation order and a capped head in
+// that order describes only the oldest clients. The stable hash keeps the cap
+// deterministic while making the head independent of client age.
 func providerUrlProbeMatureDeficitCtesSql(policy int) string {
 	return fmt.Sprintf(`,
 		mature_deficit_head AS MATERIALIZED (
 			SELECT client_id,run_count,security_exception,unknown_security_target
 			FROM cohort WHERE cycle_started_at <= $4 AND run_count < $3
-			ORDER BY client_id LIMIT %d
+			ORDER BY hashtext(client_id::text),client_id LIMIT %d
 		), mature_deficit_details AS MATERIALIZED (
 			SELECT head.client_id,jsonb_build_object(
 				'n',head.run_count,'e',cycle.eligible,'p',cycle.completed_priority_ready,
@@ -185,7 +192,7 @@ func providerUrlProbeMatureDeficitRows(raw []byte) []providerUrlProbeMatureDefic
 func providerUrlProbeMatureDeficitDiagnostics(raw []byte, policy, total int) ProviderUrlProbeMatureDeficitDiagnostics {
 	rows := providerUrlProbeMatureDeficitRows(raw)
 	diagnostic := ProviderUrlProbeMatureDeficitDiagnostics{
-		ContractVersion: 1, PolicyVersion: policy, SampleLimit: ProviderUrlProbeMatureDeficitSampleLimit,
+		ContractVersion: ProviderUrlProbeMatureDeficitContractVersion, PolicyVersion: policy, SampleLimit: ProviderUrlProbeMatureDeficitSampleLimit,
 		Selected: len(rows), TotalMatureDeficient: total,
 	}
 	if len(rows) != min(total, ProviderUrlProbeMatureDeficitSampleLimit) {

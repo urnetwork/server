@@ -4,13 +4,14 @@ package model
 
 import (
 	"context"
-	"errors"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/task"
 )
 
-var errTransferBalanceOwnershipBusy = errors.New("transfer balance ownership is busy")
+// Another writer holds a grant. A contention refusal: the work is left to the
+// holder or a later attempt, and a recovery counts it without a stack report.
+var errTransferBalanceOwnershipBusy = server.NewContentionError("transfer balance ownership is busy")
 
 func transferBalanceOwnershipKeys(balanceIds []server.Id) []server.PgOwnershipKey {
 	keys := make([]server.PgOwnershipKey, len(balanceIds))

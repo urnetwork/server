@@ -58,27 +58,26 @@ func (self *TaskWorker) hasTaskClaimGroups() bool {
 	return false
 }
 
-// Only new members in this same claim pass may share a held key. A refill must
-// not overlap another accounting batch still live on its own reentrant session.
-func (self *TaskWorker) reserveTaskClaimGroups(ctx context.Context, query taskClaimGroupQuery, guard *taskClaimGuard,
-	taskId server.Id, functionName string, argsJson string, passKeys map[taskClaimGroupKey]bool,
-) (bool, error) {
+// The sorted, distinct keys this payload's group would take, and how many
+// same-group tasks one preparation can combine. No keys retain ordinary claim
+// behavior. Decoding only, with no I/O.
+func (self *TaskWorker) taskClaimGroupKeys(functionName string, argsJson string) ([]taskClaimGroupKey, int, error) {
 	target := self.targets[updateFunctionName(functionName)]
 	grouper, ok := target.(TaskClaimGroupTarget)
 	if !ok {
-		return true, nil
+		return nil, 0, nil
 	}
 	ids, maxTasks := grouper.TaskClaimGroupIds(argsJson)
 	if len(ids) == 0 || len(ids) > TaskClaimGroupKeyLimit {
-		return true, nil
+		return nil, 0, nil
 	}
 	if maxTasks < 1 {
-		return false, errors.New("invalid task claim group sharing limit")
+		return nil, 0, errors.New("invalid task claim group sharing limit")
 	}
 	keys := make([]taskClaimGroupKey, 0, len(ids))
 	for _, id := range ids {
 		if id == (server.Id{}) {
-			return false, errors.New("invalid task claim group identity")
+			return nil, 0, errors.New("invalid task claim group identity")
 		}
 		keys = append(keys, taskClaimGroupLockKey(target.TargetFunctionName(), id))
 	}
@@ -95,11 +94,33 @@ func (self *TaskWorker) reserveTaskClaimGroups(ctx context.Context, query taskCl
 	})
 	keys = slices.Compact(keys)
 	if len(keys) != 1 && maxTasks != 1 {
-		return false, errors.New("multi-resource task claim group cannot share a writer")
+		return nil, 0, errors.New("multi-resource task claim group cannot share a writer")
+	}
+	return keys, maxTasks, nil
+}
+
+// Only new members in this same claim pass may share a held key. A refill must
+// not overlap another accounting batch still live on its own reentrant session.
+// A refused key is added to refusedKeys when it is not nil.
+func (self *TaskWorker) reserveTaskClaimGroups(ctx context.Context, query taskClaimGroupQuery, guard *taskClaimGuard,
+	taskId server.Id, functionName string, argsJson string, passKeys map[taskClaimGroupKey]bool, refusedKeys map[taskClaimGroupKey]bool,
+) (bool, error) {
+	keys, maxTasks, err := self.taskClaimGroupKeys(functionName, argsJson)
+	if err != nil {
+		return false, err
+	}
+	if len(keys) == 0 {
+		return true, nil
+	}
+	refuse := func(key taskClaimGroupKey) {
+		if refusedKeys != nil {
+			refusedKeys[key] = true
+		}
 	}
 	for _, key := range keys {
 		if state := guard.groupKeyStates[key]; state != nil &&
 			(!passKeys[key] || state.maxTasks != maxTasks || state.count >= maxTasks) {
+			refuse(key)
 			return false, nil
 		}
 	}
@@ -126,6 +147,7 @@ func (self *TaskWorker) reserveTaskClaimGroups(ctx context.Context, query taskCl
 				delete(guard.groupKeyStates, acquiredKey)
 				delete(passKeys, acquiredKey)
 			}
+			refuse(key)
 			return false, nil
 		}
 		guard.groupKeyStates[key] = &taskClaimGroupState{maxTasks: maxTasks}

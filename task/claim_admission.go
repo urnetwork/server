@@ -25,6 +25,18 @@ func snapshotTaskWorkerSettings(settings *TaskWorkerSettings) *TaskWorkerSetting
 			panic(fmt.Errorf("task claim limit requires a canonical target name and a positive bound"))
 		}
 	}
+	snapshot.TargetClaimShares = maps.Clone(settings.TargetClaimShares)
+	// Each share is 1/period of the ordinary turns; at least half remain.
+	ordinaryShare := 0.0
+	for functionName, period := range snapshot.TargetClaimShares {
+		if functionName == "" || period < 2 {
+			panic(fmt.Errorf("task claim share requires a canonical target name and a period of at least two"))
+		}
+		ordinaryShare += 1 / float64(period)
+	}
+	if 0.5 < ordinaryShare {
+		panic(fmt.Errorf("task claim shares take more than half of the ordinary turns"))
+	}
 	return &snapshot
 }
 

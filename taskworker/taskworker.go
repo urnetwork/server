@@ -558,10 +558,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveOldVerifyProviderStats,
 			work.RemoveOldVerifyProviderStatsPost,
 		),
-		task.NewTaskTargetWithPost(
-			work.RefreshVerifyProxyEgress,
-			work.RefreshVerifyProxyEgressPost,
-		),
+		work.NewRefreshVerifyProxyEgressTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.StSyncChain,
 			work.StSyncChainPost,

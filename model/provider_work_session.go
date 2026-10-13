@@ -8,10 +8,12 @@ import (
 	"crypto/sha256"
 	"errors"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/urfoundation/sn/protocol"
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 )
 
@@ -71,7 +73,7 @@ func providerWorkLockSessionMutationHeadInTx(ctx context.Context, tx server.PgTx
 		return
 	}
 	server.Raise(ctx.Err())
-	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`)
+	_, err := tx.Exec(ctx, providerWorkSessionMutationBridgeSql)
 	server.Raise(errors.Join(err, ctx.Err()))
 	if lockHead {
 		err = providerWorkLockEndpointRowsInTx(ctx, tx, clientIds)
@@ -82,6 +84,15 @@ func providerWorkLockSessionMutationHeadInTx(ctx context.Context, tx server.PgTx
 	_, err = tx.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)
 	server.Raise(errors.Join(err, ctx.Err()))
 }
+
+// Every session mutation owner writes network_client_connection under its
+// endpoint fences, so it takes that table's row-exclusive lock before them,
+// in the bridge's round trip. A strong table lock (autovacuum truncation,
+// DDL) then parks the owner before it holds an endpoint, instead of parking
+// it holding one while every later mutation of that endpoint queues behind
+// it on the fence.
+const providerWorkSessionMutationBridgeSql = `LOCK TABLE network_client_connection IN ROW EXCLUSIVE MODE;
+SELECT pg_advisory_xact_lock_shared(-776::bigint)`
 
 var providerWorkEndpointWriteLockSQL = server.TaggedDatabaseStatement(`SELECT pg_advisory_xact_lock(776,lock_key) FROM
    (SELECT DISTINCT ('x'||substr(md5(client_id::text),1,8))::bit(32)::int AS lock_key
@@ -171,12 +182,40 @@ func providerWorkSessionGenesisInTx(ctx context.Context, tx server.PgTx, clientI
 	})
 }
 
+// last unix milli a deployed signer was refused for its missing index, so a
+// misdeployed signer logs once a minute rather than on every connection change
+var providerWorkSessionIndexRefusalLogUnixMilli atomic.Int64
+
 // Sign only events issued by this transaction; old SQL rows are never promoted
 // to originals when a signer later becomes available.
+//
+// The event lookup below needs provider_work_session_event_transaction, which
+// migration 824 dropped while no signer was deployed. Without it every call
+// reads each client's whole event history. A deployed (vault-loaded) signer
+// therefore refuses to sign until the index is built again, leaving the same
+// permanent unsigned gap as an unavailable source. Before deploying
+// provider_work_session.json, add a migration that builds the index again
+// concurrently and supersedes 824 in the migration signal; the signal pages
+// on a copy built by hand.
 func providerWorkSignSessionEventsInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id) error {
 	source := providerWorkSessionSourceFromContext(ctx)
 	if source == nil {
 		return nil
+	}
+	if source.vaultLoaded {
+		var indexReady bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_index
+  WHERE indexrelid=to_regclass('public.provider_work_session_event_transaction') AND indisvalid AND indisready)`).Scan(&indexReady); err != nil {
+			return err
+		}
+		if !indexReady {
+			nowUnixMilli := time.Now().UnixMilli()
+			lastUnixMilli := providerWorkSessionIndexRefusalLogUnixMilli.Load()
+			if lastUnixMilli+60*1000 <= nowUnixMilli && providerWorkSessionIndexRefusalLogUnixMilli.CompareAndSwap(lastUnixMilli, nowUnixMilli) {
+				glog.Errorf("[pws]provider work session signer refused: index provider_work_session_event_transaction (dropped by migration 824) is missing or invalid; restore it with a migration before deploying provider_work_session.json\n")
+			}
+			return errProviderWorkEvidenceUnavailable
+		}
 	}
 	rows, err := tx.Query(ctx, `SELECT e.client_id,e.network_id,e.connection_id,e.sequence,e.kind,e.observed_at,e.extender_id
   FROM provider_work_session_event e LEFT JOIN provider_work_session_receipt r USING(client_id,sequence)

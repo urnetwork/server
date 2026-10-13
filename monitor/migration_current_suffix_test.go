@@ -140,6 +140,26 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing FleetBound scan checkpoint", 822, `DROP TABLE st_fleet_bound_sync`},
 		{"FleetBound checkpoints not unique", 822, `ALTER TABLE st_fleet_bound_sync DROP CONSTRAINT st_fleet_bound_sync_pkey`},
 		{"nullable FleetBound checkpoint", 822, `ALTER TABLE st_fleet_bound_sync ALTER COLUMN next_block DROP NOT NULL`},
+		{"missing App Store transaction price", 823, `ALTER TABLE apple_subscription_transaction DROP COLUMN price_milliunits`},
+		{"App Store transaction price truncates milliunits", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN price_milliunits TYPE integer`},
+		{"missing App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction DROP COLUMN currency`},
+		{"invented App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN currency SET DEFAULT 'USD'`},
+		{"dropped provider session transaction index rebuilt", 824, `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
+		{"provider session head accepts a zero sequence", 824, snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
+		{"dropped close evidence contract index rebuilt", 825, `CREATE INDEX contract_close_report_evidence_contract ON contract_close_report_evidence (contract_id, party, accepted_at, report_id)`},
+		{"close evidence accepted time nullable", 825, `ALTER TABLE contract_close_report_evidence ALTER COLUMN accepted_at DROP NOT NULL`},
+		{"close evidence census index missing", 825, `DROP INDEX contract_close_original_census`},
+		{"dropped completed waiting probe index rebuilt", 826, `CREATE INDEX provider_probe_cycle_completed_waiting ON provider_egress_probe_cycle (next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
+		{"dropped slot completed waiting probe index rebuilt", 827, `CREATE INDEX provider_probe_cycle_slot_completed_waiting ON provider_egress_probe_cycle (slot_id, next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
+		{"connection table truncates on vacuum", 828, `ALTER TABLE network_client_connection RESET (vacuum_truncate)`},
+		{"handler table truncates on vacuum", 828, `ALTER TABLE network_client_handler SET (vacuum_truncate = true)`},
+		{"missing device network index", 829, `DROP INDEX device_network_id`},
+		{"device network index leads with device", 829, `DROP INDEX device_network_id; CREATE INDEX device_network_id ON device(device_id,network_id)`},
+		{"missing device-leading audit index", 830, `DROP INDEX audit_device_event_device_id_event_time`},
+		{"device-leading audit index lacks the covered event type", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(device_id,event_time,event_id)`},
+		{"device-leading audit index leads with time", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(event_time,device_id,event_id) INCLUDE (event_type)`},
+		{"device-leading audit index is partial", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(device_id,event_time,event_id) INCLUDE (event_type) WHERE event_type = 'device_added'`},
+		{"dropped time-leading device stats index rebuilt", 831, `CREATE INDEX audit_device_event_stats_device_id ON audit_device_event (event_time, device_id, event_id) INCLUDE (event_type)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -190,6 +210,8 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{809, "pending_task", "pending_task_function_poll_order"},
 				{810, "transfer_contract", "transfer_contract_audit_closed_null_day"},
 				{820, "network_client_connection", "network_client_connection_connected_handler_id"},
+				{829, "device", "device_network_id"},
+				{830, "audit_device_event", "audit_device_event_device_id_event_time"},
 			} {
 				var definition string
 				var predicate *string
@@ -220,6 +242,11 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{817, "transfer_contract", "transfer_contract_pair_open_create_time"},
 				{818, "transfer_contract", "transfer_contract_open_destination_partial"},
 				{819, "pending_task", "pending_task_has_reschedule_error"},
+				{824, "provider_work_session_event", "provider_work_session_event_transaction"},
+				{825, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
+				{826, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},
+				{827, "provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting"},
+				{831, "audit_device_event", "audit_device_event_stats_device_id"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool

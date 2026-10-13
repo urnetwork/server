@@ -10047,4 +10047,123 @@ var migrations = []any{
 			next_block bigint NOT NULL
 		);
 	`),
+
+	// 823: the price of each credited App Store transaction, in milliunits of
+	// its ISO 4217 currency. Net revenue is USD and only a USD price converts,
+	// so a credit in another currency records the paid marker and its price is
+	// kept here. Rows credited earlier stay NULL: their price survives only as
+	// the net revenue it was misread into, and their currency is unknown.
+	// Nullable columns without a default rewrite nothing. Apply before
+	// deploying the api and taskworker that write them.
+	newSqlMigration(`
+		ALTER TABLE apple_subscription_transaction
+			ADD COLUMN price_milliunits bigint NULL,
+			ADD COLUMN currency varchar(3) NULL
+	`),
+
+	// The index drops below were audited on 2026-10-12 like 816-819: Main's
+	// pg_stat_user_indexes (counters since the 2026-08-24 18:24 UTC reset,
+	// kept across the clean 2026-10-01 restart) and every query in this
+	// repository. They reclaim about 25 GB of Main's nearly full disk and a
+	// write on every insert into their tables. Apply them outside a running
+	// pg_dump, as DROP INDEX CONCURRENTLY waits for every lock on the table.
+
+	// 824: provider_work_session_event_transaction (13.3 GB on Main, 0 scans)
+	// serves only providerWorkSignSessionEventsInTx, which runs only when the
+	// optional provider_work_session.json signer is deployed, and it is not.
+	// Every connection open and retirement appends an event that writes it. A
+	// vault-loaded signer refuses to sign while the index is missing. Before
+	// deploying that signer, add a migration that builds the index again
+	// concurrently and supersedes this one in the migration signal, which pages
+	// on a copy built by hand.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS provider_work_session_event_transaction`,
+		`DROP INDEX IF EXISTS provider_work_session_event_transaction`,
+	),
+	// 825: contract_close_report_evidence_contract (11.1 GB, 14,162 scans)
+	// duplicates contract_close_original_census (768, 3.3 billion scans). The
+	// only contract-keyed reader, the ST epoch original-close census, filters
+	// by contract_id and orders by client_id, report_id, which the census
+	// index matches exactly; every other reader seeks the primary key. Nothing
+	// orders evidence by party or accepted_at.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS contract_close_report_evidence_contract`,
+		`DROP INDEX IF EXISTS contract_close_report_evidence_contract`,
+	),
+	// 826: provider_probe_cycle_completed_waiting (0.23 GB, 0 scans) serves
+	// only the completed-run priority scans, which run only when the egress
+	// rule url_completed_run_priority_since is set, and it is not. If it is
+	// set later, the eligible next-attempt indexes (725, 728) serve the same
+	// reads.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_completed_waiting`,
+		`DROP INDEX IF EXISTS provider_probe_cycle_completed_waiting`,
+	),
+	// 827: provider_probe_cycle_slot_completed_waiting (0.33 GB, 1 scan) is the
+	// per-slot form of 826, with the same single gated reader.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_slot_completed_waiting`,
+		`DROP INDEX IF EXISTS provider_probe_cycle_slot_completed_waiting`,
+	),
+
+	// 828: autovacuum's end-of-vacuum truncation holds AccessExclusiveLock on
+	// the table while it drops the cut pages from all of shared_buffers (256 GB
+	// on Main), so every connect, disconnect and handler heartbeat queues
+	// behind it. On 2026-10-12 it parked 361 backends for up to 4 s on
+	// network_client_connection (18:33Z, then 18:59Z, 19:04Z and 19:06Z).
+	// Space freed by the retention deletes is reused in place instead, whatever
+	// the server-wide vacuum_truncate setting. The option takes
+	// ShareUpdateExclusiveLock, which blocks no reader or writer.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_client_connection SET (vacuum_truncate = false);
+		ALTER TABLE network_client_handler SET (vacuum_truncate = false);
+	`),
+	// 829: devices by network, for the probe-shard reap. ReapProberShard
+	// deletes a probe network's devices while it holds the endpoint fence
+	// (advisory 776) of every client in that network. Without this index the
+	// delete read the whole 11 GB device table: 8,759 calls averaging 8.5 s,
+	// max 389 s on Main by 2026-10-12, with 25,408 probe shards draining.
+	// Building it reads the heap twice and waits for older snapshots, without
+	// blocking writes. Other device deletes already go by device_id.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS device_network_id`,
+		`CREATE INDEX CONCURRENTLY device_network_id ON device (network_id)`,
+		`DROP INDEX IF EXISTS device_network_id;
+		 CREATE INDEX device_network_id ON device (network_id)`,
+	),
+
+	// 830: audit_device_event by device, for the public devices series
+	// (model/audit_model.go computeStatsDevice). The hourly export read every
+	// retained event through the time-leading stats index, grouped them all by
+	// device and day, and streamed one row per device-day to the taskworker. On
+	// Main (read 2026-10-13, 87.6M events since 2026-08-10) that one statement
+	// averaged 427 s over 93 runs (221-526 s), wrote 7.5 GB of temp files per
+	// run and returned 37M rows, and the export reached its 600 s max time.
+	// The series is now computed one chunk of devices at a time, each chunk
+	// one statement over a bounded range of this index that sorts and hashes
+	// in memory and returns only span counts. The index covers every column
+	// those statements read. Building it reads the 9 GB heap twice and waits
+	// for older snapshots, including a running pg_dump's, without blocking the
+	// device sweep's inserts. A completed build is kept, so it may be
+	// pre-created out of band with the same statement. Services built with
+	// this migration fail startup readiness until it is applied.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS audit_device_event_device_id_event_time`,
+		`CREATE INDEX CONCURRENTLY audit_device_event_device_id_event_time
+		 ON audit_device_event (device_id, event_time, event_id) INCLUDE (event_type)`,
+		`DROP INDEX IF EXISTS audit_device_event_device_id_event_time;
+		 CREATE INDEX audit_device_event_device_id_event_time
+		 ON audit_device_event (device_id, event_time, event_id) INCLUDE (event_type)`,
+	).withIndexCompletion(830, "audit_device_event", "audit_device_event_device_id_event_time",
+		"CREATE INDEX audit_device_event_device_id_event_time ON public.audit_device_event USING btree (device_id, event_time, event_id) INCLUDE (event_type)",
+		""),
+	// 831: the time-leading stats index (7.4 GB on Main) has no reader left; it
+	// served only the devices series. The primary key keeps the same time order
+	// for retention and backfill. Like 824-827, apply it outside a running
+	// pg_dump.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS audit_device_event_stats_device_id`,
+		`DROP INDEX IF EXISTS audit_device_event_stats_device_id`,
+	),
 }

@@ -405,8 +405,8 @@ var migrationArtifacts = append(append(append([]migrationArtifact{
 	{name: "URL completion receipts and exact readiness invalidation", requiredVersion: 732, rowColumn: 143},
 	{name: "provider_probe_cycle_completed_ready", requiredVersion: 733, rowColumn: 144},
 	{name: "provider_probe_cycle_slot_completed_ready", requiredVersion: 734, rowColumn: 145},
-	{name: "provider_probe_cycle_completed_waiting", requiredVersion: 735, rowColumn: 146},
-	{name: "provider_probe_cycle_slot_completed_waiting", requiredVersion: 736, rowColumn: 147},
+	{name: "provider_probe_cycle_completed_waiting", requiredVersion: 735, removedVersion: 826, rowColumn: 146},
+	{name: "provider_probe_cycle_slot_completed_waiting", requiredVersion: 736, removedVersion: 827, rowColumn: 147},
 	{name: "provider_probe_cycle_completed_expiry", requiredVersion: 737, rowColumn: 148},
 	{name: "provider_probe_cycle_slot_completed_expiry", requiredVersion: 738, rowColumn: 149},
 	{name: "transfer_balance_active_network_end_start_id", requiredVersion: 739, rowColumn: 150},
@@ -437,9 +437,9 @@ var migrationArtifacts = append(append(append([]migrationArtifact{
 	{name: "logical contract close report receipts", requiredVersion: 764, rowColumn: 175},
 	{name: "Apple offer-code transaction bindings", requiredVersion: 765, rowColumn: 176},
 	{name: "Google Play purchase-token bindings", requiredVersion: 766, rowColumn: 177},
-	{name: "original contract close evidence custody", requiredVersion: 767, rowColumn: 178},
-	{name: "original client close signature companions", requiredVersion: 768, rowColumn: 179},
-	{name: "original client report inventory", requiredVersion: 769, rowColumn: 180},
+	{name: "original contract close evidence custody", requiredVersion: 767, removedVersion: 825, rowColumn: 178},
+	{name: "original client close signature companions", requiredVersion: 768, removedVersion: 825, rowColumn: 179},
+	{name: "original client report inventory", requiredVersion: 769, removedVersion: 825, rowColumn: 180},
 }, snMainnetMigrationArtifacts()...), migrationArtifact{
 	name: "transfer_contract.expiration_time nullable timestamp without default", requiredVersion: 790, rowColumn: 201,
 }, migrationArtifact{
