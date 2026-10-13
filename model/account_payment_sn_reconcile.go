@@ -135,10 +135,10 @@ var snReconcileStuckSql = `SELECT p.payment_id,p.payment_plan_id,p.network_id,p.
 
 // RC-1 and RC-2 rows, oldest first. A request journaled under the key, valid or
 // not, may have been POSTed, so that row is out of scope. So is an original
-// that the legacy correction replaced (account_payment_legacy_correction.go):
-// it stays canceled with its key, and its replacement carries the obligation.
-// A stuck row without a network cannot be attributed to later rows; the census
-// refuses it.
+// that the legacy correction (account_payment_legacy_correction.go) replaced
+// (RC-22): it stays canceled with its key, and its replacement carries the
+// obligation. A stuck row without a network cannot be attributed to later
+// rows; the census refuses it.
 func GetSnReconcileStuckRows(ctx context.Context) (rows []*SnReconcileRow, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, returnErr = []*SnReconcileRow{}, nil

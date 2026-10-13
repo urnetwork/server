@@ -14,7 +14,7 @@ import (
 // Tests for what origin/main's legacy payment tools change about the census,
 // on the fixture of account_payment_sn_reconcile_test.go.
 
-// RC-12: a row the legacy correction (model/account_payment_legacy_correction.go)
+// RC-23: a row the legacy correction (model/account_payment_legacy_correction.go)
 // would lower is `inflated` and never paid as recorded; the report shows its
 // corrected payout. A subsidy or reliability the correction keeps, and a row
 // without either, stay payable.

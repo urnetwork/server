@@ -19,10 +19,10 @@ Only stuck rows:
   request journaling began, so the sender refuses the row forever.
 
 Every other row is out of scope and is never written. That includes an
-original that `bringyourctl payouts correct-legacy-attempts` replaced: it stays
-canceled with its key (a `legacy_payment_replaced` event), and its replacement
-carries the corrected obligation through the sender. Unplanned pre-cutoff
-earnings stay with the weekly planner.
+original that `bringyourctl payouts correct-legacy-attempts` replaced (RC-22):
+it stays canceled with its key (a `legacy_payment_replaced` event), and its
+replacement carries the corrected obligation through the sender. Unplanned
+pre-cutoff earnings stay with the weekly planner.
 
 The command never pays what it cannot prove unpaid. It never POSTs to Circle.
 `--send` revives each payable row and schedules it, and the existing sender
@@ -105,7 +105,7 @@ return only makes that row `record_unavailable`.
 | `unresolved: orphan_transfer` | A hidden transfer to its pinned wallet or to any wallet of its network, from a day before its earliest contract closed, may have paid it. | check the orphan |
 | `unresolved: census_mismatch` | Its amounts do not match its sweeps and corrections exactly. | by hand |
 | `unresolved: sweeps_missing` | It has no sweeps and nothing shows they were re-planned; they may have been reaped, and it may be owed. | never pay by hand; the owner may decide its reliability separately |
-| `unresolved: inflated` | It has a subsidy or reliability subsidy that the legacy correction of `correct-legacy-attempts` lowers: the July to September planner inflated both. A payout cannot change, so the row is never paid as recorded. The report shows its corrected payout. | owner decides; correct it by replacement |
+| `unresolved: inflated` | RC-23: it has a subsidy or reliability subsidy that the legacy correction of `correct-legacy-attempts` lowers: the July to September planner inflated both. A payout cannot change, so the row is never paid as recorded. The report shows its corrected payout. | owner decides; correct it by replacement |
 | `unresolved: duplicate_risk` | The row itself holds early earnings (its own early sweeps, or corrections from another row), which an earlier payment may already have paid. `duplicates` has an entry for its network only when another, non-stuck row there holds early earnings. | by hand, from the row's own early earnings |
 | `unresolved: no_payout_wallet` | Its network has no active Solana or Polygon payout wallet. | wait for a wallet |
 | `unresolved: below_fee` | Its payout does not cover the $0.01 fee. | none |

@@ -10,7 +10,7 @@ import (
 
 // Tests for what origin/main's legacy payment tools change about the census.
 
-// RC-1, RC-2: the legacy correction cancels an inflated legacy attempt with its
+// RC-22: the legacy correction cancels an inflated legacy attempt with its
 // key kept and moves its earnings to a replacement, which the sender pays. The
 // canceled original would read as RC-1; neither it nor its replacement is a
 // stuck row, before or after the replacement takes its anchor sweep.

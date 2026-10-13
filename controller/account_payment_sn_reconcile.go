@@ -600,7 +600,7 @@ func snReconcileClassify(item *SnReconcileRowReport, report *SnReconcileReport, 
 		item.Class, item.Reason = snReconcileUnresolved, snReconcileDuplicateRisk
 		return
 	}
-	// RC-12: the July to September planner inflated subsidies and reliability
+	// RC-23: the July to September planner inflated subsidies and reliability
 	// subsidies, and a payout is immutable, so a row the legacy correction
 	// lowers is never paid as recorded.
 	if item.correction != nil && item.correction.Changed() {
