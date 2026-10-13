@@ -8,7 +8,6 @@ package controller
 // logical key that names its epoch or commit seq.
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -369,24 +368,10 @@ func (self *CoreStClient) LedgerV2Demand(ctx context.Context, noId uint64, seq u
 // leaves a capturing close short; each epoch the close also defers takes about
 // 19,500 gas of that margin. The engine caps the floor at the operator gas
 // policy's maximum_gas, so a policy below it gets a close signed with its
-// maximum rather than a refusal.
+// maximum rather than a refusal. The capture's moveStake is the only stake
+// move the server sends through vault2: commit, finalize and answer move
+// none.
 const stLedgerV2StakeMoveGasFloor = 3_200_000
-
-// The selector of STSettlement2.closeOperatorEpoch.
-var stLedgerV2CloseSelector = stLedgerV2SettlementAbi.PackCloseOperatorEpoch(new(big.Int), new(big.Int))[:4]
-
-// ledgerV2GasFloor is the least gas limit an attempt of the intent is signed
-// with: stLedgerV2StakeMoveGasFloor for the execution of a v2 close, and 0
-// for any other attempt. Every close can capture, since emission reaches the
-// pool hotkey between a close's estimate and its inclusion, and the capture's
-// moveStake is the only stake move the server sends through vault2. Commit,
-// finalize and answer move no stake.
-func (self *CoreStClient) ledgerV2GasFloor(intent *model.StTransactionIntent, kind string) uint64 {
-	if kind == model.StTxAttemptExecution && self.cfg.LedgerV2Enabled() && common.HexToAddress(intent.ToAddress) == self.cfg.SettlementV2 && bytes.HasPrefix(intent.Calldata, stLedgerV2CloseSelector) {
-		return stLedgerV2StakeMoveGasFloor
-	}
-	return 0
-}
 
 // sendLedgerV2 sends one v2 operation through the durable engine with the
 // root key. A new operation is first preflighted with eth_call at the latest

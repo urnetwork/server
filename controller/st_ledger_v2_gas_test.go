@@ -21,8 +21,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
 
-	"github.com/urfoundation/sn/stabi"
-
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -131,22 +129,16 @@ func TestStLedgerV2CloseIsSignedAtTheGasFloor(t *testing.T) {
 }
 
 // SV-7 (§8.1 gas floor): commit, finalize and answer move no stake and keep
-// their estimate plus 20%, here from R-6's limits. So does the v1
-// coordinator's close, whose selector is the v2 close's. A spent close is
-// retired by the same 21,000-gas cancellation as any other intent.
+// their estimate plus 20%, here from R-6's limits. A spent close is retired
+// by the same 21,000-gas cancellation as any other intent.
 func TestStLedgerV2GasFloorLeavesOtherSendsUnchanged(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
 		client, rpcClient, cfg := newLedgerV2RPCClient(t, fixture)
-		client.coordinator = stabi.NewSTCoordinator()
 		from := crypto.PubkeyToAddress(cfg.RootKey.PublicKey)
 		commitment := &StLedgerV2Commitment{Root: [32]byte{1}, Total: *uint256.NewInt(1000), LeafCount: 2, LedgerHash: [32]byte{2}}
 		answer := ledgerV2TestAnswer()
-		closeCall := stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))
-		if string(client.coordinator.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))) != string(closeCall) {
-			t.Fatal("the v1 and v2 closes pack differently")
-		}
 
 		for i, send := range []struct {
 			name     string
@@ -162,8 +154,6 @@ func TestStLedgerV2GasFloorLeavesOtherSendsUnchanged(t *testing.T) {
 				func() (string, error) { return client.LedgerV2Finalize(ctx, 7, 1) }},
 			{"answer", cfg.VaultV2, stLedgerV2PackCheckPath(1, answer), 154_089, 184_907,
 				func() (string, error) { return client.LedgerV2Answer(ctx, 1, 3, answer) }},
-			{"v1 close", cfg.ContractAddress, closeCall, 246_899, 296_279,
-				func() (string, error) { return client.CloseOperatorEpoch(ctx, 7, 1) }},
 		} {
 			fixture.estimates[string(send.calldata)] = send.estimate
 			hash, err := send.call()
@@ -176,16 +166,16 @@ func TestStLedgerV2GasFloorLeavesOtherSendsUnchanged(t *testing.T) {
 			}
 		}
 
-		spent := ledgerV2Reserve(t, ctx, cfg, "v2close:8:1", cfg.SettlementV2, stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(8), big.NewInt(1)), 11)
+		spent := ledgerV2Reserve(t, ctx, cfg, "v2close:8:1", cfg.SettlementV2, stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(8), big.NewInt(1)), 10)
 		fixture.reverts[string(spent.Calldata)] = "InvalidWindow"
 		if err := client.reconcileAccountIntents(ctx, rpcClient, cfg.RootKey, from); err != nil {
 			t.Fatal(err)
 		}
-		if len(fixture.sent) != 5 {
+		if len(fixture.sent) != 4 {
 			t.Fatalf("sent %d transactions", len(fixture.sent))
 		}
-		tx := fixture.sent[4]
-		if tx.Gas() != 21_000 || *tx.To() != from || len(tx.Data()) != 0 || tx.Nonce() != 11 {
+		tx := fixture.sent[3]
+		if tx.Gas() != 21_000 || *tx.To() != from || len(tx.Data()) != 0 || tx.Nonce() != 10 {
 			t.Fatalf("cancellation of a spent close: %d gas to %s data %x nonce %d", tx.Gas(), tx.To(), tx.Data(), tx.Nonce())
 		}
 		requireLedgerV2Intent(t, ctx, cfg, "v2close:8:1", model.StTxCanceled, tx)
