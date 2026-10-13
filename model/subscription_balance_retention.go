@@ -148,7 +148,9 @@ func removeCompletedTransferBalanceBatch(ctx context.Context, candidates []serve
 	var deletedIds []server.Id
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		deletedIds = nil
-		admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, candidates)
+		// A zero balance id would fail this batch, and every batch behind it,
+		// on every pass. Its row lock below still applies.
+		admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ownableTransferBalanceIds(candidates))
 		server.Raise(err)
 		if !admitted {
 			return

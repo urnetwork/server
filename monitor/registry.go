@@ -145,6 +145,7 @@ func NewSignals() []Signal {
 		NewGrafanaDatasourcesSignal(),
 		NewGrafanaIngressSignal(),
 		NewGrafanaNodeSignal(),
+		NewMinioStorageSignal(),
 		NewMimirIndexSignal(),
 		NewLogShipperSignal(),
 		NewLokiTailersSignal(),

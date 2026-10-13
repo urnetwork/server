@@ -9,30 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
 )
-
-// Delegates all transaction operations except the exact escrow read under test.
-type settlementReadQueryTx struct {
-	server.PgTx
-	original string
-	replace  string
-	reads    int
-}
-
-// Counts the owner read even when the control retains its original query.
-func (self *settlementReadQueryTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	if query == self.original {
-		self.reads++
-		if self.replace != "" {
-			query = self.replace
-		}
-	}
-	return self.PgTx.Query(ctx, query, args...)
-}
 
 // Expected amounts are explicit financial controls, independent of query shape.
 type settlementReadBalanceCase struct {
@@ -130,6 +110,11 @@ func settlementReadFinancialArm(
 ) []settlementReadBalanceState {
 	t.Helper()
 	ctx := context.Background()
+	// The arm's statements run on traced pool clones. Closing the scope
+	// discards their connections, so a control's replaced read cannot reach a
+	// later arm through a reused pooled connection.
+	stopHooks := startLegacyStatementHooks(t, ctx)
+	defer stopHooks()
 	fixture := newForceCloseDisputeFixture(t, ctx, true, true, source, destination, 0)
 	balanceIds := make([]server.Id, len(balances))
 	balanceIds[0] = fixture.balanceId
@@ -188,12 +173,31 @@ func settlementReadFinancialArm(
 		var closed bool
 		var settleErr error
 		server.Tx(ctx, func(tx server.PgTx) {
-			queryTx := &settlementReadQueryTx{PgTx: tx, original: original, replace: replacement}
-			posts, closed, settleErr = settleEscrowInTx(ctx, queryTx, fixture.contractId, ContractOutcomeSettled)
-			if queryTx.reads != 1 {
+			// The owner admits transaction ownership only on the server's own
+			// read-committed no-retry transaction (ddad361c), so the control
+			// cannot wrap it. A prepared statement named by the owner's exact
+			// read text replaces that read on this transaction's connection,
+			// and a statement hook counts the read.
+			if replacement != "" {
+				_, err := tx.Conn().Prepare(ctx, original, replacement)
+				server.Raise(err)
+				// Best effort; the arm's scope discards the connection anyway.
+				defer tx.Conn().Deallocate(context.WithoutCancel(ctx), original)
+			}
+			reads := 0
+			hooked, releaseHooks := withLegacyStatementHooks(ctx, tx, &legacyStatementHook{
+				before: func(_ context.Context, sql string, _ []string) {
+					if sql == original {
+						reads++
+					}
+				},
+			})
+			defer releaseHooks()
+			posts, closed, settleErr = settleEscrowInTx(hooked, tx, fixture.contractId, ContractOutcomeSettled)
+			if reads != 1 {
 				t.Fatal("exact owning settlement read was not exercised once")
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if reject {
 			if !errors.Is(settleErr, errContractInsufficientEscrow) || closed || len(posts) != 0 {
 				t.Fatal("underfunded actual-model settlement changed its rejection boundary")

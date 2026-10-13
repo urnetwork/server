@@ -19,12 +19,17 @@ package model
 //
 // A refusal whose lifecycle read found the destination row present and
 // inactive is terminal, so it is kept apart in two bounded generations with a
-// long timeout instead of the short ring (see `contractTerminalRouteRejections`).
+// long timeout instead of the ring (see `contractTerminalRouteRejections`).
 // Old sdks retry such a route every 5s for as long as they hold return
-// traffic, and a load balancer spreads the retries over several api
-// processes, so a process sees one route less often than the short timeout
-// and the ring rarely answered it. A missing row, a refusal from the write
-// boundary's own read, and a missing origin stay in the ring.
+// traffic, often hours, and a load balancer spreads the retries over several
+// api processes, so a process sees one route only every 25-40s. The ring's
+// timeout bounds a missing origin's staleness and cannot hold a route that
+// long. A missing row, a refusal from the write boundary's own read, and a
+// missing origin stay in the ring.
+//
+// The api also answers a control request from these refusals before its
+// client state query, for the client they were recorded for
+// (controller/connect_control_refusal_replay.go).
 
 import (
 	"sync"

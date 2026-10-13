@@ -396,7 +396,10 @@ func TestContractExpiryRepairLateReportAndRollback(t *testing.T) {
 			scope.beforeTxForTest = func() {
 				step++
 				if step == 1 {
-					server.Raise(CloseContract(ctx, id, f.destinationId, 1, true))
+					// An id-less checkpoint retains the largest count observed,
+					// not the sum of possible retries (ca4b5c3d), so the late
+					// report raises the retained 3 bytes to 4.
+					server.Raise(CloseContract(ctx, id, f.destinationId, 4, true))
 				}
 			}
 			err := captureContractExpiryRepair(func() error { return continueContractExpiry(ctx, "[test]", fresh, scope) })

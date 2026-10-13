@@ -1351,6 +1351,12 @@ type ContractParticipant struct {
 // keyed by stream id rather than contract id so companion contracts, which do
 // not repeat the intermediary list, settle against the same participant set.
 // The first network snapshot survives retries and later membership changes.
+//
+// The contract row is written only when it does not already carry the stream:
+// a contract whose insert bound this stream (contract_stream_binding.go) is
+// not written again, and a repeated association is not rewritten. Only a
+// contract without a stream, or with the stream its insert bound before the
+// joined stream changed, gets the stream id here.
 func SetContractStream(
 	ctx context.Context,
 	contractId server.Id,
@@ -1382,6 +1388,14 @@ func SetContractStream(
 		return a.Cmp(b)
 	})
 	intermediaryIds = slices.Compact(intermediaryIds)
+
+	boundStreamId := boundContractStreamId(ctx, contractId)
+	bound := boundStreamId != nil && *boundStreamId == streamId
+	if bound && len(intermediaryIds) == 0 && providerWorkSessionSourceFromContext(ctx) == nil {
+		// the insert wrote the stream, and there are no participants or
+		// provider work to record
+		return
+	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		participantNetworks := map[server.Id]server.Id{}
@@ -1425,21 +1439,40 @@ func SetContractStream(
 			}
 		}
 
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				UPDATE transfer_contract
-				SET stream_id = $2
-				WHERE
-					contract_id = $1 AND
-					(stream_id IS NULL OR stream_id = $2)
-			`,
-			contractId,
-			streamId,
-		))
-		if tag.RowsAffected() != 1 {
-			returnErr = fmt.Errorf("Contract not found or already belongs to another stream: %s", contractId.String())
-			return
+		if !bound {
+			// $3 is the stream id the insert bound, replaced when the joined
+			// stream changed after the read before the creation transaction
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE transfer_contract
+					SET stream_id = $2
+					WHERE
+						contract_id = $1 AND
+						stream_id IS DISTINCT FROM $2 AND
+						(stream_id IS NULL OR stream_id = $3)
+				`,
+				contractId,
+				streamId,
+				boundStreamId,
+			))
+			if tag.RowsAffected() != 1 {
+				// already associated: nothing to write
+				var associated bool
+				err := tx.QueryRow(
+					ctx,
+					`SELECT COALESCE(stream_id = $2, false) FROM transfer_contract WHERE contract_id = $1`,
+					contractId,
+					streamId,
+				).Scan(&associated)
+				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					server.Raise(err)
+				}
+				if !associated {
+					returnErr = fmt.Errorf("Contract not found or already belongs to another stream: %s", contractId.String())
+					return
+				}
+			}
 		}
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
@@ -1759,6 +1792,7 @@ func createTransferEscrowInTx(
 			pending[balanceId] = snapshot
 		}
 	}
+	streamId := bindContractStreamAtInsert(ctx, contractId)
 	var expirationTime time.Time
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, balanceId := range balanceIds {
@@ -1795,12 +1829,14 @@ func createTransferEscrowInTx(
 	                usage_origin_is_source,
 	                create_time,
 	                priority,
-	                expiration_time
+	                expiration_time,
+	                stream_id
 	            )
 	            SELECT
 	                $1, $2, $3, $4, $5, $6, $7, $8, ($7::uuid IS NULL),
 	                create_time, $9,
-	                date_trunc('milliseconds', create_time) + $10 * INTERVAL '1 millisecond'
+	                date_trunc('milliseconds', create_time) + $10 * INTERVAL '1 millisecond',
+	                $11
 	            FROM creation_clock
 	            RETURNING expiration_time
 	        `,
@@ -1814,6 +1850,7 @@ func createTransferEscrowInTx(
 			payerNetworkId,
 			priority,
 			DefaultContractExpiration.Milliseconds(),
+			streamId,
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
 
 		batch.Queue(
@@ -2622,6 +2659,9 @@ func CreateContractNoEscrowWithExpiration(
 ) (contractId server.Id, expirationTime time.Time, returnErr error) {
 	// Pin before acquisition so transaction retries reuse even an absent source.
 	ctx = providerWorkSessionContext(ctx)
+	// the stream state the insert binds is read before the transaction
+	// (contract_stream_binding.go)
+	resolveContractStreamBinding(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	server.Tx(ctx, func(tx server.PgTx) {
 		contractId, expirationTime, returnErr = createContractNoEscrowInTx(
@@ -2679,6 +2719,7 @@ func createContractNoEscrowInTx(
 	}
 
 	contractId = server.NewId()
+	streamId := bindContractStreamAtInsert(ctx, contractId)
 	server.Raise(tx.QueryRow(
 		ctx,
 		`
@@ -2694,11 +2735,13 @@ func createContractNoEscrowInTx(
                     transfer_byte_count,
                     usage_origin_is_source,
                     create_time,
-                    expiration_time
+                    expiration_time,
+                    stream_id
                 )
 	            SELECT
 	                $1, $2, $3, $4, $5, $6, $7,
-	                create_time, date_trunc('milliseconds', create_time) + $8 * INTERVAL '1 millisecond'
+	                create_time, date_trunc('milliseconds', create_time) + $8 * INTERVAL '1 millisecond',
+	                $9
 	            FROM creation_clock
 	            RETURNING expiration_time
 	        `,
@@ -2710,6 +2753,7 @@ func createContractNoEscrowInTx(
 		contractTransferByteCount,
 		usageOriginIsSource,
 		DefaultContractExpiration.Milliseconds(),
+		streamId,
 	).Scan(&expirationTime))
 	server.RaisePgResult(tx.Exec(
 		ctx,
@@ -3250,20 +3294,25 @@ func claimContractOutcomeInTx(
 // The usage came from this transaction's locked contract and original reports.
 // Keep the guarded outcome write, signed provenance and commit event together.
 func claimContractOutcomeWithUsageInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, usage *contractUsageSnapshot) (bool, error) {
-	return claimContractOutcomeWithUsageValueInTx(ctx, tx, contractId, outcome, usage, false)
+	return claimContractOutcomeWithUsageValueInTx(ctx, tx, contractId, outcome, usage, false, nil)
 }
 
 // Forced reconciliation can retain an existing raw snapshot exactly, including
 // damaged historical evidence. It never replaces immutable attribution.
-func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, usage any, reconcile bool) (bool, error) {
+//
+// A deadline close passes its retirement time. The outcome write then also
+// clears the dispute, marks the usage unverified and caps the stored expiration
+// at that time, in the same row version. Retiring with a separate UPDATE first
+// wrote one more full row version per close: by its deadline a contract's page
+// is usually full, so that version moved page and added an entry to every
+// transfer_contract index, only to be replaced by the outcome before commit.
+func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, usage any, reconcile bool, retirementTime *time.Time) (bool, error) {
 	ctx = providerWorkSessionContext(ctx)
 	// Return the database clock from the outcome write, avoiding another round
 	// trip while grants are held. The signed original uses this exact stored time.
 	var closedAt time.Time
 	var sourceId, destinationId server.Id
-	err := tx.QueryRow(
-		ctx,
-		`
+	claimSql := `
             UPDATE transfer_contract
             SET
                 outcome = $2,
@@ -3273,11 +3322,26 @@ func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx,
                 contract_id = $1 AND
                 outcome IS NULL
             RETURNING close_time, source_id, destination_id
-        `,
-		contractId,
-		outcome,
-		usage,
-	).Scan(&closedAt, &sourceId, &destinationId)
+        `
+	claimArgs := []any{contractId, outcome, usage}
+	if retirementTime != nil {
+		claimSql = `
+            UPDATE transfer_contract
+            SET
+                outcome = $2,
+                close_time = clock_timestamp() AT TIME ZONE 'UTC',
+                provider_usage = $3,
+                dispute = false,
+                usage_unverified = true,
+                expiration_time = LEAST(COALESCE(expiration_time, $4), $4)
+            WHERE
+                contract_id = $1 AND
+                outcome IS NULL
+            RETURNING close_time, source_id, destination_id
+        `
+		claimArgs = append(claimArgs, *retirementTime)
+	}
+	err := tx.QueryRow(ctx, claimSql, claimArgs...).Scan(&closedAt, &sourceId, &destinationId)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -3285,6 +3349,10 @@ func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx,
 		return false, err
 	}
 	server.AddTxCommitCount(tx, &contractClosedCounter, 1)
+	// The terminal commit also retires the contract's queued scheduled close.
+	if _, err := removeScheduledContractClosesInTx(ctx, tx, []server.Id{contractId}); err != nil {
+		return false, err
+	}
 	providerWorkRetainOutcomeWithEvidencePolicyInTx(ctx, tx, contractId, outcome, closedAt, reconcile)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
 	return true, nil
@@ -4467,6 +4535,12 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 			if claimed {
 				server.AddTxCommitCount(tx, &contractClosedCounter, 1)
 				contractHoleEventInTx(ctx, tx, openContract.contractId, openContract.sourceId, openContract.destinationId, "remove")
+				_, err := removeScheduledContractClosesInTx(ctx, tx, []server.Id{openContract.contractId})
+				server.Raise(err)
+				// The release below is best effort; a lost one would hold the
+				// payer's Redis credit until its lease ends. A durable task in
+				// this commit retries it, without settling the escrow.
+				queueQuarantineReservationReleaseInTx(ctx, tx, openContract.contractId)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
 
@@ -5755,7 +5829,11 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					contractIds = append(contractIds, id)
 				}
 			})
-			admitted, err := tryContractTransferBalanceOwnershipInTx(ctx, tx, contractIds)
+			// A zero balance id on a due contract's escrow would fail this
+			// head-of-index slice on every pass and stop all reaping behind it.
+			balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, contractIds)
+			server.Raise(err)
+			admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ownableTransferBalanceIds(balanceIds))
 			server.Raise(err)
 			if !admitted || len(contractIds) == 0 {
 				return

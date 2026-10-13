@@ -318,27 +318,49 @@ func TestNetEscrowSettlementCacheZeroSettledAndMissingRows(t *testing.T) {
 // Stage all contracts first: no overtaking admission can repair a settlement's
 // cache. Count actual main-transaction census statements and one-balance mirror
 // reloads, including the cold-cache cost that would otherwise be hidden.
+// A cold mirror refresh censuses a grant only within netEscrowRefreshCensusRowBound
+// live legacy rows (086180a7, 1d9b237d): within it the first close reloads the
+// cache and the rest reuse it; past it every close defers and leaves the
+// published mirror as it was, as TestNetEscrowRefreshCacheConcurrentMirrorCost
+// expects of the same refresh.
 func TestNetEscrowSettlementCacheTwentyCloseCost(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 		defer cancel()
-		for _, cold := range []bool{false, true} {
-			f := seedAdmissionCacheHistory(t, ctx, 10001, 100)
-			contracts := make([]server.Id, 20)
+		const closeCount = 20
+		for _, test := range []struct {
+			name    string
+			history int
+			cold    bool
+			// Mirror refresh snapshots across the twenty closes.
+			reloaded float64
+			reused   float64
+			deferred float64
+		}{
+			{name: "warm", history: 10001, reused: closeCount},
+			// The first cold refresh also counts the other staged contracts'
+			// live rows; this history keeps that census within the bound.
+			{name: "cold_within_bound", history: netEscrowRefreshCensusRowBound - closeCount, cold: true, reloaded: 1, reused: closeCount - 1},
+			{name: "cold_over_bound", history: 10001, cold: true, deferred: closeCount},
+		} {
+			f := seedAdmissionCacheHistory(t, ctx, test.history, 100)
+			contracts := make([]server.Id, closeCount)
 			for i := range contracts {
 				contract, _ := createNetEscrowOrderingTestContract(ctx, f, 1)
 				contracts[i] = contract.ContractId
 				settlementCacheCloseReports(ctx, contract.ContractId)
 			}
-			if cold {
+			if test.cold {
 				server.Tx(ctx, func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, f.balanceId))
 				})
 			}
 			beforeReload := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reloaded"))
 			beforeReuse := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reused"))
+			beforeDeferred := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("deferred"))
+			mirrorBefore := Testing_NetEscrowByteCount(ctx, f.balanceId)
 			var mainReads atomic.Int64
 			census := settlementCacheCensusCounter(&mainReads)
 			stopHooks := startLegacyStatementHooks(t, ctx)
@@ -363,16 +385,18 @@ func TestNetEscrowSettlementCacheTwentyCloseCost(t *testing.T) {
 			stopHooks()
 			reloaded := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reloaded")) - beforeReload
 			reused := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reused")) - beforeReuse
-			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 10001 {
-				t.Fatalf("surviving mirrored reservation=%d want10001", got)
+			deferred := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("deferred")) - beforeDeferred
+			// A deferred refresh leaves the published mirror as it was.
+			wantMirror := ByteCount(test.history)
+			if 0 < test.deferred {
+				wantMirror = mirrorBefore
 			}
-			wantMirror := float64(0)
-			if cold {
-				wantMirror = 1
+			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != wantMirror {
+				t.Fatalf("%s surviving mirrored reservation=%d want%d", test.name, got, wantMirror)
 			}
-			t.Logf("cold_cache=%t closes20 no_overtaking_admission main_census_statements=%d mirror_census_statements=%v mirror_reused=%v elapsed=%s", cold, mainReads.Load(), reloaded, reused, elapsed)
-			if mainReads.Load() != 0 || reloaded != wantMirror || reused != 20-wantMirror {
-				t.Errorf("cold=%t main_exact=%d mirror_exact=%v reused=%v want0/%v/%v", cold, mainReads.Load(), reloaded, reused, wantMirror, 20-wantMirror)
+			t.Logf("%s closes20 no_overtaking_admission main_census_statements=%d mirror_census_statements=%v mirror_reused=%v mirror_deferred=%v elapsed=%s", test.name, mainReads.Load(), reloaded, reused, deferred, elapsed)
+			if mainReads.Load() != 0 || reloaded != test.reloaded || reused != test.reused || deferred != test.deferred {
+				t.Errorf("%s main_exact=%d mirror_exact=%v reused=%v deferred=%v want0/%v/%v/%v", test.name, mainReads.Load(), reloaded, reused, deferred, test.reloaded, test.reused, test.deferred)
 			}
 		}
 	})

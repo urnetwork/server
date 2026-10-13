@@ -21,6 +21,8 @@ import (
 type legacyStatementHook struct {
 	// Runs before the statement or batch is sent.
 	before func(ctx context.Context, sql string, queued []string)
+	// Runs before a single statement is sent, with its arguments, after before.
+	beforeQuery func(ctx context.Context, sql string, args []any)
 	// Runs after its results are consumed, with the elapsed time and error.
 	after func(sql string, elapsed time.Duration, err error)
 	// Runs after a single statement succeeds, with its command tag.
@@ -78,7 +80,7 @@ type legacyStatementTracer struct{}
 
 // Runs the before hooks and remembers the statement for its end.
 func (legacyStatementTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	return legacyStatementHookStart(ctx, conn, data.SQL, nil)
+	return legacyStatementHookStart(ctx, conn, data.SQL, nil, data.Args)
 }
 
 // Runs the after hooks once the statement's results are consumed.
@@ -96,7 +98,7 @@ func (legacyStatementTracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn
 	for _, query := range queued {
 		sql += " | " + query
 	}
-	return legacyStatementHookStart(ctx, conn, sql, queued)
+	return legacyStatementHookStart(ctx, conn, sql, queued, nil)
 }
 
 // Each queued result belongs to the batch's single round trip.
@@ -109,8 +111,9 @@ func (legacyStatementTracer) TraceBatchEnd(ctx context.Context, _ *pgx.Conn, dat
 }
 
 // Shared start of a statement or batch. The start carries its own hooks, so
-// its end runs exactly the hooks that saw it begin.
-func legacyStatementHookStart(ctx context.Context, conn *pgx.Conn, sql string, queued []string) context.Context {
+// its end runs exactly the hooks that saw it begin. A batch has no arguments
+// of its own; its queued statements carry them.
+func legacyStatementHookStart(ctx context.Context, conn *pgx.Conn, sql string, queued []string, args []any) context.Context {
 	hooks := legacyStatementHooksFor(ctx, conn)
 	if len(hooks) == 0 {
 		return ctx
@@ -118,6 +121,9 @@ func legacyStatementHookStart(ctx context.Context, conn *pgx.Conn, sql string, q
 	for _, hook := range hooks {
 		if hook.before != nil {
 			hook.before(ctx, sql, queued)
+		}
+		if hook.beforeQuery != nil && queued == nil {
+			hook.beforeQuery(ctx, sql, args)
 		}
 	}
 	return context.WithValue(ctx, legacyStatementStartKey{}, legacyStatementStart{sql: sql, started: time.Now(), hooks: hooks})

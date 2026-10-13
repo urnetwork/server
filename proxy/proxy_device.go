@@ -26,8 +26,15 @@ func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 		CheckProxyDeviceIdleTimeout: 1 * time.Minute,
 		SequenceBufferSize:          2048,
 		DeviceMemoryTargetByteCount: proxyDeviceMemoryTargetByteCountFromConfig(),
+		HostedMintConcurrency:       defaultHostedMintConcurrency,
 	}
 }
+
+// A quarter of the proxy's 16-connection default database pool. A healthy
+// registration takes tens of milliseconds, so the bound admits far more than a
+// paced fleet needs, and a slow database sheds the excess at once instead of
+// exhausting the pool for every device's control operations.
+const defaultHostedMintConcurrency = 4
 
 const defaultProxyDeviceMemoryTargetByteCount = model.ByteCount(24 * model.Mib)
 
@@ -68,6 +75,10 @@ type ProxyDeviceManagerSettings struct {
 	CheckProxyDeviceIdleTimeout time.Duration
 	SequenceBufferSize          int
 	DeviceMemoryTargetByteCount model.ByteCount
+	// HostedMintConcurrency bounds the derived-client registrations in flight
+	// across every device of this manager; past it a registration is refused
+	// as a rate limit (see localclient.MintAdmission). Nonpositive is unbounded.
+	HostedMintConcurrency int
 	// HoldWindowIdentityRestore keeps a replacement from restoring identities
 	// while its predecessor is still draining. Fresh lazy-open identities are
 	// buffered and become durable when ReleaseWindowIdentityRestore runs.
@@ -111,6 +122,8 @@ type ProxyDeviceManager struct {
 	ownsNetworkSpace    bool
 	proxyDeviceBuilder  func(server.Id) (*ProxyDevice, error)
 	windowIdentityGate  *windowIdentityRestoreGate
+	// One registration bound shared by every device this manager opens.
+	mintAdmission *localclient.MintAdmission
 
 	// stateLock guards the proxyDevices map. It is read-mostly: every
 	// OpenProxyDevice looks up an existing pdState (RLock, concurrent), and only
@@ -163,6 +176,7 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		windowIdentityGate: newWindowIdentityRestoreGate(
 			settings.HoldWindowIdentityRestore,
 		),
+		mintAdmission: localclient.NewMintAdmission(settings.HostedMintConcurrency),
 	}
 	manager.networkSpaceBuilder = newProxyDeviceManagerNetworkSpace
 	manager.networkSpaceCloser = func(networkSpace *sdk.NetworkSpace) {
@@ -382,6 +396,7 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 	settings.ClientSecurityPolicyGenerator = self.settings.ClientSecurityPolicyGenerator
 	settings.MemoryTargetByteCount = self.settings.DeviceMemoryTargetByteCount
 	settings.windowIdentityGate = self.windowIdentityGate
+	settings.mintAdmission = self.mintAdmission
 	pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, networkSpace, settings)
 	if err != nil {
 		return nil, err
@@ -693,6 +708,8 @@ type ProxyDeviceSettings struct {
 	// behavior).
 	DisableWindowIdentityPersistence bool
 	windowIdentityGate               *windowIdentityRestoreGate
+	// the owning manager's registration bound; nil is unbounded
+	mintAdmission *localclient.MintAdmission
 }
 
 // Packet routing can overlap owner-driven teardown. The NAT identity is immutable;
@@ -797,7 +814,9 @@ func NewProxyDevice(
 		return nil, mintErr
 	}
 	cancelCtx, cancel := context.WithCancel(ctx)
-	localControl, err := localclient.New(ctx, signedByJwt, networkSpace.GetApiUrl())
+	localControl, err := localclient.NewWithSettings(ctx, signedByJwt, networkSpace.GetApiUrl(), &localclient.AuthoritySettings{
+		MintAdmission: settings.mintAdmission,
+	})
 	if err != nil {
 		cancel()
 		return nil, err

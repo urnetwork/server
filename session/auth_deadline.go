@@ -21,11 +21,24 @@ var ErrAuthUnavailable = errors.New("authentication temporarily unavailable")
 // Auth validates against current account state under one admission deadline.
 // It never replaces self.Ctx: successful controllers retain their original
 // lifetime, including the existing durable financial handoff boundaries.
-func (self *ClientSession) Auth(req *http.Request) (returnErr error) {
+func (self *ClientSession) Auth(req *http.Request) error {
+	_, err := self.AuthUnlessAnswered(req, nil)
+	return err
+}
+
+// Auth, except that answer may reply to a client credential's request before
+// its client state query (see BeforeStateAnswer). An answered request is not
+// authenticated: ByJwt stays nil and no authentication attempt is recorded.
+// Every refusal, deadline and dependency failure is reported as by Auth.
+func (self *ClientSession) AuthUnlessAnswered(req *http.Request, answer BeforeStateAnswer) (answered bool, returnErr error) {
 	authCtx, cancel := context.WithTimeout(self.Ctx, AuthTimeout)
 	defer cancel()
 	method := requestAuthMethod(req)
-	defer func() { recordSessionAuth(method, self.ByJwt, returnErr) }()
+	defer func() {
+		if !answered {
+			recordSessionAuth(method, self.ByJwt, returnErr)
+		}
+	}()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err, ok := recovered.(error)
@@ -38,11 +51,12 @@ func (self *ClientSession) Auth(req *http.Request) (returnErr error) {
 			returnErr = ErrAuthUnavailable
 		}
 		if returnErr != nil {
+			answered = false
 			self.ByJwt = nil
 			self.ApiKeyAuthenticated = false
 		}
 	}()
-	return self.authenticate(authCtx, req)
+	return self.authenticate(authCtx, req, answer)
 }
 
 func authDependencyUnavailable(err error) bool {

@@ -421,7 +421,12 @@ func connectControlObserved(
 	// The response pack owns a serialized copy. Release the controller's
 	// pooled frame payloads after every marshal or error return.
 	defer returnConnectControlFrames(resultFrames)
+	return connectControlResult(resultFrames, resultErr)
+}
 
+// Serializes reply frames into the response pack. The caller still owns the
+// frames and returns them.
+func connectControlResult(resultFrames []*protocol.Frame, resultErr error) (*ConnectControlResult, error) {
 	resultPack := &protocol.Pack{
 		Frames: resultFrames,
 	}
@@ -466,6 +471,7 @@ func ConnectControlFrames(
 	// the remaining contracts' closes until the straggler reaper. Process every
 	// frame and report the joined errors.
 	var errs []error
+	refusals := connectControlRefusalsFromContext(ctx)
 
 	for _, frame := range frames {
 		message, err := connect.FromFrame(frame)
@@ -494,6 +500,11 @@ func ConnectControlFrames(
 		//   REPORTED (observed: silent bulk destination-party contract leaks
 		//   under chaos churn before this was surfaced).
 		err = observeControlFrame(ctx, message, defaultControlFrameMetrics, func() error {
+			// a request answered before its client state query carries only
+			// CreateContract frames whose refusals were prepared from it
+			if _, ok := message.(*protocol.CreateContract); refusals != nil && !ok {
+				return errConnectControlRefusalNotPrepared
+			}
 			switch v := message.(type) {
 			case *protocol.StreamAuthorization:
 				// Only authenticated control requests can establish a clock
@@ -761,42 +772,54 @@ func CreateContract(
 	// asking on their own interval. The origin notification owner keeps each
 	// such refusal briefly (model/contract_route_rejection.go), so a repeat is
 	// answered here, before any read. Only those refusals are recorded, never a
-	// contract, a canceled request or any other failure.
+	// contract, a canceled request or any other failure. A request answered
+	// before its client state query arrives with the refusals prepared from it
+	// (connect_control_refusal_replay.go) and may report only those.
 	notifications := model.GetContractOriginNotifications(ctx)
 	routeRejectable := clientId != ControlId && destinationId != ControlId
-	if routeRejectable {
-		if rejection, ok := notifications.RouteRejection(clientId, destinationId, createContract.Companion); ok {
-			err := errContractDestinationInactive
-			if rejection.Cause == model.ContractRouteMissingOrigin {
-				err = model.ErrMissingCompanionOrigin
-			}
-			rejectionCause = contractFailureClass(err)
-			// replay the labels of the recorded refusal, with this sender's lane
-			recordContractFailureResolved(
-				clientId,
-				destinationId,
-				createContract.Companion,
-				model.ByteCount(createContract.TransferByteCount),
-				err,
-				contractResolution{
-					path:                 rejection.ResolutionPath,
-					relationship:         rejection.Relationship.Mode,
-					sourceLifecycle:      rejection.Relationship.SourceLifecycle,
-					destinationLifecycle: rejection.Relationship.DestinationLifecycle,
-					sourceOwner:          rejection.Relationship.SourceOwner,
-					destinationOwner:     rejection.Relationship.DestinationOwner,
-					senderRole:           createContract.SenderRole,
-				},
-			)
-			contractRouteRejectionCounter.WithLabelValues(rejectionCause, "hit").Inc()
-			contractError := contractResultError(err)
-			frame, err := connect.ToFrame(&protocol.CreateContractResult{Error: &contractError}, connect.DefaultProtocolVersion)
-			if err != nil {
-				return nil, err
-			}
-			timingResult = server.ContractCreationRejected
-			return []*protocol.Frame{frame}, nil
+	var rejection model.ContractRouteRejection
+	replayRejection := false
+	if refusals := connectControlRefusalsFromContext(ctx); refusals != nil {
+		// Answered before the client state query: only a refusal prepared
+		// from this request is reported, and nothing is read.
+		rejection, replayRejection = refusals.rejection(clientId, destinationId, createContract.Companion)
+		if !replayRejection || !routeRejectable {
+			return nil, errConnectControlRefusalNotPrepared
 		}
+	} else if routeRejectable {
+		rejection, replayRejection = notifications.RouteRejection(clientId, destinationId, createContract.Companion)
+	}
+	if replayRejection {
+		err := errContractDestinationInactive
+		if rejection.Cause == model.ContractRouteMissingOrigin {
+			err = model.ErrMissingCompanionOrigin
+		}
+		rejectionCause = contractFailureClass(err)
+		// replay the labels of the recorded refusal, with this sender's lane
+		recordContractFailureResolved(
+			clientId,
+			destinationId,
+			createContract.Companion,
+			model.ByteCount(createContract.TransferByteCount),
+			err,
+			contractResolution{
+				path:                 rejection.ResolutionPath,
+				relationship:         rejection.Relationship.Mode,
+				sourceLifecycle:      rejection.Relationship.SourceLifecycle,
+				destinationLifecycle: rejection.Relationship.DestinationLifecycle,
+				sourceOwner:          rejection.Relationship.SourceOwner,
+				destinationOwner:     rejection.Relationship.DestinationOwner,
+				senderRole:           createContract.SenderRole,
+			},
+		)
+		contractRouteRejectionCounter.WithLabelValues(rejectionCause, "hit").Inc()
+		contractError := contractResultError(err)
+		frame, err := connect.ToFrame(&protocol.CreateContractResult{Error: &contractError}, connect.DefaultProtocolVersion)
+		if err != nil {
+			return nil, err
+		}
+		timingResult = server.ContractCreationRejected
+		return []*protocol.Frame{frame}, nil
 	}
 	relationshipDetails := getProvideRelationshipDetails(ctx, clientId, destinationId)
 	resolution := contractResolution{
@@ -1284,6 +1307,15 @@ func newContract(
 	) * model.ByteCount(len(intermediaryIds)+1)
 
 	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
+		// the insert writes the stream the contract joins below
+		// (model/contract_stream_binding.go)
+		if streamVersion != 0 {
+			if 0 < len(intermediaryIds) {
+				ctx = model.WithAddStreamBinding(ctx, sourceId, destinationId, intermediaryIds)
+			} else {
+				ctx = model.WithPairStreamBinding(ctx, sourceId, destinationId, forceStream)
+			}
+		}
 		contractId, expirationTime, err = model.CreateContractNoEscrowWithExpiration(
 			ctx,
 			sourceNetworkId,
@@ -1337,6 +1369,9 @@ func newContract(
 						return
 					}
 					streamId = &streamId_
+				} else {
+					// the pair stream the insert bound ended before the join
+					model.ClearContractStreamBinding(ctx, contractId)
 				}
 			}
 		}
@@ -1373,6 +1408,12 @@ func newContract(
 		// only for the client library's linger after its close. The reply path
 		// therefore outlives a forward contract that settled early.
 		originCloseLinger := max(contractManagerSettings.OriginContractLinger, model.CompanionOriginCloseLinger)
+		// the insert writes the pair's stream, read before each attempt's
+		// transaction, which the companion joins below with its origin
+		// (model/contract_stream_binding.go)
+		if streamVersion != 0 {
+			ctx = model.WithCompanionStreamBinding(ctx, sourceId, destinationId)
+		}
 		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
 		escrow, err := waitForCompanionOrigin(ctx, originWatch, func() (*model.TransferEscrow, error) {
 			escrow, err := createCompanionTransferEscrow(
@@ -1435,9 +1476,17 @@ func newContract(
 					return
 				}
 				streamId = &streamId_
+			} else {
+				// the stream the insert bound ended before the join
+				model.ClearContractStreamBinding(ctx, contractId)
 			}
 		}
 	} else {
+		// the insert writes the stream the contract is added to below
+		// (model/contract_stream_binding.go)
+		if streamVersion != 0 && (forceStream || 0 < len(intermediaryIds)) {
+			ctx = model.WithAddStreamBinding(ctx, sourceId, destinationId, intermediaryIds)
+		}
 		escrow, err := createTransferEscrow(
 			ctx,
 			sourceNetworkId,

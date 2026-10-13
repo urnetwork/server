@@ -159,6 +159,14 @@ The database follow-up adds §1.3a (`pg-capacity`) and a typed
 `pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
 generic panic amplification and records the validated legacy-reindex, WAL
 stall, client-deadline, and PgBouncer replacement chain.
+Updated 2026-10-12 after two MinIO incidents the monitor had no probe for. On
+2026-10-11 edge-6's shared `/mnt/data` reached MinIO's free-space floor and
+every Loki, Mimir and blob write returned 507 `XMinioStorageFull`, leaving the
+Mimir bucket index stale. On 2026-10-12 a 400GiB hard quota applied to a loki
+bucket holding about 673GiB rejected Loki's chunk flushes. §11.6a adds the
+`minio-storage` probe (drive free space against MinIO's floor, offline drives,
+bucket usage against hard quotas, S3 error rates), and §11.6 now records
+MinIO's move to edge-5's four-drive erasure set.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -211,12 +219,12 @@ active missing capability and must not be read as green.
 | 11.3 | Runbook | `grafana-node`, `log-errors` |
 | 11.4 | Runbook | `log-errors`, `grafana-node` |
 | 11.5 | Shared contract | `grafana-node`, `mimir-balance`, `mimir-index` |
-| 11.6 | Shared contract | `mimir-index`, `grafana-node`, `backup-archives` |
+| 11.6 | Shared contract | `minio-storage`, `mimir-index`, `grafana-node`, `backup-archives` |
 | 11.7 | Runbook | `rollout-guard`, `log-errors` |
 | 11.7b | Runbook | `grafana-node`, `mimir-balance`, `log-errors` |
 | 11.7c | Runbook | `rollout-guard`, `provenance` |
 | 11.8 | Shared contract | `provenance`, `grafana-node` |
-| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper` |
+| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper`, `minio-storage` |
 | 11.10 | Runbook | `log-errors`, `credentials`, `provenance` |
 | 11.11 | Shared contract | `grafana-datasources`, `grafana-node` |
 | 11.12 | Runbook | `grafana-node`, `hostpower`, `log-errors`; direct conntrack inspection remains incident evidence |
@@ -2551,9 +2559,10 @@ Probe: `redis-rates`
 
 The Redis dashboard and alerts must also respect the collection cadence. Since
 2026-08-26, edge-6 intentionally staggers its 32 exporter scrapes from 61 to 92
-seconds to avoid a remote-write burst. Grafana can resolve `$__rate_interval`
-to one minute, which contains fewer than two samples and makes counter-derived
-panels look empty even while all gauges and raw exporter counters are healthy.
+seconds, and since 2026-10-12 edge-5 its 16 from 93 to 108 seconds, to avoid a
+remote-write burst. Grafana can resolve `$__rate_interval` to one minute, which
+contains fewer than two samples and makes counter-derived panels look empty
+even while all gauges and raw exporter counters are healthy.
 On 2026-09-07, main returned 32 current series for each of
 `redis_commands_processed_total`, `redis_evicted_keys_total`, and
 `redis_expired_keys_total`, but `count(rate(...[1m]))` returned no value while
@@ -10716,8 +10725,13 @@ The API-side active-lifecycle guard exports the bounded counter cause
 `urnetwork_connect_contract_failures_total{cause="inactive_destination"}`.
 Unlike §2.17, this is not an inferred role or fallback: the contract boundary
 itself found the requested destination missing or inactive and refused to
-create the route. Query both initialized original-companion partitions and the
-traffic-created joint diagnostic family over five minutes:
+create the route. A repeat of a refused route is counted again with the
+recorded labels when the owner's route rejection registry answers it: an
+inactive destination row for up to an hour, a missing row for 60 seconds. On
+`/connect/control` that answer can come before the client state query
+(`urnetwork_connect_control_refusal_replays_total`), so the rate counts
+retries, not lifecycle reads. Query both initialized original-companion
+partitions and the traffic-created joint diagnostic family over five minutes:
 
 ```promql
 label_replace((sum by (companion) (rate(
@@ -13791,12 +13805,34 @@ The opt-in API instrumentation adds only fixed cells:
   `urnetwork_connect_control_http_phase_seconds_{sum,count}{phase}` measure
   `prepare` (session/body/JSON), `authenticate` (normal session auth),
   `controller` (pack decode, frame handlers and pack encode), and `response`
-  (HTTP result formatting/writing). The matching
+  (HTTP result formatting/writing). For a request answered from recorded
+  route refusals (below), `authenticate` covers the signature, claims,
+  session horizon, session revocation marker and remembered state refusals
+  but no client state query, and `controller` the replay of those refusals. The matching
   `urnetwork_connect_control_http_phase_completions_total{phase,outcome}` has
   exactly 16 cells: four phases by `ok|rejected|canceled|panic`. Successful
   transitions count the phase exited, not another logical request. Canceled
   context takes precedence over panic. Early rejection remains in its owning
   phase; all gauges release during normal return or panic unwind.
+- `urnetwork_connect_control_refusal_replays_total{cause}` counts API
+  `/connect/control` requests answered from route refusals that the
+  router's origin notification owner recorded for the credential's own
+  client, after the signature, claims, session horizon, session revocation
+  marker and remembered state refusals and without the client state query.
+  Every frame of such a request is a CreateContract whose exact route
+  (verified client, destination, companion flag) has a recorded refusal:
+  terminal inactive-destination refusals for up to an hour, ring refusals
+  for up to 60 seconds or until an origin edge. `cause` is
+  `inactive_destination`, `missing_companion_origin` or `mixed`; the three
+  children exist at zero. Each answered request runs no
+  `urnetwork_jwt_state_queries_total` query and records no
+  `urnetwork_session_auth_attempts_total` attempt, while its frames count
+  exactly as route rejection cache hits in the frame, rejection, failure,
+  detail and creation families. A request with any other frame, or any
+  route without a recorded refusal, authenticates normally. Until a request
+  of its own reaches the state query, a removed or rotated client is told
+  only the refusals recorded for it; a revoked session marker or a
+  remembered state refusal still answers 401 first.
 - `urnetwork_connect_control_frames_total{ingress,message,outcome}` has 64
   cells: `http|internal`, eight fixed message kinds (`create_contract`,
   `close_contract`, `provide`, `encrypted_key`, `client_key`, `control_ping`,
@@ -13850,7 +13886,11 @@ or deadline only when that attempt's context supplies the corresponding error;
 other query failures remain `query_error`.
 
 The multiplicity control is per authenticated operation, not per frame or
-unique credential. A hosted child control pack makes one combined durable
+unique credential. An API `/connect/control` request answered from recorded
+route refusals is not authenticated by the state query and makes none; such
+requests are counted by `urnetwork_connect_control_refusal_replays_total`, so
+`api/control` queries plus those replays, plus refusals and failures before
+the query, account for the route's requests. A hosted child control pack makes one combined durable
 parent-ownership and JWT-state query, even when it contains 16 frames; its frames use
 the existing `http` wrapper label. Direct prober control makes one JWT-state
 query per pack and uses `internal` frames. Verified resident in-band control
@@ -16955,7 +16995,7 @@ Probe: `redis-connections`
 
 - connected_clients per node: baseline ~pool_floor × processes; step change
   +50% in 10 min = reconnect storm or pool misconfig (min_connections is PER
-  NODE ×32 — a config of 64 = 2k idle conns per process).
+  NODE ×48 — a config of 64 = ~3k idle conns per process).
 - On a sustained per-node outlier, the probe runs one bounded `CLIENT LIST`
   battery and aggregates on the Redis host by source, flags, last command, and
   client library. The same trip-time battery records blocked clients, local
@@ -17099,6 +17139,19 @@ Probe: `redis-topology`
 - Replica count: `CLUSTER NODES | grep -c slave` — 0 means no failover
   exists and any single wedge is a partial outage until manual restart.
 - known_nodes drift vs expected = membership event worth a warn.
+- Node inventory (`node-inventory-mismatch`): every addressed `CLUSTER NODES`
+  member (phantom and handshake entries excluded) must announce the LAN
+  address, from config settings.yml `routes`, of the monitor.yml
+  redis-cluster host whose `redis.node_ports` lists its port, and every listed
+  port must be such a member. One warning per host, or per announced address
+  no redis-cluster host owns, names the ports on each side. Settings
+  validation cannot catch either broken layout: a host whose `redis:` block
+  is missing validates and its nodes silently leave every per-node probe, and
+  a range covering another host's ports validates once that host's block is
+  gone, while edge-6's nginx node-port bridge still answers on 6412-6427 with
+  edge-5's nodes, so their memory is judged against edge-6's RAM. A host
+  without a LAN address leaves the comparison unobservable rather than
+  mismatched.
 - 2026-07-17 purge: 5 `slave,noaddr` phantoms (dead old replicas) removed with
   a per-node loop — each node FORGETs the IDs in ITS OWN noaddr list (views
   differ; every FORGET returned OK, "Unknown node" is tolerable). All 32 views
@@ -17332,7 +17385,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
 | `payout-invalid-destination-reset-failed` — composed `Payment create transaction error: ...; invalid destination reset error: ...`, or the legacy form with ` = ` at both separators | The controller reported a destination rejection followed by an unsuccessful guarded attempt reset. The shared complete marker requires nonempty reset detail and precedes ordinary processor/network classes. Concurrent, terminal, or on-chain state can block reset, as can persistence failure; it does not prove unchanged wallet configuration. The Alert retains a fixed sample and `phase=guarded-reset`, never the processor/persistence suffix or inferred address. An older equals-only watcher or incomplete log window cannot establish a healthy reset window. | Reconcile the current payment/processor state privately and distinguish guarded state rejection from persistence failure. Preserve the key; do not change wallets solely from this class or clear/replay rows. Verify an eligible reset succeeds or the existing attempt reaches a safe terminal outcome, with no duplicate transfer and stable keys for ambiguous submits. Require zero reset-failure events and durable `invalid-destination-reset-failed` rows through the natural 90-minute retry window plus ingestion delay, using a containing watcher and complete observations. See §1.2/§5.7. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The ordinary processor response rejects the destination before transfer creation. Historically the chain-blind validator admitted Solana keys declared as `MATIC`; after a successful guarded reset, an unchanged wallet selection can repeat that rejection. An ordinary Circle-client line can accompany a later reset failure and is not a reset-success witness. | Confirm typed rejection, guarded reset success, current artifact, and current wallet selection before correcting a proven chain mismatch through the supported account API under account-owner/operations authority. Resolve a concurrent `payout-invalid-destination-reset-failed` boundary first. Preserve keys for ambiguous submits; never edit/delete payment/task rows. Verify the next natural retry selects the corrected wallet with the safely renewed key, no duplicate transfer, and zero durable/logical errors within 90 minutes plus ingestion delay. See §5.7. |
-| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`, or for a Stream fallback by its one origin lookup in `CreateContract`, before the provide secret, metadata and endpoint reads. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
+| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`, or for a Stream fallback by its one origin lookup in `CreateContract`, before the provide secret, metadata and endpoint reads, and again with the recorded labels when a refusal kept by the route rejection ring (60 seconds, or until an origin edge) is replayed, including before the client state query. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
 | Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | No matching request was observed on those captured fronts. This excludes a server arrival only when the capture covers every route the shipped client can choose: Alt serves its own API over H3/WhoDis without the ordinary LB/API path (§16.9). In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path and embedded client transport revision. Bind the ordinary API and Alt API/Connect handler generations and public carrier paths before assigning an absent request to the client. If a complete capture excludes arrival, inspect `[net]http serial`/`[net]http parallel` route selection and require the bounded preferred-route and cold-route discovery controls. Missing Alt coverage is unknown; it does not authorize a server restart, longer UI wait or app-level retry. |
@@ -19381,6 +19434,7 @@ Tier-0 (page):
 | journal-buffer-retention-rotation | host | §8.5b source-audited affected package plus enabled retention, or exact bounded journald reason | known unsafe combination or any exact retention-triggered rotation in five minutes; immediate | fixed build/state enums and count; capped evidence also retains visibility loss; never infer hash pressure or reader loss |
 | log-shipper-down | host | §11.14 Fluent Bit active/sub state | any non-running managed host; immediate | result, restart count, soft/hard fd limits |
 | log-shipper-journal-read-loss | host | §11.14 bounded Fluent Bit unit journal | any exact `sd_journal_next()` loss event in ten minutes; immediate | privacy-reduced total and errno-74 counts only; live unit state cannot clear it |
+| minio-drive-capacity / minio-drive-offline / minio-bucket-quota / minio-write-errors | Mimir MinIO v3 metrics | §11.6a fresh per-drive free/total/health, erasure-set write tolerance, bucket usage against the hard quota and its five-minute minimum, five-minute write-API 5xx | set free space minus 1 GiB at or under 1% of the set total, immediate; worst drive under 5% free for 2 probes (warn under 15%); any offline drive for 2 probes, immediate once write tolerance is negative (healing warns); usage at or over the quota or its five-minute minimum, immediate (warn at 90%); write 5xx at least 5% and 10 per five minutes for 2 probes (warn at 1%) | per-drive free/total, set floor, offline/healing drives, bucket usage/quota/quota minimum and usage snapshot age, request and error counts |
 | host-cpu-saturation / host-io-saturation | Mimir node metrics | §8.14 fresh normalized load plus five-minute CPU-mode ratios | non-idle/non-I/O-wait execution >=90% or I/O wait >=20%, respectively, with load1/logical CPUs >=1.25 for 2 probes | exact host; load/core, CPU execution, I/O wait, and memory-available ratios |
 | service-runtime-runaway | Mimir process metrics | §8.15 fresh exact host/service/block/instance runtime tuple | 16GiB RSS plus bounded CPU/goroutine/allocation pressure, or a 64GiB/500k-goroutine/1GiB-s hard ceiling for 2 probes | process age, same-block generation count, RSS/heap/objects/goroutines and five-minute CPU/allocation/GC rates |
 | connect-resident-ingress-capability-unobservable | Mimir process metrics | §8.15 executable-owned lazy resident-forward-ingress gauge joined to each newest fresh Connect process | any configured newest Connect generation is absent/unselectable, lacks the gauge, or reports a value other than exactly one; immediate | fleet counts only; provenance remains independent |
@@ -19395,6 +19449,7 @@ Tier-1 (warn):
 |---|---|---|---|
 | settings-generation-stale / settings-generation-unobservable | local effective settings loader | §1.6 complete in-memory comparison with the immutable startup snapshot | warn immediately; page after 5 consecutive one-minute cadences; never render contents or fingerprints |
 | host-metrics-missing / host-memory-pressure | Mimir node metrics + enabled host inventory | §8.14 complete <=90s node tuple; MemAvailable/MemTotal | missing family for 2 probes, page after 3; available memory <=10% for 2 probes, page after 5 |
+| minio-read-errors / minio-write-rejected / minio-metrics-unobservable | Mimir MinIO v3 metrics + `minio` inventory | §11.6a non-write 5xx, write-API 4xx, complete <=180s drive family and bucket usage snapshot | read 5xx at least 5% and 10 per five minutes for 2 probes, page at 25%; write 4xx at least 10% and 20 per five minutes for 2 probes; drive family missing/stale/incomplete for 2 probes, page after 3; no bucket usage snapshot for 2 probes |
 | service-runtime-metrics-incomplete / service-runtime-metrics-invalid | Mimir process metrics + managed service inventory | §8.15 complete exact raw runtime tuple and bounded labels | any fresh incomplete process or rejected unowned/malformed series for 2 probes; raw labels discarded |
 | egress-probe-config-drift / egress-probe-config-unobservable | active monitor Config resource + PostgreSQL durable task arguments | §2.19 complete desired execution settings compared in memory with one coherent shard snapshot | explicit mismatch, or a present desired resource that cannot be compared, for 2 probes; endpoints and raw configuration never leave the process |
 | redis-latencystats-source-drift / redis-latencystats-source-unobservable | bounded host-local Redis source-state reducer | §11.20d exact configured-node census for `CONFIG GET latency-tracking` | any enabled node, or any missing/malformed/unreachable node; immediate; only fixed counts leave the host |
@@ -19418,6 +19473,7 @@ Tier-1 (warn):
 | zombie-tx | pg | idle-in-tx xact age | > 30 min |
 | dead-tuples | pg | n_dead_tup hot tables | > 10M |
 | replica-cover | redis | CLUSTER NODES slave count | < expected |
+| node-inventory-mismatch | redis + monitor.yml | §3.6 CLUSTER NODES members vs each redis-cluster host's `redis.node_ports` at its LAN address | any member or listed port without its counterpart; immediate at the 1h cadence |
 | open-set-size | pg | 2.6 exact open-contract count below scan cap; explicit lower bounds at cap | exact > 150k high/rising, or capped >= 250001 with unknown trend; 3 ticks / 10 min |
 | close-duration-overrun | task logs+pg | 2.6a live heartbeat or completed CloseExpiredContracts duration | >= 120s; retain completed precursor 45 min |
 | reboot-task-collision | host journal+pg | 2.13 fresh non-terminal task heartbeat at previous-boot boundary | >= 120s during a boot in the last 20 min |
@@ -23094,13 +23150,15 @@ Signals learned draining `by-us-fmt-5-edge-4` live during a rolling deploy
 ### 10.4 Access recipe (this env)
 `ssh by@172.28.208.175` (edge-4). Orchestrator child: `ps --ppid <MainPID>`.
 Docker (root): `echo by-pass | sudo -S docker ps`. Redis registry lives on
-edge-6 `172.28.208.177`: `redis-cli -c -p 6379` (no auth). Readonly only.
+edge-6 and edge-5; from edge-6 `172.28.208.177`: `redis-cli -c -p 6379` (no
+auth). Readonly only.
 
 ## 11. Grafana / loki / mimir observability stack (the 2026-07-19 outage)
 
 The observability PLANE itself: grafana + loki + mimir behind a Go front
-(`warp/grafana/main.go`), ONE bundled service `warp-main-grafana-*` on 6-of-7
-lb/host_services hosts (edge-0/1/3/4, crisp, fireside; **edge-5 offline**). The
+(`warp/grafana/main.go`), ONE bundled service `warp-main-grafana-*` on all 6
+lb/host_services hosts (edge-0/1/3/4, crisp, fireside; edge-5 left them on
+2026-10-12 and runs MinIO and Redis nodes). The
 front is PID1 and supervises the children via `warp.Child` (restart-on-exit,
 plus restart-on-unready for loki and mimir since 2026-08-18, 11.13).
 **alloy is NOT a container child** — host-managed fluent-bit replaced it, and
@@ -23111,7 +23169,7 @@ Access: `by-pass <secmd-key> by` → per-host sudo pw, then
 `echo "$PW" | ssh by@<ip> 'sudo -S -p "" bash -s' <<'EOS' … EOS` — the `by` user
 is NOT in the docker group, so docker needs sudo. Log driver is now `local`, so
 `sudo docker logs <c>` WORKS (was awslogs → cloudwatch). IPs: edge-0=.173,
-edge-1=.51, edge-3=.174, edge-4=.175, edge-5=.176 (OFFLINE), crisp=.58,
+edge-1=.51, edge-3=.174, edge-4=.175, edge-5=.176 (MinIO, no bundle), crisp=.58,
 fireside=.3 (all 172.28.208.x mgmt). Route-net (eno1) IPs live in
 `config/main/settings.yml` routes.
 
@@ -23210,21 +23268,28 @@ have no local logs). Discriminator: `conn <peer> 6490` OK vs `conn <peer> 14609`
 timeout. FIX: pin frontend+scheduler to the external port (loki `frontend.port` +
 `query_scheduler.scheduler_ring.instance_port`=6490; mimir `.../ring.instance_port`=6491).
 
-### 11.6 minio object-store persistence (edge-6)
-loki chunks + mimir blocks land in minio (`192.168.51.193:23900`, data
-**`/mnt/data/minio`**, on edge-6 172.28.208.177). Read the data dir from the
-host, never from memory — it is `MINIO_VOLUMES` in `/etc/default/minio`
+### 11.6 minio object-store persistence (edge-5)
+loki chunks + mimir blocks land in minio (`192.168.51.179:23900`, on edge-5
+172.28.208.176 since the 2026-10-12 move from edge-6, xops
+`main/ansible/MINIO-MIGRATION.md`). Its data is one erasure set (EC:2) over four
+drives, **`/mnt/blob1/minio`** to **`/mnt/blob4/minio`**. Read the drives from the
+host, never from memory — they are `MINIO_VOLUMES` in `/etc/default/minio-storage`
 (`systemctl cat minio` shows `ExecStart=... $MINIO_VOLUMES`). This doc said
 `/data/minio` until 2026-08-18; that path does not exist, so every recipe below
 returned empty at it and read as "storage is empty" — the exact false alarm
 this section exists to prevent. A `du` that prints NOTHING (rather than `0`)
-is the tell that you have the wrong path, not an empty bucket.
+is the tell that you have the wrong path, not an empty bucket. Every drive holds
+a share of every object, so the file recipes read the first drive; at EC:2 its
+`du` is about half the logical size that `mc du` reports. The drive directories
+are `minio:minio` 0750, so the file recipes need root: without it they print
+nothing, the same false "empty" as a wrong path.
 ```
-minio_data=$(grep ^MINIO_VOLUMES= /etc/default/minio | cut -d= -f2)     # do not hardcode
-du -sh $minio_data/loki $minio_data/mimir                              # growth = writing
-find $minio_data/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
-ls $minio_data/loki/fake | wc -l                                       # loki CHUNK dirs (fake=anon tenant)
-find $minio_data/mimir -name meta.json | wc -l                         # mimir FINALIZED blocks
+minio_data=$(sed -n 's/^MINIO_VOLUMES="\([^ "]*\).*/\1/p' /etc/default/minio-storage)  # first drive; do not hardcode
+sudo /usr/local/sbin/mc du warpminio/loki warpminio/mimir              # logical size
+sudo du -sh $minio_data/loki $minio_data/mimir                         # growth = writing
+sudo find $minio_data/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
+sudo ls $minio_data/loki/fake | wc -l                                  # loki CHUNK dirs (fake=anon tenant)
+sudo find $minio_data/mimir -name meta.json | wc -l                    # mimir FINALIZED blocks
 ```
 loki flushes on `chunk_idle_period`/shutdown. Mimir normally uploads a complete
 TSDB block at roughly a two-hour boundary, so an empty Mimir bucket immediately
@@ -23241,25 +23306,171 @@ repair this by sharing one TSDB mount between overlapping containers. See §11.2
 An empty/stale Loki bucket while Loki is crash-looping = writes stopped
 (11.2/11.4), not a storage bug.
 
-The S3 API must be reachable on both edge-6 addresses: LAN
-`192.168.51.193:23900` and management overlay `172.28.208.177:23900`. Do not
+The S3 API must be reachable on both edge-5 addresses: LAN
+`192.168.51.179:23900` and management overlay `172.28.208.176:23900`. Do not
 infer this from `minio.service=active`; an address-specific bind can leave one
 path healthy and refuse the other. Check the configured bind, listening socket,
 and both HTTP health paths together:
 ```
 systemctl show minio -p ActiveState -p SubState -p NRestarts -p ExecMainStatus
-grep -E '^(MINIO_OPTS|MINIO_VOLUMES)=' /etc/default/minio
+sudo grep -E '^(MINIO_OPTS|MINIO_VOLUMES)=' /etc/default/minio /etc/default/minio-storage   # /etc/default/minio is root-only
 ss -lntp | grep ':23900'
-curl -fsS --max-time 5 http://192.168.51.193:23900/minio/health/live
-curl -fsS --max-time 5 http://172.28.208.177:23900/minio/health/live
+curl -fsS --max-time 5 http://192.168.51.179:23900/minio/health/live
+curl -fsS --max-time 5 http://172.28.208.176:23900/minio/health/live
 ```
 Desired `MINIO_OPTS` binds the S3 API as `--address :23900` and keeps the
 administrative console loopback-only. The Ansible deployment must fail unless
-both health requests return 200. On 2026-08-20 the process was healthy but used
-`--address 192.168.51.193:23900`; LAN health returned 200 while the overlay
-connection was refused. That is a bind/config split, not a route, firewall, or
-data-store failure. Re-run `xops/main/ansible/run-minio.sh` after changing the
-vault environment; a source-only vault change does not restart the service.
+both health requests return 200. On 2026-08-20 the process (then on edge-6) was
+healthy but used `--address 192.168.51.193:23900`; LAN health returned 200 while
+the overlay connection was refused. That is a bind/config split, not a route,
+firewall, or data-store failure. Re-run `xops/main/ansible/run-minio-clusters.sh`
+after changing the vault environment; a source-only vault change does not
+restart the service.
+
+### 11.6a MinIO capacity, quota and write-path health
+
+Probe: `minio-storage`
+
+Every minute, for each enabled monitor-inventory host with the `minio` role,
+read MinIO's own v3 metrics from Mimir through one bounded loopback gateway
+(`curl ... 127.0.0.1:3100/prometheus/api/v1/query` on the first reachable
+`services` host). Fluent Bit scrapes the authenticated `/minio/metrics/v3`
+endpoint every 15 seconds and remote-writes it with `job="minio"` and
+`host=<xops inventory name>` (xops `files/fluent-bit/minio.conf`). The monitor
+therefore never holds the metrics bearer token (generated by
+playbook-minio-clusters.yml into the root-only Fluent Bit environment file) or
+the root `mc` alias; neither belongs in monitor.yml. The series are MinIO's own
+statfs, usage, quota and request state — the same inputs its free-space floor
+and quota enforcement use — not a dashboard aggregate.
+
+One query returns fixed `monitor_check` partitions. Every source selector must
+have a raw sample no older than 180 seconds; the evaluation timestamp of an
+instant query or `increase` is not source freshness:
+
+- per drive: `minio_system_drive_free_bytes`, `minio_system_drive_total_bytes`,
+  `minio_system_drive_health` (0 offline, 1 healthy, 2 healing), plus the
+  node's `minio_system_drive_count` and `minio_system_drive_offline_count`;
+- the weakest erasure set's `minio_cluster_erasure_set_write_tolerance`;
+- per bucket: `minio_cluster_usage_buckets_total_bytes`,
+  `minio_cluster_usage_buckets_quota_total_bytes`, and that quota's
+  five-minute `min_over_time`; plus the usage snapshot age from
+  `minio_cluster_usage_objects_since_last_update_seconds`;
+- five-minute `increase` of `minio_api_requests_total` and its
+  `_5xx_errors_total`/`_4xx_errors_total`, summed by host over the write APIs
+  (`PutObject`, `PutObjectPart`, `CopyObject`, `CopyObjectPart`,
+  `NewMultipartUpload`, `CompleteMultipartUpload`, `PostPolicyBucket`,
+  `PutObjectExtract`) and, for 5xx, over every other API.
+
+Series from hosts outside the `minio` inventory, such as a retired store whose
+Fluent Bit still ships, are discarded. An unknown partition, a non-success or
+non-vector response, or an unparsable sample fails the whole observation.
+
+Classes, all targeted at the inventory host name (`<host>/<bucket>` for quota):
+
+- `minio-drive-capacity`. MinIO RELEASE.2025-10-15T17-29-55Z (`hasSpaceFor`)
+  refuses a new object with 507 `XMinioStorageFull` once the erasure set's free
+  space after the write would be at most 1% of the set's total
+  (`diskFillFraction` 0.99), or one drive cannot hold its share; an upload of
+  unknown size, and any object of 512 MiB or more, needs 1 GiB above that
+  floor. `band=floor` (set free space minus 1 GiB at or under 1% of the set's
+  total) pages immediately; the worst online drive under 5% free pages after two
+  observations; under 15% (MinIO's own `diskReserveFraction`) warns after two.
+  The observation lists every online drive's free/total and the set floor.
+- `minio-drive-offline`. One erasure set at EC:2 over four drives needs three
+  drives to write and two to read. Any drive with health 0, or a node offline
+  count above zero, pages after two observations (a restart brings drives back
+  within about a minute); a negative erasure-set write tolerance means writes
+  are already failing and pages immediately. A healing drive warns after two.
+- `minio-bucket-quota`. MinIO rejects every PUT once the scanner's usage figure
+  plus the object reaches the hard quota, with 400
+  `XMinioAdminBucketQuotaExceeded`, which raises no 5xx. Usage at or over the
+  quota pages immediately. So does usage at or over the quota's five-minute
+  minimum: a quota below usage that was raised again between two one-minute
+  observations still rejected writes. Usage at 90% of the quota warns after
+  two, the headroom xops `minio-set-quota` requires before it sets a quota.
+  Buckets without a quota never alert here; they are bounded by drive capacity.
+- `minio-write-errors`. Write-API 5xx: at least 10 in five minutes and 1% of
+  write requests warns, 5% pages, each after two observations. MinIO counts 5xx
+  per API without the status: 507 is one, write-quorum loss, 503 `SlowDown`
+  from a full request queue and internal errors are the others.
+  `minio-drive-capacity` at `band=floor` identifies 507.
+- `minio-read-errors`. Non-write 5xx: at least 10 in five minutes and 5% warns,
+  25% pages, each after two. Missing objects are 4xx and are not counted.
+- `minio-write-rejected`. Write-API 4xx: at least 20 in five minutes and 10% of
+  write requests warns after two. This is the symptom-side control for
+  `minio-bucket-quota`; it cannot name the bucket because the per-bucket API
+  counters (`/minio/metrics/v3/bucket/api`) need `?buckets=` and are not
+  scraped.
+- `minio-metrics-unobservable`. Frame `drives`: no complete fresh drive family
+  (missing, stale, a drive series count unequal to `minio_system_drive_count`,
+  a missing health gauge, an online drive without coherent free/total, or a
+  duplicate or invalid series) warns after two and pages after three; capacity,
+  quota and error state are then unknown and none of those classes is
+  evaluated. Frame `bucket-usage`: the drive family is complete but MinIO
+  exports no bucket usage snapshot (or a quota without its usage); warns after
+  two.
+
+Root-cause fixtures. On 2026-10-11 edge-6's shared `/mnt/data` filled; MinIO
+reached its floor, every Loki, Mimir and blob write returned 507, and the Mimir
+bucket index went stale behind them (§11.18 detected only that downstream
+symptom). The synthetic replay pages `minio-drive-capacity` at `band=floor`
+and `minio-write-errors`. On 2026-10-12 from 15:35:06Z a 400GiB hard quota sat
+on a loki bucket holding about 673GiB and MinIO rejected Loki's chunk flushes
+until it was raised back to 1TiB. The replay pages `minio-bucket-quota`, both
+while the quota is in force and within five minutes after it is raised.
+
+Source facts, verified in the pinned MinIO and mc sources rather than assumed:
+the quota gauge is emitted only for buckets in the usage snapshot and only when
+the stored config's `quota` field is positive. Enforcement reads `size` first
+and then `quota`; the pinned mc's `mc quota set --size` writes `quota` only,
+so the gauge equals the enforced limit. The buckets-path gauge
+`minio_cluster_usage_buckets_since_last_update_seconds` is written in
+nanoseconds by this release; the probe reads the objects-path gauge of the same
+name, which is in seconds. The data-usage, drive and erasure-set figures sit
+behind one-minute MinIO caches.
+
+- **False-positive qualifier:** drive gauges are filesystem statfs, so they
+  count non-MinIO data on the same filesystem; a filling drive with flat bucket
+  usage is foreign data (edge-6's shared `/mnt/data`), not bucket growth.
+  Offline drives export zero free/total and are excluded from capacity. Usage
+  is the scanner's snapshot and stays high after retention deletes until the
+  next cycle, but MinIO enforces against the same figure, so a quota page then
+  still describes rejected writes. The five-minute quota minimum keeps a page up
+  to five minutes after a quota is raised: compare `quota_bytes` with
+  `quota_min_5m_bytes`. A MinIO restart can briefly show drives offline (hence
+  two observations) and can extrapolate a counter increase. Write 4xx include
+  403 credential/policy failures and malformed or conditional requests. The
+  healthy control is a four-drive store at about 60% free with no quota near
+  usage, while a retired host's failing series are ignored.
+- **False-negative qualifier:** a stopped MinIO, Fluent Bit, bearer token or
+  Mimir ingestion path is `minio-metrics-unobservable`, never green; correlate
+  §11.14 `log-shipper` and check `/minio/health/live` on the host. A bucket the
+  scanner has not counted yet, and a quota written only in the `size` field by
+  another client, are enforced but export no quota gauge; `minio-write-rejected`
+  remains the symptom-side control, and `mc quota info --json` as root is the
+  direct check. Growth between scanner cycles is invisible to both MinIO's
+  enforcement and this probe (`usage_snapshot_age_s` is reported). A quota or
+  error episode that ends more than five minutes before the next observation,
+  as can happen under `-min-probe-cadence=15m`, is outside both windows. An
+  inventory without an enabled `minio` host (role removed or host
+  `disabled: true`) leaves this probe dark without a visibility alert. The
+  thresholds are initial static bands from MinIO's own floor and the incident
+  shapes, not a learned production baseline; record the healthy 4xx/5xx
+  background from the first live passes.
+
+Configuration: `vault/<env>/monitor.yml` needs only `roles: [minio]` on the
+MinIO host, whose `name` must equal Fluent Bit's `host` label (the xops
+inventory name), plus at least one `services` host for the loopback Mimir
+gateway. There are no other keys, no credentials and no drive list: MinIO's own
+`minio_system_drive_count` is the expected drive denominator.
+
+Implementation convention: SIGNALS.md §11.6a (`minio-storage`) maps to
+`signal_minio_storage.go` and `signal_minio_storage_test.go`. Synthetic tests
+replay both incidents and cover capacity bands, offline/healing drives and
+lost write quorum, quota bands including a quota raised within the window,
+request-error bands, missing/stale/incomplete drive and usage layers,
+malformed Mimir responses, foreign-host series, a dark inventory, and the
+query's freshness bounds.
 
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
@@ -23402,7 +23613,7 @@ the exact live DNAT rule.
 12. a whole dashboard is blank (not just some panels), or `count by (host)` on
     any metric is short a host → that host's fluent-bit is dead (11.14).
     Check `systemctl is-active fluent-bit` on the hosts with NO grafana bundle
-    too (edge-6, edge-2) — they appear in no §11.1 reading.
+    too (edge-6, edge-5, edge-2) — they appear in no §11.1 reading.
 13. Grafana UI/health and Mimir are green, the datasource row exists, but
     `/api/ds/query` and every scheduler rule fail with
     `[plugin.notRegistered]` → the datasource implementation is absent from
@@ -23414,6 +23625,12 @@ the exact live DNAT rule.
     correlate gap endpoints with Mimir starts. Do not zero-fill, span-null, or
     rewrite the throughput query: those treatments turn missing observations
     into false traffic measurements.
+15. Loki flushes or Mimir block uploads fail while Grafana, Loki and Mimir are
+    all up, and Mimir's bucket index goes stale → MinIO refuses the writes
+    (11.6a): 507 `XMinioStorageFull` when its drives reach the free-space
+    floor, 400 `XMinioAdminBucketQuotaExceeded` when a bucket's hard quota is at
+    or under its usage. Read `minio-storage` before restarting anything in the
+    Grafana bundle.
 
 ### 11.10 grafana.yml `{{ env: }}` → fleet-wide startup panic (2026-08-11)
 A config value may thread `{{ env:KEY }}`, but the KEYs live in settings.yml
@@ -23654,10 +23871,10 @@ systemctl restart warp-main-grafana-<block>
 Probe: `log-shipper`
 
 alloy is gone; **host-managed fluent-bit ships every log line and every metric**,
-on every warp host — including edge-6 (redis + minio) and edge-2 (postgres),
-which run no grafana bundle at all and so appear in NO §11.1 reading. §11 had no
-signal for it until 2026-08-18, which is why edge-6 shipped nothing for 2d13h
-without anything noticing.
+on every warp host — including edge-6 (redis), edge-5 (minio + redis) and
+edge-2 (postgres), which run no grafana bundle at all and so appear in NO §11.1
+reading. §11 had no signal for it until 2026-08-18, which is why edge-6 shipped
+nothing for 2d13h without anything noticing.
 ```
 systemctl is-active fluent-bit                                   # per host, ALL warp hosts
 systemctl show fluent-bit -p NRestarts -p ActiveEnterTimestamp -p Result
@@ -27867,10 +28084,11 @@ same sustained campaign passed outside the maintenance boundary.
 Use all three clocks; a log error that appears after the request deadline can
 still name a restart which began before the request:
 ```bash
-# Redis host: simultaneous stop is the decisive full-cluster-outage signal.
+# Each Redis host (edge-6 runs nodes 1-32, edge-5 nodes 33-48): simultaneous
+# stop is the decisive full-cluster-outage signal.
 journalctl --utc --since '<request-start - 15s>' --until '<request-end + 30s>' \
   -u 'redis-cluster@*.service'
-for i in $(seq 1 32); do
+for i in $(seq 1 32); do   # on edge-5: seq 33 48
   systemctl show "redis-cluster@$i.service" \
     -p Id -p ExecMainStartTimestamp -p ActiveEnterTimestamp -p NRestarts
 done
@@ -34099,6 +34317,10 @@ startup cleanup is confined to deliberately absent targets; it does not cover
 live settlement functions. Finished retention admits at most 64 exact finished
 keys before its row locks, rechecks the existing age predicate, and skips busy
 groups or rows for a later sweep. Age alone does not exclude a live Post retry.
+Each cleanup run seeks from a keyset position carried in its arguments, stops
+starting groups after a 30 s budget inside its 2 min max time, and re-arms at
+once from that position; a completed sweep starts again at the oldest row after
+10 minutes, and a failed or timed-out run retries within one minute.
 
 The 2026-10-08 bounded private R44 readiness capture reported taskworker
 initialization failure `invalid database ownership maintenance resource`.

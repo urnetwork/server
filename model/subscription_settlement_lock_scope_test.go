@@ -7,24 +7,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
-// Observe the real participant queries through the owning PgTx. A second
-// PostgreSQL transaction must still acquire the shared grant at each read;
-// the outcome/debit owner retains its contract lock throughout.
-type settlementParticipantLockScopeTx struct {
-	server.PgTx
-	observe func()
-}
-
-func (self *settlementParticipantLockScopeTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	if strings.Contains(sql, "FROM contract_extender") {
-		self.observe()
+// Observe the real participant queries on the owning transaction's connection.
+// A second PostgreSQL transaction must still acquire the shared grant at each
+// read; the outcome/debit owner retains its contract lock throughout. The
+// owner admits transaction ownership (ddad361c), so this is a statement hook
+// rather than a wrapper around its transaction.
+func settlementParticipantLockScopeHook(observe func()) *legacyStatementHook {
+	return &legacyStatementHook{
+		before: func(_ context.Context, sql string, queued []string) {
+			if queued == nil && strings.Contains(sql, "FROM contract_extender") {
+				observe()
+			}
+		},
 	}
-	return self.PgTx.Query(ctx, sql, args...)
 }
 
 func TestSettlementParticipantReadsDoNotHoldSharedGrant(t *testing.T) {
@@ -58,11 +57,15 @@ func TestSettlementParticipantReadsDoNotHoldSharedGrant(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			stopHooks := startLegacyStatementHooks(t, ctx)
+			defer stopHooks()
 			var posts []func() any
 			server.Tx(ctx, func(tx server.PgTx) {
+				hooked, releaseHooks := withLegacyStatementHooks(ctx, tx, settlementParticipantLockScopeHook(probe))
+				defer releaseHooks()
 				var closed bool
 				var err error
-				posts, closed, err = settleEscrowInTx(ctx, &settlementParticipantLockScopeTx{PgTx: tx, observe: probe}, escrow.ContractId, ContractOutcomeSettled)
+				posts, closed, err = settleEscrowInTx(hooked, tx, escrow.ContractId, ContractOutcomeSettled)
 				server.Raise(err)
 				if !closed {
 					t.Fatal("outcome not claimed")

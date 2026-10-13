@@ -86,6 +86,8 @@ func initTaskSchedule(ctx context.Context) {
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
 		work.ScheduleCloseContractDeadlines(clientSession, tx)
+		// idle until contract_close.yml enables it
+		work.ScheduleReapScheduledContractCloses(clientSession, tx)
 		for i := range work.DefaultCloseExpiredContractsBlockSize {
 			work.ScheduleCloseExpiredContracts(clientSession, tx, i, false)
 		}
@@ -216,11 +218,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 	// 2024.11.15 migration from "bringyour.com" to new package
 
 	addProfileTargets(taskWorker, profile,
-		task.NewTaskTargetWithPost(
-			task.TaskCleanup,
-			task.TaskCleanupPost,
-			"main.TaskCleanup",
-		),
+		task.NewTaskCleanupTaskTarget(),
 		// task.NewTaskTargetWithPost(work.WarmEmail, work.WarmEmailPost),
 		task.NewTaskTargetWithPost(
 			work.ExportStats,
@@ -231,7 +229,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExportProvidersMap,
 			work.ExportProvidersMapPost,
 		),
-		task.NewTaskTarget(work.BackfillClock),
+		task.NewTaskTargetWithPost(
+			work.BackfillClock,
+			work.BackfillClockPost,
+		),
 		work.NewMaintainNetworkSessionsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.WebSearchAnalytics,
@@ -275,6 +276,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		work.NewStartupContractClosureTaskTarget(),
 		work.NewScheduledContractClosureTaskTarget(),
 		work.NewContractDeadlineCloseTaskTarget(),
+		work.NewScheduledContractCloseReapTaskTarget(),
 		work.NewCloseExpiredContractsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.CloseExpiredNetworkClientHandlers,
@@ -293,6 +295,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		),
 		model.NewLegacyProviderTotalsTaskTarget(),
 		model.NewLegacyNetEscrowMirrorTaskTarget(),
+		model.NewQuarantineReservationReleaseTaskTarget(),
 		task.NewTaskTargetWithPost(
 			model.RemoveNetworkClientsTask,
 			model.RemoveNetworkClientsTaskPost,

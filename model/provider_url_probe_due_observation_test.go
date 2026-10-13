@@ -110,10 +110,13 @@ func TestUrlDueObservationPreservesDatabaseResults(t *testing.T) {
 				server.Db(ctx, func(conn server.PgConn) {
 					server.Raise(conn.QueryRow(ctx, `SELECT slot_id%8 FROM provider_egress_probe_cycle WHERE client_id=$1`, clientId).Scan(&shard))
 				})
+				// Both paths also start with the shard's ordinary expiry unswept.
 				reset()
+				testingClearUrlProbeOrdinaryExpiry(t, shard, 8)
 				plain := ClaimProviderUrlProbeDueWithStatus(ctx, now, 1, shard, 8)
 				plainCycle, plainRuns := snapshot()
 				reset()
+				testingClearUrlProbeOrdinaryExpiry(t, shard, 8)
 				var observation ProviderUrlProbeDueObservation
 				observed := ClaimProviderUrlProbeDueWithObservation(ctx, now, 1, shard, 8, &observation)
 				observedCycle, observedRuns := snapshot()

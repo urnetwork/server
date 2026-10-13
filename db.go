@@ -960,6 +960,7 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 		DeferrableMode: pgx.NotDeferrable,
 	}
 	beginTimeout := PgBeginTimeout
+	statementStopTimeout := PgStatementStopTimeout
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -969,6 +970,8 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			timing = v
 		case txBeginTimeout:
 			beginTimeout = time.Duration(v)
+		case txStatementStopTimeout:
+			statementStopTimeout = time.Duration(v)
 		case pgx.TxOptions:
 			txOptions = v
 		case pgx.TxIsoLevel:
@@ -1017,7 +1020,12 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			}
 			tx := &postCommitPgTx{PgTx: rawTx,
 				ownershipAllowed: txOptions.IsoLevel == pgx.ReadCommitted &&
-					!retryOptions.rerunOnCommitError && !retryOptions.rerunOnTransientError && !retryOptions.rerunOnConnectionError}
+					!retryOptions.rerunOnCommitError && !retryOptions.rerunOnTransientError && !retryOptions.rerunOnConnectionError,
+				// a caller's stop must not interrupt a statement mid round trip
+				// (see db_statement_stop.go)
+				statementStopBounded: true,
+				statementStopTimeout: statementStopTimeout,
+			}
 			// if debugOptions.txCommitSeparately {
 			// 	tx = newDebugTx(tx, conn, txOptions)
 			// }
@@ -1055,6 +1063,11 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 				phase.enter(DbOperationCallback)
 				callback(tx)
 			}()
+			if pgErr == nil && tx.statementStopErr != nil {
+				// A statement reported the caller's stop and the callback
+				// went on. Its work is incomplete, so roll back above.
+				panic(tx.statementStopErr)
+			}
 			if pgErr == nil {
 				// Logger().Printf("Db commit\n")
 				// Commit on a context detached from the caller. The

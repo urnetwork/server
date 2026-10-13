@@ -40,7 +40,20 @@ import (
 //     must be updated by at most one caller at a time
 //     a serial task is expected to update this
 
+// The longest client_reliability retention. A payout that is behind can extend
+// retention up to this horizon, never past it, so it bounds the table's size.
 const ClientExpiration = 30 * 24 * time.Hour
+
+// Steady-state client_reliability retention. Recurring readers reach at most 7
+// days back (the running network window), and payout reliability windows have
+// reached about 15 days back while payouts were behind, which leaves about a
+// week of margin. A payout further behind reads from the last subsidy epoch
+// end, and retention extends to cover it (clientReliabilityRetentionCutoffBlock).
+const ClientReliabilityRetention = 21 * 24 * time.Hour
+
+// blocks kept before the last subsidy epoch end, so a payout window that starts
+// inside a day never reaches a dropped block
+const clientReliabilityPayoutFrontierMargin = 24 * time.Hour
 
 var ClientLookbacks = []time.Duration{
 	5 * time.Minute,
@@ -690,9 +703,33 @@ func upsertClientReliabilityStatsBlock(
 	}
 }
 
+// Returns the first block number that client_reliability retention keeps at
+// now; earlier blocks may be removed.
+//
+// The cutoff is now-ClientReliabilityRetention, moved back to cover the next
+// payout's reliability window, which starts at the last subsidy epoch end
+// (predictPaymentPlanReliabilityWindow). A block missing from that window is
+// not an error: the score counts it as covered with no valid rows, which
+// silently cuts provider credit. The cutoff never moves back past
+// now-ClientExpiration, so a stalled payout cannot grow the table without
+// bound.
+func clientReliabilityRetentionCutoffBlock(ctx context.Context, now time.Time) int64 {
+	cutoffBlock := reliabilityBlockNumber(now.Add(-ClientReliabilityRetention))
+
+	var lastSubsidyEndTime *time.Time
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT MAX(end_time) FROM subsidy_payment`).Scan(&lastSubsidyEndTime))
+	})
+	if lastSubsidyEndTime != nil {
+		frontierBlock := reliabilityBlockNumber(lastSubsidyEndTime.Add(-clientReliabilityPayoutFrontierMargin))
+		cutoffBlock = min(cutoffBlock, frontierBlock)
+	}
+
+	return max(cutoffBlock, reliabilityBlockNumber(now.Add(-ClientExpiration)))
+}
+
 func RemoveOldClientReliabilityStats(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
-	minTime := maxTime.Add(-ClientExpiration)
-	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
+	minBlockNumber := clientReliabilityRetentionCutoffBlock(ctx, maxTime) - 1
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		tag, err := tx.Exec(
@@ -1372,6 +1409,78 @@ const reliabilityRunningObservedAggSql = `
 	) AS observations GROUP BY network_id,client_id
 `
 
+// The work that moves one lookback's applied window to [newMin, newMax): a
+// full recompute or a rolling delta, the aggregate that feeds it and the prune
+// that follows a rolling delta. The single-transaction pass below and the
+// staged checkpoint (network_client_reliability_running_stage.go) share it, so
+// both decide the same way from the same applied window.
+type reliabilityRunningStep struct {
+	recompute bool
+	deferred  bool
+	reliabilityRunningShape
+}
+
+// What a lookback aggregates. Client windows count invalid observations and
+// keep a client until its last observation leaves; the network window counts
+// valid rows and keeps a client until its last valid row leaves.
+type reliabilityRunningShape struct {
+	observed       bool
+	aggregateSql   string
+	prunePredicate string
+}
+
+// The shape is fixed by the lookback index.
+func newReliabilityRunningShape(lb reliabilityRunningLookback) reliabilityRunningShape {
+	if lb.lookbackIndex != networkWindowLookbackIndex {
+		return reliabilityRunningShape{
+			observed:       true,
+			aggregateSql:   reliabilityRunningObservedAggSql,
+			prunePredicate: `observed_row_count = 0`,
+		}
+	}
+	return reliabilityRunningShape{
+		aggregateSql:   `SELECT valid_counts.*,0::bigint AS observed_row_count FROM (` + reliabilityRunningAggSql + `) AS valid_counts`,
+		prunePredicate: `independent_sum < 0.5`,
+	}
+}
+
+// Decides the step from the applied window. Mandatory repairs ignore
+// periodicReanchorAllowed; it only defers the optional periodic re-anchor.
+func newReliabilityRunningStep(
+	prev reliabilityRunningWindow,
+	lb reliabilityRunningLookback,
+	newMin int64,
+	newMax int64,
+	periodicReanchorAllowed bool,
+) (step reliabilityRunningStep) {
+	step.recompute, step.deferred = reliabilityRunningNeedsRecompute(
+		prev,
+		newMin,
+		newMax,
+		periodicReanchorAllowed,
+	)
+	step.reliabilityRunningShape = newReliabilityRunningShape(lb)
+	if step.observed && !reliabilityRunningObservationCurrent(prev) {
+		// A legacy writer may have deleted observed-zero clients. This is
+		// mandatory repair, independent of optional re-anchor deferral.
+		step.recompute, step.deferred = true, false
+	}
+	return
+}
+
+// Score publication revisits windows already committed by the checkpointed
+// path. Their rows and pruning are complete: preserve the trusted marker
+// instead of repeating empty aggregates, a full prune and token writes.
+// Every mandatory/periodic repair is decided before this applies.
+func (self *reliabilityRunningStep) unchanged(prev reliabilityRunningWindow, newMin int64, newMax int64) bool {
+	return !self.recompute && prev.minBlockNumber == newMin && prev.maxBlockNumber == newMax
+}
+
+// Moves the lookback's window in the caller's transaction, aggregating each
+// range in one statement.
+// Score writers use it for the small step left after the checkpointed pass
+// (whose staged form bounds every transaction); it also repairs an invalidated
+// marker in place.
 func updateClientReliabilityRunningLookbackAtBoundsInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -1381,26 +1490,13 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 	periodicReanchorAllowed bool,
 ) {
 	prev := readReliabilityRunningWindow(ctx, tx, lb.lookbackIndex)
-	recompute, deferred := reliabilityRunningNeedsRecompute(
-		prev,
-		newMin,
-		newMax,
-		periodicReanchorAllowed,
-	)
-	aggregateSql := `SELECT valid_counts.*,0::bigint AS observed_row_count FROM (` + reliabilityRunningAggSql + `) AS valid_counts`
-	prunePredicate := `independent_sum < 0.5`
-	if lb.lookbackIndex != networkWindowLookbackIndex {
-		aggregateSql = reliabilityRunningObservedAggSql
-		prunePredicate = `observed_row_count = 0`
-		if !reliabilityRunningObservationCurrent(prev) {
-			// A legacy writer may have deleted observed-zero clients. This is
-			// mandatory repair, independent of optional re-anchor deferral.
-			recompute, deferred = true, false
-		}
-	}
-	if deferred {
+	step := newReliabilityRunningStep(prev, lb, newMin, newMax, periodicReanchorAllowed)
+	recompute := step.recompute
+	aggregateSql := step.aggregateSql
+	prunePredicate := step.prunePredicate
+	if step.deferred {
 		glog.Infof(
-			"[ncr]defer optional running-window re-anchor for lookback %d while VACUUM/index-build/logical-backup work is active; rolling [%d,%d) -> [%d,%d)\n",
+			"[ncr]defer optional running-window re-anchor for lookback %d; rolling [%d,%d) -> [%d,%d)\n",
 			lb.lookbackIndex,
 			prev.minBlockNumber,
 			prev.maxBlockNumber,
@@ -1408,11 +1504,7 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 			newMax,
 		)
 	}
-	// Score publication revisits windows already committed by the checkpointed
-	// path. Their rows and pruning are complete: preserve the trusted marker
-	// instead of repeating empty aggregates, a full prune and token writes.
-	// Compute every mandatory/periodic repair above before taking this path.
-	if !recompute && prev.minBlockNumber == newMin && prev.maxBlockNumber == newMax {
+	if step.unchanged(prev, newMin, newMax) {
 		return
 	}
 
@@ -1500,12 +1592,20 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 // lookback) reliability sums to the window ending at maxTime. It is retained
 // for score writers that need the running rows and score rows in one atomic
 // transaction. The recurring task first calls the checkpointed wrapper below;
-// this in-transaction pass is then idempotent for the same maxTime.
+// this in-transaction pass is then idempotent for the same maxTime, or rolls
+// the few blocks the rollup drained in between.
 func UpdateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, maxTime time.Time) {
 	updateClientReliabilityRunningInTx(tx, ctx, maxTime, reliabilityRunningLookbacks())
 }
 
-// Advance only the inputs consumed by this score writer, preserving its atomic transaction.
+// Advance only the inputs consumed by this score writer, preserving its atomic
+// transaction. The optional periodic re-anchor belongs to the checkpointed
+// pass, which aggregates it in bounded committed chunks. Here it would read the
+// whole window in one statement inside the score transaction and hold that
+// transaction's snapshot and xid throughout (the seven-day network window took
+// 55 minutes on Main). It happened whenever maintenance pressure deferred the
+// checkpointed re-anchor and ended before this pass. Mandatory repairs and the
+// rolling delta remain here.
 func updateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, maxTime time.Time, lookbacks []reliabilityRunningLookback) {
 	// End every window at the redis-rollup high-water mark (the SAME shift the
 	// score queries use), computed once and applied to all lookbacks so they
@@ -1513,7 +1613,6 @@ func updateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, max
 	baseMaxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 	shift := reliabilityRollupBlockShift(ctx, tx, baseMaxBlockNumber)
 	newMax := baseMaxBlockNumber - shift
-	periodicReanchorAllowed := reliabilityRunningPeriodicReanchorAllowed(ctx, tx)
 
 	for _, lb := range lookbacks {
 		newMin := maxTime.Add(-lb.lookback).UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - shift
@@ -1523,17 +1622,18 @@ func updateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, max
 			lb,
 			newMin,
 			newMax,
-			periodicReanchorAllowed,
+			false,
 		)
 	}
 }
 
-// updateClientReliabilityRunningCheckpointed advances each lookback in a
-// separate transaction. A task deadline or connection loss during a later
-// lookback therefore preserves every earlier marker and aggregate; the retry
-// rolls those completed windows instead of repeating their full scans.
+// Advances each lookback in its own committed steps
+// (advanceReliabilityRunningLookback): no transaction aggregates more than
+// reliabilityRunningChunkBlockCount blocks. A task deadline or connection loss
+// during a later lookback therefore preserves every earlier marker and
+// aggregate, and an interrupted lookback resumes from its committed chunks.
 // afterCommit is an internal failure-injection seam used by the deterministic
-// transaction-boundary test.
+// transaction-boundary test; it runs once the lookback's window is published.
 func updateClientReliabilityRunningCheckpointed(
 	ctx context.Context,
 	maxTime time.Time,
@@ -1541,21 +1641,7 @@ func updateClientReliabilityRunningCheckpointed(
 	afterCommit func(reliabilityRunningLookback),
 ) {
 	for _, lb := range lookbacks {
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			configureReliabilityRunningCheckpoint(ctx, tx)
-			baseMaxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
-			shift := reliabilityRollupBlockShift(ctx, tx, baseMaxBlockNumber)
-			newMax := baseMaxBlockNumber - shift
-			newMin := maxTime.Add(-lb.lookback).UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - shift
-			updateClientReliabilityRunningLookbackAtBoundsInTx(
-				tx,
-				ctx,
-				lb,
-				newMin,
-				newMax,
-				reliabilityRunningPeriodicReanchorAllowed(ctx, tx),
-			)
-		}, server.TxReadCommitted)
+		advanceReliabilityRunningLookback(ctx, maxTime, lb)
 		if afterCommit != nil {
 			afterCommit(lb)
 		}

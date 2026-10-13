@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/connect"
 )
@@ -115,58 +116,84 @@ func TestRedisGetSetPipeline(t *testing.T) {
 	})
 }
 
-// TestRedisPublishSubscribe exercises sharded pub/sub: `SPublish` delivers to a
-// subscriber from the `Subscribe` wrapper (which uses `SSubscribe`). `Subscribe`'s
-// channel carries the subscription confirmation and messages, so the test waits
-// for the confirmation before publishing -- pub/sub doesn't buffer for an
-// inactive subscriber.
+// TestRedisPublishSubscribe exercises sharded pub/sub on the test Redis: the
+// shard subscription reports its acknowledgement, `SPublish` then delivers to
+// it (pub/sub does not buffer for an inactive subscriber), and the server's
+// answer to a re-assertion on the live socket is recognized as one, not as a new
+// subscription.
 func TestRedisPublishSubscribe(t *testing.T) {
 	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		returned := make(chan struct{})
+		defer func() {
+			cancel()
+			<-returned
+		}()
 
 		channel := fmt.Sprintf("test:redis:channel:%s", NewId())
 		message := "hello from SPublish"
 
-		ch, closeSubscribe := Subscribe(ctx, channel)
-		defer closeSubscribe()
+		settings := DefaultRedisShardSubscriptionSettings()
+		settings.ReassertTimeout = 200 * time.Millisecond
+		subscribeds := make(chan bool, 16)
+		payloads := make(chan string, 16)
+		reassertedBefore := testutil.ToFloat64(redisShardSubscriptionCounter.WithLabelValues("reasserted"))
+		go func() {
+			defer close(returned)
+			RunRedisShardSubscription(ctx, channel, settings, DefaultRedisShardSubscriptionSource(), &RedisShardSubscriptionHandler{
+				Subscribed: func(resubscribed bool) {
+					subscribeds <- resubscribed
+				},
+				Message: func(message RedisMessage) bool {
+					if message.Channel != channel {
+						return false
+					}
+					payloads <- message.Payload
+					return true
+				},
+			})
+		}()
 
-		// Wait for the subscription to go active before publishing. The channel
-		// may carry other control events (e.g. a health-check pong), so read
-		// until the subscription confirmation arrives.
-	waitSubscribed:
-		for {
-			select {
-			case event := <-ch:
-				if _, ok := event.(RedisSubscription); ok {
-					break waitSubscribed
-				}
-			case <-time.After(10 * time.Second):
-				Raise(fmt.Errorf("timed out waiting for subscription confirmation"))
-			}
+		select {
+		case resubscribed := <-subscribeds:
+			connect.AssertEqual(t, resubscribed, false)
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for the subscription acknowledgement")
 		}
 
 		Redis(ctx, func(r RedisClient) {
 			Raise(r.SPublish(ctx, channel, message).Err())
 		})
-
-		// Wait for the published message, skipping any non-message events.
-		var received RedisMessage
-	waitMessage:
-		for {
-			select {
-			case event := <-ch:
-				if m, ok := event.(RedisMessage); ok {
-					received = m
-					break waitMessage
-				}
-			case <-time.After(10 * time.Second):
-				Raise(fmt.Errorf("timed out waiting for published message"))
-			}
+		select {
+		case payload := <-payloads:
+			connect.AssertEqual(t, payload, message)
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for the published message")
 		}
 
-		connect.AssertEqual(t, received.Channel, channel)
-		connect.AssertEqual(t, received.Payload, message)
+		// a few re-assertions are acknowledged on the same socket
+		reassertDeadline := time.Now().Add(10 * time.Second)
+		for testutil.ToFloat64(redisShardSubscriptionCounter.WithLabelValues("reasserted")) < reassertedBefore+2 {
+			if reassertDeadline.Before(time.Now()) {
+				t.Fatal("timed out waiting for acknowledged re-assertions")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		select {
+		case resubscribed := <-subscribeds:
+			t.Fatalf("a re-assertion started a new subscription (resubscribed=%t)", resubscribed)
+		default:
+		}
+
+		Redis(ctx, func(r RedisClient) {
+			Raise(r.SPublish(ctx, channel, "after re-assertion").Err())
+		})
+		select {
+		case payload := <-payloads:
+			connect.AssertEqual(t, payload, "after re-assertion")
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for the message after re-assertion")
+		}
 	})
 }
 

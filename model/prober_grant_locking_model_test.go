@@ -5,6 +5,7 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -71,6 +72,12 @@ func TestDynamicProberGrantReleasesRejectedWindowLocks(t *testing.T) {
 	testEnv.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
+		// Positive allocation admits grant ownership, which only the server's
+		// own transaction can hold (403b9c55), so its reads are observed at
+		// the driver. The scope must start before the checker borrows a
+		// connection.
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		checker := acquireContractLifecycleTestConnection(t, ctx)
 		defer checker.Release()
 		for _, fallback := range []bool{false, true} {
@@ -96,26 +103,33 @@ func TestDynamicProberGrantReleasesRejectedWindowLocks(t *testing.T) {
 						SET net_revenue_nano_cents=1 WHERE balance_id=$1`, ids[0]))
 				}, server.TxReadCommitted)
 			}
+			// Runs inside the allocation's statement start; failures are
+			// reported after the allocation returns.
+			var releaseErrs []error
 			assertReleased := func(checkedIds []server.Id) {
-				t.Helper()
 				if _, err := checker.Exec(ctx, `SELECT balance_id FROM transfer_balance
 					WHERE balance_id=ANY($1) ORDER BY balance_id FOR UPDATE NOWAIT`, checkedIds); err != nil {
-					t.Fatalf("rejected candidate window retained balance locks: %v", err)
+					releaseErrs = append(releaseErrs, fmt.Errorf("rejected candidate window retained balance locks: %w", err))
 				}
 			}
 			extendedChecked, fallbackChecked := false, false
 			server.Tx(ctx, func(tx server.PgTx) {
-				query := &escrowGrantQueryTestTx{PgTx: tx, beforeGrant: func(args []any) {
-					switch len(args) {
-					case 5: // The extended candidate read follows a rejected first window.
+				// Identify reads by their SQL: ownership ids now follow the
+				// speculative lock's arguments, so argument counts collide.
+				query := &escrowGrantQueryHook{beforeGrant: func(sql string, _ []any) {
+					locking, speculative := dynamicProberGrantLock(sql)
+					switch {
+					case sql == proberGrantExtendedSql: // The extended candidate read follows a rejected first window.
 						assertReleased(ids[len(ids)-proberGrantFirstCount:])
 						extendedChecked = true
-					case 2: // Full locking fallback follows both rejected windows.
+					case locking && !speculative: // Full locking fallback follows both rejected windows.
 						assertReleased(ids[1:])
 						fallbackChecked = true
 					}
 				}}
-				escrow, _, err := createTransferEscrowInTx(ctx, query,
+				hooked, unhook := withLegacyStatementHooks(ctx, tx, query.statementHook())
+				defer unhook()
+				escrow, _, err := createTransferEscrowInTx(hooked, tx,
 					clients.payerNetworkId, clients.payerId, clients.providerNetworkId,
 					clients.providerId, clients.payerNetworkId, 1024, nil)
 				if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != ids[0] {
@@ -129,6 +143,9 @@ func TestDynamicProberGrantReleasesRejectedWindowLocks(t *testing.T) {
 					t.Fatalf("selected grant lost its transaction lock: %v", err)
 				}
 			}, server.TxReadCommitted, server.OptNoRetry())
+			if err := errors.Join(releaseErrs...); err != nil {
+				t.Fatalf("fallback=%t: %v", fallback, err)
+			}
 			if !extendedChecked || fallbackChecked != fallback {
 				t.Fatalf("fallback=%t did not reach both lock-release boundaries: extended=%t full=%t", fallback, extendedChecked, fallbackChecked)
 			}

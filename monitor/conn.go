@@ -235,6 +235,84 @@ func (self *monitorConfig) hostByRole(role string) *host {
 	return nil
 }
 
+// The Redis cluster may span several redis-cluster hosts. Node ports are
+// globally unique across them (settings validation), so a port identifies
+// both its node and the host that runs it.
+
+// redisEntryHost returns the redis-cluster host that serves the cluster entry
+// port. Cluster-wide observations (CLUSTER INFO/NODES, -c reads) go there.
+// Validation requires exactly one such host once node inventory spans hosts;
+// the first-host fallback keeps a single host without an entry port, or a
+// host carrying the role without Redis inventory, behaving as before.
+func (self *monitorConfig) redisEntryHost() *host {
+	hosts := self.hostsWithRole("redis-cluster")
+	for _, h := range hosts {
+		if h.redisEntryPort != 0 {
+			return h
+		}
+	}
+	if len(hosts) > 0 {
+		return hosts[0]
+	}
+	return nil
+}
+
+// redisNodeHosts returns the redis-cluster hosts that run cluster nodes, in
+// inventory order. Per-node observations run on each host over its own ports.
+func (self *monitorConfig) redisNodeHosts() []*host {
+	hosts := []*host{}
+	for _, h := range self.hostsWithRole("redis-cluster") {
+		if len(h.redisNodePorts()) > 0 {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
+}
+
+// redisSweepHosts is redisNodeHosts, or the entry host alone when no host
+// carries node inventory, so a probe reports that host's missing inventory
+// exactly as it did for a single host.
+func (self *monitorConfig) redisSweepHosts() []*host {
+	if hosts := self.redisNodeHosts(); len(hosts) > 0 {
+		return hosts
+	}
+	if h := self.redisEntryHost(); h != nil {
+		return []*host{h}
+	}
+	return nil
+}
+
+// redisAllNodePorts returns every cluster node port across hosts.
+func (self *monitorConfig) redisAllNodePorts() []int {
+	ports := []int{}
+	for _, h := range self.redisNodeHosts() {
+		ports = append(ports, h.redisNodePorts()...)
+	}
+	return ports
+}
+
+// redisNodeHost returns the redis-cluster host running the node on port, or
+// nil when no host lists it.
+func (self *monitorConfig) redisNodeHost(port int) *host {
+	for _, h := range self.redisNodeHosts() {
+		for _, nodePort := range h.redisNodePorts() {
+			if nodePort == port {
+				return h
+			}
+		}
+	}
+	return nil
+}
+
+// redisNodeHostOrEntry is redisNodeHost with the entry host as fallback, for
+// node follow-ups whose port came from an unexpected source.
+func (self *monitorConfig) redisNodeHostOrEntry(port int) *host {
+	if h := self.redisNodeHost(port); h != nil {
+		return h
+	}
+	return self.redisEntryHost()
+}
+
 // runner executes commands on hosts over ssh, and warpctl locally.
 type runner struct {
 	cfg                 *monitorConfig

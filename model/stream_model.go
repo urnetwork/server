@@ -244,6 +244,8 @@ func pairStreamsKey(clientIdA server.Id, clientIdB server.Id) string {
 
 // returns a stream id to use for the contract
 // if stream count changes from 0, associate the stream id with each hop on the stream
+// a stream it starts takes the id the contract's insert bound, when the
+// creation request carries a binding (see WithAddStreamBinding)
 func AddToStream(
 	ctx context.Context,
 	contractId server.Id,
@@ -294,7 +296,7 @@ func AddToStream(
 				streamIdKey(streamKey),
 				streamContractsKey(streamKey),
 			},
-			server.NewId().Bytes(),
+			proposedStreamIdForAdd(ctx).Bytes(),
 			contractId.Bytes(),
 			ttlSeconds,
 		)

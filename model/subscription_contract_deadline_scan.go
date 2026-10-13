@@ -12,9 +12,11 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// One open contract and its stored deadline. Legacy rows have none.
+// One open contract, its creation time and its stored deadline. Legacy rows
+// have no stored deadline.
 type OpenContractDeadline struct {
 	ContractId     server.Id
+	CreateTime     time.Time
 	ExpirationTime *time.Time
 }
 
@@ -25,6 +27,21 @@ func (self OpenContractDeadline) Due(now time.Time) (ContractDeadline, bool) {
 		return ContractDeadline{}, false
 	}
 	return ContractDeadline{ContractId: self.ContractId, Deadline: *self.ExpirationTime}, true
+}
+
+// For a legacy row without a stored deadline, the end of its maximum lifetime
+// once it has passed at now: creation plus the default lifetime, the deadline
+// the expiry sweep gives a missing one (see contractExpirationDue). A row with
+// a stored deadline has none here.
+func (self OpenContractDeadline) LegacyDue(now time.Time) (ContractDeadline, bool) {
+	if self.ExpirationTime != nil || self.CreateTime.IsZero() {
+		return ContractDeadline{}, false
+	}
+	deadline := self.CreateTime.Add(DefaultContractExpiration)
+	if now.Before(deadline) {
+		return ContractDeadline{}, false
+	}
+	return ContractDeadline{ContractId: self.ContractId, Deadline: deadline}, true
 }
 
 // The smallest id minted in the millisecond of at. Every id minted before
@@ -39,7 +56,8 @@ func ContractIdTimeBound(at time.Time) server.Id {
 }
 
 // Reads at most limit open contracts with lower < contract_id < upper, newest
-// first when descending, through the outcome-null index.
+// first when descending, through the outcome-null index. Creation time comes
+// from the heap tuple the stored deadline is already read from.
 func ReadOpenContractDeadlines(ctx context.Context, lower server.Id, upper server.Id, limit int, descending bool) (contracts []OpenContractDeadline, returnErr error) {
 	if limit < 1 {
 		return nil, errors.New("invalid open contract deadline page")
@@ -50,13 +68,13 @@ func ReadOpenContractDeadlines(ctx context.Context, lower server.Id, upper serve
 	}
 	server.HandleError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
-			rows, err := conn.Query(ctx, `SELECT contract_id,expiration_time FROM transfer_contract
+			rows, err := conn.Query(ctx, `SELECT contract_id,create_time,expiration_time FROM transfer_contract
 				WHERE outcome IS NULL AND contract_id>$1 AND contract_id<$2
 				ORDER BY contract_id `+order+` LIMIT $3`, lower, upper, limit)
 			server.WithPgResult(rows, err, func() {
 				for rows.Next() {
 					var contract OpenContractDeadline
-					server.Raise(rows.Scan(&contract.ContractId, &contract.ExpirationTime))
+					server.Raise(rows.Scan(&contract.ContractId, &contract.CreateTime, &contract.ExpirationTime))
 					contracts = append(contracts, contract)
 				}
 			})

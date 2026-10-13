@@ -81,17 +81,18 @@ func TestAsyncDebitRollbackCannotPublishOrConsume(t *testing.T) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		contract := createRedisAdmissionTest(ctx, f, 100)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
+		// The settlement owner admits transaction ownership only on the
+		// server's own read-committed no-retry transaction (ddad361c). The
+		// test holds that transaction and chooses its rollback.
+		tx, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,close_time,checkpoint) VALUES($1,'source',11,now(),false),($1,'destination',11,now(),false)`, contract.ContractId))
 		posts, closed, err := settleEscrowInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
 		server.Raise(err)
 		if !closed {
 			t.Fatal("rollback owner not exercised")
 		}
-		server.Raise(tx.Rollback(ctx))
+		server.Raise(finish(false))
 		server.RunPosts(ctx, posts...)
 		credit, pending, applied := asyncDebitTestState(t, ctx, f.balanceId)
 		if credit != 1000 || pending+applied != 0 || Testing_NetEscrowByteCount(ctx, f.balanceId) != 100 {

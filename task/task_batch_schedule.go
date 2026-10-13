@@ -43,6 +43,27 @@ func QueueTaskInBatch[T any, R any](tx server.PgTx, batch server.PgBatch, taskFu
 	return prepared.taskId
 }
 
+// Inserts the task unless its run-once key is already pending, and leaves an
+// existing row untouched: no new tuple, no wake generation and so no successor
+// for a running row. For a producer whose pending row already carries every
+// field it would merge. The caller must drain the batch before committing.
+func QueueTaskInBatchIfAbsent[T any, R any](tx server.PgTx, batch server.PgBatch, taskFunction TaskFunction[T, R], args T,
+	clientSession *session.ClientSession, runOnce *RunOnceOption, opts ...any) server.Id {
+	if runOnce == nil {
+		panic("QueueTaskInBatchIfAbsent requires a run-once key")
+	}
+	requireTaskPublicationBackend(tx, opts)
+	prepared := prepareTask(taskFunction, args, clientSession, append(opts, runOnce)...)
+	batch.Queue(queuedTaskInsertSql+` ON CONFLICT (run_once_key) DO NOTHING`,
+		prepared.taskId, prepared.functionName, prepared.argsJson, prepared.clientAddressHash,
+		prepared.clientAddressPort, prepared.byJwtJson, prepared.runAt, prepared.runOnceKey,
+		prepared.priority, prepared.maxTimeSeconds, time.Time{}).Exec(func(tag pgconn.CommandTag) error {
+		observeTaskSubmissionInTx(tx, tag.RowsAffected() == 1)
+		return nil
+	})
+	return prepared.taskId
+}
+
 // A duplicate immutable allocation aborts the batch's transaction. Unlike a
 // coalescing task, it cannot silently discard a second producer's arguments.
 func QueueRequiredTaskInBatch[T any, R any](tx server.PgTx, batch server.PgBatch, taskFunction TaskFunction[T, R], args T,

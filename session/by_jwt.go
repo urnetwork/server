@@ -9,10 +9,8 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -28,11 +26,7 @@ import (
 
 // see https://github.com/golang-jwt/jwt
 // see https://golang-jwt.github.io/jwt/usage/create/
-
-var byJwtTlsKeyPaths = sync.OnceValue(func() []string {
-	jwt := server.Vault.RequireSimpleResource("jwt.yml")
-	return jwt.RequireStringList("tls_key_paths")
-})
+// the keys that sign and verify are held by the keyring (by_jwt_keyring.go)
 
 // Successful key discovery is operational context, not an error signal.
 // Keep every supported private-key encoding on the same severity path.
@@ -71,65 +65,19 @@ const (
 	ByJwtAudienceConnect = "urnetwork:connect"
 )
 
-// the first key (most recent version) is used to sign new JWTs
-var byPrivateKeys = sync.OnceValue(func() []crypto.PrivateKey {
-	keys := []crypto.PrivateKey{}
-	glog.Infof("[jwt]paths: %s", byJwtTlsKeyPaths())
-	errs := []error{}
-	for _, jwtTlsKeyPath := range byJwtTlsKeyPaths() {
-		// `ResourcePaths` returns the version paths in descending order
-		// hence the `paths[0]` will be the most recent version
-		paths, err := server.Vault.ResourcePaths(jwtTlsKeyPath)
-		if err != nil {
-			errs = append(errs, err)
-		} else {
-			for _, path := range paths {
-				bytes, err := os.ReadFile(path)
-				if err != nil {
-					panic(err)
-				}
-				block, _ := pem.Decode(bytes)
-
-				keyPathErrs := []error{}
-				if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
-					logLoadedPrivateKey("ec", path)
-					keys = append(keys, key)
-				} else {
-					if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-						logLoadedPrivateKey("pkcs8", path)
-						keys = append(keys, key)
-					} else {
-						keyPathErrs = append(keyPathErrs, err)
-						if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-							logLoadedPrivateKey("pkcs1", path)
-							keys = append(keys, key)
-						} else {
-							keyPathErrs = append(keyPathErrs, err)
-							err = errors.Join(keyPathErrs...)
-							glog.Errorf("[jwt]could not load key \"%s\". err = %s\n", path, err)
-							errs = append(errs, err)
-						}
-					}
-				}
-			}
-		}
-	}
-	if len(keys) == 0 {
-		panic(errors.Join(errs...))
-	}
-	return keys
-})
-
-// DerivedKeys returns one 32-byte HMAC key per loaded signing key, bound to a
-// purpose label, for signed tokens that must not need a vault secret of their own
-// (the onboarding landing/feedback tokens). Sign with the first; verify against
-// each, so a token outlives a key rotation exactly as a jwt does. The derivation
-// is HMAC-SHA256 over the purpose keyed by the private key's PKCS#8 encoding, so
-// the private key itself never leaves this package.
+// DerivedKeys returns one 32-byte HMAC key per held key, bound to a purpose
+// label, for signed tokens that must not need a vault secret of their own (the
+// onboarding landing/feedback tokens). The signing key's comes first: sign with
+// it, verify against each, so a token outlives a key rotation exactly as a jwt
+// does, and a verifier that fails every key retries after RereadKeys. The
+// derivation is HMAC-SHA256 over the purpose keyed by the private key's PKCS#8
+// encoding, so the private key itself never leaves this package.
 func DerivedKeys(purpose string) [][]byte {
-	keys := byPrivateKeys()
-	derived := make([][]byte, 0, len(keys))
-	for _, key := range keys {
+	keyring := defaultByJwtKeyring
+	keys := keyring.heldKeys()
+	privateKeys := keys.privateKeysSigningFirst(keys.signingKey(keyring.settings.now(), keyring.settings.signingDelay))
+	derived := make([][]byte, 0, len(privateKeys))
+	for _, key := range privateKeys {
 		der, err := x509.MarshalPKCS8PrivateKey(key)
 		if err != nil {
 			continue
@@ -141,24 +89,14 @@ func DerivedKeys(purpose string) [][]byte {
 	return derived
 }
 
-func byRsaSigningKey() *rsa.PrivateKey {
-	for _, key := range byPrivateKeys() {
-		switch v := key.(type) {
-		case *rsa.PrivateKey:
-			return v
-		}
-	}
-	return nil
-}
-
-func byEcdsaSigningKey() *ecdsa.PrivateKey {
-	for _, key := range byPrivateKeys() {
-		switch v := key.(type) {
-		case *ecdsa.PrivateKey:
-			return v
-		}
-	}
-	return nil
+// RereadKeys reads the vault keys again, at most once per reread interval, and
+// waits for a reread in progress (see byJwtKeyring); DerivedKeys then includes
+// any key gained. A verifier of tokens signed with DerivedKeys calls it when no
+// key verifies a token, so a key version the vault gained after this process
+// read its keys verifies without a restart.
+func RereadKeys() {
+	keyring := defaultByJwtKeyring
+	keyring.reread(keyring.heldKeys())
 }
 
 // jwtKid is a stable key id for a public key: the base64url (no padding) SHA-256
@@ -178,31 +116,6 @@ func jwtKid(publicKey crypto.PublicKey) (string, error) {
 func publicKey(byPrivateKey crypto.PrivateKey) crypto.PublicKey {
 	return byPrivateKey.(interface{ Public() crypto.PublicKey }).Public()
 }
-
-// byPublicKeysByKid maps each loaded key's kid to its public key, for O(1)
-// verification-key lookup from a token's `kid` header.
-var byPublicKeysByKid = sync.OnceValue(func() map[string]crypto.PublicKey {
-	publicKeysByKid := map[string]crypto.PublicKey{}
-	for _, byPrivateKey := range byPrivateKeys() {
-		kid, err := jwtKid(publicKey(byPrivateKey))
-		if err != nil {
-			glog.Errorf("[jwt]could not compute kid: %s\n", err)
-			continue
-		}
-		publicKeysByKid[kid] = publicKey(byPrivateKey)
-	}
-	return publicKeysByKid
-})
-
-// byPublicKeys is the full set of verification keys, newest first (same order as
-// byPrivateKeys). It is the fallback when a token has no recognized `kid`.
-var byPublicKeys = sync.OnceValue(func() []gojwt.VerificationKey {
-	publicKeys := []gojwt.VerificationKey{}
-	for _, byPrivateKey := range byPrivateKeys() {
-		publicKeys = append(publicKeys, publicKey(byPrivateKey))
-	}
-	return publicKeys
-})
 
 // the bringyour authorization model is:
 // Network
@@ -488,6 +401,47 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 	return ParseByJwtForAudience(ctx, jwtSigned, ByJwtAudienceApi)
 }
 
+// Decodes a token and verifies its signature and signing method with the
+// keyring, without validating claims. The token's `kid` selects the
+// verification key when the keyring holds it; otherwise every held key is
+// tried, so an absent or unknown kid never changes which tokens verify. When
+// the kid selected no key and no held key verifies, the keyring rereads the
+// vault (at most once per reread interval) and the token is verified once more
+// if a key was gained: it may be signed with a key version the vault gained
+// after this process read its keys. The token is parsed directly into the
+// ByJwt struct (a gojwt.Claims via its embedded RegisteredClaims) to avoid a
+// MapClaims map plus a json marshal/unmarshal round-trip on every request.
+func parseByJwtSigned(keyring *byJwtKeyring, jwtSigned string) (*ByJwt, error) {
+	parserOptions := []gojwt.ParserOption{
+		gojwt.WithValidMethods([]string{"ES256", "ES384", "ES512", "RS512"}),
+		gojwt.WithoutClaimsValidation(),
+	}
+	parse := func(keys *byJwtKeys) (byJwt *ByJwt, kidMissed bool, err error) {
+		keyFunc := func(token *gojwt.Token) (any, error) {
+			if kid, ok := token.Header["kid"].(string); ok {
+				if matchedPublicKey, ok := keys.kidPublicKeys[kid]; ok {
+					return matchedPublicKey, nil
+				}
+			}
+			kidMissed = true
+			return gojwt.VerificationKeySet{Keys: keys.verificationKeys}, nil
+		}
+		byJwt = &ByJwt{}
+		_, err = gojwt.ParseWithClaims(jwtSigned, byJwt, keyFunc, parserOptions...)
+		return
+	}
+
+	keys := keyring.heldKeys()
+	byJwt, kidMissed, err := parse(keys)
+	if err != nil && kidMissed && errors.Is(err, gojwt.ErrTokenSignatureInvalid) && keyring.reread(keys) {
+		byJwt, _, err = parse(keyring.heldKeys())
+	}
+	if err != nil {
+		return nil, err
+	}
+	return byJwt, nil
+}
+
 // ParseByJwtForAudience verifies the signature and the registered lifetime
 // and identity claims. API and connect use distinct expected audiences even
 // though current client credentials are deliberately minted for both.
@@ -508,28 +462,8 @@ func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience strin
 		return nil, errors.New("Missing JWT audience.")
 	}
 	rejectMissing := rejectMissingExpiration()
-	parserOptions := []gojwt.ParserOption{
-		gojwt.WithValidMethods([]string{"ES256", "ES384", "ES512", "RS512"}),
-		gojwt.WithoutClaimsValidation(),
-	}
 
-	// select the verification key by the token's `kid` header when present and
-	// recognized; otherwise fall back to trying every key. kid is only an
-	// optimization, so an absent or unknown kid never changes which tokens
-	// verify. parse directly into the ByJwt struct (which is a gojwt.Claims via
-	// its embedded RegisteredClaims) to avoid a MapClaims map plus a json
-	// marshal/unmarshal round-trip on every request.
-	keyFunc := func(token *gojwt.Token) (any, error) {
-		if kid, ok := token.Header["kid"].(string); ok {
-			if matchedPublicKey, ok := byPublicKeysByKid()[kid]; ok {
-				return matchedPublicKey, nil
-			}
-		}
-		return gojwt.VerificationKeySet{Keys: byPublicKeys()}, nil
-	}
-
-	byJwt := &ByJwt{}
-	_, err := gojwt.ParseWithClaims(jwtSigned, byJwt, keyFunc, parserOptions...)
+	byJwt, err := parseByJwtSigned(defaultByJwtKeyring, jwtSigned)
 	if err != nil {
 		// the caller-facing error stays opaque; the reason (malformed token
 		// vs bad signature) is only visible server-side
@@ -611,6 +545,20 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) e
 		return err
 	}
 	return validateByJwtStateRemembered(ctx, byJwt, nil)
+}
+
+// Every check ValidateByJwtState makes before its state query: the identity
+// shape, the session horizon, the session revocation marker and this
+// process's remembered refusals. A nil result is not authorization, only the
+// absence of a refusal that needs no query.
+func validateByJwtStateBeforeQuery(ctx context.Context, byJwt *ByJwt, requireClient bool) error {
+	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
+		return err
+	}
+	if err := validateSessionAuthority(ctx, byJwt); err != nil {
+		return err
+	}
+	return refuseRememberedByJwtState(ctx, byJwt, nil)
 }
 
 // Checks durable child ownership and live credentials in one primary-key read.
@@ -1040,12 +988,18 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 	return
 }
 
+// Signs with the keyring's signing key (see byJwtKeyring).
 func sign(claims gojwt.Claims) string {
-	var signingMethod gojwt.SigningMethod
-	var key any
+	return signWithKeyring(defaultByJwtKeyring, claims)
+}
 
-	if ecdsaKey := byEcdsaSigningKey(); ecdsaKey != nil {
-		switch bitLen := ecdsaKey.Curve.Params().N.BitLen(); bitLen {
+func signWithKeyring(keyring *byJwtKeyring, claims gojwt.Claims) string {
+	signingKey := keyring.signingKey()
+
+	var signingMethod gojwt.SigningMethod
+	switch v := signingKey.privateKey.(type) {
+	case *ecdsa.PrivateKey:
+		switch bitLen := v.Curve.Params().N.BitLen(); bitLen {
 		case 256:
 			signingMethod = gojwt.SigningMethodES256
 		case 384:
@@ -1055,24 +1009,22 @@ func sign(claims gojwt.Claims) string {
 		default:
 			panic(fmt.Errorf("Unsupported ECDSA bit len %d", bitLen))
 		}
-		key = ecdsaKey
-	} else if rsaKey := byRsaSigningKey(); rsaKey != nil {
-		if bitLen := rsaKey.N.BitLen(); 2048 <= bitLen {
+	case *rsa.PrivateKey:
+		if bitLen := v.N.BitLen(); 2048 <= bitLen {
 			signingMethod = gojwt.SigningMethodRS512
 		} else {
 			panic(fmt.Errorf("Unsupported RSA bit len %d", bitLen))
 		}
-		key = rsaKey
-	} else {
+	default:
 		panic(fmt.Errorf("No signing key found"))
 	}
 	token := gojwt.NewWithClaims(signingMethod, claims)
 	// tag the token with the signing key's kid so the verifier can select the
 	// exact key instead of trying all of them
-	if kid, err := jwtKid(publicKey(key)); err == nil {
-		token.Header["kid"] = kid
+	if signingKey.kid != "" {
+		token.Header["kid"] = signingKey.kid
 	}
-	jwtSigned, err := token.SignedString(key)
+	jwtSigned, err := token.SignedString(signingKey.privateKey)
 	if err != nil {
 		panic(err)
 	}

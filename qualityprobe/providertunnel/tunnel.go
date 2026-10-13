@@ -263,6 +263,10 @@ func providerTunnelMultiClientSettingsForConfig(cfg Config) *connect.MultiClient
 	settings := connect.DefaultMultiClientSettings()
 	settings.ProviderProbe = false
 	settings.DataOnlyProviderProbe = cfg.DataOnlyProbe
+	// A probe tunnel lives for one bounded measurement, so its re-dial of
+	// the probed provider keeps the measured cadence instead of the paced
+	// re-dial a long-lived fixed window uses.
+	settings.FixedDestinationRetryMin = 0
 	return settings
 }
 
@@ -392,6 +396,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	generatorSettings.ClientCredentials = cfg.ClientCredentials
 	generatorSettings.ClientControl = cfg.ClientControl
 	generatorSettings.ControlTelemetryProbe = true
+	// Each probe identity is retired with its exact residency at teardown,
+	// never parked for a later attempt.
+	generatorSettings.ReuseFixedDestinationIdentities = false
 	generatorSettings.PlatformTransportSettingsGenerator = func() *connect.PlatformTransportSettings {
 		settings := connect.DefaultPlatformTransportSettings()
 		settings.PlatformTransportBudget = transportBudget
