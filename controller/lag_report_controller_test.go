@@ -757,9 +757,9 @@ func TestExtenderLagReportRefusals(t *testing.T) {
 			func(body *protocol.LagReportBody) {
 				body.WindowStartTimeMs = uint64(now.Add(time.Hour).UnixMilli())
 			},
-			// a minute that starts long before its session
+			// a minute that starts more than a minute before its session
 			func(body *protocol.LagReportBody) {
-				body.SessionStartTimeMs = uint64(now.UnixMilli())
+				body.SessionStartTimeMs = uint64(now.Add(time.Minute).UnixMilli())
 			},
 		} {
 			edited := body()
