@@ -50,6 +50,7 @@ package controller
 //
 //	urnetwork_stats_provider_egress_index            connected valid public providers per bucket and egress index {bucket, index} (db)
 //	urnetwork_stats_provider_excluded                of those, the ones the egress rules leave out of a bucket {reason} (db)
+//	urnetwork_stats_provider_online_success_exempt   per country the URL-success rule exempts, the providers the exemption keeps online {country_code} (redis, written by the score export)
 //
 // the contract gauges are internal (connect/EXTENDER.md M3, M4) and are read
 // only by grafana/dashboards/providers.json:
@@ -304,6 +305,16 @@ var statsProviderExcludedGauge = newStatsGaugeVec(
 	"provider_excluded",
 	"Connected valid public providers the egress rules leave out of a bucket, per reason",
 	"reason",
+)
+
+// The countries the URL-success rule exempts because the probe fails for most
+// of their providers, each with the providers the exemption keeps online,
+// under the guard the score export last published. No series while the rule
+// is disabled or no guard is published.
+var statsProviderOnlineSuccessExemptGauge = newStatsGaugeVec(
+	"provider_online_success_exempt",
+	"Providers measured without a URL success that the URL-success rule keeps online, per country it exempts",
+	"country_code",
 )
 
 var statsProviderEgressAvailableGauge = newStatsGauge(
@@ -702,6 +713,9 @@ func statsRefreshDb(ctx context.Context) {
 	server.HandleError(func() {
 		statsRefreshProviderEgress(ctx)
 	})
+	server.HandleError(func() {
+		statsRefreshProviderOnlineSuccessExempt(ctx)
+	})
 
 	// one scan of the online extenders, grouped by country with the same
 	// family filters (M2). an extender whose activation resolved no country
@@ -788,6 +802,25 @@ func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {
 		})
 	}
 	statsProviderExcludedGauge.replace(reasonValues)
+}
+
+// Publishes the countries the URL-success rule exempts under the guard the
+// score export last published, a country with no code as "unknown". Nothing
+// is published while the rule is disabled or no guard is readable.
+func statsRefreshProviderOnlineSuccessExempt(ctx context.Context) {
+	exemptCountries, _ := model.GetProviderOnlineSuccessExemptCountries(ctx)
+	values := []statsLabeledValue{}
+	for _, exemptCountry := range exemptCountries {
+		countryCode := exemptCountry.CountryCode
+		if countryCode == "" {
+			countryCode = "unknown"
+		}
+		values = append(values, statsLabeledValue{
+			labelValues: []string{countryCode},
+			value:       float64(exemptCountry.Kept),
+		})
+	}
+	statsProviderOnlineSuccessExemptGauge.replace(values)
 }
 
 // Every index label a bucket publishes: each index up to the largest the

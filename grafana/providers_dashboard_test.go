@@ -15,6 +15,9 @@ import (
 const (
 	providersEgressIndexMetric = "urnetwork_stats_provider_egress_index"
 	providersExcludedMetric    = "urnetwork_stats_provider_excluded"
+	// the countries the URL-success rule exempts, from the guard the score
+	// export published
+	providersOnlineSuccessExemptMetric = "urnetwork_stats_provider_online_success_exempt"
 )
 
 // the backfill histogram (GEOMAP §10.3 "Backfill"), the answered-providers
@@ -56,6 +59,7 @@ func TestProvidersDashboardShowsTheEgressBuckets(t *testing.T) {
 		"answers backfilled":      `sum by (rank_mode) (rate(urnetwork_provider_backfill_bucket{env="$env",le="0"}[5m]))`,
 		"short and empty answers": `sum by (rank_mode, result_count) (rate(urnetwork_findproviders2_outcomes_total{env="$env",force_minimum="false"}[5m]))`,
 		"borrowed share":          `sum by (rank_mode) (rate(urnetwork_provider_backfill_sum{env="$env"}[5m])) / sum by (rank_mode) (rate(urnetwork_provider_answered_total{env="$env"}[5m]))`,
+		"url-success exemptions":  `max by (country_code) (urnetwork_stats_provider_online_success_exempt{env="$env"})`,
 	} {
 		if !strings.Contains(joined, read) {
 			t.Errorf("no panel answers %q (expected a read of %s)", question, read)
@@ -63,7 +67,7 @@ func TestProvidersDashboardShowsTheEgressBuckets(t *testing.T) {
 	}
 
 	// every reason the rules report has a panel of its own
-	for _, reason := range []string{"blackhole", "tls", "country", "health", "unprobed"} {
+	for _, reason := range []string{"blackhole", "tls", "country", "no_success", "health", "unprobed"} {
 		read := `max(urnetwork_stats_provider_excluded{env="$env",reason="` + reason + `"})`
 		if !strings.Contains(joined, read) {
 			t.Errorf("the %s exclusion has no panel of its own (expected %s)", reason, read)
@@ -105,7 +109,7 @@ func TestProvidersDashboardShowsTheEgressBuckets(t *testing.T) {
 
 	// the egress gauges are read replica-safely, like every stats gauge here
 	for _, expression := range expressions {
-		for _, metric := range []string{providersEgressIndexMetric, providersExcludedMetric} {
+		for _, metric := range []string{providersEgressIndexMetric, providersExcludedMetric, providersOnlineSuccessExemptMetric} {
 			assertReplicaSafeReads(t, "providers egress row", expression, metric, `{env="$env"`)
 		}
 	}
@@ -120,7 +124,7 @@ func TestProvidersDashboardShowsTheEgressBuckets(t *testing.T) {
 
 	// the egress metrics are internal: which providers the rules leave out,
 	// and how often answers borrow, is operator business
-	for _, metric := range []string{providersEgressIndexMetric, providersExcludedMetric, providersBackfillMetric, providersAnsweredMetric} {
+	for _, metric := range []string{providersEgressIndexMetric, providersExcludedMetric, providersOnlineSuccessExemptMetric, providersBackfillMetric, providersAnsweredMetric} {
 		if slices.Contains(publicSafeMetrics, metric) {
 			t.Errorf("%s is internal and must not be public-safe", metric)
 		}
