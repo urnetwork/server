@@ -12,6 +12,12 @@ import (
 // hold no address, prefix or address hash (amendment 9), and nothing here
 // reads one: results group by end reason and the family the browser reached
 // the extender on, and visitors by the country of the track's place.
+//
+// A track from an agent browser or a hosting network is automated
+// (amendment 12): its results, the track itself and its guest count in none
+// of these figures, which describe visitors' own connections. Only
+// CountLagAutomatedResultsSince counts them, so the excluded volume stays in
+// view.
 
 // The results stored in a window, by end reason and family.
 type LagResultCount struct {
@@ -22,17 +28,18 @@ type LagResultCount struct {
 }
 
 // CountLagResultsSince counts the results stored at or after `since`, by end
-// reason and family.
+// reason and family, leaving out automated tracks' results.
 func CountLagResultsSince(ctx context.Context, since time.Time) []*LagResultCount {
 	counts := []*LagResultCount{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT end_reason, extender_ip_family, count(*)
+			SELECT lag_result.end_reason, lag_result.extender_ip_family, count(*)
 			FROM lag_result
-			WHERE created_at >= $1
-			GROUP BY end_reason, extender_ip_family
+			LEFT JOIN lag_track ON lag_track.track_id = lag_result.track_id
+			WHERE lag_result.created_at >= $1 AND lag_track.automated IS NOT TRUE
+			GROUP BY lag_result.end_reason, lag_result.extender_ip_family
 			`,
 			since.UTC(),
 		)
@@ -47,7 +54,41 @@ func CountLagResultsSince(ctx context.Context, since time.Time) []*LagResultCoun
 	return counts
 }
 
-// CountLagTracksSince counts the tracks started at or after `since`.
+// CountLagAutomatedResultsSince counts the results stored at or after
+// `since` whose track is automated, by why it is: the volume every other
+// count here leaves out.
+func CountLagAutomatedResultsSince(ctx context.Context, since time.Time) map[string]int64 {
+	counts := map[string]int64{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT lag_track.automated_reason, count(*)
+			FROM lag_result
+			INNER JOIN lag_track ON lag_track.track_id = lag_result.track_id
+			WHERE lag_result.created_at >= $1 AND lag_track.automated
+			GROUP BY lag_track.automated_reason
+			`,
+			since.UTC(),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var reason *string
+				var count int64
+				server.Raise(result.Scan(&reason, &count))
+				key := ""
+				if reason != nil {
+					key = *reason
+				}
+				counts[key] += count
+			}
+		})
+	})
+	return counts
+}
+
+// CountLagTracksSince counts the tracks started at or after `since`, leaving
+// out automated ones.
 func CountLagTracksSince(ctx context.Context, since time.Time) (count int64) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -55,7 +96,7 @@ func CountLagTracksSince(ctx context.Context, since time.Time) (count int64) {
 			`
 			SELECT count(*)
 			FROM lag_track
-			WHERE started_at >= $1
+			WHERE started_at >= $1 AND NOT automated
 			`,
 			since.UTC(),
 		)
@@ -70,7 +111,9 @@ func CountLagTracksSince(ctx context.Context, since time.Time) (count int64) {
 
 // CountLagGuestsSince counts the lag guest networks created at or after
 // `since` that the sweep has not yet removed. A guest lives 24 h, so any
-// window shorter than that counts every guest created in it.
+// window shorter than that counts every guest created in it. A guest that
+// started an automated track is an agent's, and is left out; its tracks
+// start after it was created, so only tracks since `since` are read.
 func CountLagGuestsSince(ctx context.Context, since time.Time) (count int64) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -78,7 +121,16 @@ func CountLagGuestsSince(ctx context.Context, since time.Time) (count int64) {
 			`
 			SELECT count(*)
 			FROM lag_guest
-			WHERE created_at >= $1
+			WHERE
+				lag_guest.created_at >= $1 AND
+				NOT EXISTS (
+					SELECT 1
+					FROM lag_track
+					WHERE
+						lag_track.started_at >= $1 AND
+						lag_track.network_id = lag_guest.network_id AND
+						lag_track.automated
+				)
 			`,
 			since.UTC(),
 		)
@@ -109,7 +161,8 @@ type LagResultMedians struct {
 // results stored at or after `since` that ended with `endReason` of each
 // result's own p50s: latency outside every load, download and upload. A
 // result's figures are its own p50s, so this is the typical result, not the
-// p50 of every ping and interval pooled.
+// p50 of every ping and interval pooled. Automated tracks' results are left
+// out.
 func GetLagResultMediansSince(ctx context.Context, since time.Time, endReason string) []*LagResultMedians {
 	medians := []*LagResultMedians{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -123,7 +176,11 @@ func GetLagResultMediansSince(ctx context.Context, since time.Time, endReason st
 				percentile_cont(0.5) WITHIN GROUP (ORDER BY download_p50_mbps),
 				percentile_cont(0.5) WITHIN GROUP (ORDER BY upload_p50_mbps)
 			FROM lag_result
-			WHERE created_at >= $1 AND end_reason = $2
+			LEFT JOIN lag_track ON lag_track.track_id = lag_result.track_id
+			WHERE
+				lag_result.created_at >= $1 AND
+				lag_result.end_reason = $2 AND
+				lag_track.automated IS NOT TRUE
 			GROUP BY extender_ip_family
 			ORDER BY extender_ip_family
 			`,
@@ -151,7 +208,7 @@ func GetLagResultMediansSince(ctx context.Context, since time.Time, endReason st
 // place, the visitors who started a track at or after `since`. A visitor is a
 // lag guest network, one per browser for a day (A1). A track whose place has
 // no country counts under "". A visitor whose tracks fall in two countries
-// counts in both.
+// counts in both. Automated tracks count for no country.
 func CountLagVisitorsByCountrySince(ctx context.Context, since time.Time) map[string]int64 {
 	counts := map[string]int64{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -160,7 +217,7 @@ func CountLagVisitorsByCountrySince(ctx context.Context, since time.Time) map[st
 			`
 			SELECT coalesce(client_country_code, ''), count(DISTINCT network_id)
 			FROM lag_track
-			WHERE started_at >= $1
+			WHERE started_at >= $1 AND NOT automated
 			GROUP BY 1
 			`,
 			since.UTC(),

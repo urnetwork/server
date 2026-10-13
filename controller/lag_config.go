@@ -25,6 +25,7 @@ import (
 //	# tracks and their tickets (A6)
 //	track_client_limit: 12       # per client per track_limit_window
 //	track_prefix_limit: 60       # per /24 (/48) per track_limit_window
+//	track_signature_limit: 30    # per signing agent (Signature-Agent) per track_limit_window
 //	track_limit_window: 1h
 //	track_max_extenders: 12      # 8 dots and 4 spares
 //	track_reissue_max: 8         # reissued tickets per track, for dots that reconnect
@@ -55,10 +56,11 @@ type LagSettings struct {
 	ExtenderSample      int           `yaml:"extender_sample"`
 	ExtenderSampleCache time.Duration `yaml:"extender_sample_cache"`
 
-	TrackClientLimit  int           `yaml:"track_client_limit"`
-	TrackPrefixLimit  int           `yaml:"track_prefix_limit"`
-	TrackLimitWindow  time.Duration `yaml:"track_limit_window"`
-	TrackMaxExtenders int           `yaml:"track_max_extenders"`
+	TrackClientLimit    int           `yaml:"track_client_limit"`
+	TrackPrefixLimit    int           `yaml:"track_prefix_limit"`
+	TrackSignatureLimit int           `yaml:"track_signature_limit"`
+	TrackLimitWindow    time.Duration `yaml:"track_limit_window"`
+	TrackMaxExtenders   int           `yaml:"track_max_extenders"`
 	// reissued tickets per track, and how long a track can be reissued (A6)
 	TrackReissueMax    int           `yaml:"track_reissue_max"`
 	TrackReissueWindow time.Duration `yaml:"track_reissue_window"`
@@ -91,10 +93,11 @@ func DefaultLagSettings() *LagSettings {
 		ExtenderSample:      64,
 		ExtenderSampleCache: 30 * time.Second,
 
-		TrackClientLimit:  12,
-		TrackPrefixLimit:  60,
-		TrackLimitWindow:  time.Hour,
-		TrackMaxExtenders: 12,
+		TrackClientLimit:    12,
+		TrackPrefixLimit:    60,
+		TrackSignatureLimit: 30,
+		TrackLimitWindow:    time.Hour,
+		TrackMaxExtenders:   12,
 		// a dropped session reconnects once (L4), so 8 covers every dot once
 		TrackReissueMax:    8,
 		TrackReissueWindow: time.Hour,
@@ -144,6 +147,7 @@ func (self *LagSettings) withDefaults() *LagSettings {
 	positiveDuration(&self.ExtenderSampleCache, d.ExtenderSampleCache)
 	positiveInt(&self.TrackClientLimit, d.TrackClientLimit)
 	positiveInt(&self.TrackPrefixLimit, d.TrackPrefixLimit)
+	positiveInt(&self.TrackSignatureLimit, d.TrackSignatureLimit)
 	positiveDuration(&self.TrackLimitWindow, d.TrackLimitWindow)
 	positiveInt(&self.TrackMaxExtenders, d.TrackMaxExtenders)
 	positiveInt(&self.TrackReissueMax, d.TrackReissueMax)

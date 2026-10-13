@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/netip"
@@ -11,7 +12,8 @@ import (
 )
 
 // Rate limits of the lag API (lag.dev/PLAN.md A1, A6): guest sessions per
-// /24 (/48), and tracks per client and per /24 (/48).
+// /24 (/48), and tracks per client, per /24 (/48) and per signing agent
+// (amendment 12).
 //
 // The shared caller limiters bucket an address at /29 (/56)
 // (server.ClientIpHashForAddr). The plan counts a whole /24 (/48), the
@@ -62,6 +64,31 @@ func CheckLagPrefixRateLimit(
 func lagPrefixRateLimitKey(name string, addr netip.Addr) string {
 	prefixHash := server.ClientIpHashForAddrPrefix(addr, LagClientPrefixBitsV4, LagClientPrefixBitsV6)
 	return fmt.Sprintf("{lag_%s_prefix_%s}", name, hex.EncodeToString(prefixHash[:]))
+}
+
+// Counts one attempt of `name` by the agent a request's Signature-Agent
+// names (Web Bot Auth) against limit per window, so one agent's browsers
+// cannot draw on the extenders without bound (amendment 12). The key is a
+// hash of the header's value, which lives only as long as the window's
+// counter.
+func CheckLagSignatureRateLimit(
+	ctx context.Context,
+	name string,
+	signatureAgent string,
+	limit int,
+	window time.Duration,
+) (LagRateLimitResult, error) {
+	if signatureAgent == "" {
+		return LagRateLimitResult{}, fmt.Errorf("no signature agent to count")
+	}
+	return checkLagRateLimit(ctx, lagSignatureRateLimitKey(name, signatureAgent), limit, window)
+}
+
+// The counter key of `name` for a Signature-Agent value: a hash of the value,
+// so a key is bounded whatever the header holds.
+func lagSignatureRateLimitKey(name string, signatureAgent string) string {
+	digest := sha256.Sum256([]byte(signatureAgent))
+	return fmt.Sprintf("{lag_%s_signature_%s}", name, hex.EncodeToString(digest[:]))
 }
 
 // Counts one attempt of `name` by a client against limit per window.

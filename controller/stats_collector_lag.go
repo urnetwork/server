@@ -25,13 +25,20 @@ import (
 //	urnetwork_stats_lag_measurement_requests     extenders' measurement certificate requests {state} (db)
 //	urnetwork_stats_lag_extenders_opted_out      extenders whose owner opted out of measurement (db)
 //	urnetwork_stats_lag_visitors_24h_by_country  visitors who started a track in the trailing day, the top 10 countries and "other" {country_code} (db)
+//	urnetwork_stats_lag_automated_results_1h     results stored in the trailing hour from automated tracks {reason} (db)
 //
 // The results and tracks are read from the database, not counted by the
 // handlers, so the hourly figures are exact across restarts and replicas: the
 // dashboard reads each gauge with max across hosts, as for every stats gauge.
 // No query reads an address; the tables hold none (amendment 9). Every label
-// is a bounded enum: end reasons and states are fixed sets, families are two,
-// and countries are capped at the top 10 plus "other".
+// is a bounded enum: end reasons, states and automated reasons are fixed
+// sets, families are two, and countries are capped at the top 10 plus
+// "other".
+//
+// Tracks from agent browsers and hosting networks are automated (amendment
+// 12): every gauge but the automated one leaves them, their results and
+// their guests out, so the figures describe visitors' own connections, and
+// the automated gauge shows how much was left out.
 
 var statsLagResults1hGauge = newStatsGaugeVec(
 	"lag_results_1h",
@@ -88,6 +95,12 @@ var statsLagVisitors24hByCountryGauge = newStatsGaugeVec(
 	"lag_visitors_24h_by_country",
 	"lag.dev visitors who started a track in the trailing day, by the country of the track's place: the top 10 and \"other\"",
 	"country_code",
+)
+
+var statsLagAutomatedResults1hGauge = newStatsGaugeVec(
+	"lag_automated_results_1h",
+	"lag.dev results stored in the trailing hour from automated tracks (agent browsers, hosting networks), which every other lag gauge leaves out, by reason",
+	"reason",
 )
 
 // How many countries the visitors gauge names before folding the rest into
@@ -166,6 +179,30 @@ func statsRefreshLag(ctx context.Context, now time.Time) {
 	statsLagExtendersOptedOutGauge.set(float64(model.CountNetworkExtenderMeasurementsWithdrawnFor(ctx, ExtenderMeasurementOptOutReason)))
 
 	statsLagVisitors24hByCountryGauge.replace(statsLagVisitorValues(model.CountLagVisitorsByCountrySince(ctx, now.Add(-24*time.Hour))))
+
+	statsLagAutomatedResults1hGauge.replace(statsLagAutomatedValues(model.CountLagAutomatedResultsSince(ctx, now.Add(-time.Hour))))
+}
+
+// Every automated reason, zero included, so a reason's series never goes
+// stale between automated results. A stored reason this server does not know
+// counts under "other".
+func statsLagAutomatedValues(counts map[string]int64) []statsLabeledValue {
+	known := map[string]bool{}
+	values := []statsLabeledValue{}
+	for _, reason := range model.LagAutomatedReasons {
+		known[reason] = true
+		values = append(values, statsLabeledValue{labelValues: []string{reason}, value: float64(counts[reason])})
+	}
+	var other int64
+	for reason, count := range counts {
+		if !known[reason] {
+			other += count
+		}
+	}
+	if 0 < other {
+		values = append(values, statsLabeledValue{labelValues: []string{"other"}, value: float64(other)})
+	}
+	return values
 }
 
 // Every end reason and family, zero included, and "other" for a stored name

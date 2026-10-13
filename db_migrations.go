@@ -10101,10 +10101,13 @@ var migrations = []any{
 	// a hash of one (amendment 9): lag_track keeps only the network and the
 	// city-level place GeoLite2 gives for the address the track was issued
 	// to, with that city's coordinates when it names one, and lag_result only
-	// which family the browser reached the extender on. A result's session and window start times are the
+	// which family the browser reached the extender on. A track from an agent
+	// browser or a hosting network is flagged automated, with which of the two
+	// it was, and nothing more: never the address or the agent's name
+	// (amendment 12). A result's session and window start times are the
 	// extender's clock and its created_at is the report's arrival on the
 	// operator's, so an extender's offset can be estimated. Tracks and
-	// results are kept for result_retention (lag.yml, 180 days).
+	// results are kept for result_retention (lag.yml, 7 days).
 	newSqlMigration(`
 		CREATE TABLE lag_guest (
 			network_id uuid NOT NULL PRIMARY KEY,
@@ -10126,7 +10129,9 @@ var migrations = []any{
 			client_region varchar(256) NULL,
 			client_city varchar(256) NULL,
 			client_latitude double precision NULL,
-			client_longitude double precision NULL
+			client_longitude double precision NULL,
+			automated boolean NOT NULL DEFAULT false,
+			automated_reason varchar(32) NULL
 		);
 		CREATE INDEX lag_track_started_at ON lag_track (started_at, track_id);
 

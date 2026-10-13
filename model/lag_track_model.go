@@ -11,10 +11,12 @@ import (
 //
 //   - lag_track is one track: the 8 dots (and spares) a visitor measured
 //     together, whose sessions share a track id. Its client fields describe
-//     the visitor's address, filled from the track's first report; the raw
-//     address is never stored. It counts the tickets reissued in it, so a
-//     dropped session can reconnect within its track, once per dot and a
-//     bounded number of times in all (A6).
+//     the visitor's network and city-level place, looked up when the track is
+//     issued; the address is never stored (amendment 9). A track from an
+//     agent browser or a hosting network is flagged automated, and its
+//     results are left out of every aggregate (amendment 12). It counts the
+//     tickets reissued in it, so a dropped session can reconnect within its
+//     track, once per dot and a bounded number of times in all (A6).
 //   - lag_ticket is one session the operator admitted (A6), kept for its
 //     report, which arrives when the session's minute closes or the session
 //     does. A session has no time limit, so a ticket is kept for
@@ -26,6 +28,21 @@ import (
 // Geolocation never reads these tables (decision 8). Timestamps are naive
 // columns holding utc, as everywhere else in this schema.
 
+// Why a track is automated (amendment 12): an agent browser that signs its
+// requests (Web Bot Auth's Signature-Agent), or an address in a hosting or
+// cloud network. Only the reason is kept, never the agent's name or the
+// address.
+const (
+	LagAutomatedReasonSignatureAgent = "signature_agent"
+	LagAutomatedReasonDatacenterAsn  = "datacenter_asn"
+)
+
+// Every automated reason, in the order the stats publish them.
+var LagAutomatedReasons = []string{
+	LagAutomatedReasonSignatureAgent,
+	LagAutomatedReasonDatacenterAsn,
+}
+
 // One track as issued (A6).
 type LagTrack struct {
 	TrackId   server.Id
@@ -36,6 +53,14 @@ type LagTrack struct {
 	ReissueCount int
 	// the client fields stored with a new track; nil stores none
 	Client *LagTrackClient
+	// one of LagAutomatedReasons when the track came from an agent browser
+	// or a hosting network, else "": its results count in no aggregate
+	AutomatedReason string
+}
+
+// Whether the track came from an agent browser or a hosting network.
+func (self *LagTrack) Automated() bool {
+	return self.AutomatedReason != ""
 }
 
 // One admitted session (A6). A ticket admits a session on an extender, by
@@ -73,9 +98,11 @@ func CreateLagTrack(ctx context.Context, track *LagTrack, tickets []*LagTicket) 
 				client_region,
 				client_city,
 				client_latitude,
-				client_longitude
+				client_longitude,
+				automated,
+				automated_reason
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			`,
 			track.TrackId,
 			track.NetworkId,
@@ -88,6 +115,8 @@ func CreateLagTrack(ctx context.Context, track *LagTrack, tickets []*LagTicket) 
 			nullString(client.City),
 			client.Latitude,
 			client.Longitude,
+			track.Automated(),
+			nullString(track.AutomatedReason),
 		))
 		insertLagTicketsInTx(ctx, tx, tickets)
 	})
@@ -130,7 +159,7 @@ func GetLagTrack(ctx context.Context, trackId server.Id) *LagTrack {
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT network_id, client_id, started_at, reissue_count
+			SELECT network_id, client_id, started_at, reissue_count, automated_reason
 			FROM lag_track
 			WHERE track_id = $1
 			`,
@@ -139,12 +168,17 @@ func GetLagTrack(ctx context.Context, trackId server.Id) *LagTrack {
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				track = &LagTrack{TrackId: trackId}
+				var automatedReason *string
 				server.Raise(result.Scan(
 					&track.NetworkId,
 					&track.ClientId,
 					&track.StartedAt,
 					&track.ReissueCount,
+					&automatedReason,
 				))
+				if automatedReason != nil {
+					track.AutomatedReason = *automatedReason
+				}
 			}
 		})
 	})

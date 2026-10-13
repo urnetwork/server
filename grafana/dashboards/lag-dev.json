@@ -5,7 +5,7 @@
   "urnetwork",
   "lag.dev"
  ],
- "description": "lag.dev measurements: how many are made and how they end, the traffic and refusals at the lag routes, the latency and speeds measured, the extenders taking part, where visitors come from, and the retention sweep (lag.dev/PLAN.md X9). No series names a visitor, an address or an extender.",
+ "description": "lag.dev measurements: how many are made and how they end, the traffic and refusals at the lag routes, the latency and speeds measured, the extenders taking part, where visitors come from, and the retention sweep (lag.dev/PLAN.md X9). Measurements from agent browsers and hosting networks are left out of every panel but their own (amendment 12). No series names a visitor, an address or an extender.",
  "editable": false,
  "graphTooltip": 1,
  "schemaVersion": 39,
@@ -490,6 +490,63 @@
    "description": "Every answer the lag routes gave, by outcome: sessions and tracks created, reissued, refused by a limit, unavailable (nothing to measure, or tickets cannot be signed), rejected (a 4xx) or error; report posts processed, rate limited, rejected or error. unavailable tracks with no refusals usually means no extender is offered. Counted by the api's lag handlers and read as increase() over the trailing hour, summed across processes: every series is per process and keyed by instance, so the sum adds each process's own increase and a redeploy neither double counts nor reads as a reset."
   },
   {
+   "id": 23,
+   "type": "timeseries",
+   "title": "automated measurements per hour, left out",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 27
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (reason) (urnetwork_stats_lag_automated_results_1h{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{reason}}"
+    }
+   ],
+   "description": "Measurements in the trailing hour from automated tracks, which every other panel leaves out (amendment 12): signature_agent is an agent browser that signs its requests (Web Bot Auth's Signature-Agent), and datacenter_asn an address in a hosting or cloud network, Cloudflare's WARP included. Normal is a small share of the headline; a rise means agents or crawler renderers are running the test. Only the flag is stored, never an address or an agent's name. A database count every taskworker publishes, read with max across hosts."
+  },
+  {
    "id": 10,
    "type": "row",
    "title": "performance",
@@ -498,7 +555,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 27
+    "y": 35
    },
    "panels": []
   },
@@ -514,7 +571,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 28
+    "y": 36
    },
    "fieldConfig": {
     "defaults": {
@@ -567,7 +624,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 28
+    "y": 36
    },
    "fieldConfig": {
     "defaults": {
@@ -620,7 +677,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 28
+    "y": 36
    },
    "fieldConfig": {
     "defaults": {
@@ -670,7 +727,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 36
+    "y": 44
    },
    "panels": []
   },
@@ -686,7 +743,7 @@
     "h": 6,
     "w": 6,
     "x": 0,
-    "y": 37
+    "y": 45
    },
    "fieldConfig": {
     "defaults": {
@@ -742,7 +799,7 @@
     "h": 6,
     "w": 12,
     "x": 6,
-    "y": 37
+    "y": 45
    },
    "fieldConfig": {
     "defaults": {
@@ -806,7 +863,7 @@
     "h": 6,
     "w": 6,
     "x": 18,
-    "y": 37
+    "y": 45
    },
    "fieldConfig": {
     "defaults": {
@@ -862,7 +919,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 43
+    "y": 51
    },
    "fieldConfig": {
     "defaults": {
@@ -921,7 +978,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 51
+    "y": 59
    },
    "panels": []
   },
@@ -937,7 +994,7 @@
     "h": 9,
     "w": 24,
     "x": 0,
-    "y": 52
+    "y": 60
    },
    "fieldConfig": {
     "defaults": {
@@ -998,7 +1055,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 61
+    "y": 69
    },
    "panels": []
   },
@@ -1014,7 +1071,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 62
+    "y": 70
    },
    "fieldConfig": {
     "defaults": {

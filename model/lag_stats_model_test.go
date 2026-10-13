@@ -183,3 +183,62 @@ func TestLagStatsMeasurementStates(t *testing.T) {
 		connect.AssertEqual(t, CountNetworkExtenderMeasurementsWithdrawnFor(ctx, optOut), int64(1))
 	})
 }
+
+// Automated tracks (amendment 12) count in none of the visitor figures: not
+// their results, the medians, the tracks, their guests or their countries.
+// The automated count holds them, by reason.
+func TestLagStatsLeaveOutAutomated(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		addTrack := func(reason string, countryCode string) server.Id {
+			guest := CreateLagGuestNetwork(ctx, now.Add(-40*time.Minute), now.Add(24*time.Hour))
+			trackId := server.NewId()
+			CreateLagTrack(ctx, &LagTrack{
+				TrackId:         trackId,
+				NetworkId:       guest.NetworkId,
+				ClientId:        server.NewId(),
+				StartedAt:       now.Add(-30 * time.Minute),
+				Client:          &LagTrackClient{CountryCode: countryCode},
+				AutomatedReason: reason,
+			}, []*LagTicket{})
+			return trackId
+		}
+		visitor := addTrack("", "au")
+		cloud := addTrack(LagAutomatedReasonDatacenterAsn, "us")
+		agent := addTrack(LagAutomatedReasonSignatureAgent, "us")
+		for _, result := range []*LagResult{
+			testLagStatsResult(visitor, 0, 4, "complete", now.Add(-20*time.Minute), testLagStatsFloat(10), testLagStatsFloat(100), testLagStatsFloat(40)),
+			testLagStatsResult(cloud, 0, 4, "complete", now.Add(-20*time.Minute), testLagStatsFloat(1), testLagStatsFloat(5000), testLagStatsFloat(5000)),
+			testLagStatsResult(cloud, 1, 4, "complete", now.Add(-19*time.Minute), testLagStatsFloat(1), testLagStatsFloat(5000), testLagStatsFloat(5000)),
+			testLagStatsResult(agent, 0, 6, "complete", now.Add(-18*time.Minute), testLagStatsFloat(2), testLagStatsFloat(900), testLagStatsFloat(900)),
+		} {
+			connect.AssertEqual(t, AddLagResult(ctx, result), true)
+		}
+
+		counts := map[[2]any]int64{}
+		for _, count := range CountLagResultsSince(ctx, now.Add(-time.Hour)) {
+			counts[[2]any{count.EndReason, count.IpFamily}] = count.Count
+		}
+		connect.AssertEqual(t, counts, map[[2]any]int64{{"complete", 4}: 1})
+
+		medians := GetLagResultMediansSince(ctx, now.Add(-time.Hour), "complete")
+		connect.AssertEqual(t, len(medians), 1)
+		connect.AssertEqual(t, medians[0].IpFamily, 4)
+		connect.AssertEqual(t, medians[0].Count, int64(1))
+		connect.AssertEqual(t, *medians[0].DownloadP50Mbps, float64(100))
+
+		connect.AssertEqual(t, CountLagTracksSince(ctx, now.Add(-time.Hour)), int64(1))
+		connect.AssertEqual(t, CountLagGuestsSince(ctx, now.Add(-time.Hour)), int64(1))
+		connect.AssertEqual(t, CountLagVisitorsByCountrySince(ctx, now.Add(-time.Hour)), map[string]int64{"au": 1})
+		connect.AssertEqual(t, CountLagAutomatedResultsSince(ctx, now.Add(-time.Hour)), map[string]int64{
+			LagAutomatedReasonDatacenterAsn:  2,
+			LagAutomatedReasonSignatureAgent: 1,
+		})
+
+		track := GetLagTrack(ctx, cloud)
+		connect.AssertEqual(t, track.AutomatedReason, LagAutomatedReasonDatacenterAsn)
+		connect.AssertEqual(t, GetLagTrack(ctx, visitor).Automated(), false)
+	})
+}

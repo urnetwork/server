@@ -35,3 +35,27 @@ func TestLagPrefixRateLimitKey(t *testing.T) {
 		}
 	}
 }
+
+// A signing agent's counter key is a hash of its Signature-Agent value: one
+// agent shares it wherever its browsers run, two agents never do, and the
+// value itself is not in it (amendment 12).
+func TestLagSignatureRateLimitKey(t *testing.T) {
+	key := lagSignatureRateLimitKey("track", `"https://chatgpt.com"`)
+	if lagSignatureRateLimitKey("track", `"https://chatgpt.com"`) != key {
+		t.Error("one agent's key is not stable")
+	}
+	if lagSignatureRateLimitKey("track", `"https://agent.example"`) == key {
+		t.Error("two agents share a key")
+	}
+	if lagSignatureRateLimitKey("session", `"https://chatgpt.com"`) == key {
+		t.Error("two limits share a key")
+	}
+	for _, text := range []string{"chatgpt", "https"} {
+		if strings.Contains(key, text) {
+			t.Errorf("the key %q names the agent as %q", key, text)
+		}
+	}
+	if !strings.HasPrefix(key, "{lag_track_signature_") {
+		t.Errorf("the key %q is not in the lag limits' hash slot form", key)
+	}
+}
