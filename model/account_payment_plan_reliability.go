@@ -9,33 +9,57 @@
 // transaction begins:
 //   - payment_plan_reliability_window fixes the window's rollup shift, covered
 //     and degraded blocks, and a block cursor
-//   - each chunk adds per-client partial counts and sums for a bounded block
-//     range in its own transaction; drained blocks are immutable, so chunks
-//     commute
+//   - each chunk reads its block range in read-only statements of at most
+//     paymentPlanReliabilityReadBlockCount blocks, adds the per-client counts
+//     and numeric sums exactly in memory, and adds them to the partials with
+//     the cursor in one short transaction; drained blocks are immutable, so
+//     reads and chunks commute
 //   - the fold joins the client locations once and writes the scores exactly as
 //     the single statement did, then marks the window complete
+//
+// A chunk aggregated in one statement held its snapshot and xid for the whole
+// scan: 396 s on average and up to 750 s for six-hour chunks on Main. Reads now
+// hold a snapshot for one bounded statement and never take an xid, and a chunk
+// still writes one partial row per client, so the partial rows written per
+// window are those of six-hour chunks. A drain loses at most the uncommitted
+// reads of one chunk.
 //
 // The plan transaction refuses a window that is not complete, or whose scores
 // were replaced by another window's, by rolling back with
 // paymentPlanReliabilityPendingError; its caller commits that window and plans
-// again. Every step takes the payment plan lock, the single writer of these
-// scores (see network_client_reliability_model.go).
+// again. Every writing step takes the payment plan lock, the single writer of
+// these scores (see network_client_reliability_model.go). Reads take no lock: a
+// chunk commits only while the window's cursor is still where its reads began.
 package model
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )
 
-// Blocks per committed chunk: six hours of 60-second blocks, about 44M
-// client_reliability rows on Main, so a chunk commits within minutes.
+// Blocks per committed chunk: six hours of 60-second blocks, about 28M
+// client_reliability rows on Main. A chunk writes one partial row per client
+// it saw, about 137k on Main, so this size sets the partial rows written per
+// window (about 2.2M for 4 days) and the progress a drain can lose.
 var paymentPlanReliabilityChunkBlockCount int64 = 360
+
+// Blocks per read-only aggregate statement: a quarter hour of blocks, about
+// 1.2M client_reliability rows on Main, read in about 5-17 s at the measured
+// 0.33-1.1 s per block (about 32 s at the worst 2.1 s).
+var paymentPlanReliabilityReadBlockCount int64 = 15
+
+// Partial rows per upsert statement when a chunk commits.
+const paymentPlanReliabilityFlushBatchSize = 10000
 
 // Observes each committed chunk, after its commit, with the window's next
 // shifted block. Nil in production; tests use it to interrupt a window at an
@@ -227,19 +251,10 @@ func paymentPlanReliabilityWindowInTx(
 	return window.blockShift, true
 }
 
-// Adds the per-client partials of one shifted block chunk.
-const paymentPlanReliabilityChunkSql = `
-	INSERT INTO payment_plan_reliability_partial (
-		min_block_number,
-		max_block_number,
-		network_id,
-		client_id,
-		valid_block_count,
-		reliability_sum
-	)
+// The per-client partials of a shifted block range: the rows and per-row terms
+// of the single statement, with the count as bigint and the sum as numeric.
+const paymentPlanReliabilityReadSql = `
 	SELECT
-		$1,
-		$2,
 		valid_counts.network_id,
 		valid_counts.client_id,
 		COUNT(*),
@@ -252,18 +267,166 @@ const paymentPlanReliabilityChunkSql = `
 		FROM client_reliability
 		WHERE
 			valid = true AND
-			$3 <= block_number AND
-			block_number < $4 AND
-			NOT (block_number = ANY($5::bigint[]))
+			$1 <= block_number AND
+			block_number < $2 AND
+			NOT (block_number = ANY($3::bigint[]))
 	) valid_counts
 	GROUP BY
 		valid_counts.network_id,
 		valid_counts.client_id
+`
+
+// Adds a batch of a chunk's exact partials to the window's partials.
+const paymentPlanReliabilityFlushSql = `
+	INSERT INTO payment_plan_reliability_partial (
+		min_block_number,
+		max_block_number,
+		network_id,
+		client_id,
+		valid_block_count,
+		reliability_sum
+	)
+	SELECT
+		$1,
+		$2,
+		partial.network_id,
+		partial.client_id,
+		partial.valid_block_count,
+		partial.reliability_sum
+	FROM unnest($3::uuid[], $4::uuid[], $5::bigint[], $6::numeric[])
+		AS partial(network_id, client_id, valid_block_count, reliability_sum)
 	ON CONFLICT (min_block_number, max_block_number, network_id, client_id) DO UPDATE
 	SET
 		valid_block_count = payment_plan_reliability_partial.valid_block_count + EXCLUDED.valid_block_count,
 		reliability_sum = payment_plan_reliability_partial.reliability_sum + EXCLUDED.reliability_sum
 `
+
+// A partial's client under the network its rows carry, as the partials key it.
+type paymentPlanReliabilityPartialKey struct {
+	networkId server.Id
+	clientId  server.Id
+}
+
+// A client's exact count and sum over the blocks read so far.
+type paymentPlanReliabilityPartial struct {
+	validBlockCount int64
+	reliabilitySum  reliabilityExactSum
+}
+
+// Reads the partials of shifted blocks [minBlockNumber, maxBlockNumber) in
+// read-only statements of at most paymentPlanReliabilityReadBlockCount blocks,
+// each its own transaction, and adds them exactly. A read joins the totals
+// only after its transaction ends, so a retried read is counted once.
+func readPaymentPlanReliabilityPartials(
+	ctx context.Context,
+	minBlockNumber int64,
+	maxBlockNumber int64,
+	degradedBlockNumbers []int64,
+) map[paymentPlanReliabilityPartialKey]*paymentPlanReliabilityPartial {
+	partials := map[paymentPlanReliabilityPartialKey]*paymentPlanReliabilityPartial{}
+	for readMinBlockNumber := minBlockNumber; readMinBlockNumber < maxBlockNumber; {
+		readMaxBlockNumber := min(readMinBlockNumber+paymentPlanReliabilityReadBlockCount, maxBlockNumber)
+		type read struct {
+			key             paymentPlanReliabilityPartialKey
+			validBlockCount int64
+			reliabilitySum  pgtype.Numeric
+		}
+		var reads []read
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			reads = nil
+			result, err := tx.Query(
+				ctx,
+				paymentPlanReliabilityReadSql,
+				readMinBlockNumber,
+				readMaxBlockNumber,
+				degradedBlockNumbers,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var r read
+					server.Raise(result.Scan(&r.key.networkId, &r.key.clientId, &r.validBlockCount, &r.reliabilitySum))
+					reads = append(reads, r)
+				}
+			})
+		}, server.TxReadCommitted)
+		for _, r := range reads {
+			partial, ok := partials[r.key]
+			if !ok {
+				partial = &paymentPlanReliabilityPartial{}
+				partials[r.key] = partial
+			}
+			partial.validBlockCount += r.validBlockCount
+			partial.reliabilitySum.add(r.reliabilitySum)
+		}
+		readMinBlockNumber = readMaxBlockNumber
+	}
+	return partials
+}
+
+// Commits the partials of shifted blocks [cursor, nextBlockNumber) and moves
+// the window's cursor to nextBlockNumber, when the window is still pending at
+// cursor. Otherwise another preparer committed or replaced it, and the reads
+// are discarded.
+func commitPaymentPlanReliabilityChunk(
+	ctx context.Context,
+	minBlockNumber int64,
+	maxBlockNumber int64,
+	cursor int64,
+	nextBlockNumber int64,
+	partials map[paymentPlanReliabilityPartialKey]*paymentPlanReliabilityPartial,
+) (committed bool) {
+	keys := slices.Collect(maps.Keys(partials))
+	slices.SortFunc(keys, func(a paymentPlanReliabilityPartialKey, b paymentPlanReliabilityPartialKey) int {
+		if c := a.networkId.Cmp(b.networkId); c != 0 {
+			return c
+		}
+		return a.clientId.Cmp(b.clientId)
+	})
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		committed = false
+		server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, paymentPlanLockKey))
+		window := getPaymentPlanReliabilityWindowInTx(ctx, tx, minBlockNumber, maxBlockNumber, true)
+		if window == nil || window.completeTime != nil || window.nextBlockNumber != cursor {
+			return
+		}
+		for batch := range slices.Chunk(keys, paymentPlanReliabilityFlushBatchSize) {
+			networkIds := make([]server.Id, 0, len(batch))
+			clientIds := make([]server.Id, 0, len(batch))
+			validBlockCounts := make([]int64, 0, len(batch))
+			reliabilitySums := make([]pgtype.Numeric, 0, len(batch))
+			for _, key := range batch {
+				partial := partials[key]
+				networkIds = append(networkIds, key.networkId)
+				clientIds = append(clientIds, key.clientId)
+				validBlockCounts = append(validBlockCounts, partial.validBlockCount)
+				reliabilitySums = append(reliabilitySums, partial.reliabilitySum.numeric())
+			}
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				paymentPlanReliabilityFlushSql,
+				minBlockNumber,
+				maxBlockNumber,
+				networkIds,
+				clientIds,
+				validBlockCounts,
+				reliabilitySums,
+			))
+		}
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE payment_plan_reliability_window
+			SET next_block_number = $3
+			WHERE min_block_number = $1 AND max_block_number = $2
+			`,
+			minBlockNumber,
+			maxBlockNumber,
+			nextBlockNumber,
+		))
+		committed = true
+	}, server.TxReadCommitted)
+	return
+}
 
 // Folds the partials into the scores exactly as the single statement in
 // UpdateNetworkReliabilityScoresInTx writes them: one row per network and
@@ -308,11 +471,10 @@ const paymentPlanReliabilityFoldSql = `
 		max_block_number = EXCLUDED.max_block_number
 `
 
-// preparePaymentPlanReliabilityWindow commits the network reliability scores
-// of the window [minTime, maxTime] in bounded steps: the window definition,
-// one transaction per block chunk, and the fold. A call resumes the committed
-// cursor of an earlier interrupted call. progress reports whether any step
-// committed.
+// Commits the network reliability scores of the window [minTime, maxTime] in
+// bounded steps: the window definition, the bounded reads and one transaction
+// per block chunk, and the fold. A call resumes the committed cursor of an
+// earlier interrupted call. progress reports whether any step committed.
 func preparePaymentPlanReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time) (progress bool, returnErr error) {
 	defer func() {
 		if value := recover(); value != nil {
@@ -332,10 +494,10 @@ func preparePaymentPlanReliabilityWindow(ctx context.Context, minTime time.Time,
 		var done bool
 		var committed bool
 		var reset bool
-		var chunkNextBlockNumber *int64
+		var pending *paymentPlanReliabilityWindow
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			done, committed, reset = false, false, false
-			chunkNextBlockNumber = nil
+			pending = nil
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, paymentPlanLockKey))
 
 			window := getPaymentPlanReliabilityWindowInTx(ctx, tx, minBlockNumber, maxBlockNumber, true)
@@ -413,29 +575,8 @@ func preparePaymentPlanReliabilityWindow(ctx context.Context, minTime time.Time,
 			}
 
 			if window.nextBlockNumber < window.shiftedMaxBlockNumber() {
-				chunkEndBlockNumber := min(window.nextBlockNumber+paymentPlanReliabilityChunkBlockCount, window.shiftedMaxBlockNumber())
-				server.RaisePgResult(tx.Exec(
-					ctx,
-					paymentPlanReliabilityChunkSql,
-					window.minBlockNumber,
-					window.maxBlockNumber,
-					window.nextBlockNumber,
-					chunkEndBlockNumber,
-					window.degradedBlockNumbers,
-				))
-				server.RaisePgResult(tx.Exec(
-					ctx,
-					`
-					UPDATE payment_plan_reliability_window
-					SET next_block_number = $3
-					WHERE min_block_number = $1 AND max_block_number = $2
-					`,
-					window.minBlockNumber,
-					window.maxBlockNumber,
-					chunkEndBlockNumber,
-				))
-				chunkNextBlockNumber = &chunkEndBlockNumber
-				committed = true
+				// read the next chunk outside this transaction
+				pending = window
 				return
 			}
 
@@ -476,8 +617,16 @@ func preparePaymentPlanReliabilityWindow(ctx context.Context, minTime time.Time,
 			done = true
 		}, server.TxReadCommitted)
 		progress = progress || committed
-		if chunkNextBlockNumber != nil && paymentPlanReliabilityChunkCommitted != nil {
-			paymentPlanReliabilityChunkCommitted(*chunkNextBlockNumber)
+		if pending != nil {
+			chunkEndBlockNumber := min(pending.nextBlockNumber+paymentPlanReliabilityChunkBlockCount, pending.shiftedMaxBlockNumber())
+			partials := readPaymentPlanReliabilityPartials(ctx, pending.nextBlockNumber, chunkEndBlockNumber, pending.degradedBlockNumbers)
+			if commitPaymentPlanReliabilityChunk(ctx, minBlockNumber, maxBlockNumber, pending.nextBlockNumber, chunkEndBlockNumber, partials) {
+				progress = true
+				if paymentPlanReliabilityChunkCommitted != nil {
+					paymentPlanReliabilityChunkCommitted(chunkEndBlockNumber)
+				}
+			}
+			continue
 		}
 		if done {
 			return progress, nil
