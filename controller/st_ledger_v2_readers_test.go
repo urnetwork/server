@@ -217,6 +217,11 @@ func TestStV1FinalizationOfAV2EpochNotifiesNothing(t *testing.T) {
 			t.Fatalf("%d leaderboard rebuilds for a v1 epoch", rebuilds)
 		}
 
+		// The recorded activation answers the cutoff without vault2 (SV-9), so
+		// the cutoff is unknown only for a deployment without one.
+		if !model.ClearStLedgerV2Activation(f.ctx, key, model.GetStLedgerV2Activation(f.ctx, key)) {
+			t.Fatal("the fixture's activation was not recorded")
+		}
 		resetLedgerV2Caches()
 		f.chain.failNext("pool", errors.New("rpc down"))
 		stMarkEpochFinalized(f.ctx, key, 8)

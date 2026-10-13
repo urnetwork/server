@@ -124,6 +124,9 @@ type StLedgerV2Answer struct {
 type StLedgerV2Client interface {
 	// LedgerV2Pool reads vault2.pools(noId) at the finalized head.
 	LedgerV2Pool(ctx context.Context, noId uint64) (registered bool, firstEpoch uint64, err error)
+	// LedgerV2Coordinator reads vault2.coordinator(), the one STSettlement2
+	// the vault is bound to, at the finalized head.
+	LedgerV2Coordinator(ctx context.Context) (common.Address, error)
 	LedgerV2State(ctx context.Context, noId uint64) (*StLedgerV2State, error)
 	// LedgerV2EpochWindow reads the v1 epochEndBlock(epoch) and the epoch's
 	// rootCommitWindowBlocks, which is also v2's close window.
@@ -203,6 +206,14 @@ func (self *CoreStClient) LedgerV2Pool(ctx context.Context, noId uint64) (bool, 
 		return false, 0, fmt.Errorf("vault2 pools(%d): %w", noId, err)
 	}
 	return pool.Registered, pool.FirstEpoch, nil
+}
+
+func (self *CoreStClient) LedgerV2Coordinator(ctx context.Context) (common.Address, error) {
+	coordinator, err := stViewAt(self, ctx, self.cfg.VaultV2, stLedgerV2VaultAbi.PackCoordinator(), stLedgerV2VaultAbi.UnpackCoordinator)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("vault2 coordinator(): %w", err)
+	}
+	return coordinator, nil
 }
 
 func (self *CoreStClient) LedgerV2State(ctx context.Context, noId uint64) (*StLedgerV2State, error) {

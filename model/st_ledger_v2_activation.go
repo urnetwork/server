@@ -4,7 +4,8 @@ package model
 // settlement v2 activation (SV-9): vault2's registration of the configured
 // pool, as the server first observed it, with the vault2 and STSettlement2 it
 // was configured with. Registration is permanent on chain, so the record is
-// written once and never changes.
+// written once and never changes; only the operator's explicit command, naming
+// it exactly, clears one that is wrong.
 
 import (
 	"context"
@@ -65,6 +66,42 @@ func GetStLedgerV2Activation(ctx context.Context, deploymentKey StDeploymentKey)
 		activation = getStLedgerV2Activation(ctx, tx, key)
 	})
 	return activation
+}
+
+// GetStLedgerV2ActivationIfInstalled is GetStLedgerV2Activation for a
+// database that may predate the record's table (migration 823): without the
+// table there is no activation. A deployment without the v2 pair reads the
+// record this way, so settlement v1 alone needs nothing that v2 added.
+func GetStLedgerV2ActivationIfInstalled(ctx context.Context, deploymentKey StDeploymentKey) *StLedgerV2Activation {
+	key := requireStDeploymentKey(deploymentKey)
+	var activation *StLedgerV2Activation
+	server.Tx(ctx, func(tx server.PgTx) {
+		var installed bool
+		server.Raise(tx.QueryRow(ctx, `SELECT to_regclass('public.st_ledger_v2_activation') IS NOT NULL`).Scan(&installed))
+		if installed {
+			activation = getStLedgerV2Activation(ctx, tx, key)
+		}
+	})
+	return activation
+}
+
+// ClearStLedgerV2Activation removes a deployment's recorded activation when
+// it is exactly the named one, and reports whether it did.
+func ClearStLedgerV2Activation(ctx context.Context, deploymentKey StDeploymentKey, named *StLedgerV2Activation) bool {
+	key := requireStDeploymentKey(deploymentKey)
+	cleared := false
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM st_ledger_v2_activation
+				WHERE deployment_key = $1 AND no_id = $2 AND first_epoch = $3 AND vault_v2_address = $4 AND settlement_v2_address = $5
+			`,
+			key, int64(named.NoId), int64(named.FirstEpoch), named.VaultV2Address, named.SettlementV2Address,
+		))
+		cleared = tag.RowsAffected() == 1
+	})
+	return cleared
 }
 
 func getStLedgerV2Activation(ctx context.Context, tx server.PgTx, key string) *StLedgerV2Activation {

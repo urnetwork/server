@@ -41,6 +41,11 @@ func (self *ledgerV2WorkChain) LedgerV2Pool(context.Context, uint64) (bool, uint
 	return true, 5, nil
 }
 
+// The vault is bound to the STSettlement2 of ledgerV2WorkConfig.
+func (self *ledgerV2WorkChain) LedgerV2Coordinator(context.Context) (common.Address, error) {
+	return common.HexToAddress("0x00000000000000000000000000000000000000a1"), nil
+}
+
 // Epoch e ends where epoch e+1 starts in the v1 clock below.
 func (self *ledgerV2WorkChain) LedgerV2EpochWindow(_ context.Context, epoch uint64) (uint64, uint64, error) {
 	return (epoch + 1) * 50_400, 1_200, nil

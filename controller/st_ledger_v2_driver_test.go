@@ -649,6 +649,17 @@ func TestStV1DriverStopsAtFirstV2Epoch(t *testing.T) {
 		SetStClient(newStubStClient(state))
 		defer SetStClient(nil)
 
+		// Until the registration has been read once its cutoff is unknown; from
+		// then on the recorded activation answers without vault2 (SV-9).
+		f.chain.failNext("pool", errors.New("vault2 unreadable"))
+		if _, err := StV1EpochAllowed(f.ctx, 4); err == nil || err.Error() != "vault2 unreadable" {
+			t.Fatalf("unknown registration: %v", err)
+		}
+		f.chain.failNext("pool", errors.New("vault2 unreadable"))
+		if _, err := StCloseOperatorEpoch(f.ctx, 4); err == nil || err.Error() != "vault2 unreadable" {
+			t.Fatalf("close with unknown registration: %v", err)
+		}
+
 		for _, test := range []struct {
 			name       string
 			registered bool
@@ -682,16 +693,6 @@ func TestStV1DriverStopsAtFirstV2Epoch(t *testing.T) {
 			if allowed, err := StV1EpochAllowed(f.ctx, epoch); err != nil || allowed != want {
 				t.Fatalf("sweep hook: epoch %d allowed %t, %v", epoch, allowed, err)
 			}
-		}
-
-		resetLedgerV2Caches()
-		f.chain.failNext("pool", errors.New("vault2 unreadable"))
-		if _, err := StV1EpochAllowed(f.ctx, 4); err == nil || err.Error() != "vault2 unreadable" {
-			t.Fatalf("unknown registration: %v", err)
-		}
-		f.chain.failNext("pool", errors.New("vault2 unreadable"))
-		if _, err := StCloseOperatorEpoch(f.ctx, 4); err == nil || err.Error() != "vault2 unreadable" {
-			t.Fatalf("close with unknown registration: %v", err)
 		}
 
 		// Without v2 every epoch stays with v1.
