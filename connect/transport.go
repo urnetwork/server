@@ -517,7 +517,9 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 }
 
 type ConnectHandlerSettings struct {
-	testingBeforeAuthorizationLease func(*session.ByJwt)
+	// Nil outside package tests. The before hook receives the context the
+	// lease runs under, so a test can order a cancellation before the lease.
+	testingBeforeAuthorizationLease func(context.Context, *session.ByJwt)
 	testingAfterAuthorizationLease  func(*session.ByJwt, *session.AuthorizationLease)
 	// Accepts the custom H1+ carrier (connect/H1PLUS.md) in addition to
 	// WebSocket. On by default; false opts out, and clients fall back to
@@ -1264,7 +1266,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	handleCtx, handleCancel := context.WithCancel(self.ctx)
+	// A client that leaves ends handleCtx with errConnectRequestCanceled, so an
+	// attempt it abandoned is not counted as an outage or a deadline.
+	handleCtx, handleCancelCause := context.WithCancelCause(self.ctx)
+	handleCancel := func() { handleCancelCause(nil) }
 	// One deadline covers the initial frame, JWT/state/membership reads and
 	// upgrade response. Serving work retains handleCtx after successful auth.
 	authCtx, authCancel := context.WithTimeout(handleCtx, self.settings.ReadTimeout)
@@ -1294,6 +1299,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			h1Observation.close(connectH1CloseRequestCanceled)
+			handleCancelCause(errConnectRequestCanceled)
 		case <-handleCtx.Done():
 		}
 	})
@@ -1332,6 +1338,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	err, disconnect := rateLimit.Connect()
 	defer disconnect()
 	if authCtx.Err() != nil {
+		if connectRequestCanceled(authCtx) {
+			// the client left during the delay; no one reads an answer
+			h1Observation.result = connectH1ResultClientCanceled
+			return
+		}
 		h1Observation.result = connectH1ResultAuthDeadline
 		http.Error(w, "Service temporarily unavailable.", http.StatusServiceUnavailable)
 		return
@@ -1468,6 +1479,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// A WebSocket refusal follows its 101, so a refusal of the credential
 	// itself closes it in band (transport_credential_refusal.go).
 	rejectAuth := func(status int, err error) {
+		if connectRequestCanceled(authCtx) {
+			// The departure canceled the step in flight, which then reports an
+			// unavailable dependency; from the lease even ErrAuthUnavailable,
+			// so only the cause tells. No one reads a response or completes
+			// the H1+ selection.
+			h1Observation.result = connectH1ResultClientCanceled
+			return
+		}
 		if authCtx.Err() != nil {
 			status = http.StatusServiceUnavailable
 		}
@@ -1559,7 +1578,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		_ = session.RetireConnectionAuthority(ctx, clientId, connectionId)
 	}()
 	if self.settings.testingBeforeAuthorizationLease != nil {
-		self.settings.testingBeforeAuthorizationLease(byJwt)
+		self.settings.testingBeforeAuthorizationLease(handleCtx, byJwt)
 	}
 	lease, leaseErr := session.StartConnectionAuthorizationLease(handleCtx, byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
 		authorizationCloseCode.Store(int32(code))
@@ -1589,6 +1608,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	observation.Cancel()
 
 	if custom {
+		if connectRequestCanceled(authCtx) {
+			// a departure after authorization: write no 101 and record no
+			// selection for an upgrade the client left
+			h1Observation.result = connectH1ResultClientCanceled
+			return
+		}
 		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, max(time.Nanosecond, min(self.settings.WriteTimeout, time.Until(authDeadline))))
 		connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), upgradeErr)
 		if upgradeErr != nil {
@@ -1613,6 +1638,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	if authCtx.Err() != nil {
 		h1Observation.result = connectH1ResultAuthDeadline
+		if connectRequestCanceled(authCtx) {
+			h1Observation.result = connectH1ResultClientCanceled
+		}
 		return
 	}
 	// Retire the authentication timer before publishing serving ownership.
@@ -2464,7 +2492,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			connectionRegistered = true
 			var leaseErr error
 			if self.settings.testingBeforeAuthorizationLease != nil {
-				self.settings.testingBeforeAuthorizationLease(byJwt)
+				self.settings.testingBeforeAuthorizationLease(handleCtx, byJwt)
 			}
 			lease, leaseErr = session.StartConnectionAuthorizationLease(handleCtx, byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
 				_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")

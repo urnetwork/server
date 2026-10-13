@@ -118,7 +118,7 @@ func TestSessionAdmissionRevokedAfterRegistrationCannotPassFinalCheck(t *testing
 				var admitted atomic.Int32
 				var env *peerDiscoveryEnv
 				env = testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, nil, func(settings *ConnectHandlerSettings) {
-					settings.testingBeforeAuthorizationLease = func(value *session.ByJwt) {
+					settings.testingBeforeAuthorizationLease = func(_ context.Context, value *session.ByJwt) {
 						env.exchange.stateLock.Lock()
 						registered := len(env.exchange.connections[*value.ClientId]) > 0
 						env.exchange.stateLock.Unlock()
