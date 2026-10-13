@@ -35,6 +35,11 @@ func authorityControlPingArgs(t testing.TB) *connect.ConnectControlArgs {
 
 // Every complete child credential reaches one durable snapshot. Local token
 // refusals still precede acquisition, and no successful result caches authority.
+// A definitive no-active-row refusal is remembered for its exact credential
+// (state_refusal_cache.go), so its repeat is answered without a borrow; a
+// rotation and every valid credential reach the database each time. The cases
+// rebind and reactivate one child by hand, which production never does, so
+// each case first forgets the refusals the previous rewrite made stale.
 func TestAuthorityControlOwnershipUsesOneLiveStateRead(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -48,20 +53,21 @@ func TestAuthorityControlOwnershipUsesOneLiveStateRead(t *testing.T) {
 		args := authorityControlPingArgs(t)
 		poolLabels := map[string]string{"pool": "default", "outcome": "acquired"}
 		for _, control := range []struct {
-			name   string
-			change func(*session.ByJwt)
-			active bool
-			owned  bool
-			rotate bool
-			local  bool
-			valid  bool
+			name       string
+			change     func(*session.ByJwt)
+			active     bool
+			owned      bool
+			rotate     bool
+			local      bool
+			valid      bool
+			remembered bool
 		}{
 			{name: "owned", active: true, owned: true, valid: true},
-			{name: "foreign parent", active: true},
+			{name: "foreign parent", active: true, remembered: true},
 			{name: "owned after foreign", active: true, owned: true, valid: true},
-			{name: "retired", owned: true},
+			{name: "retired", owned: true, remembered: true},
 			{name: "rotated", active: true, owned: true, rotate: true},
-			{name: "child device mismatch", active: true, owned: true, change: func(claims *session.ByJwt) { claims.DeviceId = &otherDevice }},
+			{name: "child device mismatch", active: true, owned: true, remembered: true, change: func(claims *session.ByJwt) { claims.DeviceId = &otherDevice }},
 			{name: "missing child device", active: true, owned: true, local: true, change: func(claims *session.ByJwt) { claims.DeviceId = nil }},
 			{name: "foreign account", active: true, owned: true, local: true, change: func(claims *session.ByJwt) { claims.UserId = server.NewId(); claims.Subject = claims.UserId.String() }},
 			{name: "foreign network", active: true, owned: true, local: true, change: func(claims *session.ByJwt) { claims.NetworkId = server.NewId() }},
@@ -80,32 +86,42 @@ func TestAuthorityControlOwnershipUsesOneLiveStateRead(t *testing.T) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET source_client_id=$2, active=$3 WHERE client_id=$1`, *child.ClientId, source, control.active))
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_user SET credential_change_time=$2 WHERE user_id=$1`, child.UserId, changed))
 			})
+			// A path that rebinds or reactivates a client must forget the
+			// refusals it affects (3c10d399). The hand rewrite above is one.
+			session.Testing_ForgetStateRefusals()
 			claims := *child
 			if control.change != nil {
 				control.change(&claims)
 			}
 			token := claims.Testing_Sign()
-			before := authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels)
-			queryBefore := authorityObservedCounter(t, "urnetwork_jwt_state_queries_total", nil)
-			result, err := owner.ConnectControl(ctx, token, args)
-			if control.valid {
-				if err != nil || result == nil || result.Error != nil {
-					t.Fatalf("%s: owned current credential failed", control.name)
+			attempt := func(label string, want float64) {
+				before := authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels)
+				queryBefore := authorityObservedCounter(t, "urnetwork_jwt_state_queries_total", nil)
+				result, err := owner.ConnectControl(ctx, token, args)
+				if control.valid {
+					if err != nil || result == nil || result.Error != nil {
+						t.Fatalf("%s %s: owned current credential failed", control.name, label)
+					}
+				} else {
+					authorityTestUnauthorized(t, err)
+					if result != nil {
+						t.Fatalf("%s %s: refused credential reached control", control.name, label)
+					}
 				}
-			} else {
-				authorityTestUnauthorized(t, err)
-				if result != nil {
-					t.Fatalf("%s: refused credential reached control", control.name)
+				if authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) != before+want ||
+					authorityObservedCounter(t, "urnetwork_jwt_state_queries_total", nil) != queryBefore+want {
+					t.Fatalf("%s %s: control did not use exactly %.0f combined durable reads", control.name, label, want)
 				}
 			}
 			want := 1.0
 			if control.local {
 				want = 0
 			}
-			if authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) != before+want ||
-				authorityObservedCounter(t, "urnetwork_jwt_state_queries_total", nil) != queryBefore+want {
-				t.Fatalf("%s: control did not use exactly its one combined durable read", control.name)
+			attempt("first", want)
+			if control.remembered {
+				want = 0
 			}
+			attempt("repeat", want)
 		}
 	})
 }

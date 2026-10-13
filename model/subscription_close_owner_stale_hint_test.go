@@ -75,9 +75,9 @@ func legacyDispatchAuthorityState(ctx context.Context, id, balanceId server.Id) 
 	return
 }
 
-// A startup deadline already wakes the correct payer, but its indexed page is
-// empty while the accepted intent still names a source or another payer. The
-// recurring dispatcher must repair just that hint, then normal billing closes.
+// The actual payer's indexed page is empty while the accepted intent still
+// names a source or another payer. The recurring dispatcher must repair just
+// that hint, then normal billing closes.
 func TestLegacyCloseDispatcherRepairsPopulatedStalePaidHint(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -85,18 +85,6 @@ func TestLegacyCloseDispatcherRepairsPopulatedStalePaidHint(t *testing.T) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
 		for _, kind := range []string{"source", "other-payer", "other-source"} {
 			f, id := legacySettlementTestIntent(t, ctx)
-			deadline := server.NowUtc().Truncate(time.Microsecond).Add(-time.Minute)
-			server.Tx(ctx, func(tx server.PgTx) {
-				var locked server.Id
-				server.Raise(tx.QueryRow(ctx, `SELECT contract_id FROM legacy_settlement_intent
-					WHERE contract_id=$1 FOR UPDATE`, id).Scan(&locked))
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, deadline))
-				proof, err := prepareContractExpiryInTx(ctx, tx, id, server.NowUtc())
-				server.Raise(err)
-				if proof == nil {
-					t.Fatal("retained intent fixture did not acquire its ordinary expiry proof")
-				}
-			}, server.TxReadCommitted, server.OptNoRetry())
 			var payerHint *server.Id
 			sourceHint := f.sourceId
 			if kind == "other-payer" {
@@ -106,10 +94,7 @@ func TestLegacyCloseDispatcherRepairsPopulatedStalePaidHint(t *testing.T) {
 			}
 			retainLegacyDispatchStaleHint(t, ctx, id, payerHint, sourceHint)
 			before := legacyDispatchAuthorityState(ctx, id, f.balanceId)
-			owner, err := CloseContractAtDeadline(ctx, id, deadline)
-			if err != nil || owner == nil || *owner != (ContractCloseOwner{Kind: ContractCloseOwnerPayerNetwork, Id: f.sourceNetworkId}) {
-				t.Fatal("startup deadline did not retain the actual financial payer", kind, owner, err)
-			}
+			owner := ContractCloseOwner{Kind: ContractCloseOwnerPayerNetwork, Id: f.sourceNetworkId}
 			client := session.NewLocalClientSession(ctx, "", nil)
 			defer client.Cancel()
 			settings := task.DefaultTaskWorkerSettings()
@@ -121,7 +106,7 @@ func TestLegacyCloseDispatcherRepairsPopulatedStalePaidHint(t *testing.T) {
 				withLegacyPayerQueueTestTx(ctx, []server.Id{owner.Id}, func(tx server.PgTx) {
 					// Use the ordinary scheduler with an already-due fixture wake;
 					// PostgreSQL computes claim eligibility from run_at itself.
-					ScheduleLegacyCloseSettlementsInTx(client, tx, *owner, nil, time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC))
+					ScheduleLegacyCloseSettlementsInTx(client, tx, owner, nil, time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC))
 				})
 				var taskId server.Id
 				server.Db(ctx, func(conn server.PgConn) {
@@ -161,6 +146,44 @@ func TestLegacyCloseDispatcherRepairsPopulatedStalePaidHint(t *testing.T) {
 			runPayer()
 			requireLegacySettlementTestState(t, ctx, f, id, false, true, 989, 0)
 			requireLegacyProviderDurability(t, ctx, f, id, 11)
+		}
+	})
+}
+
+// A deadline close no longer hands a retained intent to its payer task; it
+// settles the contract itself and retires the intent in the same commit. A
+// stale routing hint must not change who pays: the actual payer's grant is
+// debited for the accepted reports and the provider is paid once.
+func TestLegacyDeadlineCloseSettlesStaleHintedIntentWithActualPayer(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := WithProviderWorkSessionSource(t.Context(), nil)
+		for _, kind := range []string{"source", "other-payer", "other-source"} {
+			f, id := legacySettlementTestIntent(t, ctx)
+			deadline := server.NowUtc().Truncate(time.Microsecond).Add(-time.Minute)
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, deadline))
+			}, server.TxReadCommitted, server.OptNoRetry())
+			var payerHint *server.Id
+			sourceHint := f.sourceId
+			if kind == "other-payer" {
+				payerHint = &f.destinationNetworkId
+			} else if kind == "other-source" {
+				sourceHint = server.NewId()
+			}
+			retainLegacyDispatchStaleHint(t, ctx, id, payerHint, sourceHint)
+			owner, err := CloseContractAtDeadline(ctx, id, deadline)
+			if err != nil || owner != nil {
+				t.Fatal("deadline close handed its intent to another owner", kind, owner, err)
+			}
+			requireLegacySettlementTestState(t, ctx, f, id, false, true, 989, 0)
+			requireLegacyProviderDurability(t, ctx, f, id, 11)
+			again, err := CloseContractAtDeadline(ctx, id, deadline)
+			if err != nil || again != nil {
+				t.Fatal("repeated deadline close changed a settled contract", kind, again, err)
+			}
+			requireLegacySettlementTestState(t, ctx, f, id, false, true, 989, 0)
 		}
 	})
 }

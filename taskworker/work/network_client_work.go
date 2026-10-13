@@ -108,31 +108,75 @@ func RemoveDisconnectedNetworkClientsPost(
 // SweepOrphanNetworkClientData is the low-cadence safety net for orphaned
 // network-client dependent rows. RemoveDisconnectedNetworkClients cascades
 // dependents together with the parent deletes on every run, so this only
-// catches orphans from other deletion paths or older releases. Each pass is a
-// full anti-join scan of the dependent tables, which is why it runs daily and
-// not on the reap cadence.
+// catches orphans from other deletion paths or older releases.
+//
+// A pass is far too big for one run: provide_key alone is ~1.1B keys on Main,
+// about 7 hours of slices. The pass is therefore spread the way
+// SweepOrphanContractData's is: each run pages a bounded
+// sweepOrphanNetworkClientMaxRowCount rows and returns where it stopped, Post
+// hands that cursor to the next run, and a full pass completes over days.
+//
+// The row budget is the load-bearing part. Before, a run paged until its 4-hour
+// deadline canceled it, so Post never ran, the weekly cadence was never re-armed,
+// and each error retry restarted the pass at row zero. On 2026-10-11 the task was
+// on its 46th claim, re-walking the same first half of provide_key around the
+// clock for 8% of all buffer reads. Keep the budget well under MaxTime so a run
+// always completes.
 
 type SweepOrphanNetworkClientDataArgs struct {
+	// where the previous run stopped; the zero value starts a fresh pass
+	Cursor model.SweepOrphanCursor `json:"cursor"`
 }
 
 type SweepOrphanNetworkClientDataResult struct {
 	RemovedCount int64 `json:"removed_count"`
+	// where this run stopped, handed back by Post as the next run's start
+	Cursor model.SweepOrphanCursor `json:"cursor"`
+	// every table was fully paged, so the next run starts a fresh pass
+	Done bool `json:"done"`
 }
 
+const (
+	sweepOrphanNetworkClientSliceSize = 50000
+	// rows paged per run: 200 slices, about 4 minutes of provide_key slices on
+	// Main, so a ~1.14B-row pass lands over a few days of resume runs
+	sweepOrphanNetworkClientMaxRowCount = 10 * 1000 * 1000
+	// gap between the resume runs of one pass
+	sweepOrphanNetworkClientResumeTimeout = 30 * time.Minute
+	// bounds a stranded claim if a worker dies mid-run; with the row budget a
+	// run is minutes even at the slowest measured slice, so this is headroom
+	sweepOrphanNetworkClientMaxTime = 1 * time.Hour
+)
+
+// ScheduleSweepOrphanNetworkClientData starts a fresh pass at the next weekly slot.
 func ScheduleSweepOrphanNetworkClientData(clientSession *session.ClientSession, tx server.PgTx) {
+	scheduleSweepOrphanNetworkClientData(
+		clientSession,
+		tx,
+		model.SweepOrphanCursor{},
+		// weekly, anchored off-peak (~10:00 UTC): steady state finds ~zero
+		// orphans, so a weekly pass is plenty, and `bringyourctl db
+		// sweep-orphans` covers on-demand cleanup
+		nextWeeklyOffPeak(server.NowUtc()),
+	)
+}
+
+func scheduleSweepOrphanNetworkClientData(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	cursor model.SweepOrphanCursor,
+	runAt time.Time,
+) {
 	task.ScheduleTaskInTx(
 		tx,
 		SweepOrphanNetworkClientData,
-		&SweepOrphanNetworkClientDataArgs{},
+		&SweepOrphanNetworkClientDataArgs{
+			Cursor: cursor,
+		},
 		clientSession,
 		task.RunOnce("sweep_orphan_network_client_data"),
-		// weekly, anchored off-peak (~10:00 UTC): the bounded cursor sweep pages
-		// entire large child tables per pass (measured ~2% of db time for the
-		// provide_key slices alone) while finding ~zero orphans in steady state
-		// -- a weekly safety net is plenty, and `bringyourctl db sweep-orphans`
-		// covers on-demand cleanup
-		task.RunAt(nextWeeklyOffPeak(server.NowUtc())),
-		task.MaxTime(4*time.Hour),
+		task.RunAt(runAt),
+		task.MaxTime(sweepOrphanNetworkClientMaxTime),
 	)
 }
 
@@ -140,17 +184,20 @@ func SweepOrphanNetworkClientData(
 	sweepOrphanNetworkClientData *SweepOrphanNetworkClientDataArgs,
 	clientSession *session.ClientSession,
 ) (*SweepOrphanNetworkClientDataResult, error) {
-	// Re-enabled 2026-07-14 on the bounded cursor implementation (daily safety
-	// net for orphans left by crashes mid-delete or older releases; the main
-	// reaper cascades dependents inline, so steady state finds ~nothing). The
-	// model fn pages each child table by primary key in sliceSize batches, one
-	// maintenance tx per slice -- unlike the previous NOT EXISTS ... LIMIT form,
-	// which full-scanned each driver table when orphans were rare (prod
-	// incident 2026-07-14).
-	sliceSize := 50000
-	removedCount := model.SweepOrphanNetworkClientData(clientSession.Ctx, sliceSize)
+	// the model fn pages each child table by primary key in sliceSize batches,
+	// one maintenance tx per slice -- unlike the pre-2026-07-14
+	// NOT EXISTS ... LIMIT form, which full-scanned each driver table when
+	// orphans were rare (prod incident 2026-07-14)
+	removedCount, cursor, done := model.SweepOrphanNetworkClientDataFrom(
+		clientSession.Ctx,
+		sweepOrphanNetworkClientData.Cursor,
+		sweepOrphanNetworkClientMaxRowCount,
+		sweepOrphanNetworkClientSliceSize,
+	)
 	return &SweepOrphanNetworkClientDataResult{
 		RemovedCount: removedCount,
+		Cursor:       cursor,
+		Done:         done,
 	}, nil
 }
 
@@ -160,7 +207,18 @@ func SweepOrphanNetworkClientDataPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleSweepOrphanNetworkClientData(clientSession, tx)
+	if sweepOrphanNetworkClientDataResult.Done {
+		// pass complete; start the next one on the weekly cadence
+		ScheduleSweepOrphanNetworkClientData(clientSession, tx)
+		return nil
+	}
+	// mid-pass: resume from where this run stopped
+	scheduleSweepOrphanNetworkClientData(
+		clientSession,
+		tx,
+		sweepOrphanNetworkClientDataResult.Cursor,
+		server.NowUtc().Add(sweepOrphanNetworkClientResumeTimeout),
+	)
 	return nil
 }
 

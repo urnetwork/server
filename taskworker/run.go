@@ -134,6 +134,12 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 	// Once constructed, the original worker belongs to the drain owner even
 	// if later observer startup fails. It must never become another attempt.
 	runtime = worker
+	// Retired-row cleanup is not admission work. It runs on the lifetime in
+	// its own bounded transactions, so it cannot hold the run-once rows that
+	// sibling candidates and live workers need, nor delay readiness.
+	if options.WorkloadProfile == WorkloadProfileProduction {
+		go server.HandleError(func() { reapRetiredTasks(ctx) })
+	}
 	// Retention is a best-effort lifetime observer. Its local reaper must not
 	// inherit the finite scheduling attempt, and storage I/O cannot gate work.
 	go server.HandleError(func() { controller.ApplyBlobRetention(ctx) })

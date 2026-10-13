@@ -3531,7 +3531,7 @@ func measurePerfvarRun(
 	t testing.TB,
 	scenario perfvarScenario,
 	runIndex int,
-) (perfvarRunRecord, error) {
+) (result perfvarRunRecord, resultErr error) {
 	scenarioHash, err := scenario.hash()
 	if err != nil {
 		return perfvarRunRecord{}, err
@@ -3576,7 +3576,8 @@ func measurePerfvarRun(
 		p2pHopCount = resolvedHopCount
 	}
 	var environment *routeEnvironment
-	var closeEnvironment func()
+	var path *fullTunPath
+	var closeEnvironment func() error
 	if executionScenario.Topology == perfvarTopologySplitExchange {
 		if executionScenario.InternalExchangeProfile == nil {
 			return perfvarRunRecord{}, fmt.Errorf("split exchange scenario has no internal profile")
@@ -3589,7 +3590,7 @@ func measurePerfvarRun(
 			*executionScenario.InternalExchangeProfile,
 		)
 		environment = splitEnvironment.fullTunRouteView()
-		closeEnvironment = splitEnvironment.close
+		closeEnvironment = splitEnvironment.closeWithError
 	} else {
 		enableNetworkPeers := fullTunRouteHasP2p(executionScenario.Route) && p2pHopCount == 1
 		environment = newRouteEnvironmentWithNetworkPeers(
@@ -3605,8 +3606,35 @@ func measurePerfvarRun(
 			environment.deviceAccessProfile = *executionScenario.DeviceAccessProfile
 		}
 		environment.providerAccessProfile = executionScenario.ProviderAccessProfile
-		closeEnvironment = environment.close
+		closeEnvironment = environment.closeWithError
 	}
+	// One return boundary owns all completed or partially failed runs. Cleanup
+	// errors cannot erase measurements or replace an earlier primary failure.
+	defer func() {
+		var teardownErr error
+		if path != nil {
+			pathErr := func() error {
+				joinCtx, joinCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer joinCancel()
+				return path.closeAndWait(joinCtx)
+			}()
+			if pathErr != nil {
+				t.Errorf("full-TUN teardown: %v", pathErr)
+				teardownErr = pathErr
+			}
+		}
+		teardownErr = errors.Join(teardownErr, closeEnvironment())
+		if teardownErr != nil {
+			result.Correct = false
+			if result.FailureStage == "" {
+				result.FailureStage = "teardown"
+				result.FailureReason = teardownErr.Error()
+			} else {
+				result.FailureReason += "; teardown: " + teardownErr.Error()
+			}
+		}
+		result.GoroutinesAfter = runtime.NumGoroutine()
+	}()
 	resources := perfvarTunResources(executionScenario.Resource)
 	resources.ApplicationMtu = executionScenario.ApplicationMtu
 	resources.LogicalDataLaneCount = executionScenario.LogicalDataLaneCount
@@ -3626,26 +3654,13 @@ func measurePerfvarRun(
 		record.RouteSetupDuration = routeSetupDuration
 		record.FailureStage = "route-readiness"
 		record.FailureReason = setupErr.Error()
-		closeEnvironment()
-		record.GoroutinesAfter = runtime.NumGoroutine()
 		return record, nil
 	}
-	closed := false
-	defer func() {
-		if !closed {
-			path.close()
-			closeEnvironment()
-		}
-	}()
 	if boundaryErr := path.waitForMeasurementBoundary(ctx); boundaryErr != nil {
 		record := baseRecord()
 		record.RouteSetupDuration = routeSetupDuration
 		record.FailureStage = "measurement-boundary"
 		record.FailureReason = boundaryErr.Error()
-		path.close()
-		closeEnvironment()
-		closed = true
-		record.GoroutinesAfter = runtime.NumGoroutine()
 		return record, nil
 	}
 	carrierBefore, err := beginPerfvarCarrierMeasurement(path)
@@ -3654,10 +3669,6 @@ func measurePerfvarRun(
 		record.RouteSetupDuration = routeSetupDuration
 		record.FailureStage = "measurement-boundary"
 		record.FailureReason = err.Error()
-		path.close()
-		closeEnvironment()
-		closed = true
-		record.GoroutinesAfter = runtime.NumGoroutine()
 		return record, nil
 	}
 	workloadStart := time.Now()
@@ -3673,9 +3684,6 @@ func measurePerfvarRun(
 			path,
 			carrierBefore,
 		)
-		path.close()
-		closeEnvironment()
-		closed = true
 		record := baseRecord()
 		record.Tunneled = tunneled
 		record.Tunneled.Duration = workloadDuration
@@ -3685,7 +3693,6 @@ func measurePerfvarRun(
 		record.RouteSetupDuration = routeSetupDuration
 		record.FailureStage = "workload"
 		record.FailureReason = err.Error()
-		record.GoroutinesAfter = runtime.NumGoroutine()
 		return record, nil
 	}
 	carrier := observePerfvarWorkloadCarrier(
@@ -3703,9 +3710,6 @@ func measurePerfvarRun(
 	if verificationErr == nil && tunneled.CorruptPacketCount != 0 {
 		verificationErr = fmt.Errorf("tunneled corruption count=%d", tunneled.CorruptPacketCount)
 	}
-	path.close()
-	closeEnvironment()
-	closed = true
 	record := baseRecord()
 	record.Tunneled = tunneled
 	record.Carrier = carrier
@@ -3713,7 +3717,6 @@ func measurePerfvarRun(
 	record.Memory = memory
 	record.RouteSetupDuration = routeSetupDuration
 	record.Correct = verificationErr == nil
-	record.GoroutinesAfter = runtime.NumGoroutine()
 	if verificationErr != nil {
 		record.FailureStage = "verification"
 		record.FailureReason = verificationErr.Error()

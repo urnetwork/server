@@ -84,7 +84,7 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 		return nil, protocol.ErrWalletMappingUnavailable
 	}
 	heads := stProviderWalletHeads{providers: authority.ExpectedProviders, network: authority.NetworkWallet, delegation: authority.HotkeyDelegation}
-	return selectStProviderWalletsForEpoch(ctx, expected.ClientKeyRootSigner, scope, heads, false)
+	return selectStProviderWalletsForEpoch(ctx, expected.ClientKeyRootSigner, scope, heads, nil)
 }
 
 // The exact history heads one selection reads: the signed roster's pins, or,
@@ -101,16 +101,40 @@ func stWalletMappingRefusal(err error) bool {
 	return errors.Is(err, protocol.ErrWalletMappingUnavailable) || errors.Is(err, protocol.ErrWalletMappingIntegrity) || errors.Is(err, protocol.ErrWalletMappingCapacity) || errors.Is(err, protocol.ErrWalletMappingNotEffective)
 }
 
-// Every head is verified the same way whichever source pinned it. With
-// unmapRefusals, a provider whose evidence is absent, not effective or refused
-// is left out of the map (unmapped); otherwise any refusal fails the selection.
-func selectStProviderWalletsForEpoch(ctx context.Context, rootSigner common.Address, scope StProviderWalletEpochScope, heads stProviderWalletHeads, unmapRefusals bool) (map[server.Id]*StProviderWallet, error) {
+// No signed evidence at all, or none effective at the epoch. Contradictory or
+// excessive evidence is a refusal even when joined with either outcome, and
+// unavailable evidence without either outcome is a refusal too.
+func stWalletMappingAbsent(err error) bool {
+	if errors.Is(err, protocol.ErrWalletMappingIntegrity) || errors.Is(err, protocol.ErrWalletMappingCapacity) {
+		return false
+	}
+	return errors.Is(err, protocol.ErrWalletMappingAbsent) || errors.Is(err, protocol.ErrWalletMappingNotEffective)
+}
+
+// Every observed provider of one retained selection is in exactly one of
+// Wallets, Absent or Refused. A refused provider's evidence exists and was
+// rejected, so no other source may pay that provider.
+type StRetainedProviderWalletSelection struct {
+	Wallets map[server.Id]*StProviderWallet
+	// no signed evidence at all, or none effective at the epoch
+	Absent  map[server.Id]error
+	Refused map[server.Id]error
+}
+
+// Every head is verified the same way whichever source pinned it. With an
+// outcome, a provider whose evidence is absent, not effective or refused is
+// recorded there and left out of the map; otherwise any refusal fails the
+// selection.
+func selectStProviderWalletsForEpoch(ctx context.Context, rootSigner common.Address, scope StProviderWalletEpochScope, heads stProviderWalletHeads, outcome *StRetainedProviderWalletSelection) (map[server.Id]*StProviderWallet, error) {
 	unmapped := func(clientId [16]byte, err error) bool {
-		if !unmapRefusals || ctx.Err() != nil || !stWalletMappingRefusal(err) {
+		if outcome == nil || ctx.Err() != nil || !stWalletMappingRefusal(err) {
 			return false
 		}
-		if !errors.Is(err, protocol.ErrWalletMappingAbsent) && !errors.Is(err, protocol.ErrWalletMappingNotEffective) {
-			glog.Infof("[st]epoch %d provider %s wallet evidence refused: %v\n", scope.Epoch, server.Id(clientId), err)
+		if stWalletMappingAbsent(err) {
+			outcome.Absent[server.Id(clientId)] = err
+		} else {
+			glog.Warningf("[st]epoch %d provider %s wallet evidence refused: %v\n", scope.Epoch, server.Id(clientId), err)
+			outcome.Refused[server.Id(clientId)] = err
 		}
 		return true
 	}

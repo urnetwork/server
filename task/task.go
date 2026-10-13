@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -856,6 +857,8 @@ func ListPendingTasks(ctx context.Context) []server.Id {
 }
 
 // the task struct has the latest error attached to it
+// Migration 819 dropped pending_task_has_reschedule_error, which no production
+// path read, so this scans pending_task. Keep it off hot or periodic paths.
 func ListRescheduledTasks(ctx context.Context) []server.Id {
 	taskIds := []server.Id{}
 
@@ -882,6 +885,11 @@ func ListRescheduledTasks(ctx context.Context) []server.Id {
 	return taskIds
 }
 
+// Bounds the read of CountAvailableByFunctionName, which HTTP requests
+// reach. The index read takes milliseconds; a read that cannot finish in
+// this bound fails rather than holding the request and its connection.
+var countAvailableByFunctionNameStatementTimeout = 2 * time.Second
+
 // CountAvailableByFunctionName reports how many pending_task rows targeting
 // the given task function are currently available to run (run_at has
 // passed), across all run_once keys -- this excludes rows scheduled for a
@@ -892,7 +900,14 @@ func ListRescheduledTasks(ctx context.Context) []server.Id {
 // run_once key. Counting future-scheduled rows here would make a large
 // backlog of merely-queued work block admission of brand new requests, even
 // though nothing is actually running yet.
-func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunction TaskFunction[T, R]) int {
+//
+// No index covers the bare function name, and the queue holds tens of
+// millions of rows, so a bare `function_name = $1` filter scans the whole
+// table. The read leads with the function poll index's canonical-name
+// expression, then filters the exact name and run_at, in a read-only
+// transaction whose statement is bounded. A failed or timed-out read returns
+// its error, so an admission caller can refuse and release its reservation.
+func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunction TaskFunction[T, R]) (count int, returnErr error) {
 	functionName := NewTaskTarget(taskFunction).TargetFunctionName()
 	// computed in Go, not `now()` in SQL: run_at is a naive `timestamp`
 	// column holding UTC values, and comparing it against `now()`
@@ -901,20 +916,36 @@ func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunctio
 	// model/account_action_rate_limit.go and avoided in
 	// model.ReserveBulkClientRemovalSlot.
 	asOf := server.NowUtc()
-	count := 0
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`SELECT COUNT(*) FROM pending_task WHERE function_name = $1 AND run_at <= $2`,
-			functionName, asOf,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&count))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			count = 0
+			if err, ok := recovered.(error); ok {
+				returnErr = err
+			} else {
+				returnErr = fmt.Errorf("count available %s: %v", functionName, recovered)
 			}
-		})
-	})
-	return count
+		}
+	}()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`SELECT set_config('statement_timeout', $1, true)`,
+			strconv.FormatInt(countAvailableByFunctionNameStatementTimeout.Milliseconds(), 10),
+		))
+		server.Raise(tx.QueryRow(
+			ctx,
+			`
+				SELECT COUNT(*) FROM pending_task
+				WHERE
+					regexp_replace(function_name, '/v[0-9]+', '', 'g') = regexp_replace($1::text, '/v[0-9]+', '', 'g') AND
+					function_name = $1 AND
+					run_at <= $2
+			`,
+			functionName,
+			asOf,
+		).Scan(&count))
+	}, server.TxReadCommitted, pgx.ReadOnly)
+	return
 }
 
 func ListClaimedTasks(ctx context.Context) []server.Id {
@@ -989,18 +1020,25 @@ func RemovePendingTask(ctx context.Context, taskId server.Id) {
 // function that has been removed from the codebase. Such rows can never run
 // again: the runner fails them with ErrTargetNotFound and reschedules on the
 // clamped skew backoff forever, because at claim time deploy version skew is
-// indistinguishable from permanent removal. Call this from the startup
-// seeding (taskworker InitTasks) for each deliberately removed target. The
+// indistinguishable from permanent removal. Call this from the startup reap
+// (taskworker reapRetiredTasks) for each deliberately removed target. The
 // delete ignores claims on purpose — a row for a removed target is claimed
 // and re-errored every few seconds, so a claim filter would race with that
 // cycle. A rollback to a build that still schedules the function re-seeds
 // it, and the next roll-forward cleans it again.
+//
+// No index covers the bare function name, so `function_name = $1` alone scans
+// the whole queue, which in production is tens of millions of rows and takes
+// minutes. The canonical-name expression leads the function poll index; the
+// exact name then filters only that function's rows.
 func RemovePendingTasksForFunctionInTx(ctx context.Context, tx server.PgTx, functionName string) (removedCount int64) {
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 			DELETE FROM pending_task
-			WHERE function_name = $1
+			WHERE
+				regexp_replace(function_name, '/v[0-9]+', '', 'g') = regexp_replace($1::text, '/v[0-9]+', '', 'g') AND
+				function_name = $1
 		`,
 		functionName,
 	))
@@ -1062,57 +1100,6 @@ func KickTasks(ctx context.Context, runOnceKey string) (kickedCount int64) {
 		kickedCount = tag.RowsAffected()
 	}, server.TxReadCommitted, server.OptNoRetry())
 	return
-}
-
-// Remove aged finished owners in bounded, independently admitted groups. An
-// old failed Post can still run, so age never substitutes for its finished-key
-// owner. Busy groups/rows remain for a later sweep without blocking other groups.
-func RemoveFinishedTasks(ctx context.Context, minTime time.Time, postErrorMinTime time.Time) (removeCount int64) {
-	var afterTime *time.Time
-	var afterId server.Id
-	for {
-		server.Raise(ctx.Err())
-		ids := make([]server.Id, 0, taskCompletionBatchLimit)
-		var removed int64
-		server.Tx(ctx, func(tx server.PgTx) {
-			rows, err := tx.Query(ctx, `SELECT task_id,run_end_time FROM finished_task
-                WHERE run_end_time < GREATEST($1::timestamp,$2::timestamp)
-                  AND ((run_end_time < $1 AND (post_error IS NULL OR post_completed)) OR run_end_time < $2)
-                  AND ($3::timestamp IS NULL OR (run_end_time,task_id) > ($3,$4::uuid))
-                ORDER BY run_end_time,task_id LIMIT $5`, minTime, postErrorMinTime, afterTime, afterId, taskCompletionBatchLimit)
-			server.WithPgResult(rows, err, func() {
-				for rows.Next() {
-					var id server.Id
-					var endTime time.Time
-					server.Raise(rows.Scan(&id, &endTime))
-					ids = append(ids, id)
-					afterTime, afterId = &endTime, id
-				}
-			})
-			if len(ids) == 0 {
-				return
-			}
-			keys := make([]server.PgOwnershipKey, len(ids))
-			for index, id := range ids {
-				keys[index] = taskFinishedOwnershipKey(id)
-			}
-			admitted, err := server.TryTxOwnership(ctx, tx, keys)
-			server.Raise(err)
-			if !admitted {
-				return
-			}
-			tag := server.RaisePgResult(tx.Exec(ctx, `WITH removable AS (
-                SELECT task_id FROM finished_task WHERE task_id=ANY($1::uuid[])
-                  AND ((run_end_time < $2 AND (post_error IS NULL OR post_completed)) OR run_end_time < $3)
-                ORDER BY task_id FOR UPDATE SKIP LOCKED
-                ) DELETE FROM finished_task USING removable WHERE finished_task.task_id=removable.task_id`, ids, minTime, postErrorMinTime))
-			removed = tag.RowsAffected()
-		}, server.TxReadCommitted, server.OptNoRetry())
-		removeCount += removed
-		if len(ids) < taskCompletionBatchLimit {
-			return
-		}
-	}
 }
 
 type Task struct {
@@ -2808,43 +2795,4 @@ func (self *TaskWorker) EvalTasks(n int) (
 
 func (self *TaskWorker) Close() {
 	self.cancel()
-}
-
-// PERIODIC CLEANUP
-
-type TaskCleanupArgs struct {
-}
-
-type TaskCleanupResult struct {
-}
-
-func ScheduleTaskCleanup(clientSession *session.ClientSession, tx server.PgTx) {
-	ScheduleTaskInTx(
-		tx,
-		TaskCleanup,
-		&TaskCleanupArgs{},
-		clientSession,
-		RunOnce("task_cleanup"),
-		RunAt(time.Now().Add(1*time.Hour)),
-	)
-}
-
-func TaskCleanup(
-	taskCleanup *TaskCleanupArgs,
-	clientSession *session.ClientSession,
-) (*TaskCleanupResult, error) {
-	minTime := time.Now().Add(-24 * time.Hour)
-	postErrorMinTime := time.Now().Add(-7 * 24 * time.Hour)
-	RemoveFinishedTasks(clientSession.Ctx, minTime, postErrorMinTime)
-	return &TaskCleanupResult{}, nil
-}
-
-func TaskCleanupPost(
-	taskCleanup *TaskCleanupArgs,
-	taskCleanupResult *TaskCleanupResult,
-	clientSession *session.ClientSession,
-	tx server.PgTx,
-) error {
-	ScheduleTaskCleanup(clientSession, tx)
-	return nil
 }

@@ -16,6 +16,9 @@ import (
 func TestLegacySettlementCompletesWithSharedFinancialRowsHeld(t *testing.T) {
 	legacySettlementHeldRowsControl(t, 64, 0)
 }
+
+// The same barrier holds while 512 legacy and 64 marked contracts on one payer
+// close concurrently; both modes then drain with exact conservation.
 func TestLegacySettlementLargeNMixedSamePayer(t *testing.T) {
 	legacySettlementHeldRowsControl(t, 512, 64)
 }
@@ -87,13 +90,20 @@ func legacySettlementHeldRowsControl(t *testing.T, count, markedCount int) {
 		if failed != 0 {
 			t.Fatalf("public settlement queued behind held shared financial rows: %d/%d", failed, count)
 		}
-		var terminal, pending int
+		// Legacy closes keep their reservation and durable intent. Marked closes
+		// commit their outcome and debit journal, and keep their native
+		// reservation until the debit worker confirms consumption.
+		var terminal, pending, markedTerminal, markedDebits int
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1) AND outcome='settled'`, ids).Scan(&terminal))
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=ANY($1)`, ids).Scan(&pending))
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1) AND outcome='settled'`, markedIds).Scan(&markedTerminal))
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_debit_journal WHERE contract_id=ANY($1) AND debit_byte_count=11 AND NOT applied`, markedIds).Scan(&markedDebits))
 		})
-		if terminal != 0 || pending != count || Testing_NetEscrowByteCount(ctx, f.balanceId) != 100*int64(count)+11*int64(markedCount) {
-			t.Fatalf("acknowledgement must retain reservation and durable intent: terminal=%d pending=%d", terminal, pending)
+		reserved := Testing_NetEscrowByteCount(ctx, f.balanceId)
+		if terminal != 0 || pending != count || markedTerminal != markedCount || markedDebits != markedCount || reserved != 100*int64(count+markedCount) {
+			t.Fatalf("acknowledgement must retain reservation and durable intent: terminal=%d pending=%d marked_terminal=%d marked_debits=%d reserved=%d",
+				terminal, pending, markedTerminal, markedDebits, reserved)
 		}
 		busy := 0
 		for shard := range LegacySettlementShardCount {
@@ -141,7 +151,9 @@ func legacySettlementHeldRowsControl(t *testing.T, count, markedCount int) {
 			var swept, provided int64
 			server.Raise(conn.QueryRow(ctx, `SELECT (SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE network_id=$1),
                 (SELECT provided_byte_count FROM account_balance WHERE network_id=$1)`, f.destinationNetworkId).Scan(&swept, &provided))
-			if swept != 11*int64(count+markedCount) || provided != 11*int64(count) {
+			// Marked settlements commit their earnings with the durable debt, so
+			// both modes reach the provider's lifetime total.
+			if swept != 11*int64(count+markedCount) || provided != swept {
 				t.Fatal("mixed provider financial conservation failed", swept, provided)
 			}
 		})

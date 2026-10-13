@@ -74,15 +74,48 @@ func (metricCardinalityProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	if err != nil {
 		return nil, err
 	}
-	redisSource, redisSourceErr := observeRedisLatencyTracking(ctx, env)
-	return evaluateMetricCardinality(host.name, sample, redisSource, redisSourceErr), nil
+	redisSource, redisSourceFailures, redisSourceErr := observeRedisLatencyTracking(ctx, env)
+	findings := evaluateMetricCardinality(host.name, sample, redisSource, redisSourceErr)
+	for _, failure := range redisSourceFailures {
+		findings = append(findings, redisHostCannotObserveFinding(failure, "redis-latencystats"))
+	}
+	return findings, nil
 }
 
-func observeRedisLatencyTracking(ctx context.Context, env *probeEnv) (redisLatencyTrackingObservation, error) {
-	host := env.cfg.hostByRole("redis-cluster")
-	if host == nil {
-		return redisLatencyTrackingObservation{}, fmt.Errorf("redis latencystats source: no redis-cluster host")
+// observeRedisLatencyTracking returns the cluster's latency-tracking census
+// and the redis-cluster hosts whose reduction failed. A failed host's nodes
+// are counted as unreachable, so the census still covers every configured
+// node but cannot prove the policy on them, while the other hosts' drift is
+// still judged. With no host reduced the census itself fails.
+func observeRedisLatencyTracking(ctx context.Context, env *probeEnv) (redisLatencyTrackingObservation, []redisHostFailure, error) {
+	hosts := env.cfg.redisSweepHosts()
+	if len(hosts) == 0 {
+		return redisLatencyTrackingObservation{}, nil, fmt.Errorf("redis latencystats source: no redis-cluster host")
 	}
+	// Each host reduces its own nodes; the cluster observation is their sum,
+	// and every per-host reduction must itself be consistent.
+	total := redisLatencyTrackingObservation{}
+	failures := []redisHostFailure{}
+	for _, host := range hosts {
+		observation, err := observeRedisHostLatencyTracking(ctx, env, host)
+		if err != nil {
+			failures = append(failures, redisHostFailure{host: host, err: err})
+			nodes := len(host.redisNodePorts())
+			observation = redisLatencyTrackingObservation{expected: nodes, unreachable: nodes}
+		}
+		total.expected += observation.expected
+		total.enabled += observation.enabled
+		total.disabled += observation.disabled
+		total.invalid += observation.invalid
+		total.unreachable += observation.unreachable
+	}
+	if len(failures) == len(hosts) {
+		return redisLatencyTrackingObservation{}, nil, redisHostFailuresError(failures)
+	}
+	return total, failures, nil
+}
+
+func observeRedisHostLatencyTracking(ctx context.Context, env *probeEnv, host *host) (redisLatencyTrackingObservation, error) {
 	ports := host.redisNodePorts()
 	if len(ports) == 0 {
 		return redisLatencyTrackingObservation{}, fmt.Errorf("redis latencystats source: no node ports")
@@ -350,7 +383,8 @@ func evaluateMetricCardinality(
 			verify:    "Two fresh runs observe every configured node with latency-tracking disabled; current latencystats series then expire and ordinary head compaction restores Mimir headroom.",
 			playbook:  "SIGNALS.md §11.20d and §11.20a",
 		})
-	} else if redisSourceErr == nil {
+	} else if redisSourceErr == nil && redisSource.invalid == 0 && redisSource.unreachable == 0 {
+		// an unread node, or a whole unread host, may still be enabled
 		findings = append(findings, healthyFinding(
 			"observability/metric-cardinality", tierWarn, "redis-latencystats-source-drift", "redis-cluster",
 		))

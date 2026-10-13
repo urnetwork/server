@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -61,49 +62,99 @@ func legacyMirrorTestDelete(ctx context.Context, tx server.PgTx, id server.Id, p
 	}
 }
 
-func TestLegacyNetEscrowMirrorProducerBeforeDeleteRetriesAndRequeues(t *testing.T) {
+// Publishes mirror owners the way a financial producer does: in a no-retry
+// read-committed transaction that first admits the balances' grant and mirror
+// queue keys. Optional changes run in that transaction before publication.
+func legacyMirrorTestPublish(t testing.TB, ctx context.Context, balanceIds []server.Id, changes func(server.PgTx)) {
+	t.Helper()
+	server.Tx(ctx, func(tx server.PgTx) {
+		admitted, err := server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(nil, balanceIds))
+		server.Raise(err)
+		if !admitted {
+			panic("mirror producer could not admit its queue keys")
+		}
+		if changes != nil {
+			changes(tx)
+		}
+		queueLegacyNetEscrowMirrorsInTx(ctx, tx, balanceIds)
+	}, server.TxReadCommitted, server.OptNoRetry())
+}
+
+// The queue key a finished mirror task's completion owns.
+func legacyMirrorTestQueueKey(owner *task.Task) server.PgOwnershipKey {
+	runOnceKey := owner.RunOnceKey
+	return task.PendingTaskOwnershipKey(owner.TaskId, &runOnceKey)
+}
+
+// Runs the ordinary finalizer's delete and post the way task completion does:
+// in an owned no-retry transaction over the finished task's queue key.
+func legacyMirrorTestFinalize(ctx context.Context, owner *task.Task, post func(server.PgTx) ([]server.PostFunction, error)) {
+	server.OwnedTx(ctx, []server.PgOwnershipKey{legacyMirrorTestQueueKey(owner)}, func(tx server.PgTx) {
+		legacyMirrorTestDelete(ctx, tx, owner.TaskId, post)
+	}, server.TxReadCommitted, server.OptNoRetry())
+}
+
+// A financial producer owns the mirror queue key with an uncommitted newer
+// revision. The finalizer of the older owner waits for that key before it reads
+// the pending row, then requeues a replacement for the committed revision.
+func TestLegacyNetEscrowMirrorProducerBeforeDeleteRequeues(t *testing.T) {
 	legacyMirrorTestEnv(t, func(t testing.TB, ctx context.Context) {
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		contract, posts := createNetEscrowOrderingTestContract(ctx, f, 17)
 		server.RunPosts(ctx, posts...)
-		server.Tx(ctx, func(tx server.PgTx) { queueLegacyNetEscrowMirrorsInTx(ctx, tx, []server.Id{f.balanceId}) })
+		ids := []server.Id{f.balanceId}
+		legacyMirrorTestPublish(t, ctx, ids, nil)
 		owner := legacyMirrorTestOwner(t, ctx, f.balanceId)
 		old, post := legacyMirrorTestRun(t, ctx, f.balanceId)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		producer, err := conn.Begin(ctx)
+		producer, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
+		admitted, err := server.TryTxOwnership(ctx, producer, legacyFinancialOwnershipKeys(nil, ids))
 		server.Raise(err)
-		defer producer.Rollback(context.Background())
+		if !admitted {
+			t.Fatal("producer did not admit its financial queue keys")
+		}
 		server.RaisePgResult(producer.Exec(ctx, `SELECT 1 FROM transfer_balance WHERE balance_id=$1 FOR UPDATE`, f.balanceId))
 		server.RaisePgResult(producer.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=23 WHERE contract_id=$1 AND balance_id=$2`, contract.ContractId, f.balanceId))
-		queueLegacyNetEscrowMirrorsInTx(ctx, producer, []server.Id{f.balanceId})
-		blocker := contractLifecycleTestBackendPid(t, ctx, producer)
+		queueLegacyNetEscrowMirrorsInTx(ctx, producer, ids)
+		waiting := make(chan struct{})
+		var waitOnce sync.Once
+		observed := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+			if event.Kind == server.PgOwnershipWaiting {
+				waitOnce.Do(func() { close(waiting) })
+			}
+		})
 		var attempts atomic.Int64
 		done := make(chan error, 1)
 		go func() {
 			var finishErr error
 			server.HandleError(func() {
-				server.Tx(ctx, func(tx server.PgTx) {
+				server.OwnedTx(observed, []server.PgOwnershipKey{legacyMirrorTestQueueKey(owner)}, func(tx server.PgTx) {
 					attempts.Add(1)
-					// Establish the same repeatable-read snapshot as the ordinary
-					// finished-row copy before DELETE waits for this producer.
+					// Read the row the ordinary finished-row copy reads before
+					// its delete; queue ownership precedes this snapshot.
 					var raw string
 					server.Raise(tx.QueryRow(ctx, `SELECT args_json FROM pending_task WHERE task_id=$1`, owner.TaskId).Scan(&raw))
 					legacyMirrorTestDelete(ctx, tx, owner.TaskId, post)
-				})
+				}, server.TxReadCommitted, server.OptNoRetry())
 			}, func(err error) { finishErr = err })
 			done <- finishErr
 		}()
-		requireContractLifecycleBlockedBy(t, ctx, producer, blocker)
-		server.Raise(producer.Commit(ctx))
+		select {
+		case <-waiting:
+		case err = <-done:
+			t.Fatal("finalizer did not wait for the producer's queue owner", err)
+		case <-ctx.Done():
+			t.Fatal("finalizer never reached the producer's queue owner")
+		}
+		server.Raise(finish(true))
 		select {
 		case err = <-done:
 			server.Raise(err)
 		case <-ctx.Done():
 			t.Fatal("producer-before-delete finalization did not join")
 		}
-		if attempts.Load() < 2 {
-			t.Fatal("fixture did not force the stale finalizer snapshot to retry")
+		if attempts.Load() != 1 {
+			t.Fatal("finalizer read the pending row before the producer released its queue owner", attempts.Load())
 		}
 		next := legacyMirrorTestOwner(t, ctx, f.balanceId)
 		if next.TaskId == owner.TaskId {
@@ -116,51 +167,72 @@ func TestLegacyNetEscrowMirrorProducerBeforeDeleteRetriesAndRequeues(t *testing.
 	})
 }
 
+// The finalizer deletes the older owner under its queue key and holds before
+// commit. It owns no financial lock, and a producer cannot publish beside it.
+// The producer's retry after that commit leaves a fresh owner.
 func TestLegacyNetEscrowMirrorDeleteBeforeProducerLeavesFreshOwner(t *testing.T) {
 	legacyMirrorTestEnv(t, func(t testing.TB, ctx context.Context) {
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		contract, posts := createNetEscrowOrderingTestContract(ctx, f, 17)
 		server.RunPosts(ctx, posts...)
-		server.Tx(ctx, func(tx server.PgTx) { queueLegacyNetEscrowMirrorsInTx(ctx, tx, []server.Id{f.balanceId}) })
+		ids := []server.Id{f.balanceId}
+		legacyMirrorTestPublish(t, ctx, ids, nil)
 		owner := legacyMirrorTestOwner(t, ctx, f.balanceId)
 		_, post := legacyMirrorTestRun(t, ctx, f.balanceId)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		finisher, err := conn.Begin(ctx)
-		server.Raise(err)
-		defer finisher.Rollback(context.Background())
-		legacyMirrorTestDelete(ctx, finisher, owner.TaskId, post)
-		blocker := contractLifecycleTestBackendPid(t, ctx, finisher)
-		done := make(chan error, 1)
-		grantAvailable := make(chan struct{})
+		deleted := make(chan struct{})
+		release := make(chan struct{})
+		finalized := make(chan error, 1)
 		go func() {
-			var producerErr error
+			var finishErr error
 			server.HandleError(func() {
-				server.Tx(ctx, func(tx server.PgTx) {
-					// The finishing transaction must own no financial lock.
-					server.RaisePgResult(tx.Exec(ctx, `SELECT 1 FROM transfer_balance WHERE balance_id=$1 FOR UPDATE NOWAIT`, f.balanceId))
-					close(grantAvailable)
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=29 WHERE contract_id=$1 AND balance_id=$2`, contract.ContractId, f.balanceId))
-					queueLegacyNetEscrowMirrorsInTx(ctx, tx, []server.Id{f.balanceId})
+				server.OwnedTx(ctx, []server.PgOwnershipKey{legacyMirrorTestQueueKey(owner)}, func(tx server.PgTx) {
+					legacyMirrorTestDelete(ctx, tx, owner.TaskId, post)
+					close(deleted)
+					select {
+					case <-release:
+					case <-ctx.Done():
+						server.Raise(ctx.Err())
+					}
 				}, server.TxReadCommitted, server.OptNoRetry())
-			}, func(err error) { producerErr = err })
-			done <- producerErr
+			}, func(err error) { finishErr = err })
+			finalized <- finishErr
 		}()
+		releaseFinalizer := sync.OnceFunc(func() { close(release) })
+		defer releaseFinalizer()
 		select {
-		case <-grantAvailable:
-		case err = <-done:
-			t.Fatalf("finalization retained financial grant ownership: %v", err)
+		case <-deleted:
+		case err := <-finalized:
+			t.Fatal("finalizer did not reach its delete", err)
 		case <-ctx.Done():
-			t.Fatal("producer grant probe did not complete")
+			t.Fatal("finalizer delete did not complete")
 		}
-		requireContractLifecycleBlockedBy(t, ctx, finisher, blocker)
-		server.Raise(finisher.Commit(ctx))
+		admitted := false
+		var probeErr error
+		server.HandleError(func() {
+			server.Tx(ctx, func(tx server.PgTx) {
+				// The finishing transaction must own no financial lock.
+				server.RaisePgResult(tx.Exec(ctx, `SELECT 1 FROM transfer_balance WHERE balance_id=$1 FOR UPDATE NOWAIT`, f.balanceId))
+				var err error
+				admitted, err = server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(nil, ids))
+				server.Raise(err)
+			}, server.TxReadCommitted, server.OptNoRetry())
+		}, func(err error) { probeErr = err })
+		if probeErr != nil {
+			t.Fatalf("finalization retained financial grant ownership: %v", probeErr)
+		}
+		if admitted {
+			t.Fatal("producer admitted the mirror queue key beside its finalizer")
+		}
+		releaseFinalizer()
 		select {
-		case err = <-done:
+		case err := <-finalized:
 			server.Raise(err)
 		case <-ctx.Done():
 			t.Fatal("delete-before-producer did not join")
 		}
+		legacyMirrorTestPublish(t, ctx, ids, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=29 WHERE contract_id=$1 AND balance_id=$2`, contract.ContractId, f.balanceId))
+		})
 		if legacyMirrorTestOwner(t, ctx, f.balanceId).TaskId == owner.TaskId {
 			t.Fatal("producer following a committed delete lost its new owner")
 		}
@@ -174,17 +246,15 @@ func TestLegacyNetEscrowMirrorDeleteBeforeProducerLeavesFreshOwner(t *testing.T)
 func TestLegacyNetEscrowMirrorFinancialRollbackWarmInvalidationAndOldReader(t *testing.T) {
 	legacyMirrorTestEnv(t, func(t testing.TB, ctx context.Context) {
 		f, id := legacySettlementTestIntent(t, ctx)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
-		defer tx.Rollback(context.Background())
+		// The owner gets a real owned server transaction whose end the test chooses.
+		tx, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		_, complete, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
 		server.Raise(err)
 		if !complete || busy {
 			t.Fatal("rollback did not reach the actual financial transition")
 		}
-		server.Raise(tx.Rollback(ctx))
+		server.Raise(finish(false))
 		server.Db(ctx, func(conn server.PgConn) {
 			var count int
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE function_name=$1`, legacyColdPageMirrorFunction).Scan(&count))
@@ -196,7 +266,7 @@ func TestLegacyNetEscrowMirrorFinancialRollbackWarmInvalidationAndOldReader(t *t
 		server.Tx(ctx, func(tx server.PgTx) {
 			posts, complete, busy, _, err = flushLegacySettlementInTx(ctx, tx, id)
 			server.Raise(err)
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if !complete || busy {
 			t.Fatal("committed financial owner did not finish")
 		}
@@ -257,7 +327,7 @@ func TestLegacyNetEscrowMirrorLostReplyDeletedBalanceAndScope(t *testing.T) {
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		_, posts := createNetEscrowOrderingTestContract(ctx, f, 17)
 		server.RunPosts(ctx, posts...)
-		server.Tx(ctx, func(tx server.PgTx) { queueLegacyNetEscrowMirrorsInTx(ctx, tx, []server.Id{f.balanceId}) })
+		legacyMirrorTestPublish(t, ctx, []server.Id{f.balanceId}, nil)
 		owner := legacyMirrorTestOwner(t, ctx, f.balanceId)
 		hook := &legacyMirrorLostReplyHook{}
 		server.Redis(ctx, func(r server.RedisClient) { r.AddHook(hook) })
@@ -270,12 +340,11 @@ func TestLegacyNetEscrowMirrorLostReplyDeletedBalanceAndScope(t *testing.T) {
 		if Testing_NetEscrowByteCount(ctx, f.balanceId) != 17 {
 			t.Fatal("reply replay changed exact reservation")
 		}
-		server.Tx(ctx, func(tx server.PgTx) {
+		legacyMirrorTestPublish(t, ctx, []server.Id{f.balanceId}, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance WHERE balance_id=$1`, f.balanceId))
-			queueLegacyNetEscrowMirrorsInTx(ctx, tx, []server.Id{f.balanceId})
 		})
 		_, finish := legacyMirrorTestRun(t, ctx, f.balanceId)
-		server.Tx(ctx, func(tx server.PgTx) { legacyMirrorTestDelete(ctx, tx, owner.TaskId, finish) })
+		legacyMirrorTestFinalize(ctx, owner, finish)
 		if len(task.GetTasks(ctx, owner.TaskId)) != 0 || Testing_NetEscrowByteCount(ctx, f.balanceId) != 0 || len(settlementCacheSnapshot(ctx, []server.Id{f.balanceId})) != 0 {
 			t.Fatal("deleted balance lost tombstone repair or recreated cache authority")
 		}
@@ -299,9 +368,8 @@ func TestLegacyNetEscrowMirrorColdOwnerAllowsSameGrantClose(t *testing.T) {
 		_, posts := createNetEscrowOrderingTestContract(ctx, f, 23)
 		server.RunPosts(ctx, posts...)
 		native := createRedisAdmissionTest(ctx, f, 31)
-		server.Tx(ctx, func(tx server.PgTx) {
+		legacyMirrorTestPublish(t, ctx, []server.Id{f.balanceId}, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, f.balanceId))
-			queueLegacyNetEscrowMirrorsInTx(ctx, tx, []server.Id{f.balanceId})
 		})
 		owner := legacyMirrorTestOwner(t, ctx, f.balanceId)
 		restore := installLegacyColdPageCensusBarrier(t, ctx)
@@ -345,7 +413,7 @@ func TestLegacyNetEscrowMirrorColdOwnerAllowsSameGrantClose(t *testing.T) {
 		if first.err != nil || first.result == nil || first.post == nil {
 			t.Fatalf("released cold owner failed: %v", first.err)
 		}
-		server.Tx(ctx, func(tx server.PgTx) { legacyMirrorTestDelete(ctx, tx, owner.TaskId, first.post) })
+		legacyMirrorTestFinalize(ctx, owner, first.post)
 		if legacyMirrorTestOwner(t, ctx, f.balanceId).TaskId == owner.TaskId {
 			t.Fatal("cold reader dropped the overtaking financial revision")
 		}

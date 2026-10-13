@@ -85,8 +85,10 @@ func init() {
 // createCompanionTransferEscrow's plain origin read without its prober
 // reservation column. The two branches are disjoint on open, so the global
 // earliest is the earlier of each branch's earliest, and each branch is a
-// bounded index range. $1 and $2 are the origin's source and destination, the
-// companion's reverse; $3 is the earliest close time of a lingering origin.
+// bounded index range; the closed branch is bounded by the contract id (see
+// CompanionOriginCloseLinger). $1 and $2 are the origin's source and
+// destination, the companion's reverse; $3 is the earliest close time of a
+// lingering origin.
 const zeroEscrowPlainOriginSql = `
 	SELECT contract_id
 	FROM (
@@ -109,14 +111,19 @@ const zeroEscrowPlainOriginSql = `
 
 		(
 			SELECT contract_id, create_time
-			FROM transfer_contract
-			WHERE
-				open = false AND
-				$3 <= close_time AND
-				COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-				source_id = $1 AND
-				destination_id = $2 AND
-				companion_contract_id IS NULL
+			FROM (
+				SELECT contract_id, create_time
+				FROM transfer_contract
+				WHERE
+					open = false AND
+					$3 <= close_time AND
+					contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
+					source_id = $1 AND
+					destination_id = $2 AND
+					companion_contract_id IS NULL
+				OFFSET 0
+			) AS closed_origin
 			ORDER BY create_time ASC
 			LIMIT 1
 		)
@@ -159,14 +166,19 @@ const zeroEscrowChainedOriginSql = `
 
 		(
 			SELECT contract_id, create_time, payer_network_id, source_network_id, destination_network_id
-			FROM transfer_contract
-			WHERE
-				open = false AND
-				$3 <= close_time AND
-				COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-				source_id = $1 AND
-				destination_id = $2 AND
-				companion_contract_id IS NOT NULL
+			FROM (
+				SELECT contract_id, create_time, payer_network_id, source_network_id, destination_network_id
+				FROM transfer_contract
+				WHERE
+					open = false AND
+					$3 <= close_time AND
+					contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
+					source_id = $1 AND
+					destination_id = $2 AND
+					companion_contract_id IS NOT NULL
+				OFFSET 0
+			) AS closed_companion_origin
 			ORDER BY create_time ASC
 			LIMIT 1
 		)
@@ -179,7 +191,8 @@ const zeroEscrowChainedOriginSql = `
 // The escrow insert of createTransferEscrowInTx without a payer. A null
 // payer_network_id and no transfer_escrow row are what settle the contract on
 // the no-escrow path (validateContractFreeSettlementOwnerInTx). $7 is the
-// companion origin, which also decides the usage origin.
+// companion origin, which also decides the usage origin. $10 is the stream id
+// bound at insert (see contract_stream_binding.go), or null.
 const zeroEscrowContractInsertSql = `
 	WITH creation_clock AS MATERIALIZED (
 		SELECT clock_timestamp() AT TIME ZONE 'UTC' AS create_time
@@ -195,12 +208,14 @@ const zeroEscrowContractInsertSql = `
 		usage_origin_is_source,
 		create_time,
 		priority,
-		expiration_time
+		expiration_time,
+		stream_id
 	)
 	SELECT
 		$1, $2, $3, $4, $5, $6, $7, ($7::uuid IS NULL),
 		create_time, $8,
-		date_trunc('milliseconds', create_time) + $9 * INTERVAL '1 millisecond'
+		date_trunc('milliseconds', create_time) + $9 * INTERVAL '1 millisecond',
+		$10
 	FROM creation_clock
 	RETURNING expiration_time
 `
@@ -217,6 +232,9 @@ func CreateZeroEscrowContract(
 ) (transferEscrow *TransferEscrow, returnErr error) {
 	// Pin before acquisition, as the other creation paths do.
 	ctx = providerWorkSessionContext(ctx)
+	// the stream state the insert binds is read before the transaction
+	// (contract_stream_binding.go)
+	resolveContractStreamBinding(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	server.Tx(ctx, func(tx server.PgTx) {
 		transferEscrow, returnErr = createZeroEscrowContractInTx(
@@ -263,6 +281,9 @@ func CreateZeroEscrowCompanionContract(
 	// Pin before acquisition, as the other creation paths do.
 	ctx = providerWorkSessionContext(ctx)
 	stampClientId := destinationId
+	// the stream state the insert binds is read before the transaction
+	// (contract_stream_binding.go)
+	resolveContractStreamBinding(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	server.Tx(ctx, func(tx server.PgTx) {
 		transferEscrow, returnErr, stampClientId = nil, nil, destinationId
@@ -373,6 +394,7 @@ func createZeroEscrowContractInTx(
 	}
 
 	contractId := server.NewId()
+	streamId := bindContractStreamAtInsert(ctx, contractId)
 	var expirationTime time.Time
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		batch.Queue(
@@ -386,6 +408,7 @@ func createZeroEscrowContractInTx(
 			companionContractId,
 			priority,
 			DefaultContractExpiration.Milliseconds(),
+			streamId,
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
 		batch.Queue(
 			contractExtenderInsertSql,

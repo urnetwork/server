@@ -601,3 +601,68 @@ func TestReliabilityPoints(t *testing.T) {
 
 	})
 }
+
+// The reliability USDC (`reliability_subsidy_per_payout_usd`) is per subsidy
+// period, like the reliability points, so a plan pays it for the part of the
+// period its window covers. Without a provider payout transition the planner
+// paid the full amount on every plan; plans ran every 4 days in August and
+// September 2026 and paid it about 7.5 times per period.
+func TestReliabilitySubsidyScalesToPlanWindow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.1:20000", handlerId)
+		connect.AssertEqual(t, err, nil)
+		location := &Location{
+			LocationType: LocationTypeCity,
+			City:         "synthetic-city",
+			Region:       "synthetic-region",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, location)
+		connect.AssertEqual(t, SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{}), nil)
+
+		now := server.NowUtc()
+		AddClientReliabilityStats(
+			ctx,
+			networkId,
+			clientId,
+			server.ClientIpHashForAddr(netip.MustParseAddr("192.0.2.1")),
+			now,
+			&ClientReliabilityStats{
+				ConnectionEstablishedCount: uint64(1),
+				ProvideEnabledCount:        uint64(1),
+				ReceiveMessageCount:        uint64(1),
+				ReceiveByteCount:           ByteCount(1024),
+				SendMessageCount:           uint64(1),
+				SendByteCount:              ByteCount(1024),
+			},
+		)
+
+		// a 4-day plan, scaled as the planner scales its window
+		subsidyConfig := EnvSubsidyConfig()
+		subsidyScale := float64((4*24*time.Hour)/time.Minute) / float64(subsidyConfig.Duration()/time.Minute)
+		if 1 <= subsidyScale {
+			t.Fatalf("a 4-day plan must cover part of the %s subsidy period", subsidyConfig.Duration())
+		}
+		reliabilitySubsidies := calculateReliabilityPayout(ctx, now.Add(-4*ReliabilityBlockDuration), subsidyScale)
+		connect.AssertEqual(t, len(reliabilitySubsidies), 1)
+
+		// the one reliable network holds all of the reliability weight
+		expectedUsdc := UsdToNanoCents(float64(subsidyConfig.ReliabilitySubsidyPerPayoutUsd) * subsidyScale)
+		if difference := reliabilitySubsidies[networkId].Usdc - expectedUsdc; difference < -1 || 1 < difference {
+			t.Fatalf(
+				"a 4-day plan paid $%.6f of reliability subsidy, expected $%.6f ($%d per %s)",
+				NanoCentsToUsd(reliabilitySubsidies[networkId].Usdc),
+				NanoCentsToUsd(expectedUsdc),
+				subsidyConfig.ReliabilitySubsidyPerPayoutUsd,
+				subsidyConfig.Duration(),
+			)
+		}
+	})
+}

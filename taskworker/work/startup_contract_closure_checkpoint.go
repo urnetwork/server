@@ -98,6 +98,10 @@ func (self *startupContractClosureCheckpoint) write(ctx context.Context, tx serv
 }
 
 func (self *startupContractClosureTarget) Run(ctx context.Context, queued *task.Task) (any, func(server.PgTx) ([]server.PostFunction, error), error) {
+	if queued.RunOnceKey == task.RunOnce(retiredStartupContractClosureKey).String() {
+		// Finishing removes the retired pass; nothing schedules it again.
+		return &ScheduleOpenContractClosuresResult{}, func(server.PgTx) ([]server.PostFunction, error) { return nil, nil }, nil
+	}
 	args, err := parseStartupContractClosureCheckpoint(queued.ArgsJson)
 	if err != nil {
 		return nil, nil, err

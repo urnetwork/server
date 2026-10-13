@@ -868,6 +868,9 @@ func TestProviderTunnelMultiClientSettingsDisableNestedProviderProbe(t *testing.
 		t.Fatal("test precondition: shared defaults no longer enable ProviderProbe")
 	}
 	expected.ProviderProbe = false
+	// the measured re-dial cadence of a bounded probe (see
+	// TestOpenRetiresEveryProbeIdentity)
+	expected.FixedDestinationRetryMin = 0
 
 	settings := providerTunnelMultiClientSettings()
 	if settings.SecurityPolicyGenerator == nil || expected.SecurityPolicyGenerator == nil {
@@ -885,7 +888,7 @@ func TestProviderTunnelMultiClientSettingsDisableNestedProviderProbe(t *testing.
 	actualComparable.SecurityPolicyGenerator = nil
 	expectedComparable.SecurityPolicyGenerator = nil
 	if !reflect.DeepEqual(actualComparable, expectedComparable) {
-		t.Fatal("provider tunnel settings must preserve every default except ProviderProbe=false")
+		t.Fatal("provider tunnel settings must preserve every default except ProviderProbe=false and an unpaced re-dial")
 	}
 	settings.ProviderProbe = true
 	if !connect.DefaultMultiClientSettings().ProviderProbe {
@@ -1029,6 +1032,8 @@ func TestCloseTunnelPartsJoinsGeneratorOwnership(t *testing.T) {
 
 	err := closeTunnelParts(
 		t.Context(),
+		func() { order = append(order, "resolver") },
+		func(context.Context) { order = append(order, "drain") },
 		func() { order = append(order, "cancel-data") },
 		func() error { order = append(order, "tun"); return nil },
 		pumpDone,
@@ -1043,7 +1048,7 @@ func TestCloseTunnelPartsJoinsGeneratorOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("closeTunnelParts: %v", err)
 	}
-	if want := []string{"cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}; !reflect.DeepEqual(order, want) {
+	if want := []string{"resolver", "drain", "cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}; !reflect.DeepEqual(order, want) {
 		t.Fatalf("close order = %v, want %v", order, want)
 	}
 	if lifecycleCtx.Err() == nil {
@@ -1064,6 +1069,8 @@ func TestCloseTunnelPartsAttemptsEveryOwnerAfterError(t *testing.T) {
 
 	err := closeTunnelParts(
 		t.Context(),
+		func() { order = append(order, "resolver") },
+		func(context.Context) { order = append(order, "drain") },
 		func() { order = append(order, "cancel-data") },
 		func() error { order = append(order, "tun"); return errors.New("tun close failed") },
 		pumpDone,
@@ -1075,7 +1082,7 @@ func TestCloseTunnelPartsAttemptsEveryOwnerAfterError(t *testing.T) {
 	if err == nil {
 		t.Fatal("closeTunnelParts returned nil despite close failures")
 	}
-	if want := []string{"cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}; !reflect.DeepEqual(order, want) {
+	if want := []string{"resolver", "drain", "cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}; !reflect.DeepEqual(order, want) {
 		t.Fatalf("close order = %v, want %v", order, want)
 	}
 }

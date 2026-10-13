@@ -18,14 +18,17 @@ func TestLegacySettlementOwnerReadsOnce(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
 		f, id := legacySettlementTestIntent(t, ctx)
-		owner := &legacyGrantOwnerDiagnosticTx{afterGrant: func() {}}
-		trace := &legacyFinancialLatencyTx{PgTx: owner, owner: owner}
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
+		owner := &legacyGrantOwnerDiagnostic{afterGrant: func() {}}
+		trace := &legacyFinancialLatency{owner: owner}
 		var posts []func() any
 		server.Tx(ctx, func(tx server.PgTx) {
-			owner.PgTx = tx
 			var completed, busy bool
 			var err error
-			posts, completed, busy, _, err = flushLegacySettlementInTx(ctx, trace, id)
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, trace.hook(), owner.hook())
+			defer unhook()
+			posts, completed, busy, _, err = flushLegacySettlementInTx(hooked, tx, id)
 			server.Raise(err)
 			if !completed || busy {
 				t.Fatal("synthetic owner did not reach the financial commit")

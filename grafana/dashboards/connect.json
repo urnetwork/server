@@ -854,6 +854,1269 @@
                     "legendFormat": "{{host}} {{block}} {{instance}}"
                 }
             ]
+        },
+        {
+            "id": 27,
+            "type": "row",
+            "title": "transport admission, credential refusals and provider intent",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 86
+            }
+        },
+        {
+            "id": 28,
+            "type": "timeseries",
+            "title": "H1 handshake results / s",
+            "description": "One result per H1 admission. upgraded means the carrier opened; authenticated means authorization also succeeded.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 87
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (carrier, stage, result) (rate(urnetwork_connect_h1_handshake_results_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{carrier}} {{stage}} {{result}}"
+                }
+            ]
+        },
+        {
+            "id": 29,
+            "type": "timeseries",
+            "title": "authenticated H1 sessions",
+            "description": "Authenticated H1 transports whose handler has not finished cleanup, and closes by the first observed terminal event. A close reason is an observation, not a causal verdict.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 87
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (carrier) (urnetwork_connect_h1_sessions_active{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "active {{carrier}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (carrier, reason) (rate(urnetwork_connect_h1_sessions_closed_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "closed / s {{carrier}} {{reason}}"
+                }
+            ]
+        },
+        {
+            "id": 30,
+            "type": "timeseries",
+            "title": "mean authenticated H1 session duration",
+            "description": "From successful authorization and upgrade through handler cleanup, for completed authenticated transports only, from the histogram sum and count.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 95
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (carrier) (rate(urnetwork_connect_h1_session_duration_seconds_sum{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (carrier) (rate(urnetwork_connect_h1_session_duration_seconds_count{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+                    "legendFormat": "{{carrier}}"
+                }
+            ]
+        },
+        {
+            "id": 31,
+            "type": "timeseries",
+            "title": "credential refusals / s",
+            "description": "Transport admissions refused for the credential itself, not for a failed check, by carrier, and the ten app releases refused most.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 95
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (carrier) (rate(urnetwork_connect_credential_refusals_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{carrier}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "topk(10, sum by (app_version) (rate(urnetwork_connect_credential_refusals_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])))",
+                    "legendFormat": "release {{app_version}}"
+                }
+            ]
+        },
+        {
+            "id": 32,
+            "type": "timeseries",
+            "title": "held WebSocket credential refusals",
+            "description": "Refusals held open before their authorization close: currently held, offers to the hold by outcome, and releases by cause.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 103
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(urnetwork_connect_refusal_holds_active{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "held"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (outcome) (rate(urnetwork_connect_refusal_holds_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "offered / s {{outcome}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (cause) (rate(urnetwork_connect_refusal_hold_releases_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "released / s {{cause}}"
+                }
+            ]
+        },
+        {
+            "id": 33,
+            "type": "timeseries",
+            "title": "client limit kicks / s",
+            "description": "Client limit closes sent (enforced) or computed but not sent while enforce_concurrent_clients is false (shadow).",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 103
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (transport, cause, mode) (rate(urnetwork_connect_client_limit_kicks_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{transport}} {{cause}} {{mode}}"
+                }
+            ]
+        },
+        {
+            "id": 34,
+            "type": "timeseries",
+            "title": "transports by declared provide intent",
+            "description": "Live transports by declared provide intent, and intent check store errors per second. A failed check fails open and retries at its next observation.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 111
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (transport, intent) (urnetwork_connect_provide_intent_connections{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{transport}} {{intent}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (transport) (rate(urnetwork_connect_provide_intent_check_errors_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "check errors / s {{transport}}"
+                }
+            ]
+        },
+        {
+            "id": 35,
+            "type": "timeseries",
+            "title": "public provider connections by app release (top 15)",
+            "description": "Connections from clients that provide publicly, by app release: year.month.day for recent releases, year.month for older ones, unknown when none was sent.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 111
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "topk(15, sum by (app_version) (urnetwork_connect_provider_connections{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}))",
+                    "legendFormat": "{{app_version}}"
+                }
+            ]
+        },
+        {
+            "id": 36,
+            "type": "timeseries",
+            "title": "contract allowance outcomes / s",
+            "description": "Admitted Redis or source check outcomes and refused unchecked offers. The temporary source fallback is bounded separately.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 119
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (outcome) (rate(urnetwork_connect_contract_allowance_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{outcome}}"
+                }
+            ]
+        },
+        {
+            "id": 37,
+            "type": "timeseries",
+            "title": "destination resident lookups",
+            "description": "Lookup attempts per second (initial and reconnect are distinct; queue is the pending data at admission) and mean wall residence including failed or canceled calls. Neither is CPU time or provider evidence.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 119
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (phase, queue) (rate(urnetwork_connect_resident_forward_lookup_attempts_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "attempts / s {{phase}} {{queue}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (phase) (rate(urnetwork_connect_resident_forward_lookup_seconds_sum{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (phase) (rate(urnetwork_connect_resident_forward_lookup_seconds_count{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+                    "legendFormat": "mean seconds {{phase}}"
+                }
+            ]
+        },
+        {
+            "id": 38,
+            "type": "row",
+            "title": "control frames, contract creation and companion origins — all ingresses",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 127
+            }
+        },
+        {
+            "id": 39,
+            "type": "timeseries",
+            "title": "control frames / s by ingress, message and outcome",
+            "description": "Frame handler completions from the HTTP route and in-band control, across every writing service. handler_ok may include a protocol-level contract rejection; it is not an ACK.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 128
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, ingress, message, outcome) (rate(urnetwork_connect_control_frames_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}} {{ingress}} {{message}} {{outcome}}"
+                }
+            ]
+        },
+        {
+            "id": 40,
+            "type": "timeseries",
+            "title": "control frame mean residence and frames in flight",
+            "description": "Mean handler residence including failures, from the summary sum and count, and handlers in progress, separate from HTTP requests still reading or authenticating.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 128
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, ingress, message) (rate(urnetwork_connect_control_frame_seconds_sum{env=\"$env\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (service, ingress, message) (rate(urnetwork_connect_control_frame_seconds_count{env=\"$env\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+                    "legendFormat": "mean seconds {{service}} {{ingress}} {{message}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, ingress, message) (urnetwork_connect_control_frames_inflight{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "in flight {{service}} {{ingress}} {{message}}"
+                }
+            ]
+        },
+        {
+            "id": 41,
+            "type": "timeseries",
+            "title": "contract rejections and refusal replays / s",
+            "description": "Generated create-contract protocol rejections by cause and requested companion mode (not delivery or provider outcomes); route refusal cache results (hit answers without a database read); and control requests answered from the client's own recorded refusals.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 136
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, ingress, cause, companion) (rate(urnetwork_connect_contract_rejections_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "rejection {{service}} {{ingress}} {{cause}} {{companion}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, cause, result) (rate(urnetwork_connect_contract_route_rejection_cache_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "route cache {{service}} {{cause}} {{result}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (service, cause) (rate(urnetwork_connect_control_refusal_replays_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "replayed {{service}} {{cause}}"
+                }
+            ]
+        },
+        {
+            "id": 42,
+            "type": "timeseries",
+            "title": "CreateContract completions / s by ingress and disposition",
+            "description": "Returned CreateContract calls. contract_reply does not prove delivery or provider contact.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 136
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, ingress, outcome) (rate(urnetwork_contract_creation_completed_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}} {{ingress}} {{outcome}}"
+                }
+            ]
+        },
+        {
+            "id": 43,
+            "type": "timeseries",
+            "title": "CreateContract stage occupancy",
+            "description": "Exclusive stage wall residence per second of returned calls (the mean number of calls in each stage, including cancellation and panic) beside the calls currently in each stage. The capability series counts processes that expose stage timing.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 144
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (ingress, stage) (rate(urnetwork_contract_creation_completed_stage_seconds_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "returned {{ingress}} {{stage}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (ingress, stage) (urnetwork_contract_creation_stage_inflight{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "now {{ingress}} {{stage}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (service) (urnetwork_contract_creation_stage_timing_enabled{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "timing processes {{service}}"
+                }
+            ]
+        },
+        {
+            "id": 44,
+            "type": "timeseries",
+            "title": "companion origin reads and callback outcomes / s",
+            "description": "Origin Query-through-row-drain attempts by phase, and completed origin callbacks by selection result before the transaction commits. origin_ready does not prove a committed creation.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 144
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (ingress, phase) (rate(urnetwork_contract_creation_companion_origin_reads_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "read {{ingress}} {{phase}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (ingress, outcome) (rate(urnetwork_contract_creation_companion_origin_outcomes_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "callback {{ingress}} {{outcome}}"
+                }
+            ]
+        },
+        {
+            "id": 45,
+            "type": "timeseries",
+            "title": "companion origin lookups and waits / s",
+            "description": "Authoritative origin lookups by wake source (each may run primary and chained-origin reads), waits woken by an event, fallback, deadline or cancellation, and the mean lookups per completed companion request.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 152
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, source) (rate(urnetwork_connect_companion_origin_lookups_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "lookups {{service}} {{source}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, source) (rate(urnetwork_connect_companion_origin_wait_wakes_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "wakes {{service}} {{source}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (service) (rate(urnetwork_connect_companion_origin_lookups_per_request_sum{env=\"$env\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (service) (rate(urnetwork_connect_companion_origin_lookups_per_request_count{env=\"$env\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+                    "legendFormat": "mean lookups per request {{service}}"
+                }
+            ]
+        },
+        {
+            "id": 46,
+            "type": "timeseries",
+            "title": "contract-origin notifications / s",
+            "description": "Advisory notification operations by event class. A drop requires the authoritative timed recheck.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 152
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, event) (rate(urnetwork_contract_origin_notifications_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}} {{event}}"
+                }
+            ]
+        },
+        {
+            "id": 47,
+            "type": "row",
+            "title": "contract reservations, net escrow snapshots and the degradation valve — all writing services",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 160
+            }
+        },
+        {
+            "id": 48,
+            "type": "timeseries",
+            "title": "Redis contract reservations / s",
+            "description": "Reservation operations by outcome, including token replays; not committed contract throughput.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 161
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, operation, result) (rate(urnetwork_redis_contract_reservation_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}} {{operation}} {{result}}"
+                }
+            ]
+        },
+        {
+            "id": 49,
+            "type": "timeseries",
+            "title": "Redis grant selection: mean share of the request limit",
+            "description": "Mean fraction of the request-owned grant selection capacity consumed, including held requests, from the histogram sum and count.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 161
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percentunit",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, resource) (rate(urnetwork_redis_contract_selection_fraction_sum{env=\"$env\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (service, resource) (rate(urnetwork_redis_contract_selection_fraction_count{env=\"$env\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+                    "legendFormat": "{{service}} {{resource}}"
+                }
+            ]
+        },
+        {
+            "id": 50,
+            "type": "timeseries",
+            "title": "Redis grant selection limit",
+            "description": "The declared per-request selection limit. Immutable process configuration, not a remaining financial balance.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 169
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max by (service, resource) (urnetwork_redis_contract_selection_limit{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "{{service}} {{resource}}"
+                }
+            ]
+        },
+        {
+            "id": 51,
+            "type": "timeseries",
+            "title": "net escrow balance snapshots / s",
+            "description": "Mirror balance snapshots by result: creation publications, attempted admissions, attempted settlements, and settlement, quarantine, retention and scheduled refreshes. Attempts are not committed contracts or settlements.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 169
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, result) (rate(urnetwork_net_escrow_creation_snapshot_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "creation {{service}} {{result}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, result) (rate(urnetwork_net_escrow_admission_snapshot_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "admission {{service}} {{result}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (service, result) (rate(urnetwork_net_escrow_settlement_snapshot_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "settlement {{service}} {{result}}"
+                },
+                {
+                    "refId": "D",
+                    "expr": "sum by (service, result) (rate(urnetwork_net_escrow_refresh_snapshot_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "refresh {{service}} {{result}}"
+                }
+            ]
+        },
+        {
+            "id": 52,
+            "type": "timeseries",
+            "title": "contract degradation valve state",
+            "description": "1 while the last published state opens the valve (payers with an exhausted balance get zero cost contracts), and the opens and terminal closes in the window of the last published check.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 177
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max by (service) (urnetwork_contract_degradation_zero_cost{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "zero cost {{service}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "max by (kind) (urnetwork_contract_degradation_contracts{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "window {{kind}}"
+                }
+            ]
+        },
+        {
+            "id": 53,
+            "type": "timeseries",
+            "title": "degradation checks, cost reads and zero-escrow contracts / s",
+            "description": "Valve checks by outcome, creation cache refreshes of the valve state (only zero_cost lets an exhausted payer's contract be free), and free contracts created without escrow while the valve was open.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 177
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, outcome) (rate(urnetwork_contract_degradation_checks_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "check {{service}} {{outcome}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, result) (rate(urnetwork_zero_contract_cost_reads_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "cost read {{service}} {{result}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (service, kind) (rate(urnetwork_zero_escrow_contracts_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "zero escrow {{service}} {{kind}}"
+                }
+            ]
+        },
+        {
+            "id": 54,
+            "type": "timeseries",
+            "title": "contract-hole projection and prober grant selection / s",
+            "description": "Redis contract-hole projection operations by outcome, and internal-prober positive-byte allocations by candidate selection outcome (not completed probes).",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 185
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, outcome) (rate(urnetwork_contract_hole_operations_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "contract hole {{service}} {{outcome}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, result) (rate(urnetwork_prober_grant_selection_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "prober grant {{service}} {{result}}"
+                }
+            ]
+        },
+        {
+            "id": 55,
+            "type": "timeseries",
+            "title": "provider intent qualification / s",
+            "description": "Qualification events by class, and normal client slot decisions for intent clients that failed qualification, enforced or computed in shadow mode.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 185
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, event) (rate(urnetwork_provider_intent_attempts_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "attempt {{service}} {{event}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, decision, mode) (rate(urnetwork_provider_intent_slot_decisions_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "slot {{service}} {{decision}} {{mode}}"
+                }
+            ]
+        },
+        {
+            "id": 56,
+            "type": "timeseries",
+            "title": "covered receiver checkpoints and client data usage / s",
+            "description": "Receiver checkpoints completed as finals because they covered the sender's final acknowledged bytes (counted after the settlement commit), billable byte records added to the per-client usage meter, and drained usage hashes.",
+            "gridPos": {
+                "h": 8,
+                "w": 24,
+                "x": 0,
+                "y": 193
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service) (rate(urnetwork_contract_covered_checkpoint_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "covered checkpoint {{service}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, result) (rate(urnetwork_client_data_usage_record_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "usage record {{service}} {{result}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (service, result) (rate(urnetwork_client_data_usage_drain_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "usage drain {{service}} {{result}}"
+                }
+            ]
         }
     ]
 }

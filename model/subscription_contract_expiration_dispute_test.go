@@ -169,7 +169,9 @@ func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T)
 
 // PostgreSQL rejects the dispute clear in the reconciliation transaction.
 // Its proof, outcome and all money must roll back together; the original report
-// rows remain available for a subsequent successful retirement.
+// rows remain available for a subsequent successful retirement. The deadline
+// close clears the dispute in the same write as the outcome, so the injected
+// failure matches the write that clears an open contract's dispute.
 func TestContractExpirationDisputedCheckpointCancellationRollsBackFinalization(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -188,7 +190,7 @@ func TestContractExpirationDisputedCheckpointCancellationRollsBackFinalization(t
 				BEGIN RAISE EXCEPTION USING ERRCODE='57014', MESSAGE='synthetic expiration dispute cancellation'; END;
 				$$;
 				CREATE TRIGGER synthetic_expiration_dispute_cancel AFTER UPDATE ON transfer_contract
-				FOR EACH ROW WHEN (OLD.dispute AND NOT NEW.dispute AND NEW.outcome IS NULL)
+				FOR EACH ROW WHEN (OLD.dispute AND NOT NEW.dispute AND OLD.outcome IS NULL)
 				EXECUTE FUNCTION synthetic_expiration_dispute_cancel();`))
 		})
 		before := readRedisExpiryRepairTestState(ctx, id)

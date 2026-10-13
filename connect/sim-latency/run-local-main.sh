@@ -3,10 +3,10 @@
 env=main
 domain=bringyour.com
 
-# You must port-forward the main PostgreSQL and Redis endpoints to 127.0.0.1.
-# For example:
-# ssh -i ${main-data-key} -L 5432:127.0.0.1:5432 \
-#   -L 6379:127.0.0.1:6379 by@${main-data-host} -N
+# You must port-forward the main PostgreSQL and Redis endpoints to 127.0.0.1,
+# for example with xops/bin/by-patch-main-data. It forwards the 6379 entry and
+# every Redis node port (6380-6427, on edge-6 and edge-5); the client dials
+# each node on its own port at 127.0.0.1.
 
 export WARP_HOST="127.0.0.1"
 export WARP_BLOCK="sim"

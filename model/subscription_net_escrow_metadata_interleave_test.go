@@ -11,17 +11,30 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
-type metadataInterleaveRows struct {
-	pgx.Rows
-	once    sync.Once
-	closed  chan struct{}
-	release <-chan struct{}
-	ctx     context.Context
+// Holds the metadata owner just after its cached revision read, signalling
+// read, until release. The owner admits transaction ownership only on the
+// server's own transaction (ddad361c), so the hold is a statement hook bound
+// to that transaction's connection rather than a wrapper around it.
+func metadataInterleaveHook(ctx context.Context, read chan struct{}, release <-chan struct{}) *legacyStatementHook {
+	var once sync.Once
+	return &legacyStatementHook{
+		after: func(sql string, _ time.Duration, _ error) {
+			if sql != netEscrowAdmissionCacheSQL {
+				return
+			}
+			once.Do(func() {
+				close(read)
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+			})
+		},
+	}
 }
 
 func metadataBalanceFixture(t testing.TB, ctx context.Context) (netEscrowOrderingTestFixture, server.Id, []server.Id) {
@@ -45,7 +58,7 @@ func metadataBalanceFixture(t testing.TB, ctx context.Context) (netEscrowOrderin
 		if !closed {
 			t.Fatal("financial outcome did not commit")
 		}
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 	return f, contract.ContractId, ids
 }
 
@@ -56,6 +69,8 @@ func TestNetEscrowMetadataLocksAllBalancesBeforeEscrow(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
 		f, contract, ids := metadataBalanceFixture(t, ctx)
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		read, release := make(chan struct{}), make(chan struct{})
 		var once sync.Once
 		unblock := func() { once.Do(func() { close(release) }) }
@@ -65,7 +80,9 @@ func TestNetEscrowMetadataLocksAllBalancesBeforeEscrow(t *testing.T) {
 		go func() {
 			done <- server.HandleError1(func() error {
 				server.Tx(ctx, func(tx server.PgTx) {
-					settleEscrowMetadataInTx(ctx, metadataInterleaveTx{tx, read, release}, contract, server.NowUtc(), partial)
+					hooked, releaseHooks := withLegacyStatementHooks(ctx, tx, metadataInterleaveHook(ctx, read, release))
+					defer releaseHooks()
+					settleEscrowMetadataInTx(hooked, tx, contract, server.NowUtc(), partial)
 				}, server.TxReadCommitted, server.OptNoRetry())
 				return nil
 			}, func(err error) error { return err })
@@ -103,7 +120,7 @@ func TestNetEscrowMetadataLocksAllBalancesBeforeEscrow(t *testing.T) {
 		before := settlementCacheSnapshot(ctx, ids)[f.balanceId]
 		server.Tx(ctx, func(tx server.PgTx) {
 			settleEscrowMetadataInTx(ctx, tx, contract, server.NowUtc(), partial)
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if after := settlementCacheSnapshot(ctx, ids)[f.balanceId]; before.revision != after.revision || before.reserved != after.reserved {
 			t.Fatal("metadata replay changed a settled reservation snapshot")
 		}
@@ -113,7 +130,7 @@ func TestNetEscrowMetadataLocksAllBalancesBeforeEscrow(t *testing.T) {
 			settleEscrowMetadataInTx(ctx, tx, contract, server.NowUtc(), map[server.Id]sweepPayout{
 				ids[1]: {escrowBalanceByteCount: 1, returnByteCount: 1}, ids[2]: {},
 			})
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FILTER(WHERE settled) FROM transfer_escrow WHERE contract_id=$1`, contract).Scan(&settled))
 		})
@@ -215,44 +232,6 @@ func TestNetEscrowMetadataBalanceLocksCustomGenericPointPlans(t *testing.T) {
 	})
 }
 
-func (r *metadataInterleaveRows) Close() {
-	r.Rows.Close()
-	r.once.Do(func() {
-		close(r.closed)
-		select {
-		case <-r.release:
-		case <-r.ctx.Done():
-		}
-	})
-}
-
-type metadataInterleaveTx struct {
-	server.PgTx
-	read    chan struct{}
-	release <-chan struct{}
-}
-
-func (tx metadataInterleaveTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	rows, err := tx.PgTx.Query(ctx, sql, args...)
-	if err == nil && sql == netEscrowAdmissionCacheSQL {
-		rows = &metadataInterleaveRows{Rows: rows, closed: tx.read, release: tx.release, ctx: ctx}
-	}
-	return rows, err
-}
-
-type admissionInterleaveTx struct {
-	server.PgTx
-	locking chan struct{}
-	once    *sync.Once
-}
-
-func (tx admissionInterleaveTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	if strings.Contains(sql, "FROM transfer_balance") && strings.Contains(sql, "FOR UPDATE") {
-		tx.once.Do(func() { close(tx.locking) })
-	}
-	return tx.PgTx.Query(ctx, sql, args...)
-}
-
 // A terminal metadata post does not change the amount of open reservations,
 // but its settled-flag trigger advances the durable revision. It must not
 // invalidate a concurrently maintained snapshot through an unprotected read.
@@ -274,10 +253,12 @@ func TestNetEscrowMetadataInterleavedAdmissionKeepsSnapshotCurrent(t *testing.T)
 			if !closed {
 				t.Fatal("normal financial outcome did not commit")
 			}
-		}, server.TxReadCommitted)
+		}, server.TxReadCommitted, server.OptNoRetry())
 		if _, err := cacheTestCreate(ctx, f, nil, false); err != nil {
 			t.Fatal(err)
 		}
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		read, release := make(chan struct{}), make(chan struct{})
 		var releaseOnce sync.Once
 		unblock := func() { releaseOnce.Do(func() { close(release) }) }
@@ -286,7 +267,9 @@ func TestNetEscrowMetadataInterleavedAdmissionKeepsSnapshotCurrent(t *testing.T)
 		go func() {
 			metadataDone <- server.HandleError1(func() error {
 				server.Tx(ctx, func(tx server.PgTx) {
-					settleEscrowMetadataInTx(ctx, metadataInterleaveTx{tx, read, release}, terminal.ContractId, server.NowUtc(), map[server.Id]sweepPayout{
+					hooked, releaseHooks := withLegacyStatementHooks(ctx, tx, metadataInterleaveHook(ctx, read, release))
+					defer releaseHooks()
+					settleEscrowMetadataInTx(hooked, tx, terminal.ContractId, server.NowUtc(), map[server.Id]sweepPayout{
 						f.balanceId: {escrowBalanceByteCount: 1, returnByteCount: 1},
 					})
 				}, server.TxReadCommitted, server.OptNoRetry())
@@ -300,57 +283,20 @@ func TestNetEscrowMetadataInterleavedAdmissionKeepsSnapshotCurrent(t *testing.T)
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
-		locking, createDone := make(chan struct{}), make(chan error, 1)
-		var createLockOnce sync.Once
-		var backend int32
-		backendKnown := make(chan struct{})
-		go func() {
-			createDone <- server.HandleError1(func() error {
-				server.Tx(ctx, func(tx server.PgTx) {
-					server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&backend))
-					close(backendKnown)
-					_, _, err := createTransferEscrowInTx(ctx, admissionInterleaveTx{tx, locking, &createLockOnce}, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 1, nil)
-					server.Raise(err)
-				}, server.TxReadCommitted, server.OptNoRetry())
-				return nil
-			}, func(err error) error { return err })
-		}()
-		select {
-		case <-backendKnown:
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		}
-		select {
-		case <-locking:
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		}
-		// Either the current implementation overtakes the metadata read, or a
-		// corrected balance fence makes it wait. Both schedules reach terminal.
-		createFinished, observedLock := false, false
-		for !createFinished && !observedLock {
-			select {
-			case err := <-createDone:
-				if err != nil {
-					t.Fatal(err)
-				}
-				createFinished = true
-			case <-ctx.Done():
-				t.Fatal(ctx.Err())
-			case <-time.After(5 * time.Millisecond):
-				server.Db(ctx, func(conn server.PgConn) {
-					server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(bool_or(wait_event_type='Lock'),false) FROM pg_stat_activity WHERE pid=$1`, backend).Scan(&observedLock))
-				})
-			}
+		// Since 403b9c55 the metadata owner holds its balance's transaction
+		// ownership across the cached read, and admission refuses rather than
+		// waits inside its transaction. A concurrent admission on the same grant
+		// therefore cannot interleave with the held read: it is refused as busy
+		// before it touches a row, and is admitted once the metadata commits.
+		if _, err := cacheTestCreate(ctx, f, nil, false); !errors.Is(err, errTransferBalanceOwnershipBusy) {
+			t.Fatal("admission interleaved with metadata that owns its grant", err)
 		}
 		unblock()
 		if err := <-metadataDone; err != nil {
 			t.Fatal(err)
 		}
-		if !createFinished {
-			if err := <-createDone; err != nil {
-				t.Fatal(err)
-			}
+		if _, err := cacheTestCreate(ctx, f, nil, false); err != nil {
+			t.Fatal(err)
 		}
 		var revision, cachedRevision int64
 		var cached ByteCount
@@ -386,7 +332,7 @@ func TestNetEscrowMetadataInterleavedAdmissionKeepsSnapshotCurrent(t *testing.T)
 		plan := plans[0]["Plan"].(map[string]any)
 		visit(plan)
 		buffers, _ = plan["Shared Hit Blocks"].(float64)
-		t.Logf("admission_overtook_metadata=%t cache_current=%t exact_escrow_rows=%.0f contract_probes=%.0f buffer_hits=%.0f exact_execution_ms=%v", createFinished, cachedRevision == revision, escrowRows, contractProbes, buffers, plans[0]["Execution Time"])
+		t.Logf("cache_current=%t exact_escrow_rows=%.0f contract_probes=%.0f buffer_hits=%.0f exact_execution_ms=%v", cachedRevision == revision, escrowRows, contractProbes, buffers, plans[0]["Execution Time"])
 		if got := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId].reserved; got != 10003 {
 			t.Fatal("interleaving changed financial authority", got)
 		}

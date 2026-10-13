@@ -184,7 +184,8 @@ func TestReliabilityObservedZeroRollingAndExpiry(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE client_reliability_running_window
 				SET last_recompute_block=last_recompute_block-$1`, ReliabilityRunningRecomputeBlocks+1))
 		})
-		UpdateClientReliabilityScores(ctx, next, false)
+		// the checkpoint owns the optional re-anchor
+		UpdateClientReliabilityScoresCheckpointed(ctx, next)
 		assertZero()
 		UpdateClientReliabilityScores(ctx, next.Add(ClientLookbacks[0]+ReliabilityBlockDuration), false)
 		if _, present := GetAllClientReliabilityScores(ctx)[0][failed]; present {

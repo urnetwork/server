@@ -30,7 +30,9 @@ func TestNetEscrowAdmissionRejectsUnderflowingBalance(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "Insufficient balance") || contract != nil || len(posts) != 0 {
 					t.Errorf("historical balance %d admitted nonexistent credit: contract=%+v posts=%d error=%v", balance, contract, len(posts), err)
 				}
-			}, server.TxReadCommitted)
+				// The legacy allocator admits its grant owners (403b9c55), which
+				// needs a read-committed transaction without retry.
+			}, server.TxReadCommitted, server.OptNoRetry())
 			if reserved := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId].reserved; reserved != 600 {
 				t.Errorf("historical balance %d changed reservation to %d", balance, reserved)
 			}
@@ -115,7 +117,11 @@ func TestNetEscrowSettlementMaximumAcrossGrantsDebitsExactly(t *testing.T) {
 					t.Fatalf("split grant count=%d want=2", count)
 				}
 			})
-		}, server.TxReadCommitted)
+			// The legacy owner admits its grants' transaction ownership first
+			// (ddad361c, merged in 7c7c55a4), which the server grants only to
+			// its own read-committed no-retry transaction, the shape every
+			// production settlement caller uses.
+		}, server.TxReadCommitted, server.OptNoRetry())
 	})
 }
 
@@ -154,7 +160,11 @@ func TestNetEscrowSettlementRejectsNegativeEscrowBeforeArithmetic(t *testing.T) 
 			if outcome != nil {
 				t.Errorf("malformed grant claimed terminal outcome: %s", *outcome)
 			}
-		}, server.TxReadCommitted)
+			// The legacy owner admits its grants' transaction ownership before
+			// the arithmetic under test (ddad361c, merged in 7c7c55a4), which
+			// the server grants only to its own read-committed no-retry
+			// transaction.
+		}, server.TxReadCommitted, server.OptNoRetry())
 	})
 }
 
