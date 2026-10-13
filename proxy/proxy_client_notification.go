@@ -38,6 +38,11 @@ type proxyClientNotification struct {
 
 	settings *ProxySettings
 
+	// opens the change channel subscriptions (synthetic sockets in tests)
+	subscriptionSource *server.RedisShardSubscriptionSource
+	// reads the proxy client changes (a fixture in tests)
+	getProxyClientsSince func(ctx context.Context, proxyHost string, block string, changeId int64) (map[server.Id]*model.ProxyClient, int64, error)
+
 	proxyClientsCallbacks *connect.CallbackList[ProxyClientsFunction]
 	fullSyncCallbacks     *connect.CallbackList[ProxyClientsFullSyncFunction]
 
@@ -52,11 +57,24 @@ type proxyClientNotification struct {
 }
 
 func NewProxyClientNotification(ctx context.Context, settings *ProxySettings) *proxyClientNotification {
+	return newProxyClientNotification(ctx, settings, server.DefaultRedisShardSubscriptionSource(), model.GetProxyClientsSince)
+}
+
+// The subscription source and the change reader are parameters so tests can
+// run the watches without Redis or PostgreSQL.
+func newProxyClientNotification(
+	ctx context.Context,
+	settings *ProxySettings,
+	subscriptionSource *server.RedisShardSubscriptionSource,
+	getProxyClientsSince func(ctx context.Context, proxyHost string, block string, changeId int64) (map[server.Id]*model.ProxyClient, int64, error),
+) *proxyClientNotification {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	p := &proxyClientNotification{
 		ctx:                   cancelCtx,
 		cancel:                cancel,
 		settings:              settings,
+		subscriptionSource:    subscriptionSource,
+		getProxyClientsSince:  getProxyClientsSince,
 		proxyClientsCallbacks: connect.NewCallbackList[ProxyClientsFunction](),
 		fullSyncCallbacks:     connect.NewCallbackList[ProxyClientsFullSyncFunction](),
 		initialSyncNotify:     make(chan struct{}),
@@ -140,7 +158,7 @@ func (self *proxyClientNotification) reconcile(hosts []string, block string) {
 		allProxyClients := map[server.Id]*model.ProxyClient{}
 		ok := true
 		for _, host := range hosts {
-			proxyClients, _, err := model.GetProxyClientsSince(self.ctx, host, block, 0)
+			proxyClients, _, err := self.readProxyClientsSince(host, block, 0)
 			if err != nil {
 				// never reconcile from partial data, since the full sync is
 				// used to remove stale state
@@ -158,14 +176,46 @@ func (self *proxyClientNotification) reconcile(hosts []string, block string) {
 	}
 }
 
+// Polls the (host, block) proxy client changes, woken early by the change
+// channel. The subscription follows the channel's slot across cluster moves
+// (server.RunRedisShardSubscription). A lost wake only delays a change until
+// the next poll; a new subscription also wakes the poll, since wakes published
+// before it are gone.
 func (self *proxyClientNotification) watch(host string, block string) {
 	monitor := connect.NewMonitor()
 
 	go server.HandleError(func() {
 		defer self.cancel()
 
-		event, unsub := server.Subscribe(self.ctx, model.ProxyClientChannel(host, block))
-		defer unsub()
+		// at most one pending wake; the loop below coalesces a burst
+		event := make(chan struct{}, 1)
+		wake := func() {
+			select {
+			case event <- struct{}{}:
+			default:
+			}
+		}
+		channel := model.ProxyClientChannel(host, block)
+		go server.HandleError(func() {
+			server.RunRedisShardSubscription(
+				self.ctx,
+				channel,
+				server.DefaultRedisShardSubscriptionSettings(),
+				self.subscriptionSource,
+				&server.RedisShardSubscriptionHandler{
+					Subscribed: func(resubscribed bool) {
+						wake()
+					},
+					Message: func(message server.RedisMessage) bool {
+						if message.Channel != channel {
+							return false
+						}
+						wake()
+						return true
+					},
+				},
+			)
+		}, self.cancel)
 
 		for {
 			select {
@@ -211,8 +261,7 @@ func (self *proxyClientNotification) watch(host string, block string) {
 	initialSyncDone := false
 	for {
 		notify := monitor.NotifyChannel()
-		proxyClients, maxChangeId, err := model.GetProxyClientsSince(
-			self.ctx,
+		proxyClients, maxChangeId, err := self.readProxyClientsSince(
 			host,
 			block,
 			nextChangeId,
@@ -247,6 +296,26 @@ func (self *proxyClientNotification) watch(host string, block string) {
 		case <-time.After(self.settings.NotificationTimeout):
 		}
 	}
+}
+
+// Reads one change range for the watch and reconcile loops, which no other
+// path restarts. server.Db raises a refused read, such as a pooler wait
+// timeout or a database that is shutting down, instead of returning it.
+// Returning the raise as an error keeps both loops on their retry path; left
+// raised, it ended the loop for the life of the process.
+func (self *proxyClientNotification) readProxyClientsSince(
+	host string,
+	block string,
+	changeId int64,
+) (proxyClients map[server.Id]*model.ProxyClient, maxChangeId int64, returnErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			proxyClients = nil
+			maxChangeId = changeId
+			returnErr = fmt.Errorf("proxy client change read raised: %v", r)
+		}
+	}()
+	return self.getProxyClientsSince(self.ctx, host, block, changeId)
 }
 
 func (self *proxyClientNotification) proxyClients(proxyClients []*model.ProxyClient) (returnErr error) {

@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
 func TestUrlDueTimingFixedCardinalityAndAggregation(t *testing.T) {
@@ -162,5 +163,38 @@ func TestUrlDueTimingRejectsDoNotRunObservedModel(t *testing.T) {
 	}
 	if testutil.ToFloat64(providerUrlProbeDueTiming.observations.WithLabelValues("admitted_handler")) != before {
 		t.Fatal("rejected request entered model timing")
+	}
+}
+
+// The prober's URL common-mode guard counts one turn per network, so each
+// claim's network survives the server's encoding and the prober's decoding.
+// A claim without one reads as empty, as from a server that predates it.
+func TestUrlDueCarriesEachProvidersNetworkToTheProber(t *testing.T) {
+	networkId := server.NewId()
+	claimed := []model.ProviderUrlProbeDue{
+		{ClientId: server.NewId(), NetworkId: &networkId, ClaimOrdinal: 1, RunsNeeded: 10},
+		{ClientId: server.NewId(), NetworkId: &networkId, ClaimOrdinal: 1, RunsNeeded: 10},
+		{ClientId: server.NewId(), ClaimOrdinal: 1, RunsNeeded: 10},
+	}
+	metrics := newProviderUrlProbeDueTimingCollectors(prometheus.NewPedanticRegistry())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		respondProviderUrlProbeDue(w, r, len(claimed), 0, 1, func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
+			return model.ProviderUrlProbeDueResult{Providers: claimed}
+		}, metrics)
+	}))
+	defer srv.Close()
+	client := &ingest.Client{ServerUrl: srv.URL, OperatorSecret: "synthetic-secret", Http: srv.Client()}
+	due, err := client.Due(t.Context(), len(claimed))
+	if err != nil || len(due) != len(claimed) {
+		t.Fatalf("due claims: %d of %d (%v)", len(due), len(claimed), err)
+	}
+	for index, provider := range due {
+		wantNetworkId := ""
+		if claimed[index].NetworkId != nil {
+			wantNetworkId = claimed[index].NetworkId.String()
+		}
+		if provider.ClientId != claimed[index].ClientId.String() || provider.NetworkId != wantNetworkId {
+			t.Fatalf("claim %d lost its provider or network on the wire", index)
+		}
 	}
 }

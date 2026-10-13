@@ -1085,6 +1085,10 @@ func (self *CoreStClient) buildTransactionAttempt(
 		}
 		gasLimit = estimated + (estimated+4)/5
 	}
+	// A v2 stake move is never signed below its floor, whatever its estimate
+	// or an earlier attempt's limit.
+	gasFloor := self.ledgerV2GasFloor(intent, kind)
+	gasLimit = max(gasLimit, gasFloor)
 
 	var unsigned *types.Transaction
 	attempt := &model.StTransactionAttempt{
@@ -1124,6 +1128,9 @@ func (self *CoreStClient) buildTransactionAttempt(
 	if gasPolicy != nil {
 		reservation, err := model.ReserveStTransactionGasAttempt(ctx, gasPolicy, gasAuthority, intent.IntentId, attempt.Attempt, kind, unsigned)
 		if err != nil {
+			if gasLimit == gasFloor {
+				err = fmt.Errorf("st: gas limit %d is the v2 stake-move floor (operator gas policy maximum_gas %d): %w", gasLimit, gasPolicy.MaximumGas, err)
+			}
 			return nil, err
 		}
 		return self.signReservedStTransaction(ctx, client, key, intent, kind, reservation, gasPolicy, gasAuthority)

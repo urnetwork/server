@@ -7,23 +7,25 @@ package proxy
 //
 //   - a real connect server (exchange + connect handler) on a plain ws port
 //   - a real api server (the full api.Routes()) on a plain http port
-//   - a local provider (sdk.DeviceLocal in provide mode) that egresses to the
-//     real internet
+//   - a local provider (sdk.DeviceLocal in provide mode) that egresses
+//     through a user-space NAT
 //   - the real proxy Http, Https, Socks and Wireguard servers
 //
 // A proxy device (the resident sdk.DeviceLocal created by the proxy) connects
 // through the local api+connect servers and is pinned to the local provider via
 // the real find-providers2 discovery path. The test then drives the proxy with
 // Go network libraries (http/https/socks) and an in-process userspace WireGuard
-// client, loading https://ur.io through each path.
+// client, loading a local TLS target through each path (see
+// setupProxyTargetTest).
 //
 // The SDK is pointed at the local servers via sdk.Testing_NewNetworkSpaceWithUrls.
 // Hosted proxy devices are pinned to H1 (plain websocket), so no TLS/quic is
 // required between the SDK and the local servers.
 //
 // NOTE: like connect_test, this expects the standard local test environment
-// (WARP_ENV=local plus the local postgres/redis and vault, e.g. via test.sh)
-// and real outbound internet access (it loads https://ur.io for real).
+// (WARP_ENV=local plus the local postgres/redis and vault, e.g. via test.sh).
+// URNETWORK_LIVE_THIRD_PARTY_TESTS=1 loads the live testTargetUrl instead of
+// the local target, which needs real outbound internet access.
 
 import (
 	"context"
@@ -76,6 +78,7 @@ import (
 const (
 	testConnectServicePort = 7300
 
+	// the live target, loaded only with URNETWORK_LIVE_THIRD_PARTY_TESTS=1
 	testTargetUrl = "https://api.bringyour.com/hello"
 
 	// number of times the full leg sequence is run within a single setup, to
@@ -163,6 +166,11 @@ type proxyTestHarness struct {
 	exchange      *connectserver.Exchange
 	closeProvider func(testing.TB)
 
+	// the target a test loads through the proxy (set by setupProxyTargetTest)
+	targetUrl       string
+	targetTlsConfig *tls.Config
+	closeTarget     func()
+
 	socksPort int
 	httpPort  int
 	httpsPort int
@@ -174,6 +182,9 @@ type proxyTestHarness struct {
 
 // Joins all resource consumers before the enclosing test environment can pop.
 func (self *proxyTestHarness) close(t testing.TB) {
+	if self.closeTarget != nil {
+		self.closeTarget()
+	}
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer closeCancel()
 	if err := self.lifecycle.close(closeCtx); err != nil {
@@ -314,6 +325,104 @@ func setupProxyTest(t testing.TB) *proxyTestHarness {
 	return setupProxyTestWithOptions(t, defaultProxyTestOptions())
 }
 
+// liveThirdPartyTests reports URNETWORK_LIVE_THIRD_PARTY_TESTS=1: the target
+// tests then load the live testTargetUrl, and the provider may egress to it.
+func liveThirdPartyTests() bool {
+	return os.Getenv("URNETWORK_LIVE_THIRD_PARTY_TESTS") == "1"
+}
+
+// localOnlySecurityPolicyGenerator wraps the harness provider's policy so it
+// forwards only flows with a loopback end. The hosted device also probes
+// public sites and resolvers through its provider (connect's provider probe);
+// those packets, and any other public destination, are dropped before the
+// provider would dial them.
+func localOnlySecurityPolicyGenerator(
+	generator func(context.Context, *connect.SecurityPolicyStatsCollector) connect.SecurityPolicy,
+) func(context.Context, *connect.SecurityPolicyStatsCollector) connect.SecurityPolicy {
+	return func(ctx context.Context, stats *connect.SecurityPolicyStatsCollector) connect.SecurityPolicy {
+		return &localOnlySecurityPolicy{SecurityPolicy: generator(ctx, stats)}
+	}
+}
+
+type localOnlySecurityPolicy struct {
+	connect.SecurityPolicy
+}
+
+func (self *localOnlySecurityPolicy) InspectEgress(provideMode protocol.ProvideMode, ipPath *connect.IpPath, payload []byte) (connect.SecurityPolicyResult, error) {
+	if !ipPath.SourceIp.IsLoopback() && !ipPath.DestinationIp.IsLoopback() {
+		return connect.SecurityPolicyResultDrop, nil
+	}
+	return self.SecurityPolicy.InspectEgress(provideMode, ipPath, payload)
+}
+
+func (self *localOnlySecurityPolicy) InspectIngress(provideMode protocol.ProvideMode, ipPath *connect.IpPath, payload []byte) (connect.SecurityPolicyResult, error) {
+	if !ipPath.SourceIp.IsLoopback() && !ipPath.DestinationIp.IsLoopback() {
+		return connect.SecurityPolicyResultDrop, nil
+	}
+	return self.SecurityPolicy.InspectIngress(provideMode, ipPath, payload)
+}
+
+// The harness provider forwards a flow only when one end is loopback, in both
+// directions, and otherwise leaves the decision to the wrapped policy.
+func TestLocalOnlySecurityPolicyDropsFlowsWithoutALoopbackEnd(t *testing.T) {
+	policy := localOnlySecurityPolicyGenerator(connect.DisableSecurityPolicyWithStats)(
+		context.Background(),
+		connect.DefaultSecurityPolicyStatsCollector(),
+	)
+	path := func(source string, destination string) *connect.IpPath {
+		return &connect.IpPath{
+			Version:         4,
+			Protocol:        connect.IpProtocolTcp,
+			SourceIp:        net.ParseIP(source),
+			SourcePort:      40000,
+			DestinationIp:   net.ParseIP(destination),
+			DestinationPort: 443,
+		}
+	}
+	for _, test := range []struct {
+		source      string
+		destination string
+		result      connect.SecurityPolicyResult
+	}{
+		{"10.0.0.2", "127.0.0.1", connect.SecurityPolicyResultAllow},
+		{"127.0.0.1", "10.0.0.2", connect.SecurityPolicyResultAllow},
+		{"10.0.0.2", "1.1.1.1", connect.SecurityPolicyResultDrop},
+		{"1.1.1.1", "10.0.0.2", connect.SecurityPolicyResultDrop},
+	} {
+		for direction, inspect := range map[string]func(protocol.ProvideMode, *connect.IpPath, []byte) (connect.SecurityPolicyResult, error){
+			"egress":  policy.InspectEgress,
+			"ingress": policy.InspectIngress,
+		} {
+			result, err := inspect(protocol.ProvideMode_Public, path(test.source, test.destination), nil)
+			if err != nil || result != test.result {
+				t.Fatalf("%s %s -> %s = %s, %v; want %s", direction, test.source, test.destination, result, err, test.result)
+			}
+		}
+	}
+}
+
+// setupProxyTargetTest is setupProxyTest for a test that loads a target
+// through the proxy. The target is a local TLS server. Its loopback address is
+// not public, so the security policies are disabled as for the contract load
+// tests; TestProxyNonPublicTargetTimesOut covers the policies.
+// URNETWORK_LIVE_THIRD_PARTY_TESTS=1 loads the live testTargetUrl with the
+// production policies instead.
+func setupProxyTargetTest(t testing.TB) *proxyTestHarness {
+	if liveThirdPartyTests() {
+		h := setupProxyTest(t)
+		h.targetUrl = testTargetUrl
+		return h
+	}
+	opts := defaultProxyTestOptions()
+	opts.disableSecurityPolicies = true
+	h := setupProxyTestWithOptions(t, opts)
+	baseUrl, closeTarget := startLocalTarget(t)
+	h.targetUrl = baseUrl + "/data?bytes=4096"
+	h.targetTlsConfig = testTargetTlsConfig
+	h.closeTarget = closeTarget
+	return h
+}
+
 func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestHarness {
 	setProxyTestEnv()
 
@@ -431,12 +540,18 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 			)
 			harness.lifecycle.provider.transport = providerTransport
 
-			// egress to the real internet via a user-space NAT
+			// egress via a user-space NAT, only to this machine unless the live
+			// target is loaded
 			providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
 			harness.lifecycle.provider.localNat = providerLocalUserNat
 			providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
 			if opts.disableSecurityPolicies {
 				providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+			}
+			if !liveThirdPartyTests() {
+				providerNatSettings.SecurityPolicyGenerator = localOnlySecurityPolicyGenerator(
+					providerNatSettings.SecurityPolicyGenerator,
+				)
 			}
 			providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
 			harness.lifecycle.provider.remoteNat = providerRemoteNat
@@ -716,7 +831,7 @@ func TestProxy(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxy\n")
-		h := setupProxyTest(t)
+		h := setupProxyTargetTest(t)
 		defer h.close(t)
 
 		// run the full leg sequence repeatedly within one setup to flush out
@@ -794,7 +909,7 @@ func TestProxyWgRestartReconnect(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyWgRestartReconnect\n")
-		h := setupProxyTest(t)
+		h := setupProxyTargetTest(t)
 		defer h.close(t)
 
 		// a long-lived wg client + netstack that survive the server restart
@@ -804,7 +919,7 @@ func TestProxyWgRestartReconnect(t *testing.T) {
 		defer closeWgClient()
 
 		// establish the session and confirm traffic
-		requireProxyGet(t, "wg-before-restart", transport)
+		requireProxyGet(t, h, "wg-before-restart", transport)
 
 		// stop the wg server, releasing its socket and all in-memory state
 		fmt.Printf("[progress]restarting wg server\n")
@@ -836,7 +951,7 @@ func TestProxyWgRestartReconnect(t *testing.T) {
 		// timer (~15s of unanswered data) then re-initiates, the restored peer
 		// answers, and traffic resumes
 		restartTime := time.Now()
-		requireProxyGet(t, "wg-after-restart", transport)
+		requireProxyGet(t, h, "wg-after-restart", transport)
 		fmt.Printf("[progress]wg reconnected %v after restart\n", time.Since(restartTime).Round(time.Second))
 	})
 }
@@ -855,7 +970,7 @@ func TestProxyIdleDeviceRecreate(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyIdleDeviceRecreate\n")
-		h := setupProxyTest(t)
+		h := setupProxyTargetTest(t)
 		defer h.close(t)
 
 		// the device opened during setup, reachable for the proxy id
@@ -923,7 +1038,7 @@ func TestProxyClosedDeviceRecreate(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyDeadDeviceRecreate\n")
-		h := setupProxyTest(t)
+		h := setupProxyTargetTest(t)
 		defer h.close(t)
 
 		pd1, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
@@ -988,7 +1103,7 @@ func testProxyHttp(t testing.TB, h *proxyTestHarness) {
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(proxyUrl),
 	}
-	requireProxyGet(t, "http", transport)
+	requireProxyGet(t, h, "http", transport)
 }
 
 // testProxyHttps drives the https proxy (the proxy connection itself is TLS).
@@ -1004,7 +1119,7 @@ func testProxyHttps(t testing.TB, h *proxyTestHarness) {
 		// tls (acceptable for the https-proxy leg).
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
-	requireProxyGet(t, "https", transport)
+	requireProxyGet(t, h, "https", transport)
 }
 
 // testProxySocks drives the socks5 proxy.
@@ -1026,7 +1141,7 @@ func testProxySocks(t testing.TB, h *proxyTestHarness) {
 	transport := &http.Transport{
 		DialContext: contextDialer.DialContext,
 	}
-	requireProxyGet(t, "socks", transport)
+	requireProxyGet(t, h, "socks", transport)
 }
 
 // testProxyWireguard drives the wg server with an in-process userspace
@@ -1044,7 +1159,7 @@ func testProxyWireguard(t testing.TB, h *proxyTestHarness) {
 	// key/ip), and a lingering previous client device would flap the server
 	// peer's endpoint into the next leg
 	defer closeWgClient()
-	requireProxyGet(t, "wireguard", transport)
+	requireProxyGet(t, h, "wireguard", transport)
 }
 
 // startWgClient brings up an in-process userspace WireGuard client and a
@@ -1136,9 +1251,13 @@ func startWgClient(t testing.TB, ctx context.Context, wgConfig *model.WgConfig, 
 	return transport, closeWgClient
 }
 
-// requireProxyGet issues a GET to the real target through the given transport,
-// retrying while the proxy device establishes its path to the provider.
-func requireProxyGet(t testing.TB, leg string, transport *http.Transport) {
+// requireProxyGet issues a GET to the harness target through the given
+// transport, retrying while the proxy device establishes its path to the
+// provider.
+func requireProxyGet(t testing.TB, h *proxyTestHarness, leg string, transport *http.Transport) {
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = h.targetTlsConfig
+	}
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   60 * time.Second,
@@ -1148,7 +1267,7 @@ func requireProxyGet(t testing.TB, leg string, transport *http.Transport) {
 	deadline := time.Now().Add(120 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		req, err := http.NewRequest("GET", testTargetUrl, nil)
+		req, err := http.NewRequest("GET", h.targetUrl, nil)
 		if err != nil {
 			t.Fatalf("%s: new request: %v", leg, err)
 		}
@@ -1174,7 +1293,7 @@ func requireProxyGet(t testing.TB, leg string, transport *http.Transport) {
 		fmt.Printf("[progress][%s]OK status=%d bytes=%d\n", leg, resp.StatusCode, len(body))
 		return
 	}
-	t.Fatalf("%s: could not load %s through proxy: %v", leg, testTargetUrl, lastErr)
+	t.Fatalf("%s: could not load %s through proxy: %v", leg, h.targetUrl, lastErr)
 }
 
 // ---- in-process userspace WireGuard client netstack -------------------------

@@ -1,8 +1,8 @@
 package proxy
 
 // End-to-end drain behavior over the real proxy servers (PROXYDRAIN1.md
-// §3.2), using the full harness (local connect+api servers, a real provider,
-// real internet egress — see proxy_test.go):
+// §3.2), using the full harness (local connect+api servers, a real provider
+// and a local target — see proxy_test.go):
 //
 //   - an established socks tunnel carrying a live TLS session keeps working
 //     after Drain (the deploy already flipped new flows to the replacement
@@ -35,7 +35,7 @@ func TestProxyDrainGraceful(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyDrainGraceful\n")
-		h := setupProxyTest(t)
+		h := setupProxyTargetTest(t)
 		defer h.close(t)
 
 		// ---- establish a socks tunnel with a live keep-alive TLS session ----
@@ -69,6 +69,7 @@ func TestProxyDrainGraceful(t *testing.T) {
 			},
 			// keep-alive on so the tunnel is pooled between the two requests
 			DisableKeepAlives: false,
+			TLSClientConfig:   h.targetTlsConfig,
 		}
 
 		// one client for BOTH legs: requireProxyGet closes idle conns when it
@@ -79,7 +80,7 @@ func TestProxyDrainGraceful(t *testing.T) {
 			Timeout:   60 * time.Second,
 		}
 		get := func() (int, error) {
-			request, err := http.NewRequest("GET", testTargetUrl, nil)
+			request, err := http.NewRequest("GET", h.targetUrl, nil)
 			if err != nil {
 				return 0, err
 			}

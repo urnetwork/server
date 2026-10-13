@@ -874,6 +874,8 @@ func (self *routeEnvironment) newClient(
 		4*(self.accessProfile.Forward.BaseDelay+self.accessProfile.Reverse.BaseDelay),
 	)
 	settings.WebRtcSettings.IceServerUrls = nil
+	// empty IceServerUrls alone would draw from the default STUN pool
+	settings.WebRtcSettings.IceServerPoolUrls = nil
 	stats := &clientconnect.P2pDataPlaneStats{}
 	routeStateTrace := newP2pRouteStateTrace()
 	p2pSettings := settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings

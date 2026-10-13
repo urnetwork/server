@@ -52,10 +52,18 @@ type ledgerV2RPC struct {
 	// latestUnavailable fails every read of "latest".
 	latestBlock       uint64
 	latestUnavailable bool
+	// estimates answers eth_estimateGas for a calldata; any other calldata
+	// estimates 50,000. A transaction whose calldata is in needs runs out of
+	// gas when its limit is below that: its receipt is failed. The next
+	// withheld transactions are accepted and never included.
+	estimates map[string]uint64
+	needs     map[string]uint64
+	withheld  int
 }
 
 func newLedgerV2RPC(t testing.TB) *ledgerV2RPC {
-	return &ledgerV2RPC{t: t, finalizedBlock: 100, nonce: 7, receipts: map[string]*types.Receipt{}, reverts: map[string]string{}, results: map[string][]byte{}}
+	return &ledgerV2RPC{t: t, finalizedBlock: 100, nonce: 7, receipts: map[string]*types.Receipt{}, reverts: map[string]string{}, results: map[string][]byte{},
+		estimates: map[string]uint64{}, needs: map[string]uint64{}}
 }
 
 func ledgerV2ErrorData(name string) string {
@@ -128,7 +136,11 @@ func (self *ledgerV2RPC) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			json.Unmarshal(call.Params[0], &message)
 			data := append(message.Data, message.Input...)
 			if call.Method == "eth_estimateGas" {
-				result = "0xc350"
+				estimate := uint64(50_000)
+				if known, ok := self.estimates[string(data)]; ok {
+					estimate = known
+				}
+				result = hexutil.EncodeUint64(estimate)
 				break
 			}
 			self.events = append(self.events, "call "+hex.EncodeToString(data[:min(4, len(data))]))
@@ -148,12 +160,20 @@ func (self *ledgerV2RPC) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			hash := strings.ToLower(transaction.Hash().Hex())
 			self.sent = append(self.sent, &transaction)
 			self.events = append(self.events, "send "+hex.EncodeToString(transaction.Data()[:min(4, len(transaction.Data()))]))
+			result = hash
+			if 0 < self.withheld {
+				self.withheld--
+				break
+			}
+			status := types.ReceiptStatusSuccessful
+			if transaction.Gas() < self.needs[string(transaction.Data())] {
+				status = types.ReceiptStatusFailed
+			}
 			self.receipts[hash] = &types.Receipt{
 				Type: transaction.Type(), TxHash: transaction.Hash(), BlockHash: stTransactionReconcileBlockHash(self.finalizedBlock - 1),
-				BlockNumber: new(big.Int).SetUint64(self.finalizedBlock - 1), Status: types.ReceiptStatusSuccessful,
+				BlockNumber: new(big.Int).SetUint64(self.finalizedBlock - 1), Status: status,
 				CumulativeGasUsed: transaction.Gas(), GasUsed: transaction.Gas(), EffectiveGasPrice: transaction.GasPrice(), Logs: []*types.Log{},
 			}
-			result = hash
 		case "eth_getTransactionReceipt":
 			var hash string
 			json.Unmarshal(call.Params[0], &hash)

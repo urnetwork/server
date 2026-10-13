@@ -69,7 +69,7 @@ func GetStLedgerV2Activation(ctx context.Context, deploymentKey StDeploymentKey)
 }
 
 // GetStLedgerV2ActivationIfInstalled is GetStLedgerV2Activation for a
-// database that may predate the record's table (migration 823): without the
+// database that may predate the record's table (migration 832): without the
 // table there is no activation. A deployment without the v2 pair reads the
 // record this way, so settlement v1 alone needs nothing that v2 added.
 func GetStLedgerV2ActivationIfInstalled(ctx context.Context, deploymentKey StDeploymentKey) *StLedgerV2Activation {

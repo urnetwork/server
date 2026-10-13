@@ -21,6 +21,8 @@ type ForceCloseVisitError struct {
 	progressed bool
 	// Rows left open after an operational failure, in page order.
 	deferredContractIds []server.Id
+	// Set only by a call whose every failure was a busy row it walked past.
+	deferredOnly bool
 }
 
 // The task still records the original failure, not a successful page.
@@ -40,6 +42,57 @@ func (self *ForceCloseVisitError) Progressed() bool { return self.progressed }
 // page closed nothing on their behalf; a later pass or owner retires them.
 func (self *ForceCloseVisitError) DeferredContractIds() []server.Id {
 	return append([]server.Id(nil), self.deferredContractIds...)
+}
+
+// Every failure deferred a row because another owner held its transfer
+// balance, on a page that otherwise progressed, and the call walked past them
+// until its budgets, its deferral bound or the end of its pass, or stopped just
+// before another failing page that the next call meets first. The deferred rows
+// keep their custody behind the cursor; the pass that deferred them ends once
+// its backlog is complete, so the next one revisits them (subscription_close_fresh.go).
+func (self *ForceCloseVisitError) DeferredOnly() bool { return self != nil && self.deferredOnly }
+
+// Every failed row of this complete page refused only because another owner
+// held its transfer balance. Any other cause keeps the ordinary page outcome.
+func (self *ForceCloseVisitError) ownershipBusyOnly() bool {
+	batch, ok := self.cause.(*server.ErrorCauseBatch)
+	if !ok || batch == nil {
+		return false
+	}
+	for _, cause := range batch.Unwrap() {
+		row, ok := cause.(*forceCloseRowError)
+		if !ok || row == nil || !forceCloseRowOwnershipBusy(row.cause) {
+			return false
+		}
+	}
+	return true
+}
+
+// A deadline reconciliation refused by a busy owner returns the bare refusal.
+// A refused close also carries its cleanup's confirmation that the row stayed
+// open and undisputed. Every other leaf, including a dispute, is not busy.
+func forceCloseRowOwnershipBusy(err error) bool {
+	causes := server.InspectErrorCauses(err)
+	if !causes.Complete || causes.NilBranches != 0 {
+		return false
+	}
+	busy := false
+	for _, cause := range causes.Nodes {
+		if !cause.Leaf {
+			continue
+		}
+		if nonfinal, ok := cause.Err.(*forceCloseNonfinalError); ok {
+			if nonfinal == nil || nonfinal.disputed {
+				return false
+			}
+			continue
+		}
+		if cause.Err != errTransferBalanceOwnershipBusy {
+			return false
+		}
+		busy = true
+	}
+	return busy
 }
 
 // Revalidate the witness before any wrapper or task persists its cursor.

@@ -1669,6 +1669,16 @@ reload must all occur through the owning deployment lifecycle. The decoder
 ignores additive metadata it does not consume, but rejects unsupported schema
 versions and inconsistent policy-two state/flag combinations.
 
+`urnetwork_arin_database_build_epoch_seconds` reports the build epoch of the
+serving reader each process opened, and zero until it opens. Every service pushes
+it with its own host, service, block and instance labels, so a query over it
+shows which artifact each live process classifies with and how old that artifact
+is, including on hosts without shell access. API, Connect, MCP and Alt open the
+reader at warmup; Taskworker reports zero because it consumes stored facts.
+The gauge is process self-report from the published reader; it does not hash the
+mapped file or prove request-time use, and stored connection epochs remain the
+evidence of which database classified a connection.
+
 `ArinInfo.QualityVerified()` requires a positive database build epoch,
 classifier version one, policy two, subscriber state, `non_quality: false`, and
 `risk: false`. Manual IP overrides do not provide a database epoch and therefore

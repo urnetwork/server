@@ -110,3 +110,29 @@ func TestStartupReadinessRejectsIncompleteCauseTrees(t *testing.T) {
 		}
 	}
 }
+
+// PgBouncer, between every service and PostgreSQL, reports its own
+// unavailability as FATAL 08P01 (send_pooler_error in src/proto.c): a query
+// queued past query_wait_timeout, a server login that keeps failing, the
+// client limit. On 2026-10-12 its pools stayed saturated for minutes, and a
+// startup read refused there must retry like any other unavailable read.
+func TestStartupReadinessRetriesPgBouncerPoolerRefusals(t *testing.T) {
+	for _, message := range []string{
+		"query_wait_timeout",
+		"server login has been failing, cached error: connect failed (server_login_retry)",
+		"no more connections allowed (max_client_conn)",
+	} {
+		pooler := &pgconn.PgError{Severity: "FATAL", Code: "08P01", Message: message}
+		for _, err := range []error{
+			startupReadinessReadError("pg", pooler),
+			startupReadinessReadError("pg", errors.Join(server.DbContextDoneError, pooler)),
+		} {
+			if !RetryableStartupReadinessError(err) {
+				t.Fatal("pooler refusal stranded startup readiness", message, err)
+			}
+			if RetryableStartupReadinessError(errors.Join(err, &pgconn.PgError{Code: "42P01"})) {
+				t.Fatal("pooler refusal concealed an independent hard cause", message)
+			}
+		}
+	}
+}

@@ -89,7 +89,7 @@ func TestDbMaintenanceDeferReasonRefusesLoadedPrimary(t *testing.T) {
 		{load: dbMaintenanceLoad{runningBackends: 4}, opts: custom, deferred: true},
 		{load: dbMaintenanceLoad{oldestTransactionAge: 30 * time.Second, runningBackends: 3}, opts: custom, deferred: false},
 	} {
-		reason := dbMaintenanceDeferReason(c.load, c.opts)
+		reason := dbMaintenanceDeferReason(c.load, c.opts.maxTransactionAge(), c.opts.maxRunningBackends())
 		if (reason != "") != c.deferred {
 			t.Errorf("load %+v with %+v: reason %q, want deferred=%t", c.load, *c.opts, reason, c.deferred)
 		}

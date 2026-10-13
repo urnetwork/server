@@ -11,12 +11,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 )
@@ -82,11 +80,7 @@ func DefaultContractOriginNotificationSettings() ContractOriginNotificationSetti
 	}
 }
 
-type contractOriginSubscription interface {
-	ReceiveTimeout(context.Context, time.Duration) (any, error)
-	Ping(context.Context, ...string) error
-	Close() error
-}
+type contractOriginSubscription = server.RedisShardSubscription
 
 type contractOriginPair struct {
 	version *connect.MonitorValue[uint64]
@@ -103,18 +97,18 @@ type contractOriginBucket struct {
 // All methods are safe for concurrent use. Close prevents new registrations and
 // publications, cancels I/O, and joins every reader and publisher owned here.
 type ContractOriginNotifications struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	settings  ContractOriginNotificationSettings
-	subscribe func(context.Context, string) (contractOriginSubscription, error)
-	publish   func(context.Context, string, string) error
-	queue     chan [32]byte
-	workers   sync.WaitGroup
-	closeOnce sync.Once
-	stateLock sync.Mutex
-	closed    bool
-	waiters   int
-	buckets   [contractOriginBucketCount]contractOriginBucket
+	ctx                context.Context
+	cancel             context.CancelFunc
+	settings           ContractOriginNotificationSettings
+	subscriptionSource *server.RedisShardSubscriptionSource
+	publish            func(context.Context, string, string) error
+	queue              chan [32]byte
+	workers            sync.WaitGroup
+	closeOnce          sync.Once
+	stateLock          sync.Mutex
+	closed             bool
+	waiters            int
+	buckets            [contractOriginBucketCount]contractOriginBucket
 	// Each owns its own lock; never taken while holding stateLock.
 	routeRejections         *contractRouteRejections
 	terminalRouteRejections *contractTerminalRouteRejections
@@ -123,7 +117,7 @@ type ContractOriginNotifications struct {
 // The constructor starts the owner loops, but no subscription is opened until a
 // request registers in its bucket. Settings are copied, not shared mutably.
 func NewContractOriginNotifications(ctx context.Context, settings ContractOriginNotificationSettings) *ContractOriginNotifications {
-	return newContractOriginNotifications(ctx, settings, subscribeContractOrigins, publishContractOrigin)
+	return newContractOriginNotifications(ctx, settings, server.DefaultRedisShardSubscriptionSource().Open, publishContractOrigin)
 }
 
 func newContractOriginNotifications(
@@ -138,8 +132,11 @@ func newContractOriginNotifications(
 		panic("invalid contract origin notification budgets")
 	}
 	ctx, cancel := context.WithCancel(ctx)
+	// a lost subscription reloads the process slot map before it reopens
+	subscriptionSource := server.DefaultRedisShardSubscriptionSource()
+	subscriptionSource.Open = subscribe
 	notifications := &ContractOriginNotifications{
-		ctx: ctx, cancel: cancel, settings: settings, subscribe: subscribe, publish: publish,
+		ctx: ctx, cancel: cancel, settings: settings, subscriptionSource: subscriptionSource, publish: publish,
 		queue:                   make(chan [32]byte, settings.PublishQueueSize),
 		routeRejections:         newContractRouteRejections(settings.MaxRouteRejections, settings.RouteRejectionTimeout),
 		terminalRouteRejections: newContractTerminalRouteRejections(settings.TerminalRouteRejectionCount, settings.TerminalRouteRejectionTimeout),
@@ -302,8 +299,9 @@ func (self *ContractOriginNotifications) runPublisher() {
 }
 
 // Each socket must acknowledge its owned channel and keep proving read-side
-// liveness. A topology unsubscribe or missing incoming evidence replaces it;
-// every fresh ack wakes the registered pairs to recheck missed commits.
+// liveness; a slot move, an error reply or missing evidence replaces it
+// (server.RunRedisShardSubscription). Every acknowledgement that starts a
+// subscription wakes the registered pairs to recheck missed commits.
 func (self *ContractOriginNotifications) runBucket(index int) {
 	select {
 	case <-self.ctx.Done():
@@ -311,99 +309,53 @@ func (self *ContractOriginNotifications) runBucket(index int) {
 	case <-self.buckets[index].needed:
 	}
 	channel := contractOriginChannel(index)
-	acknowledged := false
-	for self.ctx.Err() == nil {
-		reconnect := connect.NewPacedReconnect(time.Second)
-		subscription, err := self.subscribe(self.ctx, channel)
-		if err == nil {
-			closed := make(chan struct{})
-			stopClose := context.AfterFunc(self.ctx, func() { _ = subscription.Close(); close(closed) })
-			func() {
-				acknowledgementDeadline := time.Now().Add(contractOriginAcknowledgementLimit)
-				lastIncoming := time.Now()
-				ready := false
-				for self.ctx.Err() == nil {
-					deadline := lastIncoming.Add(contractOriginIncomingLimit)
-					if !ready && acknowledgementDeadline.Before(deadline) {
-						deadline = acknowledgementDeadline
-					}
-					receiveTimeout := min(contractOriginReceiveTimeout, time.Until(deadline))
-					if receiveTimeout <= 0 {
-						return
-					}
-					event, receiveErr := subscription.ReceiveTimeout(self.ctx, receiveTimeout)
-					if receiveErr != nil {
-						var timeout net.Error
-						if errors.As(receiveErr, &timeout) && timeout.Timeout() && self.ctx.Err() == nil && time.Now().Before(deadline) {
-							pingCtx, cancel := context.WithDeadline(self.ctx, deadline)
-							pingErr := subscription.Ping(pingCtx)
-							cancel()
-							if pingErr == nil {
-								// A write is not liveness; only a subsequent incoming
-								// Pong, owned ack or valid message extends the deadline.
-								continue
-							}
-						}
-						return
-					}
-					switch event := event.(type) {
-					case *redis.Subscription:
-						if event.Channel != channel {
-							continue
-						}
-						if event.Kind == "sunsubscribe" {
-							// Slot migration can remove this subscription without
-							// closing its socket. Reopen through the cluster owner.
-							return
-						}
-						if event.Kind != "ssubscribe" {
-							continue
-						}
-						lastIncoming = time.Now()
-						ready = true
-						label := "subscribed"
-						if acknowledged {
-							label = "reconnected"
-						}
-						acknowledged = true
-						contractOriginNotificationCounter.WithLabelValues(label).Inc()
-						self.notifyBucket(index, nil)
-					case *redis.Pong:
-						lastIncoming = time.Now()
-					case *redis.Message:
-						if event.Channel != channel || len(event.Payload) != 64 {
-							contractOriginNotificationCounter.WithLabelValues("invalid_message").Inc()
-							continue
-						}
-						decoded, decodeErr := hex.DecodeString(event.Payload)
-						if decodeErr != nil || int(decoded[0])%contractOriginBucketCount != index {
-							contractOriginNotificationCounter.WithLabelValues("invalid_message").Inc()
-							continue
-						}
-						lastIncoming = time.Now()
-						var key [32]byte
-						copy(key[:], decoded)
-						contractOriginNotificationCounter.WithLabelValues("received").Inc()
-						self.notifyBucket(index, &key)
-					}
+	server.RunRedisShardSubscription(
+		self.ctx,
+		channel,
+		contractOriginSubscriptionSettings(),
+		self.subscriptionSource,
+		&server.RedisShardSubscriptionHandler{
+			Subscribed: func(resubscribed bool) {
+				label := "subscribed"
+				if resubscribed {
+					label = "reconnected"
 				}
-			}()
-			if stopClose() {
-				_ = subscription.Close()
-			} else {
-				<-closed
-			}
-		}
-		if self.ctx.Err() != nil {
-			return
-		}
-		contractOriginNotificationCounter.WithLabelValues("subscription_failed").Inc()
-		select {
-		case <-self.ctx.Done():
-			return
-		case <-reconnect.After():
-		}
-	}
+				contractOriginNotificationCounter.WithLabelValues(label).Inc()
+				self.notifyBucket(index, nil)
+			},
+			Message: func(message server.RedisMessage) bool {
+				if message.Channel != channel || len(message.Payload) != 64 {
+					contractOriginNotificationCounter.WithLabelValues("invalid_message").Inc()
+					return false
+				}
+				decoded, decodeErr := hex.DecodeString(message.Payload)
+				if decodeErr != nil || int(decoded[0])%contractOriginBucketCount != index {
+					contractOriginNotificationCounter.WithLabelValues("invalid_message").Inc()
+					return false
+				}
+				var key [32]byte
+				copy(key[:], decoded)
+				contractOriginNotificationCounter.WithLabelValues("received").Inc()
+				self.notifyBucket(index, &key)
+				return true
+			},
+			Lost: func(error) {
+				contractOriginNotificationCounter.WithLabelValues("subscription_failed").Inc()
+			},
+		},
+	)
+}
+
+// Replacements keep the established strict one-second pace rather than the
+// shared growing backoff: an owner holds at most sixteen sockets.
+func contractOriginSubscriptionSettings() *server.RedisShardSubscriptionSettings {
+	settings := server.DefaultRedisShardSubscriptionSettings()
+	settings.AcknowledgementTimeout = contractOriginAcknowledgementLimit
+	settings.IncomingTimeout = contractOriginIncomingLimit
+	settings.ReceiveTimeout = contractOriginReceiveTimeout
+	settings.MinReconnectTimeout = time.Second
+	settings.MaxReconnectTimeout = time.Second
+	return settings
 }
 
 // Snapshot under the registry lock, then notify outside it: monitor operations
@@ -470,20 +422,6 @@ func (self *ContractOriginNotifications) Close() {
 		}
 		contractOriginNotificationCounter.WithLabelValues("owner_closed").Add(float64(abandoned))
 	})
-}
-
-// The reader uses explicit receive deadlines and owns its socket directly, so
-// Close joins the exact worker instead of leaving go-redis channel goroutines.
-func subscribeContractOrigins(ctx context.Context, channel string) (subscription contractOriginSubscription, returnErr error) {
-	defer func() {
-		if recover() != nil {
-			returnErr = errors.New("contract origin subscription unavailable")
-		}
-	}()
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	server.Redis(ctx, func(client server.RedisClient) { subscription = client.SSubscribe(ctx, channel) }, server.OptNoRetry())
-	return
 }
 
 // The publisher pool bounds concurrent I/O even when shared Redis socket

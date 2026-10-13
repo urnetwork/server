@@ -56,6 +56,11 @@ func forceCloseContractPagesBudgeted[Cursor any](ctx context.Context, maxCount i
 // The cooperative budget is checked between subpages. The separate dispatch
 // limit also bounds one slow subpage: its callback receives a predicate that
 // closes once that limit passes, measured on the same clock from the start.
+// A subpage whose only failures are rows another owner held, while its other
+// rows moved, does not end the call: those rows stay open behind the cursor and
+// the walk continues. The call then ends on its budgets, at the end of its pass,
+// once its merged deferrals fill one raw subpage, or just before any other
+// failing subpage, which the next call meets first with its ordinary outcome.
 func forceCloseContractPagesDispatched[Cursor any](ctx context.Context, maxCount int, after *Cursor,
 	budget time.Duration, dispatchLimit time.Duration, subpageSize int, now func() time.Time,
 	page func(int, *Cursor, func() bool) (int64, *Cursor, error),
@@ -68,6 +73,16 @@ func forceCloseContractPagesDispatched[Cursor any](ctx context.Context, maxCount
 	dispatchEnd := started.Add(dispatchLimit)
 	dispatch := func() bool { return now().Before(dispatchEnd) }
 	next = after
+	// The busy row receipts of the walked subpages, within one cause batch.
+	var deferredCauses []error
+	var deferredContractIds []server.Id
+	deferred := func() error {
+		if len(deferredCauses) == 0 {
+			return nil
+		}
+		return &ForceCloseVisitError{cause: server.NewErrorCauseBatch(deferredCauses), attemptedCloseCount: closed,
+			complete: true, progressed: true, deferredContractIds: deferredContractIds, deferredOnly: true}
+	}
 	for remaining := maxCount; remaining > 0; {
 		size := min(remaining, subpageSize)
 		var count int64
@@ -80,6 +95,24 @@ func forceCloseContractPagesDispatched[Cursor any](ctx context.Context, maxCount
 			// Parent cancellation is never a normal page yield, even after a
 			// completed prefix or at the same instant as the elapsed budget.
 			return closed + count, next, errors.Join(pageErr, ctx.Err())
+		}
+		if visited, ok := pageErr.(*ForceCloseVisitError); ok && visited.CanCheckpoint() && visited.AttemptedCloseCount() == count &&
+			visited.Progressed() && visited.ownershipBusyOnly() && len(deferredCauses) <= forceCloseRawSubpageSize {
+			// One more subpage keeps the merge within the batch's two subpages.
+			deferredCauses = append(deferredCauses, visited.cause.(*server.ErrorCauseBatch).Unwrap()...)
+			deferredContractIds = append(deferredContractIds, visited.deferredContractIds...)
+			closed += count
+			next = cursor
+			remaining -= size
+			if next == nil || !now().Before(budgetEnd) || forceCloseRawSubpageSize < len(deferredCauses) {
+				return closed, next, deferred()
+			}
+			continue
+		}
+		if pageErr != nil && 0 < len(deferredCauses) {
+			// Report only the walked subpages. This one's committed rows stay
+			// committed, but its cursor is not taken; the next call revisits it.
+			return closed, next, deferred()
 		}
 		if pageErr != nil {
 			if accounting, ok := pageErr.(*ForceCloseAccountingError); ok {
@@ -108,8 +141,8 @@ func forceCloseContractPagesDispatched[Cursor any](ctx context.Context, maxCount
 		next = cursor
 		remaining -= size
 		if next == nil || !now().Before(budgetEnd) {
-			return closed, next, nil
+			return closed, next, deferred()
 		}
 	}
-	return closed, next, nil
+	return closed, next, deferred()
 }

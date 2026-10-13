@@ -8,6 +8,7 @@ package controller
 // logical key that names its epoch or commit seq.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -364,11 +365,43 @@ func (self *CoreStClient) LedgerV2Demand(ctx context.Context, noId uint64, seq u
 	return demand, nil
 }
 
+// stLedgerV2StakeMoveGasFloor is the least gas limit the engine signs a v2
+// transaction that moves stake with. Runtime 478 admits the staking
+// precompile's moveStake with 65,517 gas plus 8,750 for each entry of the
+// caller's own StakingHotkeys list, and third parties can lengthen vault2's
+// list to 128 entries, one cheap transfer each, between a send's estimate and
+// its inclusion (VERSION2-FINAL.md §7.3). A limit sized from eth_estimateGas
+// can therefore be left short, and a move refused for gas consumes all the gas
+// forwarded to it. Through runtime 477 the admission covered a walk of all 256
+// entries a list may hold, whatever it held: R-6 measured a capturing close
+// that needed a limit of 2,688,632, which the engine signed 20% above, at
+// about 3.2M (§8.1). The floor is that size, which the rehearsal ran on
+// runtimes 475, 477 and 478. It covers the walk of a full list, so no list
+// leaves a capturing close short; each epoch the close also defers takes about
+// 19,500 gas of that margin.
+const stLedgerV2StakeMoveGasFloor = 3_200_000
+
+// The selector of STSettlement2.closeOperatorEpoch.
+var stLedgerV2CloseSelector = stLedgerV2SettlementAbi.PackCloseOperatorEpoch(new(big.Int), new(big.Int))[:4]
+
+// ledgerV2GasFloor is the least gas limit an attempt of the intent is signed
+// with: stLedgerV2StakeMoveGasFloor for the execution of a v2 close, and 0
+// for any other attempt. Every close can capture, since emission reaches the
+// pool hotkey between a close's estimate and its inclusion, and the capture's
+// moveStake is the only stake move the server sends through vault2. Commit,
+// finalize and answer move no stake.
+func (self *CoreStClient) ledgerV2GasFloor(intent *model.StTransactionIntent, kind string) uint64 {
+	if kind == model.StTxAttemptExecution && self.cfg.LedgerV2Enabled() && common.HexToAddress(intent.ToAddress) == self.cfg.SettlementV2 && bytes.HasPrefix(intent.Calldata, stLedgerV2CloseSelector) {
+		return stLedgerV2StakeMoveGasFloor
+	}
+	return 0
+}
+
 // sendLedgerV2 sends one v2 operation through the durable engine with the
 // root key. A new operation is first preflighted with eth_call at the latest
 // block, so a call that would revert never takes a nonce. The engine sizes the
-// gas limit by eth_estimateGas, which covers the weight the staking precompile
-// requires of a capture.
+// gas limit by eth_estimateGas, and a close's never below
+// stLedgerV2StakeMoveGasFloor.
 func (self *CoreStClient) sendLedgerV2(ctx context.Context, operation string, to common.Address, calldata []byte) (string, error) {
 	return self.sendPrepared(ctx, self.cfg.RootKey, func(ctx context.Context, client *ethclient.Client) (string, common.Address, []byte, error) {
 		logicalKey, err := stTransactionLogicalKey(self.cfg, operation)

@@ -766,18 +766,6 @@ func Testing_SetKeyspaceNotifications(ctx context.Context, classes string) {
 	})
 }
 
-// channel messages can be: RedisMessage, RedisSubscription
-func Subscribe(ctx context.Context, channels ...string) (update <-chan any, unsub func()) {
-	Redis(ctx, func(client RedisClient) {
-		pubsub := client.SSubscribe(ctx, channels...)
-		update = pubsub.ChannelWithSubscriptions()
-		unsub = func() {
-			pubsub.Close()
-		}
-	})
-	return
-}
-
 func RedisSetIfEqual(r RedisClient, ctx context.Context, key string, test []byte, value []byte, ttl time.Duration) *redis.Cmd {
 	script := `local key = KEYS[1] local expected_value = ARGV[1] local new_value = ARGV[2] local ttl = ARGV[3] local current_value = redis.call('GET', key) if current_value == expected_value then redis.call('SET', key, new_value) redis.call('EXPIRE', key, ttl) return 1 else return 0 end`
 	return r.Eval(ctx, script, []string{key}, test, value, redisExpirySeconds(ttl))

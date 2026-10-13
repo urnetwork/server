@@ -98,11 +98,50 @@ func snMainnetMigrationTestContract(t testing.TB, version int) snMainnetMigratio
 	return snMainnetMigrationContract{}
 }
 
+// The contract that checks a published version's custody at head: its own, or
+// the later contract that superseded it (824 keeps v776's custody once the
+// transaction index is dropped).
+func snMainnetMigrationHeadTestContract(t testing.TB, version int) snMainnetMigrationContract {
+	t.Helper()
+	contract := snMainnetMigrationTestContract(t, version)
+	if contract.artifact.removedVersion != 0 && contract.artifact.removedVersion <= server.MigrationCount() {
+		return migrationCurrentSuffixTestContract(t, contract.artifact.removedVersion)
+	}
+	return contract
+}
+
 // Execute a real catalog predicate before and after changing its schema.
+// The probe's leading catalog CTEs, captured from the emitted query, so a
+// contract that reads them (824's index_artifact removal guard) can be
+// evaluated on its own like any direct catalog predicate.
+func snMainnetMigrationProbePrefix(t testing.TB) string {
+	t.Helper()
+	query := ""
+	source := &syntheticSource{postgresFn: func(emitted string) ([]Row, error) {
+		if strings.Contains(emitted, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(server.MigrationCount()), nil
+		}
+		query = emitted
+		return []Row{syntheticMigrationArtifactRow(server.MigrationCount())}, nil
+	}}
+	if _, err := NewMigrationsSignal().Run(t.Context(), syntheticSettings(source)); err != nil {
+		t.Fatal(err)
+	}
+	prefix, _, ok := strings.Cut(query, "SELECT version.value,")
+	if !ok {
+		t.Fatal("the migration signal did not emit its catalog prefix")
+	}
+	return prefix
+}
+
 func snMainnetMigrationAdmitted(t testing.TB, ctx context.Context, tx server.PgTx, query string, want bool) {
 	t.Helper()
+	statement := "SELECT " + query
+	if strings.Contains(query, "index_artifact") {
+		statement = snMainnetMigrationProbePrefix(t) + statement
+	}
 	var admitted bool
-	if err := tx.QueryRow(ctx, "SELECT "+query).Scan(&admitted); err != nil {
+	if err := tx.QueryRow(ctx, statement).Scan(&admitted); err != nil {
 		t.Fatal(err)
 	}
 	if admitted != want {
@@ -128,7 +167,7 @@ $sn_mainnet_fault$;`, snMainnetMigrationLiteral("public."+table), snMainnetMigra
 // Exact FK definitions distinguish multiple references to the same parent.
 func snMainnetMigrationForeignKeyCatalogFaults(t testing.TB, ctx context.Context, version int, child, parent, definition string) []snMainnetMigrationAlertObservation {
 	t.Helper()
-	contract := snMainnetMigrationTestContract(t, version)
+	contract := snMainnetMigrationHeadTestContract(t, version)
 	var triggerIds []uint32
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(ctx, `SELECT t.oid FROM pg_catalog.pg_trigger t
@@ -168,7 +207,7 @@ func snMainnetMigrationForeignKeyCatalogFaults(t testing.TB, ctx context.Context
 					}
 				}
 			} else {
-				observed = append(observed, snMainnetMigrationAlertObservation{alerts: alerts, want: fmt.Sprintf("%s@v%d", contract.artifact.name, version)})
+				observed = append(observed, snMainnetMigrationAlertObservation{alerts: alerts, want: fmt.Sprintf("%s@v%d", contract.artifact.name, contract.artifact.requiredVersion)})
 			}
 		}
 	}
@@ -186,10 +225,15 @@ func TestMigrationsMainnetOriginalSignalReportsEachMissingContract(t *testing.T)
 		t.Fatalf("mainnet catalog requires the original JSON repair at head779, got %d", head)
 	}
 	for _, contract := range snMainnetMigrationContracts {
-		row := syntheticMigrationMissingArtifactRow(t, head, contract.artifact.name)
+		// a superseded contract pages only while it is still required
+		dbVersion := head
+		if contract.artifact.removedVersion != 0 {
+			dbVersion = contract.artifact.removedVersion - 1
+		}
+		row := syntheticMigrationMissingArtifactRow(t, dbVersion, contract.artifact.name)
 		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 			if strings.Contains(query, "FROM migration_catalog") {
-				return syntheticMigrationCatalogRows(head), nil
+				return syntheticMigrationCatalogRows(dbVersion), nil
 			}
 			if !strings.Contains(query, contract.query) {
 				return nil, fmt.Errorf("signal omitted original mainnet contract %d", contract.artifact.requiredVersion)
@@ -233,6 +277,10 @@ func TestMigrationsMainnetOriginalCatalogAcrossPublishedPrefixes(t *testing.T) {
 				if contract.artifact.requiredVersion == 782 && version >= 776 {
 					want = true
 				}
+				// v776 still pins the transaction index that its successor 824 drops
+				if contract.artifact.removedVersion != 0 && version >= contract.artifact.removedVersion {
+					want = false
+				}
 				if actual := migrationBool(pgRow(row).str(contract.artifact.rowColumn)); actual != want {
 					t.Fatalf("mainnet prefix %d contract %d=%t, want %t", version, contract.artifact.requiredVersion, actual, want)
 				}
@@ -259,8 +307,6 @@ func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
 			{version: 773, sql: `ALTER TABLE verify_original_request_lookup ALTER COLUMN request_signature SET DEFAULT decode(repeat('00',64),'hex')`},
 			{version: 774, sql: snMainnetMigrationDropConstraint("provider_work_owner", "u", "UNIQUE (owner_hash)")},
 			{version: 775, sql: snMainnetMigrationDropConstraint("verify_original_request_closed", "c", "CHECK (((octet_length(receipt_body) >= 1) AND (octet_length(receipt_body) <= 4096)))")},
-			{version: 776, sql: snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
-			{version: 776, sql: `DROP INDEX provider_work_session_event_transaction`},
 			{version: 777, sql: snMainnetMigrationDropConstraint("st_operator_gas_reservation", "c", "CHECK ((attempt > 0))")},
 			{version: 777, sql: `ALTER TABLE st_operator_gas_budget ALTER COLUMN maximum_lifetime_wei TYPE numeric(79,0)`},
 			{version: 778, sql: snMainnetMigrationDropConstraint("provider_work_open_original", "c", "CHECK ((observed_at >= boundary_time))")},
@@ -283,8 +329,10 @@ func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
 			})
 		}
 	})
-	if len(observed) != 16 {
-		t.Fatalf("mainnet schema fault fixture returned %d alert observations, want 16", len(observed))
+	// v776's custody faults at head belong to its 824 successor, whose fixture
+	// is in TestMigrationsCurrentSuffixSchemaFaultsReachSignal.
+	if len(observed) != 14 {
+		t.Fatalf("mainnet schema fault fixture returned %d alert observations, want 14", len(observed))
 	}
 	for _, observation := range observed {
 		if alert := requireAlertClass(t, observation.alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), observation.want) {
@@ -365,7 +413,7 @@ func TestMigrationsMainnetOriginalFunctionAndTriggerCustody(t *testing.T) {
 			{version: 779, sql: `CREATE OR REPLACE FUNCTION verify_original_request_index_body(original bytea) RETURNS jsonb LANGUAGE plpgsql IMMUTABLE STRICT AS 'BEGIN RETURN ''{}''::jsonb; END'`},
 		} {
 			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
-				contract := snMainnetMigrationTestContract(t, fault.version)
+				contract := snMainnetMigrationHeadTestContract(t, fault.version)
 				snMainnetMigrationAdmitted(t, ctx, tx, contract.query, true)
 				if _, err := tx.Exec(ctx, fault.sql); err != nil {
 					t.Fatal(err)
