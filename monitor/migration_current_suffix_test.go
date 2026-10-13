@@ -122,6 +122,10 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing open connection handler index", 820, `DROP INDEX network_client_connection_connected_handler_id`},
 		{"open connection handler index includes closed rows", 820, `DROP INDEX network_client_connection_connected_handler_id; CREATE INDEX network_client_connection_connected_handler_id ON network_client_connection(handler_id)`},
 		{"open connection handler index leads with client", 820, `DROP INDEX network_client_connection_connected_handler_id; CREATE INDEX network_client_connection_connected_handler_id ON network_client_connection(client_id,handler_id) WHERE connected`},
+		{"missing App Store transaction price", 821, `ALTER TABLE apple_subscription_transaction DROP COLUMN price_milliunits`},
+		{"App Store transaction price truncates milliunits", 821, `ALTER TABLE apple_subscription_transaction ALTER COLUMN price_milliunits TYPE integer`},
+		{"missing App Store transaction currency", 821, `ALTER TABLE apple_subscription_transaction DROP COLUMN currency`},
+		{"invented App Store transaction currency", 821, `ALTER TABLE apple_subscription_transaction ALTER COLUMN currency SET DEFAULT 'USD'`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
