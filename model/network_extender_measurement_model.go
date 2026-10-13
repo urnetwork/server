@@ -1536,10 +1536,15 @@ func GetNetworkExtenderMeasurementForClient(
 	return
 }
 
-// The latest expiry of the extender's live certificates, nil when it holds
-// none, inside the caller's transaction. A record signed in the same
-// transaction says the extender serves the measurement API while this is
-// after its issue time (C10).
+// The latest expiry of the extender's live certificates whose name is
+// published, nil when it holds none, inside the caller's transaction. A record
+// signed in the same transaction says the extender serves the measurement API
+// while this is after its issue time (C10). An unpublished name is left out
+// for the same reason the lag.dev sample leaves it out (A4): a reader that
+// computed it from the record would look it up before it resolves. So the id
+// goes from the records signed while publication is cleared -- a withdrawal,
+// an opt-out, records gone missing -- and comes back with the reconcile pass
+// that publishes the name again (C8).
 func networkExtenderMeasurementCertNotAfterInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -1551,7 +1556,10 @@ func networkExtenderMeasurementCertNotAfterInTx(
 		`
 		SELECT MAX(not_after)
 		FROM network_extender_measurement_cert
-		WHERE extender_id = $1 AND withdraw_time IS NULL
+		WHERE
+			extender_id = $1 AND
+			withdraw_time IS NULL AND
+			publish_time IS NOT NULL
 		`,
 		extenderId,
 	)
@@ -1564,7 +1572,7 @@ func networkExtenderMeasurementCertNotAfterInTx(
 }
 
 // The same for several extenders on the caller's connection; an extender
-// with no live certificate has no entry.
+// with no live certificate whose name is published has no entry.
 func getNetworkExtenderMeasurementCertNotAftersInConn(
 	ctx context.Context,
 	conn server.PgConn,
@@ -1579,7 +1587,10 @@ func getNetworkExtenderMeasurementCertNotAftersInConn(
 		`
 		SELECT extender_id, MAX(not_after)
 		FROM network_extender_measurement_cert
-		WHERE extender_id = ANY($1) AND withdraw_time IS NULL
+		WHERE
+			extender_id = ANY($1) AND
+			withdraw_time IS NULL AND
+			publish_time IS NOT NULL
 		GROUP BY extender_id
 		`,
 		extenderIds,

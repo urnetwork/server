@@ -79,11 +79,12 @@ type NetworkExtender struct {
 	// an extender that is no canary. A canary is never dripped and never in
 	// an activation's bootstrap, whatever its tier.
 	CanaryChannel string
-	// The latest expiry of the extender's live measurement certificates, nil
-	// while it holds none (lag.dev/PLAN.md C10). Read where a record is
-	// signed, in the signing transaction, so the record's MeasurementId --
-	// the extender's 16-byte id, or empty -- describes the same state the
-	// record does.
+	// The latest expiry of the extender's live measurement certificates whose
+	// name is published, nil while it holds none (lag.dev/PLAN.md C8, C10).
+	// Read where a record is signed, in the signing transaction, so the
+	// record's MeasurementId -- the extender's 16-byte id, or empty --
+	// describes the same state the record does, and is never set before the
+	// name resolves.
 	MeasurementCertNotAfter *time.Time
 }
 

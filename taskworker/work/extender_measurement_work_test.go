@@ -1097,9 +1097,33 @@ func TestExtenderMeasurementTasksAreInertWhenDisabled(t *testing.T) {
 	})
 }
 
-// C10 through the drip: a record the publish tick signs for an extender with
-// a live certificate carries its id as MeasurementId, from which a reader
-// computes its name, and one for an extender without carries none.
+// Runs the publish drip and reads the MeasurementId of the record it signed
+// last for each extender (C10). The drip's smallest batch is larger than the
+// extenders a test makes, so each run signs every one of them again.
+func runTestMeasurementDrip(t testing.TB, ctx context.Context, env *testMeasurementEnv) map[server.Id][]byte {
+	t.Helper()
+	runTestExtenderPublish(t, ctx)
+	measurementIds := map[server.Id][]byte{}
+	for _, publish := range model.Testing_GetNetworkExtenderPublishes(ctx) {
+		message := &protocol.ExtenderGossipMessage{}
+		if err := proto.Unmarshal(publish.Message, message); err != nil {
+			t.Fatal(err)
+		}
+		body, err := connect.NewExtenderRootKeySet(env.rootPublicKey).VerifyRecord(message.GetRecord())
+		if err != nil {
+			t.Fatal(err)
+		}
+		measurementIds[publish.ExtenderId] = body.MeasurementId
+	}
+	return measurementIds
+}
+
+// C10 through the drip: a record the publish tick signs for an extender whose
+// certificate's name is published (C8) carries its id as MeasurementId, from
+// which a reader computes its name. One signed while the name is not yet
+// published carries none, and so does one signed after its records went
+// missing until a pass publishes them again, so no reader looks a name up
+// before it resolves; nor does one for an extender without a certificate.
 func TestExtenderPublishSignsTheMeasurementId(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1109,19 +1133,14 @@ func TestExtenderPublishSignsTheMeasurementId(t *testing.T) {
 		withoutCert := createTestMeasurementExtender(t, ctx, 2, "203.0.113.2")
 		connect.AssertEqual(t, runTestMeasurementIssue(t, ctx).Issued, 1)
 
-		runTestExtenderPublish(t, ctx)
-		measurementIds := map[server.Id][]byte{}
-		for _, publish := range model.Testing_GetNetworkExtenderPublishes(ctx) {
-			message := &protocol.ExtenderGossipMessage{}
-			if err := proto.Unmarshal(publish.Message, message); err != nil {
-				t.Fatal(err)
-			}
-			body, err := connect.NewExtenderRootKeySet(env.rootPublicKey).VerifyRecord(message.GetRecord())
-			if err != nil {
-				t.Fatal(err)
-			}
-			measurementIds[publish.ExtenderId] = body.MeasurementId
-		}
+		// issued, and its name not yet published: none
+		measurementIds := runTestMeasurementDrip(t, ctx, env)
+		connect.AssertEqual(t, len(measurementIds[withCert]), 0)
+		connect.AssertEqual(t, len(measurementIds[withoutCert]), 0)
+
+		// published: its id
+		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Published, 1)
+		measurementIds = runTestMeasurementDrip(t, ctx, env)
 		connect.AssertEqual(t, bytes.Equal(measurementIds[withCert], withCert.Bytes()), true)
 		connect.AssertEqual(t, len(measurementIds[withCert]), 16)
 		connect.AssertEqual(t, len(measurementIds[withoutCert]), 0)
@@ -1133,6 +1152,16 @@ func TestExtenderPublishSignsTheMeasurementId(t *testing.T) {
 		}
 		certs := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, withCert)
 		connect.AssertEqual(t, connect.ExtenderMeasurementName(measurementId, testMeasurementZone), certs[0].Names[0])
+
+		// its records go missing: none from the pass that finds them gone
+		// until a pass has published them again
+		env.zone.remove(env.hostedZoneId, testMeasurementName(withCert))
+		useTestMeasurementRoute53(t, &testUnsyncedMeasurementRoute53{testMeasurementRoute53: env.zone})
+		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Published, 0)
+		connect.AssertEqual(t, len(runTestMeasurementDrip(t, ctx, env)[withCert]), 0)
+		useTestMeasurementRoute53(t, env.zone)
+		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Published, 1)
+		connect.AssertEqual(t, bytes.Equal(runTestMeasurementDrip(t, ctx, env)[withCert], withCert.Bytes()), true)
 	})
 }
 

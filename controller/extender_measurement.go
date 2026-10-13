@@ -328,10 +328,11 @@ func GetExtenderMeasurementHosts(ctx context.Context, config *ExtenderConfig, no
 
 // The id a record signed at issueTime carries as its MeasurementId (C10): the
 // extender's own, 16 bytes, when measurement is enabled, the extender may be
-// measured at one of the record's addresses, and it holds a live certificate
-// that is unexpired at issueTime; nil otherwise. A reader computes the
-// measurement name from it (N1). The certificate state is read in the signing
-// transaction (NetworkExtender.MeasurementCertNotAfter).
+// measured at one of the record's addresses, and it holds a live certificate,
+// unexpired at issueTime, whose name the dns reconcile has published (C8);
+// nil otherwise. A reader computes the measurement name from it (N1), so it
+// is never set before the name resolves. The certificate state is read in the
+// signing transaction (NetworkExtender.MeasurementCertNotAfter).
 func extenderMeasurementId(
 	config *ExtenderConfig,
 	extender *model.NetworkExtender,
