@@ -244,6 +244,7 @@ func TestStLedgerV2ActivationResumesWhenThePairIsRestored(t *testing.T) {
 // SV-9 (not registered): until vault2 registers the pool nothing is recorded,
 // and the configured pair and its removal both behave as before: v1 closes
 // any epoch, the sync turn and the mirror run, and readiness has no reason.
+// A configuration naming no deployment is checked against nothing.
 func TestStLedgerV2ActivationChangesNothingBeforeRegistration(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f, v1 := newLedgerV2ActivationFixture(t)
@@ -276,6 +277,12 @@ func TestStLedgerV2ActivationChangesNothingBeforeRegistration(t *testing.T) {
 		}
 		if activation := model.GetStLedgerV2Activation(f.ctx, f.cfg.DeploymentKey()); activation != nil {
 			t.Fatalf("an unregistered pool was recorded: %+v", activation)
+		}
+
+		// A configuration naming no deployment has no activation to check.
+		f.restart(&StConfig{Profile: "testnet"})
+		if status, err := GetProviderPayoutTransitionStatus(f.ctx); err != nil || status.ReadinessReason != "" {
+			t.Fatalf("no deployment: readiness %+v, %v", status, err)
 		}
 	})
 }
