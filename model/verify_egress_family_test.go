@@ -1,7 +1,8 @@
 // Per-family source attribution (VALIDATOR.md §8.2): a provider may hold one
-// live address in each family, and a hop resolves when its source is its
-// family's only live address for the provider. Fixtures use documentation
-// addresses in the fixture's isolated Redis database.
+// live address in each family, an IPv6 /64 counting as one address, and a hop
+// resolves when its source is its family's only live address for the
+// provider. Fixtures use documentation addresses in the fixture's isolated
+// Redis database.
 package model
 
 import (
@@ -10,7 +11,6 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +48,24 @@ func requireVerifyKeysAbsent(t testing.TB, ctx context.Context, keys ...string) 
 	})
 }
 
+// Feeds one address the way a v2 writer did: the bare exact-address hash in
+// the v2 reverse index, the shared forward entry, a lease until `expires`.
+func testVerifyFeedV2Address(ctx context.Context, clientId server.Id, ip netip.Addr, owner string, now time.Time, expires time.Time, settings *VerifySettings) {
+	legacyHash := verifyEgressLegacyIndexHash(ip, settings)
+	server.Redis(ctx, func(r server.RedisClient) {
+		updateVerifyEgressLease(ctx, r, verifyClientEgressV2Key(clientId), clientId, hex.EncodeToString(legacyHash[:]), owner, now, expires)
+	})
+	updateVerifyEligibleMembership(ctx, clientId)
+}
+
+// Requires the eligible-set sampler to draw exactly this provider.
+func requireVerifyAssignable(t testing.TB, ctx context.Context, clientId server.Id, settings *VerifySettings) {
+	t.Helper()
+	if next, _ := SampleVerifyNextHop(ctx, nil, settings); next == nil || *next != clientId {
+		t.Fatalf("provider %s was not assignable: drew %v", clientId, next)
+	}
+}
+
 // §8.2, IPV6.md C7: the validator alternates the family each hop tries first,
 // so a provider's IPv4 and IPv6 addresses must both attribute. Each is its
 // family's only live address; a hop from either, an IPv4-mapped source
@@ -63,17 +81,17 @@ func TestVerifyEgressOneAddressPerFamilyBothResolve(t *testing.T) {
 		for _, ip := range []netip.Addr{v4, v6, netip.AddrFrom16(v4.As16())} {
 			requireVerifyEgressLeaseOwner(t, ctx, ip, clientId, settings)
 		}
-		if next, _ := SampleVerifyNextHop(ctx, nil, settings); next == nil || *next != clientId {
-			t.Fatalf("provider with one address per family was not assignable: %v", next)
-		}
+		requireVerifyAssignable(t, ctx, clientId, settings)
 	})
 }
 
-// §8.2: two live addresses of one family stay ambiguous and refused: neither
-// resolves and the provider is not eligible, while its address in the other
-// family still resolves. Closing the duplicate restores both families.
+// §8.2: two live addresses of one family (two IPv4 addresses, or two IPv6
+// /64s) stay ambiguous and refused: neither resolves. The provider's address
+// in the other family still resolves and keeps it assignable, since a hop
+// that lands on the refused family is retried on the other. Closing the
+// duplicate restores both families.
 func TestVerifyEgressSecondAddressOfAFamilyIsRefused(t *testing.T) {
-	for _, duplicate := range []netip.Addr{netip.MustParseAddr("192.0.2.43"), netip.MustParseAddr("2001:db8:42::2")} {
+	for _, duplicate := range []netip.Addr{netip.MustParseAddr("192.0.2.43"), netip.MustParseAddr("2001:db8:43::1")} {
 		t.Run(fmt.Sprintf("ipv%d", server.IpVersionForAddr(duplicate)), func(t *testing.T) {
 			server.DefaultTestEnv().Run(t, func(t testing.TB) {
 				ctx := context.Background()
@@ -94,15 +112,125 @@ func TestVerifyEgressSecondAddressOfAFamilyIsRefused(t *testing.T) {
 				if got := ResolveVerifyEgress(ctx, other, settings); got == nil || *got != clientId {
 					t.Fatalf("the other family's only address did not resolve: %v", got)
 				}
-				if testVerifyEligible(ctx, clientId) {
-					t.Fatal("a provider with two live addresses of one family stayed eligible")
-				}
+				requireVerifyAssignable(t, ctx, clientId, settings)
 				ClearVerifyConnectionEgress(ctx, clientId, connectionIds[duplicate], duplicate, settings)
 				requireVerifyEgressLeaseOwner(t, ctx, v4, clientId, settings)
 				requireVerifyEgressLeaseOwner(t, ctx, v6, clientId, settings)
 			})
 		})
 	}
+}
+
+// §8.2: IPv6 privacy (temporary) addresses rotate inside the host's /64, so
+// the provider's later egress connections leave from another address than
+// its pinned IPv6 transport's. The /64 is one address: a hop from the rotated
+// address resolves, and a transport reconnecting from it adds no second IPv6
+// address, so the provider stays assignable.
+func TestVerifyEgressIpv6TemporaryAddressRotation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyFamilySettings("temporary-address-rotation")
+		clientId := server.NewId()
+		v4 := netip.MustParseAddr("192.0.2.61")
+		transportV6, rotatedV6 := netip.MustParseAddr("2001:db8:61::a1"), netip.MustParseAddr("2001:db8:61::b2")
+		testVerifySetProvideModes(ctx, clientId)
+		testVerifyFeedAddresses(ctx, clientId, settings, v4, transportV6)
+		requireVerifyEgressLeaseOwner(t, ctx, rotatedV6, clientId, settings)
+
+		// an H3 transport reconnects after rotation from the new address
+		testVerifyFeedAddresses(ctx, clientId, settings, rotatedV6)
+		for _, ip := range []netip.Addr{v4, transportV6, rotatedV6} {
+			requireVerifyEgressLeaseOwner(t, ctx, ip, clientId, settings)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			fields, err := r.HGetAll(ctx, verifyClientEgressKey(clientId)).Result()
+			server.Raise(err)
+			if len(fields) != 2 {
+				t.Fatalf("one /64 and one IPv4 address left %d reverse fields: %v", len(fields), fields)
+			}
+		})
+		requireVerifyAssignable(t, ctx, clientId, settings)
+	})
+}
+
+// §8.2: two providers in one IPv6 /64 contend exactly as two behind one IPv4
+// address do: the /64 resolves to neither, while each stays assignable
+// through its own IPv4 address.
+func TestVerifyEgressIpv6NeighborsInOneSlash64Contend(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyFamilySettings("one-slash-64-neighbors")
+		first, second := server.NewId(), server.NewId()
+		firstV6, secondV6 := netip.MustParseAddr("2001:db8:65::1"), netip.MustParseAddr("2001:db8:65::2")
+		testVerifySetProvideModes(ctx, first)
+		testVerifySetProvideModes(ctx, second)
+		testVerifyFeedAddresses(ctx, first, settings, netip.MustParseAddr("192.0.2.65"), firstV6)
+		testVerifyFeedAddresses(ctx, second, settings, netip.MustParseAddr("192.0.2.66"), secondV6)
+		for _, ip := range []netip.Addr{firstV6, secondV6} {
+			if got := ResolveVerifyEgress(ctx, ip, settings); got != nil {
+				t.Fatalf("%s in a /64 two providers share resolved to %s", ip, got)
+			}
+		}
+		// draw each alone: the other leaves the eligible set first
+		for _, pair := range [][2]server.Id{{first, second}, {second, first}} {
+			server.Redis(ctx, func(r server.RedisClient) {
+				server.Raise(r.SRem(ctx, verifyEligibleKey, pair[1].String()).Err())
+				server.Raise(r.SAdd(ctx, verifyEligibleKey, pair[0].String()).Err())
+			})
+			requireVerifyAssignable(t, ctx, pair[0], settings)
+		}
+	})
+}
+
+// §5.1, §8.2: eligibility needs one family that attributes to the provider. A
+// dual-stack provider behind a shared IPv4 (CGNAT, or a NAT64 pool its IPv4
+// leaves through over 464XLAT, IPV6.md A5) with a unique IPv6 /64 stays
+// assignable when any other client connects from the shared IPv4.
+func TestVerifyEgressSharedIpv4KeepsProviderAssignable(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyFamilySettings("shared-ipv4")
+		victim, neighbor := server.NewId(), server.NewId()
+		shared := netip.MustParseAddr("198.51.100.62")
+		victimV6, neighborV6 := netip.MustParseAddr("2001:db8:62::1"), netip.MustParseAddr("2001:db8:63::1")
+		testVerifySetProvideModes(ctx, victim)
+		testVerifyFeedAddresses(ctx, victim, settings, shared, victimV6)
+		requireVerifyAssignable(t, ctx, victim, settings)
+		// the neighbor need not even be a provider: any client's transport
+		// from the shared address marks it ambiguous
+		testVerifyFeedAddresses(ctx, neighbor, settings, shared, neighborV6)
+		if got := ResolveVerifyEgress(ctx, shared, settings); got != nil {
+			t.Fatalf("the shared IPv4 resolved to %s", got)
+		}
+		requireVerifyEgressLeaseOwner(t, ctx, victimV6, victim, settings)
+		requireVerifyAssignable(t, ctx, victim, settings)
+	})
+}
+
+// §8.2: a live address whose forward entry names another client disqualifies
+// a provider even when its other family attributes, since a hop from it would
+// resolve to that client and be refused as a mismatch, not retried. An
+// ambiguous address does not.
+func TestVerifyEgressAddressAttributedToAnotherClientDisqualifies(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyFamilySettings("foreign-address")
+		clientId := server.NewId()
+		v4, v6 := netip.MustParseAddr("192.0.2.67"), netip.MustParseAddr("2001:db8:67::1")
+		testVerifySetProvideModes(ctx, clientId)
+		testVerifyFeedAddresses(ctx, clientId, settings, v4, v6)
+		_, v4HashHex := verifyClientEgressField(v4, settings)
+		for _, forward := range []string{verifyEgressAmbiguous, server.NewId().String()} {
+			server.Redis(ctx, func(r server.RedisClient) {
+				server.Raise(r.Set(ctx, verifyEgressKeyFromHex(v4HashHex), forward, settings.EgressTtl).Err())
+				server.Raise(r.SAdd(ctx, verifyEligibleKey, clientId.String()).Err())
+			})
+			next, _ := SampleVerifyNextHop(ctx, nil, settings)
+			if assignable := next != nil && *next == clientId; assignable != (forward == verifyEgressAmbiguous) {
+				t.Fatalf("with its IPv4 forward entry %q the provider was assignable=%t", forward, assignable)
+			}
+		}
+	})
 }
 
 // §8.2: each address keeps its own lease. A refresh of one family's address
@@ -114,7 +242,7 @@ func TestVerifyEgressFamilyLeaseExpiresIndependently(t *testing.T) {
 		settings := testVerifyFamilySettings("family-lease-expiry-test")
 		for _, pair := range []struct{ lapsing, kept netip.Addr }{
 			{lapsing: netip.MustParseAddr("192.0.2.44"), kept: netip.MustParseAddr("2001:db8:44::1")},
-			{lapsing: netip.MustParseAddr("2001:db8:44::2"), kept: netip.MustParseAddr("192.0.2.54")},
+			{lapsing: netip.MustParseAddr("2001:db8:44:1::2"), kept: netip.MustParseAddr("192.0.2.54")},
 		} {
 			clientId, lapsing, kept := server.NewId(), pair.lapsing, pair.kept
 			reverseKey := verifyClientEgressKey(clientId)
@@ -129,15 +257,15 @@ func TestVerifyEgressFamilyLeaseExpiresIndependently(t *testing.T) {
 			})
 			before := uint64(now.Add(time.Minute / 2).UnixMilli())
 			for _, ip := range []netip.Addr{lapsing, kept} {
-				if got, _ := resolveVerifyEgressAt(ctx, ip, settings, before); got == nil || *got != clientId {
+				if got := resolveVerifyEgressAt(ctx, ip, settings, before); got == nil || *got != clientId {
 					t.Fatalf("%s did not resolve before either lease lapsed: %v", ip, got)
 				}
 			}
 			after := uint64(now.Add(2 * time.Minute).UnixMilli())
-			if got, _ := resolveVerifyEgressAt(ctx, lapsing, settings, after); got != nil {
+			if got := resolveVerifyEgressAt(ctx, lapsing, settings, after); got != nil {
 				t.Fatalf("lapsed %s lease still attributed: %s", lapsing, got)
 			}
-			if got, _ := resolveVerifyEgressAt(ctx, kept, settings, after); got == nil || *got != clientId {
+			if got := resolveVerifyEgressAt(ctx, kept, settings, after); got == nil || *got != clientId {
 				t.Fatalf("%s lost attribution when the other family lapsed: %v", kept, got)
 			}
 			server.Redis(ctx, func(r server.RedisClient) {
@@ -149,10 +277,10 @@ func TestVerifyEgressFamilyLeaseExpiresIndependently(t *testing.T) {
 	})
 }
 
-// §8.2: the v3 reverse index holds one field per live address, naming its
-// address hash, family and head-score prefix hash; no current writer feeds the
-// v2 index. A close withdraws only its own family's field, lease and forward
-// entry; reaping withdraws every family's.
+// §8.2: the v4 reverse index holds one field per live address, naming its
+// address hash and family; no current writer feeds the v2 index. A close
+// withdraws only its own family's field, lease and forward entry; reaping
+// withdraws every family's.
 func TestVerifyEgressReverseIndexCarriesTheFamily(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -166,7 +294,7 @@ func TestVerifyEgressReverseIndexCarriesTheFamily(t *testing.T) {
 		for _, ip := range []netip.Addr{v4, v6} {
 			indexHash := VerifyEgressIndexHashWithSettings(ip, settings)
 			hashHexes[ip] = hex.EncodeToString(indexHash[:])
-			fields[ip] = fmt.Sprintf("%s_%d_%x", hashHexes[ip], server.IpVersionForAddr(ip), VerifyEgressIpHashWithSettings(ip, settings))
+			fields[ip] = fmt.Sprintf("%s_%d", hashHexes[ip], server.IpVersionForAddr(ip))
 		}
 		requireFields := func(want ...netip.Addr) {
 			t.Helper()
@@ -204,138 +332,138 @@ func TestVerifyEgressReverseIndexCarriesTheFamily(t *testing.T) {
 	})
 }
 
-// §8.2: a field without a valid family and score hash — a v2 field, or a
-// malformed one — is an address of unknown family, which counts against both
-// families; a v3 field yields its address hash, family and score hash.
-func TestVerifyEgressFieldWithoutAFamilyIsUnknown(t *testing.T) {
+// §8.2: a v4 field is the address hash and family; anything else, a bare v2
+// field included, has no family and is no v4 entry.
+func TestVerifyEgressFieldNamesItsAddressAndFamily(t *testing.T) {
 	settings := &VerifySettings{EgressHashKey: []byte("field-parse-test"), EgressHashV4Prefix: 29, EgressHashV6Prefix: 48}
-	ip := netip.MustParseAddr("2001:db8:46::1")
-	field, hashHex := verifyClientEgressField(ip, settings)
-	entry := parseVerifyClientEgressField(field)
-	if entry.indexHashHex != hashHex || entry.family != 6 || entry.scoreHash != VerifyEgressIpHashWithSettings(ip, settings) {
-		t.Fatalf("v3 field %q parsed as %+v", field, entry)
-	}
-	scoreHex := hex.EncodeToString(entry.scoreHash[:])
-	for _, unknown := range []string{
-		hashHex,
-		hashHex + "_6_" + scoreHex[:62],
-		hashHex + "_6_" + strings.Repeat("z", 64),
-		hashHex + "_5_" + scoreHex,
-	} {
-		entry := parseVerifyClientEgressField(unknown)
-		if entry.indexHashHex != hashHex || entry.family != 0 || entry.scoreHash != ([32]byte{}) {
-			t.Fatalf("field %q parsed as %+v, want an unknown family", unknown, entry)
+	for _, ip := range []netip.Addr{netip.MustParseAddr("192.0.2.46"), netip.MustParseAddr("2001:db8:46::1")} {
+		field, hashHex := verifyClientEgressField(ip, settings)
+		if field != hashHex+fmt.Sprintf("_%d", server.IpVersionForAddr(ip)) {
+			t.Fatalf("field for %s = %q", ip, field)
+		}
+		if got, family := parseVerifyClientEgressField(field); got != hashHex || family != server.IpVersionForAddr(ip) {
+			t.Fatalf("field %q parsed as %s, %d", field, got, family)
 		}
 	}
-	entries := map[string]verifyEgressEntry{hashHex: {indexHashHex: hashHex}}
-	if len(verifyFamilyEgressEntries(entries, 4)) != 1 || len(verifyFamilyEgressEntries(entries, 6)) != 1 {
-		t.Fatal("an unknown-family address did not count against both families")
+	for _, field := range []string{"abc", "abc_5", "abc_4_def"} {
+		if got, family := parseVerifyClientEgressField(field); got != "abc" || family != 0 {
+			t.Fatalf("field %q parsed as %s, %d, want no family", field, got, family)
+		}
+	}
+	live := newVerifyLiveEgress([]string{"a_4", "b_6", "c_7"}, []string{"d"})
+	if !slices.Equal(live.byFamily[4], []string{"a"}) || !slices.Equal(live.byFamily[6], []string{"b"}) || len(live.byFamily) != 2 || !slices.Equal(live.legacy, []string{"d"}) {
+		t.Fatalf("live egress = %+v", live)
 	}
 }
 
-// §8.2: one entry stands for each address. An entry of known family wins over
-// an unknown one whatever their expiries, and otherwise the later expiry
-// wins, so a changed score prefix does not split one address in two.
-// Expired fields are returned for pruning instead.
-func TestVerifyEgressEntriesAreOnePerAddress(t *testing.T) {
-	settings := &VerifySettings{EgressHashKey: []byte("entries-test"), EgressHashV4Prefix: 29, EgressHashV6Prefix: 48}
-	ip := netip.MustParseAddr("192.0.2.46")
-	field, hashHex := verifyClientEgressField(ip, settings)
-	changedSettings := *settings
-	changedSettings.EgressHashV4Prefix = 24
-	changedScore := VerifyEgressIpHashWithSettings(ip, &changedSettings)
-	changedField := fmt.Sprintf("%s_4_%x", hashHex, changedScore)
-	entries := map[string]verifyEgressEntry{}
-	steps := []struct {
-		field    string
-		expireMs string
-		family   int
-		expire   uint64
-	}{
-		{field: hashHex, expireMs: "3000", family: 0, expire: 3000},
-		{field: field, expireMs: "1500", family: 4, expire: 1500},
-		{field: hashHex, expireMs: "4000", family: 4, expire: 1500},
-		{field: changedField, expireMs: "2500", family: 4, expire: 2500},
-		{field: field, expireMs: "2000", family: 4, expire: 2500},
-	}
-	for _, step := range steps {
-		if expired := addVerifyEgressEntries(entries, map[string]string{step.field: step.expireMs}, 1000); len(expired) != 0 {
-			t.Fatalf("live field %q reported expired", step.field)
+// §8.2: the address index is an exact IPv4 address or an IPv6 /64. Addresses
+// in one /64 share it and other /64s do not, and an IPv6 index hash is apart
+// from the address's v2 exact-address hash; an IPv4 address keeps its v2 hash.
+func TestVerifyEgressIndexHashCoversAnIpv6Slash64(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		testVerifyEgressIndexHashCoversAnIpv6Slash64(t)
+	})
+}
+
+// The unkeyed index hash uses the client ip hash pepper, which the test
+// environment provides.
+func testVerifyEgressIndexHashCoversAnIpv6Slash64(t testing.TB) {
+	for _, settings := range []*VerifySettings{{EgressHashKey: []byte("slash-64-test"), EgressHashV4Prefix: 29, EgressHashV6Prefix: 48}, {EgressHashV4Prefix: 29, EgressHashV6Prefix: 48}} {
+		inside := []netip.Addr{netip.MustParseAddr("2001:db8:68::1"), netip.MustParseAddr("2001:db8:68::ffff:1"), netip.MustParseAddr("2001:db8:68:0:a:b:c:d")}
+		for _, ip := range inside[1:] {
+			if VerifyEgressIndexHashWithSettings(ip, settings) != VerifyEgressIndexHashWithSettings(inside[0], settings) {
+				t.Fatalf("%s and %s in one /64 have two index hashes (keyed=%t)", ip, inside[0], 0 < len(settings.EgressHashKey))
+			}
 		}
-		if entry := entries[hashHex]; len(entries) != 1 || entry.family != step.family || entry.expireMs != step.expire {
-			t.Fatalf("after %q at %s the address is %+v, want family %d expiring %d", step.field, step.expireMs, entries, step.family, step.expire)
+		if VerifyEgressIndexHashWithSettings(netip.MustParseAddr("2001:db8:68:1::1"), settings) == VerifyEgressIndexHashWithSettings(inside[0], settings) {
+			t.Fatal("two /64s share an index hash")
 		}
-	}
-	if entries[hashHex].scoreHash != changedScore {
-		t.Fatal("the later known entry did not supply the score hash")
-	}
-	expired := addVerifyEgressEntries(entries, map[string]string{field: "1000"}, 1000)
-	if len(expired) != 1 || expired[field] != "1000" || entries[hashHex].expireMs != 2500 {
-		t.Fatalf("expired field = %v, entries = %+v", expired, entries)
+		if VerifyEgressIndexHashWithSettings(inside[0], settings) == verifyEgressLegacyIndexHash(inside[0], settings) {
+			t.Fatal("an IPv6 index hash equals its v2 exact-address hash")
+		}
+		v4 := netip.MustParseAddr("192.0.2.68")
+		if VerifyEgressIndexHashWithSettings(v4, settings) != verifyEgressLegacyIndexHash(v4, settings) {
+			t.Fatal("an IPv4 index hash moved off its v2 hash")
+		}
 	}
 }
 
-// §8.2 rolling deploy: a pre-v3 writer's v2 entry, a bare address hash, still
-// attributes its address and keeps the provider eligible. Its family is
-// unknown, so another address beside it is refused; the same address fed by a
-// current writer is still one address. No current writer feeds v2, so the
-// entry ends one EgressTtl after its last write and the v3 address then
-// attributes alone.
+// §8.2 rolling deploy: a v2 writer's entry, a bare exact-address hash, still
+// attributes its address by the v2 rule (the client's one live v2 address)
+// and keeps the provider eligible. An IPv6 v2 entry resolves for its exact
+// address, under its v2 hash. A v4 address beside a v2 entry resolves too:
+// the versions are judged apart. No current writer feeds v2, so an entry ends
+// one EgressTtl after its last write.
 func TestVerifyEgressV2EntryAttributesForOneTtl(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		settings := testVerifyFamilySettings("v2-dual-read-test")
-		clientId := server.NewId()
+		clientId, legacyV6Client := server.NewId(), server.NewId()
 		v4, v6 := netip.MustParseAddr("192.0.2.47"), netip.MustParseAddr("2001:db8:47::1")
-		_, v4HashHex := verifyClientEgressField(v4, settings)
+		legacyV6 := netip.MustParseAddr("2001:db8:48::1")
 		testVerifySetProvideModes(ctx, clientId)
+		testVerifySetProvideModes(ctx, legacyV6Client)
 		oldWrite := server.NowUtc().Add(-time.Second)
-		server.Redis(ctx, func(r server.RedisClient) {
-			// what a pre-v3 writer ran: the same scripts, on the v2 index
-			updateVerifyEgressLease(ctx, r, verifyClientEgressV2Key(clientId), clientId, v4HashHex, server.NewId().String(), oldWrite, oldWrite.Add(settings.EgressTtl))
-		})
-		updateVerifyEligibleMembership(ctx, clientId)
+		testVerifyFeedV2Address(ctx, clientId, v4, server.NewId().String(), oldWrite, oldWrite.Add(settings.EgressTtl), settings)
+		testVerifyFeedV2Address(ctx, legacyV6Client, legacyV6, server.NewId().String(), oldWrite, oldWrite.Add(settings.EgressTtl), settings)
 		requireVerifyEgressLeaseOwner(t, ctx, v4, clientId, settings)
-
-		connectionIds := testVerifyFeedAddresses(ctx, clientId, settings, v4)
-		requireVerifyEgressLeaseOwner(t, ctx, v4, clientId, settings)
-		ClearVerifyConnectionEgress(ctx, clientId, connectionIds[v4], v4, settings)
-		requireVerifyEgressLeaseOwner(t, ctx, v4, clientId, settings)
+		requireVerifyEgressLeaseOwner(t, ctx, legacyV6, legacyV6Client, settings)
+		// the v2 rule is the exact address: another in its /64 is unknown
+		if got := ResolveVerifyEgress(ctx, netip.MustParseAddr("2001:db8:48::2"), settings); got != nil {
+			t.Fatalf("an address beside a v2 IPv6 entry resolved to %s", got)
+		}
 
 		testVerifyFeedAddresses(ctx, clientId, settings, v6)
-		if got := ResolveVerifyEgress(ctx, v6, settings); got != nil {
-			t.Fatalf("an address resolved beside an entry of unknown family: %s", got)
-		}
-		if got := ResolveVerifyEgress(ctx, v4, settings); got == nil || *got != clientId {
-			t.Fatalf("v2 entry stopped attributing during the rollout: %v", got)
-		}
-		if testVerifyEligible(ctx, clientId) {
-			t.Fatal("an address beside an entry of unknown family left the provider eligible")
-		}
+		requireVerifyEgressLeaseOwner(t, ctx, v6, clientId, settings)
+		requireVerifyEgressLeaseOwner(t, ctx, v4, clientId, settings)
 		server.Redis(ctx, func(r server.RedisClient) {
 			fields, err := r.HGetAll(ctx, verifyClientEgressV2Key(clientId)).Result()
 			server.Raise(err)
-			if len(fields) != 1 || fields[v4HashHex] != fmt.Sprint(oldWrite.Add(settings.EgressTtl).UnixMilli()) {
+			legacyHash := verifyEgressLegacyIndexHash(v4, settings)
+			if len(fields) != 1 || fields[hex.EncodeToString(legacyHash[:])] != fmt.Sprint(oldWrite.Add(settings.EgressTtl).UnixMilli()) {
 				t.Fatalf("a current writer fed the v2 index: %v", fields)
 			}
 		})
 
 		end := uint64(oldWrite.Add(settings.EgressTtl).UnixMilli())
-		if got, _ := resolveVerifyEgressAt(ctx, v4, settings, end); got != nil {
-			t.Fatalf("v2 entry attributed one EgressTtl after its last write: %s", got)
+		for _, ip := range []netip.Addr{v4, legacyV6} {
+			if got := resolveVerifyEgressAt(ctx, ip, settings, end); got != nil {
+				t.Fatalf("v2 entry for %s attributed one EgressTtl after its last write: %s", ip, got)
+			}
 		}
-		if got, _ := resolveVerifyEgressAt(ctx, v6, settings, end); got == nil || *got != clientId {
-			t.Fatalf("v3 address did not attribute alone after the v2 entry ended: %v", got)
+		if got := resolveVerifyEgressAt(ctx, v6, settings, end); got == nil || *got != clientId {
+			t.Fatalf("v4 address did not attribute alone after the v2 entry ended: %v", got)
 		}
 		server.Redis(ctx, func(r server.RedisClient) {
-			if !verifyClientHasLiveEgress(ctx, r, clientId, end) {
-				t.Fatal("provider was not eligible on its v3 address after the v2 entry ended")
+			if !verifyClientHasLiveEgress(ctx, r, clientId, end) || verifyClientHasLiveEgress(ctx, r, legacyV6Client, end) {
+				t.Fatal("eligibility after the v2 entries ended did not follow the v4 index alone")
 			}
 		})
 	})
 }
 
-// §8.2 rolling deploy: withdrawals reach what a pre-v3 writer left in the v2
+// §8.2 rolling deploy: a v2 exact address inside a /64 another client holds
+// in the v4 index is two clients in one /64, so it resolves to neither. The
+// v4 index cannot see the v2 claim from the /64's other addresses, which stay
+// the current client's until the v2 entry lapses.
+func TestVerifyEgressV2AddressInAnotherClientsSlash64ResolvesToNeither(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyFamilySettings("cross-version-slash-64")
+		legacyClient, currentClient := server.NewId(), server.NewId()
+		legacyIp, currentIp := netip.MustParseAddr("2001:db8:69::1"), netip.MustParseAddr("2001:db8:69::2")
+		testVerifySetProvideModes(ctx, currentClient)
+		now := server.NowUtc()
+		testVerifyFeedV2Address(ctx, legacyClient, legacyIp, server.NewId().String(), now, now.Add(settings.EgressTtl), settings)
+		testVerifyFeedAddresses(ctx, currentClient, settings, currentIp)
+		requireVerifyEgressLeaseOwner(t, ctx, currentIp, currentClient, settings)
+		if got := ResolveVerifyEgress(ctx, legacyIp, settings); got != nil {
+			t.Fatalf("a /64 two clients claim across versions resolved to %s", got)
+		}
+	})
+}
+
+// §8.2 rolling deploy: withdrawals reach what a v2 writer left in the v2
 // index. Releasing a proxy allocation withdraws its v2 lease and forward
 // entry, and reaping deletes the v2 index and its leases, so neither leaves a
 // recycled address attributed for the rest of its TTL.
@@ -345,19 +473,14 @@ func TestVerifyEgressV2EntriesAreWithdrawn(t *testing.T) {
 		settings := testVerifyFamilySettings("v2-withdrawal-test")
 		released, reaped := server.NewId(), server.NewId()
 		releasedIp, reapedIp := netip.MustParseAddr("192.0.2.48"), netip.MustParseAddr("192.0.2.49")
-		_, releasedHashHex := verifyClientEgressField(releasedIp, settings)
-		_, reapedHashHex := verifyClientEgressField(reapedIp, settings)
 		now := server.NowUtc()
 		for clientId, owner := range map[server.Id]string{released: verifyProxyEgressLeaseOwner, reaped: server.NewId().String()} {
-			hashHex := releasedHashHex
+			ip := releasedIp
 			if clientId == reaped {
-				hashHex = reapedHashHex
+				ip = reapedIp
 			}
 			testVerifySetProvideModes(ctx, clientId)
-			server.Redis(ctx, func(r server.RedisClient) {
-				updateVerifyEgressLease(ctx, r, verifyClientEgressV2Key(clientId), clientId, hashHex, owner, now, now.Add(settings.EgressTtl))
-			})
-			updateVerifyEligibleMembership(ctx, clientId)
+			testVerifyFeedV2Address(ctx, clientId, ip, owner, now, now.Add(settings.EgressTtl), settings)
 		}
 		requireVerifyEgressLeaseOwner(t, ctx, releasedIp, released, settings)
 		requireVerifyEgressLeaseOwner(t, ctx, reapedIp, reaped, settings)
@@ -365,7 +488,8 @@ func TestVerifyEgressV2EntriesAreWithdrawn(t *testing.T) {
 		clearVerifyProxyEgressForClient(ctx, released)
 		RemoveVerifyEgressForClient(ctx, reaped)
 		for clientId, ip := range map[server.Id]netip.Addr{released: releasedIp, reaped: reapedIp} {
-			_, hashHex := verifyClientEgressField(ip, settings)
+			legacyHash := verifyEgressLegacyIndexHash(ip, settings)
+			hashHex := hex.EncodeToString(legacyHash[:])
 			if got := ResolveVerifyEgress(ctx, ip, settings); got != nil || testVerifyEligible(ctx, clientId) {
 				t.Fatalf("withdrawn v2 entry still attributed %s: %v", ip, got)
 			}
@@ -375,10 +499,34 @@ func TestVerifyEgressV2EntriesAreWithdrawn(t *testing.T) {
 	})
 }
 
+// §8.2 (Redis/Lua): a reverse field names the address alone, so its owners'
+// leases always publish to one field. Owners of one address opened before and
+// after an egress_ipv4_prefix change leave no live field once both close, and
+// the provider's next IPv4 address is its only one.
+func TestVerifyEgressScorePrefixChangeLeavesNoPhantomAddress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		before := testVerifyFamilySettings("prefix-change")
+		after := *before
+		after.EgressHashV4Prefix = 24
+		clientId := server.NewId()
+		ip, nextIp := netip.MustParseAddr("192.0.2.66"), netip.MustParseAddr("198.51.100.66")
+		testVerifySetProvideModes(ctx, clientId)
+		older, newer := server.NewId(), server.NewId()
+		FeedVerifyConnectionEgress(ctx, clientId, older, ip, before)
+		FeedVerifyConnectionEgress(ctx, clientId, newer, ip, &after)
+		ClearVerifyConnectionEgress(ctx, clientId, older, ip, before)
+		ClearVerifyConnectionEgress(ctx, clientId, newer, ip, &after)
+		requireVerifyKeysAbsent(t, ctx, verifyClientEgressKey(clientId))
+		testVerifyFeedAddresses(ctx, clientId, &after, nextIp)
+		requireVerifyEgressLeaseOwner(t, ctx, nextIp, clientId, &after)
+	})
+}
+
 // §9: the provider meters count per resolved provider whichever family its
 // source ip is in, so a provider with an address in each family keeps one
 // seed and one EXTEND budget. An excluded source skips them, as it skips the
-// source-ip meters.
+// source-ip meters, and an unresolved source's pad counts on a scratch key.
 func TestVerifyProviderRateMetersCountPerProvider(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -403,30 +551,82 @@ func TestVerifyProviderRateMetersCountPerProvider(t *testing.T) {
 		if got := IncrVerifySeedProviderRate(ctx, "2001:db8:50::1", clientId, settings); got != 3 {
 			t.Fatalf("seed after an excluded one = %d, want 3", got)
 		}
+		PadVerifyExtendProviderRate(ctx, "198.51.100.51", settings)
+		if got := IncrVerifyExtendProviderRate(ctx, "198.51.100.50", clientId, settings); got != 3 {
+			t.Fatalf("extend after a pad = %d, want 3", got)
+		}
+		if got := incrVerifyProviderRate(ctx, "198.51.100.51", verifyExtendProviderRateKey(server.Id{}), settings); got != 2 {
+			t.Fatalf("scratch counter after one pad = %d, want 2 now", got)
+		}
+	})
+}
+
+// §8.2, IPV6.md C7: retryable answers to an unresolved source are counted per
+// step: per trail and depth for an EXTEND, per signature for a SEED, each for
+// as long as a step can last.
+func TestVerifyUnattributedAttemptsCountPerStep(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := DefaultVerifySettings()
+		trailId := server.NewId()
+		for i := int64(1); i <= 3; i++ {
+			if got := IncrVerifyUnattributedExtend(ctx, trailId, 1, settings); got != i {
+				t.Fatalf("depth 1 attempt %d counted %d", i, got)
+			}
+		}
+		if got := IncrVerifyUnattributedExtend(ctx, trailId, 2, settings); got != 1 {
+			t.Fatalf("the next step shared the count: %d", got)
+		}
+		if got := IncrVerifyUnattributedExtend(ctx, server.NewId(), 1, settings); got != 1 {
+			t.Fatalf("another trail shared the count: %d", got)
+		}
+		seedSig, otherSig := []byte("seed-signature"), []byte("other-signature")
+		IncrVerifyUnattributedSeed(ctx, seedSig, settings)
+		if got := IncrVerifyUnattributedSeed(ctx, seedSig, settings); got != 2 {
+			t.Fatalf("second attempt of one SEED counted %d", got)
+		}
+		if got := IncrVerifyUnattributedSeed(ctx, otherSig, settings); got != 1 {
+			t.Fatalf("another SEED shared the count: %d", got)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, key := range []string{verifyUnattributedExtendKey(trailId, 1), verifyUnattributedSeedKey(seedSig)} {
+				ttl, err := r.PTTL(ctx, key).Result()
+				server.Raise(err)
+				if ttl <= 0 || settings.StepTimeout+settings.StepTimeoutGrace < ttl {
+					t.Fatalf("%s lives %s, want at most one step", key, ttl)
+				}
+			}
+		})
 	})
 }
 
 // §8.1, D27: the server-side head estimate scores each provider by one
-// address: its IPv4 address while it has one, else its other addresses.
+// address: its IPv4 address while it has one, else its IPv6 /64, else a v2
+// entry; the least hash when a family has several.
 func TestVerifyLiveEgressHashesScoreOneAddressPerProvider(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		settings := testVerifyFamilySettings("head-estimate-test")
-		dual, v6Only, preV3, absent := server.NewId(), server.NewId(), server.NewId(), server.NewId()
+		dual, v6Only, twoV4, legacy, absent := server.NewId(), server.NewId(), server.NewId(), server.NewId(), server.NewId()
 		dualV4, dualV6 := netip.MustParseAddr("192.0.2.51"), netip.MustParseAddr("2001:db8:51::1")
-		v6OnlyIp, preV3Ip := netip.MustParseAddr("2001:db8:52::1"), netip.MustParseAddr("192.0.2.53")
+		v6OnlyIp, legacyIp := netip.MustParseAddr("2001:db8:52::1"), netip.MustParseAddr("192.0.2.53")
+		twoV4Ips := []netip.Addr{netip.MustParseAddr("192.0.2.55"), netip.MustParseAddr("192.0.2.56")}
 		testVerifyFeedAddresses(ctx, dual, settings, dualV4, dualV6)
 		testVerifyFeedAddresses(ctx, v6Only, settings, v6OnlyIp)
-		_, preV3HashHex := verifyClientEgressField(preV3Ip, settings)
+		testVerifyFeedAddresses(ctx, twoV4, settings, twoV4Ips...)
 		now := server.NowUtc()
-		server.Redis(ctx, func(r server.RedisClient) {
-			updateVerifyEgressLease(ctx, r, verifyClientEgressV2Key(preV3), preV3, preV3HashHex, server.NewId().String(), now, now.Add(settings.EgressTtl))
-		})
-		got := GetVerifyLiveEgressHashes(ctx, []server.Id{dual, v6Only, preV3, absent})
-		want := map[server.Id][]string{}
-		for clientId, ip := range map[server.Id]netip.Addr{dual: dualV4, v6Only: v6OnlyIp, preV3: preV3Ip} {
-			_, hashHex := verifyClientEgressField(ip, settings)
-			want[clientId] = []string{hashHex}
+		testVerifyFeedV2Address(ctx, legacy, legacyIp, server.NewId().String(), now, now.Add(settings.EgressTtl), settings)
+		got := GetVerifyLiveEgressHashes(ctx, []server.Id{dual, v6Only, twoV4, legacy, absent})
+		_, dualHash := verifyClientEgressField(dualV4, settings)
+		_, v6OnlyHash := verifyClientEgressField(v6OnlyIp, settings)
+		_, firstHash := verifyClientEgressField(twoV4Ips[0], settings)
+		_, secondHash := verifyClientEgressField(twoV4Ips[1], settings)
+		legacyHash := verifyEgressLegacyIndexHash(legacyIp, settings)
+		want := map[server.Id][]string{
+			dual:   {dualHash},
+			v6Only: {v6OnlyHash},
+			twoV4:  {min(firstHash, secondHash)},
+			legacy: {hex.EncodeToString(legacyHash[:])},
 		}
 		if len(got) != len(want) {
 			t.Fatalf("scored hashes = %v, want %v", got, want)
@@ -435,6 +635,109 @@ func TestVerifyLiveEgressHashesScoreOneAddressPerProvider(t *testing.T) {
 			if !slices.Equal(got[clientId], hashes) {
 				t.Fatalf("client %s scored %v, want %v", clientId, got[clientId], hashes)
 			}
+		}
+	})
+}
+
+// §8.1, D27: a provider's confirmed hops record one egress-IP-hash a scoring
+// window, the first one's, whatever family each lands on and however its
+// IPv4 transport closes, reconnects or overlaps a new lease. The validators
+// union a fleet's hop hashes per window, so it scores one prefix, not two.
+func TestVerifyHeadHashOnePerProviderAcrossAWindow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyFamilySettings("head-hash-window")
+		settings.CohortDeploymentKey = testVerifyCohortDeployment
+		testVerifyCohortSetEpoch(ctx, 7)
+		clientId := server.NewId()
+		v4, v6, renewedV4 := netip.MustParseAddr("192.0.2.64"), netip.MustParseAddr("2001:db8:64::1"), netip.MustParseAddr("192.0.2.65")
+		testVerifySetProvideModes(ctx, clientId)
+		connectionIds := testVerifyFeedAddresses(ctx, clientId, settings, v4, v6)
+		recorded := map[[32]byte][]string{}
+		record := func(stage string, sources ...netip.Addr) {
+			t.Helper()
+			for _, source := range sources {
+				if resolved := ResolveVerifyEgress(ctx, source, settings); resolved == nil || *resolved != clientId {
+					t.Fatalf("control: the hop from %s %s did not resolve: %v", source, stage, resolved)
+				}
+				hash := PinVerifyHopEgressIpHash(ctx, clientId, VerifyEgressIpHashWithSettings(source, settings), settings)
+				recorded[hash] = append(recorded[hash], fmt.Sprintf("%s %s", source, stage))
+			}
+		}
+		record("with one live IPv4 address", v6, v4)
+		ClearVerifyConnectionEgress(ctx, clientId, connectionIds[v4], v4, settings)
+		record("while the IPv4 transport reconnects", v6)
+		testVerifyFeedAddresses(ctx, clientId, settings, v4)
+		record("after the IPv4 transport reconnected", v4, v6)
+		testVerifyFeedAddresses(ctx, clientId, settings, renewedV4)
+		record("while two IPv4 leases overlap", v6)
+		if len(recorded) != 1 || recorded[VerifyEgressIpHashWithSettings(v6, settings)] == nil {
+			t.Fatalf("one provider recorded %d head-score hashes in one window, want its first hop's: %v", len(recorded), recorded)
+		}
+	})
+}
+
+// §8.1, D27: the scoring window is the settlement epoch from the st mirror,
+// so the next epoch pins afresh; with no epoch it is the UTC hour. Each
+// provider has its own pin.
+func TestVerifyHeadHashWindowFollowsTheSettlementEpoch(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyFamilySettings("head-hash-epoch")
+		clientId, otherId := server.NewId(), server.NewId()
+		first, second := [32]byte{1}, [32]byte{2}
+		if window := verifyHeadHashWindow(ctx, settings); window != fmt.Sprintf("h%d", server.NowUtc().Unix()/3600) {
+			t.Fatalf("window without a deployment = %s", window)
+		}
+		settings.CohortDeploymentKey = testVerifyCohortDeployment
+		if window := verifyHeadHashWindow(ctx, settings); window[0] != 'h' {
+			t.Fatalf("window without an epoch mirror = %s", window)
+		}
+		testVerifyCohortSetEpoch(ctx, 7)
+		if got := PinVerifyHopEgressIpHash(ctx, clientId, first, settings); got != first {
+			t.Fatalf("the first hop of epoch 7 pinned %x", got)
+		}
+		if got := PinVerifyHopEgressIpHash(ctx, clientId, second, settings); got != first {
+			t.Fatalf("a later hop of epoch 7 recorded %x, want the pinned %x", got, first)
+		}
+		if got := PinVerifyHopEgressIpHash(ctx, otherId, second, settings); got != second {
+			t.Fatalf("another provider took the pin %x", got)
+		}
+		testVerifyCohortSetEpoch(ctx, 8)
+		if got := PinVerifyHopEgressIpHash(ctx, clientId, second, settings); got != second {
+			t.Fatalf("the first hop of epoch 8 recorded %x, want its own", got)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			ttl, err := r.PTTL(ctx, verifyHeadHashKey(clientId, "e8")).Result()
+			server.Raise(err)
+			if ttl <= 0 || verifyHeadHashTtl < ttl {
+				t.Fatalf("pin lives %s", ttl)
+			}
+		})
+	})
+}
+
+// A pin that is not a 32-byte hash is refused, like every malformed verify
+// state read.
+func TestVerifyHeadHashRefusesAMalformedPin(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyFamilySettings("head-hash-malformed")
+		settings.CohortDeploymentKey = testVerifyCohortDeployment
+		testVerifyCohortSetEpoch(ctx, 7)
+		clientId := server.NewId()
+		for _, value := range []string{"not-hex", "abcd"} {
+			server.Redis(ctx, func(r server.RedisClient) {
+				server.Raise(r.Set(ctx, verifyHeadHashKey(clientId, "e7"), value, time.Minute).Err())
+			})
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Fatalf("pin %q was used", value)
+					}
+				}()
+				PinVerifyHopEgressIpHash(ctx, clientId, [32]byte{3}, settings)
+			}()
 		}
 	})
 }

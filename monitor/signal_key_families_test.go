@@ -37,7 +37,7 @@ func TestSafeRedisFamilyLabelRejectsUnnormalizedKeyMaterial(t *testing.T) {
 		want   string
 	}{
 		{name: "normalized", family: "{pm_<id>}sk_1", want: "{pm_<id>}sk_1"},
-		{name: "verify reverse index v3", family: "{vce3_<id>}", want: "{vce3_<id>}"},
+		{name: "verify reverse index v4", family: "{vce4_<id>}", want: "{vce4_<id>}"},
 		{name: "verify reverse index v2", family: "{vce2_<id>}", want: "{vce2_<id>}"},
 		{name: "raw printable", family: "customer@example.invalid", want: "redacted-unnormalized-family"},
 		{name: "raw token beside id", family: "customer_alice_<id>", want: "redacted-unnormalized-family"},

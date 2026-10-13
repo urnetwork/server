@@ -3676,7 +3676,7 @@ func removeReapedClientRedisState(ctx context.Context, clientIds []server.Id) {
 						entries, err := reverseCmds[i][version].Result()
 						server.Raise(err)
 						for field := range entries {
-							egressHashHex := parseVerifyClientEgressField(field).indexHashHex
+							egressHashHex, _ := parseVerifyClientEgressField(field)
 							// Atomic compare-delete: a recycled address may already
 							// belong to another client, which must not be clobbered.
 							removeVerifyEgressAddressForClient(ctx, pipe, clientId, egressHashHex)

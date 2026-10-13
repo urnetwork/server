@@ -708,7 +708,7 @@ func TestVerifyEgressIndexStoresNoRawIp(t *testing.T) {
 		}
 
 		// no redis key mentions the ip, and the reverse-hash fields are an
-		// address hash, the family and a prefix hash rather than addresses
+		// address hash and the family rather than addresses
 		server.Redis(ctx, func(r server.RedisClient) {
 			keys, err := r.Keys(ctx, "*198.51.100*").Result()
 			if err != nil {
@@ -725,8 +725,8 @@ func TestVerifyEgressIndexStoresNoRawIp(t *testing.T) {
 				t.Fatalf("expected 1 reverse entry, got %v", entries)
 			}
 			for field := range entries {
-				if !regexp.MustCompile(`^[0-9a-f]{64}_4_[0-9a-f]{64}$`).MatchString(field) {
-					t.Fatalf("reverse field is not two 32-byte hex hashes around the family: %q", field)
+				if !regexp.MustCompile(`^[0-9a-f]{64}_4$`).MatchString(field) {
+					t.Fatalf("reverse field is not a 32-byte hex hash and the family: %q", field)
 				}
 			}
 		})

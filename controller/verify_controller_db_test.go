@@ -567,7 +567,8 @@ func TestVerifyControllerPoisonAndFailurePaths(t *testing.T) {
 		ctx := context.Background()
 		testVerifyInstallServerKey()
 		settings := model.DefaultVerifySettings()
-		settings.SeedRateHardLimit = 2
+		// two poison seeds after the retryable attempts, which the meters count
+		settings.SeedRateHardLimit = 2 + model.VerifyUnattributedAttemptLimit
 		SetVerifySettings(settings)
 		defer SetVerifySettings(model.DefaultVerifySettings())
 
@@ -578,10 +579,19 @@ func TestVerifyControllerPoisonAndFailurePaths(t *testing.T) {
 			p1: "203.0.113.10", p2: "203.0.113.20", p3: "203.0.113.30",
 		}
 
-		// --- V2: an unresolved-source SEED poisons with a deterministic
-		// synthetic trail[0], stable across identical seeds
+		// --- IPV6.md C7: the first attempts of an unresolved-source SEED are
+		// answered as retryable with no trail; past them, V2: it poisons with
+		// a deterministic synthetic trail[0], stable across identical seeds
 		poisonValidator, poisonVpk, poisonKey := testVerifyValidator(ctx)
 		unresolvedIp := "198.18.0.9" // never fed to the egress index
+		for attempt := 0; attempt < model.VerifyUnattributedAttemptLimit; attempt++ {
+			if _, err := Verify(
+				testVerifySeedArgs(t, poisonValidator, poisonVpk, poisonKey, connect.VerifyMMin),
+				testVerifySession(ctx, unresolvedIp),
+			); err == nil || err.Error() != "421 source-egress-unresolved" {
+				t.Fatalf("unresolved seed attempt %d = %v, want the retryable answer", attempt+1, err)
+			}
+		}
 		seedOnce := func() *connect.VerifyAssignResult {
 			result, err := Verify(
 				testVerifySeedArgs(t, poisonValidator, poisonVpk, poisonKey, connect.VerifyMMin),

@@ -49,7 +49,6 @@ func TestReapedClientRedisCleanupPreservesReassignedEgress(t *testing.T) {
 		targetA, targetB, targetC, survivor := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 		targets := []server.Id{targetA, targetB, targetC}
 		hashA, hashB, hashC := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
-		scoreHex := strings.Repeat("d", 64)
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -57,8 +56,8 @@ func TestReapedClientRedisCleanupPreservesReassignedEgress(t *testing.T) {
 				pipe.Set(ctx, clientPublicKeyRedisKey(targetB), []byte("target-b"), 0)
 				pipe.Set(ctx, clientPublicKeyRedisKey(targetC), []byte("target-c"), 0)
 				pipe.Set(ctx, clientPublicKeyRedisKey(survivor), []byte("survivor"), 0)
-				pipe.HSet(ctx, verifyClientEgressKey(targetA), hashA+"_4_"+scoreHex, "1")
-				pipe.HSet(ctx, verifyClientEgressKey(targetB), hashB+"_6_"+scoreHex, "1")
+				pipe.HSet(ctx, verifyClientEgressKey(targetA), hashA+"_4", "1")
+				pipe.HSet(ctx, verifyClientEgressKey(targetB), hashB+"_6", "1")
 				// targetC's entry was left in the v2 index by a pre-v3 writer
 				pipe.HSet(ctx, verifyClientEgressV2Key(targetC), hashC, "1")
 				pipe.Set(ctx, verifyEgressKeyFromHex(hashA), targetA.String(), 0)

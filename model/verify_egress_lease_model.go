@@ -1,8 +1,8 @@
 // Connection and proxy leases share the existing exact-address bijection.
 // Each Redis script keeps lease ownership and its index in one cluster slot;
 // readers retain the forward-owner and one-reverse-address-per-family checks.
-// Writers feed only the v3 reverse index, whose fields carry the family; the
-// v2 index is withdrawn but never fed.
+// Writers feed only the v4 reverse index, whose fields name each address and
+// its family; the v2 index is withdrawn but never fed.
 package model
 
 import (
@@ -149,7 +149,7 @@ func clearVerifyEgressLease(ctx context.Context, clientId server.Id, ip netip.Ad
 // `reverseKey` and `field` name the address's reverse entry; only withdrawals
 // name the v2 index.
 func updateVerifyEgressLease(ctx context.Context, r server.RedisClient, reverseKey string, clientId server.Id, field, owner string, now, expires time.Time) {
-	egressHashHex := parseVerifyClientEgressField(field).indexHashHex
+	egressHashHex, _ := parseVerifyClientEgressField(field)
 	server.Raise(r.Eval(ctx, verifyReverseEgressLeaseScript,
 		[]string{reverseKey, verifyClientEgressLeaseKey(reverseKey, egressHashHex)},
 		owner, now.UnixMilli(), expires.UnixMilli(), field).Err())
