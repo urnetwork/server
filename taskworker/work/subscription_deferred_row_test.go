@@ -254,6 +254,42 @@ func TestCloseExpiredRowDeadlineDefersRowAndContinuesPromptly(t *testing.T) {
 	})
 }
 
+// A busy row does not end the run: its siblings commit, it stays open in its
+// original custody, the same run walks on to the healthy tail, and the task
+// succeeds. The pass that deferred it ends, so its successor starts a fresh
+// pass from the oldest open row and retires it once its owner releases.
+func requireCloseBusyRunWalksPastVictim(t testing.TB, ctx context.Context, cohort *closeDeferredCohort, worker *task.TaskWorker, id server.Id,
+	release func()) {
+	t.Helper()
+	finished, retried, posts, err := worker.EvalTasks(1)
+	if err != nil || len(finished) != 1 || finished[0] != id || len(retried)+len(posts) != 0 {
+		t.Fatal("a busy row ended the run as a task failure", finished, retried, posts, err)
+	}
+	for _, siblingId := range cohort.siblingIds {
+		if terminal, journals, _, _ := readCloseDeferredContract(t, ctx, siblingId); !terminal || journals != 1 {
+			t.Fatal("a sibling in the busy row's page did not commit its close", siblingId, terminal, journals)
+		}
+	}
+	requireCloseDeferredVictimOpen(t, ctx, cohort.victimId)
+	if terminal, journals, _, _ := readCloseDeferredContract(t, ctx, cohort.tailId); !terminal || journals != 1 {
+		t.Fatal("the busy row still ended the walk before the healthy tail")
+	}
+	nextId := readCloseDeferredTaskId(t, ctx)
+	args, _, errorCount, _, _ := readCloseRetryTask(t, ctx, nextId)
+	if nextId == id || args.Sweep != nil || args.Cursor != nil || errorCount != 0 {
+		t.Fatal("the pass that deferred the busy row did not end for a fresh revisit", nextId == id, args.Sweep, errorCount)
+	}
+	release()
+	makeCloseRetryTaskDue(ctx, nextId)
+	finished, retried, posts, err = worker.EvalTasks(1)
+	if err != nil || len(finished) != 1 || finished[0] != nextId || len(retried)+len(posts) != 0 {
+		t.Fatal("the next pass did not revisit the deferred row", finished, retried, posts, err)
+	}
+	if terminal, journals, _, _ := readCloseDeferredContract(t, ctx, cohort.victimId); !terminal || journals != 1 {
+		t.Fatal("the deferred row was not retired once its owner released")
+	}
+}
+
 // Another owner holds the victim's immutable provider-totals key, so its
 // try-lock refuses. The busy row stays open and the singleton keeps moving.
 func TestCloseExpiredBusyRowDefersRowAndContinuesPromptly(t *testing.T) {
@@ -296,8 +332,7 @@ func TestCloseExpiredBusyRowDefersRowAndContinuesPromptly(t *testing.T) {
 		id := scheduleCloseDeferredTask(t, ctx, 16)
 		worker := newCloseDeferredWorker(ctx)
 		defer worker.Close()
-		requireCloseDeferredFirstAttempt(t, ctx, cohort, worker, id, "transfer balance ownership is busy")
-		requireCloseDeferredRecovery(t, ctx, cohort, worker, id, releaseOwner)
+		requireCloseBusyRunWalksPastVictim(t, ctx, cohort, worker, id, releaseOwner)
 	})
 }
 
