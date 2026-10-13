@@ -162,7 +162,8 @@ func CloseExpiredContracts(
 			clientSession.Ctx,
 			minTime,
 			closeExpiredContractsMaxCount,
-			closeExpiredContractsParallel,
+			// contract_close.yml can lower it for the next run (close_expired_parallel.go).
+			closeExpiredContractsParallelLimit(),
 			closeExpiredContracts.BlockSize,
 			closeExpiredContracts.BlockIndex,
 			sweep,
