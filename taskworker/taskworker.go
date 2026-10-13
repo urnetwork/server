@@ -59,6 +59,8 @@ func InitTasks(ctx context.Context) {
 // transaction holds every shared run-once row it upserts until commit, so it
 // runs nothing else: retired-row cleanup is reapRetiredTasks, and long-lived
 // retention observers start after the process acquires its runtime owner.
+// After the commit the expiry sweep starts on a fresh pass; a row held by a
+// run in flight is retried in the background (startup_close_expired.go).
 func initTaskSchedule(ctx context.Context) {
 	// Run-once upserts merge independently with live claim updates. A fixed
 	// snapshot needlessly retries the entire initializer whenever a claim wins.
@@ -157,6 +159,8 @@ func initTaskSchedule(ctx context.Context) {
 		work.SchedulePaymentReconcile(clientSession, tx)
 	}, server.TxReadCommitted)
 	work.ScheduleSettlementAccountingTasks(ctx)
+	// After the commit, in its own bounded transactions.
+	startCloseExpiredContractsFreshPass(ctx)
 }
 
 // Removes pending rows that can never run again: removed targets, which
