@@ -145,7 +145,7 @@ out: verify.yml (mode 0600)
 
 ```sh
 sn25golive st-check --st st.yml [--profile mainnet] [--authority AUTHORITY.yml] \
-  [--sn sn.yml] [--now RFC3339]
+  [--sn sn.yml] [--v2-activation ACTIVATION.json] [--now RFC3339]
 ```
 
 | Flag | Meaning |
@@ -154,6 +154,7 @@ sn25golive st-check --st st.yml [--profile mainnet] [--authority AUTHORITY.yml] 
 | `--profile` | `mainnet` (the default) or `testnet` |
 | `--authority` | the operator-gas-authority.yml, at most 16 KiB, to verify the embedded policy's signature and pin against |
 | `--sn` | the sn.yml, at most 32 KiB, to check the payout identity and readiness digest against |
+| `--v2-activation` | the output of `bringyourctl st v2-activation` on the server this st.yml is for, at most 16 KiB |
 | `--now` | the instant of the policy validity checks |
 
 It validates st.yml with the server loader's checks for the profile, as if the
@@ -171,6 +172,14 @@ printed. Otherwise it prints one line per finding, `<kind>: <text>`:
   and activation, then the result of the server's mainnet admission at the
   later of `--now` and the sn.yml cutoff. Admission compares the whole selected
   identity, the v2 addresses included.
+- With `--v2-activation`, the server's settlement v2 activation latch. Once
+  the server has recorded its pool's activation, it refuses to run an st.yml
+  whose v2 pair is not the recorded one. An armed latch gives `ok` for an
+  st.yml that names the recorded pair, and `FAIL` with the server's own
+  refusal for one that lacks or changes it. A latch that is not armed gives a
+  note that the server would not refuse an st.yml without the pair. A status
+  of another deployment, or a file of another shape, is a `FAIL`. Without
+  `--v2-activation` a note says that st.yml was not checked against the latch.
 - `identity` lines: the profile, chain id, genesis hash, netuid and no_id; the
   deployment id, policy hash and deploy block; the coordinator, settlement
   vault and reserve sink; when st.yml declares them, `settlement_v2_address`
