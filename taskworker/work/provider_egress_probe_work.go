@@ -564,7 +564,7 @@ func ProviderEgressProbe(
 	// An older config does not judge a newer config's live geometry, including
 	// its enablement: the post-step reschedules it unchanged for the instances
 	// configured with it.
-	if providerEgressProbeHandsBack(args, settings, server.NowUtc()) {
+	if providerEgressProbeHandsBack(clientSession.Ctx, args, settings, server.NowUtc()) {
 		return &ProviderEgressProbeResult{HandedBack: true}, nil
 	}
 	// A disabled deployment may still have an old claimed row in a worker's

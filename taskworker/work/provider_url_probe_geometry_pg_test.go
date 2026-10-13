@@ -260,6 +260,60 @@ func TestProviderEgressProbeOlderConfigClaimKeepsNewerShards(t *testing.T) {
 	})
 }
 
+// While every pass slot of the newer config's instances is busy, a shard waits
+// for one of them as older instances hand it back without restamping it, so
+// its own stamp ages past any fixed timeout while the newer config restamps
+// its other shards. The older config took the aged stamp for a withdrawn
+// geometry and retired the shard. Here newer shard 6 was stamped 45 minutes
+// ago and newer shard 1 a minute ago, so the older config must hand shard 6
+// back. Once no shard of the newer config is live, its geometry counts as
+// withdrawn and the older config retires shard 6.
+func TestProviderEgressProbeOlderConfigHandsBackWhileAnyNewerShardIsLive(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		t.Setenv("WARP_CONFIG_VERSION", testOlderConfigVersion)
+		withProviderEgressProbeSettings(t, testUrlGeometrySettings(4, 8))
+		driftTaskRunner(t, func(context.Context, *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+			t.Error("an older config ran a pass of a newer geometry")
+			return &ProviderEgressProbeResult{}, nil
+		})
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		newer := testUrlGeometrySettings(8, 64)
+		server.Tx(ctx, func(tx server.PgTx) {
+			live := testStampedGeometryArgs(t, newer, 1, testNewerConfigVersion, server.NowUtc().Add(-time.Minute))
+			scheduleProviderEgressProbeAt(clientSession, tx, live, server.NowUtc().Add(time.Hour))
+			aged := testStampedGeometryArgs(t, newer, 6, testNewerConfigVersion, server.NowUtc().Add(-45*time.Minute))
+			scheduleProviderEgressProbeAt(clientSession, tx, aged, server.NowUtc().Add(-time.Minute))
+		})
+		claimed := testPendingProbeRow(t, ctx, 6)
+
+		if finishedCount, retriedCount := testEvalProviderEgressProbeTasks(t, ctx, 1); finishedCount != 1 || retriedCount != 0 {
+			t.Fatalf("the older config finished %d and retried %d claims of shard 6", finishedCount, retriedCount)
+		}
+		next := testPendingProbeRow(t, ctx, 6)
+		if next == nil {
+			t.Fatal("the older config retired newer shard 6 while newer shard 1 shows its geometry live")
+		}
+		if next.taskId == claimed.taskId || !reflect.DeepEqual(next.args, claimed.args) {
+			t.Fatalf("the older config did not hand shard 6 back unchanged: shard_count=%v", next.args["shard_count"])
+		}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key = $1`,
+				task.RunOnce("provider_egress_probe", 1).String()))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at = $2 WHERE run_once_key = $1`,
+				task.RunOnce("provider_egress_probe", 6).String(), server.NowUtc().Add(-time.Minute)))
+		})
+		if finishedCount, retriedCount := testEvalProviderEgressProbeTasks(t, ctx, 1); finishedCount != 1 || retriedCount != 0 {
+			t.Fatalf("the older config finished %d and retried %d claims of shard 6", finishedCount, retriedCount)
+		}
+		if next := testPendingProbeRow(t, ctx, 6); next != nil {
+			t.Fatalf("the older config kept shard 6 of a withdrawn newer geometry, shard_count=%v", next.args["shard_count"])
+		}
+	})
+}
+
 // The newest config still converges older snapshots: an in-range shard takes
 // its geometry, and a shard it removed is retired.
 func TestProviderEgressProbeNewerConfigConvergesOlderShards(t *testing.T) {

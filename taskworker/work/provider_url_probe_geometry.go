@@ -22,12 +22,11 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// A newer config's geometry that no instance has rewritten for this long is
-// treated as withdrawn, for example by redeploying an older config, and older
-// instances converge it to their own settings again. Instances on the newer
-// config rewrite a shard's arguments at the end of each of its passes, so in a
-// rollout a live newer geometry is far younger than this.
-const providerEgressProbeNewerGenerationTimeout = 30 * time.Minute
+// The bounds of providerEgressProbeNewerGenerationTimeout.
+const (
+	providerEgressProbeNewerGenerationMinTimeout = 30 * time.Minute
+	providerEgressProbeNewerGenerationMaxTimeout = 24 * time.Hour
+)
 
 // The config version of this process. It is read directly rather than through
 // server.ConfigVersion, which falls back to the service version: only config
@@ -57,11 +56,28 @@ func providerEgressProbeGenerationNewer(candidate string, reference string) bool
 	return referenceVersion.LessThan(*candidateVersion)
 }
 
-// Whether a snapshot stamped with generation at writtenAt belongs to a config
-// newer than this process's that instances still rewrite.
-func providerEgressProbeGenerationLive(generation string, writtenAt time.Time, now time.Time) bool {
-	return providerEgressProbeGenerationNewer(generation, providerEgressProbeConfigVersion()) &&
-		!writtenAt.IsZero() && now.Sub(writtenAt) < providerEgressProbeNewerGenerationTimeout
+// How long after its last write a newer config's geometry still counts as
+// live, from that config's own arguments. Its instances restamp a shard at the
+// end of each pass, and a pass ends within its max time, so while one of them
+// holds any pass, some shard of the geometry is restamped at least once per
+// max time and idle delay. Twice that covers claiming the next pass, a claim
+// handed back in between, and a restart of the instance. The minimum covers a
+// restart under a short max time, and the maximum bounds how long a withdrawn
+// geometry, for example after an older config is redeployed, keeps older
+// instances from converging it. One shard's stamp can age far longer while
+// its config is live: older instances hand the shard back without restamping
+// it while the newer instances' passes are all busy. Liveness is therefore
+// judged across the geometry's shards before a shard is converged.
+func providerEgressProbeNewerGenerationTimeout(args *ProviderEgressProbeArgs) time.Duration {
+	cycle := time.Duration(max(0, args.MaxTimeSeconds)+max(0, args.IdleDelaySeconds)) * time.Second
+	return min(max(providerEgressProbeNewerGenerationMinTimeout, 2*cycle), providerEgressProbeNewerGenerationMaxTimeout)
+}
+
+// Whether a snapshot was written by a newer config than this process's within
+// that config's timeout.
+func providerEgressProbeStampLive(args *ProviderEgressProbeArgs, now time.Time) bool {
+	return args != nil && providerEgressProbeGenerationNewer(args.GeometryGeneration, providerEgressProbeConfigVersion()) &&
+		!args.GeometryWrittenAt.IsZero() && now.Sub(args.GeometryWrittenAt) < providerEgressProbeNewerGenerationTimeout(args)
 }
 
 // A copy of args written by this process at now.
@@ -72,15 +88,40 @@ func stampProviderEgressProbeArgs(args *ProviderEgressProbeArgs, now time.Time) 
 	return &stamped
 }
 
-// An older config hands back a newer, live snapshot that it would otherwise
-// retire or rewrite, including when its own config disables probing. A newer
-// snapshot of this instance's own geometry still runs here.
-func providerEgressProbeHandsBack(args *ProviderEgressProbeArgs, settings providerEgressProbeSettings, now time.Time) bool {
-	if args == nil || !providerEgressProbeGenerationLive(args.GeometryGeneration, args.GeometryWrittenAt, now) {
+// Whether a snapshot comes from a newer config than this process's and this
+// instance would retire or rewrite it, including because its own config
+// disables probing. A newer snapshot of this instance's own geometry still
+// runs here.
+func providerEgressProbeNewerForeignGeometry(args *ProviderEgressProbeArgs, settings providerEgressProbeSettings) bool {
+	if args == nil || !providerEgressProbeGenerationNewer(args.GeometryGeneration, providerEgressProbeConfigVersion()) {
 		return false
 	}
 	return !settings.Enabled || args.ShardIndex < 0 || settings.ShardCount <= args.ShardIndex ||
 		!providerEgressProbeArgsMatchSettings(args, settings)
+}
+
+// An older config hands back a newer config's snapshot that it would retire
+// or rewrite while that config is live, by the shard's own stamp or by the
+// stamp of any other shard of either geometry. Only a stale own stamp costs a
+// read of the shard rows.
+func providerEgressProbeHandsBack(
+	ctx context.Context,
+	args *ProviderEgressProbeArgs,
+	settings providerEgressProbeSettings,
+	now time.Time,
+) bool {
+	if !providerEgressProbeNewerForeignGeometry(args, settings) {
+		return false
+	}
+	if providerEgressProbeStampLive(args, now) {
+		return true
+	}
+	shardCount := min(max(args.ShardCount, settings.ShardCount, 0), maxProviderEgressProbeShardCount)
+	newerGenerationLive := false
+	server.Tx(ctx, func(tx server.PgTx) {
+		_, newerGenerationLive = readProviderEgressProbeShardRowsInTx(ctx, tx, shardCount, now)
+	}, server.TxReadCommitted)
+	return newerGenerationLive
 }
 
 // The pending rows of the first shardCount shard indexes, read as a plain
@@ -113,8 +154,7 @@ func readProviderEgressProbeShardRowsInTx(
 			server.Raise(result.Scan(&runOnceKey, &argsJson))
 			presentShardIndexes[runOnceKeyShardIndexes[runOnceKey]] = true
 			var args ProviderEgressProbeArgs
-			if json.Unmarshal([]byte(argsJson), &args) == nil &&
-				providerEgressProbeGenerationLive(args.GeometryGeneration, args.GeometryWrittenAt, now) {
+			if json.Unmarshal([]byte(argsJson), &args) == nil && providerEgressProbeStampLive(&args, now) {
 				newerGenerationLive = true
 			}
 		}

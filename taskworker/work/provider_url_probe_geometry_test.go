@@ -41,19 +41,19 @@ func TestProviderEgressProbeGenerationOrdersLikeWarp(t *testing.T) {
 	}
 }
 
-// Only a newer, live geometry this instance would retire or rewrite is handed
-// back. The same geometry from a newer config runs, and older, unstamped or
-// withdrawn snapshots keep their convergence.
-func TestProviderEgressProbeHandsBackOnlyNewerDifferentGeometry(t *testing.T) {
-	now := time.Date(2026, 10, 13, 19, 52, 0, 0, time.UTC)
+// Only a newer config's geometry that this instance would retire or rewrite
+// is foreign to it. The same geometry from a newer config runs here unless
+// this config disables probing, and older or unstamped snapshots keep their
+// convergence.
+func TestProviderEgressProbeNewerForeignGeometry(t *testing.T) {
 	withTestConfigVersion(t, testOlderConfigVersion)
 	local := testUrlGeometrySettings(4, 8)
 	disabled := testUrlGeometrySettings(4, 8)
 	disabled.Enabled = false
 	newer := testUrlGeometrySettings(8, 64)
-	stamp := func(settings providerEgressProbeSettings, shardIndex int, version string, writtenAt time.Time) *ProviderEgressProbeArgs {
+	stamp := func(settings providerEgressProbeSettings, shardIndex int, version string) *ProviderEgressProbeArgs {
 		args := providerEgressProbeArgs(settings, shardIndex)
-		args.GeometryGeneration, args.GeometryWrittenAt = version, writtenAt
+		args.GeometryGeneration, args.GeometryWrittenAt = version, time.Date(2026, 10, 13, 19, 52, 0, 0, time.UTC)
 		return args
 	}
 	cases := []struct {
@@ -62,26 +62,66 @@ func TestProviderEgressProbeHandsBackOnlyNewerDifferentGeometry(t *testing.T) {
 		settings providerEgressProbeSettings
 		want     bool
 	}{
-		{name: "newer shard beyond the local count", args: stamp(newer, 5, testNewerConfigVersion, now), settings: local, want: true},
-		{name: "newer shard within the local count", args: stamp(newer, 1, testNewerConfigVersion, now), settings: local, want: true},
-		{name: "newer geometry on a disabled older config", args: stamp(newer, 1, testNewerConfigVersion, now), settings: disabled, want: true},
-		{name: "same geometry from a newer config on a disabled older config", args: stamp(local, 1, testNewerConfigVersion, now), settings: disabled, want: true},
-		{name: "same geometry from a newer config", args: stamp(local, 1, testNewerConfigVersion, now), settings: local, want: false},
-		{name: "older snapshot", args: stamp(newer, 1, "2026.10.11-synthetic+1000000000", now), settings: local, want: false},
-		{name: "unstamped snapshot", args: stamp(newer, 5, "", time.Time{}), settings: local, want: false},
-		{name: "newer snapshot without a write time", args: stamp(newer, 5, testNewerConfigVersion, time.Time{}), settings: local, want: false},
-		{name: "newer snapshot nobody rewrote", args: stamp(newer, 5, testNewerConfigVersion, now.Add(-providerEgressProbeNewerGenerationTimeout)), settings: local, want: false},
-		{name: "newer snapshot just inside the timeout", args: stamp(newer, 5, testNewerConfigVersion, now.Add(-providerEgressProbeNewerGenerationTimeout+time.Second)), settings: local, want: true},
+		{name: "newer shard beyond the local count", args: stamp(newer, 5, testNewerConfigVersion), settings: local, want: true},
+		{name: "newer shard within the local count", args: stamp(newer, 1, testNewerConfigVersion), settings: local, want: true},
+		{name: "newer geometry on a disabled older config", args: stamp(newer, 1, testNewerConfigVersion), settings: disabled, want: true},
+		{name: "same geometry from a newer config on a disabled older config", args: stamp(local, 1, testNewerConfigVersion), settings: disabled, want: true},
+		{name: "same geometry from a newer config", args: stamp(local, 1, testNewerConfigVersion), settings: local, want: false},
+		{name: "older snapshot", args: stamp(newer, 1, "2026.10.11-synthetic+1000000000"), settings: local, want: false},
+		{name: "unstamped snapshot", args: stamp(newer, 5, ""), settings: local, want: false},
 		{name: "no snapshot", args: nil, settings: local, want: false},
 	}
 	for _, c := range cases {
-		if got := providerEgressProbeHandsBack(c.args, c.settings, now); got != c.want {
-			t.Errorf("%s: hands back %t, want %t", c.name, got, c.want)
+		if got := providerEgressProbeNewerForeignGeometry(c.args, c.settings); got != c.want {
+			t.Errorf("%s: foreign %t, want %t", c.name, got, c.want)
 		}
 	}
 	withTestConfigVersion(t, "")
-	if providerEgressProbeHandsBack(stamp(newer, 5, testNewerConfigVersion, now), local, now) {
+	if providerEgressProbeNewerForeignGeometry(stamp(newer, 5, testNewerConfigVersion), local) {
 		t.Error("a process without a config version ordered a snapshot")
+	}
+}
+
+// A newer stamp stays live for twice the newer config's own max time and idle
+// delay, within the minimum and maximum. A fixed 30 minutes expired the stamps
+// of a config whose passes run longer while its instances were still running.
+func TestProviderEgressProbeStampLiveFollowsTheNewerArguments(t *testing.T) {
+	now := time.Date(2026, 10, 13, 19, 52, 0, 0, time.UTC)
+	withTestConfigVersion(t, testOlderConfigVersion)
+	stamp := func(maxTimeSeconds int, version string, age time.Duration) *ProviderEgressProbeArgs {
+		settings := testUrlGeometrySettings(8, 64)
+		settings.MaxTimeSeconds = maxTimeSeconds
+		args := providerEgressProbeArgs(settings, 3)
+		args.GeometryGeneration = version
+		if 0 <= age {
+			args.GeometryWrittenAt = now.Add(-age)
+		}
+		return args
+	}
+	// the defaults: 900 s max time and 5 s idle delay
+	defaultTimeout := 2 * 905 * time.Second
+	cases := []struct {
+		name string
+		args *ProviderEgressProbeArgs
+		want bool
+	}{
+		{name: "fresh", args: stamp(900, testNewerConfigVersion, 0), want: true},
+		{name: "just inside the default timeout", args: stamp(900, testNewerConfigVersion, defaultTimeout-time.Second), want: true},
+		{name: "at the default timeout", args: stamp(900, testNewerConfigVersion, defaultTimeout), want: false},
+		{name: "an hour-long pass, written 45 minutes ago", args: stamp(3600, testNewerConfigVersion, 45*time.Minute), want: true},
+		{name: "at an hour-long pass's timeout", args: stamp(3600, testNewerConfigVersion, 2*3605*time.Second), want: false},
+		{name: "a minute-long pass keeps the minimum", args: stamp(60, testNewerConfigVersion, 29*time.Minute), want: true},
+		{name: "at the minimum", args: stamp(60, testNewerConfigVersion, 30*time.Minute), want: false},
+		{name: "a day-long pass keeps the maximum", args: stamp(86400, testNewerConfigVersion, 23*time.Hour), want: true},
+		{name: "at the maximum", args: stamp(86400, testNewerConfigVersion, 24*time.Hour), want: false},
+		{name: "no write time", args: stamp(900, testNewerConfigVersion, -1), want: false},
+		{name: "older generation", args: stamp(900, "2026.10.11-synthetic+1000000000", 0), want: false},
+		{name: "no snapshot", args: nil, want: false},
+	}
+	for _, c := range cases {
+		if got := providerEgressProbeStampLive(c.args, now); got != c.want {
+			t.Errorf("%s: live %t, want %t", c.name, got, c.want)
+		}
 	}
 }
 
