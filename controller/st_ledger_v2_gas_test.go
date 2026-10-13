@@ -325,10 +325,10 @@ func TestStLedgerV2CloseReplacementKeepsTheGasFloor(t *testing.T) {
 // ledgerV2SpendCloseSignatures drives the close of epoch 7 to a finalized
 // revert three times, which spends the three signatures the operator gas
 // policy allows the operation. Each try after a revert takes a new nonce, 7 to
-// 9, and signs again with the floor.
-func ledgerV2SpendCloseSignatures(t testing.TB, ctx context.Context, fixture *ledgerV2RPC, client *CoreStClient, cfg *StConfig) (closeCall []byte) {
+// 9, and signs again with the floor. revise signs the policy's next revision.
+func ledgerV2SpendCloseSignatures(t testing.TB, ctx context.Context, fixture *ledgerV2RPC, client *CoreStClient, cfg *StConfig) (closeCall []byte, revise func(edit func(*server.StOperatorGasPolicy))) {
 	t.Helper()
-	ledgerV2GasPolicy(t, client, nil)
+	_, revise = ledgerV2GasPolicy(t, client, nil)
 	closeCall = stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))
 	fixture.estimates[string(closeCall)] = 246_899
 	fixture.needs[string(closeCall)] = math.MaxUint64
@@ -343,7 +343,7 @@ func ledgerV2SpendCloseSignatures(t testing.TB, ctx context.Context, fixture *le
 			t.Fatalf("close %d: intent %+v, sent nonce %d gas %d", generation, intent, tx.Nonce(), tx.Gas())
 		}
 	}
-	return closeCall
+	return closeCall, revise
 }
 
 // SV-1 (retries): a close that reverts at its inclusion three times in its
@@ -354,14 +354,16 @@ func ledgerV2SpendCloseSignatures(t testing.TB, ctx context.Context, fixture *le
 // counts signatures per operation across those nonces and allows three, so
 // the fourth try reserves a nonce and is refused its signature. That intent
 // can never be signed, as the close or, once the window has closed, as its
-// cancellation, and every later send of the root key stops at it. Only a
-// transaction from outside the engine that consumes the nonce frees the key.
+// cancellation, and every later send of the root key stops at it. A policy
+// re-signed with more signatures per operation does not lift the cap the
+// operation's first signature recorded. Only a transaction from outside the
+// engine that consumes the nonce frees the key.
 func TestStLedgerV2ThreeFailedClosesStrandTheRootKey(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
 		client, _, cfg := newLedgerV2RPCClient(t, fixture)
-		closeCall := ledgerV2SpendCloseSignatures(t, ctx, fixture, client, cfg)
+		closeCall, revise := ledgerV2SpendCloseSignatures(t, ctx, fixture, client, cfg)
 
 		// The fourth try takes nonce 10 before the policy refuses to sign it.
 		stranded := func(step string) {
@@ -398,6 +400,8 @@ func TestStLedgerV2ThreeFailedClosesStrandTheRootKey(t *testing.T) {
 			stranded(step)
 		}
 		blocked("inside the close window")
+		revise(func(policy *server.StOperatorGasPolicy) { policy.MaximumIntentAttempts = 4 })
+		blocked("under a policy of four signatures an operation")
 
 		// Once the window has closed the close is spent, and the reconcile asks
 		// for its cancellation, which would be the operation's fourth signature.
