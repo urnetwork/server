@@ -31,6 +31,10 @@ import (
 // whose provider rows cannot be built again.
 var ErrStLedgerV2RebuildRefused = errors.New("st ledger v2: the epoch's provider rows cannot be rebuilt")
 
+// ErrStLedgerV2RebuildWithdrawRefused refuses the operator's withdrawal of an
+// epoch's rebuild request that is not pending.
+var ErrStLedgerV2RebuildWithdrawRefused = errors.New("st ledger v2: the epoch's rebuild request cannot be withdrawn")
+
 // stLedgerV2Builder is the server's LedgerBuilder.
 type stLedgerV2Builder struct{}
 
@@ -202,4 +206,36 @@ func StLedgerV2RebuildEpoch(ctx context.Context, epoch uint64, requestedBy strin
 	}
 	glog.Infof("[st]v2 epoch %d provider rows to be rebuilt as requested by %s\n", epoch, requestedBy)
 	return nil
+}
+
+// StLedgerV2WithdrawRebuild is the operator's explicit command withdrawing an
+// epoch's pending rebuild request (StLedgerV2RebuildEpoch), so the driver
+// treats the epoch as if the request had never been made (§6.4 fixed inputs,
+// §8.6). Like the request, it names who makes it and is logged; any operator
+// may withdraw any request. It returns who made the request. It is refused for
+// an epoch without a record in this deployment's pool, for one without a
+// pending request, as when its rows were already rebuilt for the request, and
+// when its rows are rebuilt, or its request changes, between reading the
+// request and withdrawing it.
+func StLedgerV2WithdrawRebuild(ctx context.Context, epoch uint64, withdrawnBy string) (string, error) {
+	cfg := stConfig()
+	if !cfg.LedgerV2Enabled() {
+		return "", errStLedgerV2NotConfigured
+	}
+	if withdrawnBy == "" {
+		return "", errors.New("st ledger v2: a rebuild withdrawal must name who makes it")
+	}
+	key := cfg.DeploymentKey()
+	record := model.GetStLedgerV2EpochRows(ctx, key, cfg.NoId, epoch, epoch)[epoch]
+	switch {
+	case record == nil:
+		return "", fmt.Errorf("%w: epoch %d has no recorded provider rows in pool %d of deployment %s", ErrStLedgerV2RebuildWithdrawRefused, epoch, cfg.NoId, key)
+	case record.RebuildRequestedBy == "":
+		return "", fmt.Errorf("%w: epoch %d has no pending rebuild request", ErrStLedgerV2RebuildWithdrawRefused, epoch)
+	}
+	if !model.WithdrawStLedgerV2EpochRebuild(ctx, key, cfg.NoId, record) {
+		return "", fmt.Errorf("%w: epoch %d's rows were rebuilt, or its request changed, while it was being withdrawn", ErrStLedgerV2RebuildWithdrawRefused, epoch)
+	}
+	glog.Infof("[st]v2 epoch %d rebuild request by %s withdrawn by %s\n", epoch, record.RebuildRequestedBy, withdrawnBy)
+	return record.RebuildRequestedBy, nil
 }

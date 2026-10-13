@@ -42,3 +42,22 @@ func stV2Rebuild(opts docopt.Opts) {
 	}
 	fmt.Printf("epoch %d provider rows to be rebuilt as requested by %s\n", epoch, by)
 }
+
+// stV2RebuildWithdraw is the operator's explicit command withdrawing an
+// epoch's pending v2-rebuild request, so the driver treats the epoch as if it
+// had never been requested (VERSION2-FINAL.md §8.6). It logs and prints who
+// made and who withdrew the request, and it is refused for an epoch without a
+// pending request.
+func stV2RebuildWithdraw(opts docopt.Opts) {
+	epochStr, _ := opts.String("--epoch")
+	epoch, err := strconv.ParseUint(epochStr, 10, 64)
+	if err != nil {
+		panic(fmt.Errorf("bad --epoch %q: %s", epochStr, err))
+	}
+	by, _ := opts.String("--by")
+	requestedBy, err := controller.StLedgerV2WithdrawRebuild(context.Background(), epoch, by)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("epoch %d rebuild request by %s withdrawn by %s\n", epoch, requestedBy, by)
+}
