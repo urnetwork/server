@@ -205,6 +205,12 @@ type VerifySettings struct {
 	CohortSize          int
 	CohortLifetimeLimit int
 	CohortDeploymentKey StDeploymentKey
+	// HopLatencyFromAttributedAttempt counts a hop confirmed after a
+	// retryable answer from the step's last such answer: its AssignedMs is
+	// that time (§7.5). Off by default, a confirmed hop keeps its ASSIGN time
+	// as before, the only record a validator's receipt check accepts until it
+	// takes the moved one; turn it on once every validator does.
+	HopLatencyFromAttributedAttempt bool
 }
 
 // TrailTtl is the redis lifetime of one trail's state (VALIDATOR.md §5.5:
@@ -215,10 +221,11 @@ func (self *VerifySettings) TrailTtl(m int) time.Duration {
 
 // VerifyTrailHop is one hop record of a trail. `AssignedMs`/`AssignN` are zero
 // for the validator-chosen seed hop, which is never a server assignment and is
-// excluded from statistics (§7.6). A confirmed hop's `AssignedMs` is the start
-// of the attempt that was attributed: its ASSIGN time, or the step's last
-// retryable answer (§8.2), so `ConfirmedMs − AssignedMs` is that attempt's
-// latency (§7.5). `ConfirmedMs` is zero while pending.
+// excluded from statistics (§7.6). With HopLatencyFromAttributedAttempt a
+// confirmed hop's `AssignedMs` is the start of the attempt that was
+// attributed: its ASSIGN time, or the step's last retryable answer (§8.2), so
+// `ConfirmedMs − AssignedMs` is that attempt's latency (§7.5); without it, its
+// ASSIGN time. `ConfirmedMs` is zero while pending.
 // `EgressIpHash` is the hop's egress-IP-hash at the configured subnet
 // granularity (§8.1, §3.3, D27) — the head routable-IP-score input, set at
 // confirmation (zero while pending) and carried verbatim into the published

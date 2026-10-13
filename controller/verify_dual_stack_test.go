@@ -7,15 +7,19 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
@@ -562,55 +566,68 @@ func TestVerifyPoisonTrailDoesNotPinTheHeadHash(t *testing.T) {
 	})
 }
 
-// §7.5, §8.2 (N6; the validator's counterpart is sn probe
-// TestProbeTrailHopLatencyExcludesTheUnattributedAttempt): a hop's recorded
-// latency, and so the published percentiles, count from the attempt that was
-// attributed. A hop answered 421 once or twice records the step's last
-// retryable answer as its start, when its resend went, so its latency
-// excludes the unattributed attempts; the 421s leave the pending hop, and so
-// the step's deadline, unchanged. A hop with no 421 keeps its ASSIGN time.
+// A trail whose first EXTEND, from its pending provider's unindexed family,
+// is answered as retryable `retries` times, each after unattributedDelay,
+// before the resend from the indexed address confirms the hop. It returns the
+// pending hop's ASSIGN time, the step's last retryable answer, and the trail
+// and provider.
+func testVerifyHopAfterRetryableAnswers(t testing.TB, ctx context.Context, settings *model.VerifySettings, retries int) (assignedMs uint64, answeredMs uint64, trailId server.Id, pending server.Id) {
+	t.Helper()
+	testVerifyInstallServerKey()
+	SetVerifySettings(settings)
+	seedIp := netip.MustParseAddr("192.0.2.130")
+	testVerifyProvider(ctx, seedIp, settings)
+	indexed, unindexed := netip.MustParseAddr("203.0.113.131"), netip.MustParseAddr("2001:db8:131::1")
+	pending = testVerifyProvider(ctx, indexed, settings)
+	validatorId, vpk, vpkKey := testVerifyValidator(ctx)
+	result, err := Verify(testVerifySeedArgs(t, validatorId, vpk, vpkKey, connect.VerifyMMin), testVerifyAddrSession(ctx, seedIp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assign := result.(*connect.VerifyAssignResult)
+	if server.Id(assign.NextHop) != pending {
+		t.Fatalf("assigned %s, want the only other provider", server.Id(assign.NextHop))
+	}
+	trailId = server.Id(assign.TrailId)
+	assignedMs = model.GetVerifyTrail(ctx, trailId).Pending.AssignedMs
+	extend := testVerifyExtendArgs(t, validatorId, vpk, vpkKey, assign)
+	// the next assignment after the confirmed hop
+	testVerifyProvider(ctx, netip.MustParseAddr("192.0.2.132"), settings)
+	for attempt := 0; attempt < retries; attempt++ {
+		time.Sleep(testVerifyUnattributedDelay)
+		if _, err := Verify(extend, testVerifyAddrSession(ctx, unindexed)); err == nil || err.Error() != testVerifyRetryableAnswer {
+			t.Fatalf("attempt %d from the unindexed family = %v, want the retryable answer", attempt+1, err)
+		}
+		if trail := model.GetVerifyTrail(ctx, trailId); trail.Pending.AssignedMs != assignedMs {
+			t.Fatalf("a retryable answer moved the pending hop's ASSIGN time to %d", trail.Pending.AssignedMs)
+		}
+		answeredMs = model.GetVerifyUnattributedExtendAnsweredMs(ctx, trailId, 1)
+	}
+	if _, err := Verify(extend, testVerifyAddrSession(ctx, indexed)); err != nil {
+		t.Fatalf("the attributed attempt = %v", err)
+	}
+	return
+}
+
+// The time an unattributed attempt of testVerifyHopAfterRetryableAnswers takes.
+const testVerifyUnattributedDelay = 300 * time.Millisecond
+
+// §7.5, §8.2 (N6, with hop_latency_from_attributed_attempt; the validator's
+// counterpart is sn probe TestProbeTrailHopLatencyExcludesTheUnattributedAttempt):
+// a hop's recorded latency, and so the published percentiles, count from the
+// attempt that was attributed. A hop answered 421 once or twice records the
+// step's last retryable answer as its start, when its resend went, so its
+// latency excludes the unattributed attempts; the 421s leave the pending hop,
+// and so the step's deadline, unchanged. A hop with no 421 keeps its ASSIGN
+// time.
 func TestVerifyHopLatencyExcludesTheUnattributedAttempts(t *testing.T) {
-	const unattributedDelay = 300 * time.Millisecond
 	for _, retries := range []int{0, 1, 2} {
 		t.Run(fmt.Sprintf("%d retryable answers", retries), func(t *testing.T) {
 			server.DefaultTestEnv().Run(t, func(t testing.TB) {
 				ctx := context.Background()
-				testVerifyInstallServerKey()
 				settings := model.DefaultVerifySettings()
-				SetVerifySettings(settings)
-				seedIp := netip.MustParseAddr("192.0.2.130")
-				testVerifyProvider(ctx, seedIp, settings)
-				indexed, unindexed := netip.MustParseAddr("203.0.113.131"), netip.MustParseAddr("2001:db8:131::1")
-				pending := testVerifyProvider(ctx, indexed, settings)
-				validatorId, vpk, vpkKey := testVerifyValidator(ctx)
-				result, err := Verify(testVerifySeedArgs(t, validatorId, vpk, vpkKey, connect.VerifyMMin), testVerifyAddrSession(ctx, seedIp))
-				if err != nil {
-					t.Fatal(err)
-				}
-				assign := result.(*connect.VerifyAssignResult)
-				if server.Id(assign.NextHop) != pending {
-					t.Fatalf("assigned %s, want the only other provider", server.Id(assign.NextHop))
-				}
-				trailId := server.Id(assign.TrailId)
-				assignedMs := model.GetVerifyTrail(ctx, trailId).Pending.AssignedMs
-				extend := testVerifyExtendArgs(t, validatorId, vpk, vpkKey, assign)
-				// the next assignment after the confirmed hop
-				testVerifyProvider(ctx, netip.MustParseAddr("192.0.2.132"), settings)
-
-				var answeredMs uint64
-				for attempt := 0; attempt < retries; attempt++ {
-					time.Sleep(unattributedDelay)
-					if _, err := Verify(extend, testVerifyAddrSession(ctx, unindexed)); err == nil || err.Error() != testVerifyRetryableAnswer {
-						t.Fatalf("attempt %d from the unindexed family = %v, want the retryable answer", attempt+1, err)
-					}
-					if trail := model.GetVerifyTrail(ctx, trailId); trail.Pending.AssignedMs != assignedMs {
-						t.Fatalf("a retryable answer moved the pending hop's ASSIGN time to %d", trail.Pending.AssignedMs)
-					}
-					answeredMs = model.GetVerifyUnattributedExtendAnsweredMs(ctx, trailId, 1)
-				}
-				if _, err := Verify(extend, testVerifyAddrSession(ctx, indexed)); err != nil {
-					t.Fatalf("the attributed attempt = %v", err)
-				}
+				settings.HopLatencyFromAttributedAttempt = true
+				assignedMs, answeredMs, trailId, pending := testVerifyHopAfterRetryableAnswers(t, ctx, settings, retries)
 				hop := model.GetVerifyTrail(ctx, trailId).Hops[1]
 				wantStart := assignedMs
 				if 0 < retries {
@@ -620,7 +637,7 @@ func TestVerifyHopLatencyExcludesTheUnattributedAttempts(t *testing.T) {
 					t.Fatalf("the confirmed hop starts at %d, want %d (ASSIGN at %d)", hop.AssignedMs, wantStart, assignedMs)
 				}
 				latencyMs := hop.ConfirmedMs - hop.AssignedMs
-				delayMs := uint64(unattributedDelay.Milliseconds())
+				delayMs := uint64(testVerifyUnattributedDelay.Milliseconds())
 				if 0 < retries {
 					if hop.ConfirmedMs-assignedMs < uint64(retries)*delayMs {
 						t.Fatalf("control: the step took %d ms, less than its unattributed attempts", hop.ConfirmedMs-assignedMs)
@@ -648,5 +665,99 @@ func TestVerifyHopLatencyExcludesTheUnattributedAttempts(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// §7.5 (N6, by default): without hop_latency_from_attributed_attempt a hop
+// confirmed after one or two 421s keeps its ASSIGN time, exactly the record
+// main writes: in the receipts, the confirmed hop is its pending hop with only
+// the confirmation time and egress-IP-hash added, which every validator's
+// receipt check accepts. Its latency still holds the unattributed attempts.
+func TestVerifyHopKeepsItsAssignTimeByDefault(t *testing.T) {
+	for _, retries := range []int{1, 2} {
+		t.Run(fmt.Sprintf("%d retryable answers", retries), func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx := context.Background()
+				settings := model.DefaultVerifySettings()
+				if settings.HopLatencyFromAttributedAttempt {
+					t.Fatal("the default counts a hop's latency from the attributed attempt")
+				}
+				start := server.NowUtc()
+				assignedMs, _, trailId, _ := testVerifyHopAfterRetryableAnswers(t, ctx, settings, retries)
+				hop := model.GetVerifyTrail(ctx, trailId).Hops[1]
+				if hop.AssignedMs != assignedMs || hop.ConfirmedMs-hop.AssignedMs < uint64(retries)*uint64(testVerifyUnattributedDelay.Milliseconds()) {
+					t.Fatalf("the confirmed hop starts at %d after %d ms, want its ASSIGN time %d", hop.AssignedMs, hop.ConfirmedMs-hop.AssignedMs, assignedMs)
+				}
+
+				// the receipt that assigned the hop, and the one that confirmed it
+				bodies := map[int]*model.VerifyOriginalBody{}
+				for _, original := range model.ListVerifyOriginals(ctx, start.Add(-time.Minute), server.NowUtc().Add(time.Minute), 100) {
+					body, err := model.DecodeVerifyOriginal(original)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if body.Trail.TrailId == trailId {
+						bodies[body.PreviousDepth] = body
+					}
+				}
+				if bodies[0] == nil || bodies[1] == nil || bodies[0].Trail.Pending == nil || len(bodies[1].Trail.Hops) != 2 {
+					t.Fatalf("the trail's receipts = %+v", bodies)
+				}
+				advanced := *bodies[0].Trail.Pending
+				confirmed := bodies[1].Trail.Hops[1]
+				advanced.ConfirmedMs, advanced.EgressIpHash = confirmed.ConfirmedMs, confirmed.EgressIpHash
+				want, err := json.Marshal(&advanced)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := json.Marshal(confirmed)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("the confirming receipt's hop %s is not its assigning receipt's pending hop %s confirmed", got, want)
+				}
+			})
+		})
+	}
+}
+
+// §7.5: hop_latency_from_attributed_attempt is a server-only verify.yml key,
+// off when absent, read with the other settings.
+func TestParseVerifySettingsHopLatencyFromAttributedAttempt(t *testing.T) {
+	policyHash := [32]byte{4, 5, 6}
+	coordinator := common.HexToAddress("0xC18925925E2B7bb9059b7d696b8c92762AE86406")
+	egressKey := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	for key, want := range map[string]bool{
+		"": false,
+		"  hop_latency_from_attributed_attempt: false\n": false,
+		"  hop_latency_from_attributed_attempt: true\n":  true,
+	} {
+		SetStConfig(&StConfig{Profile: "testnet", PolicyHash: policyHash, ChainId: 964, ContractAddress: coordinator})
+		pop := server.Vault.PushSimpleResource("verify-latency-test.yml", []byte(fmt.Sprintf(`profile: testnet
+policy_hash: "0x%x"
+egress_hash_key: %s
+settings:
+  step_timeout_seconds: 30
+  step_timeout_grace_seconds: 5
+  trail_ttl_grace_seconds: 60
+  egress_ttl_seconds: 600
+  egress_refresh_seconds: 120
+  reliability_a_min: 8
+  stats_period_seconds: 900
+  egress_ipv4_prefix: 29
+  egress_ipv6_prefix: 48
+  egress_hash_key_id: test-v1
+  soft_guardrails_enabled: false
+  hard_seed_per_minute_per_source: 40
+  hard_extend_per_minute_per_source: 240
+  hard_active_trails_per_source: 32
+%s`, policyHash, egressKey, key)))
+		settings := parseVerifySettings(server.Vault.RequireSimpleResource("verify-latency-test.yml"))
+		pop()
+		SetStConfig(nil)
+		if settings.HopLatencyFromAttributedAttempt != want {
+			t.Fatalf("with %q the setting is %t, want %t", key, settings.HopLatencyFromAttributedAttempt, want)
+		}
 	}
 }

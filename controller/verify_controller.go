@@ -231,8 +231,9 @@ func parseVerifySettings(res *server.SimpleResource) *model.VerifySettings {
 			HardExtendPerMinutePerSource int64  `yaml:"hard_extend_per_minute_per_source"`
 			HardActiveTrailsPerSource    int64  `yaml:"hard_active_trails_per_source"`
 			// server-only keys, absent from the policy's verify section
-			CohortSize          *int `yaml:"cohort_size"`
-			CohortLifetimeLimit *int `yaml:"cohort_lifetime_limit"`
+			CohortSize                      *int `yaml:"cohort_size"`
+			CohortLifetimeLimit             *int `yaml:"cohort_lifetime_limit"`
+			HopLatencyFromAttributedAttempt bool `yaml:"hop_latency_from_attributed_attempt"`
 		} `yaml:"settings"`
 	}
 	res.UnmarshalYaml(&conf)
@@ -267,6 +268,7 @@ func parseVerifySettings(res *server.SimpleResource) *model.VerifySettings {
 	s.EgressHashV4Prefix, s.EgressHashV6Prefix = v.EgressIpv4Prefix, v.EgressIpv6Prefix
 	s.EgressHashKey, s.EgressHashKeyId = append([]byte(nil), key...), v.EgressHashKeyId
 	s.SoftLimitsEnabled = v.SoftGuardrailsEnabled
+	s.HopLatencyFromAttributedAttempt = v.HopLatencyFromAttributedAttempt
 	s.SeedRateHardLimit, s.ExtendRateHardLimit, s.ActiveTrailsHardLimit = v.HardSeedPerMinutePerSource, v.HardExtendPerMinutePerSource, v.HardActiveTrailsPerSource
 	if s.CohortSize, s.CohortLifetimeLimit, err = verifyCohortSettings(conf.Profile, v.CohortSize, v.CohortLifetimeLimit); err != nil {
 		panic(fmt.Errorf("verify.yml %w", err))
@@ -944,16 +946,19 @@ func verifyExtend(
 	}
 
 	// §4.2 step 6: confirm the hop, stamp server time (§3.4), record
-	// per-step latency at the instant of confirmation (§7.5). The latency
-	// counts from the server's last answer on the step: the ASSIGN, or the
-	// step's last retryable answer, after which the attributed resend went.
-	// The hop's AssignedMs carries that start, so every reader of
-	// ConfirmedMs − AssignedMs (the stats, the published percentiles, the
-	// receipts) counts the attributed attempt only. A step with no retryable
-	// answer keeps its ASSIGN time, and the step deadline its pending hop's.
+	// per-step latency at the instant of confirmation (§7.5). With
+	// HopLatencyFromAttributedAttempt the latency counts from the server's
+	// last answer on the step: the ASSIGN, or the step's last retryable
+	// answer, after which the attributed resend went. The hop's AssignedMs
+	// carries that start, so every reader of ConfirmedMs − AssignedMs (the
+	// stats, the published percentiles, the receipts) counts the attributed
+	// attempt only. Off, and for a step with no retryable answer, the hop
+	// keeps its ASSIGN time; the step deadline is always the pending hop's.
 	startMs := trail.Pending.AssignedMs
-	if answeredMs := model.GetVerifyUnattributedExtendAnsweredMs(ctx, trailId, len(trail.Hops)); startMs < answeredMs {
-		startMs = min(answeredMs, nowMs)
+	if settings.HopLatencyFromAttributedAttempt {
+		if answeredMs := model.GetVerifyUnattributedExtendAnsweredMs(ctx, trailId, len(trail.Hops)); startMs < answeredMs {
+			startMs = min(answeredMs, nowMs)
+		}
 	}
 	confirmedHop := &model.VerifyTrailHop{
 		ClientId:     trail.Pending.ClientId,
