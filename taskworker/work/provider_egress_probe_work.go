@@ -84,6 +84,11 @@ type ProviderEgressProbeArgs struct {
 	LoadAttempts                 int `json:"load_attempts"`
 	LoadRetryMeanIntervalSeconds int `json:"load_retry_mean_interval_seconds"`
 	TunnelRecreateAttempts       int `json:"tunnel_recreate_attempts"`
+	// The config version that wrote this snapshot, and when. Neither is pass
+	// geometry; they order snapshots written by taskworkers on different
+	// configs. See provider_url_probe_geometry.go.
+	GeometryGeneration string    `json:"geometry_generation,omitempty"`
+	GeometryWrittenAt  time.Time `json:"geometry_written_at,omitzero"`
 	// The dark and batch-guard rules, snapshotted with the rest; the api
 	// reads the same keys from the same file at ingest.
 	model.ProviderEgressRules
@@ -95,6 +100,9 @@ type ProviderEgressProbeResult struct {
 	Backlog        bool `json:"backlog"`
 	UrlDue         int  `json:"url_due"`
 	UrlNotMeasured int  `json:"url_not_measured"`
+	// An older config left a newer geometry to newer instances: the post-step
+	// reschedules the same arguments.
+	HandedBack bool `json:"handed_back,omitempty"`
 	// Deprecated result fields for existing task snapshots and diagnostics.
 	Full                  bool `json:"full"`
 	Stale                 bool `json:"stale"`
@@ -387,15 +395,17 @@ func allProviderEgressProbeArgs(settings providerEgressProbeSettings) []*Provide
 }
 
 // ScheduleProviderEgressProbeTasks ensures every configured shard has exactly
-// one pending task. RunOnce makes repeated initialization idempotent.
+// one pending task. RunOnce makes repeated initialization idempotent, and an
+// existing row keeps its arguments.
 func ScheduleProviderEgressProbeTasks(clientSession *session.ClientSession, tx server.PgTx) {
 	settings, err := getProviderEgressProbeSettings()
 	server.Raise(err)
 	if !settings.Enabled {
 		return
 	}
+	now := server.NowUtc()
 	for _, args := range allProviderEgressProbeArgs(settings) {
-		scheduleProviderEgressProbeAt(clientSession, tx, args, server.NowUtc())
+		scheduleProviderEgressProbeAt(clientSession, tx, stampProviderEgressProbeArgs(args, now), now)
 	}
 }
 
@@ -412,10 +422,16 @@ func ProviderEgressProbeTaskFunctionNames() []string {
 // enabled deployment after probing is disabled. Claims are deliberately not a
 // barrier: the task reaper deletes every matching row, so stale and actively
 // leased generations cannot perpetuate themselves through their post hook.
+// An older config does not disable a newer config's live geometry: while one
+// is pending, every row stays, and this config's own rows retire as their
+// passes are claimed.
 func RemoveDisabledProviderEgressProbeTasks(ctx context.Context, tx server.PgTx) int64 {
 	settings, err := getProviderEgressProbeSettings()
 	server.Raise(err)
 	if settings.Enabled {
+		return 0
+	}
+	if _, newerGenerationLive := readProviderEgressProbeShardRowsInTx(ctx, tx, maxProviderEgressProbeShardCount, server.NowUtc()); newerGenerationLive {
 		return 0
 	}
 	var removedCount int64
@@ -427,6 +443,11 @@ func RemoveDisabledProviderEgressProbeTasks(ctx context.Context, tx server.PgTx)
 
 // The run-once key is shard-index stable so initialization and post scheduling
 // cannot create duplicate owners for one slice.
+func providerEgressProbeRunOnce(shardIndex int) *task.RunOnceOption {
+	return task.RunOnce("provider_egress_probe", shardIndex)
+}
+
+// Schedules one shard's pass, merging into a pending row of its key.
 func scheduleProviderEgressProbeAt(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
@@ -438,7 +459,7 @@ func scheduleProviderEgressProbeAt(
 		ProviderEgressProbe,
 		args,
 		clientSession,
-		task.RunOnce("provider_egress_probe", args.ShardIndex),
+		providerEgressProbeRunOnce(args.ShardIndex),
 		task.RunAt(runAt),
 		task.MaxTime(time.Duration(args.MaxTimeSeconds)*time.Second),
 	)
@@ -493,6 +514,12 @@ func ProviderEgressProbe(
 	if err != nil {
 		return nil, err
 	}
+	// An older config does not judge a newer config's live geometry, including
+	// its enablement: the post-step reschedules it unchanged for the instances
+	// configured with it.
+	if providerEgressProbeHandsBack(args, settings, server.NowUtc()) {
+		return &ProviderEgressProbeResult{HandedBack: true}, nil
+	}
 	// A disabled deployment may still have an old claimed row in a worker's
 	// input batch. Retire it before touching its arguments or the execution
 	// path, which is where identity, Vault credentials, and network clients are
@@ -535,6 +562,8 @@ func ProviderEgressProbe(
 
 // ProviderEgressProbePost checkpoints one batch before scheduling its
 // successor. Backlog drains immediately; a partial batch waits its idle cadence.
+// A handed-back pass keeps its newer arguments; otherwise the successor takes
+// this instance's settings, stamped with its config version.
 func ProviderEgressProbePost(
 	args *ProviderEgressProbeArgs,
 	result *ProviderEgressProbeResult,
@@ -545,6 +574,13 @@ func ProviderEgressProbePost(
 	if err != nil {
 		return err
 	}
+	now := server.NowUtc()
+	// The handed-back arguments wait their own idle cadence, so an instance
+	// configured with them can claim the shard.
+	if result != nil && result.HandedBack && args != nil {
+		scheduleProviderEgressProbeAt(clientSession, tx, args, now.Add(time.Duration(max(1, args.IdleDelaySeconds))*time.Second))
+		return nil
+	}
 	if !settings.Enabled {
 		return nil
 	}
@@ -552,8 +588,8 @@ func ProviderEgressProbePost(
 		return nil
 	}
 
-	nextArgs := providerEgressProbeArgs(settings, args.ShardIndex)
-	runAt := server.NowUtc()
+	nextArgs := stampProviderEgressProbeArgs(providerEgressProbeArgs(settings, args.ShardIndex), now)
+	runAt := now
 	if !result.Stale && !result.Backlog && !result.Full {
 		runAt = runAt.Add(time.Duration(nextArgs.IdleDelaySeconds) * time.Second)
 	}
