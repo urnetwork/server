@@ -1119,7 +1119,8 @@ func AddBasicTransferBalance(
 }
 
 // this finds networks with no entries in transfer_balance
-// this is potentially different than networks with zero transfer balance
+// this is potentially different than networks with zero transfer balance.
+// A lag.dev guest has none and is never given one (lag.dev/PLAN.md A1).
 func FindNetworksWithoutTransferBalance(ctx context.Context) (networkIds []server.Id) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1131,6 +1132,9 @@ func FindNetworksWithoutTransferBalance(ctx context.Context) (networkIds []serve
                 WHERE NOT EXISTS (
                     SELECT 1 FROM transfer_balance
                     WHERE transfer_balance.network_id = network.network_id
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM lag_guest
+                    WHERE lag_guest.network_id = network.network_id
                 )
             `,
 		)
@@ -5606,7 +5610,13 @@ func AddFreeTransferBalanceToAllNetworks(
 					subscription_renewal.start_time <= $2 AND
 					$2 < subscription_renewal.end_time
 
-				WHERE subscription_renewal.network_id IS NULL
+				WHERE
+					subscription_renewal.network_id IS NULL AND
+					-- a lag.dev guest gets no free data (lag.dev/PLAN.md A1)
+					NOT EXISTS (
+						SELECT 1 FROM lag_guest
+						WHERE lag_guest.network_id = network.network_id
+					)
 			`,
 			SubscriptionTypeSupporter,
 			server.NowUtc(),

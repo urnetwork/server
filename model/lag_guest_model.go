@@ -333,3 +333,35 @@ func RemoveLagGuest(ctx context.Context, networkId server.Id) bool {
 	removed, _ := removeExpiredLagGuest(ctx, networkId, server.NowUtc())
 	return removed
 }
+
+// The lag guests among networkIds, inside the caller's transaction. A lag
+// guest gets no automatic grant of any kind (lag.dev/PLAN.md A1).
+func lagGuestNetworkIdsInTx(ctx context.Context, tx server.PgTx, networkIds []server.Id) map[server.Id]bool {
+	lagGuests := map[server.Id]bool{}
+	if len(networkIds) == 0 {
+		return lagGuests
+	}
+	rows, err := tx.Query(
+		ctx,
+		`SELECT network_id FROM lag_guest WHERE network_id = ANY($1)`,
+		networkIds,
+	)
+	server.WithPgResult(rows, err, func() {
+		for rows.Next() {
+			var networkId server.Id
+			server.Raise(rows.Scan(&networkId))
+			lagGuests[networkId] = true
+		}
+	})
+	return lagGuests
+}
+
+// Every network of a referral map, referrers and the networks they referred.
+func referralNetworkIdsOf(referrals map[server.Id][]server.Id) []server.Id {
+	networkIds := []server.Id{}
+	for referralNetworkId, referredNetworkIds := range referrals {
+		networkIds = append(networkIds, referralNetworkId)
+		networkIds = append(networkIds, referredNetworkIds...)
+	}
+	return networkIds
+}
