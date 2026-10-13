@@ -4,7 +4,7 @@ package monitor
 
 import "github.com/urnetwork/server"
 
-// v767 published the evidence custody with the contract lookup index; 823
+// v767 published the evidence custody with the contract lookup index; 825
 // drops that index and keeps the rest, so both heads share these predicates.
 func contractCloseEvidenceArtifact(contractIndex string) string {
 	return `(` +
@@ -36,7 +36,7 @@ func contractCloseInventoryArtifact(original string) string {
 		financialConstraintsArtifact("contract_close_report_evidence", `('CHECK (((original_inventory IS NULL) OR ((octet_length(original_inventory) >= 1) AND (octet_length(original_inventory) <= 1024))))'),('CHECK (((original_inventory IS NULL) OR (original_report IS NOT NULL)))')`) + `)`
 }
 
-// the published v767 form of the index that 823 drops
+// the published v767 form of the index that 825 drops
 var contractCloseEvidenceContractIndexArtifact = financialIndexArtifact("contract_close_report_evidence", "contract_close_report_evidence_contract", "contract_id, party, accepted_at, report_id")
 
 var contractCloseEvidenceArtifactQuery = contractCloseEvidenceArtifact(contractCloseEvidenceContractIndexArtifact)
@@ -45,7 +45,7 @@ var contractCloseOriginalArtifactQuery = contractCloseOriginalArtifact(contractC
 
 var contractCloseInventoryArtifactQuery = contractCloseInventoryArtifact(contractCloseOriginalArtifactQuery)
 
-// The complete 767-769 evidence chain once 823 has dropped the contract index.
+// The complete 767-769 evidence chain once 825 has dropped the contract index.
 var contractCloseEvidenceChainWithoutContractIndexArtifactQuery = contractCloseInventoryArtifact(
 	contractCloseOriginalArtifact(contractCloseEvidenceArtifact(
 		migrationIndexRemoved("contract_close_report_evidence", "contract_close_report_evidence_contract"))))

@@ -46,9 +46,28 @@ func (self *countedProbeAuthority) RemoveNetworkClient(ctx context.Context, args
 	return self.Authority.RemoveNetworkClient(ctx, args)
 }
 
+// Both peers of these tests gather WebRTC candidates on loopback only and ask
+// no public STUN server, so their peer connection never leaves this machine.
+func hermeticWebRtcClientSettings(settings *connect.ClientSettings) *connect.ClientSettings {
+	settings.WebRtcSettings.IceServerPoolUrls = nil
+	settings.WebRtcSettings.UseLoopbackOnlyIceInterfaces = true
+	return settings
+}
+
+// Keeps every client the tunnel generates hermetic until the returned restore
+// runs.
+func useHermeticTunnelClientSettings() func() {
+	tunnelClientSettings := newProviderTunnelClientSettings
+	newProviderTunnelClientSettings = func(reservationByteCount connect.ByteCount) *connect.ClientSettings {
+		return hermeticWebRtcClientSettings(tunnelClientSettings(reservationByteCount))
+	}
+	return func() { newProviderTunnelClientSettings = tunnelClientSettings }
+}
+
 // The control API refuses every request. The platform exchange, provider DoH
 // origin and provider HTTPS payload are separate real listeners. No dial,
-// registration, client generator or contract callback is substituted.
+// registration, client generator or contract callback is substituted; only
+// WebRTC candidate gathering is kept on loopback.
 func TestProviderTunnelActualLocalAuthorityWithoutApi(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -101,7 +120,7 @@ func TestProviderTunnelActualLocalAuthorityWithoutApi(t *testing.T) {
 		strategy := connect.NewClientStrategy(ctx, settings)
 		defer strategy.Close()
 		oob := connect.NewApiOutOfBandControlWithLocalControl(ctx, strategy, providerJwt, trap.URL, pa)
-		provider := connect.NewClient(ctx, connect.Id(providerClientId), oob, connect.DefaultClientSettings())
+		provider := connect.NewClient(ctx, connect.Id(providerClientId), oob, hermeticWebRtcClientSettings(connect.DefaultClientSettings()))
 		transport := connect.NewPlatformTransportWithDefaults(provider.Ctx(), strategy, provider.RouteManager(), "ws"+platform.URL[4:], &connect.ClientAuth{ByJwt: providerJwt, InstanceId: connect.NewId(), AppVersion: server.RequireVersion()})
 		localNat := connect.NewLocalUserNatWithDefaults(provider.Ctx(), providerClientId.String())
 		natSettings := connect.DefaultRemoteUserNatProviderSettings()
@@ -183,6 +202,7 @@ func TestProviderTunnelActualLocalAuthorityWithoutApi(t *testing.T) {
 			_, _ = io.WriteString(w, "actual provider payload")
 		}))
 		defer payload.Close()
+		defer useHermeticTunnelClientSettings()()
 		cfg := Config{ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: sourceJwt, ClientId: connect.Id(sourceClientId), DataOnlyProbe: true, ClientCredentials: counted, ClientControl: counted, CloseTimeout: 15 * time.Second, DnsResolverSettings: &connect.DnsResolverSettings{EnableRemoteDoh: true, RemoteDohUrlsIpv4: []string{dns.URL + "/dns-query"}}, ContractReservationByteCount: 1 << 20}
 		tunnel, e := Open(ctx, cfg, connect.Id(providerClientId))
 		if e != nil {

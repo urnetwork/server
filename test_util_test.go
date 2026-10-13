@@ -1062,7 +1062,9 @@ func TestTestEnvironmentServiceProbeUsesInjectedNetwork(t *testing.T) {
 		postgresUser:      "test",
 		postgresPassword:  "not-a-secret",
 		postgresDatabase:  "test",
-		redisAuthority:    "redis-resolver.test:6379",
+		// an address literal: go-redis resolves a host name when it builds a
+		// client, outside the injected network
+		redisAuthority: "192.0.2.1:6379",
 	}
 	tests := []struct {
 		serviceName       string
@@ -1077,7 +1079,7 @@ func TestTestEnvironmentServiceProbeUsesInjectedNetwork(t *testing.T) {
 		{
 			serviceName:       "redis",
 			expectedHost:      "",
-			expectedAuthority: "redis-resolver.test:6379",
+			expectedAuthority: "192.0.2.1:6379",
 		},
 	}
 	for _, test := range tests {

@@ -635,6 +635,10 @@ func TestAccountLimitRetryHintTracksTheOldestAttempt(t *testing.T) {
 // submissions that were never going to create anything.
 func TestAbandonedSsoSignupsDoNotSpendTheAddressWideAuthBudget(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		// the synthetic google token fails verification against an empty key
+		// set instead of first fetching the live Google key set
+		defer session.Testing_SetSsoJwkKeys([]any{})()
+
 		ctx := context.Background()
 
 		// the key shape itself: no identity, so no per-user separation. This is
@@ -719,6 +723,10 @@ func TestAbandonedSsoSignupsDoNotSpendTheAddressWideAuthBudget(t *testing.T) {
 // and the address-wide bucket still refuses the caller at the documented count.
 func TestValidSignupsStillSpendTheAuthBudget(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		// the synthetic google token fails verification against an empty key
+		// set instead of first fetching the live Google key set
+		defer session.Testing_SetSsoJwkKeys([]any{})()
+
 		ctx := context.Background()
 
 		clientB := regressionSession(ctx, regressionClientB)

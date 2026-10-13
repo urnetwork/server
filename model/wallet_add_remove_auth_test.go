@@ -959,6 +959,10 @@ func TestAddAuthEmailOntoWalletOnlyAccount(t *testing.T) {
 // (used by A9 to plant rows). The remove side of SSO is covered by A9.
 func TestAddAuthRefusesMalformedCredentials(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		// the synthetic google token fails verification against an empty key
+		// set instead of first fetching the live Google key set
+		defer session.Testing_SetSsoJwkKeys([]any{})()
+
 		ctx := context.Background()
 		userId, _, clientSession := authParityAccount(t, ctx, "malformed")
 		before := authTypesOf(t, ctx, userId)

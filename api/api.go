@@ -334,6 +334,8 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
 		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),
 		router.NewRoute("GET", "/sn/artifact", handlers.SnArtifact),
+		router.NewRoute("GET", "/sn/ledger/object", handlers.SnLedgerObject),
+		router.NewRoute("GET", "/sn/ledger/account", handlers.SnLedgerAccount),
 		router.NewRoute("GET", "/sn/attempt-artifact", handlers.SnAttemptArtifact),
 		router.NewRoute("POST", "/sn/attempt-artifact", handlers.SnUploadAttemptArtifactWithReserved(reserved)),
 		router.NewRoute("GET", "/sn/artifacts", handlers.SnArtifactHistory),

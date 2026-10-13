@@ -92,6 +92,8 @@ func InitTaskWorkerForProfile(ctx context.Context, settings *task.TaskWorkerSett
 	if err := profile.Validate(); err != nil {
 		return nil, err
 	}
+	// The settlement v2 driver's steps build ledgers with the server's builder.
+	controller.InstallStLedgerBuilder()
 	return initTaskWorkerWithSettings(ctx, settings, profile), nil
 }
 
@@ -206,5 +208,6 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.StCommitRoot)},
 		{target: task.NewTaskTarget(work.StDeposit)},
 		{target: task.NewTaskTarget(work.StFinalizePoke)},
+		{target: task.NewTaskTarget(work.StLedgerV2Step)},
 	}
 }

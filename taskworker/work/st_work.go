@@ -119,7 +119,7 @@ func StSyncChain(
 
 	// closed-but-still-open rows -> compute leaves + root
 	for _, stEpoch := range model.GetStEpochsWithStatus(ctx, deploymentKey, model.StEpochStatusOpen) {
-		if stEpoch.Epoch < state.Epoch {
+		if stEpoch.Epoch < state.Epoch && stV1Epoch(ctx, stEpoch.Epoch) {
 			scheduleStEpochClose(clientSession, deploymentKey, stEpoch.Epoch, 0, server.NowUtc())
 		}
 	}
@@ -128,7 +128,7 @@ func StSyncChain(
 	// finalize block either way (a missed commit still finalizes — the
 	// pool total carries, D-11)
 	for _, stEpoch := range model.GetStEpochsWithStatus(ctx, deploymentKey, model.StEpochStatusClosed) {
-		if state.HeadBlock <= stEpoch.CommitDeadlineBlock {
+		if state.HeadBlock <= stEpoch.CommitDeadlineBlock && stV1Epoch(ctx, stEpoch.Epoch) {
 			scheduleStCommitRoot(clientSession, deploymentKey, stEpoch.Epoch, 0, server.NowUtc())
 		}
 		scheduleStFinalizePoke(clientSession, deploymentKey, stEpoch.Epoch, 0, stBlockRunAt(state, stEpoch.FinalizeBlock))
@@ -141,6 +141,8 @@ func StSyncChain(
 	if !stHasPublishKind(ctx, deploymentKey, state.Epoch, model.StPublishKindDeposit) {
 		scheduleStDeposit(clientSession, deploymentKey, state.Epoch, 0, server.NowUtc())
 	}
+
+	scheduleStLedgerV2Steps(clientSession, deploymentKey, state)
 
 	return &StSyncChainResult{}, nil
 }

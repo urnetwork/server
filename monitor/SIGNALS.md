@@ -18563,7 +18563,7 @@ limit:
   day, wrote 7.5 GB of temp files per run on the primary and streamed 37M rows
   into a Go replay: 427s on average over 93 runs (221-526s), with the other
   passes about a minute. The series is now span counts computed in SQL a chunk
-  of devices at a time over the device-leading index (migration 828), four
+  of devices at a time over the device-leading index (migration 830), four
   chains at once, each statement on its own connection, bounded to 250,000
   events and sorted in memory, with the same days, counts and summary. Its
   cost still grows with the retained events (about 1.4M a day), so

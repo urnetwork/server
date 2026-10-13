@@ -14,15 +14,15 @@ const auditDeviceEventDeviceIndexTestDefinition = "CREATE INDEX audit_device_eve
 // completed one keeps its identity instead of being rebuilt.
 func TestAuditDeviceEventDeviceIndexMigrationReplay(t *testing.T) {
 	index := migrationIndex(t, "audit_device_event_device_id_event_time")
-	if index+1 != 828 {
-		t.Fatalf("device-leading audit device event index migration = %d, want 828", index+1)
+	if index+1 != 830 {
+		t.Fatalf("device-leading audit device event index migration = %d, want 830", index+1)
 	}
 	migration, ok := migrations[index].(*OnlineSqlMigration)
 	if !ok || len(migration.productionSqlSteps()) != 2 {
 		t.Fatal("device-leading audit device event index needs separate recovery and online-create steps")
 	}
 	completion := migration.completion
-	if completion == nil || completion.version != 828 || completion.table != "audit_device_event" ||
+	if completion == nil || completion.version != 830 || completion.table != "audit_device_event" ||
 		completion.index != "audit_device_event_device_id_event_time" ||
 		completion.definition != auditDeviceEventDeviceIndexTestDefinition || completion.predicate != "" {
 		t.Fatalf("device-leading audit device event index completion = %+v", completion)

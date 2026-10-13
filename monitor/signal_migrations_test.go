@@ -500,8 +500,8 @@ func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) 
 	if byVersion[677][0].removedVersion != 678 {
 		t.Fatalf("raw-only review ordering lifetime is not pinned: %+v", byVersion[677][0])
 	}
-	// The 822-825 index drops retire every artifact that pinned a dropped index.
-	for version, removedVersion := range map[int]int{735: 824, 736: 825, 767: 823, 768: 823, 769: 823, 776: 822} {
+	// The 824-827 index drops retire every artifact that pinned a dropped index.
+	for version, removedVersion := range map[int]int{735: 826, 736: 827, 767: 825, 768: 825, 769: 825, 776: 824} {
 		if byVersion[version][0].removedVersion != removedVersion {
 			t.Fatalf("dropped index artifact lifetime is not pinned: v%d=%+v, want removed at %d", version, byVersion[version][0], removedVersion)
 		}

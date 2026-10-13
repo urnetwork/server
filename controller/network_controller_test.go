@@ -21,6 +21,12 @@ func TestNetworkCreate(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
+		// account messages go to a recording sender, not to the AWS sender
+		messages := newOutboxTestSender()
+		previousSender := GetAWSMessageSender()
+		SetMessageSender(messages)
+		defer SetMessageSender(previousSender)
+
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 
 		referralNetworkId := server.NewId()
@@ -47,6 +53,7 @@ func TestNetworkCreate(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, nil)
 		connect.AssertNotEqual(t, result.Network, nil)
+		requireNetworkCreateMessage(t, messages, result, userAuth)
 
 		// session.ByJwt.NetworkId = result.Network.NetworkId
 		clientSession.ByJwt = &session.ByJwt{
@@ -95,6 +102,12 @@ func TestNetworkCreateWithProfanity(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
+		// account messages go to a recording sender, not to the AWS sender
+		messages := newOutboxTestSender()
+		previousSender := GetAWSMessageSender()
+		SetMessageSender(messages)
+		defer SetMessageSender(previousSender)
+
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 
 		referralNetworkId := server.NewId()
@@ -116,6 +129,7 @@ func TestNetworkCreateWithProfanity(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, nil)
 		connect.AssertNotEqual(t, result.Network, nil)
+		requireNetworkCreateMessage(t, messages, result, userAuth)
 
 		clientSession.ByJwt = &session.ByJwt{
 			NetworkId: result.Network.NetworkId,
@@ -194,6 +208,12 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
+
+		// account messages go to a recording sender, not to the AWS sender
+		messages := newOutboxTestSender()
+		previousSender := GetAWSMessageSender()
+		SetMessageSender(messages)
+		defer SetMessageSender(previousSender)
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 
 		userAuth := "foo@ur.io"
@@ -226,6 +246,7 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 		result, err := NetworkCreate(networkCreate, clientSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, nil)
+		requireNetworkCreateMessage(t, messages, result, userAuth)
 
 		// The balance code's data lands on the new network...
 		transferBalances := model.GetActiveTransferBalances(ctx, result.Network.NetworkId)
@@ -247,4 +268,20 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 		connect.AssertEqual(t, isPro, false)
 
 	})
+}
+
+// A network create sends one account message to the new user: the
+// verification code, or the welcome when no verification is required.
+func requireNetworkCreateMessage(t testing.TB, messages *outboxTestSender, result *model.NetworkCreateResult, userAuth string) {
+	sends := messages.sent()
+	if len(sends) != 1 || sends[0].userAuth != userAuth {
+		t.Fatalf("network create sent %+v, want one message to %s", sends, userAuth)
+	}
+	if result.VerificationRequired != nil {
+		if _, ok := sends[0].template.(*AuthVerifyTemplate); !ok {
+			t.Fatalf("network create sent %T, want the verification code", sends[0].template)
+		}
+	} else if _, ok := sends[0].template.(*NetworkWelcomeTemplate); !ok {
+		t.Fatalf("network create sent %T, want the welcome", sends[0].template)
+	}
 }

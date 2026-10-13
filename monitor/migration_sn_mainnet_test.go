@@ -99,7 +99,7 @@ func snMainnetMigrationTestContract(t testing.TB, version int) snMainnetMigratio
 }
 
 // The contract that checks a published version's custody at head: its own, or
-// the later contract that superseded it (822 keeps v776's custody once the
+// the later contract that superseded it (824 keeps v776's custody once the
 // transaction index is dropped).
 func snMainnetMigrationHeadTestContract(t testing.TB, version int) snMainnetMigrationContract {
 	t.Helper()
@@ -112,7 +112,7 @@ func snMainnetMigrationHeadTestContract(t testing.TB, version int) snMainnetMigr
 
 // Execute a real catalog predicate before and after changing its schema.
 // The probe's leading catalog CTEs, captured from the emitted query, so a
-// contract that reads them (822's index_artifact removal guard) can be
+// contract that reads them (824's index_artifact removal guard) can be
 // evaluated on its own like any direct catalog predicate.
 func snMainnetMigrationProbePrefix(t testing.TB) string {
 	t.Helper()
@@ -277,7 +277,7 @@ func TestMigrationsMainnetOriginalCatalogAcrossPublishedPrefixes(t *testing.T) {
 				if contract.artifact.requiredVersion == 782 && version >= 776 {
 					want = true
 				}
-				// v776 still pins the transaction index that its successor 822 drops
+				// v776 still pins the transaction index that its successor 824 drops
 				if contract.artifact.removedVersion != 0 && version >= contract.artifact.removedVersion {
 					want = false
 				}
@@ -329,7 +329,7 @@ func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
 			})
 		}
 	})
-	// v776's custody faults at head belong to its 822 successor, whose fixture
+	// v776's custody faults at head belong to its 824 successor, whose fixture
 	// is in TestMigrationsCurrentSuffixSchemaFaultsReachSignal.
 	if len(observed) != 14 {
 		t.Fatalf("mainnet schema fault fixture returned %d alert observations, want 14", len(observed))

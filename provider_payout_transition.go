@@ -42,6 +42,9 @@ type ProviderPayoutMainnet struct {
 	SettlementVault string `yaml:"settlement_vault" json:"settlement_vault"`
 	PolicyHash      string `yaml:"policy_hash" json:"policy_hash"`
 	ReadinessSha256 string `yaml:"readiness_sha256" json:"readiness_sha256"`
+	// Settlement v2 is off unless both addresses are declared.
+	SettlementV2Address string `yaml:"settlement_v2_address" json:"settlement_v2_address,omitempty"`
+	VaultV2Address      string `yaml:"vault_v2_address" json:"vault_v2_address,omitempty"`
 }
 
 // Strict, bounded parsing refuses typos and multiple documents instead of
@@ -76,6 +79,9 @@ func ParseProviderPayoutTransition(data []byte) (*ProviderPayoutTransition, erro
 	}
 	if mainnet.Activation == "reviewed" && (mainnet.DeploymentId == "" || !payoutHex(mainnet.Coordinator, 20, true) || !payoutHex(mainnet.SettlementVault, 20, true) || !payoutHex(mainnet.PolicyHash, 32, true) || !payoutHex(mainnet.ReadinessSha256, 32, false)) {
 		return nil, errors.New("sn.yml: reviewed activation requires exact deployment identity and readiness receipt digest")
+	}
+	if err := ValidateLedgerV2Addresses(mainnet.SettlementV2Address, mainnet.VaultV2Address); err != nil {
+		return nil, fmt.Errorf("sn.yml: %w", err)
 	}
 	policy.Cutoff = cutoff.UTC()
 	digest := sha256.Sum256(data)
@@ -152,7 +158,7 @@ func (self *ProviderPayoutTransition) MainnetAdmission(now time.Time, identity P
 		return errors.New("sn: mainnet deployment readiness is blocked; usage retained without implied claim entitlement")
 	}
 	expected := self.Mainnet
-	if identity.Profile != expected.Profile || identity.ChainId != expected.ChainId || identity.Netuid != expected.Netuid || !strings.EqualFold(identity.GenesisHash, expected.GenesisHash) || identity.DeploymentId != expected.DeploymentId || !strings.EqualFold(identity.Coordinator, expected.Coordinator) || !strings.EqualFold(identity.SettlementVault, expected.SettlementVault) || !strings.EqualFold(identity.PolicyHash, expected.PolicyHash) {
+	if identity.Profile != expected.Profile || identity.ChainId != expected.ChainId || identity.Netuid != expected.Netuid || !strings.EqualFold(identity.GenesisHash, expected.GenesisHash) || identity.DeploymentId != expected.DeploymentId || !strings.EqualFold(identity.Coordinator, expected.Coordinator) || !strings.EqualFold(identity.SettlementVault, expected.SettlementVault) || !strings.EqualFold(identity.PolicyHash, expected.PolicyHash) || identity.SettlementV2Address != expected.SettlementV2Address || identity.VaultV2Address != expected.VaultV2Address {
 		return errors.New("sn: selected deployment differs from reviewed earnings schedule")
 	}
 	if identity.ReadinessSha256 != expected.ReadinessSha256 {

@@ -158,6 +158,11 @@ func TestOpenUsesContractReservationSettings(t *testing.T) {
 	if settings.ContractManagerSettings.StandardContractTransferByteCount != cfg.ContractReservationByteCount {
 		t.Fatal("Open bypassed the configured contract reservation budget")
 	}
+	// production clients keep the default STUN pool and interfaces; only a
+	// test replaces newProviderTunnelClientSettings
+	if len(settings.WebRtcSettings.IceServerPoolUrls) == 0 || settings.WebRtcSettings.UseLoopbackOnlyIceInterfaces {
+		t.Fatal("Open built clients without the production WebRTC settings")
+	}
 }
 
 // Invalid budgets must fail before constructing a Tun or opening any API work.

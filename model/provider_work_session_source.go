@@ -23,7 +23,7 @@ type ProviderWorkSessionSource struct {
 	key       ed25519.PrivateKey
 	// loaded from the deployed provider_work_session.json rather than handed
 	// over by an explicit owner. Only a deployed source must find the
-	// transaction lookup index that migration 822 dropped before it signs.
+	// transaction lookup index that migration 824 dropped before it signs.
 	vaultLoaded bool
 }
 

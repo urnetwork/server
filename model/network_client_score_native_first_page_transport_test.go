@@ -30,14 +30,14 @@ const nativeFirstTTL = 37*time.Minute + 250*time.Millisecond
 var nativeFirstFailure = errors.New("synthetic native alias transport failure")
 
 type nativeFirstWork struct {
-	Commands, DirectCalls, Pipelines, Sets, Aliases, DirectAliases int
-	Begins, PageBatches, Pages, Commits, Encodes, SampleEncodes    int
-	MaxPipelineCommands, MaxPipelineBytes                          int
+	Commands, DirectCalls, Pipelines, Sets, Aliases, DirectAliases         int
+	Begins, PageBatches, Pages, Commits, Encodes, SampleEncodes            int
+	MaxPipelineCommands, MaxPipelineBytes                                  int
 	NativePipelines, ReplaySubmissions, MaxNativePages, MaxNativePageBytes int
-	NativeRows int
-	NativeSemanticSum uint64
-	SetKeySum                                                      uint64
-	TransportBudget                                                time.Duration
+	NativeRows                                                             int
+	NativeSemanticSum                                                      uint64
+	SetKeySum                                                              uint64
+	TransportBudget                                                        time.Duration
 }
 
 type nativeFirstStage struct {
@@ -55,7 +55,7 @@ type nativeFirstTransport struct {
 	census        *ClientScoreNativeCensus
 	retryAttempts int
 	retryDigest   [sha256.Size]byte
-	cancel context.CancelFunc
+	cancel        context.CancelFunc
 }
 
 func newNativeFirstTransport(t *testing.T, failure string) (*redis.Client, *nativeFirstTransport) {
@@ -68,7 +68,8 @@ func newNativeFirstTransport(t *testing.T, failure string) (*redis.Client, *nati
 			SourceCompletedAt: time.Unix(1_700_000_010, 0).UTC(),
 		},
 	}
-	client := redis.NewClient(&redis.Options{Addr: "forbidden-synthetic.invalid:0", MaxRetries: -1})
+	// an address literal: go-redis resolves a host name when it builds a client
+	client := redis.NewClient(&redis.Options{Addr: "192.0.2.1:0", MaxRetries: -1})
 	client.AddHook(transport)
 	t.Cleanup(func() { client.Close() })
 	return client, transport
@@ -672,7 +673,7 @@ func TestNativeFirstPageLoadedTransportControl(t *testing.T) {
 
 func TestNativeFirstPageSnapshotShapes(t *testing.T) {
 	for _, shape := range []struct {
-		name                 string
+		name                    string
 		pages, padding, batches int
 	}{
 		{name: "empty"},

@@ -10010,7 +10010,45 @@ var migrations = []any{
 		"CREATE INDEX network_client_connection_connected_handler_id ON public.network_client_connection USING btree (handler_id) WHERE connected",
 		"connected"),
 
-	// 821: the price of each credited App Store transaction, in milliunits of
+	// 821: settlement v2 ledger records and vault2 mirror (st_ledger_v2_schema.go).
+	// New tables only. Apply before deploying a server with v2 addresses.
+	newSqlMigration(stLedgerV2SchemaSql),
+	// 822: settlement v2 ledger inputs at a million providers
+	// (VERSION2-FINAL.md §8.2). st_verified_wallet_consent holds each
+	// generation of a retained consent chain that verified completely through
+	// some head, so epoch wallet selection verifies a chain once per head
+	// (model/st_wallet_consent_verified.go). A column a kind does not carry
+	// is zero; epochs and blocks are uint64 stored by bit pattern.
+	// st_fleet_bound_sync is the next block the FleetBound scan has mirrored
+	// into st_event, which bounds the head-exclusion candidates
+	// (controller/st_head_exclusion.go). New tables: nothing is rewritten,
+	// and v1 settlement reads neither.
+	newSqlMigration(`
+		CREATE TABLE st_verified_wallet_consent (
+			scope_hash bytea NOT NULL CHECK (octet_length(scope_hash) = 32),
+			kind varchar(16) NOT NULL CHECK (kind IN ('provider', 'network', 'delegation', 'hotkey')),
+			owner bytea NOT NULL CHECK (octet_length(owner) IN (16, 32)),
+			generation bigint NOT NULL CHECK (generation BETWEEN 1 AND 4096),
+			original_hash bytea NOT NULL CHECK (octet_length(original_hash) = 32),
+			from_epoch bigint NOT NULL,
+			through_epoch bigint NOT NULL,
+			wallet bytea NOT NULL CHECK (octet_length(wallet) = 32),
+			network_id bytea NOT NULL CHECK (octet_length(network_id) = 16),
+			consent_head_hash bytea NOT NULL CHECK (octet_length(consent_head_hash) = 32),
+			consent_generation bigint NOT NULL,
+			prospective_signer bytea NOT NULL CHECK (octet_length(prospective_signer) = 20),
+			prospective_block bigint NOT NULL,
+			prospective_epoch bigint NOT NULL,
+			expires_at bigint NOT NULL,
+			PRIMARY KEY (scope_hash, kind, owner, generation)
+		);
+		CREATE TABLE st_fleet_bound_sync (
+			deployment_key varchar(96) NOT NULL PRIMARY KEY,
+			next_block bigint NOT NULL
+		);
+	`),
+
+	// 823: the price of each credited App Store transaction, in milliunits of
 	// its ISO 4217 currency. Net revenue is USD and only a USD price converts,
 	// so a credit in another currency records the paid marker and its price is
 	// kept here. Rows credited earlier stay NULL: their price survives only as
@@ -10030,7 +10068,7 @@ var migrations = []any{
 	// write on every insert into their tables. Apply them outside a running
 	// pg_dump, as DROP INDEX CONCURRENTLY waits for every lock on the table.
 
-	// 822: provider_work_session_event_transaction (13.3 GB on Main, 0 scans)
+	// 824: provider_work_session_event_transaction (13.3 GB on Main, 0 scans)
 	// serves only providerWorkSignSessionEventsInTx, which runs only when the
 	// optional provider_work_session.json signer is deployed, and it is not.
 	// Every connection open and retirement appends an event that writes it. A
@@ -10042,7 +10080,7 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS provider_work_session_event_transaction`,
 		`DROP INDEX IF EXISTS provider_work_session_event_transaction`,
 	),
-	// 823: contract_close_report_evidence_contract (11.1 GB, 14,162 scans)
+	// 825: contract_close_report_evidence_contract (11.1 GB, 14,162 scans)
 	// duplicates contract_close_original_census (768, 3.3 billion scans). The
 	// only contract-keyed reader, the ST epoch original-close census, filters
 	// by contract_id and orders by client_id, report_id, which the census
@@ -10052,7 +10090,7 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS contract_close_report_evidence_contract`,
 		`DROP INDEX IF EXISTS contract_close_report_evidence_contract`,
 	),
-	// 824: provider_probe_cycle_completed_waiting (0.23 GB, 0 scans) serves
+	// 826: provider_probe_cycle_completed_waiting (0.23 GB, 0 scans) serves
 	// only the completed-run priority scans, which run only when the egress
 	// rule url_completed_run_priority_since is set, and it is not. If it is
 	// set later, the eligible next-attempt indexes (725, 728) serve the same
@@ -10061,14 +10099,14 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_completed_waiting`,
 		`DROP INDEX IF EXISTS provider_probe_cycle_completed_waiting`,
 	),
-	// 825: provider_probe_cycle_slot_completed_waiting (0.33 GB, 1 scan) is the
-	// per-slot form of 824, with the same single gated reader.
+	// 827: provider_probe_cycle_slot_completed_waiting (0.33 GB, 1 scan) is the
+	// per-slot form of 826, with the same single gated reader.
 	newOnlineSqlMigration(
 		`DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_slot_completed_waiting`,
 		`DROP INDEX IF EXISTS provider_probe_cycle_slot_completed_waiting`,
 	),
 
-	// 826: autovacuum's end-of-vacuum truncation holds AccessExclusiveLock on
+	// 828: autovacuum's end-of-vacuum truncation holds AccessExclusiveLock on
 	// the table while it drops the cut pages from all of shared_buffers (256 GB
 	// on Main), so every connect, disconnect and handler heartbeat queues
 	// behind it. On 2026-10-12 it parked 361 backends for up to 4 s on
@@ -10081,7 +10119,7 @@ var migrations = []any{
 		ALTER TABLE network_client_connection SET (vacuum_truncate = false);
 		ALTER TABLE network_client_handler SET (vacuum_truncate = false);
 	`),
-	// 827: devices by network, for the probe-shard reap. ReapProberShard
+	// 829: devices by network, for the probe-shard reap. ReapProberShard
 	// deletes a probe network's devices while it holds the endpoint fence
 	// (advisory 776) of every client in that network. Without this index the
 	// delete read the whole 11 GB device table: 8,759 calls averaging 8.5 s,
@@ -10095,7 +10133,7 @@ var migrations = []any{
 		 CREATE INDEX device_network_id ON device (network_id)`,
 	),
 
-	// 828: audit_device_event by device, for the public devices series
+	// 830: audit_device_event by device, for the public devices series
 	// (model/audit_model.go computeStatsDevice). The hourly export read every
 	// retained event through the time-leading stats index, grouped them all by
 	// device and day, and streamed one row per device-day to the taskworker. On
@@ -10117,12 +10155,12 @@ var migrations = []any{
 		`DROP INDEX IF EXISTS audit_device_event_device_id_event_time;
 		 CREATE INDEX audit_device_event_device_id_event_time
 		 ON audit_device_event (device_id, event_time, event_id) INCLUDE (event_type)`,
-	).withIndexCompletion(828, "audit_device_event", "audit_device_event_device_id_event_time",
+	).withIndexCompletion(830, "audit_device_event", "audit_device_event_device_id_event_time",
 		"CREATE INDEX audit_device_event_device_id_event_time ON public.audit_device_event USING btree (device_id, event_time, event_id) INCLUDE (event_type)",
 		""),
-	// 829: the time-leading stats index (7.4 GB on Main) has no reader left; it
+	// 831: the time-leading stats index (7.4 GB on Main) has no reader left; it
 	// served only the devices series. The primary key keeps the same time order
-	// for retention and backfill. Like 822-825, apply it outside a running
+	// for retention and backfill. Like 824-827, apply it outside a running
 	// pg_dump.
 	newOnlineSqlMigration(
 		`DROP INDEX CONCURRENTLY IF EXISTS audit_device_event_stats_device_id`,

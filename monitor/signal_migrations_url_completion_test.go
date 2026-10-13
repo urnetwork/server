@@ -221,7 +221,7 @@ func TestMigrationUrlCompletionCatalogGuardsOnMigratedDatabase(t *testing.T) {
 }
 
 // A published artifact retired by a later migration at or before head, such as
-// the waiting-probe indexes (735, 736) that 824 and 825 drop.
+// the waiting-probe indexes (735, 736) that 826 and 827 drop.
 func migrationArtifactRetiredAtHead(version int) bool {
 	for _, artifact := range migrationArtifacts {
 		if artifact.requiredVersion == version {

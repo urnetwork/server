@@ -148,6 +148,10 @@ func (self *stubStClient) BindingsAt(_ context.Context, clientIds [][16]byte, _ 
 	return bindings, nil
 }
 
+func (self *stubStClient) FleetBoundEvents(context.Context, uint64, uint64) ([]*model.StChainEvent, error) {
+	return nil, nil
+}
+
 func (self *stubStClient) EpochDeposit(context.Context, uint64, uint64) (*big.Int, error) {
 	return big.NewInt(0), nil
 }

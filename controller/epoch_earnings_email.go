@@ -40,7 +40,8 @@ type EpochEarningsTemplate struct {
 	Top200Rank     int
 	HasWallet      bool
 	// UnclaimedRao is this epoch's claimable alpha for the network's
-	// coldkey(s); nil when the pool total could not be read.
+	// coldkey(s): a v2 epoch's ledger amount, or a v1 epoch's pool total ×
+	// share, nil when the pool total could not be read.
 	UnclaimedRao *big.Int
 	EpochEnd     time.Time
 	BaseTemplate
@@ -98,9 +99,10 @@ func (self *EpochEarningsTemplate) Top200Text() string {
 	return ""
 }
 
-// HasUnclaimed: a wallet is attached and the network holds a leaf this epoch.
+// HasUnclaimed: a wallet is attached and the network holds a leaf, or a v2
+// amount, this epoch.
 func (self *EpochEarningsTemplate) HasUnclaimed() bool {
-	return self.HasWallet && 0 < self.ShareBps
+	return self.HasWallet && (0 < self.ShareBps || (self.UnclaimedRao != nil && 0 < self.UnclaimedRao.Sign()))
 }
 
 // AlphaText is the claimable amount as "3.2410 SN25α", or "" when the pool
@@ -123,6 +125,10 @@ func stMarkEpochFinalized(ctx context.Context, deploymentKey model.StDeploymentK
 	prior := model.GetStEpoch(ctx, deploymentKey, epoch)
 	model.SetStEpochStatus(ctx, deploymentKey, epoch, model.StEpochStatusFinalized)
 	if prior != nil && prior.Status == model.StEpochStatusFinalized {
+		return
+	}
+	// a v2 epoch notifies when its finalized root's amounts are recorded
+	if v1, err := StV1EpochAllowed(ctx, epoch); err == nil && !v1 {
 		return
 	}
 	// a new finalized epoch changes blocks-with-points and streaks
@@ -194,9 +200,9 @@ func stEpochPoolTotal(ctx context.Context, epoch uint64, noId uint64) *big.Int {
 }
 
 // stEpochEarningsTemplates assembles the per-network templates: points from
-// the epoch window, share from the committed leaves, rank from the
+// the epoch window, share and alpha from stEpochNetworkEarnings, rank from the
 // leaderboard ranking, Top 200 from the head estimate and the binding
-// registry, alpha from the pool total × share.
+// registry.
 func stEpochEarningsTemplates(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64, row *model.StEpoch) map[server.Id]*EpochEarningsTemplate {
 	start, end := snEpochWindow(ctx, row)
 	points := model.GetNetworkNanoPointsInWindow(ctx, start, end)
@@ -204,37 +210,33 @@ func stEpochEarningsTemplates(ctx context.Context, deploymentKey model.StDeploym
 	if cfg := stConfig(); cfg != nil {
 		noId = cfg.NoId
 	}
-	shares := model.GetStPayoutNetworkShares(ctx, deploymentKey, epoch, noId)
+	shares, unclaimed := stEpochNetworkEarnings(ctx, deploymentKey, epoch, noId)
 	rankings, err := model.GetNetworkLeaderboardRankings(ctx)
 	if err != nil {
 		rankings = map[server.Id]model.NetworkRanking{}
 	}
 	head := snHeadRankingSafe(ctx)
-	poolTotal := stEpochPoolTotal(ctx, epoch, noId)
 
 	recipients := map[server.Id]bool{}
 	for networkId := range points {
 		recipients[networkId] = true
 	}
 	for networkId, share := range shares {
-		if 0 < share {
+		if 0 < share || unclaimed[networkId] != nil {
 			recipients[networkId] = true
 		}
 	}
 	templates := map[server.Id]*EpochEarningsTemplate{}
 	for networkId := range recipients {
 		template := &EpochEarningsTemplate{
-			Epoch:     epoch,
-			Points:    float64(points[networkId]) / snNanoPointsPerPoint,
-			ShareBps:  shares[networkId],
-			Rank:      rankings[networkId].LeaderboardRank,
-			Total:     len(rankings),
-			HasWallet: snNetworkHasWallet(ctx, networkId),
-			EpochEnd:  end,
-		}
-		if poolTotal != nil && 0 < template.ShareBps {
-			unclaimed := new(big.Int).Mul(poolTotal, big.NewInt(int64(template.ShareBps)))
-			template.UnclaimedRao = unclaimed.Div(unclaimed, big.NewInt(10_000))
+			Epoch:        epoch,
+			Points:       float64(points[networkId]) / snNanoPointsPerPoint,
+			ShareBps:     shares[networkId],
+			Rank:         rankings[networkId].LeaderboardRank,
+			Total:        len(rankings),
+			HasWallet:    snNetworkHasWallet(ctx, networkId),
+			UnclaimedRao: unclaimed[networkId],
+			EpochEnd:     end,
 		}
 		if head != nil {
 			score := head.scores[networkId]

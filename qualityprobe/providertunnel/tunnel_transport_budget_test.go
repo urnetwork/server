@@ -12,9 +12,12 @@ import (
 
 // All endpoint, token and identity inputs are visibly synthetic. The test
 // stops before Tun construction and never starts provider or API traffic.
+// The API and platform are loopback addresses that refuse, as in
+// dummyOpenConfig, so a synthetic probe whose generator reaches them resolves
+// no host name.
 func probeTransportBudgetTestConfig() Config {
 	return Config{
-		ApiUrl: "https://api.probe.example", PlatformUrl: "wss://platform.probe.example",
+		ApiUrl: "https://127.0.0.1:0", PlatformUrl: "wss://127.0.0.1:0",
 		ByJwt: "synthetic-probe-token", ClientId: connect.NewId(),
 		Pins:              map[string][]string{"geo.probe.example": {"synthetic-pin"}},
 		DeviceDescription: "synthetic probe", DeviceSpec: "synthetic", Version: "test",

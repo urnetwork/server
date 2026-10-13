@@ -36,7 +36,7 @@ func authTestRedisOptions(t *testing.T, peer *deadlineRedisPeer) *redis.Options 
 	}
 	options.Protocol, options.DisableIdentity, options.Password = 2, true, ""
 	options.MaxRetries = -1 // normalized zero would re-enable defaults on reconstruction
-	options.Addr, options.Dialer = "retirement.invalid:6379", peer.dial
+	options.Addr, options.Dialer = deadlineTestRedisAddress, peer.dial
 	return &options
 }
 
@@ -122,10 +122,10 @@ func TestRedisAuthClusterRedirectBoundAndColdMetadata(t *testing.T) {
 		t.Fatalf("cluster authentication lost finite routing policy: redirects=%d retries=%d routingDisabled=%t pool=%d readTimeout=%s", options.MaxRedirects, options.MaxRetries, options.DisableRoutingPolicies, options.PoolSize, options.ReadTimeout)
 	}
 	options.Protocol, options.DisableIdentity, options.Password, options.MaxRetries = 2, true, "", -1
-	options.Addrs = []string{"retirement.invalid:6379"}
+	options.Addrs = []string{deadlineTestRedisAddress}
 	options.Dialer = peer.dial
 	options.ClusterSlots = func(context.Context) ([]redis.ClusterSlot, error) {
-		return []redis.ClusterSlot{{Start: 0, End: 16383, Nodes: []redis.ClusterNode{{Addr: "retirement.invalid:6379"}}}}, nil
+		return []redis.ClusterSlot{{Start: 0, End: 16383, Nodes: []redis.ClusterNode{{Addr: deadlineTestRedisAddress}}}}, nil
 	}
 	installAuthTestClient(t, redis.NewClusterClient(&options))
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)

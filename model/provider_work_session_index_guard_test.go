@@ -1,5 +1,5 @@
 // A signer deployed through provider_work_session.json needs the transaction
-// lookup index that migration 822 drops; explicit fixture owners are not
+// lookup index that migration 824 drops; explicit fixture owners are not
 // deployments. All identities and keys here are synthetic.
 package model
 
@@ -14,7 +14,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The fresh head database has applied 822, so a deployed signer refuses: the
+// The fresh head database has applied 824, so a deployed signer refuses: the
 // connection owner keeps its session events unsigned rather than reading the
 // client's whole event history for each signature. Building the index again
 // lets the next operation sign every event it issues. Without the guard the

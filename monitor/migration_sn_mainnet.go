@@ -604,7 +604,7 @@ var snMainnetMigrationContracts = []snMainnetMigrationContract{
 		snMainnetMigrationFunction("verify_original_request_no_received_tombstone()", "trigger", "plpgsql", "v", false, snMainnetVerifyReceivedFenceBody),
 		snMainnetMigrationPriorFunction(snMainnetMigrationFunction("verify_original_request_closed_fence()", "trigger", "plpgsql", "v", false, snMainnetVerifyFenceLegacyBody), snMainnetMigrationFunction("verify_original_request_closed_fence()", "trigger", "plpgsql", "v", false, snMainnetVerifyFenceBody), snMainnetMigrationFunction("verify_original_request_index_body(bytea)", "jsonb", "plpgsql", "i", true, snMainnetVerifyIndexProjectionBody, "original"))),
 	snMainnetMigration(776, "original provider session reservation and outcome custody",
-		providerWorkSessionCustodyPredicates(providerWorkSessionEventTransactionIndexArtifact)...).removedAt(822),
+		providerWorkSessionCustodyPredicates(providerWorkSessionEventTransactionIndexArtifact)...).removedAt(824),
 	snMainnetMigration(777, "operator gas policy and durable liability reservations",
 		migrationFp2Table("st_operator_gas_budget"),
 		snMainnetMigrationColumns("st_operator_gas_budget",
@@ -974,7 +974,7 @@ const snMainnetResolutionHotkeyColumns = "CHECK ((num_nonnulls(hotkey, hotkey_co
 const snMainnetResolutionHotkeyMode = "CHECK ((((mode)::text = 'hotkey'::text) = (hotkey IS NOT NULL)))"
 
 // v776 published the provider work session custody together with the
-// transaction lookup index. 822 drops that index and republishes the rest of
+// transaction lookup index. 824 drops that index and republishes the rest of
 // this custody unchanged, so both heads check the same predicates in order.
 func providerWorkSessionCustodyPredicates(transactionIndex string) []string {
 	return []string{
@@ -1088,5 +1088,5 @@ func providerWorkSessionCustodyPredicates(transactionIndex string) []string {
 	}
 }
 
-// the published v776 form of the index that 822 drops
+// the published v776 form of the index that 824 drops
 var providerWorkSessionEventTransactionIndexArtifact = financialIndexArtifact("provider_work_session_event", "provider_work_session_event_transaction", "transaction_id, client_id, sequence")

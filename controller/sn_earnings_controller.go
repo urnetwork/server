@@ -416,13 +416,16 @@ type AccountEpochsArgs struct {
 
 // AccountEpoch is one finalized epoch as the app shows it: the points the
 // network earned inside the epoch window and its share of the operator pool
-// in basis points (0 when no coldkey was attached, i.e. points only).
+// in basis points (0 when no coldkey was attached, i.e. points only). A
+// settlement v2 epoch also carries its amount in rao from the ledger, and its
+// share is that amount's share of the epoch's amounts.
 type AccountEpoch struct {
 	Epoch       uint64  `json:"epoch"`
 	StartMillis int64   `json:"start_millis"`
 	EndMillis   int64   `json:"end_millis"`
 	Points      float64 `json:"points"`
 	ShareBps    int     `json:"share_bps"`
+	AmountRao   string  `json:"amount_rao,omitempty"`
 }
 
 type AccountEpochsError struct {
@@ -453,7 +456,7 @@ func AccountEpochs(
 	if accountEpochsMaxLimit < limit {
 		limit = accountEpochsMaxLimit
 	}
-	rows := model.GetFinalizedStEpochs(ctx, deploymentKey, limit)
+	rows, ledgerV2 := stLedgerV2AccountEpochs(ctx, cfg, networkId, model.GetFinalizedStEpochs(ctx, deploymentKey, limit), limit)
 	epochs := make([]uint64, len(rows))
 	for i, row := range rows {
 		epochs[i] = row.Epoch
@@ -463,13 +466,17 @@ func AccountEpochs(
 	for _, row := range rows {
 		start, end := snEpochWindow(ctx, row)
 		nanoPoints := model.GetAccountNanoPointsInWindow(ctx, networkId, start, end)
-		result.Epochs = append(result.Epochs, AccountEpoch{
+		accountEpoch := AccountEpoch{
 			Epoch:       row.Epoch,
 			StartMillis: start.UnixMilli(),
 			EndMillis:   end.UnixMilli(),
 			Points:      float64(nanoPoints) / snNanoPointsPerPoint,
 			ShareBps:    shares[row.Epoch],
-		})
+		}
+		if amount, ok := ledgerV2[row.Epoch]; ok {
+			accountEpoch.ShareBps, accountEpoch.AmountRao = stLedgerV2ShareBps(&amount.Amount, &amount.Total), amount.Amount.Dec()
+		}
+		result.Epochs = append(result.Epochs, accountEpoch)
 	}
 	return result, nil
 }
