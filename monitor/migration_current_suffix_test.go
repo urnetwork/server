@@ -133,6 +133,10 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"close evidence census index missing", 823, `DROP INDEX contract_close_original_census`},
 		{"dropped completed waiting probe index rebuilt", 824, `CREATE INDEX provider_probe_cycle_completed_waiting ON provider_egress_probe_cycle (next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
 		{"dropped slot completed waiting probe index rebuilt", 825, `CREATE INDEX provider_probe_cycle_slot_completed_waiting ON provider_egress_probe_cycle (slot_id, next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
+		{"connection table truncates on vacuum", 826, `ALTER TABLE network_client_connection RESET (vacuum_truncate)`},
+		{"handler table truncates on vacuum", 826, `ALTER TABLE network_client_handler SET (vacuum_truncate = true)`},
+		{"missing device network index", 827, `DROP INDEX device_network_id`},
+		{"device network index leads with device", 827, `DROP INDEX device_network_id; CREATE INDEX device_network_id ON device(device_id,network_id)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -183,6 +187,7 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{809, "pending_task", "pending_task_function_poll_order"},
 				{810, "transfer_contract", "transfer_contract_audit_closed_null_day"},
 				{820, "network_client_connection", "network_client_connection_connected_handler_id"},
+				{827, "device", "device_network_id"},
 			} {
 				var definition string
 				var predicate *string

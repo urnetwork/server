@@ -10067,4 +10067,31 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_slot_completed_waiting`,
 		`DROP INDEX IF EXISTS provider_probe_cycle_slot_completed_waiting`,
 	),
+
+	// 826: autovacuum's end-of-vacuum truncation holds AccessExclusiveLock on
+	// the table while it drops the cut pages from all of shared_buffers (256 GB
+	// on Main), so every connect, disconnect and handler heartbeat queues
+	// behind it. On 2026-10-12 it parked 361 backends for up to 4 s on
+	// network_client_connection (18:33Z, then 18:59Z, 19:04Z and 19:06Z).
+	// Space freed by the retention deletes is reused in place instead, whatever
+	// the server-wide vacuum_truncate setting. The option takes
+	// ShareUpdateExclusiveLock, which blocks no reader or writer.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_client_connection SET (vacuum_truncate = false);
+		ALTER TABLE network_client_handler SET (vacuum_truncate = false);
+	`),
+	// 827: devices by network, for the probe-shard reap. ReapProberShard
+	// deletes a probe network's devices while it holds the endpoint fence
+	// (advisory 776) of every client in that network. Without this index the
+	// delete read the whole 11 GB device table: 8,759 calls averaging 8.5 s,
+	// max 389 s on Main by 2026-10-12, with 25,408 probe shards draining.
+	// Building it reads the heap twice and waits for older snapshots, without
+	// blocking writes. Other device deletes already go by device_id.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS device_network_id`,
+		`CREATE INDEX CONCURRENTLY device_network_id ON device (network_id)`,
+		`DROP INDEX IF EXISTS device_network_id;
+		 CREATE INDEX device_network_id ON device (network_id)`,
+	),
 }

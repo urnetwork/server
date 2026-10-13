@@ -257,6 +257,19 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationIndexRemoved("provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting")),
 	migrationCurrentSuffix(825, "unread slot completed waiting probe index removed",
 		migrationIndexRemoved("provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting")),
+	migrationCurrentSuffix(826, "connection tables keep emptied pages",
+		migrationVacuumTruncateOff("network_client_connection"),
+		migrationVacuumTruncateOff("network_client_handler")),
+	migrationCurrentSuffix(827, "device network index",
+		migrationFp2Index("device", "device_network_id", "network_id", "", false)),
+}
+
+// Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
+// from shared_buffers, which queues every statement on these tables.
+func migrationVacuumTruncateOff(table string) string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM pg_class relation
+		WHERE relation.oid = to_regclass('public.%s')
+		AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY['vacuum_truncate=false']::text[])`, table)
 }
 
 // A dropped index stays dropped: a rebuilt copy under the published name would
