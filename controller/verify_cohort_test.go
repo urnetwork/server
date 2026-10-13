@@ -212,6 +212,14 @@ func TestVerifyCohortNeverAssignsOutsideCohort(t *testing.T) {
 		validatorId, vpk, vpkKey := testVerifyValidator(ctx)
 		poisonValidatorId, poisonVpk, poisonKey := testVerifyValidator(ctx)
 		unresolvedIp := "198.18.0.9" // never fed to the egress index: poison
+		// an unresolved SEED is first answered as retryable (IPV6.md C7)
+		exhaustRetryable := func(args *VerifyArgs) {
+			for attempt := 0; attempt < model.VerifyUnattributedAttemptLimit; attempt++ {
+				if _, err := Verify(args, testVerifySession(ctx, unresolvedIp)); err == nil || err.Error() != "421 source-egress-unresolved" {
+					t.Fatalf("unresolved seed attempt %d = %v, want the retryable answer", attempt+1, err)
+				}
+			}
+		}
 		activeTrails := func(vpk ed25519.PublicKey) (count int) {
 			server.Redis(ctx, func(r server.RedisClient) {
 				var err error
@@ -233,6 +241,9 @@ func TestVerifyCohortNeverAssignsOutsideCohort(t *testing.T) {
 			{testVerifySeedArgs(t, validatorId, vpk, vpkKey, connect.VerifyMMin), providerIps[seedProvider], vpk},
 			{testVerifySeedArgs(t, poisonValidatorId, poisonVpk, poisonKey, connect.VerifyMMin), unresolvedIp, poisonVpk},
 		} {
+			if seed.ip == unresolvedIp {
+				exhaustRetryable(seed.args)
+			}
 			result, err := Verify(seed.args, testVerifySession(ctx, seed.ip))
 			if err == nil || err.Error() != "503 verify next hop unavailable" {
 				t.Fatalf("seed without an epoch = %T %v", result, err)
@@ -279,7 +290,9 @@ func TestVerifyCohortNeverAssignsOutsideCohort(t *testing.T) {
 		// with one identical error, never receiving a synthetic hop
 		const m = connect.VerifyMMin + 1
 		realAssigned, realFinal, realErr := walk(testVerifySeedArgs(t, validatorId, vpk, vpkKey, m), providerIps[seedProvider], validatorId, vpk, vpkKey)
-		poisonAssigned, poisonFinal, poisonErr := walk(testVerifySeedArgs(t, poisonValidatorId, poisonVpk, poisonKey, m), unresolvedIp, poisonValidatorId, poisonVpk, poisonKey)
+		poisonSeed := testVerifySeedArgs(t, poisonValidatorId, poisonVpk, poisonKey, m)
+		exhaustRetryable(poisonSeed)
+		poisonAssigned, poisonFinal, poisonErr := walk(poisonSeed, unresolvedIp, poisonValidatorId, poisonVpk, poisonKey)
 		if realFinal || poisonFinal || realAssigned != 3 || poisonAssigned != 3 || realErr == nil || poisonErr == nil || realErr.Error() != poisonErr.Error() {
 			t.Fatalf("exhausted trails: real %d %t %v, poison %d %t %v", realAssigned, realFinal, realErr, poisonAssigned, poisonFinal, poisonErr)
 		}
