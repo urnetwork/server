@@ -37,6 +37,9 @@ type Route struct {
 	// set by RefuseClientCredentials: decides which client tokens the route
 	// refuses before its handler runs; nil refuses none
 	clientCredentialRefusal ClientCredentialRefusal
+	// set by RefuseLagGuestCredentials: the route refuses a lag.dev guest's
+	// token before its handler runs
+	lagGuestRefused bool
 }
 
 func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {

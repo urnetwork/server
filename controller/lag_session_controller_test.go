@@ -62,6 +62,15 @@ func TestLagSession(t *testing.T) {
 		connect.AssertEqual(t, *byJwt.ClientId, *result.ClientId)
 		connect.AssertEqual(t, byJwt.NetworkName, guest.NetworkName)
 		connect.AssertEqual(t, session.ValidateByJwtState(ctx, byJwt, true), nil)
+		// a lag guest's token, which the api accepts only on the lag routes
+		// and the connect transport refuses
+		connect.AssertEqual(t, byJwt.LagGuest, true)
+		// and the guest has no data to spend
+		var balances int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM transfer_balance WHERE network_id = $1`, *result.NetworkId).Scan(&balances))
+		})
+		connect.AssertEqual(t, balances, 0)
 
 		// a second session is a second guest
 		other := lagSessionFrom(t, ctx, "198.51.100.8:5555")

@@ -296,6 +296,16 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /oauth/consent":                           routeAccessNetwork, // OAuth consent screen data
 }
 
+// The only routes a lag.dev guest's client token is accepted on
+// (lag.dev/PLAN.md A1): the two the browser calls with it. Every other route
+// refuses it with 403 before its handler runs, whatever its class, and the
+// connect transport refuses it too, so a guest never administers, buys or
+// connects (session/AUTH.md §1).
+var lagGuestRoutes = map[string]bool{
+	"GET /lag/extenders": true,
+	"POST /lag/track":    true,
+}
+
 func routeAccessKey(route *router.Route) string {
 	return route.Method() + " " + route.Pattern()
 }
@@ -316,7 +326,8 @@ func refuseClientAdmin(ctx context.Context, byJwt *session.ByJwt) bool {
 }
 
 // applyRouteAccess puts the client token gate in front of every admin route and
-// every own client payout route.
+// every own client payout route, and the lag.dev guest gate in front of every
+// route but the guest's own.
 func applyRouteAccess(routes []*router.Route) []*router.Route {
 	applied := make([]*router.Route, 0, len(routes))
 	for _, route := range routes {
@@ -325,6 +336,9 @@ func applyRouteAccess(routes []*router.Route) []*router.Route {
 			route = router.RefuseClientCredentials(route, router.RefuseEveryClientCredential)
 		case routeAccessAppAdmin, routeAccessOwnClientPayout:
 			route = router.RefuseClientCredentials(route, refuseClientAdmin)
+		}
+		if !lagGuestRoutes[routeAccessKey(route)] {
+			route = router.RefuseLagGuestCredentials(route)
 		}
 		applied = append(applied, route)
 	}

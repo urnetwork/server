@@ -103,8 +103,11 @@ func LagSession(clientSession *session.ClientSession) (*LagSessionResult, error)
 	}
 
 	// the network's session, which the client token shares when sessions
-	// are on, as for a signup followed by an auth-client call
+	// are on, as for a signup followed by an auth-client call. Both carry the
+	// lag guest claim, which limits the client token to the lag routes and
+	// keeps it off the connect transport
 	byJwt := session.NewByJwt(guest.NetworkId, guest.UserId, guest.NetworkName, false, false)
+	byJwt.LagGuest = true
 	if _, err := session.MintNetworkSession(ctx, byJwt, "lag"); err != nil {
 		return unavailable(err.Error())
 	}

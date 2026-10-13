@@ -12,12 +12,21 @@ import (
 
 type connectAuthFinalReadTestKey struct{}
 
+// A lag.dev guest's token is refused by the connect transport.
+var errLagGuestConnect = errors.New("A lag.dev guest token cannot connect.")
+
 // Parse the instance without publishing an admission, then perform the full
 // live authorization at the final read boundary. That query already binds the
 // active client, device and network to the current administrator and credential
 // epoch; a second weaker membership query would add no authority. Preserve
 // credential-error precedence when the instance is malformed too.
 func connectClientAuthentication(ctx context.Context, byJwt *session.ByJwt, instanceBytes []byte) (server.Id, int, error) {
+	if byJwt.LagGuest {
+		// a lag.dev guest's token serves the lag routes alone and never
+		// connects (lag.dev/PLAN.md A1, session/AUTH.md §1); refused before
+		// any state is read
+		return server.Id{}, http.StatusForbidden, errLagGuestConnect
+	}
 	instanceId, instanceErr := server.IdFromBytes(instanceBytes)
 	if before, ok := ctx.Value(connectAuthFinalReadTestKey{}).(func()); ok {
 		before()

@@ -51,13 +51,16 @@ func (self *Route) Pattern() string {
 }
 
 // Testing_WithHandler returns a copy of the route that serves handler behind
-// the route's client token gate, so a test can observe what reaches it.
+// the route's gates, the client token gate and the lag.dev guest gate, so a
+// test can observe what reaches it.
 func Testing_WithHandler(route *Route, handler http.HandlerFunc) *Route {
 	replaced := *route
+	replaced.handler = handler
 	if route.clientCredentialRefusal != nil {
-		replaced.handler = clientCredentialGate(route.clientCredentialRefusal, handler)
-	} else {
-		replaced.handler = handler
+		replaced.handler = clientCredentialGate(route.clientCredentialRefusal, replaced.handler)
+	}
+	if route.lagGuestRefused {
+		replaced.handler = lagGuestGate(replaced.handler)
 	}
 	return &replaced
 }
