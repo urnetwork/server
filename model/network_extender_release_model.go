@@ -135,8 +135,31 @@ func getActiveNetworkExtendersWithAddresses(ctx context.Context, directoryTier i
 // Moves one extender between tiers (R1), the operator's decision. The next
 // record signed for it carries the tier; a gated extender's records already
 // in client directories expire within a day and are never dripped again.
-func SetNetworkExtenderDirectoryTier(ctx context.Context, extenderId server.Id, directoryTier int) {
+//
+// An extender that ever held a lag.dev measurement certificate had its
+// address public, resolvable from a name the certificate logs list, so moving
+// it into the gated tier is refused with ErrNetworkExtenderMeasurementExposure
+// unless acceptMeasurementExposure is set, and an accepted move withdraws its
+// measurement certificates (lag.dev/PLAN.md §2, A9, C9).
+func SetNetworkExtenderDirectoryTier(
+	ctx context.Context,
+	extenderId server.Id,
+	directoryTier int,
+	acceptMeasurementExposure bool,
+) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		returnErr = guardNetworkExtenderMeasurementExposureInTx(
+			ctx,
+			tx,
+			extenderId,
+			directoryTier != connect.ExtenderDirectoryTierOpen,
+			acceptMeasurementExposure,
+			"the extender moved to the gated tier",
+			server.NowUtc(),
+		)
+		if returnErr != nil {
+			return
+		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -148,16 +171,39 @@ func SetNetworkExtenderDirectoryTier(ctx context.Context, extenderId server.Id, 
 			directoryTier,
 		))
 	})
+	return
 }
 
 // Designates one extender a canary of one channel (R4), or none with the
 // empty channel. The placement follows from the channel: a dns canary is in
 // its continent's sets alone, a gated canary in its gated partition.
-func SetNetworkExtenderCanaryChannel(ctx context.Context, extenderId server.Id, canaryChannel string) {
+//
+// Designating an extender that ever held a lag.dev measurement certificate is
+// refused with ErrNetworkExtenderMeasurementExposure unless
+// acceptMeasurementExposure is set, as for the gated tier (lag.dev/PLAN.md A9,
+// C9).
+func SetNetworkExtenderCanaryChannel(
+	ctx context.Context,
+	extenderId server.Id,
+	canaryChannel string,
+	acceptMeasurementExposure bool,
+) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		var channel *string
 		if canaryChannel = strings.TrimSpace(canaryChannel); canaryChannel != "" {
 			channel = &canaryChannel
+		}
+		returnErr = guardNetworkExtenderMeasurementExposureInTx(
+			ctx,
+			tx,
+			extenderId,
+			channel != nil,
+			acceptMeasurementExposure,
+			"the extender became a canary",
+			server.NowUtc(),
+		)
+		if returnErr != nil {
+			return
 		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -170,6 +216,7 @@ func SetNetworkExtenderCanaryChannel(ctx context.Context, extenderId server.Id, 
 			channel,
 		))
 	})
+	return
 }
 
 // The release ledger over the database (R3), one per request: the policy's

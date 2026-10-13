@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/urnetwork/server/session"
 )
 
 const httpMetricsInterval = time.Minute
@@ -216,12 +218,20 @@ func (self *requestMetricsBody) Read(buffer []byte) (int, error) {
 }
 
 // requestMetricsWriter counts response status and bytes while retaining an
-// Unwrap chain for http.ResponseController.
+// Unwrap chain for http.ResponseController. Every response goes through it, so
+// it is also where a handler's cookie headers are dropped before the native
+// writer sends the header map (session/cookies.go).
 type requestMetricsWriter struct {
 	http.ResponseWriter
 	status   int
 	bytes    int64
 	hijacked bool
+	// the header map a handler asked for, which is the map the native writer
+	// sends; nil until the first Header call
+	header http.Header
+	// a final status has gone out, after which the native writer no longer
+	// reads the header map
+	finalHeaderSent bool
 }
 
 // Unwrap exposes the native writer to http.ResponseController.
@@ -229,22 +239,57 @@ func (self *requestMetricsWriter) Unwrap() http.ResponseWriter {
 	return self.ResponseWriter
 }
 
+// Header implements http.ResponseWriter. The map is kept so the cookie drop
+// reads the one a handler wrote to without a Header call of its own on the
+// native writer.
+func (self *requestMetricsWriter) Header() http.Header {
+	self.header = self.ResponseWriter.Header()
+	return self.header
+}
+
 // WriteHeader implements http.ResponseWriter.
 func (self *requestMetricsWriter) WriteHeader(status int) {
 	if self.status == 0 {
 		self.status = status
 	}
+	self.dropCookieHeaders(status)
 	self.ResponseWriter.WriteHeader(status)
 }
 
 // Write implements http.ResponseWriter.
 func (self *requestMetricsWriter) Write(buffer []byte) (int, error) {
-	if self.status == 0 {
-		self.status = http.StatusOK
-	}
+	self.beginBody()
 	count, err := self.ResponseWriter.Write(buffer)
 	self.bytes += int64(count)
 	return count, err
+}
+
+// beginBody precedes a write, flush or copy, which sends an implicit 200 when
+// no final status has gone out yet.
+func (self *requestMetricsWriter) beginBody() {
+	if self.status == 0 {
+		self.status = http.StatusOK
+	}
+	self.dropCookieHeaders(http.StatusOK)
+}
+
+// dropCookieHeaders drops the cookie headers from the map the native writer is
+// about to send with status. An informational status sends the map and leaves
+// the final status to come, so the drop repeats until a final one has gone out.
+func (self *requestMetricsWriter) dropCookieHeaders(status int) {
+	if self.finalHeaderSent {
+		return
+	}
+	header := self.header
+	if header == nil {
+		// no handler asked this writer for the map, so only a write that
+		// reached around it (Unwrap) can have put a cookie there
+		header = self.ResponseWriter.Header()
+	}
+	session.DropSetCookies(header)
+	if status < 100 || 199 < status || status == http.StatusSwitchingProtocols {
+		self.finalHeaderSent = true
+	}
 }
 
 // requestMetricsWriterFlusher retains http.Flusher only when the native writer
@@ -253,9 +298,7 @@ type requestMetricsWriterFlusher struct{ *requestMetricsWriter }
 
 // Flush implements http.Flusher.
 func (self *requestMetricsWriterFlusher) Flush() {
-	if self.status == 0 {
-		self.status = http.StatusOK
-	}
+	self.beginBody()
 	self.ResponseWriter.(http.Flusher).Flush()
 }
 
@@ -324,9 +367,7 @@ type requestMetricsWriterReaderFrom struct{ *requestMetricsWriter }
 
 // ReadFrom implements io.ReaderFrom.
 func (self *requestMetricsWriterReaderFrom) ReadFrom(reader io.Reader) (int64, error) {
-	if self.status == 0 {
-		self.status = http.StatusOK
-	}
+	self.beginBody()
 	count, err := self.ResponseWriter.(io.ReaderFrom).ReadFrom(reader)
 	self.bytes += count
 	return count, err
@@ -337,9 +378,7 @@ type requestMetricsWriterFlusherReaderFrom struct{ *requestMetricsWriterFlusher 
 
 // ReadFrom implements io.ReaderFrom.
 func (self *requestMetricsWriterFlusherReaderFrom) ReadFrom(reader io.Reader) (int64, error) {
-	if self.status == 0 {
-		self.status = http.StatusOK
-	}
+	self.beginBody()
 	count, err := self.ResponseWriter.(io.ReaderFrom).ReadFrom(reader)
 	self.bytes += count
 	return count, err
@@ -350,9 +389,7 @@ type requestMetricsWriterHijackerReaderFrom struct{ *requestMetricsWriterHijacke
 
 // ReadFrom implements io.ReaderFrom.
 func (self *requestMetricsWriterHijackerReaderFrom) ReadFrom(reader io.Reader) (int64, error) {
-	if self.status == 0 {
-		self.status = http.StatusOK
-	}
+	self.beginBody()
 	count, err := self.ResponseWriter.(io.ReaderFrom).ReadFrom(reader)
 	self.bytes += count
 	return count, err
@@ -366,9 +403,7 @@ type requestMetricsWriterFlusherHijackerReaderFrom struct {
 
 // ReadFrom implements io.ReaderFrom.
 func (self *requestMetricsWriterFlusherHijackerReaderFrom) ReadFrom(reader io.Reader) (int64, error) {
-	if self.status == 0 {
-		self.status = http.StatusOK
-	}
+	self.beginBody()
 	count, err := self.ResponseWriter.(io.ReaderFrom).ReadFrom(reader)
 	self.bytes += count
 	return count, err
@@ -379,9 +414,7 @@ type requestMetricsWriterPusherReaderFrom struct{ *requestMetricsWriterPusher }
 
 // ReadFrom implements io.ReaderFrom.
 func (self *requestMetricsWriterPusherReaderFrom) ReadFrom(reader io.Reader) (int64, error) {
-	if self.status == 0 {
-		self.status = http.StatusOK
-	}
+	self.beginBody()
 	count, err := self.ResponseWriter.(io.ReaderFrom).ReadFrom(reader)
 	self.bytes += count
 	return count, err
@@ -395,9 +428,7 @@ type requestMetricsWriterFlusherPusherReaderFrom struct {
 
 // ReadFrom implements io.ReaderFrom.
 func (self *requestMetricsWriterFlusherPusherReaderFrom) ReadFrom(reader io.Reader) (int64, error) {
-	if self.status == 0 {
-		self.status = http.StatusOK
-	}
+	self.beginBody()
 	count, err := self.ResponseWriter.(io.ReaderFrom).ReadFrom(reader)
 	self.bytes += count
 	return count, err
@@ -411,9 +442,7 @@ type requestMetricsWriterHijackerPusherReaderFrom struct {
 
 // ReadFrom implements io.ReaderFrom.
 func (self *requestMetricsWriterHijackerPusherReaderFrom) ReadFrom(reader io.Reader) (int64, error) {
-	if self.status == 0 {
-		self.status = http.StatusOK
-	}
+	self.beginBody()
 	count, err := self.ResponseWriter.(io.ReaderFrom).ReadFrom(reader)
 	self.bytes += count
 	return count, err
@@ -427,9 +456,7 @@ type requestMetricsWriterFlusherHijackerPusherReaderFrom struct {
 
 // ReadFrom implements io.ReaderFrom.
 func (self *requestMetricsWriterFlusherHijackerPusherReaderFrom) ReadFrom(reader io.Reader) (int64, error) {
-	if self.status == 0 {
-		self.status = http.StatusOK
-	}
+	self.beginBody()
 	count, err := self.ResponseWriter.(io.ReaderFrom).ReadFrom(reader)
 	self.bytes += count
 	return count, err

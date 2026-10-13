@@ -10166,4 +10166,198 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS audit_device_event_stats_device_id`,
 		`DROP INDEX IF EXISTS audit_device_event_stats_device_id`,
 	),
+
+	// 832: lag.dev guest networks, tracks, tickets and results
+	// (lag.dev/PLAN.md A1, A2, A5-A7). New tables only: nothing existing is
+	// read, locked or rewritten.
+	//
+	// lag_guest marks a guest network created for lag.dev and holds its
+	// expiry. The lag sweep removes the network once it passes (A2), and only
+	// marked networks ever expire. lag_track is one track a visitor ran, with
+	// its client fields, looked up when it was issued, and the count of
+	// tickets reissued in it, which caps how often its dots reconnect;
+	// lag_ticket is one admitted session, kept until its report can no longer
+	// arrive (ticket_retention); lag_result is one report, one session's
+	// minute of pings, which is one minute per dot per track unless the dot
+	// reconnected (decision 17), with its load and the statistics derived
+	// when it was stored. No table holds a client address, a prefix of one or
+	// a hash of one (amendment 9): lag_track keeps only the network and the
+	// city-level place GeoLite2 gives for the address the track was issued
+	// to, with that city's coordinates when it names one, and lag_result only
+	// which family the browser reached the extender on. A track from an agent
+	// browser or a hosting network is flagged automated, with which of the two
+	// it was, and nothing more: never the address or the agent's name
+	// (amendment 12). A track's source is the client that ran it: lag.dev in
+	// a browser (web), or the lagdev command line or MCP server (cli, mcp),
+	// whose tracks still count in the stats. A result's session and window
+	// start times are the extender's clock and its created_at is the
+	// report's arrival on the operator's, so an extender's offset can be
+	// estimated. Tracks and results are kept for result_retention (lag.yml,
+	// 7 days).
+	newSqlMigration(`
+		CREATE TABLE lag_guest (
+			network_id uuid NOT NULL PRIMARY KEY,
+			user_id uuid NOT NULL,
+			created_at timestamp NOT NULL,
+			expires_at timestamp NOT NULL
+		);
+		CREATE INDEX lag_guest_expires_at ON lag_guest (expires_at, network_id);
+
+		CREATE TABLE lag_track (
+			track_id uuid NOT NULL PRIMARY KEY,
+			network_id uuid NOT NULL,
+			client_id uuid NOT NULL,
+			started_at timestamp NOT NULL,
+			reissue_count int NOT NULL DEFAULT 0,
+			client_asn bigint NULL,
+			client_asn_org varchar(256) NULL,
+			client_country_code varchar(2) NULL,
+			client_region varchar(256) NULL,
+			client_city varchar(256) NULL,
+			client_latitude double precision NULL,
+			client_longitude double precision NULL,
+			automated boolean NOT NULL DEFAULT false,
+			automated_reason varchar(32) NULL,
+			source varchar(8) NOT NULL DEFAULT 'web'
+		);
+		CREATE INDEX lag_track_started_at ON lag_track (started_at, track_id);
+
+		CREATE TABLE lag_ticket (
+			ticket_id uuid NOT NULL PRIMARY KEY,
+			track_id uuid NOT NULL,
+			position smallint NOT NULL,
+			client_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			issued_at timestamp NOT NULL,
+			expires_at timestamp NOT NULL
+		);
+		CREATE INDEX lag_ticket_track_id_position ON lag_ticket (track_id, position);
+		CREATE INDEX lag_ticket_issued_at ON lag_ticket (issued_at, ticket_id);
+
+		CREATE TABLE lag_result (
+			lag_result_id uuid NOT NULL PRIMARY KEY,
+			track_id uuid NOT NULL,
+			track_position smallint NOT NULL,
+			ticket_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			extender_ip_family smallint NOT NULL,
+			session_start_time timestamp NOT NULL,
+			window_start_time timestamp NOT NULL,
+			ping_offset_ms int[] NOT NULL,
+			ping_micros int[] NOT NULL,
+			download_start_ms int NOT NULL,
+			download_ms int NOT NULL,
+			upload_start_ms int NOT NULL,
+			upload_ms int NOT NULL,
+			interval_ms int NOT NULL,
+			download_received_bytes bigint[] NOT NULL,
+			download_sent_bytes bigint[] NOT NULL,
+			upload_bytes bigint[] NOT NULL,
+			download_streams int NOT NULL,
+			upload_streams int NOT NULL,
+			upload_verified bool NOT NULL,
+			end_reason varchar(32) NOT NULL,
+			own_load_latency_p50_ms real NULL,
+			own_load_latency_p95_ms real NULL,
+			outside_load_latency_p50_ms real NULL,
+			outside_load_latency_p95_ms real NULL,
+			download_p50_mbps real NULL,
+			download_p95_mbps real NULL,
+			upload_p50_mbps real NULL,
+			upload_p95_mbps real NULL,
+			lost_count int NOT NULL,
+			created_at timestamp NOT NULL,
+			CONSTRAINT lag_result_ticket_id UNIQUE (ticket_id)
+		);
+		CREATE INDEX lag_result_track_id_position ON lag_result (track_id, track_position);
+		CREATE INDEX lag_result_created_at ON lag_result (created_at, lag_result_id);
+	`),
+
+	// 833: lag.dev measurement certificates (lag.dev/PLAN.md C5-C10, A8-A10).
+	// An open tier extender's certificate request and where it stands, and the
+	// certificates the CA issued for it, renewals, withdrawals and revocations
+	// included. measurement_ever_issued is set before an order is placed and
+	// never cleared, because the CA logs a certificate to certificate
+	// transparency during issuance; the constraint keeps every writer from
+	// moving such an extender into the gated tier or a canary channel unless
+	// an operator accepted the exposure (A9). New columns with defaults and
+	// new tables: nothing is rewritten, and every existing row satisfies the
+	// constraint. The tables are small, one row per extender and one per
+	// certificate (about six a year per extender).
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_extender
+			ADD COLUMN measurement_ever_issued bool NOT NULL DEFAULT false,
+			ADD COLUMN measurement_exposure_accepted bool NOT NULL DEFAULT false;
+		ALTER TABLE network_extender
+			ADD CONSTRAINT network_extender_measurement_exposure CHECK (
+				NOT measurement_ever_issued OR
+				measurement_exposure_accepted OR
+				(directory_tier = 0 AND canary_channel IS NULL)
+			);
+
+		CREATE TABLE network_extender_measurement (
+			extender_id uuid NOT NULL PRIMARY KEY,
+			csr bytea NULL,
+			public_key bytea NULL,
+			names varchar NOT NULL DEFAULT '',
+			state varchar(16) NOT NULL,
+			reason varchar NOT NULL DEFAULT '',
+			request_time timestamp NOT NULL,
+			pending_time timestamp NULL,
+			retry_time timestamp NULL,
+			failure_count int NOT NULL DEFAULT 0,
+			update_time timestamp NOT NULL
+		);
+		CREATE INDEX network_extender_measurement_pending_time
+		ON network_extender_measurement (pending_time, extender_id)
+		WHERE state = 'pending';
+
+		CREATE TABLE network_extender_measurement_cert (
+			cert_id uuid NOT NULL PRIMARY KEY,
+			extender_id uuid NOT NULL,
+			names varchar NOT NULL,
+			csr bytea NOT NULL,
+			public_key bytea NOT NULL,
+			chain_pem text NOT NULL,
+			serial_hex varchar NOT NULL,
+			not_before timestamp NOT NULL,
+			not_after timestamp NOT NULL,
+			issue_time timestamp NOT NULL,
+			cap_counted bool NOT NULL,
+			renew_time timestamp NOT NULL,
+			renew_failure_count int NOT NULL DEFAULT 0,
+			renewed_time timestamp NULL,
+			withdraw_time timestamp NULL,
+			withdraw_reason varchar NOT NULL DEFAULT '',
+			revoke_time timestamp NULL,
+			revoke_retry_time timestamp NULL,
+			revoke_failure_count int NOT NULL DEFAULT 0
+		);
+		CREATE INDEX network_extender_measurement_cert_extender_id_issue_time
+		ON network_extender_measurement_cert (extender_id, issue_time);
+		CREATE INDEX network_extender_measurement_cert_names_not_after
+		ON network_extender_measurement_cert (names, not_after);
+		CREATE INDEX network_extender_measurement_cert_counted_issue_time
+		ON network_extender_measurement_cert (issue_time)
+		WHERE cap_counted;
+		CREATE INDEX network_extender_measurement_cert_live_not_after
+		ON network_extender_measurement_cert (not_after)
+		WHERE withdraw_time IS NULL;
+		CREATE INDEX network_extender_measurement_cert_withdrawn_unrevoked
+		ON network_extender_measurement_cert (withdraw_time)
+		WHERE withdraw_time IS NOT NULL AND revoke_time IS NULL;
+	`),
+
+	// 834: when the measurement dns reconcile published each certificate's
+	// name (lag.dev/PLAN.md C8, A4). The lag.dev sample offers an extender
+	// only once its name resolves on every authoritative server: a resolver
+	// asked for a name before it exists caches that it does not. A nullable
+	// column on a small table: nothing is rewritten.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_extender_measurement_cert
+			ADD COLUMN publish_time timestamp NULL;
+	`),
 }
