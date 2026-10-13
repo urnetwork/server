@@ -86,3 +86,37 @@ func taskRunOnceWakeAfterPost(ctx context.Context, tx server.PgTx, taskId server
 	server.Raise(err)
 	observeTaskSubmissionInTx(tx, inserted)
 }
+
+// RescheduleFinishedTaskInTx schedules finished task taskId again under its
+// run-once key at runAt. Like the run-once wake above, it copies the stored
+// arguments and scheduling columns instead of encoding them again, so
+// argument fields the running build does not decode survive. A pending row of
+// the key keeps its own arguments and only moves earlier. It reports false and
+// schedules nothing when no finished task taskId has that run-once key.
+func RescheduleFinishedTaskInTx(ctx context.Context, tx server.PgTx, taskId server.Id, runOnce *RunOnceOption, runAt time.Time) bool {
+	if runOnce == nil {
+		panic(errors.New("rescheduling a finished task requires its run-once key"))
+	}
+	successorId := server.NewId()
+	var inserted bool
+	err := tx.QueryRow(ctx, `INSERT INTO pending_task (
+        task_id,function_name,args_json,client_address,client_address_hash,
+        client_address_port,client_by_jwt_json,run_at,run_once_key,run_priority,
+        run_max_time_seconds,claim_time,release_time)
+        SELECT $2,function_name,args_json,client_address,client_address_hash,
+            client_address_port,client_by_jwt_json,$3,run_once_key,run_priority,
+            run_max_time_seconds,$4,$4
+        FROM finished_task WHERE task_id=$1 AND run_once_key=$5
+        ON CONFLICT (run_once_key) DO UPDATE SET
+            run_at=LEAST(pending_task.run_at,EXCLUDED.run_at),
+            run_priority=LEAST(pending_task.run_priority,EXCLUDED.run_priority),
+            run_max_time_seconds=GREATEST(pending_task.run_max_time_seconds,EXCLUDED.run_max_time_seconds)
+        RETURNING task_id=$2`,
+		taskId, successorId, runAt.UTC(), time.Time{}, runOnce.String()).Scan(&inserted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false
+	}
+	server.Raise(err)
+	observeTaskSubmissionInTx(tx, inserted)
+	return true
+}

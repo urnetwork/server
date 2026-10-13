@@ -246,6 +246,48 @@ func TestProviderEgressProbeOlderConfigClaimKeepsNewerShards(t *testing.T) {
 	})
 }
 
+// A newer build can add argument fields that an older build does not decode.
+// An older instance's hand-back encoded the decoded arguments again and
+// dropped such a field, so the newer instances got a different snapshot back.
+// Through the real task evaluator, the handed-back shard must carry its stored
+// arguments as they were, including a field this build does not know.
+func TestProviderEgressProbeHandBackKeepsUnknownArgumentFields(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		t.Setenv("WARP_CONFIG_VERSION", testOlderConfigVersion)
+		withProviderEgressProbeSettings(t, testUrlGeometrySettings(4, 8))
+		driftTaskRunner(t, func(context.Context, *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+			t.Error("an older config ran a pass of a newer geometry")
+			return &ProviderEgressProbeResult{}, nil
+		})
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		runOnceKey := task.RunOnce("provider_egress_probe", 6).String()
+		server.Tx(ctx, func(tx server.PgTx) {
+			args := testStampedGeometryArgs(t, testUrlGeometrySettings(8, 64), 6, testNewerConfigVersion, server.NowUtc())
+			scheduleProviderEgressProbeAt(clientSession, tx, args, server.NowUtc().Add(-time.Minute))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task
+				SET args_json = (args_json::jsonb || '{"future_pass_setting": {"lanes": 3}}'::jsonb)::text
+				WHERE run_once_key = $1`, runOnceKey))
+		})
+		claimed := testPendingProbeRow(t, ctx, 6)
+		if _, ok := claimed.args["future_pass_setting"]; !ok {
+			t.Fatal("the fixture did not store the newer build's field")
+		}
+
+		if finishedCount, retriedCount := testEvalProviderEgressProbeTasks(t, ctx, 1); finishedCount != 1 || retriedCount != 0 {
+			t.Fatalf("the older config finished %d and retried %d claims of shard 6", finishedCount, retriedCount)
+		}
+		next := testPendingProbeRow(t, ctx, 6)
+		if next == nil || next.taskId == claimed.taskId {
+			t.Fatalf("the older config did not hand shard 6 back: %+v", next)
+		}
+		if !reflect.DeepEqual(next.args, claimed.args) {
+			t.Fatalf("the hand-back changed the stored arguments: future_pass_setting=%v", next.args["future_pass_setting"])
+		}
+	})
+}
+
 // While every pass slot of the newer config's instances is busy, a shard waits
 // for one of them as older instances hand it back without restamping it, so
 // its own stamp ages past any fixed timeout while the newer config restamps
