@@ -79,3 +79,41 @@ func TestTestBinaryReadsFixtureVaults(t *testing.T) {
 		t.Fatalf("temp directory vault: %v", err)
 	}
 }
+
+// The guard runs before the resolution cache: a resolution cached while a test
+// opted in to a non-fixture vault is refused once the opt-in is withdrawn, and
+// a refusal is never cached.
+func TestTestBinaryVaultGuardPrecedesTheResolutionCache(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", "")
+	vaultHome := filepath.Join(t.TempDir(), "vault")
+	writeResolverFixture(t, vaultHome, map[string]string{"local/fixture.yml": "key: value\n"})
+	// the vault is no longer below the temp directory, so it is not a fixture
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Setenv("WARP_VAULT_HOME", vaultHome)
+	if err := refuseNonFixtureVault(vaultHome, true); err == nil {
+		t.Fatal("the vault is still a fixture")
+	}
+	resolver := newSettledResolver(MOUNT_TYPE_VAULT)
+
+	t.Setenv(TestRealVaultEnv, "1")
+	version := resolver.resourceVersion("fixture.yml")
+	paths, err := resolver.ResourcePaths("fixture.yml")
+	if err != nil || len(paths) == 0 || paths[0] != filepath.Join(vaultHome, "local", "fixture.yml") {
+		t.Fatalf("opted-in read %v, %v", paths, err)
+	}
+	if resolver.resourceVersion("fixture.yml") != version {
+		t.Fatal("the opted-in resolution was not cached")
+	}
+
+	t.Setenv(TestRealVaultEnv, "")
+	for lookup := 0; lookup < 2; lookup += 1 {
+		_, err := resolver.ResourcePaths("fixture.yml")
+		if !errors.Is(err, ErrResourceNotFound) || !strings.Contains(err.Error(), TestRealVaultEnv) {
+			t.Fatalf("lookup %d after the opt-in was withdrawn read %v, want the refusal naming %s", lookup, err, TestRealVaultEnv)
+		}
+	}
+	if resolver.resourceVersion("fixture.yml") == resolver.resourceVersion("fixture.yml") {
+		t.Fatal("a refused resolution was reused")
+	}
+}
