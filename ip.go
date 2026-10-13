@@ -30,9 +30,12 @@ import (
 
 	mmdb "github.com/oschwald/maxminddb-golang/v2"
 	"github.com/oschwald/maxminddb-golang/v2/mmdbdata"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func init() {
+	prometheus.MustRegister(arinDatabaseBuildEpochGauge)
+
 	OnWarmup(WarmupTargetIPDatabase, func() {
 		db, _ := ipDb()
 		// GeoLite2 must be kept current (connect/GEOMAP.md §3.1), so the
@@ -664,6 +667,20 @@ func DistanceKm(
 // Published only after the serving reader is opened and its schema accepted.
 // Bounded diagnostics load this reference without triggering initialization.
 var arinServingReader atomic.Pointer[mmdb.Reader]
+
+// The reader opens once per process and never follows a later Config
+// selection, so the selected resource does not say which database a process
+// classifies with. Pushed with the process's own labels, this makes fleet
+// adoption and artifact age measurable without host access. It reads the
+// published reader at scrape time and never opens one: zero means the process
+// has not opened ARIN, as in a Taskworker that only consumes stored facts.
+var arinDatabaseBuildEpochGauge = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Name:      "arin_database_build_epoch_seconds",
+	Help:      "Build epoch of the ARIN database the serving reader opened; 0 until it opens",
+}, func() float64 {
+	return float64(CurrentArinCauseReaderEpoch())
+})
 
 var arinDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
 	path, err := Config.ResourcePath("arindb/arin.mmdb")
