@@ -55,8 +55,9 @@ func TestReapedClientRedisCleanupPreservesReassignedEgress(t *testing.T) {
 				pipe.Set(ctx, clientPublicKeyRedisKey(targetA), []byte("target-a"), 0)
 				pipe.Set(ctx, clientPublicKeyRedisKey(targetB), []byte("target-b"), 0)
 				pipe.Set(ctx, clientPublicKeyRedisKey(survivor), []byte("survivor"), 0)
-				pipe.HSet(ctx, verifyClientEgressKey(targetA), hashA, "1")
-				pipe.HSet(ctx, verifyClientEgressKey(targetB), hashB, "1")
+				// targetA's entry is v3; targetB's was left by a pre-v3 writer
+				pipe.HSet(ctx, verifyClientEgressKey(targetA), hashA+"_4_"+strings.Repeat("c", 64), "1")
+				pipe.HSet(ctx, verifyClientEgressV2Key(targetB), hashB, "1")
 				pipe.Set(ctx, verifyEgressKeyFromHex(hashA), targetA.String(), 0)
 				// targetB's stale reverse entry now points at an address that was
 				// reassigned; compare-delete must preserve the new owner.
@@ -71,8 +72,10 @@ func TestReapedClientRedisCleanupPreservesReassignedEgress(t *testing.T) {
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			for _, target := range targets {
-				if count, err := r.Exists(ctx, clientPublicKeyRedisKey(target), verifyClientEgressKey(target)).Result(); err != nil || count != 0 {
-					t.Fatalf("target %s retained %d public/reverse keys: %v", target, count, err)
+				for _, key := range append([]string{clientPublicKeyRedisKey(target)}, verifyClientEgressKeys(target)...) {
+					if count, err := r.Exists(ctx, key).Result(); err != nil || count != 0 {
+						t.Fatalf("target %s retained public/reverse key %s: %v", target, key, err)
+					}
 				}
 				if member, err := r.SIsMember(ctx, verifyEligibleKey, target.String()).Result(); err != nil || member {
 					t.Fatalf("target %s eligible = %v, err=%v; want false", target, member, err)

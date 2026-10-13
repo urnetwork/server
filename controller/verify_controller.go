@@ -523,8 +523,18 @@ func verifySeedWithAdmission(
 
 	// §4.1 step 1: resolve source ip → seed hop (§8.1); unresolved → poison
 	var seedClientId *server.Id
+	var seedEgressHash [32]byte
 	if sourceIpOk {
-		seedClientId = model.ResolveVerifyEgress(ctx, sourceIp, settings)
+		seedClientId, seedEgressHash = model.ResolveVerifyEgressHop(ctx, sourceIp, settings)
+	}
+	// §9: a resolved source's seeds also count against its provider, whose
+	// source ips in the two families share one budget
+	var providerCount int64
+	if seedClientId != nil {
+		providerCount = model.IncrVerifySeedProviderRate(ctx, sourceIpStr, *seedClientId, settings)
+		if settings.SeedRateHardLimit < providerCount {
+			return nil, fmt.Errorf("429 rate limit exceeded")
+		}
 	}
 
 	// §4.1 step 3: vpk must be the caller client_id's registered key (D-7)
@@ -550,7 +560,7 @@ func verifySeedWithAdmission(
 	// (SoftLimitsEnabled=false) so each validator drives its own trail rate; the
 	// hard per-source-ip reject above stays as the DoS backstop.
 	rateOver := settings.SoftLimitsEnabled &&
-		(settings.SeedRateSoftLimit < ipCount || settings.SeedRateSoftLimit < vpkCount)
+		(settings.SeedRateSoftLimit < ipCount || settings.SeedRateSoftLimit < vpkCount || settings.SeedRateSoftLimit < providerCount)
 
 	// §9: concurrent active trail cap per vpk (soft → poison, hard → refuse).
 	// The hard cap always applies; D26 gates only the soft → poison tier.
@@ -591,9 +601,9 @@ func verifySeedWithAdmission(
 		// caller probing with its own known client_id cannot distinguish
 		seedHopClientId = *seedClientId
 		// the seed request's source ip is the seed provider's egress ip;
-		// record its egress-IP-hash at the configured granularity (§8.1, D27).
-		// sourceIp is valid here — seedClientId resolved from it.
-		seedHopEgressHash = model.VerifyEgressIpHashWithSettings(sourceIp, settings)
+		// record the provider's egress-IP-hash at the configured granularity
+		// (§8.1, D27), as resolved with it
+		seedHopEgressHash = seedEgressHash
 	} else {
 		// synthetic: never touches a real provider (§9). deterministic per
 		// source ip (V2) so repeated identical seeds return a STABLE trail[0],
@@ -752,8 +762,14 @@ func verifyExtend(
 	// §4.2 step 1: resolve source ip → hop (§8.1), unconditionally, so the
 	// lookup cost does not depend on what follows
 	var sourceClientId *server.Id
+	var sourceEgressHash [32]byte
 	if sourceIpOk {
-		sourceClientId = model.ResolveVerifyEgress(ctx, sourceIp, settings)
+		sourceClientId, sourceEgressHash = model.ResolveVerifyEgressHop(ctx, sourceIp, settings)
+	}
+	// V4: a resolved source also counts against its provider, whose source ips
+	// in the two families share one EXTEND budget
+	if sourceClientId != nil && settings.ExtendRateHardLimit < model.IncrVerifyExtendProviderRate(ctx, sourceIpStr, *sourceClientId, settings) {
+		return nil, fmt.Errorf("429 rate limit exceeded")
 	}
 
 	// §4.2 step 2: load the trail
@@ -899,11 +915,11 @@ func verifyExtend(
 		ConfirmedMs:  nowMs,
 		AssignN:      trail.Pending.AssignN,
 		// §4.2 step 5 passed, so the confirming request's source ip is this
-		// provider's egress ip — record its egress-IP-hash at the configured
-		// granularity (§8.1, §3.3, D27). Computed unconditionally: a poison
-		// trail's synthetic pending fails step 5 before here, so there is no
-		// observable branch on poison.
-		EgressIpHash: model.VerifyEgressIpHashWithSettings(sourceIp, settings),
+		// provider's egress ip — record the provider's egress-IP-hash at the
+		// configured granularity, as resolved with it (§8.1, §3.3, D27).
+		// Computed unconditionally: a poison trail's synthetic pending fails
+		// step 5 before here, so there is no observable branch on poison.
+		EgressIpHash: sourceEgressHash,
 	}
 	if trail.Poison {
 		model.IncrVerifyPoisonCounter(ctx, "confirm")

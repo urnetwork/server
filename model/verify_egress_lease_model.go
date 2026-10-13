@@ -1,11 +1,12 @@
 // Connection and proxy leases share the existing exact-address bijection.
 // Each Redis script keeps lease ownership and its index in one cluster slot;
-// readers retain the forward-owner and exactly-one-reverse-address checks.
+// readers retain the forward-owner and one-reverse-address-per-family checks.
+// Writers feed only the v3 reverse index, whose fields carry the family; the
+// v2 index is withdrawn but never fed.
 package model
 
 import (
 	"context"
-	"encoding/hex"
 	"net/netip"
 	"time"
 
@@ -16,9 +17,9 @@ import (
 // Proxy allocation refreshes have one durable owner, separate from transports.
 const verifyProxyEgressLeaseOwner = "proxy"
 
-// Places reverse leases beside the client's existing reverse index.
-func verifyClientEgressLeaseKey(clientId server.Id, egressHashHex string) string {
-	return verifyClientEgressKey(clientId) + "leases_" + egressHashHex
+// Places reverse leases beside a client's reverse index of either version.
+func verifyClientEgressLeaseKey(reverseKey string, egressHashHex string) string {
+	return reverseKey + "leases_" + egressHashHex
 }
 
 // The hash tag matches the complete existing untagged forward key.
@@ -36,8 +37,9 @@ func ClearVerifyConnectionEgress(ctx context.Context, clientId, connectionId ser
 	clearVerifyEgressLease(ctx, clientId, ip, connectionId.String(), settings)
 }
 
-// Prunes expired owners and publishes the latest remaining reverse expiry.
-// Updating or clearing an owner and its reverse entry is one atomic operation.
+// Prunes expired owners and publishes the latest remaining reverse expiry
+// under the address's reverse field (ARGV[4]). Updating or clearing an owner
+// and its reverse entry is one atomic operation.
 const verifyReverseEgressLeaseScript = `
 local now = tonumber(ARGV[2])
 local expires = tonumber(ARGV[3])
@@ -122,11 +124,10 @@ func feedVerifyEgressLease(ctx context.Context, clientId server.Id, ip netip.Add
 	if !ip.IsValid() {
 		return
 	}
-	egressHash := VerifyEgressIndexHashWithSettings(ip.Unmap(), settings)
-	egressHashHex := hex.EncodeToString(egressHash[:])
+	field, _ := verifyClientEgressField(ip, settings)
 	now := server.NowUtc()
 	server.Redis(ctx, func(r server.RedisClient) {
-		updateVerifyEgressLease(ctx, r, clientId, egressHashHex, owner, now, now.Add(settings.EgressTtl))
+		updateVerifyEgressLease(ctx, r, verifyClientEgressKey(clientId), clientId, field, owner, now, now.Add(settings.EgressTtl))
 	})
 	updateVerifyEligibleMembership(ctx, clientId)
 }
@@ -136,20 +137,22 @@ func clearVerifyEgressLease(ctx context.Context, clientId server.Id, ip netip.Ad
 	if !ip.IsValid() {
 		return
 	}
-	egressHash := VerifyEgressIndexHashWithSettings(ip.Unmap(), settings)
-	egressHashHex := hex.EncodeToString(egressHash[:])
+	field, _ := verifyClientEgressField(ip, settings)
 	server.Redis(ctx, func(r server.RedisClient) {
-		updateVerifyEgressLease(ctx, r, clientId, egressHashHex, owner, server.NowUtc(), time.Time{})
+		updateVerifyEgressLease(ctx, r, verifyClientEgressKey(clientId), clientId, field, owner, server.NowUtc(), time.Time{})
 	})
 	updateVerifyEligibleMembership(ctx, clientId)
 }
 
 // The explicit clock makes expiration and refresh interleavings deterministic
 // in tests; all production callers use server UTC and the configured TTL.
-func updateVerifyEgressLease(ctx context.Context, r server.RedisClient, clientId server.Id, egressHashHex, owner string, now, expires time.Time) {
+// `reverseKey` and `field` name the address's reverse entry; only withdrawals
+// name the v2 index.
+func updateVerifyEgressLease(ctx context.Context, r server.RedisClient, reverseKey string, clientId server.Id, field, owner string, now, expires time.Time) {
+	egressHashHex := parseVerifyClientEgressField(field).indexHashHex
 	server.Raise(r.Eval(ctx, verifyReverseEgressLeaseScript,
-		[]string{verifyClientEgressKey(clientId), verifyClientEgressLeaseKey(clientId, egressHashHex)},
-		owner, now.UnixMilli(), expires.UnixMilli(), egressHashHex).Err())
+		[]string{reverseKey, verifyClientEgressLeaseKey(reverseKey, egressHashHex)},
+		owner, now.UnixMilli(), expires.UnixMilli(), field).Err())
 	server.Raise(r.Eval(ctx, verifyForwardEgressLeaseScript,
 		[]string{verifyEgressKeyFromHex(egressHashHex), verifyForwardEgressLeaseKey(egressHashHex)},
 		clientId.String(), owner, now.UnixMilli(), expires.UnixMilli(), verifyEgressAmbiguous).Err())
@@ -183,13 +186,16 @@ return 0`, []string{verifyClientEgressKey(clientId)}, args...).Err())
 }
 
 // Proxy release does not own simultaneous direct-transport leases. The reverse
-// index supplies the keyed address hashes without loading controller settings.
+// index supplies the keyed address hashes without loading controller settings;
+// a proxy lease a pre-v3 writer left in the v2 index is withdrawn the same way.
 func clearVerifyProxyEgressForClient(ctx context.Context, clientId server.Id) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		entries, err := r.HGetAll(ctx, verifyClientEgressKey(clientId)).Result()
-		server.Raise(err)
-		for hash := range entries {
-			updateVerifyEgressLease(ctx, r, clientId, hash, verifyProxyEgressLeaseOwner, server.NowUtc(), time.Time{})
+		for _, reverseKey := range verifyClientEgressKeys(clientId) {
+			entries, err := r.HGetAll(ctx, reverseKey).Result()
+			server.Raise(err)
+			for field := range entries {
+				updateVerifyEgressLease(ctx, r, reverseKey, clientId, field, verifyProxyEgressLeaseOwner, server.NowUtc(), time.Time{})
+			}
 		}
 	})
 	updateVerifyEligibleMembership(ctx, clientId)

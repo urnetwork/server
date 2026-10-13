@@ -8,7 +8,7 @@ package model
 import (
 	"context"
 	"errors"
-	"fmt"
+	"slices"
 
 	"github.com/redis/go-redis/v9"
 
@@ -37,8 +37,10 @@ func GetVerifyEligibleClientIds(ctx context.Context) []server.Id {
 }
 
 // GetVerifyLiveEgressHashes returns the live (unexpired) egress hashes, as
-// hex, of each client. Expired entries are skipped, not deleted; the feeder
-// path owns cleanup.
+// hex, that each client scores by: its IPv4 addresses while it has any, else
+// its others, so a provider with an address in each family counts once
+// (§8.1). Both reverse index versions are read. Expired entries are skipped,
+// not deleted; the feeder path owns cleanup.
 func GetVerifyLiveEgressHashes(ctx context.Context, clientIds []server.Id) map[server.Id][]string {
 	hashes := map[server.Id][]string{}
 	if len(clientIds) == 0 {
@@ -49,27 +51,39 @@ func GetVerifyLiveEgressHashes(ctx context.Context, clientIds []server.Id) map[s
 		for start := 0; start < len(clientIds); start += 512 {
 			end := min(start+512, len(clientIds))
 			chunk := clientIds[start:end]
-			cmds := make([]*redis.MapStringStringCmd, len(chunk))
+			cmds := make([][]*redis.MapStringStringCmd, len(chunk))
 			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				for i, clientId := range chunk {
-					cmds[i] = pipe.HGetAll(ctx, verifyClientEgressKey(clientId))
+					for _, reverseKey := range verifyClientEgressKeys(clientId) {
+						cmds[i] = append(cmds[i], pipe.HGetAll(ctx, reverseKey))
+					}
 				}
 				return nil
 			})
 			if err != nil && !errors.Is(err, redis.Nil) {
 				server.Raise(err)
 			}
-			for i, cmd := range cmds {
-				entries, cmdErr := cmd.Result()
-				if cmdErr != nil {
-					continue
-				}
-				for egressHashHex, expireMsStr := range entries {
-					var expireMs uint64
-					fmt.Sscanf(expireMsStr, "%d", &expireMs)
-					if nowMs < expireMs {
-						hashes[chunk[i]] = append(hashes[chunk[i]], egressHashHex)
+			for i, clientCmds := range cmds {
+				entries := map[string]verifyEgressEntry{}
+				for _, cmd := range clientCmds {
+					if fields, cmdErr := cmd.Result(); cmdErr == nil {
+						addVerifyEgressEntries(entries, fields, nowMs)
 					}
+				}
+				scored := []string{}
+				for egressHashHex, entry := range entries {
+					if entry.family == 4 {
+						scored = append(scored, egressHashHex)
+					}
+				}
+				if len(scored) == 0 {
+					for egressHashHex := range entries {
+						scored = append(scored, egressHashHex)
+					}
+				}
+				if 0 < len(scored) {
+					slices.Sort(scored)
+					hashes[chunk[i]] = scored
 				}
 			}
 		}
