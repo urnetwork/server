@@ -324,3 +324,61 @@ func TestStOperatorGasEnvelopeChecksDynamicCapsAndUint256Product(t *testing.T) {
 		t.Fatal("gas product overflow gained wrapped allowance")
 	}
 }
+
+// SV-1 (retries; §8.1 gas policy): under an operator gas policy a new intent
+// takes its nonce only together with its first attempt's gas reservation.
+// Without that attempt none is created. A first attempt the policy refuses,
+// here above its maximum_gas and then above its liability, leaves no intent
+// and takes no nonce: the next intent gets nonce 7. An admitted one leaves the
+// intent and a pending reservation of the exact attempt at its nonce, and an
+// existing intent is returned without a second reservation, with or without
+// an attempt.
+func TestStOperatorGasNewIntentTakesItsNonceOnlyWithItsFirstReservation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		p, a, _, _ := stGasModelApproval(tb)
+		ctx := context.Background()
+		reserve := func(logical string, data []byte, gas uint64) (*StTransactionIntent, error) {
+			var unsigned func(uint64) *types.Transaction
+			if gas != 0 {
+				unsigned = func(nonce uint64) *types.Transaction {
+					return stGasModelTransaction(&StTransactionIntent{Nonce: nonce, ToAddress: p.Coordinator, Calldata: data}, gas, 10)
+				}
+			}
+			return ReserveStTransactionIntentGas(ctx, p, a, logical, p.Profile, "synthetic-gas-operator", StDeploymentKey(fmt.Sprintf("%d:%s", p.ChainId, p.Coordinator)), p.ChainId, p.GenesisHash, p.Accounts[0].Address, p.Coordinator,
+				strings.ToLower(crypto.Keccak256Hash(data).Hex()), data, 7, unsigned)
+		}
+		if intent, err := reserve("synthetic-gas-admitted", []byte{2}, 0); !errors.Is(err, ErrStTransactionIntentNew) || intent != nil || GetStTransactionIntent(ctx, "synthetic-gas-admitted") != nil {
+			tb.Fatalf("a new intent without its first attempt: %+v, %v", intent, err)
+		}
+		for _, refusal := range []struct {
+			name string
+			gas  uint64
+		}{{"maximum_gas", 3_000_001}, {"liability", 60_001}} {
+			if intent, err := reserve("synthetic-gas-refused-"+refusal.name, []byte{1}, refusal.gas); !errors.Is(err, ErrStOperatorGasAllowance) || intent != nil {
+				tb.Fatalf("%s: intent %+v, %v", refusal.name, intent, err)
+			}
+			if GetStTransactionIntent(ctx, "synthetic-gas-refused-"+refusal.name) != nil {
+				tb.Fatalf("%s: the refused attempt left an intent", refusal.name)
+			}
+		}
+		intent, err := reserve("synthetic-gas-admitted", []byte{2}, 60_000)
+		if err != nil || intent == nil || intent.Nonce != 7 || intent.Generation != 0 || intent.Status != StTxPrepared || intent.AttemptCount != 0 {
+			tb.Fatalf("admitted intent %+v, %v", intent, err)
+		}
+		pending, err := GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+		want, _ := stGasModelTransaction(intent, 60_000, 10).MarshalBinary()
+		if err != nil || pending == nil || pending.Attempt != 1 || pending.Kind != StTxAttemptExecution || !bytes.Equal(pending.UnsignedTransaction, want) || pending.MaximumLiabilityWei != "600000" {
+			tb.Fatalf("admitted reservation %+v, %v", pending, err)
+		}
+		for _, gas := range []uint64{60_000, 0} {
+			again, err := reserve("synthetic-gas-admitted", []byte{2}, gas)
+			if err != nil || again == nil || again.IntentId != intent.IntentId {
+				tb.Fatalf("existing intent %+v, %v", again, err)
+			}
+		}
+		snapshot, err := GetStOperatorGasBudgetSnapshot(ctx, p.Scope())
+		if err != nil || snapshot == nil || snapshot.Attempts != 1 || snapshot.MaximumLiabilityWei != "600000" {
+			tb.Fatalf("budget %+v, %v", snapshot, err)
+		}
+	})
+}
