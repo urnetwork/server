@@ -158,7 +158,7 @@ func (self *proxyClientNotification) reconcile(hosts []string, block string) {
 		allProxyClients := map[server.Id]*model.ProxyClient{}
 		ok := true
 		for _, host := range hosts {
-			proxyClients, _, err := self.getProxyClientsSince(self.ctx, host, block, 0)
+			proxyClients, _, err := self.readProxyClientsSince(host, block, 0)
 			if err != nil {
 				// never reconcile from partial data, since the full sync is
 				// used to remove stale state
@@ -261,8 +261,7 @@ func (self *proxyClientNotification) watch(host string, block string) {
 	initialSyncDone := false
 	for {
 		notify := monitor.NotifyChannel()
-		proxyClients, maxChangeId, err := self.getProxyClientsSince(
-			self.ctx,
+		proxyClients, maxChangeId, err := self.readProxyClientsSince(
 			host,
 			block,
 			nextChangeId,
@@ -297,6 +296,26 @@ func (self *proxyClientNotification) watch(host string, block string) {
 		case <-time.After(self.settings.NotificationTimeout):
 		}
 	}
+}
+
+// Reads one change range for the watch and reconcile loops, which no other
+// path restarts. server.Db raises a refused read, such as a pooler wait
+// timeout or a database that is shutting down, instead of returning it.
+// Returning the raise as an error keeps both loops on their retry path; left
+// raised, it ended the loop for the life of the process.
+func (self *proxyClientNotification) readProxyClientsSince(
+	host string,
+	block string,
+	changeId int64,
+) (proxyClients map[server.Id]*model.ProxyClient, maxChangeId int64, returnErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			proxyClients = nil
+			maxChangeId = changeId
+			returnErr = fmt.Errorf("proxy client change read raised: %v", r)
+		}
+	}()
+	return self.getProxyClientsSince(self.ctx, host, block, changeId)
 }
 
 func (self *proxyClientNotification) proxyClients(proxyClients []*model.ProxyClient) (returnErr error) {
