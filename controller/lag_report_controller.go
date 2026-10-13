@@ -415,8 +415,12 @@ func lagIntervalMbps(byteCounts []uint64, intervalMs uint32) []float64 {
 // (A5): latency p50/p95 outside the session's own load and during it, over
 // the pings that came back; download and upload p50/p95 in Mbps over the
 // intervals inside each direction's load, the download from what the
-// browser reported receiving; and the lost pings. Of the browser's address
-// the row keeps only the family the report names, the family the browser
+// browser reported receiving; and the lost pings. What depends on the load
+// running to its end, the own-load latency and both speeds, is derived only
+// for a complete load: a load the browser gave up, or one cut short by an
+// error, leaves them null rather than speeds from a fraction of it. The
+// latency outside the load stands either way. Of the browser's address the
+// row keeps only the family the report names, the family the browser
 // reached the extender's name on (N3, amendment 9).
 func newLagResult(
 	body *protocol.LagReportBody,
@@ -483,11 +487,14 @@ func newLagResult(
 			outsideLoadMs = append(outsideLoadMs, ms)
 		}
 	}
-	result.OwnLoadLatencyP50Ms = lagNearestRank(ownLoadMs, 50)
-	result.OwnLoadLatencyP95Ms = lagNearestRank(ownLoadMs, 95)
 	result.OutsideLoadLatencyP50Ms = lagNearestRank(outsideLoadMs, 50)
 	result.OutsideLoadLatencyP95Ms = lagNearestRank(outsideLoadMs, 95)
 
+	if body.EndReason != protocol.LagEndReason_LAG_END_COMPLETE {
+		return result
+	}
+	result.OwnLoadLatencyP50Ms = lagNearestRank(ownLoadMs, 50)
+	result.OwnLoadLatencyP95Ms = lagNearestRank(ownLoadMs, 95)
 	downloadMbps := lagIntervalMbps(lagLoadIntervals(body.DownloadReceivedBytes, body.DownloadMs, body.IntervalMs), body.IntervalMs)
 	result.DownloadP50Mbps = lagNearestRank(downloadMbps, 50)
 	result.DownloadP95Mbps = lagNearestRank(downloadMbps, 95)

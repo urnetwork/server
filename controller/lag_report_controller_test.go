@@ -445,6 +445,42 @@ func TestLagResultStatisticsCountOnlyTheLoad(t *testing.T) {
 	connect.AssertEqual(t, len(result.DownloadReceivedBytes), 25)
 }
 
+// A load the browser gave up, or one an error cut short, gives no speeds
+// and no own-load latency: only a load that ran to its end does. The latency
+// outside the load stands, and the series are stored whole (A5). Pure.
+func TestLagResultLoadStatisticsOnlyWhenComplete(t *testing.T) {
+	now := time.Unix(1790000000, 0).UTC()
+	extender := &lagTestExtender{extenderId: server.NewId()}
+	extender.publicKey, extender.privateKey, _ = ed25519.GenerateKey(rand.Reader)
+	ticket := &model.LagTicket{TicketId: server.NewId(), TrackId: server.NewId(), ExtenderId: extender.extenderId, IssuedAt: now.Add(-time.Minute)}
+	for _, endReason := range []protocol.LagEndReason{
+		protocol.LagEndReason_LAG_END_CLIENT_CLOSED,
+		protocol.LagEndReason_LAG_END_ERROR,
+	} {
+		body := newLagTestReportBody(extender, ticket, now.Add(-time.Minute))
+		// the load stopped 2.1 s into its download
+		body.EndReason = endReason
+		body.DownloadMs = 2100
+		body.UploadStartMs = 0
+		body.UploadMs = 0
+		body.DownloadReceivedBytes = body.DownloadReceivedBytes[:9]
+		body.DownloadSentBytes = body.DownloadSentBytes[:9]
+		body.UploadBytes = nil
+
+		result := newLagResult(body, ticket, now)
+		connect.AssertEqual(t, result.EndReason, lagEndReasonName(endReason))
+		connect.AssertEqual(t, result.OwnLoadLatencyP50Ms, (*float32)(nil))
+		connect.AssertEqual(t, result.OwnLoadLatencyP95Ms, (*float32)(nil))
+		connect.AssertEqual(t, result.DownloadP50Mbps, (*float32)(nil))
+		connect.AssertEqual(t, result.DownloadP95Mbps, (*float32)(nil))
+		connect.AssertEqual(t, result.UploadP50Mbps, (*float32)(nil))
+		connect.AssertEqual(t, result.UploadP95Mbps, (*float32)(nil))
+		connect.AssertEqual(t, *result.OutsideLoadLatencyP50Ms, float32(20))
+		connect.AssertEqual(t, len(result.DownloadReceivedBytes), 9)
+		connect.AssertEqual(t, result.LostCount, 1)
+	}
+}
+
 // Percentiles are by nearest rank, as the browser computes them (S5). Pure.
 func TestLagNearestRank(t *testing.T) {
 	connect.AssertEqual(t, lagNearestRank([]float64{}, 50), (*float32)(nil))
