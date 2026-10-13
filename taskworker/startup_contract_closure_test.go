@@ -91,15 +91,25 @@ func testStartupAllOpenContractClosures(t *testing.T, profile WorkloadProfile) {
 		if err != nil || len(finished) != 1 || finished[0] != id || len(retried)+len(posts) != 0 {
 			t.Fatal("actual startup scan did not publish its children", err)
 		}
-		wanted := []time.Time{past, future, args.StartedAt.Add(model.DefaultContractExpiration)}
+		// Only the legacy contract gets a queued close; the deadline pass closes
+		// the two with a stored deadline at it.
+		wanted := args.StartedAt.Add(model.DefaultContractExpiration)
 		server.Db(ctx, func(conn server.PgConn) {
 			for index, contractId := range ids {
+				var count int
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE run_once_key=$1`, model.ScheduledContractCloseRunOnce(contractId).String()).Scan(&count))
+				if index < 2 {
+					if count != 0 {
+						t.Fatal("startup queued a close for a contract with a stored deadline", index)
+					}
+					continue
+				}
 				var raw string
 				var at time.Time
-				server.Raise(conn.QueryRow(ctx, `SELECT args_json,run_at FROM pending_task WHERE run_once_key=$1`, task.RunOnce("close_scheduled_contract", contractId).String()).Scan(&raw, &at))
+				server.Raise(conn.QueryRow(ctx, `SELECT args_json,run_at FROM pending_task WHERE run_once_key=$1`, model.ScheduledContractCloseRunOnce(contractId).String()).Scan(&raw, &at))
 				var closeArgs work.CloseScheduledContractArgs
-				if json.Unmarshal([]byte(raw), &closeArgs) != nil || closeArgs.ContractId != contractId || !closeArgs.Deadline.Equal(wanted[index]) || !at.Equal(wanted[index]) {
-					t.Fatal("startup child wake differs from requested formula", index, at, wanted[index])
+				if count != 1 || json.Unmarshal([]byte(raw), &closeArgs) != nil || closeArgs.ContractId != contractId || !closeArgs.Deadline.Equal(wanted) || !at.Equal(wanted) {
+					t.Fatal("startup child wake differs from requested formula", index, at, wanted)
 				}
 			}
 		})

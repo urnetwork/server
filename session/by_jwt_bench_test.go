@@ -50,9 +50,9 @@ func benchParseOld(ctx context.Context, jwtSigned string) *ByJwt {
 	parserOptions := []gojwt.ParserOption{gojwt.WithoutClaimsValidation()}
 	var token *gojwt.Token
 	var err error
-	for _, byPrivateKey := range byPrivateKeys() {
+	for _, key := range defaultByJwtKeyring.heldKeys().keys {
 		token, err = gojwt.Parse(jwtSigned, func(t *gojwt.Token) (any, error) {
-			return byPrivateKey.(interface{ Public() crypto.PublicKey }).Public(), nil
+			return key.privateKey.(interface{ Public() crypto.PublicKey }).Public(), nil
 		}, parserOptions...)
 		if err == nil {
 			break
@@ -69,11 +69,11 @@ func benchParseOld(ctx context.Context, jwtSigned string) *ByJwt {
 	return byJwt
 }
 
-// freshKey is what sign() uses (byPrivateKeys()[0]); oldKey is the last-loaded
-// key, the worst case for the old all-keys scan.
+// freshKey is what sign() uses (the keyring's signing key); oldKey is the
+// last-held key, the worst case for the old all-keys scan.
 func benchKeys() (freshKey crypto.PrivateKey, oldKey crypto.PrivateKey) {
-	keys := byPrivateKeys()
-	return keys[0], keys[len(keys)-1]
+	keys := defaultByJwtKeyring.heldKeys().keys
+	return defaultByJwtKeyring.signingKey().privateKey, keys[len(keys)-1].privateKey
 }
 
 func benchClaims() *ByJwt {

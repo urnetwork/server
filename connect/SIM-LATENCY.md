@@ -71,8 +71,8 @@ architecture and the load-bearing decisions.
   joins.
 - **Goal 10 pipeline.** api ships finalized segments to minio (vault
   `minio.yml`, dedicated service account); retention is a bucket lifecycle rule
-  (7-day expiry) + hard quota set by `xops/main/ansible/playbook-minio.yml` from
-  vault `stats.yml`; `bringyourctl stats export-samples --days 7 --out stats.tgz`
+  (7-day expiry) + hard quota set by `xops/main/ansible/playbook-minio-clusters.yml`
+  from vault `stats.yml`; `bringyourctl stats export-samples --days 7 --out stats.tgz`
   packs a self-describing tarball. Anonymization uses a FIXED vault hmac salt
   (global traceability, not reversible to production ids; rotation is a manual
   op only).

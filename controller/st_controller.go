@@ -3125,6 +3125,11 @@ func (self *StPublishOutcome) String() string {
 
 var errStNotConfigured = errors.New("st: not configured (st.yml missing or disabled)")
 
+// The epoch's root commit window closed before its payout was computed, so no
+// root can be committed for it. Finalize records the missed root and the
+// funded pool total carries to the next finalized epoch (D-11).
+var ErrStCommitWindowClosed = errors.New("st: root commit window closed before the payout was computed")
+
 // stRequire returns the config + client or the not-configured error.
 func stRequire() (*StConfig, StClient, error) {
 	cfg := stConfig()
@@ -3347,46 +3352,85 @@ func stComputeReleasePayout(
 	if prior := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), epoch, cfg.NoId); prior != nil {
 		return prior.PayoutRoot, len(model.GetStPayoutLeaves(ctx, cfg.DeploymentKey(), epoch, cfg.NoId)), nil
 	}
-	if err := stPayoutAdmission(ctx, cfg); err != nil {
+	payout, err := stPrepareReleasePayout(ctx, cfg, client, epoch, startTime, endTime, startBlock, closeBlock, authority, false)
+	if err != nil {
 		return [32]byte{}, 0, err
+	}
+	return stPublishReleasePayout(ctx, cfg, epoch, endTime, payout)
+}
+
+// Everything one release payout reads and derives before anything is retained
+// or published. Preparing it publishes nothing and sends no transaction, and
+// without a configured roster it writes no row, so the dry run shares the
+// close's exact computation.
+type stReleasePayout struct {
+	// signed and verified, not yet published
+	Artifact          *payoutartifact.Artifact
+	Wallets           map[server.Id]*model.StProviderWallet
+	WalletSelection   *StPayoutWalletSelection
+	NetworkForClient  map[[16]byte]server.Id
+	WholeExpectation  payoutartifact.WholeWorkExpectation
+	UsageStart        time.Time
+	UsageEnd          time.Time
+	UsageReadDuration time.Duration
+}
+
+func stPrepareReleasePayout(
+	ctx context.Context,
+	cfg *StConfig,
+	client StClient,
+	epoch uint64,
+	startTime, endTime time.Time,
+	startBlock, closeBlock uint64,
+	authority *StPayoutEpochAuthority,
+	// the dry run: a configured roster's preparation retains observations
+	readOnly bool,
+) (*stReleasePayout, error) {
+	if err := stPayoutAdmission(ctx, cfg); err != nil {
+		return nil, err
 	}
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
 	}
 	usageStart, usageEnd := transition.SnWindow(startTime, endTime)
 	if !usageStart.Before(usageEnd) {
-		return [32]byte{}, 0, fmt.Errorf("sn: epoch has no post-cutoff earning window")
+		return nil, fmt.Errorf("sn: epoch has no post-cutoff earning window")
 	}
+	usageReadStart := time.Now()
 	usages, closedWork, wholeWindow, err := model.GetStEpochProviderUsageWholeCensus(ctx, epoch, startTime, endTime)
+	usageReadDuration := time.Since(usageReadStart)
 	if err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
 	}
 	usages, err = stCanonicalProviderUsages(usages)
 	if err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
 	}
 	// The close path already owns the read which selected this exact window.
 	// Direct retained-window callers must obtain the same authority here.
 	if authority == nil {
 		authority, err = client.PayoutEpochAuthority(ctx, epoch)
 		if err != nil {
-			return [32]byte{}, 0, err
+			return nil, err
 		}
 	}
 	// The current configuration supplies the pricing and reliability rules.
 	// It cannot mint a historical artifact under a different policy. Existing
 	// signed artifacts above remain immutable and need no original local file.
 	if authority == nil || authority.Epoch != epoch || authority.PolicyHash != cfg.PolicyHash || authority.Start.Block != startBlock || authority.End.Block != closeBlock || !authority.StartTime.Equal(startTime) || !authority.EndTime.Equal(endTime) {
-		return [32]byte{}, 0, errors.New("st: payout policy or window differs from authenticated epoch authority")
+		return nil, errors.New("st: payout policy or window differs from authenticated epoch authority")
 	}
 	workAuthority, workConfigured, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
 	if err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
+	}
+	if readOnly && workConfigured {
+		return nil, ErrStPayoutDryRunRosterConfigured
 	}
 	usages, err = stProviderWorkUsages(ctx, workAuthority, usages)
 	if err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
 	}
 	usageClientIds := make([]server.Id, len(usages))
 	for index, usage := range usages {
@@ -3394,21 +3438,11 @@ func stComputeReleasePayout(
 	}
 	reliabilityRows, err := model.GetStEpochPayoutReliability(ctx, usageStart, usageEnd, usageClientIds)
 	if err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
 	}
-	var wallets map[server.Id]*model.StProviderWallet
-	if workConfigured {
-		wallets, err = stProviderWalletsForEpoch(ctx, cfg, workAuthority, authority)
-	} else {
-		// No roster signer is provisioned yet; signed retained consents select
-		// the wallets of observed providers until provider_work.yml exists.
-		wallets, err = stRetainedProviderWalletsForEpoch(ctx, cfg, authority, usages)
-		if err == nil {
-			glog.Infof("[st]epoch %d payout wallets from retained consents: %d of %d providers mapped\n", epoch, len(wallets), len(usages))
-		}
-	}
+	wallets, walletSelection, err := stSelectReleasePayoutWallets(ctx, cfg, workAuthority, workConfigured, authority, usages)
 	if err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
 	}
 	networkForClient := map[[16]byte]server.Id{}
 	clientIds := make([][16]byte, len(usages))
@@ -3418,17 +3452,17 @@ func stComputeReleasePayout(
 	}
 	bindings, err := client.BindingsAt(ctx, clientIds, epoch, startBlock, closeBlock)
 	if err != nil {
-		return [32]byte{}, 0, fmt.Errorf("bindingAt batch: %w", err)
+		return nil, fmt.Errorf("bindingAt batch: %w", err)
 	}
 	providers, err := stBuildReleaseProviderInputs(usages, reliabilityRows, wallets, bindings, cfg.ReliabilityAMin)
 	if err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
 	}
 	// The attested user count is the stats feed's per-block `users` figure
 	// over this epoch's window; with the usage bytes it sizes the next deposit.
 	epochUsers := model.CountTopLevelClientsWithContractInEpoch(ctx, usageStart, usageEnd)
 	if epochUsers < 0 {
-		return [32]byte{}, 0, fmt.Errorf("epoch %d user count is negative", epoch)
+		return nil, fmt.Errorf("epoch %d user count is negative", epoch)
 	}
 	operatorSnapshot := map[string]any{"no_id": cfg.NoId, "epoch": epoch, "policy_hash": fmt.Sprintf("0x%x", authority.PolicyHash)}
 	if transition != nil {
@@ -3451,10 +3485,10 @@ func stComputeReleasePayout(
 	}
 	wholeInventory, wholeExpectation, err := stPrepareApprovedWholeWorkInventory(ctx, workAuthority, authority, wholeWindow)
 	if err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
 	}
 	if workAuthority != nil && workAuthority.Authority.ExpectedProviders != nil && wholeInventory == nil {
-		return [32]byte{}, 0, payoutartifact.ErrClosedWorkUnavailable
+		return nil, payoutartifact.ErrClosedWorkUnavailable
 	}
 	if closedWork != nil {
 		closedWork.WholeInventory = wholeInventory
@@ -3472,21 +3506,37 @@ func stComputeReleasePayout(
 		ReliabilityAMin: uint64(cfg.ReliabilityAMin), CreatedAt: endTime,
 	})
 	if err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
 	}
 	if err := startifact.Sign(artifact, cfg.ArtifactKey); err != nil {
-		return [32]byte{}, 0, err
+		return nil, err
 	}
 	if artifact.ClosedWork != nil && artifact.ClosedWork.WholeInventory == nil {
 		selection, err := model.GetProviderPayoutEarningSelection(ctx)
 		if err != nil {
-			return [32]byte{}, 0, err
+			return nil, err
 		}
 		if _, err := payoutartifact.VerifyClosedWorkReportsWithEarningSelection(ctx, artifact, common.Address{}, selection); err != nil {
-			return [32]byte{}, 0, err
+			return nil, err
 		}
 	}
-	if err := stRetainWholeWorkWindow(ctx, artifact, wholeExpectation); err != nil {
+	return &stReleasePayout{
+		Artifact:          artifact,
+		Wallets:           wallets,
+		WalletSelection:   walletSelection,
+		NetworkForClient:  networkForClient,
+		WholeExpectation:  wholeExpectation,
+		UsageStart:        usageStart,
+		UsageEnd:          usageEnd,
+		UsageReadDuration: usageReadDuration,
+	}, nil
+}
+
+// The artifact record is written last, so a recorded artifact always has its
+// whole-work window, wallet resolutions and leaves.
+func stPublishReleasePayout(ctx context.Context, cfg *StConfig, epoch uint64, endTime time.Time, payout *stReleasePayout) ([32]byte, int, error) {
+	artifact := payout.Artifact
+	if err := stRetainWholeWorkWindow(ctx, artifact, payout.WholeExpectation); err != nil {
 		return [32]byte{}, 0, err
 	}
 	store, ok := server.LoadBlobStore()
@@ -3499,8 +3549,8 @@ func stComputeReleasePayout(
 	}
 	// which consent selected each earning wallet, retained before the artifact
 	// record so a recorded artifact always has its resolutions
-	resolutions := make([]*model.StPayoutWalletResolution, 0, len(wallets))
-	for _, wallet := range wallets {
+	resolutions := make([]*model.StPayoutWalletResolution, 0, len(payout.Wallets))
+	for _, wallet := range payout.Wallets {
 		if wallet.Resolution != nil {
 			resolutions = append(resolutions, wallet.Resolution)
 		}
@@ -3511,7 +3561,7 @@ func stComputeReleasePayout(
 	leaves := make([]*model.StPayoutLeaf, len(artifact.Leaves))
 	for i, leaf := range artifact.Leaves {
 		clientId := server.Id(leaf.ClientID)
-		leaves[i] = &model.StPayoutLeaf{Epoch: epoch, NoId: cfg.NoId, ClientId: &clientId, NetworkId: networkForClient[leaf.ClientID], Coldkey: leaf.Coldkey, ShareBps: int(leaf.ShareBPS), LeafIndex: i}
+		leaves[i] = &model.StPayoutLeaf{Epoch: epoch, NoId: cfg.NoId, ClientId: &clientId, NetworkId: payout.NetworkForClient[leaf.ClientID], Coldkey: leaf.Coldkey, ShareBps: int(leaf.ShareBPS), LeafIndex: i}
 	}
 	model.SetStPayoutLeaves(ctx, cfg.DeploymentKey(), epoch, cfg.NoId, leaves)
 	model.AddStPayoutArtifact(ctx, cfg.DeploymentKey(), &model.StPayoutArtifact{Epoch: epoch, NoId: cfg.NoId, ContentHash: published.ContentHash,
@@ -3558,6 +3608,16 @@ func StComputeEpochPayout(ctx context.Context, epoch uint64) (root [32]byte, lea
 		}
 		if outcome.Retry || outcome.Status == model.StPublishStatusFailed {
 			return root, 0, fmt.Errorf("st: epoch %d emission close not confirmed: %s", epoch, outcome)
+		}
+		// The emission is captured or deferred, so finalize can record a
+		// missed root. Past the deadline the commit path refuses, so the
+		// payout is not recomputed on every retry.
+		closeBlock, err := client.EpochCloseBlock(ctx, epoch)
+		if err != nil {
+			return root, 0, err
+		}
+		if closeBlock != 0 && closeBlock+state.CommitWindowBlocks < state.HeadBlock {
+			return root, 0, ErrStCommitWindowClosed
 		}
 		authority, err := client.PayoutEpochAuthority(ctx, epoch)
 		if err != nil {

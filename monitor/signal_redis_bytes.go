@@ -114,13 +114,19 @@ func (redisBytesProbe) tier() string           { return tierWarn }
 func (redisBytesProbe) cadence() time.Duration { return 15 * time.Minute }
 
 func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	h := env.cfg.hostByRole("redis-cluster")
-	if h == nil {
+	entryHost := env.cfg.redisEntryHost()
+	if entryHost == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
-	fullest, err := fullestRedisNodeUsage(ctx, env, h)
+	// the fullest node may be on any redis-cluster host; sample it where it runs.
+	// An unreadable host is reported and the fullest node of the others sampled.
+	h, fullest, failures, err := fullestRedisNodeUsage(ctx, env)
 	if err != nil {
 		return nil, err
+	}
+	visibility := []finding{}
+	for _, failure := range failures {
+		visibility = append(visibility, redisHostCannotObserveFinding(failure, "byte-families"))
 	}
 	sample, err := sampleRedisByteFamilies(ctx, env, h, fullest.port)
 	if err != nil {
@@ -152,12 +158,16 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			fmt.Sprintf("%s_bytes=%d", name, family.bytes),
 		)
 	}
+	if len(failures) > 0 {
+		// the sampled node is the fullest of the readable hosts only
+		observedParts = append(observedParts, redisUnobservedHosts(failures))
+	}
 	glog.Infof("[monitor]redis byte families on %s: %s\n", target, strings.Join(observedParts, " "))
 
 	if 0.85 <= usedFraction &&
 		redisByteDominanceFraction <= scoreByteFraction &&
 		redisByteDominanceMinimum <= score.bytes {
-		aliasesReady, aliasesReadyErr := redisScoreAliasesReady(ctx, env, h)
+		aliasesReady, aliasesReadyErr := redisScoreAliasesReady(ctx, env, entryHost)
 		action := "Deploy the alias-aware score cache: write one zero-caller baseline per target, one-byte aliases for unchanged callers, and full overrides only for callers whose exclusions intersect the target. Let the first compatibility pass refresh legacy payloads and publish its ready marker; then let duplicates expire naturally. Do not delete cache keys or raise maxmemory to mask the amplification."
 		mechanism := "The client-score cache is keyed by both caller location and target, but most callers do not exclude a network present in a given target. Materializing the same gob counts, filter, and provider samples under every unchanged caller multiplies large values across hundreds of keys; key-count histograms understate this because score keys are fewer but much larger."
 		context := "This is sampled byte attribution, not a full key census. Pair it with node-memory pressure and the five-hour score-cache TTL. Impossible-TTL stream residue is a separate, real defect and must not be assumed to own capacity without its own measured bytes."
@@ -174,7 +184,7 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		default:
 			observedParts = append(observedParts, "alias_schema_ready=false")
 		}
-		return []finding{{
+		return append([]finding{{
 			probeId: "redis/byte-families", tier: tierWarn,
 			class: "score-byte-dominance", target: target, frame: "score", sustain: 1,
 			symptom: fmt.Sprintf(
@@ -189,10 +199,10 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			action:    action,
 			verify:    "After one complete alias-aware export plus the five-hour legacy TTL, sampled score bytes fall below 50% or the node falls below 85%; aliases resolve to the same provider sets, excluded callers still use overrides, and OOM/error counters remain flat.",
 			playbook:  "SIGNALS.md §3.3b and §5.4",
-		}}, nil
+		}}, visibility...), nil
 	}
 
-	return []finding{healthyFinding("redis/byte-families", tierWarn, "score-byte-dominance", target)}, nil
+	return append([]finding{healthyFinding("redis/byte-families", tierWarn, "score-byte-dominance", target)}, visibility...), nil
 }
 
 func redisScoreAliasesReady(ctx context.Context, env *probeEnv, h *host) (bool, error) {

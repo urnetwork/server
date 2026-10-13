@@ -117,29 +117,28 @@ func TestLegacySettlementRollbackAndLostAcknowledgement(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=2000 WHERE balance_id=$1`, f.balanceId))
 		})
 		requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
+		// Each owner gets a real owned server transaction whose end the test chooses.
+		tx, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		_, complete, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
 		server.Raise(err)
 		if !complete || busy {
 			t.Fatal("rollback transaction never reached its outcome")
 		}
-		server.Raise(tx.Rollback(ctx))
+		server.Raise(finish(false))
 		requireLegacyProviderDurability(t, ctx, f, id, 0)
 		requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
 		// Model a committed transaction whose caller never receives its reply
 		// and never starts the post callbacks or provider projection. Sweeps,
 		// exact queued totals, payer debit and the terminal outcome are durable.
-		tx, err = conn.Begin(ctx)
-		server.Raise(err)
+		tx, finish = beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		posts, complete, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
 		server.Raise(err)
 		if !complete || busy {
 			t.Fatal("commit owner did not settle")
 		}
-		server.Raise(tx.Commit(ctx))
+		server.Raise(finish(true))
 		requireLegacyProviderDurability(t, ctx, f, id, 11, 11)
 		complete, busy, _, err = flushLegacySettlement(ctx, id)
 		if err != nil || complete {

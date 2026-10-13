@@ -284,86 +284,140 @@ func LoadBlobStore() (store BlobStore, ok bool) {
 		store, err := NewDurableLocalBlobStore(context.Background(), config.LocalPath, config.Prefix, config.LocalMaxBytes, config.DurableVolumes)
 		return store, err == nil
 	}
-	minioStore, err := NewBlobStore(config)
-	if err != nil {
-		return nil, false
-	}
-	return minioStore, true
+	minioStore := minioBlobStoreCache.Get(*config, nil, func() (BlobStore, bool) {
+		minioStore, err := NewBlobStore(config)
+		if err != nil {
+			return nil, false
+		}
+		return minioStore, true
+	})
+	return minioStore, minioStore != nil
 }
+
+// A MinIO client owns an HTTP connection pool and a bucket location cache, so
+// one client serves each complete configuration instead of a new pool, and a
+// new location lookup, for every load. Clients are safe for concurrent use.
+var minioBlobStoreCache ResourceValueCache[BlobStoreConfig, BlobStore]
+
+// Everything a blob configuration is derived from besides its authority's
+// environment: `minio.yml`, the settings that route its authority (see
+// GetSettings and Routes), the host that selects the host settings, and the
+// site root that holds the default local path.
+type blobStoreConfigKey struct {
+	minio          ResourceVersion
+	configSettings ResourceVersion
+	siteSettings   ResourceVersion
+	host           string
+	siteRoot       string
+}
+
+// A derived configuration, or its absence, and the environment its authority
+// template read when it was derived.
+type blobStoreConfigLoad struct {
+	config      *BlobStoreConfig
+	environment templateEnvironment
+}
+
+// Client key registration loads the configuration on every connection, so
+// it is derived once per version of its inputs rather than reparsing the
+// resources and logging the authority interpolation each time.
+var blobStoreConfigCache ResourceValueCache[blobStoreConfigKey, blobStoreConfigLoad]
 
 // LoadBlobStoreConfig reads the backing config from the vault `minio.yml`
 // resource. present is false only when the resource is absent; a present
-// resource with authority "local" or empty selects the local backend.
+// resource with authority "local" or empty selects the local backend. Callers
+// own the returned configuration.
 func LoadBlobStoreConfig() (config *BlobStoreConfig, present bool) {
 	resource, err := Vault.SimpleResource("minio.yml")
 	if err != nil {
 		return nil, false
 	}
-	values := resource.Parse()
-	str := func(key string) string {
-		if v, ok := values[key]; ok {
-			if s, ok := v.(string); ok {
-				return s
+	host, _ := Host()
+	key := blobStoreConfigKey{
+		minio:          resource.Version(),
+		configSettings: Config.resourceVersion("settings.yml"),
+		siteSettings:   Site.resourceVersion("settings.yml"),
+		host:           host,
+		siteRoot:       SiteHomeRoot(),
+	}
+	load := blobStoreConfigCache.Get(key, func(load blobStoreConfigLoad) bool {
+		return load.environment.current()
+	}, func() (load blobStoreConfigLoad, reusable bool) {
+		values := resource.Parse()
+		str := func(key string) string {
+			if v, ok := values[key]; ok {
+				if s, ok := v.(string); ok {
+					return s
+				}
+			}
+			return ""
+		}
+		prefix := str("prefix")
+		if prefix == "" {
+			prefix = DefaultBlobPrefix
+		}
+		authorityTemplate := str("authority")
+		// read before interpolating: a change after this is derived again
+		load.environment = readTemplateEnvironment(authorityTemplate)
+		authority, ok := resolveBlobAuthority(authorityTemplate, Routes())
+		if !ok {
+			// a host without the interpolated env var has no blob store; the
+			// stats subsystem is fail-safe and must not crash or silently fall
+			// back to the local backend on a misconfigured prod host
+			glog.Infof("[blob]store disabled: authority env interpolation unresolved\n")
+			return load, true
+		}
+		// local backend when explicitly "local" or when no endpoint is configured
+		local := authority == "" || strings.EqualFold(authority, "local")
+		localPath := str("path")
+		if localPath == "" {
+			localPath = defaultLocalBlobRoot()
+		}
+		tls := false
+		if v, ok := values["tls"]; ok {
+			if b, ok := v.(bool); ok {
+				tls = b
 			}
 		}
-		return ""
-	}
-	prefix := str("prefix")
-	if prefix == "" {
-		prefix = DefaultBlobPrefix
-	}
-	authority, ok := resolveBlobAuthority(str("authority"), Routes())
-	if !ok {
-		// a host without the interpolated env var has no blob store; the
-		// stats subsystem is fail-safe and must not crash or silently fall
-		// back to the local backend on a misconfigured prod host
-		glog.Infof("[blob]store disabled: authority env interpolation unresolved\n")
+		localMaxBytes := DefaultLocalBlobMaxBytes
+		if value, ok := values["max_bytes"]; ok {
+			switch value := value.(type) {
+			case int:
+				localMaxBytes = int64(value)
+			case int64:
+				localMaxBytes = value
+			case float64:
+				localMaxBytes = int64(value)
+			}
+		}
+		if localMaxBytes <= 0 {
+			localMaxBytes = DefaultLocalBlobMaxBytes
+		}
+		var durable durablevolume.Reference
+		if declaration, ok := values["durable_volumes"].(map[string]any); ok {
+			durable.Path, _ = declaration["path"].(string)
+			durable.Sha256, _ = declaration["sha256"].(string)
+		}
+		load.config = &BlobStoreConfig{
+			Authority:         authority,
+			AccessKey:         str("access_key"),
+			SecretKey:         str("secret_key"),
+			Bucket:            str("bucket"),
+			Tls:               tls,
+			Prefix:            prefix,
+			Local:             local,
+			LocalPath:         localPath,
+			LocalMaxBytes:     localMaxBytes,
+			DurableVolumes:    durable,
+			FeedbackLogBucket: strings.TrimSpace(str("feedback_log_bucket")),
+		}
+		return load, true
+	})
+	if load.config == nil {
 		return nil, false
 	}
-	// local backend when explicitly "local" or when no endpoint is configured
-	local := authority == "" || strings.EqualFold(authority, "local")
-	localPath := str("path")
-	if localPath == "" {
-		localPath = defaultLocalBlobRoot()
-	}
-	tls := false
-	if v, ok := values["tls"]; ok {
-		if b, ok := v.(bool); ok {
-			tls = b
-		}
-	}
-	localMaxBytes := DefaultLocalBlobMaxBytes
-	if value, ok := values["max_bytes"]; ok {
-		switch value := value.(type) {
-		case int:
-			localMaxBytes = int64(value)
-		case int64:
-			localMaxBytes = value
-		case float64:
-			localMaxBytes = int64(value)
-		}
-	}
-	if localMaxBytes <= 0 {
-		localMaxBytes = DefaultLocalBlobMaxBytes
-	}
-	var durable durablevolume.Reference
-	if declaration, ok := values["durable_volumes"].(map[string]any); ok {
-		durable.Path, _ = declaration["path"].(string)
-		durable.Sha256, _ = declaration["sha256"].(string)
-	}
-	return &BlobStoreConfig{
-		Authority:         authority,
-		AccessKey:         str("access_key"),
-		SecretKey:         str("secret_key"),
-		Bucket:            str("bucket"),
-		Tls:               tls,
-		Prefix:            prefix,
-		Local:             local,
-		LocalPath:         localPath,
-		LocalMaxBytes:     localMaxBytes,
-		DurableVolumes:    durable,
-		FeedbackLogBucket: strings.TrimSpace(str("feedback_log_bucket")),
-	}, true
+	copied := *load.config
+	return &copied, true
 }
 
 // NewBlobStore builds a MinIO-backed store from config.

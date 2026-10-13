@@ -29,9 +29,10 @@ func TestStartupContractClosureRejectsInvalidArguments(t *testing.T) {
 }
 
 // A retained old-key task has no PageSize and may carry the old After cursor.
-// The new startup key is independent; both actual executions scan from the head
-// and publish the same child identities without postponing existing wakes.
-func TestStartupContractClosureLegacyArgsAndNewKeyCoexist(t *testing.T) {
+// The earlier key's pass is retired: its claim finishes without publishing.
+// The new startup key is independent of it, and its actual execution scans
+// from the head and publishes each child once with its own lifetime.
+func TestStartupContractClosureRetiresLegacyArgsBesideTheNewKey(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -65,16 +66,8 @@ func TestStartupContractClosureLegacyArgsAndNewKeyCoexist(t *testing.T) {
 		defer worker.Close()
 		evalStartupClosureTask(t, ctx, worker, oldId)
 		first := readExpiryRecoveryQueue(t, ctx)
-		if _, found := first[oldKey]; found || len(first) != len(ids)+1 || first[newKey].id != current.id {
-			t.Fatal("legacy After or zero PageSize skipped the head or changed the independent startup")
-		}
-		for _, id := range ids {
-			row, found := first[task.RunOnce("close_scheduled_contract", id).String()]
-			var child CloseScheduledContractArgs
-			if !found || json.Unmarshal([]byte(row.args), &child) != nil || child.ContractId != id ||
-				!child.Deadline.Equal(started.Add(model.DefaultContractExpiration)) || !row.runAt.Equal(child.Deadline) {
-				t.Fatal("legacy argument compatibility omitted a child or changed its original lifetime")
-			}
+		if _, found := first[oldKey]; found || len(first) != 1 || first[newKey].id != current.id || first[newKey].args != current.args {
+			t.Fatal("the retired key's pass published children or changed the independent startup", len(first))
 		}
 		evalStartupClosureTask(t, ctx, worker, current.id)
 		second := readExpiryRecoveryQueue(t, ctx)
@@ -82,10 +75,11 @@ func TestStartupContractClosureLegacyArgsAndNewKeyCoexist(t *testing.T) {
 			t.Fatal("new startup did not finish one complete pass", len(second))
 		}
 		for _, id := range ids {
-			key := task.RunOnce("close_scheduled_contract", id).String()
-			before, after := first[key], second[key]
-			if before.id != after.id || before.args != after.args || !before.runAt.Equal(after.runAt) {
-				t.Fatal("independent startup key duplicated a child or postponed its earlier wake")
+			row, found := second[task.RunOnce("close_scheduled_contract", id).String()]
+			var child CloseScheduledContractArgs
+			if !found || json.Unmarshal([]byte(row.args), &child) != nil || child.ContractId != id ||
+				!child.Deadline.Equal(args.StartedAt.Add(model.DefaultContractExpiration)) || !row.runAt.Equal(child.Deadline) {
+				t.Fatal("startup pass omitted a child or changed its lifetime")
 			}
 		}
 	})
@@ -254,7 +248,6 @@ func TestStartupContractClosureFindsAppendAfterShortPage(t *testing.T) {
 		var stateLock sync.Mutex
 		appended := false
 		var addedId server.Id
-		var addedDeadline time.Time
 		var appendErr error
 		ctx := server.Testing_WithPgOwnershipObservation(baseCtx, func(event server.PgOwnershipEvent) {
 			if event.Kind != server.PgOwnershipReleased || startupCheckpointObservedChildren(event, keys) != len(ids) {
@@ -267,15 +260,14 @@ func TestStartupContractClosureFindsAppendAfterShortPage(t *testing.T) {
 			if !create {
 				return
 			}
+			// A legacy contract: one with a stored deadline gets no queued close.
 			var id server.Id
-			var deadline time.Time
 			var err error
 			server.HandleError(func() {
-				id, deadline, err = model.CreateContractNoEscrowWithExpiration(baseCtx, networkId, sourceId, networkId, destinationId, 100, true)
-				server.Raise(err)
+				id = newStartupClosureScanContracts(baseCtx, networkId, sourceId, destinationId, 1)[0]
 			}, func(cause error) { err = cause })
 			stateLock.Lock()
-			addedId, addedDeadline, appendErr = id, deadline, err
+			addedId, appendErr = id, err
 			stateLock.Unlock()
 		})
 		owner := session.NewLocalClientSession(ctx, "", nil)
@@ -287,11 +279,14 @@ func TestStartupContractClosureFindsAppendAfterShortPage(t *testing.T) {
 		defer worker.Close()
 		evalStartupClosureTask(t, ctx, worker, initial.id)
 		stateLock.Lock()
-		created, id, deadline, err := appended, addedId, addedDeadline, appendErr
+		created, id, err := appended, addedId, appendErr
 		stateLock.Unlock()
-		if !created || err != nil || id.Cmp(ids[len(ids)-1]) <= 0 || deadline.IsZero() {
-			t.Fatal("short-page fixture did not commit a new greater public contract", created, err)
+		if !created || err != nil || id.Cmp(ids[len(ids)-1]) <= 0 {
+			t.Fatal("short-page fixture did not commit a new greater contract", created, err)
 		}
+		var startup ScheduleOpenContractClosuresArgs
+		server.Raise(json.Unmarshal([]byte(initial.args), &startup))
+		deadline := startup.StartedAt.Add(model.DefaultContractExpiration)
 		queue := readExpiryRecoveryQueue(t, ctx)
 		child, found := queue[task.RunOnce("close_scheduled_contract", id).String()]
 		var args CloseScheduledContractArgs

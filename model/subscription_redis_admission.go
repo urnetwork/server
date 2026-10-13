@@ -320,6 +320,8 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 	// Per-contract rows only. The compatibility triggers omit marked rows from
 	// legacy revision maintenance, and no shared snapshot is read or published.
 	slices.SortFunc(selected, func(a, b *TransferEscrowBalance) int { return a.BalanceId.Cmp(b.BalanceId) })
+	// read before the transaction began (contract_stream_binding.go)
+	streamId := bindContractStreamAtInsert(ctx, admission.contractId)
 	// From this point the transaction owner decides commit/rollback. A failed
 	// round trip is not proof of absence, so compensation must not release a
 	// possibly committed contract. Existing reconciliation/lease recovery owns it.
@@ -332,11 +334,11 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 		batch.Queue(`WITH creation_clock AS MATERIALIZED (
                 SELECT clock_timestamp() AT TIME ZONE 'UTC' AS create_time
             )
-            INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,companion_contract_id,payer_network_id,usage_origin_is_source,create_time,priority,expiration_time)
-            SELECT $1,$2,$3,$4,$5,$6,$7,$8,($7::uuid IS NULL),create_time,$9,date_trunc('milliseconds', create_time) + $10 * INTERVAL '1 millisecond'
+            INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,companion_contract_id,payer_network_id,usage_origin_is_source,create_time,priority,expiration_time,stream_id)
+            SELECT $1,$2,$3,$4,$5,$6,$7,$8,($7::uuid IS NULL),create_time,$9,date_trunc('milliseconds', create_time) + $10 * INTERVAL '1 millisecond',$11
             FROM creation_clock RETURNING expiration_time`,
 			admission.contractId, sourceNetworkId, sourceId, destinationNetworkId, destinationId, granted, companionId, payerNetworkId, priority,
-			DefaultContractExpiration.Milliseconds(),
+			DefaultContractExpiration.Milliseconds(), streamId,
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
 		batch.Queue(contractExtenderInsertSql, admission.contractId, sourceId, destinationId, ContractPartySource, ContractPartyDestination)
 	})

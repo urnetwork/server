@@ -33,11 +33,13 @@ func TestContractExpirationNullClosesRecentPartialReports(t *testing.T) {
 			f := newNetEscrowOrderingTestFixture(t, ctx)
 			id, err := CreateContractNoEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 100)
 			server.Raise(err)
-			if sample.source {
-				server.Raise(CloseContract(ctx, id, f.sourceId, 0, sample.sourceCheckpoint))
-			}
+			// The receiver reports first: its checkpoint after the sender's
+			// final would settle in that report (owner decision B).
 			if sample.destination {
 				server.Raise(CloseContract(ctx, id, f.destinationId, 0, sample.destinationCheckpoint))
+			}
+			if sample.source {
+				server.Raise(CloseContract(ctx, id, f.sourceId, 0, sample.sourceCheckpoint))
 			}
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=NULL WHERE contract_id=$1`, id))

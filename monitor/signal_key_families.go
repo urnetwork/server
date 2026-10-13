@@ -60,19 +60,22 @@ func (self redisFamilyProbe) tier() string           { return tierWarn }
 func (self redisFamilyProbe) cadence() time.Duration { return 24 * time.Hour }
 
 func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	h := env.cfg.hostByRole("redis-cluster")
-	if h == nil {
+	if env.cfg.redisEntryHost() == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
-	ports := h.redisNodePorts()
-	if len(ports) == 0 {
+	if len(env.cfg.redisAllNodePorts()) == 0 {
 		return nil, fmt.Errorf("no redis node ports configured")
 	}
 
-	fullest, err := fullestRedisNodeUsage(ctx, env, h)
+	// the sampled node may be on any redis-cluster host; scan it where it runs.
+	// With a host unreadable it is only the fullest node of the other hosts:
+	// its families are still judged, but they are not the fleet's fullest-node
+	// series, so they are not recorded as its baseline.
+	h, fullest, failures, err := fullestRedisNodeUsage(ctx, env)
 	if err != nil {
 		return nil, err
 	}
+	partial := len(failures) > 0
 
 	// sampled scan, ids normalized to <id>, counted by shape. LC_ALL=C per
 	// 3.3; head bounds the scan; the generous remote+ssh timeouts cover a
@@ -125,21 +128,30 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		var haveHistory bool
 		if env.baseline != nil {
 			median, _, haveHistory = env.baseline.trailingMedian(metric, 7*24*time.Hour, 3)
-			env.baseline.record(metric, time.Now(), float64(count))
+			if !partial {
+				env.baseline.record(metric, time.Now(), float64(count))
+			}
 		}
 		if haveHistory && count > familyAlertMinCount && float64(count) > 3*median {
 			alerted = true
+			observed := fmt.Sprintf("count=%d median=%.0f node=%d", count, median, fullest.port)
+			if partial {
+				observed += " " + redisUnobservedHosts(failures)
+			}
 			findings = append(findings, finding{
 				probeId: "redis/key-families", tier: tierWarn,
 				class: "family-growth", target: target, frame: family, sustain: 1,
 				symptom: fmt.Sprintf("key family %q at %d keys in the sample, > 3x its 7-day median %.0f — missing-ttl signature",
 					family, count, median),
 				baseline: fmt.Sprintf("trailing 7-day median %.0f keys in a %d-key sample (learned)", median, familyScanKeyLimit),
-				observed: fmt.Sprintf("count=%d median=%.0f node=%d", count, median, fullest.port),
+				observed: observed,
 				context:  "a family growing without bound = missing ttl (3.3); pair with --memkeys for byte attribution",
 				playbook: "SIGNALS.md 3.3",
 			})
 		}
+	}
+	for _, failure := range failures {
+		findings = append(findings, redisHostCannotObserveFinding(failure, "key-families"))
 	}
 	// the histogram is the daily inventory a diagnostician greps for — log it
 	// unconditionally, since a healthy finding emits no ticket

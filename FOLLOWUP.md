@@ -190,6 +190,14 @@ inline comments referenced below.
 
 ## 3. Redis topology — second host + replicas (committed direction)
 
+**Superseded 2026-10-12.** The second host joined as masters, not replicas:
+the cluster is 48 masters with no replicas, edge-6 nodes 1-32 (6380-6411) and
+edge-5 nodes 33-48 (6412-6427), each announcing its own host's LAN address.
+Server 85c760bd replaced the port-rewrite dialer (step 5) with one that dials
+each node at the host that announces it. The runbook below is the July plan;
+use xops `main/ansible/REDIS.md` and `REDIS-EXPANSION.md` instead, where
+cross-host replicas remain a follow-up.
+
 Groundwork already in the tree: `cluster-announce-ip {{ redis_lan_ip }}` in
 the template + inventory var; playbook rescue path defanged (no more bare
 add-node; rebalance opt-in via `WARP_REDIS_REBALANCE=1`, never seeds empty

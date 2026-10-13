@@ -75,7 +75,10 @@ func (q *payerAdmissionQueue) acquire(ctx context.Context, payer server.Id) (fun
 // completion, and release on success, error or panic before post-commit work.
 // Zero-byte anchors need no financial serialization. A positive companion that
 // is subsequently clamped to zero may harmlessly take a turn before that read.
+// The stream state the insert binds is read first, holding no turn or
+// connection (contract_stream_binding.go).
 func transferEscrowTx(ctx context.Context, payer server.Id, requested ByteCount, callback func(server.PgTx)) error {
+	resolveContractStreamBinding(ctx)
 	if requested > 0 && redisAdmissionFromContext(ctx) == nil {
 		leaveGate := server.EnterContractCreationStage(ctx, server.ContractStagePayerGate)
 		release, err := transferEscrowAdmissionQueue.acquire(ctx, payer)

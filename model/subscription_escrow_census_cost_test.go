@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,8 +14,10 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// A held positive reservation is an actual PostgreSQL lock barrier. NOWAIT
-// makes accidental zero-byte grant locking fail deterministically.
+// A held positive reservation is an actual PostgreSQL lock barrier: it keeps
+// its grants' ownership keys, row locks and revision write until commit.
+// NOWAIT makes accidental zero-byte grant locking fail deterministically, and
+// the anchor's wrapped transaction could not admit ownership if it tried.
 func TestZeroByteEscrowDoesNotWaitForGrantOrCensus(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
@@ -27,12 +30,12 @@ func TestZeroByteEscrowDoesNotWaitForGrantOrCensus(t *testing.T) {
 					payerNetworkId: f.sourceNetworkId, payerId: f.sourceId,
 				})
 			}
-			conn := acquireContractLifecycleTestConnection(t, ctx)
-			defer conn.Release()
-			held, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-			server.Raise(err)
-			defer held.Rollback(context.Background())
-			_, _, err = createTransferEscrowInTx(ctx, held, f.sourceNetworkId, f.sourceId,
+			// Positive allocation admits its grants' transaction ownership
+			// (403b9c55), which only the server's own read-committed no-retry
+			// transaction can hold, so the test holds that transaction open.
+			held, finish := beginRareGrantTestTx(t, ctx)
+			defer finish(false)
+			_, _, err := createTransferEscrowInTx(ctx, held, f.sourceNetworkId, f.sourceId,
 				f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 600, nil)
 			server.Raise(err)
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -48,7 +51,7 @@ func TestZeroByteEscrowDoesNotWaitForGrantOrCensus(t *testing.T) {
 					t.Fatalf("zero-byte anchor performed %d exact reservation censuses", counted.reservationReads)
 				}
 			}, server.TxReadCommitted, server.OptNoRetry())
-			server.Raise(held.Commit(ctx))
+			server.Raise(finish(true))
 			if got := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId].reserved; got != 600 {
 				t.Fatalf("zero-byte overlap changed reserved credit to %d", got)
 			}
@@ -193,16 +196,16 @@ func TestNetEscrowRolledBackCreatePostRejectsReusedRevision(t *testing.T) {
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		rolledBack, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-		server.Raise(err)
-		defer rolledBack.Rollback(context.Background())
+		// Admission admits its grant's transaction ownership (403b9c55), which
+		// only the server's own read-committed no-retry transaction can hold.
+		// The test holds that transaction and chooses its rollback.
+		rolledBack, finish := beginRareGrantTestTx(t, ctx)
+		defer finish(false)
 		_, stalePosts, err := createTransferEscrowInTx(ctx, rolledBack,
 			f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId,
 			f.sourceNetworkId, 17, nil)
 		server.Raise(err)
-		server.Raise(rolledBack.Rollback(ctx))
+		server.Raise(finish(false))
 		_, currentPosts := createNetEscrowOrderingTestContract(ctx, f, 23)
 		stalePosts[0]()
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 23 {
@@ -212,18 +215,18 @@ func TestNetEscrowRolledBackCreatePostRejectsReusedRevision(t *testing.T) {
 	})
 }
 
-type beforeEscrowInsertTestTx struct {
-	server.PgTx
-	before func()
-}
-
-func (tx *beforeEscrowInsertTestTx) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
-	if tx.before != nil {
-		before := tx.before
-		tx.before = nil
-		before()
+// Runs before once, just before the admission's escrow insert batch, after its
+// census. Admission admits its grant's transaction ownership (403b9c55), so
+// this is a statement hook on its connection rather than a wrapper.
+func beforeEscrowInsertHook(before func()) *legacyStatementHook {
+	var once sync.Once
+	return &legacyStatementHook{
+		before: func(_ context.Context, _ string, queued []string) {
+			if admissionEscrowInsertBatch(queued) {
+				once.Do(before)
+			}
+		},
 	}
-	return tx.PgTx.SendBatch(ctx, batch)
 }
 
 // A terminal transition can advance reservation revisions without taking the
@@ -236,16 +239,19 @@ func TestNetEscrowCreatePostRechecksConcurrentOutcomeRevision(t *testing.T) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		prior, _ := createNetEscrowOrderingTestContract(ctx, f, 200)
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		var posts []func() any
 		server.Tx(ctx, func(tx server.PgTx) {
-			controlled := &beforeEscrowInsertTestTx{PgTx: tx, before: func() {
+			hooked, release := withLegacyStatementHooks(ctx, tx, beforeEscrowInsertHook(func() {
 				server.Db(ctx, func(conn server.PgConn) {
 					server.RaisePgResult(conn.Exec(ctx, `UPDATE transfer_contract
 						SET outcome='canceled',close_time=now() WHERE contract_id=$1`, prior.ContractId))
 				})
-			}}
+			}))
+			defer release()
 			var err error
-			_, posts, err = createTransferEscrowInTx(ctx, controlled,
+			_, posts, err = createTransferEscrowInTx(hooked, tx,
 				f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId,
 				f.sourceNetworkId, 400, nil)
 			server.Raise(err)

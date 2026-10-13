@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -610,6 +611,9 @@ type providerEgressProbePass struct {
 	// Only additional full batches retain the task deadline when detaching
 	// cancellation for publication. Zero preserves the original first batch.
 	fullReleaseDeadline time.Time
+	// Judges each URL turn against the latest turns of the pass's other
+	// providers. Every URL pass owns a new one; nil holds no turn back.
+	urlCommonMode *providerUrlProbeCommonMode
 	// recordTally records one submitted run in the site tally the pool
 	// refresh judges sites by. Nil records nothing.
 	recordTally  func(context.Context, time.Time, model.ProviderEgressRunTally, []model.ProviderEgressSiteLoad)
@@ -1314,30 +1318,38 @@ func (self *providerEgressProbePass) runFullBatchObserved(
 
 	// the guard and publication score the same provider/place: neither
 	// probationary nor incompatible loads may trip or dilute the guard
-	scoredRuns := []*egresshealth.Result{}
+	providerClientIdScoredRuns := map[string]*egresshealth.Result{}
 	for providerClientId, run := range batch.resultsByProvider() {
 		if self.urlProbes && run.Total > 0 && run.UrlSource != "" {
 			urlProbeSources.WithLabelValues(run.UrlSource).Inc()
 		}
-		scoredRuns = append(scoredRuns, scoreEgressHealthResult(run, places[providerClientId], scoring))
+		providerClientIdScoredRuns[providerClientId] = scoreEgressHealthResult(run, places[providerClientId], scoring)
 	}
-	share, tripped := providerEgressRunGuard(scoredRuns, args.ProviderEgressRules)
+	share, tripped := providerEgressRunGuard(slices.Collect(maps.Values(providerClientIdScoredRuns)), args.ProviderEgressRules)
 	if self.urlProbes {
-		// Individual accepted URL errors belong in the history denominator.
+		// A URL turn is a batch of one provider, and an individual accepted
+		// URL error belongs in the history denominator. Only a pre-response
+		// failure the pass's latest providers all share is held back.
 		tripped = false
+		if self.urlCommonMode != nil {
+			share, tripped = self.urlCommonMode.judge(providerClientIdScoredRuns)
+		}
 	}
 	egressProbeBatchShare.WithLabelValues("full").Set(share)
 	if tripped {
 		egressProbeBatchGuardTripsTotal.WithLabelValues("full").Inc()
+	}
+	if tripped && !self.urlProbes {
 		// alert class: a batch failing this much at once is the prober until
-		// proven otherwise, and nothing it measured is submitted
+		// proven otherwise, and nothing it measured is submitted. The URL
+		// guard logs once per episode instead of once per held turn.
 		glog.Errorf(
 			"[egress]run batch guard tripped: shard=%d/%d failure_share=%.3f guard=%.3f runs=%d; the batch was not submitted and its providers are re-queued after the backoff\n",
 			args.ShardIndex,
 			args.ShardCount,
 			share,
 			args.RunBatchGuard,
-			len(scoredRuns),
+			len(providerClientIdScoredRuns),
 		)
 	}
 

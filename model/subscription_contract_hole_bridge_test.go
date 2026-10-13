@@ -60,21 +60,34 @@ func TestContractHoleReadStatusDistinguishesNegativeAndUnknown(t *testing.T) {
 	})
 }
 
-// A legacy NULL expiration has no absolute lifetime. A real checkpoint renews
-// its quiet period and permits the same contract in both directions.
-func TestContractHoleLegacyRolloutHasNoFixedMaximumAge(t *testing.T) {
+// A legacy NULL expiration falls back to the default lifetime from creation.
+// Inside that lifetime a real checkpoint renews its quiet period and permits
+// the same contract in both directions; past it, a checkpoint cannot defer
+// expiry.
+func TestContractHoleLegacyCheckpointBridgeWithinFallbackLifetime(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		now := server.NowUtc()
+		cutoff := now.Add(-12 * time.Minute)
+		expired := insertContractHoleSourceRow(ctx, server.NewId(), server.NewId())
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2 WHERE contract_id=$1`, expired, now.Add(-24*time.Hour)))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,close_time,checkpoint)
+				VALUES($1,'source',0,$2,true)`, expired, now))
+			state, err := inspectContractExpiryInTx(ctx, tx, expired, cutoff, false)
+			if err != nil || state == nil {
+				t.Fatalf("checkpoint deferred a contract past its fallback lifetime: state=%+v error=%v", state, err)
+			}
+		})
 		source, destination := server.NewId(), server.NewId()
 		id := insertContractHoleSourceRow(ctx, source, destination)
-		cutoff := server.NowUtc().Add(-12 * time.Minute)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2 WHERE contract_id=$1`, id, cutoff.Add(-24*time.Hour)))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2 WHERE contract_id=$1`, id, now.Add(-DefaultContractExpiration/2)))
 			state, err := inspectContractExpiryInTx(ctx, tx, id, cutoff, false)
 			if err != nil || state == nil {
-				t.Fatalf("quiet old contract was not an expiry candidate: state=%+v error=%v", state, err)
+				t.Fatalf("quiet contract inside its lifetime was not an expiry candidate: state=%+v error=%v", state, err)
 			}
 		})
 		server.Raise(CloseContract(ctx, id, source, 0, true))

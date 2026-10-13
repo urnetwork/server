@@ -1282,6 +1282,52 @@
           "legendFormat": "window unknown {{host}} {{block}} {{instance}}"
         }
       ]
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "hosted registrations refused and invalid performance profiles / s",
+      "description": "Hosted derived-client registrations refused because the owner's concurrent registration bound was full, and stored initial performance profiles that connect refuses, read back in auto by this service. The API dashboard shows the auth-client refusals.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 138
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum (rate(urnetwork_hosted_mint_admission_refusals_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "registration refused"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (source) (rate(urnetwork_proxy_invalid_performance_profiles_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "invalid profile {{source}}"
+        }
+      ]
     }
   ]
 }

@@ -15,7 +15,7 @@ import (
 
 func seedTaskQueueRetention(t testing.TB, ctx context.Context) ([]server.Id, time.Time, time.Time) {
 	t.Helper()
-	ids := make([]server.Id, taskCompletionBatchLimit+1)
+	ids := make([]server.Id, finishedTaskRetentionGroupSize+1)
 	for index := range ids {
 		ids[index] = server.NewId()
 	}
@@ -51,11 +51,11 @@ func TestTaskQueueRetentionDefersLiveFinishedOwnerBeforeRow(t *testing.T) {
 			}
 			var observed server.Id
 			server.Raise(tx.QueryRow(ctx, `SELECT task_id FROM finished_task WHERE task_id=$1 FOR UPDATE NOWAIT`, ids[0]).Scan(&observed))
-			if observed != ids[0] || len(GetFinishedTasks(ctx, ids...)) != taskCompletionBatchLimit {
+			if observed != ids[0] || len(GetFinishedTasks(ctx, ids...)) != finishedTaskRetentionGroupSize {
 				t.Fatal("refused retention changed live finished custody")
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
-		if removed := RemoveFinishedTasks(ctx, minTime, postErrorMinTime); removed != taskCompletionBatchLimit ||
+		if removed := RemoveFinishedTasks(ctx, minTime, postErrorMinTime); removed != finishedTaskRetentionGroupSize ||
 			len(GetFinishedTasks(ctx, ids...)) != 0 || reruns.Load() != 0 {
 			t.Fatalf("released finished ownership did not sweep without retry: removed=%d reruns=%d", removed, reruns.Load())
 		}
@@ -72,7 +72,7 @@ func TestTaskQueueRetentionSkipsHeldRowWithoutBlockingPeers(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			var observed server.Id
 			server.Raise(tx.QueryRow(ctx, `SELECT task_id FROM finished_task WHERE task_id=$1 FOR UPDATE`, ids[0]).Scan(&observed))
-			if removed := RemoveFinishedTasks(ctx, minTime, postErrorMinTime); removed != taskCompletionBatchLimit {
+			if removed := RemoveFinishedTasks(ctx, minTime, postErrorMinTime); removed != finishedTaskRetentionGroupSize {
 				t.Fatalf("held finished row prevented independent retention progress: removed=%d", removed)
 			}
 			remaining := GetFinishedTasks(ctx, ids...)

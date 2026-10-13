@@ -67,7 +67,23 @@ func readStRetainedWalletHeads(ctx context.Context, query string, domain [32]byt
 // and no wallet comes from the account projection. A provider without accepted
 // evidence, or whose evidence is refused, is unmapped instead of holding every
 // other provider's payout. A failed read returns no partial map.
-func GetStRetainedProviderWalletsForEpoch(ctx context.Context, rootSigner common.Address, scope StProviderWalletEpochScope, providers []StProviderWalletIdentity) (walletClientIds map[server.Id]*StProviderWallet, resultErr error) {
+func GetStRetainedProviderWalletsForEpoch(ctx context.Context, rootSigner common.Address, scope StProviderWalletEpochScope, providers []StProviderWalletIdentity) (map[server.Id]*StProviderWallet, error) {
+	selection, err := GetStRetainedProviderWalletSelectionForEpoch(ctx, rootSigner, scope, providers)
+	if err != nil {
+		return nil, err
+	}
+	return selection.Wallets, nil
+}
+
+// Also reports why each unmapped provider is unmapped: no signed evidence at
+// all (absent), or evidence the protocol refused.
+func GetStRetainedProviderWalletSelectionForEpoch(ctx context.Context, rootSigner common.Address, scope StProviderWalletEpochScope, providers []StProviderWalletIdentity) (selection *StRetainedProviderWalletSelection, resultErr error) {
+	// a recovered failure returns no partial selection
+	defer func() {
+		if resultErr != nil {
+			selection = nil
+		}
+	}()
 	defer providerWorkRecover(&resultErr)
 	if ctx == nil || rootSigner == (common.Address{}) || scope.StartTime.Unix() <= 0 {
 		return nil, protocol.ErrWalletMappingUnavailable
@@ -130,5 +146,11 @@ func GetStRetainedProviderWalletsForEpoch(ctx context.Context, rootSigner common
 			return payoutartifact.WholeWorkHotkeyDelegation{NetworkId: networkId, DelegationHeadHash: hex.EncodeToString(head.hash[:]), DelegationGeneration: head.generation}, true
 		},
 	}
-	return selectStProviderWalletsForEpoch(ctx, rootSigner, scope, heads, true)
+	outcome := &StRetainedProviderWalletSelection{Absent: map[server.Id]error{}, Refused: map[server.Id]error{}}
+	wallets, err := selectStProviderWalletsForEpoch(ctx, rootSigner, scope, heads, outcome)
+	if err != nil {
+		return nil, err
+	}
+	outcome.Wallets = wallets
+	return outcome, nil
 }

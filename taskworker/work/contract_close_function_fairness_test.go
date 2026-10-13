@@ -20,7 +20,12 @@ import (
 )
 
 const closeFunctionFairnessCount = 288
-const closeFunctionFairnessPrefix = 144
+
+// Each paid owner's first claim closes its four contracts in one owner batch
+// and removes the other three queued closes; each free contract is its own
+// claim. The prefix covers every paid owner and the first free round.
+const closeFunctionFairnessClaims = 64 + 32
+const closeFunctionFairnessPrefix = 64 + 8
 
 // Public constructors retain actual Redis reservation tokens and payer grants.
 // The accepted intent is the same explicit retained-state seam used by the
@@ -62,6 +67,7 @@ func seedCloseFunctionFairness(t testing.TB, ctx context.Context) closeFunctionF
 	}
 	// Interleave four contracts for each owner, keeping 64 overlapping payer
 	// domains and eight genuine no-escrow source domains in one old queue block.
+	// They are legacy contracts, whose queued close is their deadline authority.
 	for index := range closeFunctionFairnessCount {
 		owner := index % len(networks)
 		var id server.Id
@@ -78,7 +84,7 @@ func seedCloseFunctionFairness(t testing.TB, ctx context.Context) closeFunctionF
 		f.ids = append(f.ids, id)
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=ANY($1)`, f.ids, f.bulkAt))
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=NULL WHERE contract_id=ANY($1)`, f.ids))
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, id := range f.ids {
 				batch.Queue(`INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,next_attempt_time)
@@ -344,7 +350,7 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 		defer func() { server.Raise(scope.Close()) }()
 		s := session.NewLocalClientSession(ctx, "", nil)
 		defer s.Cancel()
-		_, err = ScheduleOpenContractClosures(&ScheduleOpenContractClosuresArgs{PageSize: 1024, StartedAt: f.bulkAt}, s)
+		_, err = ScheduleOpenContractClosures(&ScheduleOpenContractClosuresArgs{PageSize: 1024, StartedAt: f.bulkAt.Add(-model.DefaultContractExpiration)}, s)
 		server.Raise(err)
 		canaries := closeFunctionFairnessCanaries()
 		keys := transferDebitStartupOwnershipKeys()
@@ -414,7 +420,7 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
                     AND (f.args_json::jsonb->>'contract_id')::uuid=c.contract_id AND post_completed)
                 ORDER BY contract_id LIMIT 1`, f.ids, closeTarget.TargetFunctionName()).Scan(&repeatedContract))
 		})
-		_, err = ScheduleOpenContractClosures(&ScheduleOpenContractClosuresArgs{PageSize: 1024, StartedAt: f.bulkAt}, s)
+		_, err = ScheduleOpenContractClosures(&ScheduleOpenContractClosuresArgs{PageSize: 1024, StartedAt: f.bulkAt.Add(-model.DefaultContractExpiration)}, s)
 		server.Raise(err)
 		server.Db(ctx, func(conn server.PgConn) {
 			var repeated bool
@@ -435,7 +441,10 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 			if current.Errors != 0 {
 				t.Fatal("real financial worker refused or retried the healthy fixture", current)
 			}
-			if current.Children == 288 && current.Paid == 256 && current.Free == 32 && current.PendingChildren+current.Intents+current.Unsettled+current.Journals+current.ProviderPending+current.MirrorPending == 0 {
+			if closeFunctionFairnessClaims < current.Children {
+				t.Fatal("queued closes outlived the owner batches that closed their contracts", current)
+			}
+			if current.Children == closeFunctionFairnessClaims && current.Paid == 256 && current.Free == 32 && current.PendingChildren+current.Intents+current.Unsettled+current.Journals+current.ProviderPending+current.MirrorPending == 0 {
 				break
 			}
 			select {

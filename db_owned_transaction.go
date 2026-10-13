@@ -241,40 +241,67 @@ type pgOwnershipResource struct {
 	user     string
 }
 
+// A validated maintenance authority, and the environment its templates read
+// when it was interpolated.
+type pgOwnershipResourceLoad struct {
+	resource    pgOwnershipResource
+	environment templateEnvironment
+}
+
+// Every owned transaction and task claim validates its checkout against the
+// maintenance resource, so the authority is parsed once per resource version
+// and environment rather than reparsed, and its interpolation logged, per use.
+var pgOwnershipResourceCache ResourceValueCache[ResourceVersion, pgOwnershipResourceLoad]
+
 func requirePgOwnershipResource() pgOwnershipResource {
 	resource, err := Vault.SimpleResource(MaintenancePgVaultResourceName)
 	if err != nil {
 		panic(errors.New("database ownership requires an explicit direct maintenance resource"))
 	}
-	// Pool construction resolves singleton lists and environment templates.
-	// Validate that same authority without exposing parser input on failure.
-	defer func() {
-		if recover() != nil {
+	// an invalid resource panics on every use, as before, and is never stored
+	load := pgOwnershipResourceCache.Get(resource.Version(), func(load pgOwnershipResourceLoad) bool {
+		return load.environment.current()
+	}, func() (load pgOwnershipResourceLoad, reusable bool) {
+		// Pool construction resolves singleton lists and environment templates.
+		// Validate that same authority without exposing parser input on failure.
+		defer func() {
+			if recover() != nil {
+				panic(errors.New("invalid database ownership maintenance resource"))
+			}
+		}()
+		// read before interpolating: a change after this is derived again
+		templates := []string{}
+		for _, name := range []string{"authority", "db", "user"} {
+			var values []string
+			getAll(resource.Parse(), []string{name}, &values)
+			templates = append(templates, values...)
+		}
+		load.environment = readTemplateEnvironment(templates...)
+		value := func(name string) string {
+			values := resource.String(name)
+			if len(values) != 1 {
+				panic(errors.New("invalid database ownership maintenance resource"))
+			}
+			return values[0]
+		}
+		authority := value("authority")
+		database := value("db")
+		user := value("user")
+		parsed, err := url.Parse("postgres://" + authority)
+		if err != nil || parsed.Hostname() == "" || parsed.User != nil || database == "" || user == "" {
 			panic(errors.New("invalid database ownership maintenance resource"))
 		}
-	}()
-	value := func(name string) string {
-		values := resource.String(name)
-		if len(values) != 1 {
-			panic(errors.New("invalid database ownership maintenance resource"))
+		port := uint64(5432)
+		if parsed.Port() != "" {
+			port, err = strconv.ParseUint(parsed.Port(), 10, 16)
+			if err != nil || port == 0 {
+				panic(errors.New("invalid database ownership maintenance resource"))
+			}
 		}
-		return values[0]
-	}
-	authority := value("authority")
-	database := value("db")
-	user := value("user")
-	parsed, err := url.Parse("postgres://" + authority)
-	if err != nil || parsed.Hostname() == "" || parsed.User != nil || database == "" || user == "" {
-		panic(errors.New("invalid database ownership maintenance resource"))
-	}
-	port := uint64(5432)
-	if parsed.Port() != "" {
-		port, err = strconv.ParseUint(parsed.Port(), 10, 16)
-		if err != nil || port == 0 {
-			panic(errors.New("invalid database ownership maintenance resource"))
-		}
-	}
-	return pgOwnershipResource{host: parsed.Hostname(), port: uint16(port), database: database, user: user}
+		load.resource = pgOwnershipResource{host: parsed.Hostname(), port: uint16(port), database: database, user: user}
+		return load, true
+	})
+	return load.resource
 }
 
 func (self pgOwnershipResource) validate(conn PgConn) error {

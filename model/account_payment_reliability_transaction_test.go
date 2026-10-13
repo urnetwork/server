@@ -1,4 +1,6 @@
-// Reliability refresh, policy checks and allocation share the plan's rollback owner.
+// A real plan commits its window's reliability scores in bounded steps before
+// its allocation transaction; policy checks and allocation share that
+// transaction's rollback owner. A dry run computes the scores inline.
 package model
 
 import (
@@ -139,13 +141,15 @@ func paymentReliabilityTransactionFixture(t testing.TB, ctx context.Context) (*p
 	return f, start, end
 }
 
-// Fail after allocation to prove the refresh cannot escape its caller's rollback.
+// Fail after allocation: the allocation rolls back, while the window's
+// reliability scores, committed before the allocation transaction, remain for
+// the retry, which reuses them without aggregating the window again.
 func TestPaymentPlanReliabilityRollsBackWithAllocation(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		f, _, _ := paymentReliabilityTransactionFixture(t, ctx)
+		f, start, end := paymentReliabilityTransactionFixture(t, ctx)
 		rollbackErr := errors.New("synthetic payout allocation rollback")
 		var attempted *PaymentPlan
 		panicValue := server.HandleError(func() {
@@ -164,8 +168,55 @@ func TestPaymentPlanReliabilityRollsBackWithAllocation(t *testing.T) {
 		if !ok || !errors.Is(err, rollbackErr) || attempted == nil {
 			t.Fatal("fixture did not reach the allocation rollback", panicValue)
 		}
-		requirePaymentReliabilityRollback(t, ctx, f.network, attempted.PaymentPlanId)
+		requirePaymentAllocationRollback(t, ctx, f.network, attempted.PaymentPlanId)
+		completeTime := requirePaymentReliabilityWindowCommitted(t, ctx, f.network, start, end)
+
+		retried, err := createPaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0, false, nil)
+		if err != nil || retried == nil || retried.SubsidyPayment == nil || len(retried.NetworkPayments) != 1 ||
+			!retried.SubsidyPayment.StartTime.Equal(start) || !retried.SubsidyPayment.EndTime.Equal(end) {
+			t.Fatal("retry lost the rolled back allocation", retried, err)
+		}
+		if retainedTime := requirePaymentReliabilityWindowCommitted(t, ctx, f.network, start, end); !retainedTime.Equal(completeTime) {
+			t.Fatal("retry aggregated the committed reliability window again", completeTime, retainedTime)
+		}
 	})
+}
+
+// The allocation of the plan left nothing behind.
+func requirePaymentAllocationRollback(t testing.TB, ctx context.Context, networkId, planId server.Id) {
+	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		var payments, subsidies, points, paidSweeps, stagedSweeps int
+		server.Raise(conn.QueryRow(ctx, `SELECT
+			(SELECT COUNT(*) FROM account_payment WHERE payment_plan_id=$2),
+			(SELECT COUNT(*) FROM subsidy_payment WHERE payment_plan_id=$2),
+			(SELECT COUNT(*) FROM account_point WHERE payment_plan_id=$2),
+			(SELECT COUNT(*) FROM transfer_escrow_sweep WHERE network_id=$1 AND payment_id IS NOT NULL),
+			(SELECT COUNT(*) FROM payment_plan_sweep WHERE payment_plan_id=$2)`, networkId, planId).
+			Scan(&payments, &subsidies, &points, &paidSweeps, &stagedSweeps))
+		if payments != 0 || subsidies != 0 || points != 0 || paidSweeps != 0 || stagedSweeps != 0 {
+			t.Fatalf("allocation escaped its rollback: payments=%d subsidies=%d points=%d paid_sweeps=%d staged_sweeps=%d",
+				payments, subsidies, points, paidSweeps, stagedSweeps)
+		}
+	})
+}
+
+// The window's scores are committed and current; returns the window's
+// completion time, which only a new aggregation of the window changes.
+func requirePaymentReliabilityWindowCommitted(t testing.TB, ctx context.Context, networkId server.Id, start, end time.Time) (completeTime time.Time) {
+	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		var score float64
+		var minBlock, maxBlock int64
+		server.Raise(conn.QueryRow(ctx, `SELECT independent_reliability_score, min_block_number, max_block_number
+			FROM network_connection_reliability_score WHERE network_id=$1`, networkId).Scan(&score, &minBlock, &maxBlock))
+		if score != 8192 || minBlock != reliabilityBlockNumber(start) || maxBlock != reliabilityBlockNumber(end)+1 {
+			t.Fatalf("committed reliability window lost its scores: score=%g blocks=[%d,%d)", score, minBlock, maxBlock)
+		}
+		server.Raise(conn.QueryRow(ctx, `SELECT complete_time FROM payment_plan_reliability_window
+			WHERE min_block_number=$1 AND max_block_number=$2 AND complete_time IS NOT NULL`, minBlock, maxBlock).Scan(&completeTime))
+	})
+	return
 }
 
 // The public dry-run mode computes the same window without retaining its score.
@@ -206,6 +257,9 @@ func requirePaymentReliabilityRollback(t testing.TB, ctx context.Context, networ
 
 // Exercise the real planner and retained earning identity on bounded input.
 // Counts are the performance gate; elapsed aggregation time is evidence only.
+// Every committed step (the window definition, its chunk, its fold, the plan
+// transaction that first reports its window and the one that allocates, and
+// the staged assignment) owns one backend; the window is folded exactly once.
 func TestPaymentPlanReliabilityUsesOneBackendAndOneAggregation(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -234,7 +288,7 @@ func TestPaymentPlanReliabilityUsesOneBackendAndOneAggregation(t *testing.T) {
 			t.Errorf("plan repeated or skipped its refresh/checks: aggregations=%d rows=%d schema=%d boundary=%d error=%v",
 				observer.aggregations, observer.aggregationRows, observer.schemaChecks, observer.boundaryChecks, observer.queryErr)
 		}
-		if observer.minBlock != reliabilityBlockNumber(start) || observer.maxBlock != reliabilityBlockNumber(end)+1 || observer.statements > 64 {
+		if observer.minBlock != reliabilityBlockNumber(start) || observer.maxBlock != reliabilityBlockNumber(end)+1 || observer.statements > 96 {
 			t.Errorf("plan expanded its aggregation window or round trips: blocks=[%d,%d) statements=%d", observer.minBlock, observer.maxBlock, observer.statements)
 		}
 		t.Logf("reliability input_rows=16384 contributing_rows=8192 aggregations=%d changed_rows=%d nested_acquires=%d foreign_statements=%d statements=%d aggregation_duration=%s",

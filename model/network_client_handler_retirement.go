@@ -13,6 +13,37 @@ import (
 
 const networkClientHandlerRetirementPageSize = 64
 
+// The first 4096 clients, in order, that have an open row without a handler
+// row: the result of SELECT DISTINCT client_id ... WHERE c.connected AND NOT
+// EXISTS(handler) ORDER BY client_id LIMIT 4096, which read every open row
+// because orphans rarely fill the limit. This skips from one handler id to the
+// next on network_client_connection_connected_handler_id (migration 820),
+// probes each handler row once, and reads only the open rows of absent
+// handlers and of a NULL handler id, which NOT EXISTS also counts as orphaned.
+// The materialized orphan set and OFFSET 0 keep each absent handler's rows a
+// separate indexed scan, never a join over every open row.
+const networkClientOrphanClientSql = `WITH RECURSIVE connected_handler(handler_id) AS (
+ (SELECT c.handler_id FROM network_client_connection c
+  WHERE c.connected AND c.handler_id IS NOT NULL ORDER BY c.handler_id LIMIT 1)
+ UNION ALL
+ SELECT (SELECT c.handler_id FROM network_client_connection c
+  WHERE c.connected AND c.handler_id>connected_handler.handler_id ORDER BY c.handler_id LIMIT 1)
+ FROM connected_handler WHERE connected_handler.handler_id IS NOT NULL
+), orphan_handler AS MATERIALIZED (
+ SELECT connected_handler.handler_id FROM connected_handler
+ WHERE connected_handler.handler_id IS NOT NULL
+ AND NOT EXISTS(SELECT 1 FROM network_client_handler h WHERE h.handler_id=connected_handler.handler_id)
+)
+SELECT DISTINCT orphan.client_id FROM (
+ SELECT owned.client_id FROM orphan_handler CROSS JOIN LATERAL (
+  SELECT c.client_id FROM network_client_connection c
+  WHERE c.connected AND c.handler_id=orphan_handler.handler_id OFFSET 0
+ ) AS owned
+ UNION ALL
+ SELECT c.client_id FROM network_client_connection c WHERE c.connected AND c.handler_id IS NULL
+) AS orphan
+ORDER BY orphan.client_id LIMIT 4096`
+
 // Discovery may inspect an endpoint's connected history, but holds no endpoint
 // fence. Every candidate is checked again after its row is exclusively owned.
 const networkClientOrphanConnectionPageSql = `SELECT c.connection_id
@@ -55,9 +86,7 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 	var clientIds []server.Id
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		clientIds = nil
-		rows, err := tx.Query(ctx, `SELECT DISTINCT client_id FROM network_client_connection c
-		 WHERE c.connected AND NOT EXISTS(SELECT 1 FROM network_client_handler h WHERE h.handler_id=c.handler_id)
-		 ORDER BY client_id LIMIT 4096`)
+		rows, err := tx.Query(ctx, networkClientOrphanClientSql)
 		server.Raise(err)
 		defer rows.Close()
 		for rows.Next() {

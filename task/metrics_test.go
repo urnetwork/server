@@ -120,22 +120,28 @@ func TestTaskQueueMetricsCollectorSwapCannotMixScrapeGenerations(t *testing.T) {
 	requireTaskQueueGeneration(t, newMetrics, 2, newTime)
 }
 
-// uniformTaskQueueSnapshot makes mixed generations immediately visible.
+// uniformTaskQueueSnapshot makes mixed generations immediately visible. Odd
+// values mark every state estimated, so adjacent generations also differ there.
 func uniformTaskQueueSnapshot(value int64) taskQueueMetricsSnapshot {
+	estimated := value%2 == 1
 	return taskQueueMetricsSnapshot{
-		Total:               value,
-		Available:           value,
-		Claimed:             value,
-		RescheduleError:     value,
-		OldestOverdueSecond: float64(value),
+		Total:                    value,
+		Available:                value,
+		Claimed:                  value,
+		RescheduleError:          value,
+		OldestOverdueSecond:      float64(value),
+		TotalEstimated:           estimated,
+		AvailableEstimated:       estimated,
+		ClaimedEstimated:         estimated,
+		RescheduleErrorEstimated: estimated,
 	}
 }
 
-// requireTaskQueueGeneration requires all six values to share one generation.
+// requireTaskQueueGeneration requires all ten values to share one generation.
 func requireTaskQueueGeneration(t *testing.T, metrics []prometheus.Metric, value int64, observedAt time.Time) {
 	t.Helper()
-	if len(metrics) != 6 {
-		t.Fatalf("task queue metrics = %d, want 6", len(metrics))
+	if len(metrics) != 10 {
+		t.Fatalf("task queue metrics = %d, want 10", len(metrics))
 	}
 	for _, metric := range metrics {
 		var dtoMetric dto.Metric
@@ -145,6 +151,9 @@ func requireTaskQueueGeneration(t *testing.T, metrics []prometheus.Metric, value
 		want := float64(value)
 		if strings.Contains(metric.Desc().String(), `fqName: "urnetwork_taskworker_queue_snapshot_timestamp_seconds"`) {
 			want = float64(observedAt.Unix())
+		}
+		if strings.Contains(metric.Desc().String(), `fqName: "urnetwork_taskworker_queue_depth_estimated"`) {
+			want = float64(value % 2)
 		}
 		if got := dtoMetric.GetGauge().GetValue(); got != want {
 			t.Fatalf("mixed task queue metric %s = %v, want %v", metric.Desc(), got, want)

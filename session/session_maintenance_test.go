@@ -121,10 +121,15 @@ func TestAuthorizationLeaseDeadlineAndRetiredGeneration(t *testing.T) {
 	if !state.renew(now.Add(60*time.Second), now.Add(62*time.Second), time.Time{}, 7) || !state.deadline.Equal(now.Add(150*time.Second)) {
 		t.Fatal(state)
 	}
-	if state.expire(now.Add(149*time.Second)) || !state.expire(now.Add(150*time.Second)) {
-		t.Fatal("lease timer boundary")
+	// An elapsed renewal deadline retires nothing; only the horizon does.
+	if state.expire(now.Add(151*time.Second), time.Time{}) {
+		t.Fatal("renewal deadline retired a lease without a horizon")
 	}
-	if state.renew(now.Add(145*time.Second), now.Add(151*time.Second), time.Time{}, 7) {
+	terminal := now.Add(200 * time.Second)
+	if state.expire(now.Add(199*time.Second), terminal) || !state.expire(now.Add(200*time.Second), terminal) {
+		t.Fatal("lease horizon boundary")
+	}
+	if state.renew(now.Add(195*time.Second), now.Add(201*time.Second), time.Time{}, 7) {
 		t.Fatal("late authoritative result resurrected retired generation")
 	}
 	state = authorizationLeaseState{deadline: now.Add(90 * time.Second), generation: 8}
@@ -133,5 +138,20 @@ func TestAuthorizationLeaseDeadlineAndRetiredGeneration(t *testing.T) {
 	}
 	if !state.renew(now.Add(30*time.Second), now.Add(31*time.Second), now.Add(50*time.Second), 8) || !state.deadline.Equal(now.Add(50*time.Second)) {
 		t.Fatal("lease exceeded credential horizon")
+	}
+	// A late success after the renewal deadline renews a live generation.
+	state = authorizationLeaseState{deadline: now.Add(90 * time.Second), generation: 9}
+	if !state.renew(now.Add(91*time.Second), now.Add(92*time.Second), time.Time{}, 9) || !state.deadline.Equal(now.Add(181*time.Second)) {
+		t.Fatal("success after the renewal deadline did not renew a live lease", state)
+	}
+	// An unanswered check holds the lease from its completion, never shortening it.
+	if !state.hold(now.Add(100*time.Second), time.Time{}, 9) || !state.deadline.Equal(now.Add(190*time.Second)) {
+		t.Fatal("unanswered check did not hold the lease", state)
+	}
+	if !state.hold(now.Add(95*time.Second), time.Time{}, 9) || !state.deadline.Equal(now.Add(190*time.Second)) {
+		t.Fatal("hold shortened the lease", state)
+	}
+	if state.hold(now.Add(250*time.Second), now.Add(240*time.Second), 9) {
+		t.Fatal("hold extended a credential past its horizon")
 	}
 }

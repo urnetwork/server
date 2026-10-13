@@ -11,7 +11,7 @@ import (
 )
 
 // Exercises the full partition lifecycle against a fresh (plain-table) db:
-// dry run is a no-op, the cutover retains only the last ClientExpiration and
+// dry run is a no-op, the cutover retains only the retention window and
 // takes the canonical names, the drain-style upsert works on the partitioned
 // table, the score window computation runs, maintenance creates ahead and
 // drops expired partitions, and finalize removes the old table.

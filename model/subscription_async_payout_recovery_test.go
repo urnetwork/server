@@ -187,33 +187,41 @@ func TestRedisSettlementCrashRetainsEarnedPayoutAndProjection(t *testing.T) {
 }
 
 // Rollback must discard every required financial owner, then admit one retry.
+// Settlement takes transaction ownership, so like every production caller the
+// attempt runs in a fresh read-committed no-retry server transaction, which a
+// sentinel failure rolls back after the owner has written its whole outcome.
 func TestRedisSettlementRollbackKeepsPayoutAndProjectionAtomic(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
 		f := asyncPayoutRecoveryFixture(t, ctx)
 		contract := createRedisAdmissionTest(ctx, f, 64)
 		asyncPayoutRecoveryReports(ctx, contract.ContractId, 11)
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		server.Raise(err)
-		_, closed, err := settleEscrowForegroundInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
-		server.Raise(err)
-		if !closed {
-			t.Fatal("rollback never reached the financial owner")
+		rollback := errors.New("synthetic failure after the settlement owner wrote")
+		timing := &server.DbTiming{}
+		closed := false
+		recovered := server.HandleError(func() {
+			server.Tx(ctx, func(tx server.PgTx) {
+				var err error
+				_, closed, err = settleEscrowForegroundInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
+				server.Raise(err)
+				panic(rollback)
+			}, server.TxReadCommitted, server.OptNoRetry(), timing)
+		})
+		if recovered != rollback || !closed || timing.Phases[server.DbTimingRollback].Count != 1 {
+			t.Fatal("rollback never reached the financial owner", recovered, closed)
 		}
-		server.Raise(tx.Rollback(ctx))
 		terminal, journals, sweeps, owners, earned, revenue := asyncPayoutRecoveryState(t, ctx, contract.ContractId)
 		credit, pending, applied := asyncDebitTestState(t, ctx, f.balanceId)
 		if terminal || journals+sweeps+owners != 0 || earned != 0 || revenue != 0 || credit != 1000 || pending+applied != 0 || Testing_NetEscrowByteCount(ctx, f.balanceId) != 64 {
 			t.Fatal("rollback leaked financial state")
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
+			var err error
 			_, closed, err = settleEscrowForegroundInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled)
 			server.Raise(err)
 			if !closed {
 				t.Fatal("rolled-back settlement lost retry authority")
 			}
-		})
+		}, server.TxReadCommitted, server.OptNoRetry())
 		terminal, journals, sweeps, owners, earned, revenue = asyncPayoutRecoveryState(t, ctx, contract.ContractId)
 		if !terminal || journals != 1 || sweeps != 1 || owners != 1 || earned != 11 || revenue != 11 {
 			t.Fatal("retry did not commit one exact allocation")
@@ -222,6 +230,9 @@ func TestRedisSettlementRollbackKeepsPayoutAndProjectionAtomic(t *testing.T) {
 }
 
 // An actual over-capacity report retains all liability while a neighbor settles.
+// Both closes run in the fresh read-committed no-retry server transaction
+// every production settlement caller uses, so the owner reaches the escrow
+// sufficiency decision instead of refusing ownership first.
 func TestRedisSettlementInsufficientEscrowRetainsLiabilityAndNeighbor(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
 		f := asyncPayoutRecoveryFixture(t, ctx)
@@ -232,10 +243,13 @@ func TestRedisSettlementInsufficientEscrowRetainsLiabilityAndNeighbor(t *testing
 		reports := legacyDrainTestReports(ctx, held.ContractId)
 		server.Tx(ctx, func(tx server.PgTx) {
 			posts, closed, err := settleEscrowForegroundInTx(ctx, tx, held.ContractId, ContractOutcomeSettled)
-			if !errors.Is(err, errContractInsufficientEscrow) || closed || len(posts) != 0 {
-				t.Fatal("underfunded usage was converted into settlement")
+			if err == nil || closed || len(posts) != 0 {
+				t.Fatal("underfunded usage was converted into settlement", err, closed, len(posts))
 			}
-		})
+			if !errors.Is(err, errContractInsufficientEscrow) {
+				t.Fatal("underfunded usage was refused before its escrow sufficiency decision", err)
+			}
+		}, server.TxReadCommitted, server.OptNoRetry())
 		terminal, journals, sweeps, owners, _, _ := asyncPayoutRecoveryState(t, ctx, held.ContractId)
 		if terminal || journals+sweeps+owners != 0 || string(reports) != string(legacyDrainTestReports(ctx, held.ContractId)) {
 			t.Fatal("refusal lost original reports or financial liability")
@@ -246,7 +260,7 @@ func TestRedisSettlementInsufficientEscrowRetainsLiabilityAndNeighbor(t *testing
 			if !closed {
 				t.Fatal("accounting hold blocked a healthy neighbor")
 			}
-		})
+		}, server.TxReadCommitted, server.OptNoRetry())
 		taskId := asyncPayoutRecoveryProject(t, ctx, neighbor.ContractId)
 		requireProviderTotalsTestState(t, ctx, taskId, f.destinationNetworkId, true, 11, 11)
 		_, _, _, err := flushTransferDebitBalance(ctx, f.balanceId)

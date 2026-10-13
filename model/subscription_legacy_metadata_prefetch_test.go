@@ -321,3 +321,86 @@ func TestLegacyMetadataPrefetchBusyMemberRetainsCustody(t *testing.T) {
 		legacyFinancialCohortRequire(t, ctx, f, legacyFinancialCohortCompleted(f.ids))
 	})
 }
+
+// The page budget ends after a real financial cohort's transaction returns,
+// never after an elapsed sleep. Every member that transaction committed is
+// recorded and advances the cursor. Nothing after them starts: neither the
+// cohort's first fallback nor another selection. A budget check before every
+// returned member kept only the first committed member in the result.
+func legacyMetadataPrefetchCanceledCohortControl(t *testing.T, fallback bool) {
+	t.Helper()
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		f := legacyFinancialCohortSeed(t, ctx, 12, LegacySettlementShardCount)
+		committed, returned := legacyFinancialCohortLimit, legacyFinancialCohortLimit
+		if fallback {
+			// The fourth member cannot cover its usage, so the real cohort
+			// commits three members and returns the fourth as its fallback.
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=2 WHERE contract_id=$1`, f.ids[3]))
+			}, server.TxReadCommitted, server.OptNoRetry())
+			f.reservationAmounts[3] = 2
+			committed, returned = 3, 4
+		}
+		cooldown := &legacyFinancialCohortCooldown{now: func() time.Duration { return 0 }}
+		ctx = context.WithValue(ctx, legacyFinancialCohortCooldownKey{}, cooldown)
+		bounded, expire := context.WithCancelCause(ctx)
+		defer expire(nil)
+		observer := &legacySettlementTimingObserver{now: time.Now}
+		financialCalls, cohortCalls := 0, 0
+		page, err := legacyMetadataPrefetchRun(ctx, bounded, f.payer.sourceNetworkId, nil, len(f.ids), observer,
+			func(call context.Context, id server.Id, wait *legacySettlementGrantWait) (bool, bool, legacySettlementBusyGate, error) {
+				// Every individual visit in this page starts after its budget.
+				financialCalls++
+				return false, false, legacySettlementBusyNone, context.Canceled
+			}, func(call context.Context, ids []server.Id) ([]legacyFinancialCohortAttempt, error) {
+				cohortCalls++
+				attempts, err := flushLegacySettlementCohort(call, ids)
+				if err != nil || cohortCalls != 1 || len(ids) != legacyFinancialCohortLimit || len(attempts) != returned {
+					t.Fatal("actual financial cohort changed its bounded prefix", cohortCalls, len(ids), len(attempts), err)
+				}
+				for index, attempt := range attempts {
+					if attempt.contractId != f.ids[index] || attempt.completed != (index < committed) || attempt.fallback != (index >= committed) || attempt.busy {
+						t.Fatal("actual financial cohort changed member custody", index, attempt)
+					}
+				}
+				expire(errLegacySettlementPageBudget)
+				return attempts, nil
+			})
+		if err != nil || cohortCalls != 1 || financialCalls != 0 || page.Visited != committed || page.Completed != committed ||
+			page.BusyOrGone != 0 || page.Failed != 0 || !page.More || page.Cursor == nil || page.Cursor.ContractId != f.ids[committed-1] ||
+			page.FinancialCohortAttempts != 1 || page.FinancialCohortSelected != legacyFinancialCohortLimit ||
+			page.FinancialCohortCompleted != committed || page.FinancialCohortFallbacks != returned-committed || page.Timings.Selection.Count != 1 {
+			t.Fatal("expired page lost its committed cohort prefix or started another visit", financialCalls, page, err)
+		}
+		expected := legacyFinancialCohortCompleted(f.ids[:committed])
+		legacyFinancialCohortRequire(t, ctx, f, expected)
+		resumed, err := FlushLegacyPayerSettlements(ctx, f.payer.sourceNetworkId, page.Cursor, len(f.ids))
+		if fallback {
+			// The unstarted fallback is the next visit and is refused exactly
+			// as the cohort reported, before any later member.
+			if err != nil || resumed.Visited != 1 || resumed.Completed != 0 || resumed.Failed != 1 || resumed.Cursor == nil || resumed.Cursor.ContractId != f.ids[3] {
+				t.Fatal("unstarted fallback was skipped or replayed", resumed, err)
+			}
+			resumed, err = FlushLegacyPayerSettlements(ctx, f.payer.sourceNetworkId, resumed.Cursor, len(f.ids))
+		}
+		if err != nil || resumed.Visited != len(f.ids)-returned || resumed.Completed != len(f.ids)-returned || resumed.Failed != 0 || resumed.BusyOrGone != 0 || resumed.More || resumed.Cursor != nil {
+			t.Fatal("expired page's unvisited suffix was skipped or replayed", resumed, err)
+		}
+		for _, id := range f.ids[returned:] {
+			expected[id] = true
+		}
+		legacyFinancialCohortRequire(t, ctx, f, expected)
+	})
+}
+
+func TestLegacyMetadataPrefetchCanceledCohortKeepsCommittedPrefix(t *testing.T) {
+	legacyMetadataPrefetchCanceledCohortControl(t, false)
+}
+
+func TestLegacyMetadataPrefetchCanceledCohortStartsNoFallback(t *testing.T) {
+	legacyMetadataPrefetchCanceledCohortControl(t, true)
+}

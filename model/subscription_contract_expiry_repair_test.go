@@ -19,10 +19,12 @@ func newContractExpiryRepairTestContract(t testing.TB, ctx context.Context, f ne
 	if positive {
 		amount = 3
 	}
-	server.Raise(CloseContract(ctx, escrow.ContractId, f.sourceId, amount, false))
+	// The receiver's checkpoint predates the sender's final; a covering one
+	// after it would settle in that report (owner decision B).
 	if positive {
 		server.Raise(CloseContract(ctx, escrow.ContractId, f.destinationId, amount, true))
 	}
+	server.Raise(CloseContract(ctx, escrow.ContractId, f.sourceId, amount, false))
 	server.Tx(ctx, func(tx server.PgTx) {
 		old := server.NowUtc().Add(-time.Hour)
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2 WHERE contract_id=$1`, escrow.ContractId, old))
@@ -394,7 +396,10 @@ func TestContractExpiryRepairLateReportAndRollback(t *testing.T) {
 			scope.beforeTxForTest = func() {
 				step++
 				if step == 1 {
-					server.Raise(CloseContract(ctx, id, f.destinationId, 1, true))
+					// An id-less checkpoint retains the largest count observed,
+					// not the sum of possible retries (ca4b5c3d), so the late
+					// report raises the retained 3 bytes to 4.
+					server.Raise(CloseContract(ctx, id, f.destinationId, 4, true))
 				}
 			}
 			err := captureContractExpiryRepair(func() error { return continueContractExpiry(ctx, "[test]", fresh, scope) })

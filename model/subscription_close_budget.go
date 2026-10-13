@@ -9,7 +9,10 @@ import (
 	"github.com/urnetwork/server"
 )
 
-const forceClosePageBudget = 15 * time.Second
+// The singleton sweep waits seconds to minutes between runs for its claim, so
+// a short budget left it idle most of the time. One run now works for up to a
+// minute and a half, below the dispatch limit and the two-minute duration band.
+const forceClosePageBudget = 90 * time.Second
 const forceCloseRawSubpageSize = 256
 
 // New rows stop starting this long after a scan began, well inside the

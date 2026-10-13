@@ -111,9 +111,22 @@ func sweepOrphanProvideKeyPageInTx(ctx context.Context, tx server.PgTx, first bo
 
 // Traverse all keys in bounded pages and clear only committed deleted mirrors.
 func sweepOrphanProvideKeys(ctx context.Context, sliceSize int) (removedCount int64) {
+	removedCount, _, _, _ = sweepOrphanProvideKeyCursor(ctx, nil, 0, sliceSize)
+	return
+}
+
+// Pages keys after startKey, (client_id, provide_mode), in bounded pages and
+// clears only committed deleted mirrors. It keeps sweepOrphanCursor's budget
+// contract: with 0 < maxRowCount it stops once that many keys are examined and
+// returns the resume key. provide_key is the largest network-client child by
+// far (about 10^9 keys on Main), so its pass spans many budgeted runs.
+func sweepOrphanProvideKeyCursor(ctx context.Context, startKey []any, maxRowCount int, sliceSize int) (removedCount int64, rowCount int, endKey []any, done bool) {
 	var cursorClientId server.Id
 	var cursorProvideMode ProvideMode
-	first := true
+	first := startKey == nil
+	if !first {
+		cursorClientId, cursorProvideMode = startKey[0].(server.Id), startKey[1].(ProvideMode)
+	}
 	for {
 		var page orphanProvideKeyPage
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -137,9 +150,13 @@ func sweepOrphanProvideKeys(ctx context.Context, sliceSize int) (removedCount in
 		for _, modes := range page.deleted {
 			removedCount += int64(len(modes))
 		}
+		rowCount += int(page.scanned)
 		if !page.gotBound || page.scanned < int64(sliceSize) {
-			return
+			return removedCount, rowCount, nil, true
 		}
 		cursorClientId, cursorProvideMode, first = page.lastClientId, page.lastProvideMode, false
+		if 0 < maxRowCount && maxRowCount <= rowCount {
+			return removedCount, rowCount, []any{cursorClientId, cursorProvideMode}, false
+		}
 	}
 }

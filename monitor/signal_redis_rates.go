@@ -209,8 +209,9 @@ func (p redisRatesProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 }
 
 func observeRedisRateCoverage(ctx context.Context, env *probeEnv) (redisRateCoverage, string, error) {
-	redisHost := env.cfg.hostByRole("redis-cluster")
-	if redisHost == nil || len(redisHost.redisNodePorts()) == 0 {
+	// one exporter series per node, across every redis-cluster host
+	nodeCount := len(env.cfg.redisAllNodePorts())
+	if env.cfg.redisEntryHost() == nil || nodeCount == 0 {
 		return redisRateCoverage{}, "", fmt.Errorf("no Redis node inventory is configured")
 	}
 	metricHosts := env.cfg.hostsWithRole("services")
@@ -227,7 +228,7 @@ func observeRedisRateCoverage(ctx context.Context, env *probeEnv) (redisRateCove
 	if err != nil {
 		return redisRateCoverage{}, "", fmt.Errorf("query Mimir through service gateways: %w", err)
 	}
-	coverage, err := parseRedisRateCoverage(out, len(redisHost.redisNodePorts()))
+	coverage, err := parseRedisRateCoverage(out, nodeCount)
 	if err != nil {
 		return redisRateCoverage{}, metricHost.name, err
 	}
@@ -432,13 +433,13 @@ func evaluateRedisDashboardRateWindows(target string, audit redisRateWindowAudit
 		probeId: "observability/redis-rate-windows", tier: tierWarn,
 		class: "redis-dashboard-rate-window", target: target, frame: redisRatesDashboardUID, sustain: 1,
 		symptom:   "The live Redis dashboard does not use the required five-minute range for every counter rate",
-		mechanism: "Redis exporter scrapes are intentionally staggered from 61 to 92 seconds. Grafana can resolve $__rate_interval to one minute, which contains fewer than two samples and renders counter panels as No data while the raw counters remain healthy.",
+		mechanism: "Redis exporter scrapes are intentionally staggered from 61 to 108 seconds. Grafana can resolve $__rate_interval to one minute, which contains fewer than two samples and renders counter panels as No data while the raw counters remain healthy.",
 		baseline:  "Dashboard panels 8, 9, and 11 contain exactly five required rate expressions and every one uses a fixed [5m] range.",
 		observed:  audit.summary() + " " + source,
 		evidence:  "The authenticated bounded dashboard read retained only its UID, revision, panel IDs, and rate-window counts; expressions and credentials are not emitted.",
 		context:   "When raw and five-minute coverage equal the node inventory, this is a dashboard visibility defect rather than a Redis outage. Unknown source coverage remains a separate alert and prevents that stronger attribution.",
 		action:    "Build and deploy Grafana from a server revision containing commit 3e59900c. Do not restart Redis, change scrape staggering, or substitute a shorter automatic range.",
-		verify:    "Every active Grafana block reports the new artifact; two consecutive live dashboard reads show five fixed [5m] windows and zero dynamic/other windows; all 32 command, eviction, and expiration rate series are queryable and the panels render them.",
+		verify:    "Every active Grafana block reports the new artifact; two consecutive live dashboard reads show five fixed [5m] windows and zero dynamic/other windows; all 48 command, eviction, and expiration rate series are queryable and the panels render them.",
 		playbook:  "SIGNALS.md §1.4a",
 	}
 }
