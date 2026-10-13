@@ -122,7 +122,7 @@ func TestVerifyConnectionEgressExpiryAndRefresh(t *testing.T) {
 				}
 			}
 		})
-		updateVerifyEligibleMembership(ctx, clientId)
+		updateVerifyEligibleMembership(ctx, clientId, settings.EgressPerFamily)
 		requireVerifyEgressLeaseOwner(t, ctx, ip, clientId, settings)
 		ClearVerifyConnectionEgress(ctx, clientId, oldId, ip, settings)
 		requireVerifyEgressLeaseOwner(t, ctx, ip, clientId, settings)

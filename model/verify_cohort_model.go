@@ -304,7 +304,7 @@ func sampleVerifyCohortNextHop(
 				continue
 			}
 
-			candidateId, ok := verifyCandidateAssignable(ctx, r, candidate)
+			candidateId, ok := verifyCandidateAssignable(ctx, r, candidate, settings.EgressPerFamily)
 			if !ok {
 				excluded[candidate] = true
 				continue

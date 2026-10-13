@@ -126,9 +126,21 @@ func feedVerifyEgressLease(ctx context.Context, clientId server.Id, ip netip.Add
 	egressHashHex := hex.EncodeToString(egressHash[:])
 	now := server.NowUtc()
 	server.Redis(ctx, func(r server.RedisClient) {
+		if settings.EgressPerFamily {
+			// Recorded before the lease, so a reader that sees the lease can
+			// already tell its family. This lease is the client's latest, so
+			// the key outlives every live one.
+			familyKey := verifyClientEgressFamilyKey(clientId)
+			_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.HSet(ctx, familyKey, egressHashHex, verifyEgressFamily(ip))
+				pipe.PExpire(ctx, familyKey, settings.EgressTtl)
+				return nil
+			})
+			server.Raise(err)
+		}
 		updateVerifyEgressLease(ctx, r, clientId, egressHashHex, owner, now, now.Add(settings.EgressTtl))
 	})
-	updateVerifyEligibleMembership(ctx, clientId)
+	updateVerifyEligibleMembership(ctx, clientId, settings.EgressPerFamily)
 }
 
 // Withdraws only one owner; other owners retain both their exact address and TTL.
@@ -141,7 +153,7 @@ func clearVerifyEgressLease(ctx context.Context, clientId server.Id, ip netip.Ad
 	server.Redis(ctx, func(r server.RedisClient) {
 		updateVerifyEgressLease(ctx, r, clientId, egressHashHex, owner, server.NowUtc(), time.Time{})
 	})
-	updateVerifyEligibleMembership(ctx, clientId)
+	updateVerifyEligibleMembership(ctx, clientId, settings.EgressPerFamily)
 }
 
 // The explicit clock makes expiration and refresh interleavings deterministic
@@ -192,5 +204,7 @@ func clearVerifyProxyEgressForClient(ctx context.Context, clientId server.Id) {
 			updateVerifyEgressLease(ctx, r, clientId, hash, verifyProxyEgressLeaseOwner, server.NowUtc(), time.Time{})
 		}
 	})
-	updateVerifyEligibleMembership(ctx, clientId)
+	// The cleanup layer has no settings. The strict recheck can only remove a
+	// client with one live address per family, which its next feed restores.
+	updateVerifyEligibleMembership(ctx, clientId, false)
 }

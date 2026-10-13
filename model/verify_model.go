@@ -53,6 +53,7 @@ import (
 	"math"
 	"math/big"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -186,6 +187,12 @@ type VerifySettings struct {
 	CohortSize          int
 	CohortLifetimeLimit int
 	CohortDeploymentKey StDeploymentKey
+	// EgressPerFamily relaxes the §8.2 bijection to one live address per
+	// address family: a provider whose transports egress from one IPv4 and one
+	// IPv6 address stays attributable from either, while an address backing
+	// two providers still resolves to nobody. Off keeps the strict one-address
+	// rule; families are recorded only while it is on.
+	EgressPerFamily bool
 }
 
 // TrailTtl is the redis lifetime of one trail's state (VALIDATOR.md §5.5:
@@ -273,6 +280,34 @@ func verifyEgressKeyFromHex(egressHashHex string) string {
 
 func verifyClientEgressKey(clientId server.Id) string {
 	return fmt.Sprintf("{vce2_%s}", clientId)
+}
+
+// The address family of each egress hash a client fed while per-family
+// attribution is on, in the reverse index's cluster slot. A hash's family never
+// changes, and the key lives as long as the client's latest lease.
+func verifyClientEgressFamilyKey(clientId server.Id) string {
+	return verifyClientEgressKey(clientId) + "family"
+}
+
+func verifyEgressFamily(ip netip.Addr) string {
+	if ip.Unmap().Is4() {
+		return "4"
+	}
+	return "6"
+}
+
+// Several live addresses are attributable only when each has a recorded
+// family and no family repeats; an unrecorded family fails closed.
+func verifyEgressFamiliesDistinct(families []any) bool {
+	seen := map[string]bool{}
+	for _, family := range families {
+		name, ok := family.(string)
+		if !ok || (name != "4" && name != "6") || seen[name] {
+			return false
+		}
+		seen[name] = true
+	}
+	return true
 }
 
 const verifyEligibleKey = "verify_eligible_v2"
@@ -394,6 +429,7 @@ func RemoveVerifyEgressForClient(
 			server.Raise(r.Del(ctx, verifyClientEgressLeaseKey(clientId, egressHashHex)).Err())
 		}
 		r.Del(ctx, verifyClientEgressKey(clientId))
+		r.Del(ctx, verifyClientEgressFamilyKey(clientId))
 		r.SRem(ctx, verifyEligibleKey, clientId.String())
 	})
 }
@@ -435,12 +471,13 @@ func verifyLiveEgressHashes(
 func updateVerifyEligibleMembership(
 	ctx context.Context,
 	clientId server.Id,
+	perFamily bool,
 ) {
 	nowMs := uint64(server.NowUtc().UnixMilli())
 
 	eligible := false
 	server.Redis(ctx, func(r server.RedisClient) {
-		eligible = verifyClientHasLiveEgress(ctx, r, clientId, nowMs)
+		eligible = verifyClientHasLiveEgress(ctx, r, clientId, nowMs, perFamily)
 	})
 
 	if eligible {
@@ -466,18 +503,53 @@ func updateVerifyEligibleMembership(
 	})
 }
 
-// An eligible-set entry is only a candidate index. Expiry and connection
-// changes must pass the same exact-address bijection again before assignment.
-func verifyClientHasLiveEgress(ctx context.Context, r server.RedisClient, clientId server.Id, nowMs uint64) bool {
+// The client's live egress hashes when they pass the bijection's address
+// side: exactly one live address, or with per-family attribution one live
+// address per recorded family. Otherwise nil. With per-family attribution the
+// family read always runs, so one and two live addresses cost the same reads.
+func verifyAttributableEgressHashes(ctx context.Context, r server.RedisClient, clientId server.Id, nowMs uint64, perFamily bool) []string {
 	liveHashes := verifyLiveEgressHashes(ctx, r, clientId, nowMs)
-	if len(liveHashes) != 1 {
-		return false
+	if len(liveHashes) == 0 {
+		return nil
 	}
-	forward, err := r.Get(ctx, verifyEgressKeyFromHex(liveHashes[0])).Result()
+	if !perFamily {
+		if len(liveHashes) != 1 {
+			return nil
+		}
+		return liveHashes
+	}
+	families, err := r.HMGet(ctx, verifyClientEgressFamilyKey(clientId), liveHashes...).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		server.Raise(err)
 	}
-	return forward == clientId.String()
+	if len(liveHashes) == 1 {
+		return liveHashes
+	}
+	if !verifyEgressFamiliesDistinct(families) {
+		return nil
+	}
+	return liveHashes
+}
+
+// An eligible-set entry is only a candidate index. Expiry and connection
+// changes must pass the same exact-address bijection again before assignment.
+// Every live address must name the client, so a request through either family
+// resolves.
+func verifyClientHasLiveEgress(ctx context.Context, r server.RedisClient, clientId server.Id, nowMs uint64, perFamily bool) bool {
+	liveHashes := verifyAttributableEgressHashes(ctx, r, clientId, nowMs, perFamily)
+	if len(liveHashes) == 0 {
+		return false
+	}
+	for _, egressHashHex := range liveHashes {
+		forward, err := r.Get(ctx, verifyEgressKeyFromHex(egressHashHex)).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			server.Raise(err)
+		}
+		if forward != clientId.String() {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolveVerifyEgress maps a request source ip to the provider currently
@@ -511,12 +583,15 @@ func ResolveVerifyEgress(
 			if settings.ResolveConstantTimePad {
 				// pad the miss path to the same round-trip count as a hit
 				r.HGetAll(ctx, verifyClientEgressKey(server.Id{})).Result()
+				if settings.EgressPerFamily {
+					r.HMGet(ctx, verifyClientEgressFamilyKey(server.Id{}), egressHashHex).Result()
+				}
 			}
 			return
 		}
 
-		liveHashes := verifyLiveEgressHashes(ctx, r, resolvedId, nowMs)
-		if len(liveHashes) == 1 && liveHashes[0] == egressHashHex {
+		liveHashes := verifyAttributableEgressHashes(ctx, r, resolvedId, nowMs, settings.EgressPerFamily)
+		if slices.Contains(liveHashes, egressHashHex) {
 			clientId = &resolvedId
 		}
 	})
@@ -629,7 +704,7 @@ func SampleVerifyNextHop(
 			server.Raise(err)
 			candidate := allowed[pickIndex.Int64()]
 
-			candidateId, ok := verifyCandidateAssignable(ctx, r, candidate)
+			candidateId, ok := verifyCandidateAssignable(ctx, r, candidate, settings.EgressPerFamily)
 			if !ok {
 				excluded[candidate] = true
 				continue
@@ -651,13 +726,13 @@ func SampleVerifyNextHop(
 // active provide mode. A failed candidate is lazily evicted from the eligible
 // set, which may outlive an address lease or race a disconnect; it must never
 // spend a token or be assigned as an unattributable source.
-func verifyCandidateAssignable(ctx context.Context, r server.RedisClient, candidate string) (server.Id, bool) {
+func verifyCandidateAssignable(ctx context.Context, r server.RedisClient, candidate string, perFamily bool) (server.Id, bool) {
 	candidateId, err := server.ParseId(candidate)
 	if err != nil {
 		r.SRem(ctx, verifyEligibleKey, candidate)
 		return server.Id{}, false
 	}
-	if !verifyClientHasLiveEgress(ctx, r, candidateId, uint64(server.NowUtc().UnixMilli())) {
+	if !verifyClientHasLiveEgress(ctx, r, candidateId, uint64(server.NowUtc().UnixMilli()), perFamily) {
 		server.Raise(r.SRem(ctx, verifyEligibleKey, candidate).Err())
 		return server.Id{}, false
 	}

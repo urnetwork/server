@@ -44,6 +44,7 @@ var safeRedisFamilyShapes = []*regexp.Regexp{
 	regexp.MustCompile(`^\{cs_[0-9]+_[a-z]_<id>_<id>\}(a|c|f)_(g|l)$`),
 	regexp.MustCompile(`^\{cs_[0-9]+_[a-z]_<id>_<id>\}s_(g|l)_[0-9]+$`),
 	regexp.MustCompile(`^\{vce2_<id>\}$`),
+	regexp.MustCompile(`^\{vce2_<id>\}family$`),
 	regexp.MustCompile(`^\{pd_<id>\}c$`),
 	regexp.MustCompile(`^verify_egress_v2_<id>(<id>)?$`),
 	regexp.MustCompile(`^\{account_balance_<id>\}(np|npbc)$`),

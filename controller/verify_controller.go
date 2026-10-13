@@ -222,6 +222,7 @@ func parseVerifySettings(res *server.SimpleResource) *model.VerifySettings {
 			// server-only keys, absent from the policy's verify section
 			CohortSize          *int `yaml:"cohort_size"`
 			CohortLifetimeLimit *int `yaml:"cohort_lifetime_limit"`
+			EgressPerFamily     bool `yaml:"egress_per_family"`
 		} `yaml:"settings"`
 	}
 	res.UnmarshalYaml(&conf)
@@ -256,6 +257,7 @@ func parseVerifySettings(res *server.SimpleResource) *model.VerifySettings {
 	s.EgressHashV4Prefix, s.EgressHashV6Prefix = v.EgressIpv4Prefix, v.EgressIpv6Prefix
 	s.EgressHashKey, s.EgressHashKeyId = append([]byte(nil), key...), v.EgressHashKeyId
 	s.SoftLimitsEnabled = v.SoftGuardrailsEnabled
+	s.EgressPerFamily = v.EgressPerFamily
 	s.SeedRateHardLimit, s.ExtendRateHardLimit, s.ActiveTrailsHardLimit = v.HardSeedPerMinutePerSource, v.HardExtendPerMinutePerSource, v.HardActiveTrailsPerSource
 	if s.CohortSize, s.CohortLifetimeLimit, err = verifyCohortSettings(conf.Profile, v.CohortSize, v.CohortLifetimeLimit); err != nil {
 		panic(fmt.Errorf("verify.yml %w", err))

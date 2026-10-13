@@ -3693,6 +3693,7 @@ func removeReapedClientRedisState(ctx context.Context, clientIds []server.Id) {
 			_, err = r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				for i, clientId := range chunk {
 					pipe.Del(ctx, verifyClientEgressKey(clientId))
+					pipe.Del(ctx, verifyClientEgressFamilyKey(clientId))
 					eligibleMembers[i] = clientId.String()
 				}
 				pipe.SRem(ctx, verifyEligibleKey, eligibleMembers...)
