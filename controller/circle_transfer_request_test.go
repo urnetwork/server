@@ -23,7 +23,7 @@ import (
 type customerTransferFixture struct {
 	owner       *session.ClientSession
 	args        *WalletCircleTransferOutArgs
-	client      *circleTransferClient
+	client      *circleUserClient
 	challenge   string
 	tokens      atomic.Int64
 	walletReads atomic.Int64
@@ -42,7 +42,7 @@ func newCustomerTransferFixture(t testing.TB, action func(*http.Request) (*http.
 	token := server.NewId().String()
 	requestId := server.NewId()
 	f := &customerTransferFixture{challenge: server.NewId().String(), args: &WalletCircleTransferOutArgs{RequestId: &requestId, Terms: true, ToAddress: "synthetic-destination", AmountUsdcNanoCents: 1_000_001_000}}
-	f.client = &circleTransferClient{defaultName: "Synthetic native", defaultChain: "SYNTHETIC", core: CoreCircleApiClient{readToken: func() string { return "synthetic-api-token" }}}
+	f.client = &circleUserClient{defaultName: "Synthetic native", defaultChain: "SYNTHETIC", core: CoreCircleApiClient{readToken: func() string { return "synthetic-api-token" }}}
 	f.client.tokenSource = func(owner *session.ClientSession) (*CircleUserToken, error) {
 		f.tokens.Add(1)
 		if err := owner.Ctx.Err(); err != nil {
@@ -60,7 +60,7 @@ func newCustomerTransferFixture(t testing.TB, action func(*http.Request) (*http.
 		}
 		return action(request)
 	}
-	f.owner = &session.ClientSession{Ctx: context.WithValue(t.Context(), circleTransferClientKey{}, f.client), ByJwt: &session.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()}}
+	f.owner = &session.ClientSession{Ctx: context.WithValue(t.Context(), circleUserClientKey{}, f.client), ByJwt: &session.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()}}
 	return f
 }
 
@@ -131,7 +131,7 @@ func TestCustomerChallengeLostResponseReusesExactDurableKeyAndBody(t *testing.T)
 		restartedClient := *f.client
 		restartedClient.defaultChain = "CHANGED"
 		restartedOwner := *f.owner
-		restartedOwner.Ctx = context.WithValue(t.Context(), circleTransferClientKey{}, &restartedClient)
+		restartedOwner.Ctx = context.WithValue(t.Context(), circleUserClientKey{}, &restartedClient)
 		result, err := WalletCircleTransferOut(f.args, &restartedOwner)
 		if err != nil || result == nil || result.ChallengeId != f.challenge || len(bodies) != 2 || bodies[0] != bodies[1] || bodies[0] != original.Body {
 			t.Fatal("retry changed logical transfer", err, bodies)
