@@ -304,6 +304,10 @@ func reportStIdentity(report *stCheckReport, cfg *controller.StConfig) {
 	report.add("identity", "profile %s, chain_id %d, genesis_hash 0x%x, netuid %d, no_id %d", cfg.Profile, cfg.ChainId, cfg.GenesisHash, cfg.Netuid, cfg.NoId)
 	report.add("identity", "deployment_id %s, policy_hash 0x%x, deploy_block %d", cfg.DeploymentId, cfg.PolicyHash, cfg.DeployBlock)
 	report.add("identity", "coordinator %s, settlement_vault %s, reserve_sink %s", cfg.ContractAddress.Hex(), cfg.SettlementVault.Hex(), cfg.ReserveSink.Hex())
+	if cfg.LedgerV2Enabled() {
+		// In the lowercase form st.yml and sn.yml declare, to compare byte for byte.
+		report.add("identity", "settlement_v2_address 0x%x, vault_v2_address 0x%x", cfg.SettlementV2, cfg.VaultV2)
+	}
 	report.add("identity", "deposit_hotkey 0x%x", cfg.DepositHotkey)
 	if cfg.TreasuryHotkey != ([32]byte{}) {
 		report.add("identity", "treasury_hotkey 0x%x", cfg.TreasuryHotkey)

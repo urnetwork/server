@@ -319,9 +319,15 @@ mainnet:
   readiness_sha256: "%s"
 `
 
-// The go-live st.yml values pass the server's validation, the signed policy
-// verifies against its authority and the reviewed sn.yml identity matches.
-func TestStCheckAcceptsTheGoLiveValues(t *testing.T) {
+// The readiness digest goLiveStCheck writes into st.yml.
+var goLiveReadiness = strings.Repeat("7e", 32)
+
+// goLiveStCheck writes the go-live st.yml with fresh role keys, the top-level
+// lines stExtra and an operator gas policy signed for those keys. It returns a
+// run of st-check against an sn.yml with a readiness digest and the mainnet
+// lines snExtra, and the deposit key's hex, which must never be printed.
+func goLiveStCheck(t *testing.T, stExtra string, snExtra string) (func(readiness string) (string, error), string) {
+	t.Helper()
 	isolateHomes(t)
 	dir := t.TempDir()
 	depositKey, deposit := goLiveTestKey(t)
@@ -342,24 +348,30 @@ func TestStCheckAcceptsTheGoLiveValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	readiness := strings.Repeat("7e", 32)
 	keyHex := func(key *ecdsa.PrivateKey) string { return hex.EncodeToString(crypto.FromECDSA(key)) }
 	stPath, snPath := filepath.Join(dir, "st.yml"), filepath.Join(dir, "sn.yml")
-	stYml := []byte(fmt.Sprintf(goLiveStYml, readiness, keyHex(depositKey), keyHex(rootKey), keyHex(artifactKey)))
+	stYml := []byte(fmt.Sprintf(goLiveStYml, goLiveReadiness, keyHex(depositKey), keyHex(rootKey), keyHex(artifactKey)) + stExtra)
 	if err := os.WriteFile(stPath, append(stYml, fragment...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	check := func(sn string) (string, error) {
+	check := func(readiness string) (string, error) {
 		os.Remove(snPath)
-		if err := os.WriteFile(snPath, []byte(fmt.Sprintf(goLiveSnYml, sn)), 0o644); err != nil {
+		if err := os.WriteFile(snPath, []byte(fmt.Sprintf(goLiveSnYml, readiness)+snExtra), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		var out bytes.Buffer
 		err := runStCheck([]string{"--st", stPath, "--authority", authorityPath, "--sn", snPath, "--now", goLiveNow.Format(time.RFC3339)}, &out)
 		return out.String(), err
 	}
-	out, err := check(readiness)
-	if err != nil || !strings.HasSuffix(out, "result: ok\n") || strings.Contains(out, keyHex(depositKey)) {
+	return check, keyHex(depositKey)
+}
+
+// The go-live st.yml values pass the server's validation, the signed policy
+// verifies against its authority and the reviewed sn.yml identity matches.
+func TestStCheckAcceptsTheGoLiveValues(t *testing.T) {
+	check, depositKey := goLiveStCheck(t, "", "")
+	out, err := check(goLiveReadiness)
+	if err != nil || !strings.HasSuffix(out, "result: ok\n") || strings.Contains(out, depositKey) {
 		t.Fatalf("go-live values were refused: %v\n%s", err, out)
 	}
 	for _, want := range []string{"enabled is false in the file", "signature and digest match the authority", "sn.yml reviewed identity and readiness digest equal"} {
@@ -369,5 +381,22 @@ func TestStCheckAcceptsTheGoLiveValues(t *testing.T) {
 	}
 	if out, err := check(strings.Repeat("7f", 32)); err == nil || !strings.Contains(out, "FAIL: sn.yml payout admission") {
 		t.Fatalf("a different sn.yml readiness digest was accepted: %v\n%s", err, out)
+	}
+}
+
+// st-check prints the v2 pair st.yml declares as one identity line, in the
+// lowercase form st.yml and sn.yml declare, and no v2 line without it.
+func TestStCheckPrintsTheV2Addresses(t *testing.T) {
+	const settlement, vault = "0x00000000000000000000000000000000000000a1", "0x00000000000000000000000000000000000000a2"
+	check, _ := goLiveStCheck(t,
+		fmt.Sprintf("settlement_v2_address: %q\nvault_v2_address: %q\n", settlement, vault),
+		fmt.Sprintf("  settlement_v2_address: %q\n  vault_v2_address: %q\n", settlement, vault))
+	out, err := check(goLiveReadiness)
+	if err != nil || !strings.HasSuffix(out, "result: ok\n") || !strings.Contains(out, "\nidentity: settlement_v2_address "+settlement+", vault_v2_address "+vault+"\n") {
+		t.Fatalf("the v2 pair was not printed: %v\n%s", err, out)
+	}
+	check, _ = goLiveStCheck(t, "", "")
+	if out, err := check(goLiveReadiness); err != nil || strings.Contains(out, "v2_address") {
+		t.Fatalf("a v2 line without the v2 pair: %v\n%s", err, out)
 	}
 }
