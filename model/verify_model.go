@@ -30,8 +30,9 @@ package model
 //	{verify_cohort:<deployment>}e<epoch>draws  next hops drawn from that cohort
 //	{verify_cohort:<deployment>}lifetime       every provider ever admitted (no ttl)
 //
-// The egress index is fed by exactly one bijection-gated feeder
-// (`feedVerifyEgressLease`) with two independently owned sources: observed connection source ips
+// The egress index is fed by one bijection-gated feeder
+// (`feedVerifyEgressLease`, applied a chunk at a time by the proxy refresh's
+// `feedVerifyProxyEgresses`) with two independently owned sources: observed connection source ips
 // (connect/transport_announce.go) and proxy-allocated egresses (the API
 // controller's post-allocation feed + periodic `RefreshVerifyProxyEgress`). The §8.2
 // invariant — one provider ⇄ one egress ip — is enforced at write time (an ip
@@ -411,8 +412,18 @@ func verifyLiveEgressHashes(
 	if err != nil && !errors.Is(err, redis.Nil) {
 		server.Raise(err)
 	}
-	liveHashes := []string{}
-	expiredHashes := map[string]string{}
+	liveHashes, expiredHashes := splitVerifyEgressHashes(entries, nowMs)
+	if 0 < len(expiredHashes) {
+		pruneVerifyExpiredEgressHashes(ctx, r, clientId, expiredHashes)
+	}
+	return liveHashes
+}
+
+// Partitions a client's reverse entries, egress-hash hex to expiry unix ms,
+// into the live fields and the expired fields with the expiry each was read at.
+func splitVerifyEgressHashes(entries map[string]string, nowMs uint64) (liveHashes []string, expiredHashes map[string]string) {
+	liveHashes = []string{}
+	expiredHashes = map[string]string{}
 	for egressHashHex, expireMsStr := range entries {
 		var expireMs uint64
 		fmt.Sscanf(expireMsStr, "%d", &expireMs)
@@ -422,10 +433,7 @@ func verifyLiveEgressHashes(
 			expiredHashes[egressHashHex] = expireMsStr
 		}
 	}
-	if 0 < len(expiredHashes) {
-		pruneVerifyExpiredEgressHashes(ctx, r, clientId, expiredHashes)
-	}
-	return liveHashes
+	return
 }
 
 // updateVerifyEligibleMembership recomputes one client's membership in the
@@ -521,43 +529,6 @@ func ResolveVerifyEgress(
 		}
 	})
 	return
-}
-
-// RefreshVerifyProxyEgress re-feeds the egress index from the current
-// `proxy_client` allocations (the proxy-side feeder's periodic refresh; the
-// create-side feed in `CreateProxyClient` covers the gap until the first
-// refresh). Rows deleted by the reaper stop being re-fed and age out within
-// one `EgressTtl`.
-func RefreshVerifyProxyEgress(ctx context.Context, settings *VerifySettings) {
-	type proxyEgress struct {
-		clientId server.Id
-		ip       netip.Addr
-	}
-	proxyEgresses := []proxyEgress{}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT client_id, client_ipv4
-			FROM proxy_client
-			WHERE client_ipv4 IS NOT NULL
-			`,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				var clientIpv4 int64
-				server.Raise(result.Scan(&clientId, &clientIpv4))
-				proxyEgresses = append(proxyEgresses, proxyEgress{
-					clientId: clientId,
-					ip:       IntToIpv4(clientIpv4),
-				})
-			}
-		})
-	})
-	for _, egress := range proxyEgresses {
-		FeedVerifyEgress(ctx, egress.clientId, egress.ip, settings)
-	}
 }
 
 // SampleVerifyNextHop draws the next hop uniformly at random from the

@@ -38,6 +38,18 @@ import (
 // admission. The deadline in the arguments is unchanged.
 const scheduledCloseOwnerBusyDeferral = 5 * time.Second
 
+// A deferral wakes at a uniform point of [deferral, 2 deferral), so the closes
+// one held owner refused together do not all wake and refuse together again.
+// A test fixes the offset.
+var scheduledCloseDeferralJitter = func(span time.Duration) time.Duration {
+	return time.Duration(mathrand.Int64N(int64(span)))
+}
+
+// When a refused or slotless close wakes again.
+func scheduledCloseDeferredUntil(now time.Time) time.Time {
+	return now.Add(scheduledCloseOwnerBusyDeferral + scheduledCloseDeferralJitter(scheduledCloseOwnerBusyDeferral))
+}
+
 // Random queue pages read per steal. A queue of at most
 // scheduledCloseStealFullScanPages pages is read completely instead.
 const scheduledCloseStealPages = 8

@@ -22,6 +22,11 @@ func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 		t.Fatal("production target placement differs or mutated its caller")
 	}
 	production.TargetClaimLimits = nil
+	totals := task.NewTaskTarget(model.ApplyLegacyProviderTotals).TargetFunctionName()
+	if !reflect.DeepEqual(production.TargetClaimShares, map[string]int{totals: legacyProviderTotalsClaimSharePeriod}) || settings.TargetClaimShares != nil {
+		t.Fatal("production provider totals share differs or mutated its caller")
+	}
+	production.TargetClaimShares = nil
 	if !production.FairClaimFunctions || settings.FairClaimFunctions {
 		t.Fatal("production fairness is missing or mutated caller settings")
 	}
@@ -32,6 +37,9 @@ func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 	operator := taskWorkerSettingsForProfile(settings, WorkloadProfileSubnetOperator)
 	if !reflect.DeepEqual(operator.TargetClaimLimits, map[string]int{mirror: 1}) || !operator.ClaimRegisteredTargetsOnly {
 		t.Fatal("independent profile did not retain mirror-only placement")
+	}
+	if !reflect.DeepEqual(operator.TargetClaimShares, map[string]int{totals: legacyProviderTotalsClaimSharePeriod}) {
+		t.Fatal("independent profile lost the provider totals share")
 	}
 }
 

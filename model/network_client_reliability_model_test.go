@@ -40,6 +40,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 
 		networkClientIds := map[server.Id][]server.Id{}
 		clientIps := map[server.Id]netip.Addr{}
+		handlerIds := []server.Id{}
 
 		totalClientCount := 0
 		for i := range networkCount {
@@ -66,6 +67,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				)
 				clientAddress := "192.0.2.1:20000"
 				handlerId := CreateNetworkClientHandler(ctx)
+				handlerIds = append(handlerIds, handlerId)
 				connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 				connect.AssertEqual(t, err, nil)
 				location := &Location{
@@ -78,6 +80,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				CreateLocation(ctx, location)
 				connectionLocationScores := &ConnectionLocationScores{}
 				err = SetConnectionLocation(ctx, connectionId, location.LocationId, connectionLocationScores)
+				connect.AssertEqual(t, err, nil)
 
 				// fmt.Printf("init client_id[%d] %s\n", totalClientCount, clientId)
 
@@ -155,11 +158,35 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		}
 		endTime := startTime.Add(time.Duration(n) * ReliabilityBlockDuration)
 
+		// The score update's location pass counts a connected client only while
+		// its handler heartbeat is within 2*NetworkClientHandlerHeartbeatTimeout
+		// of now, and nothing heartbeats the fixture handlers. The stats loop
+		// commits one transaction per client per block, about two minutes on an
+		// idle test database and several on a loaded one, which left every
+		// handler stale and no client scored. Age every handler past that horizon
+		// so each run starts stale, then heartbeat them as connect servers do.
+		var staleHandlerCount int64
+		server.Tx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client_handler SET heartbeat_time = $2 WHERE handler_id = ANY($1)`,
+				handlerIds,
+				server.NowUtc().Add(-3*NetworkClientHandlerHeartbeatTimeout),
+			))
+			staleHandlerCount = tag.RowsAffected()
+		})
+		connect.AssertEqual(t, staleHandlerCount, int64(len(handlerIds)))
+		for _, handlerId := range handlerIds {
+			connect.AssertEqual(t, HeartbeatNetworkClientHandler(ctx, handlerId), nil)
+		}
+
 		UpdateClientReliabilityScores(ctx, endTime, true)
 
 		lookbackClientScores := GetAllClientReliabilityScores(ctx)
 		orderedLookbackIndexes := slices.Collect(maps.Keys(lookbackClientScores))
 		slices.Sort(orderedLookbackIndexes)
+		// each lookback window holds observations of every client
+		connect.AssertEqual(t, len(orderedLookbackIndexes), len(ClientLookbacks))
 		// use the max lookback
 		clientScores := lookbackClientScores[orderedLookbackIndexes[len(orderedLookbackIndexes)-1]]
 		for clientId, reliabilityScore := range netReliabilityScores {
