@@ -124,12 +124,17 @@ func scheduleCloseExpiredContractsPageWithExpiration(clientSession *session.Clie
 			NextExpiration: expiration,
 		},
 		clientSession,
-		// legacy key
-		task.RunOnce(fmt.Sprintf("close_expired_contracts_%d_%d", blockSize, blockIndex)),
+		closeExpiredContractsRunOnce(blockSize, blockIndex),
 		task.RunAt(runAt),
 		task.MaxTime(30*time.Minute),
 		task.Priority(task.TaskPriorityFastest),
 	)
+}
+
+// The legacy key. Every producer of a block's sweep shares it, so the block
+// keeps exactly one pending owner.
+func closeExpiredContractsRunOnce(blockSize int, blockIndex int) *task.RunOnceOption {
+	return task.RunOnce(fmt.Sprintf("close_expired_contracts_%d_%d", blockSize, blockIndex))
 }
 
 // Allow two default receive-owner lifetimes before synthesizing an absent report.
