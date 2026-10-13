@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	mmdb "github.com/oschwald/maxminddb-golang/v2"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/geo"
 	"gopkg.in/yaml.v3"
@@ -43,6 +45,8 @@ func runGeoipUpdate(ctx context.Context, config string, directory string) error 
 }
 
 // Downloads and verifies a City file, then exports its matching place list.
+// An ASN file is verified and published beside them when the protected
+// configuration lists that edition.
 func refreshGeolite2(ctx context.Context, config string, output string, update geoipUpdater) error {
 	if config == "" {
 		return errors.New("geoip-config is required")
@@ -57,7 +61,7 @@ func refreshGeolite2(ctx context.Context, config string, output string, update g
 	}
 	buildTime := db.BuildTime()
 	db.Close()
-	if buildTime.After(time.Now().Add(24*time.Hour)) || buildTime.Before(time.Now().Add(-30*24*time.Hour)) {
+	if !geolite2Fresh(buildTime) {
 		return errors.New("GeoLite2 source build date is outside the supported freshness window")
 	}
 	if err := ctx.Err(); err != nil {
@@ -80,7 +84,62 @@ func refreshGeolite2(ctx context.Context, config string, output string, update g
 	if err := os.Rename(path, filepath.Join(output, "geolite2.mmdb")); err != nil {
 		return err
 	}
-	return writeManifest(output, map[string]any{"source": "GeoLite2-City", "source_build_time": buildTime.UTC(), "fetched_at": time.Now().UTC()}, "geolite2.mmdb", "places.yml")
+	manifest := map[string]any{"source": "GeoLite2-City", "source_build_time": buildTime.UTC(), "fetched_at": time.Now().UTC()}
+	names := []string{"geolite2.mmdb", "places.yml"}
+	asnBuildTime, asn, err := refreshGeolite2Asn(output)
+	if err != nil {
+		return err
+	}
+	if asn {
+		manifest["asn_source"] = "GeoLite2-ASN"
+		manifest["asn_source_build_time"] = asnBuildTime.UTC()
+		names = append(names, "geolite2-asn.mmdb")
+	}
+	return writeManifest(output, manifest, names...)
+}
+
+// GeoLite2 ASN names the network an address is announced by, which the server
+// answers as my-ip-info's `asn` (lag.dev/PLAN.md A3). It is optional:
+// geoipupdate fetches it only when the protected configuration lists the
+// GeoLite2-ASN edition, and the server answers without it. A fetched file
+// still validates like the City file, or nothing is published.
+func refreshGeolite2Asn(output string) (time.Time, bool, error) {
+	path := filepath.Join(output, "GeoLite2-ASN.mmdb")
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return time.Time{}, false, nil
+	} else if err != nil {
+		return time.Time{}, false, err
+	}
+	db, err := mmdb.Open(path)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("validate downloaded GeoLite2 ASN: %w", err)
+	}
+	buildTime := db.Metadata.BuildTime()
+	// The server reads another type's records as empty rather than failing.
+	if databaseType := db.Metadata.DatabaseType; databaseType != "GeoLite2-ASN" {
+		db.Close()
+		return time.Time{}, false, fmt.Errorf("downloaded GeoLite2 ASN has database type %q", databaseType)
+	}
+	// Every record is checked, so a damaged download is refused here rather
+	// than leaving the server without answers.
+	err = db.Verify()
+	db.Close()
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("validate downloaded GeoLite2 ASN: %w", err)
+	}
+	if !geolite2Fresh(buildTime) {
+		return time.Time{}, false, errors.New("GeoLite2 ASN source build date is outside the supported freshness window")
+	}
+	if err := os.Rename(path, filepath.Join(output, "geolite2-asn.mmdb")); err != nil {
+		return time.Time{}, false, err
+	}
+	return buildTime, true, nil
+}
+
+// A month-old or future build date means a stale mirror or a broken clock
+// rather than a usable release input.
+func geolite2Fresh(buildTime time.Time) bool {
+	return !buildTime.After(time.Now().Add(24*time.Hour)) && !buildTime.Before(time.Now().Add(-30*24*time.Hour))
 }
 
 // A dedicated YAML credential, read only by the downloader process.

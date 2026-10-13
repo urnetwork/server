@@ -1412,7 +1412,7 @@ depends on, as far as the upstream sources allow, and publishes one bundle:
 
 | Path | Contents | Config resource |
 | --- | --- | --- |
-| `mmdb/` | GeoLite2-City, places and manifest, as `geolite2 refresh` | yes |
+| `mmdb/` | GeoLite2-City, places and manifest, as `geolite2 refresh`, plus `geolite2-asn.mmdb` when `edition_ids` names `GeoLite2-ASN` | yes |
 | `arindb/` | Final `arin.mmdb`, its `manifest.json`, `registration-manifest.json` and `update-manifest.json` | yes |
 | `subscriber-evidence/catalog/` | The refreshed `catalog.yml` with every pinned snapshot under `sources/` and the pinning manifest | no |
 | `subscriber-evidence/registration/` | The registration base database and its manifest | no |
