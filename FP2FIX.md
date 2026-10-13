@@ -1,5 +1,25 @@
 # FindProviders2 supply and quality-probe repair plan
 
+Latest user decision, 2026-10-13: **every bucket, Online included, requires at
+least one accepted measured URL success in the eight-hour evidence window,
+unless the provider has fewer than two measured runs.** A provider with
+`N = S + E >= 2` and `S = 0` leaves Quality, Speed and Online and the location
+counts. Unprobed and warming providers (`N < 2`) keep the benefit of the doubt
+and their URL weight. The rule gates bucket membership only. Probe admission,
+the rolling ten-run quota and its census are unchanged, so an excluded provider
+keeps being probed and its first success restores it at the next publication.
+A country guard stops the rule where the probe itself fails: a published
+country is exempt when fewer than `online_success_country_floor` (default 0.36,
+pending the owner's confirmation) of its measured Online providers have a
+success. `online_requires_url_success: false` in provider.yml is the kill
+switch. The rule changes Online-mode answers, location lists and counts, and
+the Online tier that a Quality or Speed answer reaches only after both native
+buckets run short. It does not change native Quality or Speed membership or
+the native part of those answers. Measured on Main at about 21:25 UTC, it would
+exclude 14,164 of 63,581 Online providers (22.3%) and leave 49,417. 27 countries
+would be exempt and none emptied. See [the decision](#resolved-decisions-and-remaining-research)
+and the gate matrix below.
+
 Census implementation checkpoint, 2026-10-07: the transaction-local server
 statement deadline now has a qualified native control for snapshot release when
 the separate cancellation connection stalls. This is source qualification;
@@ -126,6 +146,7 @@ reclassifying the fleet.
 | Pass reliability | Required | Required | Required |
 | No ARIN risk exception | Required | Required | Required |
 | No probe security exception | Required | Required | Required |
+| At least one measured URL success in eight hours, or fewer than two measured runs | Required | Required | Required |
 | URL success ratio ≥ 0.8 | Required | Required | Not required |
 | Direct or identified-ISP subscriber evidence and no quality exception | Required under policy two | Not required | Not required |
 
@@ -133,6 +154,19 @@ This matrix is the bucket admission contract. Probe admission has a different
 purpose: every provider passing reliability and the ARIN **risk** gate is
 eligible for paced URL probes. ARIN quality exceptions do not stop probes;
 security-quarantined providers also need probes to establish recovery.
+
+The URL-success row (2026-10-13) is a passing condition on bucket membership,
+not a common gate. Probe admission, the rolling quota and its census never read
+it, so a provider it excludes keeps being probed and returns at the next
+publication after its first success. Quality and Speed already imply it through
+the ratio row. Unprobed providers, and providers with a single measured run,
+keep Online eligibility with their URL weight (`1` unprobed, `0.1 + 0.9*r`
+measured). The row has two switches. A published country is exempt when fewer
+than `online_success_country_floor` of its measured Online providers (common
+gate passes with current evidence) have a success, because there the probe
+itself fails, not the providers. `online_requires_url_success: false` in
+provider.yml turns the row off. Explicit client ids and `force_minimum` keep
+only the common gates, as they do for the ratio row.
 
 The probe records URL successes, errors, and security exceptions. There is no
 separate blackhole definition or cheap-blackhole admission gate. The indexer
@@ -161,7 +195,9 @@ Both quality and speed require qualifying recent URL history. All three
 buckets require reliability, no ARIN risk, and no quality-probe security
 finding. Online does not require qualifying URL history: ordinary reachability
 failure must not independently remove a reliable,
-risk-free, secure provider from online. A current TLS-authentication failure
+risk-free, secure provider from online. Since 2026-10-13 that holds while the
+provider has a measured success: repeated measured failure with none removes it
+too, outside the exempt countries (the URL-success row). A current TLS-authentication failure
 is a hard quarantine until a valid authenticated TLS response from that same
 failed URL, not something that ages into online. That response may clear the
 URL's TLS exception even if its content or performance fails the quality test.
@@ -194,8 +230,9 @@ never manufacture zero supply or widen the requested target or security rules.
 Healthy readable native sources still fill the requested limit or prove their
 exhaustion before advancing. If complete native sources are exhausted, a large
 reliable online pool must still answer. Online is a fallback
-source containing all providers that pass the common gates, including members
-of quality/speed; deduplication keeps them from appearing twice. Performance
+source containing all providers that pass the common gates and the URL-success
+row, including members of quality/speed; deduplication keeps them from
+appearing twice. Performance
 metrics order eligible candidates rather than adding hidden bucket admission
 gates. The URL-success definition below includes the explicitly requested
 TTFB/throughput thresholds. Failing those thresholds is an ordinary URL error
@@ -232,7 +269,8 @@ and ARIN flags are gates; they must not be averaged away into a good score.
 | URL errors `E` | Count of unique, accepted, measured URL errors in the same window | Denominator and evidence volume |
 | Measured URL count `N` | `S + E`; excludes unmeasured/local setup failures and duplicate reports | Distinguishes zero observations from observed failures |
 | URL success ratio `r` | `S / N` when `N > 0`; otherwise unknown | Quality/speed gate at `r >= 0.8`, and ranking factor |
-| URL ranking weight | Initially `0.1 + 0.9*r` for measured history; `1` when unknown | Multiplies existing reliability/performance selection weight; stays positive even for online providers with errors |
+| URL success presence | `S >= 1`, read only when `N >= 2` (2026-10-13) | Passing condition for every bucket, Online included; a published country whose measured Online providers have a success below `online_success_country_floor` is exempt; never a probe-admission or quota input |
+| URL ranking weight | Initially `0.1 + 0.9*r` for measured history; `1` when unknown | Multiplies existing reliability/performance selection weight; stays positive even for online providers with errors. Since 2026-10-13 an online provider at `r = 0` has a single measured run or an exempt country |
 | Quality failure index | `ceil(MaxFailureIndex * (1-r))` for measured history; undefined when `N = 0` | Sample-count-normalized quality-tier penalty; more observations at the same ratio cannot worsen the tier |
 | Relative latency | Existing measured relative latency; separately record DNS, connect, TLS, and TTFB timings for diagnosis | Performance ordering within eligible buckets |
 | Throughput | Successful transferred bytes divided by transfer duration after first response byte | Speed ordering; DNS/connection wait is not transfer time |
@@ -265,9 +303,10 @@ Bucket priority precedes these within-bucket metrics: quality → speed → onli
 or speed → quality → online, with deduplication and preserved request filters.
 The ten-run scheduling target is distinct from the ratio gate: ten accepted
 measured successes or failures within the trailing four hours satisfy quota.
-Ten errors can complete collection while leaving the provider online-only;
-ten successes and ten errors in the eight-hour history give `r = 0.5`, so that
-provider also remains online-only until its history meets the success threshold.
+Ten errors can complete collection; with no success that provider also leaves
+Online under the URL-success row, unless its country is exempt.
+Ten successes and ten errors in the eight-hour history give `r = 0.5`, so that
+provider remains online-only until its history meets the success threshold.
 Ten measured runs are a collection target, not an additional quality/speed gate;
 for example, four successes and one error already pass the URL ratio gate.
 Three successes and two errors give `3/5` and fail the inclusive `4/5` gate.
@@ -752,6 +791,72 @@ sample**. They preserve the requested monotonic ranking and small-complete-body
 exemption. Neither creates an additional online or quality/speed admission
 gate; the 0.8 ratio, 2-second TTFB, and 100-kbps meaningful-throughput thresholds
 remain the explicit product requirements.
+
+Resolved 2026-10-13, owner decision at about 20:50 UTC: **Online requires at
+least one accepted measured URL success in the eight-hour window, unless the
+provider has fewer than two measured runs.** This is the URL-success row of the
+gate matrix.
+
+- **Why.** App users saw some providers work and others not. About 40% of FP2
+  URL probe runs reached providers that were connected but never answered:
+  `dial_dns`, the 5-second DNS budget expiring. The failures follow the
+  provider; other runs of DNS-failed providers fail about 70% of the time.
+- **Scope.** Quality and Speed already imply `S >= 1` through the 0.8 ratio, so
+  the row is a common passing condition on bucket membership.
+  - It changes Online-mode answers, location lists and counts, and the Online
+    tier a Quality or Speed answer reaches. `backfillRankMode` first borrows
+    the other native bucket, and the Online fallback follows only when both
+    native buckets run short.
+  - It changes no native membership and no native part of an answer. It does
+    not claim to fix Quality answers.
+- **Minimum history.** `ProviderOnlineMinMeasuredUrlRuns = 2`. One failure is
+  a fault, not a verdict. The probe retries a failure after about a minute, so
+  two failures can share one longer fault. A working provider then misses
+  Online only until its next success is published.
+- **Probing is unchanged.** `providerUrlProbeAdmissionSql`, the rolling quota,
+  the census `N`, the hard-exclusion set and its Redis publication do not read
+  the row.
+- **Request time.** Explicit client ids and `force_minimum` keep only the
+  common gates (reliability, ARIN risk, probe security). This follows the
+  convention above that security and risk rules apply there and
+  bucket-membership rules do not; the ratio row works the same way.
+  `force_minimum` is also the operator and egress-prober census of every
+  provider that can accept a contract.
+- **Country guard.** A published country is exempt when fewer than
+  `online_success_country_floor` of its measured Online providers have a
+  success. Measured Online providers are common-gate passes with current
+  evidence. The test is share < floor, and a country with no measured provider
+  is exempt.
+  - Each fleet pass computes the guard over its own population from evidence it
+    already loaded: the score export, the location counts and the dashboard
+    counts.
+  - The score export publishes its counts to Redis for provider status,
+    `bringyourctl provider inspect` and the exempt-country gauge. A reader
+    without that document exempts every country.
+  - On 2026-10-13 the structurally failing countries measured success shares
+    of VN 0.03, JP 0.24, RU 0.25, TW 0.27, ZA 0.35 and IN 0.35. The default of
+    0.36, pending the owner's confirmation, exempts them all. HK, the lowest
+    country of a hundred or more providers where the probe works, measured
+    0.46.
+- **Kill switch.** `online_requires_url_success: false` in provider.yml takes
+  effect at each pass's next settings read.
+- **Visibility.** Excluded providers are reported under the `no_success`
+  reason, which comes after reliability, ARIN risk and TLS and before
+  unprobed or health. The counts policy schema is now 2. The provider status
+  reason is `egress_no_success`, with what to fix. Each export logs the exempt
+  countries, and `urnetwork_stats_provider_online_success_exempt{country_code}`
+  publishes them.
+- **Measured impact.** Read-only on the Main primary at about 21:25 UTC, with
+  floor 0.36:
+  - 14,164 of 63,581 Online providers excluded (22.3%), leaving 49,417 Online.
+    Without the guard the rule would exclude 16,857.
+  - 27 countries exempt, keeping 2,693 providers. No country emptied. 37
+    countries hold 1-9 providers, against 34 before.
+  - The guard is per country, so smaller locations can empty: 108 of 1,134
+    cities with Online supply (1,217 providers, all without a success) and 25
+    of 460 regions (31 providers).
+  - Largest exclusions: US 8,471, GB 1,814, DE 990, FR 727, ES 565, BR 479,
+    CA 365, IT 270, TH 111 and HK 79.
 
 The remaining research concerns evidence-backed virtual/hosting ISP rules and
 legitimate multinational exceptions, particularly AFRINIC allocations. Do not

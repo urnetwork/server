@@ -3353,16 +3353,19 @@ func testing_providerReliabilityPasses(ctx context.Context, clientIds ...server.
 	})
 }
 
-// Measured URL failures remove native quality/speed membership, not online.
+// Measured URL failures remove native quality/speed membership, not online,
+// while a provider has a success. Without one in its 131 runs, in a country
+// where the probe works, the URL-success rule removes it from online too.
 func TestUpdateClientScoresExcludesMeasuredUnhealthyProviders(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		city := testing_healthGateCity(ctx, t)
 
-		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
-		healthyClientId, deadClientId := clientIds[0], clientIds[1]
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 3)
+		healthyClientId, failingClientId, deadClientId := clientIds[0], clientIds[1], clientIds[2]
 
 		testing_setProviderEgressHealth(ctx, healthyClientId, 131, 131)
+		testing_setProviderEgressHealth(ctx, failingClientId, 65, 131)
 		testing_setProviderEgressHealth(ctx, deadClientId, 0, 131)
 		testing_rollUpEgress(ctx)
 
@@ -3374,11 +3377,14 @@ func TestUpdateClientScoresExcludesMeasuredUnhealthyProviders(t *testing.T) {
 		if !testing_qualityNative(clientScores, healthyClientId) {
 			t.Fatal("a provider measured 131/131 is not quality supply; the gate is excluding healthy providers")
 		}
-		if testing_qualityNative(clientScores, deadClientId) {
-			t.Fatal("a provider measured 0/131 is still native quality")
+		if testing_qualityNative(clientScores, failingClientId) {
+			t.Fatal("a provider measured 65/131 is still native quality")
 		}
-		if score, ok := clientScores[deadClientId]; !ok || !score.Online {
+		if score, ok := clientScores[failingClientId]; !ok || !score.Online {
 			t.Fatal("ordinary URL failures removed a provider from online")
+		}
+		if _, ok := clientScores[deadClientId]; ok {
+			t.Fatal("a provider measured 0/131 is still in the user-facing pool")
 		}
 	})
 }
@@ -3552,7 +3558,8 @@ func TestUpdateClientScoresZeroTotalHealthDoesNotPassOrPanic(t *testing.T) {
 // minimums. Quality membership is folded into exactly that same PassesMinimums
 // flag, so a provider out of quality must stay visible to a forceMinimum
 // caller for the same reason -- otherwise the providers most in need of
-// inspection are the ones an operator can no longer see.
+// inspection are the ones an operator can no longer see. That holds for a
+// provider the URL-success rule takes out of every bucket as well.
 func TestUpdateClientScoresForceMinimumStillSeesHealthExcludedProviders(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -3569,13 +3576,15 @@ func TestUpdateClientScoresForceMinimumStillSeesHealthExcludedProviders(t *testi
 		err := UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
 
-		// All three remain online; only the passing ratio is native quality.
+		// The healthy and never-measured providers remain; only the passing
+		// ratio is native quality. Without one URL success in a country where
+		// the probe works, the dead provider is not even online.
 		strict := testing_selectableClientScores(ctx, t, city, false)
-		if len(strict) != 3 || !testing_qualityNative(strict, healthyClientId) || !strict[neverMeasuredClientId].Online {
-			t.Fatalf("user-facing pool holds %d providers, want all three online and the healthy one native", len(strict))
+		if len(strict) != 2 || !testing_qualityNative(strict, healthyClientId) || !strict[neverMeasuredClientId].Online {
+			t.Fatalf("user-facing pool holds %d providers, want the healthy one native and the never-measured one online", len(strict))
 		}
-		if testing_qualityNative(strict, deadClientId) || !strict[deadClientId].Online {
-			t.Fatal("ordinary failures must leave the provider online-only")
+		if _, ok := strict[deadClientId]; ok {
+			t.Fatal("a provider without one URL success is in the user-facing pool")
 		}
 
 		// the operator census has all three

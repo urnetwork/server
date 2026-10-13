@@ -3890,6 +3890,10 @@ type providerCountFilter struct {
 	blackholed map[server.Id]bool
 	// Security exceptions persist until later authenticated TLS from the same URL.
 	tlsAuthenticationFailed map[server.Id]bool
+	// The URL-success rule's country guard, set by each consumer after the
+	// filter loads: a fleet pass counts its own population, a scoped reader
+	// reads the score export's. Nil exempts every country.
+	onlineSuccessBaseline *providerOnlineSuccessBaseline
 }
 
 // Complete means disconnected history too. The partial covering index supplies
@@ -4124,6 +4128,8 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	if err := publishProviderHardExclusions(ctx, clientIds, countFilter, ttl); err != nil {
 		return fmt.Errorf("publish provider hard exclusions: %w", err)
 	}
+	// the URL-success rule's country guard over this same population
+	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(providerCountRows), egressSettings)
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
@@ -4136,7 +4142,8 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 					continue
 				}
 
-				// Ordinary URL errors and missing probes still count online.
+				// Ordinary URL errors and missing probes still count online;
+				// a provider the URL-success rule excludes does not.
 				{
 					decision := decideProviderEgress(
 						countFilter.egressFacts(
@@ -5405,6 +5412,19 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// health map, including providers outside this serving cohort. Keep that
 	// diagnostic population and its exact evidence window unchanged.
 	countFilter.healthCounts, countFilter.healthWindowEnd = getAllProviderEgressHealthCountsSnapshot(ctx)
+	// The URL-success rule's country guard over the public cohort, the
+	// population of the location counts and the dashboard, from the evidence
+	// just loaded. Computed before the shadow observer reads any facts.
+	onlineSuccessBaseline := func() *providerOnlineSuccessBaseline {
+		clientIdCountryCodes := map[server.Id]string{}
+		for _, row := range pendingScores {
+			if !row.score.NetworkOnly {
+				clientIdCountryCodes[row.score.ClientId] = normalizeCountryCode(row.egress.publishedCountryCode)
+			}
+		}
+		return newProviderOnlineSuccessBaseline(countFilter, clientIdCountryCodes, egressSettings)
+	}()
+	countFilter.onlineSuccessBaseline = onlineSuccessBaseline
 	var observeShadowScore func(clientScoreSourceRow)
 	if shadowScoreCapture != nil {
 		observeShadowScore = func(row clientScoreSourceRow) {
@@ -5461,6 +5481,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		reasonCounts,
 		onlineCount,
 	)
+	glog.Infof("[nclm]online url-success rule: %s\n", onlineSuccessBaseline.logSummary(egressSettings))
 
 	// set each client score to its lowest lookback, decided the same way in
 	// every location and group map it sits in
@@ -5655,6 +5676,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		glog.Infof("[nclm]client score provider eligibility ready; derived and inactive clients excluded\n")
 		if err := writeClientScoreNativeCensus(ctx, nativeCensus, ttl); err != nil {
 			return fmt.Errorf("publish native client score census: %w", err)
+		}
+		// The guard this export decided Online by, for provider status,
+		// inspection and the exempt-country gauge. A reader without it
+		// exempts every country, so a failure here leaves the export standing.
+		if err := publishProviderOnlineSuccessBaseline(ctx, onlineSuccessBaseline, ttl); err != nil {
+			glog.Errorf("[nclm]publish online url-success guard: %s\n", err)
 		}
 		shadowScoreCapture.publish(nativeCensus, locationClientScores, locationGroupClientScores)
 		glog.Infof(

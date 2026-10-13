@@ -2551,6 +2551,18 @@ func providerInspect(opts docopt.Opts) {
 		evidence = fmt.Sprintf("quality %t", inspection.CurrentIndex.Quality)
 	}
 	fmt.Printf("  index from the latest run now %d (%s; evidence is %d or more loads within %s)\n", inspection.CurrentIndex.Index, evidence, inspection.Settings.MinScoredLoads, inspection.Settings.EvidenceMaxAge)
+	fmt.Printf("  url successes %d, errors %d in the evidence window; no success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
+	countryGuard := "no published guard, so every country is exempt"
+	if inspection.OnlineSuccessBaselineKnown {
+		countryGuard = fmt.Sprintf(
+			"%d of %d measured online providers in %s have a success (guard computed %s)",
+			inspection.OnlineSuccessCountrySucceeded,
+			inspection.OnlineSuccessCountryMeasured,
+			optionalString(inspection.PublishedCountryCode),
+			optionalTime(&inspection.OnlineSuccessBaselineTime),
+		)
+	}
+	fmt.Printf("  online url-success rule %t, country floor %v: %s; country exempt %t\n", inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, countryGuard, inspection.OnlineSuccessCountryExempt)
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)

@@ -129,8 +129,12 @@ type statsProviderEgressWire struct {
 	Counts    *statsProviderEgressWireCounts `json:"n"`
 }
 
+// Every bucket and exactly every reason the rules report. The reason set
+// follows model.ProviderExcludedReasons; a change to it bumps the schema of
+// model.ProviderEgressCountsPolicyKey, so a snapshot of the other set lives
+// under another key.
 func validStatsProviderEgressCounts(counts *model.ProviderEgressCounts) bool {
-	if counts == nil || counts.MaxIndex < 0 || counts.MaxIndex > statsProviderEgressMaxIndex || len(counts.BucketIndexCounts) != 3 || len(counts.ReasonCounts) != 8 {
+	if counts == nil || counts.MaxIndex < 0 || counts.MaxIndex > statsProviderEgressMaxIndex || len(counts.BucketIndexCounts) != 3 || len(counts.ReasonCounts) != len(model.ProviderExcludedReasons) {
 		return false
 	}
 	for _, bucket := range []string{model.RankModeQuality, model.RankModeSpeed, model.ProviderEgressBucketOnline} {
@@ -150,7 +154,7 @@ func validStatsProviderEgressCounts(counts *model.ProviderEgressCounts) bool {
 			}
 		}
 	}
-	for _, reason := range []string{model.ProviderExcludedBlackhole, model.ProviderExcludedTls, model.ProviderExcludedCountry, model.ProviderExcludedHealth, model.ProviderExcludedUnprobed, model.ProviderExcludedArinRisk, model.ProviderExcludedArinNonQuality, model.ProviderExcludedReliability} {
+	for _, reason := range model.ProviderExcludedReasons {
 		if count, ok := counts.ReasonCounts[reason]; !ok || count < 0 {
 			return false
 		}
