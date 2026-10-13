@@ -52,45 +52,52 @@ func TestSweepLagRemovesExpiredGuests(t *testing.T) {
 	})
 }
 
-// The sweep keeps a ticket for the ticket retention, a result for the result
-// retention, and a track until every result it can have is gone.
+// The sweep keeps a ticket for the ticket retention, 48 h, and everything of
+// a track for the result retention, 7 days: just under it the track and its
+// results stay, and just past it they go together, a late result included.
 func TestSweepLagAppliesRetention(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		settings := controller.DefaultLagSettings()
-		connect.AssertEqual(t, settings.ResultRetention, 180*24*time.Hour)
+		connect.AssertEqual(t, settings.ResultRetention, 7*24*time.Hour)
+		connect.AssertEqual(t, settings.TicketRetention, 48*time.Hour)
+		connect.AssertEqual(t, settings.GuestSweepInterval, 15*time.Minute)
 		now := server.NowUtc().Truncate(time.Second)
 
-		addTrack := func(startedAt time.Time) *model.LagTicket {
-			track := &model.LagTrack{
-				TrackId:   server.NewId(),
-				NetworkId: server.NewId(),
-				ClientId:  server.NewId(),
-				StartedAt: startedAt,
-			}
-			ticket := &model.LagTicket{
+		track := &model.LagTrack{
+			TrackId:   server.NewId(),
+			NetworkId: server.NewId(),
+			ClientId:  server.NewId(),
+			StartedAt: now,
+		}
+		tickets := []*model.LagTicket{}
+		for position := range 2 {
+			tickets = append(tickets, &model.LagTicket{
 				TicketId:   server.NewId(),
 				TrackId:    track.TrackId,
+				Position:   position,
 				ClientId:   track.ClientId,
 				NetworkId:  track.NetworkId,
 				ExtenderId: server.NewId(),
-				IssuedAt:   startedAt,
-				ExpiresAt:  startedAt.Add(settings.TicketTtl),
-			}
-			model.CreateLagTrack(ctx, track, []*model.LagTicket{ticket})
+				IssuedAt:   now,
+				ExpiresAt:  now.Add(settings.TicketTtl),
+			})
+		}
+		model.CreateLagTrack(ctx, track, tickets)
+		// a report as its minute closed, and one that came a day late
+		for i, createdAt := range []time.Time{now.Add(time.Minute), now.Add(24 * time.Hour)} {
 			connect.AssertEqual(t, model.AddLagResult(ctx, &model.LagResult{
 				LagResultId:      server.NewId(),
 				TrackId:          track.TrackId,
-				TicketId:         ticket.TicketId,
-				ExtenderId:       ticket.ExtenderId,
+				TrackPosition:    i,
+				TicketId:         tickets[i].TicketId,
+				ExtenderId:       tickets[i].ExtenderId,
 				ExtenderIpFamily: 4,
-				WindowStartTime:  startedAt,
+				WindowStartTime:  now,
 				EndReason:        "no_load",
-				CreatedAt:        startedAt.Add(time.Minute),
+				CreatedAt:        createdAt,
 			}), true)
-			return ticket
 		}
-		addTrack(now)
 
 		counts := func() [3]int {
 			return [3]int{
@@ -104,18 +111,18 @@ func TestSweepLagAppliesRetention(t *testing.T) {
 		}
 
 		// inside every retention nothing goes
-		sweepAt(now.Add(settings.TicketRetention - time.Hour))
-		connect.AssertEqual(t, counts(), [3]int{1, 1, 1})
-		// the ticket goes first, then the result, then the track
-		result := sweepAt(now.Add(settings.TicketRetention + time.Hour))
-		connect.AssertEqual(t, result.RemovedTickets, 1)
-		connect.AssertEqual(t, counts(), [3]int{0, 1, 1})
-		sweepAt(now.Add(settings.ResultRetention - time.Hour))
-		connect.AssertEqual(t, counts(), [3]int{0, 1, 1})
-		result = sweepAt(now.Add(settings.ResultRetention + time.Hour))
-		connect.AssertEqual(t, result.RemovedResults, 1)
-		connect.AssertEqual(t, counts(), [3]int{0, 0, 1})
-		result = sweepAt(now.Add(settings.ResultRetention + settings.TicketRetention + time.Hour))
+		sweepAt(now.Add(settings.TicketRetention - time.Minute))
+		connect.AssertEqual(t, counts(), [3]int{2, 2, 1})
+		// the tickets go first
+		result := sweepAt(now.Add(settings.TicketRetention + time.Minute))
+		connect.AssertEqual(t, result.RemovedTickets, 2)
+		connect.AssertEqual(t, counts(), [3]int{0, 2, 1})
+		// just under 7 days the track and its results stay
+		sweepAt(now.Add(settings.ResultRetention - time.Minute))
+		connect.AssertEqual(t, counts(), [3]int{0, 2, 1})
+		// just past, they go together, the late result too
+		result = sweepAt(now.Add(settings.ResultRetention + time.Minute))
+		connect.AssertEqual(t, result.RemovedResults, 2)
 		connect.AssertEqual(t, result.RemovedTracks, 1)
 		connect.AssertEqual(t, counts(), [3]int{0, 0, 0})
 	})

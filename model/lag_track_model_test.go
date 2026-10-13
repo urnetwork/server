@@ -172,6 +172,13 @@ func TestAddLagResult(t *testing.T) {
 		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(tickets[0], now)), false)
 		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(tickets[1], now)), true)
 
+		// a report of a track that is gone stores nothing
+		gone, goneTickets := testLagTrack(ctx, now, 1)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM lag_track WHERE track_id = $1`, gone.TrackId))
+		})
+		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(goneTickets[0], now)), false)
+
 		var count int
 		var pingMicros []int32
 		var receivedBytes []int64
@@ -198,25 +205,28 @@ func TestAddLagResult(t *testing.T) {
 	})
 }
 
-// Retention removes tickets, results and tracks by their own cuts.
+// Retention removes tickets by their own cut, and everything of a track
+// once the track is past the retention: its results, even one that arrived
+// late, and then the track with its client fields. Just inside the
+// retention, a track and its results are kept.
 func TestRemoveExpiredLagResults(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc().Truncate(time.Millisecond)
-		oldTrack, oldTickets := testLagTrack(ctx, now.Add(-200*24*time.Hour), 1)
-		newTrack, newTickets := testLagTrack(ctx, now, 1)
-		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(oldTickets[0], now.Add(-190*24*time.Hour))), true)
-		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(newTickets[0], now)), true)
+		retention := 7 * 24 * time.Hour
+		oldTrack, oldTickets := testLagTrack(ctx, now.Add(-retention-time.Minute), 2)
+		newTrack, newTickets := testLagTrack(ctx, now.Add(-retention+time.Minute), 1)
+		// one result as the session's minute closed, and one that arrived a
+		// day late, both of the old track
+		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(oldTickets[0], now.Add(-retention))), true)
+		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(oldTickets[1], now.Add(-retention+24*time.Hour))), true)
+		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(newTickets[0], now.Add(-retention+2*time.Minute))), true)
 
-		removed := RemoveExpiredLagResults(
-			ctx,
-			now.Add(-7*24*time.Hour),
-			now.Add(-180*24*time.Hour),
-			now.Add(-187*24*time.Hour),
-		)
-		connect.AssertEqual(t, removed, RemoveExpiredLagResultsResult{Tickets: 1, Results: 1, Tracks: 1})
+		removed := RemoveExpiredLagResults(ctx, now.Add(-48*time.Hour), now.Add(-retention))
+		connect.AssertEqual(t, removed, RemoveExpiredLagResultsResult{Tickets: 3, Results: 2, Tracks: 1})
 		connect.AssertEqual(t, GetLagTicket(ctx, oldTickets[0].TicketId), (*LagTicket)(nil))
-		connect.AssertNotEqual(t, GetLagTicket(ctx, newTickets[0].TicketId), (*LagTicket)(nil))
+		connect.AssertEqual(t, GetLagTrack(ctx, oldTrack.TrackId), (*LagTrack)(nil))
+		connect.AssertNotEqual(t, GetLagTrack(ctx, newTrack.TrackId), (*LagTrack)(nil))
 
 		var oldCount, newCount int
 		server.Db(ctx, func(conn server.PgConn) {
@@ -233,5 +243,13 @@ func TestRemoveExpiredLagResults(t *testing.T) {
 		})
 		connect.AssertEqual(t, oldCount, 0)
 		connect.AssertEqual(t, newCount, 2)
+
+		// a result stored before the cut goes whatever its track
+		strayTrack, strayTickets := testLagTrack(ctx, now, 1)
+		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(strayTickets[0], now.Add(-retention-time.Minute))), true)
+		removed = RemoveExpiredLagResults(ctx, now.Add(-48*time.Hour), now.Add(-retention))
+		connect.AssertEqual(t, removed.Results, 1)
+		connect.AssertEqual(t, removed.Tracks, 0)
+		connect.AssertNotEqual(t, GetLagTrack(ctx, strayTrack.TrackId), (*LagTrack)(nil))
 	})
 }

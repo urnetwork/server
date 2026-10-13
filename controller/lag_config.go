@@ -42,7 +42,7 @@ import (
 //	report_max_count: 32         # reports in one post (M8 batches 32)
 //	report_max_age: 24h          # from a ticket's issue to its report's arrival
 //	ticket_retention: 48h        # past report_max_age, so a late report still finds its ticket
-//	result_retention: 4320h      # 180 days
+//	result_retention: 168h       # 7 days: results, and the tracks with their client fields
 //
 // A value that is not positive keeps its default, so a typo can turn a limit
 // down but never off.
@@ -114,7 +114,7 @@ func DefaultLagSettings() *LagSettings {
 		ReportMaxCount:    32,
 		ReportMaxAge:      24 * time.Hour,
 		TicketRetention:   48 * time.Hour,
-		ResultRetention:   180 * 24 * time.Hour,
+		ResultRetention:   7 * 24 * time.Hour,
 	}
 }
 

@@ -17,9 +17,11 @@ import (
 // removes the lag guest networks past their expiry, with their clients, which
 // is what ends a guest's jwt while expired tokens are still accepted
 // (server/session/AUTH.md §8). Only networks marked as lag guests expire. It
-// also applies the retention of what lag.dev stores: tickets after
-// ticket_retention, results after result_retention, and tracks once every
-// result they can have is gone.
+// also applies the retention of what lag.dev stores (A5): tickets after
+// ticket_retention, and everything of a track, its results and then the
+// track with its client fields, once the track is older than
+// result_retention (7 days). The sweep runs every guest_sweep_interval
+// (15 minutes), so nothing outlives the retention by more than that.
 
 // Guests removed per batch. Each is removed in its own transaction; batches
 // repeat until the backlog is gone or the run's time is up.
@@ -82,13 +84,13 @@ func sweepLag(
 
 	// a ticket's report comes when its session's minute closes, and a
 	// session has no time limit, so a ticket is kept for its retention
-	// rather than to its expiry; a track outlives every result it can have
-	removed := model.RemoveExpiredLagResults(
-		ctx,
-		now.Add(-settings.TicketRetention),
-		now.Add(-settings.ResultRetention),
-		now.Add(-settings.ResultRetention-settings.TicketRetention),
-	)
+	// rather than to its expiry, but never past its track's
+	ticketCut := now.Add(-settings.TicketRetention)
+	retainedCut := now.Add(-settings.ResultRetention)
+	if ticketCut.Before(retainedCut) {
+		ticketCut = retainedCut
+	}
+	removed := model.RemoveExpiredLagResults(ctx, ticketCut, retainedCut)
 	result.RemovedTickets = removed.Tickets
 	result.RemovedResults = removed.Results
 	result.RemovedTracks = removed.Tracks

@@ -674,7 +674,7 @@ func TestExtenderLagReportRefusals(t *testing.T) {
 		now := server.NowUtc().Truncate(time.Millisecond)
 		extender := newLagTestExtender(t, ctx, "192.0.2.10")
 		other := newLagTestExtender(t, ctx, "192.0.2.20")
-		track, tickets := newLagTestTrack(ctx, now.Add(-2*time.Minute), extender, other)
+		_, tickets := newLagTestTrack(ctx, now.Add(-2*time.Minute), extender, other)
 		windowStartTime := now.Add(-time.Minute)
 		body := func() *protocol.LagReportBody {
 			return newLagTestReportBody(extender, tickets[0], windowStartTime)
@@ -761,10 +761,20 @@ func TestExtenderLagReportRefusals(t *testing.T) {
 			assertLagReportRejected(t, postLagTestReports(t, extender, now, signLagTestReport(t, edited, extender.privateKey)), LagReportRejectBounds)
 		}
 
+		// a track past its retention is gone, and its ticket's late report
+		// brings none of it back (A5)
+		sweptTrack, sweptTickets := newLagTestTrack(ctx, now.Add(-2*time.Minute), extender)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM lag_track WHERE track_id = $1`, sweptTrack.TrackId))
+		})
+		late := signLagTestReport(t, newLagTestReportBody(extender, sweptTickets[0], windowStartTime), extender.privateKey)
+		assertLagReportRejected(t, postLagTestReports(t, extender, now, late), LagReportRejectTicket)
+		connect.AssertEqual(t, model.GetLagTrack(ctx, sweptTrack.TrackId), (*model.LagTrack)(nil))
+
 		// nothing above was stored
 		var resultCount int
 		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM lag_result WHERE track_id = $1`, track.TrackId).Scan(&resultCount))
+			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM lag_result`).Scan(&resultCount))
 		})
 		connect.AssertEqual(t, resultCount, 0)
 

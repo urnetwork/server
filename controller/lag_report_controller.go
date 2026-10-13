@@ -274,6 +274,11 @@ func storeLagReport(
 		uint32(ticket.Position) != body.TrackPosition {
 		return LagReportRejectTicket
 	}
+	// a track past its retention is gone with everything of it, and a late
+	// report does not bring any of it back (A5)
+	if model.GetLagTrack(ctx, ticket.TrackId) == nil {
+		return LagReportRejectTicket
+	}
 
 	// a report names the browser's address family and nothing of its address
 	// (amendment 9); the track's client fields were set when it was issued

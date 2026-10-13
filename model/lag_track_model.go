@@ -367,10 +367,26 @@ type LagResult struct {
 	CreatedAt               time.Time
 }
 
-// Stores one report. False when the ticket already has a report (A7), in
-// which case nothing is written.
+// Stores one report. False when the ticket already has a report (A7), or
+// when its track is gone, past its retention: a late report never brings back
+// data for a swept track. Nothing is written then.
 func AddLagResult(ctx context.Context, result *LagResult) (added bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		// the track row is held until the result is in, so the sweep cannot
+		// remove it underneath
+		rows, err := tx.Query(
+			ctx,
+			`SELECT track_id FROM lag_track WHERE track_id = $1 FOR SHARE`,
+			result.TrackId,
+		)
+		trackExists := false
+		server.WithPgResult(rows, err, func() {
+			trackExists = rows.Next()
+		})
+		if !trackExists {
+			return
+		}
+
 		tag, err := tx.Exec(
 			ctx,
 			`
@@ -488,15 +504,14 @@ type RemoveExpiredLagResultsResult struct {
 const lagRetentionBatchSize = 10000
 
 // Deletes, in bounded batches, the tickets issued before minTicketIssuedAt,
-// the results stored before minResultCreatedAt and the tracks started before
-// minTrackStartedAt. A track's reports all arrive while its tickets are kept,
-// so a track cut at the result retention plus the ticket retention outlives
-// every result it has.
+// and everything of a track started before minRetainedAt: its results,
+// however late they arrived, and then the track with its client fields once
+// no result of it is left. A result stored before minRetainedAt goes too,
+// whatever its track. So nothing of a track outlives the retention (A5).
 func RemoveExpiredLagResults(
 	ctx context.Context,
 	minTicketIssuedAt time.Time,
-	minResultCreatedAt time.Time,
-	minTrackStartedAt time.Time,
+	minRetainedAt time.Time,
 ) RemoveExpiredLagResultsResult {
 	removed := RemoveExpiredLagResultsResult{}
 	deleteBatches := func(statement string, minTime time.Time) int {
@@ -531,6 +546,20 @@ func RemoveExpiredLagResults(
 		`
 		DELETE FROM lag_result
 		WHERE lag_result_id IN (
+			SELECT lag_result.lag_result_id
+			FROM lag_track
+			INNER JOIN lag_result ON lag_result.track_id = lag_track.track_id
+			WHERE lag_track.started_at < $1
+			ORDER BY lag_track.started_at, lag_result.lag_result_id
+			LIMIT $2
+		)
+		`,
+		minRetainedAt,
+	)
+	removed.Results += deleteBatches(
+		`
+		DELETE FROM lag_result
+		WHERE lag_result_id IN (
 			SELECT lag_result_id
 			FROM lag_result
 			WHERE created_at < $1
@@ -538,7 +567,7 @@ func RemoveExpiredLagResults(
 			LIMIT $2
 		)
 		`,
-		minResultCreatedAt,
+		minRetainedAt,
 	)
 	removed.Tracks = deleteBatches(
 		`
@@ -546,12 +575,16 @@ func RemoveExpiredLagResults(
 		WHERE track_id IN (
 			SELECT track_id
 			FROM lag_track
-			WHERE started_at < $1
+			WHERE
+				started_at < $1 AND
+				NOT EXISTS (
+					SELECT 1 FROM lag_result WHERE lag_result.track_id = lag_track.track_id
+				)
 			ORDER BY started_at, track_id
 			LIMIT $2
 		)
 		`,
-		minTrackStartedAt,
+		minRetainedAt,
 	)
 	return removed
 }

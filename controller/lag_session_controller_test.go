@@ -166,12 +166,12 @@ func TestLagSettingsDefaults(t *testing.T) {
 	connect.AssertEqual(t, settings.MaxDownloadBytes, int64(2*1024*1024*1024))
 	connect.AssertEqual(t, settings.MaxUploadBytes, int64(2*1024*1024*1024))
 	connect.AssertEqual(t, settings.ReportMaxCount, 32)
-	connect.AssertEqual(t, settings.ResultRetention, 180*24*time.Hour)
+	connect.AssertEqual(t, settings.ResultRetention, 7*24*time.Hour)
 
 	settings = (&LagSettings{GuestLimit: -1, TicketTtl: time.Minute}).withDefaults()
 	connect.AssertEqual(t, settings.GuestLimit, 10)
 	connect.AssertEqual(t, settings.TicketTtl, time.Minute)
-	connect.AssertEqual(t, settings.ResultRetention, 180*24*time.Hour)
+	connect.AssertEqual(t, settings.ResultRetention, 7*24*time.Hour)
 }
 
 // lag.yml is read over the defaults: the keys it sets, the defaults for the
