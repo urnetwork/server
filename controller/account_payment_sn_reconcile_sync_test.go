@@ -1,7 +1,10 @@
 package controller
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -83,6 +86,52 @@ func TestSnReconcileInflatedLegacyAmountIsNotPaid(t *testing.T) {
 			corrected, ok := row["corrected_payout_nano_cents"]
 			if (row["payment_id"] == inflated.String()) != ok || (ok && corrected != float64(model.UsdToNanoCents(4))) {
 				t.Fatal("JSON row", row)
+			}
+		}
+	})
+}
+
+// RC-24: upstream's reconcile-legacy-attempts decides RC-2 rows. One that
+// passes every check is `unresolved: upstream_scope`: it is outside the
+// payable set, the digest and funding, and never revived. An RC-2 row with
+// other evidence keeps its reason. RC-1 rows are revived as before.
+func TestSnReconcileUnretainedKeyIsReportOnly(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newSnReconcileTestFixture(t)
+		created := snReconcileTestCutoff.Add(-30 * snReconcileTestDay)
+		networkId, walletId, _ := f.network("MATIC")
+		unretained := f.legacy(networkId, &walletId, created, model.UsdToNanoCents(5))
+		f.reserveUnjournaled(unretained)
+		canceled := f.legacy(networkId, &walletId, created.Add(time.Hour), model.UsdToNanoCents(1))
+		f.cancelWithKey(canceled)
+		orphanNetwork, orphanWallet, orphanAddress := f.network("MATIC")
+		blocked := f.legacy(orphanNetwork, &orphanWallet, created, model.UsdToNanoCents(1))
+		f.reserveUnjournaled(blocked)
+		f.list(snReconcileTestMaticWallet, f.transfer("hidden-transfer", "COMPLETE", orphanAddress, created))
+
+		report := f.dry()
+		f.expect(report, map[server.Id]string{unretained: "unresolved: upstream_scope", canceled: snReconcilePayable, blocked: "unresolved: orphan_transfer"})
+		item, funding := snReconcileTestRow(t, report, unretained), snReconcileTestFunding(t, report, "MATIC")
+		if item.OwedNanoCents != 0 || item.Chain != "" || funding.PayableCount != 1 || funding.SendNanoCents != model.UsdToNanoCents(0.99) ||
+			!slices.Equal(snReconcileTestRow(t, report, blocked).OrphanIds, []string{"hidden-transfer"}) ||
+			!strings.Contains(report.Text(), "  "+unretained.String()+" network "+networkId.String()+" unretained_key unresolved: upstream_scope, owed 0.000000 USD\n") {
+			t.Fatalf("report:\n%s", report.Text())
+		}
+		// The digest's payable list holds the RC-1 row alone.
+		digest := sha256.Sum256([]byte(fmt.Sprintf("payable %s %d %d MATIC", canceled, model.UsdToNanoCents(1), model.UsdToNanoCents(0.99))))
+		if report.Digest != hex.EncodeToString(digest[:]) {
+			t.Fatal("the digest binds more than the RC-1 row", report.Digest)
+		}
+
+		before := f.payments()
+		sent := f.sendWith(report.Digest)
+		if !slices.Equal(sent.Revived, []server.Id{canceled}) || !slices.Equal(f.scheduled(), []server.Id{canceled}) || len(sent.Skipped) != 0 {
+			t.Fatal("not only the RC-1 row was revived", sent.Revived, snReconcileTestSkips(sent))
+		}
+		after := f.payments()
+		for _, paymentId := range []server.Id{unretained, blocked} {
+			if after[paymentId] != before[paymentId] || f.auditCount(paymentId, "sn_reconcile_revived") != 0 {
+				t.Fatal("an RC-2 row was written", paymentId)
 			}
 		}
 	})

@@ -43,6 +43,7 @@ const (
 	snReconcileChanged           = "changed"
 	snReconcileUnattributed      = "unattributed_orphan"
 	snReconcileInflated          = "inflated"
+	snReconcileUpstreamScope     = "upstream_scope"
 )
 
 // Outcomes of the row's own attempt that do not stop its classification.
@@ -617,6 +618,12 @@ func snReconcileClassify(item *SnReconcileRowReport, report *SnReconcileReport, 
 	sendUsd, sendNanoCents := snReconcileSendAmount(row.Payout)
 	if sendNanoCents <= 0 {
 		item.Class, item.Reason = snReconcileUnresolved, snReconcileBelowFee
+		return
+	}
+	// RC-24: upstream's reconcile-legacy-attempts decides RC-2 rows; one that
+	// passes every check is reported, never revived.
+	if row.Kind == model.SnReconcileUnretainedKey {
+		item.Class, item.Reason = snReconcileUnresolved, snReconcileUpstreamScope
 		return
 	}
 	// RC-12

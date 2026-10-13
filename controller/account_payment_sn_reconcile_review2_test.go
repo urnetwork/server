@@ -108,7 +108,7 @@ func TestSnReconcileSendRelistNewUnattributedSkipsAll(t *testing.T) {
 		f.cancelWithKey(first)
 		networkB, walletB, _ := f.network("SOL")
 		second := f.legacy(networkB, &walletB, created.Add(time.Hour), model.UsdToNanoCents(1))
-		f.reserveUnjournaled(second)
+		f.cancelWithKey(second)
 		_, _, registered := f.network("MATIC")
 		f.list(snReconcileTestMaticWallet, f.transfer("known-unattributed", "COMPLETE", "0xnobody", created))
 

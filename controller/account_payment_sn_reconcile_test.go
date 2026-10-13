@@ -918,12 +918,12 @@ func TestSnReconcilePayableAmounts(t *testing.T) {
 		f.cancelWithRecord(paid, "COMPLETE", "0xpaid")
 
 		report := f.dry()
-		f.expect(report, map[server.Id]string{matic: snReconcilePayable, sol: snReconcilePayable, paid: snReconcilePaid})
+		f.expect(report, map[server.Id]string{matic: snReconcilePayable, sol: "unresolved: upstream_scope", paid: snReconcilePaid})
 		for paymentId, want := range map[server.Id]struct {
 			owed  model.NanoCents
 			send  float64
 			chain string
-		}{matic: {model.UsdToNanoCents(10), 10 - 0.01, "MATIC"}, sol: {model.UsdToNanoCents(2.5), 2.5 - 0.01, "SOL"}, paid: {0, 0, ""}} {
+		}{matic: {model.UsdToNanoCents(10), 10 - 0.01, "MATIC"}, sol: {0, 0, ""}, paid: {0, 0, ""}} {
 			item := snReconcileTestRow(t, report, paymentId)
 			if item.OwedNanoCents != want.owed || item.SendUsd != want.send || item.Chain != want.chain {
 				t.Fatalf("payable %s = %+v", paymentId, item)
@@ -931,7 +931,7 @@ func TestSnReconcilePayableAmounts(t *testing.T) {
 		}
 		maticFunding, solFunding := snReconcileTestFunding(t, report, "MATIC"), snReconcileTestFunding(t, report, "SOL")
 		if maticFunding.PayableCount != 1 || maticFunding.SendNanoCents != model.UsdToNanoCents(9.99) || maticFunding.WalletId != snReconcileTestMaticWallet ||
-			solFunding.PayableCount != 1 || solFunding.SendNanoCents != model.UsdToNanoCents(2.49) || solFunding.WalletId != snReconcileTestSolWallet ||
+			solFunding.PayableCount != 0 || solFunding.SendNanoCents != 0 || solFunding.WalletId != snReconcileTestSolWallet ||
 			maticFunding.BalanceNanoCents != model.UsdToNanoCents(1000) || maticFunding.ShortfallNanoCents != 0 || solFunding.ShortfallNanoCents != 0 ||
 			maticFunding.RevivedCount != 0 || solFunding.RevivedNanoCents != 0 {
 			t.Fatalf("funding = %+v %+v", maticFunding, solFunding)
@@ -1001,8 +1001,11 @@ func TestSnReconcileSendRevivesAndSchedules(t *testing.T) {
 		unretained := f.legacy(networkId, &walletId, created.Add(time.Hour), model.UsdToNanoCents(2))
 		f.reserveUnjournaled(unretained)
 
+		before := f.payments()
 		report := f.send()
-		if !slices.Equal(report.Revived, []server.Id{failed, unretained}) || !slices.Equal(f.scheduled(), snReconcileTestSorted(failed, unretained)) || len(report.Skipped) != 0 {
+		// RC-24: an RC-2 row is reported, never revived.
+		if !slices.Equal(report.Revived, []server.Id{failed}) || !slices.Equal(f.scheduled(), []server.Id{failed}) || len(report.Skipped) != 0 ||
+			snReconcileTestRow(t, report, unretained).Reason != snReconcileUpstreamScope || f.payments()[unretained] != before[unretained] {
 			t.Fatal("payable rows were not revived and scheduled", report.Revived, f.scheduled())
 		}
 		var details string
@@ -1034,7 +1037,7 @@ func TestSnReconcileSkipsChangedRows(t *testing.T) {
 		created := snReconcileTestCutoff.Add(-30 * snReconcileTestDay)
 		networkId, walletId, _ := f.network("MATIC")
 		recorded := f.legacy(networkId, &walletId, created, model.UsdToNanoCents(1))
-		f.reserveUnjournaled(recorded)
+		f.cancelWithKey(recorded)
 		inexact := f.legacy(networkId, &walletId, created.Add(time.Hour), model.UsdToNanoCents(1))
 		f.cancelWithKey(inexact)
 		revivable := f.legacy(networkId, &walletId, created.Add(2*time.Hour), model.UsdToNanoCents(1))
@@ -1220,7 +1223,7 @@ func TestSnReconcileDryRunWritesNothing(t *testing.T) {
 		f.list(snReconcileTestMaticWallet, f.transfer("unattributed", "COMPLETE", "0xnobody", created))
 		before := f.tables()
 		report := f.dry()
-		f.expect(report, map[server.Id]string{keyOnly: snReconcilePayable, failed: snReconcilePayable, unretained: snReconcilePayable})
+		f.expect(report, map[server.Id]string{keyOnly: snReconcilePayable, failed: snReconcilePayable, unretained: "unresolved: upstream_scope"})
 		if f.tables() != before || len(f.posts) != 0 || len(f.scheduled()) != 0 || report.Mode != "dry_run" || len(report.Revived) != 0 || len(report.Skipped) != 0 ||
 			report.Relisting != nil || len(report.Duplicates) != 1 {
 			t.Fatal("the dry run wrote, scheduled or posted")
@@ -1254,11 +1257,11 @@ func TestSnReconcileEndToEnd(t *testing.T) {
 		payableFailed := f.legacy(solNetwork, &retired, at(1), model.UsdToNanoCents(7))
 		f.cancelWithRecord(payableFailed, "FAILED", "")
 		want[payableFailed] = snReconcilePayable
-		// An unjournaled key that was never canceled.
-		unretainedNetwork, unretainedWallet, unretainedAddress := f.network("MATIC")
-		payableUnretained := f.legacy(unretainedNetwork, &unretainedWallet, at(2), model.UsdToNanoCents(3))
-		f.reserveUnjournaled(payableUnretained)
-		want[payableUnretained] = snReconcilePayable
+		// An unjournaled key that was never canceled: reported, never revived (RC-24).
+		unretainedNetwork, unretainedWallet, _ := f.network("MATIC")
+		unretained := f.legacy(unretainedNetwork, &unretainedWallet, at(2), model.UsdToNanoCents(3))
+		f.reserveUnjournaled(unretained)
+		want[unretained] = "unresolved: upstream_scope"
 		next := func() (server.Id, server.Id, string) {
 			return f.network("MATIC")
 		}
@@ -1338,7 +1341,7 @@ func TestSnReconcileEndToEnd(t *testing.T) {
 		report := f.sendWith(digest)
 		t.Logf("sn-reconcile --send report:\n%s", report.Text())
 		f.expect(report, want)
-		revived := []server.Id{payableKey, payableFailed, payableUnretained}
+		revived := []server.Id{payableKey, payableFailed}
 		if report.Digest != digest || !slices.Equal(report.Revived, revived) || len(report.Skipped) != 0 || !slices.Equal(f.scheduled(), snReconcileTestSorted(revived...)) {
 			t.Fatal("exactly the payable rows were not revived and scheduled", report.Revived, report.Skipped, f.scheduled())
 		}
@@ -1363,7 +1366,7 @@ func TestSnReconcileEndToEnd(t *testing.T) {
 		}
 
 		// The sender pays each revived row once, for its send amount, to its current wallet.
-		destinations := map[server.Id][2]string{payableKey: {maticAddress, "MATIC"}, payableFailed: {solAddress, "SOL"}, payableUnretained: {unretainedAddress, "MATIC"}}
+		destinations := map[server.Id][2]string{payableKey: {maticAddress, "MATIC"}, payableFailed: {solAddress, "SOL"}}
 		for _, paymentId := range revived {
 			posts := len(f.posts)
 			result, err := AdvancePayment(&AdvancePaymentArgs{PaymentId: paymentId}, f.session)
@@ -1578,7 +1581,8 @@ func TestSnReconcileReviveSkipsKeyJournaledAfterCensus(t *testing.T) {
 		}
 		before := f.payments()
 		report := f.sendWith(digest)
-		if !slices.Equal(report.Revived, []server.Id{revivable}) || !slices.Equal(snReconcileTestSkips(report), []string{unretained.String() + " changed ", canceled.String() + " changed "}) ||
+		// The RC-2 row was never payable (RC-24); the RC-1 key-only row is skipped.
+		if !slices.Equal(report.Revived, []server.Id{revivable}) || !slices.Equal(snReconcileTestSkips(report), []string{canceled.String() + " changed "}) ||
 			!slices.Equal(f.scheduled(), []server.Id{revivable}) {
 			t.Fatal("a journaled key was revived", report.Revived, snReconcileTestSkips(report))
 		}
@@ -1634,7 +1638,7 @@ func TestSnReconcileSendRelistIncompleteSkipsAll(t *testing.T) {
 		first := f.legacy(networkId, &walletId, created, model.UsdToNanoCents(1))
 		f.cancelWithKey(first)
 		second := f.legacy(networkId, &walletId, created.Add(time.Hour), model.UsdToNanoCents(1))
-		f.reserveUnjournaled(second)
+		f.cancelWithKey(second)
 		f.completedRecord(networkId, &walletId, "moved-record", nil)
 		digest := f.dry().Digest
 		f.ledger.beforeBalance = func() {

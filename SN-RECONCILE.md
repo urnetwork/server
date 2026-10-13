@@ -6,7 +6,8 @@ then retire it.
 
 ## What it pays
 
-Only stuck rows:
+It pays only `canceled_with_evidence` rows. It reports `unretained_key` rows
+but never pays them (RC-24). Both kinds are stuck rows:
 
 - `canceled_with_evidence`: canceled, not completed, with a Circle idempotency
   key, a payment record or a tx hash. These were canceled before the
@@ -16,7 +17,10 @@ Only stuck rows:
   reaped seven days later (see `replanned`).
 - `unretained_key`: not canceled, with a key but no record or hash, and no
   `audit_account_payment` row under the key. The key was reserved before
-  request journaling began, so the sender refuses the row forever.
+  request journaling began, so the sender refuses the row forever. Upstream's
+  `reconcile-legacy-attempts` decides these rows: it binds a found transfer,
+  releases the key, or holds an uncertain row. This command classifies them
+  and reports its evidence; one that passes every check is `upstream_scope`.
 
 Every other row is out of scope and is never written. That includes an
 original that `bringyourctl payouts correct-legacy-attempts` replaced (RC-22):
@@ -33,19 +37,26 @@ reading Circle when a payout wallet id or USDC token address
 (`circle.polygon_wallet_id`, `circle.polygon_usdc_address`,
 `circle.solana_wallet_id`, `circle.solana_usdc_address`) is missing or empty.
 
-## 1. Wait for all other payout work to finish
+## 1. Run order
 
 The weekly planner and the sender may keep running: they never touch stuck
-rows. Every other person's or tool's payout work must have finished, and its
-payments completed, before you run the command. That includes the payment of
-the old pending attempts: `bringyourctl payouts reconcile-legacy-attempts
---apply`, `bringyourctl payouts correct-legacy-attempts --apply` and the sends
-they lead to. Those tools bind, release, complete or replace the same legacy
-rows this command reads. Apart from the weekly planner and the sender, no
-person or tool may pay, journal or change a payout row, or send to a
-provider, while the command runs and until its revived rows complete. The
-command's checks catch a concurrent change only up to the moment each row is
-revived.
+rows. The upstream legacy tools bind, release, complete or replace the same
+legacy rows this command reads, so the run has this order:
+
+1. `bringyourctl payouts correct-legacy-attempts`, dry run, then `--apply`.
+   It goes first: the reconciliation would release an inflated attempt, which
+   the sender then pays as recorded.
+2. `bringyourctl payouts reconcile-legacy-attempts`, dry run, then `--apply`.
+3. Wait until the sender completes every attempt those two scheduled.
+4. `bringyourctl payouts sn-reconcile`, dry run (steps 2 to 4 below), then
+   `--send --expect=<digest>` (step 5).
+5. No legacy tool runs again until the revived rows complete.
+
+Any other person's or tool's payout work must also have finished. Apart from
+the weekly planner and the sender, no person or tool may pay, journal or
+change a payout row, or send to a provider, while the command runs and until
+its revived rows complete. The command's checks catch a concurrent change
+only up to the moment each row is revived.
 
 ## 2. Dry run
 
@@ -93,7 +104,7 @@ return only makes that row `record_unavailable`.
 
 | Class or reason | Meaning | Action |
 |---|---|---|
-| `payable` | Exact, unpaid and unblocked. Owed is its payout; the send amount is payout minus the sender's $0.01 fee, on the current payout wallet's chain. | `--send` revives it |
+| `payable` | A `canceled_with_evidence` row that is exact, unpaid and unblocked. Owed is its payout; the send amount is payout minus the sender's $0.01 fee, on the current payout wallet's chain. | `--send` revives it |
 | `paid` | Circle completed its own attempt, and its sweeps are still its own. | none |
 | `paid_replanned` | Circle completed it, but its earnings were re-planned before the fix. | see duplicates |
 | `replanned` | It has no sweeps and its attempt moved no funds. Its network created a row after its `cancel_time` (its `create_time` when that is empty), and that row was created on or before 2026-08-17T23:59:59Z or holds early sweeps that closed before the stuck row was created. The re-plan moved its sweeps, even if they were reaped since. Subsidy: the re-plan's epoch already weighted these bytes in its subsidy pool; paying it by hand would reward them twice. Reliability: earned per window, and the re-plan paid none of it. | never pay by hand; the owner may decide its reliability separately |
@@ -109,6 +120,7 @@ return only makes that row `record_unavailable`.
 | `unresolved: duplicate_risk` | The row itself holds early earnings (its own early sweeps, or corrections from another row), which an earlier payment may already have paid. `duplicates` has an entry for its network only when another, non-stuck row there holds early earnings. | by hand, from the row's own early earnings |
 | `unresolved: no_payout_wallet` | Its network has no active Solana or Polygon payout wallet. | wait for a wallet |
 | `unresolved: below_fee` | Its payout does not cover the $0.01 fee. | none |
+| `unresolved: upstream_scope` | RC-24: an `unretained_key` row that passes every check. Upstream's `reconcile-legacy-attempts` decides it. | none here; see `reconcile-legacy-attempts` |
 
 Never pay a `sweeps_missing` or `replanned` row by hand. Once a network's
 later rows are reaped, nothing can show whether its sweeps were re-planned.

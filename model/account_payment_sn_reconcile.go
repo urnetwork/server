@@ -18,6 +18,7 @@ const (
 	// RC-1: canceled before the 2026-08-17 fix while carrying a processor marker.
 	SnReconcileCanceledWithEvidence = "canceled_with_evidence"
 	// RC-2: a key reserved before request journaling, refused by the sender.
+	// Reported but never revived (RC-24).
 	SnReconcileUnretainedKey = "unretained_key"
 )
 
