@@ -1264,11 +1264,14 @@ func (self *providerEgressProbePass) runFullBatchObserved(
 		scoring, siteSettings = self.loadScoring(ctx)
 	}
 	places := map[string]model.ProviderEgressPlace{}
+	// only the URL common-mode guard reads these
+	providerClientIdNetworkIds := map[string]string{}
 	for _, provider := range due {
 		places[provider.ClientId] = model.ProviderEgressPlace{
 			CountryCode: strings.ToLower(strings.TrimSpace(provider.CountryCode)),
 			Region:      strings.TrimSpace(provider.Region),
 		}
+		providerClientIdNetworkIds[provider.ClientId] = provider.NetworkId
 	}
 
 	batch := newProviderEgressFullBatch(self.fullSink)
@@ -1329,10 +1332,10 @@ func (self *providerEgressProbePass) runFullBatchObserved(
 	if self.urlProbes {
 		// A URL turn is a batch of one provider, and an individual accepted
 		// URL error belongs in the history denominator. Only a pre-response
-		// failure the pass's latest providers all share is held back.
+		// failure the pass's latest networks all share is held back.
 		tripped = false
 		if self.urlCommonMode != nil {
-			share, tripped = self.urlCommonMode.judge(providerClientIdScoredRuns)
+			share, tripped = self.urlCommonMode.judge(providerClientIdScoredRuns, providerClientIdNetworkIds)
 		}
 	}
 	egressProbeBatchShare.WithLabelValues("full").Set(share)

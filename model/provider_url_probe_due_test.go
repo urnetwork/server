@@ -147,6 +147,39 @@ func TestUrlProbeDueUsesReliabilityAndArinRisk(t *testing.T) {
 	})
 }
 
+// Each claim carries its provider's network for the prober's URL common-mode
+// guard, which counts one turn per network: two providers of one network
+// carry the same network, and a provider of another network its own.
+func TestUrlProbeDueCarriesEachProvidersNetwork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		city := egressTestCity(ctx, "Synthetic City", "Synthetic Region", "Synthetic Country", "zz")
+		first := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		second := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		other := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		// the second provider's device and client join the first's network
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE device SET network_id=$1
+				WHERE device_id=(SELECT device_id FROM network_client WHERE client_id=$2)`, first.networkId, second.clientId))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET network_id=$1 WHERE client_id=$2`, first.networkId, second.clientId))
+		})
+		now := server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		due := ClaimProviderUrlProbeDue(ctx, server.NowUtc().Add(time.Second), 10, 0, 1)
+		want := map[server.Id]server.Id{first.clientId: first.networkId, second.clientId: first.networkId, other.clientId: other.networkId}
+		for _, provider := range due {
+			networkId, ok := want[provider.ClientId]
+			if !ok || provider.NetworkId == nil || *provider.NetworkId != networkId {
+				t.Fatal("a URL claim lost or misattributed its provider's network")
+			}
+			delete(want, provider.ClientId)
+		}
+		if len(want) != 0 {
+			t.Fatalf("%d eligible providers were not claimed", len(want))
+		}
+	})
+}
+
 // Local infrastructure failures retry promptly but neither advance the success
 // target nor enter the measured URL ratio. A crash still uses the claim lease.
 func TestUrlProbeLocalFailurePreservesQuotaAndEvidence(t *testing.T) {

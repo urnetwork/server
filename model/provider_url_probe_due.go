@@ -28,6 +28,10 @@ type ProviderUrlProbeDue struct {
 	ClaimedAt            time.Time                  `json:"claimed_at"`
 	CompletedRunCount    *int64                     `json:"completed_run_count,omitempty"`
 	SecurityDestinations []egresshealth.Destination `json:"security_destinations,omitempty"`
+	// The provider's network, set on every claim. One network's providers
+	// share an operator and often one failure, so the prober's URL common-mode
+	// guard counts one turn per network.
+	NetworkId *server.Id `json:"network_id,omitempty"`
 }
 
 // A stable provider slot belongs to one logical shard, independently of the
@@ -200,10 +204,12 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 							for rows.Next() {
 								var provider ProviderUrlProbeDue
 								var securityDestinations []byte
+								var networkId server.Id
 								server.Raise(rows.Scan(&provider.ClientId, &provider.CycleStartedAt, &provider.RunsNeeded, &provider.OutcomeCount,
 									&provider.CountryCode, &provider.Region, &securityDestinations,
-									&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount))
+									&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount, &networkId))
 								server.Raise(json.Unmarshal(securityDestinations, &provider.SecurityDestinations))
+								provider.NetworkId = &networkId
 								provider.SuccessesNeeded = provider.RunsNeeded
 								result.Providers = append(result.Providers, provider)
 							}
@@ -283,10 +289,10 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 	// Keep admission lookups parameterized by each head row, and give UPDATE
 	// targets explicit bounded key arrays as well as their exact identity joins.
 	return fmt.Sprintf(head+`, candidates AS MATERIALIZED (
-				SELECT head.*, provider.country_location_id, provider.region_location_id
+				SELECT head.*, provider.country_location_id, provider.region_location_id, provider.network_id
 				FROM head
 				CROSS JOIN LATERAL (
-					SELECT provider.country_location_id, provider.region_location_id
+					SELECT provider.country_location_id, provider.region_location_id, client.network_id
 					FROM network_client_location_reliability AS provider
 					JOIN network_client AS client USING (client_id)
 					WHERE provider.client_id=head.client_id
@@ -334,7 +340,7 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				COALESCE((SELECT jsonb_agg(security.destination ORDER BY security.url_key)
 					FROM provider_egress_url_security AS security
 					WHERE security.client_id=claimed.client_id AND security.tls_failure), '[]'::jsonb),
-				claimed.claim_ordinal, issued.claimed_at, %s
+				claimed.claim_ordinal, issued.claimed_at, %s, candidates.network_id
 			FROM claimed JOIN issued USING(client_id,claim_ordinal)
 			JOIN candidates USING (client_id)
 			LEFT JOIN LATERAL (SELECT country_code FROM location
