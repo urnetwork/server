@@ -4768,6 +4768,53 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 	// try-locks. Same-payer rows of this page would refuse each other, so each
 	// waits its turn before any transaction; other rows keep full parallelism.
 	rowTurns := forceCloseRowTurnsByPayer(ctx, openContracts)
+	// Due rows sharing one balance close in owner batches. A batch takes its
+	// first row's turn; its other rows need no visit or turn of their own. A
+	// batch led from the started prefix can close rows after it: they are not
+	// in this page's receipt, and the next page, which starts before them,
+	// finds them closed.
+	rowBatches := forceCloseDeadlineOwnerBatches(ctx, openContracts, rowTurns, server.NowUtc())
+	batchSlots := make(chan struct{}, forceCloseOwnerBatchParallel)
+	// Visits every row of one batch in a single owned turn. A held owner
+	// defers each row as a row refused alone is deferred. A failed turn
+	// acknowledged no close, so each row then takes its own visit.
+	visitBatch := func(batch *forceCloseOwnerBatch) {
+		select {
+		case batchSlots <- struct{}{}:
+		case <-ctx.Done():
+			// Unvisited rows withhold the page's receipt.
+			return
+		}
+		results, busy, batchErr := func() (map[server.Id]*ContractDeadlineReconciliation, bool, error) {
+			defer func() { <-batchSlots }()
+			return reconcileContractOwnerMembersAtDeadline(ctx, []server.Id{batch.balanceId}, batch.members)
+		}()
+		var interrupted runtime.Error
+		if errors.As(batchErr, &interrupted) {
+			// A programming panic interrupts this worker, as in a row visit.
+			panic(batchErr)
+		}
+		if batchErr != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			glog.Infof("[close-expired]owner batch of %d rows failed, each row closes alone: %v\n", len(batch.indexes), batchErr)
+		}
+		for _, j := range batch.indexes {
+			result := results[openContracts[j].contractId]
+			switch {
+			case batchErr != nil || !busy && result == nil:
+				visit(j)
+			case busy:
+				contractErrors[j], leftOpen[j], contractVisited[j] = errTransferBalanceOwnershipBusy, true, true
+			case result.AlreadyClosed || result.Missing:
+				// Retired by another owner first, as a row that left the selection.
+				eligibilitySkipped[j], contractVisited[j] = true, true
+			default:
+				attempted[j], contractCompleted[j], contractVisited[j] = true, true, true
+			}
+		}
+	}
 
 	for range parallel {
 		wg.Add(1)
@@ -4780,9 +4827,17 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 						return
 					default:
 					}
+					visitRow := func() { visit(j) }
+					if batch := rowBatches[j]; batch != nil {
+						if batch.indexes[0] != j {
+							// The batch's first row visits this one.
+							continue
+						}
+						visitRow = func() { visitBatch(batch) }
+					}
 					turn := rowTurns[j]
 					if turn == nil {
-						visit(j)
+						visitRow()
 						continue
 					}
 					select {
@@ -4797,7 +4852,7 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 					}
 					func() {
 						defer func() { <-turn }()
-						visit(j)
+						visitRow()
 					}()
 				}
 			})
@@ -4944,9 +4999,17 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 			progressed: progressed, deferredContractIds: deferredContractIds}
 		forceCloseContractCounter.WithLabelValues("operational_deferred").Add(float64(len(deferredContractIds)))
 	}
-	glog.Infof("[close-expired]page returned success=%t raw_open=%d raw_disputed=%d selected=%d terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d has_more=%t started=%d deferred=%d\n",
+	// Batches led from the started prefix, and the rows they took.
+	ownerBatchCount, ownerBatchRowCount := 0, 0
+	for index, batch := range rowBatches[:started] {
+		if batch != nil && batch.indexes[0] == index {
+			ownerBatchCount += 1
+			ownerBatchRowCount += len(batch.indexes)
+		}
+	}
+	glog.Infof("[close-expired]page returned success=%t raw_open=%d raw_disputed=%d selected=%d terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d has_more=%t started=%d deferred=%d owner_batches=%d owner_batch_rows=%d\n",
 		err == nil, rawOpen, rawDisputed, len(openContracts), verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount, next != nil,
-		started, len(deferredContractIds))
+		started, len(deferredContractIds), ownerBatchCount, ownerBatchRowCount)
 
 	return
 }
