@@ -396,7 +396,8 @@ func allProviderEgressProbeArgs(settings providerEgressProbeSettings) []*Provide
 
 // ScheduleProviderEgressProbeTasks ensures every configured shard has exactly
 // one pending task. RunOnce makes repeated initialization idempotent, and an
-// existing row keeps its arguments.
+// existing row keeps its arguments. While a newer config's geometry is live in
+// a configured shard, the shard set is that config's and nothing is scheduled.
 func ScheduleProviderEgressProbeTasks(clientSession *session.ClientSession, tx server.PgTx) {
 	settings, err := getProviderEgressProbeSettings()
 	server.Raise(err)
@@ -404,8 +405,52 @@ func ScheduleProviderEgressProbeTasks(clientSession *session.ClientSession, tx s
 		return
 	}
 	now := server.NowUtc()
+	if _, newerGenerationLive := readProviderEgressProbeShardRowsInTx(clientSession.Ctx, tx, settings.ShardCount, now); newerGenerationLive {
+		return
+	}
 	for _, args := range allProviderEgressProbeArgs(settings) {
 		scheduleProviderEgressProbeAt(clientSession, tx, stampProviderEgressProbeArgs(args, now), now)
+	}
+}
+
+// Recreates each configured shard that has no pending row, stamped from this
+// instance's settings and due at once, so a shard lost since the last
+// taskworker start returns on the next pass of any other shard. A row that
+// exists, claimed or waiting, keeps its arguments, run time and backoff.
+//
+// Rows are found by a plain snapshot read. A finishing pass holds its own
+// shard's key until it commits, so a row that another pass is finishing counts
+// as present and this post-step never waits on that pass; inserting into its
+// key would make two finishing passes wait on each other. Only keys missing
+// from the snapshot are inserted, in shard order. While a newer config's
+// geometry is live in a configured shard, the shard set is that config's and
+// nothing is recreated.
+func ensureProviderEgressProbeShardsInTx(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	settings providerEgressProbeSettings,
+	now time.Time,
+) {
+	presentShardIndexes, newerGenerationLive := readProviderEgressProbeShardRowsInTx(clientSession.Ctx, tx, settings.ShardCount, now)
+	if newerGenerationLive {
+		return
+	}
+	for _, args := range allProviderEgressProbeArgs(settings) {
+		if presentShardIndexes[args.ShardIndex] {
+			continue
+		}
+		scheduled, _ := task.ScheduleTaskInTxIfAbsent(
+			tx,
+			ProviderEgressProbe,
+			stampProviderEgressProbeArgs(args, now),
+			clientSession,
+			providerEgressProbeRunOnce(args.ShardIndex),
+			task.RunAt(now),
+			task.MaxTime(time.Duration(args.MaxTimeSeconds)*time.Second),
+		)
+		if scheduled {
+			glog.Infof("[egress]recreated missing provider egress probe shard %d/%d\n", args.ShardIndex, args.ShardCount)
+		}
 	}
 }
 
@@ -563,7 +608,8 @@ func ProviderEgressProbe(
 // ProviderEgressProbePost checkpoints one batch before scheduling its
 // successor. Backlog drains immediately; a partial batch waits its idle cadence.
 // A handed-back pass keeps its newer arguments; otherwise the successor takes
-// this instance's settings, stamped with its config version.
+// this instance's settings, stamped with its config version, and every
+// configured shard that has lost its row is recreated.
 func ProviderEgressProbePost(
 	args *ProviderEgressProbeArgs,
 	result *ProviderEgressProbeResult,
@@ -584,16 +630,17 @@ func ProviderEgressProbePost(
 	if !settings.Enabled {
 		return nil
 	}
-	if args.ShardIndex < 0 || settings.ShardCount <= args.ShardIndex {
-		return nil
+	if 0 <= args.ShardIndex && args.ShardIndex < settings.ShardCount {
+		nextArgs := stampProviderEgressProbeArgs(providerEgressProbeArgs(settings, args.ShardIndex), now)
+		runAt := now
+		if !result.Stale && !result.Backlog && !result.Full {
+			runAt = runAt.Add(time.Duration(nextArgs.IdleDelaySeconds) * time.Second)
+		}
+		scheduleProviderEgressProbeAt(clientSession, tx, nextArgs, runAt)
 	}
-
-	nextArgs := stampProviderEgressProbeArgs(providerEgressProbeArgs(settings, args.ShardIndex), now)
-	runAt := now
-	if !result.Stale && !result.Backlog && !result.Full {
-		runAt = runAt.Add(time.Duration(nextArgs.IdleDelaySeconds) * time.Second)
-	}
-	scheduleProviderEgressProbeAt(clientSession, tx, nextArgs, runAt)
+	// The startup schedule again, for missing rows only: a shard lost since the
+	// last taskworker start returns without a restart.
+	ensureProviderEgressProbeShardsInTx(clientSession, tx, settings, now)
 	return nil
 }
 

@@ -3,10 +3,12 @@
 // next deploy. Each shard's arguments name the config version that wrote them
 // and when. An instance whose config is older than a newer, live geometry
 // hands that shard back unchanged, instead of retiring a shard it does not
-// know or rewriting the arguments to its own older geometry, and its startup
-// reap does not disable a geometry it is older than. Versions are ordered as
-// warp selects the latest config: release, then build metadata. A process
-// without a config version orders nothing and keeps the previous behavior.
+// know or rewriting the arguments to its own older geometry. It also leaves
+// the shard set to that geometry: its startup reap does not disable it, and
+// neither its startup schedule nor its post-steps create shards. Versions are
+// ordered as warp selects the latest config: release, then build metadata. A
+// process without a config version orders nothing and keeps the previous
+// behavior.
 package work
 
 import (
