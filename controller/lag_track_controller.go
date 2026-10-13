@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/ed25519"
 	"fmt"
 	"strings"
@@ -272,6 +273,7 @@ func lagTrack(
 		issued[extender.ExtenderId] = true
 		dots = append(dots, &lagTrackDot{extender: extender, position: position})
 	}
+	dots = lagDotsStillIssued(ctx, dots)
 	if len(dots) == 0 {
 		return lagTrackUnavailable("None of the extenders can be measured now."), nil
 	}
@@ -347,6 +349,7 @@ func lagTrackReissue(
 		}
 		dots = append(dots, &lagTrackDot{extender: extender, position: key.position})
 	}
+	dots = lagDotsStillIssued(ctx, dots)
 	if len(dots) == 0 {
 		return lagTrackUnavailable("None of the extenders can be measured now."), nil
 	}
@@ -364,6 +367,26 @@ func lagTrackReissue(
 		}, nil
 	}
 	return result, nil
+}
+
+// The dots whose extender's request is still answered issued, read now, so a
+// withdrawal or an opt-out within the serving set's cache gets no ticket.
+func lagDotsStillIssued(ctx context.Context, dots []*lagTrackDot) []*lagTrackDot {
+	extenders := make([]*lagServingExtender, 0, len(dots))
+	for _, dot := range dots {
+		extenders = append(extenders, dot.extender)
+	}
+	issued := map[server.Id]bool{}
+	for _, extender := range lagStillIssued(ctx, extenders) {
+		issued[extender.ExtenderId] = true
+	}
+	kept := []*lagTrackDot{}
+	for _, dot := range dots {
+		if issued[dot.extender.ExtenderId] {
+			kept = append(kept, dot)
+		}
+	}
+	return kept
 }
 
 // A dot of a track: an extender at a position.

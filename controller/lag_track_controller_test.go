@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/ed25519"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -356,9 +357,10 @@ func TestLagTrackReissueCap(t *testing.T) {
 }
 
 // Only an extender whose certificate is issued, unexpired and not withdrawn
-// is offered and ticketed: one withdrawn (an owner's opt-out is a withdrawal,
-// C9), one whose request went back to pending, and one with a certificate
-// but no request to answer are not, whatever certificate they still hold.
+// is offered and ticketed: one withdrawn, one its owner opted out (C9,
+// decision 18), one whose request went back to pending, and one with a
+// certificate but no request to answer are not, whatever certificate they
+// still hold. The change applies at once, through the cached serving set.
 func TestLagExtendersOnlyIssued(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -373,13 +375,16 @@ func TestLagExtendersOnlyIssued(t *testing.T) {
 		places["192.0.2.2"] = lagTestPlace("Osaka", "jp", 34.7, 135.5)
 		withdrawnCert := addLagTestCert(t, ctx, withdrawn)
 		pending := newLagServingTestExtender(t, ctx, places, lagTestPlace("Lyon", "fr", 45.7, 4.8), "192.0.2.3")
+		optedOut := newLagServingTestExtender(t, ctx, places, lagTestPlace("Quito", "ec", -0.2, -78.5), "192.0.2.5")
 		unrequested := newLagTestExtender(t, ctx, "192.0.2.4")
 		places["192.0.2.4"] = lagTestPlace("Lima", "pe", -12.0, -77.0)
 
 		guest := newLagTestGuestSession(t, ctx, "198.51.100.30:1234")
-		served := func() []server.Id {
+		served := func(reset bool) []server.Id {
 			t.Helper()
-			Testing_ResetLagServing()
+			if reset {
+				Testing_ResetLagServing()
+			}
 			result, err := LagExtenders(guest)
 			connect.AssertEqual(t, err, nil)
 			extenderIds := []server.Id{}
@@ -388,14 +393,17 @@ func TestLagExtendersOnlyIssued(t *testing.T) {
 			}
 			return extenderIds
 		}
-		ticketed := func() []server.Id {
+		ticketed := func(reset bool) []server.Id {
 			t.Helper()
-			Testing_ResetLagServing()
+			if reset {
+				Testing_ResetLagServing()
+			}
 			result, err := lagTrack(&LagTrackArgs{Extenders: []*LagTrackExtenderArgs{
 				{ExtenderId: issued.extenderId},
 				{ExtenderId: withdrawn.extenderId},
 				{ExtenderId: pending.extenderId},
 				{ExtenderId: unrequested.extenderId},
+				{ExtenderId: optedOut.extenderId},
 			}}, guest, server.NowUtc(), settings)
 			connect.AssertEqual(t, err, nil)
 			extenderIds := []server.Id{}
@@ -417,15 +425,17 @@ func TestLagExtendersOnlyIssued(t *testing.T) {
 			connect.AssertEqual(t, gotIds, wantIds)
 		}
 
-		// before anything changes, the three with an issued certificate serve
-		sameIds(served(), issued, withdrawn, pending)
-		sameIds(ticketed(), issued, withdrawn, pending)
+		// before anything changes, the four with an issued certificate serve
+		sameIds(served(true), issued, withdrawn, pending, optedOut)
+		sameIds(ticketed(false), issued, withdrawn, pending, optedOut)
 
-		// a certificate with no request to answer: a request names its key
+		// a certificate with no request to answer, its name published: a
+		// request names its key
+		unrequestedNames := []string{ExtenderMeasurementName(unrequested.extenderId, lagTestMeasurementZone)}
 		model.AddNetworkExtenderMeasurementCert(ctx, &model.NetworkExtenderMeasurementCert{
 			CertId:     server.NewId(),
 			ExtenderId: unrequested.extenderId,
-			Names:      []string{ExtenderMeasurementName(unrequested.extenderId, lagTestMeasurementZone)},
+			Names:      unrequestedNames,
 			Csr:        []byte{1},
 			PublicKey:  []byte{2},
 			ChainPem:   "-",
@@ -436,6 +446,7 @@ func TestLagExtendersOnlyIssued(t *testing.T) {
 			CapCounted: true,
 			RenewTime:  server.NowUtc().Add(40 * 24 * time.Hour),
 		})
+		model.PublishNetworkExtenderMeasurementNames(ctx, unrequestedNames, server.NowUtc())
 		// withdrawn, as an owner's opt-out or a deactivation withdraws it
 		connect.AssertEqual(t, model.WithdrawNetworkExtenderMeasurementCert(ctx, withdrawnCert.CertId, "the owner opted out of measurement", server.NowUtc()), true)
 		// a new key's request waits, while the old key's certificate is live
@@ -447,10 +458,75 @@ func TestLagExtendersOnlyIssued(t *testing.T) {
 			[]string{ExtenderMeasurementName(pending.extenderId, lagTestMeasurementZone)},
 			server.NowUtc(),
 		)
+		// its owner opted out, at its next activation
+		connect.AssertEqual(t, model.OptOutNetworkExtenderMeasurement(ctx, optedOut.publicKey, "the owner opted out of measurement", server.NowUtc()), 1)
 		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, pending.extenderId).State, model.NetworkExtenderMeasurementStatePending)
 		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, withdrawn.extenderId).State, model.NetworkExtenderMeasurementStateWithdrawn)
 
-		sameIds(served(), issued)
-		sameIds(ticketed(), issued)
+		// at once, while the serving set read before the changes is cached
+		sameIds(served(false), issued)
+		sameIds(ticketed(false), issued)
+		// and when it is read again
+		sameIds(served(true), issued)
+		sameIds(ticketed(true), issued)
+	})
+}
+
+// An extender whose certificate is issued but whose name the dns reconcile
+// has not yet published is neither offered nor ticketed: a browser that
+// looked the name up before it existed would cache that it does not
+// (lag.dev/PLAN.md A4, C8). Once published, it is both.
+func TestLagExtendersOnlyPublished(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installLagTestExtenderConfig(t, true)
+		settings := DefaultLagSettings()
+		defer Testing_SetLagSettings(settings)()
+		places := map[string]*model.LagPlace{}
+		useLagAddressPlaces(t, places)
+
+		published := newLagServingTestExtender(t, ctx, places, lagTestPlace("Hamburg", "de", 53.5, 10.0), "192.0.2.1")
+		unpublished := newLagTestExtender(t, ctx, "192.0.2.2")
+		places["192.0.2.2"] = lagTestPlace("Osaka", "jp", 34.7, 135.5)
+		cert := addLagTestUnpublishedCert(t, ctx, unpublished)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, unpublished.extenderId).State, model.NetworkExtenderMeasurementStateIssued)
+
+		guest := newLagTestGuestSession(t, ctx, "198.51.100.30:1234")
+		offered := func() []server.Id {
+			t.Helper()
+			Testing_ResetLagServing()
+			result, err := LagExtenders(guest)
+			connect.AssertEqual(t, err, nil)
+			extenderIds := []server.Id{}
+			for _, extender := range result.Extenders {
+				extenderIds = append(extenderIds, extender.ExtenderId)
+			}
+			return extenderIds
+		}
+		ticketed := func() []server.Id {
+			t.Helper()
+			Testing_ResetLagServing()
+			result, err := lagTrack(&LagTrackArgs{Extenders: []*LagTrackExtenderArgs{
+				{ExtenderId: published.extenderId},
+				{ExtenderId: unpublished.extenderId},
+			}}, guest, server.NowUtc(), settings)
+			connect.AssertEqual(t, err, nil)
+			extenderIds := []server.Id{}
+			for _, ticket := range result.Tickets {
+				extenderIds = append(extenderIds, ticket.ExtenderId)
+			}
+			return extenderIds
+		}
+
+		connect.AssertEqual(t, offered(), []server.Id{published.extenderId})
+		connect.AssertEqual(t, ticketed(), []server.Id{published.extenderId})
+
+		connect.AssertEqual(t, model.PublishNetworkExtenderMeasurementNames(ctx, cert.Names, server.NowUtc()), 1)
+		both := offered()
+		slices.SortFunc(both, func(a server.Id, b server.Id) int { return a.Cmp(b) })
+		want := []server.Id{published.extenderId, unpublished.extenderId}
+		slices.SortFunc(want, func(a server.Id, b server.Id) int { return a.Cmp(b) })
+		connect.AssertEqual(t, both, want)
+		connect.AssertEqual(t, ticketed(), []server.Id{published.extenderId, unpublished.extenderId})
 	})
 }

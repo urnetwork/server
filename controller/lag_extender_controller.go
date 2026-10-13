@@ -57,6 +57,25 @@ func Testing_ResetLagServing() {
 	lagServingCache.set = nil
 }
 
+// The extenders of a cached set whose request is still answered issued, read
+// now: a withdrawal, an owner's opt-out included, takes effect at the next
+// request rather than when the cache is next read (C9). One read for the
+// extenders a request offers or tickets, at most 64.
+func lagStillIssued(ctx context.Context, extenders []*lagServingExtender) []*lagServingExtender {
+	extenderIds := make([]server.Id, 0, len(extenders))
+	for _, extender := range extenders {
+		extenderIds = append(extenderIds, extender.ExtenderId)
+	}
+	measurements := model.GetLagExtenderMeasurements(ctx, extenderIds)
+	issued := []*lagServingExtender{}
+	for _, extender := range extenders {
+		if measurement := measurements[extender.ExtenderId]; measurement != nil && measurement.State == model.NetworkExtenderMeasurementStateIssued {
+			issued = append(issued, extender)
+		}
+	}
+	return issued
+}
+
 // The serving set, read again when the cached one is older than maxAge.
 func getLagServing(ctx context.Context, now time.Time, maxAge time.Duration) *lagServingSet {
 	lagServingCache.Lock()
@@ -219,7 +238,7 @@ func LagExtenders(clientSession *session.ClientSession) (*LagExtendersResult, er
 	result := &LagExtendersResult{
 		Extenders: []*LagExtender{},
 	}
-	for _, extender := range sampleLagServing(set, settings.ExtenderSample) {
+	for _, extender := range lagStillIssued(clientSession.Ctx, sampleLagServing(set, settings.ExtenderSample)) {
 		result.Extenders = append(result.Extenders, newLagExtender(extender))
 	}
 	return result, nil

@@ -56,9 +56,20 @@ func installLagTestExtenderConfig(t testing.TB, measurementEnabled bool) ed25519
 }
 
 // The extender's request for its measurement name and the live certificate
-// that answers it, issued an hour ago, as the issuance task leaves them: the
-// request is issued. Returns the certificate.
+// that answers it, issued an hour ago, with the name published, as the
+// issuance task and the dns reconcile leave them: the request is issued and
+// the name resolves. Returns the certificate.
 func addLagTestCert(t testing.TB, ctx context.Context, extender *lagTestExtender, names ...string) *model.NetworkExtenderMeasurementCert {
+	t.Helper()
+	cert := addLagTestUnpublishedCert(t, ctx, extender, names...)
+	model.PublishNetworkExtenderMeasurementNames(ctx, cert.Names, server.NowUtc())
+	Testing_ResetLagServing()
+	return cert
+}
+
+// The request and the live certificate as addLagTestCert, before the dns
+// reconcile has published the name.
+func addLagTestUnpublishedCert(t testing.TB, ctx context.Context, extender *lagTestExtender, names ...string) *model.NetworkExtenderMeasurementCert {
 	t.Helper()
 	if len(names) == 0 {
 		names = []string{ExtenderMeasurementName(extender.extenderId, lagTestMeasurementZone)}
