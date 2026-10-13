@@ -27,10 +27,12 @@ package controller
 // request refused outright.
 //
 // Retry on the other family (§8.2, IPV6.md C7): the first attempts of a step
-// whose source resolves to no provider, a SEED's or a valid EXTEND's, are
-// answered `421 source-egress-unresolved` with nothing changed, so the
-// validator can resend through the provider's other family. Past
-// VerifyUnattributedAttemptLimit the seed is poisoned and the EXTEND fails.
+// whose source resolves to no provider, a registered validator's SEED or a
+// valid EXTEND, are answered `421 source-egress-unresolved` with nothing
+// changed, so the validator can resend through the provider's other family.
+// Past VerifyUnattributedAttemptLimit the seed is poisoned and the EXTEND
+// fails. Any other SEED gets the answer it always got, so the 421 tells only
+// a registered key whether its source is attributed (§9).
 
 import (
 	"context"
@@ -528,23 +530,10 @@ func verifySeedWithAdmission(
 		return verifyDecodeCachedResponse(body.ResponseJson)
 	}
 
-	// §4.1 step 1: resolve source ip → seed hop (§8.1). An unresolved source is
-	// answered as retryable while the step allows (IPV6.md C7: the validator
-	// resends on the other family), then poisoned (§9)
+	// §4.1 step 1: resolve source ip → seed hop (§8.1)
 	var seedClientId *server.Id
 	if sourceIpOk {
 		seedClientId = model.ResolveVerifyEgress(ctx, sourceIp, settings)
-	}
-	// §9: a resolved source's seeds also count against its provider, whose
-	// source ips in the two families share one budget
-	var providerCount int64
-	if seedClientId != nil {
-		providerCount = model.IncrVerifySeedProviderRate(ctx, sourceIpStr, *seedClientId, settings)
-		if settings.SeedRateHardLimit < providerCount {
-			return nil, fmt.Errorf("429 rate limit exceeded")
-		}
-	} else if model.IncrVerifyUnattributedSeed(ctx, verify.SeedSig, settings) <= model.VerifyUnattributedAttemptLimit {
-		return nil, errVerifySourceUnresolved
 	}
 
 	// §4.1 step 3: vpk must be the caller client_id's registered key (D-7)
@@ -553,6 +542,22 @@ func verifySeedWithAdmission(
 		return nil, err
 	}
 	keyOk := len(registeredKey) == ed25519.PublicKeySize && slices.Equal(registeredKey, verify.Vpk)
+
+	// Only a registered key learns anything of resolution (§9). Its resolved
+	// seeds also count against the provider, whose source ips in the two
+	// families share one budget, and its unresolved ones are answered as
+	// retryable while the step allows (IPV6.md C7: the validator resends on
+	// the other family), then poisoned. Any other caller is poisoned as
+	// always, through a synthetic seed hop below.
+	var providerCount int64
+	if keyOk && seedClientId != nil {
+		providerCount = model.IncrVerifySeedProviderRate(ctx, sourceIpStr, *seedClientId, settings)
+		if settings.SeedRateHardLimit < providerCount {
+			return nil, fmt.Errorf("429 rate limit exceeded")
+		}
+	} else if keyOk && model.IncrVerifyUnattributedSeed(ctx, verify.SeedSig, settings) <= model.VerifyUnattributedAttemptLimit {
+		return nil, errVerifySourceUnresolved
+	}
 	var assignmentExclusions []server.Id
 	if keyOk {
 		assignmentExclusions, err = verifySimulationAssignmentExclusions(verify.Vpk)
@@ -606,9 +611,12 @@ func verifySeedWithAdmission(
 
 	var seedHopClientId server.Id
 	var seedHopEgressHash [32]byte
-	if seedClientId != nil {
+	if keyOk && seedClientId != nil {
 		// use the resolved hop even when poisoned for another reason, so a
-		// caller probing with its own known client_id cannot distinguish
+		// caller probing with its own known client_id cannot distinguish.
+		// trail[0] names a client only to a registered key: anyone else gets
+		// the synthetic hop wherever its source resolves, so an address in a
+		// provider's /64 learns nothing of the provider
 		seedHopClientId = *seedClientId
 		// the seed request's source ip is the seed provider's egress ip;
 		// record its egress-IP-hash at the configured granularity (§8.1, D27).
@@ -1143,11 +1151,11 @@ func verifyFailTrail(ctx context.Context, trail *model.VerifyTrail) {
 	}
 }
 
-// The answer to a well-formed SEED or EXTEND whose source resolves to no
-// provider (§8.1) while its step allows another attempt: nothing changed,
-// and the caller resends the identical body through the same hop, its tunnel
-// trying the other family first (IPV6.md C7). 421 Misdirected Request marks
-// it retryable; the body is the reason.
+// The answer to a registered validator's SEED, or to a valid EXTEND, whose
+// source resolves to no provider (§8.1) while its step allows another
+// attempt: nothing changed, and the caller resends the identical body through
+// the same hop, its tunnel trying the other family first (IPV6.md C7). 421
+// Misdirected Request marks it retryable; the body is the reason.
 var errVerifySourceUnresolved = errors.New("421 source-egress-unresolved")
 
 // Internal diagnosis cannot reveal which failure branch a remote caller hit.

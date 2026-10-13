@@ -1,12 +1,14 @@
 // Providers with an address in each family (VALIDATOR.md §8.2, IPV6.md C7):
 // hops confirm from either family, a provider scores one prefix a window, the
 // per-source budgets stay one per provider, and a source the index cannot
-// attribute is answered as retryable before it fails the step.
+// attribute is answered as retryable before it fails the step. Only a
+// registered key learns anything of attribution.
 package controller
 
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -361,6 +363,55 @@ func TestVerifyExtendWorkDoesNotDependOnResolution(t *testing.T) {
 			if got := model.IncrVerifyExtendProviderRate(ctx, fmt.Sprint(providerIp), counter, settings); got != 2 {
 				t.Fatalf("the %s counter took %d increments, want 1", name, got-1)
 			}
+		}
+	})
+}
+
+// §9 (probe TestProbeVerifySeedDoesNotRevealAttribution, N1): only a
+// registered validator key learns anything of its source's attribution. A
+// SEED under any other key gets the poison answer wherever its source
+// resolves: never the retryable 421, and a synthetic trail[0] that names no
+// client, so a caller in a provider's /64, or behind its address, does not
+// learn the provider. Its seeds do not count against the provider. A
+// registered validator's SEED from an unattributed source is answered as
+// retryable.
+func TestVerifySeedDoesNotRevealAttribution(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		testVerifyInstallServerKey()
+		settings := model.DefaultVerifySettings()
+		// one fixed rate window for the whole test
+		settings.SeedRateWindow = 1000 * time.Hour
+		SetVerifySettings(settings)
+		defer SetVerifySettings(model.DefaultVerifySettings())
+		providerIp := netip.MustParseAddr("2001:db8:a0::1")
+		provider := testVerifyProvider(ctx, providerIp, settings)
+		testVerifyProvider(ctx, netip.MustParseAddr("203.0.113.100"), settings)
+		neighbor, far := netip.MustParseAddr("2001:db8:a0::99"), netip.MustParseAddr("2001:db8:b0::99")
+		if got := model.ResolveVerifyEgress(ctx, neighbor, settings); got == nil || *got != provider {
+			t.Fatalf("control: the neighbor's address resolved to %v, want the provider through its /64", got)
+		}
+		// a caller with no registered key; any keypair signs a SEED
+		strangerVpk, strangerKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stranger := server.NewId()
+		for i, source := range []netip.Addr{neighbor, far, providerIp} {
+			result, err := Verify(testVerifySeedArgs(t, stranger, strangerVpk, strangerKey, connect.VerifyMMin+i), testVerifyAddrSession(ctx, source))
+			if err != nil {
+				t.Fatalf("an unregistered key's SEED from %s = %v, want the poison answer", source, err)
+			}
+			if trail0 := server.Id(result.(*connect.VerifyAssignResult).Trail[0]); trail0 != verifySyntheticSeedId(source.String()) {
+				t.Fatalf("an unregistered key's SEED from %s named %s in trail[0], want the synthetic hop", source, trail0)
+			}
+		}
+		if got := model.IncrVerifySeedProviderRate(ctx, providerIp.String(), provider, settings); got != 1 {
+			t.Fatalf("an unregistered key's seeds counted %d against the provider", got-1)
+		}
+		validatorId, vpk, vpkKey := testVerifyValidator(ctx)
+		if _, err := Verify(testVerifySeedArgs(t, validatorId, vpk, vpkKey, connect.VerifyMMin), testVerifyAddrSession(ctx, far)); err == nil || err.Error() != testVerifyRetryableAnswer {
+			t.Fatalf("control: a registered validator's SEED from an unattributed source = %v, want the retryable answer", err)
 		}
 	})
 }
