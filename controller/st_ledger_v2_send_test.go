@@ -54,9 +54,11 @@ type ledgerV2RPC struct {
 	latestUnavailable bool
 	// estimates answers eth_estimateGas for a calldata; any other calldata
 	// estimates 50,000. A transaction whose calldata is in needs runs out of
-	// gas when its limit is below that: its receipt is failed.
+	// gas when its limit is below that: its receipt is failed. The next
+	// withheld transactions are accepted and never included.
 	estimates map[string]uint64
 	needs     map[string]uint64
+	withheld  int
 }
 
 func newLedgerV2RPC(t testing.TB) *ledgerV2RPC {
@@ -158,6 +160,11 @@ func (self *ledgerV2RPC) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			hash := strings.ToLower(transaction.Hash().Hex())
 			self.sent = append(self.sent, &transaction)
 			self.events = append(self.events, "send "+hex.EncodeToString(transaction.Data()[:min(4, len(transaction.Data()))]))
+			result = hash
+			if 0 < self.withheld {
+				self.withheld--
+				break
+			}
 			status := types.ReceiptStatusSuccessful
 			if transaction.Gas() < self.needs[string(transaction.Data())] {
 				status = types.ReceiptStatusFailed
@@ -167,7 +174,6 @@ func (self *ledgerV2RPC) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				BlockNumber: new(big.Int).SetUint64(self.finalizedBlock - 1), Status: status,
 				CumulativeGasUsed: transaction.Gas(), GasUsed: transaction.Gas(), EffectiveGasPrice: transaction.GasPrice(), Logs: []*types.Log{},
 			}
-			result = hash
 		case "eth_getTransactionReceipt":
 			var hash string
 			json.Unmarshal(call.Params[0], &hash)
