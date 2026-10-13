@@ -10091,15 +10091,19 @@ var migrations = []any{
 	// lag_guest marks a guest network created for lag.dev and holds its
 	// expiry. The lag sweep removes the network once it passes (A2), and only
 	// marked networks ever expire. lag_track is one track a visitor ran, with
-	// the client fields filled from the track's first report; lag_ticket is
-	// one admitted session, kept until its report can no longer arrive
-	// (ticket_retention); lag_result is one report, the one minute of pings
-	// kept per dot per track (decision 17), with its load and the statistics
-	// derived when it was stored. No table holds the raw client address:
+	// the client fields filled from the track's first report and the count of
+	// tickets reissued in it, which caps how often its dots reconnect;
+	// lag_ticket is one admitted session, kept until its report can no longer
+	// arrive (ticket_retention); lag_result is one report, one session's
+	// minute of pings, which is one minute per dot per track unless the dot
+	// reconnected (decision 17), with its load and the statistics derived
+	// when it was stored. No table holds the raw client address:
 	// lag_track keeps its peppered hash, its /24 (/48) and what GeoLite2 says
 	// about it, and lag_result keeps only which family the browser reached
-	// the extender on. Tracks and results are kept for result_retention
-	// (lag.yml, 180 days).
+	// the extender on. A result's session and window start times are the
+	// extender's clock and its created_at is the report's arrival on the
+	// operator's, so an extender's offset can be estimated. Tracks and
+	// results are kept for result_retention (lag.yml, 180 days).
 	newSqlMigration(`
 		CREATE TABLE lag_guest (
 			network_id uuid NOT NULL PRIMARY KEY,
@@ -10114,6 +10118,7 @@ var migrations = []any{
 			network_id uuid NOT NULL,
 			client_id uuid NOT NULL,
 			started_at timestamp NOT NULL,
+			reissue_count int NOT NULL DEFAULT 0,
 			client_fields_at timestamp NULL,
 			client_address_hash bytea NULL,
 			client_prefix varchar(64) NULL,
@@ -10147,6 +10152,7 @@ var migrations = []any{
 			ticket_id uuid NOT NULL,
 			extender_id uuid NOT NULL,
 			extender_ip_family smallint NOT NULL,
+			session_start_time timestamp NOT NULL,
 			window_start_time timestamp NOT NULL,
 			ping_offset_ms int[] NOT NULL,
 			ping_micros int[] NOT NULL,

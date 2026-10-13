@@ -12,7 +12,9 @@ import (
 //   - lag_track is one track: the 8 dots (and spares) a visitor measured
 //     together, whose sessions share a track id. Its client fields describe
 //     the visitor's address, filled from the track's first report; the raw
-//     address is never stored.
+//     address is never stored. It counts the tickets reissued in it, so a
+//     dropped session can reconnect within its track, once per dot and a
+//     bounded number of times in all (A6).
 //   - lag_ticket is one session the operator admitted (A6), kept for its
 //     report, which arrives when the session's minute closes or the session
 //     does. A session has no time limit, so a ticket is kept for
@@ -30,6 +32,8 @@ type LagTrack struct {
 	NetworkId server.Id
 	ClientId  server.Id
 	StartedAt time.Time
+	// the tickets reissued in the track so far
+	ReissueCount int
 }
 
 // One admitted session (A6). A ticket admits a session on an extender, by
@@ -60,34 +64,184 @@ func CreateLagTrack(ctx context.Context, track *LagTrack, tickets []*LagTicket) 
 			track.ClientId,
 			track.StartedAt.UTC(),
 		))
-		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			for _, ticket := range tickets {
-				batch.Queue(
-					`
-					INSERT INTO lag_ticket (
-						ticket_id,
-						track_id,
-						position,
-						client_id,
-						network_id,
-						extender_id,
-						issued_at,
-						expires_at
-					)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-					`,
-					ticket.TicketId,
-					ticket.TrackId,
-					ticket.Position,
-					ticket.ClientId,
-					ticket.NetworkId,
-					ticket.ExtenderId,
-					ticket.IssuedAt.UTC(),
-					ticket.ExpiresAt.UTC(),
+		insertLagTicketsInTx(ctx, tx, tickets)
+	})
+}
+
+func insertLagTicketsInTx(ctx context.Context, tx server.PgTx, tickets []*LagTicket) {
+	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+		for _, ticket := range tickets {
+			batch.Queue(
+				`
+				INSERT INTO lag_ticket (
+					ticket_id,
+					track_id,
+					position,
+					client_id,
+					network_id,
+					extender_id,
+					issued_at,
+					expires_at
 				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				`,
+				ticket.TicketId,
+				ticket.TrackId,
+				ticket.Position,
+				ticket.ClientId,
+				ticket.NetworkId,
+				ticket.ExtenderId,
+				ticket.IssuedAt.UTC(),
+				ticket.ExpiresAt.UTC(),
+			)
+		}
+	})
+}
+
+// One track, or nil when there is none (never issued, or past retention).
+func GetLagTrack(ctx context.Context, trackId server.Id) *LagTrack {
+	var track *LagTrack
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT network_id, client_id, started_at, reissue_count
+			FROM lag_track
+			WHERE track_id = $1
+			`,
+			trackId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				track = &LagTrack{TrackId: trackId}
+				server.Raise(result.Scan(
+					&track.NetworkId,
+					&track.ClientId,
+					&track.StartedAt,
+					&track.ReissueCount,
+				))
 			}
 		})
 	})
+	return track
+}
+
+// Every ticket of a track, reissued ones included, by position and then
+// issue time.
+func GetLagTrackTickets(ctx context.Context, trackId server.Id) []*LagTicket {
+	tickets := []*LagTicket{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				ticket_id,
+				position,
+				client_id,
+				network_id,
+				extender_id,
+				issued_at,
+				expires_at
+			FROM lag_ticket
+			WHERE track_id = $1
+			ORDER BY position, issued_at, ticket_id
+			`,
+			trackId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				ticket := &LagTicket{TrackId: trackId}
+				server.Raise(result.Scan(
+					&ticket.TicketId,
+					&ticket.Position,
+					&ticket.ClientId,
+					&ticket.NetworkId,
+					&ticket.ExtenderId,
+					&ticket.IssuedAt,
+					&ticket.ExpiresAt,
+				))
+				tickets = append(tickets, ticket)
+			}
+		})
+	})
+	return tickets
+}
+
+// Stores tickets reissued in a track, at most one per position and at most
+// maxReissues in all, and answers false, storing nothing, when the track has
+// no room for them (A6). Each position of a track got one ticket when the
+// track was issued, so a position that already holds two was reissued. The
+// tickets' positions are distinct. The track's row is locked first, so
+// concurrent reissues of one track are checked one after the other.
+func AddLagTrackReissue(ctx context.Context, trackId server.Id, tickets []*LagTicket, maxReissues int) (added bool) {
+	positions := make([]int, 0, len(tickets))
+	for _, ticket := range tickets {
+		positions = append(positions, ticket.Position)
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		added = false
+
+		var reissueCount int
+		found := false
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT reissue_count
+			FROM lag_track
+			WHERE track_id = $1
+			FOR UPDATE
+			`,
+			trackId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&reissueCount))
+				found = true
+			}
+		})
+		if !found || maxReissues < reissueCount+len(tickets) {
+			return
+		}
+
+		reissued := false
+		result, err = tx.Query(
+			ctx,
+			`
+			SELECT EXISTS (
+				SELECT 1
+				FROM lag_ticket
+				WHERE track_id = $1 AND position = ANY($2)
+				GROUP BY position
+				HAVING 1 < COUNT(*)
+			)
+			`,
+			trackId,
+			positions,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&reissued))
+			}
+		})
+		if reissued {
+			return
+		}
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE lag_track
+			SET reissue_count = reissue_count + $2
+			WHERE track_id = $1
+			`,
+			trackId,
+			len(tickets),
+		))
+		insertLagTicketsInTx(ctx, tx, tickets)
+		added = true
+	})
+	return
 }
 
 // One ticket, or nil when there is none (never issued, or past retention).
@@ -155,6 +309,10 @@ type LagResult struct {
 	// 4 or 6: the family the browser reached the extender on, which is the
 	// family of the address the report saw it from
 	ExtenderIpFamily int
+	// the extender's clock: when the session opened, and when the minute
+	// starts. CreatedAt, the report's arrival on the operator's clock, is
+	// beside them, so the extender's offset can be estimated
+	SessionStartTime time.Time
 	// the minute
 	WindowStartTime time.Time
 	PingOffsetMs    []int32
@@ -201,6 +359,7 @@ func AddLagResult(ctx context.Context, result *LagResult, client *LagTrackClient
 				ticket_id,
 				extender_id,
 				extender_ip_family,
+				session_start_time,
 				window_start_time,
 				ping_offset_ms,
 				ping_micros,
@@ -231,7 +390,7 @@ func AddLagResult(ctx context.Context, result *LagResult, client *LagTrackClient
 				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 				$11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
 				$21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
-				$31
+				$31, $32
 			)
 			ON CONFLICT (ticket_id) DO NOTHING
 			`,
@@ -241,6 +400,7 @@ func AddLagResult(ctx context.Context, result *LagResult, client *LagTrackClient
 			result.TicketId,
 			result.ExtenderId,
 			result.ExtenderIpFamily,
+			result.SessionStartTime.UTC(),
 			result.WindowStartTime.UTC(),
 			nonNilInt32s(result.PingOffsetMs),
 			nonNilInt32s(result.PingMicros),

@@ -27,6 +27,8 @@ import (
 //	track_prefix_limit: 60       # per /24 (/48) per track_limit_window
 //	track_limit_window: 1h
 //	track_max_extenders: 12      # 8 dots and 4 spares
+//	track_reissue_max: 8         # reissued tickets per track, for dots that reconnect
+//	track_reissue_window: 1h     # how long after a track's issue it can be reissued
 //	ticket_ttl: 2m               # to open the session; an open one has no limit
 //	ping_interval_ms: 250
 //	download_ms: 5000
@@ -38,7 +40,8 @@ import (
 //	report_limit: 720            # posts per extender client per report_limit_window
 //	report_limit_window: 1h
 //	report_max_count: 32         # reports in one post (M8 batches 32)
-//	ticket_retention: 168h       # a session has no time limit, so its report can come late
+//	report_max_age: 24h          # from a ticket's issue to its report's arrival
+//	ticket_retention: 48h        # past report_max_age, so a late report still finds its ticket
 //	result_retention: 4320h      # 180 days
 //
 // A value that is not positive keeps its default, so a typo can turn a limit
@@ -56,19 +59,25 @@ type LagSettings struct {
 	TrackPrefixLimit  int           `yaml:"track_prefix_limit"`
 	TrackLimitWindow  time.Duration `yaml:"track_limit_window"`
 	TrackMaxExtenders int           `yaml:"track_max_extenders"`
-	TicketTtl         time.Duration `yaml:"ticket_ttl"`
-	PingIntervalMs    int           `yaml:"ping_interval_ms"`
-	DownloadMs        int           `yaml:"download_ms"`
-	UploadMs          int           `yaml:"upload_ms"`
-	MaxStreams        int           `yaml:"max_streams"`
-	MaxDownloadBytes  int64         `yaml:"max_download_bytes"`
-	MaxUploadBytes    int64         `yaml:"max_upload_bytes"`
+	// reissued tickets per track, and how long a track can be reissued (A6)
+	TrackReissueMax    int           `yaml:"track_reissue_max"`
+	TrackReissueWindow time.Duration `yaml:"track_reissue_window"`
+	TicketTtl          time.Duration `yaml:"ticket_ttl"`
+	PingIntervalMs     int           `yaml:"ping_interval_ms"`
+	DownloadMs         int           `yaml:"download_ms"`
+	UploadMs           int           `yaml:"upload_ms"`
+	MaxStreams         int           `yaml:"max_streams"`
+	MaxDownloadBytes   int64         `yaml:"max_download_bytes"`
+	MaxUploadBytes     int64         `yaml:"max_upload_bytes"`
 
 	ReportLimit       int           `yaml:"report_limit"`
 	ReportLimitWindow time.Duration `yaml:"report_limit_window"`
 	ReportMaxCount    int           `yaml:"report_max_count"`
-	TicketRetention   time.Duration `yaml:"ticket_retention"`
-	ResultRetention   time.Duration `yaml:"result_retention"`
+	// a session has no time limit, so its report can arrive long after its
+	// ticket was issued; past this it is refused (A7)
+	ReportMaxAge    time.Duration `yaml:"report_max_age"`
+	TicketRetention time.Duration `yaml:"ticket_retention"`
+	ResultRetention time.Duration `yaml:"result_retention"`
 }
 
 // The plan's values (lag.dev/PLAN.md A1, A4-A7).
@@ -86,13 +95,16 @@ func DefaultLagSettings() *LagSettings {
 		TrackPrefixLimit:  60,
 		TrackLimitWindow:  time.Hour,
 		TrackMaxExtenders: 12,
-		TicketTtl:         2 * time.Minute,
-		PingIntervalMs:    250,
-		DownloadMs:        5000,
-		UploadMs:          5000,
-		MaxStreams:        4,
-		MaxDownloadBytes:  2 * 1024 * 1024 * 1024,
-		MaxUploadBytes:    2 * 1024 * 1024 * 1024,
+		// a dropped session reconnects once (L4), so 8 covers every dot once
+		TrackReissueMax:    8,
+		TrackReissueWindow: time.Hour,
+		TicketTtl:          2 * time.Minute,
+		PingIntervalMs:     250,
+		DownloadMs:         5000,
+		UploadMs:           5000,
+		MaxStreams:         4,
+		MaxDownloadBytes:   2 * 1024 * 1024 * 1024,
+		MaxUploadBytes:     2 * 1024 * 1024 * 1024,
 
 		// a track's 8 to 12 sessions report about a minute apart, and an
 		// operator runs every extender of an account under one client, so the
@@ -100,7 +112,8 @@ func DefaultLagSettings() *LagSettings {
 		ReportLimit:       720,
 		ReportLimitWindow: time.Hour,
 		ReportMaxCount:    32,
-		TicketRetention:   7 * 24 * time.Hour,
+		ReportMaxAge:      24 * time.Hour,
+		TicketRetention:   48 * time.Hour,
 		ResultRetention:   180 * 24 * time.Hour,
 	}
 }
@@ -133,6 +146,8 @@ func (self *LagSettings) withDefaults() *LagSettings {
 	positiveInt(&self.TrackPrefixLimit, d.TrackPrefixLimit)
 	positiveDuration(&self.TrackLimitWindow, d.TrackLimitWindow)
 	positiveInt(&self.TrackMaxExtenders, d.TrackMaxExtenders)
+	positiveInt(&self.TrackReissueMax, d.TrackReissueMax)
+	positiveDuration(&self.TrackReissueWindow, d.TrackReissueWindow)
 	positiveDuration(&self.TicketTtl, d.TicketTtl)
 	positiveInt(&self.PingIntervalMs, d.PingIntervalMs)
 	positiveInt(&self.DownloadMs, d.DownloadMs)
@@ -143,6 +158,7 @@ func (self *LagSettings) withDefaults() *LagSettings {
 	positiveInt(&self.ReportLimit, d.ReportLimit)
 	positiveDuration(&self.ReportLimitWindow, d.ReportLimitWindow)
 	positiveInt(&self.ReportMaxCount, d.ReportMaxCount)
+	positiveDuration(&self.ReportMaxAge, d.ReportMaxAge)
 	positiveDuration(&self.TicketRetention, d.TicketRetention)
 	positiveDuration(&self.ResultRetention, d.ResultRetention)
 	return self
