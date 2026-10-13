@@ -1086,8 +1086,13 @@ func (self *CoreStClient) buildTransactionAttempt(
 		gasLimit = estimated + (estimated+4)/5
 	}
 	// A v2 stake move is never signed below its floor, whatever its estimate
-	// or an earlier attempt's limit.
+	// or an earlier attempt's limit. The floor is capped at the operator gas
+	// policy's maximum_gas, so that it alone never makes the policy refuse an
+	// attempt the estimate's limit would pass.
 	gasFloor := self.ledgerV2GasFloor(intent, kind)
+	if gasPolicy != nil {
+		gasFloor = min(gasFloor, gasPolicy.MaximumGas)
+	}
 	gasLimit = max(gasLimit, gasFloor)
 
 	var unsigned *types.Transaction
