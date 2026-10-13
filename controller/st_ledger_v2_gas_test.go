@@ -10,6 +10,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"os"
@@ -196,9 +197,10 @@ func TestStLedgerV2GasFloorLeavesOtherSendsUnchanged(t *testing.T) {
 // today's maximum_gas of 1,000,000 a close is refused as any send above the
 // maximum is: before any signature, with its nonce kept, so that the root
 // key's other sends stop at it. The refusal names the floor and the policy's
-// maximum. So is a close under a per-intent liability one wei short of the
-// floor's gas at the signed fee. The policy re-signed with both lets the
-// retained intent through, with the floor's gas.
+// maximum, and the driver records it as the close's failed publish, which it
+// retries. A close is refused the same way under a per-intent liability one
+// wei short of the floor's gas at the signed fee. The policy re-signed with
+// both lets the retained intent through, with the floor's gas.
 func TestStLedgerV2GasFloorAboveThePolicyIsRefused(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -213,28 +215,40 @@ func TestStLedgerV2GasFloorAboveThePolicyIsRefused(t *testing.T) {
 		closeCall := stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))
 		fixture.estimates[string(closeCall)] = 246_899
 
-		refused := func(step string, reason string, send func() (string, error)) {
+		unsigned := func(step string) {
 			t.Helper()
-			_, err := send()
-			if !errors.Is(err, model.ErrStOperatorGasAllowance) || err.Error() != reason+": "+model.ErrStOperatorGasAllowance.Error()+": unsigned gas/fee/tip/intent envelope exceeds approval" {
-				t.Fatalf("%s: %v", step, err)
-			}
 			intent := ledgerV2Intent(t, ctx, cfg, "v2close:7:1")
 			pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
 			if intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.Nonce != 7 || pending != nil || err != nil || signs != 0 || len(fixture.sent) != 0 {
 				t.Fatalf("%s: intent %+v, reservation %+v, %v, %d signatures, %d sent", step, intent, pending, err, signs, len(fixture.sent))
 			}
 		}
+		refusal := func(maximumGas uint64) string {
+			return fmt.Sprintf("st: gas limit 3200000 is the v2 stake-move floor (operator gas policy maximum_gas %d): %s: unsigned gas/fee/tip/intent envelope exceeds approval", maximumGas, model.ErrStOperatorGasAllowance)
+		}
+		refused := func(step string, reason string, send func() (string, error)) {
+			t.Helper()
+			if _, err := send(); !errors.Is(err, model.ErrStOperatorGasAllowance) || err.Error() != reason {
+				t.Fatalf("%s: %v", step, err)
+			}
+			unsigned(step)
+		}
 		sendClose := func() (string, error) { return client.LedgerV2Close(ctx, 7, 1) }
-		reason := "st: gas limit 3200000 is the v2 stake-move floor (operator gas policy maximum_gas 1000000)"
-		refused("maximum_gas below the floor", reason, sendClose)
-		refused("a finalize behind the refused close", reason, func() (string, error) { return client.LedgerV2Finalize(ctx, 6, 1) })
+		refused("maximum_gas below the floor", refusal(1_000_000), sendClose)
+		refused("a finalize behind the refused close", refusal(1_000_000), func() (string, error) { return client.LedgerV2Finalize(ctx, 6, 1) })
+		outcome := stLedgerV2Send(ctx, cfg, 7, model.StPublishKindV2Close, sendClose)
+		publishes := model.GetStPublishes(ctx, cfg.DeploymentKey(), 7)
+		if outcome.Status != model.StPublishStatusFailed || !outcome.Retry || outcome.Reason != refusal(1_000_000) || len(publishes) != 1 || publishes[0].Kind != model.StPublishKindV2Close ||
+			publishes[0].Status != model.StPublishStatusFailed || publishes[0].Error == nil || *publishes[0].Error != refusal(1_000_000) {
+			t.Fatalf("the driver's close: outcome %+v, publishes %+v", outcome, publishes)
+		}
+		unsigned("the driver's close")
 
 		// 3,200,000 gas at the fixture's 100 wei is 320,000,000 wei.
 		revise(func(policy *server.StOperatorGasPolicy) {
 			policy.MaximumGas, policy.MaximumIntentLiabilityWei = 3_200_000, "319999999"
 		})
-		refused("liability below the floor's", "st: gas limit 3200000 is the v2 stake-move floor (operator gas policy maximum_gas 3200000)", sendClose)
+		refused("liability below the floor's", refusal(3_200_000), sendClose)
 
 		revise(func(policy *server.StOperatorGasPolicy) { policy.MaximumIntentLiabilityWei = "320000000" })
 		hash, err := client.LedgerV2Close(ctx, 7, 1)
@@ -404,6 +418,40 @@ func TestStLedgerV2ThreeFailedClosesStrandTheRootKey(t *testing.T) {
 			t.Fatalf("finalize on the freed key: %s, %v, %d sent", hash, err, len(fixture.sent))
 		}
 		requireLedgerV2Intent(t, ctx, cfg, "v2finalize:6:1", model.StTxFinalized, fixture.sent[3])
+	})
+}
+
+// SV-1 (retries): the operator gas policy's per-intent liability sums every
+// nonce an operation takes. Under a policy that covers one floored close at
+// the signed fee, one revert strands the root key as three do under the cap
+// of three signatures: the second try reserves nonce 8, the policy refuses to
+// sign it, and the root key's later sends stop at it. A
+// maximum_intent_liability_wei of three times maximum_gas at the fee cap never
+// binds before that cap.
+func TestStLedgerV2OneFailedCloseStrandsAnUndersizedLiability(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		client, _, cfg := newLedgerV2RPCClient(t, fixture)
+		// 3,200,000 gas at the fixture's 100 wei.
+		ledgerV2GasPolicy(t, client, func(policy *server.StOperatorGasPolicy) { policy.MaximumIntentLiabilityWei = "320000000" })
+		closeCall := stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))
+		fixture.estimates[string(closeCall)] = 246_899
+		fixture.needs[string(closeCall)] = math.MaxUint64
+		if hash, err := client.LedgerV2Close(ctx, 7, 1); err == nil || !strings.Contains(err.Error(), "st: finalized transaction "+hash+" reverted") || len(fixture.sent) != 1 || fixture.sent[0].Gas() != stLedgerV2StakeMoveGasFloor {
+			t.Fatalf("first close: %s, %v, %d sent", hash, err, len(fixture.sent))
+		}
+		if _, err := client.LedgerV2Close(ctx, 7, 1); !errors.Is(err, model.ErrStOperatorGasAllowance) || !strings.Contains(err.Error(), "original logical intent") {
+			t.Fatalf("second close: %v", err)
+		}
+		if _, err := client.LedgerV2Finalize(ctx, 6, 1); !errors.Is(err, model.ErrStOperatorGasAllowance) {
+			t.Fatalf("finalize behind the stranded close: %v", err)
+		}
+		intent := ledgerV2Intent(t, ctx, cfg, "v2close:7:1")
+		logicalKey, _ := stTransactionLogicalKey(cfg, "v2finalize:6:1")
+		if intent.Generation != 1 || intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.Nonce != 8 || model.GetStTransactionIntent(ctx, logicalKey) != nil || len(fixture.sent) != 1 {
+			t.Fatalf("stranded close %+v, %d sent", intent, len(fixture.sent))
+		}
 	})
 }
 
