@@ -122,6 +122,11 @@ type ExtenderActivateArgs struct {
 	// outcome is read from GET /network/extender-measurement-cert (A8), never
 	// from this answer.
 	MeasurementCsr string `json:"measurement_csr,omitempty"`
+	// set on every activation while the extender's owner has opted out of
+	// lag.dev measurement (lag.dev/PLAN.md C4, C9, decision 18): the operator
+	// withdraws its measurement name, and a request carried beside it is not
+	// stored. Unset, the default, changes nothing on its own.
+	MeasurementDisabled bool `json:"measurement_disabled,omitempty"`
 }
 
 type ExtenderActivateResult struct {
@@ -553,6 +558,13 @@ func ExtenderActivate(
 		clientAddressHash = hash[:]
 	}
 
+	// an owner who opted out of lag.dev measurement is withdrawn now, with the
+	// key proven by the probes, and before this activation signs its record,
+	// so the record already carries no measurement id (lag.dev/PLAN.md C9)
+	if args.MeasurementDisabled {
+		optOutExtenderMeasurement(clientSession.Ctx, publicKey, server.NowUtc())
+	}
+
 	var record *protocol.ExtenderRecord
 	var expireTime time.Time
 	activated := model.ActivateNetworkExtender(
@@ -601,8 +613,9 @@ func ExtenderActivate(
 	}
 
 	// the lag.dev measurement certificate request rides the activation
-	// (lag.dev/PLAN.md A10); what becomes of it never changes this answer
-	if args.MeasurementCsr != "" {
+	// (lag.dev/PLAN.md A10); what becomes of it never changes this answer.
+	// While the owner opts out the request is not stored: the flag wins
+	if args.MeasurementCsr != "" && !args.MeasurementDisabled {
 		storeExtenderMeasurementRequest(
 			clientSession.Ctx,
 			config,

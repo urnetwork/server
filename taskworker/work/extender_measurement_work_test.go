@@ -1147,3 +1147,115 @@ func TestExtenderMeasurementRenewTimeAndBackoff(t *testing.T) {
 	}
 	connect.AssertEqual(t, firstHourAttempts, 4)
 }
+
+// An owner's opt-out end to end (lag.dev/PLAN.md C4, C9, decision 18). The
+// activation withdraws the extender; the next dns pass takes its records out,
+// the lag.dev sample (A4) no longer offers it, the next issuance pass revokes
+// its certificate, and records the drip signs carry no measurement id. While
+// the flag keeps coming nothing is issued for it. A request without the flag
+// puts it back, and its certificate, for the same name, is a renewal: it is
+// issued past a spent weekly cap.
+func TestExtenderMeasurementOptOutAndBack(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newTestMeasurementEnv(t, testMeasurementEnvSettings{issueCapPerWeek: 2})
+		now := server.NowUtc()
+
+		optedOut := createTestMeasurementExtender(t, ctx, 1, "203.0.113.1")
+		_, request := requestTestMeasurementCert(t, ctx, optedOut, now)
+		staying := createTestMeasurementExtender(t, ctx, 2, "203.0.113.2")
+		requestTestMeasurementCert(t, ctx, staying, now)
+		connect.AssertEqual(t, runTestMeasurementIssue(t, ctx).Issued, 2)
+		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Names, 2)
+
+		// the owner opts out, as an activation with the flag does
+		connect.AssertEqual(t, model.OptOutNetworkExtenderMeasurement(ctx, testMeasurementExtenderPublicKey(1), controller.ExtenderMeasurementOptOutReason, server.NowUtc()), 1)
+
+		dnsResult := runTestMeasurementDns(t, ctx)
+		connect.AssertEqual(t, dnsResult.Names, 1)
+		assertTestMeasurementAddressRecords(t, env, map[string][]string{
+			testMeasurementName(staying) + " A": {"203.0.113.2"},
+		})
+		config, err := controller.EnvExtenderConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		hosts := controller.GetExtenderMeasurementHosts(ctx, config, server.NowUtc())
+		connect.AssertEqual(t, len(hosts), 1)
+		connect.AssertEqual(t, hosts[0].ExtenderId, staying)
+
+		result := runTestMeasurementIssue(t, ctx)
+		connect.AssertEqual(t, result.Revoked, 1)
+		connect.AssertEqual(t, result.Issued, 0)
+		for _, reason := range env.ca.revokedReasons() {
+			connect.AssertEqual(t, reason, 5)
+		}
+
+		runTestExtenderPublish(t, ctx)
+		measurementIds := map[server.Id][]byte{}
+		for _, publish := range model.Testing_GetNetworkExtenderPublishes(ctx) {
+			message := &protocol.ExtenderGossipMessage{}
+			if err := proto.Unmarshal(publish.Message, message); err != nil {
+				t.Fatal(err)
+			}
+			body, err := connect.NewExtenderRootKeySet(env.rootPublicKey).VerifyRecord(message.GetRecord())
+			if err != nil {
+				t.Fatal(err)
+			}
+			measurementIds[publish.ExtenderId] = body.MeasurementId
+		}
+		connect.AssertEqual(t, len(measurementIds[optedOut]), 0)
+		connect.AssertEqual(t, bytes.Equal(measurementIds[staying], staying.Bytes()), true)
+
+		// the flag keeps coming: nothing is issued
+		connect.AssertEqual(t, model.OptOutNetworkExtenderMeasurement(ctx, testMeasurementExtenderPublicKey(1), controller.ExtenderMeasurementOptOutReason, server.NowUtc()), 0)
+		result = runTestMeasurementIssue(t, ctx)
+		connect.AssertEqual(t, result.Issued+result.Renewed+result.Revoked, 0)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, optedOut).State, model.NetworkExtenderMeasurementStateWithdrawn)
+
+		// back in: the same request, without the flag, past the spent cap
+		state := model.SetNetworkExtenderMeasurementRequest(ctx, optedOut, request.Csr, request.PublicKey, []string{request.Name}, server.NowUtc())
+		connect.AssertEqual(t, state, model.NetworkExtenderMeasurementStatePending)
+		result = runTestMeasurementIssue(t, ctx)
+		connect.AssertEqual(t, result.Issued, 1)
+		connect.AssertEqual(t, result.Waiting, 0)
+		certs := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, optedOut)
+		connect.AssertEqual(t, len(certs), 2)
+		connect.AssertEqual(t, certs[1].CapCounted, false)
+		connect.AssertEqual(t, certs[1].WithdrawTime == nil, true)
+		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Names, 2)
+		assertTestMeasurementForeignRecordSets(t, env, testMeasurementForeignApexRecordSets())
+		assertTestMeasurementBatches(t, env)
+	})
+}
+
+// A8's replacement (lag.dev/PLAN.md A8): a request for the same name under
+// another key replaces a pending one in its place in the queue, and no order
+// is placed for the old key. With room for one certificate, the extender that
+// asked first is still issued first, for its new key.
+func TestExtenderMeasurementReplacesAPendingRequestsKey(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newTestMeasurementEnv(t, testMeasurementEnvSettings{issueCapPerWeek: 1})
+		now := server.NowUtc()
+
+		first := createTestMeasurementExtender(t, ctx, 1, "203.0.113.1")
+		requestTestMeasurementCert(t, ctx, first, now.Add(-2*time.Minute))
+		second := createTestMeasurementExtender(t, ctx, 2, "203.0.113.2")
+		requestTestMeasurementCert(t, ctx, second, now.Add(-time.Minute))
+
+		// the first extender's key is replaced while it waits
+		newKey, _ := requestTestMeasurementCert(t, ctx, first, now)
+
+		result := runTestMeasurementIssue(t, ctx)
+		connect.AssertEqual(t, result.Issued, 1)
+		connect.AssertEqual(t, result.Waiting, 1)
+		connect.AssertEqual(t, env.ca.orderTotal(), 1)
+		certs := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, first)
+		connect.AssertEqual(t, len(certs), 1)
+		leaf := verifyTestMeasurementChain(t, env.ca, certs[0].ChainPem, testMeasurementName(first))
+		connect.AssertEqual(t, leaf.PublicKey.(*ecdsa.PublicKey).Equal(&newKey.PublicKey), true)
+		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderMeasurementCerts(ctx, second)), 0)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, second).State, model.NetworkExtenderMeasurementStatePending)
+	})
+}

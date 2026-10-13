@@ -749,12 +749,47 @@ func FlagNetworkExtenderMeasurementEverIssued(ctx context.Context, extenderId se
 }
 
 // AddNetworkExtenderMeasurementCert stores a certificate the CA issued (C5,
-// C6). Every other live certificate of the extender is marked renewed, since
-// this one replaces it, and a request for exactly these names and this key is
-// issued.
-func AddNetworkExtenderMeasurementCert(ctx context.Context, cert *NetworkExtenderMeasurementCert) {
+// C6), and reports whether it is live. Every other live certificate of the
+// extender is marked renewed, since this one replaces it, and a request for
+// exactly these names and this key is issued.
+//
+// An order takes a minute or more, and the extender may be withdrawn while
+// it runs -- deactivated, overridden, or opted out by its owner (C9). So the
+// extender's request is read under a lock first, and a certificate that
+// arrives for a withdrawn request is stored already withdrawn, with the
+// request's reason: it is revoked like any other withdrawn certificate and
+// never published or signed, and the request stays withdrawn.
+func AddNetworkExtenderMeasurementCert(ctx context.Context, cert *NetworkExtenderMeasurementCert) (live bool) {
 	namesValue := joinNetworkExtenderMeasurementNames(cert.Names)
 	server.Tx(ctx, func(tx server.PgTx) {
+		live = true
+
+		requestState := ""
+		requestReason := ""
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT state, reason
+			FROM network_extender_measurement
+			WHERE extender_id = $1
+			FOR UPDATE
+			`,
+			cert.ExtenderId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&requestState, &requestReason))
+			}
+		})
+		var withdrawTime *time.Time
+		withdrawReason := ""
+		if requestState == NetworkExtenderMeasurementStateWithdrawn {
+			live = false
+			issueTime := cert.IssueTime.UTC()
+			withdrawTime = &issueTime
+			withdrawReason = requestReason
+		}
+
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -770,9 +805,11 @@ func AddNetworkExtenderMeasurementCert(ctx context.Context, cert *NetworkExtende
 				not_after,
 				issue_time,
 				cap_counted,
-				renew_time
+				renew_time,
+				withdraw_time,
+				withdraw_reason
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 			`,
 			cert.CertId,
 			cert.ExtenderId,
@@ -786,7 +823,12 @@ func AddNetworkExtenderMeasurementCert(ctx context.Context, cert *NetworkExtende
 			cert.IssueTime.UTC(),
 			cert.CapCounted,
 			cert.RenewTime.UTC(),
+			withdrawTime,
+			withdrawReason,
 		))
+		if !live {
+			return
+		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -822,6 +864,70 @@ func AddNetworkExtenderMeasurementCert(ctx context.Context, cert *NetworkExtende
 			cert.IssueTime.UTC(),
 		))
 	})
+	return
+}
+
+// OptOutNetworkExtenderMeasurement withdraws the extender with this identity
+// key from measurement because its owner opted out (lag.dev/PLAN.md C4, C9,
+// decision 18), and returns how many live certificates were withdrawn: every
+// live certificate is withdrawn with `reason`, which the dns chain takes out
+// of the zone and the issuance chain revokes, and the extender's request
+// becomes withdrawn, its certificate request dropped, so nothing is issued for
+// it. An extender with neither is left as it is.
+//
+// It is called while the flag keeps arriving, each time withdrawing anything
+// that came since. Only a later request without the flag puts the extender
+// back in the queue (SetNetworkExtenderMeasurementRequest): the name is the
+// same, so its certificate is a renewal.
+func OptOutNetworkExtenderMeasurement(
+	ctx context.Context,
+	publicKey []byte,
+	reason string,
+	now time.Time,
+) (withdrawn int) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		withdrawn = 0
+		var extenderId *server.Id
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT extender_id
+			FROM network_extender
+			WHERE public_key = $1
+			`,
+			publicKey,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var id server.Id
+				server.Raise(result.Scan(&id))
+				extenderId = &id
+			}
+		})
+		if extenderId == nil {
+			return
+		}
+		withdrawn = withdrawNetworkExtenderMeasurementCertsInTx(ctx, tx, nil, extenderId, reason, now)
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_extender_measurement
+			SET
+				state = $2,
+				reason = $3,
+				csr = NULL,
+				pending_time = NULL,
+				retry_time = NULL,
+				update_time = $4
+			WHERE extender_id = $1
+			`,
+			*extenderId,
+			NetworkExtenderMeasurementStateWithdrawn,
+			reason,
+			now.UTC(),
+		))
+	})
+	return
 }
 
 // CountNetworkExtenderMeasurementCertsCountedSince counts the certificates

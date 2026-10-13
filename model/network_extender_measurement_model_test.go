@@ -548,3 +548,68 @@ func getTestMeasurementExtender(t testing.TB, ctx context.Context, extenderId se
 	}
 	return extender
 }
+
+// An owner's opt-out (lag.dev/PLAN.md C4, C9): every live certificate is
+// withdrawn with the reason, the request becomes withdrawn with its
+// certificate request dropped, and nothing is pending. A certificate an order
+// brings back after the opt-out is stored withdrawn, queued for revocation,
+// and never read by a record signer, and the request stays withdrawn.
+// Opting out again changes nothing; a request without the flag puts the
+// extender back in the queue, for a name that still has an unexpired
+// certificate, so a renewal (C7). An extender the operator never activated is
+// left alone.
+func TestNetworkExtenderMeasurementOptOut(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		activated := testMeasurementActivate(t, ctx, 1)
+		extenderId := activated.Extender.ExtenderId
+		publicKey := activated.Extender.PublicKey
+		names := testMeasurementNames(extenderId)
+		reason := "the extender's owner opted out of measurement"
+		now := server.NowUtc()
+
+		SetNetworkExtenderMeasurementRequest(ctx, extenderId, []byte("csr-a"), []byte("key-a"), names, now)
+		cert := testMeasurementCert(extenderId, []byte("key-a"), now)
+		connect.AssertEqual(t, AddNetworkExtenderMeasurementCert(ctx, cert), true)
+		// a new key's request is pending when the owner opts out
+		SetNetworkExtenderMeasurementRequest(ctx, extenderId, []byte("csr-b"), []byte("key-b"), names, now.Add(time.Minute))
+		connect.AssertEqual(t, len(GetPendingNetworkExtenderMeasurements(ctx, now.Add(2*time.Minute), 10)), 1)
+
+		connect.AssertEqual(t, OptOutNetworkExtenderMeasurement(ctx, publicKey, reason, now.Add(2*time.Minute)), 1)
+		measurement := Testing_GetNetworkExtenderMeasurement(ctx, extenderId)
+		connect.AssertEqual(t, measurement.State, NetworkExtenderMeasurementStateWithdrawn)
+		connect.AssertEqual(t, measurement.Reason, reason)
+		connect.AssertEqual(t, len(measurement.Csr), 0)
+		if !slices.Equal(measurement.Names, names) || !bytes.Equal(measurement.PublicKey, []byte("key-b")) {
+			t.Fatalf("the withdrawn request is %v for %q", measurement.Names, measurement.PublicKey)
+		}
+		connect.AssertEqual(t, len(GetPendingNetworkExtenderMeasurements(ctx, now.Add(2*time.Minute), 10)), 0)
+		connect.AssertEqual(t, len(GetLiveNetworkExtenderMeasurementCerts(ctx, now.Add(2*time.Minute))), 0)
+		connect.AssertEqual(t, len(GetNetworkExtenderMeasurementCertsToRevoke(ctx, now.Add(2*time.Minute), 10)), 1)
+
+		// an order that was in flight comes back after the opt-out
+		late := testMeasurementCert(extenderId, []byte("key-b"), now.Add(3*time.Minute))
+		connect.AssertEqual(t, AddNetworkExtenderMeasurementCert(ctx, late), false)
+		connect.AssertEqual(t, len(GetLiveNetworkExtenderMeasurementCerts(ctx, now.Add(3*time.Minute))), 0)
+		connect.AssertEqual(t, Testing_GetNetworkExtenderMeasurement(ctx, extenderId).State, NetworkExtenderMeasurementStateWithdrawn)
+		toRevoke := GetNetworkExtenderMeasurementCertsToRevoke(ctx, now.Add(3*time.Minute), 10)
+		connect.AssertEqual(t, len(toRevoke), 2)
+		connect.AssertEqual(t, toRevoke[1].CertId, late.CertId)
+		connect.AssertEqual(t, toRevoke[1].WithdrawReason, reason)
+		extender, _ := GetActiveNetworkExtenderForRecord(ctx, extenderId)
+		connect.AssertEqual(t, extender.MeasurementCertNotAfter == nil, true)
+
+		// the flag again changes nothing
+		connect.AssertEqual(t, OptOutNetworkExtenderMeasurement(ctx, publicKey, reason, now.Add(4*time.Minute)), 0)
+		connect.AssertEqual(t, Testing_GetNetworkExtenderMeasurement(ctx, extenderId).State, NetworkExtenderMeasurementStateWithdrawn)
+
+		// a request without the flag is back in the queue, for a name with an
+		// unexpired certificate
+		state := SetNetworkExtenderMeasurementRequest(ctx, extenderId, []byte("csr-b2"), []byte("key-b"), names, now.Add(5*time.Minute))
+		connect.AssertEqual(t, state, NetworkExtenderMeasurementStatePending)
+		connect.AssertEqual(t, len(GetPendingNetworkExtenderMeasurements(ctx, now.Add(5*time.Minute), 10)), 1)
+		connect.AssertEqual(t, HasUnexpiredNetworkExtenderMeasurementCertForNames(ctx, names, now.Add(5*time.Minute)), true)
+
+		connect.AssertEqual(t, OptOutNetworkExtenderMeasurement(ctx, []byte("extender-public-key-never-activated"), reason, now), 0)
+	})
+}

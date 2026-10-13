@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -56,6 +57,9 @@ const (
 	// The longest certificate request accepted, in base64 characters. A P-256
 	// request for one name is about 300 bytes of DER.
 	ExtenderMeasurementCsrMaxLength = 4096
+
+	// Why an extender is withdrawn when its owner opts out (C4, C9).
+	ExtenderMeasurementOptOutReason = "the extender's owner opted out of measurement"
 )
 
 // ExtenderMeasurementName is an extender's measurement name (N1): its id
@@ -333,6 +337,26 @@ func storeExtenderMeasurementRequest(
 	}
 }
 
+// Withdraws the extender with this identity key from measurement because its
+// owner opted out (C4, C9, decision 18). Nothing new is issued for it until an
+// activation without the flag carries its request again.
+func optOutExtenderMeasurement(ctx context.Context, publicKey []byte, now time.Time) {
+	withdrawn := model.OptOutNetworkExtenderMeasurement(ctx, publicKey, ExtenderMeasurementOptOutReason, now)
+	if 0 < withdrawn && glog.V(1) {
+		glog.Infof("[extendermeasurement]%x opted out, %d certificates withdrawn\n", publicKey, withdrawn)
+	}
+}
+
+// The hex SHA-256 of a SubjectPublicKeyInfo, which A8 names a key by; "" for
+// none.
+func extenderMeasurementKeySha256(publicKey []byte) string {
+	if len(publicKey) == 0 {
+		return ""
+	}
+	digest := sha256.Sum256(publicKey)
+	return hex.EncodeToString(digest[:])
+}
+
 // The extender's own identity key, hex, which picks one of several extenders
 // a client activated. Empty picks its active, most recently activated one.
 type ExtenderMeasurementCertArgs struct {
@@ -347,6 +371,10 @@ type ExtenderMeasurementCertResult struct {
 	// refused, the certificate's when issued, and the withdrawn certificate's
 	// when withdrawn
 	Names []string `json:"names"`
+	// the hex SHA-256 of the SubjectPublicKeyInfo of the key the answer is
+	// for: the certificate's when issued, else the request's. An extender
+	// whose key changed tells by it that what is held is not for its key
+	KeySha256 string `json:"key_sha256,omitempty"`
 	// the leaf first, then the issuers; only when issued
 	ChainPem string `json:"chain_pem,omitempty"`
 	// the leaf's expiry; only when issued. The extender reads the leaf itself.
@@ -360,12 +388,14 @@ type ExtenderMeasurementCertResult struct {
 //
 // The extender reads the answer as what the operator holds for its key
 // (connect/extender/extender_lag_cert.go, C4): pending and issued name what
-// is held, so its activations carry no new request; none, refused and
-// withdrawn hold nothing, so its next activation carries its request again.
-// It installs an issued chain at once and reads again for each renewal (C6),
+// is held, and key_sha256 names the key, so its activations carry no new
+// request while both match; none, refused and withdrawn hold nothing, so its
+// next activation carries its request again, unless its owner opted out. It
+// installs an issued chain at once and reads again for each renewal (C6),
 // which answers issued with a new chain and expiry. It keeps serving an
 // installed certificate through none, pending and refused, and drops it at
-// once on withdrawn (C9).
+// once on withdrawn (C9) -- after a deactivation, an operator's override, or
+// its owner's opt-out.
 //
 // The state is the extender's latest request's, with two exceptions:
 //
@@ -418,12 +448,14 @@ func ExtenderMeasurementCert(
 	}
 	result.State = measurement.State
 	result.Names = measurement.Names
+	result.KeySha256 = extenderMeasurementKeySha256(measurement.PublicKey)
 	result.Reason = measurement.Reason
 
 	if measurement.State == model.NetworkExtenderMeasurementStateIssued {
 		if cert != nil {
 			notAfter := cert.NotAfter
 			result.Names = cert.Names
+			result.KeySha256 = extenderMeasurementKeySha256(cert.PublicKey)
 			result.ChainPem = cert.ChainPem
 			result.NotAfter = &notAfter
 			result.Reason = ""

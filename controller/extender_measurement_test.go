@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -450,9 +451,14 @@ func installTestExtenderMeasurementConfig(t testing.TB, api *testExtenderApi) ed
 // The activation answer carries the extender's id (A10, N4), the same at
 // every activation, which is what its measurement name is made of. The
 // request rides a later activation: a successful one stores it as the
-// extender's pending request, an activation without one leaves it as it is,
-// and one that cannot be read, or that names another extender, is stored
-// refused while the activation itself still succeeds.
+// extender's pending request, and an activation without one leaves it as it
+// is. A request that cannot be read, or that names another extender, is
+// stored refused, with the reason naming the extender's own name.
+//
+// The activations offer the tcp carrier alone, a challenge and a forward
+// each, so three of them stay under the fixture extender's admission limit
+// of eight actions a minute from one subnet; the refusals go through the
+// storage the activation calls.
 func TestExtenderActivateReturnsTheIdAndStoresTheMeasurementRequest(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -463,6 +469,7 @@ func TestExtenderActivateReturnsTheIdAndStoresTheMeasurementRequest(t *testing.T
 		activate := func(csr []byte) *ExtenderActivateResult {
 			t.Helper()
 			args := fixture.activateArgs()
+			args.Carriers = []string{connect.ExtenderCarrierTcp}
 			if csr != nil {
 				args.MeasurementCsr = base64.StdEncoding.EncodeToString(csr)
 			}
@@ -515,22 +522,29 @@ func TestExtenderActivateReturnsTheIdAndStoresTheMeasurementRequest(t *testing.T
 		connect.AssertEqual(t, pending.ChainPem, "")
 
 		// most activations carry no request, and the stored one stands
-		activate(nil)
+		third := activate(nil)
+		connect.AssertEqual(t, *third.ExtenderId, extenderId)
 		measurement = model.Testing_GetNetworkExtenderMeasurement(ctx, extenderId)
 		connect.AssertEqual(t, measurement.State, model.NetworkExtenderMeasurementStatePending)
 		connect.AssertEqual(t, bytes.Equal(measurement.Csr, csr), true)
 
-		// an unreadable request is refused, the activation is not
-		activate([]byte("not a certificate request"))
+		config, err := EnvExtenderConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// an unreadable request is refused with the reason, and names no key
+		storeExtenderMeasurementRequest(ctx, config, extenderId, base64.StdEncoding.EncodeToString([]byte("not a certificate request")), server.NowUtc())
 		refused := poll()
 		connect.AssertEqual(t, refused.State, model.NetworkExtenderMeasurementStateRefused)
 		if refused.Reason == "" {
 			t.Fatalf("a refusal carries no reason")
 		}
+		connect.AssertEqual(t, refused.KeySha256, "")
 
-		// nor is a request for another extender's name
+		// and so is a request for another extender's name
 		otherName := ExtenderMeasurementName(server.NewId(), testMeasurementZone)
-		activate(testMeasurementCsr(t, testMeasurementKey(t), &x509.CertificateRequest{DNSNames: []string{otherName}}))
+		otherCsr := testMeasurementCsr(t, testMeasurementKey(t), &x509.CertificateRequest{DNSNames: []string{otherName}})
+		storeExtenderMeasurementRequest(ctx, config, extenderId, base64.StdEncoding.EncodeToString(otherCsr), server.NowUtc())
 		refused = poll()
 		connect.AssertEqual(t, refused.State, model.NetworkExtenderMeasurementStateRefused)
 		if !strings.Contains(refused.Reason, name) {
@@ -629,11 +643,18 @@ func TestExtenderMeasurementCertAnswersThePoll(t *testing.T) {
 		connect.AssertEqual(t, len(none.Names), 0)
 
 		ask()
+		publicKey, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyDigest := sha256.Sum256(publicKey)
+		keySha256 := hex.EncodeToString(keyDigest[:])
 		pending := answer("")
 		connect.AssertEqual(t, pending.State, model.NetworkExtenderMeasurementStatePending)
 		if !slices.Equal(pending.Names, []string{name}) {
 			t.Fatalf("pending names = %v", pending.Names)
 		}
+		connect.AssertEqual(t, pending.KeySha256, keySha256)
 		connect.AssertEqual(t, answer(hex.EncodeToString(extenderPublicKey)).State, model.NetworkExtenderMeasurementStatePending)
 		connect.AssertEqual(t, answer(hex.EncodeToString([]byte("another key"))).State, model.NetworkExtenderMeasurementStateNone)
 
@@ -655,6 +676,7 @@ func TestExtenderMeasurementCertAnswersThePoll(t *testing.T) {
 		if notIssuing.Reason == "" {
 			t.Fatalf("a refusal carries no reason")
 		}
+		connect.AssertEqual(t, notIssuing.KeySha256, keySha256)
 		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, extenderId).State, model.NetworkExtenderMeasurementStatePending)
 		installTestExtenderMeasurementConfig(t, nil)
 		connect.AssertEqual(t, answer("").State, model.NetworkExtenderMeasurementStatePending)
@@ -684,6 +706,7 @@ func TestExtenderMeasurementCertAnswersThePoll(t *testing.T) {
 		if !slices.Equal(issued.Names, []string{name}) {
 			t.Fatalf("issued names = %v", issued.Names)
 		}
+		connect.AssertEqual(t, issued.KeySha256, keySha256)
 		// held, so asking again orders nothing
 		ask()
 		connect.AssertEqual(t, answer("").State, model.NetworkExtenderMeasurementStateIssued)
@@ -706,11 +729,123 @@ func TestExtenderMeasurementCertAnswersThePoll(t *testing.T) {
 			}
 			connect.AssertEqual(t, withdrawn.ChainPem, "")
 			connect.AssertEqual(t, withdrawn.Reason, "the extender is not active")
+			connect.AssertEqual(t, withdrawn.KeySha256, keySha256)
 		}
 
 		// withdrawn holds nothing, so the extender's next activation carries
 		// its request again, and it waits for a certificate once more
 		ask()
 		connect.AssertEqual(t, answer("").State, model.NetworkExtenderMeasurementStatePending)
+	})
+}
+
+// An owner's opt-out rides the activation (lag.dev/PLAN.md C4, C9, decision
+// 18): the extender's live certificate is withdrawn, A8 answers withdrawn for
+// its name and key, and its certificate request is dropped. While the flag
+// keeps coming a request carried beside it is not stored, and an activation
+// with neither the flag nor a request changes nothing. A later activation
+// with a request and without the flag puts it back in the queue.
+//
+// The activations offer the tcp carrier alone and split between the two
+// loopback families, so each family's subnet stays under the fixture
+// extender's admission limit of eight actions a minute.
+func TestExtenderActivateOptsOutOfMeasurement(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		installTestExtenderMeasurementConfig(t, fixture.api)
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+
+		activate := func(loopbackIp string, csr []byte, measurementDisabled bool) *ExtenderActivateResult {
+			t.Helper()
+			clientSession.ClientAddress = fixture.clientAddress(loopbackIp)
+			args := fixture.activateArgs()
+			args.Carriers = []string{connect.ExtenderCarrierTcp}
+			if csr != nil {
+				args.MeasurementCsr = base64.StdEncoding.EncodeToString(csr)
+			}
+			args.MeasurementDisabled = measurementDisabled
+			result, err := ExtenderActivate(args, clientSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Activated {
+				t.Fatalf("the activation was refused: %s", result.Error)
+			}
+			return result
+		}
+		poll := func() *ExtenderMeasurementCertResult {
+			t.Helper()
+			result, err := ExtenderMeasurementCert(&ExtenderMeasurementCertArgs{}, clientSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return result
+		}
+
+		first := activate("127.0.0.1", nil, false)
+		extenderId := *first.ExtenderId
+		name := ExtenderMeasurementName(extenderId, testMeasurementZone)
+		key := testMeasurementKey(t)
+		csr := testMeasurementCsr(t, key, &x509.CertificateRequest{DNSNames: []string{name}})
+		request, err := ParseExtenderMeasurementCsrDer(csr, extenderId, testMeasurementZone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyDigest := sha256.Sum256(request.PublicKey)
+		keySha256 := hex.EncodeToString(keyDigest[:])
+
+		// the extender holds a live certificate for its name
+		now := server.NowUtc()
+		model.SetNetworkExtenderMeasurementRequest(ctx, extenderId, request.Csr, request.PublicKey, []string{name}, now)
+		certId := server.NewId()
+		model.AddNetworkExtenderMeasurementCert(ctx, &model.NetworkExtenderMeasurementCert{
+			CertId:     certId,
+			ExtenderId: extenderId,
+			Names:      []string{name},
+			Csr:        request.Csr,
+			PublicKey:  request.PublicKey,
+			ChainPem:   "-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n",
+			SerialHex:  "1",
+			NotBefore:  now,
+			NotAfter:   now.Add(90 * 24 * time.Hour),
+			IssueTime:  now,
+			CapCounted: true,
+			RenewTime:  now.Add(60 * 24 * time.Hour),
+		})
+		connect.AssertEqual(t, poll().State, model.NetworkExtenderMeasurementStateIssued)
+
+		// the owner opts out
+		activate("127.0.0.1", nil, true)
+		withdrawn := poll()
+		connect.AssertEqual(t, withdrawn.State, model.NetworkExtenderMeasurementStateWithdrawn)
+		if !slices.Equal(withdrawn.Names, []string{name}) {
+			t.Fatalf("withdrawn names = %v", withdrawn.Names)
+		}
+		connect.AssertEqual(t, withdrawn.KeySha256, keySha256)
+		connect.AssertEqual(t, withdrawn.Reason, ExtenderMeasurementOptOutReason)
+		connect.AssertEqual(t, withdrawn.ChainPem, "")
+		certs := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)
+		if certs[0].WithdrawTime == nil {
+			t.Fatalf("the certificate was not withdrawn")
+		}
+		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderMeasurement(ctx, extenderId).Csr), 0)
+
+		// the flag keeps coming: a request beside it is not stored
+		activate("::1", csr, true)
+		connect.AssertEqual(t, poll().State, model.NetworkExtenderMeasurementStateWithdrawn)
+		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderMeasurement(ctx, extenderId).Csr), 0)
+		connect.AssertEqual(t, len(model.GetPendingNetworkExtenderMeasurements(ctx, server.NowUtc(), 10)), 0)
+
+		// neither the flag nor a request: neither an opt-out nor a re-enable
+		activate("::1", nil, false)
+		connect.AssertEqual(t, poll().State, model.NetworkExtenderMeasurementStateWithdrawn)
+
+		// a request without the flag puts the extender back in the queue
+		activate("::1", csr, false)
+		pending := poll()
+		connect.AssertEqual(t, pending.State, model.NetworkExtenderMeasurementStatePending)
+		connect.AssertEqual(t, pending.KeySha256, keySha256)
+		connect.AssertEqual(t, len(model.GetPendingNetworkExtenderMeasurements(ctx, server.NowUtc(), 10)), 1)
 	})
 }
