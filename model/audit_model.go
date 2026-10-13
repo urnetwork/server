@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"maps"
@@ -72,8 +73,6 @@ type Stats struct {
 
 	// deviceId -> *ProviderState
 	activeProviders map[server.Id]*ProviderState
-	// deviceId -> bool
-	activeDevices map[server.Id]bool
 }
 
 type ProviderState struct {
@@ -121,10 +120,6 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 		// network daily stats
 		computeStatsNetwork(ctx, stats, conn)
 
-		glog.Infof("[audit]ComputeStats90 computeStatsDevice\n")
-		// device daily stats
-		computeStatsDevice(ctx, stats, conn)
-
 		glog.Infof("[audit]ComputeStats90 computeStatsTransfer\n")
 		// all transfer
 		computeStatsTransfer(ctx, stats, conn)
@@ -136,6 +131,10 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 		// peaks as if they were current inventory.
 		setCurrentProviderSummaries(stats, countProvidersByCountry(ctx, conn))
 	})
+
+	glog.Infof("[audit]ComputeStats90 computeStatsDevice\n")
+	// device daily stats, on connections of its own
+	computeStatsDevice(ctx, stats)
 
 	return stats
 }
@@ -419,127 +418,336 @@ func setCurrentProviderSummaries(stats *Stats, byCountry []ProviderCountryCount)
 // so a device that connects and disconnects within one day still counts that
 // day even though its end-of-day state is removed. Carry-in rows (the
 // pre-window state synthesized onto startDay) establish state only — they are
-// not same-day connection evidence. A single cutoff determines both SQL
-// buckets and the carry_in flag; carry-in is replayed before that day's events.
-// Already-removed carry-in devices have no effect and need not be returned.
-// The event ID, rather than event_time, orders revisions within a bucket.
-// Keep its event type in the same MAX value so both columns come from one
-// event without joining every winning ID back to the retained history. The
-// first array element is globally unique under audit_device_event's schema.
-const computeStatsDeviceSql = `
-	SELECT
-		t.day,
-		t.device_id,
-		t.last_event[2] AS event_type,
-		t.carry_in
-	FROM (
-		SELECT
-			to_char(event_time, 'YYYY-MM-DD') AS day,
-			device_id,
-			MAX(ARRAY[event_id::varchar, event_type]) AS last_event,
-			false AS carry_in
-		FROM audit_device_event
-		WHERE
-			@windowStart <= event_time AND
-			event_type IN (@eventTypeDeviceAdded, @eventTypeDeviceRemoved)
-		GROUP BY day, device_id
+// not same-day connection evidence. A single cutoff determines both buckets
+// and the carry_in flag; carry-in is replayed before that day's events.
+// Already-removed carry-in devices have no effect. The event ID, rather than
+// event_time, orders revisions within a bucket: a row takes the event type of
+// its latest-ID event, IDs being unique under audit_device_event's schema.
+//
+// Replayed in (day, carry-in first) order, each of a device's rows starts a
+// span of days on which the device counts: an addition until the device's next
+// row, or onward if it has none; a removal on its own day only; and an added
+// carry-in until the device's first window row. A day's count is the number of
+// spans covering it, the same as replaying every row into an active set and
+// counting active and touched devices. The database therefore returns only the
+// number of spans per (start day, end day). It does so for one chunk of devices
+// at a time: every event of a device falls in its chunk, so chunk counts add
+// exactly, and each statement reads a bounded range of the device-leading
+// index instead of the whole retained history, which keeps its snapshot short.
 
-		UNION ALL
+// Events of the device-leading index read by one chunk statement, at most. A
+// chunk statement's planned cost also stays below the JIT threshold.
+const computeStatsDeviceChunkEventLimit = 250000
 
-		SELECT
-			@startDay AS day,
-			device_id,
-			MAX(ARRAY[event_id::varchar, event_type]) AS last_event,
-			true AS carry_in
-		FROM audit_device_event
-		WHERE
-			event_time < @windowStart AND
-			event_type IN (@eventTypeDeviceAdded, @eventTypeDeviceRemoved)
-		GROUP BY device_id
-	) t
-	WHERE NOT t.carry_in OR t.last_event[2] = @eventTypeDeviceAdded
-	ORDER BY day ASC, carry_in DESC
+// Chains of chunks run at once, each statement on its own pooled connection.
+const computeStatsDeviceParallel = 4
+
+// The first device of the next chunk: the device of the event at the limit,
+// before the chain end when the chain has one. Ordered by the index alone, so
+// it reads at most the limit's entries.
+func computeStatsDeviceChunkEndSql(chained bool) string {
+	chainEnd := ""
+	if chained {
+		chainEnd = "AND device_id < @chainEnd::uuid"
+	}
+	return `
+	SELECT device_id FROM audit_device_event
+	WHERE @chunkStart::uuid <= device_id ` + chainEnd + `
+	ORDER BY device_id
+	OFFSET @limit LIMIT 1
 `
-
-func computeStatsDevice(ctx context.Context, stats *Stats, conn server.PgConn) {
-	startDay, endDay := dayRange(stats.Lookback)
-	windowStart := server.NowUtc().Add(-24 * time.Hour * time.Duration(stats.Lookback))
-	computeStatsDeviceWindow(ctx, stats, conn, startDay, endDay, windowStart)
 }
 
-func computeStatsDeviceWindow(ctx context.Context, stats *Stats, conn server.PgCanQuery, startDay string, endDay string, windowStart time.Time) {
-	result, err := conn.Query(
-		ctx,
-		computeStatsDeviceSql,
-		server.PgNamedArgs{
-			"startDay":               startDay,
-			"windowStart":            windowStart,
-			"eventTypeDeviceAdded":   AuditEventTypeDeviceAdded,
-			"eventTypeDeviceRemoved": AuditEventTypeDeviceRemoved,
-		},
+// The device after the chunk start, for a device whose own events reach the limit.
+const computeStatsDeviceNextDeviceSql = `
+	SELECT device_id FROM audit_device_event
+	WHERE @chunkStart::uuid < device_id
+	ORDER BY device_id
+	LIMIT 1
+`
+
+// Interior device ids splitting the index into chains of about equal size,
+// from the planner's histogram. Only the split depends on it.
+const computeStatsDeviceChainBoundsSql = `
+	SELECT histogram_bounds::text
+	FROM pg_stats
+	WHERE schemaname = current_schema() AND tablename = 'audit_device_event' AND attname = 'device_id'
+`
+
+// Span counts for the devices in [chunkStart, chunkEnd); the open variant has
+// no end. Rows and spans are as described above. A row's event type is that of
+// its latest-ID event, read from the latest ID of each type, compared as the
+// same varchar the replay compared; days stay dates until they are formatted.
+func computeStatsDeviceSpansSql(bounded bool) string {
+	chunkEnd := ""
+	if bounded {
+		chunkEnd = "AND device_id < @chunkEnd::uuid"
+	}
+	return `
+	WITH device_rep AS (
+		SELECT
+			device_id,
+			CASE WHEN event_time < @windowStart THEN NULL ELSE event_time::date END AS window_day,
+			max(event_id::varchar) FILTER (WHERE event_type = @eventTypeDeviceAdded) AS last_added_id,
+			max(event_id::varchar) FILTER (WHERE event_type = @eventTypeDeviceRemoved) AS last_removed_id
+		FROM audit_device_event
+		WHERE @chunkStart::uuid <= device_id ` + chunkEnd + `
+			AND event_type IN (@eventTypeDeviceAdded, @eventTypeDeviceRemoved)
+		GROUP BY device_id, window_day
+	), device_row AS (
+		SELECT
+			device_id,
+			COALESCE(window_day, @startDay::date) AS day,
+			window_day IS NULL AS carry_in,
+			last_removed_id IS NULL OR last_removed_id < last_added_id AS added
+		FROM device_rep
+	), device_span AS (
+		SELECT
+			day AS start_day,
+			CASE
+				WHEN added THEN lead(day) OVER (PARTITION BY device_id ORDER BY day, carry_in DESC)
+				ELSE day + 1
+			END AS end_day
+		FROM device_row
+		WHERE NOT carry_in OR added
 	)
-	server.WithPgResult(result, err, func() {
-		activeDay := startDay
-		activeDevices := map[server.Id]bool{}
-		// devices with a same-day event: connected that day even if their
-		// end-of-day state is removed
-		touchedDevices := map[server.Id]bool{}
+	SELECT to_char(start_day, 'YYYY-MM-DD'), to_char(end_day, 'YYYY-MM-DD'), count(*)
+	FROM device_span
+	GROUP BY start_day, end_day
+`
+}
 
-		devicesData := map[string]int{}
+// Runs one statement of the device series. The export gives each statement its
+// own pooled connection; a caller with one connection or transaction runs all
+// of them on it, one at a time.
+type computeStatsDeviceQuery func(run func(conn server.PgCanQuery))
 
-		exportActive := func() {
-			count := len(activeDevices)
-			for deviceId := range touchedDevices {
-				if !activeDevices[deviceId] {
-					count += 1
+// A span: the days [startDay, endDay) on which one device counts.
+type computeStatsDeviceSpan struct {
+	startDay string
+	// empty for a span with no end
+	endDay string
+}
+
+func computeStatsDevice(ctx context.Context, stats *Stats) {
+	startDay, endDay := dayRange(stats.Lookback)
+	windowStart := server.NowUtc().Add(-24 * time.Hour * time.Duration(stats.Lookback))
+	query := func(run func(server.PgCanQuery)) {
+		server.ReplicaDb(ctx, func(conn server.PgConn) {
+			run(conn)
+		})
+	}
+	computeStatsDeviceWindowParallel(ctx, stats, query, computeStatsDeviceParallel, startDay, endDay, windowStart, computeStatsDeviceChunkEventLimit)
+}
+
+// All statements on conn, one at a time.
+func computeStatsDeviceWindow(ctx context.Context, stats *Stats, conn server.PgCanQuery, startDay string, endDay string, windowStart time.Time) {
+	computeStatsDeviceWindowChunked(ctx, stats, conn, startDay, endDay, windowStart, computeStatsDeviceChunkEventLimit)
+}
+
+func computeStatsDeviceWindowChunked(
+	ctx context.Context,
+	stats *Stats,
+	conn server.PgCanQuery,
+	startDay string,
+	endDay string,
+	windowStart time.Time,
+	chunkEventLimit int,
+) {
+	query := func(run func(server.PgCanQuery)) {
+		run(conn)
+	}
+	computeStatsDeviceWindowParallel(ctx, stats, query, 1, startDay, endDay, windowStart, chunkEventLimit)
+}
+
+// Splits the devices into up to `parallel` chains and walks each in chunks,
+// running the chains at once. Chunk counts add the same in any order.
+func computeStatsDeviceWindowParallel(
+	ctx context.Context,
+	stats *Stats,
+	query computeStatsDeviceQuery,
+	parallel int,
+	startDay string,
+	endDay string,
+	windowStart time.Time,
+	chunkEventLimit int,
+) {
+	// the zero id precedes every device
+	chainStarts := []server.Id{{}}
+	if 1 < parallel {
+		query(func(conn server.PgCanQuery) {
+			result, err := conn.Query(ctx, computeStatsDeviceChainBoundsSql)
+			server.WithPgResult(result, err, func() {
+				if !result.Next() {
+					return
 				}
-			}
-			devicesData[activeDay] = count
-		}
-
-		var day string
-		var deviceId server.Id
-		var eventType string
-		var carryIn bool
-		for result.Next() {
-			server.Raise(result.Scan(&day, &deviceId, &eventType, &carryIn))
-
-			if day != activeDay {
-				exportActive()
-				// packed (eventless) days count carried state only
-				touchedDevices = map[server.Id]bool{}
-				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
-					activeDay = packDay
-					exportActive()
+				var boundsText *string
+				server.Raise(result.Scan(&boundsText))
+				if boundsText == nil {
+					return
 				}
-				activeDay = day
-			}
+				bounds := []server.Id{}
+				for _, boundText := range strings.Split(strings.Trim(*boundsText, "{}"), ",") {
+					bound, err := server.ParseId(boundText)
+					if err != nil {
+						// no usable split; one chain
+						return
+					}
+					bounds = append(bounds, bound)
+				}
+				if len(bounds) < parallel {
+					return
+				}
+				for index := 1; index < parallel; index++ {
+					bound := bounds[index*len(bounds)/parallel]
+					if chainStarts[len(chainStarts)-1].Less(bound) {
+						chainStarts = append(chainStarts, bound)
+					}
+				}
+			})
+		})
+	}
 
-			if !carryIn {
-				touchedDevices[deviceId] = true
-			}
-
-			// update the carried state
-			switch AuditEventType(eventType) {
-			case AuditEventTypeDeviceRemoved:
-				delete(activeDevices, deviceId)
-			case AuditEventTypeDeviceAdded:
-				activeDevices[deviceId] = true
+	var stateLock sync.Mutex
+	spanCounts := map[computeStatsDeviceSpan]int{}
+	var chainErr error
+	var chains sync.WaitGroup
+	for index, chainStart := range chainStarts {
+		var chainEnd *server.Id
+		if index+1 < len(chainStarts) {
+			chainEnd = &chainStarts[index+1]
+		}
+		walk := func() {
+			chainSpanCounts := computeStatsDeviceChainSpans(ctx, query, chainStart, chainEnd, startDay, windowStart, chunkEventLimit)
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			for span, count := range chainSpanCounts {
+				spanCounts[span] += count
 			}
 		}
-		exportActive()
-		touchedDevices = map[server.Id]bool{}
-		// endDay inclusive: see computeStatsProvider
-		for packDay := nextDay(activeDay); packDay <= endDay; packDay = nextDay(activeDay) {
-			activeDay = packDay
-			exportActive()
+		if len(chainStarts) == 1 {
+			walk()
+			continue
 		}
+		chains.Add(1)
+		go server.HandleError(func() {
+			defer chains.Done()
+			walk()
+		}, func(err error) {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			if chainErr == nil {
+				chainErr = err
+			}
+		})
+	}
+	chains.Wait()
+	if chainErr != nil {
+		panic(chainErr)
+	}
 
-		stats.DevicesData = devicesData
-		stats.DevicesSummary = summary(devicesData)
+	// The replay exported every day from the start day, or an earlier row
+	// day, through the end day, or a later row day.
+	firstDay := startDay
+	lastDay := endDay
+	startCounts := map[string]int{}
+	endCounts := map[string]int{}
+	for span, count := range spanCounts {
+		firstDay = min(firstDay, span.startDay)
+		lastDay = max(lastDay, span.startDay)
+		startCounts[span.startDay] += count
+		if span.endDay != "" {
+			endCounts[span.endDay] += count
+		}
+	}
+	devicesData := map[string]int{}
+	covering := 0
+	for day := firstDay; day <= lastDay; day = nextDay(day) {
+		covering += startCounts[day] - endCounts[day]
+		devicesData[day] = covering
+	}
 
-		stats.activeDevices = activeDevices
-	})
+	stats.DevicesData = devicesData
+	stats.DevicesSummary = summary(devicesData)
+}
+
+// Span counts of the devices in [chainStart, chainEnd), or from chainStart on
+// when chainEnd is nil, one bounded chunk statement at a time.
+func computeStatsDeviceChainSpans(
+	ctx context.Context,
+	query computeStatsDeviceQuery,
+	chainStart server.Id,
+	chainEnd *server.Id,
+	startDay string,
+	windowStart time.Time,
+	chunkEventLimit int,
+) map[computeStatsDeviceSpan]int {
+	spanCounts := map[computeStatsDeviceSpan]int{}
+	readDeviceId := func(sql string, args server.PgNamedArgs) (deviceId server.Id, found bool) {
+		query(func(conn server.PgCanQuery) {
+			result, err := conn.Query(ctx, sql, args)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&deviceId))
+					found = true
+				}
+			})
+		})
+		return
+	}
+
+	chunkStart := chainStart
+	for {
+		args := server.PgNamedArgs{
+			"chunkStart": chunkStart,
+			"limit":      chunkEventLimit,
+		}
+		if chainEnd != nil {
+			args["chainEnd"] = *chainEnd
+		}
+		chunkEnd, bounded := readDeviceId(computeStatsDeviceChunkEndSql(chainEnd != nil), args)
+		if bounded && chunkEnd == chunkStart {
+			// one device alone reaches the limit; it is its own chunk
+			chunkEnd, bounded = readDeviceId(computeStatsDeviceNextDeviceSql, server.PgNamedArgs{
+				"chunkStart": chunkStart,
+			})
+			if chainEnd != nil && (!bounded || !chunkEnd.Less(*chainEnd)) {
+				chunkEnd, bounded = *chainEnd, true
+			}
+		}
+		last := !bounded
+		if !bounded && chainEnd != nil {
+			// the rest of the chain is less than one chunk
+			chunkEnd, bounded = *chainEnd, true
+		}
+		query(func(conn server.PgCanQuery) {
+			result, err := conn.Query(ctx, computeStatsDeviceSpansSql(bounded), server.PgNamedArgs{
+				"chunkStart":             chunkStart,
+				"chunkEnd":               chunkEnd,
+				"startDay":               startDay,
+				"windowStart":            windowStart,
+				"eventTypeDeviceAdded":   AuditEventTypeDeviceAdded,
+				"eventTypeDeviceRemoved": AuditEventTypeDeviceRemoved,
+			})
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var spanStartDay string
+					var spanEndDay *string
+					var count int
+					server.Raise(result.Scan(&spanStartDay, &spanEndDay, &count))
+					span := computeStatsDeviceSpan{startDay: spanStartDay}
+					if spanEndDay != nil {
+						span.endDay = *spanEndDay
+					}
+					spanCounts[span] += count
+				}
+			})
+		})
+		if last || (chainEnd != nil && chunkEnd == *chainEnd) {
+			return spanCounts
+		}
+		chunkStart = chunkEnd
+	}
 }
 
 func computeStatsTransfer(ctx context.Context, stats *Stats, conn server.PgConn) {

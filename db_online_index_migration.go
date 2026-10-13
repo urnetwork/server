@@ -100,8 +100,10 @@ func executeOnlineSqlMigrationOnConn(ctx context.Context, conn PgConn, migration
 }
 
 // The exact public relation, definition, predicate and all usability flags
-// supply completion evidence. Progress plus relation locks protect surviving
-// builders, including sessions whose progress details are privilege-masked.
+// supply completion evidence; an empty predicate enrolls a non-partial index,
+// whose catalog predicate is NULL. Progress plus relation locks protect
+// surviving builders, including sessions whose progress details are
+// privilege-masked.
 func (self *onlineIndexMigrationCompletion) inspect(ctx context.Context, conn PgConn) (complete, busy bool, err error) {
 	var resolved bool
 	err = conn.QueryRow(ctx, `
@@ -119,7 +121,7 @@ func (self *onlineIndexMigrationCompletion) inspect(ctx context.Context, conn Pg
 		        WHERE catalog.indexrelid=target.index_oid AND catalog.indrelid=target.table_oid
 		          AND catalog.indisvalid AND catalog.indisready AND catalog.indislive
 		          AND pg_get_indexdef(catalog.indexrelid)=$3
-		          AND pg_get_expr(catalog.indpred,catalog.indrelid)=$4),
+		          AND pg_get_expr(catalog.indpred,catalog.indrelid) IS NOT DISTINCT FROM NULLIF($4::text,'')),
 		 EXISTS(SELECT 1 FROM pg_stat_progress_create_index AS progress
 		        WHERE progress.pid<>pg_backend_pid()
 		          AND progress.datid=(SELECT oid FROM pg_database WHERE datname=current_database())
