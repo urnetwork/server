@@ -58,8 +58,9 @@ func testVerifyInsertProxyClients(ctx context.Context, clientIds []server.Id, ip
 // reverse field must each end resolved, eligible and pruned alike. So must
 // the per-family rule (§8.2): a provider with an IPv6 connection beside its
 // allocation stays eligible, and so does one sharing its allocation's address
-// while its own IPv6 /64 attributes. Both ways run twice, so the single feeds
-// have seen each other's leases as the waves of one chunk do.
+// while its own IPv6 /64 attributes, or while its one v2 entry, which a v2
+// writer left, does. Both ways run twice, so the single feeds have seen each
+// other's leases as the waves of one chunk do.
 func TestRefreshVerifyProxyEgressMatchesSingleFeeds(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -71,6 +72,7 @@ func TestRefreshVerifyProxyEgressMatchesSingleFeeds(t *testing.T) {
 			address      int
 			connectionIp string
 			expiredField bool
+			v2Ip         string
 		}
 		allocations := []allocation{
 			{provider: true, address: 10},
@@ -82,6 +84,8 @@ func TestRefreshVerifyProxyEgressMatchesSingleFeeds(t *testing.T) {
 			{provider: true, address: 15, connectionIp: "2001:db8:%d::1"},
 			{provider: true, address: 16, connectionIp: "2001:db8:%d::1"},
 			{provider: true, address: 16},
+			{provider: true, address: 17, v2Ip: "203.0.113.%d"},
+			{provider: true, address: 17},
 		}
 		expected := []testVerifyProxyEgressState{
 			{resolved: true, eligible: true, reverseFieldCount: 1},
@@ -92,6 +96,8 @@ func TestRefreshVerifyProxyEgressMatchesSingleFeeds(t *testing.T) {
 			{resolved: true, eligible: true, reverseFieldCount: 1},
 			{resolved: true, eligible: true, reverseFieldCount: 2},
 			{resolved: false, eligible: true, reverseFieldCount: 2},
+			{resolved: false, eligible: false, reverseFieldCount: 1},
+			{resolved: false, eligible: true, reverseFieldCount: 1},
 			{resolved: false, eligible: false, reverseFieldCount: 1},
 		}
 
@@ -110,6 +116,11 @@ func TestRefreshVerifyProxyEgressMatchesSingleFeeds(t *testing.T) {
 				if allocation.connectionIp != "" {
 					connectionIp := netip.MustParseAddr(fmt.Sprintf(allocation.connectionIp, 10*networkIndex+index))
 					FeedVerifyConnectionEgress(ctx, clientId, server.NewId(), connectionIp, settings)
+				}
+				if allocation.v2Ip != "" {
+					now := server.NowUtc()
+					v2Ip := netip.MustParseAddr(fmt.Sprintf(allocation.v2Ip, 200+10*networkIndex+index))
+					testVerifyFeedV2Address(ctx, clientId, v2Ip, server.NewId().String(), now, now.Add(settings.EgressTtl), settings)
 				}
 				if allocation.expiredField {
 					staleIp := netip.MustParseAddr(fmt.Sprintf("203.0.113.%d", 100+10*networkIndex+index))
