@@ -162,14 +162,16 @@ var syntheticTestResourceRoot = func() string {
 
 // A test binary reads only a fixture vault unless TestRealVaultEnv is "1": one
 // below the release gate's private fixture root, the repository's synthetic
-// local/testdata, or the temp directory where a test writes its own. Any other
-// vault, such as $WARP_HOME/vault, may hold real secrets and reads as empty.
-// Other binaries are unaffected.
+// local/testdata, or the temp directory or GOTMPDIR where a test writes its
+// own. Any other vault, such as $WARP_HOME/vault, may hold real secrets and
+// reads as empty. Other binaries are unaffected.
 func refuseNonFixtureVault(root string, testBinary bool) error {
 	if !testBinary || os.Getenv(TestRealVaultEnv) == "1" {
 		return nil
 	}
-	for _, fixtureRoot := range []string{os.Getenv("WARP_TEST_ENV_PORTABLE_ROOT"), syntheticTestResourceRoot, os.TempDir()} {
+	// Go's t.TempDir creates its directory below GOTMPDIR when GOTMPDIR is
+	// set, and the release gate's child sets GOTMPDIR apart from TMPDIR.
+	for _, fixtureRoot := range []string{os.Getenv("WARP_TEST_ENV_PORTABLE_ROOT"), syntheticTestResourceRoot, os.TempDir(), os.Getenv("GOTMPDIR")} {
 		if fixtureRoot != "" && pathWithin(root, fixtureRoot) {
 			return nil
 		}
