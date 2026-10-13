@@ -20,7 +20,10 @@ type ArinShadowScoreLease struct {
 }
 
 func (s *ArinShadowScoreSnapshot) AcquireCaptureLease(ctx context.Context) (*ArinShadowScoreLease, error) {
-	expires := server.NowUtc().Add(server.ArinShadowCaptureMaxAge)
+	if s == nil {
+		return nil, server.ErrArinShadowInput
+	}
+	expires := s.owner.clock().Add(server.ArinShadowCaptureMaxAge)
 	if ctx != nil {
 		if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
 			expires = deadline
@@ -36,7 +39,7 @@ func (s *ArinShadowScoreSnapshot) acquireCaptureLease(ctx context.Context, expir
 	c := s.owner
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := server.NowUtc()
+	now := c.clock()
 	if c.closed || c.current != s || currentArinShadowScoreCapture.Load() != c || ctx.Err() != nil {
 		return nil, server.ErrArinShadowInput
 	}
@@ -61,7 +64,7 @@ func (l *ArinShadowScoreLease) current(ctx context.Context) (*ArinShadowScoreSna
 	}
 	l.owner.mu.Lock()
 	defer l.owner.mu.Unlock()
-	now := server.NowUtc()
+	now := l.owner.clock()
 	if l.owner.closed || currentArinShadowScoreCapture.Load() != l.owner || l.owner.lease != l ||
 		l.snapshot == nil || now.Before(l.startedAt) || !now.Before(l.expiresAt) {
 		if l.owner.lease == l {

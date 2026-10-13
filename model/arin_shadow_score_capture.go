@@ -22,6 +22,10 @@ type ArinShadowScoreCapture struct {
 	closed   bool
 	current  *ArinShadowScoreSnapshot
 	lease    *ArinShadowScoreLease
+	// Fixed at construction: the wall clock and the committed Redis census.
+	// Tests replace them before publication; nothing changes them later.
+	clock  func() time.Time
+	latest func(context.Context) (*ClientScoreNativeCensus, error)
 }
 
 type arinShadowScoreEntry struct {
@@ -53,7 +57,7 @@ func NewArinShadowScoreCapture(capacity int) (*ArinShadowScoreCapture, error) {
 	if capacity < 1 || capacity > server.ArinShadowCapturePopulationLimit {
 		return nil, server.ErrArinShadowInput
 	}
-	return &ArinShadowScoreCapture{capacity: capacity}, nil
+	return &ArinShadowScoreCapture{capacity: capacity, clock: server.NowUtc, latest: GetClientScoreNativeCensus}, nil
 }
 
 // Explicit diagnostic installation. It does not activate subscriber policy,
@@ -225,10 +229,11 @@ func (s *ArinShadowScoreSnapshot) Validate(ctx context.Context) bool {
 	s.owner.mu.Lock()
 	current := !s.owner.closed && s.owner.current == s && currentArinShadowScoreCapture.Load() == s.owner
 	s.owner.mu.Unlock()
-	if !current || server.NowUtc().Before(s.sourceCompletedAt) || server.NowUtc().Sub(s.sourceCompletedAt) > server.ArinShadowCaptureMaxAge {
+	now := s.owner.clock()
+	if !current || now.Before(s.sourceCompletedAt) || now.Sub(s.sourceCompletedAt) > server.ArinShadowCaptureMaxAge {
 		return false
 	}
-	census, err := GetClientScoreNativeCensus(ctx)
+	census, err := s.owner.latest(ctx)
 	return err == nil && arinShadowNativeGeneration(census) == s.generation
 }
 
