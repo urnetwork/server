@@ -3076,7 +3076,7 @@
           "legendFormat": "{{class}}"
         }
       ],
-      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the pool refresh skips its run while the all share is over the line. Read from the one taskworker with the freshest fleet snapshot."
+      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the pool refresh skips its run while the share of the loads that reached their provider is over the line (this panel counts every failure, a provider that was never reached included). Read from the one taskworker with the freshest fleet snapshot."
     },
     {
       "id": 63,
@@ -3272,7 +3272,7 @@
           "range": false
         }
       ],
-      "description": "The latest refresh's failure share of each active site: the share of the runs on healthy exits, those that passed nine in ten of the other sites, in which the site failed every attempt (over all exits when too few qualified). Read from the taskworker that ran the latest refresh; a skipped refresh judges nothing, so after one this shows that taskworker's last judged shares, or none. A site over the 50 % retire line across at least 200 runs on healthy exits is retired by the next refresh, at most one per class per run; one that stays over it for a day is the pool-needs-refresh finding of monitor signal §2.19b."
+      "description": "The latest refresh's failure share of each active site: the share of the runs on healthy exits, those that passed nine in ten of the other sites, in which the site failed every attempt (over every exit the probe reached when too few qualified; a run that never reached its provider is in no site's share). Read from the taskworker that ran the latest refresh; a skipped refresh judges nothing, so after one this shows that taskworker's last judged shares, or none. A site over the 50 % retire line across at least 200 judged runs is retired by the next refresh, at most one per class per run; one that stays over it for a day is the pool-needs-refresh finding of monitor signal §2.19b."
     },
     {
       "id": 60,

@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // A place mark covers its country, and its region when it names one, as the
@@ -395,6 +397,101 @@ func TestGetProviderEgressHealthClassTotalsSumsRecentRuns(t *testing.T) {
 			totals["cdn"] != (ProviderEgressClassTotal{Ok: 9, Total: 10}) ||
 			totals[""] != (ProviderEgressClassTotal{Ok: 55, Total: 62}) {
 			t.Fatalf("class totals = %+v", totals)
+		}
+	})
+}
+
+// The prober-fault total reads a run's contact back from its stored URL
+// evidence exactly as NoContactFailure reads it from the load: a run whose one
+// URL ended before any destination answered is counted apart, and one where
+// anything answered first -- a status, a response byte, a redirect, a TLS
+// verdict or security evidence -- or that ended in any other stage counts. A
+// batch without URL evidence keeps every load, and a run before the window is
+// not read.
+func TestGetProviderEgressHealthContactedTotalReadsNoContactFailureBack(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		at := now.Add(-time.Minute)
+		destination := egresshealth.Destination{Name: "synthetic-document", Class: egresshealth.ClassSite, Url: "https://document.example/"}
+		classResults := func(ok int, total int) map[string]ProviderEgressHealthClassResult {
+			return map[string]ProviderEgressHealthClassResult{string(egresshealth.ClassSite): {OK: ok, Total: total}}
+		}
+		// one failed URL turn, its evidence mapped from the load as the URL
+		// sampler maps it; a nil security list is stored as null
+		record := func(at time.Time, check egresshealth.CheckResult) {
+			evidence := &egresshealth.UrlProbeEvidence{
+				PolicyVersion: egresshealth.UrlProbePolicyVersion, Policy: egresshealth.DefaultUrlProbePolicy(),
+				Destination: destination, MeasuredAt: at, ContentMatcherVersion: egresshealth.UrlProbeContentMatcherVersion,
+				FailureStage: check.FailureStage, StatusCode: check.StatusCode, RedirectCount: check.RedirectCount,
+				RequestWritten: check.FirstByteReceived, FirstByteReceived: check.FirstByteReceived,
+			}
+			if check.UrlProbeSecurity != nil {
+				evidence.Security = []egresshealth.UrlProbeSecurityEvent{}
+				for _, event := range check.UrlProbeSecurity {
+					event.Destination, event.MeasuredAt = destination, at
+					evidence.Security = append(evidence.Security, event)
+				}
+			}
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+				RunId:                    server.NewId(),
+				ClientId:                 server.NewId(),
+				MeasuredAt:               at,
+				UrlProbeEvidence:         evidence,
+				Total:                    1,
+				ClassResults:             classResults(0, 1),
+				FailedNames:              destination.Name,
+				TLSAuthenticationFailure: check.TlsAuthenticationFailure,
+			})
+		}
+
+		checks := []egresshealth.CheckResult{}
+		for _, stage := range append(egresshealth.NoContactFailureStages(),
+			"", "tls", "policy", "request_build", "request_tls_timeout", "request_connect_timeout",
+			"request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled",
+			"request_eof", "request_unknown", "redirect_policy", "redirect_limit", "redirect_location",
+			"response_encoding", "response_body", "response_content", "response_performance", "run_ended", "unknown",
+		) {
+			checks = append(checks, egresshealth.CheckResult{FailureStage: stage})
+		}
+		authenticated := []egresshealth.UrlProbeSecurityEvent{{TlsAuthenticated: true}}
+		checks = append(checks,
+			egresshealth.CheckResult{FailureStage: "dial_dns", StatusCode: http.StatusBadGateway},
+			egresshealth.CheckResult{FailureStage: "dial_dns", FirstByteReceived: true},
+			egresshealth.CheckResult{FailureStage: "dial_dns", RedirectCount: 1, UrlProbeSecurity: authenticated},
+			egresshealth.CheckResult{FailureStage: "dial_tcp", UrlProbeSecurity: authenticated},
+			egresshealth.CheckResult{FailureStage: "dial_tcp", TlsAuthenticationFailure: true, UrlProbeSecurity: []egresshealth.UrlProbeSecurityEvent{{TlsFailure: true}}},
+			// an empty list is no security evidence
+			egresshealth.CheckResult{FailureStage: "request_dns_timeout", UrlProbeSecurity: []egresshealth.UrlProbeSecurityEvent{}},
+		)
+		want := ProviderEgressContactedTotal{}
+		for _, check := range checks {
+			record(at, check)
+			if check.NoContactFailure() {
+				want.NoContactFailures++
+			} else {
+				want.Total++
+			}
+		}
+		if want.NoContactFailures != len(egresshealth.NoContactFailureStages())+1 {
+			t.Fatalf("the fixture holds %d no-contact failures, want one per stage and the empty security list", want.NoContactFailures)
+		}
+
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			RunId: server.NewId(), ClientId: server.NewId(), MeasuredAt: at,
+			UrlProbeEvidence: fp2TestUrlProbeEvidence(at, true), OKCount: 1, Total: 1, ClassResults: classResults(1, 1),
+		})
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			RunId: server.NewId(), ClientId: server.NewId(), MeasuredAt: at,
+			OKCount: 3, Total: 5, ClassResults: classResults(3, 5),
+		})
+		want.Ok += 4
+		want.Total += 6
+		record(now.Add(-2*time.Hour), egresshealth.CheckResult{FailureStage: "dial_dns"})
+		record(now.Add(-2*time.Hour), egresshealth.CheckResult{FailureStage: "response_content", StatusCode: http.StatusForbidden})
+
+		if got := GetProviderEgressHealthContactedTotal(ctx, now.Add(-time.Hour)); got != want {
+			t.Fatalf("contacted total = %+v, want %+v", got, want)
 		}
 	})
 }
