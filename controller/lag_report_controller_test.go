@@ -107,13 +107,13 @@ func newLagTestTrack(ctx context.Context, issuedAt time.Time, extenders ...*lagT
 // The minute around a load, as an extender reports it: pings 250 ms apart
 // from the window start, 20 ms idle and 80 ms during the download and the
 // upload, one ping lost, and 20 intervals of each direction.
-func newLagTestReportBody(extender *lagTestExtender, ticket *model.LagTicket, clientIp string, windowStartTime time.Time) *protocol.LagReportBody {
+func newLagTestReportBody(extender *lagTestExtender, ticket *model.LagTicket, windowStartTime time.Time) *protocol.LagReportBody {
 	body := &protocol.LagReportBody{
 		TicketId:           ticket.TicketId.Bytes(),
 		ExtenderPublicKey:  extender.publicKey,
 		TrackId:            ticket.TrackId.Bytes(),
 		TrackPosition:      uint32(ticket.Position),
-		ClientIp:           netip.MustParseAddr(clientIp).AsSlice(),
+		IpFamily:           4,
 		SessionStartTimeMs: uint64(windowStartTime.Add(-time.Second).UnixMilli()),
 		WindowStartTimeMs:  uint64(windowStartTime.UnixMilli()),
 		DownloadStartMs:    25000,
@@ -348,13 +348,13 @@ func TestLagResultDerivedStatistics(t *testing.T) {
 		ExtenderId: extender.extenderId,
 		IssuedAt:   now.Add(-time.Minute),
 	}
-	body := newLagTestReportBody(extender, ticket, "203.0.113.77", now.Add(-time.Minute))
+	body := newLagTestReportBody(extender, ticket, now.Add(-time.Minute))
 	// a few slow pings, too few to move either percentile
 	body.PingMicros[0] = 400000
 	body.PingMicros[1] = 300000
 	body.PingMicros[100] = 900000
 
-	result := newLagResult(body, ticket, netip.MustParseAddr("203.0.113.77"), now)
+	result := newLagResult(body, ticket, now)
 	connect.AssertEqual(t, result.TrackId, ticket.TrackId)
 	connect.AssertEqual(t, result.TrackPosition, 3)
 	connect.AssertEqual(t, result.TicketId, ticket.TicketId)
@@ -376,9 +376,11 @@ func TestLagResultDerivedStatistics(t *testing.T) {
 	connect.AssertEqual(t, *result.UploadP50Mbps, float32(20))
 	connect.AssertEqual(t, *result.UploadP95Mbps, float32(20))
 
-	// the family is the one the browser reached the extender on
-	connect.AssertEqual(t, newLagResult(body, ticket, netip.MustParseAddr("2001:db8::77"), now).ExtenderIpFamily, 6)
-	connect.AssertEqual(t, newLagResult(body, ticket, netip.MustParseAddr("::ffff:203.0.113.77"), now).ExtenderIpFamily, 4)
+	// the family is the one the report names, which the browser reached the
+	// extender on
+	body.IpFamily = 6
+	connect.AssertEqual(t, newLagResult(body, ticket, now).ExtenderIpFamily, 6)
+	body.IpFamily = 4
 
 	// a session that closed before its load has no load statistics
 	noLoad := &protocol.LagReportBody{
@@ -387,7 +389,7 @@ func TestLagResultDerivedStatistics(t *testing.T) {
 		PingMicros:        []uint32{10000, 30000, 0, 20000},
 		EndReason:         protocol.LagEndReason_LAG_END_NO_LOAD,
 	}
-	result = newLagResult(noLoad, ticket, netip.MustParseAddr("203.0.113.77"), now)
+	result = newLagResult(noLoad, ticket, now)
 	connect.AssertEqual(t, result.EndReason, "no_load")
 	connect.AssertEqual(t, result.LostCount, 1)
 	connect.AssertEqual(t, result.OwnLoadLatencyP50Ms, (*float32)(nil))
@@ -406,14 +408,14 @@ func TestLagResultStatisticsCountOnlyTheLoad(t *testing.T) {
 	extender := &lagTestExtender{extenderId: server.NewId()}
 	extender.publicKey, extender.privateKey, _ = ed25519.GenerateKey(rand.Reader)
 	ticket := &model.LagTicket{TicketId: server.NewId(), TrackId: server.NewId(), ExtenderId: extender.extenderId, IssuedAt: now.Add(-time.Minute)}
-	body := newLagTestReportBody(extender, ticket, "203.0.113.77", now.Add(-time.Minute))
+	body := newLagTestReportBody(extender, ticket, now.Add(-time.Minute))
 	// 5 s of 250 ms intervals is 20; five more at 9 Gbps claimed past it
 	for range 5 {
 		body.DownloadReceivedBytes = append(body.DownloadReceivedBytes, 281_250_000)
 		body.DownloadSentBytes = append(body.DownloadSentBytes, 281_250_000)
 		body.UploadBytes = append(body.UploadBytes, 281_250_000)
 	}
-	result := newLagResult(body, ticket, netip.MustParseAddr("203.0.113.77"), now)
+	result := newLagResult(body, ticket, now)
 	connect.AssertEqual(t, *result.DownloadP50Mbps, float32(100))
 	connect.AssertEqual(t, *result.DownloadP95Mbps, float32(100))
 	connect.AssertEqual(t, *result.UploadP50Mbps, float32(20))
@@ -437,7 +439,7 @@ func TestLagResultStatisticsCountOnlyTheLoad(t *testing.T) {
 	body.DownloadMs = 0
 	body.UploadMs = 0
 	body.EndReason = protocol.LagEndReason_LAG_END_BUSY
-	result = newLagResult(body, ticket, netip.MustParseAddr("203.0.113.77"), now)
+	result = newLagResult(body, ticket, now)
 	connect.AssertEqual(t, result.DownloadP50Mbps, (*float32)(nil))
 	connect.AssertEqual(t, result.UploadP95Mbps, (*float32)(nil))
 	connect.AssertEqual(t, len(result.DownloadReceivedBytes), 25)
@@ -467,28 +469,22 @@ func TestLagEndReasonName(t *testing.T) {
 	connect.AssertEqual(t, lagEndReasonName(protocol.LagEndReason(250)), "250")
 }
 
-// A verified report is stored as its ticket's one result, the track's client
-// fields are derived from the address it names, and that address is in no
-// table.
+// A verified report is stored as its ticket's one result, with the address
+// family it names and no address at all (amendment 9).
 func TestExtenderLagReportStores(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc().Truncate(time.Millisecond)
+		// the extender saw the browser at these; the reports never carry them
 		const clientIp = "203.0.113.77"
 		const clientIp6 = "2001:db8:77:1::9"
-		useIpAsnDb(t, writeTestIpAsnDb(t, geoLite2AsnDatabaseType, map[string]IpAsn{
-			"203.0.113.0/24": {Number: 64500, Organization: "Example Access"},
-		}))
-		useLagAddressPlaces(t, map[string]*model.LagPlace{
-			clientIp: {City: "Lyon", Region: "Auvergne-Rhone-Alpes", CountryCode: "fr", CountryName: "France", Latitude: 45.7485, Longitude: 4.8467},
-		})
 
 		first := newLagTestExtender(t, ctx, "192.0.2.10")
 		second := newLagTestExtender(t, ctx, "192.0.2.20", "2001:db8:20::1")
-		track, tickets := newLagTestTrack(ctx, now.Add(-2*time.Minute), first, second)
+		_, tickets := newLagTestTrack(ctx, now.Add(-2*time.Minute), first, second)
 
 		windowStartTime := now.Add(-time.Minute)
-		report := signLagTestReport(t, newLagTestReportBody(first, tickets[0], clientIp, windowStartTime), first.privateKey)
+		report := signLagTestReport(t, newLagTestReportBody(first, tickets[0], windowStartTime), first.privateKey)
 		result := postLagTestReports(t, first, now, report)
 		connect.AssertEqual(t, result.Accepted, 1)
 		connect.AssertEqual(t, len(result.Rejected), 0)
@@ -547,42 +543,13 @@ func TestExtenderLagReportStores(t *testing.T) {
 		connect.AssertEqual(t, *downloadP50, float32(100))
 		connect.AssertEqual(t, *uploadP50, float32(20))
 
-		// the track's client fields, from the address the report named
-		readTrackClient := func() (addressHash []byte, prefix string, asn int64, asnOrg string, countryCode string, region string, city string, latitude float64, longitude float64) {
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(
-					ctx,
-					`
-					SELECT
-						client_address_hash, client_prefix, client_asn, client_asn_org,
-						client_country_code, client_region, client_city, client_latitude, client_longitude
-					FROM lag_track
-					WHERE track_id = $1
-					`,
-					track.TrackId,
-				).Scan(&addressHash, &prefix, &asn, &asnOrg, &countryCode, &region, &city, &latitude, &longitude))
-			})
-			return
-		}
-		addressHash, prefix, asn, asnOrg, countryCode, region, city, latitude, longitude := readTrackClient()
-		wantHash := server.ClientIpHashForAddr(netip.MustParseAddr(clientIp))
-		connect.AssertEqual(t, addressHash, wantHash[:])
-		connect.AssertEqual(t, prefix, "203.0.113.0/24")
-		connect.AssertEqual(t, asn, int64(64500))
-		connect.AssertEqual(t, asnOrg, "Example Access")
-		connect.AssertEqual(t, countryCode, "fr")
-		connect.AssertEqual(t, region, "Auvergne-Rhone-Alpes")
-		connect.AssertEqual(t, city, "Lyon")
-		// rounded to 0.1 degree
-		connect.AssertEqual(t, latitude, 45.7)
-		connect.AssertEqual(t, longitude, 4.8)
-
 		// the same report again is no second result
 		assertLagReportRejected(t, postLagTestReports(t, first, now, report), LagReportRejectDuplicate)
 
-		// the track's second report, over ipv6 from another address, stores its
-		// own row and leaves the track's client fields as the first set them
-		secondReport := signLagTestReport(t, newLagTestReportBody(second, tickets[1], clientIp6, windowStartTime), second.privateKey)
+		// the track's second report, over ipv6, stores its own row with its family
+		secondBody := newLagTestReportBody(second, tickets[1], windowStartTime)
+		secondBody.IpFamily = 6
+		secondReport := signLagTestReport(t, secondBody, second.privateKey)
 		result = postLagTestReports(t, second, now, secondReport)
 		connect.AssertEqual(t, result.Accepted, 1)
 		server.Db(ctx, func(conn server.PgConn) {
@@ -594,14 +561,9 @@ func TestExtenderLagReportStores(t *testing.T) {
 		})
 		connect.AssertEqual(t, extenderIpFamily, 6)
 		connect.AssertEqual(t, trackPosition, 1)
-		_, prefix, asn, _, countryCode, _, _, _, _ = readTrackClient()
-		connect.AssertEqual(t, prefix, "203.0.113.0/24")
-		connect.AssertEqual(t, asn, int64(64500))
-		connect.AssertEqual(t, countryCode, "fr")
 
 		// The browser's address is stored nowhere: not as text, not as an
-		// inet, and not as its bytes. The hash is of the masked address with
-		// the pepper, so it is neither.
+		// inet, and not as its bytes.
 		for _, table := range []string{"lag_track", "lag_ticket", "lag_result"} {
 			text := lagTestTableText(t, ctx, table)
 			for _, ip := range []string{clientIp, clientIp6} {
@@ -633,7 +595,7 @@ func TestExtenderLagReportExtenderClock(t *testing.T) {
 
 		for i, offset := range []time.Duration{-30 * time.Minute, 30 * time.Minute} {
 			windowStartTime := now.Add(offset - time.Minute)
-			body := newLagTestReportBody(extender, tickets[i], "203.0.113.77", windowStartTime)
+			body := newLagTestReportBody(extender, tickets[i], windowStartTime)
 			result := postLagTestReports(t, extender, now, signLagTestReport(t, body, extender.privateKey))
 			if result.Accepted != 1 {
 				t.Fatalf("an extender clock %s off: rejected %+v", offset, lagTestRejections(result))
@@ -659,11 +621,11 @@ func TestExtenderLagReportExtenderClock(t *testing.T) {
 
 		// a day and a second after the ticket, on the operator's clock
 		arrival := issuedAt.Add(24*time.Hour + time.Second)
-		late := newLagTestReportBody(extender, tickets[2], "203.0.113.77", arrival.Add(-time.Minute))
+		late := newLagTestReportBody(extender, tickets[2], arrival.Add(-time.Minute))
 		assertLagReportRejected(t, postLagTestReports(t, extender, arrival, signLagTestReport(t, late, extender.privateKey)), LagReportRejectBounds)
 		// a second earlier it is in time
 		arrival = issuedAt.Add(24 * time.Hour)
-		late = newLagTestReportBody(extender, tickets[2], "203.0.113.77", arrival.Add(-time.Minute))
+		late = newLagTestReportBody(extender, tickets[2], arrival.Add(-time.Minute))
 		connect.AssertEqual(t, postLagTestReports(t, extender, arrival, signLagTestReport(t, late, extender.privateKey)).Accepted, 1)
 	})
 }
@@ -674,16 +636,12 @@ func TestExtenderLagReportRefusals(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc().Truncate(time.Millisecond)
-		const clientIp = "203.0.113.77"
-		useIpAsnDb(t, "")
-		useLagAddressPlaces(t, map[string]*model.LagPlace{})
-
 		extender := newLagTestExtender(t, ctx, "192.0.2.10")
 		other := newLagTestExtender(t, ctx, "192.0.2.20")
 		track, tickets := newLagTestTrack(ctx, now.Add(-2*time.Minute), extender, other)
 		windowStartTime := now.Add(-time.Minute)
 		body := func() *protocol.LagReportBody {
-			return newLagTestReportBody(extender, tickets[0], clientIp, windowStartTime)
+			return newLagTestReportBody(extender, tickets[0], windowStartTime)
 		}
 
 		// not a report at all
@@ -726,12 +684,12 @@ func TestExtenderLagReportRefusals(t *testing.T) {
 			assertLagReportRejected(t, postLagTestReports(t, extender, now, signLagTestReport(t, edited, extender.privateKey)), LagReportRejectTicket)
 		}
 
-		// ids and an address of the wrong size
+		// ids of the wrong size, and a family that is neither 4 nor 6
 		for _, edit := range []func(body *protocol.LagReportBody){
 			func(body *protocol.LagReportBody) { body.TicketId = []byte{1, 2, 3} },
 			func(body *protocol.LagReportBody) { body.TrackId = nil },
-			func(body *protocol.LagReportBody) { body.ClientIp = []byte{203, 0, 113} },
-			func(body *protocol.LagReportBody) { body.ClientIp = nil },
+			func(body *protocol.LagReportBody) { body.IpFamily = 0 },
+			func(body *protocol.LagReportBody) { body.IpFamily = 5 },
 		} {
 			edited := body()
 			edit(edited)
@@ -767,15 +725,12 @@ func TestExtenderLagReportRefusals(t *testing.T) {
 			assertLagReportRejected(t, postLagTestReports(t, extender, now, signLagTestReport(t, edited, extender.privateKey)), LagReportRejectBounds)
 		}
 
-		// nothing above was stored, and the track's client fields are untouched
+		// nothing above was stored
 		var resultCount int
-		var clientFieldsAt *time.Time
 		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM lag_result`).Scan(&resultCount))
-			server.Raise(conn.QueryRow(ctx, `SELECT client_fields_at FROM lag_track WHERE track_id = $1`, track.TrackId).Scan(&clientFieldsAt))
+			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM lag_result WHERE track_id = $1`, track.TrackId).Scan(&resultCount))
 		})
 		connect.AssertEqual(t, resultCount, 0)
-		connect.AssertEqual(t, clientFieldsAt, (*time.Time)(nil))
 
 		// a post mixes outcomes, each named by its index
 		good := signLagTestReport(t, body(), extender.privateKey)
@@ -785,23 +740,6 @@ func TestExtenderLagReportRefusals(t *testing.T) {
 			{Index: 0, Reason: LagReportRejectMalformed},
 			{Index: 2, Reason: LagReportRejectDuplicate},
 		})
-
-		// without the lookups the track still gets the hash and the prefix
-		var addressHash []byte
-		var prefix *string
-		var asn *int64
-		var countryCode *string
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(
-				ctx,
-				`SELECT client_address_hash, client_prefix, client_asn, client_country_code FROM lag_track WHERE track_id = $1`,
-				track.TrackId,
-			).Scan(&addressHash, &prefix, &asn, &countryCode))
-		})
-		connect.AssertEqual(t, len(addressHash), 32)
-		connect.AssertEqual(t, *prefix, "203.0.113.0/24")
-		connect.AssertEqual(t, asn, (*int64)(nil))
-		connect.AssertEqual(t, countryCode, (*string)(nil))
 	})
 }
 

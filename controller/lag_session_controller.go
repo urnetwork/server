@@ -1,7 +1,7 @@
 package controller
 
 import (
-	"fmt"
+	"errors"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -60,7 +60,9 @@ func LagSession(clientSession *session.ClientSession) (*LagSessionResult, error)
 
 	addr, _, err := clientSession.ParseClientIpPort()
 	if err != nil {
-		return nil, fmt.Errorf("could not read the caller address: %w", err)
+		// the parse error would quote the address, so it goes no further
+		// (amendment 9)
+		return nil, errors.New("could not read the caller address")
 	}
 	limit, err := model.CheckLagPrefixRateLimit(
 		ctx,

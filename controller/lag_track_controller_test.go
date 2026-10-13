@@ -251,7 +251,7 @@ func TestLagTrackReissue(t *testing.T) {
 		// a report under the reissued ticket and one under the dropped session's
 		// ticket are both the dot's, at its place in the track
 		for _, ticketId := range []server.Id{reissuedTicketId, originalTicketId} {
-			reportBody := newLagTestReportBody(second, model.GetLagTicket(ctx, ticketId), "203.0.113.77", now.Add(-time.Minute))
+			reportBody := newLagTestReportBody(second, model.GetLagTicket(ctx, ticketId), now.Add(-time.Minute))
 			reported := postLagTestReports(t, second, now, signLagTestReport(t, reportBody, second.privateKey))
 			connect.AssertEqual(t, reported.Accepted, 1)
 		}

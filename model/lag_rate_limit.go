@@ -16,30 +16,18 @@ import (
 // The shared caller limiters bucket an address at /29 (/56)
 // (server.ClientIpHashForAddr). The plan counts a whole /24 (/48), the
 // smallest block a provider routes to one customer, so the key here is the
-// same peppered hash over the wider prefix and the raw address is never part
-// of a key. Infrastructure subnets (WARP_LIMIT_EXCLUDE_SUBNETS) are not
-// counted, as for every caller limiter. The windows are fixed and epoch
-// aligned (server.IncrementRateLimitWindow).
+// same peppered hash over the wider prefix. No address, prefix text or
+// address bytes are ever part of a key (amendment 9), and a counter lives in
+// Redis only: server.IncrementRateLimitWindow gives each window's key a TTL
+// of the window, so it is gone one window after its last count at most.
+// Infrastructure subnets (WARP_LIMIT_EXCLUDE_SUBNETS) are not counted, as
+// for every caller limiter. The windows are fixed and epoch aligned.
 
 // The prefix lengths a caller is counted by.
 const (
 	LagClientPrefixBitsV4 = 24
 	LagClientPrefixBitsV6 = 48
 )
-
-// The /24 (/48) an address is counted in, after unmapping a v4-mapped
-// address. Invalid for an invalid address.
-func LagClientPrefix(addr netip.Addr) netip.Prefix {
-	addr = addr.Unmap()
-	switch {
-	case addr.Is4():
-		return netip.PrefixFrom(addr, LagClientPrefixBitsV4).Masked()
-	case addr.Is6():
-		return netip.PrefixFrom(addr.WithZone(""), LagClientPrefixBitsV6).Masked()
-	default:
-		return netip.Prefix{}
-	}
-}
 
 // The outcome of one counted attempt. RetryAfter is the rest of the window
 // when the attempt was refused.
@@ -66,9 +54,14 @@ func CheckLagPrefixRateLimit(
 	if server.IsRateLimitExcluded(addr) {
 		return LagRateLimitResult{Allowed: true, Excluded: true}, nil
 	}
+	return checkLagRateLimit(ctx, lagPrefixRateLimitKey(name, addr), limit, window)
+}
+
+// The counter key of `name` for the /24 (/48) of a valid, unmapped address:
+// the peppered hash of the prefix, never the address or the prefix itself.
+func lagPrefixRateLimitKey(name string, addr netip.Addr) string {
 	prefixHash := server.ClientIpHashForAddrPrefix(addr, LagClientPrefixBitsV4, LagClientPrefixBitsV6)
-	key := fmt.Sprintf("{lag_%s_prefix_%s}", name, hex.EncodeToString(prefixHash[:]))
-	return checkLagRateLimit(ctx, key, limit, window)
+	return fmt.Sprintf("{lag_%s_prefix_%s}", name, hex.EncodeToString(prefixHash[:]))
 }
 
 // Counts one attempt of `name` by a client against limit per window.

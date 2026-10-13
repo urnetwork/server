@@ -10091,16 +10091,17 @@ var migrations = []any{
 	// lag_guest marks a guest network created for lag.dev and holds its
 	// expiry. The lag sweep removes the network once it passes (A2), and only
 	// marked networks ever expire. lag_track is one track a visitor ran, with
-	// the client fields filled from the track's first report and the count of
+	// its client fields, looked up when it was issued, and the count of
 	// tickets reissued in it, which caps how often its dots reconnect;
 	// lag_ticket is one admitted session, kept until its report can no longer
 	// arrive (ticket_retention); lag_result is one report, one session's
 	// minute of pings, which is one minute per dot per track unless the dot
 	// reconnected (decision 17), with its load and the statistics derived
-	// when it was stored. No table holds the raw client address:
-	// lag_track keeps its peppered hash, its /24 (/48) and what GeoLite2 says
-	// about it, and lag_result keeps only which family the browser reached
-	// the extender on. A result's session and window start times are the
+	// when it was stored. No table holds a client address, a prefix of one or
+	// a hash of one (amendment 9): lag_track keeps only the network and the
+	// city-level place GeoLite2 gives for the address the track was issued
+	// to, and lag_result only which family the browser reached the extender
+	// on. A result's session and window start times are the
 	// extender's clock and its created_at is the report's arrival on the
 	// operator's, so an extender's offset can be estimated. Tracks and
 	// results are kept for result_retention (lag.yml, 180 days).
@@ -10119,16 +10120,11 @@ var migrations = []any{
 			client_id uuid NOT NULL,
 			started_at timestamp NOT NULL,
 			reissue_count int NOT NULL DEFAULT 0,
-			client_fields_at timestamp NULL,
-			client_address_hash bytea NULL,
-			client_prefix varchar(64) NULL,
 			client_asn bigint NULL,
 			client_asn_org varchar(256) NULL,
 			client_country_code varchar(2) NULL,
 			client_region varchar(256) NULL,
-			client_city varchar(256) NULL,
-			client_latitude double precision NULL,
-			client_longitude double precision NULL
+			client_city varchar(256) NULL
 		);
 		CREATE INDEX lag_track_started_at ON lag_track (started_at, track_id);
 

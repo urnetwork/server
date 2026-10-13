@@ -67,11 +67,11 @@ func testLagResult(ticket *LagTicket, createdAt time.Time) *LagResult {
 }
 
 type testLagTrackRow struct {
-	clientFieldsAt *time.Time
-	addressHash    []byte
-	prefix         *string
-	asn            *int64
-	countryCode    *string
+	asn         *int64
+	asnOrg      *string
+	countryCode *string
+	region      *string
+	city        *string
 }
 
 func testGetLagTrackRow(t testing.TB, ctx context.Context, trackId server.Id) *testLagTrackRow {
@@ -81,12 +81,12 @@ func testGetLagTrackRow(t testing.TB, ctx context.Context, trackId server.Id) *t
 		server.Raise(conn.QueryRow(
 			ctx,
 			`
-			SELECT client_fields_at, client_address_hash, client_prefix, client_asn, client_country_code
+			SELECT client_asn, client_asn_org, client_country_code, client_region, client_city
 			FROM lag_track
 			WHERE track_id = $1
 			`,
 			trackId,
-		).Scan(&row.clientFieldsAt, &row.addressHash, &row.prefix, &row.asn, &row.countryCode))
+		).Scan(&row.asn, &row.asnOrg, &row.countryCode, &row.region, &row.city))
 	})
 	return row
 }
@@ -111,45 +111,56 @@ func TestLagTrackTickets(t *testing.T) {
 	})
 }
 
-// A ticket takes one report; only the track's first report fills the
-// track's client fields.
+// A track stores the client fields it was issued with (A5, amendment 9),
+// and none when it was issued without them.
+func TestCreateLagTrackClientFields(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().Truncate(time.Millisecond)
+
+		asn := int64(64500)
+		track := &LagTrack{
+			TrackId:   server.NewId(),
+			NetworkId: server.NewId(),
+			ClientId:  server.NewId(),
+			StartedAt: now,
+			Client: &LagTrackClient{
+				Asn:         &asn,
+				AsnOrg:      "Example",
+				CountryCode: "gb",
+				Region:      "England",
+				City:        "London",
+			},
+		}
+		CreateLagTrack(ctx, track, nil)
+		row := testGetLagTrackRow(t, ctx, track.TrackId)
+		connect.AssertEqual(t, *row.asn, int64(64500))
+		connect.AssertEqual(t, *row.asnOrg, "Example")
+		connect.AssertEqual(t, *row.countryCode, "gb")
+		connect.AssertEqual(t, *row.region, "England")
+		connect.AssertEqual(t, *row.city, "London")
+
+		bare, _ := testLagTrack(ctx, now, 0)
+		row = testGetLagTrackRow(t, ctx, bare.TrackId)
+		connect.AssertEqual(t, row.asn, (*int64)(nil))
+		connect.AssertEqual(t, row.asnOrg, (*string)(nil))
+		connect.AssertEqual(t, row.countryCode, (*string)(nil))
+		connect.AssertEqual(t, row.region, (*string)(nil))
+		connect.AssertEqual(t, row.city, (*string)(nil))
+	})
+}
+
+// A ticket takes one report.
 func TestAddLagResult(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc().Truncate(time.Millisecond)
 		track, tickets := testLagTrack(ctx, now, 2)
 
-		asn := int64(64500)
-		latitude := 51.5
-		longitude := -0.1
-		first := &LagTrackClient{
-			AddressHash: []byte{1, 2, 3},
-			Prefix:      "198.51.100.0/24",
-			Asn:         &asn,
-			AsnOrg:      "Example",
-			CountryCode: "gb",
-			Region:      "England",
-			City:        "London",
-			Latitude:    &latitude,
-			Longitude:   &longitude,
-		}
-		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(tickets[0], now), first), true)
+		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(tickets[0], now)), true)
 		// the same ticket again is no second report, whatever its row id
-		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(tickets[0], now), first), false)
-
-		second := &LagTrackClient{
-			AddressHash: []byte{9},
-			Prefix:      "192.0.2.0/24",
-			CountryCode: "us",
-		}
-		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(tickets[1], now), second), true)
-
-		row := testGetLagTrackRow(t, ctx, track.TrackId)
-		connect.AssertNotEqual(t, row.clientFieldsAt, (*time.Time)(nil))
-		connect.AssertEqual(t, row.addressHash, []byte{1, 2, 3})
-		connect.AssertEqual(t, *row.prefix, "198.51.100.0/24")
-		connect.AssertEqual(t, *row.asn, int64(64500))
-		connect.AssertEqual(t, *row.countryCode, "gb")
+		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(tickets[0], now)), false)
+		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(tickets[1], now)), true)
 
 		var count int
 		var pingMicros []int32
@@ -184,8 +195,8 @@ func TestRemoveExpiredLagResults(t *testing.T) {
 		now := server.NowUtc().Truncate(time.Millisecond)
 		oldTrack, oldTickets := testLagTrack(ctx, now.Add(-200*24*time.Hour), 1)
 		newTrack, newTickets := testLagTrack(ctx, now, 1)
-		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(oldTickets[0], now.Add(-190*24*time.Hour)), nil), true)
-		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(newTickets[0], now), nil), true)
+		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(oldTickets[0], now.Add(-190*24*time.Hour))), true)
+		connect.AssertEqual(t, AddLagResult(ctx, testLagResult(newTickets[0], now)), true)
 
 		removed := RemoveExpiredLagResults(
 			ctx,

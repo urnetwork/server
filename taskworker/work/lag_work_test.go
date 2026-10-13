@@ -87,7 +87,7 @@ func TestSweepLagAppliesRetention(t *testing.T) {
 				WindowStartTime:  startedAt,
 				EndReason:        "no_load",
 				CreatedAt:        startedAt.Add(time.Minute),
-			}, nil), true)
+			}), true)
 			return ticket
 		}
 		addTrack(now)

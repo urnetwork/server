@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -230,7 +232,9 @@ func lagTrack(
 	}
 	addr, _, err := clientSession.ParseClientIpPort()
 	if err != nil {
-		return nil, fmt.Errorf("could not read the caller address: %w", err)
+		// the parse error would quote the address, so it goes no further
+		// (amendment 9)
+		return nil, errors.New("could not read the caller address")
 	}
 	prefixLimit, err := model.CheckLagPrefixRateLimit(
 		ctx,
@@ -290,10 +294,32 @@ func lagTrack(
 			NetworkId: clientSession.ByJwt.NetworkId,
 			ClientId:  clientId,
 			StartedAt: now,
+			// the address goes no further than these lookups (amendment 9)
+			Client: newLagTrackClient(addr),
 		},
 		tickets,
 	)
 	return result, nil
+}
+
+// The track's client fields (A5): the autonomous system and the GeoLite2 City
+// place of the address the track is issued to, looked up in memory. The
+// address itself, a prefix of it or a hash of it is never kept (amendment 9).
+// A lookup that cannot answer leaves its fields empty.
+func newLagTrackClient(addr netip.Addr) *model.LagTrackClient {
+	addr = addr.Unmap().WithZone("")
+	client := &model.LagTrackClient{}
+	if asn := GetIpAsn(addr); asn != nil {
+		number := int64(asn.Number)
+		client.Asn = &number
+		client.AsnOrg = asn.Organization
+	}
+	if place := lagAddressPlace(addr); place != nil {
+		client.CountryCode = place.CountryCode
+		client.Region = place.Region
+		client.City = place.City
+	}
+	return client
 }
 
 // Reissues tickets in a track the caller was issued within the reissue

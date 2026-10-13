@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -220,10 +221,6 @@ func TestLagRateLimits(t *testing.T) {
 		window := time.Hour
 		name := "test" + server.NewId().String()[:8]
 
-		connect.AssertEqual(t, LagClientPrefix(netip.MustParseAddr("203.0.113.77")), netip.MustParsePrefix("203.0.113.0/24"))
-		connect.AssertEqual(t, LagClientPrefix(netip.MustParseAddr("::ffff:203.0.113.77")), netip.MustParsePrefix("203.0.113.0/24"))
-		connect.AssertEqual(t, LagClientPrefix(netip.MustParseAddr("2001:db8:1234:5678::1")), netip.MustParsePrefix("2001:db8:1234::/48"))
-
 		for i := range 3 {
 			// two addresses of one /24 share the budget
 			addr := netip.MustParseAddr([]string{"198.51.100.1", "198.51.100.200", "198.51.100.1"}[i])
@@ -270,5 +267,26 @@ func TestLagRateLimits(t *testing.T) {
 		limit, err = CheckLagClientRateLimit(ctx, name, server.NewId(), 2, window)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, limit.Allowed, true)
+
+		// a prefix counter is keyed by the peppered hash alone and is gone a
+		// window after its last count (amendment 9)
+		key := lagPrefixRateLimitKey(name, netip.MustParseAddr("198.51.100.1"))
+		for _, text := range []string{"198.51.100", "c63364"} {
+			if strings.Contains(key, text) {
+				t.Fatalf("the counter key %q names the address as %q", key, text)
+			}
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			physicalKeys, err := r.Keys(ctx, key+"_*").Result()
+			connect.AssertEqual(t, err, nil)
+			if len(physicalKeys) == 0 {
+				t.Fatalf("no counter under %q", key)
+			}
+			for _, physicalKey := range physicalKeys {
+				if ttl := r.TTL(ctx, physicalKey).Val(); ttl <= 0 || window < ttl {
+					t.Fatalf("counter %q expires in %s, want within %s", physicalKey, ttl, window)
+				}
+			}
+		})
 	})
 }

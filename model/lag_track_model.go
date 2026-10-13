@@ -34,6 +34,8 @@ type LagTrack struct {
 	StartedAt time.Time
 	// the tickets reissued in the track so far
 	ReissueCount int
+	// the client fields stored with a new track; nil stores none
+	Client *LagTrackClient
 }
 
 // One admitted session (A6). A ticket admits a session on an extender, by
@@ -50,19 +52,38 @@ type LagTicket struct {
 	ExpiresAt  time.Time
 }
 
-// Stores a track and its tickets in one transaction.
+// Stores a track, its client fields and its tickets in one transaction.
 func CreateLagTrack(ctx context.Context, track *LagTrack, tickets []*LagTicket) {
+	client := track.Client
+	if client == nil {
+		client = &LagTrackClient{}
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-			INSERT INTO lag_track (track_id, network_id, client_id, started_at)
-			VALUES ($1, $2, $3, $4)
+			INSERT INTO lag_track (
+				track_id,
+				network_id,
+				client_id,
+				started_at,
+				client_asn,
+				client_asn_org,
+				client_country_code,
+				client_region,
+				client_city
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			`,
 			track.TrackId,
 			track.NetworkId,
 			track.ClientId,
 			track.StartedAt.UTC(),
+			client.Asn,
+			nullString(client.AsnOrg),
+			nullString(client.CountryCode),
+			nullString(client.Region),
+			nullString(client.City),
 		))
 		insertLagTicketsInTx(ctx, tx, tickets)
 	})
@@ -282,21 +303,16 @@ func GetLagTicket(ctx context.Context, ticketId server.Id) *LagTicket {
 	return ticket
 }
 
-// The client fields of a track (A5), derived from the address its first
-// report names. Each is nil or empty when the lookup did not reach it.
+// The client fields of a track (A5): the network and the city-level place of
+// the address the track was issued to, looked up when it was issued. Never
+// the address, a prefix of it or a hash of it (amendment 9). Each is nil or
+// empty when the lookup did not reach it.
 type LagTrackClient struct {
-	// server.ClientIpHashForAddr: peppered, over the address's /29 (/56)
-	AddressHash []byte
-	// the /24 (/48) as text
-	Prefix      string
 	Asn         *int64
 	AsnOrg      string
 	CountryCode string
 	Region      string
 	City        string
-	// rounded to 0.1 degree
-	Latitude  *float64
-	Longitude *float64
 }
 
 // One report as stored (A5, A7).
@@ -344,10 +360,9 @@ type LagResult struct {
 	CreatedAt               time.Time
 }
 
-// Stores one report and, when it is the track's first, the track's client
-// fields, in one transaction. False when the ticket already has a report (A7),
-// in which case nothing is written.
-func AddLagResult(ctx context.Context, result *LagResult, client *LagTrackClient) (added bool) {
+// Stores one report. False when the ticket already has a report (A7), in
+// which case nothing is written.
+func AddLagResult(ctx context.Context, result *LagResult) (added bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag, err := tx.Exec(
 			ctx,
@@ -429,40 +444,6 @@ func AddLagResult(ctx context.Context, result *LagResult, client *LagTrackClient
 		)
 		server.Raise(err)
 		added = tag.RowsAffected() == 1
-		if !added || client == nil {
-			return
-		}
-		// only the track's first report fills the fields; a concurrent first
-		// report waits on the row and then finds them filled
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			UPDATE lag_track
-			SET
-				client_fields_at = $2,
-				client_address_hash = $3,
-				client_prefix = $4,
-				client_asn = $5,
-				client_asn_org = $6,
-				client_country_code = $7,
-				client_region = $8,
-				client_city = $9,
-				client_latitude = $10,
-				client_longitude = $11
-			WHERE track_id = $1 AND client_fields_at IS NULL
-			`,
-			result.TrackId,
-			result.CreatedAt.UTC(),
-			client.AddressHash,
-			nullString(client.Prefix),
-			client.Asn,
-			nullString(client.AsnOrg),
-			nullString(client.CountryCode),
-			nullString(client.Region),
-			nullString(client.City),
-			client.Latitude,
-			client.Longitude,
-		))
 	})
 	return
 }

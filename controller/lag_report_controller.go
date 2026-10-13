@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
-	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -276,20 +275,18 @@ func storeLagReport(
 		return LagReportRejectTicket
 	}
 
-	clientAddr, ok := netip.AddrFromSlice(body.ClientIp)
-	if !ok || (len(body.ClientIp) != 4 && len(body.ClientIp) != 16) {
+	// a report names the browser's address family and nothing of its address
+	// (amendment 9); the track's client fields were set when it was issued
+	if body.IpFamily != 4 && body.IpFamily != 6 {
 		return LagReportRejectMalformed
 	}
-	clientAddr = clientAddr.Unmap()
 
 	if !lagReportInBounds(body, ticket, now, settings) {
 		return LagReportRejectBounds
 	}
 
-	result := newLagResult(body, ticket, clientAddr, now)
-	// the address goes no further than these fields
-	client := newLagTrackClient(clientAddr)
-	if !model.AddLagResult(ctx, result, client) {
+	result := newLagResult(body, ticket, now)
+	if !model.AddLagResult(ctx, result) {
 		return LagReportRejectDuplicate
 	}
 	return ""
@@ -415,15 +412,15 @@ func lagIntervalMbps(byteCounts []uint64, intervalMs uint32) []float64 {
 }
 
 // The row of a verified, bounded report, with what is derived at insert
-// (A5): latency p50/p95 during the session's own load and outside it, over
+// (A5): latency p50/p95 outside the session's own load and during it, over
 // the pings that came back; download and upload p50/p95 in Mbps over the
 // intervals inside each direction's load, the download from what the
-// browser reported receiving; and the lost pings. Of the browser's address it keeps only the family, which is the
-// family the browser reached the extender's name on (N3).
+// browser reported receiving; and the lost pings. Of the browser's address
+// the row keeps only the family the report names, the family the browser
+// reached the extender's name on (N3, amendment 9).
 func newLagResult(
 	body *protocol.LagReportBody,
 	ticket *model.LagTicket,
-	clientAddr netip.Addr,
 	now time.Time,
 ) *model.LagResult {
 	result := &model.LagResult{
@@ -445,12 +442,8 @@ func newLagResult(
 		UploadStreams:    int(body.UploadStreams),
 		UploadVerified:   body.UploadVerified,
 		EndReason:        lagEndReasonName(body.EndReason),
+		ExtenderIpFamily: int(body.IpFamily),
 		CreatedAt:        now,
-	}
-	if clientAddr.Unmap().Is4() {
-		result.ExtenderIpFamily = 4
-	} else {
-		result.ExtenderIpFamily = 6
 	}
 	toInt64s := func(values []uint64) []int64 {
 		out := make([]int64, len(values))
@@ -502,34 +495,4 @@ func newLagResult(
 	result.UploadP50Mbps = lagNearestRank(uploadMbps, 50)
 	result.UploadP95Mbps = lagNearestRank(uploadMbps, 95)
 	return result
-}
-
-// The track's client fields of the browser's address (A5): the peppered hash
-// of server.ClientIpHash, the /24 (/48), the autonomous system, and the
-// GeoLite2 City place with its coordinates rounded to 0.1 degree. A lookup
-// that cannot answer leaves its fields empty.
-func newLagTrackClient(addr netip.Addr) *model.LagTrackClient {
-	addr = addr.Unmap().WithZone("")
-	addressHash := server.ClientIpHashForAddr(addr)
-	client := &model.LagTrackClient{
-		AddressHash: addressHash[:],
-		Prefix:      model.LagClientPrefix(addr).String(),
-	}
-	if asn := GetIpAsn(addr); asn != nil {
-		number := int64(asn.Number)
-		client.Asn = &number
-		client.AsnOrg = asn.Organization
-	}
-	if place := lagAddressPlace(addr); place != nil {
-		round := func(degrees float64) *float64 {
-			rounded := math.Round(degrees*10) / 10
-			return &rounded
-		}
-		client.CountryCode = place.CountryCode
-		client.Region = place.Region
-		client.City = place.City
-		client.Latitude = round(place.Latitude)
-		client.Longitude = round(place.Longitude)
-	}
-	return client
 }
