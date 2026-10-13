@@ -16,6 +16,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
@@ -143,27 +145,77 @@ func RollupVerifyProviderStatsPost(
 	return nil
 }
 
+// A refresh run stops starting chunks after this, well inside its max time,
+// and re-arms at once from the last client it fed.
+const refreshVerifyProxyEgressBudget = time.Minute
+
+// Only a stalled run reaches this.
+const refreshVerifyProxyEgressMaxTime = 15 * time.Minute
+
+// Spaces the chunks of a run. One chunk's commands reach every Redis node at
+// once, so a sweep is spread out rather than sent back to back.
+const refreshVerifyProxyEgressChunkPause = 50 * time.Millisecond
+
+// A failed or timed-out refresh retries within this, from the position it
+// started at.
+const refreshVerifyProxyEgressErrorRetryCap = time.Minute
+
 type RefreshVerifyProxyEgressArgs struct {
+	// The last client the current sweep fed; nil starts a sweep at the first
+	// allocation.
+	After *server.Id `json:"after,omitempty"`
 }
 
 type RefreshVerifyProxyEgressResult struct {
+	// Where the successor resumes; nil when the sweep fed the last allocation.
+	Next     *server.Id `json:"next,omitempty"`
+	FedCount int        `json:"fed_count"`
 }
 
+// Startup arms a sweep after the refresh interval. A pending run keeps its
+// position and only moves earlier.
 func ScheduleRefreshVerifyProxyEgress(clientSession *session.ClientSession, tx server.PgTx) {
 	if !controller.StEnabled() {
 		return
 	}
-	task.ScheduleTaskInTx(
-		tx,
-		RefreshVerifyProxyEgress,
-		&RefreshVerifyProxyEgressArgs{},
+	scheduleRefreshVerifyProxyEgress(
 		clientSession,
-		task.RunOnce("refresh_verify_proxy_egress"),
-		task.RunAt(server.NowUtc().Add(controller.VerifySettings().EgressRefreshInterval)),
-		task.MaxTime(15*time.Minute),
+		tx,
+		&RefreshVerifyProxyEgressArgs{},
+		server.NowUtc().Add(controller.VerifySettings().EgressRefreshInterval),
 	)
 }
 
+func scheduleRefreshVerifyProxyEgress(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	refreshVerifyProxyEgress *RefreshVerifyProxyEgressArgs,
+	runAt time.Time,
+) {
+	task.ScheduleTaskInTx(
+		tx,
+		RefreshVerifyProxyEgress,
+		refreshVerifyProxyEgress,
+		clientSession,
+		task.RunOnce("refresh_verify_proxy_egress"),
+		task.RunAt(runAt),
+		task.MaxTime(refreshVerifyProxyEgressMaxTime),
+	)
+}
+
+// A context-local clock lets tests run the budget and the pacing on synthetic
+// time.
+type refreshVerifyProxyEgressClockKey struct{}
+
+type refreshVerifyProxyEgressClock struct {
+	now  func() time.Time
+	wait func(time.Duration)
+}
+
+// One budgeted run of a sweep, from the position in its arguments. Every
+// allocation has to be fed again inside the egress ttl, so a run never grows
+// with the allocation count: it stops after its budget and its successor
+// continues after the last client fed.
 func RefreshVerifyProxyEgress(
 	refreshVerifyProxyEgress *RefreshVerifyProxyEgressArgs,
 	clientSession *session.ClientSession,
@@ -171,21 +223,75 @@ func RefreshVerifyProxyEgress(
 	if !controller.StEnabled() {
 		return &RefreshVerifyProxyEgressResult{}, nil
 	}
-	model.RefreshVerifyProxyEgress(
-		clientSession.Ctx,
-		controller.VerifySettings(),
-	)
-	return &RefreshVerifyProxyEgressResult{}, nil
+	settings := controller.VerifySettings()
+	clock := &refreshVerifyProxyEgressClock{
+		now: server.NowUtc,
+		wait: func(duration time.Duration) {
+			select {
+			case <-clientSession.Ctx.Done():
+				server.Raise(clientSession.Ctx.Err())
+			case <-time.After(duration):
+			}
+		},
+	}
+	if testClock, ok := clientSession.Ctx.Value(refreshVerifyProxyEgressClockKey{}).(*refreshVerifyProxyEgressClock); ok {
+		clock = testClock
+	}
+	startTime := clock.now()
+	after := server.Id{}
+	if refreshVerifyProxyEgress.After != nil {
+		after = *refreshVerifyProxyEgress.After
+	}
+	result := &RefreshVerifyProxyEgressResult{}
+	for {
+		last, clientCount := model.RefreshVerifyProxyEgressAfter(clientSession.Ctx, after, settings)
+		result.FedCount += clientCount
+		if clientCount < model.VerifyProxyEgressRefreshChunkSize {
+			break
+		}
+		after = last
+		if refreshVerifyProxyEgressBudget <= clock.now().Sub(startTime) {
+			result.Next = &after
+			break
+		}
+		clock.wait(refreshVerifyProxyEgressChunkPause)
+	}
+	glog.Infof("[verify]proxy egress refresh fed=%d complete=%t\n", result.FedCount, result.Next == nil)
+	return result, nil
 }
 
+// A run the budget stopped continues at once from its position; a complete
+// sweep starts the next one at the first allocation after the refresh interval.
 func RefreshVerifyProxyEgressPost(
 	refreshVerifyProxyEgress *RefreshVerifyProxyEgressArgs,
 	refreshVerifyProxyEgressResult *RefreshVerifyProxyEgressResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleRefreshVerifyProxyEgress(clientSession, tx)
+	if refreshVerifyProxyEgressResult.Next == nil {
+		ScheduleRefreshVerifyProxyEgress(clientSession, tx)
+		return nil
+	}
+	if !controller.StEnabled() {
+		return nil
+	}
+	scheduleRefreshVerifyProxyEgress(
+		clientSession,
+		tx,
+		&RefreshVerifyProxyEgressArgs{After: refreshVerifyProxyEgressResult.Next},
+		server.NowUtc(),
+	)
 	return nil
+}
+
+// The registered refresh target. A failed or timed-out run retries within the
+// error retry cap. The generic backoff reaches an hour after a dozen
+// consecutive failures, and every lease lapses one egress ttl after its feed.
+func NewRefreshVerifyProxyEgressTaskTarget() task.Target {
+	return task.WithErrorRetryCap(
+		task.NewTaskTargetWithPost(RefreshVerifyProxyEgress, RefreshVerifyProxyEgressPost),
+		refreshVerifyProxyEgressErrorRetryCap,
+	)
 }
 
 type RemoveOldVerifyProviderStatsArgs struct {
