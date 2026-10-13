@@ -123,6 +123,10 @@ type providerEgressProbeSettings struct {
 	PublicAPIURL     string                        `yaml:"public_api_url"`
 	BandwidthCDNURL  string                        `yaml:"bandwidth_cdn_url"`
 	UrlProbe         *ProviderEgressProbeBatchArgs `yaml:"url_probe"`
+	// Placement only, never a task argument: URL workers one taskworker
+	// instance may run across all of its shard passes. A change does not make
+	// pending pass snapshots stale.
+	InstanceUrlConcurrency int `yaml:"instance_url_concurrency"`
 	// Deprecated config inputs retained while old task snapshots retire.
 	Full                         ProviderEgressProbeBatchArgs `yaml:"full"`
 	Blackhole                    ProviderEgressProbeBatchArgs `yaml:"blackhole"`
@@ -151,6 +155,7 @@ func defaultProviderEgressProbeSettings(domain string) providerEgressProbeSettin
 			Concurrency:         8,
 			ProbeTimeoutSeconds: 60,
 		},
+		InstanceUrlConcurrency: defaultProviderUrlProbeInstanceConcurrency,
 		Full: ProviderEgressProbeBatchArgs{
 			Limit: 8,
 			// one round: every provider of a batch waits out its retries
@@ -305,6 +310,9 @@ func validateProviderEgressProbeArgsConfig(args *ProviderEgressProbeArgs) error 
 func (self providerEgressProbeSettings) validate() error {
 	if !self.Enabled {
 		return nil
+	}
+	if self.UrlProbe != nil && self.InstanceUrlConcurrency < 1 {
+		return fmt.Errorf("URL probe instance_url_concurrency must be positive")
 	}
 	return validateProviderEgressProbeArgsConfig(providerEgressProbeArgs(self, 0))
 }
