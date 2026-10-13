@@ -25,59 +25,62 @@ import (
 )
 
 // Steps and sync turns refuse without settlement v2, without a chain client,
-// without payout admission, and for an unknown step.
+// without payout admission, and for an unknown step. Payout admission reads
+// the activation record (SV-9), so this runs with the database.
 // SV-1
 func TestStLedgerV2StepRefusals(t *testing.T) {
-	ctx := context.Background()
-	resetLedgerV2Caches()
-	defer resetLedgerV2Caches()
-	defer SetStConfig(nil)
-	defer SetStClient(nil)
-	defer SetStLedgerV2Client(nil)
-	step := &StLedgerV2Step{Kind: StLedgerV2StepEpoch, Epoch: 5}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		resetLedgerV2Caches()
+		defer resetLedgerV2Caches()
+		defer SetStConfig(nil)
+		defer SetStClient(nil)
+		defer SetStLedgerV2Client(nil)
+		step := &StLedgerV2Step{Kind: StLedgerV2StepEpoch, Epoch: 5}
 
-	off := ledgerV2TestConfig()
-	off.SettlementV2, off.VaultV2 = common.Address{}, common.Address{}
-	SetStConfig(off)
-	if _, err := StLedgerV2RunStep(ctx, step); !errors.Is(err, errStLedgerV2NotConfigured) {
-		t.Fatalf("v2 off: %v", err)
-	}
-	if steps, err := StLedgerV2Sync(ctx, &StEpochState{Epoch: 9}); steps != nil || err != nil {
-		t.Fatalf("v2 off sync: %v %v", steps, err)
-	}
+		off := ledgerV2TestConfig()
+		off.SettlementV2, off.VaultV2 = common.Address{}, common.Address{}
+		SetStConfig(off)
+		if _, err := StLedgerV2RunStep(ctx, step); !errors.Is(err, errStLedgerV2NotConfigured) {
+			t.Fatalf("v2 off: %v", err)
+		}
+		if steps, err := StLedgerV2Sync(ctx, &StEpochState{Epoch: 9}); steps != nil || err != nil {
+			t.Fatalf("v2 off sync: %v %v", steps, err)
+		}
 
-	cfg := ledgerV2TestConfig()
-	SetStConfig(cfg)
-	SetStClient(newStubStClient(&StEpochState{}))
-	if _, err := StLedgerV2RunStep(ctx, step); !errors.Is(err, errStLedgerV2NotConfigured) {
-		t.Fatalf("no v2 client: %v", err)
-	}
-	core := &CoreStClient{cfg: cfg}
-	SetStClient(core)
-	if client := stLedgerV2Client(); client != core {
-		t.Fatalf("the core client does not serve v2: %v", client)
-	}
-	if _, err := StV1EpochAllowed(ctx, 5); err != nil && !strings.Contains(err.Error(), "vault2 pools(1)") {
-		t.Fatalf("v1 cutoff reads vault2 through the core client: %v", err)
-	}
-	SetStClient(newStubStClient(&StEpochState{}))
-	if _, err := StV1EpochAllowed(ctx, 5); !errors.Is(err, errStLedgerV2NotConfigured) {
-		t.Fatalf("v1 cutoff without a v2 client: %v", err)
-	}
+		cfg := ledgerV2TestConfig()
+		SetStConfig(cfg)
+		SetStClient(newStubStClient(&StEpochState{}))
+		if _, err := StLedgerV2RunStep(ctx, step); !errors.Is(err, errStLedgerV2NotConfigured) {
+			t.Fatalf("no v2 client: %v", err)
+		}
+		core := &CoreStClient{cfg: cfg}
+		SetStClient(core)
+		if client := stLedgerV2Client(); client != core {
+			t.Fatalf("the core client does not serve v2: %v", client)
+		}
+		if _, err := StV1EpochAllowed(ctx, 5); err != nil && !strings.Contains(err.Error(), "vault2 pools(1)") {
+			t.Fatalf("v1 cutoff reads vault2 through the core client: %v", err)
+		}
+		SetStClient(newStubStClient(&StEpochState{}))
+		if _, err := StV1EpochAllowed(ctx, 5); !errors.Is(err, errStLedgerV2NotConfigured) {
+			t.Fatalf("v1 cutoff without a v2 client: %v", err)
+		}
 
-	SetStLedgerV2Client(newFakeLedgerV2Chain(&[]string{}))
-	if _, err := StLedgerV2RunStep(ctx, &StLedgerV2Step{Kind: "sweep"}); err == nil || err.Error() != `st ledger v2: unknown step "sweep"` {
-		t.Fatalf("unknown step: %v", err)
-	}
-	mainnet := ledgerV2TestConfig()
-	mainnet.Profile = "mainnet"
-	SetStConfig(mainnet)
-	if _, err := StLedgerV2RunStep(ctx, step); err == nil || err.Error() != "sn: mainnet payout is disabled or has wrong subnet" {
-		t.Fatalf("payout admission: %v", err)
-	}
-	if seconds := stLedgerV2BlockSeconds(&StConfig{}); seconds != stDefaultBlockSeconds {
-		t.Fatalf("default block seconds %d", seconds)
-	}
+		SetStLedgerV2Client(newFakeLedgerV2Chain(&[]string{}))
+		if _, err := StLedgerV2RunStep(ctx, &StLedgerV2Step{Kind: "sweep"}); err == nil || err.Error() != `st ledger v2: unknown step "sweep"` {
+			t.Fatalf("unknown step: %v", err)
+		}
+		mainnet := ledgerV2TestConfig()
+		mainnet.Profile = "mainnet"
+		SetStConfig(mainnet)
+		if _, err := StLedgerV2RunStep(ctx, step); err == nil || err.Error() != "sn: mainnet payout is disabled or has wrong subnet" {
+			t.Fatalf("payout admission: %v", err)
+		}
+		if seconds := stLedgerV2BlockSeconds(&StConfig{}); seconds != stDefaultBlockSeconds {
+			t.Fatalf("default block seconds %d", seconds)
+		}
+	})
 }
 
 // The tree cache keeps the four most recent trees and each tree once.

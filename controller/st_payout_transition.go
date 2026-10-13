@@ -31,6 +31,10 @@ func stPayoutAdmissionAt(ctx context.Context, cfg *StConfig, now time.Time) erro
 	if cfg == nil {
 		return errStNotConfigured
 	}
+	// Once settlement v2 is active, every send needs its recorded pair (SV-9).
+	if err := stLedgerV2ActivationAdmission(ctx, cfg); err != nil {
+		return err
+	}
 	if cfg.Profile != "mainnet" {
 		// A main environment cannot accidentally run the testnet payout writer.
 		if env, _ := server.Env(); env == "main" {

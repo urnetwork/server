@@ -368,6 +368,19 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "deployment_key", kind: "character varying(96)", notNull: true},
 			snMainnetMigrationColumn{name: "next_block", kind: "bigint", notNull: true}),
 		snMainnetMigrationConstraints("st_fleet_bound_sync", "PRIMARY KEY (deployment_key)")),
+	migrationCurrentSuffix(823, "settlement v2 activation record",
+		migrationFp2Table("st_ledger_v2_activation"),
+		snMainnetMigrationColumns("st_ledger_v2_activation",
+			snMainnetMigrationColumn{name: "deployment_key", kind: "character varying(96)", notNull: true},
+			snMainnetMigrationColumn{name: "no_id", kind: "bigint", notNull: true},
+			snMainnetMigrationColumn{name: "first_epoch", kind: "bigint", notNull: true},
+			snMainnetMigrationColumn{name: "vault_v2_address", kind: "character varying(42)", notNull: true},
+			snMainnetMigrationColumn{name: "settlement_v2_address", kind: "character varying(42)", notNull: true},
+			snMainnetMigrationColumn{name: "create_time", kind: "timestamp without time zone", notNull: true}),
+		snMainnetMigrationConstraints("st_ledger_v2_activation",
+			"PRIMARY KEY (deployment_key)",
+			"CHECK ((no_id > 0))",
+			"CHECK ((first_epoch > 0))")),
 }
 
 // A dropped index stays dropped: a rebuilt copy under the published name would

@@ -140,6 +140,11 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing FleetBound scan checkpoint", 822, `DROP TABLE st_fleet_bound_sync`},
 		{"FleetBound checkpoints not unique", 822, `ALTER TABLE st_fleet_bound_sync DROP CONSTRAINT st_fleet_bound_sync_pkey`},
 		{"nullable FleetBound checkpoint", 822, `ALTER TABLE st_fleet_bound_sync ALTER COLUMN next_block DROP NOT NULL`},
+		{"missing v2 activation record", 823, `DROP TABLE st_ledger_v2_activation`},
+		{"v2 activations not one per deployment", 823, `ALTER TABLE st_ledger_v2_activation DROP CONSTRAINT st_ledger_v2_activation_pkey`},
+		{"v2 activation without a first epoch", 823, `ALTER TABLE st_ledger_v2_activation DROP CONSTRAINT st_ledger_v2_activation_first_epoch_check`},
+		{"nullable v2 activation vault", 823, `ALTER TABLE st_ledger_v2_activation ALTER COLUMN vault_v2_address DROP NOT NULL`},
+		{"v2 activation settlement truncates", 823, `ALTER TABLE st_ledger_v2_activation ALTER COLUMN settlement_v2_address TYPE varchar(41)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

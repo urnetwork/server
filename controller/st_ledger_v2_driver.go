@@ -195,8 +195,9 @@ type stLedgerV2Pool struct {
 var stLedgerV2Pools sync.Map
 
 // stLedgerV2FirstEpoch reads the pool's first v2 epoch from vault2.pools.
-// Registration is permanent, so a registered pool is cached for good; an
-// unregistered answer is read again after a minute.
+// Registration is permanent, so a registered pool is recorded durably as the
+// deployment's activation (SV-9) and cached for good; an unregistered answer
+// is read again after a minute.
 func stLedgerV2FirstEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2Client) (uint64, bool, error) {
 	key := fmt.Sprintf("%s|%s|%d", cfg.DeploymentKey(), cfg.VaultV2.Hex(), cfg.NoId)
 	if value, ok := stLedgerV2Pools.Load(key); ok {
@@ -208,6 +209,13 @@ func stLedgerV2FirstEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2C
 	registered, firstEpoch, err := client.LedgerV2Pool(ctx, cfg.NoId)
 	if err != nil {
 		return 0, false, err
+	}
+	if registered {
+		if err := model.RecordStLedgerV2Activation(ctx, cfg.DeploymentKey(), &model.StLedgerV2Activation{
+			NoId: cfg.NoId, FirstEpoch: firstEpoch, VaultV2Address: stLedgerV2Address(cfg.VaultV2), SettlementV2Address: stLedgerV2Address(cfg.SettlementV2),
+		}); err != nil {
+			return 0, false, err
+		}
 	}
 	stLedgerV2Pools.Store(key, stLedgerV2Pool{registered: registered, firstEpoch: firstEpoch, checked: server.NowUtc()})
 	return firstEpoch, registered, nil
@@ -255,7 +263,8 @@ var stLedgerV1SweepEpoch = func(ctx context.Context, cfg *StConfig) (uint64, boo
 // StV1EpochAllowed reports whether the v1 driver may close or commit an
 // epoch: always without settlement v2 or before vault2 registers the pool,
 // and afterwards only below the pool's first v2 epoch, or for the phase C
-// sweep epoch.
+// sweep epoch. Once the pool's activation is recorded, a close or commit
+// without the recorded v2 pair is refused before this is asked (SV-9).
 func StV1EpochAllowed(ctx context.Context, epoch uint64) (bool, error) {
 	return stV1EpochAllowed(ctx, stConfig(), epoch)
 }

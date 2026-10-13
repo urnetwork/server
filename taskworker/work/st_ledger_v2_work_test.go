@@ -128,6 +128,67 @@ func TestStSyncChainKeepsV1BelowFirstV2Epoch(t *testing.T) {
 	})
 }
 
+// SV-9 (work layer): once the pool's activation is recorded, a sync turn
+// without the v2 pair completes and recurs but schedules nothing and leaves
+// the mirror's checkpoint; the turn after the pair is restored mirrors on from
+// that checkpoint and schedules the v1 close below the first v2 epoch and the
+// v2 step again.
+func TestStLedgerV2ActivationStopsTheSyncTurnWithoutThePair(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		owner := session.NewLocalClientSession(ctx, "", nil)
+		defer owner.Cancel()
+		cfg := ledgerV2WorkConfig()
+		off := *cfg
+		off.SettlementV2, off.VaultV2 = common.Address{}, common.Address{}
+		controller.SetStConfig(cfg)
+		controller.SetStClient(&ledgerV2WorkV1Chain{})
+		controller.SetStLedgerV2Client(&ledgerV2WorkChain{})
+		defer func() {
+			controller.SetStConfig(nil)
+			controller.SetStClient(nil)
+			controller.SetStLedgerV2Client(nil)
+		}()
+		key := cfg.DeploymentKey()
+		if err := model.RecordStLedgerV2Activation(ctx, key, &model.StLedgerV2Activation{NoId: 1, FirstEpoch: 5,
+			VaultV2Address: "0x00000000000000000000000000000000000000a2", SettlementV2Address: "0x00000000000000000000000000000000000000a1"}); err != nil {
+			t.Fatal(err)
+		}
+		for epoch := uint64(4); epoch <= 6; epoch++ {
+			model.UpsertStEpoch(ctx, key, &model.StEpoch{Epoch: epoch, StartBlock: epoch * 50_400, Status: model.StEpochStatusOpen})
+		}
+		model.SetStChainCheckpoint(ctx, key, model.StChainCheckpoint{NextBlock: 352_000})
+		closes, steps := task.NewTaskTarget(StEpochClose).TargetFunctionName(), task.NewTaskTarget(StLedgerV2Step).TargetFunctionName()
+
+		controller.SetStConfig(&off)
+		runProjectionAuditTask(t, owner, newAsyncMaintenanceCase(StSyncChain, StSyncChainPost, &StSyncChainArgs{DeploymentKey: string(key)}), true)
+		for _, function := range []string{closes, task.NewTaskTarget(StCommitRoot).TargetFunctionName(), task.NewTaskTarget(StDeposit).TargetFunctionName(), steps} {
+			if got := pendingStArgs(t, ctx, function); len(got) != 0 {
+				t.Fatalf("a turn without the v2 pair scheduled %s %v", function, got)
+			}
+		}
+		if checkpoint := model.GetStChainCheckpoint(ctx, key); checkpoint.NextBlock != 352_000 {
+			t.Fatalf("a turn without the v2 pair moved the checkpoint to %+v", checkpoint)
+		}
+
+		controller.SetStConfig(cfg)
+		if _, err := StSyncChain(&StSyncChainArgs{DeploymentKey: string(key)}, owner); err != nil {
+			t.Fatal(err)
+		}
+		if got := pendingStArgs(t, ctx, closes); len(got) != 1 || got[0] != "4 attempt 0" {
+			t.Fatalf("v1 close tasks %v, want only epoch 4", got)
+		}
+		if got := pendingStArgs(t, ctx, steps); len(got) != 1 || got[0] != "epoch 6 attempt 0" {
+			t.Fatalf("v2 steps %v, want the epoch 6 step", got)
+		}
+		if checkpoint := model.GetStChainCheckpoint(ctx, key); checkpoint.NextBlock != 352_811 {
+			t.Fatalf("the restored turn mirrored to %+v, want from the checkpoint through the head", checkpoint)
+		}
+	})
+}
+
 // SV-1 (retries, work layer): a step whose chain read fails persists one
 // continuation with the next attempt under the same run-once key; a step of
 // another deployment does nothing and schedules nothing.

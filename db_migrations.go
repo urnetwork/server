@@ -10047,4 +10047,23 @@ var migrations = []any{
 			next_block bigint NOT NULL
 		);
 	`),
+	// 823: settlement v2 activation (SV-9). st_ledger_v2_activation holds the
+	// configured pool's registration in vault2.pools as the server first
+	// observed it, with the vault2 and STSettlement2 it was configured with
+	// (model/st_ledger_v2_activation.go). Registration is permanent on chain,
+	// so the row never changes. Once it exists, the st subsystem of its
+	// deployment runs only while st.yml names that pair
+	// (controller/st_ledger_v2_activation.go). A new table: nothing is
+	// rewritten. It must exist before a binary that reads it serves, since
+	// every st sync turn and chain write reads it.
+	newSqlMigration(`
+		CREATE TABLE st_ledger_v2_activation (
+			deployment_key varchar(96) NOT NULL PRIMARY KEY,
+			no_id bigint NOT NULL CHECK (no_id > 0),
+			first_epoch bigint NOT NULL CHECK (first_epoch > 0),
+			vault_v2_address varchar(42) NOT NULL,
+			settlement_v2_address varchar(42) NOT NULL,
+			create_time timestamp NOT NULL
+		);
+	`),
 }
