@@ -28,8 +28,9 @@ selection reads the database only (`SelectPass`); a pass that waits or finds
 nothing to measure finishes there (`FinishPass`) and takes no prober shard.
 A sweep that reaches the population's end completes; the next starts
 `min_sweep_interval_minutes` after this one started, which also spaces the
-retries of a provider that gave no evidence. No other per-provider state is
-kept.
+retries of a provider that gave no evidence. Between sweeps a waiting pass
+runs every ten minutes and reads nothing, so the last pass time tells a
+waiting probe from a stopped one. No other per-provider state is kept.
 
 ## A measurement
 
@@ -61,7 +62,7 @@ teardown. The URL tunnel's encryption stays off.
 | --- | --- |
 | sealed or unsealed session, post-quantum group | `E2eNegotiated`, `PostQuantum` |
 | sealed or unsealed session, classical group | `E2eNegotiated`, not post-quantum |
-| ClientHello unanswered for the whole window, pings acknowledged | not negotiated |
+| no handshake completed for the whole window after a ClientHello, pings acknowledged | not negotiated |
 | acknowledgement with a window / without one | `WindowAdvertised` true / false |
 | no acknowledgement, no attempt, or an attempt still in its window | nothing |
 
@@ -99,4 +100,6 @@ take the whole establishment window.
 providers by outcome, readings per capability, measurement duration, in
 flight, teardown errors, sweeps and the last sweep's duration, and the last
 pass. The egress probes dashboard charts them all; SIGNALS.md §2.19g says
-what each means.
+what each means. The probe's derived clients are minted and retired by the
+same in-process credential owner as the URL probe's, so
+`urnetwork_egress_probe_internal_credentials_total` counts both.

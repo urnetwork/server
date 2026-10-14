@@ -15778,11 +15778,13 @@ counters.
 
 Healthy shape:
 
-- `passes_total{result="measured"}` advances about once a pass interval while
-  a sweep is under way, and `result="waiting"` between sweeps, which start
-  `min_sweep_interval_minutes` (360) after the last one started.
+- `passes_total{result="measured"}` advances after every pass of a sweep
+  under way, a few seconds apart when nothing is due and a few minutes apart
+  while providers are measured; between sweeps, which start
+  `min_sweep_interval_minutes` (360) after the last one started,
+  `result="waiting"` advances every ten minutes, reading nothing. So
   `last_pass_timestamp_seconds` is never older than a pass's
-  `max_time_seconds` (900) plus the sweep interval's tail.
+  `max_time_seconds` (900) plus a few seconds.
 - `in_flight` stays at or under `concurrency` (16) on one taskworker at a
   time.
 - `providers_total` is mostly `recorded_*`: `recorded_not_post_quantum`
@@ -15837,7 +15839,11 @@ Signals:
 - `capability-probe-teardown-errors` — WARN while
   `close_errors_total` rises for an hour: capability tunnels fail to retire
   their derived clients, which the prober reaper then owns. Cross-check
-  §2.25's derived-client retirement before attributing it.
+  §2.25's derived-client retirement before attributing it. The capability
+  probe mints and retires its derived clients through the URL probe's
+  in-process credential owner, so
+  `urnetwork_egress_probe_internal_credentials_total` counts both probes;
+  this counter is the capability probe's own.
 
 Not signals: a large `no_evidence` share in the first two days after the
 first deployment; `not_post_quantum` dominating the shadow; a provider that
