@@ -143,9 +143,68 @@ func newTestEnvDialGuard(
 	if attestation == "" && (getenv("WARP_SERVICE") != "test" || getenv("WARP_BLOCK") != "test") {
 		return nil
 	}
-	attestedAddrPorts, err := parseTestEnvAttestedAddrPorts(attestation)
+	// Reads the attested endpoints. Each host must be an address literal: a name
+	// would bring back the per-dial resolution that the attestation pins.
+	parse := func() ([]netip.AddrPort, error) {
+		if attestation == "" {
+			return nil, fmt.Errorf(
+				"%s is not set; start ./local/run-local.sh, wait for 'Local environment is up', then source ./test-env.sh",
+				testEnvAttestedAddrsEnvName,
+			)
+		}
+		endpoints := strings.Split(attestation, ",")
+		if testEnvAttestedAddrsMaxCount < len(endpoints) {
+			return nil, fmt.Errorf(
+				"%s lists %d endpoints; at most %d are allowed",
+				testEnvAttestedAddrsEnvName,
+				len(endpoints),
+				testEnvAttestedAddrsMaxCount,
+			)
+		}
+		attestedAddrPorts := make([]netip.AddrPort, 0, len(endpoints))
+		for _, endpoint := range endpoints {
+			addrPort, err := netip.ParseAddrPort(endpoint)
+			addr := addrPort.Addr()
+			if err != nil || addrPort.Port() == 0 || addr.Zone() != "" || addr.Is4In6() ||
+				addr.IsUnspecified() || addr.IsMulticast() {
+				return nil, fmt.Errorf("%s has an invalid endpoint %q; want ip:port", testEnvAttestedAddrsEnvName, endpoint)
+			}
+			attestedAddrPorts = append(attestedAddrPorts, addrPort)
+		}
+		return attestedAddrPorts, nil
+	}
+	// Loopback is where a production data tunnel listens. Only the private
+	// portable root, which names its own 127.0.0.1 endpoints, may attest it,
+	// and never on a tunnel port. The managed-local launcher and the suite
+	// proxy never attest loopback.
+	requireLoopbackMode := func(attestedAddrPorts []netip.AddrPort) error {
+		privateRoot := getenv("WARP_TEST_ENV_USE_PORTABLE_RESOURCES") == "1" &&
+			getenv("WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES") == "1" &&
+			getenv("WARP_TEST_ENV_PORTABLE_ROOT") != ""
+		for _, addrPort := range attestedAddrPorts {
+			if !addrPort.Addr().IsLoopback() {
+				continue
+			}
+			if testEnvLoopbackTunnelPort(addrPort.Port()) {
+				return fmt.Errorf(
+					"%s attests loopback endpoint %s on a production data tunnel port",
+					testEnvAttestedAddrsEnvName,
+					addrPort,
+				)
+			}
+			if !privateRoot {
+				return fmt.Errorf(
+					"%s attests loopback endpoint %s outside the private portable root (WARP_TEST_ENV_PORTABLE_ROOT)",
+					testEnvAttestedAddrsEnvName,
+					addrPort,
+				)
+			}
+		}
+		return nil
+	}
+	attestedAddrPorts, err := parse()
 	if err == nil {
-		err = requireTestEnvLoopbackAttestationMode(attestedAddrPorts, getenv)
+		err = requireLoopbackMode(attestedAddrPorts)
 	}
 	if err != nil {
 		return &testEnvDialGuard{
@@ -157,55 +216,6 @@ func newTestEnvDialGuard(
 		attestedAddrPorts: attestedAddrPorts,
 		lookupNetIp:       lookupNetIp,
 	}
-}
-
-// Reads the attested endpoints. Each host must be an address literal: a name
-// would bring back the per-dial resolution that the attestation pins.
-func parseTestEnvAttestedAddrPorts(attestation string) ([]netip.AddrPort, error) {
-	if attestation == "" {
-		return nil, fmt.Errorf(
-			"%s is not set; start ./local/run-local.sh, wait for 'Local environment is up', then source ./test-env.sh",
-			testEnvAttestedAddrsEnvName,
-		)
-	}
-	endpoints := strings.Split(attestation, ",")
-	if testEnvAttestedAddrsMaxCount < len(endpoints) {
-		return nil, fmt.Errorf(
-			"%s lists %d endpoints; at most %d are allowed",
-			testEnvAttestedAddrsEnvName,
-			len(endpoints),
-			testEnvAttestedAddrsMaxCount,
-		)
-	}
-	attestedAddrPorts := make([]netip.AddrPort, 0, len(endpoints))
-	for _, endpoint := range endpoints {
-		addrPort, err := netip.ParseAddrPort(endpoint)
-		addr := addrPort.Addr()
-		if err != nil || addrPort.Port() == 0 || addr.Zone() != "" || addr.Is4In6() ||
-			addr.IsUnspecified() || addr.IsMulticast() {
-			return nil, fmt.Errorf("%s has an invalid endpoint %q; want ip:port", testEnvAttestedAddrsEnvName, endpoint)
-		}
-		attestedAddrPorts = append(attestedAddrPorts, addrPort)
-	}
-	return attestedAddrPorts, nil
-}
-
-// Loopback is where a production tunnel listens. Only the explicit
-// portable-services mode, which names its 127.0.0.1 endpoints itself, may
-// attest it; the managed-local launcher and the suite proxy never do.
-func requireTestEnvLoopbackAttestationMode(attestedAddrPorts []netip.AddrPort, getenv func(string) string) error {
-	portable := getenv("WARP_TEST_ENV_USE_PORTABLE_RESOURCES") == "1" &&
-		getenv("WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES") == "1"
-	for _, addrPort := range attestedAddrPorts {
-		if addrPort.Addr().IsLoopback() && !portable {
-			return fmt.Errorf(
-				"%s attests loopback endpoint %s outside the explicit portable-services mode",
-				testEnvAttestedAddrsEnvName,
-				addrPort,
-			)
-		}
-	}
-	return nil
 }
 
 // Pins a fixture's own Redis client to the launcher attestation in a test

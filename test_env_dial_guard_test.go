@@ -510,9 +510,9 @@ func TestTestEnvironmentProbeRequiresAttestation(t *testing.T) {
 	}
 }
 
-// The explicit portable-services mode attests its own 127.0.0.1 endpoints and
-// may dial exactly those. Every other loopback endpoint, such as a forwarded
-// production database port, stays refused.
+// The private portable root attests its own 127.0.0.1 endpoints and may dial
+// exactly those. Every other loopback endpoint, such as a forwarded production
+// database port, stays refused.
 func TestTestEnvDialGuardAdmitsOnlyAttestedPortableLoopbackEndpoints(t *testing.T) {
 	guard := newTestEnvDialGuard(testEnvGetenv(map[string]string{
 		"WARP_ENV":                             "local",
@@ -520,6 +520,7 @@ func TestTestEnvDialGuardAdmitsOnlyAttestedPortableLoopbackEndpoints(t *testing.
 		"WARP_BLOCK":                           "test",
 		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES": "1",
 		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+		"WARP_TEST_ENV_PORTABLE_ROOT":                     "/synthetic/private-root",
 		testEnvAttestedAddrsEnvName:                       "127.0.0.1:35431,127.0.0.1:36371",
 	}), testEnvUnusedResolver(t))
 	if err := guard.requireAttested(); err != nil {
@@ -550,31 +551,53 @@ func TestTestEnvDialGuardAdmitsOnlyAttestedPortableLoopbackEndpoints(t *testing.
 	}
 }
 
-// Outside the explicit portable mode a loopback attestation is itself invalid,
-// so a managed or half-portable profile can never admit loopback.
-func TestTestEnvDialGuardRefusesLoopbackAttestationOutsidePortableMode(t *testing.T) {
+// Outside the private portable root a loopback attestation is itself invalid,
+// so a managed profile, or unmanaged services named 127.0.0.1 without the
+// root, can never admit loopback.
+func TestTestEnvDialGuardRefusesLoopbackAttestationOutsidePrivateRoot(t *testing.T) {
 	for _, flags := range []map[string]string{
 		{},
 		{"WARP_TEST_ENV_USE_PORTABLE_RESOURCES": "1"},
 		{"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1"},
+		{"WARP_TEST_ENV_USE_PORTABLE_RESOURCES": "1", "WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1"},
+		{"WARP_TEST_ENV_PORTABLE_ROOT": "/synthetic/private-root"},
 	} {
 		values := map[string]string{
 			"WARP_ENV":                  "local",
 			"WARP_SERVICE":              "test",
 			"WARP_BLOCK":                "test",
-			testEnvAttestedAddrsEnvName: "192.0.2.10:5432,127.0.0.1:6379",
+			testEnvAttestedAddrsEnvName: "192.0.2.10:5432,127.0.0.1:16379",
 		}
 		for name, value := range flags {
 			values[name] = value
 		}
 		guard := newTestEnvDialGuard(testEnvGetenv(values), testEnvUnusedResolver(t))
 		err := guard.requireAttested()
-		if err == nil || !strings.Contains(err.Error(), "attests loopback endpoint 127.0.0.1:6379") {
+		if err == nil || !strings.Contains(err.Error(), "attests loopback endpoint 127.0.0.1:16379 outside the private portable root") {
 			t.Errorf("flags %v: attestation error = %v; want the loopback attestation refused", flags, err)
 			continue
 		}
 		if _, err := guard.wrapDial("redis", nil)(t.Context(), "tcp", "192.0.2.10:5432"); err == nil {
 			t.Errorf("flags %v: an invalid attestation still admitted a dial", flags)
+		}
+	}
+}
+
+// Even the private portable root may not attest loopback on a production data
+// tunnel port: on a host running the tunnel those ports are production.
+func TestTestEnvDialGuardRefusesLoopbackTunnelPortAttestation(t *testing.T) {
+	for _, endpoint := range []string{"127.0.0.1:5432", "127.0.0.1:6432", "127.0.0.1:6379", "127.0.0.1:6411", "[::1]:6427"} {
+		guard := newTestEnvDialGuard(testEnvGetenv(map[string]string{
+			"WARP_ENV":                             "local",
+			"WARP_SERVICE":                         "test",
+			"WARP_BLOCK":                           "test",
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES": "1",
+			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+			"WARP_TEST_ENV_PORTABLE_ROOT":                     "/synthetic/private-root",
+			testEnvAttestedAddrsEnvName:                       endpoint + ",127.0.0.1:36371",
+		}), testEnvUnusedResolver(t))
+		if err := guard.requireAttested(); err == nil || !strings.Contains(err.Error(), "on a production data tunnel port") {
+			t.Errorf("attestation of %s = %v; want a tunnel-port refusal", endpoint, err)
 		}
 	}
 }

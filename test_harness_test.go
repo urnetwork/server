@@ -883,6 +883,50 @@ exit "$status"`,
 	}
 }
 
+// Unmanaged services named 127.0.0.1 without the private portable root would
+// attest 127.0.0.1:5432 and 127.0.0.1:6379, which on a host running the
+// production data tunnel are production. The preflight refuses before any
+// probe and leaves no attestation.
+func TestTestEnvironmentScriptRefusesUnmanagedLoopbackWithoutPrivateRoot(t *testing.T) {
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	probePath := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(probePath, []byte("#!/bin/sh\nprintf 'called\\n' >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(
+		"bash",
+		"-c",
+		`source ./test-env.sh
+status=$?
+printf 'attestation=%s\n' "${WARP_TEST_ENV_ATTESTED_ADDRS-unset}"
+exit "$status"`,
+	)
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"WARP_HOME": t.TempDir(),
+			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+			"WARP_TEST_ENV_PROBE_RECORD":                      probeRecordPath,
+			"WARP_TEST_ENV_TCP_PROBE":                         probePath,
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":            "1",
+			"BRINGYOUR_POSTGRES_HOSTNAME":                     "127.0.0.1",
+			"BRINGYOUR_REDIS_HOSTNAME":                        "127.0.0.1",
+		},
+		"WARP_ENV",
+		"WARP_VAULT_HOME",
+		"WARP_CONFIG_HOME",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "loopback services need the private portable root") {
+		t.Fatalf("unmanaged loopback preflight = %v, %q; want a private-root refusal", err, output)
+	}
+	if !strings.Contains(string(output), "attestation=unset") {
+		t.Fatalf("a refused preflight left an attestation exported: %q", output)
+	}
+	if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an unmanaged loopback service reached a probe: %v", err)
+	}
+}
+
 // Suite-proxy mode consumes only the repository owner's stable direct-endpoint
 // attestation and explicit resource roots, then retains the bounded probes.
 func TestTestEnvironmentScriptAcceptsSuiteProxyState(t *testing.T) {

@@ -37,9 +37,13 @@ func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
 	if authority == "" {
 		t.Skip("WARP_TEST_REDIS_CLUSTER names no disposable local cluster")
 	}
-	authorityHost, _, err := net.SplitHostPort(authority)
+	authorityHost, authorityPort, err := net.SplitHostPort(authority)
 	if err != nil || !redisLoopbackHost(authorityHost) {
 		t.Fatalf("WARP_TEST_REDIS_CLUSTER=%s is not a loopback host:port", authority)
+	}
+	// A production data tunnel forwards its cluster to these loopback ports.
+	if port, err := strconv.ParseUint(authorityPort, 10, 16); err != nil || testEnvLoopbackTunnelPort(uint16(port)) {
+		t.Fatalf("WARP_TEST_REDIS_CLUSTER=%s is a production data tunnel port; use a disposable cluster on other ports", authority)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()

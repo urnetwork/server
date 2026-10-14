@@ -480,10 +480,12 @@ test_env_require_managed_resolution() {
 }
 
 # Unmanaged portable services have no launcher record. An address-literal
-# authority attests itself; a name is resolved once and its single address is
-# pinned for the whole run. A name that resolves to loopback is refused, since
-# public DNS answers the local service names that way: loopback services use
-# explicit 127.0.0.1 authorities under WARP_TEST_ENV_PORTABLE_ROOT instead.
+# authority attests itself, except that loopback is accepted only under the
+# private portable root, which names its own 127.0.0.1 endpoints; elsewhere a
+# loopback service may be a production data tunnel. A name is resolved once and
+# its single address is pinned for the whole run; a name that resolves to
+# loopback is refused, since public DNS answers the local service names that
+# way.
 test_env_pin_unmanaged_service() {
     local service_name="$1"
     local host_name="$2"
@@ -492,6 +494,13 @@ test_env_pin_unmanaged_service() {
     local addresses=()
 
     if test_env_is_address_literal "$host_name"; then
+        if test_env_is_loopback_address "$host_name" && [[ -z "${WARP_TEST_ENV_PORTABLE_ROOT:-}" ]]; then
+            test_env_error \
+                "$service_name authority $host_name is loopback, where a production data tunnel can listen;" \
+                "loopback services need the private portable root (WARP_TEST_ENV_PORTABLE_ROOT) with explicit" \
+                "127.0.0.1 authorities"
+            return 1
+        fi
         TEST_ENV_DIAL_ADDRESS="$host_name"
         return 0
     fi
@@ -518,6 +527,28 @@ test_env_pin_unmanaged_service() {
         return 1
     fi
     TEST_ENV_DIAL_ADDRESS="${addresses[0]}"
+}
+
+# The loopback ports a production data tunnel forwards
+# (xops/bin/by-patch-main-data): PostgreSQL, PgBouncer and the Redis cluster
+# nodes.
+test_env_is_loopback_tunnel_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 1
+    (( 10#$port == 5432 || 10#$port == 6432 || (10#$port >= 6379 && 10#$port <= 6427) ))
+}
+
+# No mode may attest or probe a loopback endpoint on a tunnel port.
+test_env_refuse_loopback_tunnel_endpoint() {
+    local service_name="$1"
+    local address="$2"
+    local port="$3"
+    if test_env_is_loopback_address "$address" && test_env_is_loopback_tunnel_port "$port"; then
+        test_env_error \
+            "$service_name endpoint $address:$port is a loopback production data tunnel port" \
+            "(5432, 6432, 6379-6427); refusing"
+        return 1
+    fi
 }
 
 # Formats one attested endpoint the way the Go guard parses it.
@@ -917,6 +948,8 @@ test_env_preflight() {
         pg_dial_address="$TEST_ENV_DIAL_ADDRESS"
         redis_dial_address="$TEST_ENV_DIAL_ADDRESS"
     fi
+    test_env_refuse_loopback_tunnel_endpoint postgres "$pg_dial_address" "$pg_port" || return $?
+    test_env_refuse_loopback_tunnel_endpoint redis "$redis_dial_address" "$redis_port" || return $?
     test_env_probe_service postgres "$pg_dial_address" "$pg_port" || return $?
     test_env_probe_service redis "$redis_dial_address" "$redis_port" || return $?
     if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then

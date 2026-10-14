@@ -99,9 +99,9 @@ while the clients resolve on every dial. So:
   older `test-env.sh`, refuses every dial: source `test-env.sh` again.
   Integration fixtures (`TestEnv`) refuse to start without the attestation, so
   DB tests run only through `./test.sh` or a sourced `test-env.sh`.
-- Loopback is admitted only when the attestation itself is loopback, which is
-  the explicit private portable root below with its own `127.0.0.1`
-  authorities.
+- Loopback is admitted only when the attestation itself is loopback, which
+  only the private portable root below produces, with its own `127.0.0.1`
+  authorities, and never on a tunnel port (`5432`, `6432`, `6379`-`6427`).
 - Processes that are not tests, production included, get no guard; their dial
   paths are unchanged.
 
@@ -178,9 +178,12 @@ resource-authority checks and first-attempt service probes still run. Each
 service name is resolved once and must resolve to exactly one non-loopback
 address, which is then probed and attested for the whole run. A name that
 resolves to loopback is refused, because public DNS answers the local service
-names that way. Loopback services use the private portable root with explicit
-`127.0.0.1` authorities, as `local/release-gate-services.sh` does. Do not use
-it to bless developer-machine aliases or a legacy local VM route.
+names that way, and so is a `127.0.0.1` literal: loopback services need the
+private portable root (`WARP_TEST_ENV_PORTABLE_ROOT`) with explicit `127.0.0.1`
+authorities, as `local/release-gate-services.sh` sets. No mode accepts a
+loopback endpoint on a production data tunnel port (`5432`, `6432`,
+`6379`-`6427`). Do not use the escape to bless developer-machine aliases or a
+legacy local VM route.
 
 ### Repository-owned suite proxy
 
