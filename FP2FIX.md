@@ -1,5 +1,19 @@
 # FindProviders2 supply and quality-probe repair plan
 
+Latest user decision, 2026-10-14: option 4, probe-verified, shadow first.
+**Quality and Speed will require a modern provider: one the FP2 URL prober has
+measured, on a real client to provider session, negotiating end-to-end
+post-quantum encryption (the TLS 1.3 hybrid X25519MLKEM768) and advertising
+resizable transfer windows (acks carrying `receive_window_byte_count`).**
+Versions are not trusted: about 72% of providers run a custom "v3.23.0-fix"
+lineage. Online does not require it. The gate ships off
+(`quality_speed_requires_modern_provider: false` in provider.yml) while the
+dashboard counts and every score export count what it would take out, and it
+is switched on only after those shadow numbers are reviewed. Its evidence table is migration 836, which Main
+gets only once the owner approves applying it. See
+[the modern provider gate](#modern-provider-gate-2026-10-14) and the gate
+matrix below.
+
 Latest user decision, 2026-10-13: **every bucket, Online included, requires at
 least one accepted measured URL success in the eight-hour evidence window,
 unless the provider has fewer than two measured runs.** A provider with
@@ -151,11 +165,18 @@ reclassifying the fleet.
 | At least one measured URL success in eight hours, or fewer than two measured runs | Required | Required | Required |
 | URL success ratio ≥ 0.8 | Required | Required | Not required |
 | Direct or identified-ISP subscriber evidence and no quality exception | Required under policy two | Not required | Not required |
+| Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Required once switched on | Required once switched on | Not required |
 
 This matrix is the bucket admission contract. Probe admission has a different
 purpose: every provider passing reliability and the ARIN **risk** gate is
 eligible for paced URL probes. ARIN quality exceptions do not stop probes;
 security-quarantined providers also need probes to establish recovery.
+
+The modern provider row (2026-10-14) is native bucket membership too, and only
+once `quality_speed_requires_modern_provider` is on; until then the dashboard
+counts and every score export count what it would take out. Probe admission, explicit client ids,
+`force_minimum` and Online never read it. See
+[the modern provider gate](#modern-provider-gate-2026-10-14).
 
 The URL-success row (2026-10-13) is a passing condition on bucket membership,
 not a common gate. Probe admission, the rolling quota and its census never read
@@ -260,6 +281,75 @@ queue in `model/provider_egress_location_model.go` starts with connected,
 valid, Public-key providers but does not apply the proposed reliability and
 ARIN gates. `model/network_client_location_model.go` already has the intended
 quality/speed/online backfill order; preserve it while fixing membership.
+
+### Modern provider gate (2026-10-14)
+
+Owner decision, 2026-10-14: option 4, probe-verified, shadow first. A provider
+is modern when the FP2 URL prober has measured, on a real client to provider
+session, both end-to-end post-quantum encryption (the TLS 1.3 hybrid
+X25519MLKEM768, which providers answer since v2026.7.21-999024260) and
+resizable transfer windows (acks carrying `receive_window_byte_count`, since
+v2026.9.14-1046484290). Versions are not read. The implementation is
+`model/egress_modern_provider.go`.
+
+- **Evidence.** A probe run that observed its session reports what it saw
+  beside its URL result (`modern_evidence`, optional on the operator's health
+  submission), and the ingest records it in `provider_modern_evidence`
+  (migration 836), one row per provider: post_quantum, key_exchange,
+  window_resizable, max_receive_window_byte_count, measured_at,
+  first_measured_at, run_count. The latest observation wins and counts a run.
+  A retried report changes nothing, an older delayed one only moves
+  first_measured_at, and a conflicting one at the same instant keeps the less
+  modern reading of each capability. A session without end-to-end encryption
+  is not post-quantum whatever else it reports. Evidence observed more than a
+  minute ahead, with a negative window or an unstorable key exchange name is
+  refused and logged; it never refuses the run. A run that observed nothing
+  records nothing. provider_egress_health_history is not touched.
+- **Outcomes.** Each pass classifies a provider's row: `modern`,
+  `not_post_quantum`, `no_resizable_windows`, `no_evidence` or
+  `stale_evidence`. Age is tested first: evidence exactly seven days old is
+  stale, as a URL outcome exactly eight hours old is. Then post-quantum, then
+  windows, so a row without either is `not_post_quantum`. Seven days outlasts
+  runs that observe nothing, such as a prober outage or probers rolling out
+  without the evidence. A provider in Quality or Speed is probed about ten
+  times in four hours, so its evidence is minutes old, and a downgrade shows
+  at its next run whatever the window.
+- **Shadow counts.** For the providers the other rules admit to Quality and to
+  Speed, the passes count the gate's outcome whether the gate is on or off.
+  The dashboard counts publish
+  `urnetwork_stats_provider_modern_gate_shadow{bucket,outcome}` (connected
+  valid public providers) on the providers dashboard. Every score export logs
+  one `[nclm]modern provider gate:` line with the totals over its pool. Every
+  outcome but `modern` is what the gate takes out once it is on.
+- **Switch.** `quality_speed_requires_modern_provider` in provider.yml, default
+  false. It is decoded on its own key, like the URL-success rule's keys: a
+  value that is not true or false, the key given twice, or a provider.yml
+  that is not yaml leaves the gate off and resets no other key. When on, a
+  provider whose outcome is not `modern` leaves Quality and Speed under the
+  `not_modern` reason. That reason comes after reliability, ARIN risk, TLS,
+  no_success and unprobed or health, and before arin_non_quality. The
+  provider stays Online and in the location counts. The counts policy key is
+  schema 3 and carries the switch. Provider status reports `not_modern` with
+  what to do (update the app), and `bringyourctl provider inspect` prints the
+  evidence row, its outcome and the switch.
+- **Request time.** The gate is bucket membership, not a hard exclusion.
+  Probe admission, the rolling quota, the hard-exclusion set, explicit client
+  ids and `force_minimum` with any rank mode keep only the common gates, as
+  for the URL ratio. Online is unchanged, so a Quality or Speed answer still
+  reaches a non-modern provider in its Online tier, after both native
+  buckets.
+- **Rollout.** Apply migration 836 on Main once the owner approves: a server
+  built with it requires it, so this work merges into main only after that.
+  Deploy with the switch off. Integrate the connect library's session
+  evidence into the prober: the probe tunnel's HTTP transport implements
+  `egresshealth.ModernEvidenceSource`, the probe client negotiates end-to-end
+  encryption (probe clients run `EncryptionModeOff` today, which would read
+  every provider as not post-quantum), and the API deploys before probers
+  send the field, since the handler refuses unknown keys. Review the shadow
+  counts until `no_evidence` is small and the not-modern providers are
+  understood. Switch the gate on only after that review;
+  `quality_speed_requires_modern_provider: false` turns it off again at each
+  pass's next settings read.
 
 ## Metrics derived for ranking
 
