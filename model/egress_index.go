@@ -430,8 +430,9 @@ type providerEgressFacts struct {
 	// The rollup index is a ranking diagnostic; the verdict uses current history.
 	egressIndex   *int
 	egressQuality *bool
-	// the URL-success rule holds: enabled, measured often enough without one
-	// success, and the published country is not exempt
+	// the URL-success rule holds: measured often enough without one success,
+	// and the filter's guard applies the rule in the published country (it
+	// is enabled there and the country is not exempt)
 	noUrlSuccess bool
 }
 
@@ -479,9 +480,10 @@ func (self providerCountFilter) egressFacts(
 			observedCountryCode != publishedCountryCode,
 		egressIndex:   egressIndex,
 		egressQuality: urlIndex.QualityVerdict(),
-		noUrlSuccess: settings.OnlineRequiresUrlSuccess &&
-			providerCarriesNoUrl(counts, urlIndex) &&
-			!self.onlineSuccessBaseline.exempt(publishedCountryCode, settings.OnlineSuccessCountryFloor),
+		// the guard carries the kill switch it was decided under: a fleet
+		// pass's own settings, or the score export's for a scoped reader
+		noUrlSuccess: providerCarriesNoUrl(counts, urlIndex) &&
+			self.onlineSuccessBaseline.appliesIn(publishedCountryCode),
 	}
 }
 
@@ -937,17 +939,21 @@ type ProviderEgressInspection struct {
 	// measured at least ProviderOnlineMinMeasuredUrlRuns times in the
 	// evidence window without one success, whatever the rule then decides
 	NoUrlSuccess bool
-	// the URL-success rule's country guard for the published country, from
-	// the baseline the score export last published: whether one was
-	// readable and when it was computed, the country's measured Online
+	// the URL-success rule as the score export last published it, which the
+	// decision below follows rather than Settings: whether a trusted guard
+	// was readable, when it was computed and published, the kill switch and
+	// floor the export applied, the published country's measured Online
 	// providers and those with a success, and whether the country is exempt
-	OnlineSuccessBaselineKnown    bool
-	OnlineSuccessBaselineTime     time.Time
-	OnlineSuccessCountryMeasured  int
-	OnlineSuccessCountrySucceeded int
-	OnlineSuccessCountryExempt    bool
-	EgressTestEnabled             bool
-	Settings                      *EgressIndexSettings
+	OnlineSuccessBaselineKnown       bool
+	OnlineSuccessBaselineTime        time.Time
+	OnlineSuccessBaselinePublishTime time.Time
+	OnlineSuccessBaselineEnabled     bool
+	OnlineSuccessBaselineFloor       float64
+	OnlineSuccessCountryMeasured     int
+	OnlineSuccessCountrySucceeded    int
+	OnlineSuccessCountryExempt       bool
+	EgressTestEnabled                bool
+	Settings                         *EgressIndexSettings
 	// the decision, as the client-score job makes it
 	Reason       string
 	HardExcluded bool
@@ -1007,8 +1013,8 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	inspection.Settings = egressIndexSettings()
 	inspection.EgressTestEnabled = providerEgressTestEnabled()
 	countFilter := newProviderCountFilterForClients(ctx, []server.Id{clientId})
-	// one provider cannot measure its country, so the guard is the score
-	// export's
+	// one provider cannot measure its country, so the guard, its kill switch
+	// and floor included, is the score export's
 	baseline := getProviderOnlineSuccessBaseline(ctx)
 	countFilter.onlineSuccessBaseline = baseline
 
@@ -1024,11 +1030,14 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	if baseline != nil {
 		inspection.OnlineSuccessBaselineKnown = true
 		inspection.OnlineSuccessBaselineTime = baseline.computeTime
+		inspection.OnlineSuccessBaselinePublishTime = baseline.publishTime
+		inspection.OnlineSuccessBaselineEnabled = baseline.enabled
+		inspection.OnlineSuccessBaselineFloor = baseline.floor
 		count := baseline.countryCodeCounts[inspection.PublishedCountryCode]
 		inspection.OnlineSuccessCountryMeasured = count.Measured
 		inspection.OnlineSuccessCountrySucceeded = count.Succeeded
 	}
-	inspection.OnlineSuccessCountryExempt = baseline.exempt(inspection.PublishedCountryCode, inspection.Settings.OnlineSuccessCountryFloor)
+	inspection.OnlineSuccessCountryExempt = baseline.exempt(inspection.PublishedCountryCode)
 	inspection.ObservedCountryCode = countFilter.countryCodes[clientId]
 	inspection.Blackholed = facts.blackholed
 	inspection.TlsAuthenticationFailed = facts.tlsAuthenticationFailed

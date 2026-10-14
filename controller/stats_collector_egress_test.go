@@ -156,7 +156,9 @@ func TestStatsProviderEgressIndexLabels(t *testing.T) {
 // The exempt-country gauge reads the guard the score export published: a
 // country where the probe fails for most providers is listed with the
 // providers its exemption keeps online, a country where it works is not, and
-// the kill switch removes every series.
+// the export's kill switch removes every series. The gauge follows the
+// export, not this process's provider.yml: the kill switch here changes
+// nothing until an export applies it.
 func TestStatsRefreshProviderOnlineSuccessExemptPublishesExemptCountries(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -222,7 +224,12 @@ func TestStatsRefreshProviderOnlineSuccessExemptPublishesExemptCountries(t *test
 		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderOnlineSuccessExemptGauge.gauge, "urnetwork_stats_provider_online_success_exempt"), 1)
 		connect.AssertEqual(t, testutil.ToFloat64(statsProviderOnlineSuccessExemptGauge.gauge.WithLabelValues("vn")), float64(2))
 
-		t.Cleanup(server.Config.PushSimpleResource("provider.yml", []byte("online_requires_url_success: false\n")))
+		// popped when this run returns, so a rerun starts with the rule on
+		pop := server.Config.PushSimpleResource("provider.yml", []byte("online_requires_url_success: false\n"))
+		defer pop()
+		statsRefreshProviderOnlineSuccessExempt(ctx)
+		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderOnlineSuccessExemptGauge.gauge, "urnetwork_stats_provider_online_success_exempt"), 1)
+		connect.AssertEqual(t, model.UpdateClientScores(ctx, time.Hour, 1), nil)
 		statsRefreshProviderOnlineSuccessExempt(ctx)
 		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderOnlineSuccessExemptGauge.gauge, "urnetwork_stats_provider_online_success_exempt"), 0)
 	})

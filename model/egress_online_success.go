@@ -11,10 +11,12 @@
 //
 // Each fleet pass (the score export, the location counts, the dashboard
 // counts) computes the country guard over its own population from the
-// evidence it already loaded. The score export publishes its guard for the
+// evidence it already loaded, under its own settings. The score export
+// publishes its guard, with the kill switch and floor it applied, for the
 // readers that decide a few providers at a time and cannot see a country's
 // population: provider status, `bringyourctl provider inspect` and the
-// exempt-country gauge.
+// exempt-country gauge. Those readers decide by the published guard alone, so
+// they say what the export did.
 package model
 
 import (
@@ -56,31 +58,58 @@ func providerCarriesNoUrl(counts ProviderEgressHealthCounts, urlIndex EgressInde
 
 // One published country's measured Online providers: those with current URL
 // evidence, those of them with at least one success, and those the rule would
-// exclude.
+// exclude, with the guard's verdict for the country.
 type providerOnlineSuccessCount struct {
-	Measured  int `json:"measured"`
-	Succeeded int `json:"succeeded"`
-	NoSuccess int `json:"no_success"`
+	Measured  int
+	Succeeded int
+	NoSuccess int
+	// The country keeps its providers: the probe has not shown it works
+	// there, because fewer than the floor of the measured providers have a
+	// success.
+	Exempt bool
 }
 
-// The country guard of the URL-success rule over one population. A nil
-// baseline, one a reader could not load, exempts every country: without it
-// nothing shows the probe works anywhere.
+// The country guard of the URL-success rule over one population, with the
+// rule as the pass that counted it applies it: its kill switch, its floor and
+// the verdict for each measured country. A fleet pass builds its own from its
+// settings and the evidence it loaded. A scoped reader decodes the one the
+// score export published, so it decides as that export did, whatever its own
+// provider.yml says. A nil baseline, one a reader could not load, applies the
+// rule nowhere: without it nothing shows the probe works anywhere.
 type providerOnlineSuccessBaseline struct {
 	computeTime time.Time
-	// normalized published country code, "" for none, to its providers
+	// when the score export published it, zero for a fleet pass's own
+	publishTime time.Time
+	// the kill switch and the floor the verdicts were decided under
+	enabled bool
+	floor   float64
+	// normalized published country code, "" for none, to its measured
+	// providers and verdict; a country without a measured provider is absent
 	countryCodeCounts map[string]providerOnlineSuccessCount
 }
 
-// Whether the country keeps its providers: the probe has not shown it works
-// there, because no provider is measured or fewer than floor of the measured
-// providers have a success.
-func (self *providerOnlineSuccessBaseline) exempt(countryCode string, floor float64) bool {
+// Whether the country keeps its providers: no provider is measured there, or
+// the guard found too few of the measured ones with a success.
+func (self *providerOnlineSuccessBaseline) exempt(countryCode string) bool {
 	if self == nil {
 		return true
 	}
-	count := self.countryCodeCounts[countryCode]
-	return count.Measured <= 0 || providerOnlineSuccessShareBelow(count.Succeeded, count.Measured, floor)
+	count, ok := self.countryCodeCounts[countryCode]
+	return !ok || count.Measured <= 0 || count.Exempt
+}
+
+// Whether the rule takes the country's providers without a success out of
+// every bucket: it is enabled and the country is not exempt.
+func (self *providerOnlineSuccessBaseline) appliesIn(countryCode string) bool {
+	return self != nil && self.enabled && !self.exempt(countryCode)
+}
+
+// Decides each measured country's verdict under floor, in place.
+func decideProviderOnlineSuccessCountries(countryCodeCounts map[string]providerOnlineSuccessCount, floor float64) {
+	for countryCode, count := range countryCodeCounts {
+		count.Exempt = count.Measured <= 0 || providerOnlineSuccessShareBelow(count.Succeeded, count.Measured, floor)
+		countryCodeCounts[countryCode] = count
+	}
 }
 
 // A share of the guard is compared in millionths, in integers, so a share
@@ -96,10 +125,11 @@ func providerOnlineSuccessShareBelow(succeeded int, measured int, share float64)
 	return int64(succeeded)*providerOnlineSuccessShareScale < scaledShare*int64(measured)
 }
 
-// Counts a pass's population by published country: every provider the common
-// gates admit, with current URL evidence. Unmeasured providers say nothing
-// about the probe and are left out, and so are providers the common gates
-// exclude, which are in no bucket whatever their URLs.
+// Counts a pass's population by published country, and decides each country
+// under the settings' floor: every provider the common gates admit, with
+// current URL evidence. Unmeasured providers say nothing about the probe and
+// are left out, and so are providers the common gates exclude, which are in
+// no bucket whatever their URLs.
 func newProviderOnlineSuccessBaseline(
 	filter providerCountFilter,
 	clientIdCountryCodes map[server.Id]string,
@@ -107,6 +137,8 @@ func newProviderOnlineSuccessBaseline(
 ) *providerOnlineSuccessBaseline {
 	baseline := &providerOnlineSuccessBaseline{
 		computeTime:       filter.now,
+		enabled:           settings.OnlineRequiresUrlSuccess,
+		floor:             settings.OnlineSuccessCountryFloor,
 		countryCodeCounts: map[string]providerOnlineSuccessCount{},
 	}
 	for clientId, countryCode := range clientIdCountryCodes {
@@ -127,6 +159,7 @@ func newProviderOnlineSuccessBaseline(
 		}
 		baseline.countryCodeCounts[countryCode] = count
 	}
+	decideProviderOnlineSuccessCountries(baseline.countryCodeCounts, baseline.floor)
 	return baseline
 }
 
@@ -148,16 +181,16 @@ type ProviderOnlineSuccessExemptCountry struct {
 	Kept        int
 }
 
-// Every measured country the guard exempts under floor, in country code order.
-// A country without a measured provider is exempt too but has nothing to keep,
-// so it is not listed.
-func (self *providerOnlineSuccessBaseline) exemptCountries(floor float64) []*ProviderOnlineSuccessExemptCountry {
+// Every measured country the guard exempts, in country code order. A country
+// without a measured provider is exempt too but has nothing to keep, so it is
+// not listed.
+func (self *providerOnlineSuccessBaseline) exemptCountries() []*ProviderOnlineSuccessExemptCountry {
 	exemptCountries := []*ProviderOnlineSuccessExemptCountry{}
 	if self == nil {
 		return exemptCountries
 	}
 	for countryCode, count := range self.countryCodeCounts {
-		if 0 < count.Measured && self.exempt(countryCode, floor) {
+		if 0 < count.Measured && count.Exempt {
 			exemptCountries = append(exemptCountries, &ProviderOnlineSuccessExemptCountry{
 				CountryCode: countryCode,
 				Measured:    count.Measured,
@@ -174,11 +207,11 @@ func (self *providerOnlineSuccessBaseline) exemptCountries(floor float64) []*Pro
 
 // One line for a pass's log: the rule's state, and each exempt country with
 // its successes of measured providers and the providers it keeps.
-func (self *providerOnlineSuccessBaseline) logSummary(settings *EgressIndexSettings) string {
-	if !settings.OnlineRequiresUrlSuccess {
-		return "disabled (online_requires_url_success: false)"
+func (self *providerOnlineSuccessBaseline) logSummary() string {
+	if !self.enabled {
+		return "disabled (online_requires_url_success is not true)"
 	}
-	exemptCountries := self.exemptCountries(settings.OnlineSuccessCountryFloor)
+	exemptCountries := self.exemptCountries()
 	kept := 0
 	exemptTexts := make([]string, 0, len(exemptCountries))
 	for _, exemptCountry := range exemptCountries {
@@ -191,39 +224,87 @@ func (self *providerOnlineSuccessBaseline) logSummary(settings *EgressIndexSetti
 	}
 	return fmt.Sprintf(
 		"country floor %v, %d countries exempt keeping %d providers [%s]",
-		settings.OnlineSuccessCountryFloor,
+		self.floor,
 		len(exemptCountries),
 		kept,
 		strings.Join(exemptTexts, ", "),
 	)
 }
 
-// The score export's guard, for readers that decide a few providers at a time.
-// It holds counts, not verdicts, so each reader applies the floor and the kill
-// switch of its own settings.
+// The score export's guard, for the readers that decide a few providers at a
+// time: the rule as the export applied it (its kill switch and floor), its
+// verdict for each measured country, and the counts behind each verdict. A
+// reader decides by these alone, never by its own settings, so a provider's
+// status, its inspection and the gauge say what the export did, even while
+// provider.yml or the code differs between hosts, as it does during a rollout
+// or after a rollback.
 const providerOnlineSuccessBaselineKey = "{provider_online_success_baseline}"
 
-// A reader accepts only this version of the document.
-const providerOnlineSuccessBaselineVersion = 1
+// The version this code writes, and the only one it reads. Version 1 carried
+// the counts alone and each reader applied its own kill switch and floor to
+// them, which could disagree with the export; a reader treats it as no guard,
+// every country exempt, until the export publishes this version.
+const providerOnlineSuccessBaselineVersion = 2
+
+// The oldest published guard a reader trusts. The export publishes a new one
+// at the end of every pass, so one older than this means the export has
+// stopped publishing it, as after a rollback to code without the rule, and
+// its verdicts no longer describe the pool. A reader then exempts every
+// country. A pass longer than this leaves readers exempting every country
+// until it publishes.
+const providerOnlineSuccessBaselineMaxAge = 60 * time.Minute
 
 // How long a guard read or write may wait. Neither is worth holding up a
 // status answer or the export for: a reader without a guard exempts every
 // country.
 const providerOnlineSuccessBaselineRedisTimeout = 2 * time.Second
 
+// The published guard. Every field is required of a version 2 document; the
+// pointers tell a missing one from false or zero.
 type providerOnlineSuccessBaselineDocument struct {
-	Version     int                                   `json:"version"`
-	ComputeTime time.Time                             `json:"compute_time"`
-	Countries   map[string]providerOnlineSuccessCount `json:"countries"`
+	Version     int                                           `json:"version"`
+	ComputeTime time.Time                                     `json:"compute_time"`
+	PublishTime time.Time                                     `json:"publish_time"`
+	Enabled     *bool                                         `json:"enabled"`
+	Floor       *float64                                      `json:"floor"`
+	Countries   map[string]providerOnlineSuccessCountDocument `json:"countries"`
+}
+
+// One measured country of the published guard.
+type providerOnlineSuccessCountDocument struct {
+	Measured  int   `json:"measured"`
+	Succeeded int   `json:"succeeded"`
+	NoSuccess int   `json:"no_success"`
+	Exempt    *bool `json:"exempt"`
+}
+
+// The guard as the export publishes it at publishTime.
+func encodeProviderOnlineSuccessBaseline(baseline *providerOnlineSuccessBaseline, publishTime time.Time) ([]byte, error) {
+	countries := make(map[string]providerOnlineSuccessCountDocument, len(baseline.countryCodeCounts))
+	for countryCode, count := range baseline.countryCodeCounts {
+		exempt := count.Exempt
+		countries[countryCode] = providerOnlineSuccessCountDocument{
+			Measured:  count.Measured,
+			Succeeded: count.Succeeded,
+			NoSuccess: count.NoSuccess,
+			Exempt:    &exempt,
+		}
+	}
+	enabled := baseline.enabled
+	floor := baseline.floor
+	return json.Marshal(&providerOnlineSuccessBaselineDocument{
+		Version:     providerOnlineSuccessBaselineVersion,
+		ComputeTime: baseline.computeTime,
+		PublishTime: publishTime,
+		Enabled:     &enabled,
+		Floor:       &floor,
+		Countries:   countries,
+	})
 }
 
 // Replaces the published guard, expiring with the export it describes.
 func publishProviderOnlineSuccessBaseline(ctx context.Context, baseline *providerOnlineSuccessBaseline, ttl time.Duration) error {
-	value, err := json.Marshal(&providerOnlineSuccessBaselineDocument{
-		Version:     providerOnlineSuccessBaselineVersion,
-		ComputeTime: baseline.computeTime,
-		Countries:   baseline.countryCodeCounts,
-	})
+	value, err := encodeProviderOnlineSuccessBaseline(baseline, server.NowUtc())
 	if err != nil {
 		return err
 	}
@@ -235,7 +316,7 @@ func publishProviderOnlineSuccessBaseline(ctx context.Context, baseline *provide
 }
 
 // The guard the score export last published, nil when there is none or it is
-// unreadable, which exempts every country.
+// not to be trusted, which applies the rule nowhere.
 func getProviderOnlineSuccessBaseline(ctx context.Context) *providerOnlineSuccessBaseline {
 	var value []byte
 	redisCtx, cancel := context.WithTimeout(ctx, providerOnlineSuccessBaselineRedisTimeout)
@@ -252,7 +333,7 @@ func getProviderOnlineSuccessBaseline(ctx context.Context) *providerOnlineSucces
 		glog.Errorf("[egress]online url-success guard is unavailable (%s); every country is exempt\n", err)
 		return nil
 	}
-	baseline, err := decodeProviderOnlineSuccessBaseline(value)
+	baseline, err := decodeProviderOnlineSuccessBaseline(value, server.NowUtc())
 	if err != nil {
 		glog.Errorf("[egress]online url-success guard is unreadable (%s); every country is exempt\n", err)
 		return nil
@@ -260,40 +341,57 @@ func getProviderOnlineSuccessBaseline(ctx context.Context) *providerOnlineSucces
 	return baseline
 }
 
-// A published guard, or an error for any document a reader must not trust.
-func decodeProviderOnlineSuccessBaseline(value []byte) (*providerOnlineSuccessBaseline, error) {
+// A published guard read at now, or an error for any document a reader must
+// not trust: another version, a missing field, inconsistent counts, or one
+// published more than providerOnlineSuccessBaselineMaxAge ago.
+func decodeProviderOnlineSuccessBaseline(value []byte, now time.Time) (*providerOnlineSuccessBaseline, error) {
 	var document providerOnlineSuccessBaselineDocument
 	if err := json.Unmarshal(value, &document); err != nil {
 		return nil, err
 	}
+	if document.Version == 1 {
+		return nil, fmt.Errorf("version 1 does not say how the export applied the rule")
+	}
 	if document.Version != providerOnlineSuccessBaselineVersion {
 		return nil, fmt.Errorf("version %d is not %d", document.Version, providerOnlineSuccessBaselineVersion)
+	}
+	if document.Enabled == nil || document.Floor == nil || !(0 <= *document.Floor && *document.Floor <= 1) {
+		return nil, fmt.Errorf("no rule")
 	}
 	if document.Countries == nil {
 		return nil, fmt.Errorf("no countries")
 	}
+	if age := now.Sub(document.PublishTime); providerOnlineSuccessBaselineMaxAge < age {
+		return nil, fmt.Errorf("published %s ago, more than %s", age.Round(time.Second), providerOnlineSuccessBaselineMaxAge)
+	}
+	countryCodeCounts := make(map[string]providerOnlineSuccessCount, len(document.Countries))
 	for countryCode, count := range document.Countries {
-		if count.Succeeded < 0 || count.NoSuccess < 0 || count.Measured < count.Succeeded+count.NoSuccess {
+		if count.Exempt == nil || count.Succeeded < 0 || count.NoSuccess < 0 || count.Measured < count.Succeeded+count.NoSuccess {
 			return nil, fmt.Errorf("country %q has inconsistent counts", countryCode)
+		}
+		countryCodeCounts[countryCode] = providerOnlineSuccessCount{
+			Measured:  count.Measured,
+			Succeeded: count.Succeeded,
+			NoSuccess: count.NoSuccess,
+			Exempt:    *count.Exempt,
 		}
 	}
 	return &providerOnlineSuccessBaseline{
 		computeTime:       document.ComputeTime,
-		countryCodeCounts: document.Countries,
+		publishTime:       document.PublishTime,
+		enabled:           *document.Enabled,
+		floor:             *document.Floor,
+		countryCodeCounts: countryCodeCounts,
 	}, nil
 }
 
-// The countries the URL-success rule exempts now: the guard the score export
-// last published, under this process's floor. False when the rule is disabled
-// or no guard is readable, when there is nothing to publish.
+// The countries the URL-success rule exempts now, as the score export last
+// published them. False when no guard is readable, or the export applied the
+// rule nowhere, when there is nothing to publish.
 func GetProviderOnlineSuccessExemptCountries(ctx context.Context) ([]*ProviderOnlineSuccessExemptCountry, bool) {
-	settings := egressIndexSettings()
-	if !settings.OnlineRequiresUrlSuccess {
-		return nil, false
-	}
 	baseline := getProviderOnlineSuccessBaseline(ctx)
-	if baseline == nil {
+	if baseline == nil || !baseline.enabled {
 		return nil, false
 	}
-	return baseline.exemptCountries(settings.OnlineSuccessCountryFloor), true
+	return baseline.exemptCountries(), true
 }

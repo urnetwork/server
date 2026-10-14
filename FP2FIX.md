@@ -832,9 +832,16 @@ gate matrix.
   - Each fleet pass computes the guard over its own population from evidence it
     already loaded: the score export, the location counts and the dashboard
     counts.
-  - The score export publishes its counts to Redis for provider status,
-    `bringyourctl provider inspect` and the exempt-country gauge. A reader
-    without that document exempts every country.
+  - The score export publishes its guard to Redis for provider status,
+    `bringyourctl provider inspect` and the exempt-country gauge: the kill
+    switch and floor it applied, each measured country's verdict and the
+    counts behind it (document version 2). Those readers decide by the
+    document alone, not by their own provider.yml, so they say what the export
+    did while provider.yml or the code differs between hosts, as during a
+    rollout or after a rollback. A reader without a trusted document exempts
+    every country: none is published, it is unreadable, it is version 1
+    (counts only, which each reader decided under its own settings), or it was
+    published more than 60 minutes ago.
   - On 2026-10-13 the structurally failing countries measured success shares
     of VN 0.03, JP 0.24, RU 0.25, TW 0.27, ZA 0.35 and IN 0.35. The default of
     0.36, pending the owner's confirmation, exempts them all. HK, the lowest

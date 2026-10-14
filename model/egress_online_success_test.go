@@ -1,7 +1,7 @@
 package model
 
 import (
-	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +47,18 @@ func onlineSuccessTestFilter(
 	}
 	filter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(filter, clientIdCountryCodes, settings)
 	return filter
+}
+
+// An enabled guard over the given measured countries, each decided under
+// floor, as a fleet pass decides them.
+func onlineSuccessTestBaseline(floor float64, countryCodeCounts map[string]providerOnlineSuccessCount) *providerOnlineSuccessBaseline {
+	decideProviderOnlineSuccessCountries(countryCodeCounts, floor)
+	return &providerOnlineSuccessBaseline{
+		computeTime:       onlineSuccessTestNow,
+		enabled:           true,
+		floor:             floor,
+		countryCodeCounts: countryCodeCounts,
+	}
 }
 
 // The provider's decision as every pass makes it.
@@ -233,7 +245,7 @@ func TestOnlineUrlSuccessCountryGuard(t *testing.T) {
 	filter := onlineSuccessTestFilter(clientIdCounts, clientIdCountryCodes, settings)
 
 	// vn: 1 of 5 measured providers has a success, under the 0.36 floor
-	connect.AssertEqual(t, filter.onlineSuccessBaseline.countryCodeCounts["vn"], providerOnlineSuccessCount{Measured: 5, Succeeded: 1, NoSuccess: 4})
+	connect.AssertEqual(t, filter.onlineSuccessBaseline.countryCodeCounts["vn"], providerOnlineSuccessCount{Measured: 5, Succeeded: 1, NoSuccess: 4, Exempt: true})
 	vnDecision := onlineSuccessTestDecide(filter, vnDead, "vn", settings)
 	if vnDecision.reason != ProviderExcludedHealth || !vnDecision.online || !vnDecision.counted {
 		t.Fatalf("exempt country decision %+v, want the dead provider online for health", vnDecision)
@@ -243,16 +255,27 @@ func TestOnlineUrlSuccessCountryGuard(t *testing.T) {
 	connect.AssertEqual(t, usDecision.online, false)
 
 	// the comparison is share < floor
-	baseline := &providerOnlineSuccessBaseline{countryCodeCounts: map[string]providerOnlineSuccessCount{
-		"at":    {Measured: 4, Succeeded: 2},
-		"under": {Measured: 3, Succeeded: 1},
-	}}
-	connect.AssertEqual(t, baseline.exempt("at", 0.5), false)
-	connect.AssertEqual(t, baseline.exempt("under", 0.5), true)
-	connect.AssertEqual(t, baseline.exempt("unmeasured", 0.5), true)
-	connect.AssertEqual(t, baseline.exempt("at", 0), false)
+	for _, c := range []struct {
+		floor       float64
+		countryCode string
+		exempt      bool
+	}{
+		{floor: 0.5, countryCode: "at", exempt: false},
+		{floor: 0.5, countryCode: "under", exempt: true},
+		{floor: 0.5, countryCode: "unmeasured", exempt: true},
+		{floor: 0, countryCode: "at", exempt: false},
+	} {
+		baseline := onlineSuccessTestBaseline(c.floor, map[string]providerOnlineSuccessCount{
+			"at":    {Measured: 4, Succeeded: 2},
+			"under": {Measured: 3, Succeeded: 1},
+		})
+		if exempt := baseline.exempt(c.countryCode); exempt != c.exempt {
+			t.Errorf("%s under floor %v: exempt %t, want %t", c.countryCode, c.floor, exempt, c.exempt)
+		}
+	}
 	var unpublished *providerOnlineSuccessBaseline
-	connect.AssertEqual(t, unpublished.exempt("at", 0), true)
+	connect.AssertEqual(t, unpublished.exempt("at"), true)
+	connect.AssertEqual(t, unpublished.appliesIn("at"), false)
 
 	// a scoped reader without a published guard exempts every country
 	filter.onlineSuccessBaseline = nil
@@ -277,30 +300,22 @@ func TestOnlineUrlSuccessCountryGuard(t *testing.T) {
 // product puts 7 of 25 below a floor of 0.28 (0.28·25 is 7.0000000000000009)
 // and exempts the country.
 func TestOnlineUrlSuccessCountryGuardComparesTheFloorExactly(t *testing.T) {
-	baseline := &providerOnlineSuccessBaseline{countryCodeCounts: map[string]providerOnlineSuccessCount{
-		"a": {Measured: 25, Succeeded: 7},
-		"b": {Measured: 25, Succeeded: 6},
-		"c": {Measured: 100, Succeeded: 55},
-		"d": {Measured: 100, Succeeded: 7},
-		"e": {Measured: 25, Succeeded: 9},
-		"f": {Measured: 25, Succeeded: 8},
-	}}
 	for _, c := range []struct {
-		countryCode string
-		floor       float64
-		exempt      bool
+		count  providerOnlineSuccessCount
+		floor  float64
+		exempt bool
 	}{
-		{countryCode: "a", floor: 0.28, exempt: false},
-		{countryCode: "b", floor: 0.28, exempt: true},
-		{countryCode: "c", floor: 0.55, exempt: false},
-		{countryCode: "d", floor: 0.07, exempt: false},
+		{count: providerOnlineSuccessCount{Measured: 25, Succeeded: 7}, floor: 0.28, exempt: false},
+		{count: providerOnlineSuccessCount{Measured: 25, Succeeded: 6}, floor: 0.28, exempt: true},
+		{count: providerOnlineSuccessCount{Measured: 100, Succeeded: 55}, floor: 0.55, exempt: false},
+		{count: providerOnlineSuccessCount{Measured: 100, Succeeded: 7}, floor: 0.07, exempt: false},
 		// the default floor at its boundary
-		{countryCode: "e", floor: 0.36, exempt: false},
-		{countryCode: "f", floor: 0.36, exempt: true},
+		{count: providerOnlineSuccessCount{Measured: 25, Succeeded: 9}, floor: 0.36, exempt: false},
+		{count: providerOnlineSuccessCount{Measured: 25, Succeeded: 8}, floor: 0.36, exempt: true},
 	} {
-		count := baseline.countryCodeCounts[c.countryCode]
-		if exempt := baseline.exempt(c.countryCode, c.floor); exempt != c.exempt {
-			t.Errorf("%d of %d against floor %v: exempt %t, want %t", count.Succeeded, count.Measured, c.floor, exempt, c.exempt)
+		baseline := onlineSuccessTestBaseline(c.floor, map[string]providerOnlineSuccessCount{"xx": c.count})
+		if exempt := baseline.exempt("xx"); exempt != c.exempt {
+			t.Errorf("%d of %d against floor %v: exempt %t, want %t", c.count.Succeeded, c.count.Measured, c.floor, exempt, c.exempt)
 		}
 	}
 }
@@ -422,58 +437,72 @@ func TestEgressIndexSettingsMalformedBlockKeepsTheOnlineUrlSuccessKeys(t *testin
 	connect.AssertEqual(t, settings.OnlineSuccessCountryFloor, 0.5)
 }
 
-// The published guard round-trips its counts, a reader refuses a document it
-// must not trust, and the exempt list and log line name what the guard keeps.
+// The published guard round-trips the rule the export applied and its
+// verdicts, a reader refuses a document it must not trust, and the exempt list
+// and log line name what the guard keeps.
 func TestProviderOnlineSuccessBaselineDocument(t *testing.T) {
-	baseline := &providerOnlineSuccessBaseline{
-		computeTime: onlineSuccessTestNow,
-		countryCodeCounts: map[string]providerOnlineSuccessCount{
-			"us": {Measured: 10, Succeeded: 8, NoSuccess: 2},
-			"vn": {Measured: 10, Succeeded: 1, NoSuccess: 9},
-			"":   {Measured: 2, Succeeded: 0, NoSuccess: 2},
-		},
-	}
-	value, err := json.Marshal(&providerOnlineSuccessBaselineDocument{
-		Version:     providerOnlineSuccessBaselineVersion,
-		ComputeTime: baseline.computeTime,
-		Countries:   baseline.countryCodeCounts,
+	baseline := onlineSuccessTestBaseline(0.36, map[string]providerOnlineSuccessCount{
+		"us": {Measured: 10, Succeeded: 8, NoSuccess: 2},
+		"vn": {Measured: 10, Succeeded: 1, NoSuccess: 9},
+		"":   {Measured: 2, Succeeded: 0, NoSuccess: 2},
 	})
+	publishTime := onlineSuccessTestNow.Add(5 * time.Minute)
+	value, err := encodeProviderOnlineSuccessBaseline(baseline, publishTime)
 	connect.AssertEqual(t, err, nil)
-	decoded, err := decodeProviderOnlineSuccessBaseline(value)
+	decoded, err := decodeProviderOnlineSuccessBaseline(value, publishTime.Add(time.Minute))
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, decoded.countryCodeCounts, baseline.countryCodeCounts)
 	connect.AssertEqual(t, decoded.computeTime.Equal(onlineSuccessTestNow), true)
+	connect.AssertEqual(t, decoded.publishTime.Equal(publishTime), true)
+	connect.AssertEqual(t, decoded.enabled, true)
+	connect.AssertEqual(t, decoded.floor, 0.36)
+	connect.AssertEqual(t, decoded.exempt("vn"), true)
+	connect.AssertEqual(t, decoded.appliesIn("us"), true)
+
+	// a guard as old as the max age is trusted, an older one is not
+	_, err = decodeProviderOnlineSuccessBaseline(value, publishTime.Add(providerOnlineSuccessBaselineMaxAge))
+	connect.AssertEqual(t, err, nil)
+	if _, err := decodeProviderOnlineSuccessBaseline(value, publishTime.Add(providerOnlineSuccessBaselineMaxAge+time.Second)); err == nil {
+		t.Error("a reader trusted a guard older than the max age")
+	}
 
 	for name, document := range map[string]string{
-		"version":      `{"version":2,"compute_time":"2026-10-13T21:00:00Z","countries":{}}`,
-		"no countries": `{"version":1,"compute_time":"2026-10-13T21:00:00Z"}`,
-		"inconsistent": `{"version":1,"compute_time":"2026-10-13T21:00:00Z","countries":{"us":{"measured":2,"succeeded":2,"no_success":1}}}`,
-		"negative":     `{"version":1,"compute_time":"2026-10-13T21:00:00Z","countries":{"us":{"measured":2,"succeeded":-1,"no_success":0}}}`,
-		"not json":     `{"version":1,`,
+		"version 1":          `{"version":1,"compute_time":"2026-10-13T21:00:00Z","countries":{"us":{"measured":2,"succeeded":1,"no_success":1}}}`,
+		"version 3":          `{"version":3,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{}}`,
+		"no kill switch":     `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","floor":0.36,"countries":{}}`,
+		"no floor":           `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"countries":{}}`,
+		"floor out of range": `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":1.5,"countries":{}}`,
+		"no countries":       `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36}`,
+		"no verdict":         `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{"us":{"measured":2,"succeeded":1,"no_success":1}}}`,
+		"inconsistent":       `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{"us":{"measured":2,"succeeded":2,"no_success":1,"exempt":false}}}`,
+		"negative":           `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{"us":{"measured":2,"succeeded":-1,"no_success":0,"exempt":false}}}`,
+		"no publish time":    `{"version":2,"compute_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{}}`,
+		"not json":           `{"version":2,`,
 	} {
-		if _, err := decodeProviderOnlineSuccessBaseline([]byte(document)); err == nil {
+		if _, err := decodeProviderOnlineSuccessBaseline([]byte(document), onlineSuccessTestNow); err == nil {
 			t.Errorf("%s: a reader accepted an untrustworthy guard", name)
 		}
 	}
 
-	exemptCountries := baseline.exemptCountries(0.36)
+	exemptCountries := baseline.exemptCountries()
 	connect.AssertEqual(t, len(exemptCountries), 2)
 	connect.AssertEqual(t, *exemptCountries[0], ProviderOnlineSuccessExemptCountry{CountryCode: "", Measured: 2, Succeeded: 0, Kept: 2})
 	connect.AssertEqual(t, *exemptCountries[1], ProviderOnlineSuccessExemptCountry{CountryCode: "vn", Measured: 10, Succeeded: 1, Kept: 9})
 
-	settings := DefaultEgressIndexSettings()
-	summary := baseline.logSummary(settings)
+	summary := baseline.logSummary()
 	for _, part := range []string{"country floor 0.36", "2 countries exempt keeping 11 providers", "unknown 0/2 kept 2", "vn 1/10 kept 9"} {
 		if !strings.Contains(summary, part) {
 			t.Errorf("log summary %q is missing %q", summary, part)
 		}
 	}
-	settings.OnlineRequiresUrlSuccess = false
-	connect.AssertEqual(t, strings.HasPrefix(baseline.logSummary(settings), "disabled"), true)
+	disabled := *baseline
+	disabled.enabled = false
+	connect.AssertEqual(t, strings.HasPrefix(disabled.logSummary(), "disabled"), true)
+	connect.AssertEqual(t, disabled.appliesIn("us"), false)
 }
 
-// The status of a provider the rule excludes says what to fix; with the kill
-// switch the same provider is online-only for its failing ratio.
+// The status of a provider the rule excludes says what to fix; with the
+// guard's kill switch the same provider is online-only for its failing ratio.
 func TestProviderStatusExplainsNoUrlSuccess(t *testing.T) {
 	settings := DefaultEgressIndexSettings()
 	dead, healthy := server.NewId(), server.NewId()
@@ -514,5 +543,72 @@ func TestProviderStatusExplainsNoUrlSuccess(t *testing.T) {
 
 	disabled := *settings
 	disabled.OnlineRequiresUrlSuccess = false
-	connect.AssertEqual(t, evaluateProviderStatus(facts, filter, &disabled, false, minimums).reason, ProviderStatusReasonEgressFailing)
+	disabledFilter := onlineSuccessTestFilter(
+		map[server.Id]ProviderEgressHealthCounts{dead: onlineSuccessTestCounts(0, 5), healthy: onlineSuccessTestCounts(5, 5)},
+		map[server.Id]string{dead: "us", healthy: "us"},
+		&disabled,
+	)
+	connect.AssertEqual(t, evaluateProviderStatus(facts, disabledFilter, settings, false, minimums).reason, ProviderStatusReasonEgressFailing)
+}
+
+// A status follows the rule as the score export published it, never the
+// reader's own provider.yml: the export's kill switch and the verdict it
+// decided under its floor. A reader whose kill switch is off still reports
+// what an export with the rule on did, a reader with the rule on reports
+// nothing of an export with it off, and a reader floor that would exempt the
+// country changes nothing.
+func TestProviderStatusFollowsThePublishedUrlSuccessRule(t *testing.T) {
+	dead := server.NewId()
+	countryCode := "us"
+	facts := &providerStatusFacts{
+		clientId:                 dead,
+		networkId:                server.NewId(),
+		providePublic:            true,
+		hasRollup:                true,
+		connected:                true,
+		valid:                    true,
+		minRelativeLatencyMillis: 10,
+		maxBytesPerSecond:        100 * 1024 * 1024,
+		hasLatencyTest:           true,
+		hasSpeedTest:             true,
+		publishedCountryCode:     &countryCode,
+		lookbacks:                providerStatusNeutralLookbacks(),
+	}
+	filter := providerCountFilter{
+		now:                     onlineSuccessTestNow,
+		arinRisk:                map[server.Id]bool{},
+		arinNonQuality:          map[server.Id]bool{},
+		reliabilityFailed:       map[server.Id]bool{},
+		tlsAuthenticationFailed: map[server.Id]bool{},
+		countryCodes:            map[server.Id]string{},
+		healthCounts:            map[server.Id]ProviderEgressHealthCounts{dead: onlineSuccessTestCounts(0, 5)},
+	}
+	minimums := providerReliabilityMinimums()
+	// one of two measured providers in us has a success: under the export's
+	// floor of 0.36 the country is not exempt, under 0.9 it would be
+	published := func(enabled bool) *providerOnlineSuccessBaseline {
+		document := fmt.Sprintf(`{"version":2,"compute_time":"2026-10-13T20:55:00Z","publish_time":"2026-10-13T20:58:00Z","enabled":%t,"floor":0.36,"countries":{"us":{"measured":2,"succeeded":1,"no_success":1,"exempt":false}}}`, enabled)
+		baseline, err := decodeProviderOnlineSuccessBaseline([]byte(document), onlineSuccessTestNow)
+		connect.AssertEqual(t, err, nil)
+		return baseline
+	}
+	readerSettings := func(config string) *EgressIndexSettings {
+		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
+		defer pop()
+		return egressIndexSettings()
+	}
+
+	filter.onlineSuccessBaseline = published(true)
+	for _, config := range []string{"", "online_requires_url_success: false\n", "online_success_country_floor: 0.9\n"} {
+		if reason := evaluateProviderStatus(facts, filter, readerSettings(config), false, minimums).reason; reason != ProviderStatusReasonEgressNoSuccess {
+			t.Errorf("export with the rule on, reader provider.yml %q: reason %s, want %s", config, reason, ProviderStatusReasonEgressNoSuccess)
+		}
+	}
+	filter.onlineSuccessBaseline = published(false)
+	if reason := evaluateProviderStatus(facts, filter, readerSettings(""), false, minimums).reason; reason != ProviderStatusReasonEgressFailing {
+		t.Errorf("export with the rule off, reader with it on: reason %s, want %s", reason, ProviderStatusReasonEgressFailing)
+	}
+	// no trusted guard applies the rule nowhere
+	filter.onlineSuccessBaseline = nil
+	connect.AssertEqual(t, evaluateProviderStatus(facts, filter, readerSettings(""), false, minimums).reason, ProviderStatusReasonEgressFailing)
 }

@@ -3890,9 +3890,10 @@ type providerCountFilter struct {
 	blackholed map[server.Id]bool
 	// Security exceptions persist until later authenticated TLS from the same URL.
 	tlsAuthenticationFailed map[server.Id]bool
-	// The URL-success rule's country guard, set by each consumer after the
-	// filter loads: a fleet pass counts its own population, a scoped reader
-	// reads the score export's. Nil exempts every country.
+	// The URL-success rule's country guard with the kill switch and floor it
+	// was decided under, set by each consumer after the filter loads: a fleet
+	// pass counts its own population under its own settings, a scoped reader
+	// reads the score export's. Nil applies the rule nowhere.
 	onlineSuccessBaseline *providerOnlineSuccessBaseline
 }
 
@@ -5481,7 +5482,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		reasonCounts,
 		onlineCount,
 	)
-	glog.Infof("[nclm]online url-success rule: %s\n", onlineSuccessBaseline.logSummary(egressSettings))
+	glog.Infof("[nclm]online url-success rule: %s\n", onlineSuccessBaseline.logSummary())
 
 	// set each client score to its lowest lookback, decided the same way in
 	// every location and group map it sits in
@@ -5677,9 +5678,10 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if err := writeClientScoreNativeCensus(ctx, nativeCensus, ttl); err != nil {
 			return fmt.Errorf("publish native client score census: %w", err)
 		}
-		// The guard this export decided Online by, for provider status,
-		// inspection and the exempt-country gauge. A reader without it
-		// exempts every country, so a failure here leaves the export standing.
+		// The guard this export decided Online by, with its kill switch and
+		// floor, for provider status, inspection and the exempt-country
+		// gauge. A reader without it exempts every country, so a failure here
+		// leaves the export standing.
 		if err := publishProviderOnlineSuccessBaseline(ctx, onlineSuccessBaseline, ttl); err != nil {
 			glog.Errorf("[nclm]publish online url-success guard: %s\n", err)
 		}

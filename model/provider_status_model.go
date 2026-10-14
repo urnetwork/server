@@ -6,11 +6,13 @@ package model
 // The status is the decision FindProviders2 draws from: the common gates, the
 // egress decision and the ranking UpdateClientScores publishes, computed for
 // the network's providers with the bulk filter scoped to their client ids. The
-// fleet-wide filter never runs for a status; the URL-success rule's country
-// guard is the one UpdateClientScores published. Ranking numbers are shown with
-// what they mean; the anti-abuse signals (ARIN risk and non-quality, the URL
-// security quarantine, the legacy dark verdict) are one generic reason, and
-// their values never leave this file.
+// fleet-wide filter never runs for a status; the URL-success rule is the one
+// UpdateClientScores published, its kill switch, floor and country verdicts
+// included, so the status says what the export did whatever this host's
+// provider.yml says. Ranking numbers are shown with what they mean; the
+// anti-abuse signals (ARIN risk and non-quality, the URL security quarantine,
+// the legacy dark verdict) are one generic reason, and their values never
+// leave this file.
 
 import (
 	"context"
@@ -794,7 +796,8 @@ func GetProviderStatuses(ctx context.Context, networkId server.Id, clientIds []s
 	minimums := providerReliabilityMinimums()
 	countFilter := newProviderCountFilterForClients(ctx, factClientIds)
 	// a network's providers cannot measure their countries, so the
-	// URL-success rule's guard is the one the score export decided Online by
+	// URL-success rule, its kill switch and floor included, is the one the
+	// score export decided Online by
 	countFilter.onlineSuccessBaseline = getProviderOnlineSuccessBaseline(ctx)
 	now := server.NowUtc()
 	for _, facts := range allFacts {

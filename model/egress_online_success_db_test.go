@@ -13,8 +13,10 @@ import (
 
 // The URL-success rule against the database: the passes in the order the
 // taskworker runs them, the published samples and counts, FindProviders2, the
-// dashboard counts and the provider status. These tests use only names that
-// predate the rule, so the same file runs against the code before it.
+// dashboard counts and the provider status. The first four tests use only
+// names that predate the rule, so they run against the code before it. Each
+// later test came with a follow-up fix and uses only names that predate that
+// fix, so it runs against the commit before the fix.
 
 // Fails unless every provider in want is in the answer and none in unwanted is.
 func assertOnlineSuccessTestAnswer(t testing.TB, where string, providers []*FindProvidersProvider, want []*egressTestProvider, unwanted []*egressTestProvider) {
@@ -194,5 +196,55 @@ func TestProviderStatusExplainsTheUrlSuccessRule(t *testing.T) {
 		t.Cleanup(server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_requires_url_success: false\n")))
 		egressTestPasses(ctx, t)
 		connect.AssertEqual(t, GetClientProviderStatus(ctx, dead.networkId, dead.clientId).Reason, ProviderStatusReasonEgressFailing)
+	})
+}
+
+// Provider status and inspection follow the rule as the score export applied
+// it, its kill switch and its floor, never the reader's own provider.yml. A
+// reader whose provider.yml differs from the export's, as during a rollout or
+// after a rollback, still says what the export did.
+func TestProviderStatusFollowsTheExportsUrlSuccessRule(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
+
+		// one of the two measured providers in us has a success
+		healthy := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		egressTestProbed(ctx, healthy, city, 0, "us")
+		dead := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		egressTestHealth(ctx, dead.clientId, server.NowUtc(), 5, 5)
+		for _, provider := range []*egressTestProvider{healthy, dead} {
+			for lookbackIndex := range 3 {
+				egressTestReliability(ctx, provider.clientId, lookbackIndex, 1, 1)
+			}
+		}
+		withProviderConfig := func(config string, callback func()) {
+			pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
+			defer pop()
+			callback()
+		}
+
+		// an export with the kill switch, read before the next export by a
+		// reader whose provider.yml has the rule on again
+		withProviderConfig("online_requires_url_success: false\n", func() {
+			egressTestPasses(ctx, t)
+		})
+		connect.AssertEqual(t, GetClientProviderStatus(ctx, dead.networkId, dead.clientId).Reason, ProviderStatusReasonEgressFailing)
+		connect.AssertEqual(t, InspectProviderEgress(ctx, dead.clientId).Reason, ProviderExcludedHealth)
+
+		// an export with the rule on, read by a reader with the kill switch,
+		// and by one whose floor would exempt the country
+		egressTestPasses(ctx, t)
+		for _, config := range []string{"online_requires_url_success: false\n", "online_success_country_floor: 0.9\n"} {
+			withProviderConfig(config, func() {
+				if reason := GetClientProviderStatus(ctx, dead.networkId, dead.clientId).Reason; reason != ProviderStatusReasonEgressNoSuccess {
+					t.Errorf("reader provider.yml %q: status reason %s, want %s", config, reason, ProviderStatusReasonEgressNoSuccess)
+				}
+				inspection := InspectProviderEgress(ctx, dead.clientId)
+				if inspection.Reason != ProviderExcludedNoSuccess || inspection.OnlineSuccessCountryExempt {
+					t.Errorf("reader provider.yml %q: inspection reason %s exempt %t, want %s and not exempt", config, inspection.Reason, inspection.OnlineSuccessCountryExempt, ProviderExcludedNoSuccess)
+				}
+			})
+		}
 	})
 }
