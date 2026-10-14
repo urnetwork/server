@@ -238,13 +238,14 @@ func testing_connectDueProvider(
 	testing_passingReliabilityHistory(ctx, clientId)
 }
 
-// Seeds one passing reliability score, the history URL probe admission needs
-// before a provider's first cycle.
+// Seeds passing one hour and 12 hour scores: the hour witnesses the current
+// history URL probe admission needs before a provider's first cycle, and a
+// client observed within the hour always also has its 12 hour score.
 func testing_passingReliabilityHistory(ctx context.Context, clientId server.Id) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score
 			(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight)
-			VALUES ($1,0,1,1,1,1)`, clientId))
+			VALUES ($1,1,1,1,1,1),($1,2,1,1,1,1)`, clientId))
 	})
 }
 

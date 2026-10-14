@@ -27,17 +27,17 @@ func (self testingUrlCensusContext) Context() context.Context {
 	return self.ctx
 }
 
-// (EXISTS(score) AND NOT EXISTS(bad)) OR EXISTS(priority) is equivalent to
-// requiring a score or priority and excluding only a bad score whose client
-// has no priority, since a bad score is a score. The inner client key permits
-// a distinct planner shape without changing any production source or floor.
+// (EXISTS(witness) AND NOT EXISTS(bad)) OR EXISTS(priority) distributes into
+// requiring a witness or priority and excluding only a bad score whose client
+// has no priority. The inner client key permits a distinct planner shape
+// without changing any production source or admission floor.
 func testingUrlCensusGuardedAdmissionSql(alias string) string {
 	reliability := providerReliabilityEligibilitySql(alias + ".client_id")
 	end := strings.LastIndex(reliability, "\n\t)")
 	if end < 0 || end+len("\n\t)") != len(reliability) {
 		panic("synthetic census admission anchor changed")
 	}
-	return "NOT " + alias + ".arin_risk AND (" + providerReliabilityScoredSql(alias+".client_id") + " OR " +
+	return "NOT " + alias + ".arin_risk AND (" + providerReliabilityWitnessSql(alias+".client_id") + " OR " +
 		providerIntentProbePrioritySql(alias+".client_id") + ") AND " + reliability[:end] + "\n\t\tAND NOT (" +
 		providerIntentProbePrioritySql("provider_reliability.client_id") + ")" + reliability[end:]
 }
@@ -176,7 +176,7 @@ func TestUrlProbeCensusGuardedAdmissionTruthAndQuota(t *testing.T) {
 }
 
 // This fixture has a known near-current fleet size, not a claim about Main's
-// distribution: 320k scores, 4k intent rows, 800k history rows and 160k security
+// distribution: 240k scores, 4k intent rows, 800k history rows and 160k security
 // rows. Setup is outside query timing and has its own fixed two-minute owner.
 func testingSeedUrlCensusDeadlineFleet(t testing.TB, now time.Time) {
 	t.Helper()
@@ -190,7 +190,8 @@ func testingSeedUrlCensusDeadlineFleet(t testing.TB, now time.Time) {
 		) INSERT INTO client_connection_reliability_score
 			(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight)
 			SELECT client_id,i,1,CASE WHEN n%10=0 AND i=1 THEN 0.1 ELSE 1 END,1,1
-			FROM numbered CROSS JOIN generate_series(1,3) AS i`))
+			FROM numbered CROSS JOIN generate_series(1,3) AS i
+			ON CONFLICT (client_id,lookback_index) DO UPDATE SET independent_reliability_weight=EXCLUDED.independent_reliability_weight`))
 		server.RaisePgResult(tx.Exec(ctx, `WITH numbered AS (
 			SELECT client_id,row_number() OVER (ORDER BY client_id) AS n FROM network_client
 		) INSERT INTO provider_intent_probe_priority(client_id,priority_since,update_time)

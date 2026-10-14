@@ -87,8 +87,8 @@ func TestLocationProbeEligibilityCensusDoesNotRetainLocationRow(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 		defer cancel()
-		_, client, city := locationProbeConnectedFixture(t, ctx, 41)
-		testingInsertProviderConnectionScore(ctx, client, city)
+		_, client, _ := locationProbeConnectedFixture(t, ctx, 41)
+		testingInsertProviderReliabilityWitness(ctx, client)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 

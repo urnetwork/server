@@ -9,7 +9,7 @@ import (
 )
 
 // Missing reliability history is neutral for serving (URL probe admission
-// requires some); every observed lookback must pass its floor.
+// requires a witness lookback score); every observed lookback must pass its floor.
 func providerReliabilityMinimums() map[int]float64 {
 	if NormalNetworkConditions() {
 		return map[int]float64{1: 0.95, 2: 0.7, 3: 0.6}
@@ -62,29 +62,38 @@ func providerProbeEligibilitySql(rollupAlias string) string {
 	return fmt.Sprintf(`NOT %s.arin_risk AND %s`, rollupAlias, providerReliabilityEligibilitySql(rollupAlias+".client_id"))
 }
 
-// True once any lookback has scored the client. The caller supplies a trusted
-// SQL expression; the score primary key (client_id, lookback_index) serves it.
-func providerReliabilityScoredSql(clientIdExpression string) string {
+// The one hour lookback (ClientLookbacks index 1) witnesses current history.
+// The windows nest (5 minutes, one hour, 12 hours) and a lookback's score row
+// is deleted once its window holds no observation, so a provider offline for
+// over an hour keeps only its 12 hour row, which can still pass.
+const providerReliabilityWitnessLookbackIndex = 1
+
+// True when the client has a witness lookback score. The caller supplies a
+// trusted SQL expression; the score primary key serves the exact lookup.
+func providerReliabilityWitnessSql(clientIdExpression string) string {
 	return fmt.Sprintf(`EXISTS (
-		SELECT 1 FROM client_connection_reliability_score AS provider_scored
-		WHERE provider_scored.client_id = %s
-	)`, clientIdExpression)
+		SELECT 1 FROM client_connection_reliability_score AS provider_witness
+		WHERE provider_witness.client_id = %s AND provider_witness.lookback_index = %d
+	)`, clientIdExpression, providerReliabilityWitnessLookbackIndex)
 }
 
-// URL probe admission needs reliability history. The location pass commits
-// before the score pass, so admitting missing history as neutral there would
-// count and claim a new connection until its first failing scores, and start
-// its cycle hours before its real admission. The score pass seeds the cycle
-// when the first history passes. An intent provider in its qualification grace
-// is admitted without history (provider_intent_model.go): the grace is judged
-// on probes, and a new provider's 12 hour weight stays under the floor for
-// hours. Serving eligibility (providerEgressEligibilitySql) keeps missing
-// history neutral.
+// URL probe admission needs current reliability history: a witness lookback
+// score. The location pass commits before the score pass and reads the previous
+// generation. Admitting missing history as neutral there would count and claim
+// a new connection until its first failing scores, and start its cycle hours
+// before its real admission; a provider back after more than an hour offline
+// would be judged on its 12 hour row alone until the score pass rewrote its
+// hour. The first cycle opens at the first admission that sees passing history:
+// the score pass that writes it, or a later location pass or public-mode change.
+// An intent provider in its qualification grace is admitted without history
+// (provider_intent_model.go): the grace is judged on probes, and a new
+// provider's 12 hour weight stays under the floor for hours. Serving
+// eligibility (providerEgressEligibilitySql) keeps missing history neutral.
 func providerUrlProbeAdmissionSql(rollupAlias string) string {
 	return fmt.Sprintf(
 		`NOT %s.arin_risk AND ((%s AND %s) OR %s)`,
 		rollupAlias,
-		providerReliabilityScoredSql(rollupAlias+".client_id"),
+		providerReliabilityWitnessSql(rollupAlias+".client_id"),
 		providerReliabilityEligibilitySql(rollupAlias+".client_id"),
 		providerIntentProbePrioritySql(rollupAlias+".client_id"),
 	)
@@ -92,7 +101,7 @@ func providerUrlProbeAdmissionSql(rollupAlias string) string {
 
 // Public-mode changes already own a client transaction. Read only that client's
 // admission inputs; missing location still waits for the ordinary rollup, and
-// missing reliability history for the score pass.
+// missing current reliability history for the score pass.
 func providerUrlProbeClientEligibilitySql() string {
 	return `SELECT EXISTS (
 		SELECT 1 FROM network_client_location_reliability AS provider_location

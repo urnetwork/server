@@ -55,7 +55,7 @@ func testingUrlCompletedTimestampLiteral(at time.Time) string {
 func testingSeedUrlCompletedGenericEvidence(t testing.TB, now time.Time) {
 	t.Helper()
 	server.Tx(t.Context(), func(tx server.PgTx) {
-		// The fleet seed already holds lookback 0.
+		// The fleet seed already holds the witness lookback.
 		server.RaisePgResult(tx.Exec(t.Context(), `INSERT INTO client_connection_reliability_score
 			(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,
 			reliability_score,reliability_weight,min_block_number,max_block_number)
