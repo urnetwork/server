@@ -191,6 +191,12 @@ func TestRunRouterDirectH3LoopbackCompletesHandshake(t *testing.T) {
 
 	const dialTimeout = 5 * time.Second
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), dialTimeout)
+	// The listener accepts early, possibly before the server's handshake flight
+	// is sent, and serving a connection begins with Connect admission. This
+	// process has no vault or Redis, so admission refuses at once and its close
+	// can overtake the flight (APPLICATION_ERROR). The admission lock keeps the
+	// accepted connection unserved until the dial returns.
+	handler.activeLock.Lock()
 	connection, err := quic.DialAddr(
 		dialCtx,
 		packetConn.LocalAddr().String(),
@@ -206,6 +212,7 @@ func TestRunRouterDirectH3LoopbackCompletesHandshake(t *testing.T) {
 			HandshakeIdleTimeout: dialTimeout,
 		},
 	)
+	handler.activeLock.Unlock()
 	dialCancel()
 	if err != nil {
 		cancel()
