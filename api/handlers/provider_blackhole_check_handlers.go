@@ -85,7 +85,7 @@ const maxProviderBlackholeChecksPerRequest = controller.MaxProviderBlackholeChec
 // at about 150 bytes each, with room.
 const maxProviderBlackholeChecksBody = 4 * 1024 * 1024
 
-// SubmitProviderBlackholeChecks accepts a BATCH of results. controller.
+// SubmitProviderBlackholeChecks accepts a batch of results. controller.
 // SubmitProviderBlackholeChecks validates the whole batch before writing any
 // of it.
 func SubmitProviderBlackholeChecks(w http.ResponseWriter, r *http.Request) {

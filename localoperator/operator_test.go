@@ -62,18 +62,16 @@ func TestWireIdMatchesServerIdJson(t *testing.T) {
 	}
 }
 
-// Decodes body into out the way the strict operator handlers do.
-func strictDecode(t *testing.T, body any, out any) {
-	t.Helper()
+// Decodes body into out the way the strict operator handlers do. An error is
+// the handler's refusal of the body.
+func strictDecode(body any, out any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(out); err != nil {
-		t.Fatalf("the handler would refuse this body: %v", err)
-	}
+	return decoder.Decode(out)
 }
 
 func testUrlResult(measuredAt time.Time) *egresshealth.Result {
@@ -110,23 +108,26 @@ func TestEgressHealthArgsMatchTheStrictHandlerDecode(t *testing.T) {
 	// A whole-second UTC instant has the same representation before and after
 	// a JSON round trip, so reflect.DeepEqual can compare the two sides.
 	measuredAt := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
-	for name, res := range map[string]*egresshealth.Result{
-		"url_outcome":      testUrlResult(measuredAt),
-		"aggregate":        {RunId: server.NewId().String(), OkCount: 3, Total: 5, ByClass: map[egresshealth.Class]egresshealth.ClassSummary{egresshealth.ClassDns: {Ok: 1, Total: 2}, egresshealth.ClassSite: {Ok: 2, Total: 3}}, TlsAuthenticationFailure: true},
-		"nothing_measured": {},
+	for _, c := range []struct {
+		name string
+		res  *egresshealth.Result
+	}{
+		{name: "url_outcome", res: testUrlResult(measuredAt)},
+		{name: "aggregate", res: &egresshealth.Result{RunId: server.NewId().String(), OkCount: 3, Total: 5, ByClass: map[egresshealth.Class]egresshealth.ClassSummary{egresshealth.ClassDns: {Ok: 1, Total: 2}, egresshealth.ClassSite: {Ok: 2, Total: 3}}, TlsAuthenticationFailure: true}},
+		{name: "nothing_measured", res: &egresshealth.Result{}},
 	} {
-		t.Run(name, func(t *testing.T) {
-			submission := ingest.NewEgressHealthSubmission(server.NewId().String(), res)
-			var decoded controller.SubmitProviderEgressHealthArgs
-			strictDecode(t, submission, &decoded)
-			args, err := EgressHealthArgsOf(submission)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(*args, decoded) {
-				t.Fatalf("in-process arguments differ from the handler's decode:\n in-process: %+v\n    decoded: %+v", *args, decoded)
-			}
-		})
+		submission := ingest.NewEgressHealthSubmission(server.NewId().String(), c.res)
+		var decoded controller.SubmitProviderEgressHealthArgs
+		if err := strictDecode(submission, &decoded); err != nil {
+			t.Fatalf("%s: the handler would refuse this body: %v", c.name, err)
+		}
+		args, err := EgressHealthArgsOf(submission)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if !reflect.DeepEqual(*args, decoded) {
+			t.Errorf("%s: in-process arguments differ from the handler's decode:\n in-process: %+v\n    decoded: %+v", c.name, *args, decoded)
+		}
 	}
 }
 
@@ -143,7 +144,9 @@ func TestBlackholeChecksArgsMatchTheStrictHandlerDecode(t *testing.T) {
 		t.Fatal(err)
 	}
 	var decoded controller.SubmitProviderBlackholeChecksArgs
-	strictDecode(t, submission, &decoded)
+	if err := strictDecode(submission, &decoded); err != nil {
+		t.Fatalf("the handler would refuse this body: %v", err)
+	}
 	args, err := BlackholeChecksArgsOf(submission)
 	if err != nil {
 		t.Fatal(err)
@@ -226,22 +229,21 @@ func TestDueMapsOutcomesLikeTheOperatorApi(t *testing.T) {
 		t.Fatal("maintenance outcome missing")
 	}
 
-	for name, test := range map[string]struct {
+	for _, c := range []struct {
+		name      string
 		panicWith any
 		status    int
 	}{
-		"done_error":    {fmt.Errorf("claim: %w", server.DbContextDoneError), http.StatusServiceUnavailable},
-		"model_failure": {errors.New("synthetic model failure"), http.StatusInternalServerError},
+		{name: "done_error", panicWith: fmt.Errorf("claim: %w", server.DbContextDoneError), status: http.StatusServiceUnavailable},
+		{name: "model_failure", panicWith: errors.New("synthetic model failure"), status: http.StatusInternalServerError},
 	} {
-		t.Run(name, func(t *testing.T) {
-			failing := testOperator(func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
-				panic(test.panicWith)
-			}, timing)
-			_, err := failing.Due(context.Background(), 5)
-			if !errors.Is(err, ingest.ErrRejected) || !strings.Contains(err.Error(), fmt.Sprintf("status %d", test.status)) {
-				t.Fatalf("a panicking claim is not the router's %d: %v", test.status, err)
-			}
-		})
+		failing := testOperator(func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
+			panic(c.panicWith)
+		}, timing)
+		_, err := failing.Due(context.Background(), 5)
+		if !errors.Is(err, ingest.ErrRejected) || !strings.Contains(err.Error(), fmt.Sprintf("status %d", c.status)) {
+			t.Errorf("%s: a panicking claim is not the router's %d: %v", c.name, c.status, err)
+		}
 	}
 	if testutil.ToFloat64(timing.Requests.WithLabelValues("panic")) != 2 {
 		t.Fatal("panicking claims were not observed")

@@ -69,7 +69,7 @@ const (
 // is ~16,700 probes/hour, and a 500-per-request ceiling caps the whole fleet at
 // 500/hour no matter how much prober capacity exists behind it.
 //
-// OPTIONAL, exactly like provider_bandwidth.yml and pro.yml: a deployment
+// Optional, exactly like provider_bandwidth.yml and pro.yml: a deployment
 // without the file must not fail to boot, it falls back to the conservative
 // default. Each process reads it once.
 var ProviderEgressDueLimitCeiling = sync.OnceValue(ReadMaxProviderEgressDueLimit)
@@ -254,7 +254,7 @@ type SubmitProviderBlackholeCheckArgs struct {
 	CheckedAt   time.Time `json:"checked_at"`
 }
 
-// A BATCH of results.
+// A batch of results.
 //
 // Batched, unlike the egress-location submission, because the sweep produces
 // hundreds of one-bit answers per pass and a request each would spend more on
@@ -263,7 +263,7 @@ type SubmitProviderBlackholeChecksArgs struct {
 	Checks []SubmitProviderBlackholeCheckArgs `json:"checks"`
 }
 
-// Validates the WHOLE batch before writing any of it, then records it. A
+// Validates the whole batch before writing any of it, then records it. A
 // partial write would leave the caller unable to tell which results landed,
 // and it reports fire-and-forget.
 func SubmitProviderBlackholeChecks(ctx context.Context, args *SubmitProviderBlackholeChecksArgs) error {
@@ -320,7 +320,7 @@ func SubmitProviderBlackholeChecks(ctx context.Context, args *SubmitProviderBlac
 // SubmitProviderEgressHealth for why this is checked rather than tolerated.
 const providerEgressHealthReputationClass = "reputation"
 
-// One class's ok/total tally over the destinations the run SAMPLED.
+// One class's ok/total tally over the destinations the run sampled.
 type ProviderEgressHealthClassResult struct {
 	OK    int `json:"ok"`
 	Total int `json:"total"`
@@ -373,7 +373,7 @@ type SubmitProviderEgressHealthArgs struct {
 // # Everything is validated before anything is stored
 //
 // The row is an upsert keyed on client_id, so a bad submission does not sit
-// beside the good one waiting to be noticed -- it DESTROYS the last good
+// beside the good one waiting to be noticed -- it destroys the last good
 // measurement for that provider. That is why every rule below is refused
 // before the store, and why none of them is a stored-then-flagged warning.
 //
@@ -456,7 +456,7 @@ func SubmitProviderEgressHealth(ctx context.Context, args *SubmitProviderEgressH
 		sumOK += tally.OK
 		sumTotal += tally.Total
 	}
-	// exact equality, not <=: the classes ARE the score. A total that does not
+	// exact equality, not <=: the classes are the score. A total that does not
 	// decompose into its classes means the two halves of the payload were
 	// produced by different runs, or that something not in class_results was
 	// counted into the score -- which is precisely how reputation would get in.
@@ -534,7 +534,7 @@ type SubmitProviderBandwidthArgs struct {
 // one would overwrite a real figure with a meaningless one -- so those are
 // refused before anything is written.
 //
-// The source is validated against the known ACTIVE set rather than merely
+// The source is validated against the known active set rather than merely
 // stored. An unrecognised source creates a row nothing will ever read or
 // replace, and "passive" is refused specifically: that figure is derived
 // server-side from bytes the provider has already been paid to carry, which is

@@ -143,7 +143,7 @@ const (
 	// ask for one.
 	defaultProviderEgressDueLimit = controller.DefaultProviderEgressDueLimit
 	// defaultMaxProviderEgressDueLimit bounds the batch size regardless of what
-	// the caller asks for. This is the FALLBACK; the effective value comes from
+	// the caller asks for. This is the fallback; the effective value comes from
 	// provider_egress_due.yml -- see controller.ProviderEgressDueLimitCeiling.
 	defaultMaxProviderEgressDueLimit = controller.DefaultMaxProviderEgressDueLimit
 )
