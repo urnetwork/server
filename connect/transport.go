@@ -566,10 +566,11 @@ type ConnectHandlerSettings struct {
 	// the sum of it. Zero grants every increase, which is what quic-go does
 	// with no callback at all.
 	H3MaxTotalConnectionReceiveWindow uint64
-	// H3MaxUnvalidatedHandshakeCount bounds the handshakes the H3 listeners
-	// hold at once for source addresses not yet validated, the only ones a
-	// spoofed source can start. Past it a new source must first answer a
-	// Retry, which costs it one round trip. Zero leaves them unbounded.
+	// H3MaxUnvalidatedHandshakeCount bounds the handshakes this handler's QUIC
+	// listeners, its own and an external front's, hold at once for source
+	// addresses not yet validated, the only ones a spoofed source can start.
+	// Past it a new source must first answer a Retry, which costs it one round
+	// trip. Zero leaves them unbounded.
 	H3MaxUnvalidatedHandshakeCount int
 	ConnectionAnnounceTimeout      time.Duration
 	// per-connection latency/speed test schedule.
@@ -736,7 +737,7 @@ func (self *connectQuicWindowBudget) grantedByteCount() uint64 {
 	return self.total
 }
 
-// connectQuicHandshakeLimit caps the handshakes a handler's H3 listeners hold
+// connectQuicHandshakeLimit caps the handshakes a handler's QUIC listeners hold
 // at once for source addresses that are not validated.
 //
 // quic-go creates a connection for every Initial and keeps it until the
@@ -768,9 +769,9 @@ func (self *connectQuicHandshakeLimit) verifySourceAddress(net.Addr) bool {
 }
 
 // quic.Transport.ConnContext. quic-go cancels ctx when the connection closes.
-// The returned context carries the release releaseConnectQuicHandshake runs
-// once the handshake completes; the close runs it otherwise, and only the
-// first of the two counts.
+// The returned context carries the release AwaitQuicHandshake runs once the
+// handshake completes; the close runs it otherwise, and only the first of the
+// two counts.
 func (self *connectQuicHandshakeLimit) connContext(
 	ctx context.Context,
 	info *quic.ClientInfo,
@@ -790,12 +791,26 @@ func (self *connectQuicHandshakeLimit) connContext(
 
 type connectQuicHandshakeReleaseKey struct{}
 
-// Ends the count of a connection whose handshake completed. A connection the
-// limit did not count carries no release.
-func releaseConnectQuicHandshake(conn *quic.Conn) {
+// AwaitQuicHandshake returns once conn's handshake completes, or ctx's error or
+// the connection's close cause when either comes first. A listener accepts a
+// connection once its ClientHello is processed, when its address is only what
+// the Initial claimed, and a spoofed source never receives the server's flight
+// to complete the handshake. Every front calls this before it charges any limit
+// to the source's address. It also ends the connection's count under the
+// unvalidated-handshake limit; a connection the limit did not count carries no
+// release.
+func AwaitQuicHandshake(ctx context.Context, conn *quic.Conn) error {
+	select {
+	case <-conn.HandshakeComplete():
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-conn.Context().Done():
+		return context.Cause(conn.Context())
+	}
 	if release, ok := conn.Context().Value(connectQuicHandshakeReleaseKey{}).(func()); ok {
 		release()
 	}
+	return nil
 }
 
 // newConnectQuicConfig keeps the server half of H3 aligned with the client's
@@ -852,8 +867,8 @@ type ConnectHandler struct {
 	// One aggregate stands behind every front that terminates QUIC for this
 	// handler, including an external listener using NewQuicConfig.
 	quicWindowBudget *connectQuicWindowBudget
-	// One count of unvalidated handshakes stands behind every H3 listener of
-	// this handler.
+	// So does one count of unvalidated handshakes, for an external listener
+	// using NewQuicTransport.
 	quicHandshakeLimit *connectQuicHandshakeLimit
 
 	listenerStateLock sync.RWMutex
@@ -2249,15 +2264,7 @@ func (self *ConnectHandler) listenQuic(
 		return &connectListenerError{stage: "transform", err: err}
 	}
 	defer packetConn.Close()
-	quicTransport := &quic.Transport{
-		Conn: packetConn,
-		// createdConn: true,
-		// isSingleUse: true,
-	}
-	if limit := self.quicHandshakeLimit; limit != nil {
-		quicTransport.VerifySourceAddress = limit.verifySourceAddress
-		quicTransport.ConnContext = limit.connContext
-	}
+	quicTransport := self.NewQuicTransport(packetConn)
 	defer quicTransport.Close()
 	listener, err := quicTransport.ListenEarly(tlsConfig, quicConfig)
 	if err != nil {
@@ -2333,6 +2340,18 @@ func (self *ConnectHandler) TransportTls() *server.TransportTls {
 // handler must not build a second, drifting one.
 func (self *ConnectHandler) NewQuicConfig() *quic.Config {
 	return newConnectQuicConfig(self.settings, self.quicWindowBudget)
+}
+
+// NewQuicTransport returns a QUIC transport on conn whose handshakes count
+// against this handler's unvalidated-handshake limit. An external listener for
+// the same handler must not build an unbounded one.
+func (self *ConnectHandler) NewQuicTransport(conn net.PacketConn) *quic.Transport {
+	transport := &quic.Transport{Conn: conn}
+	if limit := self.quicHandshakeLimit; limit != nil {
+		transport.VerifySourceAddress = limit.verifySourceAddress
+		transport.ConnContext = limit.connContext
+	}
+	return transport
 }
 
 // Reads one pooled H3 authentication frame and lends its exact wire bytes to
@@ -2475,18 +2494,12 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		return fmt.Errorf("Only IPv4 is supported.")
 	}
 
-	// The listeners accept a connection once its ClientHello is processed, when
-	// its address is only what the Initial claimed. A spoofed source never
-	// receives the server's flight, so it never completes the handshake, and
-	// admission charges the source's counters only after the handshake proves
+	// Admission charges the source's counters only after the handshake proves
 	// the source receives packets at its address. Data the client sent in
 	// 0-RTT waits in the connection's receive window until then.
-	select {
-	case <-conn.HandshakeComplete():
-	case <-authCtx.Done():
-		return authCtx.Err()
+	if err := AwaitQuicHandshake(authCtx, conn); err != nil {
+		return err
 	}
-	releaseConnectQuicHandshake(conn)
 
 	rateLimit, err := NewConnectionRateLimit(
 		authCtx,
