@@ -9,9 +9,9 @@ import (
 // Replaces this process's config version for one test.
 func withTestConfigVersion(t testing.TB, version string) {
 	t.Helper()
-	previous := providerEgressProbeConfigVersion
-	providerEgressProbeConfigVersion = func() string { return version }
-	t.Cleanup(func() { providerEgressProbeConfigVersion = previous })
+	previous := currentConfigGeneration
+	currentConfigGeneration = func() string { return version }
+	t.Cleanup(func() { currentConfigGeneration = previous })
 }
 
 // Release order first, then build metadata within a release, as warp picks
@@ -43,7 +43,7 @@ func TestProviderEgressProbeGenerationOrdersLikeWarp(t *testing.T) {
 		{candidate: "2026.10.12-synthetic+1000000000", reference: "2026.10.13-synthetic-1000000100", want: false},
 	}
 	for _, c := range cases {
-		if got := providerEgressProbeGenerationNewer(c.candidate, c.reference); got != c.want {
+		if got := configGenerationNewer(c.candidate, c.reference); got != c.want {
 			t.Errorf("newer(%q, %q) = %t, want %t", c.candidate, c.reference, got, c.want)
 		}
 	}
@@ -61,7 +61,7 @@ func TestProviderEgressProbeNewerForeignGeometry(t *testing.T) {
 	newer := testUrlGeometrySettings(8, 64)
 	stamp := func(settings providerEgressProbeSettings, shardIndex int, version string) *ProviderEgressProbeArgs {
 		args := providerEgressProbeArgs(settings, shardIndex)
-		args.GeometryGeneration, args.GeometryWrittenAt = version, time.Date(2026, 10, 13, 19, 52, 0, 0, time.UTC)
+		args.ConfigStamp = ConfigStamp{ConfigGeneration: version, ConfigWrittenAt: time.Date(2026, 10, 13, 19, 52, 0, 0, time.UTC)}
 		return args
 	}
 	cases := []struct {
@@ -100,9 +100,9 @@ func TestProviderEgressProbeStampLiveFollowsTheNewerArguments(t *testing.T) {
 		settings := testUrlGeometrySettings(8, 64)
 		settings.MaxTimeSeconds = maxTimeSeconds
 		args := providerEgressProbeArgs(settings, 3)
-		args.GeometryGeneration = version
+		args.ConfigGeneration = version
 		if 0 <= age {
-			args.GeometryWrittenAt = now.Add(-age)
+			args.ConfigWrittenAt = now.Add(-age)
 		}
 		return args
 	}
@@ -140,11 +140,11 @@ func TestProviderEgressProbeStampIsNotPassGeometry(t *testing.T) {
 	args := providerEgressProbeArgs(settings, 3)
 	now := time.Date(2026, 10, 13, 20, 0, 0, 0, time.FixedZone("synthetic", -5*60*60))
 	stamped := stampProviderEgressProbeArgs(args, now)
-	if args.GeometryGeneration != "" || !args.GeometryWrittenAt.IsZero() {
+	if args.ConfigGeneration != "" || !args.ConfigWrittenAt.IsZero() {
 		t.Fatal("stamping mutated the source snapshot")
 	}
-	if stamped.GeometryGeneration != testNewerConfigVersion || !stamped.GeometryWrittenAt.Equal(now) || stamped.GeometryWrittenAt.Location() != time.UTC {
-		t.Fatalf("stamp = %q at %s", stamped.GeometryGeneration, stamped.GeometryWrittenAt)
+	if stamped.ConfigGeneration != testNewerConfigVersion || !stamped.ConfigWrittenAt.Equal(now) || stamped.ConfigWrittenAt.Location() != time.UTC {
+		t.Fatalf("stamp = %q at %s", stamped.ConfigGeneration, stamped.ConfigWrittenAt)
 	}
 	if !providerEgressProbeArgsMatchSettings(stamped, settings) {
 		t.Fatal("a stamped snapshot no longer matches its own settings")

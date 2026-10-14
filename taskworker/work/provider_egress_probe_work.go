@@ -84,11 +84,10 @@ type ProviderEgressProbeArgs struct {
 	LoadAttempts                 int `json:"load_attempts"`
 	LoadRetryMeanIntervalSeconds int `json:"load_retry_mean_interval_seconds"`
 	TunnelRecreateAttempts       int `json:"tunnel_recreate_attempts"`
-	// The config version that wrote this snapshot, and when. Neither is pass
-	// geometry; they order snapshots written by taskworkers on different
-	// configs. See provider_url_probe_geometry.go.
-	GeometryGeneration string    `json:"geometry_generation,omitempty"`
-	GeometryWrittenAt  time.Time `json:"geometry_written_at,omitzero"`
+	// The config version that wrote this snapshot, and when. It is not pass
+	// geometry; it orders snapshots written by taskworkers on different
+	// configs (provider_url_probe_geometry.go).
+	ConfigStamp
 	// The dark and batch-guard rules, snapshotted with the rest; the api
 	// reads the same keys from the same file at ingest.
 	model.ProviderEgressRules

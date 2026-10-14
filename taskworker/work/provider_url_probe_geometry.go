@@ -1,23 +1,16 @@
-// Taskworkers run different config versions during a rollout, and a block
-// started before its host received a new config keeps the older one until its
-// next deploy. Each shard's arguments name the config version that wrote them
-// and when. An instance whose config is older than a newer, live geometry
-// hands that shard back unchanged, instead of retiring a shard it does not
-// know or rewriting the arguments to its own older geometry. It also leaves
-// the shard set to that geometry: its startup reap does not disable it, and
-// neither its startup schedule nor its post-steps create shards. Versions are
-// ordered as warp selects the latest config: release, then build metadata. A
-// process without a config version orders nothing and keeps the previous
-// behavior.
+// A URL probe shard's arguments carry the config stamp of the taskworker that
+// wrote them (config_generation.go). An instance whose config is older than a
+// newer, live geometry hands that shard back unchanged, instead of retiring a
+// shard it does not know or rewriting the arguments to its own older
+// geometry. It also leaves the shard set to that geometry: its startup reap
+// does not disable it, and neither its startup schedule nor its post-steps
+// create shards.
 package work
 
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"time"
-
-	"github.com/coreos/go-semver/semver"
 
 	"github.com/urnetwork/server"
 )
@@ -27,41 +20,6 @@ const (
 	providerEgressProbeNewerGenerationMinTimeout = 30 * time.Minute
 	providerEgressProbeNewerGenerationMaxTimeout = 24 * time.Hour
 )
-
-// The config version of this process. It is read directly rather than through
-// server.ConfigVersion, which falls back to the service version: only config
-// versions order geometries.
-var providerEgressProbeConfigVersion = func() string {
-	return os.Getenv("WARP_CONFIG_VERSION")
-}
-
-// Whether candidate is a strictly newer config version than reference. An
-// empty or unparsable version on either side has no order. Within a release
-// only build metadata orders versions, as in warp. A docker tag form such as
-// 2026.10.13-host-1071053750 carries the build code in the prerelease
-// instead, so a release without build metadata on either side has no order
-// rather than losing to any version that has it.
-func providerEgressProbeGenerationNewer(candidate string, reference string) bool {
-	if candidate == "" || reference == "" {
-		return false
-	}
-	candidateVersion, err := semver.NewVersion(candidate)
-	if err != nil {
-		return false
-	}
-	referenceVersion, err := semver.NewVersion(reference)
-	if err != nil {
-		return false
-	}
-	if candidateVersion.Major == referenceVersion.Major && candidateVersion.Minor == referenceVersion.Minor &&
-		candidateVersion.Patch == referenceVersion.Patch {
-		if candidateVersion.Metadata == "" || referenceVersion.Metadata == "" {
-			return false
-		}
-		return referenceVersion.Metadata < candidateVersion.Metadata
-	}
-	return referenceVersion.LessThan(*candidateVersion)
-}
 
 // How long after its last write a newer config's geometry still counts as
 // live, from that config's own arguments. Its instances restamp a shard at the
@@ -83,15 +41,13 @@ func providerEgressProbeNewerGenerationTimeout(args *ProviderEgressProbeArgs) ti
 // Whether a snapshot was written by a newer config than this process's within
 // that config's timeout.
 func providerEgressProbeStampLive(args *ProviderEgressProbeArgs, now time.Time) bool {
-	return args != nil && providerEgressProbeGenerationNewer(args.GeometryGeneration, providerEgressProbeConfigVersion()) &&
-		!args.GeometryWrittenAt.IsZero() && now.Sub(args.GeometryWrittenAt) < providerEgressProbeNewerGenerationTimeout(args)
+	return args != nil && args.ConfigStamp.newerWithin(now, providerEgressProbeNewerGenerationTimeout(args))
 }
 
 // A copy of args written by this process at now.
 func stampProviderEgressProbeArgs(args *ProviderEgressProbeArgs, now time.Time) *ProviderEgressProbeArgs {
 	stamped := *args
-	stamped.GeometryGeneration = providerEgressProbeConfigVersion()
-	stamped.GeometryWrittenAt = now.UTC()
+	stamped.ConfigStamp = newConfigStamp(now)
 	return &stamped
 }
 
@@ -100,7 +56,7 @@ func stampProviderEgressProbeArgs(args *ProviderEgressProbeArgs, now time.Time) 
 // disables probing. A newer snapshot of this instance's own geometry still
 // runs here.
 func providerEgressProbeNewerForeignGeometry(args *ProviderEgressProbeArgs, settings providerEgressProbeSettings) bool {
-	if args == nil || !providerEgressProbeGenerationNewer(args.GeometryGeneration, providerEgressProbeConfigVersion()) {
+	if args == nil || !configGenerationNewer(args.ConfigGeneration, currentConfigGeneration()) {
 		return false
 	}
 	return !settings.Enabled || args.ShardIndex < 0 || settings.ShardCount <= args.ShardIndex ||

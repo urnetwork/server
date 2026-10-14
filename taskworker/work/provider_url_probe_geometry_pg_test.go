@@ -48,8 +48,8 @@ func testStoredArgsFields(t testing.TB, args *ProviderEgressProbeArgs) map[strin
 func testStampedGeometryArgs(t testing.TB, settings providerEgressProbeSettings, shardIndex int, version string, writtenAt time.Time) *ProviderEgressProbeArgs {
 	t.Helper()
 	fields := testStoredArgsFields(t, providerEgressProbeArgs(settings, shardIndex))
-	fields["geometry_generation"] = version
-	fields["geometry_written_at"] = writtenAt.UTC().Format(time.RFC3339Nano)
+	fields["config_generation"] = version
+	fields["config_written_at"] = writtenAt.UTC().Format(time.RFC3339Nano)
 	data, err := json.Marshal(fields)
 	if err != nil {
 		t.Fatal(err)
@@ -379,14 +379,14 @@ func TestProviderEgressProbeNewerConfigConvergesOlderShards(t *testing.T) {
 			t.Fatalf("shard 2's post-step did not replace its claimed row: %+v", next)
 		}
 		wantArgs := testStoredArgsFields(t, providerEgressProbeArgs(newest, 2))
-		wantArgs["geometry_generation"] = testNewerConfigVersion
-		wantArgs["geometry_written_at"] = next.args["geometry_written_at"]
-		writtenAtText, _ := next.args["geometry_written_at"].(string)
+		wantArgs["config_generation"] = testNewerConfigVersion
+		wantArgs["config_written_at"] = next.args["config_written_at"]
+		writtenAtText, _ := next.args["config_written_at"].(string)
 		writtenAt, err := time.Parse(time.RFC3339Nano, writtenAtText)
 		if err != nil || !reflect.DeepEqual(next.args, wantArgs) ||
 			writtenAt.Before(before.Add(-time.Second)) || after.Add(time.Second).Before(writtenAt) {
 			t.Fatalf("shard 2's post-step did not converge it to the newest geometry: shard_count=%v url_probe=%v generation=%v",
-				next.args["shard_count"], next.args["url_probe"], next.args["geometry_generation"])
+				next.args["shard_count"], next.args["url_probe"], next.args["config_generation"])
 		}
 
 		// Only shard 7 is due; the recreation made the newest geometry's other shards due at once.
@@ -496,9 +496,9 @@ func TestProviderEgressProbePassRecreatesDeletedShard(t *testing.T) {
 			t.Fatal("a pass of shard 0 did not recreate deleted shard 5")
 		}
 		wantArgs := testStoredArgsFields(t, providerEgressProbeArgs(settings, 5))
-		wantArgs["geometry_generation"] = testNewerConfigVersion
-		wantArgs["geometry_written_at"] = recreated.args["geometry_written_at"]
-		writtenAtText, _ := recreated.args["geometry_written_at"].(string)
+		wantArgs["config_generation"] = testNewerConfigVersion
+		wantArgs["config_written_at"] = recreated.args["config_written_at"]
+		writtenAtText, _ := recreated.args["config_written_at"].(string)
 		writtenAt, err := time.Parse(time.RFC3339Nano, writtenAtText)
 		if err != nil || !reflect.DeepEqual(recreated.args, wantArgs) ||
 			writtenAt.Before(before.Add(-time.Second)) || after.Add(time.Second).Before(writtenAt) {

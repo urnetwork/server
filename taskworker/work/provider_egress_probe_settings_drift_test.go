@@ -225,10 +225,10 @@ func TestProviderEgressProbeSettingsDriftFinalizesCurrentSuccessor(t *testing.T)
 			t.Fatal(err)
 		}
 		// The successor names when it was written; the rest is the geometry.
-		if next.GeometryWrittenAt.Before(before.Add(-time.Second)) || server.NowUtc().Add(time.Second).Before(next.GeometryWrittenAt) {
-			t.Fatalf("successor write time %s is not this post-step", next.GeometryWrittenAt)
+		if next.ConfigWrittenAt.Before(before.Add(-time.Second)) || server.NowUtc().Add(time.Second).Before(next.ConfigWrittenAt) {
+			t.Fatalf("successor write time %s is not this post-step", next.ConfigWrittenAt)
 		}
-		next.GeometryGeneration, next.GeometryWrittenAt = "", time.Time{}
+		next.ConfigStamp = ConfigStamp{}
 		if rows != 1 || !reflect.DeepEqual(&next, providerEgressProbeArgs(settings, 2)) || maxTime != settings.MaxTimeSeconds {
 			t.Fatalf("successor wrong: rows=%d concurrency=%d max_time=%d", rows, next.Blackhole.Concurrency, maxTime)
 		}
