@@ -315,12 +315,15 @@ func TestVerifySimulationAssignmentFilterBlocksSeedPendingAndFutureAssignments(t
 		if _, err := Verify(testVerifyExtendArgs(tb, validatorID, vpk, vpkKey, assign), testVerifySession(ctx, "203.0.113.20")); err == nil || !strings.Contains(err.Error(), "validator-local simulated route unavailable") {
 			tb.Fatalf("already pending filtered hop was accepted: %v", err)
 		}
-		if _, err := Verify(testVerifySeedArgs(tb, validatorID, vpk, vpkKey, connect.VerifyMMin), testVerifySession(ctx, "203.0.113.20")); err == nil || !strings.Contains(err.Error(), "validator-local simulated route unavailable") {
+		// each later seed is a new request: distinct M values keep it from
+		// replaying the first seed's original response, which an identical
+		// signed seed gets whatever its source, before the filter is read
+		if _, err := Verify(testVerifySeedArgs(tb, validatorID, vpk, vpkKey, connect.VerifyMMin+1), testVerifySession(ctx, "203.0.113.20")); err == nil || !strings.Contains(err.Error(), "validator-local simulated route unavailable") {
 			tb.Fatalf("filtered seed hop was accepted: %v", err)
 		}
 
 		alternate := testVerifyProvider(ctx, netip.MustParseAddr("203.0.113.30"), settings)
-		result, err = Verify(testVerifySeedArgs(tb, validatorID, vpk, vpkKey, connect.VerifyMMin), testVerifySession(ctx, "203.0.113.10"))
+		result, err = Verify(testVerifySeedArgs(tb, validatorID, vpk, vpkKey, connect.VerifyMMin+2), testVerifySession(ctx, "203.0.113.10"))
 		if err != nil {
 			tb.Fatal(err)
 		}
