@@ -167,8 +167,11 @@ measured). The row has two switches. A published country is exempt when fewer
 than `online_success_country_floor` of its measured Online providers (common
 gate passes with current evidence) have a success, because there the probe
 itself fails, not the providers. `online_requires_url_success: false` in
-provider.yml turns the row off. Explicit client ids and `force_minimum` keep
-only the common gates, as they do for the ratio row.
+provider.yml turns the row off. Explicit client ids, and `force_minimum` with
+`rank_mode` quality or speed, keep only the common gates, as they do for the
+ratio row. `force_minimum` with `rank_mode` online changes nothing, so that
+answer is the Online pool without the providers the row excludes; no current
+caller sends it.
 
 The probe records URL successes, errors, and security exceptions. There is no
 separate blackhole definition or cheap-blackhole admission gate. The indexer
@@ -818,12 +821,17 @@ gate matrix.
 - **Probing is unchanged.** `providerUrlProbeAdmissionSql`, the rolling quota,
   the census `N`, the hard-exclusion set and its Redis publication do not read
   the row.
-- **Request time.** Explicit client ids and `force_minimum` keep only the
-  common gates (reliability, ARIN risk, probe security). This follows the
-  convention above that security and risk rules apply there and
-  bucket-membership rules do not; the ratio row works the same way.
-  `force_minimum` is also the operator and egress-prober census of every
-  provider that can accept a contract.
+- **Request time.** Explicit client ids, and `force_minimum` with `rank_mode`
+  quality or speed, keep only the common gates (reliability, ARIN risk, probe
+  security). This follows the convention above that security and risk rules
+  apply there and bucket-membership rules do not; the ratio row works the same
+  way. `force_minimum` is also the operator and egress-prober census of every
+  provider that can accept a contract. The exception: `force_minimum` with
+  `rank_mode` online changes nothing, since Online has no minimums to force,
+  so that answer is the Online pool and leaves out the providers the row
+  excludes. No current caller sends it (the sdk's `rank_mode` is quality or
+  speed); the 2026-10-13 commit message's "explicit client ids and
+  force_minimum are unchanged" holds for quality and speed only.
 - **Country guard.** A published country is exempt when fewer than
   `online_success_country_floor` of its measured Online providers have a
   success. Measured Online providers are common-gate passes with current

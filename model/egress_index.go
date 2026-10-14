@@ -25,11 +25,12 @@ import (
 // measured URL success within eight hours, unless the provider has too little
 // history to show one or its country is one where the probe itself fails (the
 // URL-success rule, egress_online_success.go). That gate is bucket membership
-// only: probes, explicit client ids and force_minimum still reach the provider.
-// Online includes every provider past these gates; quality and speed
-// additionally require a passing ratio of accepted URL outcomes within eight
-// hours. Only quality excludes ARIN non-quality entries. Performance and the
-// success ratio order admitted providers, never add gates.
+// only: probes, explicit client ids and force_minimum quality or speed answers
+// still reach the provider. A force_minimum online answer is the Online pool,
+// which does not. Online includes every provider past these gates; quality and
+// speed additionally require a passing ratio of accepted URL outcomes within
+// eight hours. Only quality excludes ARIN non-quality entries. Performance and
+// the success ratio order admitted providers, never add gates.
 
 // The weights of the index and the bounds of its evidence, with the other
 // tunables of the egress rules. The `egress_index` block of provider.yml,
@@ -410,8 +411,10 @@ func providerUrlProbeSuccessWeight(counts ProviderEgressHealthCounts) float64 {
 
 // Common gate failures exclude every bucket. No success, the URL-success rule,
 // also excludes every bucket but is no common gate: probes, explicit client
-// ids and force_minimum keep the provider. Health/unprobed and ARIN
-// non-quality explain missing native membership while preserving online supply.
+// ids and force_minimum quality or speed answers keep the provider (a
+// force_minimum online answer is the Online pool, which does not).
+// Health/unprobed and ARIN non-quality explain missing native membership while
+// preserving online supply.
 // Legacy blackhole/country reason labels remain for metric compatibility only.
 const (
 	ProviderExcludedBlackhole      = "blackhole"

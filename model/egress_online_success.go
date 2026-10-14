@@ -6,8 +6,11 @@
 // providers (the country guard). The rule is bucket membership only. Probe
 // admission, the rolling quota and its census never read it, so an excluded
 // provider keeps being measured and its first success restores it on the next
-// pass. Explicit client ids and force_minimum keep only the common hard
-// exclusions, as they do for the URL ratio.
+// pass. Explicit client ids, and force_minimum with rank_mode quality or
+// speed, keep only the common hard exclusions, as they do for the URL ratio.
+// force_minimum with rank_mode online changes nothing, so that answer is the
+// Online pool, without the providers the rule excludes; no current caller
+// sends it.
 //
 // Each fleet pass (the score export, the location counts, the dashboard
 // counts) computes the country guard over its own population from the

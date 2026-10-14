@@ -37,8 +37,9 @@ func assertOnlineSuccessTestAnswer(t testing.TB, where string, providers []*Find
 // A provider measured repeatedly without one success, in a country where the
 // probe works, is in no non-forced sample, no Online, Quality or Speed answer
 // and no count. Unprobed and warming providers stay online. The rule is no
-// hard exclusion: force_minimum and an explicit client id still reach the
-// provider, and its URL probes continue.
+// hard exclusion: force_minimum with quality or speed and an explicit client
+// id still reach the provider, and its URL probes continue. force_minimum
+// with online changes nothing, so that answer leaves the provider out.
 func TestOnlineUrlSuccessRuleLeavesEveryBucketAndCount(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -83,11 +84,16 @@ func TestOnlineUrlSuccessRuleLeavesEveryBucketAndCount(t *testing.T) {
 		}
 		connect.AssertEqual(t, onlineCount, int64(4))
 
-		// force_minimum and the explicit client id keep only the common gates
+		// force_minimum with quality or speed, and the explicit client id,
+		// keep only the common gates
 		forced := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeSpeed, 10, true, server.NewId())
 		if !slices.Contains(egressTestIds(forced), dead.clientId) {
 			t.Error("force_minimum lost the provider the rule excludes")
 		}
+		// force_minimum with online changes nothing: the answer is the Online
+		// pool, which the rule's exclusion is not in
+		forcedOnline := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeOnline, 10, true, server.NewId())
+		assertOnlineSuccessTestAnswer(t, "forced online", forcedOnline, kept, []*egressTestProvider{dead})
 		named := egressTestFind(ctx, t, []*ProviderSpec{{ClientId: &dead.clientId}}, RankModeSpeed, 1, false, server.NewId())
 		connect.AssertEqual(t, egressTestIds(named), []server.Id{dead.clientId})
 		// and the probe still claims it, the only way it can come back

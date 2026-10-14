@@ -4907,7 +4907,9 @@ type FindProviders2Args struct {
 	ExcludeDestinations [][]server.Id   `json:"exclude_destinations"`
 	// "quality" (the default when empty), "speed" or "online". force_minimum
 	// is accepted with "online" and changes nothing: the online bucket has
-	// no minimums to force.
+	// no minimums to force. Unlike a forced quality or speed answer, which
+	// keeps only the common gates, a forced online answer therefore leaves out
+	// the providers the URL-success rule excludes.
 	RankMode     RankMode `json:"rank_mode"`
 	ForceMinimum bool     `json:"force_minimum"`
 	// IpFamily filters providers by proven address family, in the connect
