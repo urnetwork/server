@@ -2214,7 +2214,7 @@
             "id": 59,
             "type": "timeseries",
             "title": "connection worker writes retried / s",
-            "description": "Writes of live connection announcement workers that failed: the measurement publisher's latency and speed write to PostgreSQL. The write is retried after the sync interval, doubling with each further consecutive failure up to its bound, and the publisher and the transport keep going; a retry writes the latest cumulative snapshot. Before this, a failed write ended the publisher for the rest of the connection.",
+            "description": "Writes of live connection announcement workers that failed: the measurement publisher's latency and speed write to PostgreSQL, and the verify egress lease write to Redis. The write is retried after the sync interval, doubling with each further consecutive failure up to its bound (a lease write never later than the regular refresh), and the publisher, the lease refresh and the transport keep going; a measurement retry writes the latest cumulative snapshot. Before this, a failed measurement write ended the publisher for the rest of the connection, a failed lease refresh ended the refresh, and a failed first lease write tore down the transport.",
             "gridPos": {
                 "h": 8,
                 "w": 12,

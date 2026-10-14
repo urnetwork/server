@@ -54,7 +54,7 @@ var connectionSyncReadFailuresCounter = prometheus.NewCounter(
 )
 
 // The announcement workers' writes, by operation: the measurement publisher's
-// database write.
+// database write and the verify egress lease refresh in Redis.
 var connectionWorkerFailuresCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -66,7 +66,8 @@ var connectionWorkerFailuresCounter = prometheus.NewCounterVec(
 )
 
 const (
-	connectionWorkerOperationMeasurementWrite = "measurement_write"
+	connectionWorkerOperationMeasurementWrite  = "measurement_write"
+	connectionWorkerOperationVerifyEgressLease = "verify_egress_lease"
 )
 
 func init() {
@@ -76,6 +77,7 @@ func init() {
 	prometheus.MustRegister(connectionWorkerFailuresCounter)
 	for _, operation := range []string{
 		connectionWorkerOperationMeasurementWrite,
+		connectionWorkerOperationVerifyEgressLease,
 	} {
 		connectionWorkerFailuresCounter.WithLabelValues(operation)
 	}
@@ -605,15 +607,38 @@ func (self *ConnectionAnnounce) run() {
 	}
 
 	if verifyEgressOk {
-		model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
+		// A lease write that fails, the first one included, is retried with
+		// the bounded backoff, never later than the regular refresh, and never
+		// ends the transport: at worst the lease lapses after EgressTtl, which
+		// withdraws the address from attribution, as a closed connection does.
+		feedFailureCount := 0
+		feed := func() {
+			if feedErr := self.recoverLiveCall(func() {
+				model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
+			}); feedErr != nil {
+				feedFailureCount += 1
+				connectionWorkerFailuresCounter.WithLabelValues(connectionWorkerOperationVerifyEgressLease).Inc()
+				if glog.V(1) {
+					glog.Infof("[t]verify egress lease write failed, retrying (%d consecutive): %s\n", feedFailureCount, feedErr)
+				}
+				return
+			}
+			feedFailureCount = 0
+		}
+		feed()
+		// only this worker feeds from here on
 		self.startWorker(func() {
 			for {
+				timeout := verifySettings.EgressRefreshInterval
+				if 0 < feedFailureCount {
+					timeout = min(timeout, self.retryTimeout(feedFailureCount))
+				}
 				select {
 				case <-self.ctx.Done():
 					return
-				case <-time.After(verifySettings.EgressRefreshInterval):
+				case <-time.After(timeout):
 				}
-				model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
+				feed()
 			}
 		})
 	}
