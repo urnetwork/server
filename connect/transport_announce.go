@@ -363,6 +363,10 @@ func NewConnectionAnnounceWithIpFamily(
 }
 
 // Starts one child only while the announcement lifecycle still accepts work.
+// A raise ends that child only and leaves the client's transport connected.
+// The children write measurements and verify leases, and a failed database
+// or Redis write says nothing about the connection: canceling the transport
+// for it would disconnect every live client whose write fell in an outage.
 func (self *ConnectionAnnounce) startWorker(run func()) bool {
 	self.workerStateLock.Lock()
 	defer self.workerStateLock.Unlock()
@@ -373,7 +377,7 @@ func (self *ConnectionAnnounce) startWorker(run func()) bool {
 	go server.HandleError(func() {
 		defer self.workerGroup.Done()
 		run()
-	}, self.cancel)
+	})
 	return true
 }
 

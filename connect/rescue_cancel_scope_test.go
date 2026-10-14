@@ -92,3 +92,24 @@ func TestResidentContractRefreshRaiseKeepsResident(t *testing.T) {
 		}
 	})
 }
+
+// A raise in an announcement child, such as a measurement write or a verify
+// lease refresh that fails during a database or Redis outage, ends that child
+// and leaves the client's transport connected.
+func TestConnectionAnnounceWorkerRaiseKeepsTransport(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		announce := &ConnectionAnnounce{ctx: ctx, cancel: cancel}
+		if !announce.startWorker(func() {
+			panic(errors.New("synthetic measurement write failure"))
+		}) {
+			t.Fatal("open announcement refused a child worker")
+		}
+		synctest.Wait()
+		if ctx.Err() != nil {
+			t.Fatal("a child raise canceled the transport")
+		}
+		announce.closeWorkersAndWait()
+	})
+}
