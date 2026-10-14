@@ -37,6 +37,10 @@ const (
 var (
 	testEnvFixtureAddr  = netip.MustParseAddr("192.0.2.10")
 	testEnvLoopbackAddr = netip.MustParseAddr("127.0.0.1")
+	// Answers names in tests whose base dialer is real. Were a regression to
+	// admit it, the dial would leave for documentation space on a port no
+	// production tunnel forwards, never loopback.
+	testEnvUnattestedAddr = netip.MustParseAddr("198.51.100.20")
 )
 
 // Serves scripted answers for one name, one per lookup; the last answer
@@ -434,12 +438,12 @@ func TestPgPoolOpenReplacesDialFunctionsOnlyForTestProcess(t *testing.T) {
 // that resolves outside the attestation is refused before a socket opens.
 func TestPgPoolOpenDialsThroughProcessGuard(t *testing.T) {
 	pushTestEnvGuardPgResources(t)
-	resolver := &testEnvScriptedResolver{host: "pg.fixture.invalid", answers: [][]netip.Addr{{testEnvLoopbackAddr}}}
+	resolver := &testEnvScriptedResolver{host: "pg.fixture.invalid", answers: [][]netip.Addr{{testEnvUnattestedAddr}}}
 	useTestEnvProcessDialGuard(t, newTestEnvDialGuard(testEnvManagedEnvironment(testEnvFixtureAttestation), resolver.lookupNetIp))
 	pool := &safePgPool{ctx: context.Background(), vaultResourceName: DefaultPgVaultResourceName, configResourceName: DefaultPgConfigResourceName}
 	defer pool.reset()
-	_, err := pool.open().Config().ConnConfig.DialFunc(t.Context(), "tcp", "pg.fixture.invalid:5432")
-	if err == nil || !strings.Contains(err.Error(), "pg.fixture.invalid resolved to 127.0.0.1:5432") || resolver.lookupCount() != 1 {
+	_, err := pool.open().Config().ConnConfig.DialFunc(t.Context(), "tcp", "pg.fixture.invalid:15432")
+	if err == nil || !strings.Contains(err.Error(), "pg.fixture.invalid resolved to 198.51.100.20:15432") || resolver.lookupCount() != 1 {
 		t.Fatalf("pool dial error = %v after %d lookups; want the process guard's refusal", err, resolver.lookupCount())
 	}
 }
@@ -447,7 +451,7 @@ func TestPgPoolOpenDialsThroughProcessGuard(t *testing.T) {
 // Every Redis pool constructor dials through the process guard: a name that
 // resolves outside the attestation is refused before a socket opens.
 func TestRedisPoolOpenDialsThroughProcessGuard(t *testing.T) {
-	resolver := &testEnvScriptedResolver{host: "redis.fixture.invalid", answers: [][]netip.Addr{{testEnvLoopbackAddr}}}
+	resolver := &testEnvScriptedResolver{host: "redis.fixture.invalid", answers: [][]netip.Addr{{testEnvUnattestedAddr}}}
 	useTestEnvProcessDialGuard(t, newTestEnvDialGuard(testEnvManagedEnvironment(testEnvFixtureAttestation), resolver.lookupNetIp))
 	// an address-literal authority keeps client construction off the resolver
 	popVault := Vault.PushSimpleResource("redis.yml", []byte("cluster: false\nauthority: 192.0.2.10:6379\npassword: \"\"\ndb: 3\n"))
@@ -465,9 +469,9 @@ func TestRedisPoolOpenDialsThroughProcessGuard(t *testing.T) {
 		if !ok {
 			t.Fatalf("pool %d constructor did not make a standalone client", index)
 		}
-		_, err := client.Options().Dialer(t.Context(), "tcp", "redis.fixture.invalid:6379")
+		_, err := client.Options().Dialer(t.Context(), "tcp", "redis.fixture.invalid:16379")
 		pool.close()
-		if err == nil || !strings.Contains(err.Error(), "redis.fixture.invalid resolved to 127.0.0.1:6379") {
+		if err == nil || !strings.Contains(err.Error(), "redis.fixture.invalid resolved to 198.51.100.20:16379") {
 			t.Errorf("pool %d dial error = %v; want the process guard's refusal", index, err)
 		}
 	}
@@ -481,11 +485,11 @@ func TestRedisPoolOpenDialsThroughProcessGuard(t *testing.T) {
 // and with one it reaches only attested endpoints.
 func TestTestEnvironmentProbeRequiresAttestation(t *testing.T) {
 	configuration := testEnvironmentConfiguration{
-		postgresAuthority: "198.51.100.7:5432",
+		postgresAuthority: "198.51.100.7:15432",
 		postgresUser:      "synthetic",
 		postgresPassword:  "not-a-secret",
 		postgresDatabase:  "synthetic",
-		redisAuthority:    "198.51.100.7:6379",
+		redisAuthority:    "198.51.100.7:16379",
 	}
 	useTestEnvProcessDialGuard(t, nil)
 	for _, service := range []string{"postgres", "redis"} {
