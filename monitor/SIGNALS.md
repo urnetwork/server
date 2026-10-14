@@ -13724,8 +13724,9 @@ any destination answered (`dial_dns`, `dial_tcp` and their timeout and
 combined stages, with no status, response byte, redirect or TLS verdict) is an
 offline or unreachable exit, which says nothing about the site. Tally days
 before 2026-10-14 (`model.ProviderEgressSiteTallyContactedSince`) still count
-those runs as site failures, so the refresh reads no day before it; its
-`[egresssites]` log line says when that cuts the window short. The
+those runs as site failures, so neither the refresh nor this signal reads a
+day before it; the refresh's `[egresssites]` log line says when that cuts the
+window short. The
 refresh records its judgement on the row (`failure_share`, `sample_count`,
 `judged_time`, and `above_retire_since` while the share stands above the
 retire line with enough samples), and the signal reads that record together
