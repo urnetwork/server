@@ -21,7 +21,10 @@
 // returned is still in flight. Waiting for the second sighting keeps steady
 // connection churn from ever blocking a retire, and it covers a row whose
 // registration raised after its commit. A failed final disconnect wakes an
-// early pass, no sooner than the backlog interval after the last one. Passes
+// early pass, no sooner than the backlog interval after the last one, and
+// passes keep that interval while rows known to be stale remain: rows of
+// failed final disconnects, and stale rows not yet retired. A row unheld for a
+// moment during ordinary churn waits for the regular interval. Passes
 // retire in bounded batches through the model. A retire takes the transport
 // disconnect's fences with try-locks, as handler expiry does, so a busy
 // endpoint defers its row to the next pass instead of queueing. A retire that
@@ -129,13 +132,14 @@ func DefaultConnectionReconcileSettings() *ConnectionReconcileSettings {
 
 // The pace and bounds of a handler's connection reconcile.
 type ConnectionReconcileSettings struct {
-	// between passes when the last pass left nothing to confirm or retire
+	// between passes when no row known to be stale remains
 	ReconcileInterval time.Duration
 	// added at random to each interval, so blocks started together spread
 	// their reads
 	ReconcileIntervalJitter time.Duration
-	// between passes while rows remain to confirm or retire, and the earliest
-	// a failed final disconnect moves a pass up to after the last pass
+	// between passes while rows known to be stale remain (rows of failed final
+	// disconnects, and stale rows not yet retired), and the earliest a failed
+	// final disconnect moves a pass up to after the last pass
 	BacklogInterval time.Duration
 	// the most rows one pass retires; zero observes and counts unheld rows
 	// without retiring any
@@ -275,7 +279,7 @@ func (self *handlerConnectionReconcile) release(connectionId server.Id, disconne
 }
 
 // Runs a pass every interval, or a backlog interval after the last pass while
-// rows remain to confirm or retire or a failed final disconnect asked for one.
+// rows known to be stale remain or a failed final disconnect asked for one.
 // A raised pass is retried a backlog interval later.
 func (self *handlerConnectionReconcile) run() {
 	lastPassTime := time.Now()
@@ -331,7 +335,8 @@ func (self *handlerConnectionReconcile) backlogInterval() time.Duration {
 
 // One pass: reads the handler's connected rows, notes the unheld ones, and
 // retires at most a batch of those seen unheld before whose registrations have
-// all ended. Returns whether rows remain to confirm or retire. The read and
+// all ended. Returns whether rows known to be stale remain: rows of failed
+// final disconnects, and stale rows the pass did not retire. The read and
 // every retire are bounded by the operation timeout. A raised read ends the
 // pass; a raised retire only fails its row (see the file header).
 func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
@@ -474,7 +479,25 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		// a zero batch only observes, at the regular interval
-		backlog = 0 < len(self.unheldConnectionGenerations) && 0 < self.settings.RetireBatchCount
+		if self.settings.RetireBatchCount <= 0 {
+			return
+		}
+		// Only rows known to be stale keep the backlog cadence: rows of failed
+		// final disconnects, and stale rows this pass did not retire. A row
+		// unheld for a moment during ordinary churn, such as a registration in
+		// flight or a disconnect committing, waits for the regular pass.
+		for _, connectionId := range staleConnectionIds {
+			if _, unheld := self.unheldConnectionGenerations[connectionId]; unheld {
+				backlog = true
+				return
+			}
+		}
+		for connectionId := range self.releaseTimes {
+			if _, unheld := self.unheldConnectionGenerations[connectionId]; unheld {
+				backlog = true
+				return
+			}
+		}
 	}()
 	return
 }

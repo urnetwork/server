@@ -10741,16 +10741,25 @@ reader of connected rows counted the provider: the location reliability
 writer, FP2 and URL probe admission and census, location and provider counts.
 
 Each Connect handler now reconciles: it holds the rows of the connections its
-process holds, reads the handler's connected rows every five minutes (every
-15 s while rows remain to confirm or retire, or after a failed final
-disconnect), and retires the unheld rows on their second sighting, at most 256
-per pass, with the transport disconnect's own endpoint fence. It exports, per
-process:
+process holds, reads the handler's connected rows every five minutes, and
+retires the unheld rows on their second sighting, at most 256 per pass. A
+failed final disconnect moves the next pass up to 15 s after the last one, and
+passes keep that 15 s interval while rows known to be stale remain: rows of
+failed final disconnects, and stale rows not retired yet. A row unheld for a
+moment during ordinary churn (a registration in flight, a disconnect
+committing) waits for the regular pass; before this, any such row kept the
+15 s interval, so a busy handler read its rows every 15 s. A retire takes the
+transport disconnect's fences with try-locks and defers a row whose endpoint
+is busy; a retire that fails leaves its row for a later pass, tried after the
+others, and three consecutive failures end the pass. It exports, per process:
 
 - `urnetwork_connect_connection_reconcile_unheld`: rows the last pass found
   connected under the handler but not held;
 - `urnetwork_connect_connection_reconcile_retired_total`: rows it retired;
-- `urnetwork_connect_connection_reconcile_passes_total{result="ok|error"}`.
+- `urnetwork_connect_connection_reconcile_passes_total{result="ok|error"}`;
+- `urnetwork_connect_connection_reconcile_unretired_total{reason="failed|busy"}`:
+  stale rows a pass left, because the retire raised or a fence or the row was
+  busy.
 
 The probe evaluates them per block in one Mimir query:
 

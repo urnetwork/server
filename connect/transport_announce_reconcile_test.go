@@ -597,3 +597,29 @@ func TestConnectionReconcileRetiresWithTheReleaseTime(t *testing.T) {
 		t.Fatalf("the row was retired with disconnect time %s, want its release between %s and %s", disconnectTime, beforeRelease, afterRelease)
 	}
 }
+
+// Ordinary churn leaves rows unheld for a moment: a registration whose row
+// committed before the read, a disconnect that commits after it. Those wait
+// for the regular pass. Before, any unheld row kept the backlog cadence, so on
+// a busy handler the reconcile read every backlog interval, not every
+// interval. Rows known to be stale still keep it.
+func TestConnectionReconcileKeepsItsIntervalThroughChurn(t *testing.T) {
+	store := newReconcileStoreForTest()
+	reconcile := newReconcileForTest(store, DefaultConnectionReconcileSettings())
+	failed := registerForTest(reconcile, store)
+	for pass := 0; pass < 3; pass += 1 {
+		// a registration in flight, its row committed, at every pass
+		connectionId := server.NewId()
+		endConnect := reconcile.beginConnect()
+		store.commit(connectionId)
+		if backlog := reconcile.reconcile(); backlog {
+			t.Fatalf("pass %d: a registration in flight kept the backlog cadence", pass)
+		}
+		endConnect(&connectionId)
+	}
+
+	reconcile.release(failed, false)
+	if backlog := reconcile.reconcile(); !backlog {
+		t.Fatal("the row of a failed final disconnect did not keep the backlog cadence")
+	}
+}
