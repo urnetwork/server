@@ -53,8 +53,9 @@ Press `Ctrl-C` in the `run-local.sh` terminal to stop the containers, restore
 Tests create and **drop** databases. A tunnel/port-forward to a real (prod)
 database commonly listens on `127.0.0.1:5432`, so if the local hostnames ever
 resolved to `127.0.0.1`, a test run could wipe prod. This setup therefore never
-uses `127.0.0.1`: it binds to a distinct dedicated address instead, so the worst
-case when the stack is down is "connection refused" — never a real database.
+uses `127.0.0.1`: it binds to a distinct dedicated address instead. That alone
+does not make the stack's absence harmless; see
+[Public DNS also answers 127.0.0.1](#public-dns-also-answers-127001).
 The script refuses to run if `LOCAL_HOST_IP` is set to `127.0.0.1`, either
 hostname already has any unmanaged mapping, a legacy managed block remains, or
 another launcher owns `/tmp/urnetwork-server-run-local.lock`. It never tries a
@@ -62,6 +63,65 @@ second resolved address and never silently rewrites an operator-owned entry.
 An alias that happens to reach a database is not sufficient proof: it may be a
 legacy VM route, an independently managed tunnel, or state from a launcher that
 has not finished starting.
+
+### Public DNS also answers 127.0.0.1
+
+The launcher's `/etc/hosts` block is not the only answer for these names: public
+DNS resolves both `local-pg.bringyour.com` and `local-redis.bringyour.com` to
+`127.0.0.1`. While the launcher runs, its hosts block wins. When it exits it
+restores `/etc/hosts`, and a client that resolves either name again falls
+through to `127.0.0.1`. On a machine that also runs the production data tunnel
+(`xops/bin/by-patch-main-data`, which forwards `5432`, `6432` and the Redis
+cluster ports `6379`-`6427` on loopback), that is production. A DB test run that
+outlived its launcher has redialed `local-redis.bringyour.com` this way and
+reached a production Redis cluster. What kept its commands from executing was
+only that the cluster rejected `SELECT` in cluster mode and refused a
+cross-slot `EVAL`.
+
+The preflight alone cannot prevent this: it attests the environment once,
+while the clients resolve on every dial. So:
+
+- `test-env.sh` resolves both names with the host resolver (`getent` or
+  `dscacheutil`) and refuses unless each maps only to the launcher's address,
+  in particular never to loopback. It then probes that address literal and
+  exports the validated endpoints as `WARP_TEST_ENV_ATTESTED_ADDRS`
+  (`10.213.0.1:5432,10.213.0.1:6379` by default). Any failure leaves the
+  variable unset.
+- A test process (`WARP_ENV=local` with that variable or with the
+  `WARP_SERVICE=test` and `WARP_BLOCK=test` markers `test-env.sh` exports) pins
+  every PostgreSQL and Redis socket to those endpoints for the whole run
+  ([`test_env_dial_guard.go`](../test_env_dial_guard.go)). Each dial resolves
+  once, refuses any address outside the attestation with an error naming the
+  host and the address it resolved to, and connects only to the checked
+  literal. The pools, the fixture's own probe, lease and owner connections,
+  child processes, and every go-redis client a server test builds dial this way;
+  `TestRedisClientsDialThroughExplicitDialers` fails for a client left on
+  go-redis's own dialer.
+- A test that points a pool at an in-process loopback proxy admits that
+  proxy's own live listener with `server.Testing_AdmitTestEnvLoopbackListener`
+  (its exact `ip:port`, while it stays open, until the test ends) and dials the
+  proxy's upstream with `server.Testing_DialTestEnv`, as the model fixtures do.
+- With the stack down, a test process still dials only the attested address.
+  Without the launcher's loopback alias that address leaves the machine by the
+  default route, so the dial normally times out rather than being refused, and
+  never falls through to loopback. Restart the launcher.
+- A marked process without the attestation, such as a shell that sourced an
+  older `test-env.sh`, refuses every dial: source `test-env.sh` again.
+  Integration fixtures (`TestEnv`) refuse to start without the attestation, so
+  DB tests run only through `./test.sh` or a sourced `test-env.sh`.
+- Loopback is admitted only when the attestation itself is loopback, which
+  only the private portable root below produces, with its own `127.0.0.1`
+  authorities, and never on a tunnel port (`5432`, `6432`, `6379`-`6427`).
+- Processes that are not tests, production included, get no guard; their dial
+  paths are unchanged.
+
+**Recommendation (an owner decision, not made here):** remove the public DNS
+records for `local-pg.bringyour.com` and `local-redis.bringyour.com`. The guard
+covers test processes only. Local processes that are not tests, such as the
+`cli/*/run-local.sh` services and `connect/sim-latency` (whose local-only
+`reset` truncates tables and runs `FLUSHALL` on logical db 0, which sends no
+`SELECT`), still resolve these names on every dial and fall through the same
+way when the launcher is down.
 
 On Docker Desktop / macOS the container IPs on the docker network are not
 routable from the host, so host access (where `go test` runs) goes through the
@@ -124,8 +184,16 @@ source ./test-env.sh
 ```
 
 The escape skips only the launcher attestation and managed-mapping checks; the
-resource-authority checks and first-attempt service probes still run. Do not use
-it to bless developer-machine aliases or a legacy local VM route.
+resource-authority checks and first-attempt service probes still run. Each
+service name is resolved once and must resolve to exactly one non-loopback
+address, which is then probed and attested for the whole run. A name that
+resolves to loopback is refused, because public DNS answers the local service
+names that way, and so is a `127.0.0.1` literal: loopback services need the
+private portable root (`WARP_TEST_ENV_PORTABLE_ROOT`) with explicit `127.0.0.1`
+authorities, as `local/release-gate-services.sh` sets. No mode accepts a
+loopback endpoint on a production data tunnel port (`5432`, `6432`,
+`6379`-`6427`). Do not use the escape to bless developer-machine aliases or a
+legacy local VM route.
 
 ### Repository-owned suite proxy
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
@@ -52,9 +53,14 @@ func TestRedisDoOnceDisablesCommandAndCallbackRetries(t *testing.T) {
 }
 
 func TestGoRedisNoRetrySentinelsDisableBothClientKinds(t *testing.T) {
+	// Only option normalization is observed; neither client may dial.
+	neverDial := func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("an options-only client dialed")
+	}
 	standalone := redis.NewClient(&redis.Options{
 		Addr:       "127.0.0.1:1",
 		MaxRetries: -1,
+		Dialer:     neverDial,
 	})
 	defer standalone.Close()
 	if standalone.Options().MaxRetries != 0 {
@@ -65,6 +71,7 @@ func TestGoRedisNoRetrySentinelsDisableBothClientKinds(t *testing.T) {
 		Addrs:        []string{"127.0.0.1:1"},
 		MaxRetries:   -1,
 		MaxRedirects: -1,
+		Dialer:       neverDial,
 	})
 	defer cluster.Close()
 	if cluster.Options().MaxRetries > 0 || cluster.Options().MaxRedirects != 0 {

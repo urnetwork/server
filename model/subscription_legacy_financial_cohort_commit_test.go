@@ -42,6 +42,8 @@ func newLegacyCohortCommitReplyProxy(t testing.TB, ctx context.Context, target s
 	if err != nil {
 		t.Fatal("private commit proxy could not listen", err)
 	}
+	// The pools are pointed at this proxy, so its own listener is admitted.
+	server.Testing_AdmitTestEnvLoopbackListener(t, listener)
 	owned, cancel := context.WithCancel(ctx)
 	proxy := &legacyCohortCommitReplyProxy{listener: listener, target: target, ctx: owned, cancel: cancel,
 		connectionKVs: map[net.Conn]bool{}, accepted: make(chan struct{})}
@@ -75,7 +77,7 @@ func (self *legacyCohortCommitReplyProxy) close() {
 
 func (self *legacyCohortCommitReplyProxy) forward(client net.Conn) {
 	defer client.Close()
-	upstream, err := (&net.Dialer{}).DialContext(self.ctx, "tcp", self.target)
+	upstream, err := server.Testing_DialTestEnv(self.ctx, "postgres", "tcp", self.target)
 	if err != nil {
 		return
 	}

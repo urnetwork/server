@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 const legacyCohortDiagnosticReadyLimit = 65536
@@ -335,6 +337,7 @@ func TestLegacyCohortReadyDiagnosticPreservesFramingAndJitter(t *testing.T) {
 	if err != nil {
 		t.Fatal("synthetic backend listen failed", err)
 	}
+	server.Testing_AdmitTestEnvLoopbackListener(t, listener)
 	defer listener.Close()
 	proxy := newLegacyCohortLatencyProxy(t, ctx, listener.Addr().String())
 	defer proxy.close()
@@ -410,6 +413,7 @@ func TestLegacyCohortReadyDiagnosticOverflowRetainsEarliestRecords(t *testing.T)
 	if err != nil {
 		t.Fatal("synthetic backend listen failed", err)
 	}
+	server.Testing_AdmitTestEnvLoopbackListener(t, listener)
 	defer listener.Close()
 	proxy := newLegacyCohortLatencyProxy(t, ctx, listener.Addr().String())
 	defer proxy.close()
@@ -453,6 +457,7 @@ func TestLegacyCohortReadyDiagnosticDisabledKeepsNoTrace(t *testing.T) {
 	if err != nil {
 		t.Fatal("synthetic backend listen failed", err)
 	}
+	server.Testing_AdmitTestEnvLoopbackListener(t, listener)
 	defer listener.Close()
 	proxy := newLegacyCohortLatencyProxy(t, ctx, listener.Addr().String())
 	defer proxy.close()

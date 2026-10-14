@@ -88,6 +88,8 @@ func newLegacyCohortLatencyProxy(t testing.TB, ctx context.Context, target strin
 	if err != nil {
 		t.Fatal("private latency proxy could not listen", err)
 	}
+	// The pools are pointed at this proxy, so its own listener is admitted.
+	server.Testing_AdmitTestEnvLoopbackListener(t, listener)
 	owned, cancel := context.WithCancel(ctx)
 	proxy := &legacyCohortLatencyProxy{listener: listener, target: target, ctx: owned, cancel: cancel,
 		connectionKVs: map[net.Conn]bool{}, accepted: make(chan struct{}), errorClasses: map[string]int64{}}
@@ -128,7 +130,7 @@ func (self *legacyCohortLatencyProxy) close() {
 // A completed transaction interval excludes its last reply's modeled delay.
 func (self *legacyCohortLatencyProxy) forward(client net.Conn) {
 	defer client.Close()
-	upstream, err := (&net.Dialer{}).DialContext(self.ctx, "tcp", self.target)
+	upstream, err := server.Testing_DialTestEnv(self.ctx, "postgres", "tcp", self.target)
 	if err != nil {
 		return
 	}

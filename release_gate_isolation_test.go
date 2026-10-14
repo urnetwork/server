@@ -495,6 +495,33 @@ source "$release_gate_service_root/environment.sh"
 export WARP_TEST_ENV_TCP_PROBE="$PRIVATE_PROBE"
 `
 
+// The private portable root names its own loopback endpoints, but never one on
+// a production data tunnel port, in either service: the refusal comes before
+// any probe and leaves no attestation.
+func TestTestEnvironmentPrivatePortableShellRefusesTunnelPorts(t *testing.T) {
+	for _, c := range []struct {
+		ports     string
+		errorText string
+	}{
+		{ports: "FAKE_PG_PORT=5432", errorText: "postgres endpoint 127.0.0.1:5432 is a loopback production data tunnel port"},
+		{ports: "FAKE_REDIS_PORT=6400", errorText: "redis endpoint 127.0.0.1:6400 is a loopback production data tunnel port"},
+	} {
+		self := newReleaseGateServicesFixture(t)
+		output, err := self.run(t, "export "+c.ports+"\n"+releaseGatePrivateShellProfile+`
+set +e
+source "$FIXTURE_WORKSPACE/server/test-env.sh"
+source_status=$?
+set -e
+[[ "$source_status" != 0 ]]
+[[ ! -e "$GATE_ROOT/probes" ]]
+[[ -z "${WARP_TEST_ENV_ATTESTED_ADDRS:-}" ]]
+`)
+		if err != nil || !strings.Contains(string(output), c.errorText) {
+			t.Errorf("%s: private tunnel-port refusal: %v\n%s", c.ports, err, output)
+		}
+	}
+}
+
 func TestTestEnvironmentPrivatePortableShellProfileProbesOnlyOwnedEndpoints(t *testing.T) {
 	self := newReleaseGateServicesFixture(t)
 	output, err := self.run(t, releaseGatePrivateShellProfile+`
@@ -502,6 +529,8 @@ source "$FIXTURE_WORKSPACE/server/test-env.sh"
 test_env_validate_suite_resource_manifest "$TEST_ENV_SUITE_RESOURCE_MANIFEST" "$WARP_VAULT_HOME" "$WARP_CONFIG_HOME"
 [[ "$BRINGYOUR_POSTGRES_HOSTNAME" == 127.0.0.1 && "$BRINGYOUR_REDIS_HOSTNAME" == 127.0.0.1 ]]
 [[ "$WARP_SITE_HOME" == "$WARP_TEST_ENV_PORTABLE_ROOT/site" ]]
+# the explicit portable mode attests exactly its own loopback endpoints
+[[ "$WARP_TEST_ENV_ATTESTED_ADDRS" == 127.0.0.1:35431,127.0.0.1:36371 ]]
 `)
 	if err != nil {
 		t.Fatalf("private shell profile: %v\n%s", err, output)

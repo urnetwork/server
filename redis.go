@@ -49,6 +49,14 @@ func redisClusterDialer(authority string, nodeRoutes map[string]string, dial red
 	}
 }
 
+// The dial path of every Redis pool. A test process pins each node dial to its
+// launcher attestation (test_env_dial_guard.go). Every other process has a nil
+// guard, which hands dial back unchanged, so this is redisClusterDialer over
+// dial itself.
+func redisPoolDialer(guard *testEnvDialGuard, authority string, nodeRoutes map[string]string, dial redisDialFunc) redisDialFunc {
+	return redisClusterDialer(authority, nodeRoutes, guard.wrapDial("redis", dial))
+}
+
 // redisNodeDialAddr maps an announced node address to the address to dial:
 //   - a loopback authority is an ssh tunnel (xops/bin/by-patch-main-data)
 //     that forwards every node port to loopback, so every node is dialed there
@@ -190,7 +198,12 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 		dialer := NewDialer(dialTimeout)
 		authority := redisKeys.RequireString("authority")
 		password := localEvaluationCredential("EVALUATION_REDIS_PASSWORD", redisKeys.RequireString("password"))
-		dialContext := redisClusterDialer(authority, redisNodeRoutes(LanHosts(), Routes()), dialer.DialContext)
+		dialContext := redisPoolDialer(
+			currentTestEnvDialGuard(),
+			authority,
+			redisNodeRoutes(LanHosts(), Routes()),
+			dialer.DialContext,
+		)
 
 		cluster := redisKeys.RequireBool("cluster")
 

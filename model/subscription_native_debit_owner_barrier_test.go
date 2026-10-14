@@ -61,6 +61,8 @@ func newNativeDebitOwnerBarrierOnResource(t testing.TB, ctx context.Context, bal
 	if err != nil {
 		t.Fatal("native debit owner barrier listen failed", err)
 	}
+	// The pools are pointed at this barrier, so its own listener is admitted.
+	server.Testing_AdmitTestEnvLoopbackListener(t, listener)
 	owned, cancel := context.WithCancel(ctx)
 	barrier := &nativeDebitOwnerBarrier{balanceId: balanceId, ctx: owned, cancel: cancel,
 		listener: listener, target: resource.RequireString("authority"), held: make(chan int32, 1), release: make(chan struct{}),
@@ -134,7 +136,7 @@ func (self *nativeDebitOwnerBarrier) balanceRow(raw []byte) bool {
 
 func (self *nativeDebitOwnerBarrier) forward(client net.Conn) {
 	defer client.Close()
-	upstream, err := (&net.Dialer{}).DialContext(self.ctx, "tcp", self.target)
+	upstream, err := server.Testing_DialTestEnv(self.ctx, "postgres", "tcp", self.target)
 	if err != nil {
 		return
 	}
