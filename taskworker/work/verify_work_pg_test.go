@@ -109,12 +109,14 @@ func TestDisabledVerifyChainsHandANewerConfigsChainBack(t *testing.T) {
 		due := server.NowUtc().Add(-time.Minute)
 		chains := []struct {
 			name       string
+			family     string
 			runOnceKey string
 			target     task.Target
 			schedule   func(tx server.PgTx)
 		}{
 			{
 				name:       "trail sweep",
+				family:     "verify_sweep_trails",
 				runOnceKey: task.RunOnce("sweep_verify_trails").String(),
 				target:     task.NewTaskTargetWithPost(SweepVerifyTrails, SweepVerifyTrailsPost),
 				schedule: func(tx server.PgTx) {
@@ -124,6 +126,7 @@ func TestDisabledVerifyChainsHandANewerConfigsChainBack(t *testing.T) {
 			},
 			{
 				name:       "stats rollup",
+				family:     "verify_rollup_provider_stats",
 				runOnceKey: task.RunOnce("rollup_verify_provider_stats").String(),
 				target:     task.NewTaskTargetWithPost(RollupVerifyProviderStats, RollupVerifyProviderStatsPost),
 				schedule: func(tx server.PgTx) {
@@ -133,6 +136,7 @@ func TestDisabledVerifyChainsHandANewerConfigsChainBack(t *testing.T) {
 			},
 			{
 				name:       "stats retention",
+				family:     "verify_remove_old_provider_stats",
 				runOnceKey: task.RunOnce("remove_old_verify_provider_stats").String(),
 				target:     task.NewTaskTargetWithPost(RemoveOldVerifyProviderStats, RemoveOldVerifyProviderStatsPost),
 				schedule: func(tx server.PgTx) {
@@ -147,10 +151,14 @@ func TestDisabledVerifyChainsHandANewerConfigsChainBack(t *testing.T) {
 			worker := task.NewTaskWorkerWithDefaults(ctx)
 			worker.AddTargets(chain.target)
 			before := server.NowUtc()
+			handbacks := testHandbackCount(chain.family)
 			finished, retried, postRetried, err := worker.EvalTasks(1)
 			worker.Close()
 			if err != nil || len(finished) != 1 || len(retried)+len(postRetried) != 0 {
 				t.Fatalf("%s: the older config did not finish its claim: finished=%d retried=%d err=%v", chain.name, len(finished), len(retried)+len(postRetried), err)
+			}
+			if counted := testHandbackCount(chain.family) - handbacks; counted != 1 {
+				t.Errorf("%s: %v hand-backs counted, want 1", chain.name, counted)
 			}
 			next := testPendingRunOnceRow(t, ctx, chain.runOnceKey)
 			if next == nil {

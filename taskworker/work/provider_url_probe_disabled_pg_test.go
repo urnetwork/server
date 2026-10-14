@@ -124,9 +124,14 @@ func TestProviderEgressProbeDisabledMarkerFollowsTheNewestConfig(t *testing.T) {
 				testInsertDisabledMarker(t, ctx, tx, c.markerVersion, server.NowUtc().Add(-c.markerAge), server.NowUtc().Add(-time.Minute))
 			})
 			claimed := testPendingDisabledMarker(t, ctx)
+			handbacks := testHandbackCount("provider_egress_probe_disabled")
 			before := server.NowUtc()
 			testEvalDisabledMarker(t, ctx)
 			next := testPendingDisabledMarker(t, ctx)
+			counted := testHandbackCount("provider_egress_probe_disabled") - handbacks
+			if want := map[bool]float64{true: 1, false: 0}[c.want == "handed back"]; counted != want {
+				t.Errorf("%s: %v hand-backs counted, want %v", c.name, counted, want)
+			}
 			switch c.want {
 			case "handed back":
 				if next == nil || next.taskId == claimed.taskId || !reflect.DeepEqual(next.args, claimed.args) ||

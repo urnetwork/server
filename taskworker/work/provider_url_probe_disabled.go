@@ -105,6 +105,7 @@ func ProviderEgressProbeDisabled(
 		return nil, err
 	}
 	if providerEgressProbeDisabled != nil && providerEgressProbeDisabledMarkerLive(providerEgressProbeDisabled.ConfigStamp, server.NowUtc()) {
+		configHandbacks.WithLabelValues("provider_egress_probe_disabled").Inc()
 		return &ProviderEgressProbeDisabledResult{HandedBack: true}, nil
 	}
 	return &ProviderEgressProbeDisabledResult{Restamp: !settings.Enabled}, nil

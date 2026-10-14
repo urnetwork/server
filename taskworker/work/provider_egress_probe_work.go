@@ -567,6 +567,7 @@ func ProviderEgressProbe(
 	// its enablement: the post-step reschedules it unchanged for the instances
 	// configured with it.
 	if providerEgressProbeHandsBack(clientSession.Ctx, args, settings, server.NowUtc()) {
+		configHandbacks.WithLabelValues("provider_egress_probe").Inc()
 		return &ProviderEgressProbeResult{HandedBack: true}, nil
 	}
 	// A disabled deployment may still have an old claimed row in a worker's

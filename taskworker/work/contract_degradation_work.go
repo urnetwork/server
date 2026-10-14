@@ -91,6 +91,7 @@ func CheckContractDegradation(
 		// An older config does not disable a check that a newer config enables.
 		if checkContractDegradation != nil &&
 			checkContractDegradation.newerWithin(server.NowUtc(), checkContractDegradationNewerConfigTimeout) {
+			configHandbacks.WithLabelValues("contract_degradation").Inc()
 			return &CheckContractDegradationResult{HandedBack: true}, nil
 		}
 		return &CheckContractDegradationResult{Disabled: true}, nil

@@ -52,6 +52,16 @@ func verifyTaskRunOnceKeys() []string {
 	}
 }
 
+// Whether a claimed chain row is a newer config's live one, counted as a
+// hand-back of family when it is.
+func verifyChainHandsBack(stamp ConfigStamp, family string) bool {
+	if !verifyChainNewerLive(stamp, server.NowUtc()) {
+		return false
+	}
+	configHandbacks.WithLabelValues(family).Inc()
+	return true
+}
+
 // Whether a chain row was written by a newer config within its timeout. st.yml
 // lives in the vault, which has no version of its own, so the config version
 // orders taskworkers instead: it keeps a straggler that rejoins on an older
@@ -127,7 +137,7 @@ func SweepVerifyTrails(
 ) (*SweepVerifyTrailsResult, error) {
 	if !controller.StEnabled() {
 		return &SweepVerifyTrailsResult{
-			HandedBack: sweepVerifyTrails != nil && verifyChainNewerLive(sweepVerifyTrails.ConfigStamp, server.NowUtc()),
+			HandedBack: sweepVerifyTrails != nil && verifyChainHandsBack(sweepVerifyTrails.ConfigStamp, "verify_sweep_trails"),
 		}, nil
 	}
 	model.SweepExpiredVerifyTrails(
@@ -197,7 +207,7 @@ func RollupVerifyProviderStats(
 ) (*RollupVerifyProviderStatsResult, error) {
 	if !controller.StEnabled() {
 		return &RollupVerifyProviderStatsResult{
-			HandedBack: rollupVerifyProviderStats != nil && verifyChainNewerLive(rollupVerifyProviderStats.ConfigStamp, server.NowUtc()),
+			HandedBack: rollupVerifyProviderStats != nil && verifyChainHandsBack(rollupVerifyProviderStats.ConfigStamp, "verify_rollup_provider_stats"),
 		}, nil
 	}
 	model.RollupVerifyProviderStats(
@@ -312,7 +322,7 @@ func RemoveOldVerifyProviderStats(
 ) (*RemoveOldVerifyProviderStatsResult, error) {
 	if !controller.StEnabled() {
 		return &RemoveOldVerifyProviderStatsResult{
-			HandedBack: removeOldVerifyProviderStats != nil && verifyChainNewerLive(removeOldVerifyProviderStats.ConfigStamp, server.NowUtc()),
+			HandedBack: removeOldVerifyProviderStats != nil && verifyChainHandsBack(removeOldVerifyProviderStats.ConfigStamp, "verify_remove_old_provider_stats"),
 		}, nil
 	}
 	limit := 50000

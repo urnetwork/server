@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-semver/semver"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -24,6 +25,30 @@ import (
 // A task handed back to a newer config is due again this soon, so an instance
 // of that config can claim it.
 const configHandbackDelay = 5 * time.Second
+
+// The task families that hand claims back to a newer config.
+var configHandbackFamilies = []string{
+	"provider_egress_probe",
+	"provider_egress_probe_disabled",
+	"contract_degradation",
+	"verify_sweep_trails",
+	"verify_rollup_provider_stats",
+	"verify_remove_old_provider_stats",
+}
+
+// Claims handed back unchanged because a newer config owns the row. A steady
+// rate shows taskworkers on an older config beside a newer one.
+var configHandbacks = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_task_config_handbacks_total",
+	Help: "Claimed task rows handed back unchanged to the newer config that owns them, by task family",
+}, []string{"family"})
+
+func init() {
+	prometheus.MustRegister(configHandbacks)
+	for _, family := range configHandbackFamilies {
+		configHandbacks.WithLabelValues(family)
+	}
+}
 
 // The config version that wrote a task's arguments, and when. Neither is part
 // of the work the arguments describe.

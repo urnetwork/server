@@ -108,8 +108,12 @@ func TestCheckContractDegradationOlderDisabledConfigHandsBackNewerOwner(t *testi
 		defer worker.Close()
 		worker.AddTargets(task.NewTaskTargetWithPost(CheckContractDegradation, CheckContractDegradationPost))
 		before := server.NowUtc()
+		handbacks := testHandbackCount("contract_degradation")
 		if finished, retried, postRetried, err := worker.EvalTasks(1); err != nil || len(finished) != 1 || len(retried)+len(postRetried) != 0 {
 			t.Fatalf("the older config did not finish its claim of the owner: finished=%d retried=%d err=%v", len(finished), len(retried)+len(postRetried), err)
+		}
+		if counted := testHandbackCount("contract_degradation") - handbacks; counted != 1 {
+			t.Errorf("%v hand-backs counted, want 1", counted)
 		}
 		next := testPendingDegradationOwner(t, ctx)
 		if next == nil {

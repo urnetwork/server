@@ -244,9 +244,13 @@ func TestProviderEgressProbeOlderConfigClaimKeepsNewerShards(t *testing.T) {
 			claimedShardIndexRows[shardIndex] = testPendingProbeRow(t, ctx, shardIndex)
 		}
 
+		handbacks := testHandbackCount("provider_egress_probe")
 		finishedCount, retriedCount := testEvalProviderEgressProbeTasks(t, ctx, len(shardIndexes))
 		if finishedCount != len(shardIndexes) || retriedCount != 0 {
 			t.Fatalf("the older config finished %d and retried %d of %d claimed shards", finishedCount, retriedCount, len(shardIndexes))
+		}
+		if counted := testHandbackCount("provider_egress_probe") - handbacks; counted != float64(len(shardIndexes)) {
+			t.Errorf("%v hand-backs counted, want %d", counted, len(shardIndexes))
 		}
 		for _, shardIndex := range shardIndexes {
 			next := testPendingProbeRow(t, ctx, shardIndex)
