@@ -562,3 +562,54 @@ func TestStLedgerV2LiabilityCappedFloorIsReplaced(t *testing.T) {
 		stGasFixtureSnapshot(t, policy, "250000000", 2)
 	})
 }
+
+// SV-1 (retries): a new intent takes its nonce together with its first
+// attempt's reservation, and the process may stop before the signature, as
+// a rolling deploy stops it. If another party then finalizes first, the
+// operation is spent, and the reservation refuses the cancellation that
+// retires a spent intent. The root key's next send signs the reserved finalize
+// instead, exactly as reserved, and sends it: it reverts, which that send
+// reports, and frees the nonce, so the send after it goes out.
+func TestStLedgerV2PendingReservationOfASpentFinalizeIsSigned(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		client, _, cfg := newLedgerV2RPCClient(t, fixture)
+		policy, _ := ledgerV2GasPolicy(t, client, nil)
+		stopped := errors.New("process stopped between the reservation and the signature")
+		client.transactionSigner = func(context.Context, *types.Transaction, types.Signer, *ecdsa.PrivateKey) (*types.Transaction, error) {
+			return nil, stopped
+		}
+		if _, err := client.LedgerV2Finalize(ctx, 6, 1); !errors.Is(err, stopped) {
+			t.Fatalf("finalize: %v", err)
+		}
+		intent := ledgerV2Intent(t, ctx, cfg, "v2finalize:6:1")
+		pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+		if intent.Nonce != 7 || intent.AttemptCount != 0 || pending == nil || err != nil || len(fixture.sent) != 0 {
+			t.Fatalf("finalize intent %+v, reservation %+v, %v", intent, pending, err)
+		}
+		client.transactionSigner = nil
+		finalizeCall := stLedgerV2SettlementAbi.PackFinalizeDistribution(stBig(1))
+		fixture.reverts[string(finalizeCall)] = "InvalidTransition"
+		fixture.needs[string(finalizeCall)] = math.MaxUint64
+
+		answer := ledgerV2TestAnswer()
+		if _, err := client.LedgerV2Answer(ctx, 1, 3, answer); err == nil || len(fixture.sent) != 1 || !strings.Contains(err.Error(), "st: finalized transaction "+strings.ToLower(fixture.sent[0].Hash().Hex())+" reverted") {
+			t.Fatalf("answer behind the spent finalize: %v, %d sent", err, len(fixture.sent))
+		}
+		signer := types.LatestSignerForChainID(new(big.Int).SetUint64(cfg.ChainId))
+		if finalize := fixture.sent[0]; finalize.Nonce() != 7 || string(finalize.Data()) != string(finalizeCall) || strings.ToLower(signer.Hash(finalize).Hex()) != pending.SigningHash {
+			t.Fatalf("the finalize went out as nonce %d data %x, not as reserved", finalize.Nonce(), finalize.Data())
+		}
+		requireLedgerV2Intent(t, ctx, cfg, "v2finalize:6:1", model.StTxReverted, fixture.sent[0])
+
+		hash, err := client.LedgerV2Answer(ctx, 1, 3, answer)
+		if err != nil || len(fixture.sent) != 2 || fixture.sent[1].Nonce() != 8 || !strings.EqualFold(hash, fixture.sent[1].Hash().Hex()) {
+			t.Fatalf("answer on the freed key: %s, %v, %d sent", hash, err, len(fixture.sent))
+		}
+		requireLedgerV2Intent(t, ctx, cfg, "v2answer:1:3:0:0", model.StTxFinalized, fixture.sent[1])
+		// The finalize's one reserved signature and the answer's: 60,000 gas
+		// each at 100 wei.
+		stGasFixtureSnapshot(t, policy, "12000000", 2)
+	})
+}

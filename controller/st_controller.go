@@ -1643,12 +1643,32 @@ func (self *CoreStClient) reconcileAccountIntents(
 		if err != nil {
 			return err
 		}
-		cancelIntent := stale || expiredClose || expiredDeposit || self.spentLedgerV2Intent(ctx, client, intent, from, finalized)
+		spent := self.spentLedgerV2Intent(ctx, client, intent, from, finalized)
+		cancelIntent := stale || expiredClose || expiredDeposit || spent
 		desiredKind := model.StTxAttemptExecution
 		if cancelIntent {
 			desiredKind = model.StTxAttemptCancellation
 		}
-		_, runErr := self.runTransactionIntent(ctx, client, key, intent, desiredKind, cancelIntent)
+		replaceImmediately := cancelIntent
+		if expiredClose || spent {
+			// The process may have stopped between an execution's gas
+			// reservation and its signature, and a cancellation cannot take
+			// that reservation's place. The root key's execution is signed and
+			// sent as reserved: its close has expired or its operation is
+			// spent, so it reverts and frees the nonce. Only a fee replacement
+			// of it is the cancellation.
+			pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+			if err != nil {
+				return err
+			}
+			if pending != nil && pending.Kind == model.StTxAttemptExecution {
+				if _, err := self.buildTransactionAttempt(ctx, client, key, intent, nil, model.StTxAttemptExecution); err != nil {
+					return err
+				}
+				replaceImmediately = false
+			}
+		}
+		_, runErr := self.runTransactionIntent(ctx, client, key, intent, desiredKind, replaceImmediately)
 		if runErr != nil && !stale {
 			return runErr
 		}
