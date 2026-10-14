@@ -2122,7 +2122,7 @@
             "id": 57,
             "type": "timeseries",
             "title": "connection reconcile: unheld rows and retirements",
-            "description": "Each connect handler compares the rows the database holds connected under it with the connections its process holds. Unheld counts the rows the last pass found connected but not held: a final disconnect that failed, or a registration that raised after its commit. The reconcile retires such a row on its second sighting, once every registration in flight at the first has ended. Retired counts those disconnects; passes counts passes by result, and an error pass is retried after the backlog interval.",
+            "description": "Each connect handler compares the rows the database holds connected under it with the connections its process holds. Unheld counts the rows the last pass found connected but not held: a final disconnect that failed, or a registration that raised after its commit. The reconcile retires such a row on its second sighting, once every registration in flight at the first has ended. Retired counts those disconnects; passes counts passes by result, and an error pass is retried after the backlog interval. Unretired counts stale rows a pass left: a retire that raised (tried after the other rows next pass) or a busy fence or row (deferred to the next pass).",
             "gridPos": {
                 "h": 8,
                 "w": 24,
@@ -2166,6 +2166,11 @@
                     "refId": "C",
                     "expr": "sum by (host, block, result) (increase(urnetwork_connect_connection_reconcile_passes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
                     "legendFormat": "passes {{host}} {{block}} {{result}}"
+                },
+                {
+                    "refId": "D",
+                    "expr": "sum by (host, block, reason) (increase(urnetwork_connect_connection_reconcile_unretired_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "unretired {{host}} {{block}} {{reason}}"
                 }
             ]
         },

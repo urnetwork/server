@@ -7,6 +7,7 @@ package connect
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"testing"
@@ -20,6 +21,11 @@ type reconcileStoreForTest struct {
 	stateLock              sync.Mutex
 	connectedConnectionIds map[server.Id]bool
 	retiredConnectionIds   []server.Id
+	// rows whose retire raises, and rows whose retire finds a busy fence
+	failingConnectionIds   map[server.Id]bool
+	deferringConnectionIds map[server.Id]bool
+	// every retire attempt, in order
+	retireAttempts []server.Id
 	// each read and retire is sent here when set, without blocking
 	readEvents   chan struct{}
 	retireEvents chan server.Id
@@ -28,7 +34,32 @@ type reconcileStoreForTest struct {
 func newReconcileStoreForTest() *reconcileStoreForTest {
 	return &reconcileStoreForTest{
 		connectedConnectionIds: map[server.Id]bool{},
+		failingConnectionIds:   map[server.Id]bool{},
+		deferringConnectionIds: map[server.Id]bool{},
 	}
+}
+
+// Makes the row's retire raise, or stops it raising.
+func (self *reconcileStoreForTest) failRetire(connectionId server.Id, fail bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.failingConnectionIds[connectionId] = fail
+}
+
+// Makes the row's retire find a busy fence, or stops it.
+func (self *reconcileStoreForTest) deferRetire(connectionId server.Id, deferRetire bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.deferringConnectionIds[connectionId] = deferRetire
+}
+
+// The retire attempts since the last call.
+func (self *reconcileStoreForTest) takeAttempts() []server.Id {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	attempts := self.retireAttempts
+	self.retireAttempts = nil
+	return attempts
 }
 
 // A registration's row commits.
@@ -78,6 +109,18 @@ func (self *reconcileStoreForTest) read(ctx context.Context, handlerId server.Id
 }
 
 func (self *reconcileStoreForTest) retire(ctx context.Context, handlerId server.Id, connectionId server.Id, disconnectTime time.Time) (bool, bool) {
+	fail, deferRetire := func() (bool, bool) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.retireAttempts = append(self.retireAttempts, connectionId)
+		return self.failingConnectionIds[connectionId], self.deferringConnectionIds[connectionId]
+	}()
+	if fail {
+		panic(errors.New("test: the database refused this retire"))
+	}
+	if deferRetire {
+		return false, true
+	}
 	retired := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -116,6 +159,20 @@ func registerForTest(reconcile *handlerConnectionReconcile, store *reconcileStor
 	store.commit(connectionId)
 	endConnect(&connectionId)
 	return connectionId
+}
+
+// Registers count connections whose final disconnects failed, oldest first.
+func registerFailedReleasesForTest(reconcile *handlerConnectionReconcile, store *reconcileStoreForTest, count int) []server.Id {
+	connectionIds := []server.Id{}
+	for i := 0; i < count; i += 1 {
+		connectionId := registerForTest(reconcile, store)
+		reconcile.release(connectionId, false)
+		connectionIds = append(connectionIds, connectionId)
+	}
+	slices.SortFunc(connectionIds, func(a server.Id, b server.Id) int {
+		return a.Cmp(b)
+	})
+	return connectionIds
 }
 
 // The root cause: the transport ended, its single final disconnect failed,
@@ -392,4 +449,119 @@ func TestConnectionReconcileNilHoldsNothing(t *testing.T) {
 	connectionId := server.NewId()
 	reconcile.beginConnect()(&connectionId)
 	reconcile.release(connectionId, false)
+}
+
+// A row whose retire keeps failing must not block the others. Rows retire
+// oldest first, and a raise used to end the pass before the row left the
+// map, so the failing row came first on every pass and no other row retired.
+func TestConnectionReconcileRetiresAroundARowWhoseRetireKeepsFailing(t *testing.T) {
+	store := newReconcileStoreForTest()
+	reconcile := newReconcileForTest(store, DefaultConnectionReconcileSettings())
+	connectionIds := registerFailedReleasesForTest(reconcile, store, 3)
+	failing, others := connectionIds[0], connectionIds[1:]
+	store.failRetire(failing, true)
+
+	passCount := 6
+	raisedCount := 0
+	for pass := 0; pass < passCount; pass += 1 {
+		if raisedForTest(func() { reconcile.reconcile() }) != nil {
+			raisedCount += 1
+		}
+	}
+	for _, connectionId := range others {
+		if store.connected(connectionId) {
+			t.Fatalf(
+				"a row whose retire keeps failing blocked the other stale rows: %d of %d passes raised, retired %v",
+				raisedCount,
+				passCount,
+				store.retired(),
+			)
+		}
+	}
+	if raisedCount != 0 {
+		t.Fatalf("%d of %d passes raised; a failed retire must not end its pass", raisedCount, passCount)
+	}
+	if !store.connected(failing) {
+		t.Fatal("the row whose retire fails was retired")
+	}
+}
+
+// A pass gives up after three consecutive failed retires, without raising,
+// and leaves the rest for the next pass.
+func TestConnectionReconcileEndsAPassAfterConsecutiveRetireFailures(t *testing.T) {
+	store := newReconcileStoreForTest()
+	reconcile := newReconcileForTest(store, DefaultConnectionReconcileSettings())
+	connectionIds := registerFailedReleasesForTest(reconcile, store, 5)
+	for _, connectionId := range connectionIds {
+		store.failRetire(connectionId, true)
+	}
+	reconcile.reconcile()
+	store.takeAttempts()
+
+	var backlog bool
+	raised := raisedForTest(func() { backlog = reconcile.reconcile() })
+	attempts := store.takeAttempts()
+	// the pass's bound on consecutive failed retires
+	consecutiveFailureBound := 3
+	if raised != nil || len(attempts) != consecutiveFailureBound {
+		t.Fatalf("a pass of failing retires raised %v after %d attempts, want no raise after %d", raised, len(attempts), consecutiveFailureBound)
+	}
+	if !backlog {
+		t.Fatal("rows left by failed retires are not a backlog")
+	}
+}
+
+// A row whose retire failed is tried after the rows that have not failed, so
+// rows that keep failing cannot use up a pass's consecutive failures.
+func TestConnectionReconcileTriesFailedRowsLast(t *testing.T) {
+	store := newReconcileStoreForTest()
+	reconcile := newReconcileForTest(store, DefaultConnectionReconcileSettings())
+	connectionIds := registerFailedReleasesForTest(reconcile, store, 3)
+	for _, connectionId := range connectionIds {
+		store.failRetire(connectionId, true)
+	}
+	// every pass may meet a failing retire
+	pass := func() {
+		raisedForTest(func() { reconcile.reconcile() })
+	}
+	pass()
+	pass()
+	store.takeAttempts()
+
+	// newer rows that have never failed
+	newer := registerFailedReleasesForTest(reconcile, store, 2)
+	pass()
+	store.takeAttempts()
+	pass()
+	attempts := store.takeAttempts()
+	if len(attempts) < 2 || !slices.Equal(attempts[:2], newer) {
+		t.Fatalf("retire attempts %v, want the rows that never failed %v first", attempts, newer)
+	}
+	for _, connectionId := range newer {
+		if store.connected(connectionId) {
+			t.Fatalf("rows that keep failing kept newer row %s from retiring", connectionId)
+		}
+	}
+}
+
+// A retire that finds a busy fence defers the row, which stays for the next
+// pass instead of being forgotten until two new sightings.
+func TestConnectionReconcileKeepsADeferredRowForTheNextPass(t *testing.T) {
+	store := newReconcileStoreForTest()
+	reconcile := newReconcileForTest(store, DefaultConnectionReconcileSettings())
+	connectionId := registerFailedReleasesForTest(reconcile, store, 1)[0]
+	store.deferRetire(connectionId, true)
+	reconcile.reconcile()
+	if backlog := reconcile.reconcile(); !backlog {
+		t.Fatal("a deferred row is not a backlog")
+	}
+	if !store.connected(connectionId) {
+		t.Fatal("fixture: the deferred row must stay connected")
+	}
+
+	store.deferRetire(connectionId, false)
+	reconcile.reconcile()
+	if store.connected(connectionId) {
+		t.Fatal("a deferred row was forgotten: the pass after the fence freed did not retire it")
+	}
 }

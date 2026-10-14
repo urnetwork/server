@@ -22,18 +22,23 @@
 // connection churn from ever blocking a retire, and it covers a row whose
 // registration raised after its commit. A failed final disconnect wakes an
 // early pass, no sooner than the backlog interval after the last one. Passes
-// retire in bounded batches through the model, with the same endpoint fence as
-// the transport's own disconnect. Rows of a process that ended remain handler
-// expiry's.
+// retire in bounded batches through the model. A retire takes the transport
+// disconnect's fences with try-locks, as handler expiry does, so a busy
+// endpoint defers its row to the next pass instead of queueing. A retire that
+// fails leaves its row for a later pass, tried after the rows that have not
+// failed, and the pass goes on; after three consecutive failures it leaves the
+// rest of its batch too. Rows of a process that ended remain handler expiry's.
 //
 // All methods are safe for concurrent use. A nil reconcile holds nothing and
 // never retires, which is what an announcement without a handler owner uses.
 package connect
 
 import (
+	"cmp"
 	"context"
 	"math"
 	mathrand "math/rand"
+	"runtime"
 	"slices"
 	"sync"
 	"time"
@@ -65,6 +70,16 @@ var connectionReconcilePassesCounter = prometheus.NewCounterVec(
 	[]string{"result"},
 )
 
+var connectionReconcileUnretiredCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "connection_reconcile_unretired_total",
+		Help:      "Stale connection rows a reconcile pass did not retire, by reason: the retire raised, or a fence or the row was busy; the row stays for a later pass",
+	},
+	[]string{"reason"},
+)
+
 var connectionReconcileUnheldGauge = prometheus.NewGauge(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
@@ -79,16 +94,24 @@ func init() {
 	prometheus.MustRegister(
 		connectionReconcileRetiredCounter,
 		connectionReconcilePassesCounter,
+		connectionReconcileUnretiredCounter,
 		connectionReconcileUnheldGauge,
 	)
 	for _, result := range []string{"ok", "error"} {
 		connectionReconcilePassesCounter.WithLabelValues(result)
+	}
+	for _, reason := range []string{"failed", "busy"} {
+		connectionReconcileUnretiredCounter.WithLabelValues(reason)
 	}
 }
 
 // The least time between passes whatever the settings, so a pass that keeps
 // raising, or keeps finding rows to confirm, cannot spin.
 const connectionReconcileMinInterval = 100 * time.Millisecond
+
+// A pass leaves the rest of its batch for the next pass after this many
+// consecutive failed retires: the database is likely failing them all.
+const connectionReconcileMaxConsecutiveRetireFailures = 3
 
 // A five minute pass costs one indexed read of the handler's open rows (about
 // 26 ms for the 24k rows of the largest Main block on 2026-10-14). A backlog
@@ -144,6 +167,8 @@ type handlerConnectionReconcile struct {
 	// rows seen connected and unheld, by the generation their first sighting's
 	// read returned in
 	unheldConnectionGenerations map[server.Id]uint64
+	// unheld rows whose retire raised, by how many times
+	retireFailureCounts map[server.Id]int
 }
 
 // Starts the reconcile loop for handlerId, which ends with ctx.
@@ -186,6 +211,7 @@ func newHandlerConnectionReconcileWithStore(
 		heldConnectionIds:           map[server.Id]bool{},
 		connectingGenerationCounts:  map[uint64]int{},
 		unheldConnectionGenerations: map[server.Id]uint64{},
+		retireFailureCounts:         map[server.Id]int{},
 	}
 }
 
@@ -299,8 +325,8 @@ func (self *handlerConnectionReconcile) backlogInterval() time.Duration {
 // One pass: reads the handler's connected rows, notes the unheld ones, and
 // retires at most a batch of those seen unheld before whose registrations have
 // all ended. Returns whether rows remain to confirm or retire. The read and
-// every retire are bounded by the operation timeout; a raise ends the pass and
-// leaves its rows to the next.
+// every retire are bounded by the operation timeout. A raised read ends the
+// pass; a raised retire only fails its row (see the file header).
 func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 	// every row read here committed before the read returned, so only a
 	// registration that began before it returned can still come to hold one
@@ -312,6 +338,7 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 	}()
 
 	var staleConnectionIds []server.Id
+	failureCounts := map[server.Id]int{}
 	unheldCount := 0
 	func() {
 		self.stateLock.Lock()
@@ -346,41 +373,78 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 		for connectionId := range self.unheldConnectionGenerations {
 			if !unheldConnectionIds[connectionId] {
 				delete(self.unheldConnectionGenerations, connectionId)
+				delete(self.retireFailureCounts, connectionId)
 			}
 		}
 		unheldCount = len(self.unheldConnectionGenerations)
+		for _, connectionId := range staleConnectionIds {
+			failureCounts[connectionId] = self.retireFailureCounts[connectionId]
+		}
 	}()
 	connectionReconcileUnheldGauge.Set(float64(unheldCount))
 
-	// oldest first, so a backlog drains in the order it formed
+	// rows whose retire failed go last, so a row that keeps failing never
+	// blocks the others; otherwise oldest first, so a backlog drains in the
+	// order it formed
 	slices.SortFunc(staleConnectionIds, func(a server.Id, b server.Id) int {
+		if c := cmp.Compare(failureCounts[a], failureCounts[b]); c != 0 {
+			return c
+		}
 		return a.Cmp(b)
 	})
 	batchCount := min(len(staleConnectionIds), max(self.settings.RetireBatchCount, 0))
 	retiredCount := 0
+	busyCount := 0
+	failedCount := 0
+	consecutiveFailureCount := 0
+	var lastFailure error
 	for _, connectionId := range staleConnectionIds[:batchCount] {
 		if self.ctx.Err() != nil {
 			return true
 		}
-		retired := func() bool {
-			retireCtx, retireCancel := context.WithTimeout(self.ctx, self.settings.OperationTimeout)
-			defer retireCancel()
-			retired, _ := self.retireConnection(retireCtx, self.handlerId, connectionId, server.NowUtc())
-			return retired
-		}()
+		retired, deferred, retireErr := self.retireOne(connectionId)
+		if retireErr != nil {
+			if self.ctx.Err() != nil {
+				return true
+			}
+			// the row stays for a later pass, after the rows that have not failed
+			failedCount += 1
+			consecutiveFailureCount += 1
+			lastFailure = retireErr
+			connectionReconcileUnretiredCounter.WithLabelValues("failed").Inc()
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				self.retireFailureCounts[connectionId] += 1
+			}()
+			if connectionReconcileMaxConsecutiveRetireFailures <= consecutiveFailureCount {
+				break
+			}
+			continue
+		}
+		consecutiveFailureCount = 0
+		if deferred {
+			// a fence or the row is busy; the row stays for the next pass
+			busyCount += 1
+			connectionReconcileUnretiredCounter.WithLabelValues("busy").Inc()
+			continue
+		}
 		func() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 			// retired, or already disconnected by another owner
 			delete(self.unheldConnectionGenerations, connectionId)
+			delete(self.retireFailureCounts, connectionId)
 		}()
 		if retired {
 			retiredCount += 1
 			connectionReconcileRetiredCounter.Inc()
 		}
 	}
-	if 0 < retiredCount {
-		glog.Infof("[t]connection reconcile retired %d of %d stale connections\n", retiredCount, len(staleConnectionIds))
+	if 0 < failedCount {
+		glog.Infof("[t]connection reconcile retired %d, deferred %d and failed %d of %d stale connections; last failure: %s\n", retiredCount, busyCount, failedCount, len(staleConnectionIds), lastFailure)
+	} else if 0 < retiredCount {
+		glog.Infof("[t]connection reconcile retired %d and deferred %d of %d stale connections\n", retiredCount, busyCount, len(staleConnectionIds))
 	}
 
 	func() {
@@ -389,5 +453,29 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 		// a zero batch only observes, at the regular interval
 		backlog = 0 < len(self.unheldConnectionGenerations) && 0 < self.settings.RetireBatchCount
 	}()
+	return
+}
+
+// One retire, bounded by the operation timeout. A raise is that retire's
+// failure, and the caller keeps the row for a later pass; a programming fault
+// (a runtime error, or a raise that is not an error) still raises.
+func (self *handlerConnectionReconcile) retireOne(connectionId server.Id) (retired bool, deferred bool, retireErr error) {
+	retireCtx, retireCancel := context.WithTimeout(self.ctx, self.settings.OperationTimeout)
+	defer retireCancel()
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		if _, fault := r.(runtime.Error); fault {
+			panic(r)
+		}
+		err, ok := r.(error)
+		if !ok {
+			panic(r)
+		}
+		retireErr = err
+	}()
+	retired, deferred = self.retireConnection(retireCtx, self.handlerId, connectionId, server.NowUtc())
 	return
 }

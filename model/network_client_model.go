@@ -3298,13 +3298,17 @@ func GetConnectedNetworkClientHandlerConnectionIds(ctx context.Context, handlerI
 	return
 }
 
-// Disconnects a row that its live handler no longer holds, with the same
-// endpoint fence and session events as DisconnectNetworkClient. Only a row
-// still connected under handlerId changes: a late or repeated retire never
-// moves an earlier disconnect time, and another handler's row is never
-// touched. disconnectTime is when the transport ended, or the retire time when
-// the caller does not know it. deferred reports a row left for a later retire;
-// this retire waits on its fences, so it never defers.
+// Disconnects a row that its live handler no longer holds, with the endpoint
+// fence and session events of DisconnectNetworkClient, but never queues: the
+// shared bridge, the endpoint fence, the session head and the row itself are
+// each taken with a try-lock or SKIP LOCKED, as handler expiry takes them
+// (retireNetworkClientHandlerPageInTx). Any one held elsewhere defers the row:
+// deferred is true, and the caller retries it later. A queued retire held a
+// pooled connection, and the caller's whole pass, for as long as the owner
+// kept the fence. Only a row still connected under handlerId changes: a late
+// or repeated retire never moves an earlier disconnect time, and another
+// handler's row is never touched. disconnectTime is when the transport ended,
+// or the retire time when the caller does not know it.
 func RetireNetworkClientHandlerConnection(
 	ctx context.Context,
 	handlerId server.Id,
@@ -3316,6 +3320,7 @@ func RetireNetworkClientHandlerConnection(
 	server.Tx(ctx, func(tx server.PgTx) {
 		retired = false
 		deferred = false
+		server.Raise(ctx.Err())
 		var clientId server.Id
 		err := tx.QueryRow(
 			ctx,
@@ -3333,10 +3338,67 @@ func RetireNetworkClientHandlerConnection(
 		if errors.Is(err, pgx.ErrNoRows) {
 			return
 		}
-		server.Raise(err)
-		providerWorkLockCurrentSessionMutationInTx(ctx, tx, clientId)
-		// read committed re-reads the row after the fence wait, so a disconnect
-		// that committed meanwhile leaves nothing to change
+		server.Raise(errors.Join(err, ctx.Err()))
+		var acquired bool
+		err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(-776::bigint)`).Scan(&acquired)
+		server.Raise(errors.Join(err, ctx.Err()))
+		if !acquired {
+			deferred = true
+			return
+		}
+		err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(776,('x'||substr(md5($1::uuid::text),1,8))::bit(32)::int)`, clientId).Scan(&acquired)
+		server.Raise(errors.Join(err, ctx.Err()))
+		if !acquired {
+			deferred = true
+			return
+		}
+		var busy bool
+		err = tx.QueryRow(ctx, `WITH owned AS (
+			 SELECT client_id FROM provider_work_session_head WHERE client_id=$1 FOR UPDATE SKIP LOCKED)
+			 SELECT EXISTS(SELECT 1 FROM provider_work_session_head WHERE client_id=$1)
+			 AND NOT EXISTS(SELECT 1 FROM owned)`, clientId).Scan(&busy)
+		server.Raise(errors.Join(err, ctx.Err()))
+		if busy {
+			deferred = true
+			return
+		}
+		_, err = tx.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)
+		server.Raise(errors.Join(err, ctx.Err()))
+		// the row itself: its own transport's disconnect or another owner may
+		// hold it, and a row disconnected meanwhile needs nothing
+		var lockedConnectionId server.Id
+		err = tx.QueryRow(
+			ctx,
+			`
+				SELECT connection_id
+				FROM network_client_connection
+				WHERE
+					connection_id = $1 AND
+					handler_id = $2 AND
+					connected
+				FOR UPDATE SKIP LOCKED
+			`,
+			connectionId,
+			handlerId,
+		).Scan(&lockedConnectionId)
+		if errors.Is(err, pgx.ErrNoRows) {
+			var stillConnected bool
+			err = tx.QueryRow(
+				ctx,
+				`
+					SELECT EXISTS(
+						SELECT 1 FROM network_client_connection
+						WHERE connection_id = $1 AND handler_id = $2 AND connected
+					)
+				`,
+				connectionId,
+				handlerId,
+			).Scan(&stillConnected)
+			server.Raise(errors.Join(err, ctx.Err()))
+			deferred = stillConnected
+			return
+		}
+		server.Raise(errors.Join(err, ctx.Err()))
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -3358,7 +3420,7 @@ func RetireNetworkClientHandlerConnection(
 		}
 		retired = true
 		providerWorkRetainSessionEventsInTx(ctx, tx, clientId)
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.OptNoRetry())
 
 	return
 }
