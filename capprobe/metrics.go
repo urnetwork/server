@@ -1,0 +1,181 @@
+package capprobe
+
+import (
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+// The probe's metrics, per taskworker process. Every bounded label set is
+// published from the start, zero included, so a probe that stops reads as
+// counters that stop rising rather than as series that vanish. SIGNALS.md
+// §2.19g says what each means and when it is a finding; the egress probes
+// dashboard charts every one.
+
+// Pass results, the labels of urnetwork_capability_probe_passes_total.
+const (
+	// the pass read its pages and measured what was due
+	PassResultMeasured = "measured"
+	// the sweep's next start had not come: nothing was read
+	PassResultWaiting = "waiting"
+	// the settings switch the probe off
+	PassResultDisabled = "disabled"
+	// the pass failed: its settings, prober shard, selection or a write
+	PassResultFailed = "failed"
+)
+
+// Every pass result.
+var passResults = []string{
+	PassResultMeasured,
+	PassResultWaiting,
+	PassResultDisabled,
+	PassResultFailed,
+}
+
+// Selection stages, the labels of urnetwork_capability_probe_selection_total.
+const (
+	selectionScanned  = "scanned"
+	selectionDue      = "due"
+	selectionEligible = "eligible"
+	selectionStarted  = "started"
+)
+
+var selectionStages = []string{
+	selectionScanned,
+	selectionDue,
+	selectionEligible,
+	selectionStarted,
+}
+
+// The two capabilities of urnetwork_capability_probe_readings_total.
+const (
+	capabilityE2e    = "e2e"
+	capabilityWindow = "window"
+)
+
+var passesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "passes_total",
+	Help:      "Capability probe passes by result: measured, waiting (between sweeps), disabled, failed",
+}, []string{"result"})
+
+var selectionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "selection_total",
+	Help:      "Providers the capability probe's sweep scanned, found due for evidence, found eligible for quality or speed, and started measuring",
+}, []string{"stage"})
+
+var providersTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "providers_total",
+	Help:      "Finished capability measurements by outcome: recorded with the gate's outcome, or why nothing was recorded",
+}, []string{"outcome"})
+
+var readingsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "readings_total",
+	Help:      "Final readings of opened capability measurements, per capability (e2e, window) and reading; not_tested and pending are not evidence",
+}, []string{"capability", "reading"})
+
+var measureSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "measure_seconds",
+	Help:      "One capability measurement, from opening its tunnel to reading its evidence, teardown excluded",
+	Buckets:   []float64{1, 2, 5, 10, 15, 20, 30, 45, 60, 75, 90, 120, 180, 300},
+})
+
+var inFlight = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "in_flight",
+	Help:      "Capability measurements this taskworker has running, teardown included",
+})
+
+var closeErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "close_errors_total",
+	Help:      "Capability tunnel teardowns that returned an error; the derived client's retirement is then for the prober reaper",
+})
+
+var sweepsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "sweeps_total",
+	Help:      "Capability probe sweeps this taskworker completed by reaching the end of the connected providers",
+})
+
+var lastSweepSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "last_sweep_seconds",
+	Help:      "How long the last sweep this taskworker completed took, from its first pass's start",
+})
+
+var lastPassTimestampSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "last_pass_timestamp_seconds",
+	Help:      "Unix time this taskworker last finished a capability probe pass that measured or waited",
+})
+
+// Registers the metrics with every bounded label set seeded.
+func init() {
+	for _, result := range passResults {
+		passesTotal.WithLabelValues(result)
+	}
+	for _, stage := range selectionStages {
+		selectionTotal.WithLabelValues(stage)
+	}
+	for _, outcome := range outcomes {
+		providersTotal.WithLabelValues(outcome)
+	}
+	for _, reading := range e2eReadings {
+		readingsTotal.WithLabelValues(capabilityE2e, string(reading))
+	}
+	for _, reading := range windowReadings {
+		readingsTotal.WithLabelValues(capabilityWindow, string(reading))
+	}
+	prometheus.MustRegister(
+		passesTotal,
+		selectionTotal,
+		providersTotal,
+		readingsTotal,
+		measureSeconds,
+		inFlight,
+		closeErrorsTotal,
+		sweepsTotal,
+		lastSweepSeconds,
+		lastPassTimestampSeconds,
+	)
+}
+
+// Counts one pass the task finished without running it, or failed before
+// it ran: PassResultDisabled or PassResultFailed.
+func ObservePass(result string) {
+	passesTotal.WithLabelValues(result).Inc()
+}
+
+// Counts a selection's stages.
+func observeSelection(selected selection, startedCount int) {
+	selectionTotal.WithLabelValues(selectionScanned).Add(float64(selected.scanned))
+	selectionTotal.WithLabelValues(selectionDue).Add(float64(selected.due))
+	selectionTotal.WithLabelValues(selectionEligible).Add(float64(selected.eligible))
+	selectionTotal.WithLabelValues(selectionStarted).Add(float64(startedCount))
+}
+
+// Counts one finished measurement under outcome.
+func observeMeasurement(result measurement, outcome string) {
+	providersTotal.WithLabelValues(outcome).Inc()
+	measureSeconds.Observe(result.elapsed.Seconds())
+	if result.opened {
+		readingsTotal.WithLabelValues(capabilityE2e, string(result.reading.e2e)).Inc()
+		readingsTotal.WithLabelValues(capabilityWindow, string(result.reading.window)).Inc()
+	}
+	if result.closeErr != nil {
+		closeErrorsTotal.Inc()
+	}
+}
