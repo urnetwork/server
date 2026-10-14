@@ -91,6 +91,9 @@ type stDepositCustodyRpc struct {
 	sent         []*types.Transaction
 	receiptKVs   map[common.Hash]*types.Receipt
 	viewCalls    int
+	// balance, when set, is the deposit key's native balance: a transaction
+	// whose gas limit at its fee cap exceeds it is refused as underfunded.
+	balance *big.Int
 }
 
 // Serializes the inherited domain observation with receipt inclusion changes.
@@ -261,6 +264,9 @@ func (self *stDepositCustodyRpc) SendRawTransaction(_ context.Context, raw hexut
 	var tx types.Transaction
 	if err := tx.UnmarshalBinary(raw); err != nil {
 		return common.Hash{}, err
+	}
+	if self.balance != nil && new(big.Int).Mul(new(big.Int).SetUint64(tx.Gas()), tx.GasFeeCap()).Cmp(self.balance) > 0 {
+		return common.Hash{}, errors.New("insufficient funds for gas * price + value")
 	}
 	self.sent = append(self.sent, &tx)
 	if self.receiptKVs[tx.Hash()] != nil {

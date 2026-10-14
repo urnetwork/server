@@ -7,12 +7,16 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"testing"
+	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // SV-4 (the v1 deposit, §8.1 gas floor): the staging transferStake and the
@@ -97,5 +101,78 @@ func TestStV1DepositFloorStaysWithinTheRemainingLiability(t *testing.T) {
 			t.Fatalf("%d sent, %d deposited", len(sent), deposited)
 		}
 		stGasFixtureSnapshot(t, policy, "30000000", 2)
+	})
+}
+
+// SV-4 (the v1 deposit, §8.1 gas floor): the deposit key must hold each
+// send's gas limit at its fee cap, for the staging transferStake its
+// 2,800,000 floor at the fixture's 10 wei, 28,000,000 wei. Below that the node
+// refuses the staging as underfunded. The signed staging keeps nonce 7, and the
+// deposit key's later sends stop at it: each broadcasts its stored bytes
+// again, and none takes a nonce or signs the deposit. Its fee replacement, at
+// 12 wei, needs 33,600,000 wei and is refused as well. Once the key holds
+// 34,000,000 wei, the replacement goes out at nonce 7, and the deposit, its
+// 3,400,000 floor at 10 wei, at nonce 8.
+func TestStV1DepositStagingWaitsForTheDepositKeyToBeFunded(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		client, _, fixture := newStDepositCustodyFixture(t, 1)
+		policy, _, _ := stGasFixturePolicy(t, client, func(policy *server.StOperatorGasPolicy) {
+			policy.MaximumGas, policy.MaximumIntentLiabilityWei, policy.MaximumLifetimeLiabilityWei = 3_500_000, "100000000", "1000000000"
+		})
+		fixture.stateLock.Lock()
+		fixture.balance = big.NewInt(27_999_999)
+		fixture.stateLock.Unlock()
+		ctx := context.Background()
+		stagingKey, err := stTransactionLogicalKey(client.cfg, fmt.Sprintf("deposit-fund:7:%d:3", client.cfg.NoId))
+		if err != nil {
+			t.Fatal(err)
+		}
+		underfunded := func(step string, attempts int, send func(context.Context) error) {
+			t.Helper()
+			stopCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			err := send(stopCtx)
+			cancel()
+			staging := model.GetStTransactionIntent(ctx, stagingKey)
+			fixture.stateLock.Lock()
+			sent := len(fixture.sent)
+			fixture.stateLock.Unlock()
+			if err == nil || staging == nil || staging.Nonce != 7 || staging.AttemptCount != attempts || model.GetStTransactionIntent(ctx, stGasCurrentLogical(t, client)) != nil || sent != 0 {
+				t.Fatalf("%s: %v, staging %+v, %d sent", step, err, staging, sent)
+			}
+		}
+		underfunded("staging", 1, func(ctx context.Context) error {
+			_, err := client.stageDepositPrincipal(ctx, 7, big.NewInt(100))
+			return err
+		})
+		deposit := func(ctx context.Context) error {
+			_, err := client.DepositCredit(ctx, 7, 1, big.NewInt(100))
+			return err
+		}
+		underfunded("deposit behind the staging", 1, deposit)
+		stGasFixtureSnapshot(t, policy, "28000000", 1)
+
+		staging := model.GetStTransactionIntent(ctx, stagingKey)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE st_transaction_attempt SET create_time=$2 WHERE intent_id=$1`, staging.IntentId, server.NowUtc().Add(-2*stTxReplacementDelay)))
+		})
+		underfunded("the staging's fee replacement", 2, deposit)
+		stGasFixtureSnapshot(t, policy, "33600000", 2)
+
+		fixture.stateLock.Lock()
+		fixture.balance = big.NewInt(34_000_000)
+		fixture.stateLock.Unlock()
+		if err := deposit(ctx); err != nil {
+			t.Fatalf("deposit once funded: %v", err)
+		}
+		fixture.stateLock.Lock()
+		sent := append([]*types.Transaction(nil), fixture.sent...)
+		deposited := fixture.deposited.Int64()
+		fixture.stateLock.Unlock()
+		replacement := model.GetStTransactionAttempts(ctx, staging.IntentId)[0]
+		if len(sent) != 2 || sent[0].Nonce() != 7 || sent[0].Gas() != stV1DepositStagingGasFloor || sent[0].GasPrice().Int64() != 12 || sent[0].Hash().Hex() != common.HexToHash(replacement.TxHash).Hex() ||
+			sent[1].Nonce() != 8 || sent[1].Gas() != stV1DepositGasFloor || sent[1].GasPrice().Int64() != 10 || deposited != 100 {
+			t.Fatalf("%d sent, %d deposited", len(sent), deposited)
+		}
+		stGasFixtureSnapshot(t, policy, "67600000", 3)
 	})
 }

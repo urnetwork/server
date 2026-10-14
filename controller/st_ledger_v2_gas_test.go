@@ -6,17 +6,23 @@ package controller
 // that keeps reverting (VERSION2-FINAL.md §8.1).
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"math/big"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
@@ -664,5 +670,232 @@ func TestStLedgerV2RecoveryRacingTheEngineStrandsTheRootKey(t *testing.T) {
 		if len(fixture.sent) != 1 {
 			t.Fatalf("%d sent", len(fixture.sent))
 		}
+	})
+}
+
+// ledgerV2FaultRPC serves the v2 fixture with two faults of a real node. The
+// next lostSends broadcasts are refused before they reach the fixture, and the
+// next hiddenReceipts receipt reads answer null, as a receipt index that lags
+// does. A broadcast of a transaction the fixture already included is answered
+// "nonce too low" and not included again.
+type ledgerV2FaultRPC struct {
+	fixture        *ledgerV2RPC
+	lock           sync.Mutex
+	lostSends      int
+	hiddenReceipts int
+}
+
+func (self *ledgerV2FaultRPC) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	body, err := io.ReadAll(request.Body)
+	request.Body.Close()
+	if err != nil {
+		self.fixture.t.Errorf("read RPC request: %v", err)
+		return
+	}
+	var call stEpochRPCRequest
+	if !strings.HasPrefix(strings.TrimSpace(string(body)), "[") && json.Unmarshal(body, &call) == nil {
+		response := map[string]any{"jsonrpc": "2.0", "id": call.ID}
+		answered := false
+		self.lock.Lock()
+		switch call.Method {
+		case "eth_sendRawTransaction":
+			var rawHex string
+			json.Unmarshal(call.Params[0], &rawHex)
+			var transaction types.Transaction
+			included := false
+			if transaction.UnmarshalBinary(hexutil.MustDecode(rawHex)) == nil {
+				self.fixture.lock.Lock()
+				_, included = self.fixture.receipts[strings.ToLower(transaction.Hash().Hex())]
+				self.fixture.lock.Unlock()
+			}
+			if 0 < self.lostSends {
+				self.lostSends--
+				response["error"], answered = map[string]any{"code": -32000, "message": "service unavailable"}, true
+			} else if included {
+				response["error"], answered = map[string]any{"code": -32000, "message": "nonce too low"}, true
+			}
+		case "eth_getTransactionReceipt":
+			if 0 < self.hiddenReceipts {
+				self.hiddenReceipts--
+				response["result"], answered = nil, true
+			}
+		}
+		self.lock.Unlock()
+		if answered {
+			writer.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(writer).Encode(response)
+			return
+		}
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	self.fixture.ServeHTTP(writer, request)
+}
+
+// Reverts the close of epoch 7 at its inclusion twice, which spends two of
+// its operation's three signatures, at nonces 7 and 8.
+func ledgerV2RevertCloseTwice(t testing.TB, ctx context.Context, fixture *ledgerV2RPC, client *CoreStClient) []byte {
+	t.Helper()
+	closeCall := stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))
+	fixture.estimates[string(closeCall)] = 246_899
+	fixture.needs[string(closeCall)] = math.MaxUint64
+	for generation := 0; generation < 2; generation++ {
+		if hash, err := client.LedgerV2Close(ctx, 7, 1); err == nil || !strings.Contains(err.Error(), "st: finalized transaction "+hash+" reverted") {
+			t.Fatalf("close %d: %s, %v", generation, hash, err)
+		}
+	}
+	return closeCall
+}
+
+// The close of epoch 7 holds its third and last signature at nonce 9, whose
+// one broadcast was lost, and the epoch has been closed by another party. The
+// root key's next send cannot cancel the spent close, whose signatures are
+// spent, so it broadcasts the signed close again: the close reverts, which
+// that send reports, and frees the nonce, without another signature or any
+// new liability. The send after it goes out.
+func requireLedgerV2LostLastCloseIsSentAgain(t testing.TB, ctx context.Context, fixture *ledgerV2RPC, client *CoreStClient, cfg *StConfig, policy *server.StOperatorGasPolicy) {
+	t.Helper()
+	intent := ledgerV2Intent(t, ctx, cfg, "v2close:7:1")
+	attempts := model.GetStTransactionAttempts(ctx, intent.IntentId)
+	if intent.Generation != 2 || intent.Nonce != 9 || len(attempts) != 1 || len(fixture.sent) != 2 {
+		t.Fatalf("lost close %+v, %d attempts, %d sent", intent, len(attempts), len(fixture.sent))
+	}
+	stGasFixtureSnapshot(t, policy, "960000000", 3)
+
+	answer := ledgerV2TestAnswer()
+	_, err := client.LedgerV2Answer(ctx, 1, 3, answer)
+	if err == nil || !strings.Contains(err.Error(), "st: finalized transaction "+attempts[0].TxHash+" reverted") || !errors.Is(err, model.ErrStOperatorGasAllowance) || len(fixture.sent) != 3 {
+		t.Fatalf("answer behind the lost close: %v, %d sent", err, len(fixture.sent))
+	}
+	if sent := fixture.sent[2]; !strings.EqualFold(sent.Hash().Hex(), attempts[0].TxHash) || sent.Nonce() != 9 || sent.Gas() != stLedgerV2StakeMoveGasFloor {
+		t.Fatalf("sent %s at nonce %d with %d gas, not the signed close %s", sent.Hash(), sent.Nonce(), sent.Gas(), attempts[0].TxHash)
+	}
+	requireLedgerV2Intent(t, ctx, cfg, "v2close:7:1", model.StTxReverted, fixture.sent[2])
+	if attempts := model.GetStTransactionAttempts(ctx, intent.IntentId); len(attempts) != 1 {
+		t.Fatalf("%d attempts", len(attempts))
+	}
+	stGasFixtureSnapshot(t, policy, "960000000", 3)
+
+	hash, err := client.LedgerV2Answer(ctx, 1, 3, answer)
+	if err != nil || len(fixture.sent) != 4 || fixture.sent[3].Nonce() != 10 || !strings.EqualFold(hash, fixture.sent[3].Hash().Hex()) {
+		t.Fatalf("answer on the freed key: %s, %v, %d sent", hash, err, len(fixture.sent))
+	}
+	requireLedgerV2Intent(t, ctx, cfg, "v2answer:1:3:0:0", model.StTxFinalized, fixture.sent[3])
+}
+
+// SV-1 (retries): a close that reverted twice reserves its third and last
+// signature at nonce 9, and the process stops before signing it; another
+// party then closes the epoch. The root key's next send signs the reserved
+// close and broadcasts it, and that broadcast is lost. The close is then sent
+// again, as requireLedgerV2LostLastCloseIsSentAgain describes.
+func TestStLedgerV2ReservedLastSignatureWhoseBroadcastIsLostIsSentAgain(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		fault := &ledgerV2FaultRPC{fixture: fixture}
+		client, _, cfg := newLedgerV2RPCClient(t, fault)
+		policy, _ := ledgerV2GasPolicy(t, client, nil)
+		closeCall := ledgerV2RevertCloseTwice(t, ctx, fixture, client)
+		stopped := errors.New("process stopped between the reservation and the signature")
+		client.transactionSigner = func(context.Context, *types.Transaction, types.Signer, *ecdsa.PrivateKey) (*types.Transaction, error) {
+			return nil, stopped
+		}
+		if _, err := client.LedgerV2Close(ctx, 7, 1); !errors.Is(err, stopped) {
+			t.Fatalf("third close: %v", err)
+		}
+		client.transactionSigner = nil
+		fixture.reverts[string(closeCall)] = "InvalidWindow"
+
+		fault.lock.Lock()
+		fault.lostSends = 1
+		fault.lock.Unlock()
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err := client.LedgerV2Answer(stopCtx, 1, 3, ledgerV2TestAnswer())
+		cancel()
+		if err == nil {
+			t.Fatal("answer behind the reserved close whose broadcast is lost went out")
+		}
+		requireLedgerV2LostLastCloseIsSentAgain(t, ctx, fixture, client, cfg, policy)
+	})
+}
+
+// SV-1 (retries): the same holds for a close the engine signs as the third
+// and last signature of its operation and broadcasts at once, without a
+// reservation left by a stop, when that broadcast is lost and the epoch is
+// then closed by another party.
+func TestStLedgerV2LastSignatureWhoseBroadcastIsLostIsSentAgain(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		fault := &ledgerV2FaultRPC{fixture: fixture}
+		client, _, cfg := newLedgerV2RPCClient(t, fault)
+		policy, _ := ledgerV2GasPolicy(t, client, nil)
+		closeCall := ledgerV2RevertCloseTwice(t, ctx, fixture, client)
+
+		fault.lock.Lock()
+		fault.lostSends = 1
+		fault.lock.Unlock()
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err := client.LedgerV2Close(stopCtx, 7, 1)
+		cancel()
+		if err == nil {
+			t.Fatal("close whose broadcast is lost was finalized")
+		}
+		fixture.reverts[string(closeCall)] = "InvalidWindow"
+		requireLedgerV2LostLastCloseIsSentAgain(t, ctx, fixture, client, cfg, policy)
+	})
+}
+
+// SV-1 (retries): the close sent again had in fact been included, behind a
+// receipt index that lags, and the node answers its second broadcast "nonce
+// too low". The send that broadcast it again reports its revert once. The
+// fixture holds one inclusion of it, its intent one attempt, and the gas
+// ledger what it held. The sends after it go out without another report.
+func TestStLedgerV2LastSignatureSentAgainAfterItsInclusionIsReportedOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		fault := &ledgerV2FaultRPC{fixture: fixture}
+		client, _, cfg := newLedgerV2RPCClient(t, fault)
+		policy, _ := ledgerV2GasPolicy(t, client, nil)
+		closeCall := ledgerV2RevertCloseTwice(t, ctx, fixture, client)
+
+		fixture.withheld = 1
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err := client.LedgerV2Close(stopCtx, 7, 1)
+		cancel()
+		if err == nil || len(fixture.sent) != 3 {
+			t.Fatalf("third close before its inclusion: %v, %d sent", err, len(fixture.sent))
+		}
+		closeTx := fixture.sent[2]
+		fixture.lock.Lock()
+		fixture.receipts[strings.ToLower(closeTx.Hash().Hex())] = &types.Receipt{
+			Type: closeTx.Type(), TxHash: closeTx.Hash(), BlockHash: stTransactionReconcileBlockHash(fixture.finalizedBlock - 1),
+			BlockNumber: new(big.Int).SetUint64(fixture.finalizedBlock - 1), Status: types.ReceiptStatusFailed,
+			CumulativeGasUsed: closeTx.Gas(), GasUsed: closeTx.Gas(), EffectiveGasPrice: closeTx.GasPrice(), Logs: []*types.Log{},
+		}
+		fixture.reverts[string(closeCall)] = "InvalidWindow"
+		fixture.lock.Unlock()
+		fault.lock.Lock()
+		fault.hiddenReceipts = 1
+		fault.lock.Unlock()
+
+		answer := ledgerV2TestAnswer()
+		_, err = client.LedgerV2Answer(ctx, 1, 3, answer)
+		if err == nil || !strings.Contains(err.Error(), "st: finalized transaction "+strings.ToLower(closeTx.Hash().Hex())+" reverted") || len(fixture.sent) != 3 {
+			t.Fatalf("answer behind the included close: %v, %d sent", err, len(fixture.sent))
+		}
+		requireLedgerV2Intent(t, ctx, cfg, "v2close:7:1", model.StTxReverted, closeTx)
+		if intent := ledgerV2Intent(t, ctx, cfg, "v2close:7:1"); len(model.GetStTransactionAttempts(ctx, intent.IntentId)) != 1 {
+			t.Fatal("the close sent again took another attempt")
+		}
+		stGasFixtureSnapshot(t, policy, "960000000", 3)
+		for range 2 {
+			hash, err := client.LedgerV2Answer(ctx, 1, 3, answer)
+			if err != nil || len(fixture.sent) != 4 || fixture.sent[3].Nonce() != 10 || !strings.EqualFold(hash, fixture.sent[3].Hash().Hex()) {
+				t.Fatalf("answer after the report: %s, %v, %d sent", hash, err, len(fixture.sent))
+			}
+		}
+		requireLedgerV2Intent(t, ctx, cfg, "v2answer:1:3:0:0", model.StTxFinalized, fixture.sent[3])
+		stGasFixtureSnapshot(t, policy, "966000000", 4)
 	})
 }
