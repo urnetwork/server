@@ -7,10 +7,14 @@
 // run. That is how 24 context.CancelFunc handlers went dormant for years. The
 // scan parses every Go file in the module, build constraints aside, and finds
 // the helper calls by their import names. A function literal handler is
-// checked by its syntax. Any other handler is checked by its type: its
-// package is type-checked from source against the standard library's export
-// data, with every other import left empty, which resolves the context
-// cancels and the module's own declarations without building the module.
+// checked by its syntax; for HandleError1 and HandleError2 its results must
+// read the same as the helper's type arguments or its do literal's results.
+// Any other handler is checked by its type: its package is type-checked from
+// source against the standard library's export data, with every other import
+// left empty, which resolves the context cancels and the module's own
+// declarations without building the module. Neither helper module converts
+// named function types, so a named handler type passes only as one of the two
+// context cancels that HandleError runs.
 package server
 
 import (
@@ -209,12 +213,31 @@ func TestEveryRescueHandlerArgumentIsRunnable(t *testing.T) {
 					t.Errorf("%s: %s.%s receives a handler list it cannot be checked through; pass each handler", fset.Position(call.Pos()), module, name)
 					return true
 				}
+				// HandleError1 and HandleError2 run only a handler whose results
+				// are their own, so the results are compared as written
+				var results []string
+				if 0 < helper.results {
+					results = rescueHelperResults(call)
+				}
 				for i := helper.firstHandler; i < len(call.Args); i++ {
 					arg := call.Args[i]
-					if lit, ok := arg.(*ast.FuncLit); ok {
-						if !rescueFuncLitRunnable(lit, helper.results) {
-							t.Errorf("%s: %s.%s cannot run this handler: %s", fset.Position(arg.Pos()), module, name, rescueHandlerRule(helper))
+					lit, ok := arg.(*ast.FuncLit)
+					if ok && !rescueFuncLitRunnable(lit, helper.results) {
+						t.Errorf("%s: %s.%s cannot run this handler: %s", fset.Position(arg.Pos()), module, name, rescueHandlerRule(helper))
+						continue
+					}
+					if 0 < helper.results {
+						switch {
+						case !ok:
+							t.Errorf("%s: pass each %s.%s handler as a function literal, so its results can be compared with the helper's", fset.Position(arg.Pos()), module, name)
+						case results == nil:
+							t.Errorf("%s: write %s.%s's type arguments or pass its do as a function literal, so the handler's results can be compared with the helper's", fset.Position(arg.Pos()), module, name)
+						case !slices.Equal(rescueFuncLitResults(lit), results):
+							t.Errorf("%s: %s.%s cannot run this handler: it returns (%s) and the helper returns (%s)", fset.Position(arg.Pos()), module, name, strings.Join(rescueFuncLitResults(lit), ", "), strings.Join(results, ", "))
 						}
+						continue
+					}
+					if ok {
 						continue
 					}
 					arguments = append(arguments, rescueHandlerArgument{helper: helper, file: file, path: path, arg: arg})
@@ -357,16 +380,12 @@ func (self rescueImporterFunc) Import(path string) (*types.Package, error) {
 // The handler shapes the helper's type switch runs.
 func rescueHandlerRule(helper rescueHelper) string {
 	switch {
-	case helper.module == "server" && helper.results == 0:
-		return "pass a func() or func(error), or a named type of either"
-	case helper.module == "server":
-		return "pass a func() or func(error) with the helper's results, or a named type of either"
-	case helper.name == "HandleError" && helper.results == 0:
+	case helper.name == "HandleError":
 		return "pass a func(), a func(error), a context.CancelFunc or a context.CancelCauseFunc"
 	case helper.results == 0:
 		return "pass a func() or func(error)"
 	default:
-		return "pass a func() or func(error) with the helper's results"
+		return "pass a func() or func(error) literal returning the helper's results"
 	}
 }
 
@@ -392,8 +411,8 @@ func rescueFuncLitRunnable(lit *ast.FuncLit, results int) bool {
 }
 
 // A typed handler runs when its signature takes nothing or one error and
-// returns the helper's number of results. The server helpers convert named
-// function types; connect's run only its two named context cancels.
+// returns the helper's number of results. No helper converts a named
+// function type: HandleError has cases for the two context cancels only.
 func rescueTypeRunnable(handlerType types.Type, helper rescueHelper) bool {
 	signature, ok := handlerType.Underlying().(*types.Signature)
 	if !ok || signature.Variadic() || signature.Results().Len() != helper.results {
@@ -407,10 +426,46 @@ func rescueTypeRunnable(handlerType types.Type, helper rescueHelper) bool {
 	} else if params.Len() != 0 {
 		return false
 	}
-	if _, named := types.Unalias(handlerType).(*types.Named); named && helper.module == "connect" {
+	if _, named := types.Unalias(handlerType).(*types.Named); named {
 		return helper.name == "HandleError" && rescueContextCancel(handlerType)
 	}
 	return true
+}
+
+// A function literal's result types as written, one per result.
+func rescueFuncLitResults(lit *ast.FuncLit) []string {
+	results := []string{}
+	if lit.Type.Results == nil {
+		return results
+	}
+	for _, field := range lit.Type.Results.List {
+		for range max(1, len(field.Names)) {
+			results = append(results, types.ExprString(field.Type))
+		}
+	}
+	return results
+}
+
+// The result types of a HandleError1 or HandleError2 call as written: its
+// type arguments, or else its do literal's results. Nil when the call writes
+// neither.
+func rescueHelperResults(call *ast.CallExpr) []string {
+	switch fun := call.Fun.(type) {
+	case *ast.IndexExpr:
+		return []string{types.ExprString(fun.Index)}
+	case *ast.IndexListExpr:
+		results := []string{}
+		for _, index := range fun.Indices {
+			results = append(results, types.ExprString(index))
+		}
+		return results
+	}
+	if 0 < len(call.Args) {
+		if do, ok := call.Args[0].(*ast.FuncLit); ok {
+			return rescueFuncLitResults(do)
+		}
+	}
+	return nil
 }
 
 // A context.CancelFunc or context.CancelCauseFunc.

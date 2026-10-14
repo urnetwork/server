@@ -103,36 +103,29 @@ func init() {
 // The unexpected-error report; a test observes it.
 var unexpectedErrorLogf = glog.Infof
 
-// Converts a rescue handler of a named function type to the unnamed function
-// type F with the same underlying type. A value keeps its named type in an
-// any, so a context.CancelFunc is not a func() to a type switch, which would
-// otherwise skip it without a word.
-func convertRescueHandler[F any](handler any) (F, bool) {
-	var converted F
-	value := reflect.ValueOf(handler)
-	if !value.IsValid() || value.Kind() != reflect.Func || !value.Type().ConvertibleTo(reflect.TypeFor[F]()) {
-		return converted, false
-	}
-	converted, ok := value.Convert(reflect.TypeFor[F]()).Interface().(F)
-	return converted, ok
-}
-
-// The report for a rescue handler that cannot run, which is a caller bug.
-func unsupportedRescueHandlerError(handler any) error {
-	return fmt.Errorf("rescue handler of type %T was not run: rescue handlers are func() or func(error), or a named type of either", handler)
+// The report for a rescue handler that cannot run, which is a caller bug. It
+// reads only the handler's type: giving the handler itself to fmt would make
+// every caller's handlers escape to the heap, raise or not.
+func unsupportedRescueHandlerError(handler any, supported string) error {
+	return fmt.Errorf("rescue handler of type %v was not run: rescue handlers here are %s", reflect.TypeOf(handler), supported)
 }
 
 // Recovers a raise, reports it unless it is a shutdown or a contention
 // refusal, and runs each rescue handler in order. A handler is a func(), a
-// func(error) given the raise as an error, or a named type of either such as
-// context.CancelFunc or context.CancelCauseFunc. Any other handler cannot run
-// and is reported as an unexpected error; a nil handler is skipped.
+// func(error) given the raise as an error, a context.CancelFunc, or a
+// context.CancelCauseFunc given the raise as its cause. A value keeps its
+// named type in an any, so the two context cancels have cases of their own;
+// any other handler, another named function type included, cannot run and is
+// reported as an unexpected error. A nil handler is skipped.
 //
 // Handlers run on every raise, a cancellation raise included. A cancel
 // handler therefore ends its owner whenever the work raises, even when the
 // raise is the cancellation of a narrower context the work was given: pass
 // only the cancel of an owner whose life should end with this work. A handler
 // that panics is contained, and the remaining handlers still run.
+//
+// Neither do nor the handlers escape, so a caller's closures stay on its
+// stack. Keep it that way: a handler given to fmt or reflect.ValueOf escapes.
 func HandleError(do func(), handlers ...any) (r any) {
 	defer func() {
 		if r = recover(); r != nil {
@@ -170,13 +163,7 @@ func HandleError(do func(), handlers ...any) (r any) {
 					case context.CancelCauseFunc:
 						v(err)
 					default:
-						if call, ok := convertRescueHandler[func()](handler); ok {
-							call()
-						} else if call, ok := convertRescueHandler[func(error)](handler); ok {
-							call(err)
-						} else {
-							unexpectedErrorLogf("Unexpected error: %s\n", ErrorJson(unsupportedRescueHandlerError(handler), debug.Stack()))
-						}
+						unexpectedErrorLogf("Unexpected error: %s\n", ErrorJson(unsupportedRescueHandlerError(handler, "func(), func(error), context.CancelFunc and context.CancelCauseFunc"), debug.Stack()))
 					}
 				}()
 			}
@@ -187,9 +174,9 @@ func HandleError(do func(), handlers ...any) (r any) {
 }
 
 // Returns do's result, or after a raise the result of the last rescue handler
-// that produced one. A handler is a func() R, a func(error) R given the raise
-// as an error, or a named type of either; any other handler is reported as an
-// unexpected error and a nil handler is skipped.
+// that produced one. A handler is a func() R, or a func(error) R given the
+// raise as an error. Any other handler, a named function type included, is
+// reported as an unexpected error, and a nil handler is skipped.
 func HandleError1[R any](do func() R, handlers ...any) (result R) {
 	HandleError(func() {
 		result = do()
@@ -202,13 +189,7 @@ func HandleError1[R any](do func() R, handlers ...any) (result R) {
 			case func(error) R:
 				result = v(err)
 			default:
-				if call, ok := convertRescueHandler[func() R](handler); ok {
-					result = call()
-				} else if call, ok := convertRescueHandler[func(error) R](handler); ok {
-					result = call(err)
-				} else {
-					unexpectedErrorLogf("Unexpected error: %s\n", ErrorJson(unsupportedRescueHandlerError(handler), debug.Stack()))
-				}
+				unexpectedErrorLogf("Unexpected error: %s\n", ErrorJson(unsupportedRescueHandlerError(handler, "func() and func(error) returning the helper's result"), debug.Stack()))
 			}
 		}
 	})
@@ -216,7 +197,7 @@ func HandleError1[R any](do func() R, handlers ...any) (result R) {
 }
 
 // HandleError1 for a pair of results: handlers are func() (R1, R2) and
-// func(error) (R1, R2), or a named type of either.
+// func(error) (R1, R2).
 func HandleError2[R1 any, R2 any](do func() (R1, R2), handlers ...any) (result1 R1, result2 R2) {
 	HandleError(func() {
 		result1, result2 = do()
@@ -229,13 +210,7 @@ func HandleError2[R1 any, R2 any](do func() (R1, R2), handlers ...any) (result1 
 			case func(error) (R1, R2):
 				result1, result2 = v(err)
 			default:
-				if call, ok := convertRescueHandler[func() (R1, R2)](handler); ok {
-					result1, result2 = call()
-				} else if call, ok := convertRescueHandler[func(error) (R1, R2)](handler); ok {
-					result1, result2 = call(err)
-				} else {
-					unexpectedErrorLogf("Unexpected error: %s\n", ErrorJson(unsupportedRescueHandlerError(handler), debug.Stack()))
-				}
+				unexpectedErrorLogf("Unexpected error: %s\n", ErrorJson(unsupportedRescueHandlerError(handler, "func() and func(error) returning the helper's results"), debug.Stack()))
 			}
 		}
 	})

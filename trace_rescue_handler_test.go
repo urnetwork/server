@@ -1,5 +1,6 @@
-// HandleError runs every rescue handler it is given, whatever the name of its
-// function type, and reports a handler it cannot run instead of skipping it.
+// HandleError runs every rescue handler it can, the two named context cancels
+// included, reports a handler it cannot run instead of skipping it, and costs
+// its callers nothing until a raise.
 package server
 
 import (
@@ -11,7 +12,7 @@ import (
 )
 
 // Locally named rescue handler types, which an any keeps distinct from the
-// unnamed function types.
+// unnamed function types. HandleError runs none of them.
 type testRescueFunc func()
 type testRescueErrorFunc func(error)
 type testRescueResultFunc func(error) int
@@ -66,65 +67,77 @@ func TestHandleErrorRunsNamedContextCancelCauseFunc(t *testing.T) {
 	}
 }
 
-// Any named type whose underlying type is func() or func(error) runs, in
-// order with the unnamed handlers, and none of them is reported.
-func TestHandleErrorRunsNamedFunctionTypes(t *testing.T) {
+// The handlers run in order, the context cancel among them, and none of them
+// is reported.
+func TestHandleErrorRunsHandlersInOrder(t *testing.T) {
 	reports := captureUnexpectedErrorReports(t)
 	raise := errors.New("synthetic worker fault")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	order := []string{}
 	var received error
 	HandleError(
 		func() {
 			panic(raise)
 		},
-		testRescueFunc(func() { order = append(order, "named") }),
-		func() { order = append(order, "unnamed") },
-		testRescueErrorFunc(func(err error) {
-			order = append(order, "named error")
+		func() { order = append(order, "func") },
+		cancel,
+		func(err error) {
+			if ctx.Err() != nil {
+				order = append(order, "after cancel")
+			}
 			received = err
-		}),
+		},
 	)
-	if got := strings.Join(order, ","); got != "named,unnamed,named error" {
-		t.Fatalf("handler order=%s, want named,unnamed,named error", got)
+	if got := strings.Join(order, ","); got != "func,after cancel" {
+		t.Fatalf("handler order=%s, want func,after cancel", got)
 	}
 	if received != raise {
-		t.Fatalf("named error handler received %v, want the recovered raise", received)
+		t.Fatalf("error handler received %v, want the recovered raise", received)
 	}
 	if count := unsupportedRescueHandlerReportCount(*reports); count != 0 {
 		t.Fatalf("supported handlers reported %d times", count)
 	}
 }
 
-// A handler HandleError cannot run is reported once as an unexpected error,
-// with its type, and the handlers after it still run. A nil handler is no
-// handler and is not reported.
+// A handler HandleError cannot run, another named function type included, is
+// not run and is reported once as an unexpected error with its type, and the
+// handlers after it still run. A nil handler is no handler and is not
+// reported.
 func TestHandleErrorReportsUnsupportedHandler(t *testing.T) {
 	cases := []struct {
 		name     string
-		handler  any
+		handler  func(ran *bool) any
 		reported bool
 	}{
-		{name: "result", handler: func() error { return nil }, reported: true},
-		{name: "parameter", handler: func(string) {}, reported: true},
-		{name: "named result", handler: testRescueResultFunc(func(error) int { return 0 }), reported: true},
-		{name: "string", handler: "synthetic handler", reported: true},
-		{name: "nil", handler: nil},
+		{name: "result", handler: func(ran *bool) any { return func() error { *ran = true; return nil } }, reported: true},
+		{name: "parameter", handler: func(ran *bool) any { return func(string) { *ran = true } }, reported: true},
+		{name: "named", handler: func(ran *bool) any { return testRescueFunc(func() { *ran = true }) }, reported: true},
+		{name: "named error", handler: func(ran *bool) any { return testRescueErrorFunc(func(error) { *ran = true }) }, reported: true},
+		{name: "named result", handler: func(ran *bool) any { return testRescueResultFunc(func(error) int { *ran = true; return 0 }) }, reported: true},
+		{name: "string", handler: func(*bool) any { return "synthetic handler" }, reported: true},
+		{name: "nil", handler: func(*bool) any { return nil }},
 	}
 	reports := captureUnexpectedErrorReports(t)
 	for _, c := range cases {
 		*reports = (*reports)[:0]
+		ran := false
+		handler := c.handler(&ran)
 		laterRan := false
 		HandleError(func() {
 			panic(errors.New("synthetic worker fault"))
-		}, c.handler, func() {
+		}, handler, func() {
 			laterRan = true
 		})
+		if ran {
+			t.Errorf("%s: the unsupported handler ran", c.name)
+		}
 		if !laterRan {
 			t.Errorf("%s: the handler after it did not run", c.name)
 		}
 		count := unsupportedRescueHandlerReportCount(*reports)
-		if c.reported && (count != 1 || !strings.Contains(strings.Join(*reports, ""), fmt.Sprintf("%T", c.handler))) {
-			t.Errorf("%s: reported %d times, want once with type %T", c.name, count, c.handler)
+		if c.reported && (count != 1 || !strings.Contains(strings.Join(*reports, ""), fmt.Sprintf("%T", handler))) {
+			t.Errorf("%s: reported %d times, want once with type %T", c.name, count, handler)
 		}
 		if !c.reported && count != 0 {
 			t.Errorf("%s: reported %d times, want none", c.name, count)
@@ -132,45 +145,79 @@ func TestHandleErrorReportsUnsupportedHandler(t *testing.T) {
 	}
 }
 
-// A named fallback type produces HandleError1's result after a raise.
-func TestHandleError1RunsNamedFallback(t *testing.T) {
-	raise := errors.New("synthetic lookup fault")
-	var received error
-	result := HandleError1(func() int {
-		panic(raise)
-	}, testRescueResultFunc(func(err error) int {
-		received = err
-		return 7
-	}))
-	if result != 7 || received != raise {
-		t.Fatalf("result=%d received=%v, want 7 and the recovered raise", result, received)
+// A fallback of the wrong result type, or of a named function type, is not run
+// and is reported, and a later supported handler produces the result.
+func TestHandleError1ReportsUnsupportedHandler(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler func(ran *bool) any
+	}{
+		{name: "result type", handler: func(ran *bool) any { return func(error) string { *ran = true; return "" } }},
+		{name: "named", handler: func(ran *bool) any { return testRescueResultFunc(func(error) int { *ran = true; return 3 }) }},
+	}
+	reports := captureUnexpectedErrorReports(t)
+	for _, c := range cases {
+		*reports = (*reports)[:0]
+		ran := false
+		result := HandleError1(func() int {
+			panic(errors.New("synthetic lookup fault"))
+		}, c.handler(&ran), func(error) int { return 7 })
+		if ran || result != 7 {
+			t.Errorf("%s: ran=%t result=%d, want the unsupported fallback skipped and 7", c.name, ran, result)
+		}
+		if count := unsupportedRescueHandlerReportCount(*reports); count != 1 {
+			t.Errorf("%s: reported %d times, want once", c.name, count)
+		}
 	}
 }
 
-// A named fallback type produces HandleError2's results after a raise.
-func TestHandleError2RunsNamedFallback(t *testing.T) {
+// A named fallback type is not run by HandleError2 and is reported, and a
+// later supported handler produces the results.
+func TestHandleError2ReportsUnsupportedHandler(t *testing.T) {
+	reports := captureUnexpectedErrorReports(t)
 	fallbackErr := errors.New("synthetic fallback")
+	ran := false
 	result, err := HandleError2(func() (int, error) {
 		panic(errors.New("synthetic lookup fault"))
 	}, testRescueResultPairFunc(func() (int, error) {
+		ran = true
+		return 3, nil
+	}), func() (int, error) {
 		return 7, fallbackErr
-	}))
-	if result != 7 || err != fallbackErr {
-		t.Fatalf("results=(%d, %v), want (7, the fallback error)", result, err)
+	})
+	if ran || result != 7 || err != fallbackErr {
+		t.Fatalf("ran=%t results=(%d, %v), want the named fallback skipped and (7, the fallback error)", ran, result, err)
+	}
+	if count := unsupportedRescueHandlerReportCount(*reports); count != 1 {
+		t.Fatalf("named fallback reported %d times, want once", count)
 	}
 }
 
-// A fallback of the wrong result type is reported, and the result stays zero
-// unless a later handler produces one.
-func TestHandleError1ReportsUnsupportedHandler(t *testing.T) {
-	reports := captureUnexpectedErrorReports(t)
-	result := HandleError1(func() int {
-		panic(errors.New("synthetic lookup fault"))
-	}, func(error) string { return "wrong result type" }, func(error) int { return 7 })
-	if result != 7 {
-		t.Fatalf("result=%d, want 7 from the supported handler", result)
+// Handlers cost nothing until a raise. HandleError wraps hot work such as
+// per-connection workers, so if its handlers escaped, every caller's handler
+// closure would move to the heap on each call, and so would the result and
+// wrapper closure of HandleError1 and HandleError2. Each call here captures a
+// variable, so an escaping closure allocates.
+func TestHandleErrorAllocatesNothingWithoutARaise(t *testing.T) {
+	count := 0
+	cases := []struct {
+		name string
+		call func()
+	}{
+		{name: "HandleError", call: func() {
+			HandleError(func() { count += 1 }, func() { count -= 1 }, func(error) { count -= 1 })
+		}},
+		{name: "HandleError1", call: func() {
+			count += HandleError1(func() int { return count }, func(error) int { return -count })
+		}},
+		{name: "HandleError2", call: func() {
+			result, _ := HandleError2(func() (int, error) { return count, nil }, func(error) (int, error) { return -count, nil })
+			count += result
+		}},
 	}
-	if count := unsupportedRescueHandlerReportCount(*reports); count != 1 {
-		t.Fatalf("unsupported fallback reported %d times, want once", count)
+	for _, c := range cases {
+		if allocs := testing.AllocsPerRun(100, c.call); allocs != 0 {
+			t.Errorf("%s: %v allocations per call without a raise, want 0", c.name, allocs)
+		}
 	}
 }
