@@ -234,6 +234,7 @@ func TestProviderUrlProbeLocalPassUnderLoad(t *testing.T) {
 		var running atomic.Int64
 		var peakRunning atomic.Int64
 		settings := defaultProviderEgressProbeSettings("example.test")
+		settings.OperatorTransport = providerEgressOperatorLocal
 		passes := make([]*providerEgressProbePass, shards)
 		passArgs := make([]*ProviderEgressProbeArgs, shards)
 		for shard := range shards {

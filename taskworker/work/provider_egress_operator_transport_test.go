@@ -1,5 +1,6 @@
-// The taskworker is the platform: its URL pass reaches the operator ingest
-// in-process by default, and makes no operator API request at all.
+// The taskworker is the platform: with operator_transport: local its URL pass
+// reaches the operator ingest in-process and makes no operator API request at
+// all. Without it the pass keeps the operator API.
 package work
 
 import (
@@ -24,9 +25,9 @@ import (
 )
 
 // The transport is placement only: an unknown name is refused when settings
-// load, the default and "local" are in-process, and "http" keeps the API path
-// with its vault secret (absent from a test's fixture vault, so it fails before
-// any shard is allocated).
+// load, "local" is in-process, and empty and "http" keep the operator API with
+// its vault secret, so a vault without the secret fails the pass before any
+// shard is allocated.
 func TestProviderEgressOperatorTransportSelection(t *testing.T) {
 	settings := defaultProviderEgressProbeSettings("example.test")
 	for _, transport := range []string{"", providerEgressOperatorLocal, providerEgressOperatorHttp} {
@@ -41,33 +42,85 @@ func TestProviderEgressOperatorTransportSelection(t *testing.T) {
 	}
 
 	args := providerEgressProbeArgs(defaultProviderEgressProbeSettings("example.test"), 1)
-	for _, transport := range []string{"", providerEgressOperatorLocal} {
-		operator, err := newProviderEgressOperatorForTransport(args, transport)
-		if err != nil {
-			t.Fatalf("operator_transport %q: %v", transport, err)
-		}
-		local, ok := operator.(*localoperator.Operator)
-		if !ok {
-			t.Fatalf("operator_transport %q is %T, not the in-process operator", transport, operator)
-		}
-		if local.ShardIndex != args.ShardIndex || local.ShardCount != args.ShardCount || local.CallTimeout != providerEgressControlPlaneTimeout {
-			t.Fatalf("the in-process operator lost the shard or the request bound: %+v", local)
-		}
+	operator, err := newProviderEgressOperatorForTransport(args, providerEgressOperatorLocal)
+	if err != nil {
+		t.Fatalf("operator_transport local: %v", err)
+	}
+	local, ok := operator.(*localoperator.Operator)
+	if !ok {
+		t.Fatalf("operator_transport local is %T, not the in-process operator", operator)
+	}
+	if local.ShardIndex != args.ShardIndex || local.ShardCount != args.ShardCount || local.CallTimeout != providerEgressControlPlaneTimeout {
+		t.Fatalf("the in-process operator lost the shard or the request bound: %+v", local)
 	}
 	if _, err := newProviderEgressOperatorForTransport(args, "grpc"); err == nil {
 		t.Fatal("an unknown transport built an operator")
 	}
-	t.Setenv(server.TestRealVaultEnv, "")
-	if _, err := newProviderEgressOperatorForTransport(args, providerEgressOperatorHttp); err == nil {
-		t.Fatal("the HTTP transport built an operator without the vault's ingest secret")
+	defer server.Vault.PushSimpleResource("provider_egress.yml", []byte("note: no ingest secret\n"))()
+	for _, transport := range []string{"", providerEgressOperatorHttp} {
+		if operator, err := newProviderEgressOperatorForTransport(args, transport); err == nil {
+			t.Fatalf("operator_transport %q built %T without the vault's ingest secret", transport, operator)
+		}
 	}
 	// the pass keeps the arguments it was scheduled with: a transport change is
 	// not a stale snapshot
 	settings = defaultProviderEgressProbeSettings("example.test")
 	before := providerEgressProbeArgs(settings, 0)
-	settings.OperatorTransport = providerEgressOperatorHttp
+	settings.OperatorTransport = providerEgressOperatorLocal
 	if !providerEgressProbeArgsMatchSettings(before, settings) {
 		t.Fatal("changing operator_transport made the durable pass arguments stale")
+	}
+}
+
+// The in-process transport is opt-in. A provider_egress_probe.yml without
+// operator_transport, as Main's is, or with it empty keeps the operator API,
+// authenticated with the vault's ingest secret, exactly as before the
+// in-process operator existed; only operator_transport: local runs the pass's
+// operator calls in-process.
+func TestProviderEgressOperatorTransportIsOptIn(t *testing.T) {
+	t.Setenv("WARP_DOMAIN", "example.test")
+	const secret = "synthetic-ingest-secret-0123456789"
+	defer server.Vault.PushSimpleResource("provider_egress.yml", []byte("ingest_secret: "+secret+"\n"))()
+	for _, c := range []struct {
+		name    string
+		config  string
+		inLocal bool
+	}{
+		{name: "absent", config: "shard_count: 3\n", inLocal: false},
+		{name: "empty", config: "shard_count: 3\noperator_transport: \"\"\n", inLocal: false},
+		{name: "http", config: "shard_count: 3\noperator_transport: http\n", inLocal: false},
+		{name: "local", config: "shard_count: 3\noperator_transport: local\n", inLocal: true},
+	} {
+		pop := server.Config.PushSimpleResource(model.ProviderEgressProbeResourceName, []byte(c.config))
+		settings, err := loadProviderEgressProbeSettings()
+		pop()
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		args := providerEgressProbeArgs(settings, 2)
+		operator, err := newProviderEgressOperator(args, settings.OperatorTransport)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		switch operator := operator.(type) {
+		case *ingest.Client:
+			if c.inLocal {
+				t.Errorf("%s: the pass uses the operator API", c.name)
+			}
+			if operator.ServerUrl != args.APIURL || operator.OperatorSecret != secret ||
+				operator.ShardIndex != 2 || operator.ShardCount != 3 || operator.Http == nil {
+				t.Errorf("%s: the operator API client lost its endpoint, secret, shard or bounded client", c.name)
+			}
+		case *localoperator.Operator:
+			if !c.inLocal {
+				t.Errorf("%s: the pass runs its operator calls in-process without opting in", c.name)
+			}
+			if operator.ShardIndex != 2 || operator.ShardCount != 3 {
+				t.Errorf("%s: the in-process operator lost its shard: %+v", c.name, operator)
+			}
+		default:
+			t.Errorf("%s: the pass's operator is %T", c.name, operator)
+		}
 	}
 }
 
@@ -129,14 +182,15 @@ func testOperatorTransportUrlSuccess(measuredAt time.Time) *egresshealth.Result 
 	}
 }
 
-// The production URL pass -- the operator runProviderEgressProbe selects by
-// default and the pass newProviderUrlProbePass builds -- claims a provider,
-// runs the real prober over it, publishes the measured outcome and completes
-// the claim, all in the database, without one operator API request. Two traps
-// make any request fail the test: the configured api_url is a listener that
-// fails on contact, and every dial of the process's default HTTP transport
-// fails. Only the provider tunnel and its one URL load are replaced, because
-// the in-tunnel path is not an operator call and needs a real provider.
+// The production URL pass -- the operator runProviderEgressProbe selects for
+// operator_transport: local and the pass newProviderUrlProbePass builds --
+// claims a provider, runs the real prober over it, publishes the measured
+// outcome and completes the claim, all in the database, without one operator
+// API request. Two traps make any request fail the test: the configured
+// api_url is a listener that fails on contact, and every dial of the process's
+// default HTTP transport fails. Only the provider tunnel and its one URL load
+// are replaced, because the in-tunnel path is not an operator call and needs a
+// real provider.
 func TestProviderUrlProbePassMakesNoOperatorApiRequests(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -163,7 +217,7 @@ func TestProviderUrlProbePassMakesNoOperatorApiRequests(t *testing.T) {
 		defer server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(testOperatorTransportCatalog))()
 		// The in-process path needs no operator secret, and nothing on it may
 		// gate on one: run it with provider_egress.yml present but without its
-		// ingest_secret, the state an http rollback would refuse.
+		// ingest_secret, the state the operator API transport refuses.
 		defer server.Vault.PushSimpleResource("provider_egress.yml", []byte("note: no ingest secret\n"))()
 		if _, err := readProviderEgressOperatorSecret(); err == nil {
 			tb.Fatal("the test vault still holds an operator ingest secret")
@@ -173,6 +227,7 @@ func TestProviderUrlProbePassMakesNoOperatorApiRequests(t *testing.T) {
 		server.Raise(model.AddBasicTransferBalance(ctx, proberNetworkId, model.ByteCount(1024*1024*1024), server.NowUtc().Add(-time.Minute), server.NowUtc().Add(time.Hour)))
 
 		settings := defaultProviderEgressProbeSettings("example.test")
+		settings.OperatorTransport = providerEgressOperatorLocal
 		args := providerEgressProbeArgs(settings, 0)
 		args.ShardCount = 1
 		args.APIURL, args.PublicAPIURL = trap.URL, trap.URL
@@ -181,10 +236,10 @@ func TestProviderUrlProbePassMakesNoOperatorApiRequests(t *testing.T) {
 
 		operator, err := newProviderEgressOperator(args, settings.OperatorTransport)
 		if err != nil {
-			tb.Fatalf("default operator transport: %v", err)
+			tb.Fatalf("local operator transport: %v", err)
 		}
 		if _, ok := operator.(*localoperator.Operator); !ok {
-			tb.Fatalf("the default operator transport is %T, not in-process", operator)
+			tb.Fatalf("operator_transport local is %T, not in-process", operator)
 		}
 		pass := newProviderUrlProbePass(args, operator, providertunnel.Config{
 			ApiUrl: args.APIURL, PlatformUrl: args.PlatformURL,

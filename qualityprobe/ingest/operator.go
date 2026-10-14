@@ -11,9 +11,10 @@ import (
 
 // The operator's half of a probe pass, split by what a caller needs. *Client
 // implements every part over the operator HTTP API. A process that is itself
-// the platform -- the server's taskworker -- implements them in-process
-// against the same controller and model code the API handlers call
-// (server/localoperator), and makes no API request at all.
+// the platform -- the server's taskworker, when its operator_transport is
+// local -- can implement them in-process against the same controller and
+// model code the API handlers call (server/localoperator), and then makes no
+// API request at all.
 //
 // Every implementation keeps the same contract: the client-side refusals and
 // truncations of the New*/Prepare* builders in this package run first, and a

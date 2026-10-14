@@ -137,9 +137,10 @@ type providerEgressProbeSettings struct {
 	InstanceUrlConcurrency int `yaml:"instance_url_concurrency"`
 	// Placement only, never a task argument: how this instance reaches the
 	// operator ingest (due claims, attempts, health, blackhole checks, pins and
-	// the destination pool). Empty or "local" calls the controller in-process
-	// and makes no API request; "http" keeps the public operator API and its
-	// vault ingest secret, as a rollback. Read at each pass's start.
+	// the destination pool). Empty, the default, or "http" uses the public
+	// operator API with its vault ingest secret, as the taskworker always has;
+	// "local" opts in to calling the controller in-process, with no API
+	// request. Read at each pass's start.
 	OperatorTransport string `yaml:"operator_transport"`
 	// Deprecated config inputs retained while old task snapshots retire.
 	Full                         ProviderEgressProbeBatchArgs `yaml:"full"`
@@ -715,17 +716,18 @@ const (
 	providerEgressOperatorHttp  = "http"
 )
 
-// The taskworker is the platform: it already holds the database the operator
-// API handlers write, so by default its operator calls run in-process through
-// the same controller code (server/localoperator), with the HTTP client's
-// 30-second request bound per call and no API request, secret or encoding.
-// "http" keeps the public operator API, authenticated with the vault's ingest
-// secret, for rollback; the standalone egress-prober always uses it.
+// A pass's operator calls use the public operator API, authenticated with the
+// vault's ingest secret, unless operator_transport opts in to "local": the
+// taskworker already holds the database the API handlers write, so it can run
+// them in-process through the same controller code (server/localoperator),
+// with the HTTP client's 30-second request bound per call and no API request,
+// secret or encoding. Empty is "http", so a deployment without the key keeps
+// the API; the standalone egress-prober always uses it.
 func newProviderEgressOperatorForTransport(args *ProviderEgressProbeArgs, transport string) (ingest.Operator, error) {
 	switch transport {
-	case "", providerEgressOperatorLocal:
+	case providerEgressOperatorLocal:
 		return localoperator.New(args.ShardIndex, args.ShardCount, providerEgressControlPlaneTimeout), nil
-	case providerEgressOperatorHttp:
+	case "", providerEgressOperatorHttp:
 		operatorSecret, err := readProviderEgressOperatorSecret()
 		if err != nil {
 			return nil, err
@@ -2017,7 +2019,7 @@ func runProviderEgressProbe(
 	if err != nil {
 		return nil, err
 	}
-	// Before any durable shard state: an unusable transport (an http rollback
+	// Before any durable shard state: an unusable transport (the operator API
 	// without its vault secret) fails the pass without allocating a shard.
 	operator, err := newProviderEgressOperator(args, settings.OperatorTransport)
 	if err != nil {
@@ -2076,7 +2078,8 @@ func runProviderEgressProbe(
 // The production URL pass over one operator. Every operator call -- due
 // claims, the catalogs, and through the metrics reporter (see
 // provider_egress_probe_metrics.go) every finding -- goes through operator, so
-// with the default in-process operator the pass makes no API request.
+// with the in-process operator (operator_transport: local) the pass makes no
+// API request.
 func newProviderUrlProbePass(
 	args *ProviderEgressProbeArgs,
 	operator ingest.Operator,
