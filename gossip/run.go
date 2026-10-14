@@ -213,10 +213,14 @@ func runWithDependencies(
 	} else if runCtx.Err() == nil {
 		flushStats = startStatsPusher(runCtx)
 		publishDone := make(chan struct{})
+		// A raise, such as a claim or stamp that fails while the database is
+		// away, ends the drain only. The mesh keeps carrying what it hears,
+		// as on an unready replica. Canceling runCtx would end Run, and with
+		// it the gossip process, or every service of an all-in-one operator.
 		go server.HandleError(func() {
 			defer close(publishDone)
 			runPublish(runCtx, node, publishTimeout, publishBatchSize)
-		}, cancel)
+		})
 		joinPublish = func() { <-publishDone }
 	}
 
