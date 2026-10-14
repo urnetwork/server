@@ -243,6 +243,12 @@ func TestUrlProbeAdmissionKeepsRequestAndReservePolicy(t *testing.T) {
 	if model.ProviderUrlProbeRenewalHeadroom-reserve != 50*time.Second {
 		t.Fatal("default turn and publication no longer fit the renewal scheduling margin")
 	}
+	// The renewal offset takes the control/publication reserve's place, so at
+	// the largest offset the default turn still keeps the full scheduling margin.
+	latest := model.ProviderUrlProbeRenewalHeadroom - model.ProviderUrlProbeRenewalJitter + time.Second
+	if latest-providerUrlProbeRunBudget(args) < model.ProviderUrlProbeRenewalHeadroom-reserve {
+		t.Fatalf("the default turn no longer fits the scheduling margin at the largest renewal offset: %s", latest)
+	}
 	opts := fleetprobe.EgressHealthOptions(time.Duration(args.UrlProbe.ProbeTimeoutSeconds)*time.Second, false)
 	if opts.ColdStartTimeout != 60*time.Second || opts.PerRequestTimeout != egresshealth.DefaultPerRequestTimeout {
 		t.Fatalf("network owner policy changed: %+v", opts)

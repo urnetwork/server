@@ -14,6 +14,10 @@ import (
 // configured retry interval must also have elapsed since all retained activity.
 // A busy, ambiguous or recent row is left for its original deadline. Such rows
 // can occupy the capped head, so this is not an immediate full-cohort backfill.
+// A current renewal deadline carries an offset below the six-minute headroom,
+// so it always precedes the exact four-hour geometry and is never repaired. The
+// following admission still applies the renewal offset: a repaired row that is
+// not yet at its jittered deadline is parked there rather than claimed.
 func repairProviderUrlProbeLegacyDeadlines(ctx context.Context, tx server.PgTx, now time.Time, limit, shardIndex, shardCount int) int {
 	rules, defaults := GetProviderEgressRules(), DefaultProviderEgressRules()
 	success, failure := rules.UrlSuccessIntervalSeconds, rules.UrlFailureIntervalSeconds

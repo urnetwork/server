@@ -25,7 +25,8 @@ func TestUrlCompletedLocalRetryPreservesRenewalSecurityAndEligibility(t *testing
 				for i := range 10 {
 					expiry := now.Add(time.Duration(10+i*20) * time.Minute)
 					if index == 0 && i == 0 {
-						expiry = now.Add(5 * time.Minute)
+						// Inside the headroom and past any renewal offset at completion.
+						expiry = now.Add(5*time.Minute - ProviderUrlProbeRenewalJitter)
 					}
 					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_health_history
 						(run_id,client_id,measured_at,ok_count,total_count,class_results,tls_authentication_failure,url_probe,url_probe_policy_version)

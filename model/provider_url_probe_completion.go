@@ -115,20 +115,7 @@ func CompleteProviderUrlProbeRun(ctx context.Context, completion ProviderUrlProb
 		// custom/newer deadlines and newer accepted results keep their owners.
 		// That retry is anchored to first server receipt and never extends the
 		// earlier deadline.
-		server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle AS cycle SET
-			completed_run_count=completed_run_count+$4,
-			completed_next_expiry_at=CASE WHEN $4>0
-				THEN LEAST(COALESCE(completed_next_expiry_at,$5),$5) ELSE completed_next_expiry_at END,
-			completed_priority_ready=false,
-			next_attempt_at=CASE WHEN $7<>'' AND cycle.claim_ordinal=$2
-				AND ($6 OR cycle.next_attempt_at=$9)
-				AND ((SELECT `+providerUrlProbeMeasuredWorkDueSql("recent", "$3", "$8")+` FROM (`+providerUrlProbeRunWindowSql("cycle.client_id", "$3")+`) AS recent)
-					OR (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`))
-				AND (cycle.latest_result_at IS NULL OR cycle.latest_result_at<$3)
-				THEN CASE WHEN $6 THEN $10::timestamp
-					ELSE LEAST(cycle.next_attempt_at, $11::timestamp) END
-				ELSE cycle.next_attempt_at END
-			WHERE cycle.client_id=$1`,
+		server.RaisePgResult(tx.Exec(ctx, providerUrlProbeCompletionCycleSql(),
 			completion.ClientId, completion.ClaimOrdinal, effectiveAt, increment,
 			effectiveAt.Add(ProviderUrlProbeCompletedWindow), completion.AllowPacing, completion.ProbeFailure, ProviderUrlProbeRunTarget,
 			claimedAt.Add(ProviderEgressProbeAttemptBackoff),
@@ -146,6 +133,28 @@ func CompleteProviderUrlProbeRun(ctx context.Context, completion ProviderUrlProb
 		}, false)
 	})
 	return
+}
+
+// The receipt's cycle projection: $1 client, $2 claim ordinal, $3 effective
+// completion, $4 counted increment, $5 its expiry, $6 pacing allowed, $7 local
+// failure, $8 run target, $9 issued lease, $10 paced and $11 lease-only retry.
+// Only measured work or a security recheck still due at the completion may
+// retry, so a quota-full provider keeps its jittered renewal deadline.
+func providerUrlProbeCompletionCycleSql() string {
+	return `UPDATE provider_egress_probe_cycle AS cycle SET
+		completed_run_count=completed_run_count+$4,
+		completed_next_expiry_at=CASE WHEN $4>0
+			THEN LEAST(COALESCE(completed_next_expiry_at,$5),$5) ELSE completed_next_expiry_at END,
+		completed_priority_ready=false,
+		next_attempt_at=CASE WHEN $7<>'' AND cycle.claim_ordinal=$2
+			AND ($6 OR cycle.next_attempt_at=$9)
+			AND ((SELECT ` + providerUrlProbeMeasuredWorkDueSql("recent", "cycle.client_id", "$3", "$8") + ` FROM (` + providerUrlProbeRunWindowSql("cycle.client_id", "$3") + `) AS recent)
+				OR (` + providerHasUrlSecurityExceptionSql("cycle.client_id") + `))
+			AND (cycle.latest_result_at IS NULL OR cycle.latest_result_at<$3)
+			THEN CASE WHEN $6 THEN $10::timestamp
+				ELSE LEAST(cycle.next_attempt_at, $11::timestamp) END
+			ELSE cycle.next_attempt_at END
+		WHERE cycle.client_id=$1`
 }
 
 // A missing convergence epoch is unknown, not four hours of observed zero.

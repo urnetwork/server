@@ -91,7 +91,7 @@ func TestUrlProbeDurablePacingAndQuota(t *testing.T) {
 				t.Fatalf("turn %d replay changed progress: successes=%d errors=%d", turn, successes, errors)
 			}
 			if turn+1 == ProviderUrlProbeRunTarget {
-				if !now.Before(firstSuccessAt.Add(ProviderEgressProbeRefreshAge)) || !next.Equal(firstSuccessAt.Add(ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)) {
+				if !now.Before(firstSuccessAt.Add(ProviderEgressProbeRefreshAge)) || !next.Equal(testingUrlProbeRenewalAt(provider.clientId, firstSuccessAt)) {
 					t.Fatalf("rolling quota missed its replacement deadline: completion=%s next=%s first=%s", now, next, firstSuccessAt)
 				}
 			} else {
@@ -382,7 +382,7 @@ func TestUrlProbeConcurrentReceiptsKeepRollingProgress(t *testing.T) {
 				if successes != 10 || errors != 10 || ordinal != 20 || history != 20 {
 					t.Fatalf("concurrent receipts lost or duplicated progress: success=%d error=%d ordinal=%d history=%d", successes, errors, ordinal, history)
 				}
-				renewalAt := now.Add(ProviderEgressProbeRefreshAge - ProviderUrlProbeRenewalHeadroom)
+				renewalAt := testingUrlProbeRenewalAt(clientId, now)
 				if !next.Equal(renewalAt) {
 					t.Fatalf("concurrent receipts lost oldest-measurement renewal pacing: got %s, want %s", next, renewalAt)
 				}

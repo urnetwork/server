@@ -44,12 +44,42 @@ const ProviderUrlProbeSlotCount = 1024
 // that a stalled worker finishes. Admission still owns one 15-minute claim.
 const ProviderUrlProbeRenewalHeadroom = 6 * time.Minute
 
+// Owner decision 2026-10-14: a stable per-provider offset, added to every
+// quota-full renewal deadline, breaks up synchronized due waves. A cohort whose
+// measurements aligned, such as a catch-up after an outage or deploy, otherwise
+// comes due together every cycle, because each renewal is anchored to its
+// oldest counted run. The offset also lengthens that provider's renewal period,
+// so an aligned cohort fans out by up to this bound every cycle and does not
+// re-converge. It only delays the unjittered deadline, already the earliest a
+// replacement is needed, so it adds no measured turn. It takes the place of the
+// headroom's control/publication reserve, which measured publication leaves
+// nearly unused: the default turn and scheduling margin still fit at every
+// offset, as do ten simultaneous expiries renewed with 25-second turns.
+const ProviderUrlProbeRenewalJitter = 90 * time.Second
+
+// Whole seconds in [0, ProviderUrlProbeRenewalJitter). md5 of the canonical
+// uuid text keeps the offset independent of the hashtext slot and pace hashes.
+// mod() rather than the % operator keeps the text safe inside format strings.
+func providerUrlProbeRenewalOffsetSql(clientIdExpression string) string {
+	return fmt.Sprintf(`mod(('x'||substr(md5(%s::text),1,8))::bit(32)::bigint,%d)`,
+		clientIdExpression, int(ProviderUrlProbeRenewalJitter/time.Second))
+}
+
+// The one quota-full renewal deadline. The accepted-history writer stores it,
+// admission tests and restores it, and completion gates a local retry on it.
+// The census reads only the stored deadline, so all of them agree on dueness.
+func providerUrlProbeRenewalAtSql(clientIdExpression, oldestRunExpression string) string {
+	return fmt.Sprintf(`(%s + (%d + %s) * interval '1 second')`, oldestRunExpression,
+		int((ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)/time.Second),
+		providerUrlProbeRenewalOffsetSql(clientIdExpression))
+}
+
 // The latest ten accepted measurements suffice to decide whether at least ten
 // will remain at the replacement horizon; any older measurements expire first.
-// Full cohorts outside that horizon do not receive another measured turn.
-func providerUrlProbeMeasuredWorkDueSql(recentAlias, nowExpression, targetExpression string) string {
-	return fmt.Sprintf("(%s.run_count < %s OR %s.oldest_run_at <= %s::timestamp - interval '%d seconds')",
-		recentAlias, targetExpression, recentAlias, nowExpression, int((ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)/time.Second))
+// Full cohorts before their renewal deadline do not receive another measured turn.
+func providerUrlProbeMeasuredWorkDueSql(recentAlias, clientIdExpression, nowExpression, targetExpression string) string {
+	return fmt.Sprintf("(%s.run_count < %s OR %s <= %s::timestamp)", recentAlias, targetExpression,
+		providerUrlProbeRenewalAtSql(clientIdExpression, recentAlias+".oldest_run_at"), nowExpression)
 }
 
 // Compatibility readers share the exact slot-to-shard mapping with indexed
@@ -60,7 +90,8 @@ func providerUrlProbeShardSql(clientExpression, shardCountExpression string) str
 }
 
 // Stable per-provider jitter spreads recurring work without retaining a timer
-// or tunnel. Quota-full scheduling is separately tied to the oldest counted run.
+// or tunnel. Quota-full scheduling is separately tied to the oldest counted run
+// and its own renewal offset (providerUrlProbeRenewalAtSql).
 func providerUrlProbePacedAttemptSql(cycleAlias, measuredAtParam, acceptedSuccessesParam string, measuredDeficit ...string) string {
 	rules := GetProviderEgressRules()
 	defaults := DefaultProviderEgressRules()
@@ -312,7 +343,7 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				RETURNING cycle.client_id
 			), measured AS MATERIALIZED (
 				SELECT candidates.*, recent.run_count, recent.oldest_run_at, successes.success_count,
-					`+providerUrlProbeMeasuredWorkDueSql("recent", "$1", "$6")+` AS measured_work_due,
+					`+providerUrlProbeMeasuredWorkDueSql("recent", "candidates.client_id", "$1", "$6")+` AS measured_work_due,
 					security.security_exception
 				FROM candidates CROSS JOIN LATERAL (%s) AS recent
 				CROSS JOIN LATERAL (%s) AS successes
@@ -323,7 +354,7 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 					completed_priority_ready = false,
 					claim_ordinal = cycle.claim_ordinal + CASE WHEN measured.measured_work_due OR measured.security_exception THEN 1 ELSE 0 END,
 					next_attempt_at = CASE WHEN NOT measured.measured_work_due AND NOT measured.security_exception
-						THEN measured.oldest_run_at + interval '%d seconds' ELSE $7 END
+						THEN %s ELSE $7 END
 				FROM measured WHERE cycle.client_id=measured.client_id
 				AND cycle.client_id=ANY(ARRAY(SELECT client_id FROM measured))
 				RETURNING cycle.client_id, cycle.cycle_started_at, cycle.success_count, cycle.outcome_count, cycle.claim_ordinal,
@@ -351,5 +382,6 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 			ORDER BY %s
 		`, providerUrlProbeAdmissionSql("provider"), providerUrlProbeRunWindowSql("candidates.client_id", "$1"),
 		providerUrlProbeSuccessWindowSql("candidates.client_id", "$1"),
-		providerHasUrlSecurityExceptionSql("candidates.client_id"), int((ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)/time.Second), countProjection, resultOrder)
+		providerHasUrlSecurityExceptionSql("candidates.client_id"), providerUrlProbeRenewalAtSql("measured.client_id", "measured.oldest_run_at"),
+		countProjection, resultOrder)
 }

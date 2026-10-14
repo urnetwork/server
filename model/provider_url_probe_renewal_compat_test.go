@@ -26,7 +26,8 @@ func testingLegacyRenewalHistory(t testing.TB) (server.Id, time.Time) {
 	if !oldDeadline.Equal(first.Add(4 * time.Hour)) {
 		t.Fatal("fixture did not restore the exact deployed deadline")
 	}
-	return client, oldDeadline.Add(-ProviderUrlProbeRenewalHeadroom)
+	// The current deadline for this history, inside the legacy row's headroom.
+	return client, testingUrlProbeRenewalAt(client, first)
 }
 
 // Reconstitute the deployed quota-full deadline from the same accepted-history
@@ -48,7 +49,7 @@ func TestUrlProbeRenewalDiscoversLegacyParkedDeadline(t *testing.T) {
 		ctx := t.Context()
 		client, now := testingLegacyRenewalHistory(t)
 		due := ClaimProviderUrlProbeDue(ctx, now, 1, 0, 1)
-		t.Logf("legacy_deadline_remaining=%s admitted_replacements=%d", ProviderUrlProbeRenewalHeadroom, len(due))
+		t.Logf("legacy_deadline_remaining=%s admitted_replacements=%d", ProviderUrlProbeRenewalHeadroom-testingUrlProbeRenewalOffset(client), len(due))
 		if len(due) != 1 || due[0].ClientId != client || due[0].RunsNeeded != 0 {
 			t.Fatal("legacy quota-full deadline hides required replacement before expiry")
 		}
@@ -72,7 +73,8 @@ func TestUrlProbeRenewalLegacyRepairRequiresQuietOwnership(t *testing.T) {
 					case "recent_attempt":
 						server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_attempt SET attempt_at=$2,probe_failure='setup_failed' WHERE client_id=$1`, client, now.Add(-time.Second)))
 					case "new_deadline":
-						server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET next_attempt_at=next_attempt_at-interval '6 minutes' WHERE client_id=$1`, client))
+						// The current jittered deadline, claimed one microsecond early below.
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET next_attempt_at=$2 WHERE client_id=$1`, client, now))
 					case "different_deadline":
 						server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET next_attempt_at=next_attempt_at-interval '1 microsecond' WHERE client_id=$1`, client))
 					}
@@ -227,12 +229,13 @@ func TestUrlProbeRenewalLookaheadCannotShortenLiveClaim(t *testing.T) {
 			expiries[i] = now.Add(ProviderUrlProbeRenewalHeadroom + time.Duration(i)*20*time.Minute)
 		}
 		client := testingRenewalHistory(t, now, expiries)
-		due := ClaimProviderUrlProbeDue(ctx, now, 1, 0, 1)
+		renewalAt := testingUrlProbeRenewalAt(client, expiries[0].Add(-ProviderEgressProbeRefreshAge))
+		due := ClaimProviderUrlProbeDue(ctx, renewalAt, 1, 0, 1)
 		if len(due) != 1 {
 			t.Fatal("initial owned replacement missing")
 		}
 		before := testingReadUrlCompletionCycle(t, ctx, client)
-		if got := ClaimProviderUrlProbeDue(ctx, now.Add(10*time.Minute), 1, 0, 1); len(got) != 0 {
+		if got := ClaimProviderUrlProbeDue(ctx, renewalAt.Add(10*time.Minute), 1, 0, 1); len(got) != 0 {
 			t.Fatal("future lookahead duplicated an uncompleted claim")
 		}
 		after := testingReadUrlCompletionCycle(t, ctx, client)

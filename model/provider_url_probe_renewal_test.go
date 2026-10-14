@@ -43,7 +43,9 @@ func TestUrlProbeRenewalProjectsLatestTenWithoutSurplusLoop(t *testing.T) {
 					t.Fatal("surplus history caused an unnecessary replacement")
 				}
 				cycle := testingReadUrlCompletionCycle(t, t.Context(), client)
-				if !cycle.next.Equal(now.Add(4*time.Minute)) || cycle.ordinal != 0 {
+				// The oldest of the latest ten expires ten minutes from now.
+				renewalAt := testingUrlProbeRenewalAt(client, expiries[count-10].Add(-ProviderEgressProbeRefreshAge))
+				if !cycle.next.Equal(renewalAt) || cycle.ordinal != 0 {
 					t.Fatal("latest ten did not set the next exact replacement horizon")
 				}
 			})
@@ -61,7 +63,9 @@ func TestUrlProbeRenewalClusterIsBoundedByExpiringMeasurements(t *testing.T) {
 			expiries[i] = expires
 		}
 		client := testingRenewalHistory(t, now, expiries)
-		at := now
+		// The cluster starts at the provider's renewal deadline. Its largest
+		// offset plus ten 25-second turns still precede the shared expiry.
+		at := testingUrlProbeRenewalAt(client, expires.Add(-ProviderEgressProbeRefreshAge))
 		for i := range 10 {
 			due := ClaimProviderUrlProbeDue(ctx, at, 8, 0, 1)
 			if len(due) != 1 || due[0].RunsNeeded != 0 {
@@ -92,11 +96,12 @@ func TestUrlProbeRenewalSetupFailureAndConcurrentClaim(t *testing.T) {
 			expiries[i] = now.Add(ProviderUrlProbeRenewalHeadroom + time.Duration(i)*20*time.Minute)
 		}
 		client := testingRenewalHistory(t, now, expiries)
+		renewalAt := testingUrlProbeRenewalAt(client, expiries[0].Add(-ProviderEgressProbeRefreshAge))
 		var wg sync.WaitGroup
 		results := make(chan []ProviderUrlProbeDue, 8)
 		for range 8 {
 			wg.Add(1)
-			go func() { defer wg.Done(); results <- ClaimProviderUrlProbeDue(ctx, now, 1, 0, 1) }()
+			go func() { defer wg.Done(); results <- ClaimProviderUrlProbeDue(ctx, renewalAt, 1, 0, 1) }()
 		}
 		wg.Wait()
 		close(results)
@@ -107,7 +112,7 @@ func TestUrlProbeRenewalSetupFailureAndConcurrentClaim(t *testing.T) {
 		if len(all) != 1 {
 			t.Fatal("concurrent renewal issued more than one in-flight claim")
 		}
-		completion := ProviderUrlProbeCompletion{ClientId: client, ClaimOrdinal: all[0].ClaimOrdinal, CompletedAt: now.Add(25 * time.Second), ProbeFailure: "tunnel_failed", AllowPacing: true}
+		completion := ProviderUrlProbeCompletion{ClientId: client, ClaimOrdinal: all[0].ClaimOrdinal, CompletedAt: renewalAt.Add(25 * time.Second), ProbeFailure: "tunnel_failed", AllowPacing: true}
 		receipt, err := CompleteProviderUrlProbeRun(ctx, completion, completion.CompletedAt)
 		if err != nil || receipt == nil {
 			t.Fatal("owned setup completion failed")

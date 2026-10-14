@@ -42,7 +42,7 @@ func TestUrlProbeMeasuredFailuresCompleteQuotaAndExpire(t *testing.T) {
 		}
 		cycle := testingReadUrlCompletionCycle(t, ctx, clientId)
 		if cycle.history != 10 || cycle.successes != 0 || cycle.errors != 10 || cycle.count != 10 ||
-			!cycle.next.Equal(firstAt.Add(ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)) {
+			!cycle.next.Equal(testingUrlProbeRenewalAt(clientId, firstAt)) {
 			t.Fatalf("receipt dedup, diagnostics or failure completion pacing drifted: %+v", cycle)
 		}
 		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{ClientId: clientId, AttemptAt: now, ProbeFailure: "setup_failed"})

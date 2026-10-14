@@ -328,28 +328,37 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 				WHERE security.client_id=health.client_id AND security.tls_failure
 			) WHERE health.client_id=$1`, health.ClientId))
 		if cycleAdmitted {
-			server.RaisePgResult(tx.Exec(ctx, `
-				WITH current AS MATERIALIZED (
-					SELECT client_id, GREATEST(latest_result_at,$5) AS rolling_at
-					FROM provider_egress_probe_cycle WHERE client_id=$1 AND cycle_started_at=$2
-				), recent AS MATERIALIZED (
-					SELECT current.client_id, successes.*, runs.* FROM current
-					CROSS JOIN LATERAL (`+providerUrlProbeSuccessWindowSql("current.client_id", "current.rolling_at")+`) AS successes
-					CROSS JOIN LATERAL (`+providerUrlProbeRunWindowSql("current.client_id", "current.rolling_at")+`) AS runs
-				)
-				UPDATE provider_egress_probe_cycle AS cycle SET
-					success_count = recent.success_count,
-					error_count = error_count + $4,
-					outcome_count = outcome_count + $8,
-					latest_result_at = GREATEST(latest_result_at, $5),
-					next_attempt_at = CASE WHEN latest_result_at > $5 THEN next_attempt_at
-						WHEN recent.run_count >= $6 AND NOT (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`) THEN recent.oldest_run_at + ($7 * interval '1 second')
-						ELSE `+providerUrlProbePacedAttemptSql("cycle", "$5", "$3", "recent.run_count < $6")+` END
-				FROM recent WHERE cycle.client_id = recent.client_id`,
+			server.RaisePgResult(tx.Exec(ctx, providerUrlProbeAcceptedCycleSql(),
 				health.ClientId, cycleStartedAt, health.OKCount, health.Total-health.OKCount,
-				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, (ProviderEgressProbeRefreshAge - ProviderUrlProbeRenewalHeadroom).Seconds(), health.Total))
+				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, health.Total))
 		}
 	})
+}
+
+// The accepted-history writer's cycle projection: $1 client, $2 cycle token,
+// $3 successes, $4 failures, $5 measured time, $6 run target, $7 outcomes.
+// A quota-full provider without a security exception parks until its jittered
+// renewal deadline, the same expression admission re-checks before a claim.
+func providerUrlProbeAcceptedCycleSql() string {
+	return `
+		WITH current AS MATERIALIZED (
+			SELECT client_id, GREATEST(latest_result_at,$5) AS rolling_at
+			FROM provider_egress_probe_cycle WHERE client_id=$1 AND cycle_started_at=$2
+		), recent AS MATERIALIZED (
+			SELECT current.client_id, successes.*, runs.* FROM current
+			CROSS JOIN LATERAL (` + providerUrlProbeSuccessWindowSql("current.client_id", "current.rolling_at") + `) AS successes
+			CROSS JOIN LATERAL (` + providerUrlProbeRunWindowSql("current.client_id", "current.rolling_at") + `) AS runs
+		)
+		UPDATE provider_egress_probe_cycle AS cycle SET
+			success_count = recent.success_count,
+			error_count = error_count + $4,
+			outcome_count = outcome_count + $7,
+			latest_result_at = GREATEST(latest_result_at, $5),
+			next_attempt_at = CASE WHEN latest_result_at > $5 THEN next_attempt_at
+				WHEN recent.run_count >= $6 AND NOT (` + providerHasUrlSecurityExceptionSql("cycle.client_id") + `)
+				THEN ` + providerUrlProbeRenewalAtSql("cycle.client_id", "recent.oldest_run_at") + `
+				ELSE ` + providerUrlProbePacedAttemptSql("cycle", "$5", "$3", "recent.run_count < $6") + ` END
+		FROM recent WHERE cycle.client_id = recent.client_id`
 }
 
 // Accepted measured URL outcomes contribute for strictly less than eight hours.
