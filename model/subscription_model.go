@@ -4812,7 +4812,10 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 	// Visits every row of one batch in a single owned turn. A held balance,
 	// found by this batch or earlier by a row of the page, leaves every row
 	// to its holder, as it leaves a row tried alone. A failed turn
-	// acknowledged no close, so each row then takes its own visit.
+	// acknowledged no close. When it failed inside its members each row takes
+	// its own visit; when it failed before them, at the route or admission
+	// that each row alone would also meet, every row stays open with that
+	// failure for a later pass, as a row whose own admission failed does.
 	visitBatch := func(batch *forceCloseOwnerBatch) {
 		owner := forceCloseOwnerKey([]server.Id{batch.balanceId})
 		leaveToHolder := func() {
@@ -4835,7 +4838,7 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 				return
 			}
 		}
-		results, busy, batchErr := func() (map[server.Id]*ContractDeadlineReconciliation, bool, error) {
+		results, busy, entered, batchErr := func() (map[server.Id]*ContractDeadlineReconciliation, bool, bool, error) {
 			defer func() { <-batchSlots }()
 			return reconcileContractOwnerMembersAtDeadline(ctx, []server.Id{batch.balanceId}, batch.members)
 		}()
@@ -4844,10 +4847,18 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 			// A programming panic interrupts this worker, as in a row visit.
 			panic(batchErr)
 		}
-		if batchErr != nil {
-			if ctx.Err() != nil {
-				return
+		if batchErr != nil && ctx.Err() != nil {
+			return
+		}
+		if batchErr != nil && !entered {
+			glog.Infof("[close-expired]owner batch of %d rows failed before its members, the rows stay open: %v\n", len(batch.indexes), batchErr)
+			rowErr := fmt.Errorf("owner batch of %d rows: %w", len(batch.indexes), batchErr)
+			for _, j := range batch.indexes {
+				contractErrors[j], leftOpen[j], contractVisited[j] = rowErr, true, true
 			}
+			return
+		}
+		if batchErr != nil {
 			glog.Infof("[close-expired]owner batch of %d rows failed, each row closes alone: %v\n", len(batch.indexes), batchErr)
 		}
 		if busy {

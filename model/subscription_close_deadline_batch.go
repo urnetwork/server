@@ -49,15 +49,19 @@ func forceCloseOwnerBatchSlotWait(ctx context.Context) {
 	}
 }
 
-// Open rows with a stored deadline and up to two of their balances, enough to
-// tell one balance from several. The lateral probes keep each contract's
-// estimate exact, as the deadline custody read does.
+// Open rows with a stored deadline and no pending legacy settlement intent,
+// with up to two of their balances, enough to tell one balance from several.
+// A close takes its row's intent with NOWAIT, so an intent another worker
+// holds would fail every member of a batch; alone it fails only its row. The
+// lateral probes keep each contract's estimate exact, as the deadline custody
+// read does.
 const forceCloseDeadlineOwnerSql = `SELECT contract.contract_id,contract.expiration_time,escrow.balance_id
 	FROM unnest($1::uuid[]) AS requested(contract_id)
 	CROSS JOIN LATERAL (SELECT contract_id,expiration_time FROM transfer_contract
 		WHERE contract_id=requested.contract_id AND outcome IS NULL AND expiration_time IS NOT NULL OFFSET 0) AS contract
 	CROSS JOIN LATERAL (SELECT balance_id FROM transfer_escrow
-		WHERE contract_id=contract.contract_id ORDER BY balance_id LIMIT 2) AS escrow`
+		WHERE contract_id=contract.contract_id ORDER BY balance_id LIMIT 2) AS escrow
+	WHERE NOT EXISTS(SELECT 1 FROM legacy_settlement_intent pending WHERE pending.contract_id=contract.contract_id)`
 
 // Rows of one balance in page order. The first row leads the batch; members
 // carry the stored deadlines in contract order, the order their rows lock.
@@ -70,8 +74,8 @@ type forceCloseOwnerBatch struct {
 // Groups the page's open rows whose stored deadline passed at now by their one
 // transfer balance, in page order, into batches of at most
 // ContractDeadlineOwnerBatchLimit rows, and maps each batched row to its batch.
-// A row with no stored deadline, without a balance or with several, or alone
-// in its batch keeps its own visit. Rows of one balance share their payer's
+// A row with no stored deadline, a pending legacy settlement intent, no
+// balance or several, or alone in its batch keeps its own visit. Rows of one balance share their payer's
 // turn, so only rows that share a turn are read, and a page without any reads
 // nothing. A deadline is immutable while its contract is open, so the unlocked
 // read is the deadline each batch closes at. The read is only an optimization:

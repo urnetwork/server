@@ -167,16 +167,19 @@ func ReconcileContractOwnerAtDeadline(ctx context.Context, balanceIds []server.I
 
 // Closes known due members of one owner together in one owned turn, without
 // waiting for admission or reading siblings. Busy means the owner was held and
-// nothing was read or written. A failed turn acknowledged no member, so the
-// caller closes each one alone, which finds closed any member a commit with a
-// lost reply did retire. Otherwise every member has a result.
-func reconcileContractOwnerMembersAtDeadline(ctx context.Context, balanceIds []server.Id, members []ContractDeadline) (results map[server.Id]*ContractDeadlineReconciliation, busy bool, returnErr error) {
+// nothing was read or written. A failed turn acknowledged no member. Entered
+// reports whether it began its members: then a member failed and the caller
+// can close each one alone, which finds closed any member a commit with a
+// lost reply did retire. A failure before that is the route's or the
+// admission's, which each member alone would meet again, as the deadline pass
+// does not retry siblings then. Otherwise every member has a result.
+func reconcileContractOwnerMembersAtDeadline(ctx context.Context, balanceIds []server.Id, members []ContractDeadline) (results map[server.Id]*ContractDeadlineReconciliation, busy bool, entered bool, returnErr error) {
 	if err := validateContractDeadlineOwner(balanceIds, members); err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	postCtx, finishPosts := withContractDeadlineOwnerPosts(ctx)
 	defer finishPosts()
-	results, _, busy, _, returnErr = reconcileContractOwnerBatchAtDeadline(ctx, postCtx, balanceIds, members, nil)
+	results, _, busy, entered, returnErr = reconcileContractOwnerBatchAtDeadline(ctx, postCtx, balanceIds, members, nil)
 	return
 }
 

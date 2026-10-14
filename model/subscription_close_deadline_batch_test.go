@@ -5,6 +5,8 @@ package model
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -221,10 +223,61 @@ func TestForceClosePageOwnerBatchKeepsStartedPrefixCursor(t *testing.T) {
 	})
 }
 
-// One member's pending intent is held by another owner, so its close fails
-// and the batch's shared turn rolls back. Each row then closes alone: the
-// others close, and only that row is deferred with its own failure, exactly
-// as when every row was visited alone. It closes once the intent is free.
+// Fails the outcome claim of one contract in every transaction until dropped,
+// inside an owner batch's members as in a row visited alone.
+func failForceCloseOwnerBatchMember(t testing.TB, ctx context.Context, contractId server.Id) (drop func()) {
+	t.Helper()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`
+			CREATE FUNCTION synthetic_owner_batch_member_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN
+				IF NEW.contract_id = '%s'::uuid THEN
+					RAISE EXCEPTION 'synthetic owner batch member failure';
+				END IF;
+				RETURN NEW;
+			END $$;
+			CREATE TRIGGER synthetic_owner_batch_member_failure
+			BEFORE UPDATE OF outcome ON transfer_contract
+			FOR EACH ROW WHEN (OLD.outcome IS NULL AND NEW.outcome IS NOT NULL)
+			EXECUTE FUNCTION synthetic_owner_batch_member_failure();`, contractId)))
+	}, server.TxReadCommitted, server.OptNoRetry())
+	dropped := false
+	drop = func() {
+		if dropped {
+			return
+		}
+		dropped = true
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER synthetic_owner_batch_member_failure ON transfer_contract;
+				DROP FUNCTION synthetic_owner_batch_member_failure();`))
+		}, server.TxReadCommitted, server.OptNoRetry())
+	}
+	t.Cleanup(drop)
+	return drop
+}
+
+// Counts the owned turns that covered all the given rows together, and each
+// row's turns alone. Any other turn fails the test.
+func countForceCloseOwnerBatchTurns(t testing.TB, admitted [][]server.Id, batchIds []server.Id) (batchTurns int, aloneTurns map[server.Id]int) {
+	t.Helper()
+	aloneTurns = map[server.Id]int{}
+	for _, members := range admitted {
+		switch {
+		case len(members) == len(batchIds) && !slices.ContainsFunc(members, func(id server.Id) bool { return !slices.Contains(batchIds, id) }):
+			batchTurns += 1
+		case len(members) == 1:
+			aloneTurns[members[0]] += 1
+		default:
+			t.Fatal("an unexpected owned turn", members)
+		}
+	}
+	return
+}
+
+// One member's outcome claim fails inside the batch's shared turn, which rolls
+// back. Each row then closes alone: the others close, and only that row is
+// deferred with its own failure, exactly as when every row was visited alone.
+// It closes once the failure is gone.
 func TestForceClosePageOwnerBatchFailureClosesRowsAlone(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -235,11 +288,7 @@ func TestForceClosePageOwnerBatchFailureClosesRowsAlone(t *testing.T) {
 		now := server.NowUtc()
 		contractIds := newForceCloseOwnerBatchRows(t, ctx, f, 3, now)
 		victim := contractIds[1]
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome)
-				VALUES($1,get_byte(uuid_send($1::uuid),15)%16,'settled')`, victim))
-		}, server.TxReadCommitted, server.OptNoRetry())
-		release := holdContractCloseTestRow(t, ctx, `SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1 FOR UPDATE`, victim)
+		drop := failForceCloseOwnerBatchMember(t, ctx, victim)
 		observed, turns := observeForceCloseOwnerTurns(ctx, f.balanceId, contractIds)
 
 		closed, cursor, _, err := forceCloseOpenContractIdsPage(observed, now, 8, 4, 0, 0, nil)
@@ -251,24 +300,13 @@ func TestForceClosePageOwnerBatchFailureClosesRowsAlone(t *testing.T) {
 			t.Fatal("the other rows did not close alone around the failed member", closed, visited.DeferredContractIds())
 		}
 		requireForceCloseOwnerBatchTerminal(t, ctx, contractIds, []bool{true, false, true})
-		// The failed member's own turn, if its close admits before failing, rolls back too.
 		admitted, _ := turns.snapshot()
-		batchTurns, aloneTurns := 0, map[server.Id]int{}
-		for _, members := range admitted {
-			switch len(members) {
-			case len(contractIds):
-				batchTurns += 1
-			case 1:
-				aloneTurns[members[0]] += 1
-			default:
-				t.Fatal("an unexpected owned turn", members)
-			}
-		}
-		if batchTurns != 1 || aloneTurns[contractIds[0]] != 1 || aloneTurns[contractIds[2]] != 1 || 1 < aloneTurns[victim] {
+		batchTurns, aloneTurns := countForceCloseOwnerBatchTurns(t, admitted, contractIds)
+		if batchTurns != 1 || aloneTurns[contractIds[0]] != 1 || aloneTurns[contractIds[2]] != 1 || aloneTurns[victim] != 1 {
 			t.Fatalf("the page took %d batch turns and %v turns alone, want one batch then each row alone", batchTurns, aloneTurns)
 		}
 
-		release()
+		drop()
 		closed, cursor, _, err = forceCloseOpenContractIdsPage(ctx, server.NowUtc(), 8, 4, 0, 0, nil)
 		if err != nil || closed != 1 || cursor != nil {
 			t.Fatal("the next pass did not close the freed row", closed, cursor, err)
@@ -277,10 +315,127 @@ func TestForceClosePageOwnerBatchFailureClosesRowsAlone(t *testing.T) {
 	})
 }
 
+// A row whose pending intent another worker holds stays out of its balance's
+// batch. Its close takes the intent with NOWAIT, so inside the batch it failed
+// every member and sent each row to close alone. Now the other rows close in
+// one turn and only that row fails, alone; it closes once the intent is free.
+func TestForceClosePageLeavesIntentRowsOutOfOwnerBatches(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+		defer cancel()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		now := server.NowUtc()
+		contractIds := newForceCloseOwnerBatchRows(t, ctx, f, 4, now)
+		victim := contractIds[1]
+		batchIds := []server.Id{contractIds[0], contractIds[2], contractIds[3]}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome)
+				VALUES($1,get_byte(uuid_send($1::uuid),15)%16,'settled')`, victim))
+		}, server.TxReadCommitted, server.OptNoRetry())
+		release := holdContractCloseTestRow(t, ctx, `SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1 FOR UPDATE`, victim)
+		observed, turns := observeForceCloseOwnerTurns(ctx, f.balanceId, contractIds)
+
+		closed, cursor, _, err := forceCloseOpenContractIdsPage(observed, now, 8, 4, 0, 0, nil)
+		visited, ok := err.(*ForceCloseVisitError)
+		if !ok || !visited.CanCheckpoint() || !visited.Progressed() || cursor != nil {
+			t.Fatal("the held intent did not leave a completed receipt of its own", cursor, err)
+		}
+		if closed != 3 || !slices.Equal(visited.DeferredContractIds(), []server.Id{victim}) {
+			t.Fatal("the other rows did not close around the held intent", closed, visited.DeferredContractIds())
+		}
+		requireForceCloseOwnerBatchTerminal(t, ctx, contractIds, []bool{true, false, true, true})
+		admitted, _ := turns.snapshot()
+		batchTurns, aloneTurns := countForceCloseOwnerBatchTurns(t, admitted, batchIds)
+		if batchTurns != 1 || aloneTurns[contractIds[0]]+aloneTurns[contractIds[2]]+aloneTurns[contractIds[3]] != 0 || 1 < aloneTurns[victim] {
+			t.Fatalf("the page took %d batch turns of the other rows and %v turns alone, want one batch and the intent row alone", batchTurns, aloneTurns)
+		}
+
+		release()
+		closed, cursor, _, err = forceCloseOpenContractIdsPage(ctx, server.NowUtc(), 8, 4, 0, 0, nil)
+		if err != nil || closed != 1 || cursor != nil {
+			t.Fatal("the next pass did not close the freed intent row", closed, cursor, err)
+		}
+		requireForceCloseOwnerBatchTerminal(t, ctx, contractIds, []bool{true, true, true, true})
+	})
+}
+
+// The batch fails after its admission but before its members, as a lost route
+// or connection fails it. Each row alone would meet the same route, so none is
+// retried alone: every row stays open, deferred with that failure, and the
+// next pass closes them in one batch. Each row used to be retried alone.
+func TestForceClosePageLeavesRowsOpenWhenOwnerBatchFailsBeforeItsMembers(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+		defer cancel()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		now := server.NowUtc()
+		contractIds := newForceCloseOwnerBatchRows(t, ctx, f, 3, now)
+		keyContractIds := map[server.PgOwnershipKey]server.Id{}
+		for _, contractId := range contractIds {
+			keyContractIds[task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))] = contractId
+		}
+		synthetic := errors.New("synthetic owner batch route failure")
+		var stateLock sync.Mutex
+		batchAdmissions, aloneAdmissions := 0, 0
+		observed := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+			if event.Kind != server.PgOwnershipAdmitted {
+				return
+			}
+			covered := 0
+			for _, key := range event.Keys {
+				if _, ok := keyContractIds[key]; ok {
+					covered += 1
+				}
+			}
+			stateLock.Lock()
+			first := false
+			switch {
+			case len(contractIds) <= covered:
+				batchAdmissions += 1
+				first = batchAdmissions == 1
+			case covered == 1:
+				aloneAdmissions += 1
+			}
+			stateLock.Unlock()
+			if first {
+				// Before BEGIN: the batch never reaches its members.
+				panic(synthetic)
+			}
+		})
+
+		closed, cursor, _, err := forceCloseOpenContractIdsPage(observed, now, 8, 4, 0, 0, nil)
+		visited, ok := err.(*ForceCloseVisitError)
+		if !ok || !visited.CanCheckpoint() || visited.Progressed() || !errors.Is(err, synthetic) || cursor != nil {
+			t.Fatal("the failed batch did not leave every row deferred with its failure", cursor, err)
+		}
+		if closed != 0 || !slices.Equal(visited.DeferredContractIds(), contractIds) {
+			t.Fatal("a row of the failed batch was retried alone", closed, visited.DeferredContractIds())
+		}
+		func() {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			if batchAdmissions != 1 || aloneAdmissions != 0 {
+				t.Fatalf("the page took %d batch admissions and %d row admissions, want the one batch and none alone", batchAdmissions, aloneAdmissions)
+			}
+		}()
+		requireForceCloseOwnerBatchTerminal(t, ctx, contractIds, []bool{false, false, false})
+
+		closed, cursor, _, err = forceCloseOpenContractIdsPage(observed, server.NowUtc(), 8, 4, 0, 0, nil)
+		if err != nil || closed != int64(len(contractIds)) || cursor != nil {
+			t.Fatal("the next pass did not close the rows left open", closed, cursor, err)
+		}
+		requireForceCloseOwnerBatchTerminal(t, ctx, contractIds, []bool{true, true, true})
+	})
+}
+
 // Only open rows past their stored deadline with exactly one balance join a
 // batch, at most ContractDeadlineOwnerBatchLimit to a batch, in page order;
-// a row alone on its balance, not yet due or without a stored deadline keeps
-// its own visit.
+// a row alone on its balance, not yet due, without a stored deadline or with a
+// pending legacy settlement intent keeps its own visit.
 func TestForceCloseDeadlineOwnerBatchesGroupsOnlyDueSingleBalanceRows(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -294,15 +449,18 @@ func TestForceCloseDeadlineOwnerBatchesGroupsOnlyDueSingleBalanceRows(t *testing
 		singleIds := newForceCloseOwnerBatchRows(t, ctx, single, 1, now)
 		pendingIds := newForceCloseOwnerBatchRows(t, ctx, heavy, 2, now)
 		legacyIds := newForceCloseOwnerBatchRows(t, ctx, heavy, 2, now)
+		intentIds := newForceCloseOwnerBatchRows(t, ctx, heavy, 1, now)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=ANY($1)`, pendingIds, now.Add(time.Hour)))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=NULL WHERE contract_id=ANY($1)`, legacyIds))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome)
+				VALUES($1,get_byte(uuid_send($1::uuid),15)%16,'settled')`, intentIds[0]))
 		}, server.TxReadCommitted, server.OptNoRetry())
 
 		// Page order interleaves the kinds; the first batch's rows are not contiguous.
 		pageIds := []server.Id{heavyIds[0], singleIds[0], pendingIds[0], heavyIds[1], legacyIds[0]}
 		pageIds = append(pageIds, heavyIds[2:]...)
-		pageIds = append(pageIds, pendingIds[1], legacyIds[1])
+		pageIds = append(pageIds, pendingIds[1], legacyIds[1], intentIds[0])
 		openContracts := make([]*contractExpiryState, len(pageIds))
 		for index, contractId := range pageIds {
 			openContracts[index] = &contractExpiryState{contractId: contractId}
@@ -340,9 +498,9 @@ func TestForceCloseDeadlineOwnerBatchesGroupsOnlyDueSingleBalanceRows(t *testing
 				t.Fatal("a batch's members are not in contract order")
 			}
 		}
-		for _, index := range []int{1, 2, 4, len(pageIds) - 2, len(pageIds) - 1} {
+		for _, index := range []int{1, 2, 4, len(pageIds) - 3, len(pageIds) - 2, len(pageIds) - 1} {
 			if rowBatches[index] != nil {
-				t.Fatal("a row alone on its balance, not yet due or without a deadline joined a batch", index)
+				t.Fatal("a row alone on its balance, not yet due, without a deadline or with a pending intent joined a batch", index)
 			}
 		}
 	})
