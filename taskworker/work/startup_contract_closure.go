@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -242,9 +243,19 @@ func scheduleContractClose(clientSession *session.ClientSession, tx server.PgTx,
 // An open contract's close first takes one of the process's close slots, and
 // defers when none frees in time. A funded close admits its balance owner
 // without waiting, closes, and reads the owner's due siblings; one more owner
-// turn retires up to a batch of them. A held owner defers this close rather
-// than holding the worker slot. A held or terminal close first spends its
-// claim on another owner's due closes.
+// turn retires up to a batch of them.
+//
+// A held owner's batch retires only the owner's oldest due siblings, so a
+// refused close keeps its claim and tries again after a jittered pause, for up
+// to scheduledCloseOwnerWait after its first refusal. Each try rereads the
+// contract and takes a slot only for its owner turn; a pause holds no slot and
+// no connection. A contract another closer retired meanwhile finishes as
+// terminal, and only a close still refused when its wait ends, or still
+// without a slot, defers. A deferral's successor wakes behind every due row of
+// the queue. A terminal close, and a refused close before it defers, spends
+// its claim on another owner's due closes. Every try is one owned transaction
+// that either commits the close or was refused before any read or write, so a
+// retry cannot repeat a settlement.
 func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *session.ClientSession) (*CloseScheduledContractResult, error) {
 	if args == nil || !args.Private || args.ContractId == (server.Id{}) || args.Deadline.IsZero() {
 		return nil, fmt.Errorf("invalid scheduled contract close")
@@ -254,56 +265,90 @@ func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *ses
 		return &CloseScheduledContractResult{RetryAt: &args.Deadline}, nil
 	}
 	ctx := clientSession.Ctx
-	custody, err := model.ReadContractDeadlineCustody(ctx, []server.Id{args.ContractId})
-	if err != nil {
-		return nil, err
-	}
-	state := custody[args.ContractId]
-	switch {
-	case state == nil || !state.Found:
-		return &CloseScheduledContractResult{Reconciliation: &model.ContractDeadlineReconciliation{ContractId: args.ContractId, Missing: true},
-			StolenClosed: stealScheduledCloseOwner(ctx, now, args.ContractId, nil)}, nil
-	case state.Outcome != nil:
-		return &CloseScheduledContractResult{Reconciliation: &model.ContractDeadlineReconciliation{
-			ContractId: args.ContractId, Outcome: *state.Outcome, AlreadyClosed: true},
-			StolenClosed: stealScheduledCloseOwner(ctx, now, args.ContractId, nil)}, nil
-	}
-	release, admitted := scheduledCloseSlots.acquire(ctx, scheduledCloseParallelLimit, scheduledCloseSlotTimeout())
-	if !admitted {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	primary := model.ContractDeadline{ContractId: args.ContractId, Deadline: args.Deadline}
+	// The first refusal sets both: when the owner wait ends, and the owner
+	// another closer held.
+	var ownerWait <-chan time.Time
+	var heldBalanceIds []server.Id
+	// A deferral keeps the deadline. A close its owner refused first spends its
+	// claim on another owner.
+	deferClose := func() *CloseScheduledContractResult {
+		result := &CloseScheduledContractResult{RetryAt: &args.Deadline}
+		if heldBalanceIds != nil {
+			result.StolenClosed = stealScheduledCloseOwner(ctx, now, args.ContractId, heldBalanceIds)
 		}
 		deferredUntil := scheduledCloseDeferredUntil(server.NowUtc())
-		return &CloseScheduledContractResult{RetryAt: &args.Deadline, DeferredUntil: &deferredUntil}, nil
+		result.DeferredUntil = &deferredUntil
+		return result
 	}
-	defer release()
-	if len(state.BalanceIds) == 0 {
-		// No grant owns this contract, so there is no shared owner to batch.
-		closed, err := model.ReconcileContractAtDeadline(ctx, args.ContractId, args.Deadline)
-		return &CloseScheduledContractResult{Reconciliation: closed}, err
+	for {
+		custody, err := model.ReadContractDeadlineCustody(ctx, []server.Id{args.ContractId})
+		if err != nil {
+			return nil, err
+		}
+		state := custody[args.ContractId]
+		switch {
+		case state == nil || !state.Found:
+			return &CloseScheduledContractResult{Reconciliation: &model.ContractDeadlineReconciliation{ContractId: args.ContractId, Missing: true},
+				StolenClosed: stealScheduledCloseOwner(ctx, now, args.ContractId, heldBalanceIds)}, nil
+		case state.Outcome != nil:
+			return &CloseScheduledContractResult{Reconciliation: &model.ContractDeadlineReconciliation{
+				ContractId: args.ContractId, Outcome: *state.Outcome, AlreadyClosed: true},
+				StolenClosed: stealScheduledCloseOwner(ctx, now, args.ContractId, heldBalanceIds)}, nil
+		}
+		// A retry waits for a slot only until its owner wait ends.
+		slotTimeout := ownerWait
+		if slotTimeout == nil {
+			slotTimeout = scheduledCloseSlotTimeout()
+		}
+		release, admitted := scheduledCloseSlots.acquire(ctx, scheduledCloseParallelLimit, slotTimeout)
+		if !admitted {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return deferClose(), nil
+		}
+		if len(state.BalanceIds) == 0 {
+			// No grant owns this contract, so there is no shared owner to batch.
+			closed, err := func() (*model.ContractDeadlineReconciliation, error) {
+				defer release()
+				return model.ReconcileContractAtDeadline(ctx, args.ContractId, args.Deadline)
+			}()
+			return &CloseScheduledContractResult{Reconciliation: closed}, err
+		}
+		// A steal or a pause holds no close slot.
+		closed, err := func() (*model.ContractOwnerDeadlineResult, error) {
+			defer release()
+			return model.ReconcileContractOwnerAtDeadline(ctx, state.BalanceIds, primary, dueContractDeadlines(now))
+		}()
+		if err != nil {
+			return nil, err
+		}
+		if !closed.Busy {
+			return &CloseScheduledContractResult{Reconciliation: closed.Reconciliation, OwnerBatchClosed: closed.SiblingsClosed}, nil
+		}
+		heldBalanceIds = state.BalanceIds
+		if ownerWait == nil {
+			ownerWait = scheduledCloseOwnerWaitTimeout()
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ownerWait:
+			return deferClose(), nil
+		case <-time.After(scheduledCloseOwnerRetry + time.Duration(mathrand.Int64N(int64(scheduledCloseOwnerRetryJitter)))):
+		}
 	}
-	closed, err := model.ReconcileContractOwnerAtDeadline(ctx, state.BalanceIds,
-		model.ContractDeadline{ContractId: args.ContractId, Deadline: args.Deadline}, dueContractDeadlines(now))
-	if err != nil {
-		return nil, err
-	}
-	if closed.Busy {
-		// A steal holds its own slot.
-		release()
-		stolenClosed := stealScheduledCloseOwner(ctx, now, args.ContractId, state.BalanceIds)
-		deferredUntil := scheduledCloseDeferredUntil(server.NowUtc())
-		return &CloseScheduledContractResult{RetryAt: &args.Deadline, DeferredUntil: &deferredUntil, StolenClosed: stolenClosed}, nil
-	}
-	return &CloseScheduledContractResult{Reconciliation: closed.Reconciliation, OwnerBatchClosed: closed.SiblingsClosed}, nil
 }
 
 // Early wakes retain the deadline. Owner handoffs are only for results written
 // by older workers; new due results already committed terminal reconciliation.
 // Register those retained hints with their owner wake; busy or changed custody
-// yields a new child without changing its deadline. A busy owner deferral wakes
-// later; its unchanged arguments keep the original deadline authority. A
-// contract another closer retired meanwhile, usually the held owner's own
-// batch, gets no successor: it could only finish as a terminal no-op.
+// yields a new child without changing its deadline. A deferral, by an owner
+// held through the wait or a slot that did not free, wakes later; its
+// unchanged arguments keep the original deadline authority. A contract another
+// closer retired meanwhile gets no successor: it could only finish as a
+// terminal no-op.
 func CloseScheduledContractPost(args *CloseScheduledContractArgs, result *CloseScheduledContractResult,
 	clientSession *session.ClientSession, tx server.PgTx) error {
 	if result.DeferredUntil != nil || result.RetryAt != nil {

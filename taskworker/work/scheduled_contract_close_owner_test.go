@@ -1,5 +1,6 @@
 // A retained legacy backlog closes through bounded owner transactions, a held
-// owner defers instead of waiting, and terminal queued closes take no locks.
+// owner's closes wait in their claims and defer only when the grant stays held
+// through the wait, and terminal queued closes take no locks.
 package work
 
 import (
@@ -257,17 +258,30 @@ func TestScheduledContractCloseOwnerBatchBoundsAdmissions(t *testing.T) {
 	})
 }
 
-// Another owner holds the payer's grant. Every queued close for that payer
-// refuses once and defers with its deadline unchanged, never waiting out the
-// admission budget, while other payers' contracts close in the same claim.
-// After release the deferred closes drain in bounded owner batches, each
-// removing its siblings' deferred closes.
-func TestScheduledContractCloseHeldOwnerDefersWithoutWaiting(t *testing.T) {
+// Ends every refused close's owner wait at once, so a held owner's close defers
+// at its first refusal, as every one did before closes waited.
+func endScheduledCloseOwnerWait(t testing.TB) {
+	ended := make(chan time.Time)
+	close(ended)
+	ownerWaitTimeout := scheduledCloseOwnerWaitTimeout
+	scheduledCloseOwnerWaitTimeout = func() <-chan time.Time { return ended }
+	t.Cleanup(func() { scheduledCloseOwnerWaitTimeout = ownerWaitTimeout })
+}
+
+// Another owner holds the payer's grant through every close's wait. Every
+// queued close for that payer is refused once and defers with its deadline
+// unchanged and no recorded failure, while other payers' contracts close in
+// the same claim. Each successor wakes at its deferral, behind every due row;
+// the test used to move those wakes into the past and drain them, which hid
+// how far behind the queue a deferral lands. A grant released within the wait
+// closes in the claims instead.
+func TestScheduledContractCloseOwnerHeldThroughTheWaitDefers(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		const heldCount = model.ContractDeadlineOwnerBatchLimit + 8
 		const otherCount = 8
+		endScheduledCloseOwnerWait(t)
 		f := newScheduledCloseOwnerFixture(t.Context())
 		held := f.newPayer(t, t.Context(), "synthetic-held-owner-payer")
 		f.addLegacyContracts(t.Context(), held, heldCount)
@@ -283,23 +297,8 @@ func TestScheduledContractCloseHeldOwnerDefersWithoutWaiting(t *testing.T) {
 		scope, err := server.NewTestPgQueryScope(ctx, trace)
 		server.Raise(err)
 		defer func() { server.Raise(scope.Close()) }()
-
-		admittedHolder, release, holderDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
-		go func() {
-			defer close(holderDone)
-			server.OwnedTx(t.Context(), []server.PgOwnershipKey{server.NewPgOwnershipKey("transfer_balance", held.balanceId)}, func(tx server.PgTx) {
-				close(admittedHolder)
-				<-release
-			}, server.TxReadCommitted, server.OptNoRetry())
-		}()
-		<-admittedHolder
-		released := false
-		defer func() {
-			if !released {
-				close(release)
-			}
-			<-holderDone
-		}()
+		release := holdScheduledCloseOwner(t, t.Context(), held)
+		defer release()
 
 		worker := startupClosureWorker(ctx, NewScheduledContractClosureTaskTarget())
 		defer worker.Close()
@@ -329,7 +328,7 @@ func TestScheduledContractCloseHeldOwnerDefersWithoutWaiting(t *testing.T) {
 			}
 			var args CloseScheduledContractArgs
 			server.Raise(json.Unmarshal([]byte(row.args), &args))
-			if !args.Deadline.Equal(deadline) || !row.runAt.After(before) || row.claimTime.After(time.Time{}) ||
+			if !args.Deadline.Equal(deadline) || row.runAt.Before(before.Add(scheduledCloseOwnerBusyDeferral)) || row.claimTime.After(time.Time{}) ||
 				!slices.Contains(held.contractIds, args.ContractId) {
 				t.Fatal("held owner deferral changed its deadline, lost its wake or claimed another payer", args, row.runAt)
 			}
@@ -345,20 +344,150 @@ func TestScheduledContractCloseHeldOwnerDefersWithoutWaiting(t *testing.T) {
 				t.Fatal("a busy owner was recorded as a failed close")
 			}
 		})
+	})
+}
 
-		close(release)
-		released = true
-		<-holderDone
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2 WHERE task_id=ANY($1)`, deferred, before.Add(-time.Minute)))
+// Another owner holds the payer's grant while all of its queued closes and
+// other payers' closes are claimed together. A refused close waits in its
+// claim and holds no close slot between tries, so every other payer's close
+// commits while the grant is still held, and no refused close reads the
+// owner's siblings. Once the holder releases, the refused closes retire every
+// one of the payer's contracts in bounded owner batches with exact accounting,
+// each within its own claim: none defers or leaves a queued close. These
+// closes used to defer at their first refusal.
+func TestScheduledContractCloseOwnerReleasedWithinTheWaitClosesInTheClaims(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		const heldCount = model.ContractDeadlineOwnerBatchLimit + 8
+		const otherCount = 8
+		// Neither wait ends on its own, so only the release ends them.
+		ownerWaitTimeout, slotTimeout := scheduledCloseOwnerWaitTimeout, scheduledCloseSlotTimeout
+		scheduledCloseOwnerWaitTimeout = func() <-chan time.Time { return nil }
+		scheduledCloseSlotTimeout = func() <-chan time.Time { return nil }
+		defer func() { scheduledCloseOwnerWaitTimeout, scheduledCloseSlotTimeout = ownerWaitTimeout, slotTimeout }()
+		f := newScheduledCloseOwnerFixture(t.Context())
+		held := f.newPayer(t, t.Context(), "synthetic-released-owner-payer")
+		f.addLegacyContracts(t.Context(), held, heldCount)
+		others := make([]*scheduledCloseOwnerPayer, otherCount)
+		for index := range others {
+			others[index] = f.newPayer(t, t.Context(), fmt.Sprintf("synthetic-released-other-payer-%d", index))
+			f.addLegacyContracts(t.Context(), others[index], 1)
+		}
+		events := newScheduledCloseOwnerEvents(append([]*scheduledCloseOwnerPayer{held}, others...)...)
+		// A refusal carries its contract's own publication key.
+		heldKey := server.NewPgOwnershipKey("transfer_balance", held.balanceId)
+		heldContractKeys := map[server.PgOwnershipKey]server.Id{}
+		for _, contractId := range held.contractIds {
+			heldContractKeys[task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))] = contractId
+		}
+		otherKeys := map[server.PgOwnershipKey]bool{}
+		for _, other := range others {
+			otherKeys[server.NewPgOwnershipKey("transfer_balance", other.balanceId)] = true
+		}
+		var stateLock sync.Mutex
+		refusedIds := map[server.Id]bool{}
+		otherReleases := 0
+		waited := make(chan struct{})
+		var waitedOnce sync.Once
+		ctx := server.Testing_WithPgOwnershipObservation(model.WithProviderWorkSessionSource(t.Context(), nil), func(event server.PgOwnershipEvent) {
+			events.observe(event)
+			if event.TransactionScoped {
+				return
+			}
+			ready := false
+			func() {
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				switch {
+				case event.Kind == server.PgOwnershipRefused && slices.Contains(event.Keys, heldKey):
+					for _, key := range event.Keys {
+						if contractId, found := heldContractKeys[key]; found {
+							refusedIds[contractId] = true
+						}
+					}
+				case event.Kind == server.PgOwnershipReleased:
+					for _, key := range event.Keys {
+						if otherKeys[key] {
+							otherReleases++
+						}
+					}
+				}
+				ready = len(refusedIds) == heldCount && otherReleases == otherCount
+			}()
+			if ready {
+				waitedOnce.Do(func() { close(waited) })
+			}
 		})
-		executions := drainScheduledCloses(t, worker, heldCount)
-		admitted, waiting, _ = events.counts(held.balanceId)
-		batches := (heldCount + model.ContractDeadlineOwnerBatchLimit - 1) / model.ContractDeadlineOwnerBatchLimit
-		if executions != batches || admitted != 2*batches || waiting != 0 {
-			t.Fatalf("released owner admissions=%d waiting=%d executions=%d; want %d admissions and claims", admitted, waiting, executions, 2*batches)
+		publishScheduledCloses(t, ctx)
+		trace := &scheduledCloseLockTrace{}
+		scope, err := server.NewTestPgQueryScope(ctx, trace)
+		server.Raise(err)
+		defer func() { server.Raise(scope.Close()) }()
+		var releaseOnce sync.Once
+		releaseHolder := holdScheduledCloseOwner(t, t.Context(), held)
+		release := func() { releaseOnce.Do(releaseHolder) }
+		defer release()
+
+		worker := startupClosureWorker(ctx, NewScheduledContractClosureTaskTarget())
+		defer worker.Close()
+		done := make(chan struct{})
+		var finished, retried, posts []server.Id
+		var evalErr error
+		go func() {
+			defer close(done)
+			finished, retried, posts, evalErr = worker.EvalTasks(heldCount + otherCount)
+		}()
+		defer func() {
+			release()
+			<-done
+		}()
+		select {
+		case <-waited:
+		case <-done:
+			t.Fatal("the claimed closes finished while the grant was held", len(finished), len(retried), len(posts), evalErr)
+		case <-time.After(time.Minute):
+			t.Fatal("the other payers' closes did not commit while the refused closes waited")
+		}
+		if scans := trace.siblingScanCount(); scans != otherCount {
+			t.Fatal("a refused close read its owner's siblings", scans)
+		}
+		requireScheduledCloseOwnerSettled(t, ctx, held, 0)
+		for _, other := range others {
+			requireScheduledCloseOwnerSettled(t, ctx, other, 1)
+		}
+
+		release()
+		<-done
+		if evalErr != nil || len(retried) != 0 || len(posts) != 0 || len(finished) != heldCount+otherCount {
+			t.Fatalf("released owner's closes failed: finished=%d retried=%d posts=%d err=%v", len(finished), len(retried), len(posts), evalErr)
 		}
 		requireScheduledCloseOwnerSettled(t, ctx, held, heldCount)
+		closed := 0
+		for _, result := range readScheduledCloseResults(t, ctx) {
+			if result.DeferredUntil != nil || result.RetryAt != nil || result.Reconciliation == nil || result.Reconciliation.Missing ||
+				model.ContractDeadlineOwnerBatchLimit-1 < result.OwnerBatchClosed {
+				t.Fatalf("a claimed close did not finish within its claim in one bounded batch: %+v", result)
+			}
+			if !result.Reconciliation.AlreadyClosed {
+				closed++
+			}
+			closed += result.OwnerBatchClosed + result.StolenClosed
+		}
+		if closed != heldCount+otherCount {
+			t.Fatal("the claims did not close each contract exactly once", closed, heldCount+otherCount)
+		}
+		if queued := readQueuedScheduledCloseContracts(t, ctx); len(queued) != 0 {
+			t.Fatal("a close that finished in its claim left a queued close", len(queued))
+		}
+		if admitted, waiting, refused := events.counts(held.balanceId); admitted < 2 || waiting != 0 || refused < heldCount {
+			t.Fatal("the released owner did not close through refused closes that waited", admitted, waiting, refused)
+		}
+		for _, other := range others {
+			if admitted, waiting, refused := events.counts(other.balanceId); admitted != 1 || waiting != 0 || refused != 0 {
+				t.Fatal("independent payer did not close through one admission", admitted, waiting, refused)
+			}
+		}
 	})
 }
 
