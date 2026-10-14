@@ -8,8 +8,10 @@
 // config's live geometry: it schedules and recreates no shard and hands back
 // every pass it claims, and the disabling config retires those passes. A
 // taskworker whose config enables probing retires a marker that is not a
-// newer config's live one. The marker lives under its own function, so probe
-// row counts and the disabled reap see no probe rows.
+// newer config's live one, and then recreates the shards its config is
+// missing, so a disable that was withdrawn while the shard set was retired
+// brings the shards back without a restart. The marker lives under its own
+// function, so probe row counts and the disabled reap see no probe rows.
 package work
 
 import (
@@ -134,4 +136,34 @@ func ProviderEgressProbeDisabledPost(
 			now.Add(providerEgressProbeDisabledInterval))
 	}
 	return nil
+}
+
+// The registered post-step: ProviderEgressProbeDisabledPost in the finishing
+// transaction, then, when a config that enables probing has retired the
+// marker, the probe's recreation of the shards that config is missing, after
+// the commit and through the same read committed, shard-ordered transaction
+// as after a probe pass.
+func ProviderEgressProbeDisabledCommitPost(
+	providerEgressProbeDisabled *ProviderEgressProbeDisabledArgs,
+	providerEgressProbeDisabledResult *ProviderEgressProbeDisabledResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) ([]server.PostFunction, error) {
+	if err := ProviderEgressProbeDisabledPost(providerEgressProbeDisabled, providerEgressProbeDisabledResult, clientSession, tx); err != nil {
+		return nil, err
+	}
+	if providerEgressProbeDisabledResult == nil || providerEgressProbeDisabledResult.HandedBack || providerEgressProbeDisabledResult.Restamp {
+		return nil, nil
+	}
+	// The post's session ends with the post; the recreation keeps only its values.
+	ctx := context.WithoutCancel(clientSession.Ctx)
+	return []server.PostFunction{func() any {
+		recreateMissingProviderEgressProbeShards(ctx)
+		return nil
+	}}, nil
+}
+
+// The marker's task target as the taskworker registers it.
+func NewProviderEgressProbeDisabledTaskTarget() *task.TaskTarget[*ProviderEgressProbeDisabledArgs, *ProviderEgressProbeDisabledResult] {
+	return task.NewTaskTargetWithCommitPost(ProviderEgressProbeDisabled, ProviderEgressProbeDisabledCommitPost)
 }

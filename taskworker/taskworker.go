@@ -398,10 +398,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RefreshGeolocationSourcePinsPost,
 		),
 		work.NewProviderEgressProbeTaskTarget(),
-		task.NewTaskTargetWithPost(
-			work.ProviderEgressProbeDisabled,
-			work.ProviderEgressProbeDisabledPost,
-		),
+		work.NewProviderEgressProbeDisabledTaskTarget(),
 		task.NewTaskTargetWithPost(work.RollupProviderEgressTallies, work.RollupProviderEgressTalliesPost),
 		task.NewTaskTargetWithPost(
 			work.RefreshEgressDestinations,

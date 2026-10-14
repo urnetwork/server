@@ -21,12 +21,13 @@ func testPendingDisabledMarker(t testing.TB, ctx context.Context) *testProbeRow 
 }
 
 // Runs the due marker once through the real task evaluator, registered as the
-// taskworker registers it.
+// taskworker registers it. The post-step's work after the commit has run when
+// it returns.
 func testEvalDisabledMarker(t testing.TB, ctx context.Context) {
 	t.Helper()
 	worker := task.NewTaskWorkerWithDefaults(ctx)
 	defer worker.Close()
-	worker.AddTargets(task.NewTaskTargetWithPost(ProviderEgressProbeDisabled, ProviderEgressProbeDisabledPost))
+	worker.AddTargets(NewProviderEgressProbeDisabledTaskTarget())
 	finished, retried, postRetried, err := worker.EvalTasks(1)
 	if err != nil || len(finished) != 1 || len(retried)+len(postRetried) != 0 {
 		t.Fatalf("the marker did not finish one run: finished=%d retried=%d err=%v", len(finished), len(retried)+len(postRetried), err)
@@ -95,7 +96,9 @@ func TestProviderEgressProbeDisablingConfigKeepsItsMarker(t *testing.T) {
 // A marker a newer config wrote within its timeout is handed back unchanged
 // by an older config, whether that config enables or disables probing. A
 // config that enables probing retires a marker that is not a newer config's
-// live one, and a disabling config restamps it with its own version.
+// live one and recreates its own shard set, which a withdrawn disable had left
+// retired until a taskworker restarted. A disabling config restamps the marker
+// with its own version. Neither a hand-back nor a restamp creates shards.
 func TestProviderEgressProbeDisabledMarkerFollowsTheNewestConfig(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -119,8 +122,10 @@ func TestProviderEgressProbeDisabledMarkerFollowsTheNewestConfig(t *testing.T) {
 			settings := testUrlGeometrySettings(4, 8)
 			settings.Enabled = c.enabled
 			withProviderEgressProbeSettings(t, settings)
+			// the disabled shard set is retired
 			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key = $1`, providerEgressProbeDisabledRunOnce().String()))
+				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key = $1 OR function_name = $2`,
+					providerEgressProbeDisabledRunOnce().String(), ProviderEgressProbeTaskFunctionNames()[0]))
 				testInsertDisabledMarker(t, ctx, tx, c.markerVersion, server.NowUtc().Add(-c.markerAge), server.NowUtc().Add(-time.Minute))
 			})
 			claimed := testPendingDisabledMarker(t, ctx)
@@ -142,10 +147,16 @@ func TestProviderEgressProbeDisabledMarkerFollowsTheNewestConfig(t *testing.T) {
 				if next != nil {
 					t.Errorf("%s: the marker was not retired: %v", c.name, next.args)
 				}
+				if count := testPendingProbeRowCount(t, ctx); count != settings.ShardCount {
+					t.Errorf("%s: retiring the marker brought back %d of the %d shards", c.name, count, settings.ShardCount)
+				}
 			case "restamped":
 				if next == nil || next.args["config_generation"] != c.version || testStampWrittenAt(t, next).Before(before) {
 					t.Errorf("%s: the marker was not restamped with this config's version: %+v", c.name, next)
 				}
+			}
+			if count := testPendingProbeRowCount(t, ctx); c.want != "retired" && count != 0 {
+				t.Errorf("%s: the marker run created %d shards", c.name, count)
 			}
 		}
 	})
