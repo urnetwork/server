@@ -31,6 +31,9 @@ type reconcileStoreForTest struct {
 	// each read and retire is sent here when set, without blocking
 	readEvents   chan struct{}
 	retireEvents chan server.Id
+	// runs once after the next read's snapshot, before the read returns; set
+	// only while no pass runs
+	afterRead func()
 }
 
 func newReconcileStoreForTest() *reconcileStoreForTest {
@@ -102,6 +105,10 @@ func (self *reconcileStoreForTest) read(ctx context.Context, handlerId server.Id
 		}
 		return connectionIds
 	}()
+	if afterRead := self.afterRead; afterRead != nil {
+		self.afterRead = nil
+		afterRead()
+	}
 	if self.readEvents != nil {
 		select {
 		case self.readEvents <- struct{}{}:
@@ -621,5 +628,46 @@ func TestConnectionReconcileKeepsItsIntervalThroughChurn(t *testing.T) {
 	reconcile.release(failed, false)
 	if backlog := reconcile.reconcile(); !backlog {
 		t.Fatal("the row of a failed final disconnect did not keep the backlog cadence")
+	}
+}
+
+// A registration that commits after a pass's read, and whose transport ends
+// with a failed final disconnect before that pass takes its lock, is missing
+// from that read because the read predates the row, not because the row was
+// disconnected. Its release must survive the pass: the row keeps the backlog
+// cadence and is retired with its release time.
+func TestConnectionReconcileKeepsAReleaseItsReadPredates(t *testing.T) {
+	store := newReconcileStoreForTest()
+	reconcile := newReconcileForTest(store, DefaultConnectionReconcileSettings())
+	var connectionId server.Id
+	var beforeRelease, afterRelease time.Time
+	store.afterRead = func() {
+		connectionId = registerForTest(reconcile, store)
+		beforeRelease = server.NowUtc()
+		reconcile.release(connectionId, false)
+		afterRelease = server.NowUtc()
+	}
+	reconcile.reconcile()
+	if store.afterRead != nil {
+		t.Fatal("fixture: the registration must land after the first read")
+	}
+	// the passes run strictly after the release
+	for !server.NowUtc().After(afterRelease) {
+	}
+
+	if backlog := reconcile.reconcile(); !backlog {
+		t.Fatal("the row of a failed final disconnect lost the backlog cadence: the pass whose read predates the row dropped its release")
+	}
+	reconcile.reconcile()
+	if store.connected(connectionId) {
+		t.Fatal("the row of a failed final disconnect is still connected after its second sighting")
+	}
+	disconnectTime := func() time.Time {
+		store.stateLock.Lock()
+		defer store.stateLock.Unlock()
+		return store.retireDisconnectTimes[connectionId]
+	}()
+	if disconnectTime.Before(beforeRelease) || disconnectTime.After(afterRelease) {
+		t.Fatalf("the row was retired with disconnect time %s, want its release between %s and %s", disconnectTime, beforeRelease, afterRelease)
 	}
 }

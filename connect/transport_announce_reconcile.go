@@ -342,6 +342,7 @@ func (self *handlerConnectionReconcile) backlogInterval() time.Duration {
 func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 	// every row read here committed before the read returned, so only a
 	// registration that began before it returned can still come to hold one
+	readStartTime := server.NowUtc()
 	var connectionIds []server.Id
 	func() {
 		readCtx, readCancel := context.WithTimeout(self.ctx, self.settings.OperationTimeout)
@@ -389,9 +390,10 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 				delete(self.retireFailureCounts, connectionId)
 			}
 		}
-		// a released row this read no longer saw connected was disconnected
-		for connectionId := range self.releaseTimes {
-			if !unheldConnectionIds[connectionId] {
+		// a row released before this read began, and not read connected, was
+		// disconnected; a row released since may have committed after the read
+		for connectionId, releaseTime := range self.releaseTimes {
+			if !unheldConnectionIds[connectionId] && releaseTime.Before(readStartTime) {
 				delete(self.releaseTimes, connectionId)
 			}
 		}
