@@ -96,6 +96,12 @@ type Config struct {
 	// Bounds that whole wait, for a provider that never goes quiet. It sits
 	// inside CloseTimeout. Zero or negative means 5s.
 	ReturnDrainTimeout time.Duration
+	// Optional, for a capability measurement in a tunnel of its own
+	// (server/capprobe). Nil, what the URL probe and every other probe
+	// tunnel use, leaves the clients the tunnel generates exactly as they
+	// were: end-to-end sessions off, nothing observed, and no wait for key
+	// registration.
+	CapabilityObservation *CapabilityObservation
 }
 
 // Returns CloseTimeout, or its default when unset.
@@ -411,6 +417,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	if cfg.ContractReservationByteCount < 0 {
 		return nil, ErrContractReservation
 	}
+	if err := cfg.CapabilityObservation.validate(); err != nil {
+		return nil, err
+	}
 	resolver, err := providerDnsResolverSettings(cfg)
 	if err != nil {
 		return nil, err
@@ -462,6 +471,8 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		&cfg.ClientId,
 		func() *connect.ClientSettings {
 			settings := newProviderTunnelClientSettings(cfg.ContractReservationByteCount)
+			// nil for every tunnel but a capability measurement's
+			cfg.CapabilityObservation.apply(settings)
 			// last, after every other change to the settings
 			if cfg.KeepClientKeysLocal {
 				skipUnreadClientKeyPublication(settings)
