@@ -99,6 +99,10 @@ cap. At the launch policy's fee cap of 30 gwei:
 The deposit key sends the staging and then the deposit, so a pair needs
 0.06 TAO under `maximum_gas` 1,000,000 and 0.186 TAO at the full floors.
 
+An estimate can also size a send above its floor, up to `maximum_gas`. So the
+most one send can need is `maximum_gas` at the fee cap: 0.105 TAO under the
+planned `maximum_gas` of 3,500,000 at 30 gwei.
+
 ## Procedure
 
 1. Stop every send of the account, and keep them stopped until step 5: stop
