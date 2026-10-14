@@ -224,6 +224,7 @@ func runWithDependencies(
 		joinPublish = func() { <-publishDone }
 	}
 
+	// a raise ends the status log only; the mesh does not depend on it
 	go server.HandleError(func() {
 		for {
 			select {
@@ -242,7 +243,7 @@ func runWithDependencies(
 				)
 			}
 		}
-	}, cancel)
+	})
 
 	glog.Infof(
 		"[gossip]serving %s %s as %s on *:%d\n",
