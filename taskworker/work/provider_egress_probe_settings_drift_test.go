@@ -140,7 +140,7 @@ func TestProviderEgressProbeSettingsDriftPreservesCurrentExecutionError(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := task.NewTaskTargetWithPost(ProviderEgressProbe, ProviderEgressProbePost)
+	target := NewProviderEgressProbeTaskTarget()
 	_, post, err := target.RunSpecific(context.Background(), &task.Task{ArgsJson: string(argsJSON), ClientAddress: "192.0.2.1:1234", RunMaxTimeSeconds: settings.MaxTimeSeconds})
 	if !errors.Is(err, context.DeadlineExceeded) || post != nil {
 		t.Fatalf("current execution failure was falsely retired: error=%v has_post=%t", err, post != nil)
@@ -195,7 +195,7 @@ func TestProviderEgressProbeSettingsDriftFinalizesCurrentSuccessor(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		target := task.NewTaskTargetWithPost(ProviderEgressProbe, ProviderEgressProbePost)
+		target := NewProviderEgressProbeTaskTarget()
 		before := server.NowUtc()
 		result, post, err := target.RunSpecific(context.Background(), &task.Task{ArgsJson: string(oldJSON), ClientAddress: "192.0.2.1:1234", RunMaxTimeSeconds: old.MaxTimeSeconds})
 		if err != nil || post == nil || result == nil || !result.Stale || calls != 0 {

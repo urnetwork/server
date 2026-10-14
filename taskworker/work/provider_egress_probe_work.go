@@ -678,7 +678,7 @@ func ProviderEgressProbeCommitPost(
 }
 
 // The probe's task target as the taskworker registers it.
-func NewProviderEgressProbeTaskTarget() task.Target {
+func NewProviderEgressProbeTaskTarget() *task.TaskTarget[*ProviderEgressProbeArgs, *ProviderEgressProbeResult] {
 	return task.NewTaskTargetWithCommitPost(ProviderEgressProbe, ProviderEgressProbeCommitPost)
 }
 

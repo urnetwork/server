@@ -309,7 +309,7 @@ func TestProviderEgressProbeReadinessUnfundedTaskKeepsIdleRetryCadence(t *testin
 		defer clientSession.Cancel()
 		args := providerEgressProbeArgs(settings, 0)
 		server.Tx(ctx, func(tx server.PgTx) { scheduleProviderEgressProbeAt(clientSession, tx, args, server.NowUtc()) })
-		target := task.NewTaskTargetWithPost(ProviderEgressProbe, ProviderEgressProbePost)
+		target := NewProviderEgressProbeTaskTarget()
 		var taskId server.Id
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE function_name=$1`, target.TargetFunctionName()).Scan(&taskId))

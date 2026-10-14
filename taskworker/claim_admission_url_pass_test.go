@@ -49,7 +49,7 @@ func TestProductionWorkerHoldsUrlPassesUpToGeometry(t *testing.T) {
 		worker := task.NewTaskWorker(ctx, taskWorkerSettingsForProfile(task.DefaultTaskWorkerSettings(), WorkloadProfileProduction))
 		defer worker.Close()
 		held := &heldUrlPassTarget{
-			Target:  task.NewTaskTargetWithPost(work.ProviderEgressProbe, work.ProviderEgressProbePost),
+			Target:  work.NewProviderEgressProbeTaskTarget(),
 			started: make(chan struct{}, 3),
 			release: make(chan struct{}),
 		}

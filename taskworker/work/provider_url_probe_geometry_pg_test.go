@@ -6,6 +6,7 @@ package work
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -809,6 +810,96 @@ func TestScheduleProviderEgressProbeTasksLeavesNewerGeometry(t *testing.T) {
 			if next == nil || !next.runAt.Equal(row.runAt) || !reflect.DeepEqual(next.args, row.args) {
 				t.Errorf("an older config's startup changed newer shard %d", shardIndex)
 			}
+		}
+	})
+}
+
+// A handed-back pass returns no work for after the commit, so the instance
+// that hands a newer config's shard back recreates none of its own
+// geometry's shards. A pass that it ran returns the recreation.
+func TestProviderEgressProbeHandedBackPassRecreatesNothing(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		t.Setenv("WARP_CONFIG_VERSION", testOlderConfigVersion)
+		older := testUrlGeometrySettings(4, 8)
+		withProviderEgressProbeSettings(t, older)
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		handedBack := testStampedGeometryArgs(t, testUrlGeometrySettings(8, 64), 6, testNewerConfigVersion, server.NowUtc())
+		ran := testStampedGeometryArgs(t, older, 1, testOlderConfigVersion, server.NowUtc())
+		var handedBackPosts, ranPosts []server.PostFunction
+		server.Tx(ctx, func(tx server.PgTx) {
+			var err error
+			handedBackPosts, err = ProviderEgressProbeCommitPost(handedBack, &ProviderEgressProbeResult{HandedBack: true}, clientSession, tx)
+			server.Raise(err)
+			ranPosts, err = ProviderEgressProbeCommitPost(ran, &ProviderEgressProbeResult{}, clientSession, tx)
+			server.Raise(err)
+		})
+		if len(handedBackPosts) != 0 {
+			t.Errorf("a handed-back pass returned %d posts for after the commit, want none", len(handedBackPosts))
+		}
+		if len(ranPosts) != 1 {
+			t.Errorf("a pass this config ran returned %d posts for after the commit, want the recreation", len(ranPosts))
+		}
+	})
+}
+
+// A hand-back whose post-step failed runs again from a RunPost retry, which
+// carries the retry's execution identity rather than the pass's. The copy of
+// the finished row finds nothing under that identity, so the post-step falls
+// back to the decoded arguments and the shard is handed back, not lost.
+func TestProviderEgressProbeHandBackFromARunPostRetryKeepsTheShard(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		t.Setenv("WARP_CONFIG_VERSION", testOlderConfigVersion)
+		older := testUrlGeometrySettings(4, 8)
+		// the pass reads settings once, then its first post-step fails to
+		settingsCalls := 0
+		previous := getProviderEgressProbeSettings
+		getProviderEgressProbeSettings = func() (providerEgressProbeSettings, error) {
+			settingsCalls++
+			if settingsCalls == 2 {
+				return providerEgressProbeSettings{}, errors.New("synthetic settings outage during the post-step")
+			}
+			return older, nil
+		}
+		t.Cleanup(func() { getProviderEgressProbeSettings = previous })
+		driftTaskRunner(t, func(context.Context, *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+			t.Error("an older config ran a pass of a newer geometry")
+			return &ProviderEgressProbeResult{}, nil
+		})
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		server.Tx(ctx, func(tx server.PgTx) {
+			args := testStampedGeometryArgs(t, testUrlGeometrySettings(8, 64), 6, testNewerConfigVersion, server.NowUtc())
+			scheduleProviderEgressProbeAt(clientSession, tx, args, server.NowUtc().Add(-time.Minute))
+		})
+		claimed := testPendingProbeRow(t, ctx, 6)
+
+		worker := task.NewTaskWorkerWithDefaults(ctx)
+		defer worker.Close()
+		worker.AddTargets(NewProviderEgressProbeTaskTarget())
+		finished, retried, postRetried, err := worker.EvalTasks(1)
+		if err != nil || len(finished)+len(retried) != 0 || len(postRetried) != 1 || testPendingProbeRow(t, ctx, 6) != nil {
+			t.Fatalf("the hand-back's post-step did not fail into a RunPost retry: finished=%d retried=%d post_retried=%d err=%v",
+				len(finished), len(retried), len(postRetried), err)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at = $2 WHERE args_json::jsonb ->> 'task_id' = $1`,
+				claimed.taskId.String(), server.NowUtc().Add(-time.Minute)))
+			if tag.RowsAffected() != 1 {
+				t.Fatalf("%d RunPost retries of the hand-back, want 1", tag.RowsAffected())
+			}
+		})
+		if finished, _, _, err := worker.EvalTasks(1); err != nil || len(finished) != 1 {
+			t.Fatalf("the RunPost retry did not finish: finished=%d err=%v", len(finished), err)
+		}
+		next := testPendingProbeRow(t, ctx, 6)
+		if next == nil {
+			t.Fatal("the RunPost retry of a hand-back lost newer shard 6")
+		}
+		if !reflect.DeepEqual(next.args, claimed.args) {
+			t.Fatalf("the RunPost retry changed the handed-back arguments: shard_count=%v", next.args["shard_count"])
 		}
 	})
 }
