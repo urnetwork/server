@@ -13704,7 +13704,8 @@ probe task, which holds every load of a run, therefore records each one in
 marks the loads whose exit was **healthy** — it passed at least nine in ten of
 the *other* scored sites of the same run, after their retries. A site's
 failure share is its failed healthy loads over its healthy loads in the
-window (`SiteWindow`, three days), per class:
+window (`SiteWindow`, three days, from no day before the first reached-only
+tally day below), per class:
 
 ```sql
 SELECT d.name, d.class,
@@ -13713,7 +13714,8 @@ SELECT d.name, d.class,
 FROM provider_egress_destination d
 JOIN provider_egress_site_tally t ON t.name = d.name
 WHERE d.active
-  AND date_trunc('day', now() at time zone 'utc' - interval '3 days')::date <= t.tally_day
+  AND GREATEST(date_trunc('day', now() at time zone 'utc' - interval '3 days')::date,
+               DATE '2026-10-14') <= t.tally_day
 GROUP BY d.name, d.class;
 ```
 
@@ -13722,7 +13724,11 @@ refresh judges it on all of its loads and says so in its log line. Either way
 only runs that reached their provider are tallied: a URL that failed before
 any destination answered (`dial_dns`, `dial_tcp` and their timeout and
 combined stages, with no status, response byte, redirect or TLS verdict) is an
-offline or unreachable exit, which says nothing about the site. The
+offline or unreachable exit, which says nothing about the site. Tally days
+before 2026-10-14 (`model.ProviderEgressSiteTallyContactedSince`) still count
+those runs as site failures, so neither the refresh nor this signal reads a
+day before it; the refresh's `[egresssites]` log line says when that cuts the
+window short. The
 refresh records its judgement on the row (`failure_share`, `sample_count`,
 `judged_time`, and `above_retire_since` while the share stands above the
 retire line with enough samples), and the signal reads that record together
@@ -13876,7 +13882,10 @@ because retiring sites during a prober fault empties the pool for nothing —
 the refresh skips its run while the failure share of the loads that reached
 their provider is above the prober-fault line for that reason (a run that
 never reached its provider is no evidence of a prober fault, and is counted
-apart in the refresh's `[egresssites]` log line). Verify: the site's failure share on healthy exits falls under
+apart in the refresh's `[egresssites]` log line), and while fewer than
+`SiteProberFaultReachedShare` (20 %) of the recent loads reached their
+provider at all, the shape of a fault that ends runs before any destination
+answers. Verify: the site's failure share on healthy exits falls under
 the retire line within one refresh cadence after the swap, and the
 quality-bucket count of §2.9a stops falling.
 

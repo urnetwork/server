@@ -641,7 +641,9 @@ func AddProviderEgressRunTally(ctx context.Context, measuredAt time.Time, run Pr
 	}, server.TxReadCommitted)
 }
 
-// One site's summed loads at one place, from runs that reached their provider.
+// One site's summed loads at one place: from runs that reached their provider
+// on the days from ProviderEgressSiteTallyContactedSince on, from every run
+// before it.
 type ProviderEgressSiteTally struct {
 	Name                string
 	Place               ProviderEgressPlace
@@ -760,6 +762,16 @@ func GetProviderEgressPlaceTallies(ctx context.Context, minDay time.Time) []Prov
 func ProviderEgressSiteTallyWindowStart(now time.Time, window time.Duration) time.Time {
 	return now.UTC().Add(-window).Truncate(24 * time.Hour)
 }
+
+// The first tally day whose rows hold only runs that reached their provider.
+// Until the tally writer left out a run whose every load failed before any
+// destination answered (egresshealth.CheckResult.NoContactFailure, live from
+// about 22:30Z on 2026-10-13), such a run was tallied as a failure of the site
+// it loaded. An earlier day's rows hold the fleet's offline exits -- about two
+// in five runs -- as site failures, and nothing in a row tells the two apart,
+// so no share over them says anything about a site or the prober. They age
+// out with the tally retention.
+var ProviderEgressSiteTallyContactedSince = time.Date(2026, time.October, 14, 0, 0, 0, 0, time.UTC)
 
 // Drops tally days before minDay.
 func RemoveExpiredProviderEgressTallies(ctx context.Context, minDay time.Time) {
@@ -958,10 +970,19 @@ type ProviderEgressSiteSettings struct {
 	// empties the pool for nothing. A load whose provider was never reached is
 	// not in that share, as it is not in any site's.
 	SiteProberFaultShare float64 `yaml:"site_prober_fault_share"`
-	// SiteProberFaultWindowSeconds is what "while" means for that line: the
-	// health runs measured this recently. A prober fault fails every run at
-	// once, so the newest runs show it first; the window's own three days
-	// would dilute it for days.
+	// SiteProberFaultReachedShare is the prober-fault floor: while fewer than
+	// this share of the recent scored loads reached their provider, the
+	// refresh does nothing. A fault on the prober or its tunnel path that ends
+	// runs before any destination answers is in no failure share, since those
+	// leave such runs out; it shows only as this share collapsing -- from about
+	// one in two runs in a healthy fleet to under one in seven through the
+	// 2026-10-10 outage, while the loads that did reach a provider failed no
+	// more than usual.
+	SiteProberFaultReachedShare float64 `yaml:"site_prober_fault_reached_share"`
+	// SiteProberFaultWindowSeconds is what "while" means for the line and the
+	// floor: the health runs measured this recently. A prober fault fails
+	// every run at once, so the newest runs show it first; the window's own
+	// three days would dilute it for days.
 	SiteProberFaultWindowSeconds int `yaml:"site_prober_fault_window_seconds"`
 	// SiteTallyRetentionSeconds is how long the site tally is kept: longer
 	// than the window, so a site on probation is judged on every load since
@@ -1008,6 +1029,7 @@ func DefaultProviderEgressSiteSettings() *ProviderEgressSiteSettings {
 		SiteRegionCanaryShare:        0.05,
 		SiteRegionCooldownSeconds:    30 * 24 * 60 * 60,
 		SiteProberFaultShare:         0.2,
+		SiteProberFaultReachedShare:  0.2,
 		SiteProberFaultWindowSeconds: 60 * 60,
 		SiteTallyRetentionSeconds:    14 * 24 * 60 * 60,
 		// four candidates at once keep a refresh that finds two dead ones in a
@@ -1051,6 +1073,7 @@ func (self *ProviderEgressSiteSettings) Validate() error {
 	share("site_region_fail_share", self.SiteRegionFailShare)
 	share("site_region_canary_share", self.SiteRegionCanaryShare)
 	share("site_prober_fault_share", self.SiteProberFaultShare)
+	share("site_prober_fault_reached_share", self.SiteProberFaultReachedShare)
 	for _, class := range ProviderEgressSiteClasses {
 		positive("site_pool_size."+class, self.SitePoolSize[class])
 		positive("site_sample_size."+class, self.SiteSampleSize[class])
