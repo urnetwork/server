@@ -505,9 +505,12 @@ func (self *ConnectionAnnounce) run() {
 	// does not cover a row whose handler is alive, so when this final
 	// disconnect fails the release hands the row to the handler's reconcile.
 	cleanup = func() {
-		disconnected := false
+		// whether the final disconnect was written; DisconnectNetworkClient
+		// raises a failed write, and returns an error only for a row no longer
+		// connected
+		disconnectWritten := false
 		defer func() {
-			self.connectionReconcile.release(connectionId, disconnected)
+			self.connectionReconcile.release(connectionId, disconnectWritten)
 		}()
 		server.HandleError(func() {
 			// The transport is normally canceled before cleanup begins. Preserve
@@ -516,15 +519,15 @@ func (self *ConnectionAnnounce) run() {
 			cleanupCtx, cleanupCancel := connectionCleanupContext(self.ctx)
 			defer cleanupCancel()
 			disconnectErr := model.DisconnectNetworkClient(cleanupCtx, connectionId)
-			disconnected = true
+			disconnectWritten = true
 			if verifyEgressOk {
 				model.ClearVerifyConnectionEgress(cleanupCtx, self.clientId, connectionId, verifyEgressIp, verifySettings)
 			}
 			if glog.V(1) {
 				glog.Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash[:]))
 			}
-			if disconnected := self.settings.connectionDisconnectedForTest; disconnected != nil {
-				disconnected(connectionId, disconnectErr)
+			if disconnectedForTest := self.settings.connectionDisconnectedForTest; disconnectedForTest != nil {
+				disconnectedForTest(connectionId, disconnectErr)
 			}
 		})
 	}
