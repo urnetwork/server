@@ -397,8 +397,9 @@ func TestStOperatorGasLifetimeIncreaseKeepsOriginalRevertAllocation(t *testing.T
 		if _, err := client.DepositCredit(context.Background(), 7, 1, big.NewInt(100)); !errors.Is(err, model.ErrStOperatorGasAllowance) {
 			tb.Fatal("lifetime increase inflated original per-intent allocation", err)
 		}
+		// The refused successor takes no nonce: the reverted generation stays the latest.
 		latest := model.GetStTransactionIntent(context.Background(), old.LogicalKey)
-		if latest.Generation != 1 || latest.AttemptCount != 0 || len(fixture.sent) != 1 || fixture.deposited.Sign() != 0 {
+		if latest.Generation != 0 || latest.Status != model.StTxReverted || len(fixture.sent) != 1 || fixture.deposited.Sign() != 0 {
 			tb.Fatal("revert successor escaped original cumulative allocation")
 		}
 		stGasFixtureSnapshot(tb, p, "600000", 1)

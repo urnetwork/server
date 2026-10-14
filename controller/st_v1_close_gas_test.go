@@ -137,9 +137,9 @@ func TestStV1GasFloorLeavesOtherSendsUnchanged(t *testing.T) {
 // that estimates 361,258, as on runtime 478, is signed with 1,000,000, where
 // it was signed with 433,510 before the floor, and only a close whose own
 // estimate plus 20% is above the maximum is refused, as it was before the
-// floor: before any signature, with its nonce kept. Under the policy
-// re-signed with a maximum_gas of 3,500,000 the whole floor applies again, to
-// the retained close too.
+// floor, before any signature; it keeps no nonce. Under the policy re-signed
+// with a maximum_gas of 3,500,000 the whole floor applies again, to that
+// close too.
 func TestStV1CloseGasFloorIsCappedAtThePolicyMaximum(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -179,18 +179,19 @@ func TestStV1CloseGasFloorIsCappedAtThePolicyMaximum(t *testing.T) {
 		if !errors.Is(err, model.ErrStOperatorGasAllowance) || err.Error() != model.ErrStOperatorGasAllowance.Error()+": unsigned gas/fee/tip/intent envelope exceeds approval" {
 			t.Fatalf("v1 close whose own limit is 1,080,000 under maximum_gas 1,000,000: %v", err)
 		}
-		intent := ledgerV2Intent(t, ctx, cfg, "close:8:1")
-		if intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.Nonce != 8 || signs != 1 || len(fixture.sent) != 1 {
+		logicalKey, _ := stTransactionLogicalKey(cfg, "close:8:1")
+		if intent := model.GetStTransactionIntent(ctx, logicalKey); intent != nil || signs != 1 || len(fixture.sent) != 1 {
 			t.Fatalf("refused v1 close: intent %+v, %d signatures, %d sent", intent, signs, len(fixture.sent))
 		}
 
 		revise(func(policy *server.StOperatorGasPolicy) { policy.MaximumGas = 3_500_000 })
-		hash, err = client.CloseOperatorEpoch(ctx, 9, 1)
-		if err != nil || signs != 3 || len(fixture.sent) != 3 {
-			t.Fatalf("v1 close under maximum_gas 3,500,000: %v, %d signatures, %d sent", err, signs, len(fixture.sent))
+		for i, epoch := range []uint64{8, 9} {
+			hash, err = client.CloseOperatorEpoch(ctx, epoch, 1)
+			if err != nil || signs != 2+i {
+				t.Fatalf("v1 close of epoch %d under maximum_gas 3,500,000: %v, %d signatures", epoch, err, signs)
+			}
+			sent("v1 close under maximum_gas 3,500,000", 1+i, epoch, stV1CloseGasFloor, hash)
 		}
-		sent("the retained v1 close under maximum_gas 3,500,000", 1, 8, stV1CloseGasFloor, "")
-		sent("v1 close under maximum_gas 3,500,000", 2, 9, stV1CloseGasFloor, hash)
 		// 100 wei for each unit of the three limits.
 		stGasFixtureSnapshot(t, policy, "740000000", 3)
 	})

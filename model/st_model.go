@@ -993,6 +993,30 @@ func ReserveStTransactionIntent(
 	calldata []byte,
 	pendingNonce uint64,
 ) *StTransactionIntent {
+	var intent *StTransactionIntent
+	server.Tx(ctx, func(tx server.PgTx) {
+		intent, _ = reserveStTransactionIntent(ctx, tx, logicalKey, profile, deploymentId, deploymentKey, chainId, genesisHash, fromAddress, toAddress, calldataHash, calldata, pendingNonce)
+	})
+	return intent
+}
+
+// reserveStTransactionIntent is ReserveStTransactionIntent inside tx. created
+// reports a new generation, which took a new nonce.
+func reserveStTransactionIntent(
+	ctx context.Context,
+	tx server.PgTx,
+	logicalKey string,
+	profile string,
+	deploymentId string,
+	deploymentKey StDeploymentKey,
+	chainId uint64,
+	genesisHash string,
+	fromAddress string,
+	toAddress string,
+	calldataHash string,
+	calldata []byte,
+	pendingNonce uint64,
+) (intent *StTransactionIntent, created bool) {
 	if chainId > uint64(^uint64(0)>>1) || pendingNonce > uint64(^uint64(0)>>1) {
 		panic(fmt.Errorf("st transaction chain id or nonce exceeds postgres bigint"))
 	}
@@ -1003,51 +1027,48 @@ func ReserveStTransactionIntent(
 		genesisErr != nil || len(genesisBytes) != 32 {
 		panic("st transaction chain identity and addresses must be canonical lowercase")
 	}
-	var intent *StTransactionIntent
-	server.Tx(ctx, func(tx server.PgTx) {
-		var ignored any
-		server.Raise(tx.QueryRow(ctx,
-			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-			stTransactionAdvisoryLockKey(chainId, genesisHash, fromAddress),
-		).Scan(&ignored))
+	var ignored any
+	server.Raise(tx.QueryRow(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		stTransactionAdvisoryLockKey(chainId, genesisHash, fromAddress),
+	).Scan(&ignored))
 
-		row := tx.QueryRow(ctx,
-			`SELECT `+stTransactionIntentColumns+`
+	row := tx.QueryRow(ctx,
+		`SELECT `+stTransactionIntentColumns+`
 			 FROM st_transaction_intent WHERE logical_key = $1
 			 ORDER BY generation DESC LIMIT 1`,
-			logicalKey,
-		)
-		var existing StTransactionIntent
-		var existingChain, existingNonce int64
-		err := row.Scan(
-			&existing.IntentId, &existing.IntentKey, &existing.LogicalKey, &existing.Generation,
-			&existing.Profile, &existing.DeploymentId, &existing.DeploymentKey, &existingChain, &existing.GenesisHash,
-			&existing.FromAddress, &existing.ToAddress, &existing.CalldataHash,
-			&existing.Calldata, &existingNonce, &existing.Status, &existing.CurrentTxHash,
-			&existing.AttemptCount, &existing.Error, &existing.CreateTime, &existing.UpdateTime,
-		)
-		generation := 0
-		if err == nil {
-			existing.ChainId, existing.Nonce = uint64(existingChain), uint64(existingNonce)
-			if existing.DeploymentKey != deploymentKey || existing.ChainId != chainId || existing.GenesisHash != genesisHash ||
-				existing.FromAddress != fromAddress || existing.ToAddress != toAddress ||
-				existing.CalldataHash != calldataHash || !bytes.Equal(existing.Calldata, calldata) {
-				panic(fmt.Errorf("st transaction intent %q was reused with different immutable data", logicalKey))
-			}
-			if existing.Status != StTxReverted {
-				intent = &existing
-				return
-			}
-			generation = existing.Generation + 1
+		logicalKey,
+	)
+	var existing StTransactionIntent
+	var existingChain, existingNonce int64
+	err := row.Scan(
+		&existing.IntentId, &existing.IntentKey, &existing.LogicalKey, &existing.Generation,
+		&existing.Profile, &existing.DeploymentId, &existing.DeploymentKey, &existingChain, &existing.GenesisHash,
+		&existing.FromAddress, &existing.ToAddress, &existing.CalldataHash,
+		&existing.Calldata, &existingNonce, &existing.Status, &existing.CurrentTxHash,
+		&existing.AttemptCount, &existing.Error, &existing.CreateTime, &existing.UpdateTime,
+	)
+	generation := 0
+	if err == nil {
+		existing.ChainId, existing.Nonce = uint64(existingChain), uint64(existingNonce)
+		if existing.DeploymentKey != deploymentKey || existing.ChainId != chainId || existing.GenesisHash != genesisHash ||
+			existing.FromAddress != fromAddress || existing.ToAddress != toAddress ||
+			existing.CalldataHash != calldataHash || !bytes.Equal(existing.Calldata, calldata) {
+			panic(fmt.Errorf("st transaction intent %q was reused with different immutable data", logicalKey))
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			if err != nil {
-				server.Raise(err)
-			}
+		if existing.Status != StTxReverted {
+			return &existing, false
 		}
+		generation = existing.Generation + 1
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		if err != nil {
+			server.Raise(err)
+		}
+	}
 
-		var nonce int64
-		server.Raise(tx.QueryRow(ctx, `
+	var nonce int64
+	server.Raise(tx.QueryRow(ctx, `
 			SELECT GREATEST(
 				$4::bigint,
 				COALESCE(MAX(nonce) + 1, $4::bigint)
@@ -1056,10 +1077,10 @@ func ReserveStTransactionIntent(
 			WHERE chain_id = $1 AND genesis_hash = $2 AND from_address = $3
 		`, int64(chainId), genesisHash, fromAddress, int64(pendingNonce)).Scan(&nonce))
 
-		now := server.NowUtc()
-		intentId := server.NewId()
-		intentKey := stTransactionIntentKey(logicalKey, generation)
-		server.RaisePgResult(tx.Exec(ctx, `
+	now := server.NowUtc()
+	intentId := server.NewId()
+	intentKey := stTransactionIntentKey(logicalKey, generation)
+	server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO st_transaction_intent (
 				intent_id, intent_key, logical_key, generation,
 				profile, deployment_id, deployment_key, chain_id, genesis_hash,
@@ -1067,16 +1088,14 @@ func ReserveStTransactionIntent(
 				status, create_time, update_time
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)
 		`, intentId, intentKey, logicalKey, generation, profile, deploymentId, key,
-			int64(chainId), genesisHash, fromAddress, toAddress, calldataHash, calldata, nonce, StTxPrepared, now))
-		intent = &StTransactionIntent{
-			IntentId: intentId, IntentKey: intentKey, LogicalKey: logicalKey, Generation: generation,
-			Profile: profile, DeploymentId: deploymentId, DeploymentKey: deploymentKey,
-			ChainId: chainId, GenesisHash: genesisHash, FromAddress: fromAddress,
-			ToAddress: toAddress, CalldataHash: calldataHash, Calldata: append([]byte(nil), calldata...),
-			Nonce: uint64(nonce), Status: StTxPrepared, CreateTime: now, UpdateTime: now,
-		}
-	})
-	return intent
+		int64(chainId), genesisHash, fromAddress, toAddress, calldataHash, calldata, nonce, StTxPrepared, now))
+	return &StTransactionIntent{
+		IntentId: intentId, IntentKey: intentKey, LogicalKey: logicalKey, Generation: generation,
+		Profile: profile, DeploymentId: deploymentId, DeploymentKey: deploymentKey,
+		ChainId: chainId, GenesisHash: genesisHash, FromAddress: fromAddress,
+		ToAddress: toAddress, CalldataHash: calldataHash, Calldata: append([]byte(nil), calldata...),
+		Nonce: uint64(nonce), Status: StTxPrepared, CreateTime: now, UpdateTime: now,
+	}, true
 }
 
 // Returns the latest generation, or nil when no such logical operation exists.

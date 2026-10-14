@@ -12,7 +12,6 @@ import (
 	"errors"
 	"math"
 	"math/big"
-	"os"
 	"strings"
 	"testing"
 
@@ -187,9 +186,9 @@ func TestStLedgerV2GasFloorLeavesOtherSendsUnchanged(t *testing.T) {
 // today's maximum_gas of 1,000,000 a capturing close that estimates 246,899
 // is signed with 1,000,000, where it was signed with 296,279 before the
 // floor, and only a close whose own estimate plus 20% is above the maximum
-// is refused, as it was before the floor: before any signature, with its
-// nonce kept. Under the policy re-signed with a maximum_gas of 3,500,000 the
-// whole floor applies again, to the retained close too.
+// is refused, as it was before the floor, before any signature; it keeps no
+// nonce. Under the policy re-signed with a maximum_gas of 3,500,000 the whole
+// floor applies again, to that close too.
 func TestStLedgerV2GasFloorIsCappedAtThePolicyMaximum(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -228,18 +227,19 @@ func TestStLedgerV2GasFloorIsCappedAtThePolicyMaximum(t *testing.T) {
 		if !errors.Is(err, model.ErrStOperatorGasAllowance) || err.Error() != model.ErrStOperatorGasAllowance.Error()+": unsigned gas/fee/tip/intent envelope exceeds approval" {
 			t.Fatalf("close whose own limit is 1,080,000 under maximum_gas 1,000,000: %v", err)
 		}
-		intent := ledgerV2Intent(t, ctx, cfg, "v2close:8:1")
-		if intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.Nonce != 8 || signs != 1 || len(fixture.sent) != 1 {
+		logicalKey, _ := stTransactionLogicalKey(cfg, "v2close:8:1")
+		if intent := model.GetStTransactionIntent(ctx, logicalKey); intent != nil || signs != 1 || len(fixture.sent) != 1 {
 			t.Fatalf("refused close: intent %+v, %d signatures, %d sent", intent, signs, len(fixture.sent))
 		}
 
 		revise(func(policy *server.StOperatorGasPolicy) { policy.MaximumGas = 3_500_000 })
-		hash, err = client.LedgerV2Close(ctx, 9, 1)
-		if err != nil || signs != 3 || len(fixture.sent) != 3 {
-			t.Fatalf("close under maximum_gas 3,500,000: %v, %d signatures, %d sent", err, signs, len(fixture.sent))
+		for i, epoch := range []uint64{8, 9} {
+			hash, err = client.LedgerV2Close(ctx, epoch, 1)
+			if err != nil || signs != 2+i {
+				t.Fatalf("close of epoch %d under maximum_gas 3,500,000: %v, %d signatures", epoch, err, signs)
+			}
+			sent("close under maximum_gas 3,500,000", 1+i, epoch, stLedgerV2StakeMoveGasFloor, hash)
 		}
-		sent("the retained close under maximum_gas 3,500,000", 1, 8, stLedgerV2StakeMoveGasFloor, "")
-		sent("capturing close under maximum_gas 3,500,000", 2, 9, stLedgerV2StakeMoveGasFloor, hash)
 		// 100 wei for each unit of the three limits.
 		stGasFixtureSnapshot(t, policy, "740000000", 3)
 	})
@@ -332,25 +332,73 @@ func ledgerV2SpendCloseSignatures(t testing.TB, ctx context.Context, fixture *le
 }
 
 // SV-1 (retries): a close that reverts at its inclusion three times in its
-// epoch. Before the floor a close ran out of gas when third parties added six
-// entries to vault2's StakingHotkeys list after its estimate; the floor ends
-// that, and here the close reverts whatever its gas. Each revert finalizes,
-// and the next try takes a new nonce and signs again. The operator gas policy
-// counts signatures per operation across those nonces and allows three, so
-// the fourth try reserves a nonce and is refused its signature. That intent
-// can never be signed, as the close or, once the window has closed, as its
-// cancellation, and every later send of the root key stops at it. A policy
-// re-signed with more signatures per operation does not lift the cap the
-// operation's first signature recorded. Only a transaction from outside the
-// engine that consumes the nonce frees the key.
-func TestStLedgerV2ThreeFailedClosesStrandTheRootKey(t *testing.T) {
+// epoch. Each revert finalizes, and the next try takes a new nonce and signs
+// again. The operator gas policy counts signatures per operation across those
+// nonces and allows three, so it refuses the fourth try, which reserves its
+// nonce only together with that signature's allowance and so takes none. The
+// root key's later sends go out, inside the close window and after it, and a
+// policy re-signed with more signatures per operation still refuses the close,
+// whose first signature recorded the cap of three.
+func TestStLedgerV2SpentCloseLeavesTheRootKeyFree(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
 		client, _, cfg := newLedgerV2RPCClient(t, fixture)
 		closeCall, revise := ledgerV2SpendCloseSignatures(t, ctx, fixture, client, cfg)
+		answer := ledgerV2TestAnswer()
+		next := uint64(10)
+		refused := func(step string) {
+			t.Helper()
+			if _, err := client.LedgerV2Close(ctx, 7, 1); !errors.Is(err, model.ErrStOperatorGasAllowance) || !strings.Contains(err.Error(), "original logical intent") {
+				t.Fatalf("%s: close: %v", step, err)
+			}
+			if intent := ledgerV2Intent(t, ctx, cfg, "v2close:7:1"); intent.Generation != 2 || intent.Status != model.StTxReverted || intent.Nonce != 9 {
+				t.Fatalf("%s: the refused close reserved %+v", step, intent)
+			}
+		}
+		goesOut := func(step string, operation string, send func() (string, error)) {
+			t.Helper()
+			hash, err := send()
+			if err != nil || len(fixture.sent) != int(next-6) || fixture.sent[next-7].Nonce() != next || !strings.EqualFold(hash, fixture.sent[next-7].Hash().Hex()) {
+				t.Fatalf("%s: %s: %s, %v, %d sent", step, operation, hash, err, len(fixture.sent))
+			}
+			requireLedgerV2Intent(t, ctx, cfg, operation, model.StTxFinalized, fixture.sent[next-7])
+			next++
+		}
 
-		// The fourth try takes nonce 10 before the policy refuses to sign it.
+		refused("inside the close window")
+		goesOut("inside the close window", "v2finalize:6:1", func() (string, error) { return client.LedgerV2Finalize(ctx, 6, 1) })
+		goesOut("inside the close window", "v2answer:1:3:0:0", func() (string, error) { return client.LedgerV2Answer(ctx, 1, 3, answer) })
+
+		revise(func(policy *server.StOperatorGasPolicy) { policy.MaximumIntentAttempts = 4 })
+		refused("under a policy of four signatures an operation")
+		goesOut("under a policy of four signatures an operation", "v2close:8:1", func() (string, error) { return client.LedgerV2Close(ctx, 8, 1) })
+
+		fixture.reverts[string(closeCall)] = "InvalidWindow"
+		if _, err := client.LedgerV2Close(ctx, 7, 1); err == nil || !strings.Contains(err.Error(), "v2close:7:1 preflight reverts InvalidWindow") {
+			t.Fatalf("close after its window: %v", err)
+		}
+		goesOut("after the close window", "v2finalize:7:1", func() (string, error) { return client.LedgerV2Finalize(ctx, 7, 1) })
+	})
+}
+
+// SV-1 (retries): a close stranded before the engine checked a new nonce's
+// first signature against the policy. Its fourth try reserved nonce 10 and was
+// refused the signature, so the intent holds that nonce unsigned, and every
+// later send of the root key first tries it again and stops at it, as the
+// close or, once the window has closed, as its cancellation: neither can be
+// signed, and a re-signed policy does not lift the operation's recorded cap.
+// The operator frees the key by consuming nonce 10 outside the engine, with
+// a self-transfer of the root key; the next send then retires the intent as
+// superseded, and the send after it goes out.
+func TestStLedgerV2StrandedCloseIsFreedByConsumingItsNonce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		client, _, cfg := newLedgerV2RPCClient(t, fixture)
+		closeCall, revise := ledgerV2SpendCloseSignatures(t, ctx, fixture, client, cfg)
+		ledgerV2Reserve(t, ctx, cfg, "v2close:7:1", cfg.SettlementV2, closeCall, 10)
+
 		stranded := func(step string) {
 			t.Helper()
 			intent := ledgerV2Intent(t, ctx, cfg, "v2close:7:1")
@@ -359,12 +407,6 @@ func TestStLedgerV2ThreeFailedClosesStrandTheRootKey(t *testing.T) {
 				t.Fatalf("%s: intent %+v, reservation %+v, %v, %d sent", step, intent, pending, err, len(fixture.sent))
 			}
 		}
-		if _, err := client.LedgerV2Close(ctx, 7, 1); !errors.Is(err, model.ErrStOperatorGasAllowance) || !strings.Contains(err.Error(), "original logical intent") {
-			t.Fatalf("fourth close: %v", err)
-		}
-		stranded("fourth close")
-
-		// Every later send of the root key first tries the stranded close again.
 		answer := ledgerV2TestAnswer()
 		later := map[string]func() (string, error){
 			"v2finalize:6:1":   func() (string, error) { return client.LedgerV2Finalize(ctx, 6, 1) },
@@ -387,14 +429,9 @@ func TestStLedgerV2ThreeFailedClosesStrandTheRootKey(t *testing.T) {
 		blocked("inside the close window")
 		revise(func(policy *server.StOperatorGasPolicy) { policy.MaximumIntentAttempts = 4 })
 		blocked("under a policy of four signatures an operation")
-
-		// Once the window has closed the close is spent, and the reconcile asks
-		// for its cancellation, which would be the operation's fourth signature.
 		fixture.reverts[string(closeCall)] = "InvalidWindow"
 		blocked("after the close window")
 
-		// A transaction signed outside the engine consumes nonce 10. The next
-		// send retires the stranded intent, and the one after it goes out.
 		fixture.nonce = 11
 		if _, err := client.LedgerV2Finalize(ctx, 6, 1); err == nil || !strings.Contains(err.Error(), "st: account nonce 10 was consumed without a known canonical attempt") {
 			t.Fatalf("finalize after the nonce was consumed: %v", err)
@@ -412,12 +449,11 @@ func TestStLedgerV2ThreeFailedClosesStrandTheRootKey(t *testing.T) {
 
 // SV-1 (retries): the operator gas policy's per-intent liability sums every
 // nonce an operation takes. Under a policy that covers one floored close at
-// the signed fee, one revert strands the root key as three do under the cap
-// of three signatures: the second try reserves nonce 8, the policy refuses to
-// sign it, and the root key's later sends stop at it. A
+// the signed fee, the second try after a revert is refused before it takes a
+// nonce, and the root key's next send goes out. A
 // maximum_intent_liability_wei of three times maximum_gas at the fee cap never
-// binds before that cap.
-func TestStLedgerV2OneFailedCloseStrandsAnUndersizedLiability(t *testing.T) {
+// binds before the cap of three signatures.
+func TestStLedgerV2UndersizedLiabilityLeavesTheRootKeyFree(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
@@ -433,39 +469,13 @@ func TestStLedgerV2OneFailedCloseStrandsAnUndersizedLiability(t *testing.T) {
 		if _, err := client.LedgerV2Close(ctx, 7, 1); !errors.Is(err, model.ErrStOperatorGasAllowance) || !strings.Contains(err.Error(), "original logical intent") {
 			t.Fatalf("second close: %v", err)
 		}
-		if _, err := client.LedgerV2Finalize(ctx, 6, 1); !errors.Is(err, model.ErrStOperatorGasAllowance) {
-			t.Fatalf("finalize behind the stranded close: %v", err)
-		}
-		intent := ledgerV2Intent(t, ctx, cfg, "v2close:7:1")
-		logicalKey, _ := stTransactionLogicalKey(cfg, "v2finalize:6:1")
-		if intent.Generation != 1 || intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.Nonce != 8 || model.GetStTransactionIntent(ctx, logicalKey) != nil || len(fixture.sent) != 1 {
-			t.Fatalf("stranded close %+v, %d sent", intent, len(fixture.sent))
-		}
-	})
-}
-
-// SV-1 (retries): a known defect, which TestStLedgerV2ThreeFailedClosesStrandTheRootKey
-// pins as it stands. This test states what the engine owes instead and fails
-// until it does it, so it runs only on request. A close whose three signatures
-// are spent has nothing left to sign, so its next try must not keep a nonce,
-// and the root key's next send must go out with it.
-func TestStLedgerV2SpentCloseLeavesTheRootKeyFree(t *testing.T) {
-	if os.Getenv("ST_LEDGER_V2_KNOWN_DEFECTS") == "" {
-		t.Skip("fails while a close whose signatures are spent still keeps a nonce; set ST_LEDGER_V2_KNOWN_DEFECTS=1 to run it")
-	}
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		fixture := newLedgerV2RPC(t)
-		client, _, cfg := newLedgerV2RPCClient(t, fixture)
-		ledgerV2SpendCloseSignatures(t, ctx, fixture, client, cfg)
-
-		if _, err := client.LedgerV2Close(ctx, 7, 1); !errors.Is(err, model.ErrStOperatorGasAllowance) {
-			t.Fatalf("fourth close: %v", err)
+		if intent := ledgerV2Intent(t, ctx, cfg, "v2close:7:1"); intent.Generation != 0 || intent.Status != model.StTxReverted || len(fixture.sent) != 1 {
+			t.Fatalf("the refused close reserved %+v", intent)
 		}
 		hash, err := client.LedgerV2Finalize(ctx, 6, 1)
-		if err != nil || len(fixture.sent) != 4 || fixture.sent[3].Nonce() != 10 {
-			t.Fatalf("finalize after the spent close, whose intent is %+v: %s, %v, %d sent", ledgerV2Intent(t, ctx, cfg, "v2close:7:1"), hash, err, len(fixture.sent))
+		if err != nil || len(fixture.sent) != 2 || fixture.sent[1].Nonce() != 8 {
+			t.Fatalf("finalize behind the refused close: %s, %v, %d sent", hash, err, len(fixture.sent))
 		}
-		requireLedgerV2Intent(t, ctx, cfg, "v2finalize:6:1", model.StTxFinalized, fixture.sent[3])
+		requireLedgerV2Intent(t, ctx, cfg, "v2finalize:6:1", model.StTxFinalized, fixture.sent[1])
 	})
 }
