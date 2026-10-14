@@ -2912,6 +2912,12 @@ func SetProvide(
 // Every connected client's announce loop calls this on each sync. The count is
 // one statement, so it runs without a transaction: BEGIN and COMMIT would add
 // two round trips during which its pooled server sits idle in transaction.
+// The modes come from GetProvideModes. Its only error is a provide mode mirror
+// that cannot be decoded, which stays for the mirror's ttl; the keys in
+// postgres are the truth, so they answer instead. Discarding the error
+// reported a providing client as providing nothing, which removed its live
+// connection from the provider gauge and skipped its reliability stats. A
+// failed read raises, as the change count does.
 func GetProvideKeyChanges(
 	ctx context.Context,
 	clientId server.Id,
@@ -2941,7 +2947,14 @@ func GetProvideKeyChanges(
 		})
 	})
 
-	provideModes, _ = GetProvideModes(ctx, clientId)
+	provideModes, err := GetProvideModes(ctx, clientId)
+	if err != nil {
+		glog.Infof("[ncm]provide mode mirror unreadable, reading the provide keys: %s\n", err)
+		provideModes = map[ProvideMode]bool{}
+		for provideMode := range loadProvideSecretKeys(ctx, clientId) {
+			provideModes[provideMode] = true
+		}
+	}
 
 	return
 }

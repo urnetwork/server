@@ -2,15 +2,18 @@
 // from the round's read ended the announcement, whose run cancels the
 // client's transport as it returns: on 2026-10-13 every database outage
 // disconnected the providers whose sync fell in it, exactly while their
-// disconnects could not be written. Each test holds the run goroutine in the
-// stats hook of one round, injects the failure, and releases it, so the next
-// round is the one that meets the failure. They use only seams that predate
-// the fix, and require the test DB env like the rest of this package's
-// announcement lifecycle tests.
+// disconnects could not be written. A provide mode mirror that could not be
+// decoded made the round report no modes, which dropped a live provider from
+// the provider gauge. Each test holds the run goroutine in the stats hook of
+// one round, injects the failure, and releases it, so the next round is the
+// one that meets the failure. They use only seams that predate the fix, and
+// require the test DB env like the rest of this package's announcement
+// lifecycle tests.
 package connect
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -204,5 +207,64 @@ func TestConnectionAnnounceKeepsTransportThroughFailedSyncRead(t *testing.T) {
 			t.Fatalf("the round after the failed read recorded %d messages of %d bytes, want the failed round's 1 of 1000", stats.ReceiveMessageCount, stats.ReceiveByteCount)
 		}
 		fixture.release <- struct{}{}
+	})
+}
+
+// A provide mode mirror that cannot be decoded must not report a providing
+// client as providing nothing: the live connection stays in the provider
+// gauge, and the round records its stats.
+func TestConnectionAnnounceCountsProviderThroughUnreadableProvideModes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		testCtx, testCancel := context.WithTimeout(ctx, 60*time.Second)
+		defer testCancel()
+		// two days ago's release: no other test connection uses this label
+		release := server.NowUtc().AddDate(0, 0, -2)
+		appVersion := fmt.Sprintf("%d.%d.%d-1060587890", release.Year(), release.Month(), release.Day())
+		label := fmt.Sprintf("%d.%d.%d", release.Year(), release.Month(), release.Day())
+		fixture := startSyncAnnounceForTest(ctx, appVersion)
+		defer fixture.close()
+		defer model.Testing_DeleteProvideMirror(ctx, fixture.clientId)
+		fixture.awaitRegistered(t, testCtx)
+		counted := func() float64 {
+			return gatherProviderConnections(t, providerConnectionsGauge)[label]
+		}
+
+		fixture.awaitRound(t, testCtx)
+		if count := counted(); count != 1 {
+			t.Fatalf("fixture: the provider gauge counts %v connections under %s, want 1", count, label)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, fmt.Sprintf("{pm_%s}pms", fixture.clientId), "not a mode list", time.Minute).Err())
+		})
+		if _, err := model.GetProvideModes(ctx, fixture.clientId); err == nil {
+			t.Fatal("fixture: the corrupted provide mode mirror must make GetProvideModes fail")
+		}
+		fixture.release <- struct{}{}
+
+		// the round that meets the unreadable mirror either records its stats
+		// or, before the fix, drops the connection from the gauge and records
+		// nothing
+		for {
+			select {
+			case stats := <-fixture.rounds:
+				if count := counted(); count != 1 {
+					t.Fatalf("the provider gauge counts %v connections under %s after the round, want 1", count, label)
+				}
+				if stats.ProvideEnabledCount != 1 {
+					t.Fatalf("the round recorded provide enabled %d for a providing client, want 1", stats.ProvideEnabledCount)
+				}
+				fixture.release <- struct{}{}
+				return
+			case <-time.After(10 * time.Millisecond):
+				if count := counted(); count != 1 {
+					t.Fatalf("the provider gauge dropped a live providing connection whose provide mode mirror was unreadable: %v under %s, want 1", count, label)
+				}
+			case <-fixture.announce.done:
+				t.Fatal("the announcement ended after its provide mode mirror became unreadable")
+			case <-testCtx.Done():
+				t.Fatal("timed out waiting for the round after the mirror became unreadable")
+			}
+		}
 	})
 }
