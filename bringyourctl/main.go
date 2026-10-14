@@ -2558,17 +2558,23 @@ func providerInspect(opts docopt.Opts) {
 	}
 	fmt.Printf("  index from the latest run now %d (%s; evidence is %d or more loads within %s)\n", inspection.CurrentIndex.Index, evidence, inspection.Settings.MinScoredLoads, inspection.Settings.EvidenceMaxAge)
 	fmt.Printf("  url successes %d, errors %d in the evidence window; no success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
-	countryGuard := "no published guard, so every country is exempt"
+	// the decision follows the rule as the score export published it; this
+	// host's provider.yml is shown beside it
+	countryGuard := "no trusted published guard, so the rule applies nowhere"
 	if inspection.OnlineSuccessBaselineKnown {
 		countryGuard = fmt.Sprintf(
-			"%d of %d measured online providers in %s have a success (guard computed %s)",
+			"the score export applied the rule %t with country floor %v and margin %v (guard computed %s, published %s); %d of %d measured online providers in %s have a success",
+			inspection.OnlineSuccessBaselineEnabled,
+			inspection.OnlineSuccessBaselineFloor,
+			inspection.OnlineSuccessBaselineMargin,
+			optionalTime(&inspection.OnlineSuccessBaselineTime),
+			optionalTime(&inspection.OnlineSuccessBaselinePublishTime),
 			inspection.OnlineSuccessCountrySucceeded,
 			inspection.OnlineSuccessCountryMeasured,
 			optionalString(inspection.PublishedCountryCode),
-			optionalTime(&inspection.OnlineSuccessBaselineTime),
 		)
 	}
-	fmt.Printf("  online url-success rule %t, country floor %v: %s; country exempt %t\n", inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, countryGuard, inspection.OnlineSuccessCountryExempt)
+	fmt.Printf("  online url-success rule: %s; country exempt %t (this host's provider.yml: rule %t, country floor %v, margin %v)\n", countryGuard, inspection.OnlineSuccessCountryExempt, inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, inspection.Settings.OnlineSuccessCountryFloorMargin)
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)

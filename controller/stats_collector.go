@@ -312,8 +312,9 @@ var statsProviderExcludedGauge = newStatsGaugeVec(
 
 // The countries the URL-success rule exempts because the probe fails for most
 // of their providers, each with the providers the exemption keeps online,
-// under the guard the score export last published. No series while the rule
-// is disabled or no guard is published.
+// under the guard the score export last published. No series while the
+// export applied the rule nowhere (its kill switch) or no trusted guard is
+// published.
 var statsProviderOnlineSuccessExemptGauge = newStatsGaugeVec(
 	"provider_online_success_exempt",
 	"Providers measured without a URL success that the URL-success rule keeps online, per country it exempts",
@@ -815,7 +816,8 @@ func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {
 
 // Publishes the countries the URL-success rule exempts under the guard the
 // score export last published, a country with no code as "unknown". Nothing
-// is published while the rule is disabled or no guard is readable.
+// is published while the export applied the rule nowhere or no trusted guard
+// is readable; this process's own provider.yml is not read.
 func statsRefreshProviderOnlineSuccessExempt(ctx context.Context) {
 	exemptCountries, _ := model.GetProviderOnlineSuccessExemptCountries(ctx)
 	values := []statsLabeledValue{}
