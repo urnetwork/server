@@ -938,7 +938,9 @@ the current fleet.** Current API/index code already consumes `arin_risk` and
 the subscriber request-guard switch is absent. Policy-two shadow work must keep
 the active reader/resource unchanged and mount an independently attested
 candidate only for the separate default-off observer and aggregate reducer.
-See `arinshadowctl/README.md`. A missing, stale or differently versioned lookup
+The live shadow tooling (`arinshadowctl`) is retired; the
+[dual-database canary](ARINDB.md#dual-database-canary-proposed) compares the
+latest and previous databases instead. A missing, stale or differently versioned lookup
 is an unresolved comparison, not a known policy loss. Connection identities
 must join exact current census lookup times, epochs and flags; arrival time is
 not a fresh lookup. No actual Main candidate shadow or adequate subscriber
@@ -995,7 +997,8 @@ independent eight-hour quality-evidence warmup.
 
 
 The full current-owner shadow transport and exact operator activation sequence
-are documented in [arinshadowctl/CAPTURE.md](../arinshadowctl/CAPTURE.md). The
+were documented in `arinshadowctl/CAPTURE.md`, removed with the live shadow in
+favor of the [dual-database canary](ARINDB.md#dual-database-canary-proposed). The
 protected runtime adapter keeps candidate resources separate, inventories
 current and draining owners, and pins one start-current native generation
 through healthy publication rollover. Its local full-population controls do

@@ -1348,7 +1348,8 @@ augmentation input.
 
 Unknown origin attribution preserves the base classification, including direct
 subscriber approval and all independent risk evidence. It supplies the bounded
-current-owner research aggregate in [CAPTURE.md](../arinshadowctl/CAPTURE.md)
+current-owner research aggregate of the retired live shadow (its `CAPTURE.md`
+was removed with it; see [Dual-database canary](#dual-database-canary-proposed))
 without exporting provider addresses. Withheld origin identities remain distinct
 from unknown origins in that aggregate; neither adds an approval.
 
@@ -1674,7 +1675,9 @@ serving reader each process opened, and zero until it opens. Every service pushe
 it with its own host, service, block and instance labels, so a query over it
 shows which artifact each live process classifies with and how old that artifact
 is, including on hosts without shell access. API, Connect, MCP and Alt open the
-reader at warmup; Taskworker reports zero because it consumes stored facts.
+reader at warmup; Taskworker opens its pair at its first score publication
+(see [Dual-database canary](#dual-database-canary-proposed)) and performs no
+lookups, and reports zero until then.
 The gauge is process self-report from the published reader; it does not hash the
 mapped file or prove request-time use, and stored connection epochs remain the
 evidence of which database classified a connection.
@@ -1770,10 +1773,11 @@ freshness, health, classification, and request latency as separate observations.
 
 ## Dual-database canary (proposed)
 
-Status: proposed on 2026-10-14 for review; nothing in this section is
-implemented yet. It replaces the live shadow comparison
-([arinshadowctl](../arinshadowctl/README.md), the in-process observers and
-the score-shadow freshness lease). That shadow needs a separate candidate
+Status: proposed on 2026-10-14 for review, and implemented on the
+`feat/arindb-dual-canary` branches of server, warp and build (not merged or
+deployed). It replaces the live shadow comparison (the retired `arinshadowctl`,
+the in-process observers and the score-shadow freshness lease), which the
+server branch removes. That shadow needed a separate candidate
 resource, a credentialed capture session, owner inventories and a 90-second
 lease to compare two databases. The canary compares them on every score
 publication, using facts the fleet already writes.
@@ -2121,6 +2125,44 @@ the shadow procedure point here. The shadow persists nothing beyond process
 state, the optional `ARIN_SHADOW_CAPTURE_CONFIG` file and any staged
 `arindb-shadow/` resource; an operator may delete those once the change ships.
 
+### Implementation notes
+
+Where the server branch refines the text above:
+
+- The old slot has its own write token, `arin_old_quality_write_token`, and
+  its own guard, `network_client_location_arin_old_quality_guard`, so the
+  published v751 guard of the latest slot is unchanged. A writer that predates
+  the old slot still supplies a fresh latest token, so only a separate token
+  can tell it apart. Without a fresh old token the guard revokes the old
+  positive and also sets `arin_old_database_build_epoch` to 0, so stale old
+  facts read as unavailable rather than as facts of their epoch. Migration 837,
+  stacked after the FP2 modern provider evidence at 836, carries the columns
+  and the guard; the monitor pins both.
+- The indexer reads both rollup slots for its cohort in its own primary-key
+  query beside the source rows, because the source and count-filter statements
+  are pinned by DB tests; the cohort and its rows are the same.
+- A slot that a process has not opened yet reports the state `unopened`; a
+  latest that a Taskworker cannot open reports `missing` or `invalid` and makes
+  the canary `single`, without failing the score export.
+- A failed write of the decision stops that export: without it, readers would
+  apply each row's latest slot while the export served another database.
+- Request-time readers cache the decision for five seconds per process; one
+  shared read, bounded to 250 ms and detached from the triggering request,
+  refreshes it. `newProviderQualityFilterForClients` applies it to provider
+  status, the provider-egress counts and `bringyourctl provider inspect`; the
+  location counts and hard exclusions keep the latest slot. The provider-egress
+  snapshot key includes the serving epoch, so a switch starts a fresh snapshot.
+- In `warming`, the comparison over the paired subset is still reported,
+  including `tripped`, but it does not choose. An empty public cohort counts as
+  covered and serves the latest.
+- Per-country counts leave out providers without a published country, and an
+  unknown country never trips the breaker. At most 100 emptied cities are named
+  per bucket; the count is complete.
+- The services overview dashboard charts each process's decision reads and old
+  database age beside the existing latest age. The alert rules group by `env`,
+  treat a missing series as OK (a build without the canary exports none), and
+  hold the stale rule for one minute.
+
 ### Open decisions
 
 1. Thresholds: a net bucket loss above 10% and any emptied country trip the
@@ -2165,10 +2207,10 @@ in consumers are separate events. A successful build alone proves none of the
 later events. The Config release version, resource-directory version, MMDB build
 epoch, classifier schema, and subscriber policy version are distinct identifiers.
 
-An optional shadow comparison can measure candidate decisions against the
-current database without changing serving policy; the proposed
-[dual-database canary](#dual-database-canary-proposed) replaces it with a
-comparison on every score publication. Whether comparison occurs
+The live shadow comparison that measured candidate decisions against the
+current database is retired; the
+[dual-database canary](#dual-database-canary-proposed) compares the latest and
+previous databases on every score publication instead. Whether comparison occurs
 before or after activation, actual resource and process observations establish
 which classifier was used. Operational receipts retain those release-specific
 claims. Main execution follows [RUN-MAIN.md](../monitor/RUN-MAIN.md).
