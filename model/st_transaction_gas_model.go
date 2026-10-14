@@ -628,6 +628,32 @@ func reserveStTransactionGasAttempt(ctx context.Context, tx server.PgTx, policy 
 	return &StTransactionGasReservation{IntentId: intentId, Attempt: intent.AttemptCount + 1, ScopeKey: policy.Scope(), LogicalKey: intent.LogicalKey, PolicySha256: digest, Kind: kind, UnsignedTransaction: bytes.Clone(raw), SigningHash: hash, MaximumLiabilityWei: liability.String()}
 }
 
+// StOperatorGasRemainingLiability is the liability the policy still accepts
+// for one more attempt of an operation's nonce. operation is the lower of the
+// per-intent cap its first reservation recorded and the policy's, less the
+// charges of the operation's other nonces. lifetime is the policy's lifetime
+// cap less the charges of every other nonce in its scope. Neither is below
+// zero. intentId is the nonce's intent, or the zero id for a nonce not yet
+// reserved: a nonce's charge is the largest of its attempts', so an attempt
+// within both amounts passes stGasCheckTotals unless another reservation
+// lands first.
+func StOperatorGasRemainingLiability(ctx context.Context, policy *server.StOperatorGasPolicy, logicalKey string, intentId server.Id) (operation *big.Int, lifetime *big.Int, resultErr error) {
+	defer recoverStGasError(&resultErr)
+	var operationWei, lifetimeWei string
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT
+ GREATEST(LEAST($4::numeric,COALESCE((SELECT maximum_liability_wei FROM st_operator_gas_intent WHERE logical_key=$2 AND scope_key=$1),$4::numeric))-COALESCE(SUM(charge) FILTER (WHERE logical_key=$2),0),0)::text,
+ GREATEST($5::numeric-COALESCE(SUM(charge),0),0)::text
+ FROM (`+stGasNonceChargesSql+`) nonces WHERE intent_id<>$3`, policy.Scope(), logicalKey, intentId, policy.MaximumIntentLiabilityWei, policy.MaximumLifetimeLiabilityWei).Scan(&operationWei, &lifetimeWei))
+	})
+	operation, operationOk := new(big.Int).SetString(operationWei, 10)
+	lifetime, lifetimeOk := new(big.Int).SetString(lifetimeWei, 10)
+	if !operationOk || !lifetimeOk {
+		return nil, nil, errors.New("operator gas remaining liability is invalid")
+	}
+	return operation, lifetime, nil
+}
+
 // Called inside AddStTransactionAttempt after its account and intent locks.
 // An admitted account cannot bypass pre-sign reservation through an old API.
 func checkStTransactionGasAttempt(ctx context.Context, tx server.PgTx, intent *StTransactionIntent, candidate *StTransactionAttempt) {
