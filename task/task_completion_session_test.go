@@ -289,7 +289,12 @@ func TestTaskFinalizationUnknownScopeCleanupKeepsCommittedPostAndSiblingCustody(
 		}
 		done := make(chan struct{})
 		var runErr error
-		go func() { defer close(done); server.HandleError(worker.Run, func(err error) { runErr = err }) }()
+		var runPanic any
+		go func() {
+			defer close(done)
+			// One Run collector pass, which returns its failure.
+			runPanic = server.HandleError(func() { _, runErr = worker.runTaskSlots(settings.BatchSize, &taskClaimPoll{}) })
+		}()
 		defer func() { unblock(); worker.runCancel(); worker.Close(); <-done }()
 		select {
 		case <-target.postEntered:
@@ -329,7 +334,10 @@ func TestTaskFinalizationUnknownScopeCleanupKeepsCommittedPostAndSiblingCustody(
 		worker.runCancel()
 		unblock()
 		<-done
-		if runErr == nil || target.calls.Load() != 2 || target.posts.Load() != 1 ||
+		if runPanic != nil || !errors.As(runErr, &pgErr) || pgErr.Code != "40001" {
+			t.Fatal("quarantined collector raised or lost its uncertain scope failure", runPanic, runErr)
+		}
+		if target.calls.Load() != 2 || target.posts.Load() != 1 ||
 			!reflect.DeepEqual(pending, GetTasks(ctx, ids...)) || len(GetFinishedTasks(ctx, ids...)) != 1 {
 			t.Fatal("quarantined collector replayed or changed an unacknowledged sibling", runErr)
 		}

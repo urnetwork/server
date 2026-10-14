@@ -1,4 +1,4 @@
-// A fatal Run handback stops admission, cancels cooperative siblings, and joins
+// A failed Run handback stops admission, cancels cooperative siblings, and joins
 // every function and committed post before releasing its execution owners.
 package task
 
@@ -174,6 +174,7 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 			})
 			runDone := make(chan struct{})
 			var runErr error
+			var runPanic any
 			var ownerDone chan error
 			var nextDone chan struct{}
 			runJoined, ownerJoined := false, false
@@ -198,7 +199,9 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 			}()
 			go func() {
 				defer close(runDone)
-				server.HandleError(worker.Run, func(err error) { runErr = err })
+				// One Run collector pass. It returns its failure rather than
+				// raising it, and Run continues with a new guard.
+				runPanic = server.HandleError(func() { _, runErr = worker.runTaskSlots(settings.BatchSize, &taskClaimPoll{}) })
 			}()
 			taskQueueWait(ctx, failedStarted)
 			taskQueueWait(ctx, postStarted)
@@ -288,6 +291,9 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 			postOnce.Do(func() { close(postRelease) })
 			taskQueueWait(ctx, runDone)
 			runJoined = true
+			if runPanic != nil {
+				t.Fatal("Run collector raised its recoverable handback failure", runPanic)
+			}
 			if !errors.Is(runErr, context.DeadlineExceeded) || runErr.Error() != context.DeadlineExceeded.Error() ||
 				postGenerations.Load() != 2 || worker.InflightCount() != 0 || reruns.Load() != 0 ||
 				!reflect.DeepEqual(before, GetTasks(ctx, ids[0])[ids[0]]) || failedCalls.Load() != 1 || failedPosts.Load() != 0 {
@@ -300,8 +306,8 @@ func TestTaskRunFinalizationFailureCancelsSiblingsAndJoinsCommittedPosts(t *test
 			if ownerErr != nil {
 				t.Fatal("held queue owner failed to release", ownerErr)
 			}
-			// The normal caller can start Run again. The original failed
-			// row's persisted lease and the canceled sibling's retry remain
+			// Run's next pass takes a new guard. The original failed row's
+			// persisted lease and the canceled sibling's retry remain
 			// ineligible at the unchanged claim clock; due unrelated work runs.
 			var nextErr error
 			nextDone = make(chan struct{})
