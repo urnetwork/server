@@ -6405,6 +6405,228 @@
           "legendFormat": "held {{host}} {{block}} {{instance}}"
         }
       ]
+    },
+    {
+      "type": "row",
+      "title": "in-process operator calls (taskworkers with operator_transport: local)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 384
+      },
+      "id": 121
+    },
+    {
+      "id": 122,
+      "type": "timeseries",
+      "title": "in-process operator calls / min by method",
+      "description": "Operator calls that taskworkers with operator_transport: local ran in-process, by operator method: the counterpart of the API dashboard's per-route request rate for the operator routes, which these calls never reach. A taskworker that keeps the operator API, the default, publishes none of these series; its calls are on the API dashboard.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 385
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (method) (rate(urnetwork_local_operator_call_duration_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{method}}"
+        }
+      ]
+    },
+    {
+      "id": 123,
+      "type": "timeseries",
+      "title": "in-process operator call mean duration by method",
+      "description": "Mean time an in-process operator call ran in its call slot, by operator method, on taskworkers with operator_transport: local: the counterpart of the API's per-route handler duration. Each call's 30-second bound covers its wait for a slot and this time together.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 385
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (method) (rate(urnetwork_local_operator_call_duration_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (method) (rate(urnetwork_local_operator_call_duration_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "{{method}}"
+        }
+      ]
+    },
+    {
+      "id": 124,
+      "type": "timeseries",
+      "title": "in-process operator calls running and waiting by taskworker",
+      "description": "In-process operator calls running in their passes' call slots, and calls waiting for one, on each taskworker with operator_transport: local. Running stays at or below operator_concurrency times the URL passes the taskworker holds (8 x 2 at Main's geometry), which keeps probe ingest from taking the taskworker's database pool; a steady waiting count means the bound, not the database, is pacing ingest.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 393
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, block, instance) (urnetwork_local_operator_calls_inflight{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "running {{host}} {{block}} {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (host, block, instance) (urnetwork_local_operator_calls_waiting{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "waiting {{host}} {{block}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 125,
+      "type": "timeseries",
+      "title": "in-process operator call errors / min by method and kind",
+      "description": "In-process operator calls on taskworkers with operator_transport: local that did not end in an answer the API gives as success. refused: the API would have answered 4xx; failed: a 5xx answer, such as a panic or a done error while the caller still waited, or a local failure; canceled: the caller or the 30-second call bound ended a running call; unadmitted: the call ended waiting for a call slot and never ran.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 393
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (method, kind) (rate(urnetwork_local_operator_call_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{method}} {{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 126,
+      "type": "timeseries",
+      "title": "in-process operator mean call slot wait by method",
+      "description": "Mean wait for a call slot per in-process operator call, by operator method, on taskworkers with operator_transport: local: zero when a slot was free, and including calls that gave up waiting. It rises when operator_concurrency, not the database, is the bottleneck.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 401
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (method) (rate(urnetwork_local_operator_call_slot_wait_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum by (method) (rate(urnetwork_local_operator_call_slot_wait_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "{{method}}"
+        }
+      ]
     }
   ]
 }

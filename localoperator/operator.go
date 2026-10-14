@@ -11,6 +11,11 @@
 // the controller's validation, limits and transactions. Refusals and failures
 // come back as the errors ingest.Client returns for the answers the API would
 // have given, so a pass cannot tell the transports apart.
+//
+// What the API fleet gave these calls for free, the operator supplies itself:
+// a bound on how many of its calls hold the host's database at once, and the
+// per-method call series (metrics.go) that stand in for the router's per-route
+// ones.
 package localoperator
 
 import (
@@ -56,6 +61,8 @@ type Operator struct {
 
 	// One token per running call; its capacity is the operator's concurrency.
 	callSlots chan struct{}
+	// The per-method call series this process publishes; nil publishes nothing.
+	metrics *operatorMetrics
 	// The URL Due phase timing this process publishes; nil publishes nothing.
 	dueTiming *controller.ProviderUrlProbeDueTiming
 	// The model's URL claim; nil is model.ClaimProviderUrlProbeDueWithObservation.
@@ -89,6 +96,7 @@ func New(shardIndex int, shardCount int, callTimeout time.Duration, concurrency 
 		ShardCount:  shardCount,
 		CallTimeout: callTimeout,
 		callSlots:   make(chan struct{}, concurrency),
+		metrics:     processMetrics(),
 		dueTiming:   processDueTiming(),
 	}, nil
 }
@@ -152,12 +160,13 @@ func wireId(value string) (server.Id, error) {
 	return server.Id(id), nil
 }
 
-// Runs one operation under the call bound, in one of the operator's slots. A
-// caller that is canceled or out of time, while it waits for a slot or while
-// it runs, gets its context error, as an abandoned request would; a panic
-// becomes the handlerFailure the router would have answered. Returned errors
-// are the operation's own (nil, a handlerRefusal, or an ingest sentinel).
-func (self *Operator) run(ctx context.Context, operation func(context.Context) error) (err error) {
+// Runs one operation of method under the call bound, in one of the operator's
+// slots, and records it in the method's call series. A caller that is
+// canceled or out of time, while it waits for a slot or while it runs, gets
+// its context error, as an abandoned request would; a panic becomes the
+// handlerFailure the router would have answered. Returned errors are the
+// operation's own (nil, a handlerRefusal, or an ingest sentinel).
+func (self *Operator) run(ctx context.Context, method string, operation func(context.Context) error) (err error) {
 	if self.callSlots == nil {
 		return errNoCallSlots
 	}
@@ -167,22 +176,38 @@ func (self *Operator) run(ctx context.Context, operation func(context.Context) e
 		defer cancel()
 	}
 	if err := ctx.Err(); err != nil {
+		self.metrics.unadmitted(method, 0)
 		return err
 	}
+	waitStarted := time.Now()
 	select {
 	case self.callSlots <- struct{}{}:
 	default:
-		if self.slotWait != nil {
-			self.slotWait()
-		}
-		select {
-		case self.callSlots <- struct{}{}:
-		case <-ctx.Done():
-			return ctx.Err()
+		err := func() error {
+			endWait := self.metrics.beginWait(method)
+			defer endWait()
+			if self.slotWait != nil {
+				self.slotWait()
+			}
+			select {
+			case self.callSlots <- struct{}{}:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}()
+		if err != nil {
+			self.metrics.unadmitted(method, time.Since(waitStarted))
+			return err
 		}
 	}
+	// the slot frees after the call's series record its end
 	defer func() {
 		<-self.callSlots
+	}()
+	endCall := self.metrics.beginCall(method, time.Since(waitStarted))
+	defer func() {
+		endCall(err)
 	}()
 	server.HandleError(func() {
 		err = operation(ctx)
@@ -222,7 +247,7 @@ func (self *Operator) Due(ctx context.Context, limit int) ([]ingest.DueProvider,
 		return nil, err
 	}
 	var due []ingest.DueProvider
-	err = self.run(ctx, func(ctx context.Context) error {
+	err = self.run(ctx, "due", func(ctx context.Context) error {
 		clamped, err := controller.ProviderUrlProbeDueLimit(limit)
 		if err != nil {
 			return refusalOf(err)
@@ -283,7 +308,7 @@ func DueProvidersOf(providers []model.ProviderUrlProbeDue) []ingest.DueProvider 
 // /network/provider-egress-attempt).
 func (self *Operator) ReportAttempt(ctx context.Context, providerClientId string, probeFailure string) error {
 	report := ingest.NewAttemptReport(providerClientId, probeFailure)
-	return rejected(self.run(ctx, func(ctx context.Context) error {
+	return rejected(self.run(ctx, "report_attempt", func(ctx context.Context) error {
 		clientId, err := wireId(report.ClientId)
 		if err != nil {
 			return err
@@ -304,7 +329,7 @@ func (self *Operator) ReportUrlProbeCompletion(ctx context.Context, completion q
 	if err != nil {
 		return err
 	}
-	return rejected(self.run(ctx, func(ctx context.Context) error {
+	return rejected(self.run(ctx, "report_url_probe_completion", func(ctx context.Context) error {
 		clientId, err := wireId(completion.ClientId)
 		if err != nil {
 			return err
@@ -334,7 +359,7 @@ func (self *Operator) SubmitEgressHealth(ctx context.Context, providerClientId s
 	if submission == nil {
 		return nil
 	}
-	return rejected(self.run(ctx, func(ctx context.Context) error {
+	return rejected(self.run(ctx, "submit_egress_health", func(ctx context.Context) error {
 		args, err := EgressHealthArgsOf(submission)
 		if err != nil {
 			return err
@@ -389,7 +414,7 @@ func (self *Operator) Submit(ctx context.Context, providerClientId string, exitI
 	if err != nil {
 		return err
 	}
-	return rejected(self.run(ctx, func(ctx context.Context) error {
+	return rejected(self.run(ctx, "submit_location", func(ctx context.Context) error {
 		clientId, err := wireId(submission.ClientId)
 		if err != nil {
 			return err
@@ -423,7 +448,7 @@ func (self *Operator) BlackholeDue(ctx context.Context, limit int) ([]ingest.Due
 		return nil, err
 	}
 	var due []ingest.DueProvider
-	err = self.run(ctx, func(ctx context.Context) error {
+	err = self.run(ctx, "blackhole_due", func(ctx context.Context) error {
 		result, err := controller.ProviderBlackholeCheckDue(ctx, limit, shardIndex, shardCount)
 		if err != nil {
 			return refusalOf(err)
@@ -455,7 +480,7 @@ func (self *Operator) SubmitBlackholeChecks(ctx context.Context, checks []ingest
 	if err != nil || submission == nil {
 		return err
 	}
-	return rejected(self.run(ctx, func(ctx context.Context) error {
+	return rejected(self.run(ctx, "submit_blackhole_checks", func(ctx context.Context) error {
 		args, err := BlackholeChecksArgsOf(submission)
 		if err != nil {
 			return err
@@ -490,7 +515,7 @@ func BlackholeChecksArgsOf(submission *ingest.BlackholeChecksSubmission) (*contr
 // is no behaviour to fall back to.
 func (self *Operator) GeolocationPins(ctx context.Context) (map[string]ingest.GeolocationPin, error) {
 	pins := map[string]ingest.GeolocationPin{}
-	err := self.run(ctx, func(ctx context.Context) error {
+	err := self.run(ctx, "geolocation_pins", func(ctx context.Context) error {
 		for host, pin := range model.GetGeolocationSourcePins(ctx) {
 			pins[host] = ingest.GeolocationPin{Leaf: pin.LeafSpki, Intermediate: pin.IntermediateSpki}
 		}
@@ -508,7 +533,7 @@ func (self *Operator) GeolocationPins(ctx context.Context) (map[string]ingest.Ge
 // ErrPoolUnavailable; no other catalog is substituted.
 func (self *Operator) DestinationPool(ctx context.Context) (*egresshealth.Pool, error) {
 	var pool *egresshealth.Pool
-	err := self.run(ctx, func(ctx context.Context) error {
+	err := self.run(ctx, "destination_pool", func(ctx context.Context) error {
 		built, err := controller.GetProviderEgressDestinationPool(ctx)
 		if err != nil {
 			glog.Errorf("[pegd]could not build the egress destination pool: %s\n", err)
@@ -530,7 +555,7 @@ func (self *Operator) DestinationPool(ctx context.Context) (*egresshealth.Pool, 
 // /network/provider-bandwidth-reserve). An exhausted hourly budget is the
 // clean skip bandwidth.ErrNoBudget, as the route's 429 is.
 func (self *Operator) ReserveBandwidth(ctx context.Context, providerClientId string, byteCount int64) error {
-	err := self.run(ctx, func(ctx context.Context) error {
+	err := self.run(ctx, "reserve_bandwidth", func(ctx context.Context) error {
 		clientId, err := wireId(providerClientId)
 		if err != nil {
 			return err
@@ -553,7 +578,7 @@ func (self *Operator) SubmitBandwidth(
 	bytesPerSecond float64,
 	sampleByteCount int64,
 ) error {
-	return rejected(self.run(ctx, func(ctx context.Context) error {
+	return rejected(self.run(ctx, "submit_bandwidth", func(ctx context.Context) error {
 		clientId, err := wireId(providerClientId)
 		if err != nil {
 			return err
