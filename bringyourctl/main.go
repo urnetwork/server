@@ -2600,6 +2600,9 @@ func providerInspect(opts docopt.Opts) {
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)
+	// the ARIN canary's published choice (arindbctl/ARINDB.md); risk is
+	// always the latest database's
+	fmt.Printf("  arin quality follows serving epoch %d (0 is the provider's latest database)\n", inspection.ArinServingEpoch)
 	fmt.Printf("  quality %t, speed %t, online %t (the score cache also requires the reliability floors and the speed-mode score maximum, so a provider no client has measured is not online), counted %t, hard excluded %t\n", inspection.Quality, inspection.Speed, inspection.Online, inspection.Counted, inspection.HardExcluded)
 	fmt.Printf("  exclusion reason %s\n", optionalString(inspection.Reason))
 }

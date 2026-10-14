@@ -10,10 +10,14 @@ import (
 // ProviderEgressCountsPolicyKey separates shared dashboard snapshots when
 // workers resolve different count rules. This is not a data-generation key:
 // observed providers and accepted health results retain the snapshot's age.
-func ProviderEgressCountsPolicyKey() string {
+// The ARIN serving epoch the counts follow (ArindbServingEpoch) is part of the
+// rules, so a canary switch starts a fresh snapshot instead of serving the
+// previous choice's. The caller reads it; the key itself does no I/O.
+func ProviderEgressCountsPolicyKey(arinServingEpoch int64) string {
 	return providerEgressCountsPolicyKey(
 		egressIndexSettings(), providerEgressTestEnabled(),
 		providerReliabilityMinimums(), SelectedProviderUrlProbePolicyVersion(),
+		arinServingEpoch,
 	)
 }
 
@@ -22,6 +26,7 @@ func providerEgressCountsPolicyKey(
 	enabled bool,
 	minimums map[int]float64,
 	probePolicyVersion int,
+	arinServingEpoch int64,
 ) string {
 	// Increment the schema when count semantics change. Request-only cache and
 	// routing settings do not change this aggregate and are intentionally absent.
@@ -30,7 +35,9 @@ func providerEgressCountsPolicyKey(
 	// changes which countries the dashboard counts exempt, so it is part of
 	// the policy too. Schema 3 adds the modern provider gate, its not_modern
 	// reason and its shadow counts; its switch moves providers between the
-	// buckets and that reason, and its evidence window is code.
+	// buckets and that reason, and its evidence window is code. Schema 4
+	// selects Quality by the published ARIN serving epoch, which a schema 3
+	// snapshot did not.
 	policy := struct {
 		Schema                             int
 		MaxIndex                           int
@@ -45,8 +52,9 @@ func providerEgressCountsPolicyKey(
 		OnlineSuccessCountryFloor          float64
 		OnlineSuccessCountryFloorMargin    float64
 		QualitySpeedRequiresModernProvider bool
+		ArinServingEpoch                   int64
 	}{
-		Schema: 3, MaxIndex: settings.MaxIndex(),
+		Schema: 4, MaxIndex: settings.MaxIndex(),
 		EvidenceMaxAge:   min(settings.EvidenceMaxAge, ProviderEgressHealthMaxAge),
 		QualityNumerator: settings.QualityOkNumerator, QualityDenominator: settings.QualityOkDenominator,
 		CountryGate: settings.CountryGate, EgressEnabled: enabled,
@@ -56,6 +64,7 @@ func providerEgressCountsPolicyKey(
 		OnlineSuccessCountryFloor:          settings.OnlineSuccessCountryFloor,
 		OnlineSuccessCountryFloorMargin:    settings.OnlineSuccessCountryFloorMargin,
 		QualitySpeedRequiresModernProvider: settings.QualitySpeedRequiresModernProvider,
+		ArinServingEpoch:                   arinServingEpoch,
 	}
 	encoded, err := json.Marshal(policy)
 	if err != nil {

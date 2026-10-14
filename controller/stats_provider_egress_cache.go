@@ -40,6 +40,12 @@ type statsProviderEgressSnapshot struct {
 
 type statsProviderEgressCacheKeys struct{ value, fill string }
 
+// The count rules a snapshot was filled under, including the ARIN serving
+// epoch its Quality counts follow.
+func statsProviderEgressPolicyKey(ctx context.Context) string {
+	return model.ProviderEgressCountsPolicyKey(model.ArindbServingEpoch(ctx))
+}
+
 // Both keys share a slot; policy text and ownership tokens never become labels.
 func statsProviderEgressKeys(policyKey string) statsProviderEgressCacheKeys {
 	sum := sha256.Sum256([]byte(policyKey))
@@ -337,21 +343,21 @@ func getStatsProviderEgressSnapshot(ctx context.Context, policyKey string) (snap
 		store: redisStatsProviderEgressCacheStore{}, now: time.Now,
 		newToken: func() string { return server.NewId().String() },
 		fill: func(ctx context.Context) (*model.ProviderEgressCounts, error) {
-			if model.ProviderEgressCountsPolicyKey() != policyKey {
+			if statsProviderEgressPolicyKey(ctx) != policyKey {
 				return nil, errStatsProviderEgressUnavailable
 			}
 			counts := model.CountProviderEgress(ctx)
-			if model.ProviderEgressCountsPolicyKey() != policyKey {
+			if statsProviderEgressPolicyKey(ctx) != policyKey {
 				return nil, errStatsProviderEgressUnavailable
 			}
 			return counts, nil
 		},
 	}
-	if model.ProviderEgressCountsPolicyKey() != policyKey {
+	if statsProviderEgressPolicyKey(ctx) != policyKey {
 		return nil, errStatsProviderEgressUnavailable
 	}
 	snapshot, err = cache.get(ctx, policyKey)
-	if err == nil && model.ProviderEgressCountsPolicyKey() != policyKey {
+	if err == nil && statsProviderEgressPolicyKey(ctx) != policyKey {
 		return nil, errStatsProviderEgressUnavailable
 	}
 	return

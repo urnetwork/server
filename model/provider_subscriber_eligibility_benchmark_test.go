@@ -75,7 +75,7 @@ FROM network_client_connection`).Scan(&providers, &connections, &connected, &loc
 				})
 				var encoded []byte
 				server.Raise(conn.QueryRow(ctx, "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) "+providerSubscriberExclusionsSql,
-					ids[:min(256, len(ids))], server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout)).Scan(&encoded))
+					ids[:min(256, len(ids))], server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout), int64(0)).Scan(&encoded))
 				var explain []map[string]any
 				server.Raise(json.Unmarshal(encoded, &explain))
 				var nodes []map[string]any

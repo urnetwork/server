@@ -797,7 +797,7 @@ func statsRefreshDb(ctx context.Context) {
 // it is now (model.CountProviderEgress).
 func statsRefreshProviderEgress(ctx context.Context) {
 	statsProviderEgressAvailableGauge.set(0)
-	snapshot, err := getStatsProviderEgressSnapshot(ctx, model.ProviderEgressCountsPolicyKey())
+	snapshot, err := getStatsProviderEgressSnapshot(ctx, statsProviderEgressPolicyKey(ctx))
 	server.Raise(err)
 	statsPublishProviderEgressCounts(snapshot.Counts)
 	statsProviderEgressStartedGauge.set(statsSourceTimestampSeconds(snapshot.StartedAt))

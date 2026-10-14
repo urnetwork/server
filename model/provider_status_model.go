@@ -804,7 +804,8 @@ func GetProviderStatuses(ctx context.Context, networkId server.Id, clientIds []s
 	egressSettings := egressIndexSettings()
 	egressTestEnabled := providerEgressTestEnabled()
 	minimums := providerReliabilityMinimums()
-	countFilter := newProviderCountFilterForClients(ctx, factClientIds)
+	// Quality as the score export's published ARIN decision serves it
+	countFilter := newProviderQualityFilterForClients(ctx, factClientIds)
 	// a network's providers cannot measure their countries, so the
 	// URL-success rule, its kill switch and floor included, is the one the
 	// score export decided Online by
