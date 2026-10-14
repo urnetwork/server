@@ -6361,7 +6361,7 @@
       ]
     },
     {
-      "id": 116,
+      "id": 120,
       "type": "timeseries",
       "title": "URL probe passes held and pass limit by taskworker",
       "description": "The URL shard passes each taskworker instance may hold at once, read from the probe geometry when it starts (instance_url_concurrency over the per-pass URL concurrency, at most the shard count), beside the passes it holds now. A fleet whose limits add up to fewer passes than the configured shards leaves shards waiting for a free instance.",
@@ -6369,7 +6369,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 360
+        "y": 376
       },
       "datasource": {
         "type": "prometheus",
