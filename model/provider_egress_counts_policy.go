@@ -28,30 +28,34 @@ func providerEgressCountsPolicyKey(
 	// Schema 2 adds the URL-success rule and its no_success reason, which a
 	// schema 1 snapshot neither applies nor carries. The floor's margin
 	// changes which countries the dashboard counts exempt, so it is part of
-	// the policy too.
+	// the policy too. Schema 3 adds the modern provider gate, its not_modern
+	// reason and its shadow counts; its switch moves providers between the
+	// buckets and that reason, and its evidence window is code.
 	policy := struct {
-		Schema                          int
-		MaxIndex                        int
-		EvidenceMaxAge                  time.Duration
-		QualityNumerator                int
-		QualityDenominator              int
-		CountryGate                     bool
-		EgressEnabled                   bool
-		ReliabilityMinimum              [3]float64
-		ProbePolicyVersion              int
-		OnlineRequiresUrlSuccess        bool
-		OnlineSuccessCountryFloor       float64
-		OnlineSuccessCountryFloorMargin float64
+		Schema                             int
+		MaxIndex                           int
+		EvidenceMaxAge                     time.Duration
+		QualityNumerator                   int
+		QualityDenominator                 int
+		CountryGate                        bool
+		EgressEnabled                      bool
+		ReliabilityMinimum                 [3]float64
+		ProbePolicyVersion                 int
+		OnlineRequiresUrlSuccess           bool
+		OnlineSuccessCountryFloor          float64
+		OnlineSuccessCountryFloorMargin    float64
+		QualitySpeedRequiresModernProvider bool
 	}{
-		Schema: 2, MaxIndex: settings.MaxIndex(),
+		Schema: 3, MaxIndex: settings.MaxIndex(),
 		EvidenceMaxAge:   min(settings.EvidenceMaxAge, ProviderEgressHealthMaxAge),
 		QualityNumerator: settings.QualityOkNumerator, QualityDenominator: settings.QualityOkDenominator,
 		CountryGate: settings.CountryGate, EgressEnabled: enabled,
-		ReliabilityMinimum:              [3]float64{minimums[1], minimums[2], minimums[3]},
-		ProbePolicyVersion:              probePolicyVersion,
-		OnlineRequiresUrlSuccess:        settings.OnlineRequiresUrlSuccess,
-		OnlineSuccessCountryFloor:       settings.OnlineSuccessCountryFloor,
-		OnlineSuccessCountryFloorMargin: settings.OnlineSuccessCountryFloorMargin,
+		ReliabilityMinimum:                 [3]float64{minimums[1], minimums[2], minimums[3]},
+		ProbePolicyVersion:                 probePolicyVersion,
+		OnlineRequiresUrlSuccess:           settings.OnlineRequiresUrlSuccess,
+		OnlineSuccessCountryFloor:          settings.OnlineSuccessCountryFloor,
+		OnlineSuccessCountryFloorMargin:    settings.OnlineSuccessCountryFloorMargin,
+		QualitySpeedRequiresModernProvider: settings.QualitySpeedRequiresModernProvider,
 	}
 	encoded, err := json.Marshal(policy)
 	if err != nil {

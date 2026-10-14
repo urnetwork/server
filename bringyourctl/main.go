@@ -2575,6 +2575,22 @@ func providerInspect(opts docopt.Opts) {
 		)
 	}
 	fmt.Printf("  online url-success rule: %s; country exempt %t (this host's provider.yml: rule %t, country floor %v, margin %v)\n", countryGuard, inspection.OnlineSuccessCountryExempt, inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, inspection.Settings.OnlineSuccessCountryFloorMargin)
+	// the evidence the probe recorded of the provider's end of its session,
+	// and what the gate decides from it now
+	modernEvidence := "none"
+	if evidence := inspection.ModernEvidence; evidence != nil {
+		modernEvidence = fmt.Sprintf(
+			"post-quantum %t (key exchange %s), resizable windows %t (largest %d bytes), measured %s, first measured %s, %d runs",
+			evidence.PostQuantum,
+			optionalString(evidence.KeyExchange),
+			evidence.WindowResizable,
+			evidence.MaxReceiveWindowByteCount,
+			optionalTime(&evidence.MeasuredAt),
+			optionalTime(&evidence.FirstMeasuredAt),
+			evidence.RunCount,
+		)
+	}
+	fmt.Printf("  modern provider evidence %s; outcome %s (evidence is stale at %s); gate %t (quality_speed_requires_modern_provider in this host's provider.yml)\n", modernEvidence, optionalString(inspection.ModernOutcome), model.ProviderModernEvidenceMaxAge, inspection.Settings.QualitySpeedRequiresModernProvider)
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)

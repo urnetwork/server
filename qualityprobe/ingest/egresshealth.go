@@ -39,6 +39,11 @@ type EgressHealthSubmission struct {
 	RunId            string                         `json:"run_id"`
 	CycleStartedAt   time.Time                      `json:"cycle_started_at,omitempty"`
 	UrlProbeEvidence *egresshealth.UrlProbeEvidence `json:"url_probe_evidence,omitempty"`
+	// What the run observed of the provider's end of its session, for the
+	// modern provider gate. Absent while the transport observes nothing,
+	// which a server without the field accepts; a body that carries it
+	// needs a server that declares it, so the operator API deploys first.
+	ModernEvidence *egresshealth.ModernEvidence `json:"modern_evidence,omitempty"`
 	// With TotalCount, covers every class over the loads this run sampled and
 	// measured, after their retries: ok is a load that passed on some attempt,
 	// total - ok a load that failed every one, which is what the index and the
@@ -162,6 +167,7 @@ func NewEgressHealthSubmission(providerClientId string, res *egresshealth.Result
 		RunId:                    res.RunId,
 		CycleStartedAt:           res.CycleStartedAt,
 		UrlProbeEvidence:         res.UrlProbeEvidence,
+		ModernEvidence:           res.ModernEvidence,
 		OkCount:                  res.OkCount,
 		TotalCount:               res.Total,
 		ClassResults:             classResults,

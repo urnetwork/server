@@ -35,9 +35,12 @@ const (
 	// every anti-abuse signal, never which
 	ProviderStatusReasonNotEligible = "not_eligible"
 	// the URL-success rule: measured repeatedly without carrying one URL
-	ProviderStatusReasonEgressNoSuccess  = "egress_no_success"
-	ProviderStatusReasonEgressUnprobed   = "egress_unprobed"
-	ProviderStatusReasonEgressFailing    = "egress_failing"
+	ProviderStatusReasonEgressNoSuccess = "egress_no_success"
+	ProviderStatusReasonEgressUnprobed  = "egress_unprobed"
+	ProviderStatusReasonEgressFailing   = "egress_failing"
+	// the modern provider gate, while it is on: the probe has not shown
+	// end-to-end post-quantum encryption with resizable transfer windows
+	ProviderStatusReasonNotModern        = "not_modern"
 	ProviderStatusReasonSpeedTestMissing = "speed_test_missing"
 	ProviderStatusReasonSlow             = "slow"
 	ProviderStatusReasonNone             = "none"
@@ -55,6 +58,7 @@ var ProviderStatusReasons = []string{
 	ProviderStatusReasonEgressNoSuccess,
 	ProviderStatusReasonEgressUnprobed,
 	ProviderStatusReasonEgressFailing,
+	ProviderStatusReasonNotModern,
 	ProviderStatusReasonSpeedTestMissing,
 	ProviderStatusReasonSlow,
 	ProviderStatusReasonNone,
@@ -71,6 +75,7 @@ var providerStatusReasonTexts = map[string]string{
 	ProviderStatusReasonEgressNoSuccess:      "This connection isn't passing traffic: every network check in the last 8 hours failed to load a test site through it, so clients aren't offered this device. Check that its internet connection works and that no firewall, VPN or DNS filter on it blocks traffic. Checks keep running, and it's offered again shortly after one succeeds.",
 	ProviderStatusReasonEgressUnprobed:       "The network check hasn't run on this connection yet. Until it passes, clients are offered this device only when checked providers run out.",
 	ProviderStatusReasonEgressFailing:        "Too many test sites failed to load through this connection in the last 8 hours. Clients are offered this device only when checked providers run out.",
+	ProviderStatusReasonNotModern:            "The network check hasn't confirmed end-to-end post-quantum encryption and resizable transfer windows on this device's connection, so clients are offered it only when providers that have both run out. The latest app supports both: update the app on this device. Checks keep running, and it's offered normally again shortly after one confirms both.",
 	ProviderStatusReasonSpeedTestMissing:     "No speed test yet. Until one completes, clients are offered this device much less often.",
 	ProviderStatusReasonSlow:                 "This connection measured slower than clients need, so it is offered much less often.",
 	ProviderStatusReasonNone:                 "Everything checks out. How often clients are offered this device depends on demand in its region and on how it ranks against nearby providers.",
@@ -210,9 +215,10 @@ func newProviderCountFilterForClients(ctx context.Context, clientIds []server.Id
 	return f
 }
 
-// Common gates and fresh country evidence, without the health aggregate.
-// Score publication retains its existing fleet-wide SourceMap health census;
-// other consumers load only their own clients' accepted health window.
+// Common gates, fresh country evidence and the modern provider gate's
+// evidence, without the health aggregate. Score publication retains its
+// existing fleet-wide SourceMap health census; other consumers load only
+// their own clients' accepted health window.
 func newProviderCommonFilterForClients(ctx context.Context, clientIds []server.Id) providerCountFilter {
 	// In the underlying evidence readers nil means the entire fleet. An empty
 	// consumer cohort must not accidentally request that unbounded history.
@@ -223,6 +229,7 @@ func newProviderCommonFilterForClients(ctx context.Context, clientIds []server.I
 			arinRisk: map[server.Id]bool{}, arinNonQuality: map[server.Id]bool{},
 			reliabilityFailed: map[server.Id]bool{}, tlsAuthenticationFailed: map[server.Id]bool{},
 			countryCodes: map[server.Id]string{}, healthCounts: map[server.Id]ProviderEgressHealthCounts{},
+			modernEvidence: map[server.Id]*ProviderModernEvidenceRecord{},
 		}
 	}
 	uniqueClientIds := make([]server.Id, 0, len(clientIds))
@@ -241,6 +248,7 @@ func newProviderCommonFilterForClients(ctx context.Context, clientIds []server.I
 		reliabilityFailed:       map[server.Id]bool{},
 		tlsAuthenticationFailed: getProviderEgressTlsAuthenticationFailedClientIds(ctx, clientIds),
 		countryCodes:            getProviderEgressCountryCodes(ctx, clientIds),
+		modernEvidence:          getProviderModernEvidenceRecords(ctx, clientIds),
 	}
 	server.Db(ctx, func(conn server.PgConn) {
 		// Bound planner input even for a large export cohort. Each batch can
@@ -535,6 +543,8 @@ func evaluateProviderStatus(
 		evaluation.reason = ProviderStatusReasonEgressUnprobed
 	case decision.reason == ProviderExcludedHealth:
 		evaluation.reason = ProviderStatusReasonEgressFailing
+	case decision.reason == ProviderExcludedNotModern:
+		evaluation.reason = ProviderStatusReasonNotModern
 	case decision.reason == ProviderExcludedArinNonQuality:
 		evaluation.reason = ProviderStatusReasonNotEligible
 	case !facts.hasSpeedTest || !facts.hasLatencyTest:

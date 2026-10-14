@@ -461,6 +461,9 @@ type Result struct {
 	// Scheduled URL source, including an explicit country-coverage gap.
 	UrlSource        string
 	UrlProbeEvidence *UrlProbeEvidence
+	// What a URL probe observed of the provider's end of its session, nil
+	// when its transport observed nothing (ModernEvidenceSource).
+	ModernEvidence *ModernEvidence
 	// Every sampled destination's outcome after retries, in table
 	// order.
 	Checks []CheckResult

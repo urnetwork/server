@@ -2451,7 +2451,7 @@
           "legendFormat": "{{reason}}"
         }
       ],
-      "description": "The providers each rule leaves out over time. Reliability, arin_risk and tls remove a provider from everything; no_success from every bucket and the counts while its probes continue; health and unprobed from quality and speed; arin_non_quality from quality alone. Every reason is published every refresh, zero included."
+      "description": "The providers each rule leaves out over time. Reliability, arin_risk and tls remove a provider from everything; no_success from every bucket and the counts while its probes continue; health, unprobed and not_modern (only while the modern provider gate is on) from quality and speed; arin_non_quality from quality alone. Every reason is published every refresh, zero included."
     },
     {
       "id": 46,
@@ -3104,6 +3104,341 @@
       "description": "The providers without a URL success the rule keeps online because their country is exempt, over time; the providers it excludes are the no_success reason beside the backfill. A country entering the exempt set is a probe failing there, not its providers; raise online_success_country_floor to exempt more countries, or set online_requires_url_success: false in provider.yml to turn the rule off."
     },
     {
+      "id": 67,
+      "type": "stat",
+      "title": "out of quality and speed: not modern",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 99
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_excluded{env=\"$env\",reason=\"not_modern\"})",
+          "refId": "A",
+          "legendFormat": "not_modern"
+        }
+      ],
+      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero while quality_speed_requires_modern_provider is off in provider.yml; the shadow beside it says what the gate would take out."
+    },
+    {
+      "id": 68,
+      "type": "stat",
+      "title": "modern gate shadow: quality not modern",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 99
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"quality\",outcome!=\"modern\"}))",
+          "refId": "A",
+          "legendFormat": "not modern"
+        }
+      ],
+      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before switching quality_speed_requires_modern_provider on."
+    },
+    {
+      "id": 69,
+      "type": "stat",
+      "title": "modern gate shadow: speed not modern",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 99
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"speed\",outcome!=\"modern\"}))",
+          "refId": "A",
+          "legendFormat": "not modern"
+        }
+      ],
+      "description": "Of the providers the other rules admit to speed, those the modern provider gate would take out, for the same reasons as quality. The same whether the gate is on or off."
+    },
+    {
+      "id": 70,
+      "type": "stat",
+      "title": "modern gate shadow: modern share of quality",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 99
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"quality\",outcome=\"modern\"}) / sum(max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"quality\"}))",
+          "refId": "A",
+          "legendFormat": "share"
+        }
+      ],
+      "description": "The share of the providers the other rules admit to quality that the probe has shown to be modern, which is the share of quality the gate would keep. Rises as probes that report the evidence measure the fleet; no value while quality is empty."
+    },
+    {
+      "id": 71,
+      "type": "timeseries",
+      "title": "modern gate shadow: quality by outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 103
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"quality\"})",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "The providers the other rules admit to quality, by what the modern provider gate decides for them: modern (kept), not_post_quantum and no_resizable_windows (measured without the capability), no_evidence (never measured with the evidence) and stale_evidence (last measured over seven days ago). no_evidence falls as probes report the evidence; a rise in not_post_quantum or no_resizable_windows is providers on older or custom builds."
+    },
+    {
+      "id": 72,
+      "type": "timeseries",
+      "title": "modern gate shadow: speed by outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 103
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"speed\"})",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "The providers the other rules admit to speed, by what the modern provider gate decides for them, with the outcomes of the quality panel beside it."
+    },
+    {
       "id": 55,
       "type": "row",
       "title": "egress site pool and dark verdicts",
@@ -3112,7 +3447,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 99
+        "y": 111
       },
       "panels": [],
       "description": "The prober's dark verdicts and the destination pool its health runs load (the geomap design, §11.3 and §11.4). The fleet shares are snapshots each taskworker takes for itself, so they are read from the one with the freshest snapshot; the pool gauges are read from the taskworker that ran the latest refresh; the prober's and the refresh's event counters are summed across the taskworkers on the egress probes dashboard."
@@ -3129,7 +3464,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 100
+        "y": 112
       },
       "fieldConfig": {
         "defaults": {
@@ -3183,7 +3518,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 100
+        "y": 112
       },
       "fieldConfig": {
         "defaults": {
@@ -3256,7 +3591,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 100
+        "y": 112
       },
       "fieldConfig": {
         "defaults": {
@@ -3316,7 +3651,7 @@
         "h": 10,
         "w": 6,
         "x": 0,
-        "y": 108
+        "y": 120
       },
       "fieldConfig": {
         "defaults": {
@@ -3386,7 +3721,7 @@
         "h": 10,
         "w": 9,
         "x": 6,
-        "y": 108
+        "y": 120
       },
       "fieldConfig": {
         "defaults": {
@@ -3452,7 +3787,7 @@
         "h": 10,
         "w": 9,
         "x": 15,
-        "y": 108
+        "y": 120
       },
       "fieldConfig": {
         "defaults": {
