@@ -383,6 +383,89 @@ func TestEgressRefreshTallyStartLeavesOutDaysBeforeTheReachedOnlyTally(t *testin
 	}
 }
 
+// The tally reads of a refresh start no earlier than the first reached-only
+// day: the window's site tally, and the per-day totals of the sites on
+// probation, even of one promoted before it. A later refresh reads from its
+// own window's first day and from a later promotion, and never from before
+// the retention. The known incomplete day/places go to both reads.
+func TestReadEgressRefreshInputReadsNoTallyDayBeforeTheReachedOnlyDay(t *testing.T) {
+	reachedSince := time.Date(2026, time.October, 14, 0, 0, 0, 0, time.UTC)
+	excluded := []model.ProviderEgressTallyExclusion{{Day: "2026-10-14", CountryCode: "de"}}
+	probation := func(name string, promotedTime time.Time) *model.ProviderEgressDestination {
+		d := testRefreshSite(name, "news")
+		d.Probation = true
+		d.PromotedTime = &promotedTime
+		return d
+	}
+	for _, test := range []struct {
+		name           string
+		now            time.Time
+		destinations   []*model.ProviderEgressDestination
+		tallyFrom      time.Time
+		probationFrom  time.Time
+		probationNames []string
+	}{
+		{
+			name: "the next refresh, beside a probation from before the reached-only day",
+			now:  time.Date(2026, time.October, 15, 3, 26, 9, 0, time.UTC),
+			destinations: []*model.ProviderEgressDestination{
+				testRefreshSite("scored-site", "news"),
+				probation("early-probation", time.Date(2026, time.October, 9, 3, 26, 3, 0, time.UTC)),
+				probation("late-probation", time.Date(2026, time.October, 14, 3, 26, 8, 0, time.UTC)),
+			},
+			tallyFrom:      reachedSince,
+			probationFrom:  reachedSince,
+			probationNames: []string{"early-probation", "late-probation"},
+		},
+		{
+			name: "a later refresh",
+			now:  time.Date(2026, time.October, 20, 3, 26, 14, 0, time.UTC),
+			destinations: []*model.ProviderEgressDestination{
+				testRefreshSite("scored-site", "news"),
+				probation("later-probation", time.Date(2026, time.October, 18, 3, 26, 12, 0, time.UTC)),
+			},
+			tallyFrom:      time.Date(2026, time.October, 17, 0, 0, 0, 0, time.UTC),
+			probationFrom:  time.Date(2026, time.October, 18, 3, 26, 12, 0, time.UTC),
+			probationNames: []string{"later-probation"},
+		},
+		{
+			name:           "a probation older than the retention",
+			now:            time.Date(2026, time.November, 10, 3, 26, 35, 0, time.UTC),
+			destinations:   []*model.ProviderEgressDestination{probation("long-probation", time.Date(2026, time.October, 20, 3, 26, 14, 0, time.UTC))},
+			tallyFrom:      time.Date(2026, time.November, 7, 0, 0, 0, 0, time.UTC),
+			probationFrom:  time.Date(2026, time.October, 27, 0, 0, 0, 0, time.UTC),
+			probationNames: []string{"long-probation"},
+		},
+	} {
+		var tallyFrom, probationFrom time.Time
+		var probationNames []string
+		var tallyExcluded, probationExcluded []model.ProviderEgressTallyExclusion
+		reads := egressRefreshTallyReads{
+			siteTallies: func(_ context.Context, minDay time.Time, excluded ...model.ProviderEgressTallyExclusion) []model.ProviderEgressSiteTally {
+				tallyFrom, tallyExcluded = minDay, excluded
+				return nil
+			},
+			siteDayTotals: func(_ context.Context, minDay time.Time, names []string, excluded ...model.ProviderEgressTallyExclusion) []model.ProviderEgressSiteDayTotal {
+				probationFrom, probationNames, probationExcluded = minDay, names, excluded
+				return nil
+			},
+		}
+		input := readEgressRefreshInput(context.Background(), test.now, model.DefaultProviderEgressSiteSettings(), test.destinations, reachedSince, excluded, model.ProviderEgressContactedTotal{}, reads)
+		if !tallyFrom.Equal(test.tallyFrom) {
+			t.Errorf("%s: the site tally is read from %s, want %s", test.name, tallyFrom, test.tallyFrom)
+		}
+		if !probationFrom.Equal(test.probationFrom) || !slices.Equal(probationNames, test.probationNames) {
+			t.Errorf("%s: the probation totals of %v are read from %s, want %v from %s", test.name, probationNames, probationFrom, test.probationNames, test.probationFrom)
+		}
+		if !slices.Equal(tallyExcluded, excluded) || !slices.Equal(probationExcluded, excluded) {
+			t.Errorf("%s: the reads left out %v and %v, want %v", test.name, tallyExcluded, probationExcluded, excluded)
+		}
+		if !input.reachedSince.Equal(reachedSince) || !input.now.Equal(test.now) {
+			t.Errorf("%s: the plan input = %+v, want the reached-only day and the refresh's clock", test.name, input)
+		}
+	}
+}
+
 // The refreshes of 2026-10-14 and 2026-10-15 in synthetic numbers of the same
 // shape. Every URL run loads one site, so no exit qualifies as healthy and
 // each site is judged on every exit the probe reached; about two in five runs
@@ -480,28 +563,22 @@ func TestPlanEgressDestinationRefreshJudgesTheReachedOnlyTallyBesideOfflineExits
 		{now: time.Date(2026, time.October, 14, 3, 26, 8, 0, time.UTC), samples: 300},
 		{now: time.Date(2026, time.October, 15, 3, 26, 9, 0, time.UTC), samples: 340},
 	} {
-		windowStart := model.ProviderEgressSiteTallyWindowStart(test.now, settings.SiteWindow())
-		whole := planEgressDestinationRefresh(egressRefreshInput{
-			now:           test.now,
-			settings:      settings,
-			destinations:  destinations(),
-			windowTallies: read(test.now, windowStart),
-			tallyStart:    windowStart,
-			recent:        recent,
-		})
+		// the refresh's own tally reads, over this fixture as of now
+		reads := egressRefreshTallyReads{
+			siteTallies: func(_ context.Context, minDay time.Time, _ ...model.ProviderEgressTallyExclusion) []model.ProviderEgressSiteTally {
+				return read(test.now, minDay)
+			},
+			siteDayTotals: func(context.Context, time.Time, []string, ...model.ProviderEgressTallyExclusion) []model.ProviderEgressSiteDayTotal {
+				return nil
+			},
+		}
+		// read with no first reached-only day, as before it was known
+		whole := planEgressDestinationRefresh(readEgressRefreshInput(context.Background(), test.now, settings, destinations(), time.Time{}, nil, recent, reads))
 		if !strings.HasSuffix(whole.skipped, "above the prober-fault line 0.200") {
 			t.Fatalf("%s: the whole window's tally, older days in, = %q, want it over the prober-fault line", test.now, whole.skipped)
 		}
 
-		tallyStart := egressRefreshTallyStart(windowStart, model.ProviderEgressSiteTallyContactedSince)
-		plan := planEgressDestinationRefresh(egressRefreshInput{
-			now:           test.now,
-			settings:      settings,
-			destinations:  destinations(),
-			windowTallies: read(test.now, tallyStart),
-			tallyStart:    tallyStart,
-			recent:        recent,
-		})
+		plan := planEgressDestinationRefresh(readEgressRefreshInput(context.Background(), test.now, settings, destinations(), model.ProviderEgressSiteTallyContactedSince, nil, recent, reads))
 		if plan.skipped != "" {
 			t.Fatalf("%s: a fleet whose reached loads fail 12%% skipped its refresh: %s", test.now, plan.skipped)
 		}
@@ -555,7 +632,7 @@ func TestPlanEgressDestinationRefreshSkipsWhileReachedLoadsFailBroadly(t *testin
 			settings:      testRefreshSettings(2, 1),
 			destinations:  []*model.ProviderEgressDestination{testRefreshSite("refusing-site", "news"), testRefreshSite("steady-site", "news")},
 			windowTallies: test.tally,
-			tallyStart:    time.Date(2026, time.October, 14, 0, 0, 0, 0, time.UTC),
+			reachedSince:  time.Date(2026, time.October, 14, 0, 0, 0, 0, time.UTC),
 			recent:        test.recent,
 		})
 		if !strings.Contains(plan.skipped, " is 0.600") || !strings.HasSuffix(plan.skipped, "above the prober-fault line 0.200") {
@@ -681,6 +758,63 @@ func TestPlanEgressDestinationRefreshDecidesProbation(t *testing.T) {
 	}
 	if len(plan.needs) != 1 || plan.needs[0].category != "video" {
 		t.Fatalf("openings = %+v, want one video site in new-bad's place", plan.needs)
+	}
+}
+
+// A site promoted before the first reached-only tally day is judged on its
+// loads from that day on, and its verdict says so: the days before it count
+// every run that reached no provider as a failure, and over them it would
+// fail probation. A site promoted since is judged since its promotion.
+func TestPlanEgressDestinationRefreshJudgesAProbationFromTheFirstReachedOnlyDay(t *testing.T) {
+	reachedSince := time.Date(2026, time.October, 14, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, time.October, 15, 3, 26, 9, 0, time.UTC)
+	probation := func(name string, promotedTime time.Time) *model.ProviderEgressDestination {
+		d := testRefreshSite(name, "news")
+		d.Probation = true
+		d.PromotedTime = &promotedTime
+		return d
+	}
+	// a site's loads on one day; no single-URL run's exit qualifies as healthy
+	dayTotal := func(name string, day time.Time, loads int, failures int) model.ProviderEgressSiteDayTotal {
+		return model.ProviderEgressSiteDayTotal{Day: day, Name: name, LoadCount: loads, FailureCount: failures}
+	}
+	totals := []model.ProviderEgressSiteDayTotal{}
+	for day := time.Date(2026, time.October, 9, 0, 0, 0, 0, time.UTC); day.Before(reachedSince); day = day.Add(24 * time.Hour) {
+		// 180 of the 400 runs reached no provider and were tallied failed
+		totals = append(totals, dayTotal("early-probation", day, 400, 180+50))
+	}
+	for _, name := range []string{"early-probation", "late-probation"} {
+		totals = append(totals, dayTotal(name, reachedSince, 150, 30), dayTotal(name, reachedSince.Add(24*time.Hour), 70, 20))
+	}
+	plan := planEgressDestinationRefresh(egressRefreshInput{
+		now:      now,
+		settings: testRefreshSettings(3, 1),
+		destinations: []*model.ProviderEgressDestination{
+			probation("early-probation", time.Date(2026, time.October, 9, 3, 26, 3, 0, time.UTC)),
+			probation("late-probation", time.Date(2026, time.October, 14, 3, 26, 8, 0, time.UTC)),
+			testRefreshSite("steady-site", "search"),
+		},
+		windowTallies:   []model.ProviderEgressSiteTally{testHealthyTally("steady-site", "de", "", 5000, 50)},
+		reachedSince:    reachedSince,
+		probationTotals: totals,
+	})
+	if names := testChangeNames(plan.retired); 0 < len(names) {
+		t.Fatalf("retired = %v, want both probations passed on the loads that reached their provider", names)
+	}
+	details := map[string]string{}
+	for _, change := range plan.graduated {
+		details[change.name] = change.detail
+	}
+	for name, want := range map[string]string{
+		"early-probation": "passed 77.3% of 220 contacted exits, healthy or not (too few healthy exits to judge on) since 2026-10-14",
+		"late-probation":  "passed 77.3% of 220 contacted exits, healthy or not (too few healthy exits to judge on) since its promotion",
+	} {
+		if details[name] != want {
+			t.Errorf("%s graduated with %q, want %q", name, details[name], want)
+		}
+		if row := plan.rows[name]; row.Probation || !row.Active {
+			t.Errorf("%s after the plan = %+v, want active and scored", name, row)
+		}
 	}
 }
 

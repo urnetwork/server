@@ -476,6 +476,30 @@ func TestEgressSitePoolQueriesReturnNoProviderIdentity(t *testing.T) {
 	}
 }
 
+// Every tally query of the signal reads from the refresh's own first day: the
+// later of its window's first day and the first reached-only tally day.
+func TestEgressSitePoolTallyQueriesReadFromTheFirstReachedOnlyDay(t *testing.T) {
+	poolContext := testEgressSitePoolContext()
+	settings := DefaultEgressSitePoolSettings()
+	cutoff := fmt.Sprintf("DATE '%s'", model.ProviderEgressSiteTallyContactedSince.Format(time.DateOnly))
+	if cutoff != "DATE '2026-10-14'" {
+		t.Fatalf("the first reached-only tally day = %s, want 2026-10-14", cutoff)
+	}
+	start := egressSitePoolWindowStartSql(poolContext.siteSettings)
+	if !strings.HasPrefix(start, "GREATEST(date_trunc('day', ") || !strings.HasSuffix(start, ", "+cutoff+")") {
+		t.Fatalf("the window start = %s, want the later of the window's first day and %s", start, cutoff)
+	}
+	for name, query := range map[string]string{
+		"regional":  egressSitePoolRegionalQuery(settings, poolContext.siteSettings),
+		"places":    egressSitePoolPlaceThinQuery(settings, poolContext.siteSettings),
+		"countries": egressSitePoolUnreachableQuery(settings, poolContext.siteSettings),
+	} {
+		if !strings.Contains(query, start+" <= ") || strings.Count(query, "tally_day") != strings.Count(query, start+" <= ") {
+			t.Errorf("the %s query reads a tally day from another start: %s", name, query)
+		}
+	}
+}
+
 // The signal reads the tally from the refresh's own first day. Read at the
 // refresh of 2026-10-15, whose window reaches back to 2026-10-12, a country
 // whose one site failed nearly every load on 2026-10-12 -- when every run that
