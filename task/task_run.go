@@ -308,6 +308,28 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 		}
 		nextHeartbeat = self.heartbeatNow().Add(ReleaseTimeout / 3)
 	}
+	// A refill that returns after Drain began starts none of its slots. Each is
+	// handed back unstarted as interrupted, which ends its lease without growing
+	// its backoff, and is unlocked now, so another worker can claim it at once.
+	handBack := func(claimed map[server.Id]*Task) {
+		for _, slot := range taskRunSlots(claimed) {
+			activeSlots[slot.id] = slot
+			results := make([]*taskExecutionResult, 0, len(slot.tasks))
+			for _, queued := range slot.tasks {
+				queued.FunctionName = updateFunctionName(queued.FunctionName)
+				active[queued.TaskId] = queued
+				heartbeatTasks[queued.TaskId] = queued
+				taskSlots[queued.TaskId] = slot
+				results = append(results, &taskExecutionResult{task: queued, err: self.runCtx.Err(), collectorInterrupted: true})
+			}
+			if len(results) == 1 {
+				handleSingleEvent(taskSlotEvent{taskId: slot.id, result: results[0]})
+			} else {
+				handleCohortEvent(taskSlotEvent{taskId: slot.id, cohortResults: results})
+			}
+		}
+		flushRetired()
+	}
 	var deferredEvent *taskSlotEvent
 	collectEvent := func(event taskSlotEvent) int {
 		if event.result == nil {
@@ -446,7 +468,8 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				// interrupts, and this session holds every live slot's execution
 				// lock and lends finalization its connection. Drain cancels
 				// runCtx, so a refill keeps only its deadline, which the claim's
-				// statement limit ends inside the session; Run stops next turn.
+				// statement limit ends inside the session. What it claims after
+				// Drain began is handed back unstarted; Run stops next turn.
 				claimCtx, cancel := context.WithTimeout(context.WithoutCancel(self.runCtx), timeout)
 				claimed, _, needsIsolation, err := self.takeTasksWithGuard(claimCtx, free, guard, taskClaimOptions{ordinaryOnly: true, detachCommittedRead: true, poll: poll, runCohorts: true})
 				cancel()
@@ -457,7 +480,11 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 					stopped = true
 				} else if len(claimed) != 0 {
 					taskPollsTotal.WithLabelValues("claimed").Inc()
-					launch(claimed)
+					if self.runCtx.Err() != nil {
+						handBack(claimed)
+					} else {
+						launch(claimed)
+					}
 				} else {
 					taskPollsTotal.WithLabelValues("empty").Inc()
 				}
