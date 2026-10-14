@@ -502,6 +502,8 @@ source "$FIXTURE_WORKSPACE/server/test-env.sh"
 test_env_validate_suite_resource_manifest "$TEST_ENV_SUITE_RESOURCE_MANIFEST" "$WARP_VAULT_HOME" "$WARP_CONFIG_HOME"
 [[ "$BRINGYOUR_POSTGRES_HOSTNAME" == 127.0.0.1 && "$BRINGYOUR_REDIS_HOSTNAME" == 127.0.0.1 ]]
 [[ "$WARP_SITE_HOME" == "$WARP_TEST_ENV_PORTABLE_ROOT/site" ]]
+# the explicit portable mode attests exactly its own loopback endpoints
+[[ "$WARP_TEST_ENV_ATTESTED_ADDRS" == 127.0.0.1:35431,127.0.0.1:36371 ]]
 `)
 	if err != nil {
 		t.Fatalf("private shell profile: %v\n%s", err, output)

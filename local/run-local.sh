@@ -26,7 +26,18 @@
 # not guess which resolver result is safe or rewrite operator-owned aliases: an
 # unmanaged alias, legacy managed block, or existing launcher lock stops startup
 # before host/network/Docker mutation. LOCAL_HOST_IP is a distinct dedicated
-# address; the worst case when the stack is down is "connection refused".
+# address.
+#
+# Public DNS also answers both hostnames with 127.0.0.1. Once this launcher
+# exits and restores /etc/hosts, any client that resolves the names again
+# reaches whatever listens on loopback; with the production data tunnel up
+# (xops/bin/by-patch-main-data forwards 5432, 6432 and 6379-6427), that is
+# production. test-env.sh therefore exports the endpoints it validated against
+# this launcher (WARP_TEST_ENV_ATTESTED_ADDRS), and test processes dial
+# PostgreSQL and Redis only there for the whole run (test_env_dial_guard.go),
+# so for tests the worst case with the stack down is a refused dial. Other
+# local processes still resolve per dial. Removing the public records is the
+# complete fix and an owner decision; see local/README.md.
 #
 # Run it in its own terminal, then run the tests from another, e.g.:
 #   ./test.sh -run TestFoo

@@ -294,6 +294,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		self.startupMetrics = configurePgPoolLiveness(config)
 		configurePgPoolWriteTracking(config)
 		configurePgPoolStatementErrors(config)
+		configurePgTestEnvDial(currentTestEnvDialGuard(), config.ConnConfig)
 
 		self.pool, err = pgxpool.NewWithConfig(self.ctx, config)
 		if err != nil {
@@ -301,6 +302,18 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		}
 	}
 	return self.pool
+}
+
+// Pins a test process's connection to its launcher attestation: lookups may
+// return only attested addresses and every socket, cancel requests included,
+// goes to an attested endpoint (test_env_dial_guard.go). Every other process
+// has a nil guard and keeps the configuration untouched.
+func configurePgTestEnvDial(guard *testEnvDialGuard, config *pgx.ConnConfig) {
+	if guard == nil {
+		return
+	}
+	config.LookupFunc = guard.wrapLookup("postgres", config.LookupFunc)
+	config.DialFunc = guard.wrapDial("postgres", config.DialFunc)
 }
 
 // Only a completed successful initial Ping establishes this connection's freshness.
