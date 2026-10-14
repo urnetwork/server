@@ -44,7 +44,10 @@ func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{Addrs: []string{authority}})
+	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{
+		Addrs:  []string{authority},
+		Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+	})
 	defer clusterClient.Close()
 
 	// read-only checks that this is a disposable cluster
@@ -170,7 +173,10 @@ func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
 	requireSubscribed(true, "the moved slot was never subscribed again")
 	publish("after-move")
 
-	target := redis.NewClient(&redis.Options{Addr: targetAddr})
+	target := redis.NewClient(&redis.Options{
+		Addr:   targetAddr,
+		Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+	})
 	defer target.Close()
 	subscriberCounts, err := target.PubSubShardNumSub(ctx, channel).Result()
 	if err != nil {
@@ -213,7 +219,10 @@ func testRedisSlotOwner(t *testing.T, ctx context.Context, clusterClient *redis.
 func testRedisMoveSlot(t *testing.T, ctx context.Context, slot int64, sourceAddr string, targetAddr string, masterAddrs []string) {
 	nodeClients := map[string]*redis.Client{}
 	for _, masterAddr := range masterAddrs {
-		nodeClients[masterAddr] = redis.NewClient(&redis.Options{Addr: masterAddr})
+		nodeClients[masterAddr] = redis.NewClient(&redis.Options{
+			Addr:   masterAddr,
+			Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+		})
 	}
 	defer func() {
 		for _, nodeClient := range nodeClients {

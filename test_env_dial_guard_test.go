@@ -8,8 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -830,6 +834,162 @@ func TestTestingDialTestEnvGuardsProxyUpstream(t *testing.T) {
 		t.Fatalf("ordinary proxy upstream dial outside a test process: %v", err)
 	}
 	conn.Close()
+}
+
+// Every go-redis client this package builds dials through an explicit dialer:
+// the guard's (configureTestEnvRedisDial), a pool's, or a test's synthetic or
+// never-dialing one. A client left on go-redis's own dialer resolves its name
+// on every dial outside the guard; two lease tests' db-0 clients did, which
+// sends no SELECT and could run single-key writes on a production node. The
+// source is the observable layer: those clients live in tests that need a
+// live fixture, so a pure test can only find them here.
+func TestRedisClientsDialThroughExplicitDialers(t *testing.T) {
+	paths, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileSet := token.NewFileSet()
+	files := []*ast.File{}
+	funcDecls := map[string]*ast.FuncDecl{}
+	for _, path := range paths {
+		file, err := parser.ParseFile(fileSet, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, file)
+		for _, decl := range file.Decls {
+			if funcDecl, ok := decl.(*ast.FuncDecl); ok && funcDecl.Recv == nil {
+				funcDecls[funcDecl.Name.Name] = funcDecl
+			}
+		}
+	}
+	literalHasDialer := func(literal *ast.CompositeLit) bool {
+		for _, element := range literal.Elts {
+			if keyValue, ok := element.(*ast.KeyValueExpr); ok {
+				if key, ok := keyValue.Key.(*ast.Ident); ok && key.Name == "Dialer" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	configuresGuard := func(call *ast.CallExpr, name string) bool {
+		function, ok := call.Fun.(*ast.Ident)
+		if !ok || function.Name != "configureTestEnvRedisDial" || len(call.Args) != 3 {
+			return false
+		}
+		argument := call.Args[1]
+		if unary, ok := argument.(*ast.UnaryExpr); ok {
+			argument = unary.X
+		}
+		ident, ok := argument.(*ast.Ident)
+		return ok && (name == "" || ident.Name == name)
+	}
+	assignsDialer := func(assign *ast.AssignStmt, name string) bool {
+		for _, lhs := range assign.Lhs {
+			if selector, ok := lhs.(*ast.SelectorExpr); ok && selector.Sel.Name == "Dialer" {
+				if ident, ok := selector.X.(*ast.Ident); ok && (name == "" || ident.Name == name) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	// A local helper that builds options gives them a dialer in its body.
+	helperGivesDialer := func(name string) bool {
+		funcDecl := funcDecls[name]
+		if funcDecl == nil || funcDecl.Body == nil {
+			return false
+		}
+		found := false
+		ast.Inspect(funcDecl.Body, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case *ast.CompositeLit:
+				found = found || literalHasDialer(n)
+			case *ast.AssignStmt:
+				found = found || assignsDialer(n, "")
+			case *ast.CallExpr:
+				found = found || configuresGuard(n, "")
+			}
+			return !found
+		})
+		return found
+	}
+	// Whether expr yields options that dial explicitly, where body is the
+	// enclosing function an identifier is defined and configured in.
+	var givesDialer func(body *ast.BlockStmt, expr ast.Expr, depth int) bool
+	givesDialer = func(body *ast.BlockStmt, expr ast.Expr, depth int) bool {
+		if 8 < depth {
+			return false
+		}
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			return givesDialer(body, e.X, depth+1)
+		case *ast.UnaryExpr:
+			return givesDialer(body, e.X, depth+1)
+		case *ast.CompositeLit:
+			return literalHasDialer(e)
+		case *ast.CallExpr:
+			function, ok := e.Fun.(*ast.Ident)
+			return ok && helperGivesDialer(function.Name)
+		case *ast.Ident:
+			found := false
+			ast.Inspect(body, func(node ast.Node) bool {
+				switch n := node.(type) {
+				case *ast.AssignStmt:
+					found = found || assignsDialer(n, e.Name)
+					if len(n.Lhs) == len(n.Rhs) {
+						for index, lhs := range n.Lhs {
+							if ident, ok := lhs.(*ast.Ident); ok && ident.Name == e.Name && n.Rhs[index] != expr {
+								found = found || givesDialer(body, n.Rhs[index], depth+1)
+							}
+						}
+					}
+				case *ast.CallExpr:
+					found = found || configuresGuard(n, e.Name)
+				}
+				return !found
+			})
+			return found
+		}
+		return false
+	}
+	constructors := map[string]bool{
+		"NewClient": true, "NewClusterClient": true, "NewUniversalClient": true,
+		"NewFailoverClient": true, "NewFailoverClusterClient": true, "NewRing": true,
+	}
+	checked := 0
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			funcDecl, ok := decl.(*ast.FuncDecl)
+			if !ok || funcDecl.Body == nil {
+				continue
+			}
+			ast.Inspect(funcDecl.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || !constructors[selector.Sel.Name] {
+					return true
+				}
+				if pkg, ok := selector.X.(*ast.Ident); !ok || pkg.Name != "redis" || len(call.Args) != 1 {
+					return true
+				}
+				checked += 1
+				if !givesDialer(funcDecl.Body, call.Args[0], 0) {
+					t.Errorf("%s: redis.%s leaves the client on go-redis's own dialer; route it through "+
+						"configureTestEnvRedisDial(currentTestEnvDialGuard(), options, NewDialer(timeout).DialContext) "+
+						"or give it an explicit Dialer", fileSet.Position(call.Pos()), selector.Sel.Name)
+				}
+				return true
+			})
+		}
+	}
+	if checked < 20 {
+		t.Fatalf("found only %d go-redis client constructions; the scan no longer sees this package", checked)
+	}
 }
 
 // Pushes a synthetic PostgreSQL resource whose pool opens no connection.
