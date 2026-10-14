@@ -3489,10 +3489,18 @@ type ConnectionLocationScores struct {
 	ArinQualityVerified    bool
 	ArinLookupAt           *time.Time
 	ArinDatabaseBuildEpoch int64
-	NetTypeHosting         int
-	NetTypePrivacy         int
-	NetTypeVirtual         int
-	NetTypeForeign         int
+	// The same facts from the old database beside the latest (arindbctl/ARINDB.md,
+	// "Connection and rollup facts"). Epoch 0 when the process loaded no old
+	// database or its lookup failed: the score export uses a slot only when its
+	// epoch is the published serving epoch, and 0 never is.
+	ArinOldRisk               bool
+	ArinOldNonQuality         bool
+	ArinOldQualityVerified    bool
+	ArinOldDatabaseBuildEpoch int64
+	NetTypeHosting            int
+	NetTypePrivacy            int
+	NetTypeVirtual            int
+	NetTypeForeign            int
 	// the lookup's accuracy radius in km, the genesis confidence of
 	// connect/GEOMAP.md §5.1; nil (NULL) for a location with none, such as an
 	// egress-probed one. It describes the genesis location below when one is
@@ -3511,6 +3519,8 @@ type ConnectionLocationScores struct {
 
 // Persist location and classification together. A fresh token on every write
 // lets the database revoke positive facts when an older writer updates the row.
+// Each ARIN slot has its own token, so a writer that predates the old slot
+// cannot leave an earlier old-slot positive or epoch in place.
 func SetConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
@@ -3623,9 +3633,14 @@ func SetConnectionLocation(
 		            arin_lookup_at,
 		            arin_database_build_epoch,
 		            arin_quality_verified,
-		            arin_quality_write_token
+		            arin_quality_write_token,
+		            arin_old_risk,
+		            arin_old_non_quality,
+		            arin_old_quality_verified,
+		            arin_old_database_build_epoch,
+		            arin_old_quality_write_token
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
@@ -3644,7 +3659,12 @@ func SetConnectionLocation(
                     arin_lookup_at = $15,
                     arin_database_build_epoch = $16,
                     arin_quality_verified = $17,
-                    arin_quality_write_token = $18
+                    arin_quality_write_token = $18,
+                    arin_old_risk = $19,
+                    arin_old_non_quality = $20,
+                    arin_old_quality_verified = $21,
+                    arin_old_database_build_epoch = $22,
+                    arin_old_quality_write_token = $23
             `,
 			connectionId,
 			clientId,
@@ -3663,6 +3683,11 @@ func SetConnectionLocation(
 			connectionLocationScores.ArinLookupAt,
 			connectionLocationScores.ArinDatabaseBuildEpoch,
 			connectionLocationScores.ArinQualityVerified,
+			server.NewId(),
+			connectionLocationScores.ArinOldRisk,
+			connectionLocationScores.ArinOldNonQuality,
+			connectionLocationScores.ArinOldQualityVerified,
+			connectionLocationScores.ArinOldDatabaseBuildEpoch,
 			server.NewId(),
 		))
 	})

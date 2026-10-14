@@ -10403,4 +10403,11 @@ var migrations = []any{
 			run_count int NOT NULL DEFAULT 1
 		);
 	`),
+
+	// 837: the dual-database ARIN canary (arindbctl/ARINDB.md). Connect stamps
+	// each connection with the facts of the latest and the old database, and
+	// the rollup carries both slots with their epochs. Additive with constant
+	// defaults that read as unavailable, never clean; the old slot has its own
+	// write guard so a writer predating it cannot keep an earlier positive.
+	newSqlMigration(arinDatabaseCanarySchemaSql),
 }

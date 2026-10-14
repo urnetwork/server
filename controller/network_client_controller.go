@@ -412,11 +412,13 @@ func SetConnectionLocation(
 		if parseErr != nil {
 			return parseErr
 		}
-		arinInfo, arinErr := server.GetArinInfo(addr)
+		// both databases classify the connection address on this path too,
+		// so a probed provider carries the same two slots as an unprobed one
+		arinInfo, oldArinInfo, arinErr := server.GetArinInfoPair(addr)
 		if arinErr != nil {
 			return arinErr
 		}
-		setArinConnectionFacts(scores, arinInfo)
+		setArinConnectionFacts(scores, arinInfo, oldArinInfo)
 
 		// keep the ARIN org-vs-country foreign check on the probed path too,
 		// so a probed provider is ranked on equal terms with an equivalent
