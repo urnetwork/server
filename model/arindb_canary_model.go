@@ -1,0 +1,843 @@
+// The dual-database ARIN canary of the score export (arindbctl/ARINDB.md,
+// "Dual-database canary"). Every process that classifies addresses stamps each
+// connection with the facts of the latest and the old database, and the rollup
+// carries both slots with their epochs. Once per publication the indexer counts
+// public bucket supply under each database over the providers with facts for
+// both, and chooses one serving epoch S for the whole publication: the latest
+// unless the latest trips the breaker, then the old classification. No
+// provider is decided separately.
+//
+// Quality classification (non-quality and verified) follows S; risk always
+// follows each row's latest slot, so a fallback can restore Quality but never
+// readmits a provider the latest database calls risky. A slot is used only when
+// its epoch is S, so a mixed fleet stays consistent; S = 0 (state single, or no
+// readable decision) is each row's latest slot, as before the canary. Facts
+// that are unavailable under S count as non-Quality, never clean. The indexer
+// publishes the decision before its export, so request-time readers apply the
+// same S while the export rewrites targets. There is no hysteresis: each run
+// decides independently.
+package model
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	"github.com/urnetwork/glog"
+	"github.com/urnetwork/server"
+)
+
+// The state a publication's decision ends in.
+const (
+	// the indexer loaded no usable old database: S = 0, each row's latest slot
+	ArindbCanaryStateSingle = "single"
+	// too few providers carry facts for both databases to compare
+	ArindbCanaryStateWarming = "warming"
+	// compared, and the breaker holds: S is the latest database
+	ArindbCanaryStateLatest = "latest"
+	// compared, and the breaker tripped: S is the old database
+	ArindbCanaryStateFallback = "fallback"
+)
+
+// Every state, in the order the stats gauge publishes them.
+var ArindbCanaryStates = []string{
+	ArindbCanaryStateSingle,
+	ArindbCanaryStateWarming,
+	ArindbCanaryStateLatest,
+	ArindbCanaryStateFallback,
+}
+
+// The decision document's version. A reader refuses any other.
+const ArindbCanaryDecisionVersion = 1
+
+// One key in its own hash slot, written by the indexer with the export's ttl.
+const arindbCanaryDecisionKey = "{arindb_canary_decision}"
+
+// At most this many emptied cities are named per bucket; the count is
+// complete.
+const arindbCanaryEmptiedCityLimit = 100
+
+// The tunables of provider.yml `arindb_canary`.
+type ArindbCanarySettings struct {
+	// the breaker trips when a bucket's net loss is strictly greater
+	BucketLossThreshold float64 `json:"bucket_loss_threshold"`
+	// the breaker trips when a country has supply in a bucket under the old
+	// database and none under the latest
+	TripOnEmptiedCountry bool `json:"trip_on_emptied_country"`
+	// the share of the public cohort that must carry facts for a database
+	MinCoverage float64 `json:"min_coverage"`
+}
+
+func defaultArindbCanarySettings() ArindbCanarySettings {
+	return ArindbCanarySettings{
+		BucketLossThreshold:  0.10,
+		TripOnEmptiedCountry: true,
+		MinCoverage:          0.98,
+	}
+}
+
+func arindbCanarySettings() ArindbCanarySettings {
+	return arindbCanarySettingsFromResource(server.Config.SimpleResource(providerConfigResourceName))
+}
+
+// Absent keys use the defaults. An unreadable file or an out-of-range value
+// keeps the default and logs, so a typo can neither disable nor silently
+// tighten the breaker.
+func arindbCanarySettingsFromResource(resource *server.SimpleResource, lookupErr error) ArindbCanarySettings {
+	settings := defaultArindbCanarySettings()
+	if lookupErr != nil || resource == nil {
+		if lookupErr != nil && !errors.Is(lookupErr, server.ErrResourceNotFound) {
+			glog.Errorf("[arindb]provider config is unavailable (%s); the canary keeps its defaults\n", lookupErr)
+		}
+		return settings
+	}
+	var document struct {
+		ArindbCanary *struct {
+			BucketLossThreshold  *float64 `yaml:"bucket_loss_threshold"`
+			TripOnEmptiedCountry *bool    `yaml:"trip_on_emptied_country"`
+			MinCoverage          *float64 `yaml:"min_coverage"`
+		} `yaml:"arindb_canary"`
+	}
+	if err := resource.UnmarshalYamlE(&document); err != nil {
+		glog.Errorf("[arindb]provider config arindb_canary is unreadable (%s); the canary keeps its defaults\n", err)
+		return settings
+	}
+	if document.ArindbCanary == nil {
+		return settings
+	}
+	if value := document.ArindbCanary.BucketLossThreshold; value != nil {
+		// NaN fails both comparisons
+		if 0 <= *value && *value <= 1 {
+			settings.BucketLossThreshold = *value
+		} else {
+			glog.Errorf("[arindb]provider config arindb_canary.bucket_loss_threshold = %v is outside [0, 1]; kept %v\n", *value, settings.BucketLossThreshold)
+		}
+	}
+	if value := document.ArindbCanary.TripOnEmptiedCountry; value != nil {
+		settings.TripOnEmptiedCountry = *value
+	}
+	if value := document.ArindbCanary.MinCoverage; value != nil {
+		if 0 < *value && *value <= 1 {
+			settings.MinCoverage = *value
+		} else {
+			glog.Errorf("[arindb]provider config arindb_canary.min_coverage = %v is outside (0, 1]; kept %v\n", *value, settings.MinCoverage)
+		}
+	}
+	return settings
+}
+
+// The two ARIN slots of one provider's rollup row. Non-quality already
+// includes the policy-two unverified rule of its slot.
+type arindbRollupSlots struct {
+	risk          bool
+	nonQuality    bool
+	oldRisk       bool
+	oldNonQuality bool
+	epoch         int64
+	oldEpoch      int64
+}
+
+// The provider's facts under the database built at epoch: the slot whose
+// epoch it is, or unavailable. Epoch 0 names no database.
+func (self arindbRollupSlots) factsUnder(epoch int64) (risk bool, nonQuality bool, ok bool) {
+	switch {
+	case epoch == 0:
+		return false, false, false
+	case self.epoch == epoch:
+		return self.risk, self.nonQuality, true
+	case self.oldEpoch == epoch:
+		return self.oldRisk, self.oldNonQuality, true
+	default:
+		return false, false, false
+	}
+}
+
+// Non-quality under serving epoch S. S = 0 is the latest slot; facts
+// unavailable under S are non-Quality, never clean.
+func (self arindbRollupSlots) servingNonQuality(servingEpoch int64) bool {
+	if servingEpoch == 0 {
+		return self.nonQuality
+	}
+	_, nonQuality, ok := self.factsUnder(servingEpoch)
+	return !ok || nonQuality
+}
+
+// The rollup's two slots for clientIds, read by primary key in batches.
+func loadArindbRollupSlots(ctx context.Context, clientIds []server.Id) map[server.Id]arindbRollupSlots {
+	slots := map[server.Id]arindbRollupSlots{}
+	if len(clientIds) == 0 {
+		return slots
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		const batchSize = 1024
+		for start := 0; start < len(clientIds); start += batchSize {
+			batch := clientIds[start:min(start+batchSize, len(clientIds))]
+			rows, err := conn.Query(
+				ctx,
+				`
+				SELECT
+					client_id,
+					arin_risk,
+					arin_non_quality,
+					arin_old_risk,
+					arin_old_non_quality,
+					arin_epoch,
+					arin_old_epoch
+				FROM network_client_location_reliability
+				WHERE client_id = ANY($1)
+				`,
+				batch,
+			)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var clientId server.Id
+					var s arindbRollupSlots
+					server.Raise(rows.Scan(&clientId, &s.risk, &s.nonQuality, &s.oldRisk, &s.oldNonQuality, &s.epoch, &s.oldEpoch))
+					slots[clientId] = s
+				}
+			})
+		}
+	})
+	return slots
+}
+
+// The pair the indexer compares, as its own loader opened it.
+type arindbCanaryPair struct {
+	latest server.ArinDatabaseIdentity
+	old    server.ArinDatabaseIdentity
+	// the latest could not be opened
+	err error
+}
+
+// The pair of this process. Taskworker opens it at its first score
+// publication and performs no lookups. Replaced in tests.
+var arindbCanaryPairIdentities = server.ArinDatabaseIdentities
+
+func currentArindbCanaryPair() arindbCanaryPair {
+	latest, old, err := arindbCanaryPairIdentities()
+	return arindbCanaryPair{latest: latest, old: old, err: err}
+}
+
+// The latest epoch L, 0 when the latest is not open.
+func (self arindbCanaryPair) latestEpoch() int64 {
+	if self.err != nil || self.latest.State != server.ArinDatabaseLoaded {
+		return 0
+	}
+	return self.latest.BuildEpoch
+}
+
+// The old epoch O, 0 unless a strictly older old database is loaded beside an
+// open latest.
+func (self arindbCanaryPair) oldEpoch() int64 {
+	latestEpoch := self.latestEpoch()
+	if latestEpoch == 0 || self.old.State != server.ArinDatabaseLoaded || self.old.BuildEpoch <= 0 || latestEpoch <= self.old.BuildEpoch {
+		return 0
+	}
+	return self.old.BuildEpoch
+}
+
+// One public provider of the cohort as the canary compares it.
+type arindbCanaryProvider struct {
+	clientId server.Id
+	// the published country, normalized; "" when unknown
+	countryCode string
+	// the published city; nil when none
+	cityId *server.Id
+	slots  arindbRollupSlots
+	// what the unchanged rules read besides ARIN
+	egress  *clientScoreEgress
+	weights map[int]float64
+}
+
+// Bucket membership under one database's ARIN facts.
+type arindbCanaryMembership struct {
+	quality bool
+	speed   bool
+	online  bool
+}
+
+func (self arindbCanaryMembership) in(bucket string) bool {
+	switch bucket {
+	case RankModeQuality:
+		return self.quality
+	case RankModeSpeed:
+		return self.speed
+	case ProviderEgressBucketOnline:
+		return self.online
+	default:
+		return false
+	}
+}
+
+// One database of the decision.
+type ArindbCanaryDatabase struct {
+	State      string `json:"state"`
+	BuildEpoch int64  `json:"build_epoch"`
+	// "" when no manifest names one
+	Sha256 string `json:"sha256"`
+}
+
+// How many public providers of the cohort carry facts for each database.
+type ArindbCanaryCoverage struct {
+	Providers int `json:"providers"`
+	Latest    int `json:"latest"`
+	Old       int `json:"old"`
+	Paired    int `json:"paired"`
+}
+
+// The share of the cohort count covers; an empty cohort is fully covered.
+func (self ArindbCanaryCoverage) Ratio(count int) float64 {
+	if self.Providers == 0 {
+		return 1
+	}
+	return float64(count) / float64(self.Providers)
+}
+
+// Paired providers in one bucket or one country of it, under each database.
+type ArindbCanaryCount struct {
+	Latest int `json:"latest"`
+	Old    int `json:"old"`
+}
+
+// A country with supply under the old database and none under the latest.
+type ArindbCanaryEmptiedCountry struct {
+	CountryCode string `json:"country_code"`
+	Old         int    `json:"old"`
+}
+
+// A city with supply under the old database and none under the latest. Cities
+// are reported, never tripped on.
+type ArindbCanaryEmptiedCity struct {
+	CityLocationId server.Id `json:"city_location_id"`
+	CountryCode    string    `json:"country_code"`
+	Name           string    `json:"name"`
+	Old            int       `json:"old"`
+}
+
+// One bucket of the comparison, over the paired providers.
+type ArindbCanaryBucket struct {
+	ArindbCanaryCount
+	// the net loss (old - latest) / old; negative is a gain, 0 without old supply
+	LossRatio float64 `json:"loss_ratio"`
+	// gross removals and additions of latest against old
+	Removed int `json:"removed"`
+	Added   int `json:"added"`
+	// keyed by country code; providers without a published country count only
+	// in the bucket
+	Countries        map[string]ArindbCanaryCount `json:"countries"`
+	EmptiedCountries []ArindbCanaryEmptiedCountry `json:"emptied_countries"`
+	EmptiedCityCount int                          `json:"emptied_city_count"`
+	EmptiedCities    []ArindbCanaryEmptiedCity    `json:"emptied_cities"`
+	// the net loss is over the threshold, or an emptied country trips. A
+	// warming run reports it without acting on it
+	Tripped bool `json:"tripped"`
+}
+
+// One publication's choice, as the indexer published it.
+type ArindbCanaryDecision struct {
+	Version      int    `json:"version"`
+	DecisionId   string `json:"decision_id"`
+	State        string `json:"state"`
+	ServingEpoch int64  `json:"serving_epoch"`
+	// why the state is single, "" otherwise
+	SingleReason string                         `json:"single_reason,omitempty"`
+	Latest       ArindbCanaryDatabase           `json:"latest"`
+	Old          ArindbCanaryDatabase           `json:"old"`
+	Coverage     ArindbCanaryCoverage           `json:"coverage"`
+	Settings     ArindbCanarySettings           `json:"settings"`
+	Buckets      map[string]*ArindbCanaryBucket `json:"buckets"`
+	// the start of the score source read the decision counts
+	SourceStartedAt time.Time `json:"source_started_at"`
+	DecidedAt       time.Time `json:"decided_at"`
+}
+
+// Decides one publication. membership applies the unchanged rules
+// (decideProviderEgress and the reliability minimums) with only the ARIN
+// facts substituted; under them risk can remove a provider from every bucket
+// and non-quality only from Quality.
+func decideArindbCanary(
+	pair arindbCanaryPair,
+	providers []*arindbCanaryProvider,
+	membership func(provider *arindbCanaryProvider, risk bool, nonQuality bool) arindbCanaryMembership,
+	settings ArindbCanarySettings,
+	sourceStartedAt time.Time,
+	decidedAt time.Time,
+) *ArindbCanaryDecision {
+	decision := &ArindbCanaryDecision{
+		Version:         ArindbCanaryDecisionVersion,
+		DecisionId:      server.NewId().String(),
+		Latest:          ArindbCanaryDatabase{State: pair.latest.State, BuildEpoch: pair.latest.BuildEpoch, Sha256: pair.latest.Sha256},
+		Old:             ArindbCanaryDatabase{State: pair.old.State, BuildEpoch: pair.old.BuildEpoch, Sha256: pair.old.Sha256},
+		Settings:        settings,
+		Buckets:         map[string]*ArindbCanaryBucket{},
+		SourceStartedAt: sourceStartedAt,
+		DecidedAt:       decidedAt,
+	}
+	for _, bucket := range ProviderEgressBuckets {
+		decision.Buckets[bucket] = &ArindbCanaryBucket{
+			Countries:        map[string]ArindbCanaryCount{},
+			EmptiedCountries: []ArindbCanaryEmptiedCountry{},
+			EmptiedCities:    []ArindbCanaryEmptiedCity{},
+		}
+	}
+
+	latestEpoch := pair.latestEpoch()
+	oldEpoch := pair.oldEpoch()
+	decision.Coverage.Providers = len(providers)
+	for _, provider := range providers {
+		_, _, latestOk := provider.slots.factsUnder(latestEpoch)
+		_, _, oldOk := provider.slots.factsUnder(oldEpoch)
+		if latestOk {
+			decision.Coverage.Latest += 1
+		}
+		if oldOk {
+			decision.Coverage.Old += 1
+		}
+		if latestOk && oldOk {
+			decision.Coverage.Paired += 1
+		}
+	}
+	if oldEpoch == 0 {
+		decision.State = ArindbCanaryStateSingle
+		decision.ServingEpoch = 0
+		switch {
+		case pair.err != nil:
+			decision.SingleReason = "latest_unopened"
+		case latestEpoch == 0:
+			decision.SingleReason = "latest_" + pair.latest.State
+		default:
+			decision.SingleReason = "old_" + pair.old.State
+		}
+		return decision
+	}
+
+	// compare the providers with facts for both databases
+	type cityCount struct {
+		countryCode string
+		count       ArindbCanaryCount
+	}
+	bucketCityCounts := map[string]map[server.Id]*cityCount{}
+	for _, bucket := range ProviderEgressBuckets {
+		bucketCityCounts[bucket] = map[server.Id]*cityCount{}
+	}
+	for _, provider := range providers {
+		latestRisk, latestNonQuality, latestOk := provider.slots.factsUnder(latestEpoch)
+		oldRisk, oldNonQuality, oldOk := provider.slots.factsUnder(oldEpoch)
+		if !latestOk || !oldOk {
+			continue
+		}
+		underLatest := membership(provider, latestRisk, latestNonQuality)
+		underOld := membership(provider, oldRisk, oldNonQuality)
+		for _, bucket := range ProviderEgressBuckets {
+			inLatest, inOld := underLatest.in(bucket), underOld.in(bucket)
+			if !inLatest && !inOld {
+				continue
+			}
+			add := func(count *ArindbCanaryCount) {
+				if inLatest {
+					count.Latest += 1
+				}
+				if inOld {
+					count.Old += 1
+				}
+			}
+			b := decision.Buckets[bucket]
+			add(&b.ArindbCanaryCount)
+			if inOld && !inLatest {
+				b.Removed += 1
+			}
+			if inLatest && !inOld {
+				b.Added += 1
+			}
+			if provider.countryCode != "" {
+				count := b.Countries[provider.countryCode]
+				add(&count)
+				b.Countries[provider.countryCode] = count
+			}
+			if provider.cityId != nil {
+				city, ok := bucketCityCounts[bucket][*provider.cityId]
+				if !ok {
+					city = &cityCount{countryCode: provider.countryCode}
+					bucketCityCounts[bucket][*provider.cityId] = city
+				}
+				add(&city.count)
+			}
+		}
+	}
+
+	tripped := false
+	for _, bucket := range ProviderEgressBuckets {
+		b := decision.Buckets[bucket]
+		if 0 < b.Old {
+			b.LossRatio = float64(b.Old-b.Latest) / float64(b.Old)
+		}
+		for countryCode, count := range b.Countries {
+			if 0 < count.Old && count.Latest == 0 {
+				b.EmptiedCountries = append(b.EmptiedCountries, ArindbCanaryEmptiedCountry{CountryCode: countryCode, Old: count.Old})
+			}
+		}
+		slices.SortFunc(b.EmptiedCountries, func(x, y ArindbCanaryEmptiedCountry) int {
+			if x.Old != y.Old {
+				return y.Old - x.Old
+			}
+			return strings.Compare(x.CountryCode, y.CountryCode)
+		})
+		for cityId, city := range bucketCityCounts[bucket] {
+			if 0 < city.count.Old && city.count.Latest == 0 {
+				b.EmptiedCities = append(b.EmptiedCities, ArindbCanaryEmptiedCity{CityLocationId: cityId, CountryCode: city.countryCode, Old: city.count.Old})
+			}
+		}
+		slices.SortFunc(b.EmptiedCities, func(x, y ArindbCanaryEmptiedCity) int {
+			if x.Old != y.Old {
+				return y.Old - x.Old
+			}
+			return strings.Compare(x.CityLocationId.String(), y.CityLocationId.String())
+		})
+		b.EmptiedCityCount = len(b.EmptiedCities)
+		b.EmptiedCities = b.EmptiedCities[:min(len(b.EmptiedCities), arindbCanaryEmptiedCityLimit)]
+		// net loss, so a release that moves as many providers in as out passes
+		lossTrip := 0 < b.Old && settings.BucketLossThreshold < b.LossRatio
+		countryTrip := settings.TripOnEmptiedCountry && 0 < len(b.EmptiedCountries)
+		b.Tripped = lossTrip || countryTrip
+		tripped = tripped || b.Tripped
+	}
+
+	minimum := settings.MinCoverage * float64(decision.Coverage.Providers)
+	switch {
+	case float64(decision.Coverage.Paired) < minimum:
+		// serve the database the rows carry: a fail-closed transient while
+		// processes restart onto the pair and the rollup refreshes
+		decision.State = ArindbCanaryStateWarming
+		switch {
+		case minimum <= float64(decision.Coverage.Old):
+			decision.ServingEpoch = oldEpoch
+		case minimum <= float64(decision.Coverage.Latest):
+			decision.ServingEpoch = latestEpoch
+		case decision.Coverage.Latest <= decision.Coverage.Old:
+			decision.ServingEpoch = oldEpoch
+		default:
+			decision.ServingEpoch = latestEpoch
+		}
+	case tripped:
+		decision.State = ArindbCanaryStateFallback
+		decision.ServingEpoch = oldEpoch
+	default:
+		decision.State = ArindbCanaryStateLatest
+		decision.ServingEpoch = latestEpoch
+	}
+	return decision
+}
+
+// Quality facts follow the serving epoch for every provider of the
+// publication, Network-only included; risk keeps each row's latest slot. S = 0
+// leaves the filter as the rollup's latest slots loaded it.
+func applyArindbServingEpoch(filter *providerCountFilter, slots map[server.Id]arindbRollupSlots, servingEpoch int64) {
+	filter.arindbServingEpoch = servingEpoch
+	if servingEpoch == 0 {
+		return
+	}
+	for clientId, s := range slots {
+		if s.servingNonQuality(servingEpoch) {
+			filter.arinNonQuality[clientId] = true
+		} else {
+			delete(filter.arinNonQuality, clientId)
+		}
+	}
+}
+
+// One comparison provider per public client, placed by its location row,
+// with every lookback weight its rows carry; and every client of the cohort,
+// group-only and Network-only clients included.
+func arindbCanaryProvidersFromRows(rows []clientScoreSourceRow) (providers []*arindbCanaryProvider, cohortIds []server.Id) {
+	weights := map[server.Id]map[int]float64{}
+	placedClientIds := map[server.Id]bool{}
+	for _, row := range rows {
+		clientId := row.score.ClientId
+		clientWeights, ok := weights[clientId]
+		if !ok {
+			clientWeights = map[int]float64{}
+			weights[clientId] = clientWeights
+			cohortIds = append(cohortIds, clientId)
+		}
+		clientWeights[row.score.LookbackIndex] = row.score.IndependentReliabilityWeight
+		if row.locationGroup || row.score.NetworkOnly || placedClientIds[clientId] {
+			continue
+		}
+		placedClientIds[clientId] = true
+		providers = append(providers, &arindbCanaryProvider{
+			clientId:    clientId,
+			countryCode: normalizeCountryCode(row.egress.publishedCountryCode),
+			cityId:      row.cityId,
+			egress:      row.egress,
+			weights:     clientWeights,
+		})
+	}
+	return
+}
+
+// The unchanged rules of the export, decideProviderEgress and the reliability
+// minimums, with only the ARIN facts substituted.
+func arindbCanaryMembershipRule(
+	countFilter *providerCountFilter,
+	egressSettings *EgressIndexSettings,
+	egressTestEnabled bool,
+	minIndependentReliabilityWeights map[int]float64,
+) func(provider *arindbCanaryProvider, risk bool, nonQuality bool) arindbCanaryMembership {
+	return func(provider *arindbCanaryProvider, risk bool, nonQuality bool) arindbCanaryMembership {
+		facts := countFilter.egressFacts(
+			provider.clientId,
+			provider.egress.publishedCountryCode,
+			provider.egress.egressIndex,
+			provider.egress.egressQuality,
+			egressSettings,
+		)
+		facts.arinRisk = risk
+		facts.arinNonQuality = nonQuality
+		decision := decideProviderEgress(facts, egressTestEnabled)
+		passes := providerReliabilityPasses(provider.weights, minIndependentReliabilityWeights)
+		return arindbCanaryMembership{
+			quality: decision.quality && passes,
+			speed:   decision.speed && passes,
+			online:  decision.online && passes,
+		}
+	}
+}
+
+// Decides this publication from its staged source rows and applies the
+// serving epoch to the export's filter, before any provider is decided. The
+// filter must hold the cohort's common gates and the URL-success guard. The
+// slots are read in their own primary-key query beside the source rows; the
+// pinned source and filter statements are unchanged.
+func decideArindbCanaryForPublication(
+	ctx context.Context,
+	sourceStartedAt time.Time,
+	rows []clientScoreSourceRow,
+	countFilter *providerCountFilter,
+	egressSettings *EgressIndexSettings,
+	egressTestEnabled bool,
+	minIndependentReliabilityWeights map[int]float64,
+) *ArindbCanaryDecision {
+	pair := currentArindbCanaryPair()
+	if pair.err != nil {
+		glog.Errorf("[arindb]the latest ARIN database is not open in this process (%s); the canary is single\n", pair.err)
+	}
+	providers, cohortIds := arindbCanaryProvidersFromRows(rows)
+	slots := loadArindbRollupSlots(ctx, cohortIds)
+	for _, provider := range providers {
+		provider.slots = slots[provider.clientId]
+	}
+	membership := arindbCanaryMembershipRule(countFilter, egressSettings, egressTestEnabled, minIndependentReliabilityWeights)
+	decision := decideArindbCanary(pair, providers, membership, arindbCanarySettings(), sourceStartedAt, server.NowUtc())
+	// names are best effort; a failed read leaves the ids and counts standing
+	if r := server.HandleError(func() {
+		nameArindbCanaryCities(ctx, decision)
+	}); r != nil {
+		glog.Errorf("[arindb]emptied city names unavailable: %v\n", r)
+	}
+	applyArindbServingEpoch(countFilter, slots, decision.ServingEpoch)
+	glog.Infof("[arindb]%s\n", decision.logSummary())
+	return decision
+}
+
+// Names the emptied cities of every bucket from their location rows.
+func nameArindbCanaryCities(ctx context.Context, decision *ArindbCanaryDecision) {
+	cityIds := []server.Id{}
+	for _, bucket := range decision.Buckets {
+		for _, city := range bucket.EmptiedCities {
+			cityIds = append(cityIds, city.CityLocationId)
+		}
+	}
+	if len(cityIds) == 0 {
+		return
+	}
+	names := map[server.Id]string{}
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, `SELECT location_id, location_name FROM location WHERE location_id = ANY($1)`, cityIds)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var locationId server.Id
+				var name string
+				server.Raise(rows.Scan(&locationId, &name))
+				names[locationId] = name
+			}
+		})
+	})
+	for _, bucket := range decision.Buckets {
+		for i := range bucket.EmptiedCities {
+			bucket.EmptiedCities[i].Name = names[bucket.EmptiedCities[i].CityLocationId]
+		}
+	}
+}
+
+// One line for the indexer log, emptied countries and cities named.
+func (self *ArindbCanaryDecision) logSummary() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "canary state=%s serving=%d latest=%d(%s) old=%d(%s)", self.State, self.ServingEpoch,
+		self.Latest.BuildEpoch, self.Latest.State, self.Old.BuildEpoch, self.Old.State)
+	if self.SingleReason != "" {
+		fmt.Fprintf(&b, " reason=%s", self.SingleReason)
+	}
+	fmt.Fprintf(&b, " coverage latest=%d old=%d paired=%d of %d", self.Coverage.Latest, self.Coverage.Old, self.Coverage.Paired, self.Coverage.Providers)
+	for _, bucket := range ProviderEgressBuckets {
+		b2 := self.Buckets[bucket]
+		fmt.Fprintf(&b, "; %s old=%d latest=%d loss=%.4f removed=%d added=%d tripped=%t", bucket, b2.Old, b2.Latest, b2.LossRatio, b2.Removed, b2.Added, b2.Tripped)
+		if 0 < len(b2.EmptiedCountries) {
+			countries := []string{}
+			for _, country := range b2.EmptiedCountries {
+				countries = append(countries, fmt.Sprintf("%s(%d)", country.CountryCode, country.Old))
+			}
+			fmt.Fprintf(&b, " emptied_countries=%s", strings.Join(countries, ","))
+		}
+		if 0 < b2.EmptiedCityCount {
+			cities := []string{}
+			for _, city := range b2.EmptiedCities {
+				cities = append(cities, fmt.Sprintf("%s/%s(%d)", city.CountryCode, city.Name, city.Old))
+			}
+			fmt.Fprintf(&b, " emptied_cities=%d[%s]", b2.EmptiedCityCount, strings.Join(cities, ","))
+		}
+	}
+	return b.String()
+}
+
+// Where the decision lives. Redis in production; tests substitute a store.
+type arindbCanaryDecisionStore interface {
+	set(ctx context.Context, value []byte, ttl time.Duration) error
+	// absent is (nil, nil)
+	get(ctx context.Context) ([]byte, error)
+}
+
+type redisArindbCanaryDecisionStore struct{}
+
+func (redisArindbCanaryDecisionStore) set(ctx context.Context, value []byte, ttl time.Duration) (returnErr error) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		returnErr = r.Set(ctx, arindbCanaryDecisionKey, value, ttl).Err()
+	})
+	return
+}
+
+func (redisArindbCanaryDecisionStore) get(ctx context.Context) (value []byte, returnErr error) {
+	returnErr = server.RedisWithDeadline(ctx, func(r server.RedisClient) error {
+		data, err := r.Get(ctx, arindbCanaryDecisionKey).Bytes()
+		if errors.Is(err, redis.Nil) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		value = data
+		return nil
+	})
+	return
+}
+
+var arindbCanaryDecisions arindbCanaryDecisionStore = redisArindbCanaryDecisionStore{}
+
+// Publishes the decision as versioned JSON with the export's ttl. Written
+// immediately after deciding and before the export, so readers switch while
+// the export rewrites targets; a stalled indexer's decision expires with its
+// publication.
+func writeArindbCanaryDecision(ctx context.Context, decision *ArindbCanaryDecision, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(decision)
+	if err != nil {
+		return err
+	}
+	return arindbCanaryDecisions.set(ctx, data, ttl)
+}
+
+// The published decision, nil when none is published. A decision of another
+// version or with inconsistent provenance is an error, never a default.
+// Bounded by a 2 second deadline unless ctx is shorter.
+func GetArindbCanaryDecision(ctx context.Context) (*ArindbCanaryDecision, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	data, err := arindbCanaryDecisions.get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil
+	}
+	return parseArindbCanaryDecision(data)
+}
+
+func parseArindbCanaryDecision(data []byte) (*ArindbCanaryDecision, error) {
+	var version struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &version); err != nil {
+		return nil, fmt.Errorf("unreadable arindb canary decision: %w", err)
+	}
+	if version.Version != ArindbCanaryDecisionVersion {
+		return nil, fmt.Errorf("arindb canary decision version %d is not %d", version.Version, ArindbCanaryDecisionVersion)
+	}
+	decision := &ArindbCanaryDecision{}
+	if err := json.Unmarshal(data, decision); err != nil {
+		return nil, fmt.Errorf("unreadable arindb canary decision: %w", err)
+	}
+	if decision.DecisionId == "" || decision.DecidedAt.IsZero() || decision.SourceStartedAt.IsZero() || decision.DecidedAt.Before(decision.SourceStartedAt) {
+		return nil, fmt.Errorf("arindb canary decision has incomplete provenance")
+	}
+	for _, bucket := range ProviderEgressBuckets {
+		if decision.Buckets[bucket] == nil {
+			return nil, fmt.Errorf("arindb canary decision has no %s bucket", bucket)
+		}
+	}
+	// the serving epoch must be one the state can choose
+	switch decision.State {
+	case ArindbCanaryStateSingle:
+		if decision.ServingEpoch != 0 {
+			return nil, fmt.Errorf("single arindb canary decision serves epoch %d", decision.ServingEpoch)
+		}
+	case ArindbCanaryStateLatest:
+		if decision.ServingEpoch <= 0 || decision.ServingEpoch != decision.Latest.BuildEpoch {
+			return nil, fmt.Errorf("latest arindb canary decision serves epoch %d, not the latest", decision.ServingEpoch)
+		}
+	case ArindbCanaryStateFallback:
+		if decision.ServingEpoch <= 0 || decision.ServingEpoch != decision.Old.BuildEpoch {
+			return nil, fmt.Errorf("fallback arindb canary decision serves epoch %d, not the old", decision.ServingEpoch)
+		}
+	case ArindbCanaryStateWarming:
+		if decision.ServingEpoch <= 0 || (decision.ServingEpoch != decision.Latest.BuildEpoch && decision.ServingEpoch != decision.Old.BuildEpoch) {
+			return nil, fmt.Errorf("warming arindb canary decision serves epoch %d, neither database", decision.ServingEpoch)
+		}
+	default:
+		return nil, fmt.Errorf("unknown arindb canary state %q", decision.State)
+	}
+	return decision, nil
+}
+
+// The decision's summary in the native census. Older readers ignore it.
+type ClientScoreNativeArindb struct {
+	DecisionId   string                       `json:"decision_id"`
+	State        string                       `json:"state"`
+	ServingEpoch int64                        `json:"serving_epoch"`
+	Latest       ArindbCanaryDatabase         `json:"latest"`
+	Old          ArindbCanaryDatabase         `json:"old"`
+	Coverage     ArindbCanaryCoverage         `json:"coverage"`
+	Buckets      map[string]ArindbCanaryCount `json:"buckets"`
+}
+
+func (self *ArindbCanaryDecision) nativeSummary() *ClientScoreNativeArindb {
+	summary := &ClientScoreNativeArindb{
+		DecisionId:   self.DecisionId,
+		State:        self.State,
+		ServingEpoch: self.ServingEpoch,
+		Latest:       self.Latest,
+		Old:          self.Old,
+		Coverage:     self.Coverage,
+		Buckets:      map[string]ArindbCanaryCount{},
+	}
+	for bucket, count := range self.Buckets {
+		summary.Buckets[bucket] = count.ArindbCanaryCount
+	}
+	return summary
+}

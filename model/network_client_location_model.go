@@ -3930,6 +3930,9 @@ type providerCountFilter struct {
 	// The modern provider gate's evidence rows; a provider without one has
 	// no evidence.
 	modernEvidence map[server.Id]*ProviderModernEvidenceRecord
+	// The ARIN serving epoch arinNonQuality follows (arindb_canary_model.go):
+	// 0 is each row's latest slot. Risk always follows the latest slot.
+	arindbServingEpoch int64
 }
 
 // Complete means disconnected history too. The partial covering index supplies
@@ -5470,6 +5473,35 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		return newProviderOnlineSuccessBaseline(countFilter, clientIdCountryCodes, egressSettings, readProviderOnlineSuccessPreviousBaseline(ctx, "the score export"))
 	}()
 	countFilter.onlineSuccessBaseline = onlineSuccessBaseline
+
+	// keyed by lookback index (see ClientLookbacks): 1 = the hour, 2 = 12h.
+	// The hour threshold is the gate that decides whether a provider is in the
+	// market at all. It sat at 0.99 -- less than one bad block in 60 -- which
+	// left no slack for a reconnect that straddles a block boundary (the block
+	// carrying only the new-connection sync has no established sync, so it is
+	// invalid however tolerant the rule is). 0.95 allows three such blocks an
+	// hour. Repeated reconnects still fail it: they are real user impact, and
+	// `client_reliability_valid` only forgives ONE per block.
+	minIndependentReliabilityWeights := providerReliabilityMinimums()
+
+	// The ARIN canary chooses this publication's serving database before any
+	// provider is decided, and publishes the choice before the export so the
+	// request-time readers apply it while targets are rewritten
+	// (arindb_canary_model.go). Without a readable decision the readers would
+	// fall back to each row's latest slot, so a failed write stops the export.
+	arindbDecision := decideArindbCanaryForPublication(
+		ctx,
+		nativeSourceStartedAt,
+		pendingScores,
+		&countFilter,
+		egressSettings,
+		egressTestEnabled,
+		minIndependentReliabilityWeights,
+	)
+	if err := writeArindbCanaryDecision(ctx, arindbDecision, ttl); err != nil {
+		return fmt.Errorf("publish arindb canary decision: %w", err)
+	}
+
 	var observeShadowScore func(clientScoreSourceRow)
 	if shadowScoreCapture != nil {
 		observeShadowScore = func(row clientScoreSourceRow) {
@@ -5483,16 +5515,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	hardExcludedClientIds := targetMaps.hardExcludedClientIds
 	pendingScores = nil
 	cohort = nil
-
-	// keyed by lookback index (see ClientLookbacks): 1 = the hour, 2 = 12h.
-	// The hour threshold is the gate that decides whether a provider is in the
-	// market at all. It sat at 0.99 -- less than one bad block in 60 -- which
-	// left no slack for a reconnect that straddles a block boundary (the block
-	// carrying only the new-connection sync has no established sync, so it is
-	// invalid however tolerant the rule is). 0.95 allows three such blocks an
-	// hour. Repeated reconnects still fail it: they are real user impact, and
-	// `client_reliability_valid` only forgives ONE per block.
-	minIndependentReliabilityWeights := providerReliabilityMinimums()
 
 	// The rules of connect/GEOMAP.md §10.3 for every provider of the pool, once
 	// each: a client sits in several location and group maps, each with its
@@ -5554,6 +5576,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		}
 	}
 	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthWindowEnd, countFilter.healthCounts, locationClientScores, locationGroupClientScores)
+	nativeCensus.Arindb = arindbDecision.nativeSummary()
 
 	// location id -> network id
 	excludeLocationNetworkIds := map[server.Id]map[server.Id]bool{}
