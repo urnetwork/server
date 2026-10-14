@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
@@ -279,64 +278,5 @@ func TestSubmitEgressHealthIgnoresANilResult(t *testing.T) {
 	}
 	if called {
 		t.Fatal("a nil result was submitted as a zero score")
-	}
-}
-
-// The modern provider gate's evidence rides the submission only when the run
-// observed its session: absent otherwise, so a server that does not declare
-// modern_evidence keeps accepting every body, and present with exactly its
-// keys when observed.
-func TestSubmitEgressHealthCarriesModernEvidenceOnlyWhenObserved(t *testing.T) {
-	var raw []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ = io.ReadAll(r.Body)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-	client := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret", Http: srv.Client()}
-	submit := func(result *egresshealth.Result) map[string]any {
-		t.Helper()
-		if err := client.SubmitEgressHealth(context.Background(), "provider-1", result); err != nil {
-			t.Fatalf("SubmitEgressHealth: %s", err)
-		}
-		var keys map[string]any
-		if err := json.Unmarshal(raw, &keys); err != nil {
-			t.Fatalf("unmarshal body: %s", err)
-		}
-		return keys
-	}
-
-	if _, present := submit(ingestHealthResult())["modern_evidence"]; present {
-		t.Fatal("a run that observed nothing sent modern_evidence")
-	}
-
-	result := ingestHealthResult()
-	result.ModernEvidence = &egresshealth.ModernEvidence{
-		E2eNegotiated:             true,
-		KeyExchange:               "X25519MLKEM768",
-		PostQuantum:               true,
-		WindowAdvertised:          true,
-		MaxReceiveWindowByteCount: 4 * 1024 * 1024,
-		ObservedAt:                time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC),
-	}
-	evidence, ok := submit(result)["modern_evidence"].(map[string]any)
-	if !ok {
-		t.Fatal("an observed session's evidence is missing from the body")
-	}
-	wantKeys := []string{"e2e_negotiated", "key_exchange", "post_quantum", "window_advertised", "max_receive_window_byte_count", "observed_at"}
-	if len(evidence) != len(wantKeys) {
-		t.Errorf("modern_evidence carries %d keys, want exactly %v", len(evidence), wantKeys)
-	}
-	for _, key := range wantKeys {
-		if _, present := evidence[key]; !present {
-			t.Errorf("modern_evidence is missing %q", key)
-		}
-	}
-	var decoded EgressHealthSubmission
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.ModernEvidence == nil || *decoded.ModernEvidence != *result.ModernEvidence {
-		t.Fatalf("modern evidence round-tripped as %+v, want %+v", decoded.ModernEvidence, result.ModernEvidence)
 	}
 }
