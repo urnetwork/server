@@ -206,6 +206,7 @@ func TestProviderUrlProbeLocalPassUnderLoad(t *testing.T) {
 			}()
 		}
 		seedGroup.Wait()
+		testPassingReliabilityHistory(ctx, seeded...)
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 		proberNetworkId := server.NewId()
 		server.Raise(model.AddBasicTransferBalance(ctx, proberNetworkId, model.ByteCount(1024*1024*1024*1024), server.NowUtc().Add(-time.Minute), server.NowUtc().Add(time.Hour)))
@@ -223,9 +224,10 @@ func TestProviderUrlProbeLocalPassUnderLoad(t *testing.T) {
 			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE eligible), COUNT(*) FILTER (WHERE eligible AND next_attempt_at <= $1)
 				FROM provider_egress_probe_cycle`, server.NowUtc()).Scan(&cycles, &eligible, &dueNow))
 		})
-		// A provider connected only moments before the rollup has not built the
-		// independent reliability weight URL work requires, so a long seed admits
-		// fewer than it seeded. Every admitted provider must be measured once.
+		// Every seeded provider has passing reliability history, but a seed
+		// longer than the rollup's handler heartbeat horizon leaves the earliest
+		// connections stale, so a long seed admits fewer than it seeded. Every
+		// admitted provider must be measured once.
 		tb.Logf("seeded cycles=%d eligible=%d due_now=%d", cycles, eligible, dueNow)
 		if dueNow < shards*workers {
 			tb.Fatalf("only %d eligible providers; the run needs at least %d to fill every worker", dueNow, shards*workers)

@@ -63,7 +63,14 @@ func newTestingProbeEligibilityPublication(t testing.TB) *testingProbeEligibilit
 	model.UpdateNetworkReliabilityWindowScores(ctx, oldEnd, false)
 	model.SetProvide(ctx, fixture.clients["missing"], map[model.ProvideMode][]byte{model.ProvideModePublic: []byte("public-secret")})
 	// Both implementations now see the same old scores, leaving rejected cycles
-	// false and the never-eligible provider without any scheduling row.
+	// false and the never-eligible provider without any scheduling row. The
+	// recovered and future cycles were opened by an earlier passing generation;
+	// a provider without history opens none.
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_probe_cycle(client_id,cycle_started_at,next_attempt_at,eligible)
+			SELECT client_id,$2,$2,false FROM unnest($1::uuid[]) AS client_id ON CONFLICT(client_id) DO NOTHING`,
+			[]server.Id{fixture.clients["recovered"], fixture.clients["future"]}, oldEnd.Add(-5*time.Hour)))
+	})
 	model.UpdateClientLocationReliabilities(ctx, oldEnd.Add(-time.Hour), server.NowUtc())
 	for name, h := range histories {
 		model.AddClientReliabilityStatsRange(ctx, h.networkId, h.clientId, h.addressHash, oldEnd.Add(model.ReliabilityBlockDuration), newEnd, valid)

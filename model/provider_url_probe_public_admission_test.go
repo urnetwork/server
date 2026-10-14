@@ -261,6 +261,25 @@ func TestUrlProbeMissingCycleQuotaOverlapIsIndependent(t *testing.T) {
 		if claimed := ClaimProviderUrlProbeDue(ctx, now, 2, 0, 1); len(claimed) != 0 {
 			t.Fatalf("a provider without a cycle was claimable: %+v", claimed)
 		}
+		// The real publication replaces the fleet seed's scores. Twelve hours of
+		// valid observations at a complete city location keep both providers'
+		// history passing through it.
+		city := egressTestCity(ctx, "Overlap City", "Overlap Region", "Overlap Country", "zz")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_location_reliability
+				SET city_location_id=$2,region_location_id=$3,country_location_id=$4 WHERE client_id=ANY($1::uuid[])`,
+				clients, city.LocationId, city.RegionLocationId, city.CountryLocationId))
+		})
+		valid := &ClientReliabilityStats{ConnectionEstablishedCount: 1, ProvideEnabledCount: 1, ReceiveMessageCount: 1}
+		for _, clientId := range clients {
+			var networkId server.Id
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT network_id FROM network_client WHERE client_id=$1`, clientId).Scan(&networkId))
+			})
+			var addressHash [32]byte
+			copy(addressHash[:], clientId[:])
+			AddClientReliabilityStatsRange(ctx, networkId, clientId, addressHash, now.Add(-ClientLookbacks[len(ClientLookbacks)-1]), now, valid)
+		}
 		UpdateClientReliabilityScores(ctx, now, false)
 		after := GetProviderUrlProbeFleet(ctx, server.NowUtc())
 		if after.Eligible != before.Eligible || after.MissingCycles != 0 || after.QuotaComplete != before.QuotaComplete || after.RunsNeeded != before.RunsNeeded {

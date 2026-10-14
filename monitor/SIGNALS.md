@@ -14936,6 +14936,16 @@ source must contain the cohort query, reducer and optional observation sink.
 Output failures remain monitor visibility errors and retain actual deficit
 alerts; the observer never converts healthy samples into alerts.
 
+First admission waits for reliability history: URL admission needs at least
+one `client_connection_reliability_score` row unless intent priority admits
+the provider, and the score pass opens the first cycle. Before that rule the
+location pass, which commits before the score pass, admitted a connection
+with no scores as neutral. The census counted it and the scheduler claimed it
+until its first failing scores 20 to 130 seconds later, and the cycle it
+opened made the real admission about eight hours later count as mature with
+no runs. Cycles opened that way before the rule shipped are not reset, so each
+such provider still adds one mature deficit when it is first really admitted.
+
 The provider quality probes dashboard has a dedicated URL quota row with the
 known mature ratio, known warming count, unknown age count, all-current quota,
 all nine cohort counts, and separate TLS exceptions. It selects one current,
