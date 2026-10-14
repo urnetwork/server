@@ -13704,7 +13704,8 @@ probe task, which holds every load of a run, therefore records each one in
 marks the loads whose exit was **healthy** — it passed at least nine in ten of
 the *other* scored sites of the same run, after their retries. A site's
 failure share is its failed healthy loads over its healthy loads in the
-window (`SiteWindow`, three days), per class:
+window (`SiteWindow`, three days, from no day before the first reached-only
+tally day below), per class:
 
 ```sql
 SELECT d.name, d.class,
@@ -13713,7 +13714,8 @@ SELECT d.name, d.class,
 FROM provider_egress_destination d
 JOIN provider_egress_site_tally t ON t.name = d.name
 WHERE d.active
-  AND date_trunc('day', now() at time zone 'utc' - interval '3 days')::date <= t.tally_day
+  AND GREATEST(date_trunc('day', now() at time zone 'utc' - interval '3 days')::date,
+               DATE '2026-10-14') <= t.tally_day
 GROUP BY d.name, d.class;
 ```
 

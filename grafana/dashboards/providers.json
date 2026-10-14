@@ -3242,7 +3242,7 @@
           "legendFormat": "{{class}}"
         }
       ],
-      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the pool refresh skips its run while the share of the loads that reached their provider is over the line (this panel counts every failure, a provider that was never reached included). Read from the one taskworker with the freshest fleet snapshot."
+      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the pool refresh skips its run while the share of the loads that reached their provider is over the line, or while fewer than a fifth of the recent loads reached their provider at all (this panel counts every failure, a provider that was never reached included). Read from the one taskworker with the freshest fleet snapshot."
     },
     {
       "id": 63,
