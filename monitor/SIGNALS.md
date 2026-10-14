@@ -14998,13 +14998,44 @@ expiry deadlines are refreshed when touched, so deployment is not instant
 full-cohort repair. A modeled latency-gap repair is not Main coverage proof;
 missing/stale census and historical hourly gaps remain separate unknowns.
 
+Since the 2026-10-14 owner decision (task #57), each quota-full renewal also
+waits a stable per-provider offset in [0, 90 s), derived from md5 of the
+client id. The replacement is therefore admitted between six and four and a
+half minutes before the oldest of the latest ten expires. The offset takes the
+control/publication reserve's place in the headroom: the default turn and the
+scheduling margin still fit at every offset. It only delays the old deadline,
+so it never admits a turn while ten runs survive the horizon. The writer,
+admission and completion share one deadline expression, and the census counts
+the stored deadline, so `due` and admission flip at the same instant.
+
+Due waves: before that decision, a cohort that measured together, such as a
+deploy or outage catch-up, renewed together every four hours. Its `due` count
+spiked at that cadence, and on 2026-10-13/14 mature coverage dipped about
+1–1.5 points for about 30 minutes each time. With the offset, the cohort's
+renewals spread over 90 s at the first resume and fan out by up to another
+90 s every cycle, because each offset also lengthens its provider's renewal
+period. Read the spikes accordingly:
+
+- A spike that widens and lowers on each cycle is a cohort fanning out.
+- A spike of unchanged shape every four hours means a writer or claimer
+  without the offset (a mixed rollout) or a freshly aligned cohort. A new
+  outage forms such a cohort, which then fans out at the same rate.
+- On the first resume after deployment, admission parks unjittered stored
+  deadlines at their jittered ones. Until then the census counts those
+  providers due for up to their offset, a one-cycle transient.
+- `oldest_due_seconds` can show those short ages; they are not overdue
+  deficit.
+
 An empty ordinary admission can inspect at most 128 indexed future deadlines
 inside the six-minute horizon. The compatibility repair advances only an exact
 old four-hour measurement-expiry deadline whose latest issued claim has a
 retained completed receipt, after the full configured success/failure interval
 including jitter and the live-claim reservation have elapsed since all retained
 activity. Missing/uncompleted/recent ownership, a different deadline, and longer
-custom policies stay unchanged. The ordinary due predicate is not widened, and
+custom policies stay unchanged. A jittered renewal deadline always precedes
+that exact four-hour geometry, so the repair never moves one, and admission
+after a repair still parks a row at its jittered deadline rather than claiming
+it early. The ordinary due predicate is not widened, and
 the normal authoritative eligibility and single-claim checks still run after
 repair. Populated 100,000-row and concurrent owned-shard controls distinguish
 bounded future-index seeks from a broad scan or shortened lease. Ambiguous rows

@@ -1,5 +1,17 @@
 # FindProviders2 supply and quality-probe repair plan
 
+Latest owner decision, 2026-10-14 (task #57): **break up the synchronized
+URL-probe due waves by spreading each provider's next attempt with bounded
+jitter, and keep the quota of ten accepted measured runs per mature provider
+per rolling four hours.** A quota-full provider now renews at its oldest
+counted run plus 3h54m plus a stable per-provider offset in [0, 90 s). The
+offset only delays the old deadline, so it adds no measured turn, and it fits
+inside the six-minute replacement headroom, so the default turn still finishes
+before the oldest run expires. Because it applies at every resume, an aligned
+cohort fans out by up to 90 s per cycle and does not re-form its wave. Branch
+`fix/fp2-url-due-jitter`, not deployed. See
+[the renewal offset](#quota-renewal-offset-owner-decision-2026-10-14).
+
 Latest user decision, 2026-10-13: **every bucket, Online included, requires at
 least one accepted measured URL success in the eight-hour evidence window,
 unless the provider has fewer than two measured runs.** A provider with
@@ -697,8 +709,96 @@ and use measurement time rather than report arrival. Persist history and pacing
 across restarts. A fixed period or long-running cycle cannot carry aged runs
 forward. While incomplete, both success and failed measurements count toward
 ten, with existing success/failure pacing and fairness. At quota, schedule the
-oldest retained run's expiry; do not pause for four hours after run ten. TLS
-revalidation remains independently due, even for a quota-complete provider.
+replacement six minutes before the oldest retained run expires, delayed by the
+provider's stable renewal offset ([below](#quota-renewal-offset-owner-decision-2026-10-14));
+do not pause for four hours after run ten. TLS revalidation remains
+independently due, even for a quota-complete provider.
+
+### Quota renewal offset (owner decision 2026-10-14)
+
+Owner decision, 2026-10-14 (task #57): break up the synchronized URL-probe due
+waves by spreading each provider's next attempt with bounded jitter, keeping
+the quota of ten accepted measured runs per mature provider per rolling four
+hours. Before it, a quota-full provider's next attempt was its oldest counted
+run plus 3h54m. A cohort that measured together, such as a catch-up after a
+deploy or outage, therefore came due together on every cycle. On 2026-10-13/14
+Main's mature coverage dipped about 1–1.5 points every four hours and
+recovered within about 30 minutes.
+
+Each quota-full renewal deadline is now `oldest run + 3h54m + offset`. The
+offset is a stable per-provider value in whole seconds in [0, 90 s): the first
+32 bits of md5 over the canonical client id text, mod 90. md5 keeps it
+independent of the `hashtext` slot and warmup pace hashes. One SQL expression,
+`providerUrlProbeRenewalAtSql` (`model/provider_url_probe_due.go`), serves
+every site that decides dueness:
+
+- The accepted-history writer stores it (`providerUrlProbeAcceptedCycleSql`).
+- Admission's measured-work predicate requires it, and a provider found in
+  the head before it is parked there (`providerUrlProbeDueSql`).
+- Local-failure completion retries only work still owed by it
+  (`providerUrlProbeCompletionCycleSql`).
+- The census counts only the stored `next_attempt_at`, so it flips at exactly
+  the instant admission does.
+
+The offset applies at every resume, so it also lengthens that provider's
+renewal period by itself. An aligned cohort fans out by up to 90 s per cycle
+and does not re-converge. In the pure trace control, the busiest minute holds
+100% of an aligned cohort's renewals without the offset. With it, the share is
+66% at the first renewal, 12% after six cycles (about a day) and 4% after
+twenty.
+
+The range is bounded by the headroom. A renewal claimed before oldest + 3h54m
+adds a run. One measured after oldest + 4h loses a run, and a per-cycle offset
+pays that on every renewal, not once. A [0, 30 min) offset would make about 80%
+of providers miss each renewal by up to 24 minutes; the pure control loses
+coverage at a 15-minute offset. 90 s is the headroom's control/publication
+reserve (three 30-second control-plane timeouts), which measured publication
+(0.1–1.1 s means) leaves nearly unused. At the largest offset, the default
+220-second turn and the 50-second scheduling margin still fit. Ten
+simultaneous expiries renewed with 25-second turns, the cluster renewal
+control, also still keep coverage. A high-offset turn that runs its full
+220 s and also exhausts the control-plane reserve can now finish after the
+oldest run expires. That conjunction already means a degraded control plane.
+
+- **Quota.** The offset only delays the unjittered deadline, already the
+  earliest replacement the quota needs. No turn is admitted while ten runs
+  survive the headroom, and no provider gets more renewals or a fuller rolling
+  window than it would without the offset. Its rate is ten runs per
+  (3h54m + offset + turn latency), at most today's.
+- **Coverage.** For every offset value, the pure trace keeps ten current runs
+  with a 270-second claim-to-measurement latency, and keeps the ten-run cluster
+  covered with 25-second turns.
+- **Starvation.** The largest extra delay is 89 s per renewal.
+
+Rollout needs no migration. Deadlines stored before deployment are
+unjittered. The census counts such a provider due at oldest + 3h54m until
+admission parks it at its jittered deadline: one extra head row per provider,
+on its first resume only. The legacy exact-four-hour repair cannot match a
+jittered deadline, because the offset is below the headroom. During a mixed
+rollout, an old claimer may admit or park at the unjittered deadline and a new
+claimer re-parks; neither adds a turn. A new outage still forms a new aligned
+cohort, which then fans out at the same 90 s per cycle. A faster fan-out needs
+renewing earlier, which adds runs and was not chosen, or accepting a lost run
+per renewal.
+
+Pure controls: `TestUrlProbeRenewalJitterSpreadsAlignedCohort`,
+`TestUrlProbeRenewalJitterNeverExceedsQuota`,
+`TestUrlProbeRenewalJitterKeepsCoverage`,
+`TestUrlProbeRenewalOffsetIsSpreadAndBelowLegacyGeometry`,
+`TestUrlProbeDuenessSitesShareRenewalDeadline` and the taskworker
+`TestUrlProbeAdmissionKeepsRequestAndReservePolicy`. DB controls are written
+but await the sanctioned local-fixture runner:
+
+- `TestUrlProbeRenewalOffsetSqlMatchesGoOracle`
+- `TestUrlProbeRenewalJitterSpreadsAlignedCohortInDb`
+- `TestUrlProbeRenewalJitterReparksUnjitteredDeadline`
+- `TestUrlProbeRenewalJitterGatesLocalRetry`
+- the renewal, quota, priority and legacy-repair DB tests, updated to the
+  jittered deadline.
+
+After deployment, census `due` and `oldest_due_seconds` spikes at the old
+four-hour cadence should widen and flatten over about a day, and mature
+coverage dips should stop recurring at that cadence.
 
 The minimum fleet throughput is `10*N/4` accepted measured runs per hour,
 or `10*N/14400` per second. Failures consume this quota normally; headroom is
