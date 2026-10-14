@@ -125,13 +125,8 @@ func ReconcileContractOwnerAtDeadline(ctx context.Context, balanceIds []server.I
 		return readContractDeadlineOwnerSiblingsInTx(ctx, tx, balanceIds, primary.ContractId, due)
 	}
 	// Both turns share the coalesced projections, refreshed once at the end.
-	postCtx, finishLegacyPosts := withLegacySettlementPostBatch(ctx)
-	refresh := &deadlineNetEscrowRefreshBatch{balanceIdSet: map[server.Id]bool{}}
-	postCtx = context.WithValue(postCtx, deadlineNetEscrowRefreshBatchKey{}, refresh)
-	defer func() {
-		refresh.finish(ctx)
-		finishLegacyPosts()
-	}()
+	postCtx, finishPosts := withContractDeadlineOwnerPosts(ctx)
+	defer finishPosts()
 	results, siblings, busy, _, err := reconcileContractOwnerBatchAtDeadline(ctx, postCtx, balanceIds, []ContractDeadline{primary}, discover)
 	if err != nil {
 		return nil, err
@@ -168,6 +163,37 @@ func ReconcileContractOwnerAtDeadline(ctx context.Context, balanceIds []server.I
 	}
 	// A held owner or a failed admission leaves siblings to their own closes.
 	return result, nil
+}
+
+// Closes known due members of one owner together in one owned turn, without
+// waiting for admission or reading siblings. Busy means the owner was held and
+// nothing was read or written. A failed turn acknowledged no member. Entered
+// reports whether it began its members: then a member failed and the caller
+// can close each one alone, which finds closed any member a commit with a
+// lost reply did retire. A failure before that is the route's or the
+// admission's, which each member alone would meet again, as the deadline pass
+// does not retry siblings then. Otherwise every member has a result.
+func reconcileContractOwnerMembersAtDeadline(ctx context.Context, balanceIds []server.Id, members []ContractDeadline) (results map[server.Id]*ContractDeadlineReconciliation, busy bool, entered bool, returnErr error) {
+	if err := validateContractDeadlineOwner(balanceIds, members); err != nil {
+		return nil, false, false, err
+	}
+	postCtx, finishPosts := withContractDeadlineOwnerPosts(ctx)
+	defer finishPosts()
+	results, _, busy, entered, returnErr = reconcileContractOwnerBatchAtDeadline(ctx, postCtx, balanceIds, members, nil)
+	return
+}
+
+// The turns of one owner share the coalesced projections. The returned finish
+// refreshes each recorded balance once and drains the legacy posts; it runs
+// after the owner's last turn.
+func withContractDeadlineOwnerPosts(ctx context.Context) (context.Context, func()) {
+	postCtx, finishLegacyPosts := withLegacySettlementPostBatch(ctx)
+	refresh := &deadlineNetEscrowRefreshBatch{balanceIdSet: map[server.Id]bool{}}
+	postCtx = context.WithValue(postCtx, deadlineNetEscrowRefreshBatchKey{}, refresh)
+	return postCtx, func() {
+		refresh.finish(ctx)
+		finishLegacyPosts()
+	}
 }
 
 // Rejects empty, oversized, duplicate or zero identities before any admission.
