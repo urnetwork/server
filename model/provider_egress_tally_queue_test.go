@@ -55,8 +55,12 @@ func TestProviderEgressTallyBatchCoalescesExactCounters(t *testing.T) {
 	if batch.Sites[0].CanaryLoads != 256 || batch.Sites[0].CanaryPasses != 256 || batch.Sites[0].Loads != 0 || batch.Sites[1].CanaryPasses != 0 {
 		t.Fatal("canary evidence changed scoring counters")
 	}
-	if _, err := PrepareProviderEgressTallyBatch(append(records, record)); err == nil {
-		t.Fatal("unbounded record page accepted")
+	oversized := make([]ProviderEgressTallyRecord, providerEgressTallyDrainLength+1)
+	for i := range oversized {
+		oversized[i] = record
+	}
+	if _, err := PrepareProviderEgressTallyBatch(oversized); err == nil {
+		t.Fatal("unbounded record batch accepted")
 	}
 }
 

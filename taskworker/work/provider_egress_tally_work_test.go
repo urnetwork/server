@@ -31,7 +31,13 @@ type testingTallyOwner struct {
 
 func newTestingTallyOwner(t testing.TB) *testingTallyOwner {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	return newTestingTallyOwnerWithin(t, 45*time.Second)
+}
+
+// The timeout only guards a hung fixture; it is never a throughput verdict.
+func newTestingTallyOwnerWithin(t testing.TB, timeout time.Duration) *testingTallyOwner {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	h := &testingTallyOwner{t: t, ctx: ctx, cancel: cancel, day: time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC), run: model.ProviderEgressRunTally{Place: model.ProviderEgressPlace{CountryCode: "zz", Region: "Synthetic rollup"}, Healthy: true}}
 	h.shard = model.ProviderEgressTallyShard(h.run.Place)
 	h.session = session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
