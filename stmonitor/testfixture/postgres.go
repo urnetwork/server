@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/stmonitor"
 )
 
@@ -28,6 +29,8 @@ type Fixture struct {
 
 // The caller supplies an explicitly local disposable PostgreSQL administration
 // URL. Every root owns a fresh database/role; existing application DBs are unused.
+// In a WARP_ENV=local process both connections dial only the launcher-attested
+// endpoints, so a URL that names a production data tunnel port is refused there.
 func New(t testing.TB) *Fixture {
 	t.Helper()
 	value, err := url.Parse(os.Getenv("STMONITOR_TEST_ADMIN_URL"))
@@ -35,7 +38,15 @@ func New(t testing.TB) *Fixture {
 		t.Fatal("STMONITOR_TEST_ADMIN_URL must name an explicitly disposable loopback PostgreSQL fixture")
 	}
 	ctx := t.Context()
-	admin, err := pgx.Connect(ctx, value.String())
+	connect := func(target *url.URL) (*pgx.Conn, error) {
+		config, err := pgx.ParseConfig(target.String())
+		if err != nil {
+			return nil, err
+		}
+		server.ConfigureLocalPgDial(config)
+		return pgx.ConnectConfig(ctx, config)
+	}
+	admin, err := connect(value)
 	if err != nil {
 		t.Fatal("connect local fixture", err)
 	}
@@ -85,7 +96,7 @@ func New(t testing.TB) *Fixture {
 	}
 	databaseCreated = true
 	value.Path = "/" + source.Database
-	connection, err := pgx.Connect(ctx, value.String())
+	connection, err := connect(value)
 	if err != nil {
 		t.Fatal(err)
 	}

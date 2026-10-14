@@ -263,6 +263,20 @@ Measured `run`, `fleet`, and fresh `baseline` commands require a configured
 source epoch. Use a clean epoch checkout or an authenticated evaluator source
 lock; do not bypass the identity check for convenience.
 
+For `run`, `fleet`, `reset` and a measuring `baseline`, the wrapper first
+sources `server/local/local-env.sh`, which attests the running launcher's
+endpoints (`WARP_TEST_ENV_ATTESTED_ADDRS`); without the launcher it exits
+before starting the simulator. Every `WARP_ENV=local` process, this one
+included even when only its own defaults set `WARP_ENV=local`, refuses every
+PostgreSQL and Redis dial outside that attestation, so a local service name
+that falls through to `127.0.0.1`, where a production data tunnel can listen,
+fails closed. `reset` and `run --reset` truncate tables with `CASCADE` and run
+`FLUSHALL`, so before either sends anything they also require every pool
+endpoint to be attested and not loopback outside the private portable root
+(`server.RequireAttestedLocalEndpoints`). The evaluator container attests its
+own Compose `postgres` and `redis` services in its entrypoint. See
+`server/local/README.md`.
+
 `run-local-main.sh` is a trusted operator/development wrapper for a local checkout
 using port-forwarded main PostgreSQL and Redis endpoints. It is not the
 candidate-container entrypoint and does not replace the official evaluator.

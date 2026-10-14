@@ -221,6 +221,14 @@ Do not put the one-shot migrator and runner in the same
 the measurement runner. The trusted worker treats a migration command failure,
 malformed result, or version mismatch as an infrastructure failure.
 
+The migrator and the runner are `WARP_ENV=local` processes, which dial
+PostgreSQL and Redis only at attested endpoints (server
+`test_env_dial_guard.go`). Before `migrate` and `run` exec, the entrypoint
+reads the `pg.yml` and `redis.yml` authorities, resolves each host once with
+`getent ahosts`, requires exactly one address that is not loopback, and
+exports the endpoints as `WARP_TEST_ENV_ATTESTED_ADDRS`. Any other answer
+stops the job before a process starts.
+
 After capturing container inspect data and cgroup counters, remove only that
 fully resolved project:
 

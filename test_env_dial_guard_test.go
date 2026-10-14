@@ -1,5 +1,5 @@
-// Pure checks that a local test process dials PostgreSQL and Redis only at the
-// endpoints test-env.sh attested. Every socket is a net.Pipe or a recording
+// Pure checks that a local process, test or not, dials PostgreSQL and Redis
+// only at the endpoints its launcher attested. Every socket is a net.Pipe or a recording
 // fake and every name resolves through a scripted resolver, so nothing here
 // reaches a service, the host resolver, or a loopback tunnel.
 package server
@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,10 +163,10 @@ func testEnvManagedEnvironment(attestation string) func(string) string {
 }
 
 // Installs guard as the process guard for one test and restores the startup
-// guard afterwards. Callers must not run in parallel.
+// choice afterwards. Callers must not run in parallel.
 func useTestEnvProcessDialGuard(t *testing.T, guard *testEnvDialGuard) {
 	t.Helper()
-	previous := testEnvProcessDialGuard.Swap(guard)
+	previous := testEnvProcessDialGuard.Swap(&testEnvDialGuardChoice{guard: guard})
 	t.Cleanup(func() {
 		testEnvProcessDialGuard.Store(previous)
 	})
@@ -314,10 +315,11 @@ func TestRedisLeaseCoordinatorRedialRefusesNameMovedToLoopback(t *testing.T) {
 	}
 }
 
-// Only a local test-env process gets a guard. Production, local services and a
-// lone marker get none, even with a stray attestation in a production
-// environment, so their dial paths cannot change.
-func TestTestEnvDialGuardSelectsOnlyLocalTestProcesses(t *testing.T) {
+// Every local process gets a guard, test or not; one without an attestation
+// refuses every dial. Production and every other environment get none, even
+// with stray test markers and an attestation, so their dial paths cannot
+// change.
+func TestTestEnvDialGuardSelectsEveryLocalProcess(t *testing.T) {
 	cases := []struct {
 		name     string
 		values   map[string]string
@@ -329,10 +331,17 @@ func TestTestEnvDialGuardSelectsOnlyLocalTestProcesses(t *testing.T) {
 		{name: "production with stray test markers and attestation", values: map[string]string{
 			"WARP_ENV": "main", "WARP_SERVICE": "test", "WARP_BLOCK": "test", testEnvAttestedAddrsEnvName: testEnvFixtureAttestation,
 		}},
-		{name: "local service", values: map[string]string{"WARP_ENV": "local", "WARP_SERVICE": "api", "WARP_BLOCK": "local"}},
-		{name: "service marker only", values: map[string]string{"WARP_ENV": "local", "WARP_SERVICE": "test"}},
-		{name: "block marker only", values: map[string]string{"WARP_ENV": "local", "WARP_BLOCK": "test"}},
+		{name: "another environment with an attestation", values: map[string]string{
+			"WARP_ENV": "sim-testnet-op-1", "WARP_SERVICE": "api", testEnvAttestedAddrsEnvName: testEnvFixtureAttestation,
+		}},
+		{name: "local service", values: map[string]string{"WARP_ENV": "local", "WARP_SERVICE": "api", "WARP_BLOCK": "local"}, guarded: true},
+		{name: "local without identity", values: map[string]string{"WARP_ENV": "local"}, guarded: true},
+		{name: "service marker only", values: map[string]string{"WARP_ENV": "local", "WARP_SERVICE": "test"}, guarded: true},
+		{name: "block marker only", values: map[string]string{"WARP_ENV": "local", "WARP_BLOCK": "test"}, guarded: true},
 		{name: "markers without attestation", values: map[string]string{"WARP_ENV": "local", "WARP_SERVICE": "test", "WARP_BLOCK": "test"}, guarded: true},
+		{name: "attested local service", values: map[string]string{
+			"WARP_ENV": "local", "WARP_SERVICE": "api", "WARP_BLOCK": "local", testEnvAttestedAddrsEnvName: testEnvFixtureAttestation,
+		}, guarded: true, attested: true},
 		{name: "attestation without markers", values: map[string]string{
 			"WARP_ENV": "local", testEnvAttestedAddrsEnvName: testEnvFixtureAttestation,
 		}, guarded: true, attested: true},
@@ -752,8 +761,8 @@ func TestTestEnvRefusalAdvisesByTarget(t *testing.T) {
 		advice  string
 	}{
 		{address: "127.0.0.1:54321", advice: "admit an in-process listener this test owns with Testing_AdmitTestEnvLoopbackListener"},
-		{address: "198.51.100.30:15432", advice: "a test process dials only attested endpoints"},
-		{address: movedName, advice: "public DNS answers the local service names with 127.0.0.1"},
+		{address: "198.51.100.30:15432", advice: "a local process dials only attested endpoints"},
+		{address: movedName, advice: "the local service names can fall through to 127.0.0.1"},
 	}
 	for _, c := range cases {
 		_, err := dial(t.Context(), "tcp", c.address)
@@ -1149,4 +1158,423 @@ func pushTestEnvGuardPgResources(t *testing.T) {
 		"authority: 192.0.2.10:5432\nuser: synthetic\npassword: synthetic\ndb: synthetic\n",
 	)))
 	t.Cleanup(Config.PushSimpleResource(DefaultPgConfigResourceName, []byte("min_connections: 0\nmax_connections: 1\n")))
+}
+
+// The environment test-env.sh exports for the private portable root, whose
+// services are explicit 127.0.0.1 authorities.
+func testEnvPortableEnvironment(attestation string) map[string]string {
+	return map[string]string{
+		"WARP_ENV":                             "local",
+		"WARP_SERVICE":                         "test",
+		"WARP_BLOCK":                           "test",
+		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES": "1",
+		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+		"WARP_TEST_ENV_PORTABLE_ROOT":                     "/synthetic/private-root",
+		testEnvAttestedAddrsEnvName:                       attestation,
+	}
+}
+
+// The environments the local entry points that are not tests run with: the
+// cli/*/run-local.sh services, bringyourctl/run-local.sh, sim-latency's own
+// defaults, and a bare WARP_ENV=local.
+var testEnvLocalServiceEnvironments = []map[string]string{
+	{"WARP_ENV": "local", "WARP_SERVICE": "api", "WARP_BLOCK": "local", "WARP_HOST": "127.0.0.1"},
+	{"WARP_ENV": "local", "WARP_SERVICE": "connect", "WARP_BLOCK": "local", "WARP_HOST": "127.0.0.1"},
+	{"WARP_ENV": "local", "WARP_SERVICE": "taskworker", "WARP_BLOCK": "local", "WARP_HOST": "127.0.0.1"},
+	{"WARP_ENV": "local", "WARP_SERVICE": "proxy", "WARP_BLOCK": "local", "WARP_DOMAIN": "bringyour.com"},
+	{"WARP_ENV": "local", "WARP_SERVICE": "bringyourctl", "WARP_BLOCK": "local", "WARP_HOST": "127.0.0.1"},
+	{"WARP_ENV": "local", "WARP_SERVICE": "sim", "WARP_BLOCK": "sim", "WARP_HOST": "127.0.0.1"},
+	{"WARP_ENV": "local"},
+}
+
+// Adds an attestation to a copy of one environment.
+func testEnvWithAttestation(values map[string]string, attestation string) map[string]string {
+	attested := map[string]string{testEnvAttestedAddrsEnvName: attestation}
+	for name, value := range values {
+		attested[name] = value
+	}
+	return attested
+}
+
+// The reported exposure: a local process that is not a test, started while the
+// launcher is down or still running after it exited, resolves its local service
+// name to 127.0.0.1, where the production data tunnel listens. Its Redis pool
+// dial and its PostgreSQL connect must both be refused before any socket opens,
+// with an error that tells the user to start the launcher.
+func TestLocalServiceProcessRefusesNameFallingThroughToLoopback(t *testing.T) {
+	for _, values := range testEnvLocalServiceEnvironments {
+		redisResolver := &testEnvScriptedResolver{host: testEnvFixtureRedisHost, answers: [][]netip.Addr{{testEnvLoopbackAddr}}}
+		dialer := newTestEnvRecordingDialer(t, redisResolver)
+		authority := net.JoinHostPort(testEnvFixtureRedisHost, "6379")
+		dial := redisPoolDialer(newTestEnvDialGuard(testEnvGetenv(values), redisResolver.lookupNetIp), authority, map[string]string{}, dialer.dial)
+		conn, err := dial(t.Context(), "tcp", authority)
+		if err == nil {
+			conn.Close()
+		}
+		if connected := dialer.connectedEndpoints(); len(connected) != 0 {
+			t.Errorf("%v: the Redis pool connected to %q; a local process without an attestation must not dial", values, connected)
+		}
+		if err == nil || !strings.Contains(err.Error(), testEnvAttestedAddrsEnvName+" is not set") ||
+			!strings.Contains(err.Error(), "start ./local/run-local.sh") {
+			t.Errorf("%v: Redis pool dial error = %v; want a refusal telling the user to start ./local/run-local.sh", values, err)
+		}
+
+		pgResolver := &testEnvScriptedResolver{host: testEnvFixturePgHost, answers: [][]netip.Addr{{testEnvLoopbackAddr}}}
+		config, err := pgx.ParseConfig("postgres://synthetic@" + testEnvFixturePgHost + ":5432/synthetic?sslmode=disable")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The scripted lookup and the recording dial stand in for net.Resolver
+		// and net.Dialer; reaching the dialer ends the connect without a socket.
+		dialed := []string{}
+		config.LookupFunc = pgResolver.lookupHost
+		config.DialFunc = func(_ context.Context, _ string, address string) (net.Conn, error) {
+			dialed = append(dialed, address)
+			return nil, errors.New("synthetic dial reached")
+		}
+		configurePgTestEnvDial(newTestEnvDialGuard(testEnvGetenv(values), pgResolver.lookupNetIp), config)
+		_, err = pgx.ConnectConfig(t.Context(), config)
+		if len(dialed) != 0 {
+			t.Errorf("%v: PostgreSQL dialed %q; a local process without an attestation must not dial", values, dialed)
+		}
+		if err == nil || !strings.Contains(err.Error(), testEnvAttestedAddrsEnvName+" is not set") {
+			t.Errorf("%v: PostgreSQL connect error = %v; want the missing attestation refused", values, err)
+		}
+	}
+}
+
+// local/local-env.sh exports the launcher's attestation for a process that is
+// not a test. Such a process dials the attested endpoint while the launcher maps
+// its name, and a redial after the name falls through to loopback is refused.
+func TestAttestedLocalServiceRedialRefusesNameMovedToLoopback(t *testing.T) {
+	for _, values := range testEnvLocalServiceEnvironments {
+		resolver := &testEnvScriptedResolver{
+			host:    testEnvFixtureRedisHost,
+			answers: [][]netip.Addr{{testEnvFixtureAddr}, {testEnvLoopbackAddr}},
+		}
+		dialer := newTestEnvRecordingDialer(t, resolver)
+		guard := newTestEnvDialGuard(testEnvGetenv(testEnvWithAttestation(values, testEnvFixtureAttestation)), resolver.lookupNetIp)
+		authority := net.JoinHostPort(testEnvFixtureRedisHost, "6379")
+		dial := redisPoolDialer(guard, authority, map[string]string{}, dialer.dial)
+		conn, err := dial(t.Context(), "tcp", authority)
+		if err != nil {
+			t.Errorf("%v: dial while the name maps to the attested address: %v", values, err)
+			continue
+		}
+		conn.Close()
+		conn, err = dial(t.Context(), "tcp", authority)
+		if err == nil {
+			conn.Close()
+		}
+		if connected := dialer.connectedEndpoints(); !slices.Equal(connected, []string{"192.0.2.10:6379"}) {
+			t.Errorf("%v: connected endpoints = %q; the redial after the name moved to loopback must not connect", values, connected)
+		}
+		if err == nil || !strings.Contains(err.Error(), "redis.fixture.example resolved to 127.0.0.1:6379, which the launcher did not attest") {
+			t.Errorf("%v: loopback redial error = %v; want a refusal naming the host and its loopback address", values, err)
+		}
+	}
+}
+
+// A test binary, or any process that starts in the local environment, chooses
+// its guard at startup. Any other service binary defers the choice to its first
+// guarded construction.
+func TestStartupDialGuardChoice(t *testing.T) {
+	cases := []struct {
+		name       string
+		testBinary bool
+		values     map[string]string
+		chosen     bool
+		guarded    bool
+	}{
+		{name: "production service", values: map[string]string{"WARP_ENV": "main", "WARP_SERVICE": "api"}},
+		{name: "service without an environment", values: map[string]string{}},
+		{name: "local service", values: map[string]string{"WARP_ENV": "local", "WARP_SERVICE": "api"}, chosen: true, guarded: true},
+		{name: "test binary outside the local environment", testBinary: true, values: map[string]string{}, chosen: true},
+		{name: "local test binary", testBinary: true, values: map[string]string{"WARP_ENV": "local"}, chosen: true, guarded: true},
+	}
+	for _, c := range cases {
+		choice := chooseTestEnvStartupDialGuard(c.testBinary, func() *testEnvDialGuard {
+			return newTestEnvDialGuard(testEnvGetenv(c.values), testEnvUnusedResolver(t))
+		})
+		if (choice != nil) != c.chosen {
+			t.Errorf("%s: chosen at startup = %t; want %t", c.name, choice != nil, c.chosen)
+			continue
+		}
+		if choice != nil && (choice.guard != nil) != c.guarded {
+			t.Errorf("%s: guarded = %t; want %t", c.name, choice.guard != nil, c.guarded)
+		}
+	}
+}
+
+// sim-latency sets WARP_ENV=local in main, after package initialization, when
+// it is started without one. A service binary therefore defers its choice, and
+// its first pool open, after main, must be guarded; the choice then holds for
+// the rest of the run.
+func TestServiceBinaryChoosesGuardAfterMainSetsLocalEnvironment(t *testing.T) {
+	values := map[string]string{}
+	newGuard := func() *testEnvDialGuard {
+		return newTestEnvDialGuard(testEnvGetenv(values), testEnvUnusedResolver(t))
+	}
+	var choice atomic.Pointer[testEnvDialGuardChoice]
+	choice.Store(chooseTestEnvStartupDialGuard(false, newGuard))
+
+	// main's defaults (sim-latency setDefaultEnv)
+	values["WARP_ENV"], values["WARP_SERVICE"], values["WARP_BLOCK"] = "local", "sim", "sim"
+	guard := chooseTestEnvDialGuard(&choice, newGuard)
+	if guard == nil {
+		t.Fatal("a service binary that main put in the local environment opened its pools without a guard")
+	}
+	if err := guard.requireAttested(); err == nil || !strings.Contains(err.Error(), testEnvAttestedAddrsEnvName+" is not set") {
+		t.Fatalf("attestation error = %v; want the missing attestation refused", err)
+	}
+	values["WARP_ENV"] = "main"
+	if chooseTestEnvDialGuard(&choice, newGuard) != guard {
+		t.Fatal("a later environment change moved the chosen guard")
+	}
+}
+
+// A production service chooses at its first guarded construction and gets a
+// nil guard, so its pool dial and lookup stay the callers' own functions; a
+// later environment change cannot add a guard to it.
+func TestProductionServiceChoosesNilGuardAtFirstUse(t *testing.T) {
+	values := map[string]string{
+		"WARP_ENV": "main", "WARP_SERVICE": "api", "WARP_BLOCK": "g1", testEnvAttestedAddrsEnvName: testEnvFixtureAttestation,
+	}
+	newGuard := func() *testEnvDialGuard {
+		return newTestEnvDialGuard(testEnvGetenv(values), testEnvUnusedResolver(t))
+	}
+	var choice atomic.Pointer[testEnvDialGuardChoice]
+	choice.Store(chooseTestEnvStartupDialGuard(false, newGuard))
+	guard := chooseTestEnvDialGuard(&choice, newGuard)
+	if guard != nil {
+		t.Fatal("a production service got a dial guard")
+	}
+	dial := func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("synthetic unreachable")
+	}
+	if testEnvFuncPointer(guard.wrapDial("redis", dial)) != testEnvFuncPointer(dial) {
+		t.Fatal("the production Redis pool dial is not the caller's own")
+	}
+	config, err := pgx.ParseConfig("postgres://synthetic@" + testEnvFixturePgHost + ":5432/synthetic?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialPointer, lookupPointer := testEnvFuncPointer(config.DialFunc), testEnvFuncPointer(config.LookupFunc)
+	configurePgTestEnvDial(guard, config)
+	if testEnvFuncPointer(config.DialFunc) != dialPointer || testEnvFuncPointer(config.LookupFunc) != lookupPointer {
+		t.Fatal("the production PostgreSQL dial or lookup changed")
+	}
+	values["WARP_ENV"] = "local"
+	if chooseTestEnvDialGuard(&choice, newGuard) != nil {
+		t.Fatal("a later environment change added a guard to a production service")
+	}
+}
+
+// No mode may attest a loopback port the production data tunnel forwards, the
+// private portable root included: a portable profile pointed at 127.0.0.1:5432
+// would otherwise reach production through the tunnel. Other loopback ports
+// remain available to that root.
+func TestTestEnvDialGuardRefusesLoopbackOnProductionTunnelPortsInEveryMode(t *testing.T) {
+	modeEnvironments := map[string]func(string) map[string]string{
+		"private portable root": testEnvPortableEnvironment,
+		"managed launcher": func(attestation string) map[string]string {
+			return map[string]string{"WARP_ENV": "local", "WARP_SERVICE": "test", "WARP_BLOCK": "test", testEnvAttestedAddrsEnvName: attestation}
+		},
+		"local service": func(attestation string) map[string]string {
+			return map[string]string{"WARP_ENV": "local", "WARP_SERVICE": "api", "WARP_BLOCK": "local", testEnvAttestedAddrsEnvName: attestation}
+		},
+	}
+	for mode, environment := range modeEnvironments {
+		for _, endpoint := range []string{"127.0.0.1:5432", "127.0.0.1:6432", "127.0.0.1:6379", "127.0.0.1:6400", "127.0.0.1:6427", "[::1]:6379", "127.0.0.2:5432"} {
+			guard := newTestEnvDialGuard(testEnvGetenv(environment("192.0.2.10:5432,"+endpoint)), testEnvUnusedResolver(t))
+			if err := guard.requireAttested(); err == nil || !strings.Contains(err.Error(), "on a production data tunnel port") {
+				t.Errorf("%s: attestation of %s = %v; want the tunnel port refused", mode, endpoint, err)
+			}
+		}
+	}
+	for _, endpoint := range []string{"127.0.0.1:6378", "127.0.0.1:6428", "127.0.0.1:36371", "192.0.2.10:6379"} {
+		guard := newTestEnvDialGuard(testEnvGetenv(testEnvPortableEnvironment("127.0.0.1:35431,"+endpoint)), testEnvUnusedResolver(t))
+		if err := guard.requireAttested(); err != nil {
+			t.Errorf("private portable attestation of %s refused: %v", endpoint, err)
+		}
+	}
+}
+
+// A destructive local operation (sim-latency's reset) runs only in a local
+// process with a valid attestation: production and every other environment
+// are refused, and so is a local process that was never attested.
+func TestDestructiveLocalEndpointsRequireAttestedLocalProcess(t *testing.T) {
+	endpoints := []testEnvServiceEndpoint{
+		{service: "postgres", authority: "192.0.2.10:5432"},
+		{service: "redis", authority: "192.0.2.10:6379"},
+	}
+	var production *testEnvDialGuard
+	if err := production.requireDestructiveEndpoints(t.Context(), endpoints); err == nil ||
+		!strings.Contains(err.Error(), "not a WARP_ENV=local process") {
+		t.Errorf("destructive check outside the local environment = %v; want a refusal", err)
+	}
+	for _, values := range testEnvLocalServiceEnvironments {
+		unattested := newTestEnvDialGuard(testEnvGetenv(values), testEnvUnusedResolver(t))
+		if err := unattested.requireDestructiveEndpoints(t.Context(), endpoints); err == nil ||
+			!strings.Contains(err.Error(), testEnvAttestedAddrsEnvName+" is not set") {
+			t.Errorf("%v: destructive check without an attestation = %v; want a refusal naming the attestation", values, err)
+		}
+		attested := newTestEnvDialGuard(testEnvGetenv(testEnvWithAttestation(values, testEnvFixtureAttestation)), testEnvUnusedResolver(t))
+		if err := attested.requireDestructiveEndpoints(t.Context(), endpoints); err != nil {
+			t.Errorf("%v: destructive check of attested endpoints refused: %v", values, err)
+		}
+	}
+}
+
+// With a managed attestation, any endpoint outside it is refused before the
+// operation runs: a name that fell through to loopback, a loopback literal such
+// as a forwarded production port, another address, or another port.
+func TestDestructiveLocalEndpointsRefuseUnattestedAndLoopbackEndpoints(t *testing.T) {
+	cases := []struct {
+		endpoint  testEnvServiceEndpoint
+		errorText string
+	}{
+		{
+			endpoint:  testEnvServiceEndpoint{service: "postgres", authority: net.JoinHostPort(testEnvFixturePgHost, "5432")},
+			errorText: "pg.fixture.example resolved to 127.0.0.1:5432, which the launcher did not attest",
+		},
+		{endpoint: testEnvServiceEndpoint{service: "postgres", authority: "127.0.0.1:5432"}, errorText: "production data tunnel"},
+		{endpoint: testEnvServiceEndpoint{service: "redis", authority: "127.0.0.1:6379"}, errorText: "production data tunnel"},
+		{endpoint: testEnvServiceEndpoint{service: "redis", authority: "[::1]:6379"}, errorText: "production data tunnel"},
+		{endpoint: testEnvServiceEndpoint{service: "redis", authority: "192.0.2.10:6380"}, errorText: "resolved to 192.0.2.10:6380"},
+		{endpoint: testEnvServiceEndpoint{service: "postgres", authority: "198.51.100.7:5432"}, errorText: "resolved to 198.51.100.7:5432"},
+	}
+	for _, c := range cases {
+		resolver := &testEnvScriptedResolver{host: testEnvFixturePgHost, answers: [][]netip.Addr{{testEnvLoopbackAddr}}}
+		guard := newTestEnvDialGuard(testEnvManagedEnvironment(testEnvFixtureAttestation), resolver.lookupNetIp)
+		endpoints := []testEnvServiceEndpoint{{service: "redis", authority: "192.0.2.10:6379"}, c.endpoint}
+		err := guard.requireDestructiveEndpoints(t.Context(), endpoints)
+		if err == nil || !strings.Contains(err.Error(), "destructive local operation refused") || !strings.Contains(err.Error(), c.errorText) {
+			t.Errorf("%s endpoint %s: destructive check = %v; want a refusal containing %q", c.endpoint.service, c.endpoint.authority, err, c.errorText)
+		}
+	}
+}
+
+// Loopback passes the destructive check only as the private portable root's
+// own attested endpoints. A guard admitting loopback outside that root could
+// only come from a broken constructor, and the check refuses it on its own.
+func TestDestructiveLocalEndpointsAdmitLoopbackOnlyInPortableMode(t *testing.T) {
+	endpoints := []testEnvServiceEndpoint{
+		{service: "postgres", authority: "127.0.0.1:35431"},
+		{service: "redis", authority: "127.0.0.1:36371"},
+	}
+	portable := newTestEnvDialGuard(testEnvGetenv(testEnvPortableEnvironment("127.0.0.1:35431,127.0.0.1:36371")), testEnvUnusedResolver(t))
+	if err := portable.requireDestructiveEndpoints(t.Context(), endpoints); err != nil {
+		t.Fatalf("destructive check of the attested portable endpoints refused: %v", err)
+	}
+	broken := &testEnvDialGuard{
+		attestedAddrPorts: []netip.AddrPort{netip.MustParseAddrPort("127.0.0.1:35431"), netip.MustParseAddrPort("127.0.0.1:36371")},
+		lookupNetIp:       testEnvUnusedResolver(t),
+	}
+	if err := broken.requireDestructiveEndpoints(t.Context(), endpoints); err == nil || !strings.Contains(err.Error(), "is loopback") {
+		t.Fatalf("destructive check of loopback outside the portable mode = %v; want a refusal", err)
+	}
+}
+
+// The exported check reads every PostgreSQL pool's own vault resource, the
+// maintenance pool's included, and the Redis resource, and checks them against
+// the process guard.
+func TestRequireAttestedLocalEndpointsChecksEveryPoolResource(t *testing.T) {
+	pushTestEnvGuardPgResources(t)
+	t.Cleanup(Vault.PushSimpleResource("redis.yml", []byte("cluster: false\nauthority: 192.0.2.10:6379\npassword: \"\"\ndb: 0\n")))
+	useTestEnvProcessDialGuard(t, newTestEnvDialGuard(testEnvManagedEnvironment(testEnvFixtureAttestation), testEnvUnusedResolver(t)))
+	if err := RequireAttestedLocalEndpoints(t.Context()); err != nil {
+		t.Fatalf("destructive check of attested pool resources refused: %v", err)
+	}
+
+	popMaintenance := Vault.PushSimpleResource(MaintenancePgVaultResourceName, []byte(
+		"authority: 127.0.0.1:5432\nuser: synthetic\npassword: synthetic\ndb: synthetic\n",
+	))
+	err := RequireAttestedLocalEndpoints(t.Context())
+	popMaintenance()
+	if err == nil || !strings.Contains(err.Error(), "resolved to 127.0.0.1:5432") {
+		t.Fatalf("destructive check with a loopback maintenance resource = %v; want a refusal", err)
+	}
+
+	popRedis := Vault.PushSimpleResource("redis.yml", []byte("cluster: false\nauthority: 127.0.0.1:6379\npassword: \"\"\ndb: 0\n"))
+	err = RequireAttestedLocalEndpoints(t.Context())
+	popRedis()
+	if err == nil || !strings.Contains(err.Error(), "resolved to 127.0.0.1:6379") {
+		t.Fatalf("destructive check with a loopback Redis resource = %v; want a refusal", err)
+	}
+
+	useTestEnvProcessDialGuard(t, nil)
+	if err := RequireAttestedLocalEndpoints(t.Context()); err == nil || !strings.Contains(err.Error(), "not a WARP_ENV=local process") {
+		t.Fatalf("destructive check without a local guard = %v; want a refusal", err)
+	}
+}
+
+// A PostgreSQL connection that a tool or fixture configures itself, outside the
+// pools, is pinned exactly like a pool's in a local process: a name that falls
+// through to loopback is refused before any socket. In production the
+// configuration keeps the caller's own dial and lookup.
+func TestConfigureLocalPgDialPinsOnlyLocalProcesses(t *testing.T) {
+	config, err := pgx.ParseConfig("postgres://synthetic@" + testEnvFixturePgHost + ":5432/synthetic?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialPointer, lookupPointer := testEnvFuncPointer(config.DialFunc), testEnvFuncPointer(config.LookupFunc)
+	useTestEnvProcessDialGuard(t, nil)
+	ConfigureLocalPgDial(config)
+	if testEnvFuncPointer(config.DialFunc) != dialPointer || testEnvFuncPointer(config.LookupFunc) != lookupPointer {
+		t.Fatal("a production tool connection changed its dial or lookup")
+	}
+
+	for _, values := range testEnvLocalServiceEnvironments {
+		resolver := &testEnvScriptedResolver{host: testEnvFixturePgHost, answers: [][]netip.Addr{{testEnvLoopbackAddr}}}
+		useTestEnvProcessDialGuard(t, newTestEnvDialGuard(testEnvGetenv(testEnvWithAttestation(values, testEnvFixtureAttestation)), resolver.lookupNetIp))
+		config, err := pgx.ParseConfig("postgres://synthetic@" + testEnvFixturePgHost + ":5432/synthetic?sslmode=disable")
+		if err != nil {
+			t.Fatal(err)
+		}
+		dialed := []string{}
+		config.LookupFunc = resolver.lookupHost
+		config.DialFunc = func(_ context.Context, _ string, address string) (net.Conn, error) {
+			dialed = append(dialed, address)
+			return nil, errors.New("synthetic dial reached")
+		}
+		ConfigureLocalPgDial(config)
+		_, err = pgx.ConnectConfig(t.Context(), config)
+		if len(dialed) != 0 {
+			t.Errorf("%v: a tool connection dialed %q after its name fell through to loopback", values, dialed)
+		}
+		if err == nil || !strings.Contains(err.Error(), "pg.fixture.example resolved to 127.0.0.1, which the launcher did not attest") {
+			t.Errorf("%v: tool connect error = %v; want the guard's refusal", values, err)
+		}
+	}
+}
+
+// The destructive check trusts only the attestation. A loopback listener a test
+// admitted is dialable through the guard, but it never qualifies an endpoint
+// for a destructive operation such as sim-latency's reset.
+func TestDestructiveLocalEndpointsIgnoreAdmittedListeners(t *testing.T) {
+	guard := newTestEnvDialGuard(testEnvManagedEnvironment(testEnvFixtureAttestation), testEnvUnusedResolver(t))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	remove, err := guard.admit(listener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remove()
+	address := listener.Addr().String()
+	addrPort := listener.Addr().(*net.TCPAddr).AddrPort()
+	if !guard.admits(netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port())) {
+		t.Fatal("the admitted listener is not dialable through the guard")
+	}
+	endpoints := []testEnvServiceEndpoint{
+		{service: "postgres", authority: "192.0.2.10:5432"},
+		{service: "redis", authority: address},
+	}
+	if err := guard.requireDestructiveEndpoints(t.Context(), endpoints); err == nil ||
+		!strings.Contains(err.Error(), "never an admitted test listener") {
+		t.Fatalf("destructive check of an admitted listener = %v; want a refusal", err)
+	}
 }

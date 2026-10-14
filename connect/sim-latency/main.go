@@ -252,7 +252,9 @@ Options:
 func runReset() {
 	ctx, cancel := signalContext()
 	defer cancel()
-	resetLocalState(ctx)
+	if err := resetLocalState(ctx); err != nil {
+		fatalf("%s", err)
+	}
 }
 
 func runInit(opts docopt.Opts) {
