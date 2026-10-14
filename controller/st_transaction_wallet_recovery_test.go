@@ -386,15 +386,29 @@ func TestStTransactionWalletExpiredSignedDepositCancelsBeforeCurrentCredit(t *te
 }
 
 // Immediate cancellation shares the original finite allowance. Exhaustion
-// preserves all three signatures and their liability without another send.
+// preserves all three signatures and their liability and signs nothing more.
+// The latest signature's stored bytes are sent again instead (SV-1): the
+// expired deposit reverts at inclusion, moves no principal and frees the
+// nonce.
 func TestStTransactionWalletExpiredDepositAtAttemptCapRetainsLiability(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		client, _, fixture := newStDepositCustodyFixture(tb, 1)
 		intent := stWalletRecoveryIntent(tb, client, 6, 99, stTxMaxAttempts)
 		before := model.GetStTransactionAttempts(context.Background(), intent.IntentId)
 		hash, err := client.DepositCredit(context.Background(), 7, 1, big.NewInt(100))
-		if !errors.Is(err, errStTransactionAttemptLimit) || hash != "" && hash != before[0].TxHash || !reflect.DeepEqual(before, model.GetStTransactionAttempts(context.Background(), intent.IntentId)) || len(fixture.sent) != 0 {
+		after := model.GetStTransactionAttempts(context.Background(), intent.IntentId)
+		fixture.stateLock.Lock()
+		defer fixture.stateLock.Unlock()
+		if !errors.Is(err, errStTransactionAttemptLimit) || hash != "" && hash != before[0].TxHash || len(after) != len(before) || len(fixture.sent) != 1 || strings.ToLower(fixture.sent[0].Hash().Hex()) != before[0].TxHash || fixture.deposited.Sign() != 0 {
 			tb.Fatal("expired cancellation exceeded original attempt allowance", err)
+		}
+		for index := range before {
+			if after[index].Attempt != before[index].Attempt || after[index].Kind != before[index].Kind || after[index].TxHash != before[index].TxHash || !bytes.Equal(after[index].RawTransaction, before[index].RawTransaction) {
+				tb.Fatal("expired cancellation rewrote an original signature")
+			}
+		}
+		if retained := model.GetStTransactionIntent(context.Background(), intent.LogicalKey); retained.Status != model.StTxReverted || retained.AttemptCount != stTxMaxAttempts {
+			tb.Fatalf("expired deposit %+v", retained)
 		}
 	})
 }

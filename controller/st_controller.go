@@ -1419,6 +1419,7 @@ func (self *CoreStClient) runTransactionIntent(
 ) (string, error) {
 	waitCtx, cancelWait := context.WithTimeout(ctx, stWaitFinalizedTimeout)
 	defer cancelWait()
+	var refused error
 	for {
 		attempts := model.GetStTransactionAttempts(ctx, intent.IntentId)
 		var current *model.StTransactionAttempt
@@ -1434,13 +1435,20 @@ func (self *CoreStClient) runTransactionIntent(
 			}
 			attempts = model.GetStTransactionAttempts(ctx, intent.IntentId)
 		} else if replaceImmediately && current.Kind != model.StTxAttemptCancellation && current.Status != model.StTxMined {
-			originalHash := current.TxHash
-			var err error
-			current, err = self.buildTransactionAttempt(waitCtx, client, key, intent, current, model.StTxAttemptCancellation)
-			if err != nil {
-				return originalHash, err
+			if _, err := self.buildTransactionAttempt(waitCtx, client, key, intent, current, model.StTxAttemptCancellation); err != nil {
+				// The operation can no longer succeed, but its cancellation
+				// cannot be signed, as when the operation has spent its
+				// signatures. Its latest signed attempt is broadcast again
+				// below, which takes no new signature or liability; it reverts
+				// and frees the nonce. A stale deployment's stored bytes target
+				// the old coordinator and are not sent again.
+				if intent.DeploymentKey != self.cfg.DeploymentKey() {
+					return current.TxHash, err
+				}
+				refused = err
 			}
 			attempts = model.GetStTransactionAttempts(ctx, intent.IntentId)
+			current = attempts[0]
 		}
 		if current.Status == model.StTxSigned || current.Status == model.StTxBroadcast || current.Status == model.StTxUncertain {
 			// Re-broadcasting identical signed bytes is safe and repairs a node or
@@ -1451,6 +1459,9 @@ func (self *CoreStClient) runTransactionIntent(
 		}
 		txHash, waitErr := self.waitFinalizedAttempt(waitCtx, client, intent, attempts)
 		if !errors.Is(waitErr, errStReplaceTransaction) {
+			if waitErr != nil && refused != nil {
+				waitErr = errors.Join(waitErr, refused)
+			}
 			return txHash, waitErr
 		}
 		current = model.GetCurrentStTransactionAttempt(ctx, intent.IntentId)
@@ -1465,7 +1476,7 @@ func (self *CoreStClient) runTransactionIntent(
 		if _, err := self.buildTransactionAttempt(waitCtx, client, key, intent, current, replacementKind); err != nil {
 			return txHash, err
 		}
-		replaceImmediately = false
+		replaceImmediately, refused = false, nil
 	}
 }
 
