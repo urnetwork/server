@@ -62,9 +62,9 @@ func (self *originConnections) connState(_ net.Conn, state http.ConnState) {
 // canceled client: the provider kept both flows open and the client it would
 // return to was revoked.
 //
-// This drives the real exchange, provider NAT, local authority and tunnel. The
-// probe stops reading a streamed body early, as URL sampling does, and closes
-// the tunnel. When the generator begins revoking the derived client, every
+// This drives the real exchange, provider NAT, local authority and tunnel, with
+// only WebRTC candidate gathering kept on loopback. The probe stops reading a
+// streamed body early, as URL sampling does, and closes the tunnel. When the generator begins revoking the derived client, every
 // origin the tunnel reached must already see its connection closed, and the
 // provider must hold no unacknowledged return for that client.
 func TestTunnelCloseRetiresDerivedClientOnlyAfterProviderFlowsEnd(t *testing.T) {
@@ -117,7 +117,7 @@ func TestTunnelCloseRetiresDerivedClientOnlyAfterProviderFlowsEnd(t *testing.T) 
 		strategy := connect.NewClientStrategy(ctx, strategySettings)
 		defer strategy.Close()
 		oob := connect.NewApiOutOfBandControlWithLocalControl(ctx, strategy, providerJwt, trap.URL, pa)
-		provider := connect.NewClient(ctx, connect.Id(providerClientId), oob, connect.DefaultClientSettings())
+		provider := connect.NewClient(ctx, connect.Id(providerClientId), oob, hermeticWebRtcClientSettings(connect.DefaultClientSettings()))
 		transport := connect.NewPlatformTransportWithDefaults(provider.Ctx(), strategy, provider.RouteManager(), "ws"+platform.URL[4:], &connect.ClientAuth{ByJwt: providerJwt, InstanceId: connect.NewId(), AppVersion: server.RequireVersion()})
 		localNat := connect.NewLocalUserNatWithDefaults(provider.Ctx(), providerClientId.String())
 		natSettings := connect.DefaultRemoteUserNatProviderSettings()
@@ -233,6 +233,7 @@ func TestTunnelCloseRetiresDerivedClientOnlyAfterProviderFlowsEnd(t *testing.T) 
 					dnsOpen, payloadOpen, pending))
 			}
 		}}
+		defer useHermeticTunnelClientSettings()()
 		cfg := Config{ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: sourceJwt, ClientId: connect.Id(sourceClientId), DataOnlyProbe: true,
 			ClientCredentials: authority, ClientControl: authority, CloseTimeout: 15 * time.Second,
 			DnsResolverSettings: &connect.DnsResolverSettings{EnableRemoteDoh: true, RemoteDohUrlsIpv4: []string{dns.URL + "/dns-query"}}, ContractReservationByteCount: 1024 * 1024}

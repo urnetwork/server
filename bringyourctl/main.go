@@ -93,6 +93,7 @@ Usage:
     bringyourctl payouts populate-tx-hashes
     bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
     bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
+    bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -133,6 +134,11 @@ Usage:
     bringyourctl st commit --epoch=<epoch>
     bringyourctl st finalize --epoch=<epoch>
     bringyourctl st payout-dry-run --epoch=<epoch> [--out=<path>]
+    bringyourctl st v2-unrecoverable --epoch=<epoch> --by=<operator>
+    bringyourctl st v2-rebuild --epoch=<epoch> --by=<operator>
+    bringyourctl st v2-rebuild-withdraw --epoch=<epoch> --by=<operator>
+    bringyourctl st v2-activation
+    bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
 
 Options:
@@ -175,6 +181,7 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
+    --expect=<digest>  The digest the sn-reconcile dry run printed; --send refuses any other census.
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {
@@ -324,6 +331,14 @@ func main() {
 			os.Exit(reconcileLegacyPayoutAttempts(opts))
 		} else if correctLegacy, _ := opts.Bool("correct-legacy-attempts"); correctLegacy {
 			os.Exit(correctLegacyPayoutAttempts(opts))
+		} else if snReconcile, _ := opts.Bool("sn-reconcile"); snReconcile {
+			send, _ := opts.Bool("--send")
+			expect, _ := opts.String("--expect")
+			asJson, _ := opts.Bool("--json")
+			clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
+			os.Exit(runSnReconcile(os.Stdout, os.Stderr, send, expect, asJson, func(send bool, expect string) (*controller.SnReconcileReport, error) {
+				return controller.SnReconcile(clientSession, send, expect)
+			}))
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
 		if send, _ := opts.Bool("transfer"); send {
@@ -452,6 +467,16 @@ func main() {
 			stFinalize(opts)
 		} else if payoutDryRun, _ := opts.Bool("payout-dry-run"); payoutDryRun {
 			stPayoutDryRun(opts)
+		} else if unrecoverable, _ := opts.Bool("v2-unrecoverable"); unrecoverable {
+			stV2Unrecoverable(opts)
+		} else if rebuild, _ := opts.Bool("v2-rebuild"); rebuild {
+			stV2Rebuild(opts)
+		} else if rebuildWithdraw, _ := opts.Bool("v2-rebuild-withdraw"); rebuildWithdraw {
+			stV2RebuildWithdraw(opts)
+		} else if activation, _ := opts.Bool("v2-activation"); activation {
+			stV2Activation(opts)
+		} else if activationClear, _ := opts.Bool("v2-activation-clear"); activationClear {
+			stV2ActivationClear(opts)
 		}
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
@@ -648,6 +673,9 @@ func dbMaintenance(opts docopt.Opts) {
 	// the explicit opt-in that lets this run rebuild tables above the
 	// automatic rotation's size bound
 	includeLarge, _ := opts.Bool("--include-large")
+	// bloated priority indexes are rebuilt only when db_maintenance.yml
+	// enables it, as for the scheduled task
+	priorityReindex := server.DbMaintenancePriorityReindexEnabled()
 
 	// a stopped run prints why; the load guard applies to operator runs too
 	report := func(outcome *server.DbMaintenanceOutcome) bool {
@@ -678,6 +706,7 @@ func dbMaintenance(opts docopt.Opts) {
 				Cleanup:            cleanup,
 				Analyze:            analyze && epoch == server.DbReindexEpochs-1,
 				IncludeLargeTables: includeLarge,
+				PriorityReindex:    priorityReindex,
 			})
 			if !report(outcome) {
 				return
@@ -692,6 +721,7 @@ func dbMaintenance(opts docopt.Opts) {
 		Cleanup:            cleanup,
 		Analyze:            analyze,
 		IncludeLargeTables: includeLarge,
+		PriorityReindex:    priorityReindex,
 	}
 
 	fmt.Printf("Running DB maintenance ...\n")
@@ -2527,6 +2557,18 @@ func providerInspect(opts docopt.Opts) {
 		evidence = fmt.Sprintf("quality %t", inspection.CurrentIndex.Quality)
 	}
 	fmt.Printf("  index from the latest run now %d (%s; evidence is %d or more loads within %s)\n", inspection.CurrentIndex.Index, evidence, inspection.Settings.MinScoredLoads, inspection.Settings.EvidenceMaxAge)
+	fmt.Printf("  url successes %d, errors %d in the evidence window; no success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
+	countryGuard := "no published guard, so every country is exempt"
+	if inspection.OnlineSuccessBaselineKnown {
+		countryGuard = fmt.Sprintf(
+			"%d of %d measured online providers in %s have a success (guard computed %s)",
+			inspection.OnlineSuccessCountrySucceeded,
+			inspection.OnlineSuccessCountryMeasured,
+			optionalString(inspection.PublishedCountryCode),
+			optionalTime(&inspection.OnlineSuccessBaselineTime),
+		)
+	}
+	fmt.Printf("  online url-success rule %t, country floor %v: %s; country exempt %t\n", inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, countryGuard, inspection.OnlineSuccessCountryExempt)
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)

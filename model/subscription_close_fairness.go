@@ -29,6 +29,10 @@ type ContractExpirySweepCursor struct {
 	// Keep the earliest quiet cutoff in a catch-up pass for skipped-row revisits.
 	CatchupChecked time.Time `json:"catchup_checked,omitzero"`
 	CatchupTurn    uint8     `json:"catchup_turn,omitempty"`
+	// A lane of this pass left a row open after an operational failure, such
+	// as a busy balance owner. The row sits behind that lane's cursor, so once
+	// the backlog is complete the pass ends and the next one revisits it.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 // Alternate complete subpages, not independent workers. A slow subpage keeps

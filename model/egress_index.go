@@ -19,10 +19,15 @@ import (
 
 // Provider serving eligibility is shared by score export, location counts,
 // request hard exclusions and diagnostics. Reliability, ARIN risk and persistent
-// URL security exceptions gate every bucket. Online includes every common-gate
-// pass; quality and speed additionally require a passing ratio of accepted URL
-// outcomes within eight hours. Only quality excludes ARIN non-quality entries.
-// Performance and the success ratio order admitted providers, never add gates.
+// URL security exceptions gate every bucket. Every bucket also requires a
+// measured URL success within eight hours, unless the provider has too little
+// history to show one or its country is one where the probe itself fails (the
+// URL-success rule, egress_online_success.go). That gate is bucket membership
+// only: probes, explicit client ids and force_minimum still reach the provider.
+// Online includes every provider past these gates; quality and speed
+// additionally require a passing ratio of accepted URL outcomes within eight
+// hours. Only quality excludes ARIN non-quality entries. Performance and the
+// success ratio order admitted providers, never add gates.
 
 // The weights of the index and the bounds of its evidence, with the other
 // tunables of the egress rules. The `egress_index` block of provider.yml,
@@ -77,6 +82,16 @@ type EgressIndexSettings struct {
 	// provider.yml on every call; a request path runs far too often to read
 	// and parse a file each time.
 	RequestSettingsMaxAge time.Duration
+	// The URL-success rule (egress_online_success.go): a provider measured
+	// ProviderOnlineMinMeasuredUrlRuns or more times in the evidence window
+	// without one success leaves every bucket, Online included. False is the
+	// kill switch, `online_requires_url_success: false` in provider.yml.
+	OnlineRequiresUrlSuccess bool
+	// The rule's country guard: a published country where fewer than this
+	// share of the measured Online providers have a success is one where the
+	// probe itself fails, and its providers keep the benefit of the doubt.
+	// `online_success_country_floor` in provider.yml, within [0, 1].
+	OnlineSuccessCountryFloor float64
 }
 
 // The most a connect client adds to a provider's tier from what it sees
@@ -106,11 +121,19 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		CountryGate:           true,
 		BackfillTierOffset:    ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
 		RequestSettingsMaxAge: time.Minute,
+		// The floor is pending the owner's confirmation. Measured on
+		// 2026-10-13, it exempts the countries whose probe failed
+		// structurally (VN 0.03, JP 0.24, RU 0.25, TW 0.27, ZA and IN 0.35)
+		// and no country of a hundred or more Online providers where the
+		// probe worked (the lowest of those, HK, measured 0.46).
+		OnlineRequiresUrlSuccess:  true,
+		OnlineSuccessCountryFloor: 0.36,
 	}
 }
 
-// The `egress_index` block of provider.yml. Every field is optional; an absent
-// one keeps its default.
+// The `egress_index` block of provider.yml, and the URL-success rule's two
+// top-level keys beside subscriber_quality_policy_version. Every field is
+// optional; an absent one keeps its default.
 type egressIndexSettingsDocument struct {
 	EgressIndex *struct {
 		NativeReaderEnabled  *bool          `yaml:"native_reader_enabled"`
@@ -124,6 +147,8 @@ type egressIndexSettingsDocument struct {
 		CountryGate          *bool          `yaml:"country_gate"`
 		BackfillTierOffset   *int           `yaml:"backfill_tier_offset"`
 	} `yaml:"egress_index"`
+	OnlineRequiresUrlSuccess  *bool    `yaml:"online_requires_url_success"`
+	OnlineSuccessCountryFloor *float64 `yaml:"online_success_country_floor"`
 }
 
 // The defaults with the overrides of provider.yml, read on every call like the
@@ -143,6 +168,19 @@ func egressIndexSettings() *EgressIndexSettings {
 		glog.Errorf("[egress]provider config is unreadable (%s); the egress index keeps its defaults\n", err)
 		return settings
 	}
+
+	if document.OnlineRequiresUrlSuccess != nil {
+		settings.OnlineRequiresUrlSuccess = *document.OnlineRequiresUrlSuccess
+	}
+	if floor := document.OnlineSuccessCountryFloor; floor != nil {
+		// a share outside [0, 1], NaN included, would exempt every country or none
+		if 0 <= *floor && *floor <= 1 {
+			settings.OnlineSuccessCountryFloor = *floor
+		} else {
+			glog.Errorf("[egress]provider config online_success_country_floor = %v is outside [0, 1]; kept %v\n", *floor, settings.OnlineSuccessCountryFloor)
+		}
+	}
+
 	overrides := document.EgressIndex
 	if overrides == nil {
 		return settings
@@ -320,7 +358,9 @@ func providerUrlProbeSuccessWeight(counts ProviderEgressHealthCounts) float64 {
 	return 0.1 + 0.9*ratio
 }
 
-// Common gate failures exclude every bucket. Health/unprobed and ARIN
+// Common gate failures exclude every bucket. No success, the URL-success rule,
+// also excludes every bucket but is no common gate: probes, explicit client
+// ids and force_minimum keep the provider. Health/unprobed and ARIN
 // non-quality explain missing native membership while preserving online supply.
 // Legacy blackhole/country reason labels remain for metric compatibility only.
 const (
@@ -332,9 +372,14 @@ const (
 	ProviderExcludedArinRisk       = "arin_risk"
 	ProviderExcludedArinNonQuality = "arin_non_quality"
 	ProviderExcludedReliability    = "reliability"
+	ProviderExcludedNoSuccess      = "no_success"
 )
 
-// The reasons in the order the rules apply.
+// Every reason label, in the order the labels were added. A provider counts
+// under the first reason decideProviderEgress finds, in this precedence:
+// reliability, arin_risk, tls, no_success, then unprobed or health (exclusive
+// of each other), then arin_non_quality. Blackhole and country are never
+// reported any more.
 var ProviderExcludedReasons = []string{
 	ProviderExcludedBlackhole,
 	ProviderExcludedTls,
@@ -344,6 +389,7 @@ var ProviderExcludedReasons = []string{
 	ProviderExcludedArinRisk,
 	ProviderExcludedArinNonQuality,
 	ProviderExcludedReliability,
+	ProviderExcludedNoSuccess,
 }
 
 // What the rules read about one provider.
@@ -358,6 +404,9 @@ type providerEgressFacts struct {
 	// The rollup index is a ranking diagnostic; the verdict uses current history.
 	egressIndex   *int
 	egressQuality *bool
+	// the URL-success rule holds: enabled, measured often enough without one
+	// success, and the published country is not exempt
+	noUrlSuccess bool
 }
 
 // What the rules do with one provider.
@@ -370,7 +419,8 @@ type providerEgressDecision struct {
 	// Native membership in each request mode; performance adds no gate.
 	quality bool
 	speed   bool
-	// Every common-gate pass belongs to online and advertised supply.
+	// Every common-gate pass the URL-success rule keeps belongs to online and
+	// advertised supply.
 	online  bool
 	counted bool
 }
@@ -388,10 +438,7 @@ func (self providerCountFilter) egressFacts(
 	publishedCountryCode := normalizeCountryCode(rollupCountryCode)
 	observedCountryCode := self.countryCodes[clientId]
 	// Read accepted health directly so an old rollup cannot extend freshness.
-	var quality *bool
-	if counts, ok := self.healthCounts[clientId]; ok {
-		quality = ComputeEgressIndex(&EgressHealthRun{MeasuredAt: counts.MeasuredAt, OkCount: counts.OKCount, Total: counts.Total}, self.now, settings).QualityVerdict()
-	}
+	counts, urlIndex := self.urlIndex(clientId, settings)
 	return &providerEgressFacts{
 		arinRisk:                self.arinRisk[clientId],
 		arinNonQuality:          self.arinNonQuality[clientId],
@@ -405,8 +452,21 @@ func (self providerCountFilter) egressFacts(
 			publishedCountryCode != "" &&
 			observedCountryCode != publishedCountryCode,
 		egressIndex:   egressIndex,
-		egressQuality: quality,
+		egressQuality: urlIndex.QualityVerdict(),
+		noUrlSuccess: settings.OnlineRequiresUrlSuccess &&
+			providerCarriesNoUrl(counts, urlIndex) &&
+			!self.onlineSuccessBaseline.exempt(publishedCountryCode, settings.OnlineSuccessCountryFloor),
 	}
+}
+
+// A provider's accepted URL outcomes in the evidence window and the index
+// they give now: no Evidence when there are none, or none current.
+func (self providerCountFilter) urlIndex(clientId server.Id, settings *EgressIndexSettings) (ProviderEgressHealthCounts, EgressIndex) {
+	counts, ok := self.healthCounts[clientId]
+	if !ok {
+		return counts, EgressIndex{}
+	}
+	return counts, ComputeEgressIndex(&EgressHealthRun{MeasuredAt: counts.MeasuredAt, OkCount: counts.OKCount, Total: counts.Total}, self.now, settings)
 }
 
 // Decides bucket membership once. The historical rollout flag has no authority
@@ -431,6 +491,13 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 	}
 
 	switch {
+	case facts.noUrlSuccess:
+		// Measured repeatedly and never carried a URL: out of every bucket
+		// and the counts, but no hard exclusion. Probing continues, and the
+		// first success brings the provider back on the next pass.
+		return providerEgressDecision{
+			reason: ProviderExcludedNoSuccess,
+		}
 	case facts.egressQuality == nil:
 		// no probe verdict at all, no negative mark but the exclusions and
 		// no positive one: the online bucket, and counted, since it never
@@ -716,7 +783,8 @@ var ProviderEgressBuckets = []string{
 // leaves out.
 type ProviderEgressCounts struct {
 	// bucket (a rank mode, or online), then index label, to providers.
-	// Membership uses the shared common gates and URL ratio.
+	// Membership uses the shared common gates, the URL-success rule and the
+	// URL ratio.
 	BucketIndexCounts map[string]map[string]int64
 	// reason to providers, each under the first rule that took it out of a
 	// bucket, every reason present
@@ -785,6 +853,8 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 	})
 	// Capture the exact dashboard population before loading its evidence.
 	countFilter := newProviderCountFilterForClients(ctx, clientIds)
+	// the URL-success rule's country guard over this same population
+	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(rows), settings)
 	for _, row := range rows {
 		decision := decideProviderEgress(
 			countFilter.egressFacts(row.clientId, row.claimedCountryCode, row.egressIndex, row.egressQuality, settings),
@@ -838,8 +908,20 @@ type ProviderEgressInspection struct {
 	ReliabilityFailed       bool
 	UrlSuccessCount         int
 	UrlErrorCount           int
-	EgressTestEnabled       bool
-	Settings                *EgressIndexSettings
+	// measured at least ProviderOnlineMinMeasuredUrlRuns times in the
+	// evidence window without one success, whatever the rule then decides
+	NoUrlSuccess bool
+	// the URL-success rule's country guard for the published country, from
+	// the baseline the score export last published: whether one was
+	// readable and when it was computed, the country's measured Online
+	// providers and those with a success, and whether the country is exempt
+	OnlineSuccessBaselineKnown    bool
+	OnlineSuccessBaselineTime     time.Time
+	OnlineSuccessCountryMeasured  int
+	OnlineSuccessCountrySucceeded int
+	OnlineSuccessCountryExempt    bool
+	EgressTestEnabled             bool
+	Settings                      *EgressIndexSettings
 	// the decision, as the client-score job makes it
 	Reason       string
 	HardExcluded bool
@@ -899,6 +981,10 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	inspection.Settings = egressIndexSettings()
 	inspection.EgressTestEnabled = providerEgressTestEnabled()
 	countFilter := newProviderCountFilterForClients(ctx, []server.Id{clientId})
+	// one provider cannot measure its country, so the guard is the score
+	// export's
+	baseline := getProviderOnlineSuccessBaseline(ctx)
+	countFilter.onlineSuccessBaseline = baseline
 
 	facts := countFilter.egressFacts(
 		clientId,
@@ -909,6 +995,14 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	)
 	decision := decideProviderEgress(facts, inspection.EgressTestEnabled)
 	inspection.PublishedCountryCode = normalizeCountryCode(publishedCountryCode)
+	if baseline != nil {
+		inspection.OnlineSuccessBaselineKnown = true
+		inspection.OnlineSuccessBaselineTime = baseline.computeTime
+		count := baseline.countryCodeCounts[inspection.PublishedCountryCode]
+		inspection.OnlineSuccessCountryMeasured = count.Measured
+		inspection.OnlineSuccessCountrySucceeded = count.Succeeded
+	}
+	inspection.OnlineSuccessCountryExempt = baseline.exempt(inspection.PublishedCountryCode, inspection.Settings.OnlineSuccessCountryFloor)
 	inspection.ObservedCountryCode = countFilter.countryCodes[clientId]
 	inspection.Blackholed = facts.blackholed
 	inspection.TlsAuthenticationFailed = facts.tlsAuthenticationFailed
@@ -933,6 +1027,7 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 			Total:      counts.Total,
 		}
 	}
+	inspection.NoUrlSuccess = providerCarriesNoUrl(countFilter.urlIndex(clientId, inspection.Settings))
 	inspection.CurrentIndex = ComputeEgressIndex(run, server.NowUtc(), inspection.Settings)
 	return inspection
 }

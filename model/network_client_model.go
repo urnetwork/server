@@ -3656,11 +3656,14 @@ func forEachReapedClientRedisChunk(clientIds []server.Id, cleanup func([]server.
 func removeReapedClientRedisState(ctx context.Context, clientIds []server.Id) {
 	forEachReapedClientRedisChunk(clientIds, func(chunk []server.Id) {
 		server.Redis(ctx, func(r server.RedisClient) {
-			reverseCmds := make([]*redis.MapStringStringCmd, len(chunk))
+			// both reverse index versions (verifyClientEgressKeys), per client
+			reverseCmds := make([][]*redis.MapStringStringCmd, len(chunk))
 			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				for i, clientId := range chunk {
 					pipe.Del(ctx, clientPublicKeyRedisKey(clientId))
-					reverseCmds[i] = pipe.HGetAll(ctx, verifyClientEgressKey(clientId))
+					for _, reverseKey := range verifyClientEgressKeys(clientId) {
+						reverseCmds[i] = append(reverseCmds[i], pipe.HGetAll(ctx, reverseKey))
+					}
 				}
 				return nil
 			})
@@ -3669,14 +3672,19 @@ func removeReapedClientRedisState(ctx context.Context, clientIds []server.Id) {
 			forwardEntryCount := 0
 			_, err = r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				for i, clientId := range chunk {
-					entries, err := reverseCmds[i].Result()
-					server.Raise(err)
-					for egressHashHex := range entries {
-						// Atomic compare-delete: a recycled address may already
-						// belong to another client, which must not be clobbered.
-						removeVerifyEgressAddressForClient(ctx, pipe, clientId, egressHashHex)
-						pipe.Del(ctx, verifyClientEgressLeaseKey(clientId, egressHashHex))
-						forwardEntryCount++
+					for version, reverseKey := range verifyClientEgressKeys(clientId) {
+						entries, err := reverseCmds[i][version].Result()
+						server.Raise(err)
+						for field := range entries {
+							parsed := parseVerifyClientEgressField(field)
+							// Atomic compare-delete: a recycled address may already
+							// belong to another client, which must not be clobbered.
+							for _, egressHashHex := range parsed.forwardHashes() {
+								removeVerifyEgressAddressForClient(ctx, pipe, clientId, egressHashHex)
+								forwardEntryCount++
+							}
+							pipe.Del(ctx, verifyClientEgressLeaseKey(reverseKey, parsed.address))
+						}
 					}
 				}
 				return nil
@@ -3692,7 +3700,10 @@ func removeReapedClientRedisState(ctx context.Context, clientIds []server.Id) {
 			eligibleMembers := make([]any, len(chunk))
 			_, err = r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				for i, clientId := range chunk {
-					pipe.Del(ctx, verifyClientEgressKey(clientId))
+					// one key per DEL: the versions hash to different slots
+					for _, reverseKey := range verifyClientEgressKeys(clientId) {
+						pipe.Del(ctx, reverseKey)
+					}
 					eligibleMembers[i] = clientId.String()
 				}
 				pipe.SRem(ctx, verifyEligibleKey, eligibleMembers...)

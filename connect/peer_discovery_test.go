@@ -207,6 +207,8 @@ func newPeerDiscoveryClientSettings() *connect.ClientSettings {
 	clientSettings := connect.DefaultClientSettings()
 	clientSettings.ControlPingTimeout = time.Second
 	clientSettings.WebRtcSettings.IceServerUrls = nil
+	// empty IceServerUrls alone would draw from the default STUN pool
+	clientSettings.WebRtcSettings.IceServerPoolUrls = nil
 	clientSettings.WebRtcSettings.UseLoopbackOnlyIceInterfaces = true
 	return clientSettings
 }
@@ -230,6 +232,9 @@ func TestPeerDiscoveryClientSettingsConstrainIceToLoopback(t *testing.T) {
 	clientSettings := newPeerDiscoveryClientSettings()
 	if iceServerUrls := clientSettings.WebRtcSettings.IceServerUrls; len(iceServerUrls) != 0 {
 		t.Errorf("peer discovery client has external ICE servers: %v", iceServerUrls)
+	}
+	if iceServerPoolUrls := clientSettings.WebRtcSettings.IceServerPoolUrls; len(iceServerPoolUrls) != 0 {
+		t.Errorf("peer discovery client draws from a STUN pool: %v", iceServerPoolUrls)
 	}
 	if !clientSettings.WebRtcSettings.UseLoopbackOnlyIceInterfaces {
 		t.Error("peer discovery client can gather non-loopback ICE candidates")

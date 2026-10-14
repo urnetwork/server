@@ -57,6 +57,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
 		router.NewRoute("GET", "/terms.txt", router.Txt),
 		router.NewRoute("GET", "/vdp.txt", router.Txt),
+		router.NewRoute("GET", "/robots.txt", router.RobotsTxt),
 		router.NewRoute("GET", "/status", router.WarpStatus),
 		router.NewRoute("GET", "/clock", handlers.Clock),
 		// The sim-latency competition is a separate, fail-closed security
@@ -134,6 +135,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// the pings a provider or an extender measured, reported by the pinger
 		// with the target's co-signature (connect/GEOMAP.md §2.5)
 		router.NewRoute("POST", "/network/ping-report", handlers.ExtenderPingReport),
+		// an extender's lag.dev measurement certificate, polled with its
+		// activation credential (lag.dev/PLAN.md A8)
+		router.NewRoute("GET", "/network/extender-measurement-cert", handlers.ExtenderMeasurementCert),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
 		router.NewRoute("GET", "/network/provider-blackhole-due", handlers.ProviderBlackholeCheckDue),
@@ -334,6 +338,8 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
 		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),
 		router.NewRoute("GET", "/sn/artifact", handlers.SnArtifact),
+		router.NewRoute("GET", "/sn/ledger/object", handlers.SnLedgerObject),
+		router.NewRoute("GET", "/sn/ledger/account", handlers.SnLedgerAccount),
 		router.NewRoute("GET", "/sn/attempt-artifact", handlers.SnAttemptArtifact),
 		router.NewRoute("POST", "/sn/attempt-artifact", handlers.SnUploadAttemptArtifactWithReserved(reserved)),
 		router.NewRoute("GET", "/sn/artifacts", handlers.SnArtifactHistory),
@@ -367,6 +373,13 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/connect", handlers.AuthConnect),
 		router.NewRoute("POST", "/apple/notification", handlers.AppleNotification),
 		router.NewRoute("GET", "/my-ip-info", handlers.MyIPInfo),
+		// lag.dev (lag.dev/PLAN.md A1, A4, A6, A7): a guest session, the
+		// extenders that serve the measurement api, a track's tickets, and the
+		// reports extenders post with their activation credential
+		router.NewRoute("POST", "/lag/session", handlers.LagSession),
+		router.NewRoute("GET", "/lag/extenders", handlers.LagExtenders),
+		router.NewRoute("POST", "/lag/track", handlers.LagTrack),
+		router.NewRoute("POST", "/network/extender-lag-report", handlers.ExtenderLagReport),
 		router.NewRoute("POST", "/updates/brevo", handlers.BrevoWebhook),
 		router.NewRoute("POST", "/log/([^/]+)/upload", handlers.LogUpload),
 	}

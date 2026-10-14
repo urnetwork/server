@@ -1,11 +1,13 @@
 // Connection and proxy leases share the existing exact-address bijection.
 // Each Redis script keeps lease ownership and its index in one cluster slot;
-// readers retain the forward-owner and exactly-one-reverse-address checks.
+// readers retain the forward-owner and one-reverse-egress-per-family checks.
+// Writers feed only the v4 reverse index, whose fields name each address and
+// its family, and an IPv6 address's /64 beside its own forward entry; the v2
+// index is withdrawn but never fed.
 package model
 
 import (
 	"context"
-	"encoding/hex"
 	"net/netip"
 	"time"
 
@@ -16,9 +18,9 @@ import (
 // Proxy allocation refreshes have one durable owner, separate from transports.
 const verifyProxyEgressLeaseOwner = "proxy"
 
-// Places reverse leases beside the client's existing reverse index.
-func verifyClientEgressLeaseKey(clientId server.Id, egressHashHex string) string {
-	return verifyClientEgressKey(clientId) + "leases_" + egressHashHex
+// Places reverse leases beside a client's reverse index of either version.
+func verifyClientEgressLeaseKey(reverseKey string, egressHashHex string) string {
+	return reverseKey + "leases_" + egressHashHex
 }
 
 // The hash tag matches the complete existing untagged forward key.
@@ -36,8 +38,11 @@ func ClearVerifyConnectionEgress(ctx context.Context, clientId, connectionId ser
 	clearVerifyEgressLease(ctx, clientId, ip, connectionId.String(), settings)
 }
 
-// Prunes expired owners and publishes the latest remaining reverse expiry.
-// Updating or clearing an owner and its reverse entry is one atomic operation.
+// Prunes expired owners and publishes the latest remaining reverse expiry
+// under the address's reverse field (ARGV[4]), followed by the value suffix
+// ARGV[5], or by the field's current suffix when ARGV[5] is empty (a
+// withdrawal, which does not know the address). Updating or clearing an owner
+// and its reverse entry is one atomic operation.
 const verifyReverseEgressLeaseScript = `
 local now = tonumber(ARGV[2])
 local expires = tonumber(ARGV[3])
@@ -51,7 +56,12 @@ for i = 1, #entries, 2 do
   else latest = math.max(latest, deadline) end
 end
 if latest > now then
-  redis.call('HSET', KEYS[1], ARGV[4], string.format('%.0f', latest))
+  local suffix = ARGV[5]
+  if suffix == '' then
+    local current = redis.call('HGET', KEYS[1], ARGV[4])
+    if current then suffix = string.match(current, '_.*$') or '' end
+  end
+  redis.call('HSET', KEYS[1], ARGV[4], string.format('%.0f', latest) .. suffix)
   redis.call('PEXPIRE', KEYS[2], latest-now)
   local ttl = redis.call('PTTL', KEYS[1])
   if ttl < latest-now then redis.call('PEXPIRE', KEYS[1], latest-now) end
@@ -122,11 +132,10 @@ func feedVerifyEgressLease(ctx context.Context, clientId server.Id, ip netip.Add
 	if !ip.IsValid() {
 		return
 	}
-	egressHash := VerifyEgressIndexHashWithSettings(ip.Unmap(), settings)
-	egressHashHex := hex.EncodeToString(egressHash[:])
+	field, _ := verifyClientEgressField(ip, settings)
 	now := server.NowUtc()
 	server.Redis(ctx, func(r server.RedisClient) {
-		updateVerifyEgressLease(ctx, r, clientId, egressHashHex, owner, now, now.Add(settings.EgressTtl))
+		updateVerifyEgressLease(ctx, r, verifyClientEgressKey(clientId), clientId, field, verifyClientEgressValueSuffix(ip, settings), owner, now, now.Add(settings.EgressTtl))
 	})
 	updateVerifyEligibleMembership(ctx, clientId)
 }
@@ -136,23 +145,38 @@ func clearVerifyEgressLease(ctx context.Context, clientId server.Id, ip netip.Ad
 	if !ip.IsValid() {
 		return
 	}
-	egressHash := VerifyEgressIndexHashWithSettings(ip.Unmap(), settings)
-	egressHashHex := hex.EncodeToString(egressHash[:])
+	field, _ := verifyClientEgressField(ip, settings)
 	server.Redis(ctx, func(r server.RedisClient) {
-		updateVerifyEgressLease(ctx, r, clientId, egressHashHex, owner, server.NowUtc(), time.Time{})
+		updateVerifyEgressLease(ctx, r, verifyClientEgressKey(clientId), clientId, field, "", owner, server.NowUtc(), time.Time{})
 	})
 	updateVerifyEligibleMembership(ctx, clientId)
 }
 
 // The explicit clock makes expiration and refresh interleavings deterministic
 // in tests; all production callers use server UTC and the configured TTL.
-func updateVerifyEgressLease(ctx context.Context, r server.RedisClient, clientId server.Id, egressHashHex, owner string, now, expires time.Time) {
-	server.Raise(r.Eval(ctx, verifyReverseEgressLeaseScript,
-		[]string{verifyClientEgressKey(clientId), verifyClientEgressLeaseKey(clientId, egressHashHex)},
-		owner, now.UnixMilli(), expires.UnixMilli(), egressHashHex).Err())
-	server.Raise(r.Eval(ctx, verifyForwardEgressLeaseScript,
-		[]string{verifyEgressKeyFromHex(egressHashHex), verifyForwardEgressLeaseKey(egressHashHex)},
-		clientId.String(), owner, now.UnixMilli(), expires.UnixMilli(), verifyEgressAmbiguous).Err())
+// `reverseKey` and `field` name the address's reverse entry, and
+// `valueSuffix` follows its expiry (verifyClientEgressValueSuffix), or ""
+// keeps the current one; only withdrawals name the v2 index. Every forward
+// entry the address feeds takes the same owner.
+func updateVerifyEgressLease(ctx context.Context, r server.RedisClient, reverseKey string, clientId server.Id, field, valueSuffix, owner string, now, expires time.Time) {
+	reverseKeys, reverseArgs := verifyReverseEgressLeaseCall(reverseKey, field, valueSuffix, owner, now, expires)
+	server.Raise(r.Eval(ctx, verifyReverseEgressLeaseScript, reverseKeys, reverseArgs...).Err())
+	for _, egressHashHex := range parseVerifyClientEgressField(field).forwardHashes() {
+		forwardKeys, forwardArgs := verifyForwardEgressLeaseCall(clientId, egressHashHex, owner, now, expires)
+		server.Raise(r.Eval(ctx, verifyForwardEgressLeaseScript, forwardKeys, forwardArgs...).Err())
+	}
+}
+
+// The keys and arguments of one owner's reverse lease update.
+func verifyReverseEgressLeaseCall(reverseKey, field, valueSuffix, owner string, now, expires time.Time) ([]string, []any) {
+	return []string{reverseKey, verifyClientEgressLeaseKey(reverseKey, parseVerifyClientEgressField(field).address)},
+		[]any{owner, now.UnixMilli(), expires.UnixMilli(), field, valueSuffix}
+}
+
+// The keys and arguments of one owner's update of one forward entry.
+func verifyForwardEgressLeaseCall(clientId server.Id, egressHashHex, owner string, now, expires time.Time) ([]string, []any) {
+	return []string{verifyEgressKeyFromHex(egressHashHex), verifyForwardEgressLeaseKey(egressHashHex)},
+		[]any{clientId.String(), owner, now.UnixMilli(), expires.UnixMilli(), verifyEgressAmbiguous}
 }
 
 // Reaping is stronger than disconnect: all of the removed client's owners are
@@ -169,27 +193,35 @@ return 0`, []string{verifyEgressKeyFromHex(egressHashHex), verifyForwardEgressLe
 
 // A refresh after the reader's snapshot must survive stale expiry cleanup.
 func pruneVerifyExpiredEgressHashes(ctx context.Context, r server.RedisClient, clientId server.Id, expiredHashExpiries map[string]string) {
+	server.Raise(queueVerifyExpiredEgressHashPrune(ctx, r, clientId, expiredHashExpiries).Err())
+}
+
+// The prune as one command, which a pipeline queues and a client runs at once.
+func queueVerifyExpiredEgressHashPrune(ctx context.Context, r redis.Cmdable, clientId server.Id, expiredHashExpiries map[string]string) *redis.Cmd {
 	args := make([]any, 0, 2*len(expiredHashExpiries))
 	for hash, expiry := range expiredHashExpiries {
 		args = append(args, hash, expiry)
 	}
-	server.Raise(r.Eval(ctx, `
+	return r.Eval(ctx, `
 for i = 1, #ARGV, 2 do
   if redis.call('HGET', KEYS[1], ARGV[i]) == ARGV[i+1] then
     redis.call('HDEL', KEYS[1], ARGV[i])
   end
 end
-return 0`, []string{verifyClientEgressKey(clientId)}, args...).Err())
+return 0`, []string{verifyClientEgressKey(clientId)}, args...)
 }
 
 // Proxy release does not own simultaneous direct-transport leases. The reverse
-// index supplies the keyed address hashes without loading controller settings.
+// index supplies the keyed address hashes without loading controller settings;
+// a proxy lease a v2 writer left in the v2 index is withdrawn the same way.
 func clearVerifyProxyEgressForClient(ctx context.Context, clientId server.Id) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		entries, err := r.HGetAll(ctx, verifyClientEgressKey(clientId)).Result()
-		server.Raise(err)
-		for hash := range entries {
-			updateVerifyEgressLease(ctx, r, clientId, hash, verifyProxyEgressLeaseOwner, server.NowUtc(), time.Time{})
+		for _, reverseKey := range verifyClientEgressKeys(clientId) {
+			entries, err := r.HGetAll(ctx, reverseKey).Result()
+			server.Raise(err)
+			for field := range entries {
+				updateVerifyEgressLease(ctx, r, reverseKey, clientId, field, "", verifyProxyEgressLeaseOwner, server.NowUtc(), time.Time{})
+			}
 		}
 	})
 	updateVerifyEligibleMembership(ctx, clientId)

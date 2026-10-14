@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-jose/go-jose/v3"
@@ -18,6 +19,27 @@ import (
 
 const JwkRefreshTimeout = 30 * time.Minute
 const JwkParseRetryTimeout = 5 * time.Second
+
+var ssoJwkKeysOverride atomic.Pointer[[]any]
+
+// ssoJwkKeys returns the keys an sso jwt is verified against: the provider's
+// live key set, or the keys a test set with Testing_SetSsoJwkKeys.
+func ssoJwkKeys(validator func() *JwkValidator) []any {
+	if keys := ssoJwkKeysOverride.Load(); keys != nil {
+		return *keys
+	}
+	return validator().Keys()
+}
+
+// Testing_SetSsoJwkKeys verifies Google and Apple jwts against keys instead
+// of the live key sets, so a test never fetches them. The returned pop
+// restores the previous override.
+func Testing_SetSsoJwkKeys(keys []any) func() {
+	previous := ssoJwkKeysOverride.Swap(&keys)
+	return func() {
+		ssoJwkKeysOverride.Store(previous)
+	}
+}
 
 // actively refreshed based on the `Cache-Control` of the JWK response
 type JwkValidator struct {

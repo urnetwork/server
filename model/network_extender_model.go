@@ -79,6 +79,13 @@ type NetworkExtender struct {
 	// an extender that is no canary. A canary is never dripped and never in
 	// an activation's bootstrap, whatever its tier.
 	CanaryChannel string
+	// The latest expiry of the extender's live measurement certificates whose
+	// name is published, nil while it holds none (lag.dev/PLAN.md C8, C10).
+	// Read where a record is signed, in the signing transaction, so the
+	// record's MeasurementId -- the extender's 16-byte id, or empty --
+	// describes the same state the record does, and is never set before the
+	// name resolves.
+	MeasurementCertNotAfter *time.Time
 }
 
 // Whether the extender may be carried by an open channel at all (R1, R4):
@@ -188,6 +195,7 @@ func GetActiveNetworkExtenderForRecord(
 			return
 		}
 		extender.DerivedCountryCode = derivedCountryCodeInTx(ctx, tx, extenderId)
+		extender.MeasurementCertNotAfter = networkExtenderMeasurementCertNotAfterInTx(ctx, tx, extenderId)
 	})
 	return extender, addresses
 }
@@ -517,6 +525,11 @@ func ActivateNetworkExtender(
 		// the canary designation is the operator's and outlives a
 		// re-activation; the tier follows the activating network's policy
 		var canaryChannel string
+		// except that an extender that ever held a measurement certificate
+		// stays where it is rather than moving into the gated tier, unless an
+		// operator accepted that exposure (lag.dev/PLAN.md A9); the tier the
+		// row keeps is the one the record is signed into
+		var directoryTier int
 		result, err := tx.Query(
 			ctx,
 			`
@@ -557,8 +570,15 @@ func ActivateNetworkExtender(
 				city_location_id = $13,
 				region_location_id = $14,
 				country_location_id = $15,
-				directory_tier = $16
-			RETURNING extender_id, create_time, COALESCE(canary_channel, '')
+				directory_tier = CASE
+					WHEN
+						network_extender.measurement_ever_issued AND
+						NOT network_extender.measurement_exposure_accepted AND
+						$16 != 0
+					THEN network_extender.directory_tier
+					ELSE $16
+				END
+			RETURNING extender_id, create_time, COALESCE(canary_channel, ''), directory_tier
 			`,
 			server.NewId(),
 			activation.NetworkId,
@@ -579,7 +599,7 @@ func ActivateNetworkExtender(
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&extenderId, &createTime, &canaryChannel))
+				server.Raise(result.Scan(&extenderId, &createTime, &canaryChannel, &directoryTier))
 			}
 		})
 
@@ -640,9 +660,10 @@ func ActivateNetworkExtender(
 			// the record signed now carries the derived country while the
 			// extender has one (connect/GEOMAP.md §6); a re-activation writes a
 			// new genesis, which the next derivation solves from
-			DerivedCountryCode: derivedCountryCodeInTx(ctx, tx, extenderId),
-			DirectoryTier:      activation.DirectoryTier,
-			CanaryChannel:      canaryChannel,
+			DerivedCountryCode:      derivedCountryCodeInTx(ctx, tx, extenderId),
+			DirectoryTier:           directoryTier,
+			CanaryChannel:           canaryChannel,
+			MeasurementCertNotAfter: networkExtenderMeasurementCertNotAfterInTx(ctx, tx, extenderId),
 		}
 		addresses := getActiveNetworkExtenderAddressesInTx(ctx, tx, extenderId)
 
@@ -846,6 +867,7 @@ func PublishNetworkExtenderRecord(
 			return
 		}
 		extender.DerivedCountryCode = derivedCountryCodeInTx(ctx, tx, extenderId)
+		extender.MeasurementCertNotAfter = networkExtenderMeasurementCertNotAfterInTx(ctx, tx, extenderId)
 
 		issueTime := server.NowUtc()
 		message, err := signRecord(extender, addresses, issueTime)
@@ -1216,8 +1238,15 @@ func GetRandomActiveNetworkExtenders(
 			}
 		})
 
+		// what each bootstrap record says about the measurement api
+		// (lag.dev/PLAN.md C10), on the same connection
+		measurementCertNotAfters := getNetworkExtenderMeasurementCertNotAftersInConn(ctx, conn, extenderIds)
 		for _, extenderId := range extenderIds {
-			extenders = append(extenders, extenderWithAddresses[extenderId])
+			entry := extenderWithAddresses[extenderId]
+			if notAfter, ok := measurementCertNotAfters[extenderId]; ok {
+				entry.Extender.MeasurementCertNotAfter = &notAfter
+			}
+			extenders = append(extenders, entry)
 		}
 	})
 

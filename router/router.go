@@ -11,6 +11,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // regex table approach inspired by https://benhoyt.com/writings/go-routing/
@@ -36,6 +37,9 @@ type Route struct {
 	// set by RefuseClientCredentials: decides which client tokens the route
 	// refuses before its handler runs; nil refuses none
 	clientCredentialRefusal ClientCredentialRefusal
+	// set by RefuseLagGuestCredentials: the route refuses a lag.dev guest's
+	// token before its handler runs
+	lagGuestRefused bool
 }
 
 func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {
@@ -100,8 +104,14 @@ func (self *Router) SetStreamingBody(streaming StreamingBody) {
 // deferred once at function scope (not inside a loop) so it is open-coded and
 // does not allocate.
 //
+// No route sees a cookie or sends one (session/cookies.go): the request's
+// cookie headers are dropped here, before the match, and the response's by
+// the metrics writer every response goes through.
+//
 // `http.Handler`
 func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	session.DropCookies(r)
+
 	route, allowedMethods := self.trie.match(r.Method, r.URL.Path)
 	if route == nil {
 		if 0 < len(allowedMethods) {

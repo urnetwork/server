@@ -29,7 +29,7 @@ var googleJwkValidator = sync.OnceValue(func() *JwkValidator {
 // https://www.googleapis.com/oauth2/v3/certs
 
 func ParseGoogleJwt(jwtSigned string) (*GoogleJwt, error) {
-	return parseGoogleJwtWithKeys(jwtSigned, googleJwkValidator().Keys(), googleSsoClientIds())
+	return parseGoogleJwtWithKeys(jwtSigned, ssoJwkKeys(googleJwkValidator), googleSsoClientIds())
 }
 
 func parseGoogleJwtWithKeys(jwtSigned string, keys []any, allowedClientIds []string) (*GoogleJwt, error) {

@@ -9,13 +9,40 @@ import (
 
 const forceCloseFreshWindow = time.Hour
 
+// One subpage of the sweep. A row a lane leaves open after an operational
+// failure sits behind that lane's cursor, and a pass whose backlog is complete
+// can keep revisiting only its fresh and catch-up windows. So a pass that has
+// deferred any row ends once its backlog is complete; the next pass starts at
+// the oldest open contract and revisits it. A pass without deferrals is unchanged.
+func forceCloseContractExpiryFreshPage(minTime, now time.Time, after *ContractExpirySweepCursor,
+	page func(*ContractExpiryCursor) (int64, *ContractExpiryCursor, error),
+) (int64, *ContractExpirySweepCursor, error) {
+	deferred := false
+	count, next, err := forceCloseContractExpiryLanePage(minTime, now, after,
+		func(position *ContractExpiryCursor) (int64, *ContractExpiryCursor, error) {
+			count, cursor, err := page(position)
+			if visited, ok := err.(*ForceCloseVisitError); ok && visited.CanCheckpoint() && 0 < len(visited.deferredContractIds) {
+				deferred = true
+			}
+			return count, cursor, err
+		})
+	if next == nil || next == after || !forceClosePageCanAdvance(err) {
+		return count, next, err
+	}
+	next.Deferred = next.Deferred || deferred
+	if next.BacklogDone && next.Deferred {
+		return count, nil, err
+	}
+	return count, next, err
+}
+
 // Every other raw subpage belongs to the fresh tail while that pass has work.
 // The remaining subpages rotate through historical, complete post-epoch and
 // catch-up work. Each retained pass keeps its exact position and fixed bounds.
 // Repeating the fresh window revisits a fresh report that becomes quiet after
 // an earlier pass. Rows older than this window still belong to the full passes;
 // this is a latency improvement, not an unqualified expiry deadline guarantee.
-func forceCloseContractExpiryFreshPage(minTime, now time.Time, after *ContractExpirySweepCursor,
+func forceCloseContractExpiryLanePage(minTime, now time.Time, after *ContractExpirySweepCursor,
 	page func(*ContractExpiryCursor) (int64, *ContractExpiryCursor, error),
 ) (int64, *ContractExpirySweepCursor, error) {
 	next := &ContractExpirySweepCursor{}

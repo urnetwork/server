@@ -62,7 +62,11 @@ func RetryableStartupReadinessError(err error) (retryable bool) {
 		}
 		if database, ok := cause.(*pgconn.PgError); ok {
 			switch database.Code {
-			case "08000", "08001", "08003", "08006", "08007", "40001", "40P01", "53300", "57014", "57P01", "57P02", "57P03":
+			// PgBouncer, in front of every service's pool, reports its own
+			// unavailability as FATAL 08P01: a query queued past
+			// query_wait_timeout, a server login that keeps failing, its
+			// client limit (send_pooler_error in its src/proto.c).
+			case "08000", "08001", "08003", "08006", "08007", "08P01", "40001", "40P01", "53300", "57014", "57P01", "57P02", "57P03":
 				readCause = true
 				return true
 			default:

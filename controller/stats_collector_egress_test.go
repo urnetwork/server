@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -150,4 +151,79 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 func TestStatsProviderEgressIndexLabels(t *testing.T) {
 	connect.AssertEqual(t, statsProviderEgressIndexLabels(2, map[string]int64{}), []string{"0", "1", "2", model.ProviderEgressIndexNone})
 	connect.AssertEqual(t, statsProviderEgressIndexLabels(2, map[string]int64{"5": 1, "1": 3, "none": 2}), []string{"0", "1", "2", model.ProviderEgressIndexNone, "5"})
+}
+
+// The exempt-country gauge reads the guard the score export published: a
+// country where the probe fails for most providers is listed with the
+// providers its exemption keeps online, a country where it works is not, and
+// the kill switch removes every series.
+func TestStatsRefreshProviderOnlineSuccessExemptPublishesExemptCountries(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		createCity := func(city string, country string, countryCode string) *model.Location {
+			location := &model.Location{
+				LocationType: model.LocationTypeCity,
+				City:         city,
+				Region:       city,
+				Country:      country,
+				CountryCode:  countryCode,
+			}
+			model.CreateLocation(ctx, location)
+			return location
+		}
+		usCity := createCity("Palo Alto", "United States", "us")
+		vnCity := createCity("Hanoi", "Vietnam", "vn")
+
+		handlerId := model.CreateNetworkClientHandler(ctx)
+		providerCount := 0
+		connectProvider := func(location *model.Location) server.Id {
+			providerCount += 1
+			clientId := server.NewId()
+			model.Testing_CreateDevice(ctx, server.NewId(), server.NewId(), clientId, "", "")
+			connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, fmt.Sprintf("192.0.2.%d:0", providerCount), handlerId)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, model.SetConnectionLocation(ctx, connectionId, location.LocationId, &model.ConnectionLocationScores{}), nil)
+			model.SetProvide(ctx, clientId, map[model.ProvideMode][]byte{
+				model.ProvideModePublic: []byte("public-secret"),
+			})
+			return clientId
+		}
+		// `total` accepted URL outcomes of the current policy, the first
+		// `failed` of them failures
+		runs := func(clientId server.Id, total int, failed int) {
+			measuredAt := server.NowUtc()
+			server.Tx(ctx, func(tx server.PgTx) {
+				for index := range total {
+					ok := 0
+					if index >= failed {
+						ok = 1
+					}
+					evidence := statsEgressTestUrlEvidence(measuredAt, ok == 1)
+					server.Raise(evidence.ValidateOutcome(ok, 1, false))
+					encoded, err := json.Marshal(evidence)
+					server.Raise(err)
+					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_health_history
+						(run_id,client_id,measured_at,ok_count,total_count,class_results,tls_authentication_failure,url_probe_evidence,url_probe_policy_version)
+						VALUES($1,$2,$3,$4,1,'{}',false,$5::jsonb,$6)`, server.NewId(), clientId, measuredAt.UTC(), ok, string(encoded), evidence.PolicyVersion))
+				}
+			})
+		}
+
+		runs(connectProvider(usCity), 5, 0)
+		runs(connectProvider(usCity), 5, 5)
+		// one of three measured providers in vn carries traffic
+		runs(connectProvider(vnCity), 5, 4)
+		runs(connectProvider(vnCity), 5, 5)
+		runs(connectProvider(vnCity), 5, 5)
+		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+		connect.AssertEqual(t, model.UpdateClientScores(ctx, time.Hour, 1), nil)
+
+		statsRefreshProviderOnlineSuccessExempt(ctx)
+		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderOnlineSuccessExemptGauge.gauge, "urnetwork_stats_provider_online_success_exempt"), 1)
+		connect.AssertEqual(t, testutil.ToFloat64(statsProviderOnlineSuccessExemptGauge.gauge.WithLabelValues("vn")), float64(2))
+
+		t.Cleanup(server.Config.PushSimpleResource("provider.yml", []byte("online_requires_url_success: false\n")))
+		statsRefreshProviderOnlineSuccessExempt(ctx)
+		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderOnlineSuccessExemptGauge.gauge, "urnetwork_stats_provider_online_success_exempt"), 0)
+	})
 }

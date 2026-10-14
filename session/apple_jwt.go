@@ -33,7 +33,7 @@ var appleJwkValidator = sync.OnceValue(func() *JwkValidator {
 // we do not do real time lookups against the api. new versions of the api will contain up to date keys
 
 func ParseAppleJwt(jwtSigned string) (*AppleJwt, error) {
-	return parseAppleJwtWithKeys(jwtSigned, appleJwkValidator().Keys(), appleSsoClientIds())
+	return parseAppleJwtWithKeys(jwtSigned, ssoJwkKeys(appleJwkValidator), appleSsoClientIds())
 }
 
 func parseAppleJwtWithKeys(jwtSigned string, keys []any, allowedClientIds []string) (*AppleJwt, error) {

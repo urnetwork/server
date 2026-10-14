@@ -10009,4 +10009,374 @@ var migrations = []any{
 	).withIndexCompletion(820, "network_client_connection", "network_client_connection_connected_handler_id",
 		"CREATE INDEX network_client_connection_connected_handler_id ON public.network_client_connection USING btree (handler_id) WHERE connected",
 		"connected"),
+
+	// 821: settlement v2 ledger records and vault2 mirror (st_ledger_v2_schema.go).
+	// New tables only. Apply before deploying a server with v2 addresses.
+	newSqlMigration(stLedgerV2SchemaSql),
+	// 822: settlement v2 ledger inputs at a million providers
+	// (VERSION2-FINAL.md §8.2). st_verified_wallet_consent holds each
+	// generation of a retained consent chain that verified completely through
+	// some head, so epoch wallet selection verifies a chain once per head
+	// (model/st_wallet_consent_verified.go). A column a kind does not carry
+	// is zero; epochs and blocks are uint64 stored by bit pattern.
+	// st_fleet_bound_sync is the next block the FleetBound scan has mirrored
+	// into st_event, which bounds the head-exclusion candidates
+	// (controller/st_head_exclusion.go). New tables: nothing is rewritten,
+	// and v1 settlement reads neither.
+	newSqlMigration(`
+		CREATE TABLE st_verified_wallet_consent (
+			scope_hash bytea NOT NULL CHECK (octet_length(scope_hash) = 32),
+			kind varchar(16) NOT NULL CHECK (kind IN ('provider', 'network', 'delegation', 'hotkey')),
+			owner bytea NOT NULL CHECK (octet_length(owner) IN (16, 32)),
+			generation bigint NOT NULL CHECK (generation BETWEEN 1 AND 4096),
+			original_hash bytea NOT NULL CHECK (octet_length(original_hash) = 32),
+			from_epoch bigint NOT NULL,
+			through_epoch bigint NOT NULL,
+			wallet bytea NOT NULL CHECK (octet_length(wallet) = 32),
+			network_id bytea NOT NULL CHECK (octet_length(network_id) = 16),
+			consent_head_hash bytea NOT NULL CHECK (octet_length(consent_head_hash) = 32),
+			consent_generation bigint NOT NULL,
+			prospective_signer bytea NOT NULL CHECK (octet_length(prospective_signer) = 20),
+			prospective_block bigint NOT NULL,
+			prospective_epoch bigint NOT NULL,
+			expires_at bigint NOT NULL,
+			PRIMARY KEY (scope_hash, kind, owner, generation)
+		);
+		CREATE TABLE st_fleet_bound_sync (
+			deployment_key varchar(96) NOT NULL PRIMARY KEY,
+			next_block bigint NOT NULL
+		);
+	`),
+
+	// 823: the price of each credited App Store transaction, in milliunits of
+	// its ISO 4217 currency. Net revenue is USD and only a USD price converts,
+	// so a credit in another currency records the paid marker and its price is
+	// kept here. Rows credited earlier stay NULL: their price survives only as
+	// the net revenue it was misread into, and their currency is unknown.
+	// Nullable columns without a default rewrite nothing. Apply before
+	// deploying the api and taskworker that write them.
+	newSqlMigration(`
+		ALTER TABLE apple_subscription_transaction
+			ADD COLUMN price_milliunits bigint NULL,
+			ADD COLUMN currency varchar(3) NULL
+	`),
+
+	// The index drops below were audited on 2026-10-12 like 816-819: Main's
+	// pg_stat_user_indexes (counters since the 2026-08-24 18:24 UTC reset,
+	// kept across the clean 2026-10-01 restart) and every query in this
+	// repository. They reclaim about 25 GB of Main's nearly full disk and a
+	// write on every insert into their tables. Apply them outside a running
+	// pg_dump, as DROP INDEX CONCURRENTLY waits for every lock on the table.
+
+	// 824: provider_work_session_event_transaction (13.3 GB on Main, 0 scans)
+	// serves only providerWorkSignSessionEventsInTx, which runs only when the
+	// optional provider_work_session.json signer is deployed, and it is not.
+	// Every connection open and retirement appends an event that writes it. A
+	// vault-loaded signer refuses to sign while the index is missing. Before
+	// deploying that signer, add a migration that builds the index again
+	// concurrently and supersedes this one in the migration signal, which pages
+	// on a copy built by hand.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS provider_work_session_event_transaction`,
+		`DROP INDEX IF EXISTS provider_work_session_event_transaction`,
+	),
+	// 825: contract_close_report_evidence_contract (11.1 GB, 14,162 scans)
+	// duplicates contract_close_original_census (768, 3.3 billion scans). The
+	// only contract-keyed reader, the ST epoch original-close census, filters
+	// by contract_id and orders by client_id, report_id, which the census
+	// index matches exactly; every other reader seeks the primary key. Nothing
+	// orders evidence by party or accepted_at.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS contract_close_report_evidence_contract`,
+		`DROP INDEX IF EXISTS contract_close_report_evidence_contract`,
+	),
+	// 826: provider_probe_cycle_completed_waiting (0.23 GB, 0 scans) serves
+	// only the completed-run priority scans, which run only when the egress
+	// rule url_completed_run_priority_since is set, and it is not. If it is
+	// set later, the eligible next-attempt indexes (725, 728) serve the same
+	// reads.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_completed_waiting`,
+		`DROP INDEX IF EXISTS provider_probe_cycle_completed_waiting`,
+	),
+	// 827: provider_probe_cycle_slot_completed_waiting (0.33 GB, 1 scan) is the
+	// per-slot form of 826, with the same single gated reader.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_slot_completed_waiting`,
+		`DROP INDEX IF EXISTS provider_probe_cycle_slot_completed_waiting`,
+	),
+
+	// 828: autovacuum's end-of-vacuum truncation holds AccessExclusiveLock on
+	// the table while it drops the cut pages from all of shared_buffers (256 GB
+	// on Main), so every connect, disconnect and handler heartbeat queues
+	// behind it. On 2026-10-12 it parked 361 backends for up to 4 s on
+	// network_client_connection (18:33Z, then 18:59Z, 19:04Z and 19:06Z).
+	// Space freed by the retention deletes is reused in place instead, whatever
+	// the server-wide vacuum_truncate setting. The option takes
+	// ShareUpdateExclusiveLock, which blocks no reader or writer.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_client_connection SET (vacuum_truncate = false);
+		ALTER TABLE network_client_handler SET (vacuum_truncate = false);
+	`),
+	// 829: devices by network, for the probe-shard reap. ReapProberShard
+	// deletes a probe network's devices while it holds the endpoint fence
+	// (advisory 776) of every client in that network. Without this index the
+	// delete read the whole 11 GB device table: 8,759 calls averaging 8.5 s,
+	// max 389 s on Main by 2026-10-12, with 25,408 probe shards draining.
+	// Building it reads the heap twice and waits for older snapshots, without
+	// blocking writes. Other device deletes already go by device_id.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS device_network_id`,
+		`CREATE INDEX CONCURRENTLY device_network_id ON device (network_id)`,
+		`DROP INDEX IF EXISTS device_network_id;
+		 CREATE INDEX device_network_id ON device (network_id)`,
+	),
+
+	// 830: audit_device_event by device, for the public devices series
+	// (model/audit_model.go computeStatsDevice). The hourly export read every
+	// retained event through the time-leading stats index, grouped them all by
+	// device and day, and streamed one row per device-day to the taskworker. On
+	// Main (read 2026-10-13, 87.6M events since 2026-08-10) that one statement
+	// averaged 427 s over 93 runs (221-526 s), wrote 7.5 GB of temp files per
+	// run and returned 37M rows, and the export reached its 600 s max time.
+	// The series is now computed one chunk of devices at a time, each chunk
+	// one statement over a bounded range of this index that sorts and hashes
+	// in memory and returns only span counts. The index covers every column
+	// those statements read. Building it reads the 9 GB heap twice and waits
+	// for older snapshots, including a running pg_dump's, without blocking the
+	// device sweep's inserts. A completed build is kept, so it may be
+	// pre-created out of band with the same statement. Services built with
+	// this migration fail startup readiness until it is applied.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS audit_device_event_device_id_event_time`,
+		`CREATE INDEX CONCURRENTLY audit_device_event_device_id_event_time
+		 ON audit_device_event (device_id, event_time, event_id) INCLUDE (event_type)`,
+		`DROP INDEX IF EXISTS audit_device_event_device_id_event_time;
+		 CREATE INDEX audit_device_event_device_id_event_time
+		 ON audit_device_event (device_id, event_time, event_id) INCLUDE (event_type)`,
+	).withIndexCompletion(830, "audit_device_event", "audit_device_event_device_id_event_time",
+		"CREATE INDEX audit_device_event_device_id_event_time ON public.audit_device_event USING btree (device_id, event_time, event_id) INCLUDE (event_type)",
+		""),
+	// 831: the time-leading stats index (7.4 GB on Main) has no reader left; it
+	// served only the devices series. The primary key keeps the same time order
+	// for retention and backfill. Like 824-827, apply it outside a running
+	// pg_dump.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS audit_device_event_stats_device_id`,
+		`DROP INDEX IF EXISTS audit_device_event_stats_device_id`,
+	),
+	// 832: settlement v2 activation (SV-9). st_ledger_v2_activation holds the
+	// configured pool's registration in vault2.pools as the server first
+	// observed it, with the vault2 and STSettlement2 it was configured with
+	// (model/st_ledger_v2_activation.go). Registration is permanent on chain,
+	// so the row is never updated. Once it exists, the st subsystem of its
+	// deployment runs only while st.yml names that pair
+	// (controller/st_ledger_v2_activation.go). A new table: nothing is
+	// rewritten. Apply before deploying a server with v2 addresses; a
+	// deployment without them reads the table only if it exists.
+	newSqlMigration(`
+		CREATE TABLE st_ledger_v2_activation (
+			deployment_key varchar(96) NOT NULL PRIMARY KEY,
+			no_id bigint NOT NULL CHECK (no_id > 0),
+			first_epoch bigint NOT NULL CHECK (first_epoch > 0),
+			vault_v2_address varchar(42) NOT NULL,
+			settlement_v2_address varchar(42) NOT NULL,
+			create_time timestamp NOT NULL
+		);
+	`),
+
+	// 833: lag.dev guest networks, tracks, tickets and results
+	// (lag.dev/PLAN.md A1, A2, A5-A7). New tables only: nothing existing is
+	// read, locked or rewritten.
+	//
+	// lag_guest marks a guest network created for lag.dev and holds its
+	// expiry. The lag sweep removes the network once it passes (A2), and only
+	// marked networks ever expire. lag_track is one track a visitor ran, with
+	// its client fields, looked up when it was issued, and the count of
+	// tickets reissued in it, which caps how often its dots reconnect;
+	// lag_ticket is one admitted session, kept until its report can no longer
+	// arrive (ticket_retention); lag_result is one report, one session's
+	// minute of pings, which is one minute per dot per track unless the dot
+	// reconnected (decision 17), with its load and the statistics derived
+	// when it was stored. No table holds a client address, a prefix of one or
+	// a hash of one (amendment 9): lag_track keeps only the network and the
+	// city-level place GeoLite2 gives for the address the track was issued
+	// to, with that city's coordinates when it names one, and lag_result only
+	// which family the browser reached the extender on. A track from an agent
+	// browser or a hosting network is flagged automated, with which of the two
+	// it was, and nothing more: never the address or the agent's name
+	// (amendment 12). A track's source is the client that ran it: lag.dev in
+	// a browser (web), or the lagdev command line or MCP server (cli, mcp),
+	// whose tracks still count in the stats. A result's session and window
+	// start times are the extender's clock and its created_at is the
+	// report's arrival on the operator's, so an extender's offset can be
+	// estimated. Tracks and results are kept for result_retention (lag.yml,
+	// 7 days).
+	newSqlMigration(`
+		CREATE TABLE lag_guest (
+			network_id uuid NOT NULL PRIMARY KEY,
+			user_id uuid NOT NULL,
+			created_at timestamp NOT NULL,
+			expires_at timestamp NOT NULL
+		);
+		CREATE INDEX lag_guest_expires_at ON lag_guest (expires_at, network_id);
+
+		CREATE TABLE lag_track (
+			track_id uuid NOT NULL PRIMARY KEY,
+			network_id uuid NOT NULL,
+			client_id uuid NOT NULL,
+			started_at timestamp NOT NULL,
+			reissue_count int NOT NULL DEFAULT 0,
+			client_asn bigint NULL,
+			client_asn_org varchar(256) NULL,
+			client_country_code varchar(2) NULL,
+			client_region varchar(256) NULL,
+			client_city varchar(256) NULL,
+			client_latitude double precision NULL,
+			client_longitude double precision NULL,
+			automated boolean NOT NULL DEFAULT false,
+			automated_reason varchar(32) NULL,
+			source varchar(8) NOT NULL DEFAULT 'web'
+		);
+		CREATE INDEX lag_track_started_at ON lag_track (started_at, track_id);
+
+		CREATE TABLE lag_ticket (
+			ticket_id uuid NOT NULL PRIMARY KEY,
+			track_id uuid NOT NULL,
+			position smallint NOT NULL,
+			client_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			issued_at timestamp NOT NULL,
+			expires_at timestamp NOT NULL
+		);
+		CREATE INDEX lag_ticket_track_id_position ON lag_ticket (track_id, position);
+		CREATE INDEX lag_ticket_issued_at ON lag_ticket (issued_at, ticket_id);
+
+		CREATE TABLE lag_result (
+			lag_result_id uuid NOT NULL PRIMARY KEY,
+			track_id uuid NOT NULL,
+			track_position smallint NOT NULL,
+			ticket_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			extender_ip_family smallint NOT NULL,
+			session_start_time timestamp NOT NULL,
+			window_start_time timestamp NOT NULL,
+			ping_offset_ms int[] NOT NULL,
+			ping_micros int[] NOT NULL,
+			download_start_ms int NOT NULL,
+			download_ms int NOT NULL,
+			upload_start_ms int NOT NULL,
+			upload_ms int NOT NULL,
+			interval_ms int NOT NULL,
+			download_received_bytes bigint[] NOT NULL,
+			download_sent_bytes bigint[] NOT NULL,
+			upload_bytes bigint[] NOT NULL,
+			download_streams int NOT NULL,
+			upload_streams int NOT NULL,
+			upload_verified bool NOT NULL,
+			end_reason varchar(32) NOT NULL,
+			own_load_latency_p50_ms real NULL,
+			own_load_latency_p95_ms real NULL,
+			outside_load_latency_p50_ms real NULL,
+			outside_load_latency_p95_ms real NULL,
+			download_p50_mbps real NULL,
+			download_p95_mbps real NULL,
+			upload_p50_mbps real NULL,
+			upload_p95_mbps real NULL,
+			lost_count int NOT NULL,
+			created_at timestamp NOT NULL,
+			CONSTRAINT lag_result_ticket_id UNIQUE (ticket_id)
+		);
+		CREATE INDEX lag_result_track_id_position ON lag_result (track_id, track_position);
+		CREATE INDEX lag_result_created_at ON lag_result (created_at, lag_result_id);
+	`),
+
+	// 834: lag.dev measurement certificates (lag.dev/PLAN.md C5-C10, A8-A10).
+	// An open tier extender's certificate request and where it stands, and the
+	// certificates the CA issued for it, renewals, withdrawals and revocations
+	// included. measurement_ever_issued is set before an order is placed and
+	// never cleared, because the CA logs a certificate to certificate
+	// transparency during issuance; the constraint keeps every writer from
+	// moving such an extender into the gated tier or a canary channel unless
+	// an operator accepted the exposure (A9). New columns with defaults and
+	// new tables: nothing is rewritten, and every existing row satisfies the
+	// constraint. The tables are small, one row per extender and one per
+	// certificate (about six a year per extender).
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_extender
+			ADD COLUMN measurement_ever_issued bool NOT NULL DEFAULT false,
+			ADD COLUMN measurement_exposure_accepted bool NOT NULL DEFAULT false;
+		ALTER TABLE network_extender
+			ADD CONSTRAINT network_extender_measurement_exposure CHECK (
+				NOT measurement_ever_issued OR
+				measurement_exposure_accepted OR
+				(directory_tier = 0 AND canary_channel IS NULL)
+			);
+
+		CREATE TABLE network_extender_measurement (
+			extender_id uuid NOT NULL PRIMARY KEY,
+			csr bytea NULL,
+			public_key bytea NULL,
+			names varchar NOT NULL DEFAULT '',
+			state varchar(16) NOT NULL,
+			reason varchar NOT NULL DEFAULT '',
+			request_time timestamp NOT NULL,
+			pending_time timestamp NULL,
+			retry_time timestamp NULL,
+			failure_count int NOT NULL DEFAULT 0,
+			update_time timestamp NOT NULL
+		);
+		CREATE INDEX network_extender_measurement_pending_time
+		ON network_extender_measurement (pending_time, extender_id)
+		WHERE state = 'pending';
+
+		CREATE TABLE network_extender_measurement_cert (
+			cert_id uuid NOT NULL PRIMARY KEY,
+			extender_id uuid NOT NULL,
+			names varchar NOT NULL,
+			csr bytea NOT NULL,
+			public_key bytea NOT NULL,
+			chain_pem text NOT NULL,
+			serial_hex varchar NOT NULL,
+			not_before timestamp NOT NULL,
+			not_after timestamp NOT NULL,
+			issue_time timestamp NOT NULL,
+			cap_counted bool NOT NULL,
+			renew_time timestamp NOT NULL,
+			renew_failure_count int NOT NULL DEFAULT 0,
+			renewed_time timestamp NULL,
+			withdraw_time timestamp NULL,
+			withdraw_reason varchar NOT NULL DEFAULT '',
+			revoke_time timestamp NULL,
+			revoke_retry_time timestamp NULL,
+			revoke_failure_count int NOT NULL DEFAULT 0
+		);
+		CREATE INDEX network_extender_measurement_cert_extender_id_issue_time
+		ON network_extender_measurement_cert (extender_id, issue_time);
+		CREATE INDEX network_extender_measurement_cert_names_not_after
+		ON network_extender_measurement_cert (names, not_after);
+		CREATE INDEX network_extender_measurement_cert_counted_issue_time
+		ON network_extender_measurement_cert (issue_time)
+		WHERE cap_counted;
+		CREATE INDEX network_extender_measurement_cert_live_not_after
+		ON network_extender_measurement_cert (not_after)
+		WHERE withdraw_time IS NULL;
+		CREATE INDEX network_extender_measurement_cert_withdrawn_unrevoked
+		ON network_extender_measurement_cert (withdraw_time)
+		WHERE withdraw_time IS NOT NULL AND revoke_time IS NULL;
+	`),
+
+	// 835: when the measurement dns reconcile published each certificate's
+	// name (lag.dev/PLAN.md C8, A4). The lag.dev sample offers an extender
+	// only once its name resolves on every authoritative server: a resolver
+	// asked for a name before it exists caches that it does not. A nullable
+	// column on a small table: nothing is rewritten.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_extender_measurement_cert
+			ADD COLUMN publish_time timestamp NULL;
+	`),
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // The egress destination pool (connect/GEOMAP.md §11.4) is data, not code: the
@@ -508,7 +509,8 @@ func (self *ProviderEgressHealthScoring) Class(name string) string {
 	return ""
 }
 
-// One load of one run, as the site tally counts it.
+// One load of one run, as the site tally counts it. Only a run that reached
+// its provider has loads to tally.
 type ProviderEgressSiteLoad struct {
 	Name string
 	Ok   bool
@@ -639,7 +641,7 @@ func AddProviderEgressRunTally(ctx context.Context, measuredAt time.Time, run Pr
 	}, server.TxReadCommitted)
 }
 
-// One site's summed loads at one place.
+// One site's summed loads at one place, from runs that reached their provider.
 type ProviderEgressSiteTally struct {
 	Name                string
 	Place               ProviderEgressPlace
@@ -775,9 +777,10 @@ type ProviderEgressClassTotal struct {
 }
 
 // Sums the scored class tallies of the health runs measured at or after
-// minMeasuredAt, per class and over all (""). It is the fleet-wide failure
-// share the refresh and the gauges read: a prober fault fails everyone at
-// once, and this is where that shows first.
+// minMeasuredAt, per class and over all (""): the fleet-wide failure share the
+// gauges read. It counts every failure, a provider that was never reached
+// included; the pool refresh holds the line against
+// GetProviderEgressHealthContactedTotal instead.
 func GetProviderEgressHealthClassTotals(ctx context.Context, minMeasuredAt time.Time) map[string]ProviderEgressClassTotal {
 	totals := map[string]ProviderEgressClassTotal{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -809,6 +812,65 @@ func GetProviderEgressHealthClassTotals(ctx context.Context, minMeasuredAt time.
 		})
 	})
 	return totals
+}
+
+// Ok/total of the scored loads that reached their provider over a set of
+// runs, and the failed loads left out because their run reached none.
+type ProviderEgressContactedTotal struct {
+	Ok    int
+	Total int
+	// NoContactFailures is out of Ok and Total.
+	NoContactFailures int
+}
+
+// Sums the scored loads of the health runs measured at or after minMeasuredAt
+// whose provider was reached: the fleet-wide failure share the pool refresh
+// holds against the prober-fault line. A prober fault fails the sites at once
+// on the exits it reaches, and the newest runs show it first. A run whose one
+// URL ended before any destination answered
+// (egresshealth.CheckResult.NoContactFailure, read back from its stored URL
+// evidence) is an offline or unreachable exit, a structural part of every
+// hour's runs, and is no evidence of a prober fault; it is counted apart. Each
+// accepted run counts once, from the history. A run without URL evidence (a
+// legacy batch) keeps every load, since nothing says which of its failures
+// reached the provider.
+func GetProviderEgressHealthContactedTotal(ctx context.Context, minMeasuredAt time.Time) ProviderEgressContactedTotal {
+	contacted := ProviderEgressContactedTotal{}
+	server.Db(ctx, func(conn server.PgConn) {
+		// the filter mirrors NoContactFailure over the fields URL evidence
+		// keeps of its one load: a run with a status, a response byte, a
+		// redirect, a TLS verdict or security evidence reached its provider
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				COALESCE(sum(ok_count), 0)::bigint,
+				COALESCE(sum(total_count), 0)::bigint,
+				COALESCE(sum(total_count) FILTER (WHERE
+					total_count = 1 AND ok_count = 0 AND NOT tls_authentication_failure
+					AND url_probe_evidence ->> 'failure_stage' = ANY($2)
+					AND COALESCE(url_probe_evidence ->> 'status_code', '0') = '0'
+					AND COALESCE(url_probe_evidence ->> 'redirect_count', '0') = '0'
+					AND COALESCE(url_probe_evidence ->> 'first_byte_received', 'false') = 'false'
+					AND COALESCE(url_probe_evidence -> 'security', 'null'::jsonb) IN ('null'::jsonb, '[]'::jsonb)
+				), 0)::bigint
+			FROM provider_egress_health_history
+			WHERE $1 <= measured_at
+			`,
+			minMeasuredAt.UTC(),
+			egresshealth.NoContactFailureStages(),
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var ok, total, noContact int64
+				server.Raise(result.Scan(&ok, &total, &noContact))
+				contacted.Ok = int(ok)
+				contacted.Total = int(total - noContact)
+				contacted.NoContactFailures = int(noContact)
+			}
+		})
+	})
+	return contacted
 }
 
 // Reports why name cannot key a row.
@@ -891,8 +953,10 @@ type ProviderEgressSiteSettings struct {
 	// pass before the place is unmarked.
 	SiteRegionCooldownSeconds int `yaml:"site_region_cooldown_seconds"`
 	// SiteProberFaultShare is the prober-fault line: while the fleet-wide
-	// failure share of scored loads is above it, the refresh does nothing,
-	// since retiring sites during a prober fault empties the pool for nothing.
+	// failure share of the scored loads that reached their provider is above
+	// it, the refresh does nothing, since retiring sites during a prober fault
+	// empties the pool for nothing. A load whose provider was never reached is
+	// not in that share, as it is not in any site's.
 	SiteProberFaultShare float64 `yaml:"site_prober_fault_share"`
 	// SiteProberFaultWindowSeconds is what "while" means for that line: the
 	// health runs measured this recently. A prober fault fails every run at

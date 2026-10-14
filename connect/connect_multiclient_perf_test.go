@@ -112,6 +112,8 @@ const (
 func newLocalPerformanceClientSettings() *connect.ClientSettings {
 	clientSettings := connect.DefaultClientSettings()
 	clientSettings.WebRtcSettings.IceServerUrls = nil
+	// empty IceServerUrls alone would draw from the default STUN pool
+	clientSettings.WebRtcSettings.IceServerPoolUrls = nil
 	clientSettings.WebRtcSettings.UseLoopbackOnlyIceInterfaces = true
 	return clientSettings
 }
@@ -130,6 +132,9 @@ func TestLocalPerformanceClientSettingsConstrainIceToLoopback(t *testing.T) {
 	clientSettings := newLocalPerformanceClientSettings()
 	if iceServerUrls := clientSettings.WebRtcSettings.IceServerUrls; len(iceServerUrls) != 0 {
 		t.Errorf("local performance fixture has external ICE servers: %v", iceServerUrls)
+	}
+	if iceServerPoolUrls := clientSettings.WebRtcSettings.IceServerPoolUrls; len(iceServerPoolUrls) != 0 {
+		t.Errorf("local performance fixture draws from a STUN pool: %v", iceServerPoolUrls)
 	}
 	if !clientSettings.WebRtcSettings.UseLoopbackOnlyIceInterfaces {
 		t.Error("local performance fixture can gather non-loopback ICE candidates")

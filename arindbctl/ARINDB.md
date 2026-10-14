@@ -1412,7 +1412,7 @@ depends on, as far as the upstream sources allow, and publishes one bundle:
 
 | Path | Contents | Config resource |
 | --- | --- | --- |
-| `mmdb/` | GeoLite2-City, places and manifest, as `geolite2 refresh` | yes |
+| `mmdb/` | GeoLite2-City, places and manifest, as `geolite2 refresh`, plus `geolite2-asn.mmdb` when `edition_ids` names `GeoLite2-ASN` | yes |
 | `arindb/` | Final `arin.mmdb`, its `manifest.json`, `registration-manifest.json` and `update-manifest.json` | yes |
 | `subscriber-evidence/catalog/` | The refreshed `catalog.yml` with every pinned snapshot under `sources/` and the pinning manifest | no |
 | `subscriber-evidence/registration/` | The registration base database and its manifest | no |
@@ -1668,6 +1668,16 @@ an already initialized process. Selection, resource availability, and process
 reload must all occur through the owning deployment lifecycle. The decoder
 ignores additive metadata it does not consume, but rejects unsupported schema
 versions and inconsistent policy-two state/flag combinations.
+
+`urnetwork_arin_database_build_epoch_seconds` reports the build epoch of the
+serving reader each process opened, and zero until it opens. Every service pushes
+it with its own host, service, block and instance labels, so a query over it
+shows which artifact each live process classifies with and how old that artifact
+is, including on hosts without shell access. API, Connect, MCP and Alt open the
+reader at warmup; Taskworker reports zero because it consumes stored facts.
+The gauge is process self-report from the published reader; it does not hash the
+mapped file or prove request-time use, and stored connection epochs remain the
+evidence of which database classified a connection.
 
 `ArinInfo.QualityVerified()` requires a positive database build epoch,
 classifier version one, policy two, subscriber state, `non_quality: false`, and

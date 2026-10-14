@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	gethrpc "github.com/ethereum/go-ethereum/rpc"
+	"golang.org/x/crypto/blake2b"
 
 	"github.com/urfoundation/sn/crv4"
 	"github.com/urfoundation/sn/protocol"
@@ -44,6 +45,23 @@ type snReservedAttemptAuthority struct {
 	storage    map[string]any
 	metagraph  string
 	now        time.Time
+	// the activation's native block and the finalized head after it, each
+	// under the hash of its header
+	headers   map[string]types.Header
+	finalized types.Hash
+}
+
+// A native block's hash is the Blake2b-256 of its complete SCALE header, which
+// the production readers recompute from the header they are served. The body
+// is empty, as its extrinsics root says.
+func snReservedAttemptNativeHeader(t testing.TB, parent types.Hash, number uint64) (types.Header, types.Hash) {
+	t.Helper()
+	header := types.Header{ParentHash: parent, Number: types.BlockNumber(number), StateRoot: types.Hash{4}, ExtrinsicsRoot: types.Hash(blake2b.Sum256([]byte{0})), Digest: types.Digest{}}
+	raw, err := codec.Encode(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return header, types.Hash(blake2b.Sum256(raw))
 }
 
 // This exact runtime metadata is independently hashed by CRV4 at both native
@@ -56,9 +74,12 @@ func newSnReservedAttemptAuthority(t testing.TB) *snReservedAttemptAuthority {
 	}
 	key := ed25519.NewKeyFromSeed(append([]byte{0x41}, make([]byte, 31)...))
 	self := &snReservedAttemptAuthority{key: key, storage: make(map[string]any), now: time.Now().Truncate(time.Second)}
+	activationHeader, activationHash := snReservedAttemptNativeHeader(t, types.Hash{2}, 100)
+	finalizedHeader, finalizedHash := snReservedAttemptNativeHeader(t, activationHash, 101)
+	self.headers, self.finalized = map[string]types.Header{activationHash.Hex(): activationHeader, finalizedHash.Hex(): finalizedHeader}, finalizedHash
 	self.record = protocol.ValidatorEvidenceActivation{Domain: protocol.ValidatorEvidenceActivationDomain{ChainID: 945, GenesisHash: [32]byte{1}, Netuid: 521,
 		Coordinator: [20]byte{0x12}, SettlementVault: [20]byte{0x13}, DeploymentIDHash: sha256.Sum256([]byte("reserved-http-fixture")), PolicyHash: [32]byte{0x15}, Epoch: 7},
-		Hotkey: hotkey.PublicKey(), NoID: 1, FirstSequence: 1, NativeBlock: 100, NativeHash: [32]byte{2}, EVMBlock: 1000, EVMHash: [32]byte(common.BigToHash(big.NewInt(1000)))}
+		Hotkey: hotkey.PublicKey(), NoID: 1, FirstSequence: 1, NativeBlock: 100, NativeHash: [32]byte(activationHash), EVMBlock: 1000, EVMHash: [32]byte(common.BigToHash(big.NewInt(1000)))}
 	copy(self.record.VPK[:], key[ed25519.SeedSize:])
 	self.digest, err = self.record.Digest()
 	if err != nil {
@@ -239,7 +260,7 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 		_ = json.Unmarshal(args[index], &value)
 		return value
 	}
-	knownNative := func(hash string) bool { return hash == types.Hash{2}.Hex() || hash == types.Hash{3}.Hex() }
+	knownNative := func(hash string) bool { _, known := self.headers[hash]; return known }
 	block := func(number uint64) map[string]any {
 		return map[string]any{"number": hexutil.EncodeUint64(number), "hash": common.BigToHash(new(big.Int).SetUint64(number)), "timestamp": hexutil.EncodeUint64(uint64(self.now.Unix()))}
 	}
@@ -289,29 +310,31 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 	case "eth_call":
 		return self.evmCall(args)
 	case "chain_getFinalizedHead":
-		return types.Hash{3}.Hex(), nil
+		return self.finalized.Hex(), nil
 	case "chain_getBlockHash":
 		var number uint64
 		if len(args) != 1 || json.Unmarshal(args[0], &number) != nil {
 			break
 		}
-		switch number {
-		case 0:
+		if number == 0 {
 			return types.Hash{1}.Hex(), nil
-		case 100:
-			return types.Hash{2}.Hex(), nil
-		case 101:
-			return types.Hash{3}.Hex(), nil
+		}
+		for hash, header := range self.headers {
+			if uint64(header.Number) == number {
+				return hash, nil
+			}
 		}
 	case "chain_getHeader":
-		if len(args) != 1 || !knownNative(argument(0)) {
+		header, known := self.headers[argument(0)]
+		if len(args) != 1 || !known {
 			break
 		}
-		number := "0x64"
-		if argument(0) == (types.Hash{3}).Hex() {
-			number = "0x65"
-		}
-		return map[string]any{"parentHash": types.Hash{1}.Hex(), "number": number, "stateRoot": types.Hash{4}.Hex(), "extrinsicsRoot": types.Hash{5}.Hex(), "digest": map[string]any{"logs": []string{}}}, nil
+		// Substrate spells the number as a 0x quantity; the SDK's marshaler
+		// leaves the prefix out
+		return struct {
+			types.Header
+			Number string `json:"number"`
+		}{Header: header, Number: hexutil.EncodeUint64(uint64(header.Number))}, nil
 	case "state_getRuntimeVersion":
 		if len(args) == 0 || len(args) == 1 && knownNative(argument(0)) {
 			return self.deployment.NativeRuntime.Version, nil
@@ -333,7 +356,7 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 			break
 		}
 		if value == "clock" {
-			if argument(1) != (types.Hash{3}).Hex() {
+			if argument(1) != self.finalized.Hex() {
 				break
 			}
 			return "0x" + hex.EncodeToString(binary.LittleEndian.AppendUint64(nil, uint64(self.now.UnixMilli()))), nil

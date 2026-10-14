@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"maps"
@@ -142,6 +144,52 @@ func VaultHomeRoot() string {
 func VaultHomes() []string {
 	root := VaultHomeRoot()
 	return resolveMultiHome(root)
+}
+
+// TestRealVaultEnv opts a test binary in to reading a vault that is not a test
+// fixture, such as the deployment vault $WARP_HOME/vault with its secrets.
+const TestRealVaultEnv = "URNETWORK_TEST_REAL_VAULT"
+
+// The repository's synthetic vault and config, which test-env.sh and
+// local/run-local.sh use in portable mode. Empty in a -trimpath build.
+var syntheticTestResourceRoot = func() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok || !filepath.IsAbs(file) {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(file), "local", "testdata")
+}()
+
+// A test binary reads only a fixture vault unless TestRealVaultEnv is "1": one
+// below the release gate's private fixture root, the repository's synthetic
+// local/testdata, or the temp directory or GOTMPDIR where a test writes its
+// own. Any other vault, such as $WARP_HOME/vault, may hold real secrets and
+// reads as empty. Other binaries are unaffected.
+func refuseNonFixtureVault(root string, testBinary bool) error {
+	if !testBinary || os.Getenv(TestRealVaultEnv) == "1" {
+		return nil
+	}
+	// Go's t.TempDir creates its directory below GOTMPDIR when GOTMPDIR is
+	// set, and the release gate's child sets GOTMPDIR apart from TMPDIR.
+	for _, fixtureRoot := range []string{os.Getenv("WARP_TEST_ENV_PORTABLE_ROOT"), syntheticTestResourceRoot, os.TempDir(), os.Getenv("GOTMPDIR")} {
+		if fixtureRoot != "" && pathWithin(root, fixtureRoot) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: a test reads only a fixture vault, and %s is not one; set %s=1 to read it", ErrResourceNotFound, root, TestRealVaultEnv)
+}
+
+// Reports whether path is base or below it, after resolving the symlinks of
+// each that exists.
+func pathWithin(path string, base string) bool {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
+	rel, err := filepath.Rel(filepath.Clean(base), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func ConfigHomeRoot() string {
@@ -686,6 +734,11 @@ func (self *Resolver) resolution(relPath string) *resolverResolution {
 	switch self.mountType {
 	case MOUNT_TYPE_VAULT:
 		root = VaultHomeRoot()
+		// checked before the cache, so a refusal is never cached and an opt-in
+		// that is withdrawn takes effect at the next lookup
+		if err := refuseNonFixtureVault(root, testing.Testing()); err != nil {
+			return &resolverResolution{err: err, generation: resolverGeneration.Add(1)}
+		}
 	case MOUNT_TYPE_CONFIG:
 		root = ConfigHomeRoot()
 	case MOUNT_TYPE_SITE:

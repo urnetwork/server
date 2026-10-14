@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -38,6 +39,7 @@ func runStCheck(args []string, stdout io.Writer) error {
 	profile := flags.String("profile", stconn.ProfileMainnet, "profile to select: mainnet or testnet")
 	authorityPath := flags.String("authority", "", "operator-gas-authority.yml to verify the embedded policy against")
 	snPath := flags.String("sn", "", "sn.yml to check the payout identity and readiness digest against")
+	activationPath := flags.String("v2-activation", "", "output of bringyourctl st v2-activation on the server this st.yml is for")
 	nowValue := flags.String("now", "", "RFC3339 instant for policy validity (default: now)")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -84,6 +86,7 @@ func runStCheck(args []string, stdout io.Writer) error {
 	if *snPath != "" {
 		reportStSchedule(report, check, *snPath, now)
 	}
+	reportStActivation(report, cfg, *activationPath)
 	reportStIdentity(report, cfg)
 	if projection, err := receiptProjectionSha256(raw, *profile, rpcUrls); err != nil {
 		report.add("FAIL", "receipt projection: %v", err)
@@ -295,6 +298,38 @@ func reportStSchedule(report *stCheckReport, check *controller.StGoLiveConfigChe
 	report.add("ok", "sn.yml reviewed identity and readiness digest equal this st.yml's")
 }
 
+// A server that has recorded its pool's settlement v2 activation refuses an
+// st.yml whose v2 pair is not the recorded one. Its `bringyourctl st
+// v2-activation` output shows whether that latch is armed and lets this check
+// refuse such a file before it is installed.
+func reportStActivation(report *stCheckReport, cfg *controller.StConfig, activationPath string) {
+	if activationPath == "" {
+		report.add("note", "no --v2-activation given: st.yml was not checked against the server's recorded settlement v2 activation")
+		return
+	}
+	data, err := readBounded(activationPath, 16*1024)
+	if err != nil {
+		report.add("FAIL", "v2 activation: %v", err)
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var status controller.StLedgerV2ActivationStatus
+	if err := decoder.Decode(&status); err != nil {
+		report.add("FAIL", "v2 activation: not the output of bringyourctl st v2-activation: %v", err)
+		return
+	}
+	if err := controller.CheckStLedgerV2Activation(cfg, &status); err != nil {
+		report.add("FAIL", "v2 activation: %v", err)
+		return
+	}
+	if status.Armed {
+		report.add("ok", "v2 activation: the latch is armed (pool %d from epoch %d) and st.yml names its recorded v2 pair", status.NoId, status.FirstEpoch)
+	} else {
+		report.add("note", "v2 activation: the latch is not armed: the server has recorded no activation and would not refuse an st.yml without the v2 pair")
+	}
+}
+
 func reportStIdentity(report *stCheckReport, cfg *controller.StConfig) {
 	address := func(label string, key *ecdsa.PrivateKey) {
 		if key != nil {
@@ -304,6 +339,10 @@ func reportStIdentity(report *stCheckReport, cfg *controller.StConfig) {
 	report.add("identity", "profile %s, chain_id %d, genesis_hash 0x%x, netuid %d, no_id %d", cfg.Profile, cfg.ChainId, cfg.GenesisHash, cfg.Netuid, cfg.NoId)
 	report.add("identity", "deployment_id %s, policy_hash 0x%x, deploy_block %d", cfg.DeploymentId, cfg.PolicyHash, cfg.DeployBlock)
 	report.add("identity", "coordinator %s, settlement_vault %s, reserve_sink %s", cfg.ContractAddress.Hex(), cfg.SettlementVault.Hex(), cfg.ReserveSink.Hex())
+	if cfg.LedgerV2Enabled() {
+		// In the lowercase form st.yml and sn.yml declare, to compare byte for byte.
+		report.add("identity", "settlement_v2_address 0x%x, vault_v2_address 0x%x", cfg.SettlementV2, cfg.VaultV2)
+	}
 	report.add("identity", "deposit_hotkey 0x%x", cfg.DepositHotkey)
 	if cfg.TreasuryHotkey != ([32]byte{}) {
 		report.add("identity", "treasury_hotkey 0x%x", cfg.TreasuryHotkey)

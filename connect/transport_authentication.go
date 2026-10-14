@@ -12,12 +12,36 @@ import (
 
 type connectAuthFinalReadTestKey struct{}
 
+// The cause an H1 handler context ends with when its request context ends:
+// the client hung up (or its proxy closed the upstream) before admission.
+// net/http ends that context only when the connection's read fails, never
+// for its read timeout while the handler runs, and not after a hijack.
+// Before the 101, H1+ authorizes under that context, so the departure cancels
+// the step in flight, and the step reports it as an unavailable dependency.
+var errConnectRequestCanceled = errors.New("connect request canceled")
+
+// Whether ctx ended because its client left. A deadline or a server-side
+// cancel that ended ctx first keeps its own cause, so only a departure that
+// actually ended the work is reported.
+func connectRequestCanceled(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), errConnectRequestCanceled)
+}
+
+// A lag.dev guest's token is refused by the connect transport.
+var errLagGuestConnect = errors.New("A lag.dev guest token cannot connect.")
+
 // Parse the instance without publishing an admission, then perform the full
 // live authorization at the final read boundary. That query already binds the
 // active client, device and network to the current administrator and credential
 // epoch; a second weaker membership query would add no authority. Preserve
 // credential-error precedence when the instance is malformed too.
 func connectClientAuthentication(ctx context.Context, byJwt *session.ByJwt, instanceBytes []byte) (server.Id, int, error) {
+	if byJwt.LagGuest {
+		// a lag.dev guest's token serves the lag routes alone and never
+		// connects (lag.dev/PLAN.md A1, session/AUTH.md §1); refused before
+		// any state is read
+		return server.Id{}, http.StatusForbidden, errLagGuestConnect
+	}
 	instanceId, instanceErr := server.IdFromBytes(instanceBytes)
 	if before, ok := ctx.Value(connectAuthFinalReadTestKey{}).(func()); ok {
 		before()

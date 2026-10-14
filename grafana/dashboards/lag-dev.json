@@ -1,0 +1,1177 @@
+{
+ "uid": "urnetwork-lag-dev",
+ "title": "urnetwork / lag.dev",
+ "tags": [
+  "urnetwork",
+  "lag.dev"
+ ],
+ "description": "lag.dev measurements: how many are made and how they end, the traffic and refusals at the lag routes, the latency and speeds measured, the extenders taking part, where visitors come from, and the retention sweep (lag.dev/PLAN.md X9). Measurements from agent browsers and hosting networks are left out of every panel but their own (amendment 12). No series names a visitor, an address or an extender.",
+ "editable": false,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "refresh": "5m",
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "timezone": "",
+ "templating": {
+  "list": [
+   {
+    "name": "env",
+    "label": "env",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "warp-mimir"
+    },
+    "query": "label_values(urnetwork_stats_online_extenders, env)",
+    "refresh": 2,
+    "sort": 1
+   }
+  ]
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "row",
+   "title": "measurements",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "panels": []
+  },
+  {
+   "id": 2,
+   "type": "timeseries",
+   "title": "measurements per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 16,
+    "x": 0,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (end_reason) (max by (end_reason, ip_family) (urnetwork_stats_lag_results_1h{env=\"$env\"}))",
+     "refId": "A",
+     "legendFormat": "{{end_reason}}"
+    }
+   ],
+   "description": "lag.dev results stored in the trailing hour, stacked by how the measurement ended: complete is a full minute with its download and upload; client_closed is a load the browser gave up (a hidden page); no_load and busy are a minute without a load. Counted from the database every 5 minutes, so the figure survives restarts. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "measurements, last hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 8,
+    "x": 16,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "none",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(max by (end_reason, ip_family) (urnetwork_stats_lag_results_1h{env=\"$env\"}))",
+     "refId": "A",
+     "legendFormat": "measurements"
+    }
+   ],
+   "description": "Every lag.dev result stored in the trailing hour, whatever its end reason. A healthy visit stores 8, one per dot. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 4,
+   "type": "timeseries",
+   "title": "measurements per hour by address family",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 8,
+    "x": 16,
+    "y": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (ip_family) (max by (end_reason, ip_family) (urnetwork_stats_lag_results_1h{env=\"$env\"}))",
+     "refId": "A",
+     "legendFormat": "{{ip_family}}"
+    }
+   ],
+   "description": "The same trailing-hour results split by the family the browser reached its extender on (ipv4 or ipv6). Only the family is ever stored, never an address (amendment 9). The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 24,
+   "type": "timeseries",
+   "title": "measurements per hour by source",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 10
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (source) (urnetwork_stats_lag_results_1h_by_source{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{source}}"
+    }
+   ],
+   "description": "The headline's measurements by the client that ran them: web is lag.dev in a browser, cli and mcp the lagdev command line and MCP server, which name themselves with an X-Lag-Client header. All three count in every panel; automated tracks are left out here as there. A database count every taskworker publishes, read with max across hosts."
+  },
+  {
+   "id": 5,
+   "type": "row",
+   "title": "traffic",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 18
+   },
+   "panels": []
+  },
+  {
+   "id": 6,
+   "type": "timeseries",
+   "title": "tracks and guest sessions per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 19
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_lag_tracks_1h{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "tracks"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_lag_guests_1h{env=\"$env\"})",
+     "refId": "B",
+     "legendFormat": "guest sessions"
+    }
+   ],
+   "description": "Tracks started and guest sessions created in the trailing hour, from the database. A visit is one guest session for a day and one track per run, so tracks above sessions means visitors pressing +. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 7,
+   "type": "timeseries",
+   "title": "report outcomes per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 19
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (outcome) (increase(urnetwork_lag_reports_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{outcome}}"
+    }
+   ],
+   "description": "Each report an extender posted, accepted or rejected by reason: malformed, extender (not the poster's own), signature, ticket (unknown, mismatched, or its track already swept), bounds, duplicate. A steady rejected_signature or rejected_ticket from many extenders points at a release mismatch. Counted by the api's lag handlers and read as increase() over the trailing hour, summed across processes: every series is per process and keyed by instance, so the sum adds each process's own increase and a redeploy neither double counts nor reads as a reset."
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "abuse-limit refusals per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 27
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_lag_sessions_total{env=\"$env\",outcome=\"refused_limit\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "guest sessions"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_lag_tracks_total{env=\"$env\",outcome=\"refused_limit\"}[1h]))",
+     "refId": "B",
+     "legendFormat": "tracks"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_lag_report_posts_total{env=\"$env\",outcome=\"rate_limited\"}[1h]))",
+     "refId": "C",
+     "legendFormat": "report posts"
+    }
+   ],
+   "description": "Requests the abuse limits refused: guest sessions and tracks over their per-network or per-client limits (A1, A6), and report posts over an extender's rate (a 429 its reporter retries with backoff). A per-/24 limit is shared by everyone on that network, so a burst here is not always one visitor. Counted by the api's lag handlers and read as increase() over the trailing hour, summed across processes: every series is per process and keyed by instance, so the sum adds each process's own increase and a redeploy neither double counts nor reads as a reset."
+  },
+  {
+   "id": 9,
+   "type": "timeseries",
+   "title": "request outcomes per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 27
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (outcome) (increase(urnetwork_lag_sessions_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "session {{outcome}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (outcome) (increase(urnetwork_lag_tracks_total{env=\"$env\"}[1h]))",
+     "refId": "B",
+     "legendFormat": "track {{outcome}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (outcome) (increase(urnetwork_lag_report_posts_total{env=\"$env\"}[1h]))",
+     "refId": "C",
+     "legendFormat": "report post {{outcome}}"
+    }
+   ],
+   "description": "Every answer the lag routes gave, by outcome: sessions and tracks created, reissued, refused by a limit, unavailable (nothing to measure, or tickets cannot be signed), rejected (a 4xx) or error; report posts processed, rate limited, rejected or error. unavailable tracks with no refusals usually means no extender is offered. Counted by the api's lag handlers and read as increase() over the trailing hour, summed across processes: every series is per process and keyed by instance, so the sum adds each process's own increase and a redeploy neither double counts nor reads as a reset."
+  },
+  {
+   "id": 23,
+   "type": "timeseries",
+   "title": "automated measurements per hour, left out",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 35
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (reason) (urnetwork_stats_lag_automated_results_1h{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{reason}}"
+    }
+   ],
+   "description": "Measurements in the trailing hour from automated tracks, which every other panel leaves out (amendment 12): signature_agent is an agent browser that signs its requests (Web Bot Auth's Signature-Agent), and datacenter_asn an address in a hosting or cloud network, Cloudflare's WARP included. Normal is a small share of the headline; a rise means agents or crawler renderers are running the test. Only the flag is stored, never an address or an agent's name. A database count every taskworker publishes, read with max across hosts."
+  },
+  {
+   "id": 10,
+   "type": "row",
+   "title": "performance",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 43
+   },
+   "panels": []
+  },
+  {
+   "id": 11,
+   "type": "timeseries",
+   "title": "idle latency p50",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 44
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (ip_family) (urnetwork_stats_lag_idle_latency_p50_ms{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{ip_family}}"
+    }
+   ],
+   "description": "Latency outside every load: Over the trailing hour's complete results only (a load given up has no speeds), the median of each result's own p50, split by family. A family with no complete result in the hour has no line rather than a zero. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 12,
+   "type": "timeseries",
+   "title": "download p50",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 44
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (ip_family) (urnetwork_stats_lag_download_p50_mbps{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{ip_family}}"
+    }
+   ],
+   "description": "Download speed: Over the trailing hour's complete results only (a load given up has no speeds), the median of each result's own p50, split by family. A family with no complete result in the hour has no line rather than a zero. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 13,
+   "type": "timeseries",
+   "title": "upload p50",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 44
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (ip_family) (urnetwork_stats_lag_upload_p50_mbps{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{ip_family}}"
+    }
+   ],
+   "description": "Upload speed: Over the trailing hour's complete results only (a load given up has no speeds), the median of each result's own p50, split by family. A family with no complete result in the hour has no line rather than a zero. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 14,
+   "type": "row",
+   "title": "extenders",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 52
+   },
+   "panels": []
+  },
+  {
+   "id": 15,
+   "type": "stat",
+   "title": "extenders offered",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 0,
+    "y": 53
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "none",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_lag_extenders_offered{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "offered"
+    }
+   ],
+   "description": "Extenders the lag.dev sample can offer now: an issued certificate whose name is published (C8), active addresses, and a place to pick them by (A4). Zero means every new track answers unavailable. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 16,
+   "type": "bargauge",
+   "title": "measurement requests by state",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 12,
+    "x": 6,
+    "y": 53
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "decimals": 0,
+     "color": {
+      "mode": "continuous-BlPu"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "sizing": "auto",
+    "minVizWidth": 8,
+    "minVizHeight": 16,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (state) (urnetwork_stats_lag_measurement_requests{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{state}}",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "description": "Extenders' measurement certificate requests (A10): pending waits on the weekly certificate cap, issued serves, refused failed a check, withdrawn was taken out (deactivated, gated, a canary, or opted out). The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 17,
+   "type": "stat",
+   "title": "opted out",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 18,
+    "y": 53
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "none",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_lag_extenders_opted_out{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "opted out"
+    }
+   ],
+   "description": "Extenders whose owner turned measurement off (SetMeasurementsEnabled, connectctl --no_measurement, or the app's lag.dev speed tests switch); their names were withdrawn (C4, C9). The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 18,
+   "type": "timeseries",
+   "title": "extender participation",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 59
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_lag_extenders_offered{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "offered"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (state) (urnetwork_stats_lag_measurement_requests{env=\"$env\"})",
+     "refId": "B",
+     "legendFormat": "{{state}}"
+    }
+   ],
+   "description": "Extenders offered beside the requests by state over time, so a drop in offered extenders can be read against issuance and withdrawals. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 19,
+   "type": "row",
+   "title": "visitors",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 67
+   },
+   "panels": []
+  },
+  {
+   "id": 20,
+   "type": "bargauge",
+   "title": "visitors by country, last day",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 24,
+    "x": 0,
+    "y": 68
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "decimals": 0,
+     "color": {
+      "mode": "continuous-BlPu"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "sizing": "auto",
+    "minVizWidth": 8,
+    "minVizHeight": 16,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sort_desc(max by (country_code) (urnetwork_stats_lag_visitors_24h_by_country{env=\"$env\"}))",
+     "refId": "A",
+     "legendFormat": "{{country_code}}",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "description": "lag.dev visitors (one guest session per browser for a day) who started a track in the trailing day, by the country of the track's place: the top 10 and other, so the label stays bounded. The place is looked up from the request in memory and no address is kept (amendment 9). The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 21,
+   "type": "row",
+   "title": "upkeep",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 77
+   },
+   "panels": []
+  },
+  {
+   "id": 22,
+   "type": "timeseries",
+   "title": "rows the sweep removed per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 78
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (kind) (increase(urnetwork_lag_sweep_deleted_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{kind}}"
+    }
+   ],
+   "description": "What the lag sweep removed (A2, A5): expired guest networks after their day, tickets after 48 h, and results and their tracks after the 7 day retention. A flat zero for a day while measurements arrive means the sweep has stopped. Counted by the taskworker and read as increase() over the trailing hour, summed across processes, which are keyed by instance."
+  }
+ ]
+}

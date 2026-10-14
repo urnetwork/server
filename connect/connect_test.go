@@ -530,10 +530,12 @@ func testConnect(
 	// and closed-agent churn filling the stall window, while passing attempts
 	// showed almost none. Loopback-only, no STUN makes any p2p attempt
 	// deterministic (a couple of loopback pairs) without disabling the p2p
-	// machinery the stream paths exercise.
+	// machinery the stream paths exercise. Empty IceServerUrls alone would
+	// draw from the default STUN pool, so the pool is emptied too.
 	hermeticWebRtc := func(s *connect.ClientSettings) {
 		s.WebRtcSettings.Log = connect.NewNoopLogger()
 		s.WebRtcSettings.IceServerUrls = nil
+		s.WebRtcSettings.IceServerPoolUrls = nil
 		s.WebRtcSettings.UseLoopbackOnlyIceInterfaces = true
 	}
 

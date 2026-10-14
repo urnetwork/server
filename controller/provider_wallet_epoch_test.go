@@ -5,8 +5,10 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -63,4 +65,17 @@ func TestProviderWalletEpochAdapterBindsConfiguredScope(t *testing.T) {
 			t.Fatal("canceled production owner returned wallet authority", wallets, err)
 		}
 	})
+}
+
+// The retained selection refuses an unusable subnet before reading any
+// consent; settlement v2's bulk selection shares the precondition.
+func TestProviderWalletEpochRetainedRefusesUnusableSubnet(t *testing.T) {
+	key, err := crypto.HexToECDSA(strings.Repeat("47", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := stRetainedProviderWalletSelectionForEpoch(context.Background(), &StConfig{RootKey: key}, &StPayoutEpochAuthority{}, nil)
+	if selection != nil || !errors.Is(err, protocol.ErrWalletMappingIntegrity) {
+		t.Fatal("an unusable subnet selected wallets", selection, err)
+	}
 }

@@ -14,10 +14,14 @@ package model
 //	{vtr_<trailId>}pending  the pending hop record (json) awaiting arrival
 //	{vtr_<trailId>}resp     last response (json) for idempotent retries (§4.3)
 //	verify_reap             zset trailId -> step deadline unix ms (reaper index)
-//	verify_egress_v2_<ip>   exact-address index: ip -> clientId, or `!` if ambiguous (§8.1)
-//	{vce2_<clientId>}       reverse exact-address hash: ip -> entry expiry unix ms (§8.2)
-//	{vce2_<clientId>}leases_<ip>  reverse connection/proxy owner -> expiry
+//	verify_egress_v2_<ip>   address index (an exact address, or an IPv6 /64): ip -> clientId, or `!` if ambiguous (§8.1)
+//	{vce4_<clientId>}       reverse address hash: <ip>_4 or <ip>_6_<its /64> ->
+//	                        entry expiry unix ms _ the address's egress-IP-hash (§8.2)
+//	{vce4_<clientId>}leases_<ip>  reverse connection/proxy owner -> expiry
+//	{vce2_<clientId>}       v2 reverse hash: exact ip -> expiry; read and withdrawn, never fed
 //	{verify_egress_v2_<ip>}leases forward client/owner -> expiry
+//	{vhead_<clientId>}<window> egress-IP-hash a provider's hops record in one scoring window (§8.1)
+//	{vtr_<trailId>}window   the scoring window the trail was seeded in
 //	verify_eligible_v2      set of currently eligible provider clientIds (§5.1)
 //	{velig_<clientId>}      eligibility token spend counter (INCR+EXPIRE, §5.3)
 //	{vstat_<clientId>}p<t>  per-period stats hash: assignments, confirmations,
@@ -25,19 +29,28 @@ package model
 //	verify_stat_clients     set of clientIds with stats pending rollup
 //	verify_seed_ip_<hash>_<window> seed fixed-window counter per source ip (§9)
 //	verify_seed_vpk_<vpk>_<window> seed fixed-window counter per vpk (§9)
+//	verify_{seed,extend}_provider_<clientId>_<window> counters per resolved provider (§9)
+//	verify_extend_pad_<ip hash>_<window> scratch counter an unresolved EXTEND source pays (§9)
+//	{vtr_<trailId>}unattributed_<depth> retryable answers to one step's unattributed
+//	                        source: their count, and the last one's unix ms
+//	verify_seed_unattributed_<sig hash> retryable answers to one SEED's unresolved source
 //	verify_trails_<vpk>     active trail count per vpk (concurrent-trail cap, §9)
 //	{verify_cohort:<deployment>}e<epoch>       providers admitted for one settlement epoch
 //	{verify_cohort:<deployment>}e<epoch>draws  next hops drawn from that cohort
 //	{verify_cohort:<deployment>}lifetime       every provider ever admitted (no ttl)
 //
-// The egress index is fed by exactly one bijection-gated feeder
-// (`feedVerifyEgressLease`) with two independently owned sources: observed connection source ips
+// The egress index is fed by one bijection-gated feeder
+// (`feedVerifyEgressLease`, applied a chunk at a time by the proxy refresh's
+// `feedVerifyProxyEgresses`) with two independently owned sources: observed connection source ips
 // (connect/transport_announce.go) and proxy-allocated egresses (the API
 // controller's post-allocation feed + periodic `RefreshVerifyProxyEgress`). The §8.2
-// invariant — one provider ⇄ one egress ip — is enforced at write time (an ip
-// observed backing a second client becomes ambiguous and resolves to nothing)
-// and re-checked at read time (`ResolveVerifyEgress` requires the forward and
-// reverse entries to agree and the client to have exactly one live ip).
+// invariant — one provider ⇄ one egress ip per address family, an IPv6 /64
+// counting as one ip — is enforced at write time (an ip observed backing a
+// second client becomes ambiguous and resolves to nothing) and re-checked at
+// read time (`ResolveVerifyEgress` requires the forward and reverse entries to
+// agree and the client to have exactly one live egress of the source's
+// family). An IPv6 address resolves by its own forward entry, and by its /64's
+// only when no client holds the address and one client holds the /64.
 //
 // All functions are safe for concurrent use.
 
@@ -53,6 +66,9 @@ import (
 	"math"
 	"math/big"
 	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -129,7 +145,9 @@ func DefaultVerifySettings() *VerifySettings {
 // refused outright (the DoS bound — poison trails cost server state, so the
 // state-creating path must have a hard cap). D26: the soft tier + the §5.3
 // eligibility bucket are validator-configurable and default off (see
-// DefaultVerifySettings); the hard tier is always on.
+// DefaultVerifySettings); the hard tier is always on. The per-source seed and
+// EXTEND limits also apply per resolved provider, so a provider's source ips
+// in the two families share one budget.
 type VerifySettings struct {
 	StepTimeout      time.Duration
 	StepTimeoutGrace time.Duration
@@ -151,10 +169,11 @@ type VerifySettings struct {
 	SeedRateSoftLimit int64
 	SeedRateHardLimit int64
 	// ExtendRateHardLimit is the per-source-ip EXTEND cap over one
-	// SeedRateWindow (V4). Legitimate per-provider EXTEND volume is bounded by
-	// the eligibility burst (a provider is the confirming hop only for trails it
-	// was assigned to), so this is set generously — it exists to shed a
-	// single-ip flood of the mutating path, not to shape normal traffic.
+	// SeedRateWindow (V4), also applied per resolved provider (§9).
+	// Legitimate per-provider EXTEND volume is bounded by the eligibility
+	// burst (a provider is the confirming hop only for trails it was assigned
+	// to), so this is set generously — it exists to shed a single-ip flood of
+	// the mutating path, not to shape normal traffic.
 	ExtendRateHardLimit   int64
 	ActiveTrailsSoftLimit int64
 	ActiveTrailsHardLimit int64
@@ -182,10 +201,17 @@ type VerifySettings struct {
 	// CohortLifetimeLimit to at most that many distinct providers over the
 	// deployment's life (verify_cohort_model.go). Zero keeps uniform sampling
 	// over every eligible provider. CohortDeploymentKey names the st epoch
-	// mirror that supplies the epoch.
+	// mirror that supplies the epoch, which also windows a provider's head
+	// hash (PinVerifyHopEgressIpHash).
 	CohortSize          int
 	CohortLifetimeLimit int
 	CohortDeploymentKey StDeploymentKey
+	// HopLatencyFromAttributedAttempt counts a hop confirmed after a
+	// retryable answer from the step's last such answer: its AssignedMs is
+	// that time (§7.5). Off by default, a confirmed hop keeps its ASSIGN time
+	// as before, the only record a validator's receipt check accepts until it
+	// takes the moved one; turn it on once every validator does.
+	HopLatencyFromAttributedAttempt bool
 }
 
 // TrailTtl is the redis lifetime of one trail's state (VALIDATOR.md §5.5:
@@ -196,11 +222,17 @@ func (self *VerifySettings) TrailTtl(m int) time.Duration {
 
 // VerifyTrailHop is one hop record of a trail. `AssignedMs`/`AssignN` are zero
 // for the validator-chosen seed hop, which is never a server assignment and is
-// excluded from statistics (§7.6). `ConfirmedMs` is zero while pending.
+// excluded from statistics (§7.6). With HopLatencyFromAttributedAttempt a
+// confirmed hop's `AssignedMs` is the start of the attempt that was
+// attributed: its ASSIGN time, or the step's last retryable answer (§8.2), so
+// `ConfirmedMs − AssignedMs` is that attempt's latency (§7.5); without it, its
+// ASSIGN time. `ConfirmedMs` is zero while pending.
 // `EgressIpHash` is the hop's egress-IP-hash at the configured subnet
 // granularity (§8.1, §3.3, D27) — the head routable-IP-score input, set at
-// confirmation from the confirming request's source ip (zero while pending)
-// and carried verbatim into the published FINAL proof.
+// confirmation (zero while pending) and carried verbatim into the published
+// FINAL proof. Every hop of one provider in a trail's scoring window records
+// the hash the provider pinned for the window, so it scores as one prefix
+// whatever family each lands on (PinVerifyHopEgressIpHash).
 type VerifyTrailHop struct {
 	ClientId     server.Id  `json:"client_id"`
 	NetworkId    *server.Id `json:"network_id,omitempty"`
@@ -257,12 +289,15 @@ func verifyTrailLockKey(trailId server.Id) string {
 
 const verifyReapKey = "verify_reap"
 
-// Keyed by the peppered exact-address hash (VerifyEgressIndexHashWithSettings),
-// never the raw IP. Eligibility is an address-level bijection; the separately
-// signed trail hash is deliberately coarser (/29 or /48) so different eligible
-// providers can contribute one shared prefix that head scoring splits between
-// fleets. v2 key names prevent a rolling upgrade from mixing the old
-// prefix-keyed reverse entries with exact-address entries during their TTL.
+// Keyed by the peppered hash of an address (VerifyEgressIndexHashWithSettings)
+// or of an IPv6 /64 (verifyEgressNetworkHash), never the raw IP. Eligibility
+// is an address-level bijection; the separately signed trail hash is
+// deliberately coarser (/29 or /48) so different eligible providers can
+// contribute one shared prefix that head scoring splits between fleets. v2
+// key names prevent a rolling upgrade from mixing the old prefix-keyed
+// reverse entries with exact-address entries during their TTL. An address's
+// forward entry kept its format through the v4 reverse index, so writers of
+// both versions share it and see each other's claims on an address.
 func verifyEgressKey(egressHash [32]byte) string {
 	return verifyEgressKeyFromHex(hex.EncodeToString(egressHash[:]))
 }
@@ -271,8 +306,146 @@ func verifyEgressKeyFromHex(egressHashHex string) string {
 	return fmt.Sprintf("verify_egress_v2_%s", egressHashHex)
 }
 
+// The v4 reverse index. Each field names one address and its family, so a
+// provider may hold one live egress per family (§8.2).
 func verifyClientEgressKey(clientId server.Id) string {
+	return fmt.Sprintf("{vce4_%s}", clientId)
+}
+
+// The v2 reverse index, whose fields are bare exact-address hashes. No writer
+// feeds it; it is read and withdrawn until its entries lapse, one EgressTtl
+// after the last v2 writer.
+func verifyClientEgressV2Key(clientId server.Id) string {
 	return fmt.Sprintf("{vce2_%s}", clientId)
+}
+
+// Both reverse index versions, the current one first.
+func verifyClientEgressKeys(clientId server.Id) []string {
+	return []string{verifyClientEgressKey(clientId), verifyClientEgressV2Key(clientId)}
+}
+
+// verifyEgressField is one field of a reverse index: an address hash, its
+// family, and the egress the family counts it as, the address itself or, for
+// IPv6, its /64. A bare v2 field has family 0.
+type verifyEgressField struct {
+	address string
+	family  int
+	network string
+}
+
+// A v4 reverse field names one address: `<address hash>_4`, or
+// `<address hash>_6_<its /64's hash>`. The /64 follows from the address, so a
+// field never changes for one address.
+func verifyClientEgressField(ip netip.Addr, settings *VerifySettings) (string, verifyEgressField) {
+	ip = ip.Unmap()
+	addressHash := VerifyEgressIndexHashWithSettings(ip, settings)
+	networkHash := verifyEgressNetworkHash(ip, settings)
+	field := verifyEgressField{
+		address: hex.EncodeToString(addressHash[:]),
+		family:  server.IpVersionForAddr(ip),
+		network: hex.EncodeToString(networkHash[:]),
+	}
+	if field.family == 6 {
+		return fmt.Sprintf("%s_6_%s", field.address, field.network), field
+	}
+	return fmt.Sprintf("%s_%d", field.address, field.family), field
+}
+
+// Reads a reverse field of either version. Anything but a v4 field is a bare
+// address with family 0.
+func parseVerifyClientEgressField(field string) verifyEgressField {
+	parts := strings.Split(field, "_")
+	parsed := verifyEgressField{address: parts[0], network: parts[0]}
+	switch {
+	case len(parts) == 2 && parts[1] == "4":
+		parsed.family = 4
+	case len(parts) == 3 && parts[1] == "6":
+		parsed.family, parsed.network = 6, parts[2]
+	}
+	return parsed
+}
+
+// The forward entries an address's leases feed: its own, and its /64's.
+func (self verifyEgressField) forwardHashes() []string {
+	if self.network != self.address {
+		return []string{self.address, self.network}
+	}
+	return []string{self.address}
+}
+
+// A v4 field's value: the expiry of its latest lease, and the egress-IP-hash
+// of the address (VerifyEgressIpHashWithSettings) its feeder computed. A v2
+// value is the expiry alone.
+func verifyClientEgressValueSuffix(ip netip.Addr, settings *VerifySettings) string {
+	scoreHash := VerifyEgressIpHashWithSettings(ip, settings)
+	return "_" + hex.EncodeToString(scoreHash[:])
+}
+
+func parseVerifyClientEgressValue(value string) (expireMs uint64, scoreHex string) {
+	expire, scoreHex, _ := strings.Cut(value, "_")
+	expireMs, _ = strconv.ParseUint(expire, 10, 64)
+	return
+}
+
+// verifyLiveEgressAddress is one live address with its stored egress-IP-hash,
+// "" for a v2 entry.
+type verifyLiveEgressAddress struct {
+	verifyEgressField
+	score string
+}
+
+// verifyLiveEgress is a client's live addresses: its v4 entries by family,
+// and the bare hashes a v2 writer left. The two versions are judged apart: a
+// v2 entry keeps the old rule, one live address in all.
+type verifyLiveEgress struct {
+	byFamily map[int][]verifyLiveEgressAddress
+	legacy   []string
+}
+
+// The distinct egresses of a family, sorted: IPv4 addresses, or IPv6 /64s.
+// Only a family with exactly one may attribute (§8.2).
+func (self verifyLiveEgress) networks(family int) []string {
+	networks := []string{}
+	for _, address := range self.byFamily[family] {
+		if !slices.Contains(networks, address.network) {
+			networks = append(networks, address.network)
+		}
+	}
+	slices.Sort(networks)
+	return networks
+}
+
+// Splits one reverse hash's fields into the live ones and the expired ones,
+// each with its value.
+func splitVerifyEgressFields(fields map[string]string, nowMs uint64) (live map[string]string, expired map[string]string) {
+	live, expired = map[string]string{}, map[string]string{}
+	for field, value := range fields {
+		if expireMs, _ := parseVerifyClientEgressValue(value); nowMs < expireMs {
+			live[field] = value
+		} else {
+			expired[field] = value
+		}
+	}
+	return
+}
+
+// Groups the live fields of a client's v4 and v2 reverse hashes.
+func newVerifyLiveEgress(fields map[string]string, legacyFields map[string]string) verifyLiveEgress {
+	live := verifyLiveEgress{byFamily: map[int][]verifyLiveEgressAddress{}}
+	for field, value := range fields {
+		if parsed := parseVerifyClientEgressField(field); parsed.family != 0 {
+			_, score := parseVerifyClientEgressValue(value)
+			live.byFamily[parsed.family] = append(live.byFamily[parsed.family], verifyLiveEgressAddress{verifyEgressField: parsed, score: score})
+		}
+	}
+	for _, addresses := range live.byFamily {
+		slices.SortFunc(addresses, func(a, b verifyLiveEgressAddress) int { return strings.Compare(a.address, b.address) })
+	}
+	for field := range legacyFields {
+		live.legacy = append(live.legacy, parseVerifyClientEgressField(field).address)
+	}
+	slices.Sort(live.legacy)
+	return live
 }
 
 const verifyEligibleKey = "verify_eligible_v2"
@@ -300,6 +473,18 @@ func verifySeedVpkRateKey(vpk []byte) string {
 
 func verifyExtendIpRateKey(ipHash [32]byte) string {
 	return fmt.Sprintf("verify_extend_ip_%s", hex.EncodeToString(ipHash[:]))
+}
+
+func verifySeedProviderRateKey(clientId server.Id) string {
+	return fmt.Sprintf("verify_seed_provider_%s", clientId)
+}
+
+func verifyExtendProviderRateKey(clientId server.Id) string {
+	return fmt.Sprintf("verify_extend_provider_%s", clientId)
+}
+
+func verifyExtendPadRateKey(ipHash [32]byte) string {
+	return fmt.Sprintf("verify_extend_pad_%s", hex.EncodeToString(ipHash[:]))
 }
 
 func verifyActiveTrailsKey(vpk []byte) string {
@@ -350,11 +535,12 @@ func VerifyEgressIpHashWithSettings(ip netip.Addr, settings *VerifySettings) [32
 }
 
 // VerifyEgressIndexHashWithSettings is the privacy-preserving exact-address
-// identity used only by the server's eligibility bijection. It must not use
-// the subnet scoring prefix: two distinct addresses in one /29 or /48 are two
-// independently attributable providers but intentionally produce one shared
-// VerifyEgressIpHashWithSettings value in a signed trail. Domain separation
-// also prevents an index key from being confused with a published score hash.
+// identity used only by the server's eligibility bijection, in either family.
+// It must not use the subnet scoring prefix: two distinct addresses in one
+// /29 or /48 are two independently attributable providers but intentionally
+// produce one shared VerifyEgressIpHashWithSettings value in a signed trail.
+// Domain separation also prevents an index key from being confused with a
+// published score hash. A v2 writer keyed both families by it.
 func VerifyEgressIndexHashWithSettings(ip netip.Addr, settings *VerifySettings) [32]byte {
 	ip = ip.Unmap()
 	if len(settings.EgressHashKey) == 0 {
@@ -363,6 +549,26 @@ func VerifyEgressIndexHashWithSettings(ip netip.Addr, settings *VerifySettings) 
 	h := hmac.New(sha256.New, settings.EgressHashKey)
 	h.Write([]byte("urnetwork/egress-address-index/v1"))
 	h.Write(ip.AsSlice())
+	return [32]byte(h.Sum(nil))
+}
+
+// verifyEgressNetworkHash is the egress a family counts an address as: an
+// IPv4 address itself, or an IPv6 address's /64. A host's temporary IPv6
+// addresses rotate inside its /64 (RFC 8981), so the /64 is one egress, as an
+// IPv4 address behind NAT is. Its own domain keeps a /64 apart from any
+// address.
+func verifyEgressNetworkHash(ip netip.Addr, settings *VerifySettings) [32]byte {
+	ip = ip.Unmap()
+	if !ip.Is6() {
+		return VerifyEgressIndexHashWithSettings(ip, settings)
+	}
+	prefix := netip.PrefixFrom(ip, 64).Masked().Addr()
+	if len(settings.EgressHashKey) == 0 {
+		return server.ClientIpHashForAddrPrefix(prefix, 32, 64)
+	}
+	h := hmac.New(sha256.New, settings.EgressHashKey)
+	h.Write([]byte("urnetwork/egress-ipv6-64-index/v1"))
+	h.Write(prefix.AsSlice())
 	return [32]byte(h.Sum(nil))
 }
 
@@ -377,61 +583,63 @@ func ClearVerifyEgress(ctx context.Context, clientId server.Id, ip netip.Addr, s
 	clearVerifyEgressLease(ctx, clientId, ip, verifyProxyEgressLeaseOwner, settings)
 }
 
-// RemoveVerifyEgressForClient drops all egress entries for a client — called
-// when a client_id is reaped (`RemoveDisconnectedNetworkClients`) so a
-// recycled ip is not miscredited to the previous holder (§8.2).
+// RemoveVerifyEgressForClient drops all egress entries for a client, in both
+// reverse index versions — called when a client_id is reaped
+// (`RemoveDisconnectedNetworkClients`) so a recycled ip is not miscredited to
+// the previous holder (§8.2).
 func RemoveVerifyEgressForClient(
 	ctx context.Context,
 	clientId server.Id,
 ) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		entries, err := r.HGetAll(ctx, verifyClientEgressKey(clientId)).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			server.Raise(err)
+		for _, reverseKey := range verifyClientEgressKeys(clientId) {
+			entries, err := r.HGetAll(ctx, reverseKey).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				server.Raise(err)
+			}
+			for field := range entries {
+				parsed := parseVerifyClientEgressField(field)
+				for _, egressHashHex := range parsed.forwardHashes() {
+					server.Raise(removeVerifyEgressAddressForClient(ctx, r, clientId, egressHashHex).Err())
+				}
+				server.Raise(r.Del(ctx, verifyClientEgressLeaseKey(reverseKey, parsed.address)).Err())
+			}
+			r.Del(ctx, reverseKey)
 		}
-		for egressHashHex := range entries {
-			server.Raise(removeVerifyEgressAddressForClient(ctx, r, clientId, egressHashHex).Err())
-			server.Raise(r.Del(ctx, verifyClientEgressLeaseKey(clientId, egressHashHex)).Err())
-		}
-		r.Del(ctx, verifyClientEgressKey(clientId))
 		r.SRem(ctx, verifyEligibleKey, clientId.String())
 	})
 }
 
-// verifyLiveEgressHashes reads the client's reverse hash and returns the
-// egress-hash hex fields whose entries have not expired, opportunistically
-// deleting expired fields.
-func verifyLiveEgressHashes(
+// readVerifyLiveEgress reads the client's live addresses from both reverse
+// index versions, opportunistically deleting expired v4 fields. The v2 index
+// is only read: no writer feeds it, so it empties within one EgressTtl of the
+// last v2 writer.
+func readVerifyLiveEgress(
 	ctx context.Context,
 	r server.RedisClient,
 	clientId server.Id,
 	nowMs uint64,
-) []string {
-	entries, err := r.HGetAll(ctx, verifyClientEgressKey(clientId)).Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		server.Raise(err)
-	}
-	liveHashes := []string{}
-	expiredHashes := map[string]string{}
-	for egressHashHex, expireMsStr := range entries {
-		var expireMs uint64
-		fmt.Sscanf(expireMsStr, "%d", &expireMs)
-		if nowMs < expireMs {
-			liveHashes = append(liveHashes, egressHashHex)
-		} else {
-			expiredHashes[egressHashHex] = expireMsStr
+) verifyLiveEgress {
+	versions := []map[string]string{}
+	for _, reverseKey := range verifyClientEgressKeys(clientId) {
+		fields, err := r.HGetAll(ctx, reverseKey).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			server.Raise(err)
 		}
+		live, expired := splitVerifyEgressFields(fields, nowMs)
+		if 0 < len(expired) && reverseKey == verifyClientEgressKey(clientId) {
+			pruneVerifyExpiredEgressHashes(ctx, r, clientId, expired)
+		}
+		versions = append(versions, live)
 	}
-	if 0 < len(expiredHashes) {
-		pruneVerifyExpiredEgressHashes(ctx, r, clientId, expiredHashes)
-	}
-	return liveHashes
+	return newVerifyLiveEgress(versions[0], versions[1])
 }
 
 // updateVerifyEligibleMembership recomputes one client's membership in the
-// eligible-provider set (§5.1): exactly one live egress ip, forward entry
-// agreement, and a non-empty provide mode set. Membership is also lazily
-// re-checked at sampling time, so a small staleness window here is safe.
+// eligible-provider set (§5.1): a family whose one live egress a forward
+// entry attributes to the client, and a non-empty provide mode set.
+// Membership is also lazily re-checked at sampling time, so a small staleness
+// window here is safe.
 func updateVerifyEligibleMembership(
 	ctx context.Context,
 	clientId server.Id,
@@ -467,97 +675,147 @@ func updateVerifyEligibleMembership(
 }
 
 // An eligible-set entry is only a candidate index. Expiry and connection
-// changes must pass the same exact-address bijection again before assignment.
+// changes must pass the same bijection again before assignment. One family
+// that attributes to the client suffices: a hop that lands on a shared,
+// ambiguous or refused family, or on an address another client holds, is
+// answered as retryable and resent on the other (§8.2, IPV6.md C7). A v2
+// entry keeps the old rule, one live address in all.
 func verifyClientHasLiveEgress(ctx context.Context, r server.RedisClient, clientId server.Id, nowMs uint64) bool {
-	liveHashes := verifyLiveEgressHashes(ctx, r, clientId, nowMs)
-	if len(liveHashes) != 1 {
-		return false
+	live := readVerifyLiveEgress(ctx, r, clientId, nowMs)
+	return live.attributes(clientId, readVerifyEgressForwards(ctx, r, live.eligibilityForwardHashes()))
+}
+
+// Whether one family attributes to the client (verifyLiveEgress.familyAttributes).
+func verifyFamilyAttributes(ctx context.Context, r server.RedisClient, clientId server.Id, live verifyLiveEgress, family int) bool {
+	return live.familyAttributes(family, clientId, readVerifyEgressForwards(ctx, r, live.familyForwardHashes(family)))
+}
+
+// The forward entries whose owners decide whether a family attributes to the
+// client: when its live addresses are one egress, an IPv4 address or
+// addresses of one IPv6 /64, the egress's entry and each of its addresses'.
+// A family of several egresses reads none, as it cannot attribute.
+func (self verifyLiveEgress) familyForwardHashes(family int) []string {
+	networks := self.networks(family)
+	if len(networks) != 1 {
+		return nil
 	}
-	forward, err := r.Get(ctx, verifyEgressKeyFromHex(liveHashes[0])).Result()
+	hashes := []string{networks[0]}
+	for _, address := range self.byFamily[family] {
+		if address.address != address.network {
+			hashes = append(hashes, address.address)
+		}
+	}
+	return hashes
+}
+
+// Every forward entry eligibility reads: both families' and, when it is the
+// client's one, its v2 entry's.
+func (self verifyLiveEgress) eligibilityForwardHashes() []string {
+	hashes := append(self.familyForwardHashes(4), self.familyForwardHashes(6)...)
+	if len(self.legacy) == 1 {
+		hashes = append(hashes, self.legacy[0])
+	}
+	return hashes
+}
+
+// A family attributes to the client when one of its forward entries, read
+// into `forwards`, names the client. Two providers in one /64 make the /64's
+// entry ambiguous, while each one's own address still names it.
+func (self verifyLiveEgress) familyAttributes(family int, clientId server.Id, forwards map[string]string) bool {
+	for _, egressHashHex := range self.familyForwardHashes(family) {
+		if forwards[egressHashHex] == clientId.String() {
+			return true
+		}
+	}
+	return false
+}
+
+// Eligibility's egress rule (§5.1, §8.2) on the forward owners read for
+// eligibilityForwardHashes: a family attributes to the client, or its one v2
+// entry's forward entry names it.
+func (self verifyLiveEgress) attributes(clientId server.Id, forwards map[string]string) bool {
+	return self.familyAttributes(4, clientId, forwards) || self.familyAttributes(6, clientId, forwards) ||
+		(len(self.legacy) == 1 && forwards[self.legacy[0]] == clientId.String())
+}
+
+// The owners of forward entries, each the client it names, the ambiguous
+// marker, or "".
+func readVerifyEgressForwards(ctx context.Context, r server.RedisClient, egressHashHexes []string) map[string]string {
+	forwards := map[string]string{}
+	for _, egressHashHex := range egressHashHexes {
+		forwards[egressHashHex] = verifyEgressForward(ctx, r, egressHashHex)
+	}
+	return forwards
+}
+
+// The client a forward entry names, the ambiguous marker, or "".
+func verifyEgressForward(ctx context.Context, r server.RedisClient, egressHashHex string) string {
+	forward, err := r.Get(ctx, verifyEgressKeyFromHex(egressHashHex)).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		server.Raise(err)
 	}
-	return forward == clientId.String()
+	return forward
 }
 
 // ResolveVerifyEgress maps a request source ip to the provider currently
 // egressing from it (§8.1), or nil. Resolution requires the bijection both
-// ways (§8.2): the forward entry names the client, and the client's reverse
-// hash has exactly that ip live and no other. An ambiguous ip resolves to
-// nothing — never guess. The lookup does the same number of redis round trips
-// on hit and miss so it is not a timing oracle for "is this ip a provider"
-// (§9).
+// ways (§8.2): a forward entry names the client, and the client's reverse
+// hash has the source's egress live in its family and no other egress of
+// that family. The exact address comes first; an IPv6 source falls back to
+// its /64 only when no client holds the address, and resolves by it only when
+// one client holds the /64, so two providers in one /64 each keep their own
+// address while a temporary address rotated inside a provider's /64 still
+// resolves. A v2 entry resolves by the old rule, as the client's one live
+// address, under its exact-address hash. An ambiguous ip resolves to nothing —
+// never guess. The lookup does the same number of redis round trips on hit
+// and miss so it is not a timing oracle for "is this ip a provider" (§9).
 func ResolveVerifyEgress(
 	ctx context.Context,
 	ip netip.Addr,
 	settings *VerifySettings,
 ) (clientId *server.Id) {
+	return resolveVerifyEgressAt(ctx, ip, settings, uint64(server.NowUtc().UnixMilli()))
+}
+
+// The explicit clock lets tests read past an entry's expiry without sleeping.
+func resolveVerifyEgressAt(
+	ctx context.Context,
+	ip netip.Addr,
+	settings *VerifySettings,
+	nowMs uint64,
+) (clientId *server.Id) {
 	if !ip.IsValid() {
 		return
 	}
-	ip = ip.Unmap()
-	egressHash := VerifyEgressIndexHashWithSettings(ip, settings)
-	egressHashHex := hex.EncodeToString(egressHash[:])
-	nowMs := uint64(server.NowUtc().UnixMilli())
+	_, source := verifyClientEgressField(ip, settings)
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		forward, err := r.Get(ctx, verifyEgressKey(egressHash)).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			server.Raise(err)
+		// both entries are read whichever names a client
+		owner := verifyEgressForward(ctx, r, source.address)
+		if source.network != source.address {
+			if networkOwner := verifyEgressForward(ctx, r, source.network); owner == "" {
+				owner = networkOwner
+			}
 		}
 
-		resolvedId, parseErr := server.ParseId(forward)
-		if forward == "" || forward == verifyEgressAmbiguous || parseErr != nil {
+		resolvedId, parseErr := server.ParseId(owner)
+		if owner == "" || owner == verifyEgressAmbiguous || parseErr != nil {
 			if settings.ResolveConstantTimePad {
 				// pad the miss path to the same round-trip count as a hit
-				r.HGetAll(ctx, verifyClientEgressKey(server.Id{})).Result()
+				for _, reverseKey := range verifyClientEgressKeys(server.Id{}) {
+					r.HGetAll(ctx, reverseKey).Result()
+				}
 			}
 			return
 		}
 
-		liveHashes := verifyLiveEgressHashes(ctx, r, resolvedId, nowMs)
-		if len(liveHashes) == 1 && liveHashes[0] == egressHashHex {
+		live := readVerifyLiveEgress(ctx, r, resolvedId, nowMs)
+		networks := live.networks(source.family)
+		if (len(networks) == 1 && networks[0] == source.network) || (len(live.legacy) == 1 && live.legacy[0] == source.address) {
 			clientId = &resolvedId
 		}
 	})
 	return
-}
-
-// RefreshVerifyProxyEgress re-feeds the egress index from the current
-// `proxy_client` allocations (the proxy-side feeder's periodic refresh; the
-// create-side feed in `CreateProxyClient` covers the gap until the first
-// refresh). Rows deleted by the reaper stop being re-fed and age out within
-// one `EgressTtl`.
-func RefreshVerifyProxyEgress(ctx context.Context, settings *VerifySettings) {
-	type proxyEgress struct {
-		clientId server.Id
-		ip       netip.Addr
-	}
-	proxyEgresses := []proxyEgress{}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT client_id, client_ipv4
-			FROM proxy_client
-			WHERE client_ipv4 IS NOT NULL
-			`,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				var clientIpv4 int64
-				server.Raise(result.Scan(&clientId, &clientIpv4))
-				proxyEgresses = append(proxyEgresses, proxyEgress{
-					clientId: clientId,
-					ip:       IntToIpv4(clientIpv4),
-				})
-			}
-		})
-	})
-	for _, egress := range proxyEgresses {
-		FeedVerifyEgress(ctx, egress.clientId, egress.ip, settings)
-	}
 }
 
 // SampleVerifyNextHop draws the next hop uniformly at random from the
@@ -647,10 +905,11 @@ func SampleVerifyNextHop(
 }
 
 // verifyCandidateAssignable re-checks one drawn provider before it can be
-// assigned: a parseable id, exactly one live attributable egress, and an
-// active provide mode. A failed candidate is lazily evicted from the eligible
-// set, which may outlive an address lease or race a disconnect; it must never
-// spend a token or be assigned as an unattributable source.
+// assigned: a parseable id, live attributable egresses with at most one per
+// family, and an active provide mode. A failed candidate is lazily evicted
+// from the eligible set, which may outlive an address lease or race a
+// disconnect; it must never spend a token or be assigned as an
+// unattributable source.
 func verifyCandidateAssignable(ctx context.Context, r server.RedisClient, candidate string) (server.Id, bool) {
 	candidateId, err := server.ParseId(candidate)
 	if err != nil {
@@ -863,6 +1122,157 @@ func incrVerifyExtendRateForClient(
 	)
 	server.Raise(err)
 	return ipCount
+}
+
+// IncrVerifySeedProviderRate bumps and returns the seed counter of the
+// provider a seed's source ip resolved to (§9). A provider with an address in
+// each family has two source ips, so the caller holds this count to the same
+// per-source limits: the provider keeps one budget, not one per family. An
+// excluded source skips it, as it skips the source-ip counter.
+func IncrVerifySeedProviderRate(
+	ctx context.Context,
+	clientIp string,
+	clientId server.Id,
+	settings *VerifySettings,
+) int64 {
+	return incrVerifyProviderRate(ctx, clientIp, verifySeedProviderRateKey(clientId), settings)
+}
+
+// IncrVerifyExtendProviderRate is IncrVerifySeedProviderRate for EXTEND (V4).
+func IncrVerifyExtendProviderRate(
+	ctx context.Context,
+	clientIp string,
+	clientId server.Id,
+	settings *VerifySettings,
+) int64 {
+	return incrVerifyProviderRate(ctx, clientIp, verifyExtendProviderRateKey(clientId), settings)
+}
+
+func incrVerifyProviderRate(
+	ctx context.Context,
+	clientIp string,
+	key string,
+	settings *VerifySettings,
+) int64 {
+	rateLimitClient, err := server.NewRateLimitClientIp(clientIp)
+	server.Raise(err)
+	return incrVerifyProviderRateForClient(ctx, rateLimitClient.Excluded(), key, settings)
+}
+
+func incrVerifyProviderRateForClient(
+	ctx context.Context,
+	ipExcluded bool,
+	key string,
+	settings *VerifySettings,
+) int64 {
+	if ipExcluded {
+		return 0
+	}
+	count, err := server.IncrementRateLimitWindow(ctx, key, settings.SeedRateWindow)
+	server.Raise(err)
+	return count
+}
+
+// PadVerifyExtendProviderRate does the work of IncrVerifyExtendProviderRate
+// on a scratch counter for an EXTEND whose source resolved to no provider, so
+// what an unknown trail's EXTEND costs does not depend on resolution (§9),
+// and returns its count. The counter is the source's own, keyed by its
+// rate-limit subnet like its EXTEND meter, so the pads of many sources share
+// no one key.
+func PadVerifyExtendProviderRate(
+	ctx context.Context,
+	clientIp string,
+	settings *VerifySettings,
+) int64 {
+	rateLimitClient, err := server.NewRateLimitClientIp(clientIp)
+	server.Raise(err)
+	return incrVerifyProviderRateForClient(ctx, rateLimitClient.Excluded(), verifyExtendPadRateKey(rateLimitClient.IpHash()), settings)
+}
+
+// VerifyUnattributedAttemptLimit is how many times one step answers a
+// well-formed request whose source the step cannot attribute as retryable
+// before it treats the source as today: an EXTEND fails the trail and a SEED
+// is poisoned. A validator sends each step at most three times, alternating
+// the family it tries first (IPV6.md C7), so two retries can reach the
+// provider's other family.
+const VerifyUnattributedAttemptLimit = 2
+
+func verifyUnattributedExtendKey(trailId server.Id, depth int) string {
+	return fmt.Sprintf("{vtr_%s}unattributed_%d", trailId, depth)
+}
+
+func verifyUnattributedSeedKey(seedSig []byte) string {
+	return fmt.Sprintf("verify_seed_unattributed_%x", sha256.Sum256(seedSig))
+}
+
+// IncrVerifyUnattributedExtend counts an EXTEND of the step at `depth` whose
+// source resolved to no provider or to another than the pending one, notes
+// `answeredMs` as the step's last such answer, and returns the count. Both
+// live as long as the step can. Past the limit the trail fails, so the time a
+// later confirmation reads is always a retryable answer's.
+func IncrVerifyUnattributedExtend(
+	ctx context.Context,
+	trailId server.Id,
+	depth int,
+	answeredMs uint64,
+	settings *VerifySettings,
+) (count int64) {
+	key := verifyUnattributedExtendKey(trailId, depth)
+	server.Redis(ctx, func(r server.RedisClient) {
+		var countCmd *redis.IntCmd
+		_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			countCmd = pipe.HIncrBy(ctx, key, "attempts", 1)
+			pipe.HSet(ctx, key, "answered_ms", answeredMs)
+			pipe.PExpire(ctx, key, settings.StepTimeout+settings.StepTimeoutGrace)
+			return nil
+		})
+		server.Raise(err)
+		count = countCmd.Val()
+	})
+	return
+}
+
+// GetVerifyUnattributedExtendAnsweredMs is when the step at `depth` last
+// answered an EXTEND as retryable, or 0 when it never did. The attributed
+// resend started from that answer, as a first attempt starts from the ASSIGN,
+// so the hop's latency counts from it (§7.5).
+func GetVerifyUnattributedExtendAnsweredMs(
+	ctx context.Context,
+	trailId server.Id,
+	depth int,
+) (answeredMs uint64) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		value, err := r.HGet(ctx, verifyUnattributedExtendKey(trailId, depth), "answered_ms").Result()
+		if errors.Is(err, redis.Nil) {
+			return
+		}
+		server.Raise(err)
+		answeredMs, err = strconv.ParseUint(value, 10, 64)
+		server.Raise(err)
+	})
+	return
+}
+
+// IncrVerifyUnattributedSeed is IncrVerifyUnattributedExtend for a SEED,
+// identified by its signature: the validator resends the identical body. A
+// seed hop has no latency, so no time is noted.
+func IncrVerifyUnattributedSeed(
+	ctx context.Context,
+	seedSig []byte,
+	settings *VerifySettings,
+) (count int64) {
+	key := verifyUnattributedSeedKey(seedSig)
+	server.Redis(ctx, func(r server.RedisClient) {
+		var countCmd *redis.IntCmd
+		_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			countCmd = pipe.Incr(ctx, key)
+			pipe.PExpire(ctx, key, settings.StepTimeout+settings.StepTimeoutGrace)
+			return nil
+		})
+		server.Raise(err)
+		count = countCmd.Val()
+	})
+	return
 }
 
 // IncrVerifyActiveTrails counts a new active trail against the vpk's

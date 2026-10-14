@@ -59,6 +59,8 @@ func InitTasks(ctx context.Context) {
 // transaction holds every shared run-once row it upserts until commit, so it
 // runs nothing else: retired-row cleanup is reapRetiredTasks, and long-lived
 // retention observers start after the process acquires its runtime owner.
+// After the commit the expiry sweep starts on a fresh pass; a row held by a
+// run in flight is retried in the background (startup_close_expired.go).
 func initTaskSchedule(ctx context.Context) {
 	// Run-once upserts merge independently with live claim updates. A fixed
 	// snapshot needlessly retries the entire initializer whenever a claim wins.
@@ -124,6 +126,10 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRollupProviderEgressTallies(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
+		// lag.dev measurement certificates and names (lag.dev/PLAN.md C5-C9);
+		// both idle until extender.yml enables the measurement block
+		work.ScheduleExtenderMeasurementIssue(clientSession, tx)
+		work.ScheduleExtenderMeasurementDns(clientSession, tx)
 		work.ScheduleRemoveOldExtenderLatencies(clientSession, tx)
 		work.ScheduleRemoveExpiredPings(clientSession, tx)
 		work.ScheduleDeriveLocations(clientSession, tx)
@@ -155,8 +161,12 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 		work.ScheduleStSyncChain(clientSession, tx)
 		work.SchedulePaymentReconcile(clientSession, tx)
+		// lag.dev guest expiry and result retention (lag.dev/PLAN.md A2, A5)
+		work.ScheduleSweepLag(clientSession, tx)
 	}, server.TxReadCommitted)
 	work.ScheduleSettlementAccountingTasks(ctx)
+	// After the commit, in its own bounded transactions.
+	startCloseExpiredContractsFreshPass(ctx)
 }
 
 // Removes pending rows that can never run again: removed targets, which
@@ -414,6 +424,15 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExtenderPublish,
 			work.ExtenderPublishPost,
 		),
+		// lag.dev/PLAN.md C5-C9
+		task.NewTaskTargetWithPost(
+			work.ExtenderMeasurementIssue,
+			work.ExtenderMeasurementIssuePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.ExtenderMeasurementDns,
+			work.ExtenderMeasurementDnsPost,
+		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldExtenderLatencies,
 			work.RemoveOldExtenderLatenciesPost,
@@ -554,10 +573,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveOldVerifyProviderStats,
 			work.RemoveOldVerifyProviderStatsPost,
 		),
-		task.NewTaskTargetWithPost(
-			work.RefreshVerifyProxyEgress,
-			work.RefreshVerifyProxyEgressPost,
-		),
+		work.NewRefreshVerifyProxyEgressTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.StSyncChain,
 			work.StSyncChainPost,
@@ -579,8 +595,17 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.StFinalizePokePost,
 		),
 		task.NewTaskTargetWithPost(
+			work.StLedgerV2Step,
+			work.StLedgerV2StepPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.PaymentReconcile,
 			work.PaymentReconcilePost,
+		),
+		// lag.dev/PLAN.md A2, A5
+		task.NewTaskTargetWithPost(
+			work.SweepLag,
+			work.SweepLagPost,
 		),
 	)
 

@@ -70,7 +70,10 @@ func testExtenderActivation(publicKey []byte, ipVersion int, ip string) *Network
 
 // The directory, activation history, and latency attestations exist on a fresh
 // database with their read and upsert indexes. Identity and attestation unique
-// keys keep reactivation and replay from creating duplicate rows.
+// keys keep reactivation and replay from creating duplicate rows. The gated
+// tier's release ledger and block reports (connect/EXTENDER.md R3, R4) and the
+// lag.dev measurement certificates (lag.dev/PLAN.md C5) share the prefix and
+// are pinned with the rest.
 func TestExtenderMigrationsApply(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -117,8 +120,13 @@ func TestExtenderMigrationsApply(t *testing.T) {
 			"network_extender",
 			"network_extender_activation",
 			"network_extender_address",
+			"network_extender_block_report",
 			"network_extender_latency",
+			"network_extender_measurement",
+			"network_extender_measurement_cert",
 			"network_extender_publish",
+			"network_extender_release",
+			"network_extender_release_request",
 		}
 		if !slices.Equal(tables, wantTables) {
 			t.Fatalf("extender tables = %v, want %v", tables, wantTables)

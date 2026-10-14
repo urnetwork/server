@@ -7,7 +7,7 @@
 //	    --out-policy POLICY.yml --out-authority operator-gas-authority.yml [--now RFC3339]
 //	sn25golive verify-config --policy policy-v1.yml --expect-policy-hash 0x... --out verify.yml
 //	sn25golive st-check --st st.yml [--profile mainnet] [--authority operator-gas-authority.yml]
-//	    [--sn sn.yml] [--now RFC3339]
+//	    [--sn sn.yml] [--v2-activation ACTIVATION.json] [--now RFC3339]
 //
 // Every output is created exclusively and never overwritten. Secret outputs
 // (the approver key and verify.yml) are written 0600 and their secrets are
@@ -34,7 +34,7 @@ const usage = `usage:
   sn25golive gas-policy --params PARAMS.json --dry-run [--now RFC3339]
   sn25golive gas-policy --params PARAMS.json --approver-key KEY.json --out-policy POLICY.yml --out-authority AUTHORITY.yml [--now RFC3339]
   sn25golive verify-config --policy policy-v1.yml --expect-policy-hash 0xHASH --out verify.yml
-  sn25golive st-check --st st.yml [--profile mainnet] [--authority AUTHORITY.yml] [--sn sn.yml] [--now RFC3339]
+  sn25golive st-check --st st.yml [--profile mainnet] [--authority AUTHORITY.yml] [--sn sn.yml] [--v2-activation ACTIVATION.json] [--now RFC3339]
 `
 
 func main() {

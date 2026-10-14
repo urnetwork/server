@@ -3900,6 +3900,8 @@ func tryNewFullTunPathWithTopologyHooks(
 		providerSettings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.EndToEndProbeObserver =
 			providerProbeTrace.observe
 	}
+	// no STUN: empty IceServerUrls alone would draw from the default pool
+	providerSettings.WebRtcSettings.IceServerPoolUrls = nil
 	if p2p != nil {
 		providerSettings.WebRtcSettings.IceServerUrls = nil
 		providerSettings.WebRtcSettings.Network = p2p.left
@@ -4066,6 +4068,8 @@ func tryNewFullTunPathWithTopologyHooks(
 			settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.EndToEndProbeObserver =
 				deviceProbeTrace.observe
 		}
+		// no STUN: empty IceServerUrls alone would draw from the default pool
+		settings.WebRtcSettings.IceServerPoolUrls = nil
 		if p2p != nil {
 			settings.WebRtcSettings.IceServerUrls = nil
 			settings.WebRtcSettings.Network = p2p.right

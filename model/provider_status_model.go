@@ -6,7 +6,8 @@ package model
 // The status is the decision FindProviders2 draws from: the common gates, the
 // egress decision and the ranking UpdateClientScores publishes, computed for
 // the network's providers with the bulk filter scoped to their client ids. The
-// fleet-wide filter never runs for a status. Ranking numbers are shown with
+// fleet-wide filter never runs for a status; the URL-success rule's country
+// guard is the one UpdateClientScores published. Ranking numbers are shown with
 // what they mean; the anti-abuse signals (ARIN risk and non-quality, the URL
 // security quarantine, the legacy dark verdict) are one generic reason, and
 // their values never leave this file.
@@ -30,7 +31,9 @@ const (
 	ProviderStatusReasonReliabilityWarmingUp = "reliability_warming_up"
 	ProviderStatusReasonReliabilityLow       = "reliability_low"
 	// every anti-abuse signal, never which
-	ProviderStatusReasonNotEligible      = "not_eligible"
+	ProviderStatusReasonNotEligible = "not_eligible"
+	// the URL-success rule: measured repeatedly without carrying one URL
+	ProviderStatusReasonEgressNoSuccess  = "egress_no_success"
 	ProviderStatusReasonEgressUnprobed   = "egress_unprobed"
 	ProviderStatusReasonEgressFailing    = "egress_failing"
 	ProviderStatusReasonSpeedTestMissing = "speed_test_missing"
@@ -47,6 +50,7 @@ var ProviderStatusReasons = []string{
 	ProviderStatusReasonReliabilityWarmingUp,
 	ProviderStatusReasonReliabilityLow,
 	ProviderStatusReasonNotEligible,
+	ProviderStatusReasonEgressNoSuccess,
 	ProviderStatusReasonEgressUnprobed,
 	ProviderStatusReasonEgressFailing,
 	ProviderStatusReasonSpeedTestMissing,
@@ -62,6 +66,7 @@ var providerStatusReasonTexts = map[string]string{
 	ProviderStatusReasonReliabilityWarmingUp: "Building reliability. This device has been steady for the last hour; clients are offered it once its 12-hour reliability reaches the minimum, about 8 hours after a fresh start.",
 	ProviderStatusReasonReliabilityLow:       "Reliability over the last hour is below what clients need. It rises with every minute this device stays connected; disconnects lower it.",
 	ProviderStatusReasonNotEligible:          "This connection isn't eligible to provide right now.",
+	ProviderStatusReasonEgressNoSuccess:      "This connection isn't passing traffic: every network check in the last 8 hours failed to load a test site through it, so clients aren't offered this device. Check that its internet connection works and that no firewall, VPN or DNS filter on it blocks traffic. Checks keep running, and it's offered again shortly after one succeeds.",
 	ProviderStatusReasonEgressUnprobed:       "The network check hasn't run on this connection yet. Until it passes, clients are offered this device only when checked providers run out.",
 	ProviderStatusReasonEgressFailing:        "Too many test sites failed to load through this connection in the last 8 hours. Clients are offered this device only when checked providers run out.",
 	ProviderStatusReasonSpeedTestMissing:     "No speed test yet. Until one completes, clients are offered this device much less often.",
@@ -522,6 +527,8 @@ func evaluateProviderStatus(
 	case decision.hardExcluded || evaluation.hardExcluded:
 		// ARIN risk or the URL security quarantine
 		evaluation.reason = ProviderStatusReasonNotEligible
+	case decision.reason == ProviderExcludedNoSuccess:
+		evaluation.reason = ProviderStatusReasonEgressNoSuccess
 	case decision.reason == ProviderExcludedUnprobed:
 		evaluation.reason = ProviderStatusReasonEgressUnprobed
 	case decision.reason == ProviderExcludedHealth:
@@ -552,6 +559,7 @@ var providerStatusOutOfPoolReasons = map[string]bool{
 	ProviderStatusReasonNotConnected:    true,
 	ProviderStatusReasonLocationInvalid: true,
 	ProviderStatusReasonNotEligible:     true,
+	ProviderStatusReasonEgressNoSuccess: true,
 }
 
 // The wire status of one evaluated provider. Its admission, numbers and
@@ -785,6 +793,9 @@ func GetProviderStatuses(ctx context.Context, networkId server.Id, clientIds []s
 	egressTestEnabled := providerEgressTestEnabled()
 	minimums := providerReliabilityMinimums()
 	countFilter := newProviderCountFilterForClients(ctx, factClientIds)
+	// a network's providers cannot measure their countries, so the
+	// URL-success rule's guard is the one the score export decided Online by
+	countFilter.onlineSuccessBaseline = getProviderOnlineSuccessBaseline(ctx)
 	now := server.NowUtc()
 	for _, facts := range allFacts {
 		evaluation := evaluateProviderStatus(facts, countFilter, egressSettings, egressTestEnabled, minimums)

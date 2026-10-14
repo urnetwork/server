@@ -123,6 +123,10 @@ type providerEgressProbeSettings struct {
 	PublicAPIURL     string                        `yaml:"public_api_url"`
 	BandwidthCDNURL  string                        `yaml:"bandwidth_cdn_url"`
 	UrlProbe         *ProviderEgressProbeBatchArgs `yaml:"url_probe"`
+	// Placement only, never a task argument: URL workers one taskworker
+	// instance may run across all of its shard passes. A change does not make
+	// pending pass snapshots stale.
+	InstanceUrlConcurrency int `yaml:"instance_url_concurrency"`
 	// Deprecated config inputs retained while old task snapshots retire.
 	Full                         ProviderEgressProbeBatchArgs `yaml:"full"`
 	Blackhole                    ProviderEgressProbeBatchArgs `yaml:"blackhole"`
@@ -151,6 +155,7 @@ func defaultProviderEgressProbeSettings(domain string) providerEgressProbeSettin
 			Concurrency:         8,
 			ProbeTimeoutSeconds: 60,
 		},
+		InstanceUrlConcurrency: defaultProviderUrlProbeInstanceConcurrency,
 		Full: ProviderEgressProbeBatchArgs{
 			Limit: 8,
 			// one round: every provider of a batch waits out its retries
@@ -305,6 +310,9 @@ func validateProviderEgressProbeArgsConfig(args *ProviderEgressProbeArgs) error 
 func (self providerEgressProbeSettings) validate() error {
 	if !self.Enabled {
 		return nil
+	}
+	if self.UrlProbe != nil && self.InstanceUrlConcurrency < 1 {
+		return fmt.Errorf("URL probe instance_url_concurrency must be positive")
 	}
 	return validateProviderEgressProbeArgsConfig(providerEgressProbeArgs(self, 0))
 }
@@ -1061,12 +1069,19 @@ func scoreEgressHealthResult(
 }
 
 // One run's loads as the site tally counts them, and whether the run was
-// healthy. A load's exit is healthy when it passed at least healthyShare of
-// the other scored sites of the same run -- so a site that fails everyone is
-// still judged on exits that work, not on the exits it drags under the line
-// itself. Probationary and incompatible loads are tallied against the run's
-// scored sites without being among them; a canary is tallied as a canary; a
-// load that was not measured is not tallied at all.
+// healthy. Only a run that reached its provider is tallied: when every
+// measured load failed before any destination answered
+// (egresshealth.CheckResult.NoContactFailure), the exit was offline or
+// unreachable, which says nothing about the sites it was sent to, so the run
+// has no loads. A run of one URL reaches its provider or not with its one
+// load; in a longer run that reached it, a site that could not be resolved or
+// connected from that exit failed there. A load's exit is healthy when it
+// passed at least healthyShare of the other scored sites of the same run -- so
+// a site that fails everyone is still judged on exits that work, not on the
+// exits it drags under the line itself. Probationary and incompatible loads
+// are tallied against the run's scored sites without being among them; a
+// canary is tallied as a canary; a load that was not measured is not tallied
+// at all.
 func egressHealthSiteLoads(
 	res *egresshealth.Result,
 	place model.ProviderEgressPlace,
@@ -1077,6 +1092,7 @@ func egressHealthSiteLoads(
 	scores := func(check egresshealth.CheckResult) bool {
 		return !check.Canary && !check.NotMeasured && scoring.Scores(check.Name, place)
 	}
+	contacted := false
 	for _, check := range res.Checks {
 		if scores(check) {
 			scoredTotal++
@@ -1084,11 +1100,17 @@ func egressHealthSiteLoads(
 				scoredOk++
 			}
 		}
+		if !check.NotMeasured && !check.NoContactFailure() {
+			contacted = true
+		}
 	}
 	healthy := func(ok int, total int) bool {
 		return 0 < total && healthyShare*float64(total) <= float64(ok)
 	}
 	runHealthy = healthy(scoredOk, scoredTotal)
+	if !contacted {
+		return nil, runHealthy
+	}
 	for _, check := range res.Checks {
 		if check.NotMeasured {
 			continue
@@ -1264,11 +1286,14 @@ func (self *providerEgressProbePass) runFullBatchObserved(
 		scoring, siteSettings = self.loadScoring(ctx)
 	}
 	places := map[string]model.ProviderEgressPlace{}
+	// only the URL common-mode guard reads these
+	providerClientIdNetworkIds := map[string]string{}
 	for _, provider := range due {
 		places[provider.ClientId] = model.ProviderEgressPlace{
 			CountryCode: strings.ToLower(strings.TrimSpace(provider.CountryCode)),
 			Region:      strings.TrimSpace(provider.Region),
 		}
+		providerClientIdNetworkIds[provider.ClientId] = provider.NetworkId
 	}
 
 	batch := newProviderEgressFullBatch(self.fullSink)
@@ -1329,10 +1354,10 @@ func (self *providerEgressProbePass) runFullBatchObserved(
 	if self.urlProbes {
 		// A URL turn is a batch of one provider, and an individual accepted
 		// URL error belongs in the history denominator. Only a pre-response
-		// failure the pass's latest providers all share is held back.
+		// failure the pass's latest networks all share is held back.
 		tripped = false
 		if self.urlCommonMode != nil {
-			share, tripped = self.urlCommonMode.judge(providerClientIdScoredRuns)
+			share, tripped = self.urlCommonMode.judge(providerClientIdScoredRuns, providerClientIdNetworkIds)
 		}
 	}
 	egressProbeBatchShare.WithLabelValues("full").Set(share)

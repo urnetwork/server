@@ -106,6 +106,8 @@ func registry() []specEndpoint {
 		{method: "GET", path: "/network/extender-hint", argType: nil, resultType: rt(controller.ExtenderHintResult{})},
 		{method: "POST", path: "/network/extender-latency", argType: rt(controller.ExtenderLatencyReportArgs{}), resultType: rt(controller.ExtenderLatencyReportResult{})},
 		{method: "POST", path: "/network/ping-report", argType: rt(controller.ExtenderPingReportArgs{}), resultType: rt(controller.ExtenderPingReportResult{})},
+		// an extender's lag.dev measurement certificate (lag.dev/PLAN.md A8)
+		{method: "GET", path: "/network/extender-measurement-cert", argType: nil, resultType: rt(controller.ExtenderMeasurementCertResult{})},
 		// the prober module's own pool type is the response (connect/GEOMAP.md §11.4)
 		{method: "GET", path: "/network/provider-egress-destinations", argType: nil, resultType: rt(egresshealth.Pool{})},
 		// per-client data caps for embedded clients (EMBED1.md)

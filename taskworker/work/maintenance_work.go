@@ -89,10 +89,19 @@ func dbMaintenanceNextTask(args *DbMaintenanceArgs, result *DbMaintenanceResult,
 	}
 }
 
-func DbMaintenance(dbMaintenance *DbMaintenanceArgs, clientSession *session.ClientSession) (*DbMaintenanceResult, error) {
+// The options of one run: the defaults, what the epoch already finished, and
+// whether bloated priority indexes are rebuilt, which db_maintenance.yml
+// decides when the run starts (off unless priority_reindex_enabled is true).
+func dbMaintenanceOptions(dbMaintenance *DbMaintenanceArgs) *server.DbMaintenanceOptions {
 	opts := server.DefaultDbMaintenanceOptions()
 	opts.DoneTables = dbMaintenance.DoneTables
 	opts.DoneIndexes = dbMaintenance.DoneIndexes
+	opts.PriorityReindex = server.DbMaintenancePriorityReindexEnabled()
+	return opts
+}
+
+func DbMaintenance(dbMaintenance *DbMaintenanceArgs, clientSession *session.ClientSession) (*DbMaintenanceResult, error) {
+	opts := dbMaintenanceOptions(dbMaintenance)
 	outcome := server.DbMaintenance(clientSession.Ctx, dbMaintenance.Epoch, opts)
 	return &DbMaintenanceResult{
 		Stopped:     outcome.Stopped,

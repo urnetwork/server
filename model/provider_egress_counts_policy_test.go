@@ -15,6 +15,8 @@ func TestProviderEgressCountsPolicyKeySeparatesCountRules(t *testing.T) {
 		"numerator":   func(s *EgressIndexSettings) { s.QualityOkNumerator-- },
 		"denominator": func(s *EgressIndexSettings) { s.QualityOkDenominator++ },
 		"country":     func(s *EgressIndexSettings) { s.CountryGate = !s.CountryGate },
+		"url success": func(s *EgressIndexSettings) { s.OnlineRequiresUrlSuccess = !s.OnlineRequiresUrlSuccess },
+		"floor":       func(s *EgressIndexSettings) { s.OnlineSuccessCountryFloor += 0.01 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := *settings

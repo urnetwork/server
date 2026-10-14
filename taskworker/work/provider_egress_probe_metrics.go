@@ -269,14 +269,14 @@ var egressProbeBatchGuardTripsTotal = prometheus.NewCounterVec(prometheus.Counte
 	Namespace: "urnetwork",
 	Subsystem: "egress_probe",
 	Name:      "batch_guard_trips_total",
-	Help:      "Batches the prober held to be its own fault (connect/GEOMAP.md §11.3): blackhole = dark share above dark_batch_guard, negatives discarded and re-checked after the backoff; full = scored-load failure share above run_batch_guard, not submitted and re-queued, or in URL mode one turn whose pre-response failure the pass's latest distinct providers all share, retried without measured credit",
+	Help:      "Batches the prober held to be its own fault (connect/GEOMAP.md §11.3): blackhole = dark share above dark_batch_guard, negatives discarded and re-checked after the backoff; full = scored-load failure share above run_batch_guard, not submitted and re-queued, or in URL mode one turn whose pre-response failure the pass's latest distinct networks all share, retried without measured credit",
 }, []string{"schedule"})
 
 var egressProbeBatchShare = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "egress_probe",
 	Name:      "batch_share",
-	Help:      "The share the batch guard judged in this process's latest guarded batch: blackhole = dark checks over measured checks, full = failed scored loads over scored loads, or in URL mode failed turns over the common-mode window's distinct providers",
+	Help:      "The share the batch guard judged in this process's latest guarded batch: blackhole = dark checks over measured checks, full = failed scored loads over scored loads, or in URL mode failed turns over the common-mode window's distinct networks",
 }, []string{"schedule"})
 
 var egressProbePoolFetchesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

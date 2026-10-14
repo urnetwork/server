@@ -124,12 +124,17 @@ func scheduleCloseExpiredContractsPageWithExpiration(clientSession *session.Clie
 			NextExpiration: expiration,
 		},
 		clientSession,
-		// legacy key
-		task.RunOnce(fmt.Sprintf("close_expired_contracts_%d_%d", blockSize, blockIndex)),
+		closeExpiredContractsRunOnce(blockSize, blockIndex),
 		task.RunAt(runAt),
 		task.MaxTime(30*time.Minute),
 		task.Priority(task.TaskPriorityFastest),
 	)
+}
+
+// The legacy key. Every producer of a block's sweep shares it, so the block
+// keeps exactly one pending owner.
+func closeExpiredContractsRunOnce(blockSize int, blockIndex int) *task.RunOnceOption {
+	return task.RunOnce(fmt.Sprintf("close_expired_contracts_%d_%d", blockSize, blockIndex))
 }
 
 // Allow two default receive-owner lifetimes before synthesizing an absent report.
@@ -157,7 +162,8 @@ func CloseExpiredContracts(
 			clientSession.Ctx,
 			minTime,
 			closeExpiredContractsMaxCount,
-			closeExpiredContractsParallel,
+			// contract_close.yml can lower it for the next run (close_expired_parallel.go).
+			closeExpiredContractsParallelLimit(),
 			closeExpiredContracts.BlockSize,
 			closeExpiredContracts.BlockIndex,
 			sweep,
@@ -193,8 +199,9 @@ func closeExpiredContractsSweepPageResult(ctx context.Context, args *CloseExpire
 }
 
 // Completed accounting or row-visit failures can checkpoint their raw position
-// while remaining task failures. End of pass resets the cursor so unresolved
-// rows return. Interrupted or unattested work keeps the original task args.
+// while remaining task failures. A run whose only failures were busy rows it
+// walked past succeeds with its cursor. End of pass resets the cursor so
+// unresolved rows return. Interrupted or unattested work keeps the original args.
 func closeExpiredContractsPageResult(ctx context.Context, args *CloseExpiredContractsArgs, c int64, next *model.ContractExpiryCursor, err error) (*CloseExpiredContractsResult, error) {
 	// The model alone can attest that every selected row completed and
 	// every failure is a verified still-reserved dispute or completed
@@ -226,7 +233,16 @@ func closeExpiredContractsPageResult(ctx context.Context, args *CloseExpiredCont
 			NextExpiration: args.NextExpiration,
 		}
 		deferred := visited.DeferredContractIds()
-		if visited.Progressed() {
+		if visited.DeferredOnly() {
+			// The run walked past rows whose balance another owner held to its
+			// own end. That is not a task failure: the rows keep their custody,
+			// the operational_deferred counter and this line record them, and
+			// the pass that deferred them ends at its backlog so the next one
+			// revisits them. The result carries the cursor to its successor.
+			err = nil
+			glog.Infof("[close-expired]completed run deferred=%d attempted=%d has_more=%t first_deferred=%s\n",
+				len(deferred), c, next != nil || args.Sweep != nil, closeExpiredContractsFirstId(deferred))
+		} else if visited.Progressed() {
 			// Other rows moved, so the failures belong to their own rows: a
 			// busy owner, a bounded timeout or a refused write. Keep them open
 			// for a later pass and continue at the ordinary scan cadence.

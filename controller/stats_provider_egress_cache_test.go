@@ -545,3 +545,25 @@ func TestStatsProviderEgressCacheKeysSharePolicySlot(t *testing.T) {
 		t.Fatal("cache keys lost slot or policy isolation")
 	}
 }
+
+// The URL-success rule's no_success reason is part of a complete snapshot: a
+// snapshot carrying it with every other reason is valid and round-trips, and
+// one without it is incomplete.
+func TestStatsProviderEgressCacheAcceptsTheNoSuccessReason(t *testing.T) {
+	store := newStatsProviderEgressTestStore()
+	counts := statsProviderEgressTestCounts()
+	counts.ReasonCounts["no_success"] = 3
+	if !validStatsProviderEgressCounts(counts) {
+		t.Fatal("a snapshot with the no_success reason is not valid")
+	}
+	value := statsProviderEgressTestWire(t, counts, store.now(), store.now())
+	decoded, fresh, err := decodeStatsProviderEgressSnapshot(value, store.now())
+	if err != nil || !fresh || decoded.Counts.ReasonCounts["no_success"] != 3 || !reflect.DeepEqual(decoded.Counts, counts) {
+		t.Fatalf("the no_success reason did not round-trip: %v", err)
+	}
+
+	delete(counts.ReasonCounts, "no_success")
+	if validStatsProviderEgressCounts(counts) {
+		t.Fatal("a snapshot without the no_success reason is valid")
+	}
+}

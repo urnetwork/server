@@ -2026,7 +2026,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 3,
         "x": 0,
         "y": 55
       },
@@ -2080,8 +2080,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 4,
+        "w": 3,
+        "x": 3,
         "y": 55
       },
       "fieldConfig": {
@@ -2134,8 +2134,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 8,
+        "w": 3,
+        "x": 6,
         "y": 55
       },
       "fieldConfig": {
@@ -2179,6 +2179,60 @@
       "description": "Providers a fresh probe observed exiting in a country other than the one they are listed in: out of every bucket and the counts as a minimum, still reachable with force_minimum or an explicit client id. Only a derived location that crossed a border can put a provider here, and the derive job refuses those, so anything above zero is worth a look."
     },
     {
+      "id": 64,
+      "type": "stat",
+      "title": "left out: no url success",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 9,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_excluded{env=\"$env\",reason=\"no_success\"})",
+          "refId": "A",
+          "legendFormat": "no_success"
+        }
+      ],
+      "description": "Providers measured at least twice in the last eight hours without one URL success, in a country where the probe works: out of every bucket and the counts, Online included, until their first success. Not a hard exclusion: probes, force_minimum and an explicit client id still reach them. A country where fewer than online_success_country_floor of the measured providers have a success is exempt (see the exempt countries panel); online_requires_url_success: false in provider.yml turns the rule off."
+    },
+    {
       "id": 42,
       "type": "stat",
       "title": "out of quality: health",
@@ -2189,7 +2243,7 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 12,
+        "x": 13,
         "y": 55
       },
       "fieldConfig": {
@@ -2243,7 +2297,7 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 16,
+        "x": 17,
         "y": 55
       },
       "fieldConfig": {
@@ -2296,8 +2350,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 20,
+        "w": 3,
+        "x": 21,
         "y": 55
       },
       "fieldConfig": {
@@ -2338,7 +2392,7 @@
           "legendFormat": "total"
         }
       ],
-      "description": "Every provider left out of at least one bucket, each counted once under the first rule that holds, in the order blackhole, tls, country, health, unprobed."
+      "description": "Every provider left out of at least one bucket, each counted once under the first rule that holds, in the order reliability, arin_risk, tls, no_success, then unprobed or health, then arin_non_quality. Blackhole and country are legacy labels that stay zero."
     },
     {
       "id": 45,
@@ -2397,7 +2451,7 @@
           "legendFormat": "{{reason}}"
         }
       ],
-      "description": "The providers each rule leaves out over time. Blackhole and tls remove a provider from everything, country from every bucket, health from quality alone, unprobed from quality and speed. Every reason is published every refresh, zero included."
+      "description": "The providers each rule leaves out over time. Reliability, arin_risk and tls remove a provider from everything; no_success from every bucket and the counts while its probes continue; health and unprobed from quality and speed; arin_non_quality from quality alone. Every reason is published every refresh, zero included."
     },
     {
       "id": 46,
@@ -2938,6 +2992,118 @@
       "description": "Of every provider non-forced location answers handed out, the share borrowed from outside the requested bucket. Backfill makes every answer look full, so this is the operator's view of how empty the bucket behind it is; above half for an hour is the backfill-sustained finding of SIGNALS.md §2.19b."
     },
     {
+      "id": 65,
+      "type": "bargauge",
+      "title": "online url-success rule: exempt countries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 91
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (country_code) (urnetwork_stats_provider_online_success_exempt{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{country_code}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "description": "The countries the URL-success rule exempts because fewer than online_success_country_floor of their measured Online providers have a URL success in eight hours: the probe itself fails there for most providers, so their providers keep the benefit of the doubt. Each bar is the providers without a success the exemption keeps online, from the guard the last score export published. No bars while the rule is disabled."
+    },
+    {
+      "id": 66,
+      "type": "timeseries",
+      "title": "online url-success rule: kept by exempt countries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 91
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (country_code) (urnetwork_stats_provider_online_success_exempt{env=\"$env\"}))",
+          "refId": "A",
+          "legendFormat": "kept"
+        }
+      ],
+      "description": "The providers without a URL success the rule keeps online because their country is exempt, over time; the providers it excludes are the no_success reason beside the backfill. A country entering the exempt set is a probe failing there, not its providers; raise online_success_country_floor to exempt more countries, or set online_requires_url_success: false in provider.yml to turn the rule off."
+    },
+    {
       "id": 55,
       "type": "row",
       "title": "egress site pool and dark verdicts",
@@ -2946,7 +3112,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 91
+        "y": 99
       },
       "panels": [],
       "description": "The prober's dark verdicts and the destination pool its health runs load (the geomap design, §11.3 and §11.4). The fleet shares are snapshots each taskworker takes for itself, so they are read from the one with the freshest snapshot; the pool gauges are read from the taskworker that ran the latest refresh; the prober's and the refresh's event counters are summed across the taskworkers on the egress probes dashboard."
@@ -2963,7 +3129,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 92
+        "y": 100
       },
       "fieldConfig": {
         "defaults": {
@@ -3017,7 +3183,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 92
+        "y": 100
       },
       "fieldConfig": {
         "defaults": {
@@ -3076,7 +3242,7 @@
           "legendFormat": "{{class}}"
         }
       ],
-      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the pool refresh skips its run while the all share is over the line. Read from the one taskworker with the freshest fleet snapshot."
+      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the pool refresh skips its run while the share of the loads that reached their provider is over the line (this panel counts every failure, a provider that was never reached included). Read from the one taskworker with the freshest fleet snapshot."
     },
     {
       "id": 63,
@@ -3090,7 +3256,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 92
+        "y": 100
       },
       "fieldConfig": {
         "defaults": {
@@ -3150,7 +3316,7 @@
         "h": 10,
         "w": 6,
         "x": 0,
-        "y": 100
+        "y": 108
       },
       "fieldConfig": {
         "defaults": {
@@ -3220,7 +3386,7 @@
         "h": 10,
         "w": 9,
         "x": 6,
-        "y": 100
+        "y": 108
       },
       "fieldConfig": {
         "defaults": {
@@ -3272,7 +3438,7 @@
           "range": false
         }
       ],
-      "description": "The latest refresh's failure share of each active site: the share of the runs on healthy exits, those that passed nine in ten of the other sites, in which the site failed every attempt (over all exits when too few qualified). Read from the taskworker that ran the latest refresh; a skipped refresh judges nothing, so after one this shows that taskworker's last judged shares, or none. A site over the 50 % retire line across at least 200 runs on healthy exits is retired by the next refresh, at most one per class per run; one that stays over it for a day is the pool-needs-refresh finding of monitor signal §2.19b."
+      "description": "The latest refresh's failure share of each active site: the share of the runs on healthy exits, those that passed nine in ten of the other sites, in which the site failed every attempt (over every exit the probe reached when too few qualified; a run that never reached its provider is in no site's share). Read from the taskworker that ran the latest refresh; a skipped refresh judges nothing, so after one this shows that taskworker's last judged shares, or none. A site over the 50 % retire line across at least 200 judged runs is retired by the next refresh, at most one per class per run; one that stays over it for a day is the pool-needs-refresh finding of monitor signal §2.19b."
     },
     {
       "id": 60,
@@ -3286,7 +3452,7 @@
         "h": 10,
         "w": 9,
         "x": 15,
-        "y": 100
+        "y": 108
       },
       "fieldConfig": {
         "defaults": {
