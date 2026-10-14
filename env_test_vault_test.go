@@ -80,6 +80,44 @@ func TestTestBinaryReadsFixtureVaults(t *testing.T) {
 	}
 }
 
+// A test's vault that does not exist yet is below its temp directory even when
+// the temp directory is reached through a link, as Darwin's /var is. The guard
+// used to resolve the link of the temp directory, which exists, but not of the
+// absent vault, so it refused the vault, and its lookups read as refused rather
+// than absent and were never cached. A link that leaves the temp directory
+// still leaves it.
+func TestTestBinaryReadsAnAbsentVaultBelowALinkedTempDirectory(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", "")
+	t.Setenv(TestRealVaultEnv, "")
+	t.Setenv("GOTMPDIR", "")
+	temp := t.TempDir()
+	linkedTemp := filepath.Join(t.TempDir(), "linked-temp")
+	if err := os.Symlink(temp, linkedTemp); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", linkedTemp)
+	vaultHome := filepath.Join(linkedTemp, "absent", "vault")
+	if err := refuseNonFixtureVault(vaultHome, true); err != nil {
+		t.Fatalf("an absent vault below the linked temp directory was refused: %v", err)
+	}
+	t.Setenv("WARP_VAULT_HOME", vaultHome)
+	if _, err := Vault.SimpleResource("fixture.yml"); !errors.Is(err, ErrResourceNotFound) || strings.Contains(err.Error(), TestRealVaultEnv) {
+		t.Fatalf("the absent vault read %v, want the plain lookup of an absent vault", err)
+	}
+
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(temp, "leaves")); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseNonFixtureVault(filepath.Join(linkedTemp, "leaves", "absent", "vault"), true); err == nil {
+		t.Fatal("an absent vault below a link out of the temp directory was accepted")
+	}
+	if err := refuseNonFixtureVault(filepath.Join(linkedTemp, "absent", "..", "..", "outside", "vault"), true); err == nil {
+		t.Fatal("an absent vault that climbs out of the temp directory was accepted")
+	}
+}
+
 // The guard runs before the resolution cache: a resolution cached while a test
 // opted in to a non-fixture vault is refused once the opt-in is withdrawn, and
 // a refusal is never cached.

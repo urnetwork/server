@@ -180,15 +180,30 @@ func refuseNonFixtureVault(root string, testBinary bool) error {
 }
 
 // Reports whether path is base or below it, after resolving the symlinks of
-// each that exists.
+// each. A path that does not exist resolves through its longest existing
+// ancestor, so a vault not yet written below a linked temp directory, as on
+// Darwin where /var links to /private/var, is still below it, and one below a
+// link that leaves the base is not.
 func pathWithin(path string, base string) bool {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
+	resolve := func(entry string) string {
+		if resolved, err := filepath.EvalSymlinks(entry); err == nil {
+			return resolved
+		}
+		ancestor := filepath.Clean(entry)
+		remainder := ""
+		for {
+			parent := filepath.Dir(ancestor)
+			if parent == ancestor {
+				return filepath.Clean(entry)
+			}
+			remainder = filepath.Join(filepath.Base(ancestor), remainder)
+			ancestor = parent
+			if resolved, err := filepath.EvalSymlinks(ancestor); err == nil {
+				return filepath.Join(resolved, remainder)
+			}
+		}
 	}
-	if resolved, err := filepath.EvalSymlinks(base); err == nil {
-		base = resolved
-	}
-	rel, err := filepath.Rel(filepath.Clean(base), filepath.Clean(path))
+	rel, err := filepath.Rel(resolve(base), resolve(path))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
