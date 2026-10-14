@@ -32,13 +32,30 @@ const (
 	providerEgressTallyLossCarry   = 64
 )
 
+// One claim of a shard's owner drains up to a full shard. The owner's claim
+// waits on the shared task queue, tens of seconds on Main, so one page per
+// claim capped a shard near five runs a second. Each Redis call still returns
+// at most one page and deletes at most one page of the acknowledged prefix,
+// keeping every script at the single-page bound; the calls of one drain
+// coalesce into one finishing transaction of at most
+// providerEgressTallyDrainRows shared rows, or one page's rows when the first
+// page alone exceeds it.
+const (
+	providerEgressTallyDrainCalls   = providerEgressTallyQueueLength / providerEgressTallyPageLength
+	providerEgressTallyDrainLength  = providerEgressTallyDrainCalls * providerEgressTallyPageLength
+	providerEgressTallyDrainRows    = 4096
+	providerEgressTallyDrainTimeout = 5 * time.Second
+)
+
 var providerEgressTallyHandoffs = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_provider_egress_tally_handoffs_total",
 	Help: "Auxiliary tally handoffs by finite accepted, unavailable, invalid or full outcome; never measured quota credits.",
 }, []string{"outcome"})
 
+var providerEgressTallyBacklogs = newProviderEgressTallyBacklogCollector(time.Now)
+
 func init() {
-	prometheus.MustRegister(providerEgressTallyHandoffs)
+	prometheus.MustRegister(providerEgressTallyHandoffs, providerEgressTallyBacklogs)
 }
 
 // Carries only aggregate inputs, never a provider identity or credential.
@@ -241,7 +258,12 @@ func (self *ProviderEgressTallyWriter) Record(ctx context.Context, measuredAt ti
 
 // Initializes only an empty first generation. Missing metadata after a durable
 // cursor has advanced is loss, not permission to start again at zero. Cleanup
-// deletes at most one committed page before returning the next immutable page.
+// deletes at most ARGV[9] records at or before the durable cursor ARGV[2], then
+// returns at most one immutable page after the read cursor ARGV[8], which a
+// drain advances past its durable cursor without acknowledging anything. The
+// reply heads with the admission occupancy left after cleanup, the oldest
+// unacknowledged record's millisecond, whether a record follows the page, and
+// whether acknowledged records remain to delete.
 const providerEgressTallyReadScript = `
 local generation = redis.call('HGET', KEYS[1], 'generation')
 -- Only a committed repair successor supplies a different prior generation.
@@ -272,6 +294,7 @@ local function greater(a,b)
  return as > bs
 end
 if greater(ARGV[2],tail) then return redis.error_reply('tally cursor exceeds retained tail') end
+if greater(ARGV[2],ARGV[8]) or greater(ARGV[8],tail) then return redis.error_reply('tally read cursor outside retained range') end
 if tail ~= '0-0' then
  if redis.call('EXISTS', KEYS[2]) == 0 then redis.call('HSET',KEYS[1],'ready',0); return redis.error_reply('tally records missing') end
  local info = redis.call('XINFO', 'STREAM', KEYS[2])
@@ -280,15 +303,15 @@ if tail ~= '0-0' then
  if actual ~= tail then redis.call('HSET',KEYS[1],'ready',0); return redis.error_reply('tally stream continuity mismatch') end
 end
 if ARGV[6] == '0' then redis.call('HSET', KEYS[1], 'ready', 1) end
-local old = redis.call('XRANGE', KEYS[2], '-', ARGV[2], 'COUNT', ARGV[3])
+local old = redis.call('XRANGE', KEYS[2], '-', ARGV[2], 'COUNT', ARGV[9])
 for _, entry in ipairs(old) do
  redis.call('HINCRBY', KEYS[1], 'bytes', -#entry[2][2])
  redis.call('HINCRBY', KEYS[1], 'count', -1)
  redis.call('XDEL', KEYS[2], entry[1])
 end
-local result = {}
+local result = {'', '', '', '', ''}
 local bytes = 0
-local cursor = ARGV[2]
+local cursor = ARGV[8]
 for i=1,tonumber(ARGV[3]) do
  local page = redis.call('XRANGE', KEYS[2], '(' .. cursor, '+', 'COUNT', 1)
  if #page == 0 then break end
@@ -300,7 +323,13 @@ for i=1,tonumber(ARGV[3]) do
 end
 redis.call('HSET', KEYS[1], 'observed_at', ARGV[5])
 local first = redis.call('XRANGE', KEYS[2], '(' .. ARGV[2], '+', 'COUNT', 1)
-redis.call('HSET', KEYS[1], 'pending_since', #first == 0 and '0' or string.match(first[1][1], '^(%d+)'))
+local pending = #first == 0 and '0' or string.match(first[1][1], '^(%d+)')
+redis.call('HSET', KEYS[1], 'pending_since', pending)
+result[1] = redis.call('HGET', KEYS[1], 'count') or '-1'
+result[2] = redis.call('HGET', KEYS[1], 'bytes') or '-1'
+result[3] = pending
+result[4] = tostring(#redis.call('XRANGE', KEYS[2], '(' .. cursor, '+', 'COUNT', 1))
+result[5] = tostring(#redis.call('XRANGE', KEYS[2], '-', ARGV[2], 'COUNT', 1))
 return result
 `
 
@@ -340,43 +369,118 @@ func CompareProviderEgressTallyCursor(a, b string) (int, error) {
 	return 0, nil
 }
 
-// Reads one finite prefix; it never acknowledges a speculative cursor. The
-// caller obtains cursor/generation from its durable task arguments only.
-func ReadProviderEgressTallyPage(ctx context.Context, shard int, generation, cursor string, initialize bool, repairFrom ...string) (*ProviderEgressTallyPage, error) {
+// Validates an owner's durable arguments and returns its repair predecessor.
+func providerEgressTallyOwnerPrior(shard int, generation, cursor string, initialize bool, repairFrom []string) (string, error) {
 	if shard < 0 || shard >= ProviderEgressTallyShardCount || generation == "" {
-		return nil, fmt.Errorf("invalid tally owner")
+		return "", fmt.Errorf("invalid tally owner")
 	}
 	if _, err := CompareProviderEgressTallyCursor(cursor, "0-0"); err != nil {
-		return nil, err
+		return "", err
 	}
 	prior := ""
 	if len(repairFrom) > 1 {
-		return nil, fmt.Errorf("invalid tally repair")
+		return "", fmt.Errorf("invalid tally repair")
 	}
 	if len(repairFrom) == 1 {
 		prior = repairFrom[0]
 	}
 	if prior != "" && (!initialize || cursor != "0-0" || prior == generation) {
-		return nil, fmt.Errorf("invalid tally repair")
+		return "", fmt.Errorf("invalid tally repair")
+	}
+	return prior, nil
+}
+
+// Reads one finite prefix; it never acknowledges a speculative cursor. The
+// caller obtains cursor/generation from its durable task arguments only. The
+// owner drains through DrainProviderEgressTallies; this single call remains
+// for fixtures that inspect one page.
+func readProviderEgressTallyPage(ctx context.Context, shard int, generation, cursor string, initialize bool, repairFrom ...string) (*ProviderEgressTallyPage, error) {
+	prior, err := providerEgressTallyOwnerPrior(shard, generation, cursor, initialize, repairFrom)
+	if err != nil {
+		return nil, err
+	}
+	call, err := readProviderEgressTallyCall(ctx, shard, generation, cursor, cursor, providerEgressTallyPageLength, initialize, prior)
+	if err != nil {
+		return nil, err
+	}
+	return &ProviderEgressTallyPage{Generation: generation, Cursor: cursor, NextCursor: call.nextCursor, Records: call.records}, nil
+}
+
+// Admission occupancy of one shard at an owner read, after its cleanup.
+// Acknowledged records not yet deleted still count against admission, so
+// they are included. PendingSince is zero when nothing is unacknowledged.
+type ProviderEgressTallyBacklog struct {
+	Records      int64
+	Bytes        int64
+	PendingSince time.Time
+	ObservedAt   time.Time
+}
+
+// Fraction of whichever bound refuses the next handoff first; refusal as
+// full begins at one.
+func (self ProviderEgressTallyBacklog) FillRatio() float64 {
+	return max(float64(self.Records)/float64(providerEgressTallyQueueLength), float64(self.Bytes)/float64(providerEgressTallyQueueBytes))
+}
+
+// One script call of an owner read. More reports a retained record after
+// nextCursor; dirty reports acknowledged records left to delete.
+type providerEgressTallyCall struct {
+	records    []ProviderEgressTallyRecord
+	nextCursor string
+	more       bool
+	dirty      bool
+	backlog    ProviderEgressTallyBacklog
+}
+
+// One bounded script call. Cleanup is limited to the durable cursor ackCursor;
+// the page starts after fromCursor, at or after it. Nothing is acknowledged.
+func readProviderEgressTallyCall(ctx context.Context, shard int, generation, ackCursor, fromCursor string, pageLength int, initialize bool, prior string) (*providerEgressTallyCall, error) {
+	if order, err := CompareProviderEgressTallyCursor(fromCursor, ackCursor); err != nil || order < 0 {
+		return nil, fmt.Errorf("invalid tally read cursor")
+	}
+	if pageLength < 0 || pageLength > providerEgressTallyPageLength {
+		return nil, fmt.Errorf("invalid tally page length")
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	var values []string
 	err := server.RedisWithDeadline(ctx, func(r server.RedisClient) error {
 		var redisErr error
-		values, redisErr = r.Eval(ctx, providerEgressTallyReadScript, providerEgressTallyKeys(shard), generation, cursor,
-			providerEgressTallyPageLength, providerEgressTallyPageBytes, time.Now().Unix(), map[bool]string{false: "0", true: "1"}[initialize], prior).StringSlice()
+		values, redisErr = r.Eval(ctx, providerEgressTallyReadScript, providerEgressTallyKeys(shard), generation, ackCursor,
+			pageLength, providerEgressTallyPageBytes, time.Now().Unix(), map[bool]string{false: "0", true: "1"}[initialize], prior,
+			fromCursor, providerEgressTallyPageLength).StringSlice()
 		return redisErr
 	})
 	if err != nil {
 		return nil, err
 	}
-	if len(values)%2 != 0 || len(values) > providerEgressTallyPageLength*2 {
+	const headLength = 5
+	if len(values) < headLength || (len(values)-headLength)%2 != 0 || len(values)-headLength > pageLength*2 {
 		return nil, fmt.Errorf("invalid tally page")
 	}
-	page := &ProviderEgressTallyPage{Generation: generation, Cursor: cursor, NextCursor: cursor}
-	for i := 0; i < len(values); i += 2 {
-		order, err := CompareProviderEgressTallyCursor(values[i], page.NextCursor)
+	records, err := strconv.ParseInt(values[0], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tally page")
+	}
+	bytes, err := strconv.ParseInt(values[1], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tally page")
+	}
+	pendingMillis, err := strconv.ParseInt(values[2], 10, 64)
+	if err != nil || pendingMillis < 0 || (values[3] != "0" && values[3] != "1") || (values[4] != "0" && values[4] != "1") {
+		return nil, fmt.Errorf("invalid tally page")
+	}
+	call := &providerEgressTallyCall{
+		nextCursor: fromCursor,
+		more:       values[3] == "1",
+		dirty:      values[4] == "1",
+		backlog:    ProviderEgressTallyBacklog{Records: records, Bytes: bytes, ObservedAt: time.Now()},
+	}
+	if 0 < pendingMillis {
+		call.backlog.PendingSince = time.UnixMilli(pendingMillis)
+	}
+	for i := headLength; i < len(values); i += 2 {
+		order, err := CompareProviderEgressTallyCursor(values[i], call.nextCursor)
 		if err != nil || order <= 0 {
 			return nil, fmt.Errorf("nonmonotone tally page")
 		}
@@ -385,10 +489,273 @@ func ReadProviderEgressTallyPage(ctx context.Context, shard int, generation, cur
 			record.MeasuredAt.IsZero() || len(record.Loads) > 512 || ProviderEgressTallyShard(record.Run.Place) != shard {
 			return nil, fmt.Errorf("invalid retained tally record")
 		}
-		page.Records = append(page.Records, record)
-		page.NextCursor = values[i]
+		call.records = append(call.records, record)
+		call.nextCursor = values[i]
 	}
-	return page, nil
+	return call, nil
+}
+
+// One owner execution's bounded read: whole pages coalesced into one batch
+// that the finishing transaction commits with NextCursor. Stop names why
+// reading ended: caught_up, initialize, or a budget (calls, rows, time) or
+// error that leaves a known backlog for the next claim. Err is a later call's
+// failure, while reading or while cleaning after it; the pages before it are
+// complete and immutable, so they still commit and the next claim rereads
+// from there. Backlog is the first call's occupancy, after at most one page
+// of cleanup: within one page of what producers met when the claim began.
+// Later calls report the trough the drain's own cleanup leaves.
+type ProviderEgressTallyDrain struct {
+	NextCursor string
+	Batch      *ProviderEgressTallyBatch
+	Records    int
+	Pages      int
+	Calls      int
+	Stop       string
+	Err        error
+	Backlog    ProviderEgressTallyBacklog
+}
+
+// Limits of one drain; see providerEgressTallyDrainCalls.
+type providerEgressTallyDrainBudget struct {
+	calls   int
+	rows    int
+	timeout time.Duration
+}
+
+// The production limits. Pure tests narrow a copy, for example to one call to
+// reproduce the one-page owner.
+func defaultProviderEgressTallyDrainBudget() providerEgressTallyDrainBudget {
+	return providerEgressTallyDrainBudget{calls: providerEgressTallyDrainCalls, rows: providerEgressTallyDrainRows, timeout: providerEgressTallyDrainTimeout}
+}
+
+// Reads every retained page after the durable cursor that the budget allows.
+// Every call deletes only records at or before the durable cursor, which the
+// previous owner's finishing transaction committed, and its calls also clean
+// that owner's whole drained prefix, so admission space returns at the rate
+// pages are read. The first call keeps the single-page meaning, including
+// initialization, repair and its errors. The drain's Backlog is published for
+// its shard; an owner whose first call fails publishes nothing new, so its
+// shard's observed time ages where it can be alerted on.
+func DrainProviderEgressTallies(ctx context.Context, shard int, generation, cursor string, initialize bool, repairFrom ...string) (*ProviderEgressTallyDrain, error) {
+	prior, err := providerEgressTallyOwnerPrior(shard, generation, cursor, initialize, repairFrom)
+	if err != nil {
+		return nil, err
+	}
+	providerEgressTallyBacklogs.arm()
+	read := func(ctx context.Context, fromCursor string, pageLength int, first bool) (*providerEgressTallyCall, error) {
+		if first {
+			return readProviderEgressTallyCall(ctx, shard, generation, cursor, fromCursor, pageLength, initialize, prior)
+		}
+		return readProviderEgressTallyCall(ctx, shard, generation, cursor, fromCursor, pageLength, false, "")
+	}
+	drain, err := drainProviderEgressTallies(ctx, cursor, initialize, defaultProviderEgressTallyDrainBudget(), read, time.Now)
+	if err != nil {
+		return nil, err
+	}
+	providerEgressTallyBacklogs.observe(shard, drain.Backlog)
+	return drain, nil
+}
+
+// The drain policy over any page reader, so it can be exercised without Redis.
+// read must clean only at or before the durable cursor and read after
+// fromCursor. A page is added whole or left for the next claim.
+func drainProviderEgressTallies(
+	ctx context.Context,
+	cursor string,
+	initialize bool,
+	budget providerEgressTallyDrainBudget,
+	read func(ctx context.Context, fromCursor string, pageLength int, first bool) (*providerEgressTallyCall, error),
+	now func() time.Time,
+) (*ProviderEgressTallyDrain, error) {
+	startTime := now()
+	first, err := read(ctx, cursor, providerEgressTallyPageLength, true)
+	if err != nil {
+		return nil, err
+	}
+	coalescer := newProviderEgressTallyCoalescer()
+	if err := coalescer.add(first.records); err != nil {
+		return nil, err
+	}
+	drain := &ProviderEgressTallyDrain{NextCursor: first.nextCursor, Calls: 1, Backlog: first.backlog}
+	if 0 < len(first.records) {
+		drain.Records = len(first.records)
+		drain.Pages = 1
+	}
+	last := first
+	reading := !initialize
+	if initialize {
+		drain.Stop = "initialize"
+	}
+	for !initialize {
+		if reading && !last.more {
+			reading = false
+			drain.Stop = "caught_up"
+		}
+		// Cleanup-only calls continue after reading stops, within the budget.
+		if !reading && !last.dirty {
+			break
+		}
+		if budget.calls <= drain.Calls {
+			if reading {
+				drain.Stop = "calls"
+			}
+			break
+		}
+		if budget.timeout <= now().Sub(startTime) {
+			if reading {
+				drain.Stop = "time"
+			}
+			break
+		}
+		pageLength := 0
+		if reading {
+			pageLength = providerEgressTallyPageLength
+		}
+		call, err := read(ctx, drain.NextCursor, pageLength, false)
+		drain.Calls += 1
+		if err != nil {
+			drain.Err = err
+			if reading {
+				drain.Stop = "error"
+			}
+			break
+		}
+		last = call
+		if !reading || len(call.records) == 0 {
+			continue
+		}
+		rows, err := coalescer.rowsWith(call.records)
+		if err != nil {
+			drain.Err = err
+			drain.Stop = "error"
+			reading = false
+			continue
+		}
+		if budget.rows < rows {
+			// The whole page stays retained for the next claim.
+			drain.Stop = "rows"
+			reading = false
+			continue
+		}
+		server.Raise(coalescer.add(call.records))
+		drain.NextCursor = call.nextCursor
+		drain.Records += len(call.records)
+		drain.Pages += 1
+	}
+	drain.Batch = coalescer.batch()
+	return drain, nil
+}
+
+// A drain's occupancy is fresh for this long. Older depths are withheld,
+// since other workers' claims have changed them since; the observed time is
+// never withheld, so a shard no owner has read lately shows its age.
+const providerEgressTallyBacklogFreshness = 5 * time.Minute
+
+// Per-shard occupancy at the first call of this process's latest drain of each
+// shard. The fleet view of a depth is the maximum across instances, and of the
+// observed time the latest. Once this process drains any shard, every shard's
+// observed time is published, zero for one not read here since start, so an
+// owner stuck before its first read stays visible. Safe for concurrent use.
+type providerEgressTallyBacklogCollector struct {
+	now           func() time.Time
+	stateLock     sync.Mutex
+	armed         bool
+	shardBacklogs [ProviderEgressTallyShardCount]ProviderEgressTallyBacklog
+	records       *prometheus.Desc
+	bytes         *prometheus.Desc
+	fill          *prometheus.Desc
+	pending       *prometheus.Desc
+	observed      *prometheus.Desc
+}
+
+// Publishes nothing until this process drains a shard or observes one.
+func newProviderEgressTallyBacklogCollector(now func() time.Time) *providerEgressTallyBacklogCollector {
+	shard := []string{"shard"}
+	return &providerEgressTallyBacklogCollector{
+		now: now,
+		records: prometheus.NewDesc("urnetwork_provider_egress_tally_queue_records",
+			"Tally records a shard retained at the first read of its owner's latest drain in this process, after at most one page of cleanup, so within 256 records of the occupancy producers met; handoffs are refused as full at 16384; withheld when older than five minutes", shard, nil),
+		bytes: prometheus.NewDesc("urnetwork_provider_egress_tally_queue_bytes",
+			"Tally record bytes a shard retained at the first read of its owner's latest drain in this process, after at most one page of cleanup; handoffs are refused as full past 16 MiB; withheld when older than five minutes", shard, nil),
+		fill: prometheus.NewDesc("urnetwork_provider_egress_tally_queue_fill_ratio",
+			"Retained tally records or bytes at the first read of the shard owner's latest drain in this process, as a fraction of the shard's admission bound, whichever is fuller; at most one page below the peak, and handoffs are refused as full at 1; withheld when older than five minutes", shard, nil),
+		pending: prometheus.NewDesc("urnetwork_provider_egress_tally_queue_oldest_pending_seconds",
+			"Age of the shard's oldest unacknowledged tally record at the first read of its owner's latest drain in this process; zero when none is pending; withheld when older than five minutes", shard, nil),
+		observed: prometheus.NewDesc("urnetwork_provider_egress_tally_queue_observed_timestamp_seconds",
+			"Unix time of the first read of the shard owner's latest drain in this process whose first read succeeded; never withheld, so its age shows a stuck owner; zero when this process has drained other shards but not this one since it started", shard, nil),
+	}
+}
+
+// Marks this process as a tally owner: every shard's observed time is
+// published from now on, read here or not.
+func (self *providerEgressTallyBacklogCollector) arm() {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.armed = true
+	}()
+}
+
+// Records a drain's occupancy unless an occupancy observed later is already
+// held, and arms the collector.
+func (self *providerEgressTallyBacklogCollector) observe(shard int, backlog ProviderEgressTallyBacklog) {
+	if shard < 0 || shard >= ProviderEgressTallyShardCount || backlog.Records < 0 || backlog.Bytes < 0 {
+		return
+	}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.armed = true
+		if backlog.ObservedAt.Before(self.shardBacklogs[shard].ObservedAt) {
+			return
+		}
+		self.shardBacklogs[shard] = backlog
+	}()
+}
+
+// The five shard-labelled families; see the constructor.
+func (self *providerEgressTallyBacklogCollector) Describe(metrics chan<- *prometheus.Desc) {
+	metrics <- self.records
+	metrics <- self.bytes
+	metrics <- self.fill
+	metrics <- self.pending
+	metrics <- self.observed
+}
+
+// Emits one consistent copy of the samples: the observed time for every
+// shard once armed, and the depths of shards observed within the window.
+func (self *providerEgressTallyBacklogCollector) Collect(metrics chan<- prometheus.Metric) {
+	var armed bool
+	var shardBacklogs [ProviderEgressTallyShardCount]ProviderEgressTallyBacklog
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		armed = self.armed
+		shardBacklogs = self.shardBacklogs
+	}()
+	if !armed {
+		return
+	}
+	now := self.now()
+	for shard, backlog := range shardBacklogs {
+		label := strconv.Itoa(shard)
+		observedSeconds := 0.0
+		if !backlog.ObservedAt.IsZero() {
+			observedSeconds = float64(backlog.ObservedAt.UnixNano()) / float64(time.Second)
+		}
+		metrics <- prometheus.MustNewConstMetric(self.observed, prometheus.GaugeValue, observedSeconds, label)
+		if backlog.ObservedAt.IsZero() || providerEgressTallyBacklogFreshness < now.Sub(backlog.ObservedAt) {
+			continue
+		}
+		pendingSeconds := 0.0
+		if !backlog.PendingSince.IsZero() {
+			pendingSeconds = max(0, backlog.ObservedAt.Sub(backlog.PendingSince).Seconds())
+		}
+		metrics <- prometheus.MustNewConstMetric(self.records, prometheus.GaugeValue, float64(backlog.Records), label)
+		metrics <- prometheus.MustNewConstMetric(self.bytes, prometheus.GaugeValue, float64(backlog.Bytes), label)
+		metrics <- prometheus.MustNewConstMetric(self.fill, prometheus.GaugeValue, backlog.FillRatio(), label)
+		metrics <- prometheus.MustNewConstMetric(self.pending, prometheus.GaugeValue, pendingSeconds, label)
+	}
 }
 
 // Only explicit lost-continuity replies permit a durable repair intent. A
