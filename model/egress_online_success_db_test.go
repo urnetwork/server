@@ -248,3 +248,48 @@ func TestProviderStatusFollowsTheExportsUrlSuccessRule(t *testing.T) {
 		}
 	})
 }
+
+// The floor's margin across real passes: a country each path exempted in its
+// previous pass stays exempt until its share reaches the floor plus the
+// margin, in the dashboard counts, the location counts and the score export
+// that provider status reads, and the exemption ends once it does. Here the
+// floor is 0.5 and the margin 0.25, over four measured providers.
+func TestOnlineUrlSuccessCountryGuardMarginAcrossPasses(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_success_country_floor: 0.5\nonline_success_country_floor_margin: 0.25\n"))
+		defer pop()
+		city := egressTestCity(ctx, "Hanoi", "Hanoi", "Vietnam", "vn")
+
+		providers := []*egressTestProvider{}
+		for range 4 {
+			provider := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+			egressTestHealth(ctx, provider.clientId, server.NowUtc().Add(-time.Minute), 5, 5)
+			for lookbackIndex := range 3 {
+				egressTestReliability(ctx, provider.clientId, lookbackIndex, 1, 1)
+			}
+			providers = append(providers, provider)
+		}
+		dead := providers[3]
+		// each step: one more provider with a success, then the passes
+		step := func(name string, succeeded *egressTestProvider, noSuccess int64, locationCount int, statusReason string) {
+			egressTestHealth(ctx, succeeded.clientId, server.NowUtc(), 1, 0)
+			egressTestPasses(ctx, t)
+			if count := CountProviderEgress(ctx).ReasonCounts["no_success"]; count != noSuccess {
+				t.Errorf("%s: the dashboard counts %d providers without a success excluded, want %d", name, count, noSuccess)
+			}
+			if count := egressTestLocationCount(ctx, t, city); count != locationCount {
+				t.Errorf("%s: the location counts %d providers, want %d", name, count, locationCount)
+			}
+			if reason := GetClientProviderStatus(ctx, dead.networkId, dead.clientId).Reason; reason != statusReason {
+				t.Errorf("%s: a provider without a success has status %s, want %s", name, reason, statusReason)
+			}
+		}
+		// 1 of 4 is below the floor: exempt
+		step("1 of 4", providers[0], 0, 4, ProviderStatusReasonEgressFailing)
+		// 2 of 4 is the floor, inside the margin of an exempt country
+		step("2 of 4", providers[1], 0, 4, ProviderStatusReasonEgressFailing)
+		// 3 of 4 reaches the floor plus the margin: the exemption ends
+		step("3 of 4", providers[2], 1, 3, ProviderStatusReasonEgressNoSuccess)
+	})
+}

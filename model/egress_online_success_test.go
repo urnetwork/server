@@ -45,14 +45,14 @@ func onlineSuccessTestFilter(
 		countryCodes:            map[server.Id]string{},
 		healthCounts:            clientIdCounts,
 	}
-	filter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(filter, clientIdCountryCodes, settings)
+	filter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(filter, clientIdCountryCodes, settings, nil)
 	return filter
 }
 
 // An enabled guard over the given measured countries, each decided under
 // floor, as a fleet pass decides them.
 func onlineSuccessTestBaseline(floor float64, countryCodeCounts map[string]providerOnlineSuccessCount) *providerOnlineSuccessBaseline {
-	decideProviderOnlineSuccessCountries(countryCodeCounts, floor)
+	decideProviderOnlineSuccessCountries(countryCodeCounts, floor, 0, nil)
 	return &providerOnlineSuccessBaseline{
 		computeTime:       onlineSuccessTestNow,
 		enabled:           true,
@@ -320,6 +320,139 @@ func TestOnlineUrlSuccessCountryGuardComparesTheFloorExactly(t *testing.T) {
 	}
 }
 
+// A pass's evidence for `measured` measured providers in countryCode,
+// `succeeded` of them with a success and the rest with none in five runs.
+func onlineSuccessTestCountry(countryCode string, measured int, succeeded int) providerCountFilter {
+	filter := providerCountFilter{
+		now:          onlineSuccessTestNow,
+		healthCounts: map[server.Id]ProviderEgressHealthCounts{},
+	}
+	for index := range measured {
+		ok := 0
+		if index < succeeded {
+			ok = 1
+		}
+		filter.healthCounts[server.NewId()] = onlineSuccessTestCounts(ok, 5)
+	}
+	return filter
+}
+
+// Every provider of the filter, in countryCode.
+func onlineSuccessTestCountryCodes(filter providerCountFilter, countryCode string) map[server.Id]string {
+	clientIdCountryCodes := map[server.Id]string{}
+	for clientId := range filter.healthCounts {
+		clientIdCountryCodes[clientId] = countryCode
+	}
+	return clientIdCountryCodes
+}
+
+// The floor's margin: a country the path exempted in its previous computation
+// stays exempt until its share reaches the floor plus the margin, and one it
+// did not exempt becomes exempt only below the floor. At the default floor
+// of 0.36 and margin of 0.03, 25 measured providers cross the floor between
+// 8 and 9 with a success and the margin between 9 and 10. Without the margin
+// a country measured at 8 and 9 on alternate passes moves 16 providers in
+// and out of Online on every pass.
+func TestOnlineUrlSuccessCountryGuardMarginHoldsAnExemption(t *testing.T) {
+	settings := DefaultEgressIndexSettings()
+	connect.AssertEqual(t, settings.OnlineSuccessCountryFloor, 0.36)
+	connect.AssertEqual(t, settings.OnlineSuccessCountryFloorMargin, 0.03)
+	memory := &providerOnlineSuccessGuardMemory{}
+	for index, c := range []struct {
+		succeeded int
+		exempt    bool
+	}{
+		// a fresh path decides by the plain floor: 9 of 25 is the floor
+		{succeeded: 9, exempt: false},
+		{succeeded: 8, exempt: true},
+		// exempt last time, 9 of 25 (0.36) is inside the margin
+		{succeeded: 9, exempt: true},
+		{succeeded: 9, exempt: true},
+		// 10 of 25 (0.40) is past the floor plus the margin (0.39)
+		{succeeded: 10, exempt: false},
+		// not exempt last time, 9 of 25 is not below the floor
+		{succeeded: 9, exempt: false},
+		{succeeded: 8, exempt: true},
+	} {
+		filter := onlineSuccessTestCountry("in", 25, c.succeeded)
+		baseline := newProviderOnlineSuccessBaseline(filter, onlineSuccessTestCountryCodes(filter, "in"), settings, memory)
+		if exempt := baseline.exempt("in"); exempt != c.exempt {
+			t.Errorf("computation %d, %d of 25: exempt %t, want %t", index, c.succeeded, exempt, c.exempt)
+		}
+		// the decision is the one the rule applies, and the log names it
+		dead := server.Id{}
+		for clientId, counts := range filter.healthCounts {
+			if counts.OKCount == 0 {
+				dead = clientId
+				break
+			}
+		}
+		filter.onlineSuccessBaseline = baseline
+		if online := onlineSuccessTestDecide(filter, dead, "in", settings).online; online != c.exempt {
+			t.Errorf("computation %d, %d of 25: a provider without a success online %t, want %t", index, c.succeeded, online, c.exempt)
+		}
+		if c.exempt && c.succeeded == 9 && !strings.Contains(baseline.logSummary(), "in 9/25 kept 16 by margin") {
+			t.Errorf("computation %d: log summary %q does not say the margin keeps the country", index, baseline.logSummary())
+		}
+	}
+}
+
+// The margin's band is half-open like the floor: a share of exactly the floor
+// plus the margin ends an exemption and one just below keeps it. A margin of
+// zero is the plain floor, the floor plus the margin is at most one, and the
+// margin holds no country the path did not exempt.
+func TestOnlineUrlSuccessCountryGuardMarginBoundaries(t *testing.T) {
+	for _, c := range []struct {
+		name             string
+		count            providerOnlineSuccessCount
+		floor            float64
+		margin           float64
+		previouslyExempt bool
+		exempt           bool
+	}{
+		{name: "at floor plus margin", count: providerOnlineSuccessCount{Measured: 100, Succeeded: 39}, floor: 0.36, margin: 0.03, previouslyExempt: true, exempt: false},
+		{name: "below floor plus margin", count: providerOnlineSuccessCount{Measured: 100, Succeeded: 38}, floor: 0.36, margin: 0.03, previouslyExempt: true, exempt: true},
+		{name: "not exempt last time", count: providerOnlineSuccessCount{Measured: 100, Succeeded: 38}, floor: 0.36, margin: 0.03, previouslyExempt: false, exempt: false},
+		{name: "margin zero", count: providerOnlineSuccessCount{Measured: 25, Succeeded: 9}, floor: 0.36, margin: 0, previouslyExempt: true, exempt: false},
+		{name: "capped at one", count: providerOnlineSuccessCount{Measured: 100, Succeeded: 100}, floor: 0.99, margin: 0.03, previouslyExempt: true, exempt: false},
+		{name: "below the cap", count: providerOnlineSuccessCount{Measured: 100, Succeeded: 99}, floor: 0.99, margin: 0.03, previouslyExempt: true, exempt: true},
+	} {
+		countryCodeCounts := map[string]providerOnlineSuccessCount{"xx": c.count}
+		decideProviderOnlineSuccessCountries(countryCodeCounts, c.floor, c.margin, map[string]bool{"xx": c.previouslyExempt})
+		if exempt := countryCodeCounts["xx"].Exempt; exempt != c.exempt {
+			t.Errorf("%s: %d of %d, floor %v margin %v: exempt %t, want %t", c.name, c.count.Succeeded, c.count.Measured, c.floor, c.margin, exempt, c.exempt)
+		}
+	}
+}
+
+// Each computing path remembers only its own computations: an exemption the
+// score export holds by the margin says nothing to the location counts, and
+// a path without a memory, or one that has forgotten, decides by the plain
+// floor. A country nothing measured is not remembered.
+func TestOnlineUrlSuccessGuardMemoryIsPerPath(t *testing.T) {
+	settings := DefaultEgressIndexSettings()
+	exportMemory := &providerOnlineSuccessGuardMemory{}
+	locationMemory := &providerOnlineSuccessGuardMemory{}
+	exempt := func(succeeded int, memory *providerOnlineSuccessGuardMemory) bool {
+		filter := onlineSuccessTestCountry("za", 25, succeeded)
+		return newProviderOnlineSuccessBaseline(filter, onlineSuccessTestCountryCodes(filter, "za"), settings, memory).exempt("za")
+	}
+	connect.AssertEqual(t, exempt(8, exportMemory), true)
+	connect.AssertEqual(t, exempt(9, exportMemory), true)
+	connect.AssertEqual(t, exempt(9, locationMemory), false)
+	connect.AssertEqual(t, exempt(9, nil), false)
+	connect.AssertEqual(t, exportMemory.previousExemptCountryCodes(), map[string]bool{"za": true})
+
+	// a computation that measured nothing in za leaves it unremembered
+	newProviderOnlineSuccessBaseline(onlineSuccessTestCountry("za", 0, 0), map[server.Id]string{}, settings, exportMemory)
+	connect.AssertEqual(t, exportMemory.previousExemptCountryCodes(), map[string]bool{})
+	connect.AssertEqual(t, exempt(9, exportMemory), false)
+
+	connect.AssertEqual(t, exempt(8, exportMemory), true)
+	exportMemory.remember(nil)
+	connect.AssertEqual(t, exempt(9, exportMemory), false)
+}
+
 // The guard counts only providers the common gates admit with current URL
 // evidence; unmeasured, stale and hard-excluded providers say nothing about
 // the probe in their country.
@@ -347,7 +480,7 @@ func TestOnlineUrlSuccessBaselineCountsMeasuredCommonGatePasses(t *testing.T) {
 	for _, clientId := range []server.Id{measured, dead, unmeasured, stale, unreliable, risky, intercepted} {
 		clientIdCountryCodes[clientId] = "us"
 	}
-	baseline := newProviderOnlineSuccessBaseline(filter, clientIdCountryCodes, settings)
+	baseline := newProviderOnlineSuccessBaseline(filter, clientIdCountryCodes, settings, nil)
 	connect.AssertEqual(t, baseline.countryCodeCounts, map[string]providerOnlineSuccessCount{
 		"us": {Measured: 2, Succeeded: 1, NoSuccess: 1},
 	})
@@ -424,6 +557,37 @@ func TestEgressIndexSettingsMalformedOnlineUrlSuccessKeyKeepsTheOtherKeys(t *tes
 	}
 }
 
+// provider.yml sets the floor's margin beside the floor. One outside [0, 1]
+// or not a number keeps the default, and a malformed one resets nothing
+// else.
+func TestEgressIndexSettingsOnlineSuccessCountryFloorMargin(t *testing.T) {
+	load := func(config string) *EgressIndexSettings {
+		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
+		defer pop()
+		return egressIndexSettings()
+	}
+	defaultMargin := DefaultEgressIndexSettings().OnlineSuccessCountryFloorMargin
+	connect.AssertEqual(t, defaultMargin, 0.03)
+	connect.AssertEqual(t, load("online_success_country_floor_margin: 0.05\n").OnlineSuccessCountryFloorMargin, 0.05)
+	connect.AssertEqual(t, load("online_success_country_floor_margin: 0\n").OnlineSuccessCountryFloorMargin, float64(0))
+	connect.AssertEqual(t, load("online_success_country_floor_margin: 1\n").OnlineSuccessCountryFloorMargin, float64(1))
+	for _, config := range []string{
+		"online_success_country_floor_margin: 1.5\n",
+		"online_success_country_floor_margin: -0.01\n",
+		"online_success_country_floor_margin: .nan\n",
+		"online_success_country_floor_margin: \"0.05\"\n",
+		"online_success_country_floor_margin: 3%\n",
+	} {
+		settings := load(config + "online_success_country_floor: 0.5\negress_index:\n  native_reader_enabled: true\n")
+		if settings.OnlineSuccessCountryFloorMargin != defaultMargin {
+			t.Errorf("%q set the margin to %v, want the default %v", config, settings.OnlineSuccessCountryFloorMargin, defaultMargin)
+		}
+		if !settings.OnlineRequiresUrlSuccess || settings.OnlineSuccessCountryFloor != 0.5 || !settings.NativeReaderEnabled {
+			t.Errorf("%q reset another key: rule %t floor %v native_reader_enabled %t", config, settings.OnlineRequiresUrlSuccess, settings.OnlineSuccessCountryFloor, settings.NativeReaderEnabled)
+		}
+	}
+}
+
 // A malformed egress_index value resets that block, as it always has, but
 // not the rule's keys: the kill switch and the floor beside it still apply.
 func TestEgressIndexSettingsMalformedBlockKeepsTheOnlineUrlSuccessKeys(t *testing.T) {
@@ -446,6 +610,7 @@ func TestProviderOnlineSuccessBaselineDocument(t *testing.T) {
 		"vn": {Measured: 10, Succeeded: 1, NoSuccess: 9},
 		"":   {Measured: 2, Succeeded: 0, NoSuccess: 2},
 	})
+	baseline.margin = 0.03
 	publishTime := onlineSuccessTestNow.Add(5 * time.Minute)
 	value, err := encodeProviderOnlineSuccessBaseline(baseline, publishTime)
 	connect.AssertEqual(t, err, nil)
@@ -456,6 +621,7 @@ func TestProviderOnlineSuccessBaselineDocument(t *testing.T) {
 	connect.AssertEqual(t, decoded.publishTime.Equal(publishTime), true)
 	connect.AssertEqual(t, decoded.enabled, true)
 	connect.AssertEqual(t, decoded.floor, 0.36)
+	connect.AssertEqual(t, decoded.margin, 0.03)
 	connect.AssertEqual(t, decoded.exempt("vn"), true)
 	connect.AssertEqual(t, decoded.appliesIn("us"), true)
 
@@ -466,18 +632,24 @@ func TestProviderOnlineSuccessBaselineDocument(t *testing.T) {
 		t.Error("a reader trusted a guard older than the max age")
 	}
 
+	// a document written by hand with every field is trusted, so each one
+	// below is refused for its own defect
+	_, err = decodeProviderOnlineSuccessBaseline([]byte(`{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{"us":{"measured":2,"succeeded":1,"no_success":1,"exempt":false}}}`), onlineSuccessTestNow)
+	connect.AssertEqual(t, err, nil)
 	for name, document := range map[string]string{
-		"version 1":          `{"version":1,"compute_time":"2026-10-13T21:00:00Z","countries":{"us":{"measured":2,"succeeded":1,"no_success":1}}}`,
-		"version 3":          `{"version":3,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{}}`,
-		"no kill switch":     `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","floor":0.36,"countries":{}}`,
-		"no floor":           `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"countries":{}}`,
-		"floor out of range": `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":1.5,"countries":{}}`,
-		"no countries":       `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36}`,
-		"no verdict":         `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{"us":{"measured":2,"succeeded":1,"no_success":1}}}`,
-		"inconsistent":       `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{"us":{"measured":2,"succeeded":2,"no_success":1,"exempt":false}}}`,
-		"negative":           `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{"us":{"measured":2,"succeeded":-1,"no_success":0,"exempt":false}}}`,
-		"no publish time":    `{"version":2,"compute_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{}}`,
-		"not json":           `{"version":2,`,
+		"version 1":           `{"version":1,"compute_time":"2026-10-13T21:00:00Z","countries":{"us":{"measured":2,"succeeded":1,"no_success":1}}}`,
+		"version 3":           `{"version":3,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{}}`,
+		"no kill switch":      `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","floor":0.36,"margin":0.03,"countries":{}}`,
+		"no floor":            `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"margin":0.03,"countries":{}}`,
+		"floor out of range":  `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":1.5,"margin":0.03,"countries":{}}`,
+		"no margin":           `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"countries":{}}`,
+		"margin out of range": `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":-0.03,"countries":{}}`,
+		"no countries":        `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03}`,
+		"no verdict":          `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{"us":{"measured":2,"succeeded":1,"no_success":1}}}`,
+		"inconsistent":        `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{"us":{"measured":2,"succeeded":2,"no_success":1,"exempt":false}}}`,
+		"negative":            `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{"us":{"measured":2,"succeeded":-1,"no_success":0,"exempt":false}}}`,
+		"no publish time":     `{"version":2,"compute_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{}}`,
+		"not json":            `{"version":2,`,
 	} {
 		if _, err := decodeProviderOnlineSuccessBaseline([]byte(document), onlineSuccessTestNow); err == nil {
 			t.Errorf("%s: a reader accepted an untrustworthy guard", name)
@@ -490,7 +662,7 @@ func TestProviderOnlineSuccessBaselineDocument(t *testing.T) {
 	connect.AssertEqual(t, *exemptCountries[1], ProviderOnlineSuccessExemptCountry{CountryCode: "vn", Measured: 10, Succeeded: 1, Kept: 9})
 
 	summary := baseline.logSummary()
-	for _, part := range []string{"country floor 0.36", "2 countries exempt keeping 11 providers", "unknown 0/2 kept 2", "vn 1/10 kept 9"} {
+	for _, part := range []string{"country floor 0.36 margin 0.03", "2 countries exempt keeping 11 providers", "unknown 0/2 kept 2", "vn 1/10 kept 9"} {
 		if !strings.Contains(summary, part) {
 			t.Errorf("log summary %q is missing %q", summary, part)
 		}
@@ -587,7 +759,7 @@ func TestProviderStatusFollowsThePublishedUrlSuccessRule(t *testing.T) {
 	// one of two measured providers in us has a success: under the export's
 	// floor of 0.36 the country is not exempt, under 0.9 it would be
 	published := func(enabled bool) *providerOnlineSuccessBaseline {
-		document := fmt.Sprintf(`{"version":2,"compute_time":"2026-10-13T20:55:00Z","publish_time":"2026-10-13T20:58:00Z","enabled":%t,"floor":0.36,"countries":{"us":{"measured":2,"succeeded":1,"no_success":1,"exempt":false}}}`, enabled)
+		document := fmt.Sprintf(`{"version":2,"compute_time":"2026-10-13T20:55:00Z","publish_time":"2026-10-13T20:58:00Z","enabled":%t,"floor":0.36,"margin":0.03,"countries":{"us":{"measured":2,"succeeded":1,"no_success":1,"exempt":false}}}`, enabled)
 		baseline, err := decodeProviderOnlineSuccessBaseline([]byte(document), onlineSuccessTestNow)
 		connect.AssertEqual(t, err, nil)
 		return baseline

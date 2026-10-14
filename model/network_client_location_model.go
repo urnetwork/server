@@ -4129,8 +4129,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	if err := publishProviderHardExclusions(ctx, clientIds, countFilter, ttl); err != nil {
 		return fmt.Errorf("publish provider hard exclusions: %w", err)
 	}
-	// the URL-success rule's country guard over this same population
-	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(providerCountRows), egressSettings)
+	// the URL-success rule's country guard over this same population, with
+	// the location counts' memory for the floor's margin
+	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(providerCountRows), egressSettings, locationCountOnlineSuccessGuardMemory)
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
@@ -5415,7 +5416,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	countFilter.healthCounts, countFilter.healthWindowEnd = getAllProviderEgressHealthCountsSnapshot(ctx)
 	// The URL-success rule's country guard over the public cohort, the
 	// population of the location counts and the dashboard, from the evidence
-	// just loaded. Computed before the shadow observer reads any facts.
+	// just loaded, with the export's memory for the floor's margin. Computed
+	// before the shadow observer reads any facts.
 	onlineSuccessBaseline := func() *providerOnlineSuccessBaseline {
 		clientIdCountryCodes := map[server.Id]string{}
 		for _, row := range pendingScores {
@@ -5423,7 +5425,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				clientIdCountryCodes[row.score.ClientId] = normalizeCountryCode(row.egress.publishedCountryCode)
 			}
 		}
-		return newProviderOnlineSuccessBaseline(countFilter, clientIdCountryCodes, egressSettings)
+		return newProviderOnlineSuccessBaseline(countFilter, clientIdCountryCodes, egressSettings, scoreExportOnlineSuccessGuardMemory)
 	}()
 	countFilter.onlineSuccessBaseline = onlineSuccessBaseline
 	var observeShadowScore func(clientScoreSourceRow)

@@ -2533,9 +2533,10 @@ func providerInspect(opts docopt.Opts) {
 	countryGuard := "no trusted published guard, so the rule applies nowhere"
 	if inspection.OnlineSuccessBaselineKnown {
 		countryGuard = fmt.Sprintf(
-			"the score export applied the rule %t with country floor %v (guard computed %s, published %s); %d of %d measured online providers in %s have a success",
+			"the score export applied the rule %t with country floor %v and margin %v (guard computed %s, published %s); %d of %d measured online providers in %s have a success",
 			inspection.OnlineSuccessBaselineEnabled,
 			inspection.OnlineSuccessBaselineFloor,
+			inspection.OnlineSuccessBaselineMargin,
 			optionalTime(&inspection.OnlineSuccessBaselineTime),
 			optionalTime(&inspection.OnlineSuccessBaselinePublishTime),
 			inspection.OnlineSuccessCountrySucceeded,
@@ -2543,7 +2544,7 @@ func providerInspect(opts docopt.Opts) {
 			optionalString(inspection.PublishedCountryCode),
 		)
 	}
-	fmt.Printf("  online url-success rule: %s; country exempt %t (this host's provider.yml: rule %t, country floor %v)\n", countryGuard, inspection.OnlineSuccessCountryExempt, inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor)
+	fmt.Printf("  online url-success rule: %s; country exempt %t (this host's provider.yml: rule %t, country floor %v, margin %v)\n", countryGuard, inspection.OnlineSuccessCountryExempt, inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, inspection.Settings.OnlineSuccessCountryFloorMargin)
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)

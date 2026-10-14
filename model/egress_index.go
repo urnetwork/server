@@ -94,6 +94,13 @@ type EgressIndexSettings struct {
 	// probe itself fails, and its providers keep the benefit of the doubt.
 	// `online_success_country_floor` in provider.yml, within [0, 1].
 	OnlineSuccessCountryFloor float64
+	// The guard's hysteresis: a country one computing path exempted in its
+	// previous computation stays exempt until its share reaches the floor
+	// plus this margin, so a share that hovers at the floor does not move the
+	// country's providers in and out of Online on every pass
+	// (providerOnlineSuccessGuardMemory). Zero is the plain floor.
+	// `online_success_country_floor_margin` in provider.yml, within [0, 1].
+	OnlineSuccessCountryFloorMargin float64
 }
 
 // The most a connect client adds to a provider's tier from what it sees
@@ -130,6 +137,10 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		// probe worked (the lowest of those, HK, measured 0.46).
 		OnlineRequiresUrlSuccess:  true,
 		OnlineSuccessCountryFloor: 0.36,
+		// Pending the owner's confirmation. IN and ZA measured 0.35 against
+		// the 0.36 floor on 2026-10-13; the margin keeps such a country's
+		// exemption until its share passes the noise of one pass to the next.
+		OnlineSuccessCountryFloorMargin: 0.03,
 	}
 }
 
@@ -200,6 +211,19 @@ func egressIndexSettings() *EgressIndexSettings {
 			settings.OnlineSuccessCountryFloor = *floor
 		} else {
 			glog.Errorf("[egress]provider config online_success_country_floor = %v is outside [0, 1]; kept %v\n", *floor, settings.OnlineSuccessCountryFloor)
+		}
+	}
+
+	var marginDocument struct {
+		OnlineSuccessCountryFloorMargin *float64 `yaml:"online_success_country_floor_margin"`
+	}
+	if err := resource.UnmarshalYamlE(&marginDocument); err != nil {
+		glog.Errorf("[egress]provider config online_success_country_floor_margin is not a number (%s); kept %v\n", err, settings.OnlineSuccessCountryFloorMargin)
+	} else if margin := marginDocument.OnlineSuccessCountryFloorMargin; margin != nil {
+		if 0 <= *margin && *margin <= 1 {
+			settings.OnlineSuccessCountryFloorMargin = *margin
+		} else {
+			glog.Errorf("[egress]provider config online_success_country_floor_margin = %v is outside [0, 1]; kept %v\n", *margin, settings.OnlineSuccessCountryFloorMargin)
 		}
 	}
 
@@ -881,8 +905,9 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 	})
 	// Capture the exact dashboard population before loading its evidence.
 	countFilter := newProviderCountFilterForClients(ctx, clientIds)
-	// the URL-success rule's country guard over this same population
-	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(rows), settings)
+	// the URL-success rule's country guard over this same population, with
+	// the dashboard counts' memory for the floor's margin
+	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(rows), settings, dashboardCountOnlineSuccessGuardMemory)
 	for _, row := range rows {
 		decision := decideProviderEgress(
 			countFilter.egressFacts(row.clientId, row.claimedCountryCode, row.egressIndex, row.egressQuality, settings),
@@ -941,14 +966,16 @@ type ProviderEgressInspection struct {
 	NoUrlSuccess bool
 	// the URL-success rule as the score export last published it, which the
 	// decision below follows rather than Settings: whether a trusted guard
-	// was readable, when it was computed and published, the kill switch and
-	// floor the export applied, the published country's measured Online
-	// providers and those with a success, and whether the country is exempt
+	// was readable, when it was computed and published, the kill switch,
+	// floor and margin the export applied, the published country's measured
+	// Online providers and those with a success, and whether the country is
+	// exempt
 	OnlineSuccessBaselineKnown       bool
 	OnlineSuccessBaselineTime        time.Time
 	OnlineSuccessBaselinePublishTime time.Time
 	OnlineSuccessBaselineEnabled     bool
 	OnlineSuccessBaselineFloor       float64
+	OnlineSuccessBaselineMargin      float64
 	OnlineSuccessCountryMeasured     int
 	OnlineSuccessCountrySucceeded    int
 	OnlineSuccessCountryExempt       bool
@@ -1033,6 +1060,7 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 		inspection.OnlineSuccessBaselinePublishTime = baseline.publishTime
 		inspection.OnlineSuccessBaselineEnabled = baseline.enabled
 		inspection.OnlineSuccessBaselineFloor = baseline.floor
+		inspection.OnlineSuccessBaselineMargin = baseline.margin
 		count := baseline.countryCodeCounts[inspection.PublishedCountryCode]
 		inspection.OnlineSuccessCountryMeasured = count.Measured
 		inspection.OnlineSuccessCountrySucceeded = count.Succeeded

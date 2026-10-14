@@ -11,7 +11,9 @@ keeps being probed and its first success restores it at the next publication.
 A country guard stops the rule where the probe itself fails: a published
 country is exempt when fewer than `online_success_country_floor` (default 0.36,
 pending the owner's confirmation) of its measured Online providers have a
-success. `online_requires_url_success: false` in provider.yml is the kill
+success, and stays exempt until its share reaches the floor plus
+`online_success_country_floor_margin` (default 0.03, also pending
+confirmation). `online_requires_url_success: false` in provider.yml is the kill
 switch. The rule changes Online-mode answers, location lists and counts, and
 the Online tier that a Quality or Speed answer reaches only after both native
 buckets run short. It does not change native Quality or Speed membership or
@@ -832,16 +834,32 @@ gate matrix.
   - Each fleet pass computes the guard over its own population from evidence it
     already loaded: the score export, the location counts and the dashboard
     counts.
+  - **Margin.** A country a pass exempted in its previous computation stays
+    exempt until its share reaches the floor plus
+    `online_success_country_floor_margin` (default 0.03, pending the owner's
+    confirmation; a margin outside [0, 1] or not a number keeps the default,
+    and the floor plus the margin is at most one). A country that was not
+    exempt becomes exempt only below the floor. IN and ZA measured 0.35 against
+    the 0.36 floor, so without the margin a share moving by one provider would
+    move most of a country's measured providers in and out of Online from one
+    pass to the next. Each pass (the score export, the location counts, the
+    dashboard counts) remembers the countries it last exempted in its own
+    process; a restarted process decides its first pass by the plain floor, so
+    a country held only by the margin leaves at a restart. A margin of 0 is the
+    plain floor. The share of exactly the floor plus the margin ends the
+    exemption, as the floor itself is not exempt. The export's log marks a
+    country held only by the margin `by margin`.
   - The score export publishes its guard to Redis for provider status,
     `bringyourctl provider inspect` and the exempt-country gauge: the kill
-    switch and floor it applied, each measured country's verdict and the
-    counts behind it (document version 2). Those readers decide by the
-    document alone, not by their own provider.yml, so they say what the export
-    did while provider.yml or the code differs between hosts, as during a
-    rollout or after a rollback. A reader without a trusted document exempts
-    every country: none is published, it is unreadable, it is version 1
-    (counts only, which each reader decided under its own settings), or it was
-    published more than 60 minutes ago.
+    switch, floor and margin it applied, each measured country's verdict and
+    the counts behind it (document version 2). Since a verdict depends on the
+    export's previous one, a reader could not rederive it from the counts.
+    Those readers decide by the document alone, not by their own provider.yml,
+    so they say what the export did while provider.yml or the code differs
+    between hosts, as during a rollout or after a rollback. A reader without a
+    trusted document exempts every country: none is published, it is
+    unreadable, it is version 1 (counts only, which each reader decided under
+    its own settings), or it was published more than 60 minutes ago.
   - On 2026-10-13 the structurally failing countries measured success shares
     of VN 0.03, JP 0.24, RU 0.25, TW 0.27, ZA 0.35 and IN 0.35. The default of
     0.36, pending the owner's confirmation, exempts them all. HK, the lowest

@@ -11,8 +11,9 @@
 //
 // Each fleet pass (the score export, the location counts, the dashboard
 // counts) computes the country guard over its own population from the
-// evidence it already loaded, under its own settings. The score export
-// publishes its guard, with the kill switch and floor it applied, for the
+// evidence it already loaded, under its own settings, and remembers which
+// countries it exempted for the floor's margin. The score export publishes
+// its guard, with the kill switch, floor and margin it applied, for the
 // readers that decide a few providers at a time and cannot see a country's
 // population: provider status, `bringyourctl provider inspect` and the
 // exempt-country gauge. Those readers decide by the published guard alone, so
@@ -27,6 +28,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -65,7 +67,8 @@ type providerOnlineSuccessCount struct {
 	NoSuccess int
 	// The country keeps its providers: the probe has not shown it works
 	// there, because fewer than the floor of the measured providers have a
-	// success.
+	// success, or, for a country the same path exempted last time, fewer
+	// than the floor plus its margin.
 	Exempt bool
 }
 
@@ -80,9 +83,11 @@ type providerOnlineSuccessBaseline struct {
 	computeTime time.Time
 	// when the score export published it, zero for a fleet pass's own
 	publishTime time.Time
-	// the kill switch and the floor the verdicts were decided under
+	// the kill switch, the floor and its margin the verdicts were decided
+	// under
 	enabled bool
 	floor   float64
+	margin  float64
 	// normalized published country code, "" for none, to its measured
 	// providers and verdict; a country without a measured provider is absent
 	countryCodeCounts map[string]providerOnlineSuccessCount
@@ -104,12 +109,91 @@ func (self *providerOnlineSuccessBaseline) appliesIn(countryCode string) bool {
 	return self != nil && self.enabled && !self.exempt(countryCode)
 }
 
-// Decides each measured country's verdict under floor, in place.
-func decideProviderOnlineSuccessCountries(countryCodeCounts map[string]providerOnlineSuccessCount, floor float64) {
+// Decides each measured country's verdict in place. A country becomes exempt
+// when its share is below floor, and one in previouslyExemptCountryCodes
+// stays exempt until its share reaches floor plus margin (at most one), so
+// that a share hovering at the floor does not flip the country, and the
+// providers the exemption keeps, between passes. The band is half-open like
+// the floor: a share of exactly floor plus margin ends the exemption, and a
+// margin of zero is the plain floor.
+func decideProviderOnlineSuccessCountries(
+	countryCodeCounts map[string]providerOnlineSuccessCount,
+	floor float64,
+	margin float64,
+	previouslyExemptCountryCodes map[string]bool,
+) {
 	for countryCode, count := range countryCodeCounts {
-		count.Exempt = count.Measured <= 0 || providerOnlineSuccessShareBelow(count.Succeeded, count.Measured, floor)
+		threshold := floor
+		if previouslyExemptCountryCodes[countryCode] {
+			threshold = min(1, floor+margin)
+		}
+		count.Exempt = count.Measured <= 0 || providerOnlineSuccessShareBelow(count.Succeeded, count.Measured, threshold)
 		countryCodeCounts[countryCode] = count
 	}
+}
+
+// What one computing path of the guard remembers between its computations:
+// the measured countries it exempted last time, for the floor's margin. Each
+// fleet pass (the score export, the location counts, the dashboard counts)
+// has its own in this process, so a path's verdicts depend only on its own
+// sequence of computations. A fresh process remembers nothing and decides its
+// first computation by the plain floor; a country that was exempt inside the
+// margin then leaves at once. A country with no measured provider is not
+// remembered. Safe for concurrent use; two computations of one path that run
+// at once each read the memory before either writes it.
+type providerOnlineSuccessGuardMemory struct {
+	stateLock          sync.Mutex
+	exemptCountryCodes map[string]bool
+}
+
+// The memory of each computing path in this process.
+var (
+	scoreExportOnlineSuccessGuardMemory    = &providerOnlineSuccessGuardMemory{}
+	locationCountOnlineSuccessGuardMemory  = &providerOnlineSuccessGuardMemory{}
+	dashboardCountOnlineSuccessGuardMemory = &providerOnlineSuccessGuardMemory{}
+)
+
+// Forgets every path's memory on a test reset, as a fresh process would.
+func init() {
+	server.OnReset(func() {
+		for _, memory := range []*providerOnlineSuccessGuardMemory{
+			scoreExportOnlineSuccessGuardMemory,
+			locationCountOnlineSuccessGuardMemory,
+			dashboardCountOnlineSuccessGuardMemory,
+		} {
+			memory.remember(nil)
+		}
+	})
+}
+
+// The countries the path exempted last time, none for a nil memory. The map
+// is replaced, never changed, so the caller may read it unlocked.
+func (self *providerOnlineSuccessGuardMemory) previousExemptCountryCodes() map[string]bool {
+	if self == nil {
+		return nil
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.exemptCountryCodes
+}
+
+// Replaces the memory with the measured countries baseline exempts; a nil
+// baseline forgets every country.
+func (self *providerOnlineSuccessGuardMemory) remember(baseline *providerOnlineSuccessBaseline) {
+	if self == nil {
+		return
+	}
+	exemptCountryCodes := map[string]bool{}
+	if baseline != nil {
+		for countryCode, count := range baseline.countryCodeCounts {
+			if 0 < count.Measured && count.Exempt {
+				exemptCountryCodes[countryCode] = true
+			}
+		}
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.exemptCountryCodes = exemptCountryCodes
 }
 
 // A share of the guard is compared in millionths, in integers, so a share
@@ -126,19 +210,22 @@ func providerOnlineSuccessShareBelow(succeeded int, measured int, share float64)
 }
 
 // Counts a pass's population by published country, and decides each country
-// under the settings' floor: every provider the common gates admit, with
-// current URL evidence. Unmeasured providers say nothing about the probe and
-// are left out, and so are providers the common gates exclude, which are in
-// no bucket whatever their URLs.
+// under the settings' floor and margin with the computing path's memory,
+// which it then updates: every provider the common gates admit, with current
+// URL evidence. Unmeasured providers say nothing about the probe and are left
+// out, and so are providers the common gates exclude, which are in no bucket
+// whatever their URLs. A nil memory decides by the plain floor.
 func newProviderOnlineSuccessBaseline(
 	filter providerCountFilter,
 	clientIdCountryCodes map[server.Id]string,
 	settings *EgressIndexSettings,
+	memory *providerOnlineSuccessGuardMemory,
 ) *providerOnlineSuccessBaseline {
 	baseline := &providerOnlineSuccessBaseline{
 		computeTime:       filter.now,
 		enabled:           settings.OnlineRequiresUrlSuccess,
 		floor:             settings.OnlineSuccessCountryFloor,
+		margin:            settings.OnlineSuccessCountryFloorMargin,
 		countryCodeCounts: map[string]providerOnlineSuccessCount{},
 	}
 	for clientId, countryCode := range clientIdCountryCodes {
@@ -159,7 +246,8 @@ func newProviderOnlineSuccessBaseline(
 		}
 		baseline.countryCodeCounts[countryCode] = count
 	}
-	decideProviderOnlineSuccessCountries(baseline.countryCodeCounts, baseline.floor)
+	decideProviderOnlineSuccessCountries(baseline.countryCodeCounts, baseline.floor, baseline.margin, memory.previousExemptCountryCodes())
+	memory.remember(baseline)
 	return baseline
 }
 
@@ -206,7 +294,8 @@ func (self *providerOnlineSuccessBaseline) exemptCountries() []*ProviderOnlineSu
 }
 
 // One line for a pass's log: the rule's state, and each exempt country with
-// its successes of measured providers and the providers it keeps.
+// its successes of measured providers and the providers it keeps, marked when
+// only the margin keeps it exempt.
 func (self *providerOnlineSuccessBaseline) logSummary() string {
 	if !self.enabled {
 		return "disabled (online_requires_url_success is not true)"
@@ -220,11 +309,16 @@ func (self *providerOnlineSuccessBaseline) logSummary() string {
 		if countryCode == "" {
 			countryCode = "unknown"
 		}
-		exemptTexts = append(exemptTexts, fmt.Sprintf("%s %d/%d kept %d", countryCode, exemptCountry.Succeeded, exemptCountry.Measured, exemptCountry.Kept))
+		exemptText := fmt.Sprintf("%s %d/%d kept %d", countryCode, exemptCountry.Succeeded, exemptCountry.Measured, exemptCountry.Kept)
+		if !providerOnlineSuccessShareBelow(exemptCountry.Succeeded, exemptCountry.Measured, self.floor) {
+			exemptText += " by margin"
+		}
+		exemptTexts = append(exemptTexts, exemptText)
 	}
 	return fmt.Sprintf(
-		"country floor %v, %d countries exempt keeping %d providers [%s]",
+		"country floor %v margin %v, %d countries exempt keeping %d providers [%s]",
 		self.floor,
+		self.margin,
 		len(exemptCountries),
 		kept,
 		strings.Join(exemptTexts, ", "),
@@ -232,12 +326,13 @@ func (self *providerOnlineSuccessBaseline) logSummary() string {
 }
 
 // The score export's guard, for the readers that decide a few providers at a
-// time: the rule as the export applied it (its kill switch and floor), its
-// verdict for each measured country, and the counts behind each verdict. A
-// reader decides by these alone, never by its own settings, so a provider's
-// status, its inspection and the gauge say what the export did, even while
-// provider.yml or the code differs between hosts, as it does during a rollout
-// or after a rollback.
+// time: the rule as the export applied it (its kill switch, floor and
+// margin), its verdict for each measured country, which the margin makes
+// depend on the export's previous verdicts too, and the counts behind each
+// verdict. A reader decides by these alone, never by its own settings, so a
+// provider's status, its inspection and the gauge say what the export did,
+// even while provider.yml or the code differs between hosts, as it does
+// during a rollout or after a rollback.
 const providerOnlineSuccessBaselineKey = "{provider_online_success_baseline}"
 
 // The version this code writes, and the only one it reads. Version 1 carried
@@ -267,6 +362,7 @@ type providerOnlineSuccessBaselineDocument struct {
 	PublishTime time.Time                                     `json:"publish_time"`
 	Enabled     *bool                                         `json:"enabled"`
 	Floor       *float64                                      `json:"floor"`
+	Margin      *float64                                      `json:"margin"`
 	Countries   map[string]providerOnlineSuccessCountDocument `json:"countries"`
 }
 
@@ -292,12 +388,14 @@ func encodeProviderOnlineSuccessBaseline(baseline *providerOnlineSuccessBaseline
 	}
 	enabled := baseline.enabled
 	floor := baseline.floor
+	margin := baseline.margin
 	return json.Marshal(&providerOnlineSuccessBaselineDocument{
 		Version:     providerOnlineSuccessBaselineVersion,
 		ComputeTime: baseline.computeTime,
 		PublishTime: publishTime,
 		Enabled:     &enabled,
 		Floor:       &floor,
+		Margin:      &margin,
 		Countries:   countries,
 	})
 }
@@ -355,7 +453,9 @@ func decodeProviderOnlineSuccessBaseline(value []byte, now time.Time) (*provider
 	if document.Version != providerOnlineSuccessBaselineVersion {
 		return nil, fmt.Errorf("version %d is not %d", document.Version, providerOnlineSuccessBaselineVersion)
 	}
-	if document.Enabled == nil || document.Floor == nil || !(0 <= *document.Floor && *document.Floor <= 1) {
+	if document.Enabled == nil ||
+		document.Floor == nil || !(0 <= *document.Floor && *document.Floor <= 1) ||
+		document.Margin == nil || !(0 <= *document.Margin && *document.Margin <= 1) {
 		return nil, fmt.Errorf("no rule")
 	}
 	if document.Countries == nil {
@@ -381,6 +481,7 @@ func decodeProviderOnlineSuccessBaseline(value []byte, now time.Time) (*provider
 		publishTime:       document.PublishTime,
 		enabled:           *document.Enabled,
 		floor:             *document.Floor,
+		margin:            *document.Margin,
 		countryCodeCounts: countryCodeCounts,
 	}, nil
 }
