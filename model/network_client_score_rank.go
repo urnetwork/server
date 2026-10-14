@@ -174,8 +174,9 @@ func rankClientScore(
 		RankModeSpeed:   decision.speed,
 	}
 
-	// Online is all common-gate passes. Missing latency/throughput tests
-	// and low performance change ordering without reducing membership.
+	// Online is every common-gate pass the URL-success rule keeps
+	// (decision.online). Missing latency/throughput tests and low
+	// performance change ordering without reducing membership.
 	weights := map[int]float64{}
 	for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
 		weights[lookbackIndex] = lookbackClientScore.IndependentReliabilityWeight

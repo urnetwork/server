@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
@@ -357,6 +358,152 @@ func TestGeoLiteRefreshPublishesDatabaseAndPlacesTogether(t *testing.T) {
 	for _, name := range []string{"geolite2.mmdb", "places.yml", "manifest.json"} {
 		if _, err := os.Stat(filepath.Join(output, name)); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// A database in GeoLite2 ASN's record shape, of the given type and build time.
+func testAsnDatabase(t *testing.T, databaseType string, buildTime time.Time) []byte {
+	t.Helper()
+	w, err := mmdbwriter.New(mmdbwriter.Options{DatabaseType: databaseType, BuildEpoch: buildTime.Unix(), IncludeReservedNetworks: true, Description: map[string]string{"en": "synthetic asn fixture"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, network, err := net.ParseCIDR("192.0.2.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Insert(network, mmdbtype.Map{"autonomous_system_number": mmdbtype.Uint32(64500), "autonomous_system_organization": mmdbtype.String("Synthetic Network")}); err != nil {
+		t.Fatal(err)
+	}
+	var content bytes.Buffer
+	if _, err := w.WriteTo(&content); err != nil {
+		t.Fatal(err)
+	}
+	return content.Bytes()
+}
+
+// Refreshes from an updater that fetches the City file and, when asn is not
+// nil, the ASN file an edition list naming GeoLite2-ASN adds.
+func refreshTestGeolite2(t *testing.T, asn []byte) (string, error) {
+	t.Helper()
+	output := filepath.Join(t.TempDir(), "version")
+	return output, publishDirectory(output, func(stage string) error {
+		return refreshGeolite2(t.Context(), "protected-test-config", stage, func(_ context.Context, _ string, directory string) error {
+			if err := os.WriteFile(filepath.Join(directory, "GeoLite2-City.mmdb"), testGeoDatabase(t), 0o600); err != nil {
+				return err
+			}
+			if asn == nil {
+				return nil
+			}
+			return os.WriteFile(filepath.Join(directory, "GeoLite2-ASN.mmdb"), asn, 0o600)
+		})
+	})
+}
+
+type testGeoliteManifest struct {
+	AsnSource          string            `json:"asn_source"`
+	AsnSourceBuildTime *time.Time        `json:"asn_source_build_time"`
+	Hashes             map[string]string `json:"sha256"`
+}
+
+func readTestGeoliteManifest(t *testing.T, output string) testGeoliteManifest {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(output, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest testGeoliteManifest
+	if err := json.Unmarshal(content, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	return manifest
+}
+
+// A fetched ASN file is published under the name the server resolves
+// (mmdb/geolite2-asn.mmdb) and bound into the manifest.
+func TestGeoLiteRefreshPublishesFetchedAsnDatabase(t *testing.T) {
+	output, err := refreshTestGeolite2(t, testAsnDatabase(t, "GeoLite2-ASN", time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// exact names, since the release may run on a case-insensitive filesystem
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if !slices.Contains(names, "geolite2-asn.mmdb") || slices.Contains(names, "GeoLite2-ASN.mmdb") {
+		t.Fatalf("published names %v", names)
+	}
+	content, err := os.ReadFile(filepath.Join(output, "geolite2-asn.mmdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := mmdb.OpenBytes(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var record struct {
+		Number uint32 `maxminddb:"autonomous_system_number"`
+	}
+	if err := db.Lookup(netip.MustParseAddr("192.0.2.7")).Decode(&record); err != nil || record.Number != 64500 {
+		t.Fatalf("published ASN database answers %d, %v", record.Number, err)
+	}
+	manifest := readTestGeoliteManifest(t, output)
+	hash := sha256.Sum256(content)
+	if manifest.Hashes["geolite2-asn.mmdb"] != hex.EncodeToString(hash[:]) {
+		t.Error("manifest does not bind the ASN database")
+	}
+	if manifest.AsnSource != "GeoLite2-ASN" || manifest.AsnSourceBuildTime == nil {
+		t.Error("manifest does not name the ASN source and its build time")
+	}
+}
+
+// Without the edition there is no ASN file, and the bundle is the City bundle.
+func TestGeoLiteRefreshWithoutAsnEdition(t *testing.T) {
+	output, err := refreshTestGeolite2(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(output, "geolite2-asn.mmdb")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("an ASN database was published without one being fetched")
+	}
+	manifest := readTestGeoliteManifest(t, output)
+	if _, ok := manifest.Hashes["geolite2-asn.mmdb"]; ok || manifest.AsnSource != "" || manifest.AsnSourceBuildTime != nil {
+		t.Error("manifest names an ASN database that was not fetched")
+	}
+}
+
+// A fetched ASN file that is not GeoLite2 ASN, is damaged, or is stale fails
+// the refresh like the City file, and nothing is published.
+func TestGeoLiteRefreshRefusesUnusableAsnDatabase(t *testing.T) {
+	damaged := testAsnDatabase(t, "GeoLite2-ASN", time.Now())
+	db, err := mmdb.OpenBytes(damaged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the 16 zero bytes between the search tree and the data section
+	separator := int(db.Metadata.NodeCount) * int(db.Metadata.RecordSize) / 4
+	db.Close()
+	damaged[separator] = 0xff
+
+	for name, asn := range map[string][]byte{
+		"another type":   testAsnDatabase(t, "GeoLite2-City", time.Now()),
+		"not a database": []byte("synthetic bytes that are not a MaxMind database"),
+		"damaged":        damaged,
+		"stale":          testAsnDatabase(t, "GeoLite2-ASN", time.Now().Add(-31*24*time.Hour)),
+	} {
+		output, err := refreshTestGeolite2(t, asn)
+		if err == nil {
+			t.Errorf("%s: refresh published an unusable ASN database", name)
+		}
+		if _, statErr := os.Lstat(output); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("%s: a version was published", name)
 		}
 	}
 }

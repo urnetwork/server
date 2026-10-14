@@ -1060,72 +1060,18 @@ func (self *CoreStClient) buildTransactionAttempt(
 		return nil, err
 	}
 	chainId := new(big.Int).SetUint64(intent.ChainId)
-
-	if gasLimit != 0 {
-		// intrinsic gas was selected by the cancellation payload
-	} else if previous != nil {
-		gasLimit = previous.GasLimit
-	}
-	estimate := gasLimit == 0 && previous == nil
-	var prepared *stTransactionFeePreparation
-	err = self.readTransactionRpc(ctx, client, func(ctx context.Context) error {
-		var err error
-		prepared, err = readStTransactionFeePreparation(ctx, client, from, to, calldata, estimate, previous != nil && previous.GasPrice != nil)
-		return err
-	})
+	envelope, err := self.transactionEnvelope(ctx, client, intent, from, to, calldata, gasLimit, previous, kind, gasPolicy)
 	if err != nil {
 		return nil, err
 	}
-	if estimate {
-		estimated := prepared.estimatedGas
-		// A stable 20% margin avoids a replacement changing gas limit because
-		// unrelated state shifted between attempts.
-		if estimated > ^uint64(0)/6*5 {
-			return nil, fmt.Errorf("st: estimated gas overflows safety margin")
-		}
-		gasLimit = estimated + (estimated+4)/5
-	}
-	// A stake move is never signed below its floor, whatever its estimate or
-	// an earlier attempt's limit. The floor is capped at the operator gas
-	// policy's maximum_gas, so that it alone never makes the policy refuse an
-	// attempt the estimate's limit would pass.
-	gasFloor, floorName := self.stakeMoveGasFloor(intent, kind)
-	if gasPolicy != nil {
-		gasFloor = min(gasFloor, gasPolicy.MaximumGas)
-	}
-	gasLimit = max(gasLimit, gasFloor)
-
-	var unsigned *types.Transaction
+	unsigned := envelope.transaction(chainId, intent.Nonce, to, calldata)
 	attempt := &model.StTransactionAttempt{
-		IntentId: intent.IntentId, Attempt: intent.AttemptCount + 1, Kind: kind, GasLimit: gasLimit,
+		IntentId: intent.IntentId, Attempt: intent.AttemptCount + 1, Kind: kind, GasLimit: envelope.gasLimit,
 	}
-	if prepared.legacy {
-		price := prepared.fee
-		if previous != nil {
-			price = stReplacementFee(previous.GasPrice, price)
-		}
-		attempt.GasPrice = stBigIntString(price)
-		unsigned = types.NewTx(&types.LegacyTx{
-			Nonce: intent.Nonce, To: &to, Gas: gasLimit, GasPrice: price,
-			Value: new(big.Int), Data: append([]byte(nil), calldata...),
-		})
+	if envelope.legacy {
+		attempt.GasPrice = stBigIntString(envelope.price)
 	} else {
-		tip := prepared.fee
-		fee := new(big.Int).Mul(prepared.header.BaseFee, big.NewInt(2))
-		fee.Add(fee, tip)
-		if previous != nil {
-			tip = stReplacementFee(previous.GasTipCap, tip)
-			fee = stReplacementFee(previous.GasFeeCap, fee)
-			if fee.Cmp(tip) < 0 {
-				fee.Set(tip)
-			}
-		}
-		attempt.GasTipCap, attempt.GasFeeCap = stBigIntString(tip), stBigIntString(fee)
-		unsigned = types.NewTx(&types.DynamicFeeTx{
-			ChainID: chainId, Nonce: intent.Nonce, To: &to, Gas: gasLimit,
-			GasTipCap: tip, GasFeeCap: fee, Value: new(big.Int),
-			Data: append([]byte(nil), calldata...),
-		})
+		attempt.GasTipCap, attempt.GasFeeCap = stBigIntString(envelope.tip), stBigIntString(envelope.fee)
 	}
 	if err := stPayoutAdmission(ctx, self.cfg); err != nil {
 		return nil, err
@@ -1133,9 +1079,6 @@ func (self *CoreStClient) buildTransactionAttempt(
 	if gasPolicy != nil {
 		reservation, err := model.ReserveStTransactionGasAttempt(ctx, gasPolicy, gasAuthority, intent.IntentId, attempt.Attempt, kind, unsigned)
 		if err != nil {
-			if gasLimit == gasFloor {
-				err = fmt.Errorf("st: gas limit %d is the %s's stake-move floor (operator gas policy maximum_gas %d): %w", gasLimit, floorName, gasPolicy.MaximumGas, err)
-			}
 			return nil, err
 		}
 		return self.signReservedStTransaction(ctx, client, key, intent, kind, reservation, gasPolicy, gasAuthority)
@@ -1155,6 +1098,136 @@ func (self *CoreStClient) buildTransactionAttempt(
 		return nil, fmt.Errorf("st: transaction intent became terminal before attempt %d was stored", attempt.Attempt)
 	}
 	return stored, nil
+}
+
+// stTransactionEnvelope is one attempt's gas limit and fees, which do not
+// depend on its nonce.
+type stTransactionEnvelope struct {
+	gasLimit uint64
+	legacy   bool
+	price    *big.Int
+	tip, fee *big.Int
+}
+
+// transactionEnvelope sizes and prices an attempt of intent, which sends
+// calldata to `to` from `from`. Its gas limit is gasLimit when given (a
+// cancellation's intrinsic gas), a replacement's earlier limit, or the
+// estimate plus 20%, and never below the stake-move floor as the operator gas
+// policy caps it. A replacement's fees are bumped.
+func (self *CoreStClient) transactionEnvelope(ctx context.Context, client *ethclient.Client, intent *model.StTransactionIntent, from, to common.Address, calldata []byte, gasLimit uint64, previous *model.StTransactionAttempt, kind string, gasPolicy *server.StOperatorGasPolicy) (*stTransactionEnvelope, error) {
+	if gasLimit != 0 {
+		// intrinsic gas was selected by the cancellation payload
+	} else if previous != nil {
+		gasLimit = previous.GasLimit
+	}
+	estimate := gasLimit == 0 && previous == nil
+	forceLegacy := previous != nil && previous.GasPrice != nil
+	var prepared *stTransactionFeePreparation
+	err := self.readTransactionRpc(ctx, client, func(ctx context.Context) error {
+		var err error
+		prepared, err = readStTransactionFeePreparation(ctx, client, from, to, calldata, estimate, forceLegacy)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if estimate {
+		if gasLimit, err = stEstimatedGasLimit(prepared.estimatedGas); err != nil {
+			return nil, err
+		}
+	}
+	envelope := &stTransactionEnvelope{legacy: prepared.legacy}
+	feeCap := prepared.fee
+	if prepared.legacy {
+		envelope.price = prepared.fee
+		if previous != nil {
+			envelope.price = stReplacementFee(previous.GasPrice, envelope.price)
+		}
+		feeCap = envelope.price
+	} else {
+		envelope.tip = prepared.fee
+		envelope.fee = new(big.Int).Mul(prepared.header.BaseFee, big.NewInt(2))
+		envelope.fee.Add(envelope.fee, envelope.tip)
+		if previous != nil {
+			envelope.tip = stReplacementFee(previous.GasTipCap, envelope.tip)
+			envelope.fee = stReplacementFee(previous.GasFeeCap, envelope.fee)
+			if envelope.fee.Cmp(envelope.tip) < 0 {
+				envelope.fee.Set(envelope.tip)
+			}
+		}
+		feeCap = envelope.fee
+	}
+	// A stake move is never signed below its floor, whatever its estimate or
+	// an earlier attempt's limit. The floor is capped at the gas the operator
+	// gas policy still accepts at this fee cap: its maximum_gas, and what the
+	// liability that the operation's and the scope's other nonces leave
+	// covers. The floor alone therefore never makes the policy refuse an
+	// attempt that the estimate's limit would pass.
+	floor := self.stakeMoveGasFloor(to, calldata, kind)
+	if gasPolicy != nil && floor != 0 {
+		operation, lifetime, err := model.StOperatorGasRemainingLiability(ctx, gasPolicy, intent.LogicalKey, intent.IntentId)
+		if err != nil {
+			return nil, err
+		}
+		accepted := min(gasPolicy.MaximumGas, stGasCoveredBy(operation, feeCap), stGasCoveredBy(lifetime, feeCap))
+		floor = min(floor, accepted)
+		if previous != nil && gasLimit > accepted {
+			// The earlier limit, such as a floor capped at the earlier fee, no
+			// longer fits at the bumped fee. The replacement is sized as a
+			// first attempt is: by its estimate and the floor capped anew.
+			err := self.readTransactionRpc(ctx, client, func(ctx context.Context) error {
+				var err error
+				prepared, err = readStTransactionFeePreparation(ctx, client, from, to, calldata, true, forceLegacy)
+				return err
+			})
+			if err != nil {
+				return nil, err
+			}
+			if gasLimit, err = stEstimatedGasLimit(prepared.estimatedGas); err != nil {
+				return nil, err
+			}
+		}
+	}
+	envelope.gasLimit = max(gasLimit, floor)
+	return envelope, nil
+}
+
+// stEstimatedGasLimit is the gas limit of an estimate: the estimate plus 20%.
+func stEstimatedGasLimit(estimated uint64) (uint64, error) {
+	// A stable 20% margin avoids a replacement changing gas limit because
+	// unrelated state shifted between attempts.
+	if estimated > ^uint64(0)/6*5 {
+		return 0, fmt.Errorf("st: estimated gas overflows safety margin")
+	}
+	return estimated + (estimated+4)/5, nil
+}
+
+// stGasCoveredBy is the most gas a liability in wei covers at a fee cap, and 0
+// for a fee cap the policy refuses anyway.
+func stGasCoveredBy(liability *big.Int, feeCap *big.Int) uint64 {
+	if feeCap == nil || feeCap.Sign() <= 0 {
+		return 0
+	}
+	covered := new(big.Int).Quo(liability, feeCap)
+	if !covered.IsUint64() {
+		return math.MaxUint64
+	}
+	return covered.Uint64()
+}
+
+// transaction is the envelope's unsigned transaction at nonce.
+func (self *stTransactionEnvelope) transaction(chainId *big.Int, nonce uint64, to common.Address, calldata []byte) *types.Transaction {
+	if self.legacy {
+		return types.NewTx(&types.LegacyTx{
+			Nonce: nonce, To: &to, Gas: self.gasLimit, GasPrice: self.price,
+			Value: new(big.Int), Data: append([]byte(nil), calldata...),
+		})
+	}
+	return types.NewTx(&types.DynamicFeeTx{
+		ChainID: chainId, Nonce: nonce, To: &to, Gas: self.gasLimit,
+		GasTipCap: self.tip, GasFeeCap: self.fee, Value: new(big.Int),
+		Data: append([]byte(nil), calldata...),
+	})
 }
 
 func stDecodeStoredTransaction(attempt *model.StTransactionAttempt) (*types.Transaction, error) {
@@ -1346,6 +1419,7 @@ func (self *CoreStClient) runTransactionIntent(
 ) (string, error) {
 	waitCtx, cancelWait := context.WithTimeout(ctx, stWaitFinalizedTimeout)
 	defer cancelWait()
+	var refused error
 	for {
 		attempts := model.GetStTransactionAttempts(ctx, intent.IntentId)
 		var current *model.StTransactionAttempt
@@ -1361,13 +1435,20 @@ func (self *CoreStClient) runTransactionIntent(
 			}
 			attempts = model.GetStTransactionAttempts(ctx, intent.IntentId)
 		} else if replaceImmediately && current.Kind != model.StTxAttemptCancellation && current.Status != model.StTxMined {
-			originalHash := current.TxHash
-			var err error
-			current, err = self.buildTransactionAttempt(waitCtx, client, key, intent, current, model.StTxAttemptCancellation)
-			if err != nil {
-				return originalHash, err
+			if _, err := self.buildTransactionAttempt(waitCtx, client, key, intent, current, model.StTxAttemptCancellation); err != nil {
+				// The operation can no longer succeed, but its cancellation
+				// cannot be signed, as when the operation has spent its
+				// signatures. Its latest signed attempt is broadcast again
+				// below, which takes no new signature or liability; it reverts
+				// and frees the nonce. A stale deployment's stored bytes target
+				// the old coordinator and are not sent again.
+				if intent.DeploymentKey != self.cfg.DeploymentKey() {
+					return current.TxHash, err
+				}
+				refused = err
 			}
 			attempts = model.GetStTransactionAttempts(ctx, intent.IntentId)
+			current = attempts[0]
 		}
 		if current.Status == model.StTxSigned || current.Status == model.StTxBroadcast || current.Status == model.StTxUncertain {
 			// Re-broadcasting identical signed bytes is safe and repairs a node or
@@ -1378,6 +1459,9 @@ func (self *CoreStClient) runTransactionIntent(
 		}
 		txHash, waitErr := self.waitFinalizedAttempt(waitCtx, client, intent, attempts)
 		if !errors.Is(waitErr, errStReplaceTransaction) {
+			if waitErr != nil && refused != nil {
+				waitErr = errors.Join(waitErr, refused)
+			}
 			return txHash, waitErr
 		}
 		current = model.GetCurrentStTransactionAttempt(ctx, intent.IntentId)
@@ -1392,7 +1476,7 @@ func (self *CoreStClient) runTransactionIntent(
 		if _, err := self.buildTransactionAttempt(waitCtx, client, key, intent, current, replacementKind); err != nil {
 			return txHash, err
 		}
-		replaceImmediately = false
+		replaceImmediately, refused = false, nil
 	}
 }
 
@@ -1570,12 +1654,32 @@ func (self *CoreStClient) reconcileAccountIntents(
 		if err != nil {
 			return err
 		}
-		cancelIntent := stale || expiredClose || expiredDeposit || self.spentLedgerV2Intent(ctx, client, intent, from, finalized)
+		spent := self.spentLedgerV2Intent(ctx, client, intent, from, finalized)
+		cancelIntent := stale || expiredClose || expiredDeposit || spent
 		desiredKind := model.StTxAttemptExecution
 		if cancelIntent {
 			desiredKind = model.StTxAttemptCancellation
 		}
-		_, runErr := self.runTransactionIntent(ctx, client, key, intent, desiredKind, cancelIntent)
+		replaceImmediately := cancelIntent
+		if expiredClose || spent {
+			// The process may have stopped between an execution's gas
+			// reservation and its signature, and a cancellation cannot take
+			// that reservation's place. The root key's execution is signed and
+			// sent as reserved: its close has expired or its operation is
+			// spent, so it reverts and frees the nonce. Only a fee replacement
+			// of it is the cancellation.
+			pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+			if err != nil {
+				return err
+			}
+			if pending != nil && pending.Kind == model.StTxAttemptExecution {
+				if _, err := self.buildTransactionAttempt(ctx, client, key, intent, nil, model.StTxAttemptExecution); err != nil {
+					return err
+				}
+				replaceImmediately = false
+			}
+		}
+		_, runErr := self.runTransactionIntent(ctx, client, key, intent, desiredKind, replaceImmediately)
 		if runErr != nil && !stale {
 			return runErr
 		}
@@ -1633,7 +1737,8 @@ func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKe
 	}
 	// Adopt the independently approved original history before reserving a
 	// fresh nonce. Reconciliation above remains possible without new authority.
-	if _, _, err := self.operatorGasAdmission(ctx, from); err != nil {
+	gasPolicy, gasAuthority, err := self.operatorGasAdmission(ctx, from)
+	if err != nil {
 		return "", err
 	}
 	operation, to, calldata, err := prepare(ctx, client)
@@ -1653,12 +1758,21 @@ func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKe
 	if err != nil {
 		return "", fmt.Errorf("st: pending nonce for %s: %w", from, err)
 	}
-	intent := model.ReserveStTransactionIntent(
-		ctx, logicalKey, self.cfg.Profile, self.cfg.DeploymentId, self.cfg.DeploymentKey(), self.cfg.ChainId,
-		"0x"+hex.EncodeToString(self.cfg.GenesisHash[:]),
-		strings.ToLower(from.Hex()), strings.ToLower(to.Hex()),
-		strings.ToLower(crypto.Keccak256Hash(calldata).Hex()), calldata, pendingNonce,
-	)
+	genesisHash, fromAddress, toAddress := "0x"+hex.EncodeToString(self.cfg.GenesisHash[:]), strings.ToLower(from.Hex()), strings.ToLower(to.Hex())
+	calldataHash := strings.ToLower(crypto.Keccak256Hash(calldata).Hex())
+	var intent *model.StTransactionIntent
+	if gasPolicy == nil {
+		intent = model.ReserveStTransactionIntent(
+			ctx, logicalKey, self.cfg.Profile, self.cfg.DeploymentId, self.cfg.DeploymentKey(), self.cfg.ChainId,
+			genesisHash, fromAddress, toAddress, calldataHash, calldata, pendingNonce,
+		)
+	} else if intent, err = model.ReserveStTransactionIntentGas(ctx, gasPolicy, gasAuthority, logicalKey, self.cfg.Profile, self.cfg.DeploymentId, self.cfg.DeploymentKey(), self.cfg.ChainId,
+		genesisHash, fromAddress, toAddress, calldataHash, calldata, pendingNonce, nil); errors.Is(err, model.ErrStTransactionIntentNew) {
+		intent, err = self.reserveSignableIntent(ctx, client, gasPolicy, gasAuthority, logicalKey, from, to, calldata, pendingNonce)
+	}
+	if err != nil {
+		return "", err
+	}
 	if intent.Status == model.StTxFinalized && intent.CurrentTxHash != nil {
 		return *intent.CurrentTxHash, nil
 	}
@@ -1667,6 +1781,42 @@ func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKe
 	}
 
 	return self.runTransactionIntent(ctx, client, key, intent, model.StTxAttemptExecution, false)
+}
+
+// reserveSignableIntent reserves a new intent under the operator gas policy.
+// Its nonce is taken only together with its first attempt's gas reservation,
+// so a policy that refuses that attempt leaves no intent to hold the
+// account's later sends; the attempt is then signed from the reservation. An
+// intent another sender reserved first is returned as it is.
+func (self *CoreStClient) reserveSignableIntent(ctx context.Context, client *ethclient.Client, gasPolicy *server.StOperatorGasPolicy, gasAuthority *server.StOperatorGasAuthority, logicalKey string, from, to common.Address, calldata []byte, pendingNonce uint64) (*model.StTransactionIntent, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
+	// The intent as it will be reserved, without an id yet, for the checks
+	// and the sizing of an attempt.
+	planned := &model.StTransactionIntent{LogicalKey: logicalKey, Profile: self.cfg.Profile, DeploymentId: self.cfg.DeploymentId, DeploymentKey: self.cfg.DeploymentKey(),
+		ChainId: self.cfg.ChainId, GenesisHash: "0x" + hex.EncodeToString(self.cfg.GenesisHash[:]), FromAddress: strings.ToLower(from.Hex()), ToAddress: strings.ToLower(to.Hex()),
+		CalldataHash: strings.ToLower(crypto.Keccak256Hash(calldata).Hex()), Calldata: calldata}
+	if err := self.validateDepositAttempt(ctx, client, planned, model.StTxAttemptExecution); err != nil {
+		return nil, err
+	}
+	envelope, err := self.transactionEnvelope(ctx, client, planned, from, to, calldata, 0, nil, model.StTxAttemptExecution, gasPolicy)
+	if err != nil {
+		return nil, err
+	}
+	if err := stPayoutAdmission(ctx, self.cfg); err != nil {
+		return nil, err
+	}
+	chainId := new(big.Int).SetUint64(planned.ChainId)
+	intent, err := model.ReserveStTransactionIntentGas(ctx, gasPolicy, gasAuthority, planned.LogicalKey, planned.Profile, planned.DeploymentId, planned.DeploymentKey, planned.ChainId,
+		planned.GenesisHash, planned.FromAddress, planned.ToAddress, planned.CalldataHash, calldata, pendingNonce,
+		func(nonce uint64) *types.Transaction { return envelope.transaction(chainId, nonce, to, calldata) })
+	if err != nil {
+		return nil, err
+	}
+	return intent, nil
 }
 
 // Hashing a length-framed exact deployment and operation keeps the durable key
@@ -1896,26 +2046,51 @@ func (self *CoreStClient) RollEpochs(ctx context.Context) (string, error) {
 // same close estimated 361,258 and needed 336,422.
 const stV1CloseGasFloor = 3_200_000
 
-// stCloseSelector is the selector of closeOperatorEpoch(uint256,uint256),
-// which the v1 coordinator and STSettlement2 share.
-var stCloseSelector = crypto.Keccak256([]byte("closeOperatorEpoch(uint256,uint256)"))[:4]
+// stV1DepositGasFloor and stV1DepositStagingGasFloor are the least gas limits
+// the engine signs the deposit key's two stake moves with, for
+// stV1CloseGasFloor's reason: runtime 478 admits each with gas that grows
+// with its caller's own StakingHotkeys list. Measured on 2026-10-13 on the
+// runtime 477 rehearsal node, the coordinator's deposit, a moveStake and a
+// transferStake, needed a gas limit of 2,655,491 and eth_estimateGas gave
+// 2,831,419, which the engine signed 20% above, at 3,397,703; the staging
+// transferStake to the staking precompile needed 2,316,879 and estimated
+// 2,331,211, signed at 2,797,454. Each floor is that size, rounded up. On
+// runtime 478 they estimated 441,046 and 95,406.
+const (
+	stV1DepositGasFloor        = 3_400_000
+	stV1DepositStagingGasFloor = 2_800_000
+)
 
-// stakeMoveGasFloor is the least gas limit an attempt of the intent is signed
-// with, and the name of the send it is the floor of: the floor of a v1 or v2
-// close for its execution, and 0 for any other attempt. Every close can
-// capture, since emission reaches the pool hotkey between a close's estimate
-// and its inclusion.
-func (self *CoreStClient) stakeMoveGasFloor(intent *model.StTransactionIntent, kind string) (uint64, string) {
-	if kind != model.StTxAttemptExecution || !bytes.HasPrefix(intent.Calldata, stCloseSelector) {
-		return 0, ""
+// stCloseSelector is the selector of closeOperatorEpoch(uint256,uint256),
+// which the v1 coordinator and STSettlement2 share; stDepositSelector is the
+// coordinator's deposit, and stTransferStakeSelector the staking precompile's
+// transferStake.
+var (
+	stCloseSelector         = crypto.Keccak256([]byte("closeOperatorEpoch(uint256,uint256)"))[:4]
+	stDepositSelector       = crypto.Keccak256([]byte("deposit(uint256,uint256,uint256,uint64)"))[:4]
+	stTransferStakeSelector = crypto.Keccak256([]byte("transferStake(bytes32,bytes32,uint256,uint256,uint256)"))[:4]
+)
+
+// stakeMoveGasFloor is the least gas limit an attempt that sends calldata to
+// `to` is signed with: the floor of a stake-moving send for its execution (a
+// v1 or v2 close, a deposit or its staging), and 0 for any other attempt.
+// Every close can capture, since emission reaches the pool hotkey between a
+// close's estimate and its inclusion.
+func (self *CoreStClient) stakeMoveGasFloor(to common.Address, calldata []byte, kind string) uint64 {
+	if kind != model.StTxAttemptExecution {
+		return 0
 	}
-	switch to := common.HexToAddress(intent.ToAddress); {
-	case self.cfg.LedgerV2Enabled() && to == self.cfg.SettlementV2:
-		return stLedgerV2StakeMoveGasFloor, "v2 close"
-	case to == self.cfg.ContractAddress:
-		return stV1CloseGasFloor, "v1 close"
+	switch {
+	case bytes.HasPrefix(calldata, stCloseSelector) && self.cfg.LedgerV2Enabled() && to == self.cfg.SettlementV2:
+		return stLedgerV2StakeMoveGasFloor
+	case bytes.HasPrefix(calldata, stCloseSelector) && to == self.cfg.ContractAddress:
+		return stV1CloseGasFloor
+	case bytes.HasPrefix(calldata, stDepositSelector) && to == self.cfg.ContractAddress:
+		return stV1DepositGasFloor
+	case bytes.HasPrefix(calldata, stTransferStakeSelector) && to == stStakingPrecompileAddress:
+		return stV1DepositStagingGasFloor
 	}
-	return 0, ""
+	return 0
 }
 
 func (self *CoreStClient) CloseOperatorEpoch(ctx context.Context, epoch uint64, noId uint64) (string, error) {

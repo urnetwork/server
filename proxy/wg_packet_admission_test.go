@@ -40,31 +40,59 @@ func wgAdmissionTestManager(t *testing.T) *ProxyDeviceManager {
 // Uses the real post-decryption packet entry and peer factory. The encrypted
 // receive owner's Noise/source checks are separately exercised by the native
 // userspace WireGuard integration; this fixture needs no socket or listener.
-func wgAdmissionTestProxy(t *testing.T, manager *ProxyDeviceManager, ids map[netip.Addr]server.Id) *wgproxy.WgProxy {
+//
+// The proxy and its peers are made, and the proxy closed, outside the test's
+// bubble. userwireguard drains each peer's queues from a GC finalizer, and
+// finalizers run outside every bubble, so a peer made inside one faults the
+// process when it is collected: "receive on synctest channel from outside
+// bubble", however empty the queue. attach gives each peer the real tun
+// factory of the bubble's manager, and as the bubble ends removes the peers,
+// so the tuns opened inside it are dropped inside it. Packets still enter on
+// the bubble's goroutines, with its clock.
+func wgAdmissionTestProxy(t *testing.T, ids map[netip.Addr]server.Id) (*wgproxy.WgProxy, func(*testing.T, *ProxyDeviceManager)) {
 	t.Helper()
 	settings := wgproxy.DefaultWgProxySettings()
 	settings.Log = connect.NewNoopLogger()
-	wg := wgproxy.NewWgProxy(manager.ctx, settings)
+	wg := wgproxy.NewWgProxy(server.WithoutPostgres(t.Context()), settings)
 	t.Cleanup(func() { _ = wg.Close() })
+	var factoryLock sync.Mutex
+	factories := map[netip.Addr]func() (wgproxy.WgTun, error){}
 	clients := map[netip.Addr]*wgproxy.WgClient{}
-	for addr, proxyId := range ids {
+	for addr := range ids {
 		_, publicKey, err := wgproxy.WgGenKeyPairStrings()
 		if err != nil {
 			t.Fatal(err)
 		}
-		clients[addr] = &wgproxy.WgClient{
-			PublicKey: publicKey, ClientIpv4: addr, Tun: wgTunFactory(manager, proxyId),
-		}
+		clients[addr] = &wgproxy.WgClient{PublicKey: publicKey, ClientIpv4: addr, Tun: func() (wgproxy.WgTun, error) {
+			factoryLock.Lock()
+			factory := factories[addr]
+			factoryLock.Unlock()
+			return factory()
+		}}
 	}
 	if err := wg.SetClients(clients); err != nil {
 		t.Fatal(err)
 	}
-	return wg
+	attach := func(t *testing.T, manager *ProxyDeviceManager) {
+		factoryLock.Lock()
+		defer factoryLock.Unlock()
+		for addr, proxyId := range ids {
+			factories[addr] = wgTunFactory(manager, proxyId)
+		}
+		t.Cleanup(func() {
+			if err := wg.SetClients(map[netip.Addr]*wgproxy.WgClient{}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	return wg, attach
 }
 
 // The real packet entry may attempt failed setup once per second. A sustained
 // refused packet stream does not postpone the next admitted attempt.
 func TestWgPacketFailedSetupHasBoundedRetry(t *testing.T) {
+	addr := netip.MustParseAddr("192.0.2.42")
+	wg, attach := wgAdmissionTestProxy(t, map[netip.Addr]server.Id{addr: server.NewId()})
 	synctest.Test(t, func(t *testing.T) {
 		manager := wgAdmissionTestManager(t)
 		var calls atomic.Int32
@@ -73,8 +101,7 @@ func TestWgPacketFailedSetupHasBoundedRetry(t *testing.T) {
 			calls.Add(1)
 			return nil, setupErr
 		}
-		addr := netip.MustParseAddr("192.0.2.42")
-		wg := wgAdmissionTestProxy(t, manager, map[netip.Addr]server.Id{addr: server.NewId()})
+		attach(t, manager)
 		packet := buildWgTestPacket(t, addr.String(), "198.51.100.21", "bounded cold setup")
 		wantPacket := bytes.Clone(packet)
 		for range 128 {
@@ -230,10 +257,11 @@ func TestWgPacketLiveOwnerBypassesUnrelatedSetup(t *testing.T) {
 	// The allocator's statistics worker belongs to the process, outside this
 	// device-owner bubble. Packet copies and reconciliation still use the real pool.
 	connect.MessagePoolCounts()
+	liveId, coldId := server.NewId(), server.NewId()
+	liveAddr, coldAddr := netip.MustParseAddr("192.0.2.42"), netip.MustParseAddr("192.0.2.43")
+	wg, attach := wgAdmissionTestProxy(t, map[netip.Addr]server.Id{liveAddr: liveId, coldAddr: coldId})
 	synctest.Test(t, func(t *testing.T) {
 		manager := wgAdmissionTestManager(t)
-		liveId, coldId := server.NewId(), server.NewId()
-		liveAddr, coldAddr := netip.MustParseAddr("192.0.2.42"), netip.MustParseAddr("192.0.2.43")
 		entered, release := make(chan struct{}), make(chan struct{})
 		manager.proxyDeviceBuilder = func(server.Id) (*ProxyDevice, error) {
 			close(entered)
@@ -255,7 +283,7 @@ func TestWgPacketLiveOwnerBypassesUnrelatedSetup(t *testing.T) {
 			},
 		}
 		manager.proxyDevices[liveId] = &proxyDeviceState{ProxyDevice: device}
-		wg := wgAdmissionTestProxy(t, manager, map[netip.Addr]server.Id{liveAddr: liveId, coldAddr: coldId})
+		attach(t, manager)
 		livePacket := buildWgTestPacket(t, liveAddr.String(), "198.51.100.21", "established owner")
 		wantPacket := bytes.Clone(livePacket)
 		beforeTaken, beforeReturned, _ := connect.MessagePoolCounts()

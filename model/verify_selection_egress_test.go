@@ -4,7 +4,6 @@ package model
 
 import (
 	"context"
-	"encoding/hex"
 	"net/netip"
 	"testing"
 	"time"
@@ -24,13 +23,13 @@ func TestVerifySelectionRejectsStaleEgressMembership(t *testing.T) {
 				clientId := server.NewId()
 				ip := netip.MustParseAddr("192.0.2.17")
 				hash := VerifyEgressIndexHashWithSettings(ip, settings)
-				hashHex := hex.EncodeToString(hash[:])
+				field, _ := verifyClientEgressField(ip, settings)
 				testVerifySetProvideModes(ctx, clientId)
 				FeedVerifyConnectionEgress(ctx, clientId, server.NewId(), ip, settings)
 				server.Redis(ctx, func(r server.RedisClient) {
 					switch mutation {
 					case "expired-reverse":
-						server.Raise(r.HSet(ctx, verifyClientEgressKey(clientId), hashHex, server.NowUtc().Add(-time.Second).UnixMilli()).Err())
+						server.Raise(r.HSet(ctx, verifyClientEgressKey(clientId), field, server.NowUtc().Add(-time.Second).UnixMilli()).Err())
 					case "missing-reverse":
 						server.Raise(r.Del(ctx, verifyClientEgressKey(clientId)).Err())
 					case "missing-forward":
@@ -40,8 +39,8 @@ func TestVerifySelectionRejectsStaleEgressMembership(t *testing.T) {
 					case "foreign-forward":
 						server.Raise(r.Set(ctx, verifyEgressKey(hash), server.NewId().String(), settings.EgressTtl).Err())
 					case "multiple-addresses":
-						other := VerifyEgressIndexHashWithSettings(netip.MustParseAddr("192.0.2.18"), settings)
-						server.Raise(r.HSet(ctx, verifyClientEgressKey(clientId), hex.EncodeToString(other[:]), server.NowUtc().Add(time.Minute).UnixMilli()).Err())
+						other, _ := verifyClientEgressField(netip.MustParseAddr("192.0.2.18"), settings)
+						server.Raise(r.HSet(ctx, verifyClientEgressKey(clientId), other, server.NowUtc().Add(time.Minute).UnixMilli()).Err())
 					}
 				})
 				if !testVerifyEligible(ctx, clientId) {

@@ -7,7 +7,7 @@ How the server authenticates a request or a connection, and what each credential
 - [REVOKE-OPERATIONS.md](REVOKE-OPERATIONS.md): tracked sessions and revocation.
 - [EMBED1.md](../EMBED1.md): the Embed plan.
 
-State as of 2026-10-09.
+State as of 2026-10-13.
 
 ## Terms
 
@@ -24,6 +24,7 @@ State as of 2026-10-09.
 | API key | `urn_…`, 56 characters, stored as its SHA-256 | `POST /account/api-key` | Never expires | None: both refresh routes refuse it | `POST /account/api-key/remove`. The key is looked up on every request, so removal takes effect on the next one |
 | Auth code | A sign-in code | `POST /auth/code-create` (at most 24 h and 100 uses) | ≤ 24 h | None | Its expiry or uses |
 | MCP OAuth identity | An unsigned request identity (`UnsignedIdentity`, `mcp/auth.go`) | `POST /oauth/authorize`, `POST /oauth/consent` | The OAuth access token's `expires_in` | The OAuth refresh grant (`oauth/grant.go`); both refresh routes refuse it | Expiry of its OAuth tokens |
+| Lag guest token | A client token with the `lag_guest` claim: the one client of a lag.dev guest network | `POST /lag/session` (Public), limited per /24 (/48) of the caller | 30 days as a token; the guest network is removed 24 h after creation | None: lag.dev starts a new guest session | The lag sweep removing the guest network at its expiry |
 
 **The sign-in routes** are `POST /auth/login` (SSO and user auth), `/auth/login-with-password`, `/auth/verify`, `/auth/network-create` and `/auth/code-login`.
 
@@ -33,6 +34,19 @@ State as of 2026-10-09.
 - **Auth codes.** `/auth/code-login` returns a network token whose `CreateTime` is that of the root token that created the code. When session creation is on, a redemption starts an independent session.
 - **SSO.** Google and Apple id tokens are inputs to `/auth/login`, not credentials. Their audience must be one of our OAuth client ids: the `client_id` key of vault `google.yml` and `apple.yml`. An empty value skips the audience check (`session/sso_jwt.go`). The OAuth callbacks (`/auth/apple/callback`, `/auth/google/callback`) only hand the provider's answer back to the app; they mint nothing.
 - **Internal credentials.** Hosted proxy devices run on hosted session credentials (`MintHostedSession`) and never hold a network credential. Internal probes (`SignInternalProbe`) carry no session and their real client root, with the normal lifetime.
+- **Lag guests** ([lag.dev](../../mmm/lag.dev/PLAN.md) A1). A browser on lag.dev gets a guest network marked to expire after 24 h, with one client, and that client's token. The token carries `lag_guest`, which every credential derived from it and every renewal keeps. It works on the two routes the browser needs, `GET /lag/extenders` and `POST /lag/track`, and nowhere else:
+  - every other route answers it 403, "A lag.dev guest token works only on the lag.dev routes.", before its handler runs, whatever its class (§4);
+  - the connect transport refuses it as a refused credential, on h1 and h3 alike, so a guest is never a VPN client;
+  - the guest network gets no automatic data grant: no daily free data, no initial balance and no referral data.
+
+  So a guest administers nothing, buys nothing and connects nowhere. The lag sweep removes the network at its expiry, which ends the token while `reject_expired` is off (§8). Only networks marked as lag guests expire this way.
+
+**No cookies.** Every credential above is sent by the caller in the `Authorization` header. No server reads a cookie, sets one or keeps state in one. This is enforced in code, not left to convention (`session/cookies.go`):
+
+- The router drops `Cookie` and the obsolete `Cookie2` from every request before any route runs. `NewClientSessionFromRequest` drops them again, so neither a handler nor `ClientSession.Header` sees one.
+- The router's response writer drops `Set-Cookie` and `Set-Cookie2`, in any letter case, before the header is sent. That includes the header of an informational (1xx) response.
+
+The reason is the shared domain. Any host under `bringyour.com` can set a cookie for the whole domain and receives every cookie scoped to it, and hosts the operator does not run may be named under it (the planned extender names). A browser's login lives in storage on the ur.io origin ([IDP.md §1](../IDP.md)). A feature that seems to need a cookie needs a different design.
 
 ## 2. The token (`by_jwt`)
 
@@ -60,6 +74,7 @@ State as of 2026-10-09.
 - `root_client_id`: the topmost client row, on client tokens.
 - `pro`: re-derived at every mint.
 - `roles`, `principal`: assigned at client or auth code creation. They mean nothing to the network.
+- `lag_guest`: a lag.dev guest's credential (§1). Limits the token to the lag routes and keeps it off the connect transport.
 - `guest_mode`: deprecated, and false on new tokens.
 
 ## 3. Verification
@@ -92,7 +107,7 @@ Every API request (`ClientSession.Auth`) and every connect transport (`connect/t
 
 ## 4. Route authorization: admin, client, Embed
 
-Every route has a class in `api/route_authz.go`: 235 routes as of 2026-10-09.
+Every route has a class in `api/route_authz.go`: 241 routes as of 2026-10-13.
 
 - `TestEveryRouteIsClassified` fails for any route without a class.
 - At runtime, an unclassified route refuses client tokens.
@@ -100,8 +115,8 @@ Every route has a class in `api/route_authz.go`: 235 routes as of 2026-10-09.
 
 | Class | Routes | Network credential | Client token, ordinary network | Client token, Embed network |
 |---|---|---|---|---|
-| Public | 113 | Not needed | Not needed | Not needed |
-| Client | 43 | Yes | Yes | Yes |
+| Public | 115 | Not needed | Not needed | Not needed |
+| Client | 47 | Yes | Yes | Yes |
 | OwnClient | 5 | Yes, any client | Its own client and children | Its own client and children |
 | OwnClientPayout | 4 | Yes | Its own client | **403** |
 | AppAdmin | 27 | Yes | Yes, until the hard gate | **403** |
@@ -130,6 +145,8 @@ Every route has a class in `api/route_authz.go`: 235 routes as of 2026-10-09.
 - The router reads the bearer token's claims unverified. Network tokens and API keys pass at no cost.
 - A token that names a client is verified before it is refused. A token that fails verification goes to the handler, whose authentication answers 401 as usual.
 - The refusal is **403** with "A client token cannot administer the network. Use the network's root token or an API key." It is 403, not 401, because clients read a 401 as a dead token: the SDK signs the app out when its client-token refresh gets one. A 403 only refuses the call.
+
+**The lag guest gate.** Separate from the classes, every route except `GET /lag/extenders` and `POST /lag/track` (`lagGuestRoutes`) refuses a lag guest's token (§1) with **403**, "A lag.dev guest token works only on the lag.dev routes.". This includes the Public routes. The gate reads the `lag_guest` claim unverified, so any other credential costs one decode of its claims. It verifies a token that claims to be a guest's before refusing it; a token that fails verification goes to the handler, as above. `TestLagGuestTokenServesOnlyTheLagRoutes` keeps every route but the two gated.
 
 **Embed.**
 
@@ -229,5 +246,7 @@ After the flip, a network token that expired unrenewed needs a new sign-in. Turn
 | Refresh routes | `controller/auth_controller.go` | `api/auth_refresh_db_test.go` |
 | Connect transport auth and leases | `connect/transport.go`, `connect/transport_authentication.go`, `session/authorization_lease.go` | `connect/*_test.go` |
 | SSO id tokens | `session/sso_jwt.go`, `session/google_jwt.go`, `session/apple_jwt.go` | `session/*_jwt_test.go` |
+| No cookies: dropped from requests and responses | `session/cookies.go`, `router/router.go`, `router/metrics.go` | `session/cookies_test.go`, `router/router_cookies_test.go` |
+| Lag guests: the claim, the route gate, the connect refusal, no grants | `session/by_jwt.go`, `router/lag_guest_credential.go`, `api/route_authz.go` (`lagGuestRoutes`), `connect/transport_authentication.go`, `controller/lag_session_controller.go`, `model/lag_guest_model.go` | `session/lag_guest_jwt_test.go`, `router/lag_guest_credential_test.go`, `api/lag_route_test.go`, `connect/transport_lag_guest_test.go`, `model/lag_grant_test.go` |
 
 Keep this document current when a class, a credential or a gate changes.

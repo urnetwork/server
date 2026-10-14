@@ -91,6 +91,9 @@ type stDepositCustodyRpc struct {
 	sent         []*types.Transaction
 	receiptKVs   map[common.Hash]*types.Receipt
 	viewCalls    int
+	// balance, when set, is the deposit key's native balance: a transaction
+	// whose gas limit at its fee cap exceeds it is refused as underfunded.
+	balance *big.Int
 }
 
 // Serializes the inherited domain observation with receipt inclusion changes.
@@ -261,6 +264,9 @@ func (self *stDepositCustodyRpc) SendRawTransaction(_ context.Context, raw hexut
 	var tx types.Transaction
 	if err := tx.UnmarshalBinary(raw); err != nil {
 		return common.Hash{}, err
+	}
+	if self.balance != nil && new(big.Int).Mul(new(big.Int).SetUint64(tx.Gas()), tx.GasFeeCap()).Cmp(self.balance) > 0 {
+		return common.Hash{}, errors.New("insufficient funds for gas * price + value")
 	}
 	self.sent = append(self.sent, &tx)
 	if self.receiptKVs[tx.Hash()] != nil {
@@ -542,6 +548,7 @@ func TestStDepositCustodyReconcilesPreparedFundingBeforeNewSizing(t *testing.T) 
 
 // The actual server staging/credit entries send only one exact transfer and
 // one principal deposit, preserving two independent nonce domains and fees.
+// Each moves stake, so each is signed with its stake-move floor.
 func TestStDepositCustodyStagesRoundingOnceAndCreditsExactPrincipal(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		client, _, fixture := newStDepositCustodyFixture(t, 1)
@@ -566,7 +573,7 @@ func TestStDepositCustodyStagesRoundingOnceAndCreditsExactPrincipal(t *testing.T
 			t.Fatal("deposit repeated funding or misattributed principal")
 		}
 		for index, tx := range fixture.sent {
-			if tx.Nonce() != uint64(7+index) || tx.GasPrice().Int64() != 10 || tx.Gas() != 60_000 {
+			if tx.Nonce() != uint64(7+index) || tx.GasPrice().Int64() != 10 || tx.Gas() != []uint64{stV1DepositStagingGasFloor, stV1DepositGasFloor}[index] {
 				t.Fatal("deposit account nonce or fee reservation changed")
 			}
 		}

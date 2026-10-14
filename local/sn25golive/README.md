@@ -114,6 +114,11 @@ out_authority: AUTHORITY.yml
 
 Merge the fragment's `operator_gas_policy` key into st.yml.
 
+A re-signed policy cannot lift an operation's spent signatures or per-intent
+liability, which its first signature recorded. An account whose sends all stop
+at one unsigned intent, stranded before server commit 8d63033c9, is freed as
+`docs/operator/st-stranded-nonce.md` describes.
+
 ### verify-config
 
 ```sh

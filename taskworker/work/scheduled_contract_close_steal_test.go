@@ -78,17 +78,19 @@ func requireScheduledClosesQueued(t testing.TB, ctx context.Context, payer *sche
 
 // Production shape: the queue head is a held payer's run, two other payers
 // with a full owner batch each are queued behind it, and a fourth payer's
-// contracts carry a stored deadline that has not passed. Three claims at the head all refuse on the held
-// grant. Each refusal now closes one other owner's due batch, so the three
-// claims retire both owners' contracts with exact accounting, two owner turns
-// each, while the held payer and the not-yet-due payer stay untouched and
-// every refused close keeps its deadline. On the unchanged worker the same
-// three claims retire nothing.
+// contracts carry a stored deadline that has not passed. Three claims at the
+// head all refuse on the held grant, which stays held through their wait. Each
+// refusal now closes one other owner's due batch, so the three claims retire
+// both owners' contracts with exact accounting, two owner turns each, while
+// the held payer and the not-yet-due payer stay untouched and every refused
+// close keeps its deadline. On the unchanged worker the same three claims
+// retire nothing.
 func TestScheduledContractCloseHeadRefusalsCloseOtherOwners(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		const headCount = 3
+		endScheduledCloseOwnerWait(t)
 		f := newScheduledCloseOwnerFixture(t.Context())
 		head := f.newPayer(t, t.Context(), "synthetic-steal-head-payer")
 		f.addLegacyContracts(t.Context(), head, headCount)

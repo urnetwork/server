@@ -1,6 +1,8 @@
 // A durable task chain owns each tally stream. A finishing transaction commits
 // the increments, an applied receipt, and its next cursor together; Redis
-// cleanup occurs only when that committed successor starts.
+// cleanup occurs only when that committed successor starts. One claim drains
+// every retained page its budget allows, because the successor's claim waits
+// on the shared task queue far longer than its own run-at delay.
 package work
 
 import (
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -18,10 +21,25 @@ import (
 
 var egressTallyRollups = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_provider_egress_tally_rollups_total",
-	Help: "Finite auxiliary tally rollup page reads by read, failed or repair outcome; SQL commitment is recorded by the durable task receipt.",
+	Help: "Finite auxiliary tally rollup drain reads by read, failed or repair outcome; SQL commitment is recorded by the durable task receipt.",
 }, []string{"outcome"})
 
-func init() { prometheus.MustRegister(egressTallyRollups) }
+var egressTallyRollupDrains = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_provider_egress_tally_rollup_drains_total",
+	Help: "Tally rollup drain reads by why reading ended: caught_up or initialize, or a calls, rows, time or error stop that leaves retained records for the next claim.",
+}, []string{"stop"})
+
+var egressTallyRollupRecords = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_provider_egress_tally_rollup_records_total",
+	Help: "Retained tally records read into rollup batches; SQL commitment is recorded by the durable task receipt.",
+})
+
+func init() {
+	prometheus.MustRegister(egressTallyRollups, egressTallyRollupDrains, egressTallyRollupRecords)
+}
+
+// Handoffs are refused as full at a fill ratio of one; warn well before.
+const egressTallyBacklogWarnFill = 0.5
 
 type RollupProviderEgressTalliesArgs struct {
 	Shard      int    `json:"shard"`
@@ -59,6 +77,8 @@ func scheduleProviderEgressTallyOwner(tx server.PgTx, clientSession *session.Cli
 
 // Source reads and coalescing finish before the SQL handback owns tally rows.
 // MaxTime isolates the task from generic batches; its actual I/O is bounded.
+// Only the first page's failure fails or repairs the owner; a later page's
+// failure ends the drain early with the complete pages before it.
 func RollupProviderEgressTallies(args *RollupProviderEgressTalliesArgs, clientSession *session.ClientSession) (*RollupProviderEgressTalliesResult, error) {
 	if args == nil {
 		return nil, fmt.Errorf("missing tally rollup owner")
@@ -67,7 +87,7 @@ func RollupProviderEgressTallies(args *RollupProviderEgressTalliesArgs, clientSe
 	if !ok {
 		return nil, fmt.Errorf("tally rollup requires a durable task owner")
 	}
-	page, err := model.ReadProviderEgressTallyPage(clientSession.Ctx, args.Shard, args.Generation, args.Cursor, args.Initialize, args.RepairFrom)
+	drain, err := model.DrainProviderEgressTallies(clientSession.Ctx, args.Shard, args.Generation, args.Cursor, args.Initialize, args.RepairFrom)
 	if err != nil {
 		if !args.Initialize && model.IsProviderEgressTallyContinuityLoss(err) {
 			// First commit a new owner generation. Only its successor may
@@ -78,13 +98,38 @@ func RollupProviderEgressTallies(args *RollupProviderEgressTalliesArgs, clientSe
 		egressTallyRollups.WithLabelValues("failed").Inc()
 		return nil, err
 	}
-	batch, err := model.PrepareProviderEgressTallyBatch(page.Records)
-	if err != nil {
-		egressTallyRollups.WithLabelValues("failed").Inc()
-		return nil, err
-	}
 	egressTallyRollups.WithLabelValues("read").Inc()
-	return &RollupProviderEgressTalliesResult{TaskId: identity.TaskId, NextCursor: page.NextCursor, Batch: batch}, nil
+	egressTallyRollupDrains.WithLabelValues(drain.Stop).Inc()
+	egressTallyRollupRecords.Add(float64(drain.Records))
+	// A failed call, a shard approaching full at its claim, or a drain that
+	// ends with a known backlog is visible before handoffs are refused. Each
+	// shard logs at most once per claim.
+	logDrain := func() {
+		backlog := drain.Backlog
+		pendingSeconds := 0.0
+		if !backlog.PendingSince.IsZero() {
+			pendingSeconds = max(0, backlog.ObservedAt.Sub(backlog.PendingSince).Seconds())
+		}
+		state := fmt.Sprintf("%d records, %d bytes retained at the claim (fill %.2f), oldest pending %.0fs",
+			backlog.Records, backlog.Bytes, backlog.FillRatio(), pendingSeconds)
+		switch {
+		case drain.Err != nil && drain.Stop == "error":
+			glog.Errorf("[egress]tally shard %d stopped reading after %d pages, %d records: %v; %s\n",
+				args.Shard, drain.Pages, drain.Records, drain.Err, state)
+		case drain.Err != nil:
+			// Reading had ended; the next claim resumes the committed prefix's cleanup.
+			glog.Errorf("[egress]tally shard %d read %d pages, %d records (stop %s), then committed-prefix cleanup failed on call %d: %v; %s\n",
+				args.Shard, drain.Pages, drain.Records, drain.Stop, drain.Calls, drain.Err, state)
+		case egressTallyBacklogWarnFill <= backlog.FillRatio():
+			glog.Warningf("[egress]tally shard %d was %.0f%% full at its claim and drained %d pages, %d records (stop %s); %s; handoffs are refused at 100%%\n",
+				args.Shard, 100*backlog.FillRatio(), drain.Pages, drain.Records, drain.Stop, state)
+		case drain.Stop == "calls" || drain.Stop == "rows" || drain.Stop == "time":
+			glog.Infof("[egress]tally shard %d drain reached its %s budget after %d pages, %d records; %s\n",
+				args.Shard, drain.Stop, drain.Pages, drain.Records, state)
+		}
+	}
+	logDrain()
+	return &RollupProviderEgressTalliesResult{TaskId: identity.TaskId, NextCursor: drain.NextCursor, Batch: drain.Batch}, nil
 }
 
 // The generic Post retry catches plain panics, unlike initial finalization.

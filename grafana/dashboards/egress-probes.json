@@ -858,7 +858,7 @@
     {
       "type": "stat",
       "title": "fleet failure share by class",
-      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them (all). Over the 20 % prober-fault line in every class is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the site pool refresh skips its run while the share of the loads that reached their provider is over the line (this panel counts every failure, a provider that was never reached included). Read from the one fresh taskworker snapshot like the rest of this row.",
+      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them (all). Over the 20 % prober-fault line in every class is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the site pool refresh skips its run while the share of the loads that reached their provider is over the line, or while fewer than a fifth of the recent loads reached their provider at all (this panel counts every failure, a provider that was never reached included). Read from the one fresh taskworker snapshot like the rest of this row.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -4097,7 +4097,7 @@
       "id": 69,
       "type": "timeseries",
       "title": "site pool refresh runs",
-      "description": "Pool refresh runs by result: refreshed, skipped because the fleet-wide failure share was over the prober-fault line, or failed. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes: any non-zero value is a run; a skip is the refresh keeping a prober fault from emptying the pool, and failures with no refresh after them are the refresh-not-running finding of monitor signal §2.19b.",
+      "description": "Pool refresh runs by result: refreshed, skipped (the fleet-wide failure share of the loads that reached their provider was over the 20 % prober-fault line, or fewer than the 20 % prober-fault floor of the recent loads reached their provider at all), or failed. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes: any non-zero value is a run; a skip is the refresh keeping a prober fault from emptying the pool, and failures with no refresh after them are the refresh-not-running finding of monitor signal §2.19b.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -6100,7 +6100,7 @@
       "id": 115,
       "type": "timeseries",
       "title": "auxiliary egress tally handoffs and rollups / min",
-      "description": "Auxiliary tally handoffs by accepted, unavailable, invalid or full outcome on every service that hands one off (never measured quota credits), and tally rollup page reads by outcome. SQL commitment is recorded by the durable task receipt.",
+      "description": "Auxiliary tally handoffs by accepted, unavailable, invalid or full outcome on every service that hands one off (never measured quota credits), tally rollup drains by outcome and by why reading ended, and the records they read. A calls, rows, time or error stop leaves retained records for the shard's next claim. SQL commitment is recorded by the durable task receipt.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -6139,6 +6139,270 @@
           "refId": "B",
           "expr": "sum by (outcome) (rate(urnetwork_provider_egress_tally_rollups_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
           "legendFormat": "rollup {{outcome}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(urnetwork_provider_egress_tally_rollup_records_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "rollup records"
+        },
+        {
+          "refId": "D",
+          "expr": "sum by (stop) (rate(urnetwork_provider_egress_tally_rollup_drains_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "drain {{stop}}"
+        }
+      ]
+    },
+    {
+      "id": 116,
+      "type": "timeseries",
+      "title": "auxiliary egress tally backlog by shard",
+      "description": "Retained tally records or bytes as a fraction of each place shard's admission bound, whichever is fuller. Handoffs are refused as full at 100%. A drain that keeps up holds about two claims of a shard's runs. Read at the first call of each owner's latest drain, after at most one page of cleanup, so within 256 records of the occupancy producers met at the claim. Each taskworker publishes a shard's depth for five minutes after it reads it; the maximum across taskworkers is the fleet view.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 360
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (shard) (urnetwork_provider_egress_tally_queue_fill_ratio{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "shard {{shard}}"
+        }
+      ]
+    },
+    {
+      "id": 117,
+      "type": "timeseries",
+      "title": "auxiliary egress tally oldest pending record by shard",
+      "description": "Age of each place shard's oldest unacknowledged tally record at the first call of its owner's latest drain: about one claim interval when the owner keeps up, rising while a backlog grows. Each taskworker publishes it for five minutes after it reads the shard; the maximum across taskworkers is the fleet view.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 360
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (shard) (urnetwork_provider_egress_tally_queue_oldest_pending_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "shard {{shard}}"
+        }
+      ]
+    },
+    {
+      "id": 118,
+      "type": "timeseries",
+      "title": "auxiliary egress tally retained records and bytes by shard",
+      "description": "Tally records (left) and record bytes (right) each place shard retained, including committed records its next claim deletes. Handoffs are refused as full at 16384 records or 16 MiB. Read at the first call of each owner's latest drain, after at most one page of cleanup, so within 256 records of the occupancy producers met at the claim. Each taskworker publishes a shard's depth for five minutes after it reads it; the maximum across taskworkers is the fleet view.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 368
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (shard) (urnetwork_provider_egress_tally_queue_records{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "records shard {{shard}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (shard) (urnetwork_provider_egress_tally_queue_bytes{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "bytes shard {{shard}}"
+        }
+      ]
+    },
+    {
+      "id": 119,
+      "type": "timeseries",
+      "title": "auxiliary egress tally owner read age by shard",
+      "description": "Seconds since any taskworker last completed the first call of a drain of each place shard (left): about one claim interval while its owner runs, rising without bound when the owner is stuck, for example failing its first call. The observed time is never withheld. Right: shards that no taskworker draining tally shards has read since it started.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 368
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max by (shard) (urnetwork_provider_egress_tally_queue_observed_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} > 0)",
+          "legendFormat": "shard {{shard}}"
+        },
+        {
+          "refId": "B",
+          "expr": "count(max by (shard) (urnetwork_provider_egress_tally_queue_observed_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"}) == 0) or vector(0)",
+          "legendFormat": "shards never read"
+        }
+      ]
+    },
+    {
+      "id": 120,
+      "type": "timeseries",
+      "title": "URL probe passes held and pass limit by taskworker",
+      "description": "The URL shard passes each taskworker instance may hold at once, read from the probe geometry when it starts (instance_url_concurrency over the per-pass URL concurrency, at most the shard count), beside the passes it holds now. A fleet whose limits add up to fewer passes than the configured shards leaves shards waiting for a free instance.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 376
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (host, block, instance) (urnetwork_url_probe_instance_pass_limit{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "limit {{host}} {{block}} {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (host, block, instance) (urnetwork_url_probe_scheduler_inflight{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "held {{host}} {{block}} {{instance}}"
         }
       ]
     }

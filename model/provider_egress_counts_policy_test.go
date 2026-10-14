@@ -17,6 +17,7 @@ func TestProviderEgressCountsPolicyKeySeparatesCountRules(t *testing.T) {
 		"country":     func(s *EgressIndexSettings) { s.CountryGate = !s.CountryGate },
 		"url success": func(s *EgressIndexSettings) { s.OnlineRequiresUrlSuccess = !s.OnlineRequiresUrlSuccess },
 		"floor":       func(s *EgressIndexSettings) { s.OnlineSuccessCountryFloor += 0.01 },
+		"margin":      func(s *EgressIndexSettings) { s.OnlineSuccessCountryFloorMargin += 0.01 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := *settings

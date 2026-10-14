@@ -13704,7 +13704,8 @@ probe task, which holds every load of a run, therefore records each one in
 marks the loads whose exit was **healthy** — it passed at least nine in ten of
 the *other* scored sites of the same run, after their retries. A site's
 failure share is its failed healthy loads over its healthy loads in the
-window (`SiteWindow`, three days), per class:
+window (`SiteWindow`, three days, from no day before the first reached-only
+tally day below), per class:
 
 ```sql
 SELECT d.name, d.class,
@@ -13713,7 +13714,8 @@ SELECT d.name, d.class,
 FROM provider_egress_destination d
 JOIN provider_egress_site_tally t ON t.name = d.name
 WHERE d.active
-  AND date_trunc('day', now() at time zone 'utc' - interval '3 days')::date <= t.tally_day
+  AND GREATEST(date_trunc('day', now() at time zone 'utc' - interval '3 days')::date,
+               DATE '2026-10-14') <= t.tally_day
 GROUP BY d.name, d.class;
 ```
 
@@ -13722,7 +13724,11 @@ refresh judges it on all of its loads and says so in its log line. Either way
 only runs that reached their provider are tallied: a URL that failed before
 any destination answered (`dial_dns`, `dial_tcp` and their timeout and
 combined stages, with no status, response byte, redirect or TLS verdict) is an
-offline or unreachable exit, which says nothing about the site. The
+offline or unreachable exit, which says nothing about the site. Tally days
+before 2026-10-14 (`model.ProviderEgressSiteTallyContactedSince`) still count
+those runs as site failures, so neither the refresh nor this signal reads a
+day before it; the refresh's `[egresssites]` log line says when that cuts the
+window short. The
 refresh records its judgement on the row (`failure_share`, `sample_count`,
 `judged_time`, and `above_retire_since` while the share stands above the
 retire line with enough samples), and the signal reads that record together
@@ -13876,7 +13882,10 @@ because retiring sites during a prober fault empties the pool for nothing —
 the refresh skips its run while the failure share of the loads that reached
 their provider is above the prober-fault line for that reason (a run that
 never reached its provider is no evidence of a prober fault, and is counted
-apart in the refresh's `[egresssites]` log line). Verify: the site's failure share on healthy exits falls under
+apart in the refresh's `[egresssites]` log line), and while fewer than
+`SiteProberFaultReachedShare` (20 %) of the recent loads reached their
+provider at all, the shape of a fault that ends runs before any destination
+answers. Verify: the site's failure share on healthy exits falls under
 the retire line within one refresh cadence after the swap, and the
 quality-bucket count of §2.9a stops falling.
 
@@ -29558,13 +29567,14 @@ standalone DeviceLocal worked because it did not arrive behind that saturated
 process queue. `WindowStatus.Failed` remained a presentation latch; it did not
 stop enumeration or retry.
 
-Current proxy builds give each hosted DeviceLocal one private carrier budget
-derived from `config/main/proxy.yml: device_memory_budget` (24 MiB in main).
+Current proxy builds explicitly select the shared SDK low-memory profile for
+each hosted DeviceLocal, including on Linux. Its private budgets derive from
+`config/main/proxy.yml: device_memory_budget` (32 MiB by default in main).
 Devices share one manager-lifetime NetworkSpace for immutable metadata and
 discovery, but each owns its mutable JWT/refresh session, control client
 strategy (including DoH concurrency and dial pacing), and memory admission.
 The private strategy's idle sockets and DoH cache are not a hard-RSS component
-of the 24 MiB DeviceLocal target; compare host reserve and per-device RSS trend
+of the 32 MiB DeviceLocal target; compare host reserve and per-device RSS trend
 after deployment before claiming spare physical capacity.
 
 **Private-control lifecycle qualifier:** the strategy is device-owned, but its
@@ -29583,7 +29593,7 @@ generation before assigning an incident to this mechanism.
 Use these aggregate, identity-free metrics:
 
 - `urnetwork_proxy_device_memory_target_bytes`: should equal approximately
-  `urnetwork_proxy_devices_live * 24 MiB` in main.
+  `urnetwork_proxy_devices_live * 32 MiB` in main's canonical configuration.
 - `urnetwork_proxy_platform_transports_max`: should scale as
   `urnetwork_proxy_devices_live * 16`; a flat 16 with multiple live devices is
   a pre-fix/shared-budget deployment.
@@ -29656,7 +29666,8 @@ For a reported proxy failure, correlate pending H1 with these owner-window
 aggregates and bounded available retry controls. If pending remains zero while the window repeatedly enumerates and
 evaluates candidates, investigate provider reachability/auth. If pending is
 sustained, compare `transports_used` with `transports_max` and verify both the
-24 MiB config and the per-device SDK build before blaming the provider fleet.
+32 MiB canonical config (or its deliberate override) and the per-device SDK
+build before blaming the provider fleet.
 
 The `proxy-transport` probe performs that identity-free aggregate check on the
 newest actual-scrape-fresh process generation. Its authoritative denominator is
@@ -30707,12 +30718,23 @@ pressure, and newest-generation selection during rollout.
 ### 14.7d Proxy private device memory targets
 Probe: `proxy-device-target`
 
-Every hosted Proxy `DeviceLocal` owns its own 24 MiB steady-state memory target
+Every hosted Proxy `DeviceLocal` defaults to its own 32 MiB steady-state target
 and private transport admission budget. No manager-wide sum of targets may
-reject an otherwise valid device open. This is **not** a 24 MiB hard cap on
+reject an otherwise valid device open. This is **not** a 32 MiB hard cap on
 each device's RSS, and removing the old process-wide gate does not create
 physical RAM. Device count and host reserve must be considered together; more
 hardware or rebalancing is required when the active-client load cannot fit.
+
+The proxy selects the SDK low profile explicitly instead of inferring it from
+the host OS. A positive `device_memory_budget` override changes per-device
+sizing while keeping that profile; zero, negative, and malformed values remain
+invalid. Metrics report the actual installed targets, including overrides.
+The monitor below checks the canonical main target: a deliberate different
+target produces a policy-mismatch warning, not a runtime admission refusal.
+Reconcile an approved override before treating the warning as an old build.
+This per-owner choice does not change the process Go memory limit, global
+message pools, or normal Server/Connect settings. The separate proxy TUN and
+other process allocations remain outside the SDK tracked-use sum.
 
 Once per minute, join fresh `urnetwork_proxy_devices_live`,
 `urnetwork_proxy_device_memory_target_bytes`, and
@@ -30720,7 +30742,7 @@ Once per minute, join fresh `urnetwork_proxy_devices_live`,
 `process_start_time_seconds` on `env`, `host`, `block`, and `instance`.
 Use the active services.yml Proxy host/block topology as denominator, select
 the newest fresh generation per slot, and require fresh source timestamps.
-For each process, the aggregate target must equal live devices × 24 MiB. The
+For canonical main, the aggregate target must equal live devices × 32 MiB. The
 aggregate is observation only; it is not an admission budget.
 Also query the former `urnetwork_proxy_device_memory_budget_bytes` metric as
 optional rollout evidence. A fresh positive value on the newest process

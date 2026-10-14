@@ -33,6 +33,60 @@ func snMainnetMigrationTestEnv() *server.TestEnv {
 	return environment
 }
 
+// A catalog fixture runs the complete coherence query once for each projected
+// fault, a few seconds of PostgreSQL time apiece, so a fixed budget fits one
+// host and not the next. On a loaded build host on 2026-10-14 the native-fee
+// foreign-key custody fixture took 508 s against the five minutes it had, and
+// the partial-index guard fixture ran past its minute under the race
+// detector. The budget follows the run's own deadline instead: the package's
+// -timeout, less a margin to report the failure and drop the database in. A
+// run without a deadline gets snMainnetMigrationFixtureBudget.
+func snMainnetMigrationFixtureContext(t testing.TB) (context.Context, context.CancelFunc) {
+	if test, ok := t.(interface{ Deadline() (time.Time, bool) }); ok {
+		if deadline, ok := test.Deadline(); ok {
+			return context.WithDeadline(t.Context(), deadline.Add(-snMainnetMigrationFixtureMargin))
+		}
+	}
+	return context.WithTimeout(t.Context(), snMainnetMigrationFixtureBudget)
+}
+
+const (
+	snMainnetMigrationFixtureBudget = 30 * time.Minute
+	snMainnetMigrationFixtureMargin = 30 * time.Second
+)
+
+// A test value that reports a chosen deadline, or none.
+type snMainnetMigrationDeadlineTB struct {
+	testing.TB
+	deadline time.Time
+	ok       bool
+}
+
+func (self snMainnetMigrationDeadlineTB) Deadline() (time.Time, bool) {
+	return self.deadline, self.ok
+}
+
+// The budget ends a margin before the run's own deadline. A run without a
+// deadline, or a test value that cannot report one, gets the fallback.
+func TestMigrationsFixtureBudgetFollowsTheRunDeadline(t *testing.T) {
+	deadline := time.Now().Add(47 * time.Minute)
+	ctx, cancel := snMainnetMigrationFixtureContext(snMainnetMigrationDeadlineTB{TB: t, deadline: deadline, ok: true})
+	budgetEnd, ok := ctx.Deadline()
+	cancel()
+	if !ok || !budgetEnd.Equal(deadline.Add(-snMainnetMigrationFixtureMargin)) {
+		t.Fatalf("budget ends %s, %t; the run's deadline is %s", budgetEnd, ok, deadline)
+	}
+	for _, without := range []testing.TB{snMainnetMigrationDeadlineTB{TB: t, deadline: deadline}, struct{ testing.TB }{t}} {
+		before := time.Now()
+		ctx, cancel := snMainnetMigrationFixtureContext(without)
+		budgetEnd, ok := ctx.Deadline()
+		cancel()
+		if !ok || budgetEnd.Before(before.Add(snMainnetMigrationFixtureBudget)) || time.Now().Add(snMainnetMigrationFixtureBudget).Before(budgetEnd) {
+			t.Fatalf("budget without a run deadline ends %s, %t; want %s from now", budgetEnd, ok, snMainnetMigrationFixtureBudget)
+		}
+	}
+}
+
 // Render catalog values as psql does, without replacing any predicate result.
 func (self *snMainnetMigrationTxSource) PostgreSQL(ctx context.Context, query string) ([]Row, error) {
 	result, err := self.tx.Query(ctx, query)
@@ -68,7 +122,7 @@ func (self *snMainnetMigrationTxSource) PostgreSQL(ctx context.Context, query st
 // The independent local fixture owns both the connection and joined rollback.
 func snMainnetMigrationFaultTx(t testing.TB, callback func(context.Context, server.PgTx)) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	ctx, cancel := snMainnetMigrationFixtureContext(t)
 	defer cancel()
 	server.Db(ctx, func(conn server.PgConn) {
 		tx, err := conn.Begin(ctx)
@@ -256,7 +310,7 @@ func TestMigrationsMainnetOriginalSignalReportsEachMissingContract(t *testing.T)
 // old deployed 773/775 bodies are tested separately through the upgrade below.
 func TestMigrationsMainnetOriginalCatalogAcrossPublishedPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+		ctx, cancel := snMainnetMigrationFixtureContext(t)
 		defer cancel()
 		for version := 769; version <= server.MigrationCount(); version++ {
 			server.ApplyDbMigrationsUpTo(ctx, version)
@@ -347,7 +401,7 @@ func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
 func TestMigrationsMainnetOriginalForeignKeyCustody(t *testing.T) {
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+		ctx, cancel := snMainnetMigrationFixtureContext(t)
 		defer cancel()
 		for _, foreignKey := range []struct {
 			version                   int

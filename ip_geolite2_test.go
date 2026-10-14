@@ -732,3 +732,79 @@ func TestGetIpInfoHandBuiltGeoLite2City(t *testing.T) {
 	connect.AssertNotEqual(t, err, nil)
 	connect.AssertEqual(t, ipInfo == nil, true)
 }
+
+// Records the failure a test helper reports and stops the helper there.
+type ipDbTestRefusal struct {
+	testing.TB
+	message string
+}
+
+func (self *ipDbTestRefusal) Fatal(args ...any) {
+	self.message = fmt.Sprint(args...)
+	panic(self)
+}
+
+// A test in another package reads the database at an explicit path, whatever
+// the config home holds, and the process's reader is back when that test ends.
+// A file the runtime would refuse is refused, and nothing stands in.
+func TestUseIpDbFileForTestStandsInUntilTheTestEnds(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, databaseType string) string {
+		path := filepath.Join(dir, name)
+		data := &mmdbTestData{}
+		if err := os.WriteFile(path, mmdbTestFile(databaseType, data, geoLite2TestRecord(data)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	addr := netip.MustParseAddr(geoLite2TestRecordIp)
+	connect.AssertEqual(t, ipOverrideFor(addr) == nil, true)
+
+	// the process's reader for this test: a read of it is counted and fails
+	processReads := 0
+	previousIpDb := ipDb
+	ipDb = func() (*mmdb.Reader, schemaType) {
+		processReads += 1
+		panic(fmt.Errorf("the process's reader was read"))
+	}
+	defer func() { ipDb = previousIpDb }()
+	readProcess := func() {
+		defer func() { recover() }()
+		GetIpInfo(addr)
+	}
+
+	t.Run("stand-in", func(t *testing.T) {
+		UseIpDbFileForTest(t, write("geolite2.mmdb", string(schemaTypeGeoLite2City)))
+		ipInfo, err := GetIpInfo(addr)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, *ipInfo, geoLite2Samples[0].ipInfo)
+	})
+	connect.AssertEqual(t, processReads, 0)
+	readProcess()
+	connect.AssertEqual(t, processReads, 1)
+
+	refusal := &ipDbTestRefusal{TB: t}
+	func() {
+		defer func() { recover() }()
+		UseIpDbFileForTest(refusal, write("country.mmdb", "GeoLite2-Country"))
+	}()
+	if !strings.Contains(refusal.message, "\"GeoLite2-Country\"") {
+		t.Fatalf("a GeoLite2-Country file: expected a refusal naming the type, got %q", refusal.message)
+	}
+	readProcess()
+	connect.AssertEqual(t, processReads, 2)
+}
+
+// The repository's synthetic database, which a suite reads in place of the
+// deployment's: it has no record, so every address is unknown geography, the
+// unspecified address of a local session included.
+func TestRepositorySyntheticIpDbKnowsNoAddress(t *testing.T) {
+	UseIpDbFileForTest(t, filepath.Join("local", "testdata", "config", "local", "mmdb", "geolite2.mmdb"))
+	for _, rawIp := range []string{"0.0.0.0", "::", geoLite2TestRecordIp, "2001:4860:4860::8888"} {
+		addr := netip.MustParseAddr(rawIp)
+		connect.AssertEqual(t, ipOverrideFor(addr) == nil, true)
+		ipInfo, err := GetIpInfo(addr)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, *ipInfo, IpInfo{})
+	}
+}

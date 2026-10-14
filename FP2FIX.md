@@ -11,7 +11,9 @@ keeps being probed and its first success restores it at the next publication.
 A country guard stops the rule where the probe itself fails: a published
 country is exempt when fewer than `online_success_country_floor` (default 0.36,
 pending the owner's confirmation) of its measured Online providers have a
-success. `online_requires_url_success: false` in provider.yml is the kill
+success, and stays exempt until its share reaches the floor plus
+`online_success_country_floor_margin` (default 0.03, also pending
+confirmation). `online_requires_url_success: false` in provider.yml is the kill
 switch. The rule changes Online-mode answers, location lists and counts, and
 the Online tier that a Quality or Speed answer reaches only after both native
 buckets run short. It does not change native Quality or Speed membership or
@@ -165,8 +167,11 @@ measured). The row has two switches. A published country is exempt when fewer
 than `online_success_country_floor` of its measured Online providers (common
 gate passes with current evidence) have a success, because there the probe
 itself fails, not the providers. `online_requires_url_success: false` in
-provider.yml turns the row off. Explicit client ids and `force_minimum` keep
-only the common gates, as they do for the ratio row.
+provider.yml turns the row off. Explicit client ids, and `force_minimum` with
+`rank_mode` quality or speed, keep only the common gates, as they do for the
+ratio row. `force_minimum` with `rank_mode` online changes nothing, so that
+answer is the Online pool without the providers the row excludes; no current
+caller sends it.
 
 The probe records URL successes, errors, and security exceptions. There is no
 separate blackhole definition or cheap-blackhole admission gate. The indexer
@@ -816,30 +821,86 @@ gate matrix.
 - **Probing is unchanged.** `providerUrlProbeAdmissionSql`, the rolling quota,
   the census `N`, the hard-exclusion set and its Redis publication do not read
   the row.
-- **Request time.** Explicit client ids and `force_minimum` keep only the
-  common gates (reliability, ARIN risk, probe security). This follows the
-  convention above that security and risk rules apply there and
-  bucket-membership rules do not; the ratio row works the same way.
-  `force_minimum` is also the operator and egress-prober census of every
-  provider that can accept a contract.
+- **Request time.** Explicit client ids, and `force_minimum` with `rank_mode`
+  quality or speed, keep only the common gates (reliability, ARIN risk, probe
+  security). This follows the convention above that security and risk rules
+  apply there and bucket-membership rules do not; the ratio row works the same
+  way. `force_minimum` is also the operator and egress-prober census of every
+  provider that can accept a contract. The exception: `force_minimum` with
+  `rank_mode` online changes nothing, since Online has no minimums to force,
+  so that answer is the Online pool and leaves out the providers the row
+  excludes. No current caller sends it (the sdk's `rank_mode` is quality or
+  speed); the 2026-10-13 commit message's "explicit client ids and
+  force_minimum are unchanged" holds for quality and speed only.
 - **Country guard.** A published country is exempt when fewer than
   `online_success_country_floor` of its measured Online providers have a
   success. Measured Online providers are common-gate passes with current
   evidence. The test is share < floor, and a country with no measured provider
-  is exempt.
+  is exempt. Shares and floors are compared exactly, in integer millionths, so
+  a share equal to the floor as written is never below it (a float product put
+  7 of 25 below a floor of 0.28).
   - Each fleet pass computes the guard over its own population from evidence it
     already loaded: the score export, the location counts and the dashboard
     counts.
-  - The score export publishes its counts to Redis for provider status,
-    `bringyourctl provider inspect` and the exempt-country gauge. A reader
-    without that document exempts every country.
+  - **Margin.** A country the score export's last trusted guard exempted stays
+    exempt until its share reaches the floor plus
+    `online_success_country_floor_margin` (default 0.03, pending the owner's
+    confirmation; a margin outside [0, 1] or not a number keeps the default,
+    and the floor plus the margin is at most one). A country that was not
+    exempt becomes exempt only below the floor. IN and ZA measured 0.35 against
+    the 0.36 floor, so without the margin a share moving by one provider would
+    move most of a country's measured providers in and out of Online from one
+    pass to the next. Every pass (the score export, the location counts, the
+    dashboard counts) takes that previous state from the guard the export last
+    published, read from Redis. Main runs each pass in whichever taskworker
+    process claims it (over 12 hours, 173 export passes ran in 39 processes),
+    so a state each process kept for itself would move a country inside the
+    margin in and out of its exemption as the passes moved between processes.
+    Without a trusted guard (none published, an unreadable or version 1 one, or
+    one published more than 60 minutes ago) a pass decides by the plain floor.
+    A margin of 0 is the plain floor. The share of exactly the floor plus the
+    margin ends the exemption, as the floor itself is not exempt. The export's
+    log names the guard it held the margin against and marks a country held
+    only by the margin `by margin`.
+  - The score export publishes its guard to Redis for provider status,
+    `bringyourctl provider inspect` and the exempt-country gauge: the kill
+    switch, floor and margin it applied, each measured country's verdict and
+    the counts behind it (document version 2). Since a verdict depends on the
+    export's previous one, a reader could not rederive it from the counts.
+    Those readers decide by the document alone, not by their own provider.yml,
+    so they say what the export did while provider.yml or the code differs
+    between hosts, as during a rollout or after a rollback. A reader without a
+    trusted document exempts every country: none is published, it is
+    unreadable, it is version 1 (counts only, which each reader decided under
+    its own settings), or it was published more than 60 minutes ago. A process
+    reads the document at most once every 30 seconds, however many status calls
+    ask, and while one call reads, the others keep the last result; a read does
+    not fail with the status call that started it, which may end early. A
+    failure to read it is logged once when it starts and once when it ends: as
+    information while none is published yet or the published one is version 1,
+    the expected states of a rollout, and as an error otherwise. The publishing
+    process uses what it published at once.
   - On 2026-10-13 the structurally failing countries measured success shares
     of VN 0.03, JP 0.24, RU 0.25, TW 0.27, ZA 0.35 and IN 0.35. The default of
     0.36, pending the owner's confirmation, exempts them all. HK, the lowest
     country of a hundred or more providers where the probe works, measured
     0.46.
 - **Kill switch.** `online_requires_url_success: false` in provider.yml takes
-  effect at each pass's next settings read.
+  effect at each pass's next settings read. provider.yml is parsed once and
+  each of the rule's keys is decoded on its own, so a malformed value, or a key
+  the file gives twice, resets nothing else in provider.yml; before this,
+  `online_requires_url_success: "false"` or a floor of `36%` reset every egress
+  setting, `native_reader_enabled` included, and left the rule on. A kill
+  switch that is not `true` or `false`, one the file gives twice, or a
+  provider.yml that is not yaml at all (a tab in its indentation, say) disables
+  the rule: that may be an attempt to turn it off, and the behaviour before the
+  rule is the one to fall back to. A malformed floor keeps the default, like
+  one outside [0, 1]. Such a file no longer panics the passes and readers that
+  read the rollout flag `enable_egress_test` (the score export, the location
+  counts, the dashboard counts, provider status and inspect); the flag reads as
+  off. The reliability rollup still fails on it: it reads the subscriber
+  quality policy from the same file, and that reader fails closed on a file it
+  cannot decode.
 - **Visibility.** Excluded providers are reported under the `no_success`
   reason, which comes after reliability, ARIN risk and TLS and before
   unprobed or health. The counts policy schema is now 2. The provider status

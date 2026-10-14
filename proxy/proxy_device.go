@@ -36,12 +36,13 @@ func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 // exhausting the pool for every device's control operations.
 const defaultHostedMintConcurrency = 4
 
-const defaultProxyDeviceMemoryTargetByteCount = model.ByteCount(24 * model.Mib)
+const defaultProxyDeviceMemoryTargetByteCount = model.ByteCount(sdk.LowMemoryDeviceTargetByteCount)
 
 // proxyDeviceMemoryTargetByteCountFromConfig loads the single DeviceLocal
-// steady-state target. Older environments without proxy.yml retain the 24 MiB
-// default; a present but invalid value fails startup instead of silently
-// changing each hosted device's private target.
+// steady-state target. Missing configuration uses the shared 32 MiB low-profile
+// default. A positive override changes this device's sizing target, not its
+// low-profile selection or any process-wide memory limit. Invalid values fail
+// startup instead of silently changing each hosted device's private target.
 func proxyDeviceMemoryTargetByteCountFromConfig() model.ByteCount {
 	resource, err := server.Config.SimpleResource("proxy.yml")
 	if err != nil {
@@ -699,8 +700,9 @@ type ProxyDeviceSettings struct {
 	Mtu                           int
 	ProxyDeviceIdleTimeout        time.Duration
 	SequenceBufferSize            int
-	// MemoryTargetByteCount is the one SDK DeviceLocal target from which DNS,
-	// mux, transfer, P2P, and carrier budgets are derived.
+	// MemoryTargetByteCount sizes the shared SDK low profile's private DNS,
+	// mux, transfer, P2P, and carrier budgets. A positive override preserves
+	// the low profile; it is not a whole-device RSS or process-wide limit.
 	MemoryTargetByteCount model.ByteCount
 	// DisableWindowIdentityPersistence turns off the window identity store
 	// (PROXYDRAIN1.md §3.5); a recreated device then mints fresh window
@@ -950,14 +952,16 @@ func proxyDeviceTunSettings(settings *ProxyDeviceSettings) *connect.TunSettings 
 }
 
 // newProxyDeviceLocalSettings builds the immutable hosted-device policy used
-// by every server/proxy device. HostedIncompatible pins the SDK carrier to H1
-// and blocks Auto, H3, DNS, direct, local-route, and provider reconfiguration.
+// by every server/proxy device. The shared low profile is explicit even on
+// Linux; it does not change the host's Go limit or process-global pools.
+// HostedIncompatible pins H1 and blocks Auto, H3, DNS, direct, local-route,
+// and provider reconfiguration.
 func newProxyDeviceLocalSettings(
 	ctx context.Context,
 	proxyDeviceConfig *model.ProxyDeviceConfig,
 	proxyDeviceSettings *ProxyDeviceSettings,
 ) *sdk.DeviceLocalSettings {
-	deviceLocalSettings := sdk.DefaultDeviceLocalSettings()
+	deviceLocalSettings := sdk.DefaultLowMemoryDeviceLocalSettings()
 	// embedded devices must be silent: this host runs thousands of clients
 	deviceLocalSettings.DisableLogging = true
 	// The SDK derives every DeviceLocal-owned memory area from this one target,

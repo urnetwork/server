@@ -3872,6 +3872,13 @@ func providerEgressTestEnabledFromResource(resource *server.SimpleResource, err 
 	if err != nil || resource == nil {
 		return false
 	}
+	// Bool parses with Parse, which panics on a file that is not yaml or that
+	// gives a key twice, and every pass that applies the egress rules reads
+	// this flag. ParseE reports that instead, and once it has succeeded, Bool
+	// reads its result.
+	if _, err := resource.ParseE(); err != nil {
+		return false
+	}
 	enabled := resource.Bool("enable_egress_test")
 	return len(enabled) == 1 && enabled[0]
 }
@@ -3890,9 +3897,10 @@ type providerCountFilter struct {
 	blackholed map[server.Id]bool
 	// Security exceptions persist until later authenticated TLS from the same URL.
 	tlsAuthenticationFailed map[server.Id]bool
-	// The URL-success rule's country guard, set by each consumer after the
-	// filter loads: a fleet pass counts its own population, a scoped reader
-	// reads the score export's. Nil exempts every country.
+	// The URL-success rule's country guard with the kill switch and floor it
+	// was decided under, set by each consumer after the filter loads: a fleet
+	// pass counts its own population under its own settings, a scoped reader
+	// reads the score export's. Nil applies the rule nowhere.
 	onlineSuccessBaseline *providerOnlineSuccessBaseline
 }
 
@@ -4128,12 +4136,14 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	if err := publishProviderHardExclusions(ctx, clientIds, countFilter, ttl); err != nil {
 		return fmt.Errorf("publish provider hard exclusions: %w", err)
 	}
-	// the URL-success rule's country guard over this same population
-	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(providerCountRows), egressSettings)
+	// the URL-success rule's country guard over this same population, its
+	// margin held against the export's last published guard
+	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(providerCountRows), egressSettings, readProviderOnlineSuccessPreviousBaseline(ctx, "the location counts"))
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
-		// Count the same common-gate passes exposed as online supply.
+		// Count the providers exposed as online supply: the common-gate
+		// passes the URL-success rule keeps.
 		countProviderRows := func() map[server.Id]int {
 			locationClientCounts := map[server.Id]int{}
 			for _, row := range providerCountRows {
@@ -4887,8 +4897,9 @@ type RankMode = string
 const (
 	RankModeQuality RankMode = "quality"
 	RankModeSpeed   RankMode = "speed"
-	// Every online provider: each provider that passed the common gates at
-	// export, native Quality and Speed members included (ClientScore.Online).
+	// Every online provider: each provider that passed the common gates and
+	// the URL-success rule at export, native Quality and Speed members
+	// included (ClientScore.Online).
 	// It has no minimums, no subscriber validation and no borrowing, and
 	// draws its members uniformly: the ip_family filter still decides which
 	// families are eligible, but no family is preferred over another. It
@@ -4905,7 +4916,9 @@ type FindProviders2Args struct {
 	ExcludeDestinations [][]server.Id   `json:"exclude_destinations"`
 	// "quality" (the default when empty), "speed" or "online". force_minimum
 	// is accepted with "online" and changes nothing: the online bucket has
-	// no minimums to force.
+	// no minimums to force. Unlike a forced quality or speed answer, which
+	// keeps only the common gates, a forced online answer therefore leaves out
+	// the providers the URL-success rule excludes.
 	RankMode     RankMode `json:"rank_mode"`
 	ForceMinimum bool     `json:"force_minimum"`
 	// IpFamily filters providers by proven address family, in the connect
@@ -4993,8 +5006,9 @@ type ClientScore struct {
 	// NetworkOnly: an entry written before this field existed must keep
 	// today's behavior. See IpFamily and network_client_ip_family.go.
 	IpFamilies uint8
-	// Every common-gate pass belongs to online, including native quality/speed
-	// members. PassesMinimums distinguishes each mode's native membership.
+	// Every common-gate pass the URL-success rule keeps belongs to online,
+	// including native quality/speed members. PassesMinimums distinguishes
+	// each mode's native membership.
 	Online bool
 
 	// set only on the top-level score, never on the `LookbackClientScores`
@@ -5414,7 +5428,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	countFilter.healthCounts, countFilter.healthWindowEnd = getAllProviderEgressHealthCountsSnapshot(ctx)
 	// The URL-success rule's country guard over the public cohort, the
 	// population of the location counts and the dashboard, from the evidence
-	// just loaded. Computed before the shadow observer reads any facts.
+	// just loaded, its margin held against the guard the last export
+	// published, whichever process ran it. Computed before the shadow
+	// observer reads any facts.
 	onlineSuccessBaseline := func() *providerOnlineSuccessBaseline {
 		clientIdCountryCodes := map[server.Id]string{}
 		for _, row := range pendingScores {
@@ -5422,7 +5438,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				clientIdCountryCodes[row.score.ClientId] = normalizeCountryCode(row.egress.publishedCountryCode)
 			}
 		}
-		return newProviderOnlineSuccessBaseline(countFilter, clientIdCountryCodes, egressSettings)
+		return newProviderOnlineSuccessBaseline(countFilter, clientIdCountryCodes, egressSettings, readProviderOnlineSuccessPreviousBaseline(ctx, "the score export"))
 	}()
 	countFilter.onlineSuccessBaseline = onlineSuccessBaseline
 	var observeShadowScore func(clientScoreSourceRow)
@@ -5481,7 +5497,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		reasonCounts,
 		onlineCount,
 	)
-	glog.Infof("[nclm]online url-success rule: %s\n", onlineSuccessBaseline.logSummary(egressSettings))
+	glog.Infof("[nclm]online url-success rule: %s\n", onlineSuccessBaseline.logSummary())
 
 	// set each client score to its lowest lookback, decided the same way in
 	// every location and group map it sits in
@@ -5677,9 +5693,10 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if err := writeClientScoreNativeCensus(ctx, nativeCensus, ttl); err != nil {
 			return fmt.Errorf("publish native client score census: %w", err)
 		}
-		// The guard this export decided Online by, for provider status,
-		// inspection and the exempt-country gauge. A reader without it
-		// exempts every country, so a failure here leaves the export standing.
+		// The guard this export decided Online by, with its kill switch and
+		// floor, for provider status, inspection and the exempt-country
+		// gauge. A reader without it exempts every country, so a failure here
+		// leaves the export standing.
 		if err := publishProviderOnlineSuccessBaseline(ctx, onlineSuccessBaseline, ttl); err != nil {
 			glog.Errorf("[nclm]publish online url-success guard: %s\n", err)
 		}

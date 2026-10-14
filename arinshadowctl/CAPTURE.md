@@ -210,6 +210,11 @@ The operator has a180-second total deadline, including a separately bounded
 90-second resource/inventory setup. The unchanged cohort capture/native lease
 starts after setup and is bounded at90seconds and2million source
 connections. One immutable score generation must be current at lease start.
+The lease must start within 90 seconds of that generation's committed
+publication, and its source evaluation must have completed at most 900
+seconds earlier, the native census limit. The export between source
+completion and publication (186-374 seconds on Main) does not consume the
+90-second window, and publication never renews source age.
 Normal publication rollover does not mutate that leased membership; end
 publication identity/change is reported explicitly. This is a comparison to
 the pinned starting generation, not a claim that membership stayed current at

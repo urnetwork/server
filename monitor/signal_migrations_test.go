@@ -1333,7 +1333,7 @@ func TestMigrationsSignalPartialIndexContractsExecuteExactGuards(t *testing.T) {
 	if os.Getenv("WARP_ENV") != "local" {
 		t.Fatal("partial-index query fixtures require the attested local test environment")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := snMainnetMigrationFixtureContext(t)
 	defer cancel()
 	server.Db(ctx, func(conn server.PgConn) {
 		type partialIndexCase struct {

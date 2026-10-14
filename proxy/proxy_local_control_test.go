@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +21,11 @@ import (
 // the payload origin. Actual hosted mint/renew/refresh/reconnect must still
 // deliver traffic and settle the caller's ledger without touching that API.
 func TestProxyCriticalControlUsesLocalAuthorityWithoutHttp(t *testing.T) {
+	// The local authority asks for provider locations from the unspecified
+	// address its sessions carry. No ip override covers that address, so the
+	// lookup reads the GeoLite2 database, which a config home may not have:
+	// the repository's synthetic empty one stands in, and knows no address.
+	server.UseIpDbFileForTest(t, filepath.Join("..", "local", "testdata", "config", "local", "mmdb", "geolite2.mmdb"))
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {

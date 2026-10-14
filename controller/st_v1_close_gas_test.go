@@ -10,6 +10,7 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
@@ -137,9 +138,9 @@ func TestStV1GasFloorLeavesOtherSendsUnchanged(t *testing.T) {
 // that estimates 361,258, as on runtime 478, is signed with 1,000,000, where
 // it was signed with 433,510 before the floor, and only a close whose own
 // estimate plus 20% is above the maximum is refused, as it was before the
-// floor: before any signature, with its nonce kept. Under the policy
-// re-signed with a maximum_gas of 3,500,000 the whole floor applies again, to
-// the retained close too.
+// floor, before any signature; it keeps no nonce. Under the policy re-signed
+// with a maximum_gas of 3,500,000 the whole floor applies again, to that
+// close too.
 func TestStV1CloseGasFloorIsCappedAtThePolicyMaximum(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -179,18 +180,19 @@ func TestStV1CloseGasFloorIsCappedAtThePolicyMaximum(t *testing.T) {
 		if !errors.Is(err, model.ErrStOperatorGasAllowance) || err.Error() != model.ErrStOperatorGasAllowance.Error()+": unsigned gas/fee/tip/intent envelope exceeds approval" {
 			t.Fatalf("v1 close whose own limit is 1,080,000 under maximum_gas 1,000,000: %v", err)
 		}
-		intent := ledgerV2Intent(t, ctx, cfg, "close:8:1")
-		if intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.Nonce != 8 || signs != 1 || len(fixture.sent) != 1 {
+		logicalKey, _ := stTransactionLogicalKey(cfg, "close:8:1")
+		if intent := model.GetStTransactionIntent(ctx, logicalKey); intent != nil || signs != 1 || len(fixture.sent) != 1 {
 			t.Fatalf("refused v1 close: intent %+v, %d signatures, %d sent", intent, signs, len(fixture.sent))
 		}
 
 		revise(func(policy *server.StOperatorGasPolicy) { policy.MaximumGas = 3_500_000 })
-		hash, err = client.CloseOperatorEpoch(ctx, 9, 1)
-		if err != nil || signs != 3 || len(fixture.sent) != 3 {
-			t.Fatalf("v1 close under maximum_gas 3,500,000: %v, %d signatures, %d sent", err, signs, len(fixture.sent))
+		for i, epoch := range []uint64{8, 9} {
+			hash, err = client.CloseOperatorEpoch(ctx, epoch, 1)
+			if err != nil || signs != 2+i {
+				t.Fatalf("v1 close of epoch %d under maximum_gas 3,500,000: %v, %d signatures", epoch, err, signs)
+			}
+			sent("v1 close under maximum_gas 3,500,000", 1+i, epoch, stV1CloseGasFloor, hash)
 		}
-		sent("the retained v1 close under maximum_gas 3,500,000", 1, 8, stV1CloseGasFloor, "")
-		sent("v1 close under maximum_gas 3,500,000", 2, 9, stV1CloseGasFloor, hash)
 		// 100 wei for each unit of the three limits.
 		stGasFixtureSnapshot(t, policy, "740000000", 3)
 	})
@@ -232,5 +234,54 @@ func TestStV1CloseReplacementKeepsTheGasFloor(t *testing.T) {
 			t.Fatalf("v1 close: original %s gas %d, replacement nonce %d gas %d price %s", original.Hash(), original.Gas(), replacement.Nonce(), replacement.Gas(), replacement.GasPrice())
 		}
 		requireLedgerV2Intent(t, ctx, cfg, "close:7:1", model.StTxFinalized, replacement)
+	})
+}
+
+// SV-1 (retries): a v1 close takes its nonce together with its first
+// attempt's reservation, and the process may stop before the signature. Once
+// the close's grace has finalized, here at block 171 for an epoch that ended
+// at 50 with a grace of 120, the close is expired, and the reservation refuses
+// the cancellation that retires an expired close. The root key's next send,
+// here a v2 answer, signs the reserved close instead, exactly as reserved,
+// and sends it: it reverts, which that send reports, and frees the nonce the
+// v1 and v2 sends share, so the send after it goes out.
+func TestStV1PendingReservationOfAnExpiredCloseIsSigned(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		client, cfg := newLedgerV1RPCClient(t, fixture)
+		ledgerV2GasPolicy(t, client, nil)
+		stopped := errors.New("process stopped between the reservation and the signature")
+		client.transactionSigner = func(context.Context, *types.Transaction, types.Signer, *ecdsa.PrivateKey) (*types.Transaction, error) {
+			return nil, stopped
+		}
+		if _, err := client.CloseOperatorEpoch(ctx, 7, 1); !errors.Is(err, stopped) {
+			t.Fatalf("close: %v", err)
+		}
+		intent := ledgerV2Intent(t, ctx, cfg, "close:7:1")
+		pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+		if intent.Nonce != 7 || intent.AttemptCount != 0 || pending == nil || err != nil || len(fixture.sent) != 0 {
+			t.Fatalf("close intent %+v, reservation %+v, %v", intent, pending, err)
+		}
+		client.transactionSigner = nil
+		closeCall := client.coordinator.PackCloseOperatorEpoch(stBig(7), big.NewInt(1))
+		fixture.finalizedBlock = 171
+		fixture.needs[string(closeCall)] = math.MaxUint64
+
+		answer := ledgerV2TestAnswer()
+		if _, err := client.LedgerV2Answer(ctx, 1, 3, answer); err == nil || len(fixture.sent) != 1 || !strings.Contains(err.Error(), "st: finalized transaction "+strings.ToLower(fixture.sent[0].Hash().Hex())+" reverted") {
+			t.Fatalf("answer behind the expired close: %v, %d sent", err, len(fixture.sent))
+		}
+		signer := types.LatestSignerForChainID(new(big.Int).SetUint64(cfg.ChainId))
+		if sent := fixture.sent[0]; sent.Nonce() != 7 || sent.Gas() != stV1CloseGasFloor || string(sent.Data()) != string(closeCall) || strings.ToLower(signer.Hash(sent).Hex()) != pending.SigningHash {
+			t.Fatalf("the close went out as nonce %d gas %d data %x, not as reserved", sent.Nonce(), sent.Gas(), sent.Data())
+		}
+		requireLedgerV2Intent(t, ctx, cfg, "close:7:1", model.StTxReverted, fixture.sent[0])
+
+		hash, err := client.LedgerV2Answer(ctx, 1, 3, answer)
+		if err != nil || len(fixture.sent) != 2 || fixture.sent[1].Nonce() != 8 || !strings.EqualFold(hash, fixture.sent[1].Hash().Hex()) {
+			t.Fatalf("answer on the freed key: %s, %v, %d sent", hash, err, len(fixture.sent))
+		}
+		requireLedgerV2Intent(t, ctx, cfg, "v2answer:1:3:0:0", model.StTxFinalized, fixture.sent[1])
 	})
 }

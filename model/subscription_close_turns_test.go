@@ -12,10 +12,11 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Two rows of one payer passed explicit deadlines and start together. Deadline
-// reconciliation try-locks their shared grant. The first admitted row is held
-// inside its transaction until the second either waits for its in-page turn or
-// is refused; only the turn lets both rows close in the same page.
+// One payer's rows passed explicit deadlines, one more than an owner batch
+// holds, and start together. Deadline reconciliation try-locks their shared
+// grant. The first admitted turn, the full batch or the row left over, is held
+// inside its transaction until the other either waits for its in-page turn or
+// is refused; only the turn lets every row close in the same page.
 func TestForceClosePageGivesSamePayerDeadlineRowsTurns(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -23,7 +24,10 @@ func TestForceClosePageGivesSamePayerDeadlineRowsTurns(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 		defer cancel()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		ids := []server.Id{createRedisAdmissionTest(ctx, f, 100).ContractId, createRedisAdmissionTest(ctx, f, 200).ContractId}
+		ids := make([]server.Id, ContractDeadlineOwnerBatchLimit+1)
+		for index := range ids {
+			ids[index] = createRedisAdmissionTest(ctx, f, 5).ContractId
+		}
 		now := server.NowUtc()
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,expiration_time=$3 WHERE contract_id=ANY($1)`,
@@ -53,8 +57,8 @@ func TestForceClosePageGivesSamePayerDeadlineRowsTurns(t *testing.T) {
 		callCtx := context.WithValue(observed, forceCloseRowTurnWaitKey{}, func(server.Id) {
 			otherOnce.Do(func() { close(other) })
 		})
-		count, cursor, _, err := forceCloseOpenContractIdsPage(callCtx, now, 10, 2, 0, 0, nil)
-		if err != nil || refused.Load() != 0 || count != 2 || cursor != nil {
+		count, cursor, _, err := forceCloseOpenContractIdsPage(callCtx, now, 2*len(ids), 2, 0, 0, nil)
+		if err != nil || refused.Load() != 0 || count != int64(len(ids)) || cursor != nil {
 			t.Fatal("same-payer deadline rows refused each other inside one page", count, refused.Load(), err)
 		}
 		for _, id := range ids {

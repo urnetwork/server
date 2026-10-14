@@ -38,13 +38,57 @@ func VerifyTaskFunctionNames() []string {
 	}
 }
 
+// A chain row that a newer config wrote stays that config's while its stamp
+// is this recent. The rollup and retention chains run for up to an hour and
+// repeat a minute apart, so their instances restamp them at least that often;
+// twice that covers a claim handed back in between and a restart.
+const verifyNewerConfigTimeout = 2 * (time.Hour + time.Minute)
+
+// The run-once keys of the verification chains.
+func verifyTaskRunOnceKeys() []string {
+	return []string{
+		task.RunOnce("sweep_verify_trails").String(),
+		task.RunOnce("rollup_verify_provider_stats").String(),
+		task.RunOnce("remove_old_verify_provider_stats").String(),
+		task.RunOnce("refresh_verify_proxy_egress").String(),
+	}
+}
+
+// Whether a claimed chain row is a newer config's live one, counted as a
+// hand-back of family when it is.
+func verifyChainHandsBack(stamp ConfigStamp, family string) bool {
+	if !verifyChainNewerLive(stamp, server.NowUtc()) {
+		return false
+	}
+	configHandbacks.WithLabelValues(family).Inc()
+	return true
+}
+
+// Whether a chain row was written by a newer config within its timeout. st.yml
+// lives in the vault, which has no version of its own, so the config version
+// orders taskworkers instead: it keeps a straggler that rejoins on an older
+// config, as one did on 2026-10-13, from ending or removing the chains of the
+// instances on the newer config, while taskworkers on the same config disable
+// the chains at once, as before (config_generation.go).
+func verifyChainNewerLive(stamp ConfigStamp, now time.Time) bool {
+	return stamp.newerWithin(now, verifyNewerConfigTimeout)
+}
+
 // RemoveDisabledVerifyTasks removes an old generation's pending chains after
 // the subnet is disabled. Merely skipping seeding is insufficient because a
 // RunOnce row survives deploys and its Post hook would otherwise perpetuate
-// the chain. Enabling later seeds fresh rows through InitTasks.
+// the chain. Enabling later seeds fresh rows through InitTasks. While any
+// chain row carries a newer config's live stamp, every row stays: an older
+// config does not disable the chains that config runs.
 func RemoveDisabledVerifyTasks(ctx context.Context, tx server.PgTx) int64 {
 	if controller.StEnabled() {
 		return 0
+	}
+	now := server.NowUtc()
+	for _, stamp := range readConfigStampsInTx(ctx, tx, verifyTaskRunOnceKeys()) {
+		if verifyChainNewerLive(stamp, now) {
+			return 0
+		}
 	}
 	var removed int64
 	for _, functionName := range VerifyTaskFunctionNames() {
@@ -54,22 +98,37 @@ func RemoveDisabledVerifyTasks(ctx context.Context, tx server.PgTx) int64 {
 }
 
 type SweepVerifyTrailsArgs struct {
+	// The config version that wrote the chain's row, and when.
+	ConfigStamp
 }
 
 type SweepVerifyTrailsResult struct {
+	// st.yml disables verification here, but a newer config's live chain was
+	// claimed: nothing ran, and the post-step reschedules it unchanged
+	HandedBack bool `json:"handed_back,omitempty"`
 }
 
 func ScheduleSweepVerifyTrails(clientSession *session.ClientSession, tx server.PgTx) {
 	if !controller.StEnabled() {
 		return
 	}
+	scheduleSweepVerifyTrailsAt(clientSession, tx, &SweepVerifyTrailsArgs{ConfigStamp: newConfigStamp(server.NowUtc())},
+		server.NowUtc().Add(15*time.Second))
+}
+
+func scheduleSweepVerifyTrailsAt(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	sweepVerifyTrails *SweepVerifyTrailsArgs,
+	runAt time.Time,
+) {
 	task.ScheduleTaskInTx(
 		tx,
 		SweepVerifyTrails,
-		&SweepVerifyTrailsArgs{},
+		sweepVerifyTrails,
 		clientSession,
 		task.RunOnce("sweep_verify_trails"),
-		task.RunAt(server.NowUtc().Add(15*time.Second)),
+		task.RunAt(runAt),
 		task.MaxTime(15*time.Minute),
 	)
 }
@@ -79,7 +138,9 @@ func SweepVerifyTrails(
 	clientSession *session.ClientSession,
 ) (*SweepVerifyTrailsResult, error) {
 	if !controller.StEnabled() {
-		return &SweepVerifyTrailsResult{}, nil
+		return &SweepVerifyTrailsResult{
+			HandedBack: sweepVerifyTrails != nil && verifyChainHandsBack(sweepVerifyTrails.ConfigStamp, "verify_sweep_trails"),
+		}, nil
 	}
 	model.SweepExpiredVerifyTrails(
 		clientSession.Ctx,
@@ -95,27 +156,49 @@ func SweepVerifyTrailsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if sweepVerifyTrailsResult != nil && sweepVerifyTrailsResult.HandedBack {
+		runAt := server.NowUtc().Add(configHandbackDelay)
+		rescheduleHandedBackTaskInTx(clientSession, tx, task.RunOnce("sweep_verify_trails"), runAt, func() {
+			scheduleSweepVerifyTrailsAt(clientSession, tx, sweepVerifyTrails, runAt)
+		})
+		return nil
+	}
 	ScheduleSweepVerifyTrails(clientSession, tx)
 	return nil
 }
 
 type RollupVerifyProviderStatsArgs struct {
+	// The config version that wrote the chain's row, and when.
+	ConfigStamp
 }
 
 type RollupVerifyProviderStatsResult struct {
+	// st.yml disables verification here, but a newer config's live chain was
+	// claimed: nothing ran, and the post-step reschedules it unchanged
+	HandedBack bool `json:"handed_back,omitempty"`
 }
 
 func ScheduleRollupVerifyProviderStats(clientSession *session.ClientSession, tx server.PgTx) {
 	if !controller.StEnabled() {
 		return
 	}
+	scheduleRollupVerifyProviderStatsAt(clientSession, tx, &RollupVerifyProviderStatsArgs{ConfigStamp: newConfigStamp(server.NowUtc())},
+		server.NowUtc().Add(1*time.Minute))
+}
+
+func scheduleRollupVerifyProviderStatsAt(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	rollupVerifyProviderStats *RollupVerifyProviderStatsArgs,
+	runAt time.Time,
+) {
 	task.ScheduleTaskInTx(
 		tx,
 		RollupVerifyProviderStats,
-		&RollupVerifyProviderStatsArgs{},
+		rollupVerifyProviderStats,
 		clientSession,
 		task.RunOnce("rollup_verify_provider_stats"),
-		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.RunAt(runAt),
 		task.MaxTime(1*time.Hour),
 	)
 }
@@ -125,7 +208,9 @@ func RollupVerifyProviderStats(
 	clientSession *session.ClientSession,
 ) (*RollupVerifyProviderStatsResult, error) {
 	if !controller.StEnabled() {
-		return &RollupVerifyProviderStatsResult{}, nil
+		return &RollupVerifyProviderStatsResult{
+			HandedBack: rollupVerifyProviderStats != nil && verifyChainHandsBack(rollupVerifyProviderStats.ConfigStamp, "verify_rollup_provider_stats"),
+		}, nil
 	}
 	model.RollupVerifyProviderStats(
 		clientSession.Ctx,
@@ -141,6 +226,13 @@ func RollupVerifyProviderStatsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if rollupVerifyProviderStatsResult != nil && rollupVerifyProviderStatsResult.HandedBack {
+		runAt := server.NowUtc().Add(configHandbackDelay)
+		rescheduleHandedBackTaskInTx(clientSession, tx, task.RunOnce("rollup_verify_provider_stats"), runAt, func() {
+			scheduleRollupVerifyProviderStatsAt(clientSession, tx, rollupVerifyProviderStats, runAt)
+		})
+		return nil
+	}
 	ScheduleRollupVerifyProviderStats(clientSession, tx)
 	return nil
 }
@@ -295,22 +387,37 @@ func NewRefreshVerifyProxyEgressTaskTarget() task.Target {
 }
 
 type RemoveOldVerifyProviderStatsArgs struct {
+	// The config version that wrote the chain's row, and when.
+	ConfigStamp
 }
 
 type RemoveOldVerifyProviderStatsResult struct {
+	// st.yml disables verification here, but a newer config's live chain was
+	// claimed: nothing ran, and the post-step reschedules it unchanged
+	HandedBack bool `json:"handed_back,omitempty"`
 }
 
 func ScheduleRemoveOldVerifyProviderStats(clientSession *session.ClientSession, tx server.PgTx) {
 	if !controller.StEnabled() {
 		return
 	}
+	scheduleRemoveOldVerifyProviderStatsAt(clientSession, tx, &RemoveOldVerifyProviderStatsArgs{ConfigStamp: newConfigStamp(server.NowUtc())},
+		server.NowUtc().Add(1*time.Minute))
+}
+
+func scheduleRemoveOldVerifyProviderStatsAt(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	removeOldVerifyProviderStats *RemoveOldVerifyProviderStatsArgs,
+	runAt time.Time,
+) {
 	task.ScheduleTaskInTx(
 		tx,
 		RemoveOldVerifyProviderStats,
-		&RemoveOldVerifyProviderStatsArgs{},
+		removeOldVerifyProviderStats,
 		clientSession,
 		task.RunOnce("remove_old_verify_provider_stats"),
-		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.RunAt(runAt),
 		task.MaxTime(1*time.Hour),
 	)
 }
@@ -320,7 +427,9 @@ func RemoveOldVerifyProviderStats(
 	clientSession *session.ClientSession,
 ) (*RemoveOldVerifyProviderStatsResult, error) {
 	if !controller.StEnabled() {
-		return &RemoveOldVerifyProviderStatsResult{}, nil
+		return &RemoveOldVerifyProviderStatsResult{
+			HandedBack: removeOldVerifyProviderStats != nil && verifyChainHandsBack(removeOldVerifyProviderStats.ConfigStamp, "verify_remove_old_provider_stats"),
+		}, nil
 	}
 	limit := 50000
 	model.RemoveOldVerifyProviderStats(clientSession.Ctx, server.NowUtc(), limit)
@@ -333,6 +442,13 @@ func RemoveOldVerifyProviderStatsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if removeOldVerifyProviderStatsResult != nil && removeOldVerifyProviderStatsResult.HandedBack {
+		runAt := server.NowUtc().Add(configHandbackDelay)
+		rescheduleHandedBackTaskInTx(clientSession, tx, task.RunOnce("remove_old_verify_provider_stats"), runAt, func() {
+			scheduleRemoveOldVerifyProviderStatsAt(clientSession, tx, removeOldVerifyProviderStats, runAt)
+		})
+		return nil
+	}
 	ScheduleRemoveOldVerifyProviderStats(clientSession, tx)
 	return nil
 }

@@ -203,7 +203,7 @@ func (self *ledgerV2RPC) takeEvents() []string {
 	return events
 }
 
-func newLedgerV2RPCClient(t testing.TB, fixture *ledgerV2RPC) (*CoreStClient, *ethclient.Client, *StConfig) {
+func newLedgerV2RPCClient(t testing.TB, fixture http.Handler) (*CoreStClient, *ethclient.Client, *StConfig) {
 	t.Helper()
 	key, err := crypto.HexToECDSA(strings.Repeat("3", 64))
 	if err != nil {

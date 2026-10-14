@@ -143,6 +143,12 @@ type ByJwt struct {
 	// The values have no meaning to the network.
 	Roles     []string `json:"roles,omitempty"`
 	Principal string   `json:"principal,omitempty"`
+	// a lag.dev guest's credential (lag.dev/PLAN.md A1). The api accepts it
+	// only on the lag routes the guest needs and refuses it on every other
+	// route, and the connect transport refuses it, so a guest is never a vpn
+	// client (session/AUTH.md §1). Set when the guest is created; renewal and
+	// every credential derived from it keep it.
+	LagGuest bool `json:"lag_guest,omitempty"`
 	gojwt.RegisteredClaims
 }
 
@@ -717,6 +723,18 @@ func ParseByJwtUnverified(ctx context.Context, jwtStr string) (*ByJwt, error) {
 	return byJwt, nil
 }
 
+// ByJwtLagGuestUnverified reports whether the token's claims, read without
+// verifying it, say it is a lag.dev guest's. A token that says so is verified
+// before anything is refused on its word; one that does not cannot be a
+// guest's, since removing the claim breaks its signature.
+func ByJwtLagGuestUnverified(jwtStr string) bool {
+	byJwt := &ByJwt{}
+	if _, _, err := gojwt.NewParser().ParseUnverified(jwtStr, byJwt); err != nil {
+		return false
+	}
+	return byJwt.LagGuest
+}
+
 // ByJwtNamesClientUnverified reports whether the token's claims, read without
 // verifying the signature and without any lookup, name a client. It never
 // authenticates: a caller verifies the token before relying on its claims.
@@ -747,6 +765,7 @@ func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 		Pro:              self.Pro,
 		Roles:            self.Roles,
 		Principal:        self.Principal,
+		LagGuest:         self.LagGuest,
 		DeviceId:         &deviceId,
 		ClientId:         &clientId,
 		SessionId:        self.SessionId,

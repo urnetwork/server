@@ -45,6 +45,9 @@ package controller
 //	urnetwork_stats_derive_residual_km               the last derivation's RMS ping residual {at} (redis, written by the derivation)
 //	urnetwork_stats_derive_last_run_seconds          unix time of the last derivation (redis, written by the derivation)
 //
+// the lag.dev gauges are internal (lag.dev/PLAN.md X9), listed in
+// stats_collector_lag.go and read only by grafana/dashboards/lag-dev.json.
+//
 // the egress index gauges are internal (connect/GEOMAP.md §10.4) and are read
 // only by grafana/dashboards/providers.json:
 //
@@ -309,8 +312,9 @@ var statsProviderExcludedGauge = newStatsGaugeVec(
 
 // The countries the URL-success rule exempts because the probe fails for most
 // of their providers, each with the providers the exemption keeps online,
-// under the guard the score export last published. No series while the rule
-// is disabled or no guard is published.
+// under the guard the score export last published. No series while the
+// export applied the rule nowhere (its kill switch) or no trusted guard is
+// published.
 var statsProviderOnlineSuccessExemptGauge = newStatsGaugeVec(
 	"provider_online_success_exempt",
 	"Providers measured without a URL success that the URL-success rule keeps online, per country it exempts",
@@ -752,6 +756,12 @@ func statsRefreshDb(ctx context.Context) {
 	// the extender gossip and popularity gauges (grafana/dashboards/extenders.json)
 	statsRefreshExtenders(ctx, now)
 
+	// the lag.dev gauges (grafana/dashboards/lag-dev.json, stats_collector_lag.go);
+	// isolated, so a lag read that fails costs only its own gauges
+	server.HandleError(func() {
+		statsRefreshLag(ctx, now)
+	})
+
 	// Open counts are a bounded snapshot, separate from the hourly cache.
 	// A capped or unavailable read must never masquerade as an exact gauge.
 	statsRefreshOpenContracts(ctx)
@@ -806,7 +816,8 @@ func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {
 
 // Publishes the countries the URL-success rule exempts under the guard the
 // score export last published, a country with no code as "unknown". Nothing
-// is published while the rule is disabled or no guard is readable.
+// is published while the export applied the rule nowhere or no trusted guard
+// is readable; this process's own provider.yml is not read.
 func statsRefreshProviderOnlineSuccessExempt(ctx context.Context) {
 	exemptCountries, _ := model.GetProviderOnlineSuccessExemptCountries(ctx)
 	values := []statsLabeledValue{}

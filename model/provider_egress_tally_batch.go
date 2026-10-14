@@ -1,5 +1,6 @@
-// Coalesces a finite immutable page before opening the shared-row critical
-// section. The caller commits these increments with its durable stream cursor.
+// Coalesces the finite immutable pages of one owner drain before opening the
+// shared-row critical section. The caller commits these increments with its
+// durable stream cursor.
 package model
 
 import (
@@ -40,32 +41,95 @@ type ProviderEgressTallyBatch struct {
 	Sites  []ProviderEgressTallySiteDelta  `json:"sites"`
 }
 
-// No I/O occurs while normalizing and coalescing. The page bound limits both
+// No I/O occurs while normalizing and coalescing. The drain bound limits both
 // memory and SQL work, even if every record uses different sites and places.
-func PrepareProviderEgressTallyBatch(records []ProviderEgressTallyRecord) (*ProviderEgressTallyBatch, error) {
-	if len(records) > providerEgressTallyPageLength {
-		return nil, fmt.Errorf("tally page exceeds record bound")
+func prepareProviderEgressTallyBatch(records []ProviderEgressTallyRecord) (*ProviderEgressTallyBatch, error) {
+	if len(records) > providerEgressTallyDrainLength {
+		return nil, fmt.Errorf("tally batch exceeds record bound")
 	}
-	type placeKey struct {
-		day             time.Time
-		country, region string
+	coalescer := newProviderEgressTallyCoalescer()
+	if err := coalescer.add(records); err != nil {
+		return nil, err
 	}
-	type siteKey struct {
-		place placeKey
-		name  string
+	return coalescer.batch(), nil
+}
+
+type providerEgressTallyPlaceKey struct {
+	day             time.Time
+	country, region string
+}
+
+type providerEgressTallySiteKey struct {
+	place providerEgressTallyPlaceKey
+	name  string
+}
+
+// Accumulates whole pages of one drain into one batch of shared-row deltas.
+// The rows a candidate page would add are known before it is added, so a
+// drain can stop on a page boundary instead of splitting a page.
+type providerEgressTallyCoalescer struct {
+	placeDeltas map[providerEgressTallyPlaceKey]*ProviderEgressTallyPlaceDelta
+	siteDeltas  map[providerEgressTallySiteKey]*ProviderEgressTallySiteDelta
+}
+
+func newProviderEgressTallyCoalescer() *providerEgressTallyCoalescer {
+	return &providerEgressTallyCoalescer{
+		placeDeltas: map[providerEgressTallyPlaceKey]*ProviderEgressTallyPlaceDelta{},
+		siteDeltas:  map[providerEgressTallySiteKey]*ProviderEgressTallySiteDelta{},
 	}
-	places := map[placeKey]*ProviderEgressTallyPlaceDelta{}
-	sites := map[siteKey]*ProviderEgressTallySiteDelta{}
+}
+
+// Normalizes a record to its daily place, as the direct SQL writer does.
+func providerEgressTallyRecordPlace(record ProviderEgressTallyRecord) (providerEgressTallyPlaceKey, ProviderEgressPlace, error) {
+	place, err := providerEgressTallyPlace(record.Run.Place)
+	if err != nil || record.MeasuredAt.IsZero() || len(record.Loads) > 512 {
+		return providerEgressTallyPlaceKey{}, ProviderEgressPlace{}, fmt.Errorf("invalid retained tally")
+	}
+	return providerEgressTallyPlaceKey{day: record.MeasuredAt.UTC().Truncate(24 * time.Hour), country: place.CountryCode, region: place.Region}, place, nil
+}
+
+// Empty and over-long names are ignored, as the direct SQL writer does.
+func providerEgressTallyLoadName(load ProviderEgressSiteLoad) (string, bool) {
+	name := strings.TrimSpace(load.Name)
+	return name, name != "" && len(name) <= 128
+}
+
+// Place and site rows the batch would hold after adding records. Pure: the
+// batch is unchanged, and an invalid record is reported without adding any.
+func (self *providerEgressTallyCoalescer) rowsWith(records []ProviderEgressTallyRecord) (int, error) {
+	newPlaceKeys := map[providerEgressTallyPlaceKey]bool{}
+	newSiteKeys := map[providerEgressTallySiteKey]bool{}
 	for _, record := range records {
-		place, err := providerEgressTallyPlace(record.Run.Place)
-		if err != nil || record.MeasuredAt.IsZero() || len(record.Loads) > 512 {
-			return nil, fmt.Errorf("invalid retained tally")
+		key, _, err := providerEgressTallyRecordPlace(record)
+		if err != nil {
+			return 0, err
 		}
-		key := placeKey{day: record.MeasuredAt.UTC().Truncate(24 * time.Hour), country: place.CountryCode, region: place.Region}
-		p := places[key]
+		if self.placeDeltas[key] == nil {
+			newPlaceKeys[key] = true
+		}
+		for _, load := range record.Loads {
+			if name, ok := providerEgressTallyLoadName(load); ok {
+				siteKey := providerEgressTallySiteKey{place: key, name: name}
+				if self.siteDeltas[siteKey] == nil {
+					newSiteKeys[siteKey] = true
+				}
+			}
+		}
+	}
+	return len(self.placeDeltas) + len(self.siteDeltas) + len(newPlaceKeys) + len(newSiteKeys), nil
+}
+
+// Adds whole records; every record is validated before any counter changes.
+func (self *providerEgressTallyCoalescer) add(records []ProviderEgressTallyRecord) error {
+	if _, err := self.rowsWith(records); err != nil {
+		return err
+	}
+	for _, record := range records {
+		key, place, _ := providerEgressTallyRecordPlace(record)
+		p := self.placeDeltas[key]
 		if p == nil {
 			p = &ProviderEgressTallyPlaceDelta{Day: key.day, Place: place}
-			places[key] = p
+			self.placeDeltas[key] = p
 		}
 		p.Runs++
 		if record.Run.Healthy {
@@ -75,15 +139,15 @@ func PrepareProviderEgressTallyBatch(records []ProviderEgressTallyRecord) (*Prov
 			p.EchoFailures++
 		}
 		for _, load := range record.Loads {
-			name := strings.TrimSpace(load.Name)
-			if name == "" || len(name) > 128 {
+			name, ok := providerEgressTallyLoadName(load)
+			if !ok {
 				continue
 			}
-			sk := siteKey{place: key, name: name}
-			s := sites[sk]
+			siteKey := providerEgressTallySiteKey{place: key, name: name}
+			s := self.siteDeltas[siteKey]
 			if s == nil {
 				s = &ProviderEgressTallySiteDelta{Day: key.day, Place: place, Name: name}
-				sites[sk] = s
+				self.siteDeltas[siteKey] = s
 			}
 			if load.Canary {
 				s.CanaryLoads++
@@ -104,11 +168,16 @@ func PrepareProviderEgressTallyBatch(records []ProviderEgressTallyRecord) (*Prov
 			}
 		}
 	}
+	return nil
+}
+
+// A sorted copy in the shared rows' primary-key order.
+func (self *providerEgressTallyCoalescer) batch() *ProviderEgressTallyBatch {
 	batch := &ProviderEgressTallyBatch{}
-	for _, p := range places {
+	for _, p := range self.placeDeltas {
 		batch.Places = append(batch.Places, *p)
 	}
-	for _, s := range sites {
+	for _, s := range self.siteDeltas {
 		batch.Sites = append(batch.Sites, *s)
 	}
 	lessPlace := func(day1, day2 time.Time, p1, p2 ProviderEgressPlace) bool {
@@ -136,17 +205,18 @@ func PrepareProviderEgressTallyBatch(records []ProviderEgressTallyRecord) (*Prov
 		}
 		return lessPlace(a.Day, b.Day, a.Place, b.Place)
 	})
-	return batch, nil
+	return batch
 }
 
 // Pure validation can precede every mutation of the durable checkpoint. The
 // generic Post retry converts a plain panic into an error without aborting SQL.
 func ValidateProviderEgressTallyBatch(values *ProviderEgressTallyBatch) {
-	if values == nil || len(values.Places) > providerEgressTallyPageLength || len(values.Sites) > providerEgressTallyPageLength*512 {
+	if values == nil || len(values.Places) > providerEgressTallyDrainLength || len(values.Sites) > providerEgressTallyDrainLength*512 {
 		panic("invalid tally batch bounds")
 	}
 	// Refuse malformed retained results before taking any shared tally row.
-	// A page represents at most 256 whole runs, regardless of its site count.
+	// A drain represents at most one full shard of whole runs, regardless of
+	// its site count.
 	type placeKey struct {
 		day   time.Time
 		place ProviderEgressPlace
@@ -156,13 +226,13 @@ func ValidateProviderEgressTallyBatch(values *ProviderEgressTallyBatch) {
 	for _, p := range values.Places {
 		place, err := providerEgressTallyPlace(p.Place)
 		key := placeKey{day: p.Day, place: p.Place}
-		if err != nil || place != p.Place || !p.Day.Equal(p.Day.UTC().Truncate(24*time.Hour)) || p.Day.IsZero() || p.Runs < 1 || p.Runs > providerEgressTallyPageLength || p.HealthyRuns < 0 || p.HealthyRuns > p.Runs || p.EchoFailures < 0 || p.EchoFailures > p.Runs || placeRuns[key] != 0 {
+		if err != nil || place != p.Place || !p.Day.Equal(p.Day.UTC().Truncate(24*time.Hour)) || p.Day.IsZero() || p.Runs < 1 || p.Runs > providerEgressTallyDrainLength || p.HealthyRuns < 0 || p.HealthyRuns > p.Runs || p.EchoFailures < 0 || p.EchoFailures > p.Runs || placeRuns[key] != 0 {
 			panic("invalid tally place delta")
 		}
 		placeRuns[key] = p.Runs
 		totalRuns += p.Runs
 	}
-	if totalRuns > providerEgressTallyPageLength {
+	if totalRuns > providerEgressTallyDrainLength {
 		panic("invalid tally page run count")
 	}
 	type siteKey struct {
@@ -174,7 +244,7 @@ func ValidateProviderEgressTallyBatch(values *ProviderEgressTallyBatch) {
 	for _, s := range values.Sites {
 		pk := placeKey{day: s.Day, place: s.Place}
 		sk := siteKey{place: pk, name: s.Name}
-		if placeRuns[pk] == 0 || siteKeys[sk] || s.Name == "" || strings.TrimSpace(s.Name) != s.Name || len(s.Name) > 128 || !utf8.ValidString(s.Name) || s.Loads < 0 || s.Loads > providerEgressTallyPageLength*512 || s.Failures < 0 || s.Failures > s.Loads || s.HealthyLoads < 0 || s.HealthyLoads > s.Loads || s.HealthyFailures < 0 || s.HealthyFailures > min(s.Failures, s.HealthyLoads) || s.CanaryLoads < 0 || s.CanaryLoads > providerEgressTallyPageLength*512 || s.CanaryPasses < 0 || s.CanaryPasses > s.CanaryLoads {
+		if placeRuns[pk] == 0 || siteKeys[sk] || s.Name == "" || strings.TrimSpace(s.Name) != s.Name || len(s.Name) > 128 || !utf8.ValidString(s.Name) || s.Loads < 0 || s.Loads > providerEgressTallyDrainLength*512 || s.Failures < 0 || s.Failures > s.Loads || s.HealthyLoads < 0 || s.HealthyLoads > s.Loads || s.HealthyFailures < 0 || s.HealthyFailures > min(s.Failures, s.HealthyLoads) || s.CanaryLoads < 0 || s.CanaryLoads > providerEgressTallyDrainLength*512 || s.CanaryPasses < 0 || s.CanaryPasses > s.CanaryLoads {
 			panic("invalid tally site delta")
 		}
 		siteKeys[sk] = true

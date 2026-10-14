@@ -99,7 +99,7 @@ func NewArinShadowNativeRPC(lifetime context.Context, capacity int) (server.Arin
 			}
 			// The RPC's five-second transport deadline must not become the
 			// ninety-second generation lease; service shutdown still revokes it.
-			expires := server.NowUtc().Add(server.ArinShadowCaptureMaxAge)
+			expires := capture.clock().Add(server.ArinShadowCaptureMaxAge)
 			if deadline, ok := lifetime.Deadline(); ok && deadline.Before(expires) {
 				expires = deadline
 			}

@@ -23,6 +23,10 @@ func TestNativeReaderSettingsDefaultAndActivation(t *testing.T) {
 		{name: "invalid_scalar", config: "egress_index:\n  native_reader_enabled: invalid\n"},
 		{name: "invalid_shape", config: "egress_index:\n  native_reader_enabled: [true]\n"},
 		{name: "malformed", config: "egress_index: [unterminated\n"},
+		// a malformed url-success rule key beside the block reads as nothing
+		// in the block
+		{name: "malformed_rule_switch", config: "online_requires_url_success: \"false\"\negress_index:\n  native_reader_enabled: true\n", enabled: true},
+		{name: "malformed_rule_floor", config: "online_success_country_floor: 36%\negress_index:\n  native_reader_enabled: true\n", enabled: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(tc.config))
