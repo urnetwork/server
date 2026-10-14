@@ -17,8 +17,37 @@ import (
 // Owner batches admit on the process's direct maintenance connections, which
 // task claims, task completions and the other closers share. Main allows 32 per
 // taskworker and showed at most 13 in use in an hour on 2026-10-13. A page runs
-// at most this many batches at once.
-const forceCloseOwnerBatchParallel = 8
+// at most this many batches at once; contract_close.yml can lower it or turn
+// batching off (taskworker/work/close_expired_parallel.go).
+const ForceCloseOwnerBatchParallel = 4
+
+type forceCloseOwnerBatchParallelKey struct{}
+
+// A sweep page under the returned context runs at most parallel owner batches
+// at once. Zero turns batching off: every row is visited alone, as before
+// owner batches. A value outside [0, ForceCloseOwnerBatchParallel], or none,
+// keeps ForceCloseOwnerBatchParallel.
+func WithForceCloseOwnerBatchParallel(ctx context.Context, parallel int) context.Context {
+	return context.WithValue(ctx, forceCloseOwnerBatchParallelKey{}, parallel)
+}
+
+// The owner batch limit a page under ctx runs with, in [0, ForceCloseOwnerBatchParallel].
+func forceCloseOwnerBatchParallel(ctx context.Context) int {
+	if parallel, ok := ctx.Value(forceCloseOwnerBatchParallelKey{}).(int); ok && 0 <= parallel && parallel <= ForceCloseOwnerBatchParallel {
+		return parallel
+	}
+	return ForceCloseOwnerBatchParallel
+}
+
+// A private fixture seam observes a batch that must wait for a slot. It is
+// called with the batch's payer turn held and no transaction or slot.
+type forceCloseOwnerBatchSlotWaitKey struct{}
+
+func forceCloseOwnerBatchSlotWait(ctx context.Context) {
+	if observe, ok := ctx.Value(forceCloseOwnerBatchSlotWaitKey{}).(func()); ok {
+		observe()
+	}
+}
 
 // Open rows with a stored deadline and up to two of their balances, enough to
 // tell one balance from several. The lateral probes keep each contract's

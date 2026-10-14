@@ -4799,8 +4799,16 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 	// batch led from the started prefix can close rows after it: they are not
 	// in this page's receipt, and the next page, which starts before them,
 	// finds them closed.
-	rowBatches := forceCloseDeadlineOwnerBatches(ctx, openContracts, rowTurns, server.NowUtc())
-	batchSlots := make(chan struct{}, forceCloseOwnerBatchParallel)
+	// contract_close.yml can lower the batches a page runs at once, or turn
+	// them off so every row is visited alone.
+	batchParallel := forceCloseOwnerBatchParallel(ctx)
+	var rowBatches []*forceCloseOwnerBatch
+	if 0 < batchParallel {
+		rowBatches = forceCloseDeadlineOwnerBatches(ctx, openContracts, rowTurns, server.NowUtc())
+	} else {
+		rowBatches = make([]*forceCloseOwnerBatch, len(openContracts))
+	}
+	batchSlots := make(chan struct{}, max(1, batchParallel))
 	// Visits every row of one batch in a single owned turn. A held balance,
 	// found by this batch or earlier by a row of the page, leaves every row
 	// to its holder, as it leaves a row tried alone. A failed turn
@@ -4818,9 +4826,14 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 		}
 		select {
 		case batchSlots <- struct{}{}:
-		case <-ctx.Done():
-			// Unvisited rows withhold the page's receipt.
-			return
+		default:
+			forceCloseOwnerBatchSlotWait(ctx)
+			select {
+			case batchSlots <- struct{}{}:
+			case <-ctx.Done():
+				// Unvisited rows withhold the page's receipt.
+				return
+			}
 		}
 		results, busy, batchErr := func() (map[server.Id]*ContractDeadlineReconciliation, bool, error) {
 			defer func() { <-batchSlots }()
