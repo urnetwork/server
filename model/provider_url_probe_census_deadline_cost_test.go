@@ -27,16 +27,18 @@ func (self testingUrlCensusContext) Context() context.Context {
 	return self.ctx
 }
 
-// NOT EXISTS(bad) OR EXISTS(priority) is equivalent to excluding only a bad
-// score whose client has no priority. The inner client key permits a distinct
-// planner shape without changing any production source or admission floor.
+// (EXISTS(score) AND NOT EXISTS(bad)) OR EXISTS(priority) is equivalent to
+// requiring a score or priority and excluding only a bad score whose client
+// has no priority, since a bad score is a score. The inner client key permits
+// a distinct planner shape without changing any production source or floor.
 func testingUrlCensusGuardedAdmissionSql(alias string) string {
 	reliability := providerReliabilityEligibilitySql(alias + ".client_id")
 	end := strings.LastIndex(reliability, "\n\t)")
 	if end < 0 || end+len("\n\t)") != len(reliability) {
 		panic("synthetic census admission anchor changed")
 	}
-	return "NOT " + alias + ".arin_risk AND " + reliability[:end] + "\n\t\tAND NOT (" +
+	return "NOT " + alias + ".arin_risk AND (" + providerReliabilityScoredSql(alias+".client_id") + " OR " +
+		providerIntentProbePrioritySql(alias+".client_id") + ") AND " + reliability[:end] + "\n\t\tAND NOT (" +
 		providerIntentProbePrioritySql("provider_reliability.client_id") + ")" + reliability[end:]
 }
 
@@ -110,14 +112,17 @@ func testingUrlCensusBoundedValues(t testing.TB, query string, now time.Time) ([
 }
 
 // Sixteen independent states cover missing, low, exact-floor and healthy
-// scores with and without intent priority and ARIN exclusion. The historical
-// no-grace predicate must differ in its one legitimately admitted low-score row.
+// scores with and without intent priority and ARIN exclusion. The serving
+// predicate, which has no grace and treats missing history as neutral, must
+// differ in its one legitimately admitted low-score row and its unscored row.
 func TestUrlProbeCensusGuardedAdmissionTruthAndQuota(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		now := server.NowUtc().Truncate(time.Microsecond)
 		testingSeedUrlProbeFleet(t, now.Add(-5*time.Hour), 16)
 		server.Tx(ctx, func(tx server.PgTx) {
+			// These states replace the fleet seed's history.
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM client_connection_reliability_score`))
 			server.RaisePgResult(tx.Exec(ctx, `WITH numbered AS (
 				SELECT client_id,row_number() OVER (ORDER BY client_id)-1 AS n FROM network_client
 			) INSERT INTO client_connection_reliability_score
@@ -144,7 +149,7 @@ func TestUrlProbeCensusGuardedAdmissionTruthAndQuota(t *testing.T) {
 			for rows.Next() {
 				var current, guarded, historical bool
 				server.Raise(rows.Scan(&current, &guarded, &historical))
-				want := rowsSeen < 8 && (rowsSeen%4 != 1 || rowsSeen%8 >= 4)
+				want := rowsSeen < 8 && (rowsSeen%4 >= 2 || rowsSeen%8 >= 4)
 				oldWant := rowsSeen < 8 && rowsSeen%4 != 1
 				if current != want || guarded != want || historical != oldWant {
 					panic(fmt.Sprintf("synthetic admission truth row %d differs: current=%t guarded=%t historical=%t", rowsSeen, current, guarded, historical))
@@ -164,14 +169,14 @@ func TestUrlProbeCensusGuardedAdmissionTruthAndQuota(t *testing.T) {
 		readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		fleet := GetProviderUrlProbeFleet(readCtx, now)
-		if fleet.Eligible != 7 || fleet.MatureEligible != 7 || fleet.QuotaComplete != 0 || fleet.MatureRunsNeeded != 70 {
+		if fleet.Eligible != 6 || fleet.MatureEligible != 6 || fleet.QuotaComplete != 0 || fleet.MatureRunsNeeded != 60 {
 			t.Fatalf("admission truth changed the typed quota: %+v", fleet)
 		}
 	})
 }
 
 // This fixture has a known near-current fleet size, not a claim about Main's
-// distribution: 240k scores, 4k intent rows, 800k history rows and 160k security
+// distribution: 320k scores, 4k intent rows, 800k history rows and 160k security
 // rows. Setup is outside query timing and has its own fixed two-minute owner.
 func testingSeedUrlCensusDeadlineFleet(t testing.TB, now time.Time) {
 	t.Helper()

@@ -212,7 +212,18 @@ settings:
 candidates: []
 `
 
-// One provider due for its first URL turn: connected, placed and providing.
+// Seeds one passing reliability score per client, the history URL probe
+// admission needs before a provider's first cycle.
+func testPassingReliabilityHistory(ctx context.Context, clientIds ...server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score
+			(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight)
+			SELECT client_id,0,1,1,1,1 FROM unnest($1::uuid[]) AS client_id`, clientIds))
+	})
+}
+
+// One provider due for its first URL turn: connected, placed, providing and
+// with passing reliability history.
 func testOperatorTransportDueProvider(tb testing.TB, ctx context.Context) server.Id {
 	city := &model.Location{
 		LocationType: model.LocationTypeCity,
@@ -232,6 +243,7 @@ func testOperatorTransportDueProvider(tb testing.TB, ctx context.Context) server
 		tb.Fatalf("set connection location: %s", err)
 	}
 	model.SetProvide(ctx, clientId, map[model.ProvideMode][]byte{model.ProvideModePublic: []byte("provide-secret")})
+	testPassingReliabilityHistory(ctx, clientId)
 	model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 	return clientId
 }

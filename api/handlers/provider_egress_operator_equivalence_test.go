@@ -78,7 +78,8 @@ settings:
 candidates: []
 `
 
-// One provider placed at Palo Alto, connected and providing publicly.
+// One provider placed at Palo Alto, connected, providing publicly and with
+// passing reliability history.
 func operatorEquivalenceProvider(t testing.TB, ctx context.Context, networkId, deviceId, clientId, locationId server.Id, address string) {
 	model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "", "")
 	handlerId := model.CreateNetworkClientHandler(ctx)
@@ -92,6 +93,7 @@ func operatorEquivalenceProvider(t testing.TB, ctx context.Context, networkId, d
 	model.SetProvide(ctx, clientId, map[model.ProvideMode][]byte{
 		model.ProvideModePublic: []byte("provide-secret"),
 	})
+	testing_passingReliabilityHistory(ctx, clientId)
 }
 
 // The same database state in both runs: two due providers and one observed pin.

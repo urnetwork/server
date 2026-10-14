@@ -212,8 +212,9 @@ func TestProviderEgressLocationDueRejectsAlteredSecret(t *testing.T) {
 }
 
 // testing_connectDueProvider stands up a connected + valid provider holding a
-// Public provide key and no probe result, i.e. a provider the due query must
-// return. The caller runs model.UpdateClientLocationReliabilities afterward.
+// Public provide key, passing reliability history (which URL probe admission
+// requires) and no probe result, i.e. a provider the due query must return.
+// The caller runs model.UpdateClientLocationReliabilities afterward.
 func testing_connectDueProvider(
 	t testing.TB,
 	ctx context.Context,
@@ -233,6 +234,17 @@ func testing_connectDueProvider(
 	}
 	model.SetProvide(ctx, clientId, map[model.ProvideMode][]byte{
 		model.ProvideModePublic: []byte("provide-secret"),
+	})
+	testing_passingReliabilityHistory(ctx, clientId)
+}
+
+// Seeds one passing reliability score, the history URL probe admission needs
+// before a provider's first cycle.
+func testing_passingReliabilityHistory(ctx context.Context, clientId server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score
+			(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight)
+			VALUES ($1,0,1,1,1,1)`, clientId))
 	})
 }
 
