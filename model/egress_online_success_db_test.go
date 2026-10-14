@@ -345,3 +345,41 @@ func TestProviderOnlineSuccessBaselineIsReadOnceAWindow(t *testing.T) {
 		connect.AssertEqual(t, readFloor(), 0.7)
 	})
 }
+
+// A provider.yml that gives the kill switch twice panics none of the passes
+// or readers that apply the rule. Its kill switch cannot be read, so the rule
+// is off in all of them: a provider without a success is online, counted and
+// told it fails its network checks, not that it carries no traffic. The
+// rollup runs first, under a readable file: it also reads the subscriber
+// quality policy from provider.yml, which fails closed on a file it cannot
+// decode.
+func TestOnlineUrlSuccessPassesSurviveAKillSwitchGivenTwice(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
+
+		healthy := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		egressTestProbed(ctx, healthy, city, 0, "us")
+		dead := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		egressTestHealth(ctx, dead.clientId, server.NowUtc(), 5, 5)
+		for _, provider := range []*egressTestProvider{healthy, dead} {
+			for lookbackIndex := range 3 {
+				egressTestReliability(ctx, provider.clientId, lookbackIndex, 1, 1)
+			}
+		}
+
+		now := server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+
+		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_requires_url_success: true\nonline_requires_url_success: false\n"))
+		defer pop()
+		connect.AssertEqual(t, UpdateClientScores(ctx, time.Hour, 1), nil)
+		connect.AssertEqual(t, UpdateClientLocations(ctx, time.Hour), nil)
+		assertOnlineSuccessTestAnswer(t, "online", egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeOnline, 10, false, server.NewId()),
+			[]*egressTestProvider{healthy, dead}, nil)
+		connect.AssertEqual(t, egressTestLocationCount(ctx, t, city), 2)
+		connect.AssertEqual(t, CountProviderEgress(ctx).ReasonCounts["no_success"], int64(0))
+		connect.AssertEqual(t, GetClientProviderStatus(ctx, dead.networkId, dead.clientId).Reason, ProviderStatusReasonEgressFailing)
+		connect.AssertEqual(t, InspectProviderEgress(ctx, dead.clientId).Reason, ProviderExcludedHealth)
+	})
+}

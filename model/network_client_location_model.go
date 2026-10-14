@@ -3872,6 +3872,13 @@ func providerEgressTestEnabledFromResource(resource *server.SimpleResource, err 
 	if err != nil || resource == nil {
 		return false
 	}
+	// Bool parses with Parse, which panics on a file that is not yaml or that
+	// gives a key twice, and every pass that applies the egress rules reads
+	// this flag. ParseE reports that instead, and once it has succeeded, Bool
+	// reads its result.
+	if _, err := resource.ParseE(); err != nil {
+		return false
+	}
 	enabled := resource.Bool("enable_egress_test")
 	return len(enabled) == 1 && enabled[0]
 }

@@ -592,6 +592,58 @@ func TestEgressIndexSettingsOnlineSuccessCountryFloorMargin(t *testing.T) {
 	}
 }
 
+// A provider.yml that gives the kill switch twice, or that indents with a
+// tab, panics no pass and no reader: the rollout flag, the counts policy key,
+// the settings and the request settings all read it. The kill switch cannot
+// be read from either, so the rule is off. A key given twice leaves the rest
+// of the file readable, so native_reader_enabled keeps its value; a tab makes
+// the whole file unreadable, so the egress index keeps its defaults.
+func TestProviderConfigWithADuplicateKeyOrATabPanicsNothing(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		config       string
+		nativeReader bool
+	}{
+		{name: "kill switch given twice", config: "online_requires_url_success: true\nonline_requires_url_success: false\negress_index:\n  native_reader_enabled: true\n", nativeReader: true},
+		{name: "tab indentation", config: "egress_index:\n\tnative_reader_enabled: true\nonline_requires_url_success: true\n", nativeReader: false},
+	} {
+		func() {
+			pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(c.config))
+			defer pop()
+			requestEgressIndexSettingsSnapshot.Store(nil)
+			defer requestEgressIndexSettingsSnapshot.Store(nil)
+			noPanic := func(what string, read func()) {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						t.Errorf("%s: %s panicked: %v", c.name, what, recovered)
+					}
+				}()
+				read()
+			}
+			noPanic("the rollout flag", func() {
+				if providerEgressTestEnabled() {
+					t.Errorf("%s: the rollout flag is on", c.name)
+				}
+			})
+			noPanic("the counts policy key", func() {
+				ProviderEgressCountsPolicyKey()
+			})
+			noPanic("the settings", func() {
+				settings := egressIndexSettings()
+				if settings.OnlineRequiresUrlSuccess {
+					t.Errorf("%s: the rule is on", c.name)
+				}
+				if settings.NativeReaderEnabled != c.nativeReader {
+					t.Errorf("%s: native_reader_enabled %t, want %t", c.name, settings.NativeReaderEnabled, c.nativeReader)
+				}
+			})
+			noPanic("the request settings", func() {
+				requestEgressIndexSettings()
+			})
+		}()
+	}
+}
+
 // A malformed egress_index value resets that block, as it always has, but
 // not the rule's keys: the kill switch and the floor beside it still apply.
 func TestEgressIndexSettingsMalformedBlockKeepsTheOnlineUrlSuccessKeys(t *testing.T) {
