@@ -108,14 +108,14 @@ func CheckContractDegradationPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	if checkContractDegradationResult.HandedBack {
+	if checkContractDegradationResult != nil && checkContractDegradationResult.HandedBack {
 		runAt := server.NowUtc().Add(configHandbackDelay)
 		rescheduleHandedBackTaskInTx(clientSession, tx, checkContractDegradationRunOnce(), runAt, func() {
 			scheduleCheckContractDegradationArgsAt(clientSession, tx, checkContractDegradation, runAt)
 		})
 		return nil
 	}
-	if checkContractDegradationResult.Disabled || !model.NetworkDegradationEnabled() {
+	if (checkContractDegradationResult != nil && checkContractDegradationResult.Disabled) || !model.NetworkDegradationEnabled() {
 		return nil
 	}
 	scheduleCheckContractDegradationAt(clientSession, tx, server.NowUtc().Add(model.ContractDegradationCheckInterval))

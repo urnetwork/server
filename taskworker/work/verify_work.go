@@ -154,7 +154,7 @@ func SweepVerifyTrailsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	if sweepVerifyTrailsResult.HandedBack {
+	if sweepVerifyTrailsResult != nil && sweepVerifyTrailsResult.HandedBack {
 		runAt := server.NowUtc().Add(configHandbackDelay)
 		rescheduleHandedBackTaskInTx(clientSession, tx, task.RunOnce("sweep_verify_trails"), runAt, func() {
 			scheduleSweepVerifyTrailsAt(clientSession, tx, sweepVerifyTrails, runAt)
@@ -224,7 +224,7 @@ func RollupVerifyProviderStatsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	if rollupVerifyProviderStatsResult.HandedBack {
+	if rollupVerifyProviderStatsResult != nil && rollupVerifyProviderStatsResult.HandedBack {
 		runAt := server.NowUtc().Add(configHandbackDelay)
 		rescheduleHandedBackTaskInTx(clientSession, tx, task.RunOnce("rollup_verify_provider_stats"), runAt, func() {
 			scheduleRollupVerifyProviderStatsAt(clientSession, tx, rollupVerifyProviderStats, runAt)
@@ -336,7 +336,7 @@ func RemoveOldVerifyProviderStatsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	if removeOldVerifyProviderStatsResult.HandedBack {
+	if removeOldVerifyProviderStatsResult != nil && removeOldVerifyProviderStatsResult.HandedBack {
 		runAt := server.NowUtc().Add(configHandbackDelay)
 		rescheduleHandedBackTaskInTx(clientSession, tx, task.RunOnce("remove_old_verify_provider_stats"), runAt, func() {
 			scheduleRemoveOldVerifyProviderStatsAt(clientSession, tx, removeOldVerifyProviderStats, runAt)
