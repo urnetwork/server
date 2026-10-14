@@ -71,6 +71,7 @@ func NewSignals() []Signal {
 		NewProviderCountSignal(),
 		NewProviderPickerSignal(),
 		NewProviderSelectionSignal(),
+		NewArindbCanarySignal(),
 		NewRetentionFanoutSignal(),
 		NewPgBouncerStallsSignal(),
 		NewWorkerMemorySignal(),

@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-providers",
   "title": "urnetwork / providers",
-  "description": "The supply side of the network and the contracts it carries: the provider and extender populations with their ip family splits, the contract and dispute counts open now and over the trailing 24 hours, the countries with the most of each, and the egress buckets with the providers each egress rule leaves out and the backfill that answers for them. Internal: the contract counts are not published. Every gauge is replicated by every taskworker and read with max, so no panel needs a block or host variable; the one histogram, the backfill, is observed by each api process for its own answers and read as a rate summed across them.",
+  "description": "The supply side of the network and the contracts it carries: the provider and extender populations with their ip family splits, the contract and dispute counts open now and over the trailing 24 hours, the countries with the most of each, and the egress buckets with the providers each egress rule leaves out and the backfill that answers for them. Internal: the contract counts are not published. Every gauge is replicated by every taskworker and read with max, so no panel needs a block or host variable; the one histogram, the backfill, is observed by each api process for its own answers and read as a rate summed across them. The ARIN database canary row reads the published canary decision, replicated by every taskworker like the other gauges, and each process's own ARIN slots.",
   "tags": [
     "urnetwork",
     "providers"
@@ -3833,6 +3833,780 @@
         }
       ],
       "description": "Destination pool rows per class after the latest refresh, by state: scored sites count toward the index and the 90 % rule, probation sites are loaded and recorded but not yet counted, and candidates are promotable now. Read from the taskworker that ran the latest refresh. An active pool under the class's pool size, or no candidates left to promote, is the pool-thin finding of monitor signal §2.19b."
+    },
+    {
+      "id": 73,
+      "type": "row",
+      "title": "ARIN database canary",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 130
+      },
+      "panels": []
+    },
+    {
+      "id": 74,
+      "type": "stat",
+      "title": "canary state",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 131
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (state) (urnetwork_stats_arindb_canary_state{env=\"$env\"}) == 1",
+          "refId": "A",
+          "legendFormat": "{{state}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "description": "The state the latest score publication's ARIN canary decision ended in (arindbctl/ARINDB.md, Dual-database canary): single when the indexer has no usable old database, warming while too few providers carry facts for both databases, latest when the comparison passes, fallback when the latest tripped the breaker and the export serves the old database's Quality classification. Risk always comes from the latest database. Read from the published decision by every taskworker; nothing shows while no decision is readable, when readers serve each provider's latest slot."
+    },
+    {
+      "id": 75,
+      "type": "stat",
+      "title": "fallback active",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 131
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_arindb_fallback_active{env=\"$env\"})",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "description": "1 while the score export serves the old ARIN database's Quality classification because the latest tripped the breaker: a bucket's net loss above bucket_loss_threshold or a country with no supply left in a bucket. Pages (ArinDbFallbackActive). A fallback restores Quality only; a Speed or Online loss comes from risk, which always follows the latest database and pages separately."
+    },
+    {
+      "id": 76,
+      "type": "stat",
+      "title": "serving database",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 131
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_arindb_serving_epoch_seconds{env=\"$env\"}) * 1000",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "description": "Build time of the ARIN database whose Quality classification the score export and every request-time reader serve. The epoch 0 (shown as 1970) means each provider's latest slot, as before the canary: the single state, or no readable decision."
+    },
+    {
+      "id": 77,
+      "type": "stat",
+      "title": "decision age",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 131
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1800
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max(urnetwork_stats_arindb_decision_seconds{env=\"$env\"})",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "description": "Time since the indexer last published a canary decision; every score publication publishes one before its export. Over 30 minutes is ArinDbDecisionStale: the indexer is stalled, and its decision expires with the publication's 300 minute ttl, after which readers serve each provider's latest slot."
+    },
+    {
+      "id": 78,
+      "type": "timeseries",
+      "title": "bucket supply under each database",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 136
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (bucket, database) (urnetwork_stats_arindb_providers{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{bucket}} {{database}}"
+        }
+      ],
+      "description": "Public providers with facts for both ARIN databases in each bucket under the latest and under the old database, counted by the export's unchanged rules with only the ARIN facts substituted. Risk removes a provider from every bucket and non-quality only from Quality, so Speed and Online differ between the databases only through risk."
+    },
+    {
+      "id": 79,
+      "type": "timeseries",
+      "title": "net loss of latest against old",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 136
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (bucket) (urnetwork_stats_arindb_loss_ratio{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{bucket}}"
+        }
+      ],
+      "description": "(old - latest) / old supply per bucket over the paired providers; negative is a gain and 0 means no old supply. The breaker trips when a bucket is strictly above bucket_loss_threshold (0.10 by default, the line). A Speed or Online loss above it pages (ArinDbRiskSupplyLoss) without an automatic repair, because only risk causes it and risk always follows the latest database."
+    },
+    {
+      "id": 80,
+      "type": "timeseries",
+      "title": "coverage of the public cohort",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 145
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.98
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (database) (urnetwork_stats_arindb_coverage_ratio{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{database}}"
+        }
+      ],
+      "description": "Share of the public score cohort whose rollup carries facts for the latest database, the old database, or both (paired). Below min_coverage (0.98 by default, the line) the run is warming and serves the database the rows carry: processes not yet restarted onto the pair, a rollup not yet refreshed after a release, or a stuck host. Warming for two hours warns (ArinDbCanaryWarming)."
+    },
+    {
+      "id": 81,
+      "type": "timeseries",
+      "title": "emptied countries and cities",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 145
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (bucket) (urnetwork_stats_arindb_emptied_countries{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{bucket}} countries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (bucket) (urnetwork_stats_arindb_emptied_cities{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "{{bucket}} cities"
+        }
+      ],
+      "description": "Countries and cities with supply in a bucket under the old ARIN database and none under the latest. An emptied country trips the breaker when trip_on_emptied_country is set (the default); emptied cities are reported only, and their names are in the published decision and the indexer log."
+    },
+    {
+      "id": 82,
+      "type": "table",
+      "title": "countries the latest would empty",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 154
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        }
+      ],
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (bucket, country_code) (urnetwork_stats_arindb_emptied_country{env=\"$env\"})",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "description": "Each country the latest database would empty, per bucket, with the old database's supply there. Monitor signal §2.9d names these countries in its page."
+    },
+    {
+      "id": 83,
+      "type": "table",
+      "title": "supply by country under each database",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 154
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        }
+      ],
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (bucket, database, country_code) (urnetwork_stats_arindb_providers_by_country{env=\"$env\"})",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "description": "Paired public providers per bucket and published country under each database. Providers without a published country count only in the bucket totals."
+    },
+    {
+      "id": 84,
+      "type": "table",
+      "title": "the indexer's pair",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 162
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        }
+      ],
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (database) (urnetwork_stats_arindb_database_build_epoch_seconds{env=\"$env\"})",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_arindb_database_info{env=\"$env\"}) by (database, state, sha256)",
+          "refId": "B",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "description": "The latest and old databases the score export compared, from its own loader: build epoch, state and the SHA-256 their manifests record. The old database is the byte copy arindbctl update made of the previously selected release (arin-old.mmdb); a refused copy ships the release without one, and the state is then missing."
+    },
+    {
+      "id": 85,
+      "type": "table",
+      "title": "each process's slots",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 162
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        }
+      ],
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_arin_database_info{env=\"$env\"}) by (service, host, block, instance, slot, state, sha256)",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "description": "Both ARIN slots of every process that opened a pair, pushed with the process's own labels: loaded, missing, identical, invalid or unopened, with the manifest hash (none when unknown). Connect, API, MCP and Alt open the pair at warmup; Taskworker at its first score publication. A process keeps its pair until it restarts."
+    },
+    {
+      "id": 86,
+      "type": "timeseries",
+      "title": "each process's database ages",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 169
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max by (service, host, block, instance) (urnetwork_arin_database_build_epoch_seconds{env=\"$env\"} > 0)",
+          "refId": "A",
+          "legendFormat": "latest {{service}} {{host}} {{block}} {{instance}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max by (service, host, block, instance) (urnetwork_arin_old_database_build_epoch_seconds{env=\"$env\"} > 0)",
+          "refId": "B",
+          "legendFormat": "old {{service}} {{host}} {{block}} {{instance}}"
+        }
+      ],
+      "description": "Time since the build of each process's latest and old ARIN databases; a slot that is not loaded is left out. Processes at different latest ages are a fleet not yet restarted onto a release, which keeps the canary warming."
     }
   ]
 }
