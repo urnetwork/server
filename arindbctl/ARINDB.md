@@ -1768,6 +1768,393 @@ Zero native Quality therefore does not, by itself, prove an empty picker or
 identify the cause of a request failure. Evaluate selection results, publication
 freshness, health, classification, and request latency as separate observations.
 
+## Dual-database canary (proposed)
+
+Status: proposed on 2026-10-14 for review; nothing in this section is
+implemented yet. It replaces the live shadow comparison
+([arinshadowctl](../arinshadowctl/README.md), the in-process observers and
+the score-shadow freshness lease). That shadow needs a separate candidate
+resource, a credentialed capture session, owner inventories and a 90-second
+lease to compare two databases. The canary compares them on every score
+publication, using facts the fleet already writes.
+
+Each release directory carries two databases: the new build as `arin.mmdb`
+and a byte copy of the previously selected release as `arin-old.mmdb`. Every
+process that classifies addresses opens both when it starts, and stamps each
+connection with the facts of both. Once per score publication the FP2 indexer
+counts bucket supply under each database. It serves the latest unless the
+latest trips a circuit breaker; then it serves the old classification and
+raises signals. The indexer publishes the database it chose, and every
+request-time reader applies that same database to stored facts. The MMDB file
+stays the only source of truth, and a process restart stays the only point at
+which a process reads a new one.
+
+### Goals and non-goals
+
+Goals:
+
+- Stop a release whose database would remove a large share of Quality, Speed
+  or Online supply, or empty a country, from taking effect, without operator
+  action, and report it.
+- Keep build and deploy as they are: one copy step in `arindbctl update`, and
+  no new Config resource, transport, credential or operator session.
+- Make one choice per publication, applied identically by the indexer and
+  every request-time reader, including during rolling restarts.
+- Make the comparison observable: counts per bucket and country under each
+  database, degradation, emptied countries and cities, the active choice, and
+  both files' identity and age.
+
+Non-goals:
+
+- Correctness review. A release that is wrong but removes little supply passes.
+  The reviewed rules, catalog audit and Atlas validation remain the quality
+  gates.
+- A per-provider choice ("best of both"). Taking whichever database is more
+  permissive for each provider unions the two databases and drops the
+  exclusions either one makes.
+- Hot reload. A process keeps the pair it opened until it restarts.
+- GeoLite2. Location is resolved and stored once per connection; a canary for
+  it would need two location rows per connection.
+- Reclassifying stored connections. Raw addresses are not stored, so both
+  databases classify an address only while Connect holds it.
+- Reverting risk. Risk vetoes always come from the latest database (open
+  decision 2).
+
+### Files and the arindbctl copy-forward
+
+A release directory gains two files; everything else is unchanged:
+
+```text
+config/all/arindb/<version>/
+  arin.mmdb                   the new build
+  manifest.json               its manifest
+  registration-manifest.json
+  update-manifest.json        records the copy under previous_database
+  arin-old.mmdb               byte copy of the previously selected arin.mmdb
+  manifest-old.json           byte copy of that release's manifest.json
+```
+
+`arindbctl update --previous-config <config root> --previous-env <env>`
+resolves `arindb/arin.mmdb` beneath that root with the runtime resolver
+(`server.ResolveResourcePaths`). "Previous" therefore means exactly the file a
+process of that environment would open before this release is added. The
+release runner passes `$WARP_HOME/config` and `$BUILD_ENV`; that is the only
+build change. `--previous-database <file>` names a file explicitly instead,
+for the baseline pin described under failure modes.
+
+Before copying, update opens the previous file with the runtime decoder. It
+refuses the file unless the type is `urnetwork arindb`, the sibling
+`manifest.json` names it in `sha256["arin.mmdb"]`, the streamed copy has that
+SHA-256, the manifest's `built_at` second equals the MMDB build epoch, and the
+build epoch is strictly older than the new one. A refusal, an identical
+previous database or no previous database leaves both files out.
+`update-manifest.json` records the source path, hash, epoch and size of the
+copy, or why there is none, and the release message says so. A refused copy
+never fails the release, because blocking the release would keep the suspect
+database in service.
+
+The copy is a second full file in every release directory, about 0.6 GB
+today. Git LFS stores identical content once, but the checkout, the
+config-updater image and each host's config tree carry it twice. The image
+already includes every retained `arindb` version (7.5 GB for 17 versions on
+2026-10-14), so pruning old versions is the natural mitigation. Pruning is
+outside this change.
+
+### Loader
+
+`arindb/arin.mmdb` resolves and opens exactly as today, including the warmup
+panic on an unopenable or mistyped file. The old file is opened only as
+`arin-old.mmdb` in the directory of the resolved latest file. It is never
+resolved on its own: the resolver picks the highest version directory that
+contains the requested name, so an independent lookup could pair this
+release's latest with another release's old file.
+
+| Old slot state | Condition | Effect |
+| --- | --- | --- |
+| `loaded` | Valid, strictly older and distinct | Both readers serve lookups |
+| `missing` | No `arin-old.mmdb` beside the latest | Latest only |
+| `identical` | Same build epoch and manifest hash as the latest | Latest only |
+| `invalid` | Unopenable or mistyped, no readable `manifest-old.json`, metadata epoch differs from the manifest's `built_at`, not older than the latest, or an equal epoch with a different hash | Latest only, error logged |
+
+Only the latest can fail a process. An old-slot open or lookup failure makes
+that slot's facts unavailable; it never fails warmup or a connection's
+location write. Both readers stay memory mapped for the process lifetime, and
+opening reads only metadata. A slot's identity is its path, MMDB build epoch
+and manifest SHA-256. arindbctl verified the copied bytes; runtime does not
+rehash whole files, as today. Lookups touch pages in both files, so resident
+ARIN page cache can roughly double on Connect hosts; processes on one host
+share the read-only mapping.
+
+Taskworker opens the pair at its first score publication, rather than at
+warmup, to learn which pair it compares. It still performs no lookups.
+
+### Connection and rollup facts
+
+Connect looks the connection address up in both readers, on both the GeoLite2
+and the probed-egress location paths, and stores:
+
+| Slot | Columns | Meaning |
+| --- | --- | --- |
+| latest | `arin_risk`, `arin_non_quality`, `arin_quality_verified`, `arin_database_build_epoch`, `arin_lookup_at` (existing) | Unchanged |
+| old | `arin_old_risk`, `arin_old_non_quality`, `arin_old_quality_verified`, `arin_old_database_build_epoch` (new) | The same facts from `arin-old.mmdb`; epoch 0 when no old reader was loaded or its lookup failed |
+
+`arin_old_quality_verified` gets the same write-token fence as
+`arin_quality_verified`, so a writer that does not set it cannot leave an
+earlier positive in place. The location rollup adds, per client,
+`arin_old_risk` and `arin_old_non_quality`, aggregated over live connections
+exactly like the latest facts, including the policy-two unverified rule. It
+also adds `arin_epoch` and `arin_old_epoch`: each slot's epoch when every live
+connection has the same one, otherwise 0. Defaults of false and 0 never read as
+clean, because a slot's facts are used only when its epoch equals the
+published serving epoch (below), and 0 never does.
+
+### Comparison and breaker
+
+The indexer (`UpdateClientScores`) learns the pair (L, O) from its own loader
+and reads both slots with its existing rollup source rows. For each public
+provider in the cohort, its facts under database e are:
+
+- the latest slot when `arin_epoch` = e;
+- the old slot when `arin_old_epoch` = e;
+- otherwise unavailable.
+
+Membership under e uses the unchanged rules (`decideProviderEgress` and the
+reliability minimums) with only the ARIN facts substituted. Under those rules
+risk can remove a provider from every bucket, and non-quality only from
+Quality. Speed and Online therefore differ between the two databases only
+through risk.
+
+Each run ends in exactly one state:
+
+| State | When | Serving epoch S |
+| --- | --- | --- |
+| `single` | Taskworker loaded no usable old file | 0: each row's latest slot, today's behavior |
+| `warming` | Fewer than `min_coverage` of providers have facts for both L and O | O if its own coverage reaches `min_coverage`, else L if its coverage does, else whichever covers more (ties to O) |
+| `latest` | Paired coverage reached, breaker holds | L |
+| `fallback` | Paired coverage reached, breaker trips | O |
+
+The breaker compares only the providers with facts for both databases. For a
+bucket b with old supply N_O,b > 0, it trips when the net loss
+(N_O,b − N_L,b) / N_O,b is strictly greater than `bucket_loss_threshold`
+(default 0.10). It also trips when any country has supply in b under O and
+none under L. Gross removals, additions and emptied cities are reported but do
+not trip. Using net loss tolerates a release that moves as many providers into
+a bucket as out of it.
+
+The choice is one serving epoch for the whole publication; no provider is
+decided separately. Quality classification (non-quality and verified) comes
+from S. Risk always comes from the latest slot, in every state including
+`fallback`. A fallback can therefore restore Quality, but it never readmits a
+provider that the latest database calls risky. A Speed or Online trip, which
+only risk can cause, pages without an automatic repair. Facts that are
+unavailable under S count as non-Quality, never as clean; risk still applies.
+There is no hysteresis: each run decides independently, so the latest
+database is served again as soon as a run passes.
+
+`provider.yml` carries the tunables under `arindb_canary`:
+`bucket_loss_threshold`, `trip_on_emptied_country` and `min_coverage`. Absent
+keys use the defaults.
+
+### Publication and request-time consistency
+
+Immediately after deciding, before export, the indexer writes the decision to
+`{arindb_canary_decision}` as versioned JSON with the export's TTL (300
+minutes). The document holds the state, the serving epoch, both databases'
+epochs, hashes and states, coverage, per-bucket and per-country counts under
+each database, losses, emptied countries and cities, and the source clock.
+The native census gains a matching `arindb` summary, which older readers
+ignore.
+
+Request-time readers read the decision, cached in process for a few seconds,
+and evaluate stored facts for S, choosing each row's slot by epoch:
+
+| Reader | Facts | Change |
+| --- | --- | --- |
+| FindProviders2 Quality validation, named providers and force_minimum (`getProviderSubscriberExclusions`) | Live connection rows | Quality uses the slot whose epoch is S, and refuses otherwise; risk unchanged |
+| Provider status and provider-egress dashboard counts | Rollup rows | The same selection |
+| Hard exclusions, probe admission and URL eligibility | Rollup risk | Unchanged: always latest |
+
+When no decision is readable (absent, expired, invalid or a Redis error), a
+reader uses each row's latest slot, as today, and counts the event. Refusing
+Quality instead would let a Redis blip empty it.
+
+Matching by epoch rather than by slot keeps a mixed fleet consistent:
+
+| Row written by | Latest slot | Old slot | S = E(N−1) | S = E(N) |
+| --- | --- | --- | --- | --- |
+| Restarted process (release N) | E(N) | E(N−1) | old slot | latest slot |
+| Process not yet restarted (N−1) | E(N−1) | E(N−2) | latest slot | none: not Quality |
+
+The indexer serves L only when at least `min_coverage` of providers carry it,
+so the last row type is a bounded, fail-closed transient. Readers switch when
+the decision is written, while the export rewrites targets over the following
+minutes. Validation only refuses, so during that window a provider drawn from a
+target of the previous choice reaches a Quality answer only if the published
+database also admits it.
+
+### Failure modes
+
+| Condition | Outcome | Signal |
+| --- | --- | --- |
+| Old file missing or identical | `single`: latest served as today | warn, no page |
+| Old file invalid | `single` in that process; error logged | warn |
+| Previous database refused at build | The release ships without an old file | update manifest and release message, then warn |
+| Latest unopenable or mistyped | Process fails warmup (unchanged) | existing |
+| Taskworker and Connect on different pairs | `warming` serves the epoch the rows carry | warn when sustained |
+| Rollup not yet refreshed after a release | `warming` until it is | warn when sustained |
+| Coverage held below `min_coverage`, such as a stuck host | `warming` on the established database | warn |
+| Old-slot lookup error | That connection's old facts are unavailable | none |
+| Decision unreadable | Readers use the latest slot | counter |
+| Indexer stalled | The decision expires with the publication | stale warning |
+| Breaker trips | `fallback`: old classification, latest risk | page |
+| Two bad releases in a row | The second compares against the first and can pass | page on the first; pin before the next |
+
+Baseline drift is the main limit of copying the previous latest: after a trip,
+the next release's old file is the rejected database. When a trip is judged to
+be a bad release, the operator sets `ARIN_PREVIOUS_DATABASE_FILE` for the
+runner to the last good `arin.mmdb`. Subsequent releases then compare against
+it, and the operator clears the pin once a good release ships.
+
+### Signals, alerts and dashboards
+
+Each process that opens ARIN pushes its own pair:
+
+| Metric | Meaning |
+| --- | --- |
+| `urnetwork_arin_database_build_epoch_seconds` | Existing: the latest slot's epoch, 0 until opened |
+| `urnetwork_arin_old_database_build_epoch_seconds` | The old slot's epoch, 0 when not loaded |
+| `urnetwork_arin_database_info{slot,state,sha256}` | 1 for each slot, always both, with its state and manifest hash (`none` when absent) |
+
+Every Taskworker's stats collector exports the indexer's decision from the
+published document, so all hosts report the same values:
+
+| Metric | Meaning |
+| --- | --- |
+| `urnetwork_stats_arindb_canary_state{state}` | One-hot `single`, `warming`, `latest` or `fallback` |
+| `urnetwork_stats_arindb_fallback_active` | 1 while serving old because the breaker tripped |
+| `urnetwork_stats_arindb_providers{bucket,database}` | Paired providers per bucket under `latest` and `old` |
+| `urnetwork_stats_arindb_providers_by_country{bucket,database,country_code}` | The same per country |
+| `urnetwork_stats_arindb_loss_ratio{bucket}` | Net loss of latest against old; negative is a gain |
+| `urnetwork_stats_arindb_emptied_countries{bucket}` and `urnetwork_stats_arindb_emptied_country{bucket,country_code}` | Countries latest would empty, and old's supply in each |
+| `urnetwork_stats_arindb_emptied_cities{bucket}` | A count; names are in the decision and the indexer log |
+| `urnetwork_stats_arindb_coverage_ratio{database}` | `latest`, `old` and `paired` coverage of the cohort |
+| `urnetwork_stats_arindb_database_build_epoch_seconds{database}` and `urnetwork_stats_arindb_database_info{database,state,sha256}` | The indexer's pair |
+| `urnetwork_stats_arindb_serving_epoch_seconds` and `urnetwork_stats_arindb_decision_seconds` | The serving epoch and the decision time |
+
+Request paths count decision reads in
+`urnetwork_arindb_decision_reads_total{outcome}`. Grafana alert rules live in
+warp `grafana/alerting/arindb-canary.yml`:
+
+| Rule | Expression (sketch) | Severity |
+| --- | --- | --- |
+| ArinDbFallbackActive | `max(urnetwork_stats_arindb_fallback_active) > 0` for 10m | page |
+| ArinDbRiskSupplyLoss | `max by (bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed\|online"}) > 0.10` for 10m | page |
+| ArinDbCanaryUnavailable | state `single` for 1h | warn |
+| ArinDbCanaryWarming | state `warming` for 2h | warn |
+| ArinDbDecisionStale | `time() - max(urnetwork_stats_arindb_decision_seconds) > 1800` | warn |
+
+Monitor signal §2.9d reads the same series through Mimir, pages on fallback
+and risk-driven loss, warns on the others, and names the emptied countries.
+The providers dashboard gains an "ARIN database canary" row: the state and
+fallback, bucket supply under each database, losses, coverage, emptied
+countries, and each process's slot states, hashes and ages.
+
+### Rollout
+
+1. Merge with an additive migration: the new columns default to false and 0,
+   the old-slot write fence, and the rollup columns. Old binaries ignore the
+   columns. A new binary without an old file runs `single` with S = 0, which
+   is today's behavior, so the code can ship ahead of any paired release.
+   Taskworker, API and Connect can deploy in any order.
+2. The next all-release build passes `--previous-config`. Its Config deploy
+   restarts services onto the pair: Connect writes both slots, the rollup
+   carries them, and the indexer warms, then compares.
+3. Check the first comparison on the dashboards before relying on the breaker:
+   losses, coverage and decision freshness. Tune `provider.yml` if needed.
+4. Remove the live shadow in the same change. It is default-off, and nothing
+   serves through it.
+
+### Test plan
+
+Deterministic tests use fixtures and injected clocks, and each is written to
+fail when its rule is removed:
+
+- Breaker: loss just under and just over 10% for each of Quality, Speed and
+  Online; a country emptied in each bucket; emptied cities reported without
+  tripping; zero old supply.
+- One choice per run: a provider that is better under latest still receives
+  the old classification in `fallback`.
+- Risk from latest: `fallback` keeps a latest-only risk veto and never
+  readmits that provider.
+- States: `single` for missing, identical and invalid old files; `warming`
+  coverage selection, including Taskworker ahead of and behind Connect; and
+  recovery to `latest`.
+- Readers follow the published epoch: the subscriber guard and the rollup
+  readers select slots by epoch for a mixed fleet, unavailable facts refuse
+  Quality, and no decision falls back to the latest slot.
+- Loader: sibling-only old resolution against a decoy in another version
+  directory, each invalid state, and old lookup errors that never fail the
+  write.
+- arindbctl: copy-forward with its manifest, the identical skip, refusal on a
+  hash mismatch, a wrong epoch or a wrong type, and the runner's flags.
+- Signals: the gauges carry both slots' hash and epoch in every state, the
+  fallback gauge toggles, the alert expressions evaluate, and the monitor
+  signal assigns its tiers.
+
+### Retiring the live shadow
+
+Removed:
+
+- `arinshadowctl/`, including CAPTURE.md and README.md;
+- root `arin_shadow_*.go`, `ip_arin_shadow*.go` and `arin_current_cause*.go`;
+- `model/arin_shadow_*.go` and `connect/arin_shadow_*.go`, with their tests;
+- the Connect owner-registry hooks in `transport_announce.go`, the capture
+  start in `connect/run.go` and `taskworker/startup.go`, and
+  `ObserveArinShadowConnection` in the location controller;
+- the score-capture observer and its lease in `UpdateClientScores` and
+  `newClientScoreTargetMaps`.
+
+Kept: the serving reader, the build-epoch gauge (its reader seam moves into
+`ip.go`), `provider_arin_coverage_model.go`, and stored lookup provenance.
+Historical measurements in this document remain as records, and references to
+the shadow procedure point here. The shadow persists nothing beyond process
+state, the optional `ARIN_SHADOW_CAPTURE_CONFIG` file and any staged
+`arindb-shadow/` resource; an operator may delete those once the change ships.
+
+### Open decisions
+
+1. Thresholds: a net bucket loss above 10% and any emptied country trip the
+   breaker; emptied cities only signal; `min_coverage` is 0.98.
+2. Risk always comes from the latest database, even in fallback. The
+   alternative takes risk from the served database, so that a fallback also
+   restores Speed and Online, at the cost of readmitting the risk a new release
+   added.
+3. Without a readable decision, readers use the latest slot (today's
+   behavior) rather than refusing Quality.
+4. Baseline drift is handled by a manual pin, not an automatic last-good
+   baseline, which would need production state at build time.
+5. No hysteresis, so decisions can alternate near a threshold.
+6. A refused copy ships the release without a canary instead of failing it.
+7. Disk: each release carries a second 0.6 GB file; pruning old `arindb`
+   versions is separate work.
+
+### Implementation scope
+
+- `arindbctl`: `update.go` and `main.go` (copy-forward and flags) with tests.
+  Build repository: `all/run.sh` and `ip_database_refresh_test.go` (flags and
+  pin).
+- `server`: `ip.go` (dual loader, gauges, sibling resolution).
+- `controller`: location facts on both location paths, and the stats
+  collector's gauges.
+- `model`: `ConnectionLocationScores`, `SetConnectionLocation`, the rollup, a
+  new canary file (comparison, breaker, publication and reader),
+  `UpdateClientScores`, the native census, `provider_subscriber_eligibility.go`,
+  `provider_status_model.go` and the provider-egress counts.
+- `db_migrations.go` and the monitor's migration contract.
+- `grafana/dashboards/providers.json`, a `monitor` signal with its SIGNALS.md
+  entry, and the warp alert rules.
+- The deletions listed above, about 10,500 lines.
+
 ## Release, activation, and measurement
 
 Package the final MMDB and manifest under a new versioned `arindb` resource in
@@ -1779,7 +2166,9 @@ later events. The Config release version, resource-directory version, MMDB build
 epoch, classifier schema, and subscriber policy version are distinct identifiers.
 
 An optional shadow comparison can measure candidate decisions against the
-current database without changing serving policy. Whether comparison occurs
+current database without changing serving policy; the proposed
+[dual-database canary](#dual-database-canary-proposed) replaces it with a
+comparison on every score publication. Whether comparison occurs
 before or after activation, actual resource and process observations establish
 which classifier was used. Operational receipts retain those release-specific
 claims. Main execution follows [RUN-MAIN.md](../monitor/RUN-MAIN.md).
