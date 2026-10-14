@@ -64,8 +64,8 @@ func forceCloseDeadlineOwnerBatches(ctx context.Context, openContracts []*contra
 	if len(contractIds) < 2 {
 		return
 	}
-	contractDeadlines := map[server.Id]time.Time{}
-	contractBalanceIds := map[server.Id][]server.Id{}
+	contractIdDeadlines := map[server.Id]time.Time{}
+	contractIdBalanceIds := map[server.Id][]server.Id{}
 	readOk := false
 	server.HandleError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
@@ -75,8 +75,8 @@ func forceCloseDeadlineOwnerBatches(ctx context.Context, openContracts []*contra
 					var contractId, balanceId server.Id
 					var deadline time.Time
 					server.Raise(rows.Scan(&contractId, &deadline, &balanceId))
-					contractDeadlines[contractId] = deadline
-					contractBalanceIds[contractId] = append(contractBalanceIds[contractId], balanceId)
+					contractIdDeadlines[contractId] = deadline
+					contractIdBalanceIds[contractId] = append(contractIdBalanceIds[contractId], balanceId)
 				}
 			})
 		}, server.OptNoRetry())
@@ -87,23 +87,23 @@ func forceCloseDeadlineOwnerBatches(ctx context.Context, openContracts []*contra
 	if !readOk {
 		return
 	}
-	balanceIndexes := map[server.Id][]int{}
+	balanceIdIndexes := map[server.Id][]int{}
 	balanceIds := []server.Id{}
 	for index, openContract := range openContracts {
-		deadline, ok := contractDeadlines[openContract.contractId]
-		rowBalanceIds := contractBalanceIds[openContract.contractId]
+		deadline, ok := contractIdDeadlines[openContract.contractId]
+		rowBalanceIds := contractIdBalanceIds[openContract.contractId]
 		// No financial owner admits the zero id; such a row fails alone.
 		if !ok || now.Before(deadline) || len(rowBalanceIds) != 1 || rowBalanceIds[0] == (server.Id{}) {
 			continue
 		}
 		balanceId := rowBalanceIds[0]
-		if _, ok := balanceIndexes[balanceId]; !ok {
+		if _, ok := balanceIdIndexes[balanceId]; !ok {
 			balanceIds = append(balanceIds, balanceId)
 		}
-		balanceIndexes[balanceId] = append(balanceIndexes[balanceId], index)
+		balanceIdIndexes[balanceId] = append(balanceIdIndexes[balanceId], index)
 	}
 	for _, balanceId := range balanceIds {
-		indexes := balanceIndexes[balanceId]
+		indexes := balanceIdIndexes[balanceId]
 		for offset := 0; offset < len(indexes); offset += ContractDeadlineOwnerBatchLimit {
 			batchIndexes := indexes[offset:min(offset+ContractDeadlineOwnerBatchLimit, len(indexes))]
 			if len(batchIndexes) < 2 {
@@ -112,7 +112,7 @@ func forceCloseDeadlineOwnerBatches(ctx context.Context, openContracts []*contra
 			batch := &forceCloseOwnerBatch{balanceId: balanceId, indexes: batchIndexes}
 			for _, index := range batchIndexes {
 				contractId := openContracts[index].contractId
-				batch.members = append(batch.members, ContractDeadline{ContractId: contractId, Deadline: contractDeadlines[contractId]})
+				batch.members = append(batch.members, ContractDeadline{ContractId: contractId, Deadline: contractIdDeadlines[contractId]})
 				rowBatches[index] = batch
 			}
 			slices.SortFunc(batch.members, func(a, b ContractDeadline) int { return a.ContractId.Cmp(b.ContractId) })
