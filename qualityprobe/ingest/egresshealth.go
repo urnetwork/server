@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -20,21 +19,22 @@ import (
 
 // One class's ok/total tally over the destinations
 // this run sampled.
-type egressHealthClassBody struct {
+type EgressHealthClassTally struct {
 	Ok    int `json:"ok"`
 	Total int `json:"total"`
 }
 
 // The fixed contract of the server's
-// handlers.SubmitProviderEgressHealthArgs
-// (POST /network/provider-egress-health, X-UR-Operator-Secret header).
+// controller.SubmitProviderEgressHealthArgs
+// (POST /network/provider-egress-health, X-UR-Operator-Secret header), and the
+// submission an in-process operator hands that same controller.
 //
 // The server rejects unknown fields, so this struct's json tags are not a
 // convention here -- they are the wire format, and a rename on either side
 // makes every submission 400. Legacy reports use server arrival time; explicit
 // URL evidence carries its validated actual measurement time so publication
 // retries cannot rejuvenate a rolling success or security event.
-type submitEgressHealthBody struct {
+type EgressHealthSubmission struct {
 	ClientId         string                         `json:"client_id"`
 	RunId            string                         `json:"run_id"`
 	CycleStartedAt   time.Time                      `json:"cycle_started_at,omitempty"`
@@ -45,9 +45,9 @@ type submitEgressHealthBody struct {
 	// one-in-ten rule count. The server checks that ClassResults sums to
 	// exactly these two. A load that was not measured, and a canary, is in
 	// neither -- see below.
-	OkCount      int                              `json:"ok_count"`
-	TotalCount   int                              `json:"total_count"`
-	ClassResults map[string]egressHealthClassBody `json:"class_results"`
+	OkCount      int                               `json:"ok_count"`
+	TotalCount   int                               `json:"total_count"`
+	ClassResults map[string]EgressHealthClassTally `json:"class_results"`
 	// The tallies and failed names of the dissolved reputation class, which
 	// is scored with the sites now (GEOMAP §11.3).
 	// They stay on the wire, always zero and empty, for one release, because a
@@ -99,47 +99,11 @@ func (self *Client) SubmitEgressHealth(
 	providerClientId string,
 	res *egresshealth.Result,
 ) error {
-	if res == nil {
-		// nothing measured. Submitting a zero here would be indistinguishable
-		// from a total blackhole, which is a false accusation against a
-		// provider whose check simply did not run.
+	body := NewEgressHealthSubmission(providerClientId, res)
+	if body == nil {
 		return nil
 	}
-	if res.RunId == "" {
-		res.RunId = connect.NewId().String()
-	}
-
-	classResults := map[string]egressHealthClassBody{}
-	for class, summary := range res.ByClass {
-		classResults[string(class)] = egressHealthClassBody{Ok: summary.Ok, Total: summary.Total}
-	}
-	shortClasses := make([]string, 0, len(res.ShortClasses))
-	for _, class := range res.ShortClasses {
-		shortClasses = append(shortClasses, string(class))
-	}
-
-	buf, err := json.Marshal(submitEgressHealthBody{
-		ClientId:                 providerClientId,
-		RunId:                    res.RunId,
-		CycleStartedAt:           res.CycleStartedAt,
-		UrlProbeEvidence:         res.UrlProbeEvidence,
-		OkCount:                  res.OkCount,
-		TotalCount:               res.Total,
-		ClassResults:             classResults,
-		TlsAuthenticationFailure: res.TlsAuthenticationFailure,
-		NotMeasuredCount:         res.NotMeasured,
-		// Bounded like probe_failure, and for the same reason: a run with
-		// many failures names dozens of destinations under
-		// -egress-health-all, and a submission the server rejects for length
-		// would leave the measured health unacknowledged. Cut on element
-		// boundaries with a dropped count -- see truncateNameList and
-		// MaxNameListLen.
-		FailedNames:       truncateNameList(res.FailedNames(), MaxNameListLen),
-		NotMeasuredNames:  truncateNameList(res.NotMeasuredNames(), MaxNameListLen),
-		CanaryPassedNames: truncateNameList(res.CanaryPassedNames(), MaxNameListLen),
-		CanaryFailedNames: truncateNameList(res.CanaryFailedNames(), MaxNameListLen),
-		ShortClasses:      strings.Join(shortClasses, ","),
-	})
+	buf, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
@@ -167,6 +131,52 @@ func (self *Client) SubmitEgressHealth(
 		return ErrUnauthorized
 	default:
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%w: status %d: %s", ErrRejected, resp.StatusCode, strings.TrimSpace(string(msg)))
+		return RejectedError(resp.StatusCode, string(msg))
+	}
+}
+
+// The client-side half of SubmitEgressHealth, shared by every transport: the
+// run as submitted, or nil when nothing was measured -- submitting a zero would
+// be indistinguishable from a total blackhole, which is a false accusation
+// against a provider whose check simply did not run. A run without an id is
+// given one here, on res, so every retry of it carries the same identity.
+func NewEgressHealthSubmission(providerClientId string, res *egresshealth.Result) *EgressHealthSubmission {
+	if res == nil {
+		return nil
+	}
+	if res.RunId == "" {
+		res.RunId = connect.NewId().String()
+	}
+
+	classResults := map[string]EgressHealthClassTally{}
+	for class, summary := range res.ByClass {
+		classResults[string(class)] = EgressHealthClassTally{Ok: summary.Ok, Total: summary.Total}
+	}
+	shortClasses := make([]string, 0, len(res.ShortClasses))
+	for _, class := range res.ShortClasses {
+		shortClasses = append(shortClasses, string(class))
+	}
+
+	return &EgressHealthSubmission{
+		ClientId:                 providerClientId,
+		RunId:                    res.RunId,
+		CycleStartedAt:           res.CycleStartedAt,
+		UrlProbeEvidence:         res.UrlProbeEvidence,
+		OkCount:                  res.OkCount,
+		TotalCount:               res.Total,
+		ClassResults:             classResults,
+		TlsAuthenticationFailure: res.TlsAuthenticationFailure,
+		NotMeasuredCount:         res.NotMeasured,
+		// Bounded like probe_failure, and for the same reason: a run with
+		// many failures names dozens of destinations under
+		// -egress-health-all, and a submission the server rejects for length
+		// would leave the measured health unacknowledged. Cut on element
+		// boundaries with a dropped count -- see truncateNameList and
+		// MaxNameListLen.
+		FailedNames:       truncateNameList(res.FailedNames(), MaxNameListLen),
+		NotMeasuredNames:  truncateNameList(res.NotMeasuredNames(), MaxNameListLen),
+		CanaryPassedNames: truncateNameList(res.CanaryPassedNames(), MaxNameListLen),
+		CanaryFailedNames: truncateNameList(res.CanaryFailedNames(), MaxNameListLen),
+		ShortClasses:      strings.Join(shortClasses, ","),
 	}
 }

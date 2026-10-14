@@ -192,17 +192,8 @@ func (self dueResult) due() []DueProvider {
 // entirely, which is both the single-prober case and what keeps this working
 // against a server that predates them.
 func (self *Client) Due(ctx context.Context, limit int) ([]DueProvider, error) {
-	if limit < 1 {
-		return nil, fmt.Errorf("ingest: due limit must be positive (got %d)", limit)
-	}
-	// Caught here rather than sent. The server answers 400, but an operator
-	// reading an empty result as "nothing is due" is exactly the confusion the
-	// limit<1 check above already exists to prevent.
-	if 1 < self.ShardCount && (self.ShardIndex < 0 || self.ShardCount <= self.ShardIndex) {
-		return nil, fmt.Errorf(
-			"ingest: shard index %d is out of range for shard count %d",
-			self.ShardIndex, self.ShardCount,
-		)
+	if _, _, err := PrepareDueRequest("due", limit, self.ShardIndex, self.ShardCount); err != nil {
+		return nil, err
 	}
 
 	u, err := url.Parse(self.dueUrl())
@@ -237,7 +228,7 @@ func (self *Client) Due(ctx context.Context, limit int) ([]DueProvider, error) {
 		return nil, ErrUnauthorized
 	default:
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("%w: status %d: %s", ErrRejected, resp.StatusCode, strings.TrimSpace(string(msg)))
+		return nil, RejectedError(resp.StatusCode, string(msg))
 	}
 
 	var out dueResult
@@ -251,10 +242,40 @@ func (self *Client) Due(ctx context.Context, limit int) ([]DueProvider, error) {
 }
 
 // The wire body of an attempt report.
-type attemptBody struct {
+type AttemptReport struct {
 	ClientId string `json:"client_id"`
 	// Omitted on success, otherwise a short failure class.
 	ProbeFailure string `json:"probe_failure,omitempty"`
+}
+
+// The client-side half of ReportAttempt, shared by every transport: the
+// failure class is cut to the server's column width rather than sent and
+// rejected (see MaxProbeFailureLen).
+func NewAttemptReport(providerClientId string, probeFailure string) AttemptReport {
+	return AttemptReport{ClientId: providerClientId, ProbeFailure: truncateUtf8(probeFailure, MaxProbeFailureLen)}
+}
+
+// The client-side checks every due request makes before it is sent, whichever
+// transport carries it: a positive limit (the server answers 400 to limit<1
+// precisely because an empty list is indistinguishable from "nothing is due")
+// and an index inside a multi-shard geometry, caught here rather than sent for
+// the same reason. It returns the geometry the server reads: 0 of 1 when
+// shardCount is 1 or less, because the parameters are then omitted from the
+// request, which also keeps it working against a server that predates them.
+func PrepareDueRequest(name string, limit int, shardIndex int, shardCount int) (int, int, error) {
+	if limit < 1 {
+		return 0, 0, fmt.Errorf("ingest: %s limit must be positive (got %d)", name, limit)
+	}
+	if shardCount <= 1 {
+		return 0, 1, nil
+	}
+	if shardIndex < 0 || shardCount <= shardIndex {
+		return 0, 0, fmt.Errorf(
+			"ingest: shard index %d is out of range for shard count %d",
+			shardIndex, shardCount,
+		)
+	}
+	return shardIndex, shardCount, nil
 }
 
 // Records that the prober tried this provider, whether or not the
@@ -271,9 +292,7 @@ type attemptBody struct {
 // and reporting unconditionally means there is no path through the prober that
 // forgets.
 func (self *Client) ReportAttempt(ctx context.Context, providerClientId string, probeFailure string) error {
-	probeFailure = truncateUtf8(probeFailure, MaxProbeFailureLen)
-
-	buf, err := json.Marshal(attemptBody{ClientId: providerClientId, ProbeFailure: probeFailure})
+	buf, err := json.Marshal(NewAttemptReport(providerClientId, probeFailure))
 	if err != nil {
 		return err
 	}
@@ -301,6 +320,6 @@ func (self *Client) ReportAttempt(ctx context.Context, providerClientId string, 
 		return ErrUnauthorized
 	default:
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%w: status %d: %s", ErrRejected, resp.StatusCode, strings.TrimSpace(string(msg)))
+		return RejectedError(resp.StatusCode, string(msg))
 	}
 }

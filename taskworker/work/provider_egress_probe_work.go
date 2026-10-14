@@ -26,6 +26,7 @@ import (
 	"github.com/urnetwork/server/qualityprobe/providertunnel"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/localoperator"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
@@ -35,6 +36,10 @@ const (
 	defaultProviderEgressProbeShardCount = 4
 	maxProviderEgressProbeShardCount     = 256
 	providerEgressBlackholeSubmitTimeout = 30 * time.Second
+	// In-process operator calls one pass runs at once (operator_concurrency).
+	// Two 64-worker passes per taskworker, Main's geometry, then run at most 16
+	// probe ingest calls against its database pool at once.
+	defaultProviderEgressOperatorConcurrency = 8
 )
 
 // Admission refusal is not task cancellation or a successful empty pass.
@@ -134,6 +139,21 @@ type providerEgressProbeSettings struct {
 	// instance may run across all of its shard passes. A change does not make
 	// pending pass snapshots stale.
 	InstanceUrlConcurrency int `yaml:"instance_url_concurrency"`
+	// Placement only, never a task argument: how this instance reaches the
+	// operator ingest (due claims, attempts, health, blackhole checks, pins and
+	// the destination pool). Empty, the default, or "http" uses the public
+	// operator API with its vault ingest secret, as the taskworker always has;
+	// "local" opts in to calling the controller in-process, with no API
+	// request. Read at each pass's start.
+	OperatorTransport string `yaml:"operator_transport"`
+	// Placement only, never a task argument: how many operator calls one pass
+	// runs at once in-process (operator_transport: local). Over the API those
+	// calls held the API fleet's database connections; in-process they hold
+	// this taskworker's, which every other task shares, so the pass's workers
+	// must not be able to take the pool. Each pass owns its own slots, and a
+	// call beyond them waits for one within its 30-second call bound. Read at
+	// each pass's start.
+	OperatorConcurrency int `yaml:"operator_concurrency"`
 	// Deprecated config inputs retained while old task snapshots retire.
 	Full                         ProviderEgressProbeBatchArgs `yaml:"full"`
 	Blackhole                    ProviderEgressProbeBatchArgs `yaml:"blackhole"`
@@ -163,6 +183,7 @@ func defaultProviderEgressProbeSettings(domain string) providerEgressProbeSettin
 			ProbeTimeoutSeconds: 60,
 		},
 		InstanceUrlConcurrency: defaultProviderUrlProbeInstanceConcurrency,
+		OperatorConcurrency:    defaultProviderEgressOperatorConcurrency,
 		Full: ProviderEgressProbeBatchArgs{
 			Limit: 8,
 			// one round: every provider of a batch waits out its retries
@@ -320,6 +341,16 @@ func (self providerEgressProbeSettings) validate() error {
 	}
 	if self.UrlProbe != nil && self.InstanceUrlConcurrency < 1 {
 		return fmt.Errorf("URL probe instance_url_concurrency must be positive")
+	}
+	switch self.OperatorTransport {
+	case "", providerEgressOperatorLocal, providerEgressOperatorHttp:
+	default:
+		return fmt.Errorf("provider egress probe operator_transport must be %q or %q", providerEgressOperatorLocal, providerEgressOperatorHttp)
+	}
+	// whatever the transport, so switching to local cannot meet a bound that
+	// was never checked
+	if self.OperatorConcurrency < 1 {
+		return fmt.Errorf("provider egress probe operator_concurrency must be positive")
 	}
 	return validateProviderEgressProbeArgsConfig(providerEgressProbeArgs(self, 0))
 }
@@ -696,6 +727,52 @@ func recreateMissingProviderEgressProbeShards(ctx context.Context) {
 		ensureProviderEgressProbeShardsInTx(clientSession, tx, settings, server.NowUtc())
 	}, server.TxReadCommitted)
 }
+
+// The transports a pass's operator calls may take (operator_transport).
+const (
+	providerEgressOperatorLocal = "local"
+	providerEgressOperatorHttp  = "http"
+)
+
+// A pass's operator calls use the public operator API, authenticated with the
+// vault's ingest secret, unless operator_transport opts in to "local": the
+// taskworker already holds the database the API handlers write, so it can run
+// them in-process through the same controller code (server/localoperator),
+// with the HTTP client's 30-second request bound per call, at most
+// operator_concurrency at once, and no API request, secret or encoding. Empty
+// is "http", so a deployment without the key keeps the API; the standalone
+// egress-prober always uses it.
+func newProviderEgressOperatorForSettings(args *ProviderEgressProbeArgs, settings providerEgressProbeSettings) (ingest.Operator, error) {
+	switch transport := settings.OperatorTransport; transport {
+	case providerEgressOperatorLocal:
+		// this pass's own slots, never shared with another pass
+		operator, err := newLocalProviderEgressOperator(args.ShardIndex, args.ShardCount, providerEgressControlPlaneTimeout, settings.OperatorConcurrency)
+		if err != nil {
+			return nil, err
+		}
+		return operator, nil
+	case "", providerEgressOperatorHttp:
+		operatorSecret, err := readProviderEgressOperatorSecret()
+		if err != nil {
+			return nil, err
+		}
+		return &ingest.Client{
+			ServerUrl:      args.APIURL,
+			OperatorSecret: operatorSecret,
+			ShardIndex:     args.ShardIndex,
+			ShardCount:     args.ShardCount,
+			Http:           controlplane.NewHTTPClient(providerEgressControlPlaneTimeout),
+		}, nil
+	default:
+		return nil, fmt.Errorf("provider egress probe operator_transport %q is not %q or %q", transport, providerEgressOperatorLocal, providerEgressOperatorHttp)
+	}
+}
+
+// Package-level seams like executeProviderEgressProbe: immutable in
+// production, replaced by tests that must observe every operator call or what
+// a pass's settings give the in-process operator.
+var newProviderEgressOperator = newProviderEgressOperatorForSettings
+var newLocalProviderEgressOperator = localoperator.New
 
 // The ingest credential stays in Vault and is never copied into task JSON.
 func readProviderEgressOperatorSecret() (string, error) {
@@ -1964,7 +2041,13 @@ func runProviderEgressProbe(
 	if !ok {
 		return nil, fmt.Errorf("provider egress probe requires a durable task execution owner")
 	}
-	operatorSecret, err := readProviderEgressOperatorSecret()
+	settings, err := getProviderEgressProbeSettings()
+	if err != nil {
+		return nil, err
+	}
+	// Before any durable shard state: an unusable transport (the operator API
+	// without its vault secret) fails the pass without allocating a shard.
+	operator, err := newProviderEgressOperator(args, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -1973,13 +2056,6 @@ func runProviderEgressProbe(
 		credentials, err := newProviderEgressCredentials(identity)
 		if err != nil {
 			return nil, err
-		}
-		operator := &ingest.Client{
-			ServerUrl:      args.APIURL,
-			OperatorSecret: operatorSecret,
-			ShardIndex:     args.ShardIndex,
-			ShardCount:     args.ShardCount,
-			Http:           controlplane.NewHTTPClient(providerEgressControlPlaneTimeout),
 		}
 		return runWithProviderEgressControl(ctx, credentials, func(localControl connect.NetworkClientControl) (*ProviderEgressProbeResult, error) {
 			tunnelConfig := providertunnel.Config{
@@ -1997,34 +2073,7 @@ func runProviderEgressProbe(
 				ClientControl:           localControl,
 			}
 
-			// every finding the prober submits passes through the metrics reporter
-			// first (see provider_egress_probe_metrics.go), then to the operator
-			reporter := newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry)
-			readiness := newProviderEgressProbeReadiness(*identity.NetworkId)
-
-			pass := &providerEgressProbePass{
-				urlProbes: true,
-				readiness: readiness,
-				fullDue:   operator.Due,
-				loadPins: func(ctx context.Context) (map[string][]string, error) {
-					servedPins, err := operator.GeolocationPins(ctx)
-					if err != nil {
-						return nil, err
-					}
-					return fleetprobe.ValidatePins(servedPins)
-				},
-				loadPool: func(ctx context.Context) (*egresshealth.Pool, error) {
-					return fleetprobe.LoadPool(ctx, operator.Http, fleetprobe.PoolUrl(args.APIURL), operatorSecret)
-				},
-				fullOptions: fleetprobe.FullOptions{
-					UrlProbe:     true,
-					TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
-				},
-				fullSink:     reporter,
-				recordTally:  newProviderEgressTallyRecorder(),
-				runFull:      fleetprobe.RunUrlProbes,
-				refreshFleet: providerUrlProbeFleetHeartbeat(args),
-			}
+			pass := newProviderUrlProbePass(args, operator, tunnelConfig, *identity.NetworkId)
 			result, err := runWithProviderUrlProbeFleetHeartbeat(ctx, args,
 				pass.refreshFleet, func() (*ProviderEgressProbeResult, error) { return pass.run(ctx, args) })
 			outcome := "ok"
@@ -2050,6 +2099,40 @@ func runProviderEgressProbe(
 			return result, err
 		})
 	})
+}
+
+// The production URL pass over one operator. Every operator call -- due
+// claims, the catalogs, and through the metrics reporter (see
+// provider_egress_probe_metrics.go) every finding -- goes through operator, so
+// with the in-process operator (operator_transport: local) the pass makes no
+// API request.
+func newProviderUrlProbePass(
+	args *ProviderEgressProbeArgs,
+	operator ingest.Operator,
+	tunnelConfig providertunnel.Config,
+	networkId server.Id,
+) *providerEgressProbePass {
+	return &providerEgressProbePass{
+		urlProbes: true,
+		readiness: newProviderEgressProbeReadiness(networkId),
+		fullDue:   operator.Due,
+		loadPins: func(ctx context.Context) (map[string][]string, error) {
+			servedPins, err := operator.GeolocationPins(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return fleetprobe.ValidatePins(servedPins)
+		},
+		loadPool: operator.DestinationPool,
+		fullOptions: fleetprobe.FullOptions{
+			UrlProbe:     true,
+			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
+		},
+		fullSink:     newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry),
+		recordTally:  newProviderEgressTallyRecorder(),
+		runFull:      fleetprobe.RunUrlProbes,
+		refreshFleet: providerUrlProbeFleetHeartbeat(args),
+	}
 }
 
 // The callback owns and joins its tunnels/control client before returning. This

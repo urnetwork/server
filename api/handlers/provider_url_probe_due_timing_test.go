@@ -27,15 +27,15 @@ func TestUrlDueTimingFixedCardinalityAndAggregation(t *testing.T) {
 	observation.Phases[model.ProviderUrlProbeDueClaimBody] = server.DbTimingSample{Count: 2, Duration: 7 * time.Millisecond}
 	observation.ClaimDatabase.Phases[server.DbTimingAcquire] = server.DbTimingSample{Count: 2, Duration: 3 * time.Millisecond}
 	observation.RetentionDatabase.Phases[server.DbTimingAcquire] = server.DbTimingSample{Count: 1, Duration: time.Millisecond}
-	metrics.observe(observation, 15*time.Millisecond, server.DbTimingSample{Count: 1, Duration: time.Millisecond}, urlDueTimingReturned)
-	metrics.observe(model.ProviderUrlProbeDueObservation{}, time.Millisecond, server.DbTimingSample{}, urlDueTimingPanic)
-	if got := testutil.ToFloat64(metrics.observations.WithLabelValues("claim_body")); got != 2 {
+	metrics.Observe(observation, 15*time.Millisecond, server.DbTimingSample{Count: 1, Duration: time.Millisecond}, urlDueTimingReturned)
+	metrics.Observe(model.ProviderUrlProbeDueObservation{}, time.Millisecond, server.DbTimingSample{}, urlDueTimingPanic)
+	if got := testutil.ToFloat64(metrics.Observations.WithLabelValues("claim_body")); got != 2 {
 		t.Fatalf("rolled-back attempts disappeared: %v", got)
 	}
-	if got := testutil.ToFloat64(metrics.seconds.WithLabelValues("claim_db_acquire")); got != .003 {
+	if got := testutil.ToFloat64(metrics.Seconds.WithLabelValues("claim_db_acquire")); got != .003 {
 		t.Fatalf("claim acquisition time=%v", got)
 	}
-	if got := testutil.ToFloat64(metrics.seconds.WithLabelValues("retention_db_acquire")); got != .001 {
+	if got := testutil.ToFloat64(metrics.Seconds.WithLabelValues("retention_db_acquire")); got != .001 {
 		t.Fatalf("retention acquisition time=%v", got)
 	}
 	if count, err := testutil.GatherAndCount(registry); err != nil || count != 49 {
@@ -127,14 +127,14 @@ func TestUrlDueTimingHandlerPreservesResultsAndFailures(t *testing.T) {
 			if calls != 1 || (test.name == "panic" && recovered != original) || (test.name != "panic" && recovered != nil) {
 				t.Fatalf("model outcome changed: calls=%d panic=%v", calls, recovered)
 			}
-			if testutil.ToFloat64(metrics.requests.WithLabelValues(test.outcome)) != 1 || testutil.ToFloat64(metrics.observations.WithLabelValues("expiry")) != 1 || testutil.ToFloat64(metrics.observations.WithLabelValues("admitted_handler")) != 1 {
+			if testutil.ToFloat64(metrics.Requests.WithLabelValues(test.outcome)) != 1 || testutil.ToFloat64(metrics.Observations.WithLabelValues("expiry")) != 1 || testutil.ToFloat64(metrics.Observations.WithLabelValues("admitted_handler")) != 1 {
 				t.Fatal("terminal outcome or partial model observation missing")
 			}
 			if test.name == "panic" {
-				if testutil.ToFloat64(metrics.observations.WithLabelValues("encode")) != 0 {
+				if testutil.ToFloat64(metrics.Observations.WithLabelValues("encode")) != 0 {
 					t.Fatal("model panic invented encoding")
 				}
-			} else if testutil.ToFloat64(metrics.observations.WithLabelValues("encode")) != 1 {
+			} else if testutil.ToFloat64(metrics.Observations.WithLabelValues("encode")) != 1 {
 				t.Fatal("encoding attempt missing")
 			}
 			if test.name == "success" || test.name == "maintenance" {
@@ -149,7 +149,7 @@ func TestUrlDueTimingHandlerPreservesResultsAndFailures(t *testing.T) {
 
 func TestUrlDueTimingRejectsDoNotRunObservedModel(t *testing.T) {
 	defer withStubOperatorIngestSecret("synthetic-secret")()
-	before := testutil.ToFloat64(providerUrlProbeDueTiming.observations.WithLabelValues("admitted_handler"))
+	before := testutil.ToFloat64(providerUrlProbeDueTiming.Observations.WithLabelValues("admitted_handler"))
 	for _, path := range []string{"/network/provider-egress-due", "/network/provider-egress-due?limit=0"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		if path != "/network/provider-egress-due" {
@@ -161,7 +161,7 @@ func TestUrlDueTimingRejectsDoNotRunObservedModel(t *testing.T) {
 			t.Fatalf("reject status changed to%d", recorder.Code)
 		}
 	}
-	if testutil.ToFloat64(providerUrlProbeDueTiming.observations.WithLabelValues("admitted_handler")) != before {
+	if testutil.ToFloat64(providerUrlProbeDueTiming.Observations.WithLabelValues("admitted_handler")) != before {
 		t.Fatal("rejected request entered model timing")
 	}
 }
