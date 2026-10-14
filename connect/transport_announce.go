@@ -53,10 +53,32 @@ var connectionSyncReadFailuresCounter = prometheus.NewCounter(
 	},
 )
 
+// The announcement workers' writes, by operation: the measurement publisher's
+// database write.
+var connectionWorkerFailuresCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "connection_worker_failures_total",
+		Help:      "Writes of live connection announcement workers that failed; the write was retried later and the transport kept",
+	},
+	[]string{"operation"},
+)
+
+const (
+	connectionWorkerOperationMeasurementWrite = "measurement_write"
+)
+
 func init() {
 	prometheus.MustRegister(connectionNewCounter)
 	prometheus.MustRegister(drainExcusesConsumedCounter)
 	prometheus.MustRegister(connectionSyncReadFailuresCounter)
+	prometheus.MustRegister(connectionWorkerFailuresCounter)
+	for _, operation := range []string{
+		connectionWorkerOperationMeasurementWrite,
+	} {
+		connectionWorkerFailuresCounter.WithLabelValues(operation)
+	}
 }
 
 // connectionCleanupTimeout bounds the detached database/redis cleanup that
@@ -98,8 +120,9 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 
 type ConnectionAnnounceSettings struct {
 	SyncConnectionTimeout time.Duration
-	// a sync round whose read failed is retried after SyncConnectionTimeout,
-	// doubling with each further consecutive failure up to this bound
+	// a sync round whose read failed, or a worker write that failed, is
+	// retried after SyncConnectionTimeout, doubling with each further
+	// consecutive failure up to this bound
 	SyncRetryMaxTimeout  time.Duration
 	LocationRetryTimeout time.Duration
 	// ttl for the network peer registration made at announce
@@ -682,7 +705,7 @@ func (self *ConnectionAnnounce) run() {
 		case <-self.ctx.Done():
 			return
 		case <-time.After(nextTestTimeout):
-		case <-time.After(self.syncTimeout(syncFailureCount)):
+		case <-time.After(self.retryTimeout(syncFailureCount)):
 			roundEndTime := server.NowUtc()
 
 			// FIXME need events to support kicking off connections from the model
@@ -698,7 +721,7 @@ func (self *ConnectionAnnounce) run() {
 			// so the next round's provide changes and stats cover this one.
 			var changedCount int
 			var currentProvideModes map[model.ProvideMode]bool
-			if readErr := self.recoverLiveRead(func() {
+			if readErr := self.recoverLiveCall(func() {
 				changedCount, currentProvideModes = model.GetProvideKeyChanges(self.ctx, self.clientId, nextStartTime)
 			}); readErr != nil {
 				syncFailureCount += 1
@@ -828,15 +851,18 @@ func (self *ConnectionAnnounce) run() {
 	}
 }
 
-// Runs one read of a live announcement and returns the read's raise as an
-// error. A raise in run() ends the announcement, and run cancels the client's
-// transport as it returns: a database outage then disconnected every live
-// connection whose sync fell in it, exactly while the disconnect writes could
-// not commit (2026-10-13). A failed read says nothing about the connection,
-// so the caller keeps the transport and retries. The announcement's own end
-// still raises, and so does a programming fault: a runtime error, or a raise
-// that is not an error.
-func (self *ConnectionAnnounce) recoverLiveRead(read func()) (readErr error) {
+// Runs one database or Redis read or write of a live announcement and returns
+// its raise as an error. A raise in run() ends the announcement, and run
+// cancels the client's transport as it returns: a database outage then
+// disconnected every live connection whose sync fell in it, exactly while the
+// disconnect writes could not commit (2026-10-13). A raise in a worker ends
+// only the worker, because HandleError does not call the context.CancelFunc
+// that startWorker hands it, so the connection silently lost its measurement
+// writes or its verify lease refreshes for the rest of its life. A failed
+// read or write says nothing about the connection, so the caller keeps going
+// and retries. The announcement's own end still raises, and so does a
+// programming fault: a runtime error, or a raise that is not an error.
+func (self *ConnectionAnnounce) recoverLiveCall(call func()) (callErr error) {
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -852,16 +878,17 @@ func (self *ConnectionAnnounce) recoverLiveRead(read func()) (readErr error) {
 		if !ok {
 			panic(r)
 		}
-		readErr = err
+		callErr = err
 	}()
-	read()
+	call()
 	return nil
 }
 
-// The wait before the next sync round: the sync interval, and after the
-// second consecutive failed read, double the previous wait up to
-// SyncRetryMaxTimeout. A failed round retries at the next regular tick.
-func (self *ConnectionAnnounce) syncTimeout(failureCount int) time.Duration {
+// The wait before the next attempt after failureCount consecutive failures:
+// the sync interval for none or one, then doubling up to SyncRetryMaxTimeout.
+// The sync loop waits it between rounds, so a failed round retries at the
+// next regular tick; the workers wait it before retrying a failed write.
+func (self *ConnectionAnnounce) retryTimeout(failureCount int) time.Duration {
 	timeout := self.settings.SyncConnectionTimeout
 	maxTimeout := max(self.settings.SyncRetryMaxTimeout, timeout)
 	for i := 1; i < failureCount && timeout < maxTimeout; i += 1 {
@@ -1198,8 +1225,14 @@ func connectionMeasurementAverage(previous, sample, sampleCount uint64, sampleWi
 // one in-flight snapshot and one coalesced successor, with no additional worker
 // per connection. A database stall may delay passive sampling, as before, but
 // cannot delay the reader. Cancellation joins this child before model cleanup.
+// A write that fails keeps the transport: the snapshot stays pending, and the
+// latest one is written after the bounded backoff. Snapshots are cumulative
+// and their count fence makes a replay idempotent, so nothing is lost.
 func (self *ConnectionAnnounce) runMeasurementPublisher() {
 	passiveSampleTime := time.After(self.settings.PassiveSpeedWindowDuration)
+	// consecutive failed writes; while a retry waits, no write is attempted
+	writeFailureCount := 0
+	var writeRetryTime <-chan time.Time
 	for {
 		passiveSampleDue := false
 		select {
@@ -1208,6 +1241,8 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 		case <-self.measurementWake:
 		case <-passiveSampleTime:
 			passiveSampleDue = true
+		case <-writeRetryTime:
+			writeRetryTime = nil
 		}
 		if self.ctx.Err() != nil {
 			return
@@ -1223,19 +1258,39 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 		if passiveSampleDue {
 			self.samplePassiveSpeed()
 		}
-		measurements, pending := func() (connectionMeasurements, bool) {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			if self.measurementsClosed || !self.measurementPending {
-				return connectionMeasurements{}, false
-			}
-			self.measurementPending = false
-			return self.measurementSnapshot, true
-		}()
-		if pending {
-			self.writeMeasurements(measurements)
-			if published := self.measurementPublishedForTest; published != nil {
-				published(measurements)
+		if writeRetryTime == nil {
+			measurements, pending := func() (connectionMeasurements, bool) {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				if self.measurementsClosed || !self.measurementPending {
+					return connectionMeasurements{}, false
+				}
+				self.measurementPending = false
+				return self.measurementSnapshot, true
+			}()
+			if pending {
+				if writeErr := self.recoverLiveCall(func() {
+					self.writeMeasurements(measurements)
+				}); writeErr != nil {
+					writeFailureCount += 1
+					connectionWorkerFailuresCounter.WithLabelValues(connectionWorkerOperationMeasurementWrite).Inc()
+					if glog.V(1) {
+						glog.Infof("[t]measurement write failed, retrying (%d consecutive): %s\n", writeFailureCount, writeErr)
+					}
+					func() {
+						self.stateLock.Lock()
+						defer self.stateLock.Unlock()
+						if !self.measurementsClosed {
+							self.measurementPending = true
+						}
+					}()
+					writeRetryTime = time.After(self.retryTimeout(writeFailureCount))
+				} else {
+					writeFailureCount = 0
+					if published := self.measurementPublishedForTest; published != nil {
+						published(measurements)
+					}
+				}
 			}
 		}
 		if passiveSampleDue {
