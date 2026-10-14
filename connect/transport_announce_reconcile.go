@@ -130,7 +130,7 @@ type handlerConnectionReconcile struct {
 
 	// the model by default; tests read and retire against a fake store
 	readConnectionIds func(ctx context.Context, handlerId server.Id) []server.Id
-	retireConnection  func(ctx context.Context, handlerId server.Id, connectionId server.Id) bool
+	retireConnection  func(ctx context.Context, handlerId server.Id, connectionId server.Id, disconnectTime time.Time) (retired bool, deferred bool)
 
 	wake chan struct{}
 
@@ -170,7 +170,7 @@ func newHandlerConnectionReconcileWithStore(
 	handlerId server.Id,
 	settings *ConnectionReconcileSettings,
 	readConnectionIds func(ctx context.Context, handlerId server.Id) []server.Id,
-	retireConnection func(ctx context.Context, handlerId server.Id, connectionId server.Id) bool,
+	retireConnection func(ctx context.Context, handlerId server.Id, connectionId server.Id, disconnectTime time.Time) (retired bool, deferred bool),
 ) *handlerConnectionReconcile {
 	if settings == nil || settings.ReconcileInterval <= 0 || settings.BacklogInterval <= 0 || settings.OperationTimeout <= 0 {
 		// unset settings would spin the loop, or expire every read at once
@@ -365,7 +365,8 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 		retired := func() bool {
 			retireCtx, retireCancel := context.WithTimeout(self.ctx, self.settings.OperationTimeout)
 			defer retireCancel()
-			return self.retireConnection(retireCtx, self.handlerId, connectionId)
+			retired, _ := self.retireConnection(retireCtx, self.handlerId, connectionId, server.NowUtc())
+			return retired
 		}()
 		func() {
 			self.stateLock.Lock()

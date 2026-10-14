@@ -77,7 +77,7 @@ func (self *reconcileStoreForTest) read(ctx context.Context, handlerId server.Id
 	return connectionIds
 }
 
-func (self *reconcileStoreForTest) retire(ctx context.Context, handlerId server.Id, connectionId server.Id) bool {
+func (self *reconcileStoreForTest) retire(ctx context.Context, handlerId server.Id, connectionId server.Id, disconnectTime time.Time) (bool, bool) {
 	retired := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -94,7 +94,7 @@ func (self *reconcileStoreForTest) retire(ctx context.Context, handlerId server.
 		default:
 		}
 	}
-	return retired
+	return retired, false
 }
 
 // A reconcile over store whose passes the test drives.

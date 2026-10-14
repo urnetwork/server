@@ -3302,12 +3302,20 @@ func GetConnectedNetworkClientHandlerConnectionIds(ctx context.Context, handlerI
 // endpoint fence and session events as DisconnectNetworkClient. Only a row
 // still connected under handlerId changes: a late or repeated retire never
 // moves an earlier disconnect time, and another handler's row is never
-// touched. The disconnect time is the retire time, as for handler expiry.
-func RetireNetworkClientHandlerConnection(ctx context.Context, handlerId server.Id, connectionId server.Id) (retired bool) {
+// touched. disconnectTime is when the transport ended, or the retire time when
+// the caller does not know it. deferred reports a row left for a later retire;
+// this retire waits on its fences, so it never defers.
+func RetireNetworkClientHandlerConnection(
+	ctx context.Context,
+	handlerId server.Id,
+	connectionId server.Id,
+	disconnectTime time.Time,
+) (retired bool, deferred bool) {
 	ctx = providerWorkSessionContext(ctx)
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		retired = false
+		deferred = false
 		var clientId server.Id
 		err := tx.QueryRow(
 			ctx,
@@ -3343,7 +3351,7 @@ func RetireNetworkClientHandlerConnection(ctx context.Context, handlerId server.
 			`,
 			connectionId,
 			handlerId,
-			server.NowUtc(),
+			disconnectTime.UTC(),
 		))
 		if tag.RowsAffected() == 0 {
 			return
