@@ -35,9 +35,12 @@
 # production. test-env.sh therefore exports the endpoints it validated against
 # this launcher (WARP_TEST_ENV_ATTESTED_ADDRS), and test processes dial
 # PostgreSQL and Redis only there for the whole run (test_env_dial_guard.go),
-# so for tests the worst case with the stack down is a refused dial. Other
-# local processes still resolve per dial. Removing the public records is the
-# complete fix and an owner decision; see local/README.md.
+# so a test never follows the names to loopback. With the stack down a test
+# still dials LOCAL_HOST_IP, which without this launcher's alias leaves the
+# machine by the default route and normally times out rather than being
+# refused. Other local processes still resolve per dial. Removing the public
+# records closes the fall-through for every local process; that is an owner
+# decision (see local/README.md).
 #
 # Run it in its own terminal, then run the tests from another, e.g.:
 #   ./test.sh -run TestFoo

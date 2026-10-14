@@ -707,15 +707,32 @@ func TestTestEnvDialGuardRefusesNonTcpNetworks(t *testing.T) {
 	}
 }
 
-// The process guard is chosen once at startup; later environment changes, such
-// as the proxy tests' temporary WARP_BLOCK, cannot remove it mid-run.
-func TestTestEnvProcessDialGuardIgnoresLaterEnvironmentChanges(t *testing.T) {
-	before := currentTestEnvDialGuard()
-	t.Setenv("WARP_ENV", "main")
+// The pools keep the guard chosen at startup when the environment changes
+// mid-run, as the proxy tests' temporary WARP_BLOCK does. A constructor that
+// re-derived its guard from the environment would find none here, dial the
+// host resolver instead, and get no such host rather than the guard's refusal.
+func TestPoolsKeepStartupGuardAfterEnvironmentChanges(t *testing.T) {
+	pushTestEnvGuardPgResources(t)
+	popVault := Vault.PushSimpleResource("redis.yml", []byte("cluster: false\nauthority: 192.0.2.10:6379\npassword: \"\"\ndb: 3\n"))
+	defer popVault()
+	popConfig := Config.PushSimpleResource("redis.yml", []byte("min_connections: 0\nmax_connections: 1\n"))
+	defer popConfig()
+	resolver := useTestEnvUnattestedNameGuard(t, "pool.fixture.invalid")
+	t.Setenv("WARP_SERVICE", "synthetic")
 	t.Setenv("WARP_BLOCK", "synthetic")
 	t.Setenv(testEnvAttestedAddrsEnvName, "")
-	if currentTestEnvDialGuard() != before {
-		t.Fatal("an environment change moved the process guard")
+
+	redisPool := &safeRedisClient{}
+	defer redisPool.close()
+	_, err := redisPool.open().(*redis.Client).Options().Dialer(t.Context(), "tcp", "pool.fixture.invalid:16379")
+	if err == nil || !strings.Contains(err.Error(), "pool.fixture.invalid resolved to 198.51.100.20:16379") || resolver.lookupCount() != 1 {
+		t.Fatalf("redis pool dial after the environment changed = %v; want the startup guard's refusal", err)
+	}
+	pgPool := &safePgPool{ctx: context.Background(), vaultResourceName: DefaultPgVaultResourceName, configResourceName: DefaultPgConfigResourceName}
+	defer pgPool.reset()
+	_, err = pgPool.open().Config().ConnConfig.DialFunc(t.Context(), "tcp", "pool.fixture.invalid:15432")
+	if err == nil || !strings.Contains(err.Error(), "pool.fixture.invalid resolved to 198.51.100.20:15432") || resolver.lookupCount() != 2 {
+		t.Fatalf("postgres pool dial after the environment changed = %v; want the startup guard's refusal", err)
 	}
 }
 

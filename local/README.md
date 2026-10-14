@@ -93,8 +93,18 @@ while the clients resolve on every dial. So:
   ([`test_env_dial_guard.go`](../test_env_dial_guard.go)). Each dial resolves
   once, refuses any address outside the attestation with an error naming the
   host and the address it resolved to, and connects only to the checked
-  literal. The pools, the fixture's own probe, lease and owner connections, and
-  child processes all dial this way.
+  literal. The pools, the fixture's own probe, lease and owner connections,
+  child processes, and every go-redis client a server test builds dial this way;
+  `TestRedisClientsDialThroughExplicitDialers` fails for a client left on
+  go-redis's own dialer.
+- A test that points a pool at an in-process loopback proxy admits that
+  proxy's own live listener with `server.Testing_AdmitTestEnvLoopbackListener`
+  (its exact `ip:port`, while it stays open, until the test ends) and dials the
+  proxy's upstream with `server.Testing_DialTestEnv`, as the model fixtures do.
+- With the stack down, a test process still dials only the attested address.
+  Without the launcher's loopback alias that address leaves the machine by the
+  default route, so the dial normally times out rather than being refused, and
+  never falls through to loopback. Restart the launcher.
 - A marked process without the attestation, such as a shell that sourced an
   older `test-env.sh`, refuses every dial: source `test-env.sh` again.
   Integration fixtures (`TestEnv`) refuse to start without the attestation, so
