@@ -14,16 +14,17 @@
 //
 // A chunk applies the lease scripts, the bijection checks and the eligibility
 // rule of `feedVerifyEgressLease` and `updateVerifyEligibleMembership` in
-// their per-client order: leases, then the client's live addresses, then the
-// forward entry, then membership. Clients of one chunk are independent: each
-// lease and the shared forward entry are updated by slot-local scripts, and
-// eligibility is rechecked when sampled. A chunk is fed completely before it
-// is reported, so its last client is a safe position to resume from.
+// their per-client order: leases, then the client's live addresses in both
+// reverse index versions, then the forward entries eligibility reads
+// (verifyLiveEgress.eligibilityForwardHashes), then membership. Clients of
+// one chunk are independent: each lease and the shared forward entries are
+// updated by slot-local scripts, and eligibility is rechecked when sampled. A
+// chunk is fed completely before it is reported, so its last client is a safe
+// position to resume from.
 package model
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 
 	"github.com/redis/go-redis/v9"
@@ -51,9 +52,12 @@ func Testing_WithVerifyProxyEgressRefreshObserver(ctx context.Context, observe f
 	return context.WithValue(ctx, verifyProxyEgressRefreshObserverKey{}, observe)
 }
 
+// One allocation: its address's v4 reverse field and the value suffix its
+// feed writes (verifyClientEgressField, verifyClientEgressValueSuffix).
 type verifyProxyEgress struct {
 	clientId      server.Id
-	egressHashHex string
+	field         string
+	valueSuffix   string
 	hasProvideKey bool
 }
 
@@ -104,10 +108,12 @@ func RefreshVerifyProxyEgressAfter(
 				var clientIpv4 int64
 				var hasProvideKey bool
 				server.Raise(result.Scan(&clientId, &clientIpv4, &hasProvideKey))
-				egressHash := VerifyEgressIndexHashWithSettings(IntToIpv4(clientIpv4), settings)
+				ip := IntToIpv4(clientIpv4)
+				field, _ := verifyClientEgressField(ip, settings)
 				proxyEgresses = append(proxyEgresses, &verifyProxyEgress{
 					clientId:      clientId,
-					egressHashHex: hex.EncodeToString(egressHash[:]),
+					field:         field,
+					valueSuffix:   verifyClientEgressValueSuffix(ip, settings),
 					hasProvideKey: hasProvideKey,
 				})
 			}
@@ -155,20 +161,25 @@ func feedVerifyProxyEgresses(
 		}
 	}
 
-	// leases: the reverse and forward update of every allocation
-	leaseCalls := func(index int) (script *redis.Script, keys []string, args []any) {
-		egress := proxyEgresses[index/2]
-		if index%2 == 0 {
-			keys, args = verifyReverseEgressLeaseCall(egress.clientId, egress.egressHashHex, verifyProxyEgressLeaseOwner, now, expires)
-			return verifyReverseEgressLeaseRedisScript, keys, args
+	// leases: the reverse update of every allocation and the update of each
+	// forward entry its address feeds
+	type leaseCall struct {
+		script *redis.Script
+		keys   []string
+		args   []any
+	}
+	leaseCalls := []leaseCall{}
+	for _, egress := range proxyEgresses {
+		keys, args := verifyReverseEgressLeaseCall(verifyClientEgressKey(egress.clientId), egress.field, egress.valueSuffix, verifyProxyEgressLeaseOwner, now, expires)
+		leaseCalls = append(leaseCalls, leaseCall{verifyReverseEgressLeaseRedisScript, keys, args})
+		for _, egressHashHex := range parseVerifyClientEgressField(egress.field).forwardHashes() {
+			keys, args := verifyForwardEgressLeaseCall(egress.clientId, egressHashHex, verifyProxyEgressLeaseOwner, now, expires)
+			leaseCalls = append(leaseCalls, leaseCall{verifyForwardEgressLeaseRedisScript, keys, args})
 		}
-		keys, args = verifyForwardEgressLeaseCall(egress.clientId, egress.egressHashHex, verifyProxyEgressLeaseOwner, now, expires)
-		return verifyForwardEgressLeaseRedisScript, keys, args
 	}
 	leaseCmds, _ := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		for index := range 2 * len(proxyEgresses) {
-			script, keys, args := leaseCalls(index)
-			script.EvalSha(ctx, pipe, keys, args...)
+		for _, call := range leaseCalls {
+			call.script.EvalSha(ctx, pipe, call.keys, call.args...)
 		}
 		return nil
 	})
@@ -185,8 +196,8 @@ func feedVerifyProxyEgresses(
 	if 0 < len(uncachedIndexes) {
 		uncachedCmds, _ := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for _, index := range uncachedIndexes {
-				script, keys, args := leaseCalls(index)
-				script.Eval(ctx, pipe, keys, args...)
+				call := leaseCalls[index]
+				call.script.Eval(ctx, pipe, call.keys, call.args...)
 			}
 			return nil
 		})
@@ -194,28 +205,34 @@ func feedVerifyProxyEgresses(
 		raiseErrors(uncachedCmds)
 	}
 
-	// each client's live addresses
-	reverseCmds := make([]*redis.MapStringStringCmd, len(proxyEgresses))
+	// each client's live addresses, in both reverse index versions
+	reverseCmds := make([][]*redis.MapStringStringCmd, len(proxyEgresses))
 	cmds, _ := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		for index, egress := range proxyEgresses {
-			reverseCmds[index] = pipe.HGetAll(ctx, verifyClientEgressKey(egress.clientId))
+			for _, reverseKey := range verifyClientEgressKeys(egress.clientId) {
+				reverseCmds[index] = append(reverseCmds[index], pipe.HGetAll(ctx, reverseKey))
+			}
 		}
 		return nil
 	})
 	waveCount += 1
 	raiseErrors(cmds)
 
-	// the forward entry of each client with exactly one live address, and
-	// the opportunistic prune of expired reverse fields
-	forwardCmds := make([]*redis.StringCmd, len(proxyEgresses))
+	// the forward entries each client's eligibility reads, and the
+	// opportunistic prune of expired v4 reverse fields
+	lives := make([]verifyLiveEgress, len(proxyEgresses))
+	forwardCmds := make([]map[string]*redis.StringCmd, len(proxyEgresses))
 	cmds, _ = r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		for index, egress := range proxyEgresses {
-			liveHashes, expiredHashes := splitVerifyEgressHashes(reverseCmds[index].Val(), nowMs)
-			if 0 < len(expiredHashes) {
-				queueVerifyExpiredEgressHashPrune(ctx, pipe, egress.clientId, expiredHashes)
+			live, expired := splitVerifyEgressFields(reverseCmds[index][0].Val(), nowMs)
+			if 0 < len(expired) {
+				queueVerifyExpiredEgressHashPrune(ctx, pipe, egress.clientId, expired)
 			}
-			if len(liveHashes) == 1 {
-				forwardCmds[index] = pipe.Get(ctx, verifyEgressKeyFromHex(liveHashes[0]))
+			legacyLive, _ := splitVerifyEgressFields(reverseCmds[index][1].Val(), nowMs)
+			lives[index] = newVerifyLiveEgress(live, legacyLive)
+			forwardCmds[index] = map[string]*redis.StringCmd{}
+			for _, egressHashHex := range lives[index].eligibilityForwardHashes() {
+				forwardCmds[index][egressHashHex] = pipe.Get(ctx, verifyEgressKeyFromHex(egressHashHex))
 			}
 		}
 		return nil
@@ -225,13 +242,17 @@ func feedVerifyProxyEgresses(
 		raiseErrors(cmds)
 	}
 
-	// membership (§5.1): exactly one live egress ip, forward entry agreement
-	// and a provide key
+	// membership (§5.1): a family that attributes to the client, or its one v2
+	// entry, and a provide key
 	eligibleMembers := []any{}
 	ineligibleMembers := []any{}
 	for index, egress := range proxyEgresses {
 		member := egress.clientId.String()
-		if forwardCmds[index] != nil && forwardCmds[index].Val() == member && egress.hasProvideKey {
+		forwards := map[string]string{}
+		for egressHashHex, cmd := range forwardCmds[index] {
+			forwards[egressHashHex] = cmd.Val()
+		}
+		if lives[index].attributes(egress.clientId, forwards) && egress.hasProvideKey {
 			eligibleMembers = append(eligibleMembers, member)
 		} else {
 			ineligibleMembers = append(ineligibleMembers, member)

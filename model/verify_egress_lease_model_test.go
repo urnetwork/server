@@ -67,15 +67,15 @@ func TestVerifyConnectionEgressInterleavedCleanup(t *testing.T) {
 		settings.EgressHashKey = []byte("interleaved-connection-egress-test")
 		clientId, oldId, nextId := server.NewId(), server.NewId(), server.NewId()
 		ip := netip.MustParseAddr("192.0.2.11")
-		hash := VerifyEgressIndexHashWithSettings(ip, settings)
-		hashHex := hex.EncodeToString(hash[:])
+		field, parsed := verifyClientEgressField(ip, settings)
+		hashHex := parsed.address
 		testVerifySetProvideModes(ctx, clientId)
 		FeedVerifyConnectionEgress(ctx, clientId, oldId, ip, settings)
 		server.Redis(ctx, func(r server.RedisClient) {
 			now := server.NowUtc().UnixMilli()
 			server.Raise(r.Eval(ctx, verifyReverseEgressLeaseScript,
-				[]string{verifyClientEgressKey(clientId), verifyClientEgressLeaseKey(clientId, hashHex)},
-				oldId.String(), now, 0, hashHex).Err())
+				[]string{verifyClientEgressKey(clientId), verifyClientEgressLeaseKey(verifyClientEgressKey(clientId), hashHex)},
+				oldId.String(), now, 0, field, "").Err())
 		})
 		FeedVerifyConnectionEgress(ctx, clientId, nextId, ip, settings)
 		server.Redis(ctx, func(r server.RedisClient) {
@@ -99,22 +99,23 @@ func TestVerifyConnectionEgressExpiryAndRefresh(t *testing.T) {
 		settings.EgressHashKey = []byte("expiry-connection-egress-test")
 		clientId, oldId, nextId := server.NewId(), server.NewId(), server.NewId()
 		ip := netip.MustParseAddr("192.0.2.12")
-		hash := VerifyEgressIndexHashWithSettings(ip, settings)
-		hashHex := hex.EncodeToString(hash[:])
+		field, parsed := verifyClientEgressField(ip, settings)
+		hashHex := parsed.address
+		reverseKey := verifyClientEgressKey(clientId)
 		testVerifySetProvideModes(ctx, clientId)
 		now := server.NowUtc()
 		server.Redis(ctx, func(r server.RedisClient) {
-			updateVerifyEgressLease(ctx, r, clientId, hashHex, oldId.String(), now, now.Add(time.Minute))
-			staleExpiry, err := r.HGet(ctx, verifyClientEgressKey(clientId), hashHex).Result()
+			updateVerifyEgressLease(ctx, r, reverseKey, clientId, field, verifyClientEgressValueSuffix(ip, settings), oldId.String(), now, now.Add(time.Minute))
+			staleExpiry, err := r.HGet(ctx, reverseKey, field).Result()
 			server.Raise(err)
-			updateVerifyEgressLease(ctx, r, clientId, hashHex, nextId.String(), now.Add(2*time.Minute), now.Add(10*time.Minute))
-			pruneVerifyExpiredEgressHashes(ctx, r, clientId, map[string]string{hashHex: staleExpiry})
-			owners, err := r.HGetAll(ctx, verifyClientEgressLeaseKey(clientId, hashHex)).Result()
+			updateVerifyEgressLease(ctx, r, reverseKey, clientId, field, verifyClientEgressValueSuffix(ip, settings), nextId.String(), now.Add(2*time.Minute), now.Add(10*time.Minute))
+			pruneVerifyExpiredEgressHashes(ctx, r, clientId, map[string]string{field: staleExpiry})
+			owners, err := r.HGetAll(ctx, verifyClientEgressLeaseKey(reverseKey, hashHex)).Result()
 			server.Raise(err)
 			if len(owners) != 1 || owners[nextId.String()] == "" {
 				t.Fatalf("expired transport survived or successor vanished: %v", owners)
 			}
-			for _, key := range []string{verifyClientEgressKey(clientId), verifyClientEgressLeaseKey(clientId, hashHex), verifyEgressKeyFromHex(hashHex), verifyForwardEgressLeaseKey(hashHex)} {
+			for _, key := range []string{reverseKey, verifyClientEgressLeaseKey(reverseKey, hashHex), verifyEgressKeyFromHex(hashHex), verifyForwardEgressLeaseKey(hashHex)} {
 				ttl, err := r.PTTL(ctx, key).Result()
 				server.Raise(err)
 				if ttl <= 0 || ttl > 10*time.Minute {
@@ -168,7 +169,7 @@ func TestVerifyConnectionEgressProxyAndReapOwnership(t *testing.T) {
 			if len(leases) != 1 || leases[survivorId.String()+"/proxy"] == "" {
 				t.Fatalf("reaping retained dead owners or erased survivor: %v", leases)
 			}
-			count, err := r.Exists(ctx, verifyClientEgressKey(clientId), verifyClientEgressLeaseKey(clientId, hashHex)).Result()
+			count, err := r.Exists(ctx, verifyClientEgressKey(clientId), verifyClientEgressLeaseKey(verifyClientEgressKey(clientId), hashHex)).Result()
 			server.Raise(err)
 			if count != 0 {
 				t.Fatal("reaping retained reverse ownership")
