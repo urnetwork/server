@@ -9,8 +9,12 @@ package connect
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
+	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // A raise in one accepted connection, including the cancellation raise of the
@@ -53,6 +57,38 @@ func TestResidentForwardWorkerRaiseKeepsResident(t *testing.T) {
 				t.Errorf("forward raise %v canceled the resident", raise)
 			}
 			cancel()
+		}
+	})
+}
+
+// A positive allowance's background refresh that raises releases its read and
+// leaves the resident serving. The cached allowance keeps its own deadline.
+func TestResidentContractRefreshRaiseKeepsResident(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, _, source, destination := residentReadControl(t)
+		var calls atomic.Int32
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool {
+			if calls.Add(1) == 1 {
+				return true
+			}
+			panic(errors.New("synthetic contract refresh fault"))
+		})
+		if !manager.HasActiveContract(source, destination) {
+			t.Fatal("initial positive result was refused")
+		}
+		time.Sleep(2500 * time.Millisecond)
+		if !manager.HasActiveContract(source, destination) {
+			t.Fatal("half-window refresh refused the cached allowance")
+		}
+		synctest.Wait()
+		if calls.Load() != 2 {
+			t.Fatalf("contract reads=%d, want 2 with one background refresh", calls.Load())
+		}
+		if manager.ctx.Err() != nil {
+			t.Fatal("a raising refresh canceled the resident")
+		}
+		if len(manager.activeReads) != 0 {
+			t.Fatal("a raising refresh kept its read")
 		}
 	})
 }
