@@ -801,7 +801,11 @@ func newExchange(
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
 
-	go server.HandleError(exchange.Run, cancel)
+	// Run only starts the listeners and waits, and each listener cancels the
+	// exchange when it stops. A raise in Run leaves the started listeners
+	// serving. A canceled exchange does not stop the process (connect/run.go),
+	// so canceling it here would leave a host taking clients it cannot serve.
+	go server.HandleError(exchange.Run)
 
 	return exchange
 }
