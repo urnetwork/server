@@ -10,10 +10,11 @@ import (
 )
 
 // A finished run-once task is scheduled again with its stored row copied, so an
-// argument field its build does not decode survives. A finished task without
-// the key schedules nothing. Outside the finishing transaction, where a
-// pending row holds the key, it schedules nothing either and leaves the
-// pending row as it was, with no wake recorded.
+// argument field its build does not decode survives, and counted as one
+// submission. A finished task without the key schedules nothing. Outside the
+// finishing transaction, where a pending row holds the key, it schedules
+// nothing either and counts nothing, leaving the pending row as it was with
+// no wake recorded, for the caller's fallback to merge and count once.
 func TestRescheduleFinishedTaskCopiesTheStoredArguments(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -46,6 +47,7 @@ func TestRescheduleFinishedTaskCopiesTheStoredArguments(t *testing.T) {
 		}
 
 		runAt := server.NowUtc().Add(time.Hour).Truncate(time.Microsecond)
+		submitted, balked := taskSubmittedCounter.ConfirmedCount(), taskBalkedCounter.ConfirmedCount()
 		var otherKey, unknownTask, rescheduled bool
 		server.Tx(ctx, func(tx server.PgTx) {
 			otherKey = RescheduleFinishedTaskInTx(ctx, tx, taskId, RunOnce("reschedule_finished_task", "other"), runAt)
@@ -55,6 +57,9 @@ func TestRescheduleFinishedTaskCopiesTheStoredArguments(t *testing.T) {
 		if otherKey || unknownTask || !rescheduled {
 			t.Fatalf("rescheduled other key=%t unknown task=%t own key=%t", otherKey, unknownTask, rescheduled)
 		}
+		if counted := taskSubmittedCounter.ConfirmedCount() - submitted; counted != 1 || taskBalkedCounter.ConfirmedCount() != balked {
+			t.Fatalf("the reschedule counted %d submissions and %d balks, want 1 and 0", counted, taskBalkedCounter.ConfirmedCount()-balked)
+		}
 		count, argsJson, pendingRunAt, pendingTaskId := pending()
 		if count != 1 || argsJson != storedArgs || !pendingRunAt.Equal(runAt) || pendingTaskId == taskId {
 			t.Fatalf("the successor is not the stored row: count=%d args=%s run_at=%s new_id=%t", count, argsJson, pendingRunAt, pendingTaskId != taskId)
@@ -62,6 +67,7 @@ func TestRescheduleFinishedTaskCopiesTheStoredArguments(t *testing.T) {
 
 		const pendingArgs = `{"pending": true}`
 		var merged bool
+		balked = taskBalkedCounter.ConfirmedCount()
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET args_json = $2 WHERE task_id = $1`, pendingTaskId, pendingArgs))
 			merged = RescheduleFinishedTaskInTx(ctx, tx, taskId, key, runAt.Add(-30*time.Minute))
@@ -75,6 +81,9 @@ func TestRescheduleFinishedTaskCopiesTheStoredArguments(t *testing.T) {
 		if merged || count != 1 || argsJson != pendingArgs || !pendingRunAt.Equal(runAt) || generation != 0 || wakeAt != nil {
 			t.Fatalf("a call outside the finishing transaction changed the pending row: merged=%t count=%d args=%s run_at=%s generation=%d wake=%v",
 				merged, count, argsJson, pendingRunAt, generation, wakeAt)
+		}
+		if counted := taskBalkedCounter.ConfirmedCount() - balked; counted != 0 {
+			t.Fatalf("a call outside the finishing transaction counted %d balks, leaving its fallback to count a second", counted)
 		}
 	})
 }
