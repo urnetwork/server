@@ -195,8 +195,9 @@ func TestConnectionReconcileRetiresRowAfterFailedFinalDisconnect(t *testing.T) {
 	})
 }
 
-// While the database still refuses, a confirmed retire raises, the pass ends,
-// and the row stays the reconcile's until a pass after the recovery.
+// While the database still refuses, the confirmed retire fails only its row:
+// the pass completes without raising and keeps the row as a backlog, and a
+// pass after the recovery retires it.
 func TestConnectionReconcileRetriesRetireTheDatabaseRefused(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -211,8 +212,12 @@ func TestConnectionReconcileRetriesRetireTheDatabaseRefused(t *testing.T) {
 		failed.end(t, testCtx)
 
 		reconcile.reconcile()
-		if r := server.HandleError(func() { reconcile.reconcile() }); r == nil {
-			t.Fatal("a retire the database refused did not raise out of its pass")
+		backlog := false
+		if r := server.HandleError(func() { backlog = reconcile.reconcile() }); r != nil {
+			t.Fatalf("a retire the database refused raised out of its pass: %v", r)
+		}
+		if !backlog {
+			t.Fatal("the pass did not keep the row of its refused retire as a backlog")
 		}
 		if !model.GetNetworkClientConnectionStatus(ctx, failedConnectionId).Connected {
 			t.Fatal("fixture: the refused retire must leave the row connected")
