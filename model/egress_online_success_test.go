@@ -333,8 +333,60 @@ func TestEgressIndexSettingsOnlineUrlSuccess(t *testing.T) {
 			t.Errorf("%q set the floor to %v, want the default %v", config, floor, defaults.OnlineSuccessCountryFloor)
 		}
 	}
-	// a document that is not yaml keeps every default, the rule included
-	connect.AssertEqual(t, load("online_requires_url_success: [unterminated\n"), defaults)
+	// a document that is not yaml keeps every default of the egress index, and
+	// since its kill switch cannot be read either, the rule is disabled
+	unreadable := DefaultEgressIndexSettings()
+	unreadable.OnlineRequiresUrlSuccess = false
+	connect.AssertEqual(t, load("online_requires_url_success: [unterminated\n"), unreadable)
+	connect.AssertEqual(t, load("egress_index:\n  max_failure_index: [9\nonline_requires_url_success: true\n"), unreadable)
+}
+
+// A malformed value of one of the rule's keys reaches nothing else in
+// provider.yml. The egress_index block keeps its configured values, an
+// unreadable kill switch disables the rule (the behaviour before it) and an
+// unreadable floor keeps the default. Each key is read on its own, so a valid
+// neighbour of a malformed key keeps its value as well.
+func TestEgressIndexSettingsMalformedOnlineUrlSuccessKeyKeepsTheOtherKeys(t *testing.T) {
+	load := func(config string) *EgressIndexSettings {
+		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
+		defer pop()
+		return egressIndexSettings()
+	}
+	defaultFloor := DefaultEgressIndexSettings().OnlineSuccessCountryFloor
+	block := "egress_index:\n  native_reader_enabled: true\n  max_failure_index: 9\n"
+	for _, c := range []struct {
+		config  string
+		enabled bool
+		floor   float64
+	}{
+		{config: "online_requires_url_success: \"false\"\n", enabled: false, floor: defaultFloor},
+		{config: "online_requires_url_success: 0\n", enabled: false, floor: defaultFloor},
+		{config: "online_requires_url_success: \"true\"\nonline_success_country_floor: 0.5\n", enabled: false, floor: 0.5},
+		{config: "online_success_country_floor: \"0.5\"\n", enabled: true, floor: defaultFloor},
+		{config: "online_success_country_floor: 36%\n", enabled: true, floor: defaultFloor},
+		{config: "online_requires_url_success: false\nonline_success_country_floor: \"0.5\"\n", enabled: false, floor: defaultFloor},
+	} {
+		settings := load(c.config + block)
+		if !settings.NativeReaderEnabled || settings.MaxFailureIndex != 9 {
+			t.Errorf("%q reset the egress_index block: native_reader_enabled %t, max_failure_index %d", c.config, settings.NativeReaderEnabled, settings.MaxFailureIndex)
+		}
+		if settings.OnlineRequiresUrlSuccess != c.enabled || settings.OnlineSuccessCountryFloor != c.floor {
+			t.Errorf("%q read as rule %t floor %v, want rule %t floor %v", c.config, settings.OnlineRequiresUrlSuccess, settings.OnlineSuccessCountryFloor, c.enabled, c.floor)
+		}
+	}
+}
+
+// A malformed egress_index value resets that block, as it always has, but
+// not the rule's keys: the kill switch and the floor beside it still apply.
+func TestEgressIndexSettingsMalformedBlockKeepsTheOnlineUrlSuccessKeys(t *testing.T) {
+	pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(
+		"online_requires_url_success: false\nonline_success_country_floor: 0.5\negress_index:\n  max_failure_index: \"nine\"\n",
+	))
+	defer pop()
+	settings := egressIndexSettings()
+	connect.AssertEqual(t, settings.MaxFailureIndex, DefaultEgressIndexSettings().MaxFailureIndex)
+	connect.AssertEqual(t, settings.OnlineRequiresUrlSuccess, false)
+	connect.AssertEqual(t, settings.OnlineSuccessCountryFloor, 0.5)
 }
 
 // The published guard round-trips its counts, a reader refuses a document it

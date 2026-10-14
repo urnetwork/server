@@ -839,7 +839,14 @@ gate matrix.
     country of a hundred or more providers where the probe works, measured
     0.46.
 - **Kill switch.** `online_requires_url_success: false` in provider.yml takes
-  effect at each pass's next settings read.
+  effect at each pass's next settings read. Each of the rule's keys is decoded
+  on its own, so a malformed value resets nothing else in provider.yml; before
+  this, `online_requires_url_success: "false"` or a floor of `36%` reset every
+  egress setting, `native_reader_enabled` included, and left the rule on. A
+  kill switch that is not `true` or `false`, or a provider.yml that is not
+  yaml at all, disables the rule: that may be an attempt to turn it off, and
+  the behaviour before the rule is the one to fall back to. A malformed floor
+  keeps the default, like one outside [0, 1].
 - **Visibility.** Excluded providers are reported under the `no_success`
   reason, which comes after reliability, ARIN risk and TLS and before
   unprobed or health. The counts policy schema is now 2. The provider status

@@ -204,7 +204,8 @@ func TestEgressIndexSettingsDefaults(t *testing.T) {
 }
 
 // provider.yml overrides every setting it names, keeps the default of every
-// value out of range, and falls back to the defaults when unreadable.
+// value out of range, and falls back to the defaults when unreadable, with
+// the online url-success rule disabled.
 func TestEgressIndexSettingsOverrides(t *testing.T) {
 	load := func(config string) *EgressIndexSettings {
 		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
@@ -266,10 +267,14 @@ egress_index:
 
 	assert.Equal(t, load("egress_index:\n  evidence_max_age: soon\n").EvidenceMaxAge, defaults.EvidenceMaxAge)
 
-	// an empty file, no block, and an unreadable file are the defaults
+	// an empty file and no block are the defaults; an unreadable file is the
+	// defaults too, except that the online url-success rule is disabled, since
+	// its kill switch cannot be read
 	assert.Equal(t, load(""), defaults)
 	assert.Equal(t, load("enable_egress_test: true\n"), defaults)
-	assert.Equal(t, load("egress_index: [unterminated\n"), defaults)
+	unreadable := DefaultEgressIndexSettings()
+	unreadable.OnlineRequiresUrlSuccess = false
+	assert.Equal(t, load("egress_index: [unterminated\n"), unreadable)
 }
 
 // The evidence time is the newer of the two runs, whichever is present.

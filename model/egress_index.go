@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
+	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/glog"
 
@@ -131,9 +133,11 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 	}
 }
 
-// The `egress_index` block of provider.yml, and the URL-success rule's two
-// top-level keys beside subscriber_quality_policy_version. Every field is
-// optional; an absent one keeps its default.
+// The `egress_index` block of provider.yml. Every field is optional; an
+// absent one keeps its default. The URL-success rule's top-level keys beside
+// subscriber_quality_policy_version are each decoded on their own
+// (egressIndexSettings), so a value of the wrong type in one of them cannot
+// reset this block, and one in this block cannot reset them.
 type egressIndexSettingsDocument struct {
 	EgressIndex *struct {
 		NativeReaderEnabled  *bool          `yaml:"native_reader_enabled"`
@@ -147,16 +151,18 @@ type egressIndexSettingsDocument struct {
 		CountryGate          *bool          `yaml:"country_gate"`
 		BackfillTierOffset   *int           `yaml:"backfill_tier_offset"`
 	} `yaml:"egress_index"`
-	OnlineRequiresUrlSuccess  *bool    `yaml:"online_requires_url_success"`
-	OnlineSuccessCountryFloor *float64 `yaml:"online_success_country_floor"`
 }
 
 // The defaults with the overrides of provider.yml, read on every call like the
 // rollout flag, so a config change takes effect on the next pass without a
 // restart. A missing provider.yml is the defaults, as it is for the rollout
-// flag; an unreadable one, or a value out of range, keeps the default and says
+// flag; an unreadable value, or one out of range, keeps the default and says
 // so, since a typo in one weight must not take the index away from the whole
-// fleet.
+// fleet. A value of the wrong type in the egress_index block resets that
+// block. The URL-success rule's keys are decoded one at a time, so a
+// malformed one resets nothing else. An unreadable kill switch, or a file that
+// is not yaml at all, disables the rule: it may be an attempt to turn the rule
+// off, and the behaviour before the rule is the one to fall back to.
 func egressIndexSettings() *EgressIndexSettings {
 	settings := DefaultEgressIndexSettings()
 	resource, err := server.Config.SimpleResource(providerConfigResourceName)
@@ -164,15 +170,31 @@ func egressIndexSettings() *EgressIndexSettings {
 		return settings
 	}
 	var document egressIndexSettingsDocument
-	if err := resource.UnmarshalYamlE(&document); err != nil {
-		glog.Errorf("[egress]provider config is unreadable (%s); the egress index keeps its defaults\n", err)
+	documentErr := resource.UnmarshalYamlE(&document)
+	// yaml decodes every value it can and reports the mismatched ones as a
+	// type error; any other error means nothing in the file was read
+	var typeErr *yaml.TypeError
+	if documentErr != nil && !errors.As(documentErr, &typeErr) {
+		glog.Errorf("[egress]provider config is unreadable (%s); the egress index keeps its defaults and the online url-success rule is disabled\n", documentErr)
+		settings.OnlineRequiresUrlSuccess = false
 		return settings
 	}
 
-	if document.OnlineRequiresUrlSuccess != nil {
-		settings.OnlineRequiresUrlSuccess = *document.OnlineRequiresUrlSuccess
+	var enabledDocument struct {
+		OnlineRequiresUrlSuccess *bool `yaml:"online_requires_url_success"`
 	}
-	if floor := document.OnlineSuccessCountryFloor; floor != nil {
+	if err := resource.UnmarshalYamlE(&enabledDocument); err != nil {
+		glog.Errorf("[egress]provider config online_requires_url_success is not true or false (%s); the online url-success rule is disabled\n", err)
+		settings.OnlineRequiresUrlSuccess = false
+	} else if enabledDocument.OnlineRequiresUrlSuccess != nil {
+		settings.OnlineRequiresUrlSuccess = *enabledDocument.OnlineRequiresUrlSuccess
+	}
+	var floorDocument struct {
+		OnlineSuccessCountryFloor *float64 `yaml:"online_success_country_floor"`
+	}
+	if err := resource.UnmarshalYamlE(&floorDocument); err != nil {
+		glog.Errorf("[egress]provider config online_success_country_floor is not a number (%s); kept %v\n", err, settings.OnlineSuccessCountryFloor)
+	} else if floor := floorDocument.OnlineSuccessCountryFloor; floor != nil {
 		// a share outside [0, 1], NaN included, would exempt every country or none
 		if 0 <= *floor && *floor <= 1 {
 			settings.OnlineSuccessCountryFloor = *floor
@@ -181,6 +203,10 @@ func egressIndexSettings() *EgressIndexSettings {
 		}
 	}
 
+	if documentErr != nil {
+		glog.Errorf("[egress]provider config egress_index is unreadable (%s); the egress index keeps its defaults\n", documentErr)
+		return settings
+	}
 	overrides := document.EgressIndex
 	if overrides == nil {
 		return settings
