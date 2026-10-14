@@ -9,11 +9,21 @@
 package work
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"time"
 
 	"github.com/coreos/go-semver/semver"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
+
+// A task handed back to a newer config is due again this soon, so an instance
+// of that config can claim it.
+const configHandbackDelay = 5 * time.Second
 
 // The config version that wrote a task's arguments, and when. Neither is part
 // of the work the arguments describe.
@@ -70,4 +80,42 @@ func configGenerationNewer(candidate string, reference string) bool {
 		return referenceVersion.Metadata < candidateVersion.Metadata
 	}
 	return referenceVersion.LessThan(*candidateVersion)
+}
+
+// The stamps of the pending rows under runOnceKeys, read as a plain snapshot
+// that takes no lock. A row whose arguments do not decode has no stamp.
+func readConfigStampsInTx(ctx context.Context, tx server.PgTx, runOnceKeys []string) []ConfigStamp {
+	stamps := []ConfigStamp{}
+	result, err := tx.Query(ctx, `SELECT args_json FROM pending_task WHERE run_once_key = ANY($1)`, runOnceKeys)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var argsJson string
+			server.Raise(result.Scan(&argsJson))
+			var stamp ConfigStamp
+			if json.Unmarshal([]byte(argsJson), &stamp) == nil {
+				stamps = append(stamps, stamp)
+			}
+		}
+	})
+	return stamps
+}
+
+// From a handed-back task's own post-step, schedules the task again under its
+// run-once key at runAt with its arguments copied as stored, so the newer
+// build's fields that this build does not decode survive. The post-step's
+// execution identity names the row its finishing transaction moved to
+// finished_task; a RunPost retry carries the retry's identity instead, finds
+// no such row, and falls back to schedule, which encodes the decoded
+// arguments again.
+func rescheduleHandedBackTaskInTx(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	runOnce *task.RunOnceOption,
+	runAt time.Time,
+	schedule func(),
+) {
+	identity, ok := task.ExecutionIdentityFromContext(clientSession.Ctx)
+	if !ok || !task.RescheduleFinishedTaskInTx(clientSession.Ctx, tx, identity.TaskId, runOnce, runAt) {
+		schedule()
+	}
 }

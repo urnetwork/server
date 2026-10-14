@@ -623,16 +623,13 @@ func ProviderEgressProbePost(
 	}
 	now := server.NowUtc()
 	// The handed-back arguments wait their own idle cadence, so an instance
-	// configured with them can claim the shard. They are copied as stored, not
-	// encoded again, so the newer build's fields that this build does not
-	// decode survive. The pass's identity names its finished row; a RunPost
-	// retry carries the retry's identity instead and encodes them again.
+	// configured with them can claim the shard, and keep the fields this
+	// build does not decode.
 	if result != nil && result.HandedBack && args != nil {
 		runAt := now.Add(time.Duration(max(1, args.IdleDelaySeconds)) * time.Second)
-		identity, ok := task.ExecutionIdentityFromContext(clientSession.Ctx)
-		if !ok || !task.RescheduleFinishedTaskInTx(clientSession.Ctx, tx, identity.TaskId, providerEgressProbeRunOnce(args.ShardIndex), runAt) {
+		rescheduleHandedBackTaskInTx(clientSession, tx, providerEgressProbeRunOnce(args.ShardIndex), runAt, func() {
 			scheduleProviderEgressProbeAt(clientSession, tx, args, runAt)
-		}
+		})
 		return nil
 	}
 	if !settings.Enabled {
