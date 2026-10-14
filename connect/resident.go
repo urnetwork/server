@@ -870,7 +870,10 @@ func (self *Exchange) endConnectionWorker() {
 	self.connectionWorkers.Done()
 }
 
-// Starts one admitted exchange socket owner.
+// Starts one admitted exchange socket owner. A raise ends that owner only. The
+// exchange serves every resident on the host, so one accepted connection's
+// fault, or the cancellation raise of its narrower context, must not cancel
+// it. A listener cancels the exchange itself when it stops.
 func (self *Exchange) startConnectionWorker(run func()) bool {
 	if !self.beginConnectionWorker() {
 		return false
@@ -878,7 +881,7 @@ func (self *Exchange) startConnectionWorker(run func()) bool {
 	go server.HandleError(func() {
 		defer self.endConnectionWorker()
 		run()
-	}, self.cancel)
+	})
 	return true
 }
 
