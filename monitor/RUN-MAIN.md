@@ -364,6 +364,18 @@ PATH="$monitor_warpctl_dir:$PATH" WARP_HOME="$WARP_HOME" WARP_ENV=main \
   2>"$monitor_run_dir/stderr.log"
 ```
 
+The watcher's stderr carries one notifier line at startup:
+`monitor: Slack alert notifications enabled: ...` when
+`vault/main/monitor.yml` `alerts.slack_webhook_url` is set, or
+`monitor: Slack alert notifications disabled: ...` when it is empty or not an
+https URL. An enabled watcher posts one Slack message per alert transition
+(MONITOR.md §3.6). It announces each alert active at its start, so every new
+watcher re-posts the current alerts once, at most 10 messages a minute plus a
+summary. Start a watcher that must never post, such as a diagnostic second
+watcher, with `-slack-alerts=false`; the flag is fixed for the process
+lifetime. `-once` never posts. Never print the webhook to check it: the
+startup line is the evidence.
+
 Treat the exact Warpctl resolved by the watcher as part of the immutable
 observation boundary. Before launch, require its `go version -m` output to carry
 a full `vcs.revision` and Boolean `vcs.modified`, record its hash, and verify
@@ -732,7 +744,10 @@ parent and tail processes; a PID-only check cannot certify durable ownership.
 
 Overlap is allowed only for this bounded handoff. Prolonged duplicate watchers
 distort log coverage and add production load; stopping the old watcher before
-the new one is proven creates an observation gap.
+the new one is proven creates an observation gap. During the overlap both
+watchers post Slack transitions, and the candidate announces every alert
+active at its start. Accept those duplicates: a candidate started with
+`-slack-alerts=false` would stay silent after promotion.
 
 When the operator explicitly prioritizes a no-overlap active-probe interval,
 use this alternative instead of waiting 15 minutes beside an active predecessor:

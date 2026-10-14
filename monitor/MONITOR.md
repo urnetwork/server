@@ -24,7 +24,8 @@ catalog, including synchronous reproductions of asynchronous production work.
 
 The current CLI emits active Alerts, not ticket lifecycle events. It renders
 each eligible alert batch as Markdown or JSONL on stdout; stderr carries
-diagnostics. The private legacy ticket manager and console emitter remain in
+diagnostics. In continuous mode it can also post one Slack message per alert
+transition (§3.6). The private legacy ticket manager and console emitter remain in
 the package but are not wired into this CLI. Healthy findings are filtered
 before alert emission. The current CLI does not emit an all-probes heartbeat.
 Silence is not recovery. Confirm recovery from direct healthy observations and
@@ -99,7 +100,8 @@ host, redis-cli on the redis hosts, top/ss/dmesg/journalctl/docker anywhere.
 ssh authentication is delegated to `~/.ssh/config` (host → IdentityFile),
 assumed set up on whatever runs the monitor; no key material lives in
 `vault/<env>/monitor.yml` — it carries only the login user, host roles,
-operator-disabled state, overlay IPs, and redis ports.
+operator-disabled state, overlay IPs, redis ports, and the optional Slack
+alert webhook (`alerts.slack_webhook_url`, a credential; §3.6).
 
 **ssh-exec is the universal transport.** Every command in SIGNALS.md is
 written as a run-on-the-host command, and that is exactly how the monitor
@@ -149,7 +151,8 @@ first active version in `vault/<env>/services.yml`; historical versions are
 never probe targets.
 `vault/<env>/monitor.yml` (§7) carries only what exists nowhere else: the
 monitor ssh identity, host roles, explicit operator-disabled state, overlay
-IPs (local dev), and redis port layout. The pg path has one special rule from
+IPs (local dev), redis port layout, and the Slack alert webhook that the
+monitor and Grafana's default contact point share. The pg path has one special rule from
 the 2026-07-17 incident: diagnose on **direct 5432**, never through
 pgbouncer 6432 — but *also* probe 6432 cheaply, because "6432 queues/dies
 while 5432 connects instantly" is itself a documented discriminator
@@ -336,9 +339,31 @@ The current CLI supplies this handler to `RunLoopWithOptions`, skips empty batch
 writes the selected Markdown or JSONL format to stdout. Stderr is diagnostic
 output, not a second machine-readable ticket-event channel. The legacy console
 emitter's lifecycle JSON and the historical webhook/PR proposals are not
-current CLI capabilities; additional sinks remain deferred. The fixed-schema
-`monitor-log-reconcile ` diagnostic receipt described below is bounded
-collector evidence, not an Alert, ticket event, or all-probes heartbeat.
+current CLI capabilities; sinks other than the Slack notifier below remain
+deferred. The fixed-schema `monitor-log-reconcile ` diagnostic receipt
+described below is bounded collector evidence, not an Alert, ticket event, or
+all-probes heartbeat.
+
+**Slack transition notifier** (`alert_slack.go`, owner decision 2026-10-14).
+In continuous mode the handler also gives every gated batch, empty ones
+included, to a notifier that posts to `vault/<env>/monitor.yml`
+`alerts.slack_webhook_url`, the webhook Grafana's default contact point uses
+(`bringyourctl grafana reconcile-alerting`). It posts one concise message per
+transition of an incident keyed by (signal id, class, target), frame excluded
+per SIGNALS.md §7: raised, escalated once to PAGE, and cleared after two
+consecutive complete runs of every signal that reported it. A batch with a
+visibility alert is incomplete and clears nothing. A clear says the incident
+is no longer reported, not that it recovered. Messages are capped at 10 per
+sliding minute; transitions over the cap are folded into one summary. Posts
+never block the handler: a bounded queue feeds one sender that spaces posts by
+a second, and a full queue drops and counts. State is process-local, so a new
+watcher announces each alert active at its start, and two overlapping
+watchers both post. An empty webhook disables the notifier with one stderr
+line at startup; `-slack-alerts=false` disables it for a watcher that must not
+post. `-once` never posts. The webhook is a credential: it is never logged or
+put in a message, and post failures are logged as a fixed class (net/http
+errors embed the URL), once per run of failures. A changed webhook makes a
+running watcher's settings stale (§1.6 settings freshness).
 
 Self-health: the monitor distinguishes three states per target — *healthy
 observation*, *broken observation* (ticket about the target), and *cannot
@@ -711,7 +736,8 @@ legacy ticket/console behavior is not the current CLI wiring described in §3.
    current CLI (identity/dedupe/hysteresis/auto-resolve; legacy JSON event line
    on stderr). Additional alerting channels
    (webhook, github pr, persistence/spool) deliberately DEFERRED — console
-   only for now (user decision 2026-07-17).
+   only for now (user decision 2026-07-17). The 2026-10-14 owner decision
+   added one: Slack transition messages from the continuous CLI (§3.6).
 3. **Baselines — DONE (2026-07-17).** Local history store (baseline.go:
    append-only per-metric files under ~/.urnetwork-monitor/<env>/baseline,
    14d retention, compaction); trailing-hour median brownout band live on
@@ -784,8 +810,9 @@ Decided (2026-07-17):
 
 - **Historical ticket sink**: the 2026-07-17 decision used a console emitter
   with stdout rendering and lifecycle JSON on stderr. Current CLI output is
-  the selected active-Alert format on stdout (§3.6); webhook and github-PR
-  emitters remain deferred.
+  the selected active-Alert format on stdout (§3.6), plus the optional Slack
+  transition notifier (2026-10-14); webhook and github-PR emitters for the
+  diagnosing system remain deferred.
 - **Control-plane events** (§6.4): read from the source of truth on the
   edges — the warp logs via journalctl and docker container status
   (`docker ps` state/created-at, `docker events` window) over ssh. A
