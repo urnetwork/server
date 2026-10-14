@@ -161,6 +161,13 @@ func TestProviderUrlProbePassMakesNoOperatorApiRequests(t *testing.T) {
 		defer func() { http.DefaultTransport = defaultTransport }()
 
 		defer server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(testOperatorTransportCatalog))()
+		// The in-process path needs no operator secret, and nothing on it may
+		// gate on one: run it with provider_egress.yml present but without its
+		// ingest_secret, the state an http rollback would refuse.
+		defer server.Vault.PushSimpleResource("provider_egress.yml", []byte("note: no ingest secret\n"))()
+		if _, err := readProviderEgressOperatorSecret(); err == nil {
+			tb.Fatal("the test vault still holds an operator ingest secret")
+		}
 		providerId := testOperatorTransportDueProvider(tb, ctx)
 		proberNetworkId := server.NewId()
 		server.Raise(model.AddBasicTransferBalance(ctx, proberNetworkId, model.ByteCount(1024*1024*1024), server.NowUtc().Add(-time.Minute), server.NowUtc().Add(time.Hour)))
