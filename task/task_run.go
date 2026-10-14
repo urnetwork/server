@@ -442,7 +442,12 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 				if timeout <= 0 {
 					timeout = DefaultTaskFinalizeTimeout
 				}
-				claimCtx, cancel := context.WithTimeout(self.runCtx, timeout)
+				// pgx closes a connection whose statement a canceled context
+				// interrupts, and this session holds every live slot's execution
+				// lock and lends finalization its connection. Drain cancels
+				// runCtx, so a refill keeps only its deadline, which the claim's
+				// statement limit ends inside the session; Run stops next turn.
+				claimCtx, cancel := context.WithTimeout(context.WithoutCancel(self.runCtx), timeout)
 				claimed, _, needsIsolation, err := self.takeTasksWithGuard(claimCtx, free, guard, taskClaimOptions{ordinaryOnly: true, detachCommittedRead: true, poll: poll, runCohorts: true})
 				cancel()
 				if err != nil {
@@ -508,7 +513,14 @@ func (self *TaskWorker) runTaskSlots(n int, poll *taskClaimPoll) (worked bool, r
 		}
 	}
 
+	if err, ok := firstPanic.(error); ok {
+		// Every owner a failed handback, heartbeat or unlock left unacknowledged
+		// keeps its lease and claim fence, and the deferred release ends this
+		// guard. Run reports the failure and continues with a new guard.
+		return true, err
+	}
 	if firstPanic != nil {
+		// A broken collector invariant still unwinds Run.
 		panic(firstPanic)
 	}
 	if self.runCtx.Err() != nil {

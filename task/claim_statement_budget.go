@@ -1,9 +1,9 @@
-// Claim statements run on the collector's guard session, which live executions
-// also finalize on. If a claim context expired during a statement, pgx would
-// close that session and every live finalization on it would fail. A claim
-// with a deadline instead keeps a server-side statement limit that ends each
-// of its statements before the deadline, so a slow claim fails as an ordinary
-// statement timeout and the session stays usable.
+// Claim statements run on the collector's guard session, which holds the live
+// executions' locks and lends them finalization. If a claim context expired
+// during a statement, pgx would close that session and drop those locks. A
+// claim with a deadline instead keeps a server-side statement limit that ends
+// each of its statements before the deadline, so a slow claim fails as an
+// ordinary statement timeout and the session stays usable.
 package task
 
 import (
