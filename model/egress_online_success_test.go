@@ -834,6 +834,40 @@ func TestProviderOnlineSuccessBaselineReadsOnceAWindowAndLogsOnce(t *testing.T) 
 	connect.AssertEqual(t, readCount, 7)
 }
 
+// One canceled caller cannot empty the shared guard for the window. Status
+// requests end early all the time; the read runs without the caller's
+// cancellation, bounded by its own timeout, so the caller right after it gets
+// the guard, and from the same read.
+func TestProviderOnlineSuccessBaselineReadsSurviveACanceledCaller(t *testing.T) {
+	now := onlineSuccessTestNow
+	published := onlineSuccessTestBaseline(0.36, map[string]providerOnlineSuccessCount{"us": {Measured: 2, Succeeded: 1, NoSuccess: 1}})
+	readCount := 0
+	errorLogs := []string{}
+	reads := &providerOnlineSuccessBaselineReads{
+		maxAge: 30 * time.Second,
+		now:    func() time.Time { return now },
+		read: func(ctx context.Context, readNow time.Time) (*providerOnlineSuccessBaseline, error) {
+			readCount += 1
+			// as the Redis read does, a canceled context fails it
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return published, nil
+		},
+		errorf: func(format string, args ...any) { errorLogs = append(errorLogs, fmt.Sprintf(format, args...)) },
+		infof:  func(format string, args ...any) {},
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	reads.get(canceled)
+	if baseline := reads.get(context.Background()); baseline != published {
+		t.Fatalf("after a canceled caller, a healthy caller read %v, want the published guard", baseline)
+	}
+	connect.AssertEqual(t, readCount, 1)
+	connect.AssertEqual(t, len(errorLogs), 0)
+}
+
 // While one caller reads past the window, every other caller keeps the last
 // result instead of waiting for the read or reading too, so an unavailable
 // Redis holds up one status call a window rather than every call that

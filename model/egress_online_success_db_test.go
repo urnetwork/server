@@ -452,3 +452,30 @@ func TestOnlineUrlSuccessCountryGuardMarginAcrossProcesses(t *testing.T) {
 		step("3 of 4", providers[2], 1, 3, ProviderStatusReasonEgressNoSuccess)
 	})
 }
+
+// A status request canceled while it reads the guard does not empty the
+// process's guard for the read window: the read from Redis runs without the
+// caller's cancellation, so the next caller gets the published guard.
+func TestProviderOnlineSuccessBaselineSurvivesACanceledRead(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		value, err := encodeProviderOnlineSuccessBaseline(&providerOnlineSuccessBaseline{
+			computeTime:       server.NowUtc(),
+			enabled:           true,
+			floor:             0.36,
+			countryCodeCounts: map[string]providerOnlineSuccessCount{"us": {Measured: 2, Succeeded: 1, NoSuccess: 1}},
+		}, server.NowUtc())
+		connect.AssertEqual(t, err, nil)
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, providerOnlineSuccessBaselineKey, value, time.Hour).Err())
+		})
+
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		getProviderOnlineSuccessBaseline(canceled)
+		baseline := getProviderOnlineSuccessBaseline(ctx)
+		if baseline == nil || baseline.floor != 0.36 {
+			t.Fatalf("after a canceled read the guard is %v, want the published one", baseline)
+		}
+	})
+}

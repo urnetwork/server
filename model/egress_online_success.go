@@ -448,7 +448,8 @@ const providerOnlineSuccessBaselineReadMaxAge = 30 * time.Second
 // read a window rather than one a status call, and each failure window is
 // logged once when it starts and once when it ends, however many readers ask
 // meanwhile. While one caller reads past the window, the others keep the last
-// result rather than wait or read too. Safe for concurrent use.
+// result rather than wait or read too. A read does not end with the caller
+// that started it, since its result is everyone's. Safe for concurrent use.
 type providerOnlineSuccessBaselineReads struct {
 	maxAge time.Duration
 	now    func() time.Time
@@ -509,7 +510,10 @@ func (self *providerOnlineSuccessBaselineReads) get(ctx context.Context) *provid
 				baseline, err = nil, fmt.Errorf("read failed: %v", recovered)
 			}
 		}()
-		return self.read(ctx, now)
+		// The result serves every caller in the window, so the caller's own
+		// cancellation must not fail it: a status request that ends early
+		// would empty the guard for everyone. The read keeps its own timeout.
+		return self.read(context.WithoutCancel(ctx), now)
 	}()
 	failureStarted, failureEnded := func() (bool, bool) {
 		self.stateLock.Lock()
