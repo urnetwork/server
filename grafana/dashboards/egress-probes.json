@@ -6141,6 +6141,52 @@
           "legendFormat": "rollup {{outcome}}"
         }
       ]
+    },
+    {
+      "id": 116,
+      "type": "timeseries",
+      "title": "URL probe passes held and pass limit by taskworker",
+      "description": "The URL shard passes each taskworker instance may hold at once, read from the probe geometry when it starts (instance_url_concurrency over the per-pass URL concurrency, at most the shard count), beside the passes it holds now. A fleet whose limits add up to fewer passes than the configured shards leaves shards waiting for a free instance.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 360
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (host, block, instance) (urnetwork_url_probe_instance_pass_limit{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "limit {{host}} {{block}} {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (host, block, instance) (urnetwork_url_probe_scheduler_inflight{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "held {{host}} {{block}} {{instance}}"
+        }
+      ]
     }
   ]
 }

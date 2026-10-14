@@ -1115,6 +1115,47 @@
           }
         }
       ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "sharded pub/sub subscription events / s by service",
+      "description": "Sharded pub/sub subscription events of each service's Redis clients: subscribed, resubscribed after a loss, reasserted on a live socket, lost after an acknowledgement, or failed before one. Messages published between a loss and its resubscription are gone, and the consumer resyncs from its source there. Lost or failed events that do not settle point at slot moves or at the connections to the slot owners.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service, event) (rate(urnetwork_redis_shard_subscriptions_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "{{event}} {{service}}"
+        }
+      ]
     }
   ]
 }

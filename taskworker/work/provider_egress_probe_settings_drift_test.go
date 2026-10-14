@@ -140,7 +140,7 @@ func TestProviderEgressProbeSettingsDriftPreservesCurrentExecutionError(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := task.NewTaskTargetWithPost(ProviderEgressProbe, ProviderEgressProbePost)
+	target := NewProviderEgressProbeTaskTarget()
 	_, post, err := target.RunSpecific(context.Background(), &task.Task{ArgsJson: string(argsJSON), ClientAddress: "192.0.2.1:1234", RunMaxTimeSeconds: settings.MaxTimeSeconds})
 	if !errors.Is(err, context.DeadlineExceeded) || post != nil {
 		t.Fatalf("current execution failure was falsely retired: error=%v has_post=%t", err, post != nil)
@@ -195,7 +195,7 @@ func TestProviderEgressProbeSettingsDriftFinalizesCurrentSuccessor(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		target := task.NewTaskTargetWithPost(ProviderEgressProbe, ProviderEgressProbePost)
+		target := NewProviderEgressProbeTaskTarget()
 		before := server.NowUtc()
 		result, post, err := target.RunSpecific(context.Background(), &task.Task{ArgsJson: string(oldJSON), ClientAddress: "192.0.2.1:1234", RunMaxTimeSeconds: old.MaxTimeSeconds})
 		if err != nil || post == nil || result == nil || !result.Stale || calls != 0 {
@@ -224,6 +224,11 @@ func TestProviderEgressProbeSettingsDriftFinalizesCurrentSuccessor(t *testing.T)
 		if err := json.Unmarshal(nextJSON, &next); err != nil {
 			t.Fatal(err)
 		}
+		// The successor names when it was written; the rest is the geometry.
+		if next.ConfigWrittenAt.Before(before.Add(-time.Second)) || server.NowUtc().Add(time.Second).Before(next.ConfigWrittenAt) {
+			t.Fatalf("successor write time %s is not this post-step", next.ConfigWrittenAt)
+		}
+		next.ConfigStamp = ConfigStamp{}
 		if rows != 1 || !reflect.DeepEqual(&next, providerEgressProbeArgs(settings, 2)) || maxTime != settings.MaxTimeSeconds {
 			t.Fatalf("successor wrong: rows=%d concurrency=%d max_time=%d", rows, next.Blackhole.Concurrency, maxTime)
 		}

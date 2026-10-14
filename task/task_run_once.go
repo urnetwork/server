@@ -86,3 +86,34 @@ func taskRunOnceWakeAfterPost(ctx context.Context, tx server.PgTx, taskId server
 	server.Raise(err)
 	observeTaskSubmissionInTx(tx, inserted)
 }
+
+// From a run-once task's own finishing transaction, schedules finished task
+// taskId again under its key at runAt. Like the run-once wake above, it copies
+// the stored arguments and scheduling columns instead of encoding them again,
+// so argument fields the running build does not decode survive. The finishing
+// transaction deleted the claimed row, so there no pending row holds the key,
+// and the insert never merges into one. A pending row under the key means the
+// caller is outside that transaction: like a finished task without the key, it
+// schedules nothing, counts no submission and reports false, and the caller
+// schedules through ScheduleTaskInTx, which merges into the pending row,
+// records a wake and counts the merge once.
+func RescheduleFinishedTaskInTx(ctx context.Context, tx server.PgTx, taskId server.Id, runOnce *RunOnceOption, runAt time.Time) bool {
+	if runOnce == nil {
+		panic(errors.New("rescheduling a finished task requires its run-once key"))
+	}
+	tag := server.RaisePgResult(tx.Exec(ctx, `INSERT INTO pending_task (
+            task_id,function_name,args_json,client_address,client_address_hash,
+            client_address_port,client_by_jwt_json,run_at,run_once_key,run_priority,
+            run_max_time_seconds,claim_time,release_time)
+        SELECT $2,function_name,args_json,client_address,client_address_hash,
+            client_address_port,client_by_jwt_json,$3,run_once_key,run_priority,
+            run_max_time_seconds,$4,$4
+        FROM finished_task WHERE task_id=$1 AND run_once_key=$5
+        ON CONFLICT (run_once_key) DO NOTHING`,
+		taskId, server.NewId(), runAt.UTC(), time.Time{}, runOnce.String()))
+	if tag.RowsAffected() != 1 {
+		return false
+	}
+	observeTaskSubmissionInTx(tx, true)
+	return true
+}
