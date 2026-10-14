@@ -154,11 +154,13 @@ settings:
 	if settings.SiteRetireShare != 0.6 || settings.SitePoolSize["site"] != 120 {
 		t.Fatalf("overrides were not applied: %+v", settings)
 	}
-	if settings.SitePoolSize["dns"] != defaults.SitePoolSize["dns"] || settings.SiteMinSamples != defaults.SiteMinSamples {
+	if settings.SitePoolSize["dns"] != defaults.SitePoolSize["dns"] || settings.SiteMinSamples != defaults.SiteMinSamples ||
+		settings.SiteProberFaultReachedShare != 0.2 {
 		t.Fatalf("an unnamed value lost its default: %+v", settings)
 	}
 	for _, text := range []string{
 		"settings:\n  site_retire_share: 1.5\n",
+		"settings:\n  site_prober_fault_reached_share: 0\n",
 		"settings:\n  site_min_samples: 0\n",
 		"settings:\n  site_pool_size: {cdn: 0}\n",
 		"settings:\n  site_tally_retention_seconds: 60\n",

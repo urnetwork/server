@@ -3,7 +3,9 @@
 // load tally, retires the sites that fail exits known to work, promotes
 // candidates in their place, and learns the places a working site is blocked
 // from. Only exits the probe reached are evidence: a run that never reached
-// its provider is in no site's tally and in no prober-fault share.
+// its provider is in no site's tally and in no prober-fault share, and a tally
+// day from before the tally left such runs out is not read at all. Too few
+// runs reaching their provider is itself a prober fault.
 package work
 
 import (
@@ -53,7 +55,7 @@ var egressSiteRefreshRunsTotal = prometheus.NewCounterVec(prometheus.CounterOpts
 	Namespace: "urnetwork",
 	Subsystem: "egress_site",
 	Name:      "refresh_runs_total",
-	Help:      "Pool refreshes by result: refreshed, skipped (the fleet-wide failure share of the loads that reached their provider was above the prober-fault line), failed",
+	Help:      "Pool refreshes by result: refreshed, skipped (the fleet-wide failure share of the loads that reached their provider was above the prober-fault line, or the share of the recent loads that reached it was under the prober-fault floor), failed",
 }, []string{"result"})
 
 var egressSiteRefreshLastRunTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -269,10 +271,15 @@ type egressRefreshInput struct {
 	now          time.Time
 	settings     *model.ProviderEgressSiteSettings
 	destinations []*model.ProviderEgressDestination
-	// windowTallies are the site tally over the window, per site and place
+	// windowTallies are the site tally per site and place from tallyStart on
 	windowTallies []model.ProviderEgressSiteTally
+	// tallyStart is the first tally day windowTallies hold: the window's first
+	// day, or the first reached-only tally day when that is later
+	// (egressRefreshTallyStart). Zero reads as the window's first day.
+	tallyStart time.Time
 	// probationTotals are the per-day totals of the sites on probation, from
-	// their earliest promotion day on
+	// their earliest promotion day on, never from before the first
+	// reached-only tally day
 	probationTotals []model.ProviderEgressSiteDayTotal
 	// recent is the fleet's scored loads within the prober-fault window that
 	// reached their provider, and the no-contact failures left out
@@ -330,12 +337,15 @@ func (self *egressPlaceCounts) add(t model.ProviderEgressSiteTally) {
 // Decides one refresh (GEOMAP §11.4), with no I/O, in this order:
 //
 //  1. skip everything while the fleet-wide failure share of the loads that
-//     reached their provider -- recent, or over the window -- is above the
-//     prober-fault line: a prober fault fails every site at once on the exits
-//     it reaches, and retiring sites then would empty the pool for nothing. A
-//     run that never reached its provider is in neither share, as it is in no
-//     site's: an offline exit is a structural part of every hour's runs, and
-//     says nothing about the prober or the sites;
+//     reached their provider -- recent, or over the tally the sites are about
+//     to be judged on -- is above the prober-fault line: a prober fault fails
+//     every site at once on the exits it reaches, and retiring sites then
+//     would empty the pool for nothing. A run that never reached its provider
+//     is in neither share, as it is in no site's: an offline exit is a
+//     structural part of every hour's runs, and says nothing about the prober
+//     or the sites. A fault that ends runs before any destination answers is
+//     in no share either, so the refresh also skips while the recent share of
+//     the loads that reached their provider is under the prober-fault floor;
 //  2. judge every active site on its failure share among healthy exits, else
 //     among every exit the probe reached (judgeEgressSite), and every site on
 //     probation on its loads since its promotion: past SiteProbationShare of
@@ -364,13 +374,30 @@ func planEgressDestinationRefresh(input egressRefreshInput) *egressRefreshPlan {
 		}
 		return "healthy exits"
 	}
+	// what the judged tally spans, for the log: the window, or the
+	// reached-only tally when that starts later
+	judgedOver := "over " + settings.SiteWindow().String()
+	if model.ProviderEgressSiteTallyWindowStart(now, settings.SiteWindow()).Before(input.tallyStart) {
+		judgedOver = "since " + input.tallyStart.Format(time.DateOnly)
+	}
 
-	// 1. the prober-fault line, over the loads that reached their provider:
-	// the window's tally holds no others
+	// 1. the prober-fault line and floor, over the loads that reached their
+	// provider: the recent ones from the run history, the judged ones from the
+	// tally from tallyStart on, which holds no others
 	windowLoads, windowFailures := 0, 0
 	for _, t := range input.windowTallies {
 		windowLoads += t.LoadCount
 		windowFailures += t.FailureCount
+	}
+	if loads := input.recent.Total + input.recent.NoContactFailures; 0 < loads {
+		reachedShare := float64(input.recent.Total) / float64(loads)
+		if reachedShare < settings.SiteProberFaultReachedShare {
+			plan.skipped = fmt.Sprintf(
+				"only %.3f of the %d loads of the last %s reached their provider (%d no-contact failures), under the prober-fault floor %.3f",
+				reachedShare, loads, settings.SiteProberFaultWindow(), input.recent.NoContactFailures, settings.SiteProberFaultReachedShare,
+			)
+			return plan
+		}
 	}
 	if 0 < input.recent.Total {
 		share := float64(input.recent.Total-input.recent.Ok) / float64(input.recent.Total)
@@ -385,7 +412,10 @@ func planEgressDestinationRefresh(input egressRefreshInput) *egressRefreshPlan {
 	if 0 < windowLoads {
 		share := float64(windowFailures) / float64(windowLoads)
 		if settings.SiteProberFaultShare < share {
-			plan.skipped = fmt.Sprintf("the fleet-wide failure share over the window is %.3f, above the prober-fault line %.3f", share, settings.SiteProberFaultShare)
+			plan.skipped = fmt.Sprintf(
+				"the fleet-wide failure share of the %d tallied loads that reached their provider %s is %.3f, above the prober-fault line %.3f",
+				windowLoads, judgedOver, share, settings.SiteProberFaultShare,
+			)
 			return plan
 		}
 	}
@@ -513,7 +543,7 @@ func planEgressDestinationRefresh(input egressRefreshInput) *egressRefreshPlan {
 			d := byName[judgement.name]
 			changes = append(changes, egressRefreshChange{
 				name: d.Name, class: d.Class, category: d.Category,
-				detail: fmt.Sprintf("failed %.1f%% of %d %s over %s", 100**judgement.share, judgement.samples, exitsJudged(judgement.basis), settings.SiteWindow()),
+				detail: fmt.Sprintf("failed %.1f%% of %d %s %s", 100**judgement.share, judgement.samples, exitsJudged(judgement.basis), judgedOver),
 			})
 		}
 		for i, change := range changes {
@@ -756,6 +786,20 @@ func orderEgressCandidates(
 	return candidates
 }
 
+// The first tally day a refresh reads from start on: start, or contactedSince
+// -- the first day the tally counted only runs that reached their provider
+// (model.ProviderEgressSiteTallyContactedSince) -- when that is later. A day
+// before it holds every offline exit as a failure of the site it loaded, about
+// two in five runs, so a window reaching back over it would hold the fleet
+// over the prober-fault line, and judge every site on the exits that were
+// offline rather than on the site.
+func egressRefreshTallyStart(start time.Time, contactedSince time.Time) time.Time {
+	if start.Before(contactedSince) {
+		return contactedSince
+	}
+	return start
+}
+
 // One refresh at now: seed, sync the candidates, plan, fill the openings
 // through host checks, write, and report.
 func refreshEgressDestinations(ctx context.Context, now time.Time, check egressCandidateCheck) (*RefreshEgressDestinationsResult, error) {
@@ -790,6 +834,13 @@ func refreshEgressDestinations(ctx context.Context, now time.Time, check egressC
 
 	destinations := model.GetProviderEgressDestinations(ctx)
 	windowStart := model.ProviderEgressSiteTallyWindowStart(now, settings.SiteWindow())
+	tallyStart := egressRefreshTallyStart(windowStart, model.ProviderEgressSiteTallyContactedSince)
+	if windowStart.Before(tallyStart) {
+		glog.Infof(
+			"[egresssites]refresh evidence starts at %s, the first tally day that leaves out the runs that never reached their provider; the %s window starts at %s\n",
+			tallyStart.Format(time.DateOnly), settings.SiteWindow(), windowStart.Format(time.DateOnly),
+		)
+	}
 	probationStart := now
 	probationNames := []string{}
 	for _, d := range destinations {
@@ -804,6 +855,7 @@ func refreshEgressDestinations(ctx context.Context, now time.Time, check egressC
 	if probationStart.Before(retentionStart) {
 		probationStart = retentionStart
 	}
+	probationStart = egressRefreshTallyStart(probationStart, model.ProviderEgressSiteTallyContactedSince)
 	projection := model.ReadProviderEgressTallyProjection(ctx, now, retentionStart)
 	result.TallyExcludedPlaceDays = len(projection.Excluded)
 	result.TallyUnknownShards = len(projection.UnknownShards)
@@ -819,7 +871,8 @@ func refreshEgressDestinations(ctx context.Context, now time.Time, check egressC
 		now:             now,
 		settings:        settings,
 		destinations:    destinations,
-		windowTallies:   model.GetProviderEgressSiteTallies(ctx, windowStart, projection.Excluded...),
+		windowTallies:   model.GetProviderEgressSiteTallies(ctx, tallyStart, projection.Excluded...),
+		tallyStart:      tallyStart,
 		probationTotals: model.GetProviderEgressSiteDayTotals(ctx, probationStart, probationNames, projection.Excluded...),
 		recent:          recent,
 	})
