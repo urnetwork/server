@@ -509,6 +509,9 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// the sum across connections.
 		H3MaxStreamReceiveWindow:          0,
 		H3MaxTotalConnectionReceiveWindow: 0,
+		// A handshake is in flight for about one round trip, so outside a
+		// flood a client is rarely asked for a Retry.
+		H3MaxUnvalidatedHandshakeCount: 1024,
 
 		RefusalHoldTimeout:           defaultRefusalHoldTimeout,
 		RefusalHoldKeepaliveInterval: defaultRefusalHoldKeepaliveInterval,
@@ -563,7 +566,13 @@ type ConnectHandlerSettings struct {
 	// the sum of it. Zero grants every increase, which is what quic-go does
 	// with no callback at all.
 	H3MaxTotalConnectionReceiveWindow uint64
-	ConnectionAnnounceTimeout         time.Duration
+	// H3MaxUnvalidatedHandshakeCount bounds the handshakes this handler's QUIC
+	// listeners, its own and an external front's, hold at once for source
+	// addresses not yet validated, the only ones a spoofed source can start.
+	// Past it a new source must first answer a Retry, which costs it one round
+	// trip. Zero leaves them unbounded.
+	H3MaxUnvalidatedHandshakeCount int
+	ConnectionAnnounceTimeout      time.Duration
 	// per-connection latency/speed test schedule.
 	// nil selects a default based on the transport version.
 	ConnectionTestConfig *TestConfig
@@ -728,6 +737,82 @@ func (self *connectQuicWindowBudget) grantedByteCount() uint64 {
 	return self.total
 }
 
+// connectQuicHandshakeLimit caps the handshakes a handler's QUIC listeners hold
+// at once for source addresses that are not validated.
+//
+// quic-go creates a connection for every Initial and keeps it until the
+// handshake completes or times out, and a spoofed source never completes one.
+// A connection from an unvalidated address is counted from its creation until
+// its handshake completes or it closes. At the maximum every new source must
+// first answer a Retry, which keeps no state here. Only a source that receives
+// packets at its address can return the Retry's token, and a connection with a
+// valid token is validated, so it is not counted. Each listener checks and
+// counts on its own goroutine, so the count can pass the maximum by one for
+// each listener after the first. A nil limit is the inert default: no callback
+// is installed.
+type connectQuicHandshakeLimit struct {
+	maximum int64
+	count   atomic.Int64
+}
+
+// Returns nil when no maximum is configured.
+func newConnectQuicHandshakeLimit(maximum int) *connectQuicHandshakeLimit {
+	if maximum <= 0 {
+		return nil
+	}
+	return &connectQuicHandshakeLimit{maximum: int64(maximum)}
+}
+
+// quic.Transport.VerifySourceAddress: true sends the source a Retry.
+func (self *connectQuicHandshakeLimit) verifySourceAddress(net.Addr) bool {
+	return self.maximum <= self.count.Load()
+}
+
+// quic.Transport.ConnContext. quic-go cancels ctx when the connection closes.
+// The returned context carries the release AwaitQuicHandshake runs once the
+// handshake completes; the close runs it otherwise, and only the first of the
+// two counts.
+func (self *connectQuicHandshakeLimit) connContext(
+	ctx context.Context,
+	info *quic.ClientInfo,
+) (context.Context, error) {
+	if info.AddrVerified {
+		return ctx, nil
+	}
+	self.count.Add(1)
+	stop := context.AfterFunc(ctx, func() { self.count.Add(-1) })
+	release := func() {
+		if stop() {
+			self.count.Add(-1)
+		}
+	}
+	return context.WithValue(ctx, connectQuicHandshakeReleaseKey{}, release), nil
+}
+
+type connectQuicHandshakeReleaseKey struct{}
+
+// AwaitQuicHandshake returns once conn's handshake completes, or ctx's error or
+// the connection's close cause when either comes first. A listener accepts a
+// connection once its ClientHello is processed, when its address is only what
+// the Initial claimed, and a spoofed source never receives the server's flight
+// to complete the handshake. Every front calls this before it charges any limit
+// to the source's address. It also ends the connection's count under the
+// unvalidated-handshake limit; a connection the limit did not count carries no
+// release.
+func AwaitQuicHandshake(ctx context.Context, conn *quic.Conn) error {
+	select {
+	case <-conn.HandshakeComplete():
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-conn.Context().Done():
+		return context.Cause(conn.Context())
+	}
+	if release, ok := conn.Context().Value(connectQuicHandshakeReleaseKey{}).(func()); ok {
+		release()
+	}
+	return nil
+}
+
 // newConnectQuicConfig keeps the server half of H3 aligned with the client's
 // conservative startup packet and enabled DPLPMTUD behavior.
 func newConnectQuicConfig(
@@ -782,6 +867,9 @@ type ConnectHandler struct {
 	// One aggregate stands behind every front that terminates QUIC for this
 	// handler, including an external listener using NewQuicConfig.
 	quicWindowBudget *connectQuicWindowBudget
+	// So does one count of unvalidated handshakes, for an external listener
+	// using NewQuicTransport.
+	quicHandshakeLimit *connectQuicHandshakeLimit
 
 	listenerStateLock sync.RWMutex
 	listenerStates    map[connectListenerKey]bool
@@ -987,6 +1075,9 @@ func newConnectHandlerWithPacketConns(
 		),
 		quicWindowBudget: newConnectQuicWindowBudget(
 			settings.H3MaxTotalConnectionReceiveWindow,
+		),
+		quicHandshakeLimit: newConnectQuicHandshakeLimit(
+			settings.H3MaxUnvalidatedHandshakeCount,
 		),
 		activeCount: activeCount,
 		activeZero:  activeZero,
@@ -1580,10 +1671,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	if self.settings.testingBeforeAuthorizationLease != nil {
 		self.settings.testingBeforeAuthorizationLease(handleCtx, byJwt)
 	}
-	lease, leaseErr := session.StartConnectionAuthorizationLease(handleCtx, byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
-		authorizationCloseCode.Store(int32(code))
-		handleCancel()
-	})
+	// the lease's final check before admission is one of the handshake's queries
+	lease, leaseErr := session.StartConnectionAuthorizationLease(
+		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
+			authorizationCloseCode.Store(int32(code))
+			handleCancel()
+		})
 	if leaseErr != nil {
 		h1Observation.result = connectH1ResultStateRefused
 		status := http.StatusUnauthorized
@@ -2173,11 +2266,7 @@ func (self *ConnectHandler) listenQuic(
 		return &connectListenerError{stage: "transform", err: err}
 	}
 	defer packetConn.Close()
-	quicTransport := &quic.Transport{
-		Conn: packetConn,
-		// createdConn: true,
-		// isSingleUse: true,
-	}
+	quicTransport := self.NewQuicTransport(packetConn)
 	defer quicTransport.Close()
 	listener, err := quicTransport.ListenEarly(tlsConfig, quicConfig)
 	if err != nil {
@@ -2253,6 +2342,18 @@ func (self *ConnectHandler) TransportTls() *server.TransportTls {
 // handler must not build a second, drifting one.
 func (self *ConnectHandler) NewQuicConfig() *quic.Config {
 	return newConnectQuicConfig(self.settings, self.quicWindowBudget)
+}
+
+// NewQuicTransport returns a QUIC transport on conn whose handshakes count
+// against this handler's unvalidated-handshake limit. An external listener for
+// the same handler must not build an unbounded one.
+func (self *ConnectHandler) NewQuicTransport(conn net.PacketConn) *quic.Transport {
+	transport := &quic.Transport{Conn: conn}
+	if limit := self.quicHandshakeLimit; limit != nil {
+		transport.VerifySourceAddress = limit.verifySourceAddress
+		transport.ConnContext = limit.connContext
+	}
+	return transport
 }
 
 // Reads one pooled H3 authentication frame and lends its exact wire bytes to
@@ -2395,6 +2496,13 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		return fmt.Errorf("Only IPv4 is supported.")
 	}
 
+	// Admission charges the source's counters only after the handshake proves
+	// the source receives packets at its address. Data the client sent in
+	// 0-RTT waits in the connection's receive window until then.
+	if err := AwaitQuicHandshake(authCtx, conn); err != nil {
+		return err
+	}
+
 	rateLimit, err := NewConnectionRateLimit(
 		authCtx,
 		clientAddress,
@@ -2494,10 +2602,12 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			if self.settings.testingBeforeAuthorizationLease != nil {
 				self.settings.testingBeforeAuthorizationLease(handleCtx, byJwt)
 			}
-			lease, leaseErr = session.StartConnectionAuthorizationLease(handleCtx, byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
-				_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
-				handleCancel()
-			})
+			// the lease's final check before admission is one of the handshake's queries
+			lease, leaseErr = session.StartConnectionAuthorizationLease(
+				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
+					_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
+					handleCancel()
+				})
 			if leaseErr != nil {
 				if !connectAuthDependencyUnavailable(leaseErr) {
 					return refused(leaseErr)
