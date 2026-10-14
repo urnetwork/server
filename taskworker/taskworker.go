@@ -126,6 +126,10 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRollupProviderEgressTallies(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
+		// lag.dev measurement certificates and names (lag.dev/PLAN.md C5-C9);
+		// both idle until extender.yml enables the measurement block
+		work.ScheduleExtenderMeasurementIssue(clientSession, tx)
+		work.ScheduleExtenderMeasurementDns(clientSession, tx)
 		work.ScheduleRemoveOldExtenderLatencies(clientSession, tx)
 		work.ScheduleRemoveExpiredPings(clientSession, tx)
 		work.ScheduleDeriveLocations(clientSession, tx)
@@ -157,6 +161,8 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 		work.ScheduleStSyncChain(clientSession, tx)
 		work.SchedulePaymentReconcile(clientSession, tx)
+		// lag.dev guest expiry and result retention (lag.dev/PLAN.md A2, A5)
+		work.ScheduleSweepLag(clientSession, tx)
 	}, server.TxReadCommitted)
 	work.ScheduleSettlementAccountingTasks(ctx)
 	// After the commit, in its own bounded transactions.
@@ -418,6 +424,15 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExtenderPublish,
 			work.ExtenderPublishPost,
 		),
+		// lag.dev/PLAN.md C5-C9
+		task.NewTaskTargetWithPost(
+			work.ExtenderMeasurementIssue,
+			work.ExtenderMeasurementIssuePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.ExtenderMeasurementDns,
+			work.ExtenderMeasurementDnsPost,
+		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldExtenderLatencies,
 			work.RemoveOldExtenderLatenciesPost,
@@ -586,6 +601,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.PaymentReconcile,
 			work.PaymentReconcilePost,
+		),
+		// lag.dev/PLAN.md A2, A5
+		task.NewTaskTargetWithPost(
+			work.SweepLag,
+			work.SweepLagPost,
 		),
 	)
 

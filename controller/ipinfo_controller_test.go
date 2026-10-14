@@ -125,7 +125,13 @@ func assertMyIpInfoJsonShape(t testing.TB, resultJson []byte) {
 	connect.AssertEqual(t, keys(result), []string{"connected_to_network", "info"})
 
 	info := result["info"].(map[string]any)
-	connect.AssertEqual(t, keys(info), []string{"ip", "location"})
+	// `asn` is there exactly when GeoLite2 ASN knows the ip (lag.dev/PLAN.md A3)
+	if asn, ok := info["asn"]; ok {
+		connect.AssertEqual(t, keys(info), []string{"asn", "ip", "location"})
+		connect.AssertEqual(t, keys(asn), []string{"number", "organization"})
+	} else {
+		connect.AssertEqual(t, keys(info), []string{"ip", "location"})
+	}
 
 	location := info["location"].(map[string]any)
 	for _, key := range []string{"coordinates", "country", "continent", "timezone"} {

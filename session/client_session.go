@@ -52,8 +52,11 @@ type ClientSession struct {
 	UnsignedIdentity bool
 }
 
-// Resolves the ingress-owned client address before exposing request state.
+// Drops the request's cookie headers (cookies.go) and resolves the
+// ingress-owned client address before exposing request state.
 func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
+	DropCookies(req)
+
 	cancelCtx, cancel := context.WithCancel(req.Context())
 
 	clientAddress, err := ResolveClientAddress(req)

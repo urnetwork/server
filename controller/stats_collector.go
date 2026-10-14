@@ -45,6 +45,9 @@ package controller
 //	urnetwork_stats_derive_residual_km               the last derivation's RMS ping residual {at} (redis, written by the derivation)
 //	urnetwork_stats_derive_last_run_seconds          unix time of the last derivation (redis, written by the derivation)
 //
+// the lag.dev gauges are internal (lag.dev/PLAN.md X9), listed in
+// stats_collector_lag.go and read only by grafana/dashboards/lag-dev.json.
+//
 // the egress index gauges are internal (connect/GEOMAP.md §10.4) and are read
 // only by grafana/dashboards/providers.json:
 //
@@ -751,6 +754,12 @@ func statsRefreshDb(ctx context.Context) {
 
 	// the extender gossip and popularity gauges (grafana/dashboards/extenders.json)
 	statsRefreshExtenders(ctx, now)
+
+	// the lag.dev gauges (grafana/dashboards/lag-dev.json, stats_collector_lag.go);
+	// isolated, so a lag read that fails costs only its own gauges
+	server.HandleError(func() {
+		statsRefreshLag(ctx, now)
+	})
 
 	// Open counts are a bounded snapshot, separate from the hourly cache.
 	// A capped or unavailable read must never masquerade as an exact gauge.
