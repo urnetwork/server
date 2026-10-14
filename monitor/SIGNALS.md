@@ -10728,6 +10728,148 @@ each Connect process whose handler is gone cancels itself on its next
 heartbeat. An outage longer than about 105–110 s therefore drops every Connect
 process. Stop the Taskworker before a planned primary restart (§5.13).
 
+### 2.16a Live handler connection reconcile — rows a running process no longer holds
+Probe: `connection-reconcile`
+
+§2.16 finds open rows whose handler is gone. A row can also stay open under a
+handler that is alive: each announcement writes its connection row once and
+disconnects it once, and before the handler connection reconcile a final
+disconnect that failed (a database outage, a pooler stall) was dropped. Handler
+expiry never reached the row, because the process kept heartbeating its
+handler, so the row stayed connected until that process restarted, and every
+reader of connected rows counted the provider: the location reliability
+writer, FP2 and URL probe admission and census, location and provider counts.
+
+Each Connect handler now reconciles: it holds the rows of the connections its
+process holds, reads the handler's connected rows every five minutes, and
+retires the unheld rows on their second sighting, at most 256 per pass. A
+failed final disconnect moves the next pass up to 15 s after the last one, and
+passes keep that 15 s interval while rows known to be stale remain: rows of
+failed final disconnects, and stale rows not retired yet. A row unheld for a
+moment during ordinary churn (a registration in flight, a disconnect
+committing) waits for the regular pass; before this, any such row kept the
+15 s interval, so a busy handler read its rows every 15 s. A retire takes the
+transport disconnect's fences with try-locks and defers a row whose endpoint
+is busy; a retire that fails leaves its row for a later pass, tried after the
+others, and three consecutive failures end the pass. It exports, per process:
+
+- `urnetwork_connect_connection_reconcile_unheld`: rows the last pass found
+  connected under the handler but not held;
+- `urnetwork_connect_connection_reconcile_retired_total`: rows it retired;
+- `urnetwork_connect_connection_reconcile_passes_total{result="ok|error"}`;
+- `urnetwork_connect_connection_reconcile_unretired_total{reason="failed|busy"}`:
+  stale rows a pass left, because the retire raised or a fence or the row was
+  busy.
+
+The probe evaluates them per block in one Mimir query:
+
+```promql
+label_replace(max by (host,block) (urnetwork_connect_connection_reconcile_unheld{env="main"}),"monitor_metric","unheld","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_retired_total{env="main"}[15m])),"monitor_metric","retired","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env="main",result="ok"}[15m])),"monitor_metric","ok_passes","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env="main",result="error"}[15m])),"monitor_metric","error_passes","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env="main",reason="failed"}[15m])),"monitor_metric","failed_retires","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env="main",reason="busy"}[15m])),"monitor_metric","busy_retires","__name__",".*")
+```
+
+- HEALTHY: every block's unheld count stays below 256, or falls while the
+  reconcile retires rows. After a database outage a block can hold thousands of
+  unheld rows for a few minutes while it drains them.
+- STUCK (`connection-reconcile-stuck`, two probes): a block holds at least 256
+  unheld rows and retired none in 15 minutes. Its retires fail, are deferred
+  behind busy endpoint fences or find nothing, its batch is zero, or a
+  registration it waits for never ends.
+- FAILING (`connection-reconcile-failing`, two probes): in 15 minutes every
+  pass on a block raised, or its retires failed and none succeeded; the
+  database path of that process is down. A failed retire fails only its row
+  and its pass completes, so the pass results alone miss it.
+- UNOBSERVABLE (`connection-reconcile-unobservable`, two probes): no block
+  exports a fresh gauge. Expected until Connect runs an artifact with the
+  reconcile; until then compare a block's connected provider rows with its
+  `urnetwork_connect_provider_connections` gauge.
+
+2026-10-14 production evidence: about 29.6k provider rows were connected under
+live handlers of eight blocks whose processes survived the 2026-10-13 primary
+restarts (06:40Z, 08:10Z) and PgBouncer livelock (16:45-17:30Z). Each block's
+excess over its own provider gauge matched, within 40 rows, its rows of clients
+absent from `client_reliability` plus rows replaced by a newer row of the same
+live client. Connect logged `query_wait_timeout (SQLSTATE 08P01)` and `context
+deadline exceeded` from the final `DisconnectNetworkClient` in those windows.
+About 9.8k providers in the FP2 population were connected only through such
+rows; they took about 12% of URL probe runs and 26% of the no-contact failures.
+
+Do not update connection rows or delete handlers manually. Rows of a process
+that predates the reconcile are retired by restarting that Connect block:
+handler expiry then retires all of its rows, at the cost of its live
+connections reconnecting. The same release keeps a live transport through a
+failed sync read, so an outage no longer disconnects every provider whose sync
+fell in it.
+
+Implementation convention: SIGNALS.md §2.16a (`connection-reconcile`) maps to
+`signal_connection_reconcile.go` and `signal_connection_reconcile_test.go`.
+Synthetic tests cover a healthy fleet, a draining block, a stuck block, a
+failing block, failing retires and an absent gauge. The reconcile itself is tested in
+`connect/transport_announce_reconcile_test.go` and
+`connect/transport_announce_reconcile_db_test.go`.
+
+### 2.16b Live connection announcement failures — reads and writes retried with the transport kept
+Probe: `connection-live-failures`
+
+A live Connect announcement reads its provide key changes every sync round,
+publishes its connection's measurements, and refreshes its verify egress
+lease. Before 2026-10-14 a failed sync read or lease write raised and tore
+the transport down, so a database outage disconnected every provider whose
+sync fell in it, and a failed measurement write ended the publisher for the
+connection's life. Each now keeps the transport and retries with a backoff of
+at most 2 minutes, counting every failure:
+
+- `urnetwork_connect_connection_sync_read_failures_total`;
+- `urnetwork_connect_connection_worker_failures_total{operation="measurement_write|verify_egress_lease"}`.
+
+Each failure is logged at V(1), and the process logs them unconditionally at
+most once a minute, with the failures by operation since its last line and the
+latest error:
+
+```text
+[t]live connection failures retried with the transport kept (in 1m0s): measurement_write=412 sync_read=1803; latest sync_read: <error>
+```
+
+The probe evaluates, per host, block and operation, the failures in the
+fewest-failure 2 minute window of the last 15 minutes and in the whole range:
+
+```promql
+label_replace(label_replace(min_over_time((sum by (host,block) (increase(urnetwork_connect_connection_sync_read_failures_total{env="main"}[2m])))[15m:1m]),"operation","sync_read","__name__",".*"),"monitor_metric","window_min","__name__",".*")
+or label_replace(label_replace(sum by (host,block) (increase(urnetwork_connect_connection_sync_read_failures_total{env="main"}[15m])),"operation","sync_read","__name__",".*"),"monitor_metric","total","__name__",".*")
+or label_replace(min_over_time((sum by (host,block,operation) (increase(urnetwork_connect_connection_worker_failures_total{env="main"}[2m])))[15m:1m]),"monitor_metric","window_min","__name__",".*")
+or label_replace(sum by (host,block,operation) (increase(urnetwork_connect_connection_worker_failures_total{env="main"}[15m])),"monitor_metric","total","__name__",".*")
+```
+
+- HEALTHY: failures are isolated, or only one connection fails. One
+  connection retries at most every 2 minutes, so it fails about 8 times in
+  the range, below the floor of 30.
+- SUSTAINED (`connection-live-failures-sustained`, two probes): a block
+  operation failed in every 2 minute window and at least 30 times in 15
+  minutes. The block's PostgreSQL or Redis path keeps failing: sync_read stops
+  its providers' mode changes and reliability stats, measurement_write stops
+  its measurements reaching the reliability writer, verify_egress_lease lets
+  its leases lapse after their ttl. Read the block's unconditional log line
+  for the latest error, then restore the database path (§2.11, §2.2) or Redis
+  (§3). Do not restart the block for these failures alone: the transports are
+  kept, and a restart reconnects every connection.
+- UNOBSERVABLE (`connection-live-failures-unobservable`, two probes): samples
+  that are unlabeled, stale or negative. Absent counters are §2.16a's: the
+  same processes export the reconcile gauge, whose unobservable class covers a
+  fleet that does not export them.
+
+Panels 58 (sync reads retried) and 59 (worker writes retried, by operation) of
+the Connect dashboard chart the counters.
+
+Implementation convention: SIGNALS.md §2.16b (`connection-live-failures`)
+maps to `signal_connection_live_failures.go` and
+`signal_connection_live_failures_test.go`. Synthetic tests cover a healthy
+fleet, one failing connection below the floor, a sustained block and a stale
+sample. The log is tested in `connect/transport_announce_failure_log_test.go`.
+
 ### 2.17 Missing companion-origin contract rate — return path cannot anchor
 Probe: `missing-origin`
 
