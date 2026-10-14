@@ -10,6 +10,15 @@
 # after the launcher exits falls through to public DNS, which answers the local
 # service names with 127.0.0.1. Any failure leaves the variable unset, and the
 # integration fixtures then refuse to start.
+#
+# In managed-local mode a successful preflight also exports
+# WARP_TEST_ENV_LAUNCHER_VAULT_HOME, the vault whose local pg.yml and redis.yml
+# the launcher runs with. A Go test binary reads only fixture vaults; from that
+# vault it reads just pg.yml, pg_maintenance.yml and redis.yml in its local
+# directory, while the launcher attestation stays valid, and every other
+# resource from local/testdata/vault (env_test_vault.go). That is the sanctioned
+# way to run DB tests on a developer machine whose launcher uses a real vault's
+# local credentials. Do not set URNETWORK_TEST_REAL_VAULT=1 for DB tests.
 
 test_env_error() {
     printf 'test environment: %s\n' "$*" >&2
@@ -967,11 +976,26 @@ test_env_preflight() {
     export WARP_TEST_ENV_ATTESTED_ADDRS="$pg_endpoint,$TEST_ENV_ENDPOINT"
 }
 
+# Names the vault that the launcher read its PostgreSQL and Redis resources
+# from, which the preflight just checked against the launcher attestation, for
+# the Go test vault guard (env_test_vault.go). Only the managed-local mode has a
+# launcher; under the suite proxy or the portable services a test reads its
+# vault only if that vault is a fixture root.
+test_env_export_launcher_vault() {
+    if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ||
+          "${WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES:-0}" == 1 ]]; then
+        return 0
+    fi
+    export WARP_TEST_ENV_LAUNCHER_VAULT_HOME="$WARP_VAULT_HOME"
+}
+
 test_env_main() {
     # A failed preflight must not leave an earlier attestation exported.
     unset WARP_TEST_ENV_ATTESTED_ADDRS
+    unset WARP_TEST_ENV_LAUNCHER_VAULT_HOME
     test_env_configure || return $?
     test_env_preflight || return $?
+    test_env_export_launcher_vault
 }
 
 test_env_main

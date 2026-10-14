@@ -164,7 +164,8 @@ var syntheticTestResourceRoot = func() string {
 // below the release gate's private fixture root, the repository's synthetic
 // local/testdata, or the temp directory or GOTMPDIR where a test writes its
 // own. Any other vault, such as $WARP_HOME/vault, may hold real secrets and
-// reads as empty. Other binaries are unaffected.
+// reads as empty, except for the launcher resources that test-env.sh attested
+// (see selectTestVaultScope). Other binaries are unaffected.
 func refuseNonFixtureVault(root string, testBinary bool) error {
 	if !testBinary || os.Getenv(TestRealVaultEnv) == "1" {
 		return nil
@@ -176,7 +177,13 @@ func refuseNonFixtureVault(root string, testBinary bool) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("%w: a test reads only a fixture vault, and %s is not one; set %s=1 to read it", ErrResourceNotFound, root, TestRealVaultEnv)
+	return fmt.Errorf(
+		"%w: a test reads only a fixture vault, and %s is not one; DB tests read the local launcher's resources "+
+			"through ./test.sh or a sourced ./test-env.sh, and %s=1 reads any vault",
+		ErrResourceNotFound,
+		root,
+		TestRealVaultEnv,
+	)
 }
 
 // Reports whether path is base or below it, after resolving the symlinks of
@@ -735,24 +742,36 @@ func (self *Resolver) resourceVersion(relPath string) ResourceVersion {
 	}
 }
 
-// The resolution of relPath: the cached one when every entry it observed is
-// unchanged, else a new resolution of the current filesystem, which is cached
-// when it is stable. A not-found resolution is cached like a found one, so an
-// absent optional resource stays absent without searching again. An
-// unavailable resolution is never cached and forgets any cached one.
+// The resolution of relPath below the mount's root (see homeResolution). A
+// test binary's vault lookup first selects the homes it may read, or is
+// refused (see selectTestVaultScope).
 func (self *Resolver) resolution(relPath string) *resolverResolution {
 	if filepath.IsAbs(relPath) {
 		panic("Resource path must be relative.")
 	}
 
 	var root string
+	env, _ := Env()
 	switch self.mountType {
 	case MOUNT_TYPE_VAULT:
 		root = VaultHomeRoot()
-		// checked before the cache, so a refusal is never cached and an opt-in
-		// that is withdrawn takes effect at the next lookup
-		if err := refuseNonFixtureVault(root, testing.Testing()); err != nil {
-			return &resolverResolution{err: err, generation: resolverGeneration.Add(1)}
+		if testing.Testing() {
+			// checked before the cache, so a refusal is never cached, and an
+			// opt-in or a launcher attestation that is withdrawn takes effect at
+			// the next lookup
+			scope, err := selectTestVaultScope(root, env, relPath)
+			if err != nil {
+				return &resolverResolution{err: err, generation: resolverGeneration.Add(1)}
+			}
+			resolution := self.homeResolution(scope.root, scope.env, relPath)
+			if scope.launcherEndpoint != "" && resolution.err == nil {
+				// the selected launcher file, cached or not, must name the
+				// endpoint of the attestation just read
+				if err := requireTestLauncherResourceEndpoint(resolution.paths[0], scope.launcherEndpoint); err != nil {
+					return &resolverResolution{err: err, generation: resolverGeneration.Add(1)}
+				}
+			}
+			return resolution
 		}
 	case MOUNT_TYPE_CONFIG:
 		root = ConfigHomeRoot()
@@ -761,7 +780,16 @@ func (self *Resolver) resolution(relPath string) *resolverResolution {
 	default:
 		panic(fmt.Sprintf("Unknown mount type %s", self.mountType))
 	}
-	env, _ := Env()
+	return self.homeResolution(root, env, relPath)
+}
+
+// The resolution of relPath below root and env: the cached one when every
+// entry it observed is unchanged, else a new resolution of the current
+// filesystem, which is cached when it is stable. A not-found resolution is
+// cached like a found one, so an absent optional resource stays absent without
+// searching again. An unavailable resolution is never cached and forgets any
+// cached one.
+func (self *Resolver) homeResolution(root string, env string, relPath string) *resolverResolution {
 	key := resolverResolutionKey{root: root, env: env, relPath: relPath}
 
 	cached := func() *resolverResolution {
