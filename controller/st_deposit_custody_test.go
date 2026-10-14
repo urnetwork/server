@@ -542,6 +542,7 @@ func TestStDepositCustodyReconcilesPreparedFundingBeforeNewSizing(t *testing.T) 
 
 // The actual server staging/credit entries send only one exact transfer and
 // one principal deposit, preserving two independent nonce domains and fees.
+// Each moves stake, so each is signed with its stake-move floor.
 func TestStDepositCustodyStagesRoundingOnceAndCreditsExactPrincipal(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		client, _, fixture := newStDepositCustodyFixture(t, 1)
@@ -566,7 +567,7 @@ func TestStDepositCustodyStagesRoundingOnceAndCreditsExactPrincipal(t *testing.T
 			t.Fatal("deposit repeated funding or misattributed principal")
 		}
 		for index, tx := range fixture.sent {
-			if tx.Nonce() != uint64(7+index) || tx.GasPrice().Int64() != 10 || tx.Gas() != 60_000 {
+			if tx.Nonce() != uint64(7+index) || tx.GasPrice().Int64() != 10 || tx.Gas() != []uint64{stV1DepositStagingGasFloor, stV1DepositGasFloor}[index] {
 				t.Fatal("deposit account nonce or fee reservation changed")
 			}
 		}

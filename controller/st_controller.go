@@ -1114,8 +1114,8 @@ type stTransactionEnvelope struct {
 // transactionEnvelope sizes and prices an attempt that sends calldata to `to`
 // from `from`. Its gas limit is gasLimit when given (a cancellation's
 // intrinsic gas), a replacement's earlier limit, or the estimate plus 20%,
-// and never below the stake-move floor, which is capped at the operator gas
-// policy's maximum_gas. A replacement's fees are bumped.
+// and never below the stake-move floor as the operator gas policy caps it. A
+// replacement's fees are bumped.
 func (self *CoreStClient) transactionEnvelope(ctx context.Context, client *ethclient.Client, from, to common.Address, calldata []byte, gasLimit uint64, previous *model.StTransactionAttempt, kind string, gasPolicy *server.StOperatorGasPolicy) (*stTransactionEnvelope, error) {
 	if gasLimit != 0 {
 		// intrinsic gas was selected by the cancellation payload
@@ -1141,34 +1141,52 @@ func (self *CoreStClient) transactionEnvelope(ctx context.Context, client *ethcl
 		}
 		gasLimit = estimated + (estimated+4)/5
 	}
-	// A stake move is never signed below its floor, whatever its estimate or
-	// an earlier attempt's limit. The floor is capped at the operator gas
-	// policy's maximum_gas, so that it alone never makes the policy refuse an
-	// attempt the estimate's limit would pass.
 	envelope := &stTransactionEnvelope{legacy: prepared.legacy}
-	envelope.gasFloor, envelope.floorName = self.stakeMoveGasFloor(to, calldata, kind)
-	if gasPolicy != nil {
-		envelope.gasFloor = min(envelope.gasFloor, gasPolicy.MaximumGas)
-	}
-	envelope.gasLimit = max(gasLimit, envelope.gasFloor)
+	feeCap := prepared.fee
 	if prepared.legacy {
 		envelope.price = prepared.fee
 		if previous != nil {
 			envelope.price = stReplacementFee(previous.GasPrice, envelope.price)
 		}
-		return envelope, nil
-	}
-	envelope.tip = prepared.fee
-	envelope.fee = new(big.Int).Mul(prepared.header.BaseFee, big.NewInt(2))
-	envelope.fee.Add(envelope.fee, envelope.tip)
-	if previous != nil {
-		envelope.tip = stReplacementFee(previous.GasTipCap, envelope.tip)
-		envelope.fee = stReplacementFee(previous.GasFeeCap, envelope.fee)
-		if envelope.fee.Cmp(envelope.tip) < 0 {
-			envelope.fee.Set(envelope.tip)
+		feeCap = envelope.price
+	} else {
+		envelope.tip = prepared.fee
+		envelope.fee = new(big.Int).Mul(prepared.header.BaseFee, big.NewInt(2))
+		envelope.fee.Add(envelope.fee, envelope.tip)
+		if previous != nil {
+			envelope.tip = stReplacementFee(previous.GasTipCap, envelope.tip)
+			envelope.fee = stReplacementFee(previous.GasFeeCap, envelope.fee)
+			if envelope.fee.Cmp(envelope.tip) < 0 {
+				envelope.fee.Set(envelope.tip)
+			}
 		}
+		feeCap = envelope.fee
 	}
+	// A stake move is never signed below its floor, whatever its estimate or
+	// an earlier attempt's limit. The floor is capped at the operator gas
+	// policy's maximum_gas and at the gas its per-intent liability covers at
+	// this fee cap, so that it alone never makes the policy refuse an attempt
+	// the estimate's limit would pass.
+	envelope.gasFloor, envelope.floorName = self.stakeMoveGasFloor(to, calldata, kind)
+	if gasPolicy != nil {
+		envelope.gasFloor = min(envelope.gasFloor, gasPolicy.MaximumGas, stGasCoveredBy(gasPolicy.MaximumIntentLiabilityWei, feeCap))
+	}
+	envelope.gasLimit = max(gasLimit, envelope.gasFloor)
 	return envelope, nil
+}
+
+// stGasCoveredBy is the most gas a liability in wei covers at a fee cap, and 0
+// for a fee cap the policy refuses anyway.
+func stGasCoveredBy(liabilityWei string, feeCap *big.Int) uint64 {
+	liability, err := server.StOperatorGasQuantity(liabilityWei)
+	if err != nil || feeCap == nil || feeCap.Sign() <= 0 {
+		return 0
+	}
+	covered := new(big.Int).Quo(liability, feeCap)
+	if !covered.IsUint64() {
+		return math.MaxUint64
+	}
+	return covered.Uint64()
 }
 
 // transaction is the envelope's unsigned transaction at nonce.
@@ -1979,24 +1997,50 @@ func (self *CoreStClient) RollEpochs(ctx context.Context) (string, error) {
 // same close estimated 361,258 and needed 336,422.
 const stV1CloseGasFloor = 3_200_000
 
+// stV1DepositGasFloor and stV1DepositStagingGasFloor are the least gas limits
+// the engine signs the deposit key's two stake moves with, for
+// stV1CloseGasFloor's reason: runtime 478 admits each with gas that grows
+// with its caller's own StakingHotkeys list. Measured on 2026-10-13 on the
+// runtime 477 rehearsal node, the coordinator's deposit, a moveStake and a
+// transferStake, needed a gas limit of 2,655,491 and eth_estimateGas gave
+// 2,831,419, which the engine signed 20% above, at 3,397,703; the staging
+// transferStake to the staking precompile needed 2,316,879 and estimated
+// 2,331,211, signed at 2,797,454. Each floor is that size, rounded up. On
+// runtime 478 they estimated 441,046 and 95,406.
+const (
+	stV1DepositGasFloor        = 3_400_000
+	stV1DepositStagingGasFloor = 2_800_000
+)
+
 // stCloseSelector is the selector of closeOperatorEpoch(uint256,uint256),
-// which the v1 coordinator and STSettlement2 share.
-var stCloseSelector = crypto.Keccak256([]byte("closeOperatorEpoch(uint256,uint256)"))[:4]
+// which the v1 coordinator and STSettlement2 share; stDepositSelector is the
+// coordinator's deposit, and stTransferStakeSelector the staking precompile's
+// transferStake.
+var (
+	stCloseSelector         = crypto.Keccak256([]byte("closeOperatorEpoch(uint256,uint256)"))[:4]
+	stDepositSelector       = crypto.Keccak256([]byte("deposit(uint256,uint256,uint256,uint64)"))[:4]
+	stTransferStakeSelector = crypto.Keccak256([]byte("transferStake(bytes32,bytes32,uint256,uint256,uint256)"))[:4]
+)
 
 // stakeMoveGasFloor is the least gas limit an attempt that sends calldata to
 // `to` is signed with, and the name of the send it is the floor of: the floor
-// of a v1 or v2 close for its execution, and 0 for any other attempt. Every close can
-// capture, since emission reaches the pool hotkey between a close's estimate
-// and its inclusion.
+// of a stake-moving send for its execution (a v1 or v2 close, a deposit or
+// its staging), and 0 for any other attempt. Every close can capture, since
+// emission reaches the pool hotkey between a close's estimate and its
+// inclusion.
 func (self *CoreStClient) stakeMoveGasFloor(to common.Address, calldata []byte, kind string) (uint64, string) {
-	if kind != model.StTxAttemptExecution || !bytes.HasPrefix(calldata, stCloseSelector) {
+	if kind != model.StTxAttemptExecution {
 		return 0, ""
 	}
 	switch {
-	case self.cfg.LedgerV2Enabled() && to == self.cfg.SettlementV2:
+	case bytes.HasPrefix(calldata, stCloseSelector) && self.cfg.LedgerV2Enabled() && to == self.cfg.SettlementV2:
 		return stLedgerV2StakeMoveGasFloor, "v2 close"
-	case to == self.cfg.ContractAddress:
+	case bytes.HasPrefix(calldata, stCloseSelector) && to == self.cfg.ContractAddress:
 		return stV1CloseGasFloor, "v1 close"
+	case bytes.HasPrefix(calldata, stDepositSelector) && to == self.cfg.ContractAddress:
+		return stV1DepositGasFloor, "v1 deposit"
+	case bytes.HasPrefix(calldata, stTransferStakeSelector) && to == stStakingPrecompileAddress:
+		return stV1DepositStagingGasFloor, "v1 deposit staging"
 	}
 	return 0, ""
 }
