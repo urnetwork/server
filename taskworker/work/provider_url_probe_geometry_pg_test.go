@@ -6,6 +6,7 @@ package work
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -157,6 +158,24 @@ func testFinishProbePass(ctx context.Context, shardIndex int, between func()) (f
 	})
 }
 
+// The stored function name of the disabled marker. A plain constant keeps the
+// fixture independent of the marker's code.
+const testDisabledMarkerFunctionName = "github.com/urnetwork/server/taskworker/work.ProviderEgressProbeDisabled"
+
+// Inserts the disabled marker a taskworker on version writes at writtenAt, due
+// at runAt.
+func testInsertDisabledMarker(t testing.TB, ctx context.Context, tx server.PgTx, version string, writtenAt time.Time, runAt time.Time) {
+	t.Helper()
+	argsJson := fmt.Sprintf(`{"config_generation":%q,"config_written_at":%q}`, version, writtenAt.UTC().Format(time.RFC3339Nano))
+	server.RaisePgResult(tx.Exec(ctx, `
+		INSERT INTO pending_task (
+			task_id, function_name, args_json, client_address, run_at, run_once_key,
+			run_priority, run_max_time_seconds, claim_time, release_time
+		) VALUES ($1, $2, $3, '', $4, $5, $6, 60, $7, $7)`,
+		server.NewId(), testDisabledMarkerFunctionName, argsJson, runAt.UTC(),
+		task.RunOnce("provider_egress_probe_disabled").String(), task.DefaultPriority, time.Time{}))
+}
+
 // Returns once PostgreSQL reports the backend waiting on a lock. The barrier is
 // the server's own report of the wait, not a sleep.
 func testAwaitLockWait(t testing.TB, ctx context.Context, pid int32) {
@@ -242,6 +261,57 @@ func TestProviderEgressProbeOlderConfigClaimKeepsNewerShards(t *testing.T) {
 		}
 		if count := testPendingProbeRowCount(t, ctx); count != len(shardIndexes) {
 			t.Errorf("%d probe rows after the claims, want the %d newer shards", count, len(shardIndexes))
+		}
+	})
+}
+
+// A config that disables probing writes no shard rows. An older taskworker
+// that still enables probing found the shards the newer config had retired
+// missing, recreated them after every pass, and probed on until it restarted.
+// With the newer config's disabled marker live, the older config's claim of
+// shard 0 must run no pass and recreate no shard, and leave shard 0 unchanged
+// for the disabling config to retire.
+func TestProviderEgressProbeOlderConfigLeavesANewerDisableInPlace(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		t.Setenv("WARP_CONFIG_VERSION", testOlderConfigVersion)
+		older := testUrlGeometrySettings(4, 8)
+		withProviderEgressProbeSettings(t, older)
+		driftTaskRunner(t, func(context.Context, *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+			t.Error("an older config ran a pass of a shard set that a newer config disabled")
+			return &ProviderEgressProbeResult{}, nil
+		})
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		server.Tx(ctx, func(tx server.PgTx) {
+			for shardIndex := range older.ShardCount {
+				// the newer config already retired shard 2
+				if shardIndex == 2 {
+					continue
+				}
+				runAt := server.NowUtc().Add(time.Hour)
+				if shardIndex == 0 {
+					runAt = server.NowUtc().Add(-time.Minute)
+				}
+				args := testStampedGeometryArgs(t, older, shardIndex, testOlderConfigVersion, server.NowUtc())
+				scheduleProviderEgressProbeAt(clientSession, tx, args, runAt)
+			}
+			testInsertDisabledMarker(t, ctx, tx, testNewerConfigVersion, server.NowUtc(), server.NowUtc().Add(time.Hour))
+		})
+		claimed := testPendingProbeRow(t, ctx, 0)
+
+		if finishedCount, retriedCount := testEvalProviderEgressProbeTasks(t, ctx, 1); finishedCount != 1 || retriedCount != 0 {
+			t.Fatalf("the older config finished %d and retried %d claims of shard 0", finishedCount, retriedCount)
+		}
+		if next := testPendingProbeRow(t, ctx, 2); next != nil {
+			t.Errorf("the older config recreated shard 2 after a newer config disabled probing")
+		}
+		next := testPendingProbeRow(t, ctx, 0)
+		if next == nil || next.taskId == claimed.taskId {
+			t.Errorf("the older config did not hand shard 0 back to the disabling config")
+		} else if !reflect.DeepEqual(next.args, claimed.args) {
+			t.Errorf("the older config rewrote shard 0 instead of handing it back: config_written_at %v, was %v",
+				next.args["config_written_at"], claimed.args["config_written_at"])
 		}
 	})
 }

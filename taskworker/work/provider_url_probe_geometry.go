@@ -66,7 +66,9 @@ func providerEgressProbeNewerForeignGeometry(args *ProviderEgressProbeArgs, sett
 // An older config hands back a newer config's snapshot that it would retire
 // or rewrite while that config is live, by the shard's own stamp or by the
 // stamp of any other shard of either geometry. Only a stale own stamp costs a
-// read of the shard rows.
+// read of the shard rows. A config that still enables probing also hands back
+// its own snapshots while a newer config's disabled marker is live, since that
+// config writes no shard rows to show it.
 func providerEgressProbeHandsBack(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
@@ -74,7 +76,7 @@ func providerEgressProbeHandsBack(
 	now time.Time,
 ) bool {
 	if !providerEgressProbeNewerForeignGeometry(args, settings) {
-		return false
+		return settings.Enabled && providerEgressProbeDisabledByNewerConfig(ctx, now)
 	}
 	if providerEgressProbeStampLive(args, now) {
 		return true
@@ -89,8 +91,9 @@ func providerEgressProbeHandsBack(
 
 // The pending rows of the first shardCount shard indexes, read as a plain
 // snapshot that takes no lock and waits on no transaction: the indexes that
-// have a row, and whether any row carries a newer config's live geometry. A
-// row whose arguments do not decode counts as present and not newer.
+// have a row, and whether any row carries a newer config's live geometry, or
+// a newer config's live disabled marker shows it retired the shard set. A row
+// whose arguments do not decode counts as present and not newer.
 func readProviderEgressProbeShardRowsInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -122,5 +125,8 @@ func readProviderEgressProbeShardRowsInTx(
 			}
 		}
 	})
+	if providerEgressProbeDisabledMarkerLiveInTx(ctx, tx, now) {
+		newerGenerationLive = true
+	}
 	return
 }

@@ -397,13 +397,16 @@ func allProviderEgressProbeArgs(settings providerEgressProbeSettings) []*Provide
 // one pending task. RunOnce makes repeated initialization idempotent, and an
 // existing row keeps its arguments. While a newer config's geometry is live in
 // a configured shard, the shard set is that config's and nothing is scheduled.
+// A config that disables probing schedules no shard and seeds its disabled
+// marker instead (provider_url_probe_disabled.go).
 func ScheduleProviderEgressProbeTasks(clientSession *session.ClientSession, tx server.PgTx) {
 	settings, err := getProviderEgressProbeSettings()
 	server.Raise(err)
+	now := server.NowUtc()
 	if !settings.Enabled {
+		scheduleProviderEgressProbeDisabledAt(clientSession, tx, &ProviderEgressProbeDisabledArgs{ConfigStamp: newConfigStamp(now)}, now)
 		return
 	}
-	now := server.NowUtc()
 	if _, newerGenerationLive := readProviderEgressProbeShardRowsInTx(clientSession.Ctx, tx, settings.ShardCount, now); newerGenerationLive {
 		return
 	}
