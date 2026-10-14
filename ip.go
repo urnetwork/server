@@ -872,10 +872,6 @@ func openArinOldDatabase(dir string, latest ArinDatabaseIdentity) (*mmdb.Reader,
 // latest. Gauges and diagnostics load it at read time and never open anything.
 var arinServingPair atomic.Pointer[arinDatabasePair]
 
-// The latest reader alone, for the bounded live-shadow diagnostics. Published
-// with the pair.
-var arinServingReader atomic.Pointer[mmdb.Reader]
-
 // The pair of the selected resource, opened once per process. A pair never
 // follows a later Config selection: a restart is the only point at which a
 // process reads a new database.
@@ -897,7 +893,6 @@ func loadArinDatabasePair() (*arinDatabasePair, error) {
 		arinServingPair.Store(&arinDatabasePair{latestIdentity: ArinDatabaseIdentity{State: ArinDatabaseInvalid, Path: path}, oldIdentity: unopened})
 		return nil, err
 	}
-	arinServingReader.Store(pair.latest)
 	arinServingPair.Store(pair)
 	return pair, nil
 }

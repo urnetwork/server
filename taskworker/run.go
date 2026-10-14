@@ -277,9 +277,6 @@ func runWithStartupWait(
 	if startup.flushStats != nil {
 		startup.flushStats()
 	}
-	if startup.closeCapture != nil {
-		startup.closeCapture()
-	}
 	logDrainAsync("[taskworker]close\n")
 	if unavailable {
 		return err

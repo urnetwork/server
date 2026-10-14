@@ -26,7 +26,7 @@ func TestSubscriberGuardQueryPlan(t *testing.T) {
 			// Preserve one fixture timestamp. Each batch commits before the next,
 			// releasing the real session trigger's endpoint fences.
 			connectionTime := server.NowUtc()
-			arinRemoteInsertPopulation(t, ctx, conn, 240000, `INSERT INTO network_client_connection
+			insertPopulationFixture(t, ctx, conn, 240000, `INSERT INTO network_client_connection
 				(client_id,connection_id,connected,connect_time,disconnect_time,connection_host,connection_service,connection_block,handler_id)
 				SELECT md5('subscriber-benchmark-client-'||n)::uuid, md5('subscriber-benchmark-connection-'||n||':'||generation)::uuid,
 					generation<=2, $1::timestamp, CASE WHEN generation>2 THEN $1::timestamp END, 'synthetic','synthetic','synthetic',

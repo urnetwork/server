@@ -104,7 +104,6 @@ func newClientScoreEmptyTargetFixture() *clientScoreEmptyTargetFixture {
 		func(clientId server.Id) bool {
 			return clientId == self.excludedClientId
 		},
-		nil,
 	)
 	// what rankClientScore decides for an admitted provider without native
 	// membership: online, so both modes' union pools carry it

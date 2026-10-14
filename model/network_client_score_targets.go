@@ -53,13 +53,11 @@ type clientScoreTargetMaps struct {
 // admitted provider stops serving its previous payload instead of keeping it
 // until the cache ttl. A location no row names at all is still not visited.
 // Rows are cleared as they are consumed so their staging references are
-// released early. observe, when set, sees every row before the hard-exclusion
-// check.
+// released early.
 func newClientScoreTargetMaps(
 	rows []clientScoreSourceRow,
 	knownLocationGroupIds []server.Id,
 	hardExcluded func(clientId server.Id) bool,
-	observe func(row clientScoreSourceRow),
 ) *clientScoreTargetMaps {
 	self := &clientScoreTargetMaps{
 		locationClientScores:      map[server.Id]map[server.Id]*ClientScore{},
@@ -92,9 +90,6 @@ func newClientScoreTargetMaps(
 		// Release staging references as each row is moved into its target maps.
 		rows[i] = clientScoreSourceRow{}
 		lookbackClientScore, reputationFailedNames, egress := row.score, row.reputationFailedNames, row.egress
-		if observe != nil {
-			observe(row)
-		}
 		excluded := hardExcluded(lookbackClientScore.ClientId)
 		if excluded {
 			self.hardExcludedClientIds[lookbackClientScore.ClientId] = true

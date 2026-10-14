@@ -5302,7 +5302,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	pendingScores := []clientScoreSourceRow{}
 	cohort := map[server.Id]bool{}
 	knownLocationGroupIds := []server.Id{}
-	shadowScoreCapture := beginArinShadowScoreCapture()
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -5461,8 +5460,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// The URL-success rule's country guard over the public cohort, the
 	// population of the location counts and the dashboard, from the evidence
 	// just loaded, its margin held against the guard the last export
-	// published, whichever process ran it. Computed before the shadow
-	// observer reads any facts.
+	// published, whichever process ran it.
 	onlineSuccessBaseline := func() *providerOnlineSuccessBaseline {
 		clientIdCountryCodes := map[server.Id]string{}
 		for _, row := range pendingScores {
@@ -5502,13 +5500,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		return fmt.Errorf("publish arindb canary decision: %w", err)
 	}
 
-	var observeShadowScore func(clientScoreSourceRow)
-	if shadowScoreCapture != nil {
-		observeShadowScore = func(row clientScoreSourceRow) {
-			shadowScoreCapture.observe(row.score, row.egress.publishedCountryCode, countFilter.egressFacts(row.score.ClientId, row.egress.publishedCountryCode, row.egress.egressIndex, row.egress.egressQuality, egressSettings), egressTestEnabled)
-		}
-	}
-	targetMaps := newClientScoreTargetMaps(pendingScores, knownLocationGroupIds, countFilter.hasHardEgressFailure, observeShadowScore)
+	targetMaps := newClientScoreTargetMaps(pendingScores, knownLocationGroupIds, countFilter.hasHardEgressFailure)
 	locationClientScores := targetMaps.locationClientScores
 	locationGroupClientScores := targetMaps.locationGroupClientScores
 	clientIdEgresses := targetMaps.clientIdEgresses
@@ -5756,7 +5748,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if err := publishProviderOnlineSuccessBaseline(ctx, onlineSuccessBaseline, ttl); err != nil {
 			glog.Errorf("[nclm]publish online url-success guard: %s\n", err)
 		}
-		shadowScoreCapture.publish(nativeCensus, locationClientScores, locationGroupClientScores)
 		glog.Infof(
 			"[nclm]update %d client locations x %d location scores, %d location group scores, %d of them empty\n",
 			len(clientLocationIds),
