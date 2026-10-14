@@ -6,15 +6,18 @@
 // The queue runs in deadline order and then in publication order, which is
 // contract creation order. One payer grant owns runs of thousands of
 // consecutive queued closes, so at the queue head every worker slot claims the
-// same owner, one closes a batch and the rest refuse. A refused or terminal
-// close retires nothing of its own. It instead closes one other owner's due
-// contracts: first the owner of a contract whose stored deadline passed within
-// the last hour, read from a random slice of that hour, then within the rest
-// of the last day and the rest of the deadline lookback, and otherwise the
-// owner of a queued close sampled from random queue pages. The queue holds only
-// legacy contracts behind days of older deadlines, so contracts that carry
-// their own deadline are otherwise reached by no queued close at all. The
-// newest come first: most hold escrow on a grant that is still active.
+// same owner, one closes a batch and the rest are refused. A refused close
+// waits in its claim and tries the owner again, since the holder's batch
+// retires only the owner's oldest due siblings. A close still refused when its
+// wait ends, or a terminal close, retires nothing of its own. It instead
+// closes one other owner's due contracts: first the owner of a contract whose
+// stored deadline passed within the last hour, read from a random slice of
+// that hour, then within the rest of the last day and the rest of the deadline
+// lookback, and otherwise the owner of a queued close sampled from random
+// queue pages. The queue holds only legacy contracts behind days of older
+// deadlines, so contracts that carry their own deadline are otherwise reached
+// by no queued close at all. The newest come first: most hold escrow on a
+// grant that is still active.
 package work
 
 import (
@@ -34,9 +37,27 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// A held owner reschedules its close after this delay instead of waiting for
-// admission. The deadline in the arguments is unchanged.
+// A close whose owner stays held through its wait reschedules after this
+// delay. The deadline in the arguments is unchanged.
 const scheduledCloseOwnerBusyDeferral = 5 * time.Second
+
+// A close its owner refused keeps its claim and tries the owner again for this
+// long after the first refusal. The holder is usually another close's owner
+// batch, which on Main committed within 3 s, and that batch retires only the
+// owner's oldest due siblings. A deferred successor instead wakes behind every
+// due row of the queue, which orders by wake: on Main on 2026-10-13 about 44k
+// rows claimed at about one a second, so each deferral kept a legacy contract
+// that no other closer reaches open for more than a day.
+const scheduledCloseOwnerWait = 5 * time.Second
+
+// The end of a refused close's owner wait, started at its first refusal. A
+// test replaces the timer.
+var scheduledCloseOwnerWaitTimeout = func() <-chan time.Time { return time.After(scheduledCloseOwnerWait) }
+
+// A refused close tries its owner again after a uniform point of [retry,
+// retry+jitter), so the closes one held owner refused do not try together.
+const scheduledCloseOwnerRetry = 100 * time.Millisecond
+const scheduledCloseOwnerRetryJitter = 150 * time.Millisecond
 
 // A deferral wakes at a uniform point of [deferral, 2 deferral), so the closes
 // one held owner refused together do not all wake and refuse together again.

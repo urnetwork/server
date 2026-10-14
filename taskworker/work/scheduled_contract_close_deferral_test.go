@@ -1,4 +1,5 @@
-// A close refused by a held owner wakes at a jittered point after the deferral.
+// A close whose owner stays held through its wait wakes at a jittered point
+// after the deferral.
 package work
 
 import (
@@ -11,12 +12,14 @@ import (
 
 // The closes one held owner refused together used to wake together, exactly
 // the deferral later, and refuse together again. A fixed jitter offset shows
-// the wake is the deferral plus that offset, with the deadline unchanged.
+// the wake is the deferral plus that offset, with the deadline unchanged. The
+// owner wait ends at the first refusal.
 func TestScheduledCloseHeldOwnerDeferralIsJittered(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		const offset = 1234 * time.Millisecond
+		endScheduledCloseOwnerWait(t)
 		jitter := scheduledCloseDeferralJitter
 		var spans []time.Duration
 		scheduledCloseDeferralJitter = func(span time.Duration) time.Duration {

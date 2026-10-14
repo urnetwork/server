@@ -9,7 +9,9 @@
 // A close waits for a slot instead of deferring: a deferral requeues its row
 // behind the backlog at the claim rate, while a wait costs the database
 // nothing. A wait that outlasts scheduledCloseSlotWait defers as a held owner
-// does, well inside the close's task deadline.
+// does when its wait ends, well inside the close's task deadline. A close
+// waiting for a held owner takes a slot only for each try of the owner, so a
+// held owner cannot keep other owners' closes from the slots.
 package work
 
 import (
