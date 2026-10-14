@@ -234,11 +234,19 @@ func TestConnectionAnnounceCountsProviderThroughUnreadableProvideModes(t *testin
 		if count := counted(); count != 1 {
 			t.Fatalf("fixture: the provider gauge counts %v connections under %s, want 1", count, label)
 		}
+		mirrorKey := fmt.Sprintf("{pm_%s}pms", fixture.clientId)
+		mirrored := func() string {
+			value := ""
+			server.Redis(ctx, func(r server.RedisClient) {
+				value, _ = r.Get(ctx, mirrorKey).Result()
+			})
+			return value
+		}
 		server.Redis(ctx, func(r server.RedisClient) {
-			server.Raise(r.Set(ctx, fmt.Sprintf("{pm_%s}pms", fixture.clientId), "not a mode list", time.Minute).Err())
+			server.Raise(r.Set(ctx, mirrorKey, "not a mode list", time.Minute).Err())
 		})
-		if _, err := model.GetProvideModes(ctx, fixture.clientId); err == nil {
-			t.Fatal("fixture: the corrupted provide mode mirror must make GetProvideModes fail")
+		if value := mirrored(); value != "not a mode list" {
+			t.Fatalf("fixture: the provide mode mirror holds %q, want the undecodable value", value)
 		}
 		fixture.release <- struct{}{}
 
@@ -253,6 +261,9 @@ func TestConnectionAnnounceCountsProviderThroughUnreadableProvideModes(t *testin
 				}
 				if stats.ProvideEnabledCount != 1 {
 					t.Fatalf("the round recorded provide enabled %d for a providing client, want 1", stats.ProvideEnabledCount)
+				}
+				if value := mirrored(); value == "not a mode list" {
+					t.Fatal("the round left the undecodable provide mode mirror in place")
 				}
 				fixture.release <- struct{}{}
 				return

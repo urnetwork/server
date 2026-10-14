@@ -2536,6 +2536,19 @@ return 1
 // caller was canceled.
 const provideMirrorUnfillTimeout = 5 * time.Second
 
+// Deletes an undecodable mode list while it still holds the value read, with
+// the take-back script over the mode list alone, so a list another writer
+// wrote meanwhile stays. The refill that follows confirms its own fill. Best
+// effort: a failure leaves the next read to try again.
+func dropUndecodableProvideMirror(ctx context.Context, clientId server.Id, undecodableProvideModesListJson string) {
+	glog.Infof("[ncm]provide mode mirror undecodable, replacing it from postgres\n")
+	server.HandleError(func() {
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(provideMirrorUnfillScript.Run(ctx, r, []string{provideModesKey(clientId)}, undecodableProvideModesListJson).Err())
+		})
+	})
+}
+
 // Reads every provide key of a client in one statement. A client with no keys
 // returns an empty map, which the refill mirrors as an empty mode list.
 func loadProvideSecretKeys(ctx context.Context, clientId server.Id) (secretKeys map[ProvideMode][]byte) {
@@ -2627,7 +2640,11 @@ func refillProvideMirror(ctx context.Context, clientId server.Id, secretKeys map
 	})
 }
 
+// The client's provide modes, from the Redis mirror when it holds a decodable
+// list, else from the keys in postgres, which also refill the mirror. A mirror
+// that cannot be decoded is replaced from postgres by the read that finds it.
 func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[ProvideMode]bool, returnErr error) {
+	undecodableProvideModesListJson := ""
 	server.Redis(ctx, func(r server.RedisClient) {
 		provideModesListJson, _ := r.Get(ctx, provideModesKey(clientId)).Result()
 		if provideModesListJson == "" {
@@ -2637,7 +2654,7 @@ func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[
 		var provideModesList []ProvideMode
 		err := json.Unmarshal([]byte(provideModesListJson), &provideModesList)
 		if err != nil {
-			returnErr = err
+			undecodableProvideModesListJson = provideModesListJson
 			return
 		}
 		provideModes = map[ProvideMode]bool{}
@@ -2645,6 +2662,12 @@ func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[
 			provideModes[provideMode] = true
 		}
 	})
+	// An undecodable mirror would stay for its ttl, since the refill never
+	// overwrites a mirror, and every read of it would go to postgres. Drop it
+	// while it still holds the value read, then refill from postgres below.
+	if undecodableProvideModesListJson != "" {
+		dropUndecodableProvideMirror(ctx, clientId, undecodableProvideModesListJson)
+	}
 
 	// the redis mirror carries a ttl (provideMirrorTtl), so this db fallback
 	// is load-bearing for idle clients whose keys expired, not just for
@@ -2912,10 +2935,9 @@ func SetProvide(
 // Every connected client's announce loop calls this on each sync. The count is
 // one statement, so it runs without a transaction: BEGIN and COMMIT would add
 // two round trips during which its pooled server sits idle in transaction.
-// The modes come from GetProvideModes. Its only error is a provide mode mirror
-// that cannot be decoded, which stays for the mirror's ttl; the keys in
-// postgres are the truth, so they answer instead. Discarding the error
-// reported a providing client as providing nothing, which removed its live
+// The modes come from GetProvideModes, which replaces a provide mode mirror
+// that cannot be decoded from the keys in postgres. Discarding its error used
+// to report a providing client as providing nothing, which removed its live
 // connection from the provider gauge and skipped its reliability stats. A
 // failed read raises, as the change count does.
 func GetProvideKeyChanges(
@@ -2948,13 +2970,7 @@ func GetProvideKeyChanges(
 	})
 
 	provideModes, err := GetProvideModes(ctx, clientId)
-	if err != nil {
-		glog.Infof("[ncm]provide mode mirror unreadable, reading the provide keys: %s\n", err)
-		provideModes = map[ProvideMode]bool{}
-		for provideMode := range loadProvideSecretKeys(ctx, clientId) {
-			provideModes[provideMode] = true
-		}
-	}
+	server.Raise(err)
 
 	return
 }
