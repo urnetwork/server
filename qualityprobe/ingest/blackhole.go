@@ -44,14 +44,8 @@ func (self *Client) blackholeDueUrl() string {
 // provider that failed last hour must be re-checked this hour, because that is
 // how it returns to the public list once it recovers.
 func (self *Client) BlackholeDue(ctx context.Context, limit int) ([]DueProvider, error) {
-	if limit < 1 {
-		return nil, fmt.Errorf("ingest: blackhole due limit must be positive (got %d)", limit)
-	}
-	if 1 < self.ShardCount && (self.ShardIndex < 0 || self.ShardCount <= self.ShardIndex) {
-		return nil, fmt.Errorf(
-			"ingest: shard index %d is out of range for shard count %d",
-			self.ShardIndex, self.ShardCount,
-		)
+	if _, _, err := PrepareDueRequest("blackhole due", limit, self.ShardIndex, self.ShardCount); err != nil {
+		return nil, err
 	}
 
 	u, err := url.Parse(self.blackholeDueUrl())
@@ -88,7 +82,7 @@ func (self *Client) BlackholeDue(ctx context.Context, limit int) ([]DueProvider,
 		return nil, fmt.Errorf("%w: %w", ErrRejected, ErrBlackholeDueUnavailable)
 	default:
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("%w: status %d: %s", ErrRejected, resp.StatusCode, strings.TrimSpace(string(msg)))
+		return nil, RejectedError(resp.StatusCode, string(msg))
 	}
 
 	var out dueResult
@@ -114,8 +108,40 @@ type BlackholeCheck struct {
 }
 
 // The wire body of a blackhole pass.
-type blackholeChecksBody struct {
+type BlackholeChecksSubmission struct {
 	Checks []BlackholeCheck `json:"checks"`
+}
+
+// The client-side half of SubmitBlackholeChecks, shared by every transport:
+// nil for an empty pass, which sends nothing. The server validates the entire
+// batch before writing any of it, so a single malformed entry loses the whole
+// pass; everything that can be fixed locally is fixed here rather than sent
+// and rejected: a zero CheckedAt is refused (never fabricated: an "as of now"
+// timestamp would defeat the server's freshness bound and could pin a stale
+// verdict), a failed check must name its class, a passing check carries none,
+// and an over-long class is cut to the column width.
+func NewBlackholeChecksSubmission(checks []BlackholeCheck) (*BlackholeChecksSubmission, error) {
+	if len(checks) == 0 {
+		return nil, nil
+	}
+
+	body := &BlackholeChecksSubmission{Checks: make([]BlackholeCheck, 0, len(checks))}
+	for _, check := range checks {
+		if check.CheckedAt.IsZero() {
+			return nil, fmt.Errorf("ingest: blackhole check for %s has a zero CheckedAt", check.ClientId)
+		}
+		if !check.Ok && strings.TrimSpace(check.Failure) == "" {
+			// the server rejects this, and a rejected batch is a lost sweep
+			return nil, fmt.Errorf("ingest: failed blackhole check for %s names no failure class", check.ClientId)
+		}
+		if check.Ok {
+			check.Failure = ""
+			check.NotMeasured = false
+		}
+		check.Failure = truncateUtf8(check.Failure, MaxBlackholeFailureLen)
+		body.Checks = append(body.Checks, check)
+	}
+	return body, nil
 }
 
 // Reports a whole pass in one request.
@@ -128,27 +154,9 @@ type blackholeChecksBody struct {
 // fixed here rather than sent and rejected: a zero CheckedAt is refused, and an
 // over-long failure class is truncated to the column width.
 func (self *Client) SubmitBlackholeChecks(ctx context.Context, checks []BlackholeCheck) error {
-	if len(checks) == 0 {
-		return nil
-	}
-
-	body := blackholeChecksBody{Checks: make([]BlackholeCheck, 0, len(checks))}
-	for _, check := range checks {
-		if check.CheckedAt.IsZero() {
-			// never fabricated: an "as of now" timestamp would defeat the
-			// server's freshness bound and could pin a stale verdict
-			return fmt.Errorf("ingest: blackhole check for %s has a zero CheckedAt", check.ClientId)
-		}
-		if !check.Ok && strings.TrimSpace(check.Failure) == "" {
-			// the server rejects this, and a rejected batch is a lost sweep
-			return fmt.Errorf("ingest: failed blackhole check for %s names no failure class", check.ClientId)
-		}
-		if check.Ok {
-			check.Failure = ""
-			check.NotMeasured = false
-		}
-		check.Failure = truncateUtf8(check.Failure, MaxBlackholeFailureLen)
-		body.Checks = append(body.Checks, check)
+	body, err := NewBlackholeChecksSubmission(checks)
+	if err != nil || body == nil {
+		return err
 	}
 
 	buf, err := json.Marshal(body)
@@ -179,6 +187,6 @@ func (self *Client) SubmitBlackholeChecks(ctx context.Context, checks []Blackhol
 		return fmt.Errorf("%w: %w", ErrRejected, ErrUnauthorized)
 	default:
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%w: status %d: %s", ErrRejected, resp.StatusCode, strings.TrimSpace(string(msg)))
+		return RejectedError(resp.StatusCode, string(msg))
 	}
 }
