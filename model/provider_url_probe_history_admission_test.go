@@ -4,6 +4,7 @@ package model
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -340,5 +341,24 @@ func TestProviderReliabilityWitnessIsTheHourLookback(t *testing.T) {
 	}
 	if providerReliabilityMinimums()[providerReliabilityWitnessLookbackIndex] <= 0 {
 		t.Fatal("witness lookback has no reliability floor")
+	}
+}
+
+// Every URL admission path looks up the exact one hour witness row, an
+// equality on the score primary key, rather than any lookback's row.
+func TestUrlProbeAdmissionSqlLooksUpTheExactWitnessRow(t *testing.T) {
+	const lookup = "provider_witness.lookback_index = 1"
+	for _, c := range []struct {
+		name  string
+		query string
+	}{
+		{name: "admission", query: providerUrlProbeAdmissionSql("provider")},
+		{name: "public mode", query: providerUrlProbeClientEligibilitySql()},
+		{name: "census", query: providerUrlProbeFleetSql(1)},
+		{name: "claim", query: providerUrlProbeDueSql(0, 1)},
+	} {
+		if count := strings.Count(c.query, lookup); count != 1 {
+			t.Errorf("%s admission has %d exact witness lookups, want 1", c.name, count)
+		}
 	}
 }

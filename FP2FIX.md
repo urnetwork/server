@@ -10,11 +10,11 @@ the rolling ten-run quota and its census are unchanged, so an excluded provider
 keeps being probed and its first success restores it at the next publication.
 A country guard stops the rule where the probe itself fails: a published
 country is exempt when fewer than `online_success_country_floor` (default 0.36,
-pending the owner's confirmation) of its measured Online providers have a
+confirmed by the owner 2026-10-14) of its measured Online providers have a
 success, and stays exempt until its share reaches the floor plus
-`online_success_country_floor_margin` (default 0.03, also pending
-confirmation). `online_requires_url_success: false` in provider.yml is the kill
-switch. The rule changes Online-mode answers, location lists and counts, and
+`online_success_country_floor_margin` (default 0.03, also confirmed by the
+owner 2026-10-14). `online_requires_url_success: false` in provider.yml is the
+kill switch. The rule changes Online-mode answers, location lists and counts, and
 the Online tier that a Quality or Speed answer reaches only after both native
 buckets run short. It does not change native Quality or Speed membership or
 the native part of those answers. Measured on Main at about 21:25 UTC, it would
@@ -844,8 +844,8 @@ gate matrix.
     counts.
   - **Margin.** A country the score export's last trusted guard exempted stays
     exempt until its share reaches the floor plus
-    `online_success_country_floor_margin` (default 0.03, pending the owner's
-    confirmation; a margin outside [0, 1] or not a number keeps the default,
+    `online_success_country_floor_margin` (default 0.03, confirmed by the owner
+    2026-10-14; a margin outside [0, 1] or not a number keeps the default,
     and the floor plus the margin is at most one). A country that was not
     exempt becomes exempt only below the floor. IN and ZA measured 0.35 against
     the 0.36 floor, so without the margin a share moving by one provider would
@@ -882,7 +882,7 @@ gate matrix.
     process uses what it published at once.
   - On 2026-10-13 the structurally failing countries measured success shares
     of VN 0.03, JP 0.24, RU 0.25, TW 0.27, ZA 0.35 and IN 0.35. The default of
-    0.36, pending the owner's confirmation, exempts them all. HK, the lowest
+    0.36, confirmed by the owner 2026-10-14, exempts them all. HK, the lowest
     country of a hundred or more providers where the probe works, measured
     0.46.
 - **Kill switch.** `online_requires_url_success: false` in provider.yml takes

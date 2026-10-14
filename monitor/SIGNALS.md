@@ -14955,10 +14955,11 @@ when it is first really admitted.
 
 During a reliability rollup stall the location pass still runs, but
 `UpdateReliabilities` skips the score pass until `ClientReliabilityRollupSynced`
-holds. New providers, and providers back after more than an hour, therefore
-serve as neutral but are not URL-probed until the rollup recovers and the
-score pass writes their hour; providers scored before the stall keep their last
-scores. Whether that trade-off is acceptable is pending an owner decision.
+holds, so no score row is written or deleted. New providers, and providers
+whose hour row was deleted before the stall, serve as neutral but are not
+URL-probed until the rollup recovers and the score pass writes their hour. A
+provider that leaves during the stall keeps its frozen rows and is readmitted
+on them when it returns. Accepted by the owner 2026-10-14.
 
 The provider quality probes dashboard has a dedicated URL quota row with the
 known mature ratio, known warming count, unknown age count, all-current quota,

@@ -127,7 +127,7 @@ func TestLocationProbeEligibilityPrecomputeMatchesAuthoritativeRollup(t *testing
 		for _, name := range []string{"failed", "grace"} {
 			x := clients[name]
 			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE client_connection_reliability_score SET lookback_index=1,independent_reliability_weight=0.1 WHERE client_id=$1`, x.client))
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE client_connection_reliability_score SET independent_reliability_weight=0.1 WHERE client_id=$1 AND lookback_index=1`, x.client))
 			})
 		}
 		for _, extra := range []struct {
