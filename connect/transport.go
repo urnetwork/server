@@ -509,6 +509,9 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// the sum across connections.
 		H3MaxStreamReceiveWindow:          0,
 		H3MaxTotalConnectionReceiveWindow: 0,
+		// A handshake is in flight for about one round trip, so outside a
+		// flood a client is rarely asked for a Retry.
+		H3MaxUnvalidatedHandshakeCount: 1024,
 
 		RefusalHoldTimeout:           defaultRefusalHoldTimeout,
 		RefusalHoldKeepaliveInterval: defaultRefusalHoldKeepaliveInterval,
@@ -563,7 +566,12 @@ type ConnectHandlerSettings struct {
 	// the sum of it. Zero grants every increase, which is what quic-go does
 	// with no callback at all.
 	H3MaxTotalConnectionReceiveWindow uint64
-	ConnectionAnnounceTimeout         time.Duration
+	// H3MaxUnvalidatedHandshakeCount bounds the handshakes the H3 listeners
+	// hold at once for source addresses not yet validated, the only ones a
+	// spoofed source can start. Past it a new source must first answer a
+	// Retry, which costs it one round trip. Zero leaves them unbounded.
+	H3MaxUnvalidatedHandshakeCount int
+	ConnectionAnnounceTimeout      time.Duration
 	// per-connection latency/speed test schedule.
 	// nil selects a default based on the transport version.
 	ConnectionTestConfig *TestConfig
@@ -728,6 +736,68 @@ func (self *connectQuicWindowBudget) grantedByteCount() uint64 {
 	return self.total
 }
 
+// connectQuicHandshakeLimit caps the handshakes a handler's H3 listeners hold
+// at once for source addresses that are not validated.
+//
+// quic-go creates a connection for every Initial and keeps it until the
+// handshake completes or times out, and a spoofed source never completes one.
+// A connection from an unvalidated address is counted from its creation until
+// its handshake completes or it closes. At the maximum every new source must
+// first answer a Retry, which keeps no state here. Only a source that receives
+// packets at its address can return the Retry's token, and a connection with a
+// valid token is validated, so it is not counted. Each listener checks and
+// counts on its own goroutine, so the count can pass the maximum by one for
+// each listener after the first. A nil limit is the inert default: no callback
+// is installed.
+type connectQuicHandshakeLimit struct {
+	maximum int64
+	count   atomic.Int64
+}
+
+// Returns nil when no maximum is configured.
+func newConnectQuicHandshakeLimit(maximum int) *connectQuicHandshakeLimit {
+	if maximum <= 0 {
+		return nil
+	}
+	return &connectQuicHandshakeLimit{maximum: int64(maximum)}
+}
+
+// quic.Transport.VerifySourceAddress: true sends the source a Retry.
+func (self *connectQuicHandshakeLimit) verifySourceAddress(net.Addr) bool {
+	return self.maximum <= self.count.Load()
+}
+
+// quic.Transport.ConnContext. quic-go cancels ctx when the connection closes.
+// The returned context carries the release releaseConnectQuicHandshake runs
+// once the handshake completes; the close runs it otherwise, and only the
+// first of the two counts.
+func (self *connectQuicHandshakeLimit) connContext(
+	ctx context.Context,
+	info *quic.ClientInfo,
+) (context.Context, error) {
+	if info.AddrVerified {
+		return ctx, nil
+	}
+	self.count.Add(1)
+	stop := context.AfterFunc(ctx, func() { self.count.Add(-1) })
+	release := func() {
+		if stop() {
+			self.count.Add(-1)
+		}
+	}
+	return context.WithValue(ctx, connectQuicHandshakeReleaseKey{}, release), nil
+}
+
+type connectQuicHandshakeReleaseKey struct{}
+
+// Ends the count of a connection whose handshake completed. A connection the
+// limit did not count carries no release.
+func releaseConnectQuicHandshake(conn *quic.Conn) {
+	if release, ok := conn.Context().Value(connectQuicHandshakeReleaseKey{}).(func()); ok {
+		release()
+	}
+}
+
 // newConnectQuicConfig keeps the server half of H3 aligned with the client's
 // conservative startup packet and enabled DPLPMTUD behavior.
 func newConnectQuicConfig(
@@ -782,6 +852,9 @@ type ConnectHandler struct {
 	// One aggregate stands behind every front that terminates QUIC for this
 	// handler, including an external listener using NewQuicConfig.
 	quicWindowBudget *connectQuicWindowBudget
+	// One count of unvalidated handshakes stands behind every H3 listener of
+	// this handler.
+	quicHandshakeLimit *connectQuicHandshakeLimit
 
 	listenerStateLock sync.RWMutex
 	listenerStates    map[connectListenerKey]bool
@@ -987,6 +1060,9 @@ func newConnectHandlerWithPacketConns(
 		),
 		quicWindowBudget: newConnectQuicWindowBudget(
 			settings.H3MaxTotalConnectionReceiveWindow,
+		),
+		quicHandshakeLimit: newConnectQuicHandshakeLimit(
+			settings.H3MaxUnvalidatedHandshakeCount,
 		),
 		activeCount: activeCount,
 		activeZero:  activeZero,
@@ -2178,6 +2254,10 @@ func (self *ConnectHandler) listenQuic(
 		// createdConn: true,
 		// isSingleUse: true,
 	}
+	if limit := self.quicHandshakeLimit; limit != nil {
+		quicTransport.VerifySourceAddress = limit.verifySourceAddress
+		quicTransport.ConnContext = limit.connContext
+	}
 	defer quicTransport.Close()
 	listener, err := quicTransport.ListenEarly(tlsConfig, quicConfig)
 	if err != nil {
@@ -2394,6 +2474,19 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	} else if AllowOnlyIpv4 && !addrPort.Addr().Is4() {
 		return fmt.Errorf("Only IPv4 is supported.")
 	}
+
+	// The listeners accept a connection once its ClientHello is processed, when
+	// its address is only what the Initial claimed. A spoofed source never
+	// receives the server's flight, so it never completes the handshake, and
+	// admission charges the source's counters only after the handshake proves
+	// the source receives packets at its address. Data the client sent in
+	// 0-RTT waits in the connection's receive window until then.
+	select {
+	case <-conn.HandshakeComplete():
+	case <-authCtx.Done():
+		return authCtx.Err()
+	}
+	releaseConnectQuicHandshake(conn)
 
 	rateLimit, err := NewConnectionRateLimit(
 		authCtx,
