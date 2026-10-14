@@ -6100,7 +6100,7 @@
       "id": 115,
       "type": "timeseries",
       "title": "auxiliary egress tally handoffs and rollups / min",
-      "description": "Auxiliary tally handoffs by accepted, unavailable, invalid or full outcome on every service that hands one off (never measured quota credits), and tally rollup page reads by outcome. SQL commitment is recorded by the durable task receipt.",
+      "description": "Auxiliary tally handoffs by accepted, unavailable, invalid or full outcome on every service that hands one off (never measured quota credits), tally rollup drains by outcome and by why reading ended, and the records they read. A calls, rows, time or error stop leaves retained records for the shard's next claim. SQL commitment is recorded by the durable task receipt.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -6139,6 +6139,98 @@
           "refId": "B",
           "expr": "sum by (outcome) (rate(urnetwork_provider_egress_tally_rollups_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
           "legendFormat": "rollup {{outcome}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(urnetwork_provider_egress_tally_rollup_records_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "rollup records"
+        },
+        {
+          "refId": "D",
+          "expr": "sum by (stop) (rate(urnetwork_provider_egress_tally_rollup_drains_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "drain {{stop}}"
+        }
+      ]
+    },
+    {
+      "id": 116,
+      "type": "timeseries",
+      "title": "auxiliary egress tally backlog by shard",
+      "description": "Retained tally records or bytes as a fraction of each place shard's admission bound, whichever is fuller, after its owner's latest read. Handoffs are refused as full at 100%. A drain that keeps up holds about two claims of a shard's runs. Each taskworker publishes only the shards it read in the last five minutes; the maximum across taskworkers is the fleet view.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 360
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (shard) (urnetwork_provider_egress_tally_queue_fill_ratio{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "shard {{shard}}"
+        }
+      ]
+    },
+    {
+      "id": 117,
+      "type": "timeseries",
+      "title": "auxiliary egress tally oldest pending record by shard",
+      "description": "Age of each place shard's oldest unacknowledged tally record at its owner's latest read: about one claim interval when the owner keeps up, rising while a backlog grows. Each taskworker publishes only the shards it read in the last five minutes; the maximum across taskworkers is the fleet view.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 360
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (shard) (urnetwork_provider_egress_tally_queue_oldest_pending_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "shard {{shard}}"
         }
       ]
     }
