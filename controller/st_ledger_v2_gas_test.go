@@ -245,6 +245,41 @@ func TestStLedgerV2GasFloorIsCappedAtThePolicyMaximum(t *testing.T) {
 	})
 }
 
+// SV-7 (§8.1 gas floor): the floor is also capped at the liability the policy
+// still accepts for the operation, which its earlier nonces reduce. Under a
+// per-intent liability of 480,000,000 wei, one and a half floors at the
+// fixture's 100 wei, a close that keeps reverting is signed with the floor,
+// then at its next nonce with the 1,600,000 gas the rest covers. Nothing is
+// left for a third try: its estimate's limit of 296,279 is refused, as it was
+// before the floor, and takes no nonce.
+func TestStLedgerV2GasFloorIsCappedAtTheRemainingLiability(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		client, _, cfg := newLedgerV2RPCClient(t, fixture)
+		policy, _ := ledgerV2GasPolicy(t, client, func(policy *server.StOperatorGasPolicy) { policy.MaximumIntentLiabilityWei = "480000000" })
+		closeCall := stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))
+		fixture.estimates[string(closeCall)] = 246_899
+		fixture.needs[string(closeCall)] = math.MaxUint64
+		for generation, limit := range []uint64{stLedgerV2StakeMoveGasFloor, 1_600_000} {
+			hash, err := client.LedgerV2Close(ctx, 7, 1)
+			if err == nil || !strings.Contains(err.Error(), "st: finalized transaction "+hash+" reverted") || len(fixture.sent) != generation+1 {
+				t.Fatalf("close %d: %s, %v, %d sent", generation, hash, err, len(fixture.sent))
+			}
+			if tx := fixture.sent[generation]; tx.Gas() != limit || tx.Nonce() != uint64(7+generation) {
+				t.Fatalf("close %d signed with %d gas at nonce %d, want %d", generation, tx.Gas(), tx.Nonce(), limit)
+			}
+		}
+		if _, err := client.LedgerV2Close(ctx, 7, 1); !errors.Is(err, model.ErrStOperatorGasAllowance) || !strings.Contains(err.Error(), "original logical intent") {
+			t.Fatalf("third close: %v", err)
+		}
+		if intent := ledgerV2Intent(t, ctx, cfg, "v2close:7:1"); intent.Generation != 1 || intent.Status != model.StTxReverted || intent.Nonce != 8 || len(fixture.sent) != 2 {
+			t.Fatalf("the refused close reserved %+v, %d sent", intent, len(fixture.sent))
+		}
+		stGasFixtureSnapshot(t, policy, "480000000", 2)
+	})
+}
+
 // SV-7 (§8.1 gas floor): a close's fee replacement keeps the floor. A close
 // signed with the floor and never included is replaced with the same limit
 // at a higher fee. A close whose retained first attempt holds less gas,
@@ -449,8 +484,8 @@ func TestStLedgerV2StrandedCloseIsFreedByConsumingItsNonce(t *testing.T) {
 
 // SV-1 (retries): the operator gas policy's per-intent liability sums every
 // nonce an operation takes. Under a policy that covers one floored close at
-// the signed fee, the second try after a revert is refused before it takes a
-// nonce, and the root key's next send goes out. A
+// the signed fee, nothing is left for the second try after a revert: it is
+// refused before it takes a nonce, and the root key's next send goes out. A
 // maximum_intent_liability_wei of three times maximum_gas at the fee cap never
 // binds before the cap of three signatures.
 func TestStLedgerV2UndersizedLiabilityLeavesTheRootKeyFree(t *testing.T) {
@@ -477,5 +512,53 @@ func TestStLedgerV2UndersizedLiabilityLeavesTheRootKeyFree(t *testing.T) {
 			t.Fatalf("finalize behind the refused close: %s, %v, %d sent", hash, err, len(fixture.sent))
 		}
 		requireLedgerV2Intent(t, ctx, cfg, "v2finalize:6:1", model.StTxFinalized, fixture.sent[1])
+	})
+}
+
+// Admits the client's operator gas policy with the accounts' empty histories,
+// as the first send does, so that an intent reserved afterwards is retained
+// history rather than unreconciled original history.
+func ledgerV2AdmitPolicy(t testing.TB, ctx context.Context, client *CoreStClient) {
+	t.Helper()
+	if _, _, err := client.operatorGasAdmission(ctx, crypto.PubkeyToAddress(client.cfg.RootKey.PublicKey)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// SV-7 (§8.1 gas floor): a floor the per-intent liability caps signs the
+// first attempt with all of that liability, 2,500,000 gas at 100 wei under a
+// liability of 250,000,000 wei. Its fee replacement cannot keep that limit at
+// the bumped fee of 113 wei, 282,500,000 wei, so it is sized as a first
+// attempt is: by its estimate's limit, 296,279, and the floor capped anew at
+// 113 wei, 2,212,389. The replacement goes out within the liability.
+func TestStLedgerV2LiabilityCappedFloorIsReplaced(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		client, rpcClient, cfg := newLedgerV2RPCClient(t, fixture)
+		policy, _ := ledgerV2GasPolicy(t, client, func(policy *server.StOperatorGasPolicy) { policy.MaximumIntentLiabilityWei = "250000000" })
+		closeCall := stLedgerV2SettlementAbi.PackCloseOperatorEpoch(big.NewInt(7), big.NewInt(1))
+		fixture.estimates[string(closeCall)] = 246_899
+		ledgerV2AdmitPolicy(t, ctx, client)
+		intent := ledgerV2Reserve(t, ctx, cfg, "v2close:7:1", cfg.SettlementV2, closeCall, 7)
+		first, err := client.buildTransactionAttempt(ctx, rpcClient, cfg.RootKey, intent, nil, model.StTxAttemptExecution)
+		if err != nil || first.GasLimit != 2_500_000 {
+			t.Fatalf("first attempt %+v, %v", first, err)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE st_transaction_attempt SET create_time=$2 WHERE intent_id=$1`, first.IntentId, server.NowUtc().Add(-2*stTxReplacementDelay)))
+		})
+		fixture.withheld = 1
+		hash, err := client.LedgerV2Close(ctx, 7, 1)
+		if err != nil || len(fixture.sent) != 2 {
+			t.Fatalf("replacement of the liability-capped close: %s, %v, %d sent", hash, err, len(fixture.sent))
+		}
+		replacement := fixture.sent[1]
+		if replacement.Nonce() != 7 || replacement.GasPrice().Int64() != 113 || replacement.Gas() != 250_000_000/113 || !strings.EqualFold(hash, replacement.Hash().Hex()) {
+			t.Fatalf("replacement nonce %d price %s gas %d", replacement.Nonce(), replacement.GasPrice(), replacement.Gas())
+		}
+		requireLedgerV2Intent(t, ctx, cfg, "v2close:7:1", model.StTxFinalized, replacement)
+		// The nonce's charge is its largest attempt's: 2,500,000 at 100 wei.
+		stGasFixtureSnapshot(t, policy, "250000000", 2)
 	})
 }

@@ -68,3 +68,34 @@ func TestStV1DepositIsSignedAtTheGasFloor(t *testing.T) {
 		}
 	})
 }
+
+// SV-4 (the v1 deposit, §8.1 gas floor): each floor is capped at what the
+// operator gas policy still accepts, the per-operation and the lifetime
+// liability its other nonces leave. Under a per-intent and lifetime liability
+// of 30,000,000 wei the staging transferStake is signed with its 2,800,000
+// floor at 10 wei, which leaves 2,000,000 wei of the lifetime. The deposit's
+// floor is capped at the 200,000 gas that covers, above the estimate's limit
+// of 60,000, and the deposit goes out.
+func TestStV1DepositFloorStaysWithinTheRemainingLiability(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		client, _, fixture := newStDepositCustodyFixture(t, 1)
+		policy, _, _ := stGasFixturePolicy(t, client, func(policy *server.StOperatorGasPolicy) {
+			policy.MaximumGas, policy.MaximumIntentLiabilityWei, policy.MaximumLifetimeLiabilityWei = 3_500_000, "30000000", "30000000"
+		})
+		ctx := context.Background()
+		if _, err := client.stageDepositPrincipal(ctx, 7, big.NewInt(100)); err != nil {
+			t.Fatalf("staging: %v", err)
+		}
+		if _, err := client.DepositCredit(ctx, 7, 1, big.NewInt(100)); err != nil {
+			t.Fatalf("deposit: %v", err)
+		}
+		fixture.stateLock.Lock()
+		sent := append([]*types.Transaction(nil), fixture.sent...)
+		deposited := fixture.deposited.Int64()
+		fixture.stateLock.Unlock()
+		if len(sent) != 2 || sent[0].Gas() != stV1DepositStagingGasFloor || sent[1].Gas() != 200_000 || deposited != 100 {
+			t.Fatalf("%d sent, %d deposited", len(sent), deposited)
+		}
+		stGasFixtureSnapshot(t, policy, "30000000", 2)
+	})
+}

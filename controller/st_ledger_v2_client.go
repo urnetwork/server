@@ -377,11 +377,11 @@ func (self *CoreStClient) LedgerV2Demand(ctx context.Context, noId uint64, seq u
 // about 3.2M (§8.1). The floor is that size, which the rehearsal ran on
 // runtimes 475, 477 and 478. It covers the walk of a full list, so no list
 // leaves a capturing close short; each epoch the close also defers takes about
-// 19,500 gas of that margin. The engine caps the floor at the operator gas
-// policy's maximum_gas, so a policy below it gets a close signed with its
-// maximum rather than a refusal. The capture's moveStake is the only stake
-// move the server sends through vault2: commit, finalize and answer move
-// none.
+// 19,500 gas of that margin. The engine caps the floor at the gas the operator
+// gas policy still accepts (transactionEnvelope), so a policy that does not
+// cover it gets a close signed with what it does cover rather than a refusal.
+// The capture's moveStake is the only stake move the server sends through
+// vault2: commit, finalize and answer move none.
 const stLedgerV2StakeMoveGasFloor = 3_200_000
 
 // sendLedgerV2 sends one v2 operation through the durable engine with the
