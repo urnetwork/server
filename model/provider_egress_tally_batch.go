@@ -43,7 +43,7 @@ type ProviderEgressTallyBatch struct {
 
 // No I/O occurs while normalizing and coalescing. The drain bound limits both
 // memory and SQL work, even if every record uses different sites and places.
-func PrepareProviderEgressTallyBatch(records []ProviderEgressTallyRecord) (*ProviderEgressTallyBatch, error) {
+func prepareProviderEgressTallyBatch(records []ProviderEgressTallyRecord) (*ProviderEgressTallyBatch, error) {
 	if len(records) > providerEgressTallyDrainLength {
 		return nil, fmt.Errorf("tally batch exceeds record bound")
 	}

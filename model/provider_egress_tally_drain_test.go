@@ -186,7 +186,7 @@ func TestProviderEgressTallyBatchHoldsOneFullShardDrain(t *testing.T) {
 			Loads:      []ProviderEgressSiteLoad{{Name: fmt.Sprintf("synthetic-%d.example", i%100), Ok: i%3 != 0, Healthy: true}},
 		}
 	}
-	batch, err := PrepareProviderEgressTallyBatch(records)
+	batch, err := prepareProviderEgressTallyBatch(records)
 	if err != nil {
 		t.Fatalf("one full shard drain refused: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestProviderEgressTallyBatchHoldsOneFullShardDrain(t *testing.T) {
 	if loads != len(records) || failures != (len(records)+2)/3 {
 		t.Fatalf("drain batch loads=%d failures=%d", loads, failures)
 	}
-	if _, err := PrepareProviderEgressTallyBatch(append(records, records[0])); err == nil {
+	if _, err := prepareProviderEgressTallyBatch(append(records, records[0])); err == nil {
 		t.Fatal("batch beyond one full shard accepted")
 	}
 }

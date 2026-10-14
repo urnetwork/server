@@ -69,7 +69,7 @@ func TestProviderEgressTallyQueueReadPastDurableCursorAcknowledgesNothing(t *tes
 		if count, length := retained(); count != 88 || length != 88 {
 			t.Fatalf("cleanup passed the durable cursor: count=%d length=%d", count, length)
 		}
-		rest, err := ReadProviderEgressTallyPage(ctx, shard, generation, ack, false)
+		rest, err := readProviderEgressTallyPage(ctx, shard, generation, ack, false)
 		if err != nil || len(rest.Records) != 88 {
 			t.Fatalf("unacknowledged suffix lost: %+v %v", rest, err)
 		}

@@ -14,6 +14,18 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
+// The shard's last accepted record id, straight from its metadata.
+func (self *testingTallyOwner) tail() string {
+	self.t.Helper()
+	var tail string
+	server.Redis(self.ctx, func(r server.RedisClient) {
+		var err error
+		tail, err = r.HGet(self.ctx, fmt.Sprintf("provider_egress_tally:{v1:%d}:meta", self.shard), "tail").Result()
+		server.Raise(err)
+	})
+	return tail
+}
+
 // Admission occupancy straight from the shard's metadata and stream.
 func (self *testingTallyOwner) retained() (count int64, length int64) {
 	self.t.Helper()
@@ -34,13 +46,10 @@ func TestProviderEgressTallyRollupDrainsBacklogBeyondOnePagePerClaim(t *testing.
 		h := newTestingTallyOwner(t)
 		defer h.close()
 		h.record(1000)
-		before := h.pending()
 		h.eval()
 		h.counts(1000)
-		after := h.pending()
-		retained, err := model.ReadProviderEgressTallyPage(h.ctx, h.shard, before.Generation, after.Cursor, false)
-		if err != nil || len(retained.Records) != 0 {
-			t.Fatalf("committed cursor did not reach the end of the backlog: %+v %v", retained, err)
+		if after, tail := h.pending(), h.tail(); after.Cursor != tail {
+			t.Fatalf("committed cursor %s did not reach the end of the backlog %s", after.Cursor, tail)
 		}
 		// The committed successor deletes the whole drained prefix.
 		h.eval()
@@ -115,9 +124,9 @@ func TestProviderEgressTallyRollupMultiPageReplayDoesNotAddTwice(t *testing.T) {
 		if count, length := h.retained(); count != 600 || length != 600 {
 			t.Fatalf("cleanup preceded the committed successor: count=%d length=%d", count, length)
 		}
-		retained, err := model.ReadProviderEgressTallyPage(h.ctx, h.shard, before.Generation, before.Cursor, false)
-		if err != nil || len(retained.Records) != 256 {
-			t.Fatalf("lost-ACK fixture did not retain its first page: %v", err)
+		retained, err := model.DrainProviderEgressTallies(h.ctx, h.shard, before.Generation, before.Cursor, false)
+		if err != nil || retained.Records != 600 {
+			t.Fatalf("lost-ACK fixture did not retain its drained prefix: %v", err)
 		}
 		for range 2 {
 			server.Tx(h.ctx, func(tx server.PgTx) { server.Raise(RollupProviderEgressTalliesPost(&before, &result, h.session, tx)) })

@@ -136,8 +136,8 @@ func TestProviderEgressTallyRollupCommittedReplayDoesNotAddTwice(t *testing.T) {
 		}
 		// Cleanup has not run: the original prefix still exists at the old
 		// cursor, reproducing a lost post-commit Redis acknowledgment.
-		retained, err := model.ReadProviderEgressTallyPage(h.ctx, h.shard, before.Generation, before.Cursor, false)
-		if err != nil || len(retained.Records) != 100 {
+		retained, err := model.DrainProviderEgressTallies(h.ctx, h.shard, before.Generation, before.Cursor, false)
+		if err != nil || retained.Records != 100 {
 			t.Fatalf("lost-ACK fixture did not retain its page: %v", err)
 		}
 		for range 2 {
@@ -181,8 +181,8 @@ func TestProviderEgressTallyRollupFailureRetainsCursorAndPage(t *testing.T) {
 		if after := h.pending(); after != before {
 			t.Fatal("failed page advanced the durable cursor")
 		}
-		page, err := model.ReadProviderEgressTallyPage(h.ctx, h.shard, before.Generation, before.Cursor, false)
-		if err != nil || len(page.Records) != 7 {
+		page, err := model.DrainProviderEgressTallies(h.ctx, h.shard, before.Generation, before.Cursor, false)
+		if err != nil || page.Records != 7 {
 			t.Fatalf("failed page lost its retained records: %v", err)
 		}
 		server.Tx(h.ctx, func(tx server.PgTx) {
@@ -214,7 +214,7 @@ func TestProviderEgressTallyRollupBootstrapCannotResetRetainedCursor(t *testing.
 		if replacement.Generation == before.Generation {
 			t.Fatal("lost durable cursor reused its generation")
 		}
-		if _, err := model.ReadProviderEgressTallyPage(h.ctx, h.shard, replacement.Generation, replacement.Cursor, replacement.Initialize); err == nil {
+		if _, err := model.DrainProviderEgressTallies(h.ctx, h.shard, replacement.Generation, replacement.Cursor, replacement.Initialize); err == nil {
 			t.Fatal("fresh task replayed retained records")
 		}
 		h.counts(2)
@@ -234,8 +234,8 @@ func TestProviderEgressTallyProductionHandoffRetainsEvidenceWithoutSql(t *testin
 		CREATE TRIGGER synthetic_tally_tripwire BEFORE INSERT ON provider_egress_place_tally FOR EACH ROW EXECUTE FUNCTION synthetic_tally_tripwire()`))
 		})
 		recordProviderEgressRunTally(h.ctx, h.day, h.run, []model.ProviderEgressSiteLoad{{Name: "synthetic.example", Ok: true, Healthy: true}})
-		page, err := model.ReadProviderEgressTallyPage(h.ctx, h.shard, args.Generation, args.Cursor, false)
-		if err != nil || len(page.Records) != 1 {
+		page, err := model.DrainProviderEgressTallies(h.ctx, h.shard, args.Generation, args.Cursor, false)
+		if err != nil || page.Records != 1 {
 			t.Fatalf("production handoff lost the accepted evidence: %v", err)
 		}
 		h.counts(0)
@@ -283,7 +283,7 @@ func TestProviderEgressTallyRollupRepairsLostContinuityAfterCheckpoint(t *testin
 		h.record(1)
 		h.eval()
 		h.counts(3)
-		if _, err := model.ReadProviderEgressTallyPage(h.ctx, h.shard, before.Generation, before.Cursor, false); err == nil {
+		if _, err := model.DrainProviderEgressTallies(h.ctx, h.shard, before.Generation, before.Cursor, false); err == nil {
 			t.Fatal("old generation survived repair")
 		}
 		finished := task.GetFinishedTasks(h.ctx, repairId)[repairId]

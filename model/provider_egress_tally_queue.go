@@ -391,8 +391,10 @@ func providerEgressTallyOwnerPrior(shard int, generation, cursor string, initial
 }
 
 // Reads one finite prefix; it never acknowledges a speculative cursor. The
-// caller obtains cursor/generation from its durable task arguments only.
-func ReadProviderEgressTallyPage(ctx context.Context, shard int, generation, cursor string, initialize bool, repairFrom ...string) (*ProviderEgressTallyPage, error) {
+// caller obtains cursor/generation from its durable task arguments only. The
+// owner drains through DrainProviderEgressTallies; this single call remains
+// for fixtures that inspect one page.
+func readProviderEgressTallyPage(ctx context.Context, shard int, generation, cursor string, initialize bool, repairFrom ...string) (*ProviderEgressTallyPage, error) {
 	prior, err := providerEgressTallyOwnerPrior(shard, generation, cursor, initialize, repairFrom)
 	if err != nil {
 		return nil, err
@@ -520,6 +522,8 @@ type providerEgressTallyDrainBudget struct {
 	timeout time.Duration
 }
 
+// The production limits. Pure tests narrow a copy, for example to one call to
+// reproduce the one-page owner.
 func defaultProviderEgressTallyDrainBudget() providerEgressTallyDrainBudget {
 	return providerEgressTallyDrainBudget{calls: providerEgressTallyDrainCalls, rows: providerEgressTallyDrainRows, timeout: providerEgressTallyDrainTimeout}
 }

@@ -101,29 +101,35 @@ func RollupProviderEgressTallies(args *RollupProviderEgressTalliesArgs, clientSe
 	egressTallyRollups.WithLabelValues("read").Inc()
 	egressTallyRollupDrains.WithLabelValues(drain.Stop).Inc()
 	egressTallyRollupRecords.Add(float64(drain.Records))
-	logProviderEgressTallyDrain(args.Shard, drain)
+	// A failed call, a shard approaching full at its claim, or a drain that
+	// ends with a known backlog is visible before handoffs are refused. Each
+	// shard logs at most once per claim.
+	logDrain := func() {
+		backlog := drain.Backlog
+		pendingSeconds := 0.0
+		if !backlog.PendingSince.IsZero() {
+			pendingSeconds = max(0, backlog.ObservedAt.Sub(backlog.PendingSince).Seconds())
+		}
+		state := fmt.Sprintf("%d records, %d bytes retained at the claim (fill %.2f), oldest pending %.0fs",
+			backlog.Records, backlog.Bytes, backlog.FillRatio(), pendingSeconds)
+		switch {
+		case drain.Err != nil && drain.Stop == "error":
+			glog.Errorf("[egress]tally shard %d stopped reading after %d pages, %d records: %v; %s\n",
+				args.Shard, drain.Pages, drain.Records, drain.Err, state)
+		case drain.Err != nil:
+			// Reading had ended; the next claim resumes the committed prefix's cleanup.
+			glog.Errorf("[egress]tally shard %d read %d pages, %d records (stop %s), then committed-prefix cleanup failed on call %d: %v; %s\n",
+				args.Shard, drain.Pages, drain.Records, drain.Stop, drain.Calls, drain.Err, state)
+		case egressTallyBacklogWarnFill <= backlog.FillRatio():
+			glog.Warningf("[egress]tally shard %d was %.0f%% full at its claim and drained %d pages, %d records (stop %s); %s; handoffs are refused at 100%%\n",
+				args.Shard, 100*backlog.FillRatio(), drain.Pages, drain.Records, drain.Stop, state)
+		case drain.Stop == "calls" || drain.Stop == "rows" || drain.Stop == "time":
+			glog.Infof("[egress]tally shard %d drain reached its %s budget after %d pages, %d records; %s\n",
+				args.Shard, drain.Stop, drain.Pages, drain.Records, state)
+		}
+	}
+	logDrain()
 	return &RollupProviderEgressTalliesResult{TaskId: identity.TaskId, NextCursor: drain.NextCursor, Batch: drain.Batch}, nil
-}
-
-// A drain that ends with a known backlog, or a shard approaching full, is
-// visible before handoffs are refused. Each shard logs at most once per claim.
-func logProviderEgressTallyDrain(shard int, drain *model.ProviderEgressTallyDrain) {
-	backlog := drain.Backlog
-	pendingSeconds := 0.0
-	if !backlog.PendingSince.IsZero() {
-		pendingSeconds = max(0, backlog.ObservedAt.Sub(backlog.PendingSince).Seconds())
-	}
-	switch {
-	case drain.Err != nil:
-		glog.Errorf("[egress]tally shard %d drain ended early after %d pages, %d records: %v; %d records, %d bytes retained (fill %.2f), oldest pending %.0fs\n",
-			shard, drain.Pages, drain.Records, drain.Err, backlog.Records, backlog.Bytes, backlog.FillRatio(), pendingSeconds)
-	case egressTallyBacklogWarnFill <= backlog.FillRatio():
-		glog.Warningf("[egress]tally shard %d is %.0f%% full after draining %d pages, %d records (stop %s); %d records, %d bytes retained, oldest pending %.0fs; handoffs are refused at 100%%\n",
-			shard, 100*backlog.FillRatio(), drain.Pages, drain.Records, drain.Stop, backlog.Records, backlog.Bytes, pendingSeconds)
-	case drain.Stop == "calls" || drain.Stop == "rows" || drain.Stop == "time":
-		glog.Infof("[egress]tally shard %d drain reached its %s budget after %d pages, %d records; %d records, %d bytes retained (fill %.2f), oldest pending %.0fs\n",
-			shard, drain.Stop, drain.Pages, drain.Records, backlog.Records, backlog.Bytes, backlog.FillRatio(), pendingSeconds)
-	}
 }
 
 // The generic Post retry catches plain panics, unlike initial finalization.
