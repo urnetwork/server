@@ -101,3 +101,11 @@ func testingInsertProviderConnectionScore(ctx context.Context, clientId server.I
 		))
 	})
 }
+
+// Seeds a passing witness lookback score for each client, the current history
+// URL probe admission needs.
+func testingInsertProviderReliabilityWitness(ctx context.Context, clientIds ...server.Id) {
+	for _, clientId := range clientIds {
+		egressTestReliability(ctx, clientId, providerReliabilityWitnessLookbackIndex, 1, 1)
+	}
+}

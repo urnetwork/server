@@ -1783,8 +1783,8 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 
 		// Publish scheduling hints with the scores: the preceding location pass
 		// saw the old generation, and unrelated network work may delay the next
-		// pass. Also seed providers whose old scores, or missing history,
-		// prevented cycle creation; a new cycle starts at this admission.
+		// pass. Also seed providers whose old scores, or missing current
+		// history, prevented cycle creation; a new cycle starts at this admission.
 		updateProviderUrlProbeEligibility(ctx, tx)
 
 	}, server.TxReadCommitted)

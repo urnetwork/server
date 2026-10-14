@@ -282,9 +282,11 @@ func TestUrlProbeMatureDeficitGatesHistoryAndClocks(t *testing.T) {
 			} {
 				server.RaisePgResult(tx.Exec(ctx, change.sql, ids[change.index]))
 			}
+			// This failing witness score replaces the fleet seed's.
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score
 				(client_id,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight,lookback_index)
-				VALUES($1,0.9,0.9,1,1,1)`, ids[12]))
+				VALUES($1,0.9,0.9,1,1,1)
+				ON CONFLICT (client_id,lookback_index) DO UPDATE SET independent_reliability_weight=EXCLUDED.independent_reliability_weight`, ids[12]))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_url_security(client_id,url_key,destination,measured_at,tls_failure)
 				VALUES($1,'synthetic','{}',$2,true)`, ids[14], now))
 			for i := range 9 {

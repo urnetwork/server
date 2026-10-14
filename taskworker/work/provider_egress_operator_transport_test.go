@@ -212,13 +212,13 @@ settings:
 candidates: []
 `
 
-// Seeds one passing reliability score per client, the history URL probe
-// admission needs before a provider's first cycle.
+// Seeds one passing one hour score per client, the witness of current history
+// URL probe admission needs before a provider's first cycle.
 func testPassingReliabilityHistory(ctx context.Context, clientIds ...server.Id) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score
 			(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight)
-			SELECT client_id,0,1,1,1,1 FROM unnest($1::uuid[]) AS client_id`, clientIds))
+			SELECT client_id,1,1,1,1,1 FROM unnest($1::uuid[]) AS client_id`, clientIds))
 	})
 }
 

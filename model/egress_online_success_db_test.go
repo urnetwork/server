@@ -55,8 +55,8 @@ func TestOnlineUrlSuccessRuleLeavesEveryBucketAndCount(t *testing.T) {
 		egressTestProbed(ctx, healthy2, city, 0, "us")
 		dead := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestHealth(ctx, dead.clientId, server.NowUtc(), 5, 5)
-		// the reliability history URL probe admission requires
-		egressTestReliability(ctx, dead.clientId, 0, 1, 1)
+		// the current reliability history URL probe admission requires
+		testingInsertProviderReliabilityWitness(ctx, dead.clientId)
 		warming := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestHealth(ctx, warming.clientId, server.NowUtc(), 1, 1)
 		unprobed := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)

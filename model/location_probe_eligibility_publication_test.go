@@ -35,11 +35,9 @@ func TestLocationProbeEligibilityPrecomputePreservesConcurrentProvide(t *testing
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 		defer cancel()
-		_, admitted, city := locationProbeConnectedFixture(t, ctx, 85)
+		_, admitted, _ := locationProbeConnectedFixture(t, ctx, 85)
 		_, rejected, _ := locationProbeConnectedFixture(t, ctx, 86)
-		for _, client := range []server.Id{admitted, rejected} {
-			testingInsertProviderConnectionScore(ctx, client, city)
-		}
+		testingInsertProviderReliabilityWitness(ctx, admitted, rejected)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		SetProvide(ctx, admitted, map[ProvideMode][]byte{})
@@ -112,7 +110,7 @@ func TestLocationProbeEligibilityPrecomputeMatchesAuthoritativeRollup(t *testing
 			network, client, city := locationProbeConnectedFixture(t, ctx, 60+index)
 			clients[name] = fixture{network: network, client: client, city: city}
 			if name != "unscored" {
-				testingInsertProviderConnectionScore(ctx, client, city)
+				testingInsertProviderReliabilityWitness(ctx, client)
 			}
 		}
 		now := server.NowUtc()
@@ -214,12 +212,12 @@ func TestLocationProbeEligibilityPrecomputeKeepsAtomicRollback(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		_, client, city := locationProbeConnectedFixture(t, ctx, 81)
-		testingInsertProviderConnectionScore(ctx, client, city)
+		_, client, _ := locationProbeConnectedFixture(t, ctx, 81)
+		testingInsertProviderReliabilityWitness(ctx, client)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		_, newClient, _ := locationProbeConnectedFixture(t, ctx, 82)
-		testingInsertProviderConnectionScore(ctx, newClient, city)
+		testingInsertProviderReliabilityWitness(ctx, newClient)
 		before := locationProbeCycleSnapshot(ctx)
 		var originalLocation string
 		server.Tx(ctx, func(tx server.PgTx) {

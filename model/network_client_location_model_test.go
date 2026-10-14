@@ -3623,9 +3623,9 @@ func TestProbeDueQueueIgnoresTheEgressHealthGate(t *testing.T) {
 
 		// Both bad measurements deny native quality. Only the older one is
 		// beyond the half-life refresh boundary; location age alone is not due.
-		// Passing reliability history admits both to URL probes at the rollup.
+		// Passing current reliability history admits both to URL probes at the rollup.
 		for _, clientId := range clientIds {
-			testingInsertProviderConnectionScore(ctx, clientId, city)
+			testingInsertProviderReliabilityWitness(ctx, clientId)
 			measuredAt := now
 			if clientId == staleClientId {
 				measuredAt = now.Add(-3 * ProviderEgressHealthMaxAge / 4)
