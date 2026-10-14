@@ -51,6 +51,18 @@ reserved but not signed before its deadline stays refused (`pending original
 signing outcome cannot become a different request`). No operator step frees
 it; it needs a change to the engine.
 
+An intent whose operation can no longer succeed, a v1 close or deposit past
+its window or a spent v2 operation, is retired by a cancellation, a fee
+replacement of its signed attempt. When the cancellation cannot be signed,
+because the operation's signatures or the intent's three attempts are spent,
+the engine broadcasts the latest signed attempt's stored bytes again, which
+takes no new signature or liability: it reverts and frees the nonce
+(`TestStLedgerV2LastSignatureWhoseBroadcastIsLostIsSentAgain`). Before
+server commit bac7e5770 it did not, and such an account stayed blocked when
+that attempt's broadcast had been lost or the node had dropped it. An intent
+of a replaced deployment is still not sent again, since its bytes target the
+old coordinator.
+
 ## Intents that free themselves
 
 - Refused for `maximum_gas`, the fee caps or the lifetime caps: a policy
@@ -62,6 +74,30 @@ it; it needs a change to the engine.
   its per-intent liability are spent: a re-signed policy cannot lift them,
   since both caps are recorded at the operation's first signature, and the
   cancellation is refused for the same reason. Use the procedure.
+
+## When the account cannot pay
+
+A node refuses a transaction whose gas limit at its fee cap exceeds the
+account's balance. The engine keeps the signed attempt and its nonce. Every
+later send of the account broadcasts the attempt's stored bytes again, and the
+account's other sends wait behind it. A send two minutes or more after the
+attempt's signature replaces it at a fee at least 12.5% higher, up to the
+policy's `maximum_fee_per_gas_wei` and three signatures, and the replacement
+is broadcast instead. Once the account holds the latest attempt's gas limit
+at its fee cap, the next send's broadcast goes out
+(`TestStV1DepositStagingWaitsForTheDepositKeyToBeFunded`).
+
+Each signing account therefore holds its largest send's gas limit at the fee
+cap. At the launch policy's fee cap of 30 gwei:
+
+| Send | Gas limit under `maximum_gas` 1,000,000 | Gas limit at the full floor |
+| --- | --- | --- |
+| deposit staging (transferStake) | 1,000,000, 0.03 TAO | 2,800,000, 0.084 TAO |
+| deposit | 1,000,000, 0.03 TAO | 3,400,000, 0.102 TAO |
+| v1 or v2 close (root key) | 1,000,000, 0.03 TAO | 3,200,000, 0.096 TAO |
+
+The deposit key sends the staging and then the deposit, so a pair needs
+0.06 TAO under `maximum_gas` 1,000,000 and 0.186 TAO at the full floors.
 
 ## Procedure
 
