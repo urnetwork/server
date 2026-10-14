@@ -2142,14 +2142,24 @@ func newProviderUrlProbePass(
 
 // The callback owns and joins its tunnels/control client before returning. This
 // boundary persists cleanup even when the caller cancels or a callback fails.
-func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, args *ProviderEgressProbeArgs, run func(*model.ProberIdentity) (*ProviderEgressProbeResult, error)) (result *ProviderEgressProbeResult, returnErr error) {
+func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, args *ProviderEgressProbeArgs, run func(*model.ProberIdentity) (*ProviderEgressProbeResult, error)) (*ProviderEgressProbeResult, error) {
 	credit, err := providerUrlProbeShardCredit(args)
 	if err != nil {
 		return nil, err
 	}
-	owner, err := model.BeginProberShard(ctx, key, credit, time.Duration(args.MaxTimeSeconds)*time.Second)
+	return runWithProberShard(ctx, "provider egress", key, credit, time.Duration(args.MaxTimeSeconds)*time.Second, run)
+}
+
+// One prober shard's whole lifetime around run: allocation with credit, the
+// identity, and the drain and reap after run returns, which the probe named
+// by label owns. The callback owns and joins its tunnels/control client
+// before returning; this boundary persists cleanup even when the caller
+// cancels or a callback fails. The URL probe and the capability probe each
+// run their passes in one, in shard slots of their own.
+func runWithProberShard[R any](ctx context.Context, label string, key model.ProberShardKey, credit model.ByteCount, lifetime time.Duration, run func(*model.ProberIdentity) (R, error)) (result R, returnErr error) {
+	owner, err := model.BeginProberShard(ctx, key, credit, lifetime)
 	if err != nil {
-		return nil, fmt.Errorf("provider egress shard allocation: %w", err)
+		return result, fmt.Errorf("%s shard allocation: %w", label, err)
 	}
 	defer func() {
 		// runWithProviderEgressControl and its tunnel owners have joined before
@@ -2158,16 +2168,16 @@ func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, a
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		if err := model.DrainProberShard(cleanupCtx, key); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("provider egress shard drain: %w", err))
+			returnErr = errors.Join(returnErr, fmt.Errorf("%s shard drain: %w", label, err))
 			return
 		}
 		if _, err := model.ReapProberShard(cleanupCtx, key); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("provider egress shard cleanup: %w", err))
+			returnErr = errors.Join(returnErr, fmt.Errorf("%s shard cleanup: %w", label, err))
 		}
 	}()
 	identity, err := model.ProberShardIdentity(ctx, owner)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	return run(identity)
 }
