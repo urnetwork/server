@@ -4809,6 +4809,8 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 		rowBatches = make([]*forceCloseOwnerBatch, len(openContracts))
 	}
 	batchSlots := make(chan struct{}, max(1, batchParallel))
+	// How each batch ended, by its first row; only that row's worker writes it.
+	batchOutcomes := make([]forceCloseOwnerBatchOutcome, len(openContracts))
 	// Visits every row of one batch in a single owned turn. A held balance,
 	// found by this batch or earlier by a row of the page, leaves every row
 	// to its holder, as it leaves a row tried alone. A failed turn
@@ -4819,6 +4821,7 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 	visitBatch := func(batch *forceCloseOwnerBatch) {
 		owner := forceCloseOwnerKey([]server.Id{batch.balanceId})
 		leaveToHolder := func() {
+			batchOutcomes[batch.indexes[0]] = forceCloseOwnerBatchHeld
 			for _, j := range batch.indexes {
 				ownerBusy[j], contractVisited[j] = true, true
 			}
@@ -4850,6 +4853,9 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 		if batchErr != nil && ctx.Err() != nil {
 			return
 		}
+		if batchErr != nil {
+			batchOutcomes[batch.indexes[0]] = forceCloseOwnerBatchFailed
+		}
 		if batchErr != nil && !entered {
 			glog.Infof("[close-expired]owner batch of %d rows failed before its members, the rows stay open: %v\n", len(batch.indexes), batchErr)
 			rowErr := fmt.Errorf("owner batch of %d rows: %w", len(batch.indexes), batchErr)
@@ -4865,6 +4871,9 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 			busyOwners.add(owner)
 			leaveToHolder()
 			return
+		}
+		if batchErr == nil {
+			batchOutcomes[batch.indexes[0]] = forceCloseOwnerBatchClosed
 		}
 		for _, j := range batch.indexes {
 			result := results[openContracts[j].contractId]
@@ -5070,17 +5079,10 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 			progressed: progressed, deferredContractIds: deferredContractIds}
 		forceCloseContractCounter.WithLabelValues("operational_deferred").Add(float64(len(deferredContractIds)))
 	}
-	// Batches led from the started prefix, and the rows they took.
-	ownerBatchCount, ownerBatchRowCount := 0, 0
-	for index, batch := range rowBatches[:started] {
-		if batch != nil && batch.indexes[0] == index {
-			ownerBatchCount += 1
-			ownerBatchRowCount += len(batch.indexes)
-		}
-	}
-	glog.Infof("[close-expired]page returned success=%t raw_open=%d raw_disputed=%d selected=%d terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d has_more=%t started=%d deferred=%d owner_busy=%d owner_batches=%d owner_batch_rows=%d\n",
+	ownerBatchClosedCount, ownerBatchHeldCount, ownerBatchFailedCount := forceCloseOwnerBatchSummary(rowBatches, batchOutcomes, started)
+	glog.Infof("[close-expired]page returned success=%t raw_open=%d raw_disputed=%d selected=%d terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d has_more=%t started=%d deferred=%d owner_busy=%d owner_batch_closed=%d owner_batch_held=%d owner_batch_failed=%d\n",
 		err == nil, rawOpen, rawDisputed, len(openContracts), verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount, next != nil,
-		started, len(deferredContractIds), ownerBusyCount, ownerBatchCount, ownerBatchRowCount)
+		started, len(deferredContractIds), ownerBusyCount, ownerBatchClosedCount, ownerBatchHeldCount, ownerBatchFailedCount)
 
 	return
 }

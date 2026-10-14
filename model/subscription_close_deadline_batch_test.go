@@ -505,3 +505,25 @@ func TestForceCloseDeadlineOwnerBatchesGroupsOnlyDueSingleBalanceRows(t *testing
 		}
 	})
 }
+
+// The page summary counts each batch led from the started prefix once, by how
+// it ended; a batch led after the prefix, or never run, is not counted. The
+// summary used to count every batch led from the prefix, held or failed ones
+// too, with all their rows.
+func TestForceCloseOwnerBatchSummaryCountsBatchesByOutcome(t *testing.T) {
+	newBatch := func(indexes ...int) *forceCloseOwnerBatch {
+		return &forceCloseOwnerBatch{balanceId: server.NewId(), indexes: indexes}
+	}
+	closedBatch, heldBatch, failedBatch, unrunBatch, laterBatch := newBatch(0, 2), newBatch(1, 3), newBatch(4, 7), newBatch(5, 6), newBatch(8, 9)
+	rowBatches := []*forceCloseOwnerBatch{closedBatch, heldBatch, closedBatch, heldBatch, failedBatch, unrunBatch, unrunBatch, failedBatch, laterBatch, laterBatch}
+	batchOutcomes := make([]forceCloseOwnerBatchOutcome, len(rowBatches))
+	batchOutcomes[0], batchOutcomes[1], batchOutcomes[4], batchOutcomes[8] =
+		forceCloseOwnerBatchClosed, forceCloseOwnerBatchHeld, forceCloseOwnerBatchFailed, forceCloseOwnerBatchClosed
+	closedCount, heldCount, failedCount := forceCloseOwnerBatchSummary(rowBatches, batchOutcomes, 8)
+	if closedCount != 1 || heldCount != 1 || failedCount != 1 {
+		t.Fatalf("summary counted %d closed, %d held and %d failed batches, want 1 of each", closedCount, heldCount, failedCount)
+	}
+	if closedCount, heldCount, failedCount := forceCloseOwnerBatchSummary(rowBatches, batchOutcomes, 0); closedCount+heldCount+failedCount != 0 {
+		t.Fatal("an empty started prefix counted batches")
+	}
+}

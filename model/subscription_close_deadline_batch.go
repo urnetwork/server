@@ -71,6 +71,39 @@ type forceCloseOwnerBatch struct {
 	members   []ContractDeadline
 }
 
+// How one owner batch ended, for the page summary.
+type forceCloseOwnerBatchOutcome int
+
+const (
+	// Never started, or stopped with its page.
+	forceCloseOwnerBatchUnrun forceCloseOwnerBatchOutcome = iota
+	// Its owned turn committed every member.
+	forceCloseOwnerBatchClosed
+	// Left with its rows to the holder of its balance.
+	forceCloseOwnerBatchHeld
+	// Its turn failed; its rows closed alone or stayed open.
+	forceCloseOwnerBatchFailed
+)
+
+// Counts the batches led from the started prefix by how they ended. Outcomes
+// are indexed by each batch's first row.
+func forceCloseOwnerBatchSummary(rowBatches []*forceCloseOwnerBatch, batchOutcomes []forceCloseOwnerBatchOutcome, started int) (closedCount int, heldCount int, failedCount int) {
+	for index, batch := range rowBatches[:started] {
+		if batch == nil || batch.indexes[0] != index {
+			continue
+		}
+		switch batchOutcomes[index] {
+		case forceCloseOwnerBatchClosed:
+			closedCount += 1
+		case forceCloseOwnerBatchHeld:
+			heldCount += 1
+		case forceCloseOwnerBatchFailed:
+			failedCount += 1
+		}
+	}
+	return
+}
+
 // Groups the page's open rows whose stored deadline passed at now by their one
 // transfer balance, in page order, into batches of at most
 // ContractDeadlineOwnerBatchLimit rows, and maps each batched row to its batch.
