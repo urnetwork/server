@@ -10768,16 +10768,21 @@ label_replace(max by (host,block) (urnetwork_connect_connection_reconcile_unheld
 or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_retired_total{env="main"}[15m])),"monitor_metric","retired","__name__",".*")
 or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env="main",result="ok"}[15m])),"monitor_metric","ok_passes","__name__",".*")
 or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env="main",result="error"}[15m])),"monitor_metric","error_passes","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env="main",reason="failed"}[15m])),"monitor_metric","failed_retires","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env="main",reason="busy"}[15m])),"monitor_metric","busy_retires","__name__",".*")
 ```
 
 - HEALTHY: every block's unheld count stays below 256, or falls while the
   reconcile retires rows. After a database outage a block can hold thousands of
   unheld rows for a few minutes while it drains them.
 - STUCK (`connection-reconcile-stuck`, two probes): a block holds at least 256
-  unheld rows and retired none in 15 minutes. Its retires fail or find nothing,
-  its batch is zero, or a registration it waits for never ends.
-- FAILING (`connection-reconcile-failing`, two probes): every pass on a block
-  raised in 15 minutes; the database path of that process is down.
+  unheld rows and retired none in 15 minutes. Its retires fail, are deferred
+  behind busy endpoint fences or find nothing, its batch is zero, or a
+  registration it waits for never ends.
+- FAILING (`connection-reconcile-failing`, two probes): in 15 minutes every
+  pass on a block raised, or its retires failed and none succeeded; the
+  database path of that process is down. A failed retire fails only its row
+  and its pass completes, so the pass results alone miss it.
 - UNOBSERVABLE (`connection-reconcile-unobservable`, two probes): no block
   exports a fresh gauge. Expected until Connect runs an artifact with the
   reconcile; until then compare a block's connected provider rows with its
@@ -10803,7 +10808,7 @@ fell in it.
 Implementation convention: SIGNALS.md §2.16a (`connection-reconcile`) maps to
 `signal_connection_reconcile.go` and `signal_connection_reconcile_test.go`.
 Synthetic tests cover a healthy fleet, a draining block, a stuck block, a
-failing block and an absent gauge. The reconcile itself is tested in
+failing block, failing retires and an absent gauge. The reconcile itself is tested in
 `connect/transport_announce_reconcile_test.go` and
 `connect/transport_announce_reconcile_db_test.go`.
 

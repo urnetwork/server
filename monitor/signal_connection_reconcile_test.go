@@ -17,6 +17,9 @@ type connectionReconcileFixtureBlock struct {
 	retired     float64
 	okPasses    float64
 	errorPasses float64
+	// emitted only when positive
+	failedRetires float64
+	busyRetires   float64
 }
 
 // A Mimir vector for the probe's query, sampled at now.
@@ -36,6 +39,12 @@ func connectionReconcileFixtureJSON(t testing.TB, now time.Time, blocks []connec
 		sample(block.host, block.block, "retired", block.retired)
 		sample(block.host, block.block, "ok_passes", block.okPasses)
 		sample(block.host, block.block, "error_passes", block.errorPasses)
+		if 0 < block.failedRetires {
+			sample(block.host, block.block, "failed_retires", block.failedRetires)
+		}
+		if 0 < block.busyRetires {
+			sample(block.host, block.block, "busy_retires", block.busyRetires)
+		}
 	}
 	payload, err := json.Marshal(map[string]any{
 		"status": "success",
@@ -50,10 +59,17 @@ func connectionReconcileFixtureJSON(t testing.TB, now time.Time, blocks []connec
 // Runs the signal over blocks, checking the query it sends.
 func runConnectionReconcileFixture(t *testing.T, blocks []connectionReconcileFixtureBlock) Alerts {
 	t.Helper()
+	return runConnectionReconcileFixtureQuerying(t, blocks, nil)
+}
+
+// Runs the signal over blocks, checking the query it sends for wantQueried
+// too.
+func runConnectionReconcileFixtureQuerying(t *testing.T, blocks []connectionReconcileFixtureBlock, wantQueried []string) Alerts {
+	t.Helper()
 	now := time.Date(2026, 10, 14, 8, 15, 0, 0, time.UTC)
 	payload := connectionReconcileFixtureJSON(t, now, blocks)
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
-		for _, want := range []string{
+		for _, want := range append([]string{
 			"urnetwork_connect_connection_reconcile_unheld",
 			"urnetwork_connect_connection_reconcile_retired_total",
 			"urnetwork_connect_connection_reconcile_passes_total",
@@ -61,7 +77,7 @@ func runConnectionReconcileFixture(t *testing.T, blocks []connectionReconcileFix
 			"%5B15m%5D",
 			"%22synthetic%22",
 			"monitor_metric",
-		} {
+		}, wantQueried...) {
 			if !strings.Contains(command, want) {
 				return "", fmt.Errorf("connection reconcile query missing %q: %s", want, command)
 			}
@@ -140,7 +156,7 @@ func TestConnectionReconcileSignalSyntheticFailingBlock(t *testing.T) {
 	})
 	alert := requireAlertClass(t, alerts, "connection-reconcile-failing")
 	for _, want := range []string{
-		"every connection reconcile pass in 15m raised on 1 Connect block(s)",
+		"the connection reconcile failed in 15m on 1 Connect block(s): every pass raised",
 		"connect-a/g1 unheld=10 retired_15m=0 ok_passes=0 error_passes=6",
 		"SIGNALS.md §2.16a",
 	} {
@@ -163,5 +179,37 @@ func TestConnectionReconcileSignalSyntheticAbsentGaugeIsUnobservable(t *testing.
 	alert := requireAlertClass(t, alerts, "connection-reconcile-unobservable")
 	if !strings.Contains(alert.Markdown(), "visibility_reason=no_reconcile_gauge") {
 		t.Fatalf("unobservable alert has no structural reason:\n%s", alert.Markdown())
+	}
+}
+
+// A failed retire fails only its row, and its pass completes. Retires that
+// keep failing on a block whose passes complete are a failing reconcile too,
+// below the stuck floor; a block whose retires sometimes fail but that
+// retires rows is healthy.
+func TestConnectionReconcileSignalSyntheticFailingRetires(t *testing.T) {
+	alerts := runConnectionReconcileFixtureQuerying(t, []connectionReconcileFixtureBlock{
+		{host: "connect-a", block: "g1", unheld: 40, okPasses: 60, failedRetires: 120, busyRetires: 4},
+		{host: "connect-b", block: "g2", unheld: 3, okPasses: 3, retired: 2, failedRetires: 1},
+	}, []string{
+		"urnetwork_connect_connection_reconcile_unretired_total",
+		"reason%3D%22failed%22",
+		"reason%3D%22busy%22",
+	})
+	alert := requireAlertClass(t, alerts, "connection-reconcile-failing")
+	for _, want := range []string{
+		"connect-a/g1 unheld=40 retired_15m=0 ok_passes=60 error_passes=0 failed_retires=120 busy_retires=4",
+		"SIGNALS.md §2.16a",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("failing retires alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if strings.Contains(alert.Markdown(), "connect-b/g2") {
+		t.Fatalf("failing retires alert names a block that retires rows:\n%s", alert.Markdown())
+	}
+	for _, other := range alerts {
+		if other.Class == "connection-reconcile-stuck" || other.Class == "connection-reconcile-unobservable" {
+			t.Fatalf("failing retires also raised %s", other.Class)
+		}
 	}
 }

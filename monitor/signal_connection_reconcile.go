@@ -19,8 +19,10 @@ import (
 // (urnetwork_connect_connection_reconcile_unheld) and retires them. This
 // signal reads that gauge with the reconcile's retirements and pass results
 // per block, and warns when unheld rows stay while nothing retires them, or
-// when every pass fails. No connection, client or handler identifier leaves
-// Mimir; host and block names are the bounded scrape labels.
+// when the reconcile fails: every pass raises, or retires fail and none
+// succeeds. A failed retire fails only its row and its pass completes, so the
+// pass results alone miss it. No connection, client or handler identifier
+// leaves Mimir; host and block names are the bounded scrape labels.
 func NewConnectionReconcileSignal() Signal {
 	return &signalAdapter{
 		number: "2.16a", key: "connection-reconcile", name: "Live handler connection reconcile",
@@ -41,8 +43,8 @@ const (
 	connectionReconcileFreshness  = 5 * time.Minute
 )
 
-// The unheld gauge and the reconcile's retirements and pass results over the
-// range, each per host and block, in one evaluation.
+// The unheld gauge and the reconcile's retirements, pass results and unretired
+// rows by reason over the range, each per host and block, in one evaluation.
 func connectionReconcileQuery(environment string) string {
 	env := strconv.Quote(environment)
 	parts := []string{
@@ -53,6 +55,12 @@ func connectionReconcileQuery(environment string) string {
 		parts = append(parts, fmt.Sprintf(
 			`label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env=%s,result=%s}[%s])),"monitor_metric",%s,"__name__",".*")`,
 			env, strconv.Quote(result), connectionReconcileRange, strconv.Quote(result+"_passes"),
+		))
+	}
+	for _, reason := range []string{"failed", "busy"} {
+		parts = append(parts, fmt.Sprintf(
+			`label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env=%s,reason=%s}[%s])),"monitor_metric",%s,"__name__",".*")`,
+			env, strconv.Quote(reason), connectionReconcileRange, strconv.Quote(reason+"_retires"),
 		))
 	}
 	return strings.Join(parts, " or ")
@@ -66,6 +74,9 @@ type connectionReconcileBlock struct {
 	retired     float64
 	okPasses    float64
 	errorPasses float64
+	// absent before the reconcile counted its unretired rows
+	failedRetires float64
+	busyRetires   float64
 }
 
 // Groups the evaluation by block. A sample that is malformed, stale or
@@ -97,6 +108,10 @@ func parseConnectionReconcileFrame(response mimirInstantResponse, now time.Time)
 			state.okPasses = value
 		case "error_passes":
 			state.errorPasses = value
+		case "failed_retires":
+			state.failedRetires = value
+		case "busy_retires":
+			state.busyRetires = value
 		default:
 			return nil, "unknown_metric_class"
 		}
@@ -128,8 +143,8 @@ func connectionReconcileObserved(blocks []*connectionReconcileBlock) string {
 			parts = append(parts, fmt.Sprintf("and %d more", len(ordered)-8))
 			break
 		}
-		parts = append(parts, fmt.Sprintf("%s unheld=%.0f retired_%s=%.0f ok_passes=%.0f error_passes=%.0f",
-			state.name, state.unheld, connectionReconcileRange, state.retired, state.okPasses, state.errorPasses))
+		parts = append(parts, fmt.Sprintf("%s unheld=%.0f retired_%s=%.0f ok_passes=%.0f error_passes=%.0f failed_retires=%.0f busy_retires=%.0f",
+			state.name, state.unheld, connectionReconcileRange, state.retired, state.okPasses, state.errorPasses, state.failedRetires, state.busyRetires))
 	}
 	return strings.Join(parts, "; ")
 }
@@ -178,7 +193,8 @@ func (connectionReconcileProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		if connectionReconcileStuckFloor <= state.unheld && state.retired == 0 {
 			stuck = append(stuck, state)
 		}
-		if 0 < state.errorPasses && state.okPasses == 0 {
+		// every pass raised, or retires failed and none succeeded
+		if (0 < state.errorPasses && state.okPasses == 0) || (0 < state.failedRetires && state.retired == 0) {
 			failing = append(failing, state)
 		}
 	}
@@ -191,7 +207,7 @@ func (connectionReconcileProbe) check(ctx context.Context, env *probeEnv) ([]fin
 				"%d Connect block(s) hold at least %.0f connected rows their process no longer holds, and retired none in %s",
 				len(stuck), connectionReconcileStuckFloor, connectionReconcileRange,
 			),
-			mechanism: "These rows are connected under a handler that is alive, so handler expiry never reaches them, and every reader of connected rows (the location reliability writer, FP2 and URL probe admission, location and provider counts) counts a provider that is gone. The reconcile retires at most 256 such rows per pass every 15 seconds; none retired means its retires fail or return nothing, its batch is zero, or a registration it waits for never ends.",
+			mechanism: "These rows are connected under a handler that is alive, so handler expiry never reaches them, and every reader of connected rows (the location reliability writer, FP2 and URL probe admission, location and provider counts) counts a provider that is gone. The reconcile retires at most 256 such rows per pass every 15 seconds; none retired means its retires fail, are deferred behind busy endpoint fences, or return nothing, its batch is zero, or a registration it waits for never ends.",
 			baseline:  fmt.Sprintf("Unheld rows stay below %.0f, or fall as the reconcile retires them.", connectionReconcileStuckFloor),
 			observed:  connectionReconcileObserved(stuck) + " metrics_gateway=" + gateway.name,
 			evidence:  "Mimir evaluates the per-block unheld gauge with the reconcile's retirements over the range; no identifier leaves Mimir.",
@@ -209,11 +225,11 @@ func (connectionReconcileProbe) check(ctx context.Context, env *probeEnv) ([]fin
 			probeId: "mimir/connection-reconcile", tier: tierWarn, class: "connection-reconcile-failing",
 			target: target, sustain: 2,
 			symptom: fmt.Sprintf(
-				"every connection reconcile pass in %s raised on %d Connect block(s)",
+				"the connection reconcile failed in %s on %d Connect block(s): every pass raised, or retires failed and none succeeded",
 				connectionReconcileRange, len(failing),
 			),
-			mechanism: "A pass reads the handler's connected rows and retires the unheld ones through PostgreSQL. A pass that raises leaves its rows for the next pass, which runs after the backlog interval, so a sustained failure means connection rows of ended transports accumulate.",
-			baseline:  "At least one pass completes on every block in the range.",
+			mechanism: "A pass reads the handler's connected rows and retires the unheld ones through PostgreSQL. A pass whose read raises leaves its rows for the next pass, which runs after the backlog interval; a retire that raises leaves its row for a later pass, after the rows that have not failed, and three consecutive failures end the pass. Either sustained means connection rows of ended transports accumulate.",
+			baseline:  "At least one pass completes, and some retire succeeds whenever retires fail, on every block in the range.",
 			observed:  connectionReconcileObserved(failing) + " metrics_gateway=" + gateway.name,
 			evidence:  "Per-block pass counts by result over the range; no identifier leaves Mimir.",
 			context:   "A database outage fails the passes, and the connections' own final disconnects, together. The passes recover with the database.",
