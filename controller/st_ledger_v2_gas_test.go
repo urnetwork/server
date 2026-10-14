@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -611,5 +612,57 @@ func TestStLedgerV2PendingReservationOfASpentFinalizeIsSigned(t *testing.T) {
 		// The finalize's one reserved signature and the answer's: 60,000 gas
 		// each at 100 wei.
 		stGasFixtureSnapshot(t, policy, "12000000", 2)
+	})
+}
+
+// SV-1 (retries): why the recovery of an intent stranded before the engine
+// checked a new nonce's first signature against the policy stops the
+// engine's sends for the key until its self-transfer is final. Here the
+// stranded finalize's own limit is above maximum_gas until its estimate
+// drops. If the engine is still sending when it drops, it signs and
+// broadcasts the finalize at the nonce the operator's self-transfer, broadcast
+// first, then takes. That signature can never be included, and a missing
+// receipt cannot prove that it was not, so the engine never retires the
+// intent: the root key stays blocked. docs/operator/st-stranded-nonce.md
+// stops the sends first.
+func TestStLedgerV2RecoveryRacingTheEngineStrandsTheRootKey(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLedgerV2RPC(t)
+		client, _, cfg := newLedgerV2RPCClient(t, fixture)
+		ledgerV2GasPolicy(t, client, nil)
+		finalizeCall := stLedgerV2SettlementAbi.PackFinalizeDistribution(stBig(1))
+		// 3,600,000 with the margin, above maximum_gas 3,500,000.
+		fixture.estimates[string(finalizeCall)] = 3_000_000
+		ledgerV2AdmitPolicy(t, ctx, client)
+		ledgerV2Reserve(t, ctx, cfg, "v2finalize:6:1", cfg.SettlementV2, finalizeCall, 7)
+		answer := ledgerV2TestAnswer()
+		if _, err := client.LedgerV2Answer(ctx, 1, 3, answer); !errors.Is(err, model.ErrStOperatorGasAllowance) || !strings.Contains(err.Error(), "envelope exceeds approval") {
+			t.Fatalf("answer behind the stranded finalize: %v", err)
+		}
+
+		// The operator's self-transfer at nonce 7 is broadcast, the estimate
+		// drops, and the engine signs and broadcasts the finalize at nonce 7.
+		fixture.estimates[string(finalizeCall)] = 2_000_000
+		fixture.withheld = 1
+		raceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err := client.LedgerV2Answer(raceCtx, 1, 3, answer)
+		cancel()
+		if err == nil || len(fixture.sent) != 1 || fixture.sent[0].Nonce() != 7 {
+			t.Fatalf("the engine's racing finalize: %v, %d sent", err, len(fixture.sent))
+		}
+		// The self-transfer takes nonce 7.
+		fixture.nonce = 8
+		for range 3 {
+			if _, err := client.LedgerV2Answer(ctx, 1, 3, answer); err == nil || !strings.Contains(err.Error(), "st: account nonce 7 was consumed without a known canonical attempt") {
+				t.Fatalf("answer after the self-transfer: %v", err)
+			}
+		}
+		if intent := ledgerV2Intent(t, ctx, cfg, "v2finalize:6:1"); intent.AttemptCount != 1 || intent.Nonce != 7 || model.StTxBroadcast != intent.Status && model.StTxUncertain != intent.Status {
+			t.Fatalf("finalize intent %+v", intent)
+		}
+		if len(fixture.sent) != 1 {
+			t.Fatalf("%d sent", len(fixture.sent))
+		}
 	})
 }
