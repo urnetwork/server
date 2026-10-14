@@ -150,6 +150,9 @@ release_gate_service_resources() (
 
 # Settings match server/local and the simulator's dependency specs; the
 # release lock supplies exact images. Data is tmpfs and restart is disabled.
+# PostgreSQL also keeps 16kB of each statement's text, where those keep the
+# 1kB default: the monitor's native query-sample fixtures need at least that
+# much of a statement in pg_stat_activity, and refuse to run with less.
 release_gate_services_start() {
   local gate_root="$1" workspace="$2" lock="$3" service image port id output expected attempt ready
   [[ -z "${release_gate_service_root:-}" ]] || return 1
@@ -182,7 +185,7 @@ release_gate_services_start() {
         -e LANG=en_US.UTF-8 -e POSTGRES_INITDB_ARGS=--locale=en_US.UTF-8
         -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=urnetwork-local-test -e POSTGRES_DB=postgres
         -e APP_DB_USER=bringyour -e APP_DB_PASSWORD=urnetwork-local-test -e APP_DB_NAME=bringyour
-        "$image" postgres -c max_connections=512 -c shared_buffers=256MB)
+        "$image" postgres -c max_connections=512 -c shared_buffers=256MB -c track_activity_query_size=16kB)
     else
       arguments+=(--tmpfs /data:rw --ulimit nofile=65536:65536
         --sysctl net.core.somaxconn=65535 --sysctl net.ipv4.tcp_max_syn_backlog=65535

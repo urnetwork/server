@@ -1057,6 +1057,15 @@ func (self *retryTB) Fail() {
 	}
 }
 
+// The wrapped test's deadline, which testing.TB leaves out: a fixture sizes
+// its own budget from the run's -timeout through it.
+func (self *retryTB) Deadline() (time.Time, bool) {
+	if test, ok := self.TB.(interface{ Deadline() (time.Time, bool) }); ok {
+		return test.Deadline()
+	}
+	return time.Time{}, false
+}
+
 func (self *retryTB) completeAttempt() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
