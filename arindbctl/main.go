@@ -30,6 +30,12 @@ type commandOptions struct {
 	evidence          subscriberEvidenceOptions
 	subscriberCatalog string
 	atlasProbes       string
+	// The previously selected database for the canary copy-forward of update:
+	// resolved beneath previousConfig for previousEnv exactly as the runtime
+	// would open it, or named directly by previousDatabase (the baseline pin).
+	previousConfig   string
+	previousEnv      string
+	previousDatabase string
 }
 
 func main() {
@@ -93,11 +99,17 @@ func runCommandWithDependencies(ctx context.Context, args []string, output io.Wr
 	flags.BoolVar(&options.evidence.HostingPrefixes, "hosting-prefixes", false, "also pin AWS EC2, Google Cloud, AzureCloud, Oracle, DigitalOcean, Linode and Vultr published prefixes as hosting evidence")
 	flags.BoolVar(&options.evidence.RegistryAssignments, "registry-assignments", false, "also pin the RIPE, APNIC and AFRINIC whois assignment dumps for hosting-named object withholding")
 	flags.BoolVar(&options.evidence.LabelSources, "label-sources", false, "also pin bgp.tools, APNIC Labs, ASdb, ipverse and Linnaeus labels for the audit's independent validation")
+	flags.StringVar(&options.previousConfig, "previous-config", "", "config root whose selected arindb/arin.mmdb update copies beside the new build as arin-old.mmdb for the canary")
+	flags.StringVar(&options.previousEnv, "previous-env", "", "environment whose resource selection --previous-config follows")
+	flags.StringVar(&options.previousDatabase, "previous-database", "", "a previous arin.mmdb, with its manifest.json beside it, to copy instead of resolving one (the baseline pin)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || options.output == "" || options.timeout <= 0 {
 		return errors.New("output and a positive timeout are required; positional arguments are not accepted")
+	}
+	if err := validatePreviousDatabaseOptions(command, options); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, options.timeout)
 	defer cancel()
@@ -152,6 +164,21 @@ func runCommandWithDependencies(ctx context.Context, args []string, output io.Wr
 			return errors.New("unknown command")
 		}
 	})
+}
+
+// The previous-database flags belong to update. A resolution needs its config
+// root, and the pin replaces resolution rather than combining with it.
+func validatePreviousDatabaseOptions(command string, options commandOptions) error {
+	named := options.previousConfig != "" || options.previousEnv != "" || options.previousDatabase != ""
+	switch {
+	case named && command != "update":
+		return errors.New("previous-config, previous-env and previous-database apply only to update")
+	case options.previousEnv != "" && options.previousConfig == "":
+		return errors.New("previous-env requires previous-config")
+	case options.previousDatabase != "" && (options.previousConfig != "" || options.previousEnv != ""):
+		return errors.New("previous-database names the previous database itself; it cannot be combined with previous-config")
+	}
+	return nil
 }
 
 // A same-filesystem directory rename publishes all related artifacts together.
