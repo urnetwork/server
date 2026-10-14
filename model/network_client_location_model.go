@@ -4135,7 +4135,8 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
-		// Count the same common-gate passes exposed as online supply.
+		// Count the providers exposed as online supply: the common-gate
+		// passes the URL-success rule keeps.
 		countProviderRows := func() map[server.Id]int {
 			locationClientCounts := map[server.Id]int{}
 			for _, row := range providerCountRows {
@@ -4889,8 +4890,9 @@ type RankMode = string
 const (
 	RankModeQuality RankMode = "quality"
 	RankModeSpeed   RankMode = "speed"
-	// Every online provider: each provider that passed the common gates at
-	// export, native Quality and Speed members included (ClientScore.Online).
+	// Every online provider: each provider that passed the common gates and
+	// the URL-success rule at export, native Quality and Speed members
+	// included (ClientScore.Online).
 	// It has no minimums, no subscriber validation and no borrowing, and
 	// draws its members uniformly: the ip_family filter still decides which
 	// families are eligible, but no family is preferred over another. It
@@ -4997,8 +4999,9 @@ type ClientScore struct {
 	// NetworkOnly: an entry written before this field existed must keep
 	// today's behavior. See IpFamily and network_client_ip_family.go.
 	IpFamilies uint8
-	// Every common-gate pass belongs to online, including native quality/speed
-	// members. PassesMinimums distinguishes each mode's native membership.
+	// Every common-gate pass the URL-success rule keeps belongs to online,
+	// including native quality/speed members. PassesMinimums distinguishes
+	// each mode's native membership.
 	Online bool
 
 	// set only on the top-level score, never on the `LookbackClientScores`
