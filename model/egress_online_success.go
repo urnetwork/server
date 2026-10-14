@@ -400,22 +400,38 @@ func encodeProviderOnlineSuccessBaseline(baseline *providerOnlineSuccessBaseline
 	})
 }
 
-// Replaces the published guard, expiring with the export it describes.
+// Replaces the published guard, expiring with the export it describes, and
+// hands it to this process's readers at once.
 func publishProviderOnlineSuccessBaseline(ctx context.Context, baseline *providerOnlineSuccessBaseline, ttl time.Duration) error {
-	value, err := encodeProviderOnlineSuccessBaseline(baseline, server.NowUtc())
+	publishTime := server.NowUtc()
+	value, err := encodeProviderOnlineSuccessBaseline(baseline, publishTime)
 	if err != nil {
 		return err
 	}
 	redisCtx, cancel := context.WithTimeout(ctx, providerOnlineSuccessBaselineRedisTimeout)
 	defer cancel()
-	return server.RedisWithDeadline(redisCtx, func(r server.RedisClient) error {
+	err = server.RedisWithDeadline(redisCtx, func(r server.RedisClient) error {
 		return r.Set(redisCtx, providerOnlineSuccessBaselineKey, value, ttl).Err()
 	})
+	if err != nil {
+		return err
+	}
+	published := *baseline
+	published.publishTime = publishTime
+	providerOnlineSuccessBaselineReader.store(&published)
+	return nil
 }
 
 // The guard the score export last published, nil when there is none or it is
-// not to be trusted, which applies the rule nowhere.
+// not to be trusted, which applies the rule nowhere. This process reads it
+// from Redis at most once in providerOnlineSuccessBaselineReadMaxAge.
 func getProviderOnlineSuccessBaseline(ctx context.Context) *providerOnlineSuccessBaseline {
+	return providerOnlineSuccessBaselineReader.get(ctx)
+}
+
+// Reads the published guard from Redis at now: an error when there is none,
+// Redis is unavailable, or the document is not to be trusted.
+func readProviderOnlineSuccessBaseline(ctx context.Context, now time.Time) (*providerOnlineSuccessBaseline, error) {
 	var value []byte
 	redisCtx, cancel := context.WithTimeout(ctx, providerOnlineSuccessBaselineRedisTimeout)
 	defer cancel()
@@ -425,18 +441,142 @@ func getProviderOnlineSuccessBaseline(ctx context.Context) *providerOnlineSucces
 		return err
 	})
 	if errors.Is(err, redis.Nil) {
-		return nil
+		return nil, fmt.Errorf("none is published")
 	}
 	if err != nil {
-		glog.Errorf("[egress]online url-success guard is unavailable (%s); every country is exempt\n", err)
-		return nil
+		return nil, fmt.Errorf("unavailable: %w", err)
 	}
-	baseline, err := decodeProviderOnlineSuccessBaseline(value, server.NowUtc())
+	baseline, err := decodeProviderOnlineSuccessBaseline(value, now)
 	if err != nil {
-		glog.Errorf("[egress]online url-success guard is unreadable (%s); every country is exempt\n", err)
-		return nil
+		return nil, fmt.Errorf("unreadable: %w", err)
+	}
+	return baseline, nil
+}
+
+// How long a process reuses the guard it read. Every provider status call
+// and inspection reads the guard, a Redis read and the decode of about 15 KB,
+// so a process reads it at most once in this time. The export publishes a
+// new guard once a pass, minutes apart, and the publishing process hands its
+// own to its readers at once, so this delays what a reader in another process
+// sees by at most this much.
+const providerOnlineSuccessBaselineReadMaxAge = 30 * time.Second
+
+// The guard as this process last read it, shared by every scoped reader. A
+// failed read is kept for the window too, so an unavailable Redis costs one
+// read a window rather than one a status call, and each failure window is
+// logged once when it starts and once when it ends, however many readers ask
+// meanwhile. While one caller reads past the window, the others keep the last
+// result rather than wait or read too. Safe for concurrent use.
+type providerOnlineSuccessBaselineReads struct {
+	maxAge time.Duration
+	now    func() time.Time
+	read   func(ctx context.Context, now time.Time) (*providerOnlineSuccessBaseline, error)
+	// log the start of a failure window and its end
+	errorf func(format string, args ...any)
+	infof  func(format string, args ...any)
+
+	stateLock sync.Mutex
+	// the last result, nil for a failed read, and when it was read or stored;
+	// hasResult is false before the first
+	baseline   *providerOnlineSuccessBaseline
+	resultTime time.Time
+	hasResult  bool
+	// a caller is reading past the window
+	reading bool
+	// the last read failed, and its failure window has been logged
+	failing bool
+}
+
+// This process's guard reads.
+var providerOnlineSuccessBaselineReader = &providerOnlineSuccessBaselineReads{
+	maxAge: providerOnlineSuccessBaselineReadMaxAge,
+	now:    server.NowUtc,
+	read:   readProviderOnlineSuccessBaseline,
+	errorf: glog.Errorf,
+	infof:  glog.Infof,
+}
+
+// Forgets the last read on a test reset, as a fresh process would.
+func init() {
+	server.OnReset(func() {
+		providerOnlineSuccessBaselineReader.reset()
+	})
+}
+
+// The guard as last read within the window, or read now.
+func (self *providerOnlineSuccessBaselineReads) get(ctx context.Context) *providerOnlineSuccessBaseline {
+	now := self.now()
+	baseline, current := func() (*providerOnlineSuccessBaseline, bool) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.hasResult && (now.Sub(self.resultTime) < self.maxAge || self.reading) {
+			return self.baseline, true
+		}
+		self.reading = true
+		return nil, false
+	}()
+	if current {
+		return baseline
+	}
+
+	baseline, err := func() (baseline *providerOnlineSuccessBaseline, err error) {
+		// a read that panics must not leave every later caller on the last
+		// result; the guard is advisory, so it fails like any other read
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				baseline, err = nil, fmt.Errorf("read failed: %v", recovered)
+			}
+		}()
+		return self.read(ctx, now)
+	}()
+	failureStarted, failureEnded := func() (bool, bool) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.reading = false
+		self.baseline = baseline
+		self.resultTime = now
+		self.hasResult = true
+		failureStarted := err != nil && !self.failing
+		failureEnded := err == nil && self.failing
+		self.failing = err != nil
+		return failureStarted, failureEnded
+	}()
+	if failureStarted {
+		self.errorf("[egress]online url-success guard is %s; every country is exempt until it is readable again\n", err)
+	}
+	if failureEnded {
+		self.infof("[egress]online url-success guard is readable again\n")
 	}
 	return baseline
+}
+
+// Replaces the last result with a guard this process just published, which
+// is current for a full window and ends any failure window.
+func (self *providerOnlineSuccessBaselineReads) store(baseline *providerOnlineSuccessBaseline) {
+	failureEnded := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.baseline = baseline
+		self.resultTime = self.now()
+		self.hasResult = true
+		failureEnded := self.failing
+		self.failing = false
+		return failureEnded
+	}()
+	if failureEnded {
+		self.infof("[egress]online url-success guard is readable again\n")
+	}
+}
+
+// Forgets the last result, so the next caller reads.
+func (self *providerOnlineSuccessBaselineReads) reset() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.baseline = nil
+	self.resultTime = time.Time{}
+	self.hasResult = false
+	self.reading = false
+	self.failing = false
 }
 
 // A published guard read at now, or an error for any document a reader must

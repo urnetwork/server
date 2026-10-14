@@ -859,7 +859,11 @@ gate matrix.
     between hosts, as during a rollout or after a rollback. A reader without a
     trusted document exempts every country: none is published, it is
     unreadable, it is version 1 (counts only, which each reader decided under
-    its own settings), or it was published more than 60 minutes ago.
+    its own settings), or it was published more than 60 minutes ago. A process
+    reads the document at most once every 30 seconds, however many status calls
+    ask, and while one call reads, the others keep the last result. A failure
+    to read it is logged once when it starts and once when it ends. The
+    publishing process uses what it published at once.
   - On 2026-10-13 the structurally failing countries measured success shares
     of VN 0.03, JP 0.24, RU 0.25, TW 0.27, ZA 0.35 and IN 0.35. The default of
     0.36, pending the owner's confirmation, exempts them all. HK, the lowest

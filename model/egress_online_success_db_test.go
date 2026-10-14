@@ -293,3 +293,49 @@ func TestOnlineUrlSuccessCountryGuardMarginAcrossPasses(t *testing.T) {
 		step("3 of 4", providers[2], 1, 3, ProviderStatusReasonEgressNoSuccess)
 	})
 }
+
+// A process reads the published guard from Redis at most once a read window
+// (30 seconds; these steps take milliseconds): a guard replaced or removed in
+// Redis within the window is not read again, and a guard this process
+// publishes is current at once.
+func TestProviderOnlineSuccessBaselineIsReadOnceAWindow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		guard := func(floor float64) *providerOnlineSuccessBaseline {
+			return &providerOnlineSuccessBaseline{
+				computeTime:       server.NowUtc(),
+				enabled:           true,
+				floor:             floor,
+				countryCodeCounts: map[string]providerOnlineSuccessCount{"us": {Measured: 2, Succeeded: 1, NoSuccess: 1}},
+			}
+		}
+		write := func(floor float64) {
+			value, err := encodeProviderOnlineSuccessBaseline(guard(floor), server.NowUtc())
+			connect.AssertEqual(t, err, nil)
+			server.Redis(ctx, func(r server.RedisClient) {
+				server.Raise(r.Set(ctx, providerOnlineSuccessBaselineKey, value, time.Hour).Err())
+			})
+		}
+		readFloor := func() float64 {
+			baseline := getProviderOnlineSuccessBaseline(ctx)
+			if baseline == nil {
+				return -1
+			}
+			return baseline.floor
+		}
+
+		write(0.36)
+		connect.AssertEqual(t, readFloor(), 0.36)
+		// replaced in Redis within the window: not read again
+		write(0.5)
+		connect.AssertEqual(t, readFloor(), 0.36)
+		// removed: the last read stands
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Del(ctx, providerOnlineSuccessBaselineKey).Err())
+		})
+		connect.AssertEqual(t, readFloor(), 0.36)
+		// published by this process: current at once
+		connect.AssertEqual(t, publishProviderOnlineSuccessBaseline(ctx, guard(0.7), time.Hour), nil)
+		connect.AssertEqual(t, readFloor(), 0.7)
+	})
+}

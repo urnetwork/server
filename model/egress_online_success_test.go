@@ -1,8 +1,12 @@
 package model
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -671,6 +675,144 @@ func TestProviderOnlineSuccessBaselineDocument(t *testing.T) {
 	disabled.enabled = false
 	connect.AssertEqual(t, strings.HasPrefix(disabled.logSummary(), "disabled"), true)
 	connect.AssertEqual(t, disabled.appliesIn("us"), false)
+}
+
+// A process reads the guard at most once a window: every reader within it
+// gets the last result without a read, the first reader past it reads again,
+// and a guard the process published is current at once. A failed read is
+// kept for its window too, and a failure is logged once when it starts and
+// once when it ends, however many readers ask meanwhile.
+func TestProviderOnlineSuccessBaselineReadsOnceAWindowAndLogsOnce(t *testing.T) {
+	ctx := context.Background()
+	now := onlineSuccessTestNow
+	published := onlineSuccessTestBaseline(0.36, map[string]providerOnlineSuccessCount{"us": {Measured: 2, Succeeded: 1, NoSuccess: 1}})
+	readCount := 0
+	var readErr error
+	errorLogs, infoLogs := []string{}, []string{}
+	reads := &providerOnlineSuccessBaselineReads{
+		maxAge: 30 * time.Second,
+		now:    func() time.Time { return now },
+		read: func(ctx context.Context, readNow time.Time) (*providerOnlineSuccessBaseline, error) {
+			readCount += 1
+			if readErr != nil {
+				return nil, readErr
+			}
+			return published, nil
+		},
+		errorf: func(format string, args ...any) { errorLogs = append(errorLogs, fmt.Sprintf(format, args...)) },
+		infof:  func(format string, args ...any) { infoLogs = append(infoLogs, fmt.Sprintf(format, args...)) },
+	}
+	getMany := func(want *providerOnlineSuccessBaseline) {
+		for range 100 {
+			if baseline := reads.get(ctx); baseline != want {
+				t.Fatalf("read %v, want %v", baseline, want)
+			}
+		}
+	}
+
+	// one read serves every reader in its window
+	getMany(published)
+	connect.AssertEqual(t, readCount, 1)
+	now = now.Add(29 * time.Second)
+	getMany(published)
+	connect.AssertEqual(t, readCount, 1)
+	now = now.Add(time.Second)
+	getMany(published)
+	connect.AssertEqual(t, readCount, 2)
+
+	// redis goes down: one read a window, every reader without a guard, one log
+	readErr = errors.New("unavailable: synthetic redis failure")
+	now = now.Add(30 * time.Second)
+	getMany(nil)
+	now = now.Add(30 * time.Second)
+	getMany(nil)
+	connect.AssertEqual(t, readCount, 4)
+	connect.AssertEqual(t, len(errorLogs), 1)
+	if !strings.Contains(errorLogs[0], "synthetic redis failure") || !strings.Contains(errorLogs[0], "every country is exempt") {
+		t.Fatalf("failure log %q does not say what failed and what it means", errorLogs[0])
+	}
+	connect.AssertEqual(t, len(infoLogs), 0)
+
+	// and back: one log for the end of the window
+	readErr = nil
+	now = now.Add(30 * time.Second)
+	getMany(published)
+	connect.AssertEqual(t, readCount, 5)
+	connect.AssertEqual(t, len(errorLogs), 1)
+	connect.AssertEqual(t, len(infoLogs), 1)
+
+	// a second failure window is logged again
+	readErr = errors.New("unreadable: synthetic stale guard")
+	now = now.Add(30 * time.Second)
+	getMany(nil)
+	connect.AssertEqual(t, len(errorLogs), 2)
+
+	// what this process publishes is current at once, and ends the failure
+	republished := onlineSuccessTestBaseline(0.5, map[string]providerOnlineSuccessCount{"us": {Measured: 2, Succeeded: 1, NoSuccess: 1}})
+	reads.store(republished)
+	getMany(republished)
+	connect.AssertEqual(t, readCount, 6)
+	connect.AssertEqual(t, len(infoLogs), 2)
+
+	// a reset forgets the last result, as a fresh process would
+	reads.reset()
+	readErr = nil
+	getMany(published)
+	connect.AssertEqual(t, readCount, 7)
+}
+
+// While one caller reads past the window, every other caller keeps the last
+// result instead of waiting for the read or reading too, so an unavailable
+// Redis holds up one status call a window rather than every call that
+// arrives during its timeout.
+func TestProviderOnlineSuccessBaselineReadsOneReadWhileReading(t *testing.T) {
+	ctx := context.Background()
+	var nowLock sync.Mutex
+	now := onlineSuccessTestNow
+	first := onlineSuccessTestBaseline(0.36, map[string]providerOnlineSuccessCount{"us": {Measured: 2, Succeeded: 1, NoSuccess: 1}})
+	second := onlineSuccessTestBaseline(0.5, map[string]providerOnlineSuccessCount{"us": {Measured: 2, Succeeded: 1, NoSuccess: 1}})
+	var readCount atomic.Int32
+	readStarted := make(chan struct{})
+	readRelease := make(chan struct{})
+	reads := &providerOnlineSuccessBaselineReads{
+		maxAge: 30 * time.Second,
+		now: func() time.Time {
+			nowLock.Lock()
+			defer nowLock.Unlock()
+			return now
+		},
+		read: func(ctx context.Context, readNow time.Time) (*providerOnlineSuccessBaseline, error) {
+			if readCount.Add(1) == 1 {
+				return first, nil
+			}
+			close(readStarted)
+			<-readRelease
+			return second, nil
+		},
+		errorf: func(format string, args ...any) {},
+		infof:  func(format string, args ...any) {},
+	}
+	connect.AssertEqual(t, reads.get(ctx), first)
+
+	func() {
+		nowLock.Lock()
+		defer nowLock.Unlock()
+		now = now.Add(time.Minute)
+	}()
+	reading := make(chan *providerOnlineSuccessBaseline)
+	go func() {
+		reading <- reads.get(ctx)
+	}()
+	<-readStarted
+	// the read is held: other callers keep the last result and do not read
+	for range 10 {
+		connect.AssertEqual(t, reads.get(ctx), first)
+	}
+	connect.AssertEqual(t, readCount.Load(), int32(2))
+	close(readRelease)
+	connect.AssertEqual(t, <-reading, second)
+	connect.AssertEqual(t, reads.get(ctx), second)
+	connect.AssertEqual(t, readCount.Load(), int32(2))
 }
 
 // The status of a provider the rule excludes says what to fix; with the
