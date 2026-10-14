@@ -35,11 +35,12 @@ func snMainnetMigrationTestEnv() *server.TestEnv {
 
 // A catalog fixture runs the complete coherence query once for each projected
 // fault, a few seconds of PostgreSQL time apiece, so a fixed budget fits one
-// host and not the next: the native-fee foreign-key custody fixture took 508 s
-// on a loaded build host on 2026-10-14, past the five minutes it had. The
-// budget follows the run's own deadline instead: the package's -timeout, less
-// a margin to report the failure and drop the database in. A run without a
-// deadline gets snMainnetMigrationFixtureBudget.
+// host and not the next. On a loaded build host on 2026-10-14 the native-fee
+// foreign-key custody fixture took 508 s against the five minutes it had, and
+// the partial-index guard fixture ran past its minute under the race
+// detector. The budget follows the run's own deadline instead: the package's
+// -timeout, less a margin to report the failure and drop the database in. A
+// run without a deadline gets snMainnetMigrationFixtureBudget.
 func snMainnetMigrationFixtureContext(t testing.TB) (context.Context, context.CancelFunc) {
 	if test, ok := t.(interface{ Deadline() (time.Time, bool) }); ok {
 		if deadline, ok := test.Deadline(); ok {
