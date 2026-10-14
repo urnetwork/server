@@ -75,6 +75,10 @@ func providerEgressProbeHandsBack(
 	settings providerEgressProbeSettings,
 	now time.Time,
 ) bool {
+	// Nil arguments name no shard; validation fails them.
+	if args == nil {
+		return false
+	}
 	if !providerEgressProbeNewerForeignGeometry(args, settings) {
 		return settings.Enabled && providerEgressProbeDisabledByNewerConfig(ctx, now)
 	}

@@ -903,3 +903,36 @@ func TestProviderEgressProbeHandBackFromARunPostRetryKeepsTheShard(t *testing.T)
 		}
 	})
 }
+
+// Nil arguments, for example a stored snapshot that decoded to null, name no
+// shard. With a newer config's disabled marker live, a pass handed them back,
+// and its post-step then read their shard index and panicked, also from a
+// RunPost retry. The pass must fail them as invalid instead, and a post-step
+// given them must schedule nothing.
+func TestProviderEgressProbeNilArgumentsAreNotHandedBack(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		t.Setenv("WARP_CONFIG_VERSION", testOlderConfigVersion)
+		withProviderEgressProbeSettings(t, testUrlGeometrySettings(4, 8))
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		server.Tx(ctx, func(tx server.PgTx) {
+			testInsertDisabledMarker(t, ctx, tx, testNewerConfigVersion, server.NowUtc(), server.NowUtc().Add(time.Hour))
+		})
+
+		if result, err := ProviderEgressProbe(nil, clientSession); err == nil || (result != nil && result.HandedBack) {
+			t.Errorf("nil arguments were handed back instead of failing: result=%+v err=%v", result, err)
+		}
+		failure := server.HandleError(func() {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.Raise(ProviderEgressProbePost(nil, &ProviderEgressProbeResult{HandedBack: true}, clientSession, tx))
+			})
+		})
+		if failure != nil {
+			t.Errorf("the post-step of handed-back nil arguments failed: %v", failure)
+		}
+		if count := testPendingProbeRowCount(t, ctx); count != 0 {
+			t.Errorf("the post-step of nil arguments scheduled %d shards", count)
+		}
+	})
+}

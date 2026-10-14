@@ -639,7 +639,7 @@ func ProviderEgressProbePost(
 	if !settings.Enabled {
 		return nil
 	}
-	if args.ShardIndex < 0 || settings.ShardCount <= args.ShardIndex {
+	if args == nil || args.ShardIndex < 0 || settings.ShardCount <= args.ShardIndex {
 		return nil
 	}
 
