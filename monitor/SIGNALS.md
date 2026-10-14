@@ -14936,15 +14936,29 @@ source must contain the cohort query, reducer and optional observation sink.
 Output failures remain monitor visibility errors and retain actual deficit
 alerts; the observer never converts healthy samples into alerts.
 
-First admission waits for reliability history: URL admission needs at least
-one `client_connection_reliability_score` row unless intent priority admits
-the provider, and the score pass opens the first cycle. Before that rule the
-location pass, which commits before the score pass, admitted a connection
-with no scores as neutral. The census counted it and the scheduler claimed it
-until its first failing scores 20 to 130 seconds later, and the cycle it
-opened made the real admission about eight hours later count as mature with
-no runs. Cycles opened that way before the rule shipped are not reset, so each
-such provider still adds one mature deficit when it is first really admitted.
+First admission waits for current reliability history: URL admission needs a
+one hour (`lookback_index=1`) `client_connection_reliability_score` row unless
+intent priority admits the provider. The lookbacks nest (5 minutes, one hour,
+12 hours) and a lookback's row is deleted once its window holds no
+observation, so a provider back after more than an hour offline has only its
+12 hour row and waits for the score pass to write its hour. The first cycle
+opens at the first admission that sees passing history, usually the score pass
+that writes it; a later location pass or public-mode change (`SetProvide`) can
+open it too. Before the rule the location pass, which commits before the score
+pass, admitted a connection with no scores as neutral, and later a returning
+provider on its 12 hour row alone. The census counted it and the scheduler
+claimed it until the score pass wrote its failing scores 20 to 130 seconds
+later. A new connection's cycle also made its real admission about eight hours
+later count as mature with no runs. Cycles opened that way before the rule
+shipped are not reset, so each such provider still adds one mature deficit
+when it is first really admitted.
+
+During a reliability rollup stall the location pass still runs, but
+`UpdateReliabilities` skips the score pass until `ClientReliabilityRollupSynced`
+holds. New providers, and providers back after more than an hour, therefore
+serve as neutral but are not URL-probed until the rollup recovers and the
+score pass writes their hour; providers scored before the stall keep their last
+scores. Whether that trade-off is acceptable is pending an owner decision.
 
 The provider quality probes dashboard has a dedicated URL quota row with the
 known mature ratio, known warming count, unknown age count, all-current quota,
