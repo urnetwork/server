@@ -1671,10 +1671,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	if self.settings.testingBeforeAuthorizationLease != nil {
 		self.settings.testingBeforeAuthorizationLease(handleCtx, byJwt)
 	}
-	lease, leaseErr := session.StartConnectionAuthorizationLease(handleCtx, byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
-		authorizationCloseCode.Store(int32(code))
-		handleCancel()
-	})
+	// the lease's final check before admission is one of the handshake's queries
+	lease, leaseErr := session.StartConnectionAuthorizationLease(
+		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
+			authorizationCloseCode.Store(int32(code))
+			handleCancel()
+		})
 	if leaseErr != nil {
 		h1Observation.result = connectH1ResultStateRefused
 		status := http.StatusUnauthorized
@@ -2600,10 +2602,12 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			if self.settings.testingBeforeAuthorizationLease != nil {
 				self.settings.testingBeforeAuthorizationLease(handleCtx, byJwt)
 			}
-			lease, leaseErr = session.StartConnectionAuthorizationLease(handleCtx, byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
-				_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
-				handleCancel()
-			})
+			// the lease's final check before admission is one of the handshake's queries
+			lease, leaseErr = session.StartConnectionAuthorizationLease(
+				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
+					_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
+					handleCancel()
+				})
 			if leaseErr != nil {
 				if !connectAuthDependencyUnavailable(leaseErr) {
 					return refused(leaseErr)
