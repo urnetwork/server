@@ -10807,6 +10807,64 @@ failing block and an absent gauge. The reconcile itself is tested in
 `connect/transport_announce_reconcile_test.go` and
 `connect/transport_announce_reconcile_db_test.go`.
 
+### 2.16b Live connection announcement failures — reads and writes retried with the transport kept
+Probe: `connection-live-failures`
+
+A live Connect announcement reads its provide key changes every sync round,
+publishes its connection's measurements, and refreshes its verify egress
+lease. Before 2026-10-14 a failed sync read or lease write raised and tore
+the transport down, so a database outage disconnected every provider whose
+sync fell in it, and a failed measurement write ended the publisher for the
+connection's life. Each now keeps the transport and retries with a backoff of
+at most 2 minutes, counting every failure:
+
+- `urnetwork_connect_connection_sync_read_failures_total`;
+- `urnetwork_connect_connection_worker_failures_total{operation="measurement_write|verify_egress_lease"}`.
+
+Each failure is logged at V(1), and the process logs them unconditionally at
+most once a minute, with the failures by operation since its last line and the
+latest error:
+
+```text
+[t]live connection failures retried with the transport kept (in 1m0s): measurement_write=412 sync_read=1803; latest sync_read: <error>
+```
+
+The probe evaluates, per host, block and operation, the failures in the
+fewest-failure 2 minute window of the last 15 minutes and in the whole range:
+
+```promql
+label_replace(label_replace(min_over_time((sum by (host,block) (increase(urnetwork_connect_connection_sync_read_failures_total{env="main"}[2m])))[15m:1m]),"operation","sync_read","__name__",".*"),"monitor_metric","window_min","__name__",".*")
+or label_replace(label_replace(sum by (host,block) (increase(urnetwork_connect_connection_sync_read_failures_total{env="main"}[15m])),"operation","sync_read","__name__",".*"),"monitor_metric","total","__name__",".*")
+or label_replace(min_over_time((sum by (host,block,operation) (increase(urnetwork_connect_connection_worker_failures_total{env="main"}[2m])))[15m:1m]),"monitor_metric","window_min","__name__",".*")
+or label_replace(sum by (host,block,operation) (increase(urnetwork_connect_connection_worker_failures_total{env="main"}[15m])),"monitor_metric","total","__name__",".*")
+```
+
+- HEALTHY: failures are isolated, or only one connection fails. One
+  connection retries at most every 2 minutes, so it fails about 8 times in
+  the range, below the floor of 30.
+- SUSTAINED (`connection-live-failures-sustained`, two probes): a block
+  operation failed in every 2 minute window and at least 30 times in 15
+  minutes. The block's PostgreSQL or Redis path keeps failing: sync_read stops
+  its providers' mode changes and reliability stats, measurement_write stops
+  its measurements reaching the reliability writer, verify_egress_lease lets
+  its leases lapse after their ttl. Read the block's unconditional log line
+  for the latest error, then restore the database path (§2.11, §2.2) or Redis
+  (§3). Do not restart the block for these failures alone: the transports are
+  kept, and a restart reconnects every connection.
+- UNOBSERVABLE (`connection-live-failures-unobservable`, two probes): samples
+  that are unlabeled, stale or negative. Absent counters are §2.16a's: the
+  same processes export the reconcile gauge, whose unobservable class covers a
+  fleet that does not export them.
+
+Panels 58 (sync reads retried) and 59 (worker writes retried, by operation) of
+the Connect dashboard chart the counters.
+
+Implementation convention: SIGNALS.md §2.16b (`connection-live-failures`)
+maps to `signal_connection_live_failures.go` and
+`signal_connection_live_failures_test.go`. Synthetic tests cover a healthy
+fleet, one failing connection below the floor, a sustained block and a stale
+sample. The log is tested in `connect/transport_announce_failure_log_test.go`.
+
 ### 2.17 Missing companion-origin contract rate — return path cannot anchor
 Probe: `missing-origin`
 

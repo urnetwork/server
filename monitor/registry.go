@@ -81,6 +81,7 @@ func NewSignals() []Signal {
 		NewReliabilityFreshnessSignal(),
 		NewConnectionOrphansSignal(),
 		NewConnectionReconcileSignal(),
+		NewConnectionLiveFailuresSignal(),
 		NewMissingOriginSignal(),
 		NewOriginWaitSignal(),
 		NewStaleDestinationSignal(),
