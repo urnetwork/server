@@ -216,6 +216,7 @@ active missing capability and must not be read as green.
 | 2.6b | Coverage gap | A probe of the contract degradation valve state is missing: `open-contracts` and `contract-rate` show the close backlog and creation rate that drive it, not whether exhausted payers get free contracts or providers go unpaid. |
 | 2.11a | Coverage gap | A monitor reader of the PgBouncer pool exporter is missing: Grafana rules evaluate it, while `pgbouncer-stalls` checks listener admission and app-side 6432 write timeouts and `log-errors` counts queue-timeout lines. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
+| 2.19g | Coverage gap | A monitor reader of the capability probe's urnetwork_capability_probe_* series and of the age of the modern provider gate's evidence is missing: `task-health` sees the probe's task row and `egress-coverage` the URL probe's coverage, and neither says whether the gate's evidence is fresh or whether capability tunnels retire their derived clients. |
 | 3.6a | Coverage gap | A per-channel sharded-subscriber census is missing: `redis-topology` checks membership and phantoms, and `redis-keyevents` checks keyspace-notification patterns, not SSUBSCRIBE channels. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
@@ -15758,6 +15759,100 @@ or Main policy activation. Missing observation coverage can hide either losses
 or gains. Publishing candidate MMDB bytes is itself a serving change on current
 binaries, independently of the subscriber request-guard switch; keep shadow
 resources separate until every activation gate is reviewed.
+
+### 2.19g Modern provider evidence — the capability probe must keep measuring
+Planned probe: `capability-probe` (none is registered; the signals below are dashboard reads, and the crosswalk lists the gap)
+
+WHAT: the FP2 modern provider gate (FP2FIX.md, "Modern provider gate") reads
+`provider_modern_evidence`, and only the capability probe writes it: the
+recurring taskworker task `work.CapabilityProbe` (`server/capprobe`), one pass
+at a time fleet-wide, each provider measured in a short tunnel of its own
+whose clients attempt opportunistic end-to-end sessions. The URL probe writes
+no evidence. While the gate's switch is off a stopped probe only freezes the
+shadow; once it is on, a stopped probe ages every provider's evidence toward
+`stale_evidence` and the gate takes Quality and Speed away from providers
+that are modern. Every series below is per taskworker process
+(`urnetwork_capability_probe_*`, egress probes dashboard, capability probe
+row); sum across the env's taskworkers and remember a process restart resets
+counters.
+
+Healthy shape:
+
+- `passes_total{result="measured"}` advances about once a pass interval while
+  a sweep is under way, and `result="waiting"` between sweeps, which start
+  `min_sweep_interval_minutes` (360) after the last one started.
+  `last_pass_timestamp_seconds` is never older than a pass's
+  `max_time_seconds` (900) plus the sweep interval's tail.
+- `in_flight` stays at or under `concurrency` (16) on one taskworker at a
+  time.
+- `providers_total` is mostly `recorded_*`: `recorded_not_post_quantum`
+  dominates while most providers run the custom lineage.
+- `measure_seconds` p95 is about 61-65 s (a provider without the end-to-end
+  responder takes the whole establishment window after its first
+  acknowledgement) and never above `measure_timeout_seconds` (120); modern
+  providers read in seconds.
+- `selection_total` in steady state: `scanned` far above `due`; during the
+  first sweep after deployment, about two days, `due` and `eligible` are
+  close to `scanned` and the shadow's `no_evidence` is large. Neither is a
+  finding then.
+
+Signals:
+
+- `capability-probe-stalled` — WARN when no taskworker has finished a
+  measured or waiting pass for 30 minutes while `capability_probe.yml`
+  enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
+  PAGE after two hours with the gate switched on. Read
+  `passes_total{result="failed"}` and the taskworker log's `[capprobe]` and
+  task error lines: unreadable or invalid settings; the URL probe's
+  `shard_count` reaching the capability probe's prober shard slot 255; shard
+  allocation, identity or readiness; a page read; or an evidence write. A
+  failed pass retries the same sweep page after a minute, so a persistent
+  failure repeats once a minute. `passes_total{result="disabled"}` rising is
+  `enabled: false`, deliberate or not.
+- `capability-probe-no-evidence` — WARN when measurements finish for an hour
+  and none records (`providers_total` rising with every `recorded_*` flat).
+  The outcome says where: `tunnel_failed` is the probe's own setup (shard
+  credentials, local control, control plane); `no_ack` everywhere is the
+  probe's tunnels reaching no provider, so compare §2.19's URL probe health
+  before suspecting the fleet; `e2e_not_attempted` means the probe client's
+  sessions are off, a code or settings regression in which every reading
+  would be wrong, never something to record around; `e2e_pending` means
+  setup ate the measurement's margin over the 60 s window; `record_failed`
+  is the database write, and fails the pass.
+- `capability-probe-unsealed-share` — INFO for the shadow review, WARN above
+  10% over a day: of the negotiated post-quantum readings
+  (`readings_total{capability="e2e",reading=~"post_quantum_.*"}`), the share
+  `post_quantum_unsealed`. Those providers negotiated the hybrid group but
+  the probe could not verify their identity proof within the seal grace (no
+  published provider key, or the probe's key read failing). The model counts
+  them post-quantum, so understand the share before the switch goes on.
+- `capability-probe-staleness-risk` — WARN when
+  `last_sweep_seconds` exceeds the seven-day staleness window less
+  `modern_refresh_hours` and the sweep interval (about 3.75 days at the
+  defaults), or when the shadow's
+  `urnetwork_stats_provider_modern_gate_shadow{outcome="stale_evidence"}`
+  rises for a day: the probe no longer refreshes evidence before the gate
+  reads it as stale. Raise `concurrency` or find what fails first; never
+  lengthen the staleness window to hide it.
+- `capability-probe-teardown-errors` — WARN while
+  `close_errors_total` rises for an hour: capability tunnels fail to retire
+  their derived clients, which the prober reaper then owns. Cross-check
+  §2.25's derived-client retirement before attributing it.
+
+Not signals: a large `no_evidence` share in the first two days after the
+first deployment; `not_post_quantum` dominating the shadow; a provider that
+gives no evidence being measured again only by the next sweep (that is the
+probe's retry spacing, by design); `waiting` passes between sweeps.
+
+Do not backfill evidence rows by hand, route evidence through URL probe
+runs, or switch the gate on while the first sweep is incomplete or
+`capability-probe-stalled` holds. A measurement records only when both
+capabilities read conclusively; a capability that was not tested is never
+recorded as a negative, so "missing negatives" are not a defect to repair.
+
+Implementation convention: no monitor probe implements these classes yet;
+they are dashboard reads of the series above. A probe for them belongs in
+`signal_capability_probe.go` with the class names here.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`

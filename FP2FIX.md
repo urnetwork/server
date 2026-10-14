@@ -1,8 +1,8 @@
 # FindProviders2 supply and quality-probe repair plan
 
 Latest user decision, 2026-10-14: option 4, probe-verified, shadow first.
-**Quality and Speed will require a modern provider: one the FP2 URL prober has
-measured, on a real client to provider session, negotiating end-to-end
+**Quality and Speed will require a modern provider: one the capability probe
+has measured, on a real client to provider session, negotiating end-to-end
 post-quantum encryption (the TLS 1.3 hybrid X25519MLKEM768) and advertising
 resizable transfer windows (acks carrying `receive_window_byte_count`).**
 Versions are not trusted: about 72% of providers run a custom "v3.23.0-fix"
@@ -10,7 +10,10 @@ lineage. Online does not require it. The gate ships off
 (`quality_speed_requires_modern_provider: false` in provider.yml) while the
 dashboard counts and every score export count what it would take out, and it
 is switched on only after those shadow numbers are reviewed. Its evidence table is migration 836, which Main
-gets only once the owner approves applying it. See
+gets only once the owner approves applying it. Owner decision, the same day:
+the evidence comes from a separate capability probe task
+([server/capprobe](capprobe/README.md)), not from the URL measurement tunnel,
+whose encryption stays off. See
 [the modern provider gate](#modern-provider-gate-2026-10-14) and the gate
 matrix below.
 
@@ -285,35 +288,74 @@ quality/speed/online backfill order; preserve it while fixing membership.
 ### Modern provider gate (2026-10-14)
 
 Owner decision, 2026-10-14: option 4, probe-verified, shadow first. A provider
-is modern when the FP2 URL prober has measured, on a real client to provider
-session, both end-to-end post-quantum encryption (the TLS 1.3 hybrid
+is modern when the capability probe has measured, on a real client to
+provider session, both end-to-end post-quantum encryption (the TLS 1.3 hybrid
 X25519MLKEM768, which providers answer since v2026.7.21-999024260) and
 resizable transfer windows (acks carrying `receive_window_byte_count`, since
-v2026.9.14-1046484290). Versions are not read. The implementation is
-`model/egress_modern_provider.go`.
+v2026.9.14-1046484290). Versions are not read. The gate is
+`model/egress_modern_provider.go`; its evidence is
+[server/capprobe](capprobe/README.md). A second owner decision the same day
+put the evidence in a separate capability probe task rather than in the URL
+measurement tunnel: sealing a URL measurement would stall it whenever a
+provider cannot resolve the probe client's key.
 
-- **Evidence.** A probe run that observed its session reports what it saw
-  beside its URL result (`modern_evidence`, optional on the operator's health
-  submission), and the ingest records it in `provider_modern_evidence`
-  (migration 836), one row per provider: post_quantum, key_exchange,
-  window_resizable, max_receive_window_byte_count, measured_at,
-  first_measured_at, run_count. The latest observation wins and counts a run.
-  A retried report changes nothing, an older delayed one only moves
-  first_measured_at, and a conflicting one at the same instant keeps the less
-  modern reading of each capability. A session without end-to-end encryption
-  is not post-quantum whatever else it reports. Evidence observed more than a
-  minute ahead, with a negative window or an unstorable key exchange name is
-  refused and logged; it never refuses the run. A run that observed nothing
-  records nothing. provider_egress_health_history is not touched.
+- **Evidence.** The capability probe (`work.CapabilityProbe`, a recurring
+  taskworker task) measures each provider in a short tunnel of its own and
+  records a conclusive measurement through `model.RecordProviderModernEvidence`
+  in `provider_modern_evidence` (migration 836), one row per provider:
+  post_quantum, key_exchange, window_resizable,
+  max_receive_window_byte_count, measured_at, first_measured_at, run_count.
+  The latest observation wins and counts a run. A retried write changes
+  nothing, an older delayed one only moves first_measured_at, and a
+  conflicting one at the same instant keeps the less modern reading of each
+  capability. A session without end-to-end encryption is not post-quantum
+  whatever else it reports. Evidence observed more than a minute ahead, with
+  a negative window or an unstorable key exchange name is refused and logged.
+  A measurement that observed nothing records nothing, and neither does one
+  where either capability went untested. provider_egress_health_history, the
+  URL due queue and the URL quota are not touched. The URL probe's
+  submission carries no evidence: the gate's first cut put an optional
+  `modern_evidence` on it, read through an `egresshealth.ModernEvidenceSource`
+  transport, and the capability probe branch removed that path, since a URL
+  tunnel with encryption off could only ever report nothing.
+- **Capability probe.** Each pass continues a sweep over the connected, valid
+  providers in client id order, a bounded page at a time, and keeps the due
+  ones (no evidence, modern evidence older than `modern_refresh_hours`, other
+  evidence older than `other_refresh_hours`, 72 and 72 by default) that the
+  egress rules admit to Quality or Speed before the gate, so a provider the
+  gate takes out still gets measured. It measures up to `limit` (64) of them,
+  `concurrency` (16) at once, each in a tunnel whose window pings the
+  provider and whose clients attempt opportunistic end-to-end sessions after
+  the platform has processed their key registration, recording into connect's
+  `PeerCapabilityObservations`. A measurement stops once both capabilities
+  read conclusively (an acknowledgement read the window; the session
+  negotiated, sealed or after a ten-second seal grace, or its ClientHello
+  went unanswered for a whole 60 s establishment window counted from both the
+  first attempt and the first acknowledgement), and at
+  `measure_timeout_seconds` (120) whatever the reading. A provider that gave
+  no evidence is retried by the next sweep, which starts at least
+  `min_sweep_interval_minutes` (360) after the last one started. A pass
+  selects from the database first, and one that measures runs in a prober
+  shard of its own (slot 255, refused while the URL probe's `shard_count`
+  reaches it): a private network, credential parent and balance, so its load
+  and funding are apart from the URL probe's quota and budget. A pass with
+  nothing to measure takes no shard. Settings are `capability_probe.yml`,
+  enabled by default. Metrics are `urnetwork_capability_probe_*` on the
+  egress probes dashboard, and SIGNALS.md §2.19g reads them.
 - **Outcomes.** Each pass classifies a provider's row: `modern`,
   `not_post_quantum`, `no_resizable_windows`, `no_evidence` or
   `stale_evidence`. Age is tested first: evidence exactly seven days old is
   stale, as a URL outcome exactly eight hours old is. Then post-quantum, then
   windows, so a row without either is `not_post_quantum`. Seven days outlasts
-  runs that observe nothing, such as a prober outage or probers rolling out
-  without the evidence. A provider in Quality or Speed is probed about ten
-  times in four hours, so its evidence is minutes old, and a downgrade shows
-  at its next run whatever the window.
+  measurements that observe nothing, such as a probe outage or a provider
+  that could not be reached. The capability probe refreshes a provider's
+  evidence after three days by default, and its settings refuse a refresh
+  that, with one sweep interval's delay, would not land inside the seven, so
+  a downgrade shows at the provider's next measurement, within about three
+  days. With 16 tunnels at a time the probe measures several hundred
+  providers an hour, so the first sweep over the fleet's Quality and Speed
+  providers takes about two days, and until it has, the shadow's
+  `no_evidence` is large.
 - **Shadow counts.** For the providers the other rules admit to Quality and to
   Speed, the passes count the gate's outcome whether the gate is on or off.
   The dashboard counts publish
@@ -338,18 +380,25 @@ v2026.9.14-1046484290). Versions are not read. The implementation is
   for the URL ratio. Online is unchanged, so a Quality or Speed answer still
   reaches a non-modern provider in its Online tier, after both native
   buckets.
-- **Rollout.** Apply migration 836 on Main once the owner approves: a server
-  built with it requires it, so this work merges into main only after that.
-  Deploy with the switch off. Integrate the connect library's session
-  evidence into the prober: the probe tunnel's HTTP transport implements
-  `egresshealth.ModernEvidenceSource`, the probe client negotiates end-to-end
-  encryption (probe clients run `EncryptionModeOff` today, which would read
-  every provider as not post-quantum), and the API deploys before probers
-  send the field, since the handler refuses unknown keys. Review the shadow
-  counts until `no_evidence` is small and the not-modern providers are
-  understood. Switch the gate on only after that review;
+- **Rollout.** In order. (1) Merge the connect accessor
+  (`ClientSettings.PeerCapabilityObservations`, connect
+  feat/modern-provider-evidence) into connect main, and revert the capability
+  probe branch's temporary replace of connect with that worktree. (2) Apply
+  migration 836 on Main once the owner approves: a server built with it
+  requires it, so this work merges into main only after that. (3) Deploy the
+  API and the taskworkers with the switch off; the capability probe starts
+  measuring at the taskworkers' next start (`enabled: false` in
+  `capability_probe.yml` stops it at the next pass). There is no API-first
+  constraint any more: nothing new rides the operator submission. (4) Review
+  the shadow counts until `no_evidence` is small and the not-modern providers
+  are understood, with the capability probe's readings: a large
+  `post_quantum_unsealed` share would mean providers whose identity proof the
+  probe could not verify, which the gate counts as post-quantum and which
+  should be understood first. (5) Switch the gate on only after that review;
   `quality_speed_requires_modern_provider: false` turns it off again at each
-  pass's next settings read.
+  pass's next settings read. Lowering `other_refresh_hours` before the
+  switch returns an updated provider sooner, at a measurement of every
+  non-modern provider that often.
 
 ## Metrics derived for ranking
 
