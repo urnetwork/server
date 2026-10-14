@@ -59,6 +59,7 @@ var reviewedRescueCancelSites = map[rescueCancelSite]int{
 	// The worker's owner should end with it: a raise leaves the resident
 	// without the consumer, and the client reconnects to a fresh resident.
 	{path: "connect/resident.go", function: "(*Resident).startClientCallbackWorkers", handler: "self.cancel"}: 1,
+	{path: "connect/resident.go", function: "(*Resident).startClientForwardIngress", handler: "self.cancel"}:  1,
 }
 
 // The helpers whose trailing arguments are rescue handlers.

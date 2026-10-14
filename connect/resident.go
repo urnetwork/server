@@ -4018,14 +4018,15 @@ func (self *Resident) startClientForwardIngress(shardIndex int) chan residentFor
 		shard.queue = queue
 		self.callbackWorkers.Add(1)
 		residentCallbackWorkersGauge.Inc()
-		// A raise ends the shard's consumer and leaves the resident running
-		// without one: later forwards on the shard fill its queue and are
-		// refused.
+		// A raise cancels the resident, so its client reconnects to a fresh
+		// one instead of keeping a resident that refuses every forward to the
+		// shard's destinations. The consumer runs on the resident's context,
+		// and a forward's own cancellation stays inside its forward worker.
 		go server.HandleError(func() {
 			defer self.callbackWorkers.Done()
 			defer residentCallbackWorkersGauge.Dec()
 			self.runClientForwardIngress(queue)
-		})
+		}, self.cancel)
 	})
 	return shard.queue
 }
