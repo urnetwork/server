@@ -272,6 +272,39 @@ func TestOnlineUrlSuccessCountryGuard(t *testing.T) {
 	}
 }
 
+// The guard compares a share with the floor exactly, as the decimals they
+// are written in. A share equal to the floor is not below it, where a float
+// product puts 7 of 25 below a floor of 0.28 (0.28·25 is 7.0000000000000009)
+// and exempts the country.
+func TestOnlineUrlSuccessCountryGuardComparesTheFloorExactly(t *testing.T) {
+	baseline := &providerOnlineSuccessBaseline{countryCodeCounts: map[string]providerOnlineSuccessCount{
+		"a": {Measured: 25, Succeeded: 7},
+		"b": {Measured: 25, Succeeded: 6},
+		"c": {Measured: 100, Succeeded: 55},
+		"d": {Measured: 100, Succeeded: 7},
+		"e": {Measured: 25, Succeeded: 9},
+		"f": {Measured: 25, Succeeded: 8},
+	}}
+	for _, c := range []struct {
+		countryCode string
+		floor       float64
+		exempt      bool
+	}{
+		{countryCode: "a", floor: 0.28, exempt: false},
+		{countryCode: "b", floor: 0.28, exempt: true},
+		{countryCode: "c", floor: 0.55, exempt: false},
+		{countryCode: "d", floor: 0.07, exempt: false},
+		// the default floor at its boundary
+		{countryCode: "e", floor: 0.36, exempt: false},
+		{countryCode: "f", floor: 0.36, exempt: true},
+	} {
+		count := baseline.countryCodeCounts[c.countryCode]
+		if exempt := baseline.exempt(c.countryCode, c.floor); exempt != c.exempt {
+			t.Errorf("%d of %d against floor %v: exempt %t, want %t", count.Succeeded, count.Measured, c.floor, exempt, c.exempt)
+		}
+	}
+}
+
 // The guard counts only providers the common gates admit with current URL
 // evidence; unmeasured, stale and hard-excluded providers say nothing about
 // the probe in their country.

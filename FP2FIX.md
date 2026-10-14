@@ -826,7 +826,9 @@ gate matrix.
   `online_success_country_floor` of its measured Online providers have a
   success. Measured Online providers are common-gate passes with current
   evidence. The test is share < floor, and a country with no measured provider
-  is exempt.
+  is exempt. Shares and floors are compared exactly, in integer millionths, so
+  a share equal to the floor as written is never below it (a float product put
+  7 of 25 below a floor of 0.28).
   - Each fleet pass computes the guard over its own population from evidence it
     already loaded: the score export, the location counts and the dashboard
     counts.

@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -79,7 +80,20 @@ func (self *providerOnlineSuccessBaseline) exempt(countryCode string, floor floa
 		return true
 	}
 	count := self.countryCodeCounts[countryCode]
-	return count.Measured <= 0 || float64(count.Succeeded) < floor*float64(count.Measured)
+	return count.Measured <= 0 || providerOnlineSuccessShareBelow(count.Succeeded, count.Measured, floor)
+}
+
+// A share of the guard is compared in millionths, in integers, so a share
+// equal to the floor as provider.yml writes it is never below it. A float
+// product can be: 0.28·25 is 7.0000000000000009, which would put 7 of 25
+// below a floor of 0.28. A floor finer than a millionth rounds to the
+// nearest one.
+const providerOnlineSuccessShareScale = 1000 * 1000
+
+// Whether succeeded of measured is less than share, compared exactly.
+func providerOnlineSuccessShareBelow(succeeded int, measured int, share float64) bool {
+	scaledShare := int64(math.Round(share * providerOnlineSuccessShareScale))
+	return int64(succeeded)*providerOnlineSuccessShareScale < scaledShare*int64(measured)
 }
 
 // Counts a pass's population by published country: every provider the common
