@@ -305,90 +305,13 @@ type connectionMeasurements struct {
 	speedSampleCount   uint64
 }
 
-func NewConnectionAnnounceWithDefaults(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	networkId server.Id,
-	clientId server.Id,
-	clientAddress string,
-	handlerId server.Id,
-	announceTimeout time.Duration,
-) *ConnectionAnnounce {
-	return NewConnectionAnnounce(
-		ctx,
-		cancel,
-		networkId,
-		clientId,
-		clientAddress,
-		handlerId,
-		announceTimeout,
-		DefaultTestConfig(),
-		DefaultConnectionAnnounceSettings(),
-	)
-}
-
-// NewConnectionAnnounce announces a legacy, family-agnostic connection
-// (intent 0). Family-pinned transports use NewConnectionAnnounceWithIpFamily.
-func NewConnectionAnnounce(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	networkId server.Id,
-	clientId server.Id,
-	clientAddress string,
-	handlerId server.Id,
-	announceTimeout time.Duration,
-	testConfig *TestConfig,
-	settings *ConnectionAnnounceSettings,
-) *ConnectionAnnounce {
-	return NewConnectionAnnounceWithIpFamily(
-		ctx,
-		cancel,
-		networkId,
-		clientId,
-		clientAddress,
-		0,
-		"",
-		handlerId,
-		announceTimeout,
-		testConfig,
-		settings,
-	)
-}
-
-// NewConnectionAnnounceWithIpFamily is NewConnectionAnnounce with the address
-// family the transport declared it intends to prove (0, 4 or 6) and the
-// client's app version from its auth.
-func NewConnectionAnnounceWithIpFamily(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	networkId server.Id,
-	clientId server.Id,
-	clientAddress string,
-	ipFamilyIntent int,
-	appVersion string,
-	handlerId server.Id,
-	announceTimeout time.Duration,
-	testConfig *TestConfig,
-	settings *ConnectionAnnounceSettings,
-) *ConnectionAnnounce {
-	return newConnectionAnnounceWithReconcile(
-		ctx,
-		cancel,
-		networkId,
-		clientId,
-		clientAddress,
-		ipFamilyIntent,
-		appVersion,
-		handlerId,
-		nil,
-		announceTimeout,
-		testConfig,
-		settings,
-	)
-}
-
-// The announcement of a transport that a ConnectHandler owns: connectionReconcile
-// is that handler's, and retires the row if its final disconnect fails.
+// The announcement of a transport that a ConnectHandler owns, the only kind in
+// production: connectionReconcile is that handler's, holds the row while the
+// transport lives, and retires it if its final disconnect fails. ipFamilyIntent
+// is the address family the transport declared it intends to prove (0, 4 or
+// 6) and appVersion the client's app version from its auth. Tests announce
+// without a reconcile through NewConnectionAnnounce*
+// (transport_announce_testing_test.go).
 func newConnectionAnnounceWithReconcile(
 	ctx context.Context,
 	cancel context.CancelFunc,
