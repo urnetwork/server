@@ -4817,6 +4817,10 @@ func (self *Resident) Cancel() {
 }
 
 // Starts one owned exchange-forward loop unless resident shutdown has begun.
+// A raise ends that forward only: run cancels and unpublishes it, and the next
+// packet to the destination opens a new one. The resident outlives its
+// forwards, so neither a forward's lookup failure nor the cancellation raise
+// of a retired forward's narrower context may cancel it.
 func (self *Resident) startForwardWorker(forward *ResidentForward, run func()) bool {
 	self.forwardWorkerLock.Lock()
 	defer self.forwardWorkerLock.Unlock()
@@ -4829,7 +4833,7 @@ func (self *Resident) startForwardWorker(forward *ResidentForward, run func()) b
 		defer self.forwardWorkers.Done()
 		defer residentForwardWorkersGauge.Dec()
 		run()
-	}, self.cancel)
+	})
 	return true
 }
 

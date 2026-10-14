@@ -34,3 +34,25 @@ func TestExchangeConnectionWorkerRaiseKeepsExchange(t *testing.T) {
 		}
 	})
 }
+
+// A raise in one forward, such as a failed resident lookup or the cancellation
+// raise of a forward the idle reaper retired mid-lookup, ends that forward and
+// leaves its resident serving the client.
+func TestResidentForwardWorkerRaiseKeepsResident(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for _, raise := range []any{errors.New("synthetic resident lookup failure"), context.Canceled} {
+			ctx, cancel := context.WithCancel(t.Context())
+			resident := &Resident{ctx: ctx, cancel: cancel}
+			if !resident.startForwardWorker(nil, func() {
+				panic(raise)
+			}) {
+				t.Fatal("open resident refused a forward worker")
+			}
+			synctest.Wait()
+			if ctx.Err() != nil {
+				t.Errorf("forward raise %v canceled the resident", raise)
+			}
+			cancel()
+		}
+	})
+}
