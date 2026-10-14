@@ -3939,11 +3939,13 @@ func (self *Resident) startClientCallbackWorkers() {
 
 	self.callbackWorkers.Add(1)
 	residentCallbackWorkersGauge.Inc()
+	// A raise ends the consumer and leaves the resident running without one:
+	// later control frames fill the queue and are refused.
 	go server.HandleError(func() {
 		defer self.callbackWorkers.Done()
 		defer residentCallbackWorkersGauge.Dec()
 		self.runClientControlIngress()
-	}, self.cancel)
+	})
 }
 
 func (self *Resident) runClientControlIngress() {
