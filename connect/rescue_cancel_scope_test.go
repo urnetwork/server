@@ -14,6 +14,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 )
 
@@ -111,5 +112,35 @@ func TestConnectionAnnounceWorkerRaiseKeepsTransport(t *testing.T) {
 			t.Fatal("a child raise canceled the transport")
 		}
 		announce.closeWorkersAndWait()
+	})
+}
+
+// A raise in the resident's control consumer cancels the resident, so its
+// client reconnects to a fresh one instead of keeping a resident whose
+// control frames nothing consumes.
+func TestResidentControlConsumerRaiseCancelsResident(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		settings := DefaultExchangeSettings()
+		resident := &Resident{
+			ctx:            ctx,
+			cancel:         cancel,
+			exchange:       &Exchange{settings: settings},
+			clientId:       server.NewId(),
+			controlLimiter: newLimiter(ctx, 0),
+		}
+		resident.residentController = newResidentController(ctx, resident.clientId, nil, settings)
+		defer resident.residentController.Close()
+		resident.residentController.beforeHandleControlFramesForTest = func() {
+			panic(errors.New("synthetic control consumer fault"))
+		}
+		resident.startClientCallbackWorkers()
+		resident.controlIngress <- []*protocol.Frame{}
+		synctest.Wait()
+		if ctx.Err() == nil {
+			t.Fatal("a raise in the control consumer left the resident running without one")
+		}
+		resident.callbackWorkers.Wait()
 	})
 }
