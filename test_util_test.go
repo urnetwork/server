@@ -1752,3 +1752,24 @@ func TestReserveTestListenPortsProbeWildcardScope(t *testing.T) {
 		})
 	}
 }
+
+// A fixture sizes its budget from the run's -timeout, so an attempt's wrapper
+// reports the deadline of the test it wraps, which testing.TB leaves out.
+func TestRunPassesTheTestDeadlineThrough(t *testing.T) {
+	wantDeadline, wantOk := t.Deadline()
+	var deadline time.Time
+	var ok, exposed bool
+	runRetryTestEnv(t, retryTestEnv(0), func(tb testing.TB) {
+		var test interface{ Deadline() (time.Time, bool) }
+		if test, exposed = tb.(interface{ Deadline() (time.Time, bool) }); exposed {
+			deadline, ok = test.Deadline()
+		}
+	})
+	if !exposed || ok != wantOk || !deadline.Equal(wantDeadline) {
+		t.Fatalf("attempt deadline = %s, %t (exposed %t); the test's is %s, %t", deadline, ok, exposed, wantDeadline, wantOk)
+	}
+	// a wrapped value with no deadline of its own reports none
+	if deadline, ok := (&retryTB{TB: struct{ testing.TB }{t}}).Deadline(); ok || !deadline.IsZero() {
+		t.Fatalf("a wrapper without a deadline reported %s, %t", deadline, ok)
+	}
+}
