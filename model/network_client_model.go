@@ -2694,6 +2694,7 @@ func GetProvideSecretKey(
 	// both together, so a list without this mode means postgres has no key.
 	provideModesListed := false
 	provideModeListed := false
+	undecodableProvideModesListJson := ""
 	server.Redis(ctx, func(r server.RedisClient) {
 		// both keys share the {pm_<clientId>} hash tag (one slot)
 		values, err := r.MGet(ctx, provideModeSecretKeyKey(clientId, provideMode), provideModesKey(clientId)).Result()
@@ -2710,6 +2711,8 @@ func GetProvideSecretKey(
 			if json.Unmarshal([]byte(provideModesListJson), &provideModesList) == nil {
 				provideModesListed = true
 				provideModeListed = slices.Contains(provideModesList, provideMode)
+			} else {
+				undecodableProvideModesListJson = provideModesListJson
 			}
 		}
 	})
@@ -2725,7 +2728,12 @@ func GetProvideSecretKey(
 	// is load-bearing for idle clients whose keys expired, not just for
 	// provide_key rows older than the redis layer. It refills the whole
 	// mirror when the mode list is missing too; a listed mode whose secret
-	// alone is missing reads postgres until its list expires.
+	// alone is missing reads postgres until its list expires. An undecodable
+	// list is dropped first, as in GetProvideModes, or the refill could never
+	// replace it.
+	if undecodableProvideModesListJson != "" {
+		dropUndecodableProvideMirror(ctx, clientId, undecodableProvideModesListJson)
+	}
 	secretKeys := loadProvideSecretKeys(ctx, clientId)
 	if !provideModesListed {
 		refillProvideMirror(ctx, clientId, secretKeys)

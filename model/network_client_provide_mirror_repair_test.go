@@ -53,3 +53,42 @@ func TestGetProvideModesRepairsAnUndecodableMirror(t *testing.T) {
 		}
 	})
 }
+
+// A secret key lookup that misses Redis reads postgres and refills the
+// mirror. With an undecodable mode list the refill wrote nothing, so every
+// such lookup, as for a mode the client does not provide, read postgres
+// until the list's ttl. The lookup now replaces the list too.
+func TestGetProvideSecretKeyRepairsAnUndecodableMirror(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic: make([]byte, 32),
+		})
+		key := provideModesKey(clientId)
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, key, "not a mode list", time.Hour).Err())
+		})
+
+		if _, err := GetProvideSecretKey(ctx, clientId, ProvideModeNetwork); err == nil {
+			t.Fatal("fixture: the client provides no network mode key")
+		}
+
+		mirrored := ""
+		server.Redis(ctx, func(r server.RedisClient) {
+			mirrored, _ = r.Get(ctx, key).Result()
+		})
+		var provideModesList []ProvideMode
+		if err := json.Unmarshal([]byte(mirrored), &provideModesList); err != nil {
+			t.Fatalf("the undecodable provide mode mirror %q is still in place after a secret key lookup; every lookup that misses Redis reads postgres until its ttl", mirrored)
+		}
+		if !slices.Contains(provideModesList, ProvideModePublic) {
+			t.Fatalf("the repaired mirror lists %v, want the keys' public mode", provideModesList)
+		}
+		if secretKey, err := GetProvideSecretKey(ctx, clientId, ProvideModePublic); err != nil || len(secretKey) != 32 {
+			t.Fatalf("the public secret key after the repair is %d bytes with error %v, want 32", len(secretKey), err)
+		}
+	})
+}
