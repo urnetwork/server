@@ -501,6 +501,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 
 		ConnectionAnnounceTimeout:   5 * time.Second,
 		ConnectionAnnounceSettings:  *DefaultConnectionAnnounceSettings(),
+		ConnectionReconcileSettings: *DefaultConnectionReconcileSettings(),
 		ConnectionRateLimitSettings: *DefaultConnectionRateLimitSettings(),
 		ProviderIntentCheckSettings: *DefaultProviderIntentCheckSettings(),
 
@@ -568,6 +569,9 @@ type ConnectHandlerSettings struct {
 	// nil selects a default based on the transport version.
 	ConnectionTestConfig *TestConfig
 	ConnectionAnnounceSettings
+	// the handler's reconcile of its connected rows with the connections its
+	// process holds (transport_announce_reconcile.go)
+	ConnectionReconcileSettings ConnectionReconcileSettings
 	ConnectionRateLimitSettings
 	// the check of connections that declare provide intent (provider_intent.go)
 	ProviderIntentCheckSettings ProviderIntentCheckSettings
@@ -794,6 +798,9 @@ type ConnectHandler struct {
 	activeZero  chan struct{}
 	closing     bool
 
+	// holds the rows of this handler's live connections and retires the rest
+	connectionReconcile *handlerConnectionReconcile
+
 	// holds the WebSocket refusals of clients that cannot read the close
 	refusalHold *connectRefusalHold
 }
@@ -990,6 +997,11 @@ func newConnectHandlerWithPacketConns(
 		),
 		activeCount: activeCount,
 		activeZero:  activeZero,
+		connectionReconcile: newHandlerConnectionReconcile(
+			cancelCtx,
+			handlerId,
+			&settings.ConnectionReconcileSettings,
+		),
 	}
 	h.refusalHold = newConnectRefusalHold(cancelCtx, exchange.IsDraining, settings)
 
@@ -1698,7 +1710,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		announce := NewConnectionAnnounceWithIpFamily(
+		announce := newConnectionAnnounceWithReconcile(
 			handleCtx,
 			handleCancel,
 			byJwt.NetworkId,
@@ -1707,6 +1719,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			ipFamilyIntent,
 			auth.AppVersion,
 			self.handlerId,
+			self.connectionReconcile,
 			announceTimeout,
 			testConfig,
 			&self.settings.ConnectionAnnounceSettings,
@@ -2593,7 +2606,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			}
 		}
 
-		announce := NewConnectionAnnounceWithIpFamily(
+		announce := newConnectionAnnounceWithReconcile(
 			handleCtx,
 			handleCancel,
 			byJwt.NetworkId,
@@ -2602,6 +2615,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			ipFamilyIntent,
 			appVersion,
 			self.handlerId,
+			self.connectionReconcile,
 			announceTimeout,
 			V0TestConfig(),
 			&self.settings.ConnectionAnnounceSettings,

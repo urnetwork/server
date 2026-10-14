@@ -190,9 +190,13 @@ type ConnectionAnnounce struct {
 	ipFamilyIntent int
 	// the client's app version from its auth, for the provider rollout gauge
 	// (providerVersionConnection); "" when it sent none
-	appVersion      string
-	handlerId       server.Id
-	announceTimeout time.Duration
+	appVersion string
+	handlerId  server.Id
+	// the handler's reconcile, which holds this connection's row from its
+	// registration until the end of its final disconnect; nil without a
+	// handler owner (transport_announce_reconcile.go)
+	connectionReconcile *handlerConnectionReconcile
+	announceTimeout     time.Duration
 
 	settings *ConnectionAnnounceSettings
 
@@ -327,6 +331,38 @@ func NewConnectionAnnounceWithIpFamily(
 	testConfig *TestConfig,
 	settings *ConnectionAnnounceSettings,
 ) *ConnectionAnnounce {
+	return newConnectionAnnounceWithReconcile(
+		ctx,
+		cancel,
+		networkId,
+		clientId,
+		clientAddress,
+		ipFamilyIntent,
+		appVersion,
+		handlerId,
+		nil,
+		announceTimeout,
+		testConfig,
+		settings,
+	)
+}
+
+// The announcement of a transport that a ConnectHandler owns: connectionReconcile
+// is that handler's, and retires the row if its final disconnect fails.
+func newConnectionAnnounceWithReconcile(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	networkId server.Id,
+	clientId server.Id,
+	clientAddress string,
+	ipFamilyIntent int,
+	appVersion string,
+	handlerId server.Id,
+	connectionReconcile *handlerConnectionReconcile,
+	announceTimeout time.Duration,
+	testConfig *TestConfig,
+	settings *ConnectionAnnounceSettings,
+) *ConnectionAnnounce {
 	announce := &ConnectionAnnounce{
 		ctx:                    ctx,
 		cancel:                 cancel,
@@ -336,6 +372,7 @@ func NewConnectionAnnounceWithIpFamily(
 		ipFamilyIntent:         ipFamilyIntent,
 		appVersion:             appVersion,
 		handlerId:              handlerId,
+		connectionReconcile:    connectionReconcile,
 		announceTimeout:        announceTimeout,
 		settings:               settings,
 		testConfig:             testConfig,
@@ -471,23 +508,44 @@ func (self *ConnectionAnnounce) run() {
 	// FIXME compute expected latency between client and this edge
 	// FIXME store edge coordinated in the config as host variables
 	// FIXME pass the host coordinate in here so the expected latency can be set
-	connectionId, clientAddressHash, err := controller.ConnectNetworkClientWithIpFamily(
-		self.ctx,
-		self.clientId,
-		self.clientAddress,
-		self.handlerId,
-		self.settings.LocationRetryTimeout,
-		self.ipFamilyIntent,
-		self.networkId,
-	)
+	// The handler's reconcile holds the row from the moment its id returns. A
+	// registration that raises after its commit ends unheld, and the reconcile
+	// retires the row it may have left.
+	var connectionId server.Id
+	var clientAddressHash [32]byte
+	var err error
+	func() {
+		var heldConnectionId *server.Id
+		endConnect := self.connectionReconcile.beginConnect()
+		defer func() {
+			endConnect(heldConnectionId)
+		}()
+		connectionId, clientAddressHash, err = controller.ConnectNetworkClientWithIpFamily(
+			self.ctx,
+			self.clientId,
+			self.clientAddress,
+			self.handlerId,
+			self.settings.LocationRetryTimeout,
+			self.ipFamilyIntent,
+			self.networkId,
+		)
+		if err == nil {
+			heldConnectionId = &connectionId
+		}
+	}()
 	if err != nil {
 		glog.Infof("[t][%s]could not connect client. err = %s\n", hex.EncodeToString(clientAddressHash[:]), err)
 		return
 	}
 	// Registered as soon as the committed row's id exists, so a raise in any
 	// later step still disconnects the row, exactly once. Handler retirement
-	// does not cover a row whose handler is alive.
+	// does not cover a row whose handler is alive, so when this final
+	// disconnect fails the release hands the row to the handler's reconcile.
 	cleanup = func() {
+		disconnected := false
+		defer func() {
+			self.connectionReconcile.release(connectionId, disconnected)
+		}()
 		server.HandleError(func() {
 			// The transport is normally canceled before cleanup begins. Preserve
 			// its values but detach cancellation, then add a hard bound so a lost
@@ -495,6 +553,7 @@ func (self *ConnectionAnnounce) run() {
 			cleanupCtx, cleanupCancel := connectionCleanupContext(self.ctx)
 			defer cleanupCancel()
 			disconnectErr := model.DisconnectNetworkClient(cleanupCtx, connectionId)
+			disconnected = true
 			if verifyEgressOk {
 				model.ClearVerifyConnectionEgress(cleanupCtx, self.clientId, connectionId, verifyEgressIp, verifySettings)
 			}

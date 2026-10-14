@@ -3213,7 +3213,10 @@ func ConnectNetworkClientWithIpFamily(
 
 // The exclusive endpoint fence orders retirement; read committed observes its
 // current head after a wait. Conflicts still retry within Tx's existing bound.
-// Handler expiry retires any connection left after transport cancellation.
+// This is the transport's single final write. When it fails while the
+// handler stays alive, handler expiry never reaches the row; the handler's
+// connection reconcile retires it (RetireNetworkClientHandlerConnection).
+// Handler expiry retires the rows of a handler whose process ended.
 func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error {
 	ctx = providerWorkSessionContext(ctx)
 	var disconnectErr error
@@ -3251,6 +3254,92 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 	}, server.TxReadCommitted)
 
 	return disconnectErr
+}
+
+// The connections still marked connected under a live handler, for that
+// handler's connection reconcile. The partial index
+// network_client_connection_connected_handler_id bounds the read to the
+// handler's open rows; closed rows are never visited.
+func GetConnectedNetworkClientHandlerConnectionIds(ctx context.Context, handlerId server.Id) (connectionIds []server.Id) {
+	server.Db(ctx, func(conn server.PgConn) {
+		connectionIds = nil
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT connection_id
+				FROM network_client_connection
+				WHERE
+					handler_id = $1 AND
+					connected
+			`,
+			handlerId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var connectionId server.Id
+				server.Raise(result.Scan(&connectionId))
+				connectionIds = append(connectionIds, connectionId)
+			}
+		})
+	})
+	return
+}
+
+// Disconnects a row that its live handler no longer holds, with the same
+// endpoint fence and session events as DisconnectNetworkClient. Only a row
+// still connected under handlerId changes: a late or repeated retire never
+// moves an earlier disconnect time, and another handler's row is never
+// touched. The disconnect time is the retire time, as for handler expiry.
+func RetireNetworkClientHandlerConnection(ctx context.Context, handlerId server.Id, connectionId server.Id) (retired bool) {
+	ctx = providerWorkSessionContext(ctx)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		retired = false
+		var clientId server.Id
+		err := tx.QueryRow(
+			ctx,
+			`
+				SELECT client_id
+				FROM network_client_connection
+				WHERE
+					connection_id = $1 AND
+					handler_id = $2 AND
+					connected
+			`,
+			connectionId,
+			handlerId,
+		).Scan(&clientId)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return
+		}
+		server.Raise(err)
+		providerWorkLockCurrentSessionMutationInTx(ctx, tx, clientId)
+		// read committed re-reads the row after the fence wait, so a disconnect
+		// that committed meanwhile leaves nothing to change
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE network_client_connection
+				SET
+					connected = false,
+					disconnect_time = $3
+				WHERE
+					connection_id = $1 AND
+					handler_id = $2 AND
+					connected
+			`,
+			connectionId,
+			handlerId,
+			server.NowUtc(),
+		))
+		if tag.RowsAffected() == 0 {
+			return
+		}
+		retired = true
+		providerWorkRetainSessionEventsInTx(ctx, tx, clientId)
+	}, server.TxReadCommitted)
+
+	return
 }
 
 // `minConnectionTime` bounds how long disconnected connection rows are
