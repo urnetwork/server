@@ -617,10 +617,7 @@ func (self *ConnectionAnnounce) run() {
 				model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
 			}); feedErr != nil {
 				feedFailureCount += 1
-				connectionWorkerFailuresCounter.WithLabelValues(connectionWorkerOperationVerifyEgressLease).Inc()
-				if glog.V(1) {
-					glog.Infof("[t]verify egress lease write failed, retrying (%d consecutive): %s\n", feedFailureCount, feedErr)
-				}
+				defaultLiveFailureLog.record(liveFailureOperationVerifyEgressLease, feedFailureCount, feedErr)
 				return
 			}
 			feedFailureCount = 0
@@ -750,10 +747,7 @@ func (self *ConnectionAnnounce) run() {
 				changedCount, currentProvideModes = model.GetProvideKeyChanges(self.ctx, self.clientId, nextStartTime)
 			}); readErr != nil {
 				syncFailureCount += 1
-				connectionSyncReadFailuresCounter.Inc()
-				if glog.V(1) {
-					glog.Infof("[t]sync read failed, retrying (%d consecutive): %s\n", syncFailureCount, readErr)
-				}
+				defaultLiveFailureLog.record(liveFailureOperationSyncRead, syncFailureCount, readErr)
 				continue
 			}
 			syncFailureCount = 0
@@ -1298,10 +1292,7 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 					self.writeMeasurements(measurements)
 				}); writeErr != nil {
 					writeFailureCount += 1
-					connectionWorkerFailuresCounter.WithLabelValues(connectionWorkerOperationMeasurementWrite).Inc()
-					if glog.V(1) {
-						glog.Infof("[t]measurement write failed, retrying (%d consecutive): %s\n", writeFailureCount, writeErr)
-					}
+					defaultLiveFailureLog.record(liveFailureOperationMeasurementWrite, writeFailureCount, writeErr)
 					func() {
 						self.stateLock.Lock()
 						defer self.stateLock.Unlock()
