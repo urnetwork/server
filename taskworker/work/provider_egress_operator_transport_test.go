@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -41,8 +42,10 @@ func TestProviderEgressOperatorTransportSelection(t *testing.T) {
 		t.Fatal("an unknown operator_transport was accepted")
 	}
 
-	args := providerEgressProbeArgs(defaultProviderEgressProbeSettings("example.test"), 1)
-	operator, err := newProviderEgressOperatorForTransport(args, providerEgressOperatorLocal)
+	settings = defaultProviderEgressProbeSettings("example.test")
+	args := providerEgressProbeArgs(settings, 1)
+	settings.OperatorTransport = providerEgressOperatorLocal
+	operator, err := newProviderEgressOperatorForSettings(args, settings)
 	if err != nil {
 		t.Fatalf("operator_transport local: %v", err)
 	}
@@ -53,12 +56,14 @@ func TestProviderEgressOperatorTransportSelection(t *testing.T) {
 	if local.ShardIndex != args.ShardIndex || local.ShardCount != args.ShardCount || local.CallTimeout != providerEgressControlPlaneTimeout {
 		t.Fatalf("the in-process operator lost the shard or the request bound: %+v", local)
 	}
-	if _, err := newProviderEgressOperatorForTransport(args, "grpc"); err == nil {
+	settings.OperatorTransport = "grpc"
+	if _, err := newProviderEgressOperatorForSettings(args, settings); err == nil {
 		t.Fatal("an unknown transport built an operator")
 	}
 	defer server.Vault.PushSimpleResource("provider_egress.yml", []byte("note: no ingest secret\n"))()
 	for _, transport := range []string{"", providerEgressOperatorHttp} {
-		if operator, err := newProviderEgressOperatorForTransport(args, transport); err == nil {
+		settings.OperatorTransport = transport
+		if operator, err := newProviderEgressOperatorForSettings(args, settings); err == nil {
 			t.Fatalf("operator_transport %q built %T without the vault's ingest secret", transport, operator)
 		}
 	}
@@ -98,7 +103,7 @@ func TestProviderEgressOperatorTransportIsOptIn(t *testing.T) {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		args := providerEgressProbeArgs(settings, 2)
-		operator, err := newProviderEgressOperator(args, settings.OperatorTransport)
+		operator, err := newProviderEgressOperator(args, settings)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -121,6 +126,74 @@ func TestProviderEgressOperatorTransportIsOptIn(t *testing.T) {
 		default:
 			t.Errorf("%s: the pass's operator is %T", c.name, operator)
 		}
+	}
+}
+
+// operator_concurrency bounds each pass's in-process operator: 8 unless the
+// config sets it, refused unless positive whatever the transport, handed to
+// every pass's own operator, and placement only, so a change does not make a
+// pending pass snapshot stale. The operator API transport builds no in-process
+// operator.
+func TestProviderEgressOperatorConcurrencyBoundsEachPass(t *testing.T) {
+	t.Setenv("WARP_DOMAIN", "example.test")
+	defer server.Vault.PushSimpleResource("provider_egress.yml", []byte("ingest_secret: synthetic-ingest-secret-0123456789\n"))()
+	load := func(config string) (providerEgressProbeSettings, error) {
+		defer server.Config.PushSimpleResource(model.ProviderEgressProbeResourceName, []byte(config))()
+		return loadProviderEgressProbeSettings()
+	}
+	settings, err := load("operator_transport: local\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.OperatorConcurrency != 8 {
+		t.Fatalf("operator_concurrency defaults to %d, want 8", settings.OperatorConcurrency)
+	}
+	for _, config := range []string{
+		"operator_concurrency: 0\n",
+		"operator_concurrency: -2\n",
+		"operator_transport: local\noperator_concurrency: 0\n",
+	} {
+		if _, err := load(config); err == nil {
+			t.Errorf("%q was accepted", config)
+		}
+	}
+	if _, err := load("enabled: false\noperator_concurrency: 0\n"); err != nil {
+		t.Errorf("a disabled config judged operator_concurrency: %v", err)
+	}
+
+	var concurrencies []int
+	defer func(previous func(int, int, time.Duration, int) (*localoperator.Operator, error)) {
+		newLocalProviderEgressOperator = previous
+	}(newLocalProviderEgressOperator)
+	newLocalProviderEgressOperator = func(shardIndex int, shardCount int, callTimeout time.Duration, concurrency int) (*localoperator.Operator, error) {
+		concurrencies = append(concurrencies, concurrency)
+		return localoperator.New(shardIndex, shardCount, callTimeout, concurrency)
+	}
+	settings, err = load("operator_transport: local\noperator_concurrency: 3\nshard_count: 2\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for shardIndex := range settings.ShardCount {
+		operator, err := newProviderEgressOperator(providerEgressProbeArgs(settings, shardIndex), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := operator.(*localoperator.Operator); !ok {
+			t.Fatalf("shard %d's operator is %T, not in-process", shardIndex, operator)
+		}
+	}
+	if !slices.Equal(concurrencies, []int{3, 3}) {
+		t.Fatalf("the passes' operators were built with bounds %v, want 3 for each", concurrencies)
+	}
+	settings.OperatorTransport = providerEgressOperatorHttp
+	if _, err := newProviderEgressOperator(providerEgressProbeArgs(settings, 0), settings); err != nil || len(concurrencies) != 2 {
+		t.Fatalf("the operator API transport built an in-process operator: bounds %v, err %v", concurrencies, err)
+	}
+
+	before := providerEgressProbeArgs(settings, 0)
+	settings.OperatorConcurrency = 1
+	if !providerEgressProbeArgsMatchSettings(before, settings) {
+		t.Fatal("changing operator_concurrency made the durable pass arguments stale")
 	}
 }
 
@@ -234,7 +307,7 @@ func TestProviderUrlProbePassMakesNoOperatorApiRequests(t *testing.T) {
 		args.PlatformURL = "wss://" + strings.TrimPrefix(trap.URL, "http://")
 		args.UrlProbe.Limit, args.UrlProbe.Concurrency = 1, 1
 
-		operator, err := newProviderEgressOperator(args, settings.OperatorTransport)
+		operator, err := newProviderEgressOperator(args, settings)
 		if err != nil {
 			tb.Fatalf("local operator transport: %v", err)
 		}

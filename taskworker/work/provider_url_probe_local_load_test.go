@@ -135,8 +135,9 @@ func testQuantile(durations []time.Duration, q float64) time.Duration {
 }
 
 // Several production-shaped URL passes -- 64 workers each, one in-process
-// operator per shard, sharing the process's database pool as a taskworker's
-// passes do -- claim, measure, publish and complete every seeded provider.
+// operator per shard with its own operator_concurrency slots, sharing the
+// process's database pool as a taskworker's passes do -- claim, measure,
+// publish and complete every seeded provider.
 // The real prober runs; only the tunnel and its one URL load are replaced. A
 // watchdog dumps every goroutine if a pass stops making progress. Afterwards
 // every eligible provider must have exactly one completed claim and one accepted
@@ -151,6 +152,7 @@ func TestProviderUrlProbeLocalPassUnderLoad(t *testing.T) {
 	perShard := testLoadSetting("URNETWORK_URL_PROBE_LOAD_PROVIDERS_PER_SHARD", 256)
 	turnMillis := testLoadSetting("URNETWORK_URL_PROBE_LOAD_TURN_MILLIS", 50)
 	stallSeconds := testLoadSetting("URNETWORK_URL_PROBE_LOAD_STALL_SECONDS", 120)
+	operatorConcurrency := testLoadSetting("URNETWORK_URL_PROBE_LOAD_OPERATOR_CONCURRENCY", defaultProviderEgressOperatorConcurrency)
 	// Optionally size this process's pool like a deployment's, e.g. Main's
 	// taskworker at 128; the local default is 16. Read when the pool opens.
 	if pool := testLoadSetting("URNETWORK_URL_PROBE_LOAD_POOL", 0); 0 < pool {
@@ -235,6 +237,7 @@ func TestProviderUrlProbeLocalPassUnderLoad(t *testing.T) {
 		var peakRunning atomic.Int64
 		settings := defaultProviderEgressProbeSettings("example.test")
 		settings.OperatorTransport = providerEgressOperatorLocal
+		settings.OperatorConcurrency = operatorConcurrency
 		passes := make([]*providerEgressProbePass, shards)
 		passArgs := make([]*ProviderEgressProbeArgs, shards)
 		for shard := range shards {
@@ -243,7 +246,7 @@ func TestProviderUrlProbeLocalPassUnderLoad(t *testing.T) {
 			args.APIURL, args.PublicAPIURL = trap.URL, trap.URL
 			args.PlatformURL = "wss://" + strings.TrimPrefix(trap.URL, "http://")
 			args.UrlProbe.Limit, args.UrlProbe.Concurrency = workers, workers
-			operator, err := newProviderEgressOperator(args, settings.OperatorTransport)
+			operator, err := newProviderEgressOperator(args, settings)
 			if err != nil {
 				tb.Fatal(err)
 			}
@@ -410,8 +413,8 @@ func TestProviderUrlProbeLocalPassUnderLoad(t *testing.T) {
 		for outcome, value := range after.acquires {
 			acquireDelta[outcome] = value - before.acquires[outcome]
 		}
-		tb.Logf("shards=%d workers/shard=%d providers=%d turn<=%dms elapsed=%s turns/s=%.0f peak_concurrent_turns=%d pass_durations=%v",
-			shards, workers, total, turnMillis, elapsed.Round(time.Millisecond), float64(turns.Load())/elapsed.Seconds(), peakRunning.Load(), durations)
+		tb.Logf("shards=%d workers/shard=%d operator_concurrency/shard=%d providers=%d turn<=%dms elapsed=%s turns/s=%.0f peak_concurrent_turns=%d pass_durations=%v",
+			shards, workers, operatorConcurrency, total, turnMillis, elapsed.Round(time.Millisecond), float64(turns.Load())/elapsed.Seconds(), peakRunning.Load(), durations)
 		tb.Logf("main pool: max_connections=%.0f peak_acquired=%.0f acquires=%v acquire_wait=%.3fs", after.maximum, peakAcquired, acquireDelta, after.waited-before.waited)
 		tb.Logf("durable: due=%d attempted=%d accepted=%d claimed=%d completed=%d unfinished=%d health=%d", dueTotal, attempted, submitted, claimed, completed, unfinished, accepted)
 

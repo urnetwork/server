@@ -191,9 +191,21 @@ func TestDueProvidersMatchTheClientDecode(t *testing.T) {
 	}
 }
 
-// A synthetic model claim for the Due path.
-func testOperator(claim controller.ProviderUrlProbeDueClaim, timing *controller.ProviderUrlProbeDueTiming) *Operator {
-	return &Operator{ShardIndex: 0, ShardCount: 1, CallTimeout: time.Minute, claimDue: claim, dueTiming: timing}
+// An operator built by New, with a synthetic model claim for the Due path.
+func testOperatorWithConcurrency(t *testing.T, concurrency int, claim controller.ProviderUrlProbeDueClaim, timing *controller.ProviderUrlProbeDueTiming) *Operator {
+	t.Helper()
+	operator, err := New(0, 1, time.Minute, concurrency)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator.claimDue = claim
+	operator.dueTiming = timing
+	return operator
+}
+
+func testOperator(t *testing.T, claim controller.ProviderUrlProbeDueClaim, timing *controller.ProviderUrlProbeDueTiming) *Operator {
+	t.Helper()
+	return testOperatorWithConcurrency(t, 4, claim, timing)
 }
 
 // The Due path observes its claim into the API's URL Due series, returns the
@@ -203,7 +215,7 @@ func testOperator(claim controller.ProviderUrlProbeDueClaim, timing *controller.
 func TestDueMapsOutcomesLikeTheOperatorApi(t *testing.T) {
 	timing := controller.NewProviderUrlProbeDueTiming(prometheus.NewPedanticRegistry())
 	claimId := server.NewId()
-	ok := testOperator(func(ctx context.Context, now time.Time, limit, shardIndex, shardCount int, observation *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
+	ok := testOperator(t, func(ctx context.Context, now time.Time, limit, shardIndex, shardCount int, observation *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
 		if now.Location() != time.UTC || limit != 5 || shardIndex != 0 || shardCount != 1 {
 			t.Errorf("claim arguments changed: %s %d %d/%d", now.Location(), limit, shardIndex, shardCount)
 		}
@@ -219,7 +231,7 @@ func TestDueMapsOutcomesLikeTheOperatorApi(t *testing.T) {
 		t.Fatal("the in-process claim was not observed as one request without an encoding")
 	}
 
-	maintenance := testOperator(func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
+	maintenance := testOperator(t, func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
 		return model.ProviderUrlProbeDueResult{Providers: []model.ProviderUrlProbeDue{}, PriorityMaintenancePending: true}
 	}, timing)
 	if _, err := maintenance.Due(context.Background(), 5); !errors.Is(err, ingest.ErrDuePriorityMaintenancePending) {
@@ -237,7 +249,7 @@ func TestDueMapsOutcomesLikeTheOperatorApi(t *testing.T) {
 		{name: "done_error", panicWith: fmt.Errorf("claim: %w", server.DbContextDoneError), status: http.StatusServiceUnavailable},
 		{name: "model_failure", panicWith: errors.New("synthetic model failure"), status: http.StatusInternalServerError},
 	} {
-		failing := testOperator(func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
+		failing := testOperator(t, func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
 			panic(c.panicWith)
 		}, timing)
 		_, err := failing.Due(context.Background(), 5)
@@ -250,7 +262,7 @@ func TestDueMapsOutcomesLikeTheOperatorApi(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	abandoned := testOperator(func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
+	abandoned := testOperator(t, func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
 		cancel()
 		panic(fmt.Errorf("claim: %w", context.Canceled))
 	}, timing)
@@ -258,7 +270,7 @@ func TestDueMapsOutcomesLikeTheOperatorApi(t *testing.T) {
 		t.Fatalf("an abandoned caller did not get its own cancellation: %v", err)
 	}
 
-	bounded := testOperator(func(ctx context.Context, _ time.Time, _, _, _ int, _ *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
+	bounded := testOperator(t, func(ctx context.Context, _ time.Time, _, _, _ int, _ *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
 		<-ctx.Done()
 		panic(ctx.Err())
 	}, timing)
@@ -272,7 +284,7 @@ func TestDueMapsOutcomesLikeTheOperatorApi(t *testing.T) {
 // with the same errors.
 func TestDueClientSideRefusalsMatchTheClient(t *testing.T) {
 	claimed := false
-	operator := testOperator(func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
+	operator := testOperator(t, func(context.Context, time.Time, int, int, int, *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
 		claimed = true
 		return model.ProviderUrlProbeDueResult{}
 	}, nil)
@@ -311,5 +323,164 @@ func TestRefusalsReadAsTheClientReadsTheHandler(t *testing.T) {
 	// a plain controller error is the 400 the attempt and location handlers answer
 	if got := rejected(refusalOf(errors.New("Unknown client."))).Error(); got != ingest.RejectedError(http.StatusBadRequest, "Unknown client.").Error() {
 		t.Fatalf("plain controller error: %q", got)
+	}
+}
+
+// A Due claim that reports it entered, then holds its call slot until it is
+// released alone, all claims are released, or its call ends.
+func testHeldClaim(entered chan<- struct{}, releaseOne <-chan struct{}, releaseAll context.Context) controller.ProviderUrlProbeDueClaim {
+	return func(ctx context.Context, _ time.Time, _, _, _ int, _ *model.ProviderUrlProbeDueObservation) model.ProviderUrlProbeDueResult {
+		entered <- struct{}{}
+		select {
+		case <-releaseOne:
+		case <-releaseAll.Done():
+		case <-ctx.Done():
+		}
+		return model.ProviderUrlProbeDueResult{Providers: []model.ProviderUrlProbeDue{}}
+	}
+}
+
+// At most an operator's concurrency of its calls run at once. A call that
+// finds every slot taken waits, and runs only once a running call returns its
+// slot, so a pass's workers cannot hold more of the process's database than
+// the pass's bound.
+func TestOperatorRunsAtMostItsConcurrencyAtOnce(t *testing.T) {
+	const concurrency = 2
+	entered := make(chan struct{}, concurrency+1)
+	releaseOne := make(chan struct{})
+	releaseAll, release := context.WithCancel(context.Background())
+	defer release()
+	waiting := make(chan struct{}, concurrency+1)
+	operator := testOperatorWithConcurrency(t, concurrency, testHeldClaim(entered, releaseOne, releaseAll), nil)
+	operator.slotWait = func() { waiting <- struct{}{} }
+
+	results := make(chan error, concurrency+1)
+	call := func() {
+		_, err := operator.Due(context.Background(), 1)
+		results <- err
+	}
+	for range concurrency {
+		go call()
+	}
+	for range concurrency {
+		<-entered
+	}
+	go call()
+	select {
+	case <-waiting:
+	case <-entered:
+		t.Fatalf("a call beyond the operator's %d slots ran", concurrency)
+	}
+	// one running call returns its slot; only then does the waiting call run
+	releaseOne <- struct{}{}
+	<-entered
+	release()
+	for range concurrency + 1 {
+		if err := <-results; err != nil {
+			t.Fatalf("a bounded call failed: %v", err)
+		}
+	}
+}
+
+// A call waiting for a slot ends with its own context and never runs:
+// canceled by its caller, or out of its call bound, which covers the wait as
+// an HTTP client's timeout covers waiting for a connection. Every method waits
+// on the same slots: an attempt report queued behind a held claim never
+// reaches its own validation, which would have refused its malformed id.
+func TestOperatorCallWaitingForASlotEndsWithItsContext(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	releaseAll, release := context.WithCancel(context.Background())
+	defer release()
+	waiting := make(chan struct{}, 2)
+	operator := testOperatorWithConcurrency(t, 1, testHeldClaim(entered, nil, releaseAll), nil)
+	operator.slotWait = func() { waiting <- struct{}{} }
+	held := make(chan error, 1)
+	go func() {
+		_, err := operator.Due(context.Background(), 1)
+		held <- err
+	}()
+	<-entered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	attempt := make(chan error, 1)
+	go func() {
+		attempt <- operator.ReportAttempt(ctx, "not-a-client-id", "")
+	}()
+	select {
+	case <-waiting:
+	case err := <-attempt:
+		t.Fatalf("an attempt report ran beside the held claim in a one-slot operator: %v", err)
+	}
+	cancel()
+	if err := <-attempt; !errors.Is(err, context.Canceled) || errors.Is(err, ingest.ErrRejected) {
+		t.Fatalf("a canceled wait for a slot did not end with the caller's cancellation: %v", err)
+	}
+
+	operator.CallTimeout = 10 * time.Millisecond
+	if _, err := operator.Due(context.Background(), 1); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ingest.ErrRejected) {
+		t.Fatalf("a wait for a slot outlived the call bound: %v", err)
+	}
+	select {
+	case <-waiting:
+	default:
+		t.Fatal("the bounded call never waited for a slot")
+	}
+
+	release()
+	if err := <-held; err != nil {
+		t.Fatalf("the held call failed: %v", err)
+	}
+	select {
+	case <-entered:
+		t.Fatal("a call that gave up waiting still ran")
+	default:
+	}
+}
+
+// Slots belong to one operator: while one pass's operator has every slot
+// taken, another pass's operator still runs its calls.
+func TestOperatorsDoNotShareCallSlots(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	releaseAll, release := context.WithCancel(context.Background())
+	defer release()
+	waiting := make(chan struct{}, 2)
+	first := testOperatorWithConcurrency(t, 1, testHeldClaim(entered, nil, releaseAll), nil)
+	second := testOperatorWithConcurrency(t, 1, testHeldClaim(entered, nil, releaseAll), nil)
+	first.slotWait = func() { waiting <- struct{}{} }
+	second.slotWait = func() { waiting <- struct{}{} }
+
+	results := make(chan error, 2)
+	go func() {
+		_, err := first.Due(context.Background(), 1)
+		results <- err
+	}()
+	<-entered
+	go func() {
+		_, err := second.Due(context.Background(), 1)
+		results <- err
+	}()
+	select {
+	case <-entered:
+	case <-waiting:
+		t.Fatal("one operator's taken slot kept another operator's call waiting")
+	}
+	release()
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("a call failed: %v", err)
+		}
+	}
+}
+
+// New refuses a bound that admits no call, and an operator New did not build
+// refuses its calls rather than waiting forever for a slot it does not have.
+func TestNewRefusesAConcurrencyBelowOne(t *testing.T) {
+	for _, concurrency := range []int{0, -1} {
+		if operator, err := New(0, 1, time.Minute, concurrency); err == nil || operator != nil {
+			t.Errorf("concurrency %d built an operator", concurrency)
+		}
+	}
+	if _, err := (&Operator{ShardCount: 1}).Due(context.Background(), 1); !errors.Is(err, errNoCallSlots) {
+		t.Fatalf("an operator without slots ran or waited: %v", err)
 	}
 }

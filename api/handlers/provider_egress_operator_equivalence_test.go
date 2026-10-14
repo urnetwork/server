@@ -549,9 +549,14 @@ func TestOperatorIngestInProcessMatchesOperatorApi(t *testing.T) {
 		t.Fatal("the HTTP transport made no request; the comparison would be vacuous")
 	}
 	inProcess := operatorEquivalenceExecute(t, func(ctx context.Context, tb testing.TB) (func(int, int) ingest.Operator, func()) {
-		// no listener and no secret: the in-process operator needs neither
+		// no listener and no secret: the in-process operator needs neither. It
+		// runs with the taskworker's default bound of 8 calls at once.
 		return func(shardIndex, shardCount int) ingest.Operator {
-			return localoperator.New(shardIndex, shardCount, 30*time.Second)
+			operator, err := localoperator.New(shardIndex, shardCount, 30*time.Second, 8)
+			if err != nil {
+				tb.Fatal(err)
+			}
+			return operator
 		}, func() {}
 	})
 

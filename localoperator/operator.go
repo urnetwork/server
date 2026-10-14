@@ -15,6 +15,7 @@ package localoperator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -33,10 +34,15 @@ import (
 	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
-// One shard's in-process operator. Safe for concurrent use. It adds no
-// concurrency limit of its own: the pass's configured worker concurrency and
-// the process's database pool, the same budgets every other in-process caller
-// shares, bound its calls.
+// One shard's in-process operator. Safe for concurrent use.
+//
+// Over HTTP these calls held the API fleet's database connections; in-process
+// they hold the host's own, which in the taskworker every other task shares.
+// So each operator owns a fixed number of call slots, sized by New from its
+// pass's settings: at most that many of its calls run at once, and a further
+// call waits for a slot within its own call bound, as a request waits for a
+// connection. Slots are never shared between operators, so one pass's burst
+// cannot take another's.
 type Operator struct {
 	// The slice of the due queues this operator claims, with ingest.Client's
 	// semantics: a count of 1 or less takes the whole queue.
@@ -44,17 +50,27 @@ type Operator struct {
 	ShardCount int
 	// Bounds each call the way the HTTP client's timeout bounds a request, so a
 	// stalled database cannot hold a pass longer than an unanswered request
-	// could. Zero leaves only the caller's deadline.
+	// could. Zero leaves only the caller's deadline. A call's wait for a slot
+	// counts against it.
 	CallTimeout time.Duration
 
+	// One token per running call; its capacity is the operator's concurrency.
+	callSlots chan struct{}
 	// The URL Due phase timing this process publishes; nil publishes nothing.
 	dueTiming *controller.ProviderUrlProbeDueTiming
 	// The model's URL claim; nil is model.ClaimProviderUrlProbeDueWithObservation.
 	// Only tests replace it.
 	claimDue controller.ProviderUrlProbeDueClaim
+	// Called when a call finds every slot taken, just before it waits. Only
+	// tests set it.
+	slotWait func()
 }
 
 var _ ingest.Operator = (*Operator)(nil)
+
+// What a call of an Operator that New did not build returns: it has no slots
+// to run in.
+var errNoCallSlots = errors.New("localoperator: the operator was not built by New")
 
 // The process publishes the API's URL Due timing series under the same names,
 // adopting the API's collectors when one binary holds both.
@@ -62,13 +78,19 @@ var processDueTiming = sync.OnceValue(func() *controller.ProviderUrlProbeDueTimi
 	return controller.RegisterProviderUrlProbeDueTiming(prometheus.DefaultRegisterer)
 })
 
-func New(shardIndex int, shardCount int, callTimeout time.Duration) *Operator {
+// An operator for one shard whose calls each run within callTimeout, at most
+// concurrency of them at once. Concurrency must be positive.
+func New(shardIndex int, shardCount int, callTimeout time.Duration, concurrency int) (*Operator, error) {
+	if concurrency < 1 {
+		return nil, fmt.Errorf("localoperator: concurrency must be positive (got %d)", concurrency)
+	}
 	return &Operator{
 		ShardIndex:  shardIndex,
 		ShardCount:  shardCount,
 		CallTimeout: callTimeout,
+		callSlots:   make(chan struct{}, concurrency),
 		dueTiming:   processDueTiming(),
-	}
+	}, nil
 }
 
 // What the API's router answers when a handler panics: 503 for a done-error
@@ -130,11 +152,15 @@ func wireId(value string) (server.Id, error) {
 	return server.Id(id), nil
 }
 
-// Runs one operation under the call bound. A caller that is canceled or out of
-// time gets its context error, as an abandoned request would; a panic becomes
-// the handlerFailure the router would have answered. Returned errors are the
-// operation's own (nil, a handlerRefusal, or an ingest sentinel).
+// Runs one operation under the call bound, in one of the operator's slots. A
+// caller that is canceled or out of time, while it waits for a slot or while
+// it runs, gets its context error, as an abandoned request would; a panic
+// becomes the handlerFailure the router would have answered. Returned errors
+// are the operation's own (nil, a handlerRefusal, or an ingest sentinel).
 func (self *Operator) run(ctx context.Context, operation func(context.Context) error) (err error) {
+	if self.callSlots == nil {
+		return errNoCallSlots
+	}
 	if 0 < self.CallTimeout {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, self.CallTimeout)
@@ -143,6 +169,21 @@ func (self *Operator) run(ctx context.Context, operation func(context.Context) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	select {
+	case self.callSlots <- struct{}{}:
+	default:
+		if self.slotWait != nil {
+			self.slotWait()
+		}
+		select {
+		case self.callSlots <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	defer func() {
+		<-self.callSlots
+	}()
 	server.HandleError(func() {
 		err = operation(ctx)
 	}, func(recovered error) {
