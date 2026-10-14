@@ -6156,7 +6156,7 @@
       "id": 116,
       "type": "timeseries",
       "title": "auxiliary egress tally backlog by shard",
-      "description": "Retained tally records or bytes as a fraction of each place shard's admission bound, whichever is fuller, after its owner's latest read. Handoffs are refused as full at 100%. A drain that keeps up holds about two claims of a shard's runs. Each taskworker publishes only the shards it read in the last five minutes; the maximum across taskworkers is the fleet view.",
+      "description": "Retained tally records or bytes as a fraction of each place shard's admission bound, whichever is fuller. Handoffs are refused as full at 100%. A drain that keeps up holds about two claims of a shard's runs. Read at the first call of each owner's latest drain, after at most one page of cleanup, so within 256 records of the occupancy producers met at the claim. Each taskworker publishes a shard's depth for five minutes after it reads it; the maximum across taskworkers is the fleet view.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -6197,7 +6197,7 @@
       "id": 117,
       "type": "timeseries",
       "title": "auxiliary egress tally oldest pending record by shard",
-      "description": "Age of each place shard's oldest unacknowledged tally record at its owner's latest read: about one claim interval when the owner keeps up, rising while a backlog grows. Each taskworker publishes only the shards it read in the last five minutes; the maximum across taskworkers is the fleet view.",
+      "description": "Age of each place shard's oldest unacknowledged tally record at the first call of its owner's latest drain: about one claim interval when the owner keeps up, rising while a backlog grows. Each taskworker publishes it for five minutes after it reads the shard; the maximum across taskworkers is the fleet view.",
       "gridPos": {
         "h": 8,
         "w": 12,

@@ -254,7 +254,8 @@ func TestProviderEgressTallyDrainCleansOnlyTheCommittedPrefix(t *testing.T) {
 		t.Fatalf("successor records=%d stop=%q next=%q", second.Records, second.Stop, second.NextCursor)
 	}
 	// Two reading calls clean 512; two cleanup-only calls clean the other 488.
-	if second.Calls != 4 || queue.count != 300 || second.Backlog.Records != 300 {
+	// The drain reports the claim's occupancy: 1300 less the first call's 256.
+	if second.Calls != 4 || queue.count != 300 || second.Backlog.Records != 1300-providerEgressTallyPageLength {
 		t.Fatalf("committed prefix not cleaned in step: calls=%d retained=%d backlog=%d", second.Calls, queue.count, second.Backlog.Records)
 	}
 	committedMillis, committedSeq := testingParseTallyId(t, first.NextCursor)
@@ -455,8 +456,9 @@ func testingGaugeValues(t *testing.T, collector *providerEgressTallyBacklogColle
 }
 
 // Backlog depth is visible before refusal: the fuller bound is reported as a
-// fill ratio, and a shard this process has not read recently is withheld.
-func TestProviderEgressTallyBacklogGaugeReportsFreshShardsOnly(t *testing.T) {
+// fill ratio, and the depth of a shard this process has not read recently is
+// withheld; its observed time is not (see the backlog tests).
+func TestProviderEgressTallyBacklogGaugeReportsFreshDepthsOnly(t *testing.T) {
 	now := time.Date(2026, 10, 14, 2, 40, 0, 0, time.UTC)
 	collector := newProviderEgressTallyBacklogCollector(func() time.Time { return now })
 	collector.observe(3, ProviderEgressTallyBacklog{Records: 8192, Bytes: 1024 * 1024, PendingSince: now.Add(-90 * time.Second), ObservedAt: now.Add(-10 * time.Second)})
@@ -464,8 +466,14 @@ func TestProviderEgressTallyBacklogGaugeReportsFreshShardsOnly(t *testing.T) {
 	collector.observe(7, ProviderEgressTallyBacklog{Records: 16384, ObservedAt: now.Add(-6 * time.Minute)})
 	collector.observe(9, ProviderEgressTallyBacklog{Records: 10, Bytes: 12 * 1024 * 1024, ObservedAt: now})
 	values := testingGaugeValues(t, collector)
-	if len(values) != 2 || values["7"] != nil {
-		t.Fatalf("stale or missing shards published: %+v", values)
+	depths := 0
+	for _, gauges := range values {
+		if _, ok := gauges["queue_records"]; ok {
+			depths += 1
+		}
+	}
+	if _, stale := values["7"]["queue_records"]; depths != 2 || stale {
+		t.Fatalf("stale or missing shard depths published: %+v", values)
 	}
 	three := values["3"]
 	if three["queue_records"] != 8192 || three["queue_bytes"] != 1024*1024 || three["queue_fill_ratio"] != 0.5 || three["queue_oldest_pending_seconds"] != 80 || three["queue_observed_timestamp_seconds"] != float64(now.Add(-10*time.Second).Unix()) {

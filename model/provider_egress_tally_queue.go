@@ -490,7 +490,6 @@ func readProviderEgressTallyCall(ctx context.Context, shard int, generation, ack
 		call.records = append(call.records, record)
 		call.nextCursor = values[i]
 	}
-	providerEgressTallyBacklogs.observe(shard, call.backlog)
 	return call, nil
 }
 
@@ -498,8 +497,11 @@ func readProviderEgressTallyCall(ctx context.Context, shard int, generation, ack
 // that the finishing transaction commits with NextCursor. Stop names why
 // reading ended: caught_up, initialize, or a budget (calls, rows, time) or
 // error that leaves a known backlog for the next claim. Err is a later call's
-// failure; the pages before it are complete and immutable, so they still
-// commit and the next claim rereads from there.
+// failure, while reading or while cleaning after it; the pages before it are
+// complete and immutable, so they still commit and the next claim rereads
+// from there. Backlog is the first call's occupancy, after at most one page
+// of cleanup: within one page of what producers met when the claim began.
+// Later calls report the trough the drain's own cleanup leaves.
 type ProviderEgressTallyDrain struct {
 	NextCursor string
 	Batch      *ProviderEgressTallyBatch
@@ -527,19 +529,27 @@ func defaultProviderEgressTallyDrainBudget() providerEgressTallyDrainBudget {
 // previous owner's finishing transaction committed, and its calls also clean
 // that owner's whole drained prefix, so admission space returns at the rate
 // pages are read. The first call keeps the single-page meaning, including
-// initialization, repair and its errors.
+// initialization, repair and its errors. The drain's Backlog is published for
+// its shard; an owner whose first call fails publishes nothing new, so its
+// shard's observed time ages where it can be alerted on.
 func DrainProviderEgressTallies(ctx context.Context, shard int, generation, cursor string, initialize bool, repairFrom ...string) (*ProviderEgressTallyDrain, error) {
 	prior, err := providerEgressTallyOwnerPrior(shard, generation, cursor, initialize, repairFrom)
 	if err != nil {
 		return nil, err
 	}
+	providerEgressTallyBacklogs.arm()
 	read := func(ctx context.Context, fromCursor string, pageLength int, first bool) (*providerEgressTallyCall, error) {
 		if first {
 			return readProviderEgressTallyCall(ctx, shard, generation, cursor, fromCursor, pageLength, initialize, prior)
 		}
 		return readProviderEgressTallyCall(ctx, shard, generation, cursor, fromCursor, pageLength, false, "")
 	}
-	return drainProviderEgressTallies(ctx, cursor, initialize, defaultProviderEgressTallyDrainBudget(), read, time.Now)
+	drain, err := drainProviderEgressTallies(ctx, cursor, initialize, defaultProviderEgressTallyDrainBudget(), read, time.Now)
+	if err != nil {
+		return nil, err
+	}
+	providerEgressTallyBacklogs.observe(shard, drain.Backlog)
+	return drain, nil
 }
 
 // The drain policy over any page reader, so it can be exercised without Redis.
@@ -607,7 +617,6 @@ func drainProviderEgressTallies(
 			break
 		}
 		last = call
-		drain.Backlog = call.backlog
 		if !reading || len(call.records) == 0 {
 			continue
 		}
@@ -633,15 +642,20 @@ func drainProviderEgressTallies(
 	return drain, nil
 }
 
-// Only this process's own recent reads are published. A shard last read here
-// longer ago than the freshness window is withheld rather than reporting a
-// depth that another worker's claims have since changed; the fleet view is the
-// maximum across instances.
+// A drain's occupancy is fresh for this long. Older depths are withheld,
+// since other workers' claims have changed them since; the observed time is
+// never withheld, so a shard no owner has read lately shows its age.
 const providerEgressTallyBacklogFreshness = 5 * time.Minute
 
+// Per-shard occupancy at the first call of this process's latest drain of each
+// shard. The fleet view of a depth is the maximum across instances, and of the
+// observed time the latest. Once this process drains any shard, every shard's
+// observed time is published, zero for one not read here since start, so an
+// owner stuck before its first read stays visible. Safe for concurrent use.
 type providerEgressTallyBacklogCollector struct {
 	now           func() time.Time
 	stateLock     sync.Mutex
+	armed         bool
 	shardBacklogs [ProviderEgressTallyShardCount]ProviderEgressTallyBacklog
 	records       *prometheus.Desc
 	bytes         *prometheus.Desc
@@ -650,23 +664,36 @@ type providerEgressTallyBacklogCollector struct {
 	observed      *prometheus.Desc
 }
 
+// Publishes nothing until this process drains a shard or observes one.
 func newProviderEgressTallyBacklogCollector(now func() time.Time) *providerEgressTallyBacklogCollector {
 	shard := []string{"shard"}
 	return &providerEgressTallyBacklogCollector{
 		now: now,
 		records: prometheus.NewDesc("urnetwork_provider_egress_tally_queue_records",
-			"Tally records a shard retains after its owner's latest read in this process, including acknowledged records not yet deleted; handoffs are refused as full at 16384", shard, nil),
+			"Tally records a shard retained at the first read of its owner's latest drain in this process, after at most one page of cleanup, so within 256 records of the occupancy producers met; handoffs are refused as full at 16384; withheld when older than five minutes", shard, nil),
 		bytes: prometheus.NewDesc("urnetwork_provider_egress_tally_queue_bytes",
-			"Tally record bytes a shard retains after its owner's latest read in this process; handoffs are refused as full past 16 MiB", shard, nil),
+			"Tally record bytes a shard retained at the first read of its owner's latest drain in this process, after at most one page of cleanup; handoffs are refused as full past 16 MiB; withheld when older than five minutes", shard, nil),
 		fill: prometheus.NewDesc("urnetwork_provider_egress_tally_queue_fill_ratio",
-			"Retained tally records or bytes as a fraction of the shard's admission bound, whichever is fuller; handoffs are refused as full at 1", shard, nil),
+			"Retained tally records or bytes at the first read of the shard owner's latest drain in this process, as a fraction of the shard's admission bound, whichever is fuller; at most one page below the peak, and handoffs are refused as full at 1; withheld when older than five minutes", shard, nil),
 		pending: prometheus.NewDesc("urnetwork_provider_egress_tally_queue_oldest_pending_seconds",
-			"Age of the shard's oldest unacknowledged tally record at its owner's latest read in this process; zero when none is pending", shard, nil),
+			"Age of the shard's oldest unacknowledged tally record at the first read of its owner's latest drain in this process; zero when none is pending; withheld when older than five minutes", shard, nil),
 		observed: prometheus.NewDesc("urnetwork_provider_egress_tally_queue_observed_timestamp_seconds",
-			"Unix time of the shard owner's latest read in this process; samples older than five minutes are withheld", shard, nil),
+			"Unix time of the first read of the shard owner's latest drain in this process whose first read succeeded; never withheld, so its age shows a stuck owner; zero when this process has drained other shards but not this one since it started", shard, nil),
 	}
 }
 
+// Marks this process as a tally owner: every shard's observed time is
+// published from now on, read here or not.
+func (self *providerEgressTallyBacklogCollector) arm() {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.armed = true
+	}()
+}
+
+// Records a drain's occupancy unless an occupancy observed later is already
+// held, and arms the collector.
 func (self *providerEgressTallyBacklogCollector) observe(shard int, backlog ProviderEgressTallyBacklog) {
 	if shard < 0 || shard >= ProviderEgressTallyShardCount || backlog.Records < 0 || backlog.Bytes < 0 {
 		return
@@ -674,6 +701,7 @@ func (self *providerEgressTallyBacklogCollector) observe(shard int, backlog Prov
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		self.armed = true
 		if backlog.ObservedAt.Before(self.shardBacklogs[shard].ObservedAt) {
 			return
 		}
@@ -681,6 +709,7 @@ func (self *providerEgressTallyBacklogCollector) observe(shard int, backlog Prov
 	}()
 }
 
+// The five shard-labelled families; see the constructor.
 func (self *providerEgressTallyBacklogCollector) Describe(metrics chan<- *prometheus.Desc) {
 	metrics <- self.records
 	metrics <- self.bytes
@@ -689,19 +718,31 @@ func (self *providerEgressTallyBacklogCollector) Describe(metrics chan<- *promet
 	metrics <- self.observed
 }
 
+// Emits one consistent copy of the samples: the observed time for every
+// shard once armed, and the depths of shards observed within the window.
 func (self *providerEgressTallyBacklogCollector) Collect(metrics chan<- prometheus.Metric) {
+	var armed bool
 	var shardBacklogs [ProviderEgressTallyShardCount]ProviderEgressTallyBacklog
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		armed = self.armed
 		shardBacklogs = self.shardBacklogs
 	}()
+	if !armed {
+		return
+	}
 	now := self.now()
 	for shard, backlog := range shardBacklogs {
+		label := strconv.Itoa(shard)
+		observedSeconds := 0.0
+		if !backlog.ObservedAt.IsZero() {
+			observedSeconds = float64(backlog.ObservedAt.UnixNano()) / float64(time.Second)
+		}
+		metrics <- prometheus.MustNewConstMetric(self.observed, prometheus.GaugeValue, observedSeconds, label)
 		if backlog.ObservedAt.IsZero() || providerEgressTallyBacklogFreshness < now.Sub(backlog.ObservedAt) {
 			continue
 		}
-		label := strconv.Itoa(shard)
 		pendingSeconds := 0.0
 		if !backlog.PendingSince.IsZero() {
 			pendingSeconds = max(0, backlog.ObservedAt.Sub(backlog.PendingSince).Seconds())
@@ -710,7 +751,6 @@ func (self *providerEgressTallyBacklogCollector) Collect(metrics chan<- promethe
 		metrics <- prometheus.MustNewConstMetric(self.bytes, prometheus.GaugeValue, float64(backlog.Bytes), label)
 		metrics <- prometheus.MustNewConstMetric(self.fill, prometheus.GaugeValue, backlog.FillRatio(), label)
 		metrics <- prometheus.MustNewConstMetric(self.pending, prometheus.GaugeValue, pendingSeconds, label)
-		metrics <- prometheus.MustNewConstMetric(self.observed, prometheus.GaugeValue, float64(backlog.ObservedAt.UnixNano())/float64(time.Second), label)
 	}
 }
 
