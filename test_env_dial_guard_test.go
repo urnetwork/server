@@ -369,14 +369,14 @@ func TestNilTestEnvDialGuardLeavesDialPathsUnchanged(t *testing.T) {
 		return []string{"198.51.100.7"}, nil
 	}
 	if testEnvFuncPointer(guard.wrapDial("redis", dial)) != testEnvFuncPointer(dial) ||
-		testEnvFuncPointer(guard.wrapLookup("postgres", lookup)) != testEnvFuncPointer(lookup) {
+		testEnvFuncPointer(guard.lookupFunc("postgres", lookup)) != testEnvFuncPointer(lookup) {
 		t.Fatal("a nil guard replaced the caller's dial or lookup")
 	}
 	authority := net.JoinHostPort(testEnvFixtureRedisHost, "6379")
 	if _, err := redisPoolDialer(guard, authority, map[string]string{}, dial)(t.Context(), "tcp", authority); !errors.Is(err, unreachable) {
 		t.Fatalf("unguarded pool dial error = %v; want the caller's own result", err)
 	}
-	addresses, err := guard.wrapLookup("postgres", lookup)(t.Context(), testEnvFixturePgHost)
+	addresses, err := guard.lookupFunc("postgres", lookup)(t.Context(), testEnvFixturePgHost)
 	if err != nil || !slices.Equal(addresses, []string{"198.51.100.7"}) {
 		t.Fatalf("unguarded lookup = %q, %v; want the caller's own answer", addresses, err)
 	}
@@ -652,7 +652,7 @@ func TestTestEnvDialGuardRefusesAnyUnattestedResolvedAddress(t *testing.T) {
 		!strings.Contains(err.Error(), "resolved to 127.0.0.1:6379") {
 		t.Fatalf("mixed answer dial = %v; want the loopback address refused", err)
 	}
-	if _, err := guard.wrapLookup("redis", resolver.lookupHost)(t.Context(), testEnvFixtureRedisHost); err == nil ||
+	if _, err := guard.lookupFunc("redis", resolver.lookupHost)(t.Context(), testEnvFixtureRedisHost); err == nil ||
 		!strings.Contains(err.Error(), "resolved to 127.0.0.1") {
 		t.Fatalf("mixed answer lookup = %v; want the loopback address refused", err)
 	}
@@ -1016,6 +1016,112 @@ func TestRedisClientsDialThroughExplicitDialers(t *testing.T) {
 	}
 	if checked < 20 {
 		t.Fatalf("found only %d go-redis client constructions; the scan no longer sees this package", checked)
+	}
+}
+
+// Installs a process guard whose scripted resolver answers an unattested
+// documentation address for one .invalid name. A wiring that bypassed the
+// guard would ask the host resolver instead, get no such host, and open no
+// socket.
+func useTestEnvUnattestedNameGuard(t *testing.T, host string) *testEnvScriptedResolver {
+	t.Helper()
+	resolver := &testEnvScriptedResolver{host: host, answers: [][]netip.Addr{{testEnvUnattestedAddr}}}
+	useTestEnvProcessDialGuard(t, newTestEnvDialGuard(testEnvManagedEnvironment(testEnvFixtureAttestation), resolver.lookupNetIp))
+	return resolver
+}
+
+// Runs a fixture function that raises on failure and returns what it raised.
+func testEnvRecoverRaised(run func()) (raised any) {
+	defer func() {
+		raised = recover()
+	}()
+	run()
+	return nil
+}
+
+// The lease coordinator, the db-0 client of the incident, dials through the
+// process guard.
+func TestRedisLeaseCoordinatorDialsThroughProcessGuard(t *testing.T) {
+	resolver := useTestEnvUnattestedNameGuard(t, "redis.fixture.invalid")
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	raised := testEnvRecoverRaised(func() {
+		acquireTestRedisDbLease(ctx, "redis.fixture.invalid:16379", "", 0, "synthetic-token", 0, time.Minute)
+	})
+	if !strings.Contains(fmt.Sprint(raised), "redis.fixture.invalid resolved to 198.51.100.20:16379") || resolver.lookupCount() == 0 {
+		t.Fatalf("lease coordinator raised %v after %d guard lookups; want the guard's refusal", raised, resolver.lookupCount())
+	}
+}
+
+// Integration setup pins its PostgreSQL resource through the process guard,
+// before any orphan sweep, CREATE DATABASE or Redis lease.
+func TestTestEnvSetupResolvesThroughProcessGuard(t *testing.T) {
+	childTestResources(t)
+	t.Setenv("BRINGYOUR_POSTGRES_HOSTNAME", "pg.fixture.invalid")
+	resolver := useTestEnvUnattestedNameGuard(t, "pg.fixture.invalid")
+	raised := testEnvRecoverRaised(func() {
+		teardown := (&TestEnv{ApplyDbMigrations: false}).setup()
+		teardown()
+	})
+	if !strings.Contains(fmt.Sprint(raised), "pg.fixture.invalid resolved to 198.51.100.20") || resolver.lookupCount() != 1 {
+		t.Fatalf("setup raised %v after %d guard lookups; want the guard's refusal", raised, resolver.lookupCount())
+	}
+}
+
+// The database owner session keeps the guarded pool dialer and resolves its
+// host through the process guard.
+func TestTestPgDbLeaseResolvesThroughProcessGuard(t *testing.T) {
+	childTestResources(t)
+	t.Setenv("BRINGYOUR_POSTGRES_HOSTNAME", "pg.fixture.invalid")
+	resolver := useTestEnvUnattestedNameGuard(t, "pg.fixture.invalid")
+	PgReset()
+	t.Cleanup(PgReset)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	raised := testEnvRecoverRaised(func() {
+		closePgConnection(ctx, acquireTestPgDbLease(ctx, childTestDatabase))
+	})
+	if !strings.Contains(fmt.Sprint(raised), "pg.fixture.invalid resolved to 198.51.100.20") || resolver.lookupCount() != 1 {
+		t.Fatalf("owner session raised %v after %d guard lookups; want the guard's refusal", raised, resolver.lookupCount())
+	}
+}
+
+// A child process qualifies its inherited PostgreSQL endpoint through the
+// process guard. The child reports only that the endpoint differs, so the
+// guard's own resolver is the observable boundary.
+func TestTestEnvironmentChildValidationResolvesThroughProcessGuard(t *testing.T) {
+	pg, redisResource := childTestResources(t)
+	t.Setenv("BRINGYOUR_POSTGRES_HOSTNAME", "pg.fixture.invalid")
+	resolver := useTestEnvUnattestedNameGuard(t, "pg.fixture.invalid")
+	err := ValidateTestEnvironmentChildResources(t.Context(), childTestWire(t, pg), childTestWire(t, redisResource))
+	if err == nil || resolver.lookupCount() != 1 {
+		t.Fatalf("child validation = %v after %d guard lookups; want it refused through the guard", err, resolver.lookupCount())
+	}
+}
+
+// A child's read of the parent's lease dials through the process guard.
+func TestTestEnvironmentChildLeaseReadDialsThroughProcessGuard(t *testing.T) {
+	resolver := useTestEnvUnattestedNameGuard(t, "redis.fixture.invalid")
+	_, err := readTestEnvironmentChildRedisLease(t.Context(), testEnvironmentChildResources{
+		redisAuthority: "redis.fixture.invalid:16379",
+		redisDatabase:  1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "redis.fixture.invalid resolved to 198.51.100.20:16379") || resolver.lookupCount() == 0 {
+		t.Fatalf("child lease read = %v after %d guard lookups; want the guard's refusal", err, resolver.lookupCount())
+	}
+}
+
+// A child's owner query resolves and dials through the process guard.
+func TestTestEnvironmentChildOwnerQueryDialsThroughProcessGuard(t *testing.T) {
+	resolver := useTestEnvUnattestedNameGuard(t, "pg.fixture.invalid")
+	_, err := readTestEnvironmentChildPgOwner(t.Context(), testEnvironmentChildResources{
+		postgresAuthority: "pg.fixture.invalid:15432",
+		postgresUser:      "synthetic",
+		postgresPassword:  "not-a-secret",
+		postgresDatabase:  childTestDatabase,
+	})
+	if err == nil || !strings.Contains(err.Error(), "pg.fixture.invalid resolved to 198.51.100.20") || resolver.lookupCount() != 1 {
+		t.Fatalf("child owner query = %v after %d guard lookups; want the guard's refusal", err, resolver.lookupCount())
 	}
 }
 

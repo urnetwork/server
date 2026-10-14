@@ -680,7 +680,7 @@ func probeTestEnvironmentService(
 		ctx,
 		serviceName,
 		configuration,
-		guard.wrapLookup(serviceName, resolver.LookupHost),
+		guard.lookupFunc(serviceName, resolver.LookupHost),
 		guard.wrapDial(serviceName, dialer.DialContext),
 	)
 }
@@ -1149,7 +1149,7 @@ func (self *TestEnv) setup() func() {
 	// refusal here names the host before any orphan sweep or CREATE runs.
 	pg, maintenancePg, popResolvedPg, resolveErr := prepareResolvedTestPgResources(
 		ctx,
-		currentTestEnvDialGuard().wrapLookup("postgres", newTestEnvironmentProbeResolver().LookupHost),
+		currentTestEnvDialGuard().lookupFunc("postgres", newTestEnvironmentProbeResolver().LookupHost),
 	)
 	Raise(resolveErr)
 	// This outer scope spans orphan sweep, CREATE, the independent owner,
@@ -1328,7 +1328,7 @@ cluster: %t`,
 func acquireTestPgDbLease(ctx context.Context, datname string) *pgx.Conn {
 	configuration := testPgDbLeaseConfiguration(safeMaintenancePool.open().Config().ConnConfig, datname)
 	// The copied pool configuration already carries the guarded dialer.
-	configuration.LookupFunc = currentTestEnvDialGuard().wrapLookup("postgres", configuration.LookupFunc)
+	configuration.LookupFunc = currentTestEnvDialGuard().lookupFunc("postgres", configuration.LookupFunc)
 	connection, err := pgx.ConnectConfig(ctx, configuration)
 	Raise(err)
 	return connection

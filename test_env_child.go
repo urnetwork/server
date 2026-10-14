@@ -32,7 +32,7 @@ type testEnvironmentChildResources struct {
 // pool. Only the exact live parent's disposable databases may be inherited.
 // Errors deliberately omit resource values, credentials and lease tokens.
 func ValidateTestEnvironmentChildResources(ctx context.Context, pgWire, redisWire []byte) error {
-	lookup := currentTestEnvDialGuard().wrapLookup("postgres", newTestEnvironmentProbeResolver().LookupHost)
+	lookup := currentTestEnvDialGuard().lookupFunc("postgres", newTestEnvironmentProbeResolver().LookupHost)
 	return validateTestEnvironmentChildResources(ctx, pgWire, redisWire, os.Getppid(),
 		lookup, attestTestEnvironmentChildOwnership)
 }

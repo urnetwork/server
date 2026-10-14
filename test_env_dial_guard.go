@@ -119,9 +119,17 @@ func Testing_DialTestEnv(ctx context.Context, service string, network string, ad
 // atomic access keeps that race-free.
 var testEnvProcessDialGuard atomic.Pointer[testEnvDialGuard]
 
-// Chooses this process's guard before any pool can open.
+// Chooses this process's guard before any pool can open. Its resolver is the
+// fixture's files-first resolver, bounded like a PostgreSQL lookup: pgconn
+// resolves before its connect timeout applies.
 func init() {
-	testEnvProcessDialGuard.Store(newTestEnvDialGuard(os.Getenv, newTestEnvironmentProbeResolver().LookupNetIP))
+	resolver := newTestEnvironmentProbeResolver()
+	lookupNetIp := func(ctx context.Context, network string, host string) ([]netip.Addr, error) {
+		lookupCtx, cancel := context.WithTimeout(ctx, PgConnectTimeout)
+		defer cancel()
+		return resolver.LookupNetIP(lookupCtx, network, host)
+	}
+	testEnvProcessDialGuard.Store(newTestEnvDialGuard(os.Getenv, lookupNetIp))
 }
 
 // The guard chosen for this process at startup, or nil outside a test process.
@@ -337,39 +345,48 @@ func (self *testEnvDialGuard) wrapDial(
 	}
 }
 
-// Returns lookup itself for a nil guard. Otherwise a name may resolve only to
-// attested addresses, so a refusal names the host; the dial guard still checks
-// each endpoint's port.
-func (self *testEnvDialGuard) wrapLookup(
+// Returns fallback itself for a nil guard. Otherwise the lookup resolves
+// through the guard's own resolver, the one its dials use, and admits only
+// attested or admitted addresses, so a refusal names the host; the dial still
+// checks each endpoint's port. No caller's resolver can widen the attestation,
+// and a test can script the guard's.
+func (self *testEnvDialGuard) lookupFunc(
 	service string,
-	lookup func(ctx context.Context, host string) ([]string, error),
+	fallback func(ctx context.Context, host string) ([]string, error),
 ) func(ctx context.Context, host string) ([]string, error) {
 	if self == nil {
-		return lookup
+		return fallback
 	}
 	return func(ctx context.Context, host string) ([]string, error) {
 		if self.attestationErr != nil {
 			return nil, self.unattested(service, host)
 		}
-		addresses, err := lookup(ctx, host)
+		addrs, err := self.resolveHost(ctx, host)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("test environment refused %s lookup: could not resolve %s: %w", service, host, err)
 		}
-		if len(addresses) == 0 {
+		if len(addrs) == 0 {
 			return nil, fmt.Errorf("test environment refused %s lookup: %s resolved to no address", service, host)
 		}
-		for _, address := range addresses {
-			addr, err := netip.ParseAddr(address)
-			if err != nil {
-				return nil, self.refusal(service, host, address, false)
-			}
+		addresses := make([]string, 0, len(addrs))
+		for _, addr := range addrs {
 			addr = addr.Unmap()
 			if !self.admitsAddr(addr) {
-				return nil, self.refusal(service, host, address, addr.IsLoopback())
+				return nil, self.refusal(service, host, addr.String(), addr.IsLoopback())
 			}
+			addresses = append(addresses, addr.String())
 		}
 		return addresses, nil
 	}
+}
+
+// Resolves a host once through the guard's resolver; an address literal is
+// its own answer.
+func (self *testEnvDialGuard) resolveHost(ctx context.Context, host string) ([]netip.Addr, error) {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return []netip.Addr{addr}, nil
+	}
+	return self.lookupNetIp(ctx, "ip", host)
 }
 
 // Resolves one dial address to the attested endpoints it may use, or refuses.
@@ -400,13 +417,7 @@ func (self *testEnvDialGuard) resolveAttested(
 	if err != nil || port == 0 {
 		return nil, fmt.Errorf("test environment refused %s dial to %q: invalid port", service, address)
 	}
-	resolve := func() ([]netip.Addr, error) {
-		if addr, err := netip.ParseAddr(host); err == nil {
-			return []netip.Addr{addr}, nil
-		}
-		return self.lookupNetIp(ctx, "ip", host)
-	}
-	addrs, err := resolve()
+	addrs, err := self.resolveHost(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("test environment refused %s dial: could not resolve %s: %w", service, host, err)
 	}

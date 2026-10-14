@@ -312,7 +312,7 @@ func configurePgTestEnvDial(guard *testEnvDialGuard, config *pgx.ConnConfig) {
 	if guard == nil {
 		return
 	}
-	config.LookupFunc = guard.wrapLookup("postgres", config.LookupFunc)
+	config.LookupFunc = guard.lookupFunc("postgres", config.LookupFunc)
 	config.DialFunc = guard.wrapDial("postgres", config.DialFunc)
 }
 
