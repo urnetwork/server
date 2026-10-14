@@ -24,7 +24,13 @@
 // helpers stay unguarded so their hermetic tests do not depend on the
 // environment that runs them.
 //
-// A guard is immutable after construction and safe for concurrent use.
+// A test may also point the pools at an in-process loopback proxy. It admits
+// that proxy's own live listener with Testing_AdmitTestEnvLoopbackListener and
+// dials the proxy's upstream with Testing_DialTestEnv, so the proxy too reaches
+// only attested endpoints.
+//
+// A guard's attestation is immutable after construction; its admissions are
+// guarded by stateLock. A guard is safe for concurrent use.
 package server
 
 import (
@@ -37,7 +43,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"testing"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -57,6 +65,54 @@ type testEnvDialGuard struct {
 	attestationErr error
 	// resolves a name handed to a guarded dial
 	lookupNetIp func(ctx context.Context, network string, host string) ([]netip.Addr, error)
+
+	stateLock sync.Mutex
+	// in-process loopback listeners admitted by running tests
+	admittedAddrPortListeners map[netip.AddrPort]*net.TCPListener
+}
+
+// The loopback ports a production data tunnel forwards
+// (xops/bin/by-patch-main-data): PostgreSQL, PgBouncer and the Redis cluster
+// nodes. No loopback endpoint on them is ever admitted.
+func testEnvLoopbackTunnelPort(port uint16) bool {
+	return port == 5432 || port == 6432 || (6379 <= port && port <= 6427)
+}
+
+// A closed listener's endpoint may already belong to another process, so an
+// admission holds only while its listener is open.
+func testEnvListenerLive(listener *net.TCPListener) bool {
+	rawConn, err := listener.SyscallConn()
+	if err != nil {
+		return false
+	}
+	return rawConn.Control(func(uintptr) {}) == nil
+}
+
+// Admits one live loopback listener that this test process owns, such as an
+// in-process proxy the PostgreSQL or Redis pools are pointed at, as a dial
+// target until the test ends. Holding the open listener is the proof of
+// ownership: only its exact ip:port is admitted, only while it stays open, and
+// never on a production tunnel port. Outside a test-env process this does
+// nothing.
+func Testing_AdmitTestEnvLoopbackListener(t testing.TB, listener net.Listener) {
+	t.Helper()
+	guard := currentTestEnvDialGuard()
+	if guard == nil {
+		return
+	}
+	remove, err := guard.admit(listener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(remove)
+}
+
+// Dials a fixture's own upstream PostgreSQL or Redis endpoint, as an in-process
+// proxy forwarding to the fixture does, through the process guard, so the proxy
+// reaches only attested endpoints. Outside a test-env process it is an
+// ordinary dial.
+func Testing_DialTestEnv(ctx context.Context, service string, network string, address string) (net.Conn, error) {
+	return currentTestEnvDialGuard().wrapDial(service, (&net.Dialer{}).DialContext)(ctx, network, address)
 }
 
 // Set once at startup. Tests may swap it to exercise the real constructors;
@@ -163,6 +219,75 @@ func configureTestEnvRedisDial(guard *testEnvDialGuard, options *redis.Options, 
 	options.Dialer = guard.wrapDial("redis", dial)
 }
 
+// Admits one live TCP loopback listener's exact endpoint until the returned
+// removal runs. A later admission of the same endpoint is kept by an earlier
+// removal.
+func (self *testEnvDialGuard) admit(listener net.Listener) (func(), error) {
+	tcpListener, ok := listener.(*net.TCPListener)
+	if !ok {
+		return nil, fmt.Errorf("test environment admits only a TCP listener, not %T", listener)
+	}
+	addrPort := tcpListener.Addr().(*net.TCPAddr).AddrPort()
+	addrPort = netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port())
+	if !addrPort.Addr().IsLoopback() || addrPort.Addr().Zone() != "" {
+		return nil, fmt.Errorf("test environment admits only a loopback listener, not %s", addrPort)
+	}
+	if testEnvLoopbackTunnelPort(addrPort.Port()) {
+		return nil, fmt.Errorf("test environment never admits loopback %s: a production data tunnel can listen on that port", addrPort)
+	}
+	if !testEnvListenerLive(tcpListener) {
+		return nil, fmt.Errorf("test environment admits only an open listener; %s is closed", addrPort)
+	}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.admittedAddrPortListeners == nil {
+			self.admittedAddrPortListeners = map[netip.AddrPort]*net.TCPListener{}
+		}
+		self.admittedAddrPortListeners[addrPort] = tcpListener
+	}()
+	return func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.admittedAddrPortListeners[addrPort] == tcpListener {
+			delete(self.admittedAddrPortListeners, addrPort)
+		}
+	}, nil
+}
+
+// Reports whether a dial may reach endpoint: it is attested, or it belongs to
+// an admitted listener that is still open.
+func (self *testEnvDialGuard) admits(addrPort netip.AddrPort) bool {
+	if slices.Contains(self.attestedAddrPorts, addrPort) {
+		return true
+	}
+	listener := func() *net.TCPListener {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.admittedAddrPortListeners[addrPort]
+	}()
+	return listener != nil && testEnvListenerLive(listener)
+}
+
+// Reports whether addr is the address of an attested or admitted endpoint. A
+// lookup has no port; the dial still checks the exact endpoint.
+func (self *testEnvDialGuard) admitsAddr(addr netip.Addr) bool {
+	sameAddr := func(addrPort netip.AddrPort) bool {
+		return addrPort.Addr() == addr
+	}
+	if slices.ContainsFunc(self.attestedAddrPorts, sameAddr) {
+		return true
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	for addrPort := range self.admittedAddrPortListeners {
+		if sameAddr(addrPort) {
+			return true
+		}
+	}
+	return false
+}
+
 // Integration fixtures create and drop databases, so they need a guard with a
 // valid attestation: a process that test-env.sh qualified against its launcher.
 func (self *testEnvDialGuard) requireAttested() error {
@@ -229,10 +354,7 @@ func (self *testEnvDialGuard) wrapLookup(
 				return nil, self.refusal(service, host, address, false)
 			}
 			addr = addr.Unmap()
-			attested := slices.ContainsFunc(self.attestedAddrPorts, func(addrPort netip.AddrPort) bool {
-				return addrPort.Addr() == addr
-			})
-			if !attested {
+			if !self.admitsAddr(addr) {
 				return nil, self.refusal(service, host, address, addr.IsLoopback())
 			}
 		}
@@ -284,7 +406,7 @@ func (self *testEnvDialGuard) resolveAttested(
 	addrPorts := make([]netip.AddrPort, 0, len(addrs))
 	for _, addr := range addrs {
 		addrPort := netip.AddrPortFrom(addr.Unmap(), uint16(port))
-		if !slices.Contains(self.attestedAddrPorts, addrPort) {
+		if !self.admits(addrPort) {
 			return nil, self.refusal(service, host, addrPort.String(), addrPort.Addr().IsLoopback())
 		}
 		addrPorts = append(addrPorts, addrPort)
@@ -292,25 +414,31 @@ func (self *testEnvDialGuard) resolveAttested(
 	return addrPorts, nil
 }
 
-// Names the host, what it resolved to and the attestation. Loopback also gets
-// the reason it is never taken for the local stack.
+// Names the host, what it resolved to and the attestation, then what would
+// admit the dial. Only a name that moved off the launcher's address is fixed by
+// restarting the launcher; an address literal was chosen by the caller.
 func (self *testEnvDialGuard) refusal(service string, host string, resolved string, loopback bool) error {
-	reason := ""
-	if loopback {
-		reason = "; public DNS answers the local service names with 127.0.0.1, where a production data tunnel can listen"
-	}
 	attested := make([]string, 0, len(self.attestedAddrPorts))
 	for _, addrPort := range self.attestedAddrPorts {
 		attested = append(attested, addrPort.String())
 	}
+	advice := "a test process dials only attested endpoints"
+	if _, err := netip.ParseAddr(host); err != nil {
+		advice = "restart ./local/run-local.sh, wait for 'Local environment is up', and source ./test-env.sh again"
+		if loopback {
+			advice = "public DNS answers the local service names with 127.0.0.1, where a production data tunnel can listen; " + advice
+		}
+	} else if loopback {
+		advice = "a production data tunnel can listen on loopback; admit an in-process listener this test owns with " +
+			"Testing_AdmitTestEnvLoopbackListener"
+	}
 	return fmt.Errorf(
-		"test environment refused %s dial: %s resolved to %s, which the launcher did not attest (attested %s)%s; "+
-			"restart ./local/run-local.sh, wait for 'Local environment is up', and source ./test-env.sh again",
+		"test environment refused %s dial: %s resolved to %s, which the launcher did not attest (attested %s); %s",
 		service,
 		host,
 		resolved,
 		strings.Join(attested, ", "),
-		reason,
+		advice,
 	)
 }
 

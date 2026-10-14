@@ -688,6 +688,150 @@ func TestTestEnvProcessDialGuardIgnoresLaterEnvironmentChanges(t *testing.T) {
 	}
 }
 
+// A refusal says what would admit the dial. Restarting the launcher fixes only
+// a name that moved off its address; an in-process loopback endpoint needs its
+// own listener admitted, and another literal was never the launcher's.
+func TestTestEnvRefusalAdvisesByTarget(t *testing.T) {
+	resolver := &testEnvScriptedResolver{host: testEnvFixtureRedisHost, answers: [][]netip.Addr{{testEnvLoopbackAddr}}}
+	guard := newTestEnvDialGuard(testEnvManagedEnvironment(testEnvFixtureAttestation), resolver.lookupNetIp)
+	dial := guard.wrapDial("postgres", func(context.Context, string, string) (net.Conn, error) {
+		t.Error("a refused endpoint reached the dialer")
+		return nil, errors.New("unexpected dial")
+	})
+	movedName := net.JoinHostPort(testEnvFixtureRedisHost, "16379")
+	cases := []struct {
+		address string
+		advice  string
+	}{
+		{address: "127.0.0.1:54321", advice: "admit an in-process listener this test owns with Testing_AdmitTestEnvLoopbackListener"},
+		{address: "198.51.100.30:15432", advice: "a test process dials only attested endpoints"},
+		{address: movedName, advice: "public DNS answers the local service names with 127.0.0.1"},
+	}
+	for _, c := range cases {
+		_, err := dial(t.Context(), "tcp", c.address)
+		if err == nil || !strings.Contains(err.Error(), c.advice) {
+			t.Errorf("refusal of %s = %v; want advice %q", c.address, err, c.advice)
+			continue
+		}
+		if restart := strings.Contains(err.Error(), "restart ./local/run-local.sh"); restart != (c.address == movedName) {
+			t.Errorf("refusal of %s = %v; restarting the launcher fixes only a moved name", c.address, err)
+		}
+	}
+}
+
+// An in-process proxy that the pools are pointed at, as the model fixtures do:
+// its own live loopback listener is admitted for the test and reached through
+// the real PostgreSQL pool path, while the same endpoint before admission,
+// after the test's cleanup, or once the listener closes is refused.
+func TestTestEnvAdmitsOnlyLiveOwnedLoopbackListener(t *testing.T) {
+	guard := newTestEnvDialGuard(testEnvManagedEnvironment(testEnvFixtureAttestation), testEnvUnusedResolver(t))
+	useTestEnvProcessDialGuard(t, guard)
+	pushTestEnvGuardPgResources(t)
+	pool := &safePgPool{ctx: context.Background(), vaultResourceName: DefaultPgVaultResourceName, configResourceName: DefaultPgConfigResourceName}
+	defer pool.reset()
+	config := pool.open().Config().ConnConfig
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	address := listener.Addr().String()
+
+	if _, err := config.DialFunc(t.Context(), "tcp", address); err == nil {
+		t.Fatal("an unadmitted in-process listener was dialed")
+	}
+	runScopedChildTest(t, "admitted proxy", func(scoped testing.TB) {
+		Testing_AdmitTestEnvLoopbackListener(scoped, listener)
+		addresses, err := config.LookupFunc(t.Context(), "127.0.0.1")
+		if err != nil || !slices.Equal(addresses, []string{"127.0.0.1"}) {
+			t.Fatalf("admitted proxy lookup = %q, %v", addresses, err)
+		}
+		conn, err := config.DialFunc(t.Context(), "tcp", address)
+		if err != nil {
+			t.Fatalf("admitted proxy dial: %v", err)
+		}
+		conn.Close()
+		// One exact endpoint is admitted, never its address's other ports.
+		port := listener.Addr().(*net.TCPAddr).Port
+		neighbor := net.JoinHostPort("127.0.0.1", fmt.Sprint(port+1))
+		if _, err := guard.wrapDial("postgres", func(context.Context, string, string) (net.Conn, error) {
+			t.Error("a neighboring loopback port reached the dialer")
+			return nil, errors.New("unexpected dial")
+		})(t.Context(), "tcp", neighbor); err == nil {
+			t.Fatalf("admission of %s also admitted %s", address, neighbor)
+		}
+	})
+	if _, err := config.DialFunc(t.Context(), "tcp", address); err == nil {
+		t.Fatal("an admission outlived its test")
+	}
+	runScopedChildTest(t, "closed proxy", func(scoped testing.TB) {
+		Testing_AdmitTestEnvLoopbackListener(scoped, listener)
+		listener.Close()
+		if _, err := config.DialFunc(t.Context(), "tcp", address); err == nil {
+			t.Fatal("a closed listener's endpoint stayed admitted")
+		}
+	})
+	if _, err := guard.admit(listener); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("admission of a closed listener = %v; want refused", err)
+	}
+	if _, err := guard.admit(testEnvFakeListener{}); err == nil || !strings.Contains(err.Error(), "only a TCP listener") {
+		t.Fatalf("admission of a non-TCP listener = %v; want refused", err)
+	}
+}
+
+// Stands in for a listener that is not a real TCP socket.
+type testEnvFakeListener struct{}
+
+// Never yields a connection.
+func (self testEnvFakeListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+
+// Holds nothing to close.
+func (self testEnvFakeListener) Close() error { return nil }
+
+// Claims a loopback endpoint it does not hold.
+func (self testEnvFakeListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 16379}
+}
+
+// The production data tunnel's loopback ports are never admitted: PostgreSQL,
+// PgBouncer and every Redis cluster node port the tunnel forwards.
+func TestTestEnvLoopbackTunnelPorts(t *testing.T) {
+	for _, port := range []uint16{5432, 6432, 6379, 6380, 6411, 6412, 6427} {
+		if !testEnvLoopbackTunnelPort(port) {
+			t.Errorf("tunnel port %d was not recognized", port)
+		}
+	}
+	for _, port := range []uint16{5431, 5433, 6378, 6428, 6431, 6433, 15432, 16379, 35431, 36371} {
+		if testEnvLoopbackTunnelPort(port) {
+			t.Errorf("port %d was taken for a tunnel port", port)
+		}
+	}
+}
+
+// A proxy's upstream dial goes through the process guard: an endpoint outside
+// the attestation is refused before a socket opens, and outside a test-env
+// process the same call is an ordinary dial.
+func TestTestingDialTestEnvGuardsProxyUpstream(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	useTestEnvProcessDialGuard(t, newTestEnvDialGuard(testEnvManagedEnvironment(testEnvFixtureAttestation), testEnvUnusedResolver(t)))
+	for _, address := range []string{"198.51.100.30:15432", listener.Addr().String()} {
+		if conn, err := Testing_DialTestEnv(t.Context(), "postgres", "tcp", address); err == nil {
+			conn.Close()
+			t.Errorf("proxy upstream %s was dialed outside the attestation", address)
+		}
+	}
+	useTestEnvProcessDialGuard(t, nil)
+	conn, err := Testing_DialTestEnv(t.Context(), "postgres", "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("ordinary proxy upstream dial outside a test process: %v", err)
+	}
+	conn.Close()
+}
+
 // Pushes a synthetic PostgreSQL resource whose pool opens no connection.
 func pushTestEnvGuardPgResources(t *testing.T) {
 	t.Helper()
