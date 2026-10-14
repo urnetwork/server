@@ -2168,6 +2168,47 @@
                     "legendFormat": "passes {{host}} {{block}} {{result}}"
                 }
             ]
+        },
+        {
+            "id": 58,
+            "type": "timeseries",
+            "title": "connection sync reads retried / s",
+            "description": "Sync rounds of live connection announcements whose read (provide changes and modes) failed. The round is skipped and retried after the sync interval, doubling with each further consecutive failure up to its bound; the transport and its row stay, and the next successful round records the skipped round's stats. Before this, each such failure tore down the client's transport, so a database outage disconnected the providers whose sync fell in it.",
+            "gridPos": {
+                "h": 8,
+                "w": 24,
+                "x": 0,
+                "y": 209
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (host, block) (rate(urnetwork_connect_connection_sync_read_failures_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "retried {{host}} {{block}}"
+                }
+            ]
         }
     ]
 }

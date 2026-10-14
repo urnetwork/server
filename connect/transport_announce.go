@@ -9,6 +9,7 @@ import (
 	"math"
 	mathrand "math/rand"
 	"net/netip"
+	"runtime"
 	"sync"
 	"time"
 
@@ -43,9 +44,19 @@ var drainExcusesConsumedCounter = prometheus.NewCounter(
 	},
 )
 
+var connectionSyncReadFailuresCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "connection_sync_read_failures_total",
+		Help:      "Sync rounds of live connection announcements whose read failed; the round was retried later and the transport kept",
+	},
+)
+
 func init() {
 	prometheus.MustRegister(connectionNewCounter)
 	prometheus.MustRegister(drainExcusesConsumedCounter)
+	prometheus.MustRegister(connectionSyncReadFailuresCounter)
 }
 
 // connectionCleanupTimeout bounds the detached database/redis cleanup that
@@ -61,6 +72,7 @@ func connectionCleanupContext(parent context.Context) (context.Context, context.
 func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 	return &ConnectionAnnounceSettings{
 		SyncConnectionTimeout: model.ReliabilityBlockDuration / 2,
+		SyncRetryMaxTimeout:   2 * model.ReliabilityBlockDuration,
 		LocationRetryTimeout:  5 * time.Minute,
 		// PeerRegisterTtl is derived from ExchangeResidentTtl in
 		// NewConnectHandler (must equal the heartbeat refresh ttl or
@@ -86,7 +98,10 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 
 type ConnectionAnnounceSettings struct {
 	SyncConnectionTimeout time.Duration
-	LocationRetryTimeout  time.Duration
+	// a sync round whose read failed is retried after SyncConnectionTimeout,
+	// doubling with each further consecutive failure up to this bound
+	SyncRetryMaxTimeout  time.Duration
+	LocationRetryTimeout time.Duration
 	// ttl for the network peer registration made at announce
 	PeerRegisterTtl time.Duration
 	// set from ExchangeSettings.EnableNetworkPeers in NewConnectHandler (the
@@ -659,15 +674,16 @@ func (self *ConnectionAnnounce) run() {
 
 	established := self.announceTimeout == 0
 	nextStartTime := server.NowUtc()
+	// consecutive sync rounds whose read failed
+	syncFailureCount := 0
 	for {
 		nextTestTimeout := nextTest()
 		select {
 		case <-self.ctx.Done():
 			return
 		case <-time.After(nextTestTimeout):
-		case <-time.After(self.settings.SyncConnectionTimeout):
-			startTime := nextStartTime
-			nextStartTime = server.NowUtc()
+		case <-time.After(self.syncTimeout(syncFailureCount)):
+			roundEndTime := server.NowUtc()
 
 			// FIXME need events to support kicking off connections from the model
 			/*
@@ -677,6 +693,24 @@ func (self *ConnectionAnnounce) run() {
 					return
 				}
 			*/
+
+			// The read comes first: a round whose read fails consumes nothing,
+			// so the next round's provide changes and stats cover this one.
+			var changedCount int
+			var currentProvideModes map[model.ProvideMode]bool
+			if readErr := self.recoverLiveRead(func() {
+				changedCount, currentProvideModes = model.GetProvideKeyChanges(self.ctx, self.clientId, nextStartTime)
+			}); readErr != nil {
+				syncFailureCount += 1
+				connectionSyncReadFailuresCounter.Inc()
+				if glog.V(1) {
+					glog.Infof("[t]sync read failed, retrying (%d consecutive): %s\n", syncFailureCount, readErr)
+				}
+				continue
+			}
+			syncFailureCount = 0
+			startTime := nextStartTime
+			nextStartTime = roundEndTime
 
 			var receiveMessageCount uint64
 			var receiveByteCount ByteCount
@@ -702,7 +736,6 @@ func (self *ConnectionAnnounce) run() {
 				SendByteCount:       sendByteCount,
 			}
 
-			changedCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, self.clientId, startTime)
 			provideEnabled := currentProvideModes[model.ProvideModePublic]
 			providerVersion.update(provideEnabled, nextStartTime)
 			// stats only matter for providers
@@ -793,6 +826,48 @@ func (self *ConnectionAnnounce) run() {
 			}
 		}
 	}
+}
+
+// Runs one read of a live announcement and returns the read's raise as an
+// error. A raise in run() ends the announcement, and run cancels the client's
+// transport as it returns: a database outage then disconnected every live
+// connection whose sync fell in it, exactly while the disconnect writes could
+// not commit (2026-10-13). A failed read says nothing about the connection,
+// so the caller keeps the transport and retries. The announcement's own end
+// still raises, and so does a programming fault: a runtime error, or a raise
+// that is not an error.
+func (self *ConnectionAnnounce) recoverLiveRead(read func()) (readErr error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		if self.ctx.Err() != nil {
+			panic(r)
+		}
+		if _, fault := r.(runtime.Error); fault {
+			panic(r)
+		}
+		err, ok := r.(error)
+		if !ok {
+			panic(r)
+		}
+		readErr = err
+	}()
+	read()
+	return nil
+}
+
+// The wait before the next sync round: the sync interval, and after the
+// second consecutive failed read, double the previous wait up to
+// SyncRetryMaxTimeout. A failed round retries at the next regular tick.
+func (self *ConnectionAnnounce) syncTimeout(failureCount int) time.Duration {
+	timeout := self.settings.SyncConnectionTimeout
+	maxTimeout := max(self.settings.SyncRetryMaxTimeout, timeout)
+	for i := 1; i < failureCount && timeout < maxTimeout; i += 1 {
+		timeout *= 2
+	}
+	return min(timeout, maxTimeout)
 }
 
 // Connect and API are separate processes, so the observed-egress writer must
