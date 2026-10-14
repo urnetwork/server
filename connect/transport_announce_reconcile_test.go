@@ -26,6 +26,8 @@ type reconcileStoreForTest struct {
 	deferringConnectionIds map[server.Id]bool
 	// every retire attempt, in order
 	retireAttempts []server.Id
+	// the disconnect time each retired row was given
+	retireDisconnectTimes map[server.Id]time.Time
 	// each read and retire is sent here when set, without blocking
 	readEvents   chan struct{}
 	retireEvents chan server.Id
@@ -36,6 +38,7 @@ func newReconcileStoreForTest() *reconcileStoreForTest {
 		connectedConnectionIds: map[server.Id]bool{},
 		failingConnectionIds:   map[server.Id]bool{},
 		deferringConnectionIds: map[server.Id]bool{},
+		retireDisconnectTimes:  map[server.Id]time.Time{},
 	}
 }
 
@@ -129,6 +132,7 @@ func (self *reconcileStoreForTest) retire(ctx context.Context, handlerId server.
 		}
 		delete(self.connectedConnectionIds, connectionId)
 		self.retiredConnectionIds = append(self.retiredConnectionIds, connectionId)
+		self.retireDisconnectTimes[connectionId] = disconnectTime
 		return true
 	}()
 	if retired && self.retireEvents != nil {
@@ -563,5 +567,33 @@ func TestConnectionReconcileKeepsADeferredRowForTheNextPass(t *testing.T) {
 	reconcile.reconcile()
 	if store.connected(connectionId) {
 		t.Fatal("a deferred row was forgotten: the pass after the fence freed did not retire it")
+	}
+}
+
+// The row of a failed final disconnect is retired with the time its
+// transport ended, which the release knows, not the later time of the pass.
+func TestConnectionReconcileRetiresWithTheReleaseTime(t *testing.T) {
+	store := newReconcileStoreForTest()
+	reconcile := newReconcileForTest(store, DefaultConnectionReconcileSettings())
+	connectionId := registerForTest(reconcile, store)
+	beforeRelease := server.NowUtc()
+	reconcile.release(connectionId, false)
+	afterRelease := server.NowUtc()
+	// the passes run strictly after the release
+	for !server.NowUtc().After(afterRelease) {
+	}
+
+	reconcile.reconcile()
+	reconcile.reconcile()
+	if store.connected(connectionId) {
+		t.Fatal("fixture: the row must be retired")
+	}
+	disconnectTime := func() time.Time {
+		store.stateLock.Lock()
+		defer store.stateLock.Unlock()
+		return store.retireDisconnectTimes[connectionId]
+	}()
+	if disconnectTime.Before(beforeRelease) || disconnectTime.After(afterRelease) {
+		t.Fatalf("the row was retired with disconnect time %s, want its release between %s and %s", disconnectTime, beforeRelease, afterRelease)
 	}
 }

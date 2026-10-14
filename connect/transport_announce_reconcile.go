@@ -169,6 +169,8 @@ type handlerConnectionReconcile struct {
 	unheldConnectionGenerations map[server.Id]uint64
 	// unheld rows whose retire raised, by how many times
 	retireFailureCounts map[server.Id]int
+	// rows whose final disconnect failed, by when their transport ended
+	releaseTimes map[server.Id]time.Time
 }
 
 // Starts the reconcile loop for handlerId, which ends with ctx.
@@ -212,6 +214,7 @@ func newHandlerConnectionReconcileWithStore(
 		connectingGenerationCounts:  map[uint64]int{},
 		unheldConnectionGenerations: map[server.Id]uint64{},
 		retireFailureCounts:         map[server.Id]int{},
+		releaseTimes:                map[server.Id]time.Time{},
 	}
 }
 
@@ -249,7 +252,8 @@ func (self *handlerConnectionReconcile) beginConnect() func(connectionId *server
 
 // Ends the hold of a connection whose announcement ended. disconnected
 // reports whether its final disconnect was written; a row it left connected is
-// the reconcile's, and wakes an early pass.
+// the reconcile's, retired with this release's time as its disconnect time,
+// and wakes an early pass.
 func (self *handlerConnectionReconcile) release(connectionId server.Id, disconnected bool) {
 	if self == nil {
 		return
@@ -258,6 +262,9 @@ func (self *handlerConnectionReconcile) release(connectionId server.Id, disconne
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		delete(self.heldConnectionIds, connectionId)
+		if !disconnected {
+			self.releaseTimes[connectionId] = server.NowUtc()
+		}
 	}()
 	if !disconnected {
 		select {
@@ -339,6 +346,7 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 
 	var staleConnectionIds []server.Id
 	failureCounts := map[server.Id]int{}
+	releaseTimes := map[server.Id]time.Time{}
 	unheldCount := 0
 	func() {
 		self.stateLock.Lock()
@@ -376,9 +384,18 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 				delete(self.retireFailureCounts, connectionId)
 			}
 		}
+		// a released row this read no longer saw connected was disconnected
+		for connectionId := range self.releaseTimes {
+			if !unheldConnectionIds[connectionId] {
+				delete(self.releaseTimes, connectionId)
+			}
+		}
 		unheldCount = len(self.unheldConnectionGenerations)
 		for _, connectionId := range staleConnectionIds {
 			failureCounts[connectionId] = self.retireFailureCounts[connectionId]
+			if releaseTime, released := self.releaseTimes[connectionId]; released {
+				releaseTimes[connectionId] = releaseTime
+			}
 		}
 	}()
 	connectionReconcileUnheldGauge.Set(float64(unheldCount))
@@ -402,7 +419,12 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 		if self.ctx.Err() != nil {
 			return true
 		}
-		retired, deferred, retireErr := self.retireOne(connectionId)
+		// the transport's end when its release recorded it, else now
+		disconnectTime, released := releaseTimes[connectionId]
+		if !released {
+			disconnectTime = server.NowUtc()
+		}
+		retired, deferred, retireErr := self.retireOne(connectionId, disconnectTime)
 		if retireErr != nil {
 			if self.ctx.Err() != nil {
 				return true
@@ -435,6 +457,7 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 			// retired, or already disconnected by another owner
 			delete(self.unheldConnectionGenerations, connectionId)
 			delete(self.retireFailureCounts, connectionId)
+			delete(self.releaseTimes, connectionId)
 		}()
 		if retired {
 			retiredCount += 1
@@ -459,7 +482,7 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 // One retire, bounded by the operation timeout. A raise is that retire's
 // failure, and the caller keeps the row for a later pass; a programming fault
 // (a runtime error, or a raise that is not an error) still raises.
-func (self *handlerConnectionReconcile) retireOne(connectionId server.Id) (retired bool, deferred bool, retireErr error) {
+func (self *handlerConnectionReconcile) retireOne(connectionId server.Id, disconnectTime time.Time) (retired bool, deferred bool, retireErr error) {
 	retireCtx, retireCancel := context.WithTimeout(self.ctx, self.settings.OperationTimeout)
 	defer retireCancel()
 	defer func() {
@@ -476,6 +499,6 @@ func (self *handlerConnectionReconcile) retireOne(connectionId server.Id) (retir
 		}
 		retireErr = err
 	}()
-	retired, deferred = self.retireConnection(retireCtx, self.handlerId, connectionId, server.NowUtc())
+	retired, deferred = self.retireConnection(retireCtx, self.handlerId, connectionId, disconnectTime)
 	return
 }
