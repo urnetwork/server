@@ -2,7 +2,9 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -477,5 +479,77 @@ func TestProviderOnlineSuccessBaselineSurvivesACanceledRead(t *testing.T) {
 		if baseline == nil || baseline.floor != 0.36 {
 			t.Fatalf("after a canceled read the guard is %v, want the published one", baseline)
 		}
+	})
+}
+
+// The states of the published guard a reader meets in the ordinary course of
+// a rollout, none published yet and a version 1 guard from the code before,
+// are logged as information, once, in words that read. A guard that cannot
+// be trusted is an error, and a trusted one ends the window.
+func TestProviderOnlineSuccessBaselineLogsExpectedStatesAsInformation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		reader := providerOnlineSuccessBaselineReader
+		errorLogs, infoLogs := []string{}, []string{}
+		clock := server.NowUtc()
+		savedNow, savedErrorf, savedInfof := reader.now, reader.errorf, reader.infof
+		reader.now = func() time.Time { return clock }
+		reader.errorf = func(format string, args ...any) { errorLogs = append(errorLogs, fmt.Sprintf(format, args...)) }
+		reader.infof = func(format string, args ...any) { infoLogs = append(infoLogs, fmt.Sprintf(format, args...)) }
+		defer func() {
+			reader.now, reader.errorf, reader.infof = savedNow, savedErrorf, savedInfof
+		}()
+		write := func(value []byte) {
+			server.Redis(ctx, func(r server.RedisClient) {
+				server.Raise(r.Set(ctx, providerOnlineSuccessBaselineKey, value, time.Hour).Err())
+			})
+		}
+		// one read past the window, then a new failure window
+		readInNewWindow := func() *providerOnlineSuccessBaseline {
+			reader.reset()
+			clock = clock.Add(time.Minute)
+			return getProviderOnlineSuccessBaseline(ctx)
+		}
+		expectLogs := func(state string, infoCount int, errorCount int, words string) {
+			if len(infoLogs) != infoCount || len(errorLogs) != errorCount {
+				t.Errorf("%s: %d information and %d error logs %v %v, want %d and %d", state, len(infoLogs), len(errorLogs), infoLogs, errorLogs, infoCount, errorCount)
+				return
+			}
+			logs := append(append([]string{}, infoLogs...), errorLogs...)
+			if last := logs[len(logs)-1]; !strings.Contains(last, words) || strings.Contains(last, "is none is") {
+				t.Errorf("%s: log %q does not say %q in words that read", state, last, words)
+			}
+		}
+
+		// none published yet
+		if baseline := readInNewWindow(); baseline != nil {
+			t.Fatalf("no guard read as %v", baseline)
+		}
+		expectLogs("none published", 1, 0, "none is published")
+
+		// a version 1 guard, as the code before this one publishes
+		write([]byte(`{"version":1,"compute_time":"` + clock.Format(time.RFC3339) + `","countries":{"us":{"measured":2,"succeeded":1,"no_success":1}}}`))
+		readInNewWindow()
+		expectLogs("version 1", 2, 0, "version 1")
+
+		// a guard that cannot be trusted
+		write([]byte(`{"version":2,`))
+		readInNewWindow()
+		expectLogs("not json", 2, 1, "not to be trusted")
+
+		// a trusted guard ends the window
+		value, err := encodeProviderOnlineSuccessBaseline(&providerOnlineSuccessBaseline{
+			computeTime:       clock,
+			enabled:           true,
+			floor:             0.36,
+			countryCodeCounts: map[string]providerOnlineSuccessCount{"us": {Measured: 2, Succeeded: 1, NoSuccess: 1}},
+		}, clock)
+		connect.AssertEqual(t, err, nil)
+		write(value)
+		clock = clock.Add(time.Minute)
+		if baseline := getProviderOnlineSuccessBaseline(ctx); baseline == nil {
+			t.Fatal("a trusted guard read as none")
+		}
+		expectLogs("trusted again", 3, 1, "trusted")
 	})
 }

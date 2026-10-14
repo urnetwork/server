@@ -876,8 +876,10 @@ gate matrix.
     reads the document at most once every 30 seconds, however many status calls
     ask, and while one call reads, the others keep the last result; a read does
     not fail with the status call that started it, which may end early. A
-    failure to read it is logged once when it starts and once when it ends. The
-    publishing process uses what it published at once.
+    failure to read it is logged once when it starts and once when it ends: as
+    information while none is published yet or the published one is version 1,
+    the expected states of a rollout, and as an error otherwise. The publishing
+    process uses what it published at once.
   - On 2026-10-13 the structurally failing countries measured success shares
     of VN 0.03, JP 0.24, RU 0.25, TW 0.27, ZA 0.35 and IN 0.35. The default of
     0.36, pending the owner's confirmation, exempts them all. HK, the lowest

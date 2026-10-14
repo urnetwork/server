@@ -164,7 +164,7 @@ func readProviderOnlineSuccessPreviousBaseline(ctx context.Context, pass string)
 	previous, err := readProviderOnlineSuccessBaseline(ctx, server.NowUtc())
 	if err != nil {
 		if glog.V(1) {
-			glog.Infof("[egress]%s decides the online url-success margin by the plain floor: %s\n", pass, err)
+			glog.Infof("[egress]%s decides the online url-success margin by the plain floor (guard: %s)\n", pass, err)
 		}
 		return nil
 	}
@@ -411,6 +411,20 @@ func getProviderOnlineSuccessBaseline(ctx context.Context) *providerOnlineSucces
 	return providerOnlineSuccessBaselineReader.get(ctx)
 }
 
+// The states of the published guard a reader meets in the ordinary course of
+// a rollout: no guard yet, or a version 1 guard from the code before this
+// one. A reader logs them as information, not as errors. Every reason a read
+// returns reads as the clause after "online url-success guard: ".
+var (
+	errProviderOnlineSuccessBaselineNone     = errors.New("none is published")
+	errProviderOnlineSuccessBaselineVersion1 = errors.New("the published one is version 1, which does not say how the export applied the rule")
+)
+
+// Whether a reason a read returns is one of the expected states.
+func providerOnlineSuccessBaselineExpectedErr(err error) bool {
+	return errors.Is(err, errProviderOnlineSuccessBaselineNone) || errors.Is(err, errProviderOnlineSuccessBaselineVersion1)
+}
+
 // Reads the published guard from Redis at now: an error when there is none,
 // Redis is unavailable, or the document is not to be trusted.
 func readProviderOnlineSuccessBaseline(ctx context.Context, now time.Time) (*providerOnlineSuccessBaseline, error) {
@@ -423,14 +437,17 @@ func readProviderOnlineSuccessBaseline(ctx context.Context, now time.Time) (*pro
 		return err
 	})
 	if errors.Is(err, redis.Nil) {
-		return nil, fmt.Errorf("none is published")
+		return nil, errProviderOnlineSuccessBaselineNone
 	}
 	if err != nil {
-		return nil, fmt.Errorf("unavailable: %w", err)
+		return nil, fmt.Errorf("Redis is unavailable (%w)", err)
 	}
 	baseline, err := decodeProviderOnlineSuccessBaseline(value, now)
+	if providerOnlineSuccessBaselineExpectedErr(err) {
+		return nil, err
+	}
 	if err != nil {
-		return nil, fmt.Errorf("unreadable: %w", err)
+		return nil, fmt.Errorf("the published one is not to be trusted (%w)", err)
 	}
 	return baseline, nil
 }
@@ -528,10 +545,15 @@ func (self *providerOnlineSuccessBaselineReads) get(ctx context.Context) *provid
 		return failureStarted, failureEnded
 	}()
 	if failureStarted {
-		self.errorf("[egress]online url-success guard is %s; every country is exempt until it is readable again\n", err)
+		// the expected states of a rollout are information; the rest are errors
+		logf := self.errorf
+		if providerOnlineSuccessBaselineExpectedErr(err) {
+			logf = self.infof
+		}
+		logf("[egress]online url-success guard: %s; every country is exempt until a trusted guard is read\n", err)
 	}
 	if failureEnded {
-		self.infof("[egress]online url-success guard is readable again\n")
+		self.infof("[egress]online url-success guard: a trusted guard is read again\n")
 	}
 	return baseline
 }
@@ -550,7 +572,7 @@ func (self *providerOnlineSuccessBaselineReads) store(baseline *providerOnlineSu
 		return failureEnded
 	}()
 	if failureEnded {
-		self.infof("[egress]online url-success guard is readable again\n")
+		self.infof("[egress]online url-success guard: a trusted guard is read again\n")
 	}
 }
 
@@ -571,29 +593,29 @@ func (self *providerOnlineSuccessBaselineReads) reset() {
 func decodeProviderOnlineSuccessBaseline(value []byte, now time.Time) (*providerOnlineSuccessBaseline, error) {
 	var document providerOnlineSuccessBaselineDocument
 	if err := json.Unmarshal(value, &document); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("it is not json: %w", err)
 	}
 	if document.Version == 1 {
-		return nil, fmt.Errorf("version 1 does not say how the export applied the rule")
+		return nil, errProviderOnlineSuccessBaselineVersion1
 	}
 	if document.Version != providerOnlineSuccessBaselineVersion {
-		return nil, fmt.Errorf("version %d is not %d", document.Version, providerOnlineSuccessBaselineVersion)
+		return nil, fmt.Errorf("it is version %d, not %d", document.Version, providerOnlineSuccessBaselineVersion)
 	}
 	if document.Enabled == nil ||
 		document.Floor == nil || !(0 <= *document.Floor && *document.Floor <= 1) ||
 		document.Margin == nil || !(0 <= *document.Margin && *document.Margin <= 1) {
-		return nil, fmt.Errorf("no rule")
+		return nil, fmt.Errorf("it does not say how the export applied the rule")
 	}
 	if document.Countries == nil {
-		return nil, fmt.Errorf("no countries")
+		return nil, fmt.Errorf("it has no countries")
 	}
 	if age := now.Sub(document.PublishTime); providerOnlineSuccessBaselineMaxAge < age {
-		return nil, fmt.Errorf("published %s ago, more than %s", age.Round(time.Second), providerOnlineSuccessBaselineMaxAge)
+		return nil, fmt.Errorf("it was published %s ago, more than %s", age.Round(time.Second), providerOnlineSuccessBaselineMaxAge)
 	}
 	countryCodeCounts := make(map[string]providerOnlineSuccessCount, len(document.Countries))
 	for countryCode, count := range document.Countries {
 		if count.Exempt == nil || count.Succeeded < 0 || count.NoSuccess < 0 || count.Measured < count.Succeeded+count.NoSuccess {
-			return nil, fmt.Errorf("country %q has inconsistent counts", countryCode)
+			return nil, fmt.Errorf("its country %q has inconsistent counts", countryCode)
 		}
 		countryCodeCounts[countryCode] = providerOnlineSuccessCount{
 			Measured:  count.Measured,

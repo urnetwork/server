@@ -834,6 +834,29 @@ func TestProviderOnlineSuccessBaselineReadsOnceAWindowAndLogsOnce(t *testing.T) 
 	connect.AssertEqual(t, readCount, 7)
 }
 
+// A version 1 guard and an absent one are the expected states of a rollout,
+// however a read wraps them, and every reason a read returns reads as the
+// clause after "online url-success guard: ".
+func TestProviderOnlineSuccessBaselineReasonsReadAsClauses(t *testing.T) {
+	_, err := decodeProviderOnlineSuccessBaseline([]byte(`{"version":1,"compute_time":"2026-10-13T21:00:00Z","countries":{}}`), onlineSuccessTestNow)
+	connect.AssertEqual(t, errors.Is(err, errProviderOnlineSuccessBaselineVersion1), true)
+	connect.AssertEqual(t, providerOnlineSuccessBaselineExpectedErr(err), true)
+	connect.AssertEqual(t, providerOnlineSuccessBaselineExpectedErr(fmt.Errorf("read: %w", errProviderOnlineSuccessBaselineNone)), true)
+	connect.AssertEqual(t, providerOnlineSuccessBaselineExpectedErr(errors.New("Redis is unavailable (synthetic)")), false)
+
+	for document, reason := range map[string]string{
+		`{"version":3,"compute_time":"2026-10-13T21:00:00Z","countries":{}}`:                                                                                 "it is version 3, not 2",
+		`{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","floor":0.36,"margin":0.03,"countries":{}}`:                "it does not say how the export applied the rule",
+		`{"version":2,"compute_time":"2026-10-13T19:00:00Z","publish_time":"2026-10-13T19:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{}}`: "it was published 2h0m0s ago, more than 1h0m0s",
+		`{"version":2,`: "it is not json",
+	} {
+		_, err := decodeProviderOnlineSuccessBaseline([]byte(document), onlineSuccessTestNow)
+		if err == nil || !strings.HasPrefix(err.Error(), reason) || providerOnlineSuccessBaselineExpectedErr(err) {
+			t.Errorf("%s: reason %v, want an unexpected one starting %q", document, err, reason)
+		}
+	}
+}
+
 // One canceled caller cannot empty the shared guard for the window. Status
 // requests end early all the time; the read runs without the caller's
 // cancellation, bounded by its own timeout, so the caller right after it gets
