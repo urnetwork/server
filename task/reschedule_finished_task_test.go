@@ -11,8 +11,9 @@ import (
 
 // A finished run-once task is scheduled again with its stored row copied, so an
 // argument field its build does not decode survives. A finished task without
-// the key schedules nothing, and a pending row of the key keeps its arguments
-// and only moves earlier.
+// the key schedules nothing. Outside the finishing transaction, where a
+// pending row holds the key, it schedules nothing either and leaves the
+// pending row as it was, with no wake recorded.
 func TestRescheduleFinishedTaskCopiesTheStoredArguments(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -60,14 +61,20 @@ func TestRescheduleFinishedTaskCopiesTheStoredArguments(t *testing.T) {
 		}
 
 		const pendingArgs = `{"pending": true}`
+		var merged bool
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET args_json = $2 WHERE task_id = $1`, pendingTaskId, pendingArgs))
-			RescheduleFinishedTaskInTx(ctx, tx, taskId, key, runAt.Add(time.Hour))
-			RescheduleFinishedTaskInTx(ctx, tx, taskId, key, runAt.Add(-30*time.Minute))
+			merged = RescheduleFinishedTaskInTx(ctx, tx, taskId, key, runAt.Add(-30*time.Minute))
+		})
+		var generation int64
+		var wakeAt *time.Time
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT run_once_generation, run_once_wake_at FROM pending_task WHERE task_id = $1`, pendingTaskId).Scan(&generation, &wakeAt))
 		})
 		count, argsJson, pendingRunAt, _ = pending()
-		if count != 1 || argsJson != pendingArgs || !pendingRunAt.Equal(runAt.Add(-30*time.Minute)) {
-			t.Fatalf("the pending row did not keep its arguments and move only earlier: count=%d args=%s run_at=%s", count, argsJson, pendingRunAt)
+		if merged || count != 1 || argsJson != pendingArgs || !pendingRunAt.Equal(runAt) || generation != 0 || wakeAt != nil {
+			t.Fatalf("a call outside the finishing transaction changed the pending row: merged=%t count=%d args=%s run_at=%s generation=%d wake=%v",
+				merged, count, argsJson, pendingRunAt, generation, wakeAt)
 		}
 	})
 }

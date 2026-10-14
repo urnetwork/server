@@ -87,36 +87,42 @@ func taskRunOnceWakeAfterPost(ctx context.Context, tx server.PgTx, taskId server
 	observeTaskSubmissionInTx(tx, inserted)
 }
 
-// RescheduleFinishedTaskInTx schedules finished task taskId again under its
-// run-once key at runAt. Like the run-once wake above, it copies the stored
-// arguments and scheduling columns instead of encoding them again, so
-// argument fields the running build does not decode survive. A pending row of
-// the key keeps its own arguments and only moves earlier. It reports false and
-// schedules nothing when no finished task taskId has that run-once key.
+// From a run-once task's own finishing transaction, schedules finished task
+// taskId again under its key at runAt. Like the run-once wake above, it copies
+// the stored arguments and scheduling columns instead of encoding them again,
+// so argument fields the running build does not decode survive. The finishing
+// transaction deleted the claimed row, so there no pending row holds the key,
+// and the insert never merges into one. A pending row under the key means the
+// caller is outside that transaction: like a finished task without the key, it
+// schedules nothing and reports false, and the caller schedules through
+// ScheduleTaskInTx, which merges into the pending row and records a wake.
 func RescheduleFinishedTaskInTx(ctx context.Context, tx server.PgTx, taskId server.Id, runOnce *RunOnceOption, runAt time.Time) bool {
 	if runOnce == nil {
 		panic(errors.New("rescheduling a finished task requires its run-once key"))
 	}
-	successorId := server.NewId()
-	var inserted bool
-	err := tx.QueryRow(ctx, `INSERT INTO pending_task (
-        task_id,function_name,args_json,client_address,client_address_hash,
-        client_address_port,client_by_jwt_json,run_at,run_once_key,run_priority,
-        run_max_time_seconds,claim_time,release_time)
-        SELECT $2,function_name,args_json,client_address,client_address_hash,
-            client_address_port,client_by_jwt_json,$3,run_once_key,run_priority,
-            run_max_time_seconds,$4,$4
-        FROM finished_task WHERE task_id=$1 AND run_once_key=$5
-        ON CONFLICT (run_once_key) DO UPDATE SET
-            run_at=LEAST(pending_task.run_at,EXCLUDED.run_at),
-            run_priority=LEAST(pending_task.run_priority,EXCLUDED.run_priority),
-            run_max_time_seconds=GREATEST(pending_task.run_max_time_seconds,EXCLUDED.run_max_time_seconds)
-        RETURNING task_id=$2`,
-		taskId, successorId, runAt.UTC(), time.Time{}, runOnce.String()).Scan(&inserted)
-	if errors.Is(err, pgx.ErrNoRows) {
+	var finishedCount, insertedCount int
+	server.Raise(tx.QueryRow(ctx, `WITH finished AS (
+            SELECT function_name,args_json,client_address,client_address_hash,
+                client_address_port,client_by_jwt_json,run_once_key,run_priority,
+                run_max_time_seconds
+            FROM finished_task WHERE task_id=$1 AND run_once_key=$5
+        ), inserted AS (
+            INSERT INTO pending_task (
+                task_id,function_name,args_json,client_address,client_address_hash,
+                client_address_port,client_by_jwt_json,run_at,run_once_key,run_priority,
+                run_max_time_seconds,claim_time,release_time)
+            SELECT $2,function_name,args_json,client_address,client_address_hash,
+                client_address_port,client_by_jwt_json,$3,run_once_key,run_priority,
+                run_max_time_seconds,$4,$4
+            FROM finished
+            ON CONFLICT (run_once_key) DO NOTHING
+            RETURNING 1
+        )
+        SELECT (SELECT count(*) FROM finished), (SELECT count(*) FROM inserted)`,
+		taskId, server.NewId(), runAt.UTC(), time.Time{}, runOnce.String()).Scan(&finishedCount, &insertedCount))
+	if finishedCount == 0 {
 		return false
 	}
-	server.Raise(err)
-	observeTaskSubmissionInTx(tx, inserted)
-	return true
+	observeTaskSubmissionInTx(tx, 0 < insertedCount)
+	return 0 < insertedCount
 }
