@@ -4136,9 +4136,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	if err := publishProviderHardExclusions(ctx, clientIds, countFilter, ttl); err != nil {
 		return fmt.Errorf("publish provider hard exclusions: %w", err)
 	}
-	// the URL-success rule's country guard over this same population, with
-	// the location counts' memory for the floor's margin
-	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(providerCountRows), egressSettings, locationCountOnlineSuccessGuardMemory)
+	// the URL-success rule's country guard over this same population, its
+	// margin held against the export's last published guard
+	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(providerCountRows), egressSettings, readProviderOnlineSuccessPreviousBaseline(ctx, "the location counts"))
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
@@ -5428,8 +5428,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	countFilter.healthCounts, countFilter.healthWindowEnd = getAllProviderEgressHealthCountsSnapshot(ctx)
 	// The URL-success rule's country guard over the public cohort, the
 	// population of the location counts and the dashboard, from the evidence
-	// just loaded, with the export's memory for the floor's margin. Computed
-	// before the shadow observer reads any facts.
+	// just loaded, its margin held against the guard the last export
+	// published, whichever process ran it. Computed before the shadow
+	// observer reads any facts.
 	onlineSuccessBaseline := func() *providerOnlineSuccessBaseline {
 		clientIdCountryCodes := map[server.Id]string{}
 		for _, row := range pendingScores {
@@ -5437,7 +5438,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				clientIdCountryCodes[row.score.ClientId] = normalizeCountryCode(row.egress.publishedCountryCode)
 			}
 		}
-		return newProviderOnlineSuccessBaseline(countFilter, clientIdCountryCodes, egressSettings, scoreExportOnlineSuccessGuardMemory)
+		return newProviderOnlineSuccessBaseline(countFilter, clientIdCountryCodes, egressSettings, readProviderOnlineSuccessPreviousBaseline(ctx, "the score export"))
 	}()
 	countFilter.onlineSuccessBaseline = onlineSuccessBaseline
 	var observeShadowScore func(clientScoreSourceRow)

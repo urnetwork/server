@@ -94,11 +94,11 @@ type EgressIndexSettings struct {
 	// probe itself fails, and its providers keep the benefit of the doubt.
 	// `online_success_country_floor` in provider.yml, within [0, 1].
 	OnlineSuccessCountryFloor float64
-	// The guard's hysteresis: a country one computing path exempted in its
-	// previous computation stays exempt until its share reaches the floor
+	// The guard's hysteresis: a country the score export's last trusted
+	// published guard exempted stays exempt until its share reaches the floor
 	// plus this margin, so a share that hovers at the floor does not move the
 	// country's providers in and out of Online on every pass
-	// (providerOnlineSuccessGuardMemory). Zero is the plain floor.
+	// (readProviderOnlineSuccessPreviousBaseline). Zero is the plain floor.
 	// `online_success_country_floor_margin` in provider.yml, within [0, 1].
 	OnlineSuccessCountryFloorMargin float64
 }
@@ -935,9 +935,9 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 	})
 	// Capture the exact dashboard population before loading its evidence.
 	countFilter := newProviderCountFilterForClients(ctx, clientIds)
-	// the URL-success rule's country guard over this same population, with
-	// the dashboard counts' memory for the floor's margin
-	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(rows), settings, dashboardCountOnlineSuccessGuardMemory)
+	// the URL-success rule's country guard over this same population, its
+	// margin held against the export's last published guard
+	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(rows), settings, readProviderOnlineSuccessPreviousBaseline(ctx, "the dashboard counts"))
 	for _, row := range rows {
 		decision := decideProviderEgress(
 			countFilter.egressFacts(row.clientId, row.claimedCountryCode, row.egressIndex, row.egressQuality, settings),

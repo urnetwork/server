@@ -842,7 +842,7 @@ gate matrix.
   - Each fleet pass computes the guard over its own population from evidence it
     already loaded: the score export, the location counts and the dashboard
     counts.
-  - **Margin.** A country a pass exempted in its previous computation stays
+  - **Margin.** A country the score export's last trusted guard exempted stays
     exempt until its share reaches the floor plus
     `online_success_country_floor_margin` (default 0.03, pending the owner's
     confirmation; a margin outside [0, 1] or not a number keeps the default,
@@ -850,13 +850,18 @@ gate matrix.
     exempt becomes exempt only below the floor. IN and ZA measured 0.35 against
     the 0.36 floor, so without the margin a share moving by one provider would
     move most of a country's measured providers in and out of Online from one
-    pass to the next. Each pass (the score export, the location counts, the
-    dashboard counts) remembers the countries it last exempted in its own
-    process; a restarted process decides its first pass by the plain floor, so
-    a country held only by the margin leaves at a restart. A margin of 0 is the
-    plain floor. The share of exactly the floor plus the margin ends the
-    exemption, as the floor itself is not exempt. The export's log marks a
-    country held only by the margin `by margin`.
+    pass to the next. Every pass (the score export, the location counts, the
+    dashboard counts) takes that previous state from the guard the export last
+    published, read from Redis. Main runs each pass in whichever taskworker
+    process claims it (over 12 hours, 173 export passes ran in 39 processes),
+    so a state each process kept for itself would move a country inside the
+    margin in and out of its exemption as the passes moved between processes.
+    Without a trusted guard (none published, an unreadable or version 1 one, or
+    one published more than 60 minutes ago) a pass decides by the plain floor.
+    A margin of 0 is the plain floor. The share of exactly the floor plus the
+    margin ends the exemption, as the floor itself is not exempt. The export's
+    log names the guard it held the margin against and marks a country held
+    only by the margin `by margin`.
   - The score export publishes its guard to Redis for provider status,
     `bringyourctl provider inspect` and the exempt-country gauge: the kill
     switch, floor and margin it applied, each measured country's verdict and

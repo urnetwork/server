@@ -350,23 +350,26 @@ func onlineSuccessTestCountryCodes(filter providerCountFilter, countryCode strin
 	return clientIdCountryCodes
 }
 
-// The floor's margin: a country the path exempted in its previous computation
-// stays exempt until its share reaches the floor plus the margin, and one it
-// did not exempt becomes exempt only below the floor. At the default floor
-// of 0.36 and margin of 0.03, 25 measured providers cross the floor between
-// 8 and 9 with a success and the margin between 9 and 10. Without the margin
-// a country measured at 8 and 9 on alternate passes moves 16 providers in
-// and out of Online on every pass.
+// The floor's margin: a country the previous guard exempted stays exempt
+// until its share reaches the floor plus the margin, and one it did not
+// exempt becomes exempt only below the floor. At the default floor of 0.36
+// and margin of 0.03, 25 measured providers cross the floor between 8 and 9
+// with a success and the margin between 9 and 10. Without the margin a
+// country measured at 8 and 9 on alternate passes moves 16 providers in and
+// out of Online on every pass.
 func TestOnlineUrlSuccessCountryGuardMarginHoldsAnExemption(t *testing.T) {
 	settings := DefaultEgressIndexSettings()
 	connect.AssertEqual(t, settings.OnlineSuccessCountryFloor, 0.36)
 	connect.AssertEqual(t, settings.OnlineSuccessCountryFloorMargin, 0.03)
-	memory := &providerOnlineSuccessGuardMemory{}
+	// each computation holds the margin against the one before it, as every
+	// pass holds it against the export's last published guard
+	var previous *providerOnlineSuccessBaseline
 	for index, c := range []struct {
 		succeeded int
 		exempt    bool
 	}{
-		// a fresh path decides by the plain floor: 9 of 25 is the floor
+		// without a previous guard a pass decides by the plain floor: 9 of
+		// 25 is the floor
 		{succeeded: 9, exempt: false},
 		{succeeded: 8, exempt: true},
 		// exempt last time, 9 of 25 (0.36) is inside the margin
@@ -379,7 +382,8 @@ func TestOnlineUrlSuccessCountryGuardMarginHoldsAnExemption(t *testing.T) {
 		{succeeded: 8, exempt: true},
 	} {
 		filter := onlineSuccessTestCountry("in", 25, c.succeeded)
-		baseline := newProviderOnlineSuccessBaseline(filter, onlineSuccessTestCountryCodes(filter, "in"), settings, memory)
+		baseline := newProviderOnlineSuccessBaseline(filter, onlineSuccessTestCountryCodes(filter, "in"), settings, previous)
+		previous = baseline
 		if exempt := baseline.exempt("in"); exempt != c.exempt {
 			t.Errorf("computation %d, %d of 25: exempt %t, want %t", index, c.succeeded, exempt, c.exempt)
 		}
@@ -429,32 +433,49 @@ func TestOnlineUrlSuccessCountryGuardMarginBoundaries(t *testing.T) {
 	}
 }
 
-// Each computing path remembers only its own computations: an exemption the
-// score export holds by the margin says nothing to the location counts, and
-// a path without a memory, or one that has forgotten, decides by the plain
-// floor. A country nothing measured is not remembered.
-func TestOnlineUrlSuccessGuardMemoryIsPerPath(t *testing.T) {
+// The passes of the country guard run in whichever process claims them, and
+// none of those processes keeps a state of its own: each pass reads the
+// export's published guard as its previous state and the export publishes
+// the next. A share inside the margin then keeps the exemption on every pass,
+// however the passes alternate between processes. A state each process kept
+// for itself made the same share alternate [true false true false] between
+// two processes. Without a trusted guard a pass decides by the plain floor.
+func TestOnlineUrlSuccessCountryGuardMarginAcrossAlternatingProcesses(t *testing.T) {
 	settings := DefaultEgressIndexSettings()
-	exportMemory := &providerOnlineSuccessGuardMemory{}
-	locationMemory := &providerOnlineSuccessGuardMemory{}
-	exempt := func(succeeded int, memory *providerOnlineSuccessGuardMemory) bool {
+	// what Redis holds: the guard the last export published, in whichever
+	// process it ran
+	var published []byte
+	now := onlineSuccessTestNow
+	// one pass in a process that holds nothing of its own; a guard it cannot
+	// trust is no previous state
+	pass := func(succeeded int) bool {
+		var previous *providerOnlineSuccessBaseline
+		if decoded, err := decodeProviderOnlineSuccessBaseline(published, now); err == nil {
+			previous = decoded
+		}
 		filter := onlineSuccessTestCountry("za", 25, succeeded)
-		return newProviderOnlineSuccessBaseline(filter, onlineSuccessTestCountryCodes(filter, "za"), settings, memory).exempt("za")
+		baseline := newProviderOnlineSuccessBaseline(filter, onlineSuccessTestCountryCodes(filter, "za"), settings, previous)
+		value, err := encodeProviderOnlineSuccessBaseline(baseline, now)
+		connect.AssertEqual(t, err, nil)
+		published = value
+		now = now.Add(5 * time.Minute)
+		return baseline.exempt("za")
 	}
-	connect.AssertEqual(t, exempt(8, exportMemory), true)
-	connect.AssertEqual(t, exempt(9, exportMemory), true)
-	connect.AssertEqual(t, exempt(9, locationMemory), false)
-	connect.AssertEqual(t, exempt(9, nil), false)
-	connect.AssertEqual(t, exportMemory.previousExemptCountryCodes(), map[string]bool{"za": true})
 
-	// a computation that measured nothing in za leaves it unremembered
-	newProviderOnlineSuccessBaseline(onlineSuccessTestCountry("za", 0, 0), map[server.Id]string{}, settings, exportMemory)
-	connect.AssertEqual(t, exportMemory.previousExemptCountryCodes(), map[string]bool{})
-	connect.AssertEqual(t, exempt(9, exportMemory), false)
+	exempts := []bool{}
+	for _, succeeded := range []int{8, 9, 9, 9, 9, 9, 10, 9, 9} {
+		exempts = append(exempts, pass(succeeded))
+	}
+	connect.AssertEqual(t, exempts, []bool{true, true, true, true, true, true, false, false, false})
 
-	connect.AssertEqual(t, exempt(8, exportMemory), true)
-	exportMemory.remember(nil)
-	connect.AssertEqual(t, exempt(9, exportMemory), false)
+	// a pass with no trusted guard, such as one past its max age, decides by
+	// the plain floor
+	connect.AssertEqual(t, pass(8), true)
+	now = now.Add(providerOnlineSuccessBaselineMaxAge)
+	if _, err := decodeProviderOnlineSuccessBaseline(published, now); err == nil {
+		t.Fatal("a guard past its max age is trusted")
+	}
+	connect.AssertEqual(t, pass(9), false)
 }
 
 // The guard counts only providers the common gates admit with current URL

@@ -383,3 +383,72 @@ func TestOnlineUrlSuccessPassesSurviveAKillSwitchGivenTwice(t *testing.T) {
 		connect.AssertEqual(t, InspectProviderEgress(ctx, dead.clientId).Reason, ProviderExcludedHealth)
 	})
 }
+
+// The floor's margin across processes. On Main each pass runs in whichever
+// taskworker process claims it, so here every pass runs as a fresh process:
+// server.Reset forgets everything a process holds. The margin still holds a
+// country inside it, in the dashboard counts, the location counts and the
+// score export that provider status reads, because a pass takes its previous
+// state from the export's published guard, which every process reads. The
+// floor is 0.5 and the margin 0.25, over four measured providers.
+func TestOnlineUrlSuccessCountryGuardMarginAcrossProcesses(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_success_country_floor: 0.5\nonline_success_country_floor_margin: 0.25\n"))
+		defer pop()
+		city := egressTestCity(ctx, "Hanoi", "Hanoi", "Vietnam", "vn")
+
+		providers := []*egressTestProvider{}
+		for range 4 {
+			provider := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+			egressTestHealth(ctx, provider.clientId, server.NowUtc().Add(-time.Minute), 5, 5)
+			for lookbackIndex := range 3 {
+				egressTestReliability(ctx, provider.clientId, lookbackIndex, 1, 1)
+			}
+			providers = append(providers, provider)
+		}
+		dead := providers[3]
+		inFreshProcess := func(pass func()) {
+			server.Reset()
+			pass()
+		}
+		// each step: one more provider with a success, or none, then every
+		// pass and reader in a process of its own
+		step := func(name string, succeeded *egressTestProvider, noSuccess int64, locationCount int, statusReason string) {
+			if succeeded != nil {
+				egressTestHealth(ctx, succeeded.clientId, server.NowUtc(), 1, 0)
+			}
+			inFreshProcess(func() {
+				now := server.NowUtc()
+				UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+			})
+			inFreshProcess(func() {
+				connect.AssertEqual(t, UpdateClientScores(ctx, time.Hour, 1), nil)
+			})
+			inFreshProcess(func() {
+				connect.AssertEqual(t, UpdateClientLocations(ctx, time.Hour), nil)
+			})
+			inFreshProcess(func() {
+				if count := CountProviderEgress(ctx).ReasonCounts["no_success"]; count != noSuccess {
+					t.Errorf("%s: the dashboard counts %d providers without a success excluded, want %d", name, count, noSuccess)
+				}
+			})
+			if count := egressTestLocationCount(ctx, t, city); count != locationCount {
+				t.Errorf("%s: the location counts %d providers, want %d", name, count, locationCount)
+			}
+			inFreshProcess(func() {
+				if reason := GetClientProviderStatus(ctx, dead.networkId, dead.clientId).Reason; reason != statusReason {
+					t.Errorf("%s: a provider without a success has status %s, want %s", name, reason, statusReason)
+				}
+			})
+		}
+		// 1 of 4 is below the floor: exempt
+		step("1 of 4", providers[0], 0, 4, ProviderStatusReasonEgressFailing)
+		// 2 of 4 is the floor, inside the margin of an exempt country, in
+		// every process that runs a pass
+		step("2 of 4", providers[1], 0, 4, ProviderStatusReasonEgressFailing)
+		step("2 of 4 again", nil, 0, 4, ProviderStatusReasonEgressFailing)
+		// 3 of 4 reaches the floor plus the margin: the exemption ends
+		step("3 of 4", providers[2], 1, 3, ProviderStatusReasonEgressNoSuccess)
+	})
+}
