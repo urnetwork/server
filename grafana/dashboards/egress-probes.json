@@ -6233,6 +6233,132 @@
           "legendFormat": "shard {{shard}}"
         }
       ]
+    },
+    {
+      "id": 118,
+      "type": "timeseries",
+      "title": "auxiliary egress tally retained records and bytes by shard",
+      "description": "Tally records (left) and record bytes (right) each place shard retained, including committed records its next claim deletes. Handoffs are refused as full at 16384 records or 16 MiB. Read at the first call of each owner's latest drain, after at most one page of cleanup, so within 256 records of the occupancy producers met at the claim. Each taskworker publishes a shard's depth for five minutes after it reads it; the maximum across taskworkers is the fleet view.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 368
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (shard) (urnetwork_provider_egress_tally_queue_records{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "records shard {{shard}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (shard) (urnetwork_provider_egress_tally_queue_bytes{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "bytes shard {{shard}}"
+        }
+      ]
+    },
+    {
+      "id": 119,
+      "type": "timeseries",
+      "title": "auxiliary egress tally owner read age by shard",
+      "description": "Seconds since any taskworker last completed the first call of a drain of each place shard (left): about one claim interval while its owner runs, rising without bound when the owner is stuck, for example failing its first call. The observed time is never withheld. Right: shards that no taskworker draining tally shards has read since it started.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 368
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max by (shard) (urnetwork_provider_egress_tally_queue_observed_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} > 0)",
+          "legendFormat": "shard {{shard}}"
+        },
+        {
+          "refId": "B",
+          "expr": "count(max by (shard) (urnetwork_provider_egress_tally_queue_observed_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"}) == 0) or vector(0)",
+          "legendFormat": "shards never read"
+        }
+      ]
     }
   ]
 }
