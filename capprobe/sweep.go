@@ -1,3 +1,5 @@
+// The sweep over the connected providers: its place between passes, one
+// pass's selection, and where the sweep stands after the pass.
 package capprobe
 
 import (
@@ -32,22 +34,32 @@ func (self Sweep) inProgress() bool {
 	return self.Cursor != (server.Id{}) || !self.StartedAt.IsZero()
 }
 
+// How often a probe between sweeps runs a waiting pass, which reads nothing:
+// it keeps urnetwork_capability_probe_last_pass_timestamp_seconds current, so
+// a probe that stopped is told apart from one that waits.
+const waitingPassInterval = 10 * time.Minute
+
 // When the pass after one that left sweep at now should run: within a sweep
-// after the pass interval, between sweeps at the next sweep's start.
+// after the pass interval, between sweeps at the next sweep's start or the
+// waiting pass interval, whichever comes first.
 func (self Settings) NextPassAt(sweep Sweep, now time.Time) time.Time {
 	runAt := now.Add(self.PassInterval())
 	if !sweep.inProgress() && runAt.Before(sweep.NextSweepAt) {
+		if waitingAt := now.Add(waitingPassInterval); waitingAt.Before(sweep.NextSweepAt) {
+			return waitingAt
+		}
 		return sweep.NextSweepAt
 	}
 	return runAt
 }
 
 // The providers one pass selected, in client id order, and where the sweep
-// stands after them.
+// stands after them. The counts cover only the providers the pass passed, up
+// to its cursor, so a provider the next pass reads again counts once.
 type selection struct {
 	dueClientIds []server.Id
-	// the last provider examined: the last selected one when the limit cut
-	// a page short, else the end of the last page read
+	// the last provider passed: the last selected one when the limit cut a
+	// page short, else the end of the last page read
 	cursor server.Id
 	// the last page read was short: the population ends with this selection
 	endReached bool
@@ -56,14 +68,34 @@ type selection struct {
 	eligible   int
 }
 
+// The fewest due providers one eligibility read judges.
+const minEligibilityChunk = 32
+
 // Reads pages after the sweep's cursor until the pass has its limit of due,
 // eligible providers, the population ends, or max_pages_per_pass pages are
 // read. Evidence is due at now: a modern row after modern_refresh_hours,
 // any other after other_refresh_hours, no row at once.
+//
+// A page's due providers are judged for eligibility in chunks of twice the
+// pass's remaining room, so a page with more eligible providers than the
+// pass can take is judged little past what it takes. When the pass fills
+// inside a page it resumes after the last provider it took; the page's later
+// providers are read, and judged, again by the next pass.
 func (self *passRunner) selectDue(ctx context.Context, cursor server.Id, now time.Time) (selection, error) {
 	selected := selection{dueClientIds: []server.Id{}, cursor: cursor}
 	modernRefreshBefore := now.Add(-self.settings.modernRefresh())
 	otherRefreshBefore := now.Add(-self.settings.otherRefresh())
+	// how many of ids (in client id order) are at or before last
+	countThrough := func(ids []server.Id, last server.Id) int {
+		count := 0
+		for _, id := range ids {
+			if 0 < id.Cmp(last) {
+				break
+			}
+			count += 1
+		}
+		return count
+	}
 	for pages := 0; pages < self.settings.MaxPagesPerPass && len(selected.dueClientIds) < self.settings.Limit; pages += 1 {
 		if err := ctx.Err(); err != nil {
 			return selected, err
@@ -72,30 +104,38 @@ func (self *passRunner) selectDue(ctx context.Context, cursor server.Id, now tim
 		if err != nil {
 			return selected, err
 		}
-		selected.scanned += len(page)
+		pageClientIds := make([]server.Id, 0, len(page))
 		dueClientIds := []server.Id{}
 		for _, candidate := range page {
+			pageClientIds = append(pageClientIds, candidate.ClientId)
 			if candidate.Due {
 				dueClientIds = append(dueClientIds, candidate.ClientId)
 			}
 		}
-		selected.due += len(dueClientIds)
-		eligibleClientIds := []server.Id{}
-		if 0 < len(dueClientIds) {
-			eligibleClientIds, err = self.filterEligible(ctx, dueClientIds)
+		for judged := 0; judged < len(dueClientIds); {
+			room := self.settings.Limit - len(selected.dueClientIds)
+			chunkEnd := min(len(dueClientIds), judged+max(2*room, minEligibilityChunk))
+			eligibleClientIds, err := self.filterEligible(ctx, dueClientIds[judged:chunkEnd])
 			if err != nil {
 				return selected, err
 			}
+			if room < len(eligibleClientIds) || (room == len(eligibleClientIds) && chunkEnd < len(dueClientIds)) {
+				// the pass fills inside this page
+				taken := eligibleClientIds[:room]
+				last := taken[len(taken)-1]
+				selected.dueClientIds = append(selected.dueClientIds, taken...)
+				selected.cursor = last
+				selected.scanned += countThrough(pageClientIds, last)
+				selected.due += countThrough(dueClientIds, last)
+				selected.eligible += len(taken)
+				return selected, nil
+			}
+			selected.dueClientIds = append(selected.dueClientIds, eligibleClientIds...)
+			selected.eligible += len(eligibleClientIds)
+			judged = chunkEnd
 		}
-		selected.eligible += len(eligibleClientIds)
-		room := self.settings.Limit - len(selected.dueClientIds)
-		if room < len(eligibleClientIds) {
-			// the rest of this page is read again by the next pass
-			selected.dueClientIds = append(selected.dueClientIds, eligibleClientIds[:room]...)
-			selected.cursor = eligibleClientIds[room-1]
-			return selected, nil
-		}
-		selected.dueClientIds = append(selected.dueClientIds, eligibleClientIds...)
+		selected.scanned += len(page)
+		selected.due += len(dueClientIds)
 		if 0 < len(page) {
 			selected.cursor = page[len(page)-1].ClientId
 		}

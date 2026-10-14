@@ -3,9 +3,10 @@
 // windows, measured in short tunnels of its own and recorded straight into
 // provider_modern_evidence. One task row at a time runs one pass of the
 // probe's sweep; its post-step schedules the next pass with the sweep's
-// place. Each pass runs in a prober shard of its own, a private network,
-// credential parent and balance separate from every URL probe shard, so its
-// load, funding and contracts never draw on the URL probe's quota or budget.
+// place. Each pass that measures runs in a prober shard of its own, a private
+// network, credential parent and balance separate from every URL probe shard,
+// so its load, funding and contracts never draw on the URL probe's quota or
+// budget; a pass with nothing to measure takes no shard.
 package work
 
 import (
@@ -16,7 +17,6 @@ import (
 	"time"
 
 	"github.com/urnetwork/connect"
-	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/capprobe"
@@ -71,8 +71,14 @@ func ScheduleCapabilityProbe(clientSession *session.ClientSession, tx server.PgT
 	scheduleCapabilityProbeAt(clientSession, tx, &CapabilityProbeArgs{}, server.NowUtc(), capabilityProbeSettingsOrDefault())
 }
 
-// Schedules a pass, merging into the pending row of the probe's key.
+// Schedules a pass, merging into the pending row of the probe's key. A
+// switched-off probe's settings are not validated, so its row takes the
+// default max time.
 func scheduleCapabilityProbeAt(clientSession *session.ClientSession, tx server.PgTx, args *CapabilityProbeArgs, runAt time.Time, settings capprobe.Settings) {
+	maxTime := settings.MaxTime()
+	if !settings.Enabled {
+		maxTime = capprobe.DefaultSettings().MaxTime()
+	}
 	task.ScheduleTaskInTx(
 		tx,
 		CapabilityProbe,
@@ -80,7 +86,7 @@ func scheduleCapabilityProbeAt(clientSession *session.ClientSession, tx server.P
 		clientSession,
 		capabilityProbeRunOnce(),
 		task.RunAt(runAt),
-		task.MaxTime(settings.MaxTime()),
+		task.MaxTime(maxTime),
 	)
 }
 
@@ -204,10 +210,13 @@ type capabilityProbeOutcome struct {
 	pass  *capprobe.PassResult
 }
 
-// The production pass: a fresh prober shard for this task execution, its
-// derived-client credentials and in-process control, the URL probe's
-// control-plane endpoints, then capprobe.RunPass. The shard is drained and
-// reaped when the pass returns, after every tunnel has joined.
+// The production pass. It selects first, from the database alone; a pass that
+// waits for the sweep's next start or finds nothing to measure finishes
+// there and costs no prober shard. Otherwise it takes a fresh prober shard
+// for this task execution, its derived-client credentials and in-process
+// control and the URL probe's control-plane endpoints, and measures. The
+// shard is drained and reaped when the pass returns, after every tunnel has
+// joined.
 func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep capprobe.Sweep) (capprobe.Sweep, *capprobe.PassResult, error) {
 	fail := func(err error) (capprobe.Sweep, *capprobe.PassResult, error) {
 		capprobe.ObservePass(capprobe.PassResultFailed)
@@ -224,6 +233,14 @@ func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep c
 	if err := capabilityProbeShardAvailable(urlProbeSettings.ShardCount); err != nil {
 		return fail(err)
 	}
+	// SelectPass and FinishPass count the failures they return
+	selected, err := capprobe.SelectPass(ctx, settings, sweep)
+	if err != nil {
+		return sweep, nil, err
+	}
+	if !selected.NeedsTunnels() {
+		return capprobe.FinishPass(ctx, settings, selected, providertunnel.Config{})
+	}
 	credit, err := capabilityProbeShardCredit(settings)
 	if err != nil {
 		return fail(err)
@@ -234,8 +251,9 @@ func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep c
 		ShardIndex: capabilityProbeShardIndex,
 		ShardCount: capabilityProbeShardCount,
 	}
-	// RunPass counts the failures it returns; every other one is counted here
-	var passErr error
+	// whether FinishPass ran, and what it returned: it counts its own failures
+	finished := false
+	var finishErr error
 	outcome, err := runWithProberShard(ctx, "capability probe", key, credit, settings.MaxTime(), func(identity *model.ProberIdentity) (capabilityProbeOutcome, error) {
 		credentials, err := newProviderEgressCredentials(identity)
 		if err != nil {
@@ -245,7 +263,8 @@ func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep c
 			if err := newProviderEgressProbeReadiness(*identity.NetworkId).check(ctx); err != nil {
 				return capabilityProbeOutcome{}, err
 			}
-			next, pass, err := capprobe.RunPass(ctx, settings, sweep, providertunnel.Config{
+			finished = true
+			next, pass, err := capprobe.FinishPass(ctx, settings, selected, providertunnel.Config{
 				ApiUrl:            urlProbeSettings.APIURL,
 				PlatformUrl:       urlProbeSettings.PlatformURL,
 				ByJwt:             identity.ByClientJwt,
@@ -256,18 +275,16 @@ func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep c
 				ClientCredentials: credentials,
 				ClientControl:     localControl,
 			})
-			passErr = err
+			finishErr = err
 			return capabilityProbeOutcome{sweep: next, pass: pass}, err
 		})
 	})
 	if err != nil {
-		if passErr == nil {
+		// a failure before FinishPass, or of the shard's cleanup after it
+		if !finished || finishErr == nil {
 			capprobe.ObservePass(capprobe.PassResultFailed)
 		}
 		return sweep, outcome.pass, err
-	}
-	if outcome.pass != nil && !outcome.pass.Waiting {
-		glog.Infof("[capprobe]task pass: started=%d recorded=%d sweep_completed=%t\n", outcome.pass.Started, outcome.pass.Recorded, outcome.pass.SweepCompleted)
 	}
 	return outcome.sweep, outcome.pass, nil
 }

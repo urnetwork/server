@@ -1,3 +1,5 @@
+// The production capability tunnel over providertunnel, and the
+// platform-local resolver of a peer's identity key.
 package capprobe
 
 import (
@@ -68,15 +70,21 @@ func newProviderCapabilityTunnelOpener(base providertunnel.Config, settings Sett
 	}
 }
 
+// The platform's read of a client's published identity key. A package-level
+// seam like the URL probe's: immutable in production, replaced by the
+// resolver's test.
+var getClientPublicKey = model.GetClientPublicKey
+
 // A session's resolver of its peer's published identity key, read from the
 // platform's own store: the taskworker is the platform, so this is what the
 // unauthenticated /key/<client_id> route would answer, without the request.
-// A session runs it on a worker of its own, never on the packet path; a
-// failed read is an error, which the session treats as no key yet.
+// A session runs it on a worker of its own, never on the packet path. A peer
+// that never published a key reads as no key and no error; a failed read,
+// raised or returned, is an error, which the session treats as no key yet.
 func newLocalPeerClientPublicKeyFetcher(peerId connect.Id) func(context.Context) ([]byte, error) {
 	return func(ctx context.Context) (publicKey []byte, returnErr error) {
 		server.HandleError(func() {
-			publicKey, returnErr = model.GetClientPublicKey(ctx, server.Id(peerId))
+			publicKey, returnErr = getClientPublicKey(ctx, server.Id(peerId))
 		}, func(err error) {
 			publicKey, returnErr = nil, err
 		})

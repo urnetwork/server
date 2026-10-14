@@ -1,3 +1,4 @@
+// The settings' defaults, bounds and resource overlay.
 package capprobe
 
 import (

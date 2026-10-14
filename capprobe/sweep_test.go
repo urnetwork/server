@@ -1,3 +1,4 @@
+// The sweep's selection, its place between passes, and its cadence.
 package capprobe
 
 import (
@@ -29,15 +30,42 @@ func selectFake(t *testing.T, settings Settings, store *fakeStore, cursor server
 }
 
 // The limit cuts a page short: the pass takes the first eligible due
-// providers and resumes after the last one it took.
+// providers, resumes after the last one it took, and counts only the
+// providers up to it, which the next pass does not read again.
 func TestSelectionStopsAtTheLimit(t *testing.T) {
 	store := newFakeStore(6)
 	ids := store.clientIds
-	selected := selectFake(t, fakeSettings(1, 3, 4, 5), store, server.Id{})
-	connect.AssertEqual(t, selected.dueClientIds, ids[:3])
-	connect.AssertEqual(t, selected.cursor, ids[2])
+	store.ineligible[ids[1]] = true
+	selected := selectFake(t, fakeSettings(1, 3, 6, 5), store, server.Id{})
+	connect.AssertEqual(t, selected.dueClientIds, []server.Id{ids[0], ids[2], ids[3]})
+	connect.AssertEqual(t, selected.cursor, ids[3])
 	connect.AssertEqual(t, selected.endReached, false)
-	connect.AssertEqual(t, []int{selected.scanned, selected.due, selected.eligible}, []int{4, 4, 4})
+	connect.AssertEqual(t, []int{selected.scanned, selected.due, selected.eligible}, []int{4, 4, 3})
+	resumed := selectFake(t, fakeSettings(1, 3, 6, 5), store, selected.cursor)
+	connect.AssertEqual(t, resumed.dueClientIds, ids[4:])
+	connect.AssertEqual(t, resumed.endReached, true)
+}
+
+// A page with far more due providers than the pass has room for is judged
+// for eligibility in bounded chunks: twice the room, at least the chunk
+// floor, and the next chunk only when the first left room.
+func TestSelectionJudgesEligibilityInBoundedChunks(t *testing.T) {
+	store := newFakeStore(200)
+	ids := store.clientIds
+	selected := selectFake(t, fakeSettings(2, 2, 200, 1), store, server.Id{})
+	connect.AssertEqual(t, selected.dueClientIds, ids[:2])
+	connect.AssertEqual(t, len(store.filterCalls), 1)
+	connect.AssertEqual(t, len(store.filterCalls[0]), minEligibilityChunk)
+
+	// a first chunk without eligible providers leads to the next
+	for _, clientId := range ids[2 : 2+minEligibilityChunk] {
+		store.ineligible[clientId] = true
+	}
+	store.filterCalls = nil
+	selected = selectFake(t, fakeSettings(2, 2, 200, 1), store, ids[1])
+	connect.AssertEqual(t, selected.dueClientIds, ids[2+minEligibilityChunk:4+minEligibilityChunk])
+	connect.AssertEqual(t, len(store.filterCalls), 2)
+	connect.AssertEqual(t, selected.cursor, ids[3+minEligibilityChunk])
 }
 
 // Pages continue until the population ends, which a short page shows. Only

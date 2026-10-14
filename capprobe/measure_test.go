@@ -1,3 +1,5 @@
+// One provider's measurement: when it stops, what it reads and records, and
+// that its tunnel is torn down once.
 package capprobe
 
 import (

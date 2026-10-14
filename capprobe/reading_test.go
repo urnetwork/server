@@ -1,3 +1,5 @@
+// The reading contract of connect's per-peer evidence, and that a capability
+// that was not tested is never recorded.
 package capprobe
 
 import (

@@ -1,14 +1,13 @@
-package capprobe
-
-import (
-	"github.com/prometheus/client_golang/prometheus"
-)
-
 // The probe's metrics, per taskworker process. Every bounded label set is
 // published from the start, zero included, so a probe that stops reads as
 // counters that stop rising rather than as series that vanish. SIGNALS.md
 // §2.19g says what each means and when it is a finding; the egress probes
 // dashboard charts every one.
+package capprobe
+
+import (
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // Pass results, the labels of urnetwork_capability_probe_passes_total.
 const (
@@ -55,7 +54,7 @@ var passesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "capability_probe",
 	Name:      "passes_total",
-	Help:      "Capability probe passes by result: measured, waiting (between sweeps), disabled, failed",
+	Help:      "Capability probe passes by result: measured, waiting (every ten minutes between sweeps), disabled, failed",
 }, []string{"result"})
 
 var selectionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

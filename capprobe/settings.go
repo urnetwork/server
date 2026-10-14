@@ -1,3 +1,5 @@
+// The capability probe's deployment settings (capability_probe.yml), their
+// defaults and their bounds.
 package capprobe
 
 import (

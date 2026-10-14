@@ -1,3 +1,4 @@
+// A pass's concurrency, admission, failure and metrics.
 package capprobe
 
 import (
@@ -186,6 +187,48 @@ func TestMetricsPublishEveryLabelSet(t *testing.T) {
 	connect.AssertEqual(t, testutil.CollectAndCount(selectionTotal), len(selectionStages))
 	connect.AssertEqual(t, testutil.CollectAndCount(providersTotal), len(outcomes))
 	connect.AssertEqual(t, testutil.CollectAndCount(readingsTotal), len(e2eReadings)+len(windowReadings))
+}
+
+// Only a pass with providers to measure needs tunnels, and so a prober
+// shard: one that waits for its sweep's next start, or finds nothing due and
+// eligible, finishes without any and still moves the sweep; one with
+// providers and no tunnels fails rather than skip them.
+func TestOnlyAPassWithProvidersNeedsTunnels(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := newFakeStore(3)
+		for _, clientId := range store.clientIds {
+			store.ineligible[clientId] = true
+		}
+		selecting := newFakeRunner(t, fakeSettings(1, 2, 2, 1), store, newFakeFleet())
+		selecting.open = nil
+
+		waiting, err := selecting.begin(t.Context(), Sweep{NextSweepAt: time.Now().Add(time.Hour)})
+		if err != nil || waiting.NeedsTunnels() {
+			t.Fatalf("a waiting pass needs tunnels: %v", err)
+		}
+		_, result, err := selecting.finish(t.Context(), waiting)
+		if err != nil || !result.Waiting {
+			t.Fatalf("a waiting pass finished %+v, %v", result, err)
+		}
+
+		empty, err := selecting.begin(t.Context(), Sweep{})
+		if err != nil || empty.NeedsTunnels() {
+			t.Fatalf("a pass with nothing eligible needs tunnels: %v", err)
+		}
+		next, result, err := selecting.finish(t.Context(), empty)
+		if err != nil || result.Started != 0 || result.Scanned != 2 || next.Cursor != store.clientIds[1] {
+			t.Fatalf("an empty pass finished %+v at %+v, %v", result, next, err)
+		}
+
+		store.ineligible[store.clientIds[2]] = false
+		measuring, err := selecting.begin(t.Context(), next)
+		if err != nil || !measuring.NeedsTunnels() {
+			t.Fatalf("a pass with a provider needs no tunnels: %v", err)
+		}
+		if _, _, err := selecting.finish(t.Context(), measuring); err == nil {
+			t.Fatal("a pass with a provider finished without tunnels")
+		}
+	})
 }
 
 // A pass with settings that switch the probe off, or do not validate, does

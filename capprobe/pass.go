@@ -1,3 +1,5 @@
+// One pass: its selection from the database, then bounded concurrent
+// measurement and recording, and its result.
 package capprobe
 
 import (
@@ -38,10 +40,11 @@ type PassResult struct {
 	SweepCompleted bool `json:"sweep_completed,omitempty"`
 }
 
-// One pass's owners and seams. Production builds it in RunPass; tests
-// replace the reads, the tunnels, the write and the clock. It is safe for
-// concurrent use after construction: measurements share only the record
-// write, and the pass's own counts are kept under its own lock.
+// One pass's owners and seams. Production builds one in SelectPass and one
+// in FinishPass; tests replace the reads, the tunnels, the write and the
+// clock. It is safe for concurrent use after construction: measurements
+// share only the record write, and the pass's own counts are kept under its
+// own lock.
 type passRunner struct {
 	settings Settings
 	// the establishment window a ClientHello has to be answered in
@@ -54,46 +57,92 @@ type passRunner struct {
 	after          func(time.Duration) <-chan time.Time
 }
 
-// Runs one pass of the sweep with settings, which the caller has validated
-// and found enabled, and returns where the sweep stands after it. tunnelConfig
-// carries the pass's identity, endpoints, credentials and control; a nil
-// transport budget gets one of the pass's own, shared by its tunnels alone.
-// ctx's deadline is the pass's budget: no measurement starts that could not
-// finish, with its teardown, before it.
-//
-// An error leaves the sweep where it was, so the task's retry selects the
-// same page again: the providers this pass recorded are no longer due, and
-// the rest are measured again.
-func RunPass(ctx context.Context, settings Settings, sweep Sweep, tunnelConfig providertunnel.Config) (Sweep, *PassResult, error) {
-	if tunnelConfig.PlatformTransportBudget == nil {
-		limits := connect.DefaultPlatformTransportSettings().PlatformTransportBudget.Stats()
-		tunnelConfig.PlatformTransportBudget = connect.NewPlatformTransportBudget(limits.TotalByteCount, limits.MaxTransportCount)
-	}
+// The production runner, with tunnels from tunnelConfig, nil for a runner
+// that only selects.
+func newPassRunner(settings Settings, tunnelConfig *providertunnel.Config) *passRunner {
 	runner := &passRunner{
 		settings:       settings,
 		tlsTimeout:     tlsTimeout(),
 		readPage:       readProviderCapabilityProbePage,
 		filterEligible: filterProviderCapabilityProbeEligible,
-		open:           newProviderCapabilityTunnelOpener(tunnelConfig, settings),
 		record:         recordProviderModernEvidence,
 		now:            server.NowUtc,
 		after:          time.After,
 	}
-	return runner.run(ctx, sweep)
+	if tunnelConfig != nil {
+		config := *tunnelConfig
+		if config.PlatformTransportBudget == nil {
+			// the pass's own budget, which its tunnels share and nothing else
+			limits := connect.DefaultPlatformTransportSettings().PlatformTransportBudget.Stats()
+			config.PlatformTransportBudget = connect.NewPlatformTransportBudget(limits.TotalByteCount, limits.MaxTransportCount)
+		}
+		runner.open = newProviderCapabilityTunnelOpener(config, settings)
+	}
+	return runner
 }
 
-// One pass: start or continue the sweep, select, measure, record.
+// One pass's selection, before any tunnel: whether it waits for the sweep's
+// next start, the sweep it continues, and the providers it measures.
+type PassSelection struct {
+	waiting   bool
+	sweep     Sweep
+	selected  selection
+	startedAt time.Time
+}
+
+// Whether the pass measures anything, and so needs the prober identity its
+// tunnels open with.
+func (self *PassSelection) NeedsTunnels() bool {
+	return self != nil && !self.waiting && 0 < len(self.selected.dueClientIds)
+}
+
+// Selects one pass of the sweep with settings, which the caller has found
+// enabled: whether it waits for the sweep's next start, and otherwise which
+// due, eligible providers it measures. It reads the database and opens
+// nothing, so a pass with nothing to measure costs no prober shard.
+func SelectPass(ctx context.Context, settings Settings, sweep Sweep) (*PassSelection, error) {
+	return newPassRunner(settings, nil).begin(ctx, sweep)
+}
+
+// Finishes a selected pass: measures its providers with tunnels from
+// tunnelConfig, the pass's identity, endpoints, credentials and control,
+// records what each read conclusively, and returns where the sweep stands
+// after it. tunnelConfig is unused, and may be empty, for a pass that needs
+// no tunnels. ctx's deadline is the pass's budget: no measurement starts that
+// could not finish, with its teardown, before it.
+//
+// An error leaves the sweep where it was, so the task's retry selects the
+// same page again: the providers this pass recorded are no longer due, and
+// the rest are measured again.
+func FinishPass(ctx context.Context, settings Settings, pass *PassSelection, tunnelConfig providertunnel.Config) (Sweep, *PassResult, error) {
+	var runner *passRunner
+	if pass.NeedsTunnels() {
+		runner = newPassRunner(settings, &tunnelConfig)
+	} else {
+		runner = newPassRunner(settings, nil)
+	}
+	return runner.finish(ctx, pass)
+}
+
+// One pass, selection and measurement together.
 func (self *passRunner) run(ctx context.Context, sweep Sweep) (Sweep, *PassResult, error) {
+	pass, err := self.begin(ctx, sweep)
+	if err != nil {
+		return sweep, nil, err
+	}
+	return self.finish(ctx, pass)
+}
+
+// Starts or continues the sweep and selects the pass's providers.
+func (self *passRunner) begin(ctx context.Context, sweep Sweep) (*PassSelection, error) {
 	if err := self.settings.Validate(); err != nil || !self.settings.Enabled {
 		passesTotal.WithLabelValues(PassResultFailed).Inc()
-		return sweep, nil, errors.Join(errors.New("capability probe pass needs enabled, valid settings"), err)
+		return nil, errors.Join(errors.New("capability probe pass needs enabled, valid settings"), err)
 	}
 	startedAt := self.now()
 	if !sweep.inProgress() {
 		if startedAt.Before(sweep.NextSweepAt) {
-			passesTotal.WithLabelValues(PassResultWaiting).Inc()
-			lastPassTimestampSeconds.Set(float64(startedAt.Unix()))
-			return sweep, &PassResult{Waiting: true}, nil
+			return &PassSelection{waiting: true, sweep: sweep, startedAt: startedAt}, nil
 		}
 		sweep = Sweep{StartedAt: startedAt}
 	}
@@ -101,34 +150,53 @@ func (self *passRunner) run(ctx context.Context, sweep Sweep) (Sweep, *PassResul
 	if err != nil {
 		observeSelection(selected, 0)
 		passesTotal.WithLabelValues(PassResultFailed).Inc()
-		return sweep, nil, fmt.Errorf("capability probe selection: %w", err)
+		return nil, fmt.Errorf("capability probe selection: %w", err)
 	}
-	startedCount, recordedCount, measureErr := self.measureAll(ctx, selected.dueClientIds)
-	observeSelection(selected, startedCount)
+	return &PassSelection{sweep: sweep, selected: selected, startedAt: startedAt}, nil
+}
+
+// Measures and records the selection's providers, and counts the pass.
+func (self *passRunner) finish(ctx context.Context, pass *PassSelection) (Sweep, *PassResult, error) {
+	if pass.waiting {
+		passesTotal.WithLabelValues(PassResultWaiting).Inc()
+		lastPassTimestampSeconds.Set(float64(pass.startedAt.Unix()))
+		return pass.sweep, &PassResult{Waiting: true}, nil
+	}
+	startedCount, recordedCount, measureErr := 0, 0, error(nil)
+	if 0 < len(pass.selected.dueClientIds) {
+		if self.open == nil {
+			passesTotal.WithLabelValues(PassResultFailed).Inc()
+			return pass.sweep, nil, errors.New("capability probe pass has providers to measure and no tunnels")
+		}
+		startedCount, recordedCount, measureErr = self.measureAll(ctx, pass.selected.dueClientIds)
+	}
+	observeSelection(pass.selected, startedCount)
 	result := &PassResult{
-		Scanned:  selected.scanned,
-		Due:      selected.due,
-		Eligible: selected.eligible,
+		Scanned:  pass.selected.scanned,
+		Due:      pass.selected.due,
+		Eligible: pass.selected.eligible,
 		Started:  startedCount,
 		Recorded: recordedCount,
 	}
 	if measureErr != nil {
 		passesTotal.WithLabelValues(PassResultFailed).Inc()
-		return sweep, result, measureErr
+		return pass.sweep, result, measureErr
 	}
-	next, completed := nextSweep(sweep, selected, startedCount, self.settings.minSweepInterval())
+	next, completed := nextSweep(pass.sweep, pass.selected, startedCount, self.settings.minSweepInterval())
 	finishedAt := self.now()
 	if completed {
 		result.SweepCompleted = true
 		sweepsTotal.Inc()
-		lastSweepSeconds.Set(finishedAt.Sub(sweep.StartedAt).Seconds())
+		lastSweepSeconds.Set(finishedAt.Sub(pass.sweep.StartedAt).Seconds())
 	}
 	passesTotal.WithLabelValues(PassResultMeasured).Inc()
 	lastPassTimestampSeconds.Set(float64(finishedAt.Unix()))
-	glog.Infof(
-		"[capprobe]pass: scanned=%d due=%d eligible=%d started=%d recorded=%d sweep_completed=%t\n",
-		result.Scanned, result.Due, result.Eligible, result.Started, result.Recorded, result.SweepCompleted,
-	)
+	if 0 < startedCount || completed {
+		glog.Infof(
+			"[capprobe]pass: scanned=%d due=%d eligible=%d started=%d recorded=%d sweep_completed=%t\n",
+			result.Scanned, result.Due, result.Eligible, result.Started, result.Recorded, result.SweepCompleted,
+		)
+	}
 	return next, result, nil
 }
 

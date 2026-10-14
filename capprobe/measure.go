@@ -1,3 +1,4 @@
+// One provider's bounded measurement, in a capability tunnel of its own.
 package capprobe
 
 import (

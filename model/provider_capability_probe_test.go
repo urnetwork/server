@@ -1,3 +1,5 @@
+// The capability probe's eligibility rule, pure: the modern provider gate's
+// own population.
 package model
 
 import (

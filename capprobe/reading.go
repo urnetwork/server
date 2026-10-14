@@ -1,3 +1,5 @@
+// What one measurement's observation says about each capability, and the
+// evidence a conclusive reading records.
 package capprobe
 
 import (
@@ -18,8 +20,10 @@ const (
 	e2eNotTested e2eReading = "not_tested"
 	// a ClientHello went out and is still within its establishment window
 	e2ePending e2eReading = "pending"
-	// a ClientHello went unanswered for a whole establishment window while
-	// the provider acknowledged the probe's pings: no end-to-end responder
+	// no handshake completed for a whole establishment window after a
+	// ClientHello, while the provider acknowledged the probe's pings: the
+	// provider has no end-to-end responder, or its answer failed, and either
+	// way gives a client no session
 	e2eNoResponder e2eReading = "no_responder"
 	// a session negotiated a classical group, and did not or did seal
 	e2eClassicalUnsealed e2eReading = "classical_unsealed"

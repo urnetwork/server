@@ -9,11 +9,11 @@
 // Each pass continues a sweep over the connected providers (Sweep), a
 // bounded page at a time, and selects the providers the egress rules admit
 // to Quality or Speed before the gate whose evidence is missing or due for a
-// refresh (model.GetProviderCapabilityProbePage,
-// model.FilterProviderCapabilityProbeEligible). It measures each in a short
-// tunnel of its own (providertunnel.CapabilityObservation): the tunnel's
-// window pings the provider, its clients attempt opportunistic end-to-end
-// sessions after their key registration, and connect's
+// refresh (SelectPass, from model.GetProviderCapabilityProbePage and
+// model.FilterProviderCapabilityProbeEligible). FinishPass measures each in
+// a short tunnel of its own (providertunnel.CapabilityObservation): the
+// tunnel's window pings the provider, its clients attempt opportunistic
+// end-to-end sessions after their key registration, and connect's
 // PeerCapabilityObservations records what the provider did. A measurement
 // ends once the reading is conclusive or its time is up (measure), and a
 // conclusive reading is recorded through model.RecordProviderModernEvidence;

@@ -1,3 +1,4 @@
+// The capability probe's sweep page and eligibility against the database.
 package model
 
 import (
@@ -10,9 +11,6 @@ import (
 
 	"github.com/urnetwork/server"
 )
-
-// The capability probe's reads against the database: the sweep page and the
-// eligibility of its due providers.
 
 // A provider row of the sweep's population: a network client with the
 // given activity and parent, a location reliability row connected or not

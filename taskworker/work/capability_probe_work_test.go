@@ -1,3 +1,4 @@
+// The capability probe's task without tunnels or a database.
 package work
 
 import (
@@ -13,9 +14,6 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
-
-// The capability probe's task, without tunnels or a database: its shard
-// slot, funding, cadence, and what a pass is handed and hands back.
 
 // Replaces the probe's settings and execution until the test ends.
 func withCapabilityProbeSeams(t *testing.T, settings func() (capprobe.Settings, error), execute func(context.Context, capprobe.Settings, capprobe.Sweep) (capprobe.Sweep, *capprobe.PassResult, error)) {
@@ -72,8 +70,9 @@ func TestCapabilityProbeShardCredit(t *testing.T) {
 }
 
 // The next pass: within a sweep after the pass interval, between sweeps at
-// the next sweep's start, a switched-off probe after its recheck, and after
-// a result-less finish with the pass's own sweep.
+// the next sweep's start or a waiting pass ten minutes on, whichever is
+// first, a switched-off probe after its recheck, and after a result-less
+// finish with the pass's own sweep.
 func TestCapabilityProbeSuccessor(t *testing.T) {
 	settings := capprobe.DefaultSettings()
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
@@ -88,7 +87,8 @@ func TestCapabilityProbeSuccessor(t *testing.T) {
 		runAt  time.Time
 	}{
 		{name: "within a sweep", result: &CapabilityProbeResult{Sweep: inSweep}, sweep: inSweep, runAt: now.Add(settings.PassInterval())},
-		{name: "between sweeps", result: &CapabilityProbeResult{Sweep: betweenSweeps}, sweep: betweenSweeps, runAt: betweenSweeps.NextSweepAt},
+		{name: "between sweeps", result: &CapabilityProbeResult{Sweep: betweenSweeps}, sweep: betweenSweeps, runAt: now.Add(10 * time.Minute)},
+		{name: "just before the next sweep", result: &CapabilityProbeResult{Sweep: capprobe.Sweep{NextSweepAt: now.Add(7 * time.Minute)}}, sweep: capprobe.Sweep{NextSweepAt: now.Add(7 * time.Minute)}, runAt: now.Add(7 * time.Minute)},
 		{name: "a next sweep already due", result: &CapabilityProbeResult{Sweep: capprobe.Sweep{NextSweepAt: now.Add(-time.Minute)}}, sweep: capprobe.Sweep{NextSweepAt: now.Add(-time.Minute)}, runAt: now.Add(settings.PassInterval())},
 		{name: "switched off", result: &CapabilityProbeResult{Disabled: true, Sweep: inSweep}, sweep: inSweep, runAt: now.Add(capabilityProbeDisabledRecheck)},
 		{name: "no result", args: &CapabilityProbeArgs{Sweep: inSweep}, sweep: inSweep, runAt: now.Add(settings.PassInterval())},

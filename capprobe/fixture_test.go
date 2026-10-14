@@ -1,3 +1,5 @@
+// Fakes for the probe's tunnels, reads and write, on a synctest bubble's
+// clock.
 package capprobe
 
 import (
