@@ -33,7 +33,10 @@ import (
 	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
-// One shard's in-process operator. Safe for concurrent use.
+// One shard's in-process operator. Safe for concurrent use. It adds no
+// concurrency limit of its own: the pass's configured worker concurrency and
+// the process's database pool, the same budgets every other in-process caller
+// shares, bound its calls.
 type Operator struct {
 	// The slice of the due queues this operator claims, with ingest.Client's
 	// semantics: a count of 1 or less takes the whole queue.
@@ -52,17 +55,6 @@ type Operator struct {
 }
 
 var _ ingest.Operator = (*Operator)(nil)
-
-// Bounds this process's in-flight operator calls. Over HTTP these writes held
-// connections of the API fleet's pools; in-process they hold the host
-// process's own (the taskworker's is shared with every other task), so a burst
-// of finished turns must not take more than a small share of it. A call waits
-// for a slot within its own CallTimeout, as a request waits for a connection.
-// Sixteen slots of ~20 ms database work admit ~800 calls/s per process, well
-// above a fleet's ingest rate.
-const MaxInFlight = 16
-
-var inFlight = make(chan struct{}, MaxInFlight)
 
 // The process publishes the API's URL Due timing series under the same names,
 // adopting the API's collectors when one binary holds both.
@@ -150,12 +142,6 @@ func (self *Operator) run(ctx context.Context, operation func(context.Context) e
 	}
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	select {
-	case inFlight <- struct{}{}:
-		defer func() { <-inFlight }()
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 	server.HandleError(func() {
 		err = operation(ctx)
