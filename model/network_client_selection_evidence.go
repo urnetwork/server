@@ -8,11 +8,12 @@
 // provider without a reliability score gets the source query's neutral
 // lookback, both weights 1 (UpdateClientScores), the weight of a provider
 // steady through the whole window. The Online fallback, which orders by their
-// product, therefore lent the least known providers first. While rank_measured_first is on, the
-// evidence is the first key of every draw instead: the draws take the
-// candidates rank by rank, best first, and each rank in the order the draw
-// gave it before, the neutral weights included. Supply is unchanged; the
-// providers without evidence fill whatever the measured leave.
+// product, therefore lent the least-known providers first. While
+// rank_measured_first is on, the evidence is the first key of every draw
+// instead: the draws take the candidates rank by rank, best first, and each
+// rank in the order the draw gave it before, the neutral weights included.
+// Supply is unchanged; the providers without evidence fill whatever the
+// measured leave.
 package model
 
 import (
