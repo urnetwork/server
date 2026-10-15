@@ -1083,6 +1083,30 @@ func TestSlackAlertNotifierStartWindowSkipsFailedRuns(t *testing.T) {
 	)
 }
 
+// Slack text gets the address scrubbing of the process's stdout and stderr:
+// addresses become [scrubbed], an IPv4 port stays, and the rest survives.
+func TestSlackAlertNotifierScrubsAddressesFromMessages(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.settings(webhookUrl))
+	alert := slackTestAlert("192.0.2.10:6379", "", SeverityPage)
+	alert.Symptom = "Connections from 2001:db8::7 and 198.51.100.4 stall at 18:00:00"
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{alert}})
+	closeSlackNotifier(t, notifier)
+
+	texts := webhook.posted()
+	requireSlackTexts(t, texts,
+		"[PAGE] raised (synthetic): Connections from [scrubbed] and [scrubbed] stall at 18:00:00\n"+
+			"pg/active-pileup · active-pileup · [scrubbed]:6379\n"+
+			"SIGNALS.md §1.3 · active-pileup · playbook SIGNALS.md 5.8",
+	)
+	for _, address := range []string{"192.0.2.10", "2001:db8::7", "198.51.100.4"} {
+		if strings.Contains(texts[0], address) {
+			t.Fatalf("message carries %s: %q", address, texts[0])
+		}
+	}
+}
+
 // Alert text cannot mention a channel or render a link.
 func TestSlackAlertMessagesEscapeSlackControlSequences(t *testing.T) {
 	alert := slackTestAlert("pg-1", "", SeverityPage)

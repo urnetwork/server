@@ -49,7 +49,8 @@ package monitor
 //
 // The webhook URL is a credential. It is never logged, put in a message, or
 // put in an error. net/http errors embed the request URL, so a failed post is
-// reduced to a fixed class before it is logged.
+// reduced to a fixed class before it is logged. Message text gets the same
+// address scrubbing as the process's stdout and stderr.
 //
 // Handle and Close are safe for concurrent use.
 
@@ -806,11 +807,12 @@ func (self *SlackAlertNotifier) retryDelay(retryAfter string) time.Duration {
 	return self.settings.RetryDelay
 }
 
-// Posts one message once. Link and media unfurling stay off, so nothing in an
-// alert makes Slack fetch a URL.
+// Posts one message once. Addresses are scrubbed as on the process's stdout
+// and stderr (server.ScrubProcessLogs), and link and media unfurling stay
+// off, so nothing in an alert makes Slack fetch a URL.
 func (self *SlackAlertNotifier) post(text string) slackPostOutcome {
 	payload, err := json.Marshal(map[string]any{
-		"text":         text,
+		"text":         server.ScrubAddrsText(text),
 		"unfurl_links": false,
 		"unfurl_media": false,
 	})
