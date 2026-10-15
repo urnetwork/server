@@ -20,11 +20,22 @@ import (
 // credential in the path, so it must never reach a log line.
 const syntheticSlackSecret = "syntheticSlackSecret0001"
 
+// One scripted answer of the fake webhook. A zero status answers 200 "ok".
+type fakeSlackResponse struct {
+	status     int
+	retryAfter string
+	body       string
+	// never answer: the client gives up at its post timeout
+	hold bool
+}
+
 // A recording incoming webhook. Each accepted post's text is kept in order.
 type fakeSlackWebhook struct {
 	stateLock sync.Mutex
 	texts     []string
 	requests  int
+	// answers for the next requests, in order, ahead of status and body
+	script []fakeSlackResponse
 	// status and body for every response; zero status answers 200 "ok"
 	status int
 	body   string
@@ -45,6 +56,12 @@ func newFakeSlackWebhook(t *testing.T) (*fakeSlackWebhook, string) {
 		webhook.stateLock.Lock()
 		webhook.requests++
 		hold, status, body, release := webhook.hold, webhook.status, webhook.body, webhook.release
+		retryAfter := ""
+		if 0 < len(webhook.script) {
+			next := webhook.script[0]
+			webhook.script = webhook.script[1:]
+			hold, status, body, retryAfter = next.hold, next.status, next.body, next.retryAfter
+		}
 		webhook.stateLock.Unlock()
 		select {
 		case webhook.arrived <- struct{}{}:
@@ -80,6 +97,9 @@ func newFakeSlackWebhook(t *testing.T) (*fakeSlackWebhook, string) {
 			return
 		}
 		if status != 0 {
+			if retryAfter != "" {
+				response.Header().Set("Retry-After", retryAfter)
+			}
 			response.WriteHeader(status)
 			_, _ = io.WriteString(response, body)
 			return
@@ -112,6 +132,13 @@ func (self *fakeSlackWebhook) respond(status int, body string) {
 	self.body = body
 }
 
+// Queues answers for the next requests.
+func (self *fakeSlackWebhook) answerNext(responses ...fakeSlackResponse) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.script = append(self.script, responses...)
+}
+
 // Makes later requests wait for the returned channel; closing it releases
 // them all.
 func (self *fakeSlackWebhook) holdUntilReleased() chan struct{} {
@@ -133,11 +160,13 @@ func awaitSlackWebhook(t *testing.T, barrier chan struct{}, count int, what stri
 	}
 }
 
-// A manually advanced clock and a log sink, shared by the notifier tests.
+// A manually advanced clock, a log sink, and a retry wait that returns at once
+// and records the delay it was asked for, shared by the notifier tests.
 type slackTestHarness struct {
-	stateLock sync.Mutex
-	now       time.Time
-	logs      []string
+	stateLock   sync.Mutex
+	now         time.Time
+	logs        []string
+	retryDelays []time.Duration
 }
 
 func newSlackTestHarness() *slackTestHarness {
@@ -168,8 +197,22 @@ func (self *slackTestHarness) logLines() []string {
 	return append([]string(nil), self.logs...)
 }
 
+func (self *slackTestHarness) retryWait(ctx context.Context, delay time.Duration) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.retryDelays = append(self.retryDelays, delay)
+	return ctx.Err() == nil
+}
+
+func (self *slackTestHarness) retryDelayLog() []time.Duration {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return append([]time.Duration(nil), self.retryDelays...)
+}
+
 // Settings that never post or flush on a wall-clock schedule: the only
-// summary flushes are explicit, and Close drains the queue.
+// summary flushes are explicit, retries do not wait, and Close drains the
+// queue.
 func (self *slackTestHarness) settings(webhookUrl string) SlackAlertNotifierSettings {
 	return SlackAlertNotifierSettings{
 		WebhookUrl:      webhookUrl,
@@ -179,6 +222,7 @@ func (self *slackTestHarness) settings(webhookUrl string) SlackAlertNotifierSett
 		SummaryInterval: time.Hour,
 		Logf:            self.Logf,
 		Now:             self.Now,
+		retryWait:       self.retryWait,
 	}
 }
 
@@ -584,17 +628,10 @@ func TestSlackAlertNotifierNeverLogsTheWebhookUrl(t *testing.T) {
 
 	// failure then success: one failure line and one recovery line
 	recovering, recoveringUrl := newFakeSlackWebhook(t)
-	recovering.respond(http.StatusServiceUnavailable, "")
+	recovering.answerNext(fakeSlackResponse{status: http.StatusServiceUnavailable})
 	harness := newSlackTestHarness()
 	notifier := NewSlackAlertNotifier(harness.settings(recoveringUrl))
 	notifier.Handle(slackTestSignal, SignalExecution{Alerts: alerts})
-	// barrier: the raise has been answered 503 before the webhook recovers
-	select {
-	case <-recovering.answered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the raise was never posted")
-	}
-	recovering.respond(0, "")
 	notifier.Handle(slackTestSignal, SignalExecution{})
 	notifier.Handle(slackTestSignal, SignalExecution{})
 	closeSlackNotifier(t, notifier)
@@ -605,6 +642,207 @@ func TestSlackAlertNotifierNeverLogsTheWebhookUrl(t *testing.T) {
 	if strings.Contains(strings.Join(logs, "\n"), syntheticSlackSecret) {
 		t.Fatalf("recovery logs quote the webhook: %q", logs)
 	}
+}
+
+// A 5xx, a 429 or a timeout is retried once, after the Retry-After Slack
+// sends, in seconds or as an HTTP date, RetryDelay when it sends none, and at
+// most MaxRetryDelay.
+func TestSlackAlertNotifierRetriesOnceAfterServerErrorsRateLimitsAndTimeouts(t *testing.T) {
+	for _, c := range []struct {
+		first     fakeSlackResponse
+		wantDelay time.Duration
+	}{
+		{first: fakeSlackResponse{status: http.StatusServiceUnavailable}, wantDelay: time.Second},
+		{first: fakeSlackResponse{status: http.StatusInternalServerError, retryAfter: "3"}, wantDelay: 3 * time.Second},
+		{first: fakeSlackResponse{status: http.StatusTooManyRequests, retryAfter: "7"}, wantDelay: 7 * time.Second},
+		{first: fakeSlackResponse{status: http.StatusTooManyRequests, retryAfter: "120"}, wantDelay: 30 * time.Second},
+		{first: fakeSlackResponse{status: http.StatusTooManyRequests, retryAfter: "Wed, 14 Oct 2026 18:00:12 GMT"}, wantDelay: 12 * time.Second},
+		{first: fakeSlackResponse{status: http.StatusBadGateway, retryAfter: "soon"}, wantDelay: time.Second},
+		{first: fakeSlackResponse{hold: true}, wantDelay: time.Second},
+	} {
+		webhook, webhookUrl := newFakeSlackWebhook(t)
+		webhook.answerNext(c.first)
+		harness := newSlackTestHarness()
+		settings := harness.settings(webhookUrl)
+		if c.first.hold {
+			settings.PostTimeout = 500 * time.Millisecond
+		}
+		notifier := NewSlackAlertNotifier(settings)
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
+		closeSlackNotifier(t, notifier)
+
+		texts := webhook.posted()
+		delays := harness.retryDelayLog()
+		if len(texts) != 1 || !strings.HasPrefix(texts[0], "[WARN] raised (synthetic)") || webhook.requestCount() != 2 ||
+			len(delays) != 1 || delays[0] != c.wantDelay {
+			t.Errorf("first answer %+v: posted %q in %d requests after waits %v, want one raise in 2 requests after %v",
+				c.first, texts, webhook.requestCount(), delays, c.wantDelay)
+		}
+	}
+}
+
+// Other failures are not retried: the message is undelivered at once, and the
+// report at close names it.
+func TestSlackAlertNotifierDoesNotRetryOtherFailures(t *testing.T) {
+	for _, first := range []fakeSlackResponse{
+		{status: http.StatusNotFound, body: "no_service"},
+		{status: http.StatusBadRequest, body: "invalid_payload"},
+		{status: http.StatusForbidden},
+	} {
+		webhook, webhookUrl := newFakeSlackWebhook(t)
+		webhook.answerNext(first)
+		harness := newSlackTestHarness()
+		notifier := NewSlackAlertNotifier(harness.settings(webhookUrl))
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
+		closeSlackNotifier(t, notifier)
+
+		texts := webhook.posted()
+		if delays := harness.retryDelayLog(); len(delays) != 0 || webhook.requestCount() != 2 || len(texts) != 1 ||
+			!strings.HasPrefix(texts[0], "[UNDELIVERED] (synthetic) 1 message(s) queued between 2026-10-14T18:00:00Z and 2026-10-14T18:00:00Z failed to post:\n- [WARN] raised (synthetic): Active client backends on pg-1") {
+			t.Errorf("first answer %+v: posted %q in %d requests after waits %v", first, texts, webhook.requestCount(), delays)
+		}
+	}
+
+	// a refused connection is not retried either
+	refused := httptest.NewServer(http.NotFoundHandler())
+	refusedUrl := refused.URL + "/services/T0SYNTHETIC/B0SYNTHETIC/" + syntheticSlackSecret
+	refused.Close()
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.settings(refusedUrl))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
+	closeSlackNotifier(t, notifier)
+	if delays := harness.retryDelayLog(); len(delays) != 0 {
+		t.Fatalf("refused connection waited %v to retry", delays)
+	}
+}
+
+// Messages that still fail after their retry are reported once Slack takes a
+// post again: one report with their count, when they were queued, and their
+// first lines.
+func TestSlackAlertNotifierReportsUndeliveredMessagesAfterRecovery(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	// pg-1 and pg-2 each fail twice
+	for i := 0; i < 4; i++ {
+		webhook.answerNext(fakeSlackResponse{status: http.StatusServiceUnavailable})
+	}
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.settings(webhookUrl))
+	active := Alerts{}
+	for _, target := range []string{"pg-1", "pg-2", "pg-3"} {
+		active = append(active, slackTestAlert(target, "", SeverityWarn))
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+		harness.advance(time.Minute)
+	}
+	closeSlackNotifier(t, notifier)
+
+	texts := webhook.posted()
+	requireSlackTexts(t, texts,
+		"[WARN] raised (synthetic): Active client backends on pg-3",
+		"[UNDELIVERED] (synthetic) 2 message(s) queued between 2026-10-14T18:00:00Z and 2026-10-14T18:01:00Z failed to post:\n"+
+			"- [WARN] raised (synthetic): Active client backends on pg-1 exceed the band\n"+
+			"- [WARN] raised (synthetic): Active client backends on pg-2 exceed the band\n"+
+			"The monitor's alert output carries every alert.",
+	)
+	if webhook.requestCount() != 6 {
+		t.Fatalf("requests = %d, want 6", webhook.requestCount())
+	}
+}
+
+// Without a later message, the periodic check posts the report itself once
+// Slack recovers; while Slack still refuses it, the report waits a minute
+// between attempts.
+func TestSlackAlertNotifierProbesWithTheUndeliveredReport(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	// pg-1 and its retry fail, and so does the first report with its retry
+	for i := 0; i < 4; i++ {
+		webhook.answerNext(fakeSlackResponse{status: http.StatusServiceUnavailable})
+	}
+	harness := newSlackTestHarness()
+	settings := harness.settings(webhookUrl)
+	ticks := make(chan time.Time)
+	settings.after = func(time.Duration) <-chan time.Time { return ticks }
+	notifier := NewSlackAlertNotifier(settings)
+	tick := func() {
+		t.Helper()
+		select {
+		case ticks <- harness.Now():
+		case <-time.After(30 * time.Second):
+			t.Fatal("the sender never waited for its periodic check")
+		}
+	}
+
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
+	awaitSlackWebhook(t, webhook.answered, 2, "answer")
+	// the sender takes a tick only after it recorded pg-1 as undelivered
+	tick()
+	awaitSlackWebhook(t, webhook.answered, 2, "answer")
+	// a minute has not passed: these ticks post nothing, and the second one
+	// is taken only after the first is handled
+	tick()
+	tick()
+	if webhook.requestCount() != 4 {
+		t.Fatalf("requests before the report interval = %d, want 4", webhook.requestCount())
+	}
+	harness.advance(time.Minute)
+	tick()
+	awaitSlackWebhook(t, webhook.answered, 1, "answer")
+	closeSlackNotifier(t, notifier)
+
+	requireSlackTexts(t, webhook.posted(),
+		"[UNDELIVERED] (synthetic) 1 message(s) queued between 2026-10-14T18:00:00Z and 2026-10-14T18:00:00Z failed to post:\n- [WARN] raised (synthetic): Active client backends on pg-1",
+	)
+}
+
+// Handle returns while the sender waits to retry. Executions meanwhile fill
+// the bounded queue, and what does not fit is dropped and counted.
+func TestSlackAlertNotifierHandleNeverWaitsForARetry(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	webhook.answerNext(fakeSlackResponse{status: http.StatusServiceUnavailable})
+	harness := newSlackTestHarness()
+	settings := harness.settings(webhookUrl)
+	settings.QueueSize = 2
+	settings.MaxMessagesPerMinute = 100
+	retrying := make(chan struct{}, 1)
+	release := make(chan struct{})
+	settings.retryWait = func(ctx context.Context, _ time.Duration) bool {
+		retrying <- struct{}{}
+		select {
+		case <-release:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	notifier := NewSlackAlertNotifier(settings)
+
+	active := Alerts{slackTestAlert("pg-1", "", SeverityWarn)}
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	awaitSlackWebhook(t, retrying, 1, "retry wait")
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		for _, target := range []string{"pg-2", "pg-3", "pg-4", "pg-5", "pg-6"} {
+			active = append(active, slackTestAlert(target, "", SeverityWarn))
+			notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+		}
+	}()
+	select {
+	case <-handled:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Handle waited for the sender's retry")
+	}
+	close(release)
+	// the 503, the retry, pg-2 and pg-3
+	awaitSlackWebhook(t, webhook.answered, 4, "answer")
+	notifier.flushSummary()
+	closeSlackNotifier(t, notifier)
+
+	requireSlackTexts(t, webhook.posted(),
+		"[WARN] raised (synthetic): Active client backends on pg-1",
+		"[WARN] raised (synthetic): Active client backends on pg-2",
+		"[WARN] raised (synthetic): Active client backends on pg-3",
+		"[RATE LIMIT] (synthetic)\n3 message(s) were dropped while the Slack sender was backlogged.",
+	)
 }
 
 // Alert text cannot mention a channel or render a link.
