@@ -402,6 +402,42 @@ lifecycle event, not loss of production visibility, and must not emit a
 `Sustain` value and resets that identity after a healthy tick; `--once`
 deliberately reports current violations immediately for diagnosis.
 
+An empty gated tick is therefore not evidence of absence. After a one-tick
+dip the gate holds a returning alert for `Sustain - 1` more ticks, and it
+holds a failed run's two-cadence `cannot-observe` alert on its first failure,
+so either tick reaches a consumer with no gated alerts. A consumer that tracks
+incidents across ticks takes the run loop's `SignalExecution`, which also
+carries the held alerts and whether the run failed: a held alert is still
+observed, and a failed run or one with an unobservable alert, gated or held,
+is incomplete. The Slack notifier (MONITOR.md §3.6) clears an incident only
+after two complete ticks in which nothing observed it. Healthy control: one
+dip of a Sustain 2 alert posts nothing after its raise. Failure control: two
+complete ticks without the alert post one clear.
+
+An unknown state is unobservable whatever signal reports it.
+`alert_classes.go` classifies every alert class as visibility, an unknown
+state reported in place of an incident, or incident, and
+`TestEveryAlertClassIsClassified` fails for a class the table leaves out,
+including one a signal computes, which the test lists with every class it can
+take. The classes `cannot-observe` and `*-unobservable` are always
+visibility, and the probe id `monitor/visibility` is reserved for unknown
+states. The classification errs toward visibility: over-marking only delays a
+signal's other clears while the state lasts, but under-marking lets an
+incident clear because its signal could not see it. A class whose findings
+are unknown only in some states stays an incident, and those findings set
+their `unobservable` field, as the host-scope partial finding of a run with
+blocked hosts and the proxy public path without an allocation do. An Alert
+built directly sets the alert's marker exactly when its class is visibility,
+as the provider, crash-report and settings-generation visibility alerts do,
+and the test checks it. Accept filters let unobservable findings through,
+because a probe shared by several signals that loses part of its source has
+lost it for each of them. Deterministic controls: a redis node's PAGE is
+kept, not cleared and raised again, while its INFO times out for two runs; a
+pg-cpu PAGE is kept while its database host does not answer for two runs; and
+a configured host exclusion without blocked hosts, which settings freshness
+reports every run, leaves the run complete.
+
+
 Subnet operators: §17 covers node/gateway infrastructure; §22 covers continuous
 whitepaper-1.0 correctness of pools, head miners, validators, deposits, custody,
 settlement and public evidence. A healthy §17 result does not satisfy §22.
@@ -20637,7 +20673,14 @@ legacy ticket manager's five-healthy-tick resolution events. The current CLI
 does not emit an all-probes heartbeat. Silence is not recovery. Require direct
 healthy observations held for the applicable verification window, including
 the five-minute healthy-band check where specified, and record recovery
-confirmation in the run ledger (6.8).
+confirmation in the run ledger (6.8). The continuous CLI's Slack notifier
+(MONITOR.md §3.6) is a transition sink, not a ticket lifecycle: it keys an
+incident on (probe, class, target) per the identity discipline below, and its
+`[CLEARED]` means only that two complete runs no longer reported the incident.
+Its `[ACTIVE AT START]` digest lists what a new watcher's first runs found,
+which can repeat earlier announcements; it does not date the incidents. A
+state the configuration chose, such as the PG query sample without its flag,
+is never posted.
 
 Historical ledger class aliases remain readable but must not be emitted by new
 probes:

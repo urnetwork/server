@@ -160,7 +160,7 @@ func pgSampleUnavailable(env *probeEnv, reason string) finding {
 			observed += fmt.Sprintf(" last_attempted_at=%s last_completed_at=%s next_eligible_at=%s due_age_s=%.3f", state.AttemptedAt.Format(time.RFC3339Nano), completed, state.NextEligibleAt.Format(time.RFC3339Nano), max(0, env.now().Sub(state.NextEligibleAt).Seconds()))
 		}
 	}
-	return finding{probeId: "pg/query-sample", tier: tierWarn, class: "pg-query-sample-unavailable", target: pgTarget(env), sustain: 1,
+	return finding{probeId: "pg/query-sample", tier: tierWarn, class: "pg-query-sample-unavailable", target: pgTarget(env), sustain: 1, configuredOff: reason == "configured-disabled",
 		symptom: "PostgreSQL query/load observation is unavailable", observed: observed,
 		mechanism: "An expired or incomplete observation cannot establish current slow-query or repeated-work coverage.",
 		baseline:  "Continuous mode collects one bounded catalog sample per 15-minute interval; expiry mode is one shot.",
