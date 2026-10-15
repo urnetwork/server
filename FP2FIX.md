@@ -1158,7 +1158,12 @@ keeps the URL-success rule above exactly, and the owner chooses by config.
   `online_url_ratio_country_exemption`, default `true`; a value that cannot
   be read keeps `true`. Each key is decoded on its own, so neither resets a
   neighbour, and a provider.yml that is not yaml disables the rule, and the
-  ratio with it.
+  ratio with it. Setting or clearing either is a config release through the
+  config-updater and a restart of every taskworker block, whose passes (the
+  score export, the location counts, the dashboard counts) apply it, since a
+  running container keeps the config it was created with (the procedure of
+  server/capprobe/README.md, "Switching it on"). Provider status and inspect
+  follow the score export's published guard, not their own provider.yml.
 - **Rule.** With the ratio on, a provider with `N >= 2` measured runs and
   `S >= 1` successes whose `S / N` is below the ratio, compared in exact
   millionths like the country floor (19 of 24 is below 0.8, 4 of 5 is not),
