@@ -406,6 +406,50 @@ func TestLocalVaultHomeWithoutWarpEnvIsGuarded(t *testing.T) {
 	}
 }
 
+// A test binary whose vault home names a vault's local directory itself starts
+// with a dial guard, and the test vault guard still reads none of that
+// directory's credentials, even when test-env.sh names it as the launcher's
+// vault: the launcher scope needs WARP_ENV=local, and then reads only a real
+// local directory below the vault home, which a local directory has not. The
+// guard is chosen from the environment alone, so each lookup ends in one
+// refusal that names no credential.
+func TestLocalVaultHomeTestBinaryIsGuardedAndReadsNoLauncherCredentials(t *testing.T) {
+	cases := []struct {
+		warpEnv   string
+		errorText string
+	}{
+		{warpEnv: "", errorText: "only with WARP_ENV=local"},
+		{warpEnv: "local", errorText: "only from a real local directory"},
+	}
+	for _, c := range cases {
+		vaultHome, _ := writeTestLauncherVault(t)
+		localVaultHome := filepath.Join(vaultHome, "local")
+		t.Setenv("WARP_ENV", c.warpEnv)
+		t.Setenv("WARP_VAULT_HOME", localVaultHome)
+		t.Setenv(testLauncherVaultHomeEnvName, localVaultHome)
+		t.Setenv(testEnvAttestedAddrsEnvName, testLauncherAttestedAddrs)
+		// the choice of a test binary started from this environment
+		choice := chooseTestEnvStartupDialGuard(true, c.warpEnv, func() *testEnvDialGuard {
+			return newTestEnvDialGuard(os.Getenv, testEnvUnusedResolver(t))
+		})
+		if choice == nil || choice.guard.requireAttested() != nil {
+			t.Fatalf("WARP_ENV %q: a test binary with vault home %s started without an attested dial guard", c.warpEnv, localVaultHome)
+		}
+		useTestEnvProcessDialGuard(t, choice.guard)
+		for _, name := range []string{DefaultPgVaultResourceName, "redis.yml"} {
+			_, err := Vault.SimpleResource(name)
+			if !errors.Is(err, ErrResourceNotFound) || !strings.Contains(err.Error(), c.errorText) {
+				t.Errorf("WARP_ENV %q: %s read %v; want a refusal naming %q", c.warpEnv, name, err, c.errorText)
+			} else if strings.Contains(err.Error(), testLauncherPassword) {
+				t.Errorf("WARP_ENV %q: the %s refusal names a credential", c.warpEnv, name)
+			}
+		}
+		if _, err := loadTestEnvironmentConfiguration(); err == nil {
+			t.Errorf("WARP_ENV %q: a DB test loaded the launcher's settings from vault home %s", c.warpEnv, localVaultHome)
+		}
+	}
+}
+
 // A nil guard is the production case: it hands back the caller's own dial and
 // lookup, which then see the unresolved name exactly as before, and leaves
 // every client configuration untouched.
