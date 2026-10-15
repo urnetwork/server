@@ -34,7 +34,11 @@ import (
 
 const (
 	defaultProviderEgressProbeShardCount = 4
-	maxProviderEgressProbeShardCount     = 256
+	// The prober shard registry's slots (model.BeginProberShard).
+	maxProviderEgressProbeShardCount = 256
+	// The most URL probe shards. They take slots [0, shard_count), and the
+	// registry's last slot is the capability probe's.
+	maxProviderUrlProbeShardCount        = maxProviderEgressProbeShardCount - 1
 	providerEgressBlackholeSubmitTimeout = 30 * time.Second
 	// In-process operator calls one pass runs at once (operator_concurrency).
 	// Two 64-worker passes per taskworker, Main's geometry, then run at most 16
@@ -289,8 +293,8 @@ func validateProviderEgressProbeArgsConfig(args *ProviderEgressProbeArgs) error 
 	if args.UrlProbe != nil {
 		return validateProviderUrlProbeArgs(args)
 	}
-	if args.ShardCount < 1 || maxProviderEgressProbeShardCount < args.ShardCount {
-		return fmt.Errorf("provider egress probe shard_count must be in [1,%d] (got %d)", maxProviderEgressProbeShardCount, args.ShardCount)
+	if args.ShardCount < 1 || maxProviderUrlProbeShardCount < args.ShardCount {
+		return fmt.Errorf("provider egress probe shard_count must be in [1,%d] (got %d)", maxProviderUrlProbeShardCount, args.ShardCount)
 	}
 	if args.IdleDelaySeconds < 1 || args.MaxTimeSeconds < 1 {
 		return fmt.Errorf("provider egress probe idle delay and max time must be positive")

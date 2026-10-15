@@ -256,3 +256,45 @@ func TestCapabilityProbeKeepsAFinishedPassWhoseShardCleanupFailed(t *testing.T) 
 		}
 	}
 }
+
+// Root cause (review F9): slot 255 was reserved on one side only. The URL
+// probe's settings and arguments accepted shard_count 256, whose last shard
+// takes slot 255, and the capability probe then refused every pass while a
+// URL shard and it would have retired each other's owner. The URL probe's
+// settings, its URL arguments and its legacy arguments now refuse a
+// shard_count that reaches the capability probe's slot, accept the largest
+// that does not, and every geometry they accept leaves the slot free.
+func TestUrlProbeShardCountStopsBeforeTheCapabilityProbeSlot(t *testing.T) {
+	for _, c := range []struct {
+		shardCount int
+		valid      bool
+	}{
+		{shardCount: capabilityProbeShardIndex, valid: true},
+		{shardCount: capabilityProbeShardIndex + 1, valid: false},
+	} {
+		settings := defaultProviderEgressProbeSettings("probe.example")
+		settings.ShardCount = c.shardCount
+		urlArgs := providerEgressProbeArgs(settings, 0)
+		legacyArgs := providerEgressProbeArgs(settings, 0)
+		legacyArgs.UrlProbe = nil
+		// a legacy pass's own floor, apart from the shard count
+		legacyArgs.MaxTimeSeconds = int((providerEgressProbeMinMaxTime(legacyArgs) + time.Second - 1) / time.Second)
+		for _, check := range []struct {
+			name string
+			err  error
+		}{
+			{name: "settings", err: settings.validate()},
+			{name: "URL arguments", err: validateProviderEgressProbeArgsConfig(urlArgs)},
+			{name: "legacy arguments", err: validateProviderEgressProbeArgsConfig(legacyArgs)},
+		} {
+			if (check.err == nil) != c.valid {
+				t.Errorf("shard_count %d: %s validate = %v, want valid %t", c.shardCount, check.name, check.err, c.valid)
+			}
+		}
+		if c.valid {
+			if err := capabilityProbeShardAvailable(c.shardCount); err != nil {
+				t.Errorf("an accepted URL shard_count %d reaches the capability probe's slot: %v", c.shardCount, err)
+			}
+		}
+	}
+}

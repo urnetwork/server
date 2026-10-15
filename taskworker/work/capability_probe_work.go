@@ -28,9 +28,11 @@ import (
 )
 
 // The prober shard slot the capability probe owns: the registry's last. The
-// URL probe's shards are slots [0, shard_count), so the capability probe
-// refuses to run while the URL probe's configured shard count reaches it,
-// rather than retire a URL shard's owner or have its own retired by one.
+// URL probe's shards are slots [0, shard_count), and its settings and
+// arguments refuse a shard_count past maxProviderUrlProbeShardCount, which
+// stops before this slot. The capability probe still refuses to run while
+// the URL probe's shard count reaches it, rather than retire a URL shard's
+// owner or have its own retired by one.
 const (
 	capabilityProbeShardIndex = maxProviderEgressProbeShardCount - 1
 	capabilityProbeShardCount = maxProviderEgressProbeShardCount

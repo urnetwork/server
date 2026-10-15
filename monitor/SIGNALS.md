@@ -15805,9 +15805,10 @@ Signals:
   enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
   PAGE after two hours with the gate switched on. Read
   `passes_total{result="failed"}` and the taskworker log's `[capprobe]` and
-  task error lines: unreadable or invalid settings; the URL probe's
-  `shard_count` reaching the capability probe's prober shard slot 255; shard
-  allocation, identity or readiness; a page read; or an evidence write. A
+  task error lines: unreadable or invalid settings, the URL probe's
+  included, whose `shard_count` past 255 would reach the capability probe's
+  prober shard slot 255; shard allocation, identity or readiness; a page
+  read; or an evidence write. A
   failed pass retries the same sweep page after a minute, so a persistent
   failure repeats once a minute. `passes_total{result="disabled"}` rising is
   `enabled: false`, deliberate or not.

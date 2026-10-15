@@ -337,9 +337,9 @@ provider cannot resolve the probe client's key.
   no evidence is retried by the next sweep, which starts at least
   `min_sweep_interval_minutes` (360) after the last one started. A pass
   selects from the database first, and one that measures runs in a prober
-  shard of its own (slot 255, refused while the URL probe's `shard_count`
-  reaches it): a private network, credential parent and balance, so its load
-  and funding are apart from the URL probe's quota and budget. A pass with
+  shard of its own (slot 255, which the URL probe's `shard_count`, at most
+  255, never reaches): a private network, credential parent and balance, so
+  its load and funding are apart from the URL probe's quota and budget. A pass with
   nothing to measure takes no shard. Settings are `capability_probe.yml`,
   enabled by default. Metrics are `urnetwork_capability_probe_*` on the
   egress probes dashboard, and SIGNALS.md §2.19g reads them.
