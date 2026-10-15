@@ -1,20 +1,29 @@
-// Admits to a test binary, which otherwise reads only a fixture vault (see
-// refuseNonFixtureVault), the local PostgreSQL and Redis resources of the
+// Selects what a test binary's vault lookup may read: a fixture vault (see
+// refuseNonFixtureVault), and the local PostgreSQL and Redis resources of the
 // launcher that test-env.sh attested.
 //
 // local/run-local.sh starts the local PostgreSQL and Redis services with the
 // credentials in pg.yml and redis.yml of its selected vault's local directory.
 // That vault is $WARP_VAULT_HOME, $WARP_HOME/vault or a sibling vault checkout,
 // any of which can also hold live secrets, or else the checked-in fixture.
-// test-env.sh selects the same vault, checks those resources against the
-// launcher's readiness attestation, and in managed-local mode names the vault
-// in WARP_TEST_ENV_LAUNCHER_VAULT_HOME. While WARP_ENV is local and the vault
-// home is that vault, a test binary reads pg.yml, pg_maintenance.yml and
-// redis.yml only from the vault's local directory, each only while the
-// attestation is valid and names the endpoint that the selected file names. It
-// reads every other resource from the checked-in fixture vault. Nothing else in
-// that vault is read: not its root or all directory, no other environment such
-// as main, and no other resource of its local directory.
+// test-env.sh selects a vault by the same rules, checks the authorities of its
+// pg.yml and redis.yml against the launcher's readiness attestation, and in
+// managed-local mode names it in WARP_TEST_ENV_LAUNCHER_VAULT_HOME. Neither
+// proves that the launcher started from that vault, only that its files name
+// the launcher's endpoints; credentials from another one fail to authenticate.
+// While WARP_ENV is local and the vault home is that vault, a test binary reads
+// pg.yml, pg_maintenance.yml and redis.yml only from the vault's real local
+// directory, each only while the attestation is valid and names the endpoint
+// that the selected file names. It reads every other resource from the
+// checked-in fixture vault. Nothing else in that vault is read: not its root or
+// all directory, no other environment such as main, and no other resource of
+// its local directory.
+//
+// Every scope but the explicit opt-in is contained: each file a lookup selects
+// must resolve, through any links, inside the scope it was admitted for before
+// anything reads it. A vault home is judged cleaned, as the resolver opens it,
+// and a resource path that climbs out of its vault is refused under the opt-in
+// too.
 //
 // The attestation is read again on every lookup of those resources, so a
 // launcher that withdraws readiness stops the reads at once. A valid attestation

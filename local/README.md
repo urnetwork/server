@@ -139,29 +139,42 @@ resources read as absent (`refuseNonFixtureVault` in [`env.go`](../env.go)).
 
 The launcher, though, starts PostgreSQL and Redis with the credentials in its
 selected vault's `local/pg.yml` and `local/redis.yml`, and on a developer
-machine that is usually such a vault. So in managed-local mode, once the
-preflight has checked those resources against the launcher's readiness record,
-`test-env.sh` exports `WARP_TEST_ENV_LAUNCHER_VAULT_HOME`, the vault it
-selected. While `WARP_ENV=local` and the vault home is that vault, a test binary
+machine that is usually such a vault. So in managed-local mode, `test-env.sh`
+selects a vault by the launcher's own rules, checks the authorities of that
+vault's `pg.yml` and `redis.yml` against the launcher's readiness record, and
+exports the vault as `WARP_TEST_ENV_LAUNCHER_VAULT_HOME`. Neither can prove
+that the launcher started from that vault, only that the files name its
+endpoints; credentials from another vault fail to authenticate. While
+`WARP_ENV=local` and the vault home is that vault, a test binary
 ([`env_test_vault.go`](../env_test_vault.go)):
 
 - reads `pg.yml`, `pg_maintenance.yml` and `redis.yml` only from the vault's
-  `local` directory, each only while the launcher lock holds a v2 owner and its
-  readiness record is complete, names that owner and a dedicated non-loopback
-  address, and names the endpoint that the selected file names;
+  `local` directory, which must be a real directory, and each only when:
+  - the launcher lock holds a v2 owner, and its readiness record is complete
+    and names that owner, a dedicated non-loopback address and the endpoint
+    that the selected file names;
+  - the process's dial guard, chosen at startup from the environment
+    `test-env.sh` exports, attests the record's address with both its ports;
 - reads every other resource from `testdata/vault`;
 - reads nothing else of that vault: not its root or `all` directory, no other
   environment such as `main`, and no other `local` resource.
 
+Every file a test binary reads from a vault must resolve, through any links,
+inside the scope it was admitted for: a fixture vault's own root, the
+checked-in fixture, or the launcher vault's `local` directory. A vault home is
+judged cleaned, as the resolver opens it, and a resource path that climbs out
+of its vault with `..` is refused.
+
 The readiness record is read again at each lookup of those resources, so a
 launcher that withdraws readiness stops the reads at once. A failure refuses
-with an error that names what is wrong, never a credential. The suite proxy and
-the portable services have no launcher, so `test-env.sh` names no launcher
-vault for them, and a test reads their vault only if it is a fixture root.
+with an error that names what is wrong, never a credential or a value from the
+refused file. The suite proxy and the portable services have no launcher, so
+`test-env.sh` names no launcher vault for them, and a test reads their vault
+only if it is a fixture root.
 
-`URNETWORK_TEST_REAL_VAULT=1` still lets a test binary read any vault, but DB
-tests do not use it, and they do not run by cherry-picking a change onto a base
-from before the guard.
+`URNETWORK_TEST_REAL_VAULT=1` still lets a test binary read any vault, as
+before and without the containment above, but DB tests do not use it, and they
+do not run by cherry-picking a change onto a base from before the guard.
 
 ### Running a DB test
 
