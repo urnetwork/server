@@ -105,8 +105,11 @@ to its launcher's attested endpoints for its whole run:
   same preflight as `test-env.sh` but keeps the caller's `WARP_SERVICE`,
   `WARP_BLOCK`, `WARP_VERSION` and `WARP_DOMAIN`. It leaves `test-env.sh`'s
   `WARP_VAULT_HOME` and `WARP_CONFIG_HOME` exported, so the service reads the
-  vault and config the preflight validated: an explicit value, then
+  vault and config the preflight selected: an explicit value, then
   `WARP_HOME`'s, a sibling checkout's, and finally the checked-in testdata.
+  The preflight checks that the vault's `pg.yml` and `redis.yml` name the
+  launcher's endpoints, which does not prove that the launcher started from
+  that vault ([DB tests and the test vault guard](#db-tests-and-the-test-vault-guard)).
 - The `cli/*/run-local.sh` services, `bringyourctl/run-local.sh` and
   `connect/sim-latency/run-local.sh` (for `run`, `fleet`, `reset` and a
   measuring `baseline`) source `local/local-env.sh` before they start the
@@ -136,12 +139,14 @@ to its launcher's attested endpoints for its whole run:
   that says to start `./local/run-local.sh` and restart the process through its
   `run-local.sh` (or source `test-env.sh` for tests). That includes a process
   started directly with `go run .`, one whose `main` sets `WARP_ENV=local`
-  itself (sim-latency's defaults; a process that starts without `WARP_ENV`
-  chooses its guard at its first pool open rather than at startup), and a shell
-  that sourced an older `test-env.sh`. A process that starts with any other
-  `WARP_ENV`, production included, locks in no guard at startup. Integration fixtures (`TestEnv`) refuse to start without the
-  attestation, so DB tests run only through `./test.sh` or a sourced
-  `test-env.sh`.
+  itself (sim-latency's defaults: a binary other than a test that starts
+  without `WARP_ENV` chooses its guard at its first PostgreSQL or Redis use
+  rather than at startup), and a shell that sourced an older `test-env.sh`. A
+  test binary, and any process that starts with `WARP_ENV` set, chooses at
+  startup, so a process that starts with another `WARP_ENV`, production
+  included, locks in no guard. Integration fixtures (`TestEnv`) refuse to start
+  without the attestation, so DB tests run only through `./test.sh` or a
+  sourced `test-env.sh`.
 - `sim-latency reset` and `run --reset` truncate tables with `CASCADE` and run
   `FLUSHALL` on logical db 0, which sends no `SELECT`. Before either sends
   anything, `server.RequireAttestedLocalEndpoints` checks every pool's vault

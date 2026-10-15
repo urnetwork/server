@@ -19,10 +19,14 @@
 # Unlike test-env.sh it keeps the caller's WARP_SERVICE, WARP_BLOCK,
 # WARP_VERSION and WARP_DOMAIN. It does leave test-env.sh's WARP_VAULT_HOME and
 # WARP_CONFIG_HOME exported, so the process reads the vault and config that the
-# preflight validated against the launcher: an explicit value first, then
-# WARP_HOME's, a sibling checkout's, and finally the checked-in testdata. A
-# failure leaves the attestation unset and returns non-zero; a process started
-# anyway then refuses every dial.
+# preflight selected: an explicit value first, then WARP_HOME's, a sibling
+# checkout's, and finally the checked-in testdata. The preflight checks that the
+# vault's pg.yml and redis.yml name the launcher's endpoints; nothing proves the
+# launcher started from that vault, and credentials from another one fail to
+# authenticate. In managed-local mode WARP_TEST_ENV_LAUNCHER_VAULT_HOME stays
+# exported too, which only a test binary reads (env_test_vault.go). A failure
+# leaves the attestation unset and returns non-zero; a process started anyway
+# then refuses every dial.
 #
 # Start ./local/run-local.sh in its own terminal first and wait for
 # 'Local environment is up'. Requires bash 3.2 or newer.
