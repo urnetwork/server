@@ -96,7 +96,7 @@ const (
 	ArindbCanaryFlagLatestUnavailable = "latest_unavailable"
 	// the pair compared is the previous decision's
 	ArindbCanaryFlagPairCarried = "pair_carried"
-	// single right after a fallback: page
+	// a latched fallback's protection is not served: page
 	ArindbCanaryFlagFallbackDropped = "fallback_dropped"
 )
 
@@ -576,6 +576,30 @@ func arindbCanaryServingChangesAfter(previous *ArindbCanaryDecision, servingEpoc
 	return changes[max(0, len(changes)-arindbCanaryServingChangeLimit):]
 }
 
+// A latch the decision can no longer honour, carried while that lasts: the
+// canary went single after it, or the pair changed to one whose old database
+// is the latest the latch held out, so the comparison's baseline is the
+// rejected database. A latch the decision still holds, or one released by
+// passing comparisons or by a new pair whose old database is the latch's own,
+// is not dropped, and accepting the latch's latest clears it.
+func arindbCanaryDroppedLatch(previous *ArindbCanaryDecision, decision *ArindbCanaryDecision, settings ArindbCanarySettings) *ArindbCanaryLatch {
+	if previous == nil || decision.Latch != nil {
+		return nil
+	}
+	candidate := previous.Latch
+	if candidate == nil {
+		candidate = previous.DroppedLatch
+	}
+	if candidate == nil || (settings.AcceptLatestBuildEpoch != 0 && settings.AcceptLatestBuildEpoch == candidate.LatestEpoch) {
+		return nil
+	}
+	if decision.State != ArindbCanaryStateSingle && decision.Old.BuildEpoch != candidate.LatestEpoch {
+		return nil
+	}
+	dropped := *candidate
+	return &dropped
+}
+
 // The cohort of this decision against the previous decision's history.
 func arindbCanaryCohortAfter(previous *ArindbCanaryDecision, providers int, decidedAt time.Time) ArindbCanaryCohort {
 	cohort := ArindbCanaryCohort{History: []ArindbCanaryCohortSample{}}
@@ -636,9 +660,13 @@ type ArindbCanaryDecision struct {
 	// the pair compared is the previous decision's because this Taskworker
 	// could not use its own: latest_<state> or old_<state>; "" otherwise
 	PairCarriedReason string `json:"pair_carried_reason,omitempty"`
-	// single right after a fallback or a latch, which the comparison that held
-	// the latest out no longer does; carried while single lasts
+	// a latched fallback's protection is not served: a held latch while S is
+	// not its old database, or a dropped latch
 	FallbackDropped bool `json:"fallback_dropped"`
+	// a latch the decision can no longer honour: the canary went single after
+	// it, or the pair changed to one whose old database is the latest the latch
+	// held out. Carried while that lasts; nil otherwise
+	DroppedLatch *ArindbCanaryLatch `json:"dropped_latch,omitempty"`
 	// provider.yml accept_latest_build_epoch names this latest database
 	Accepted bool `json:"accepted"`
 	// why the state is single, "" otherwise
@@ -690,9 +718,13 @@ func decideArindbCanary(
 	if previous != nil {
 		decision.PreviousDecisionId = previous.DecisionId
 	}
-	// every state below counts a change of the serving epoch
+	// every state below counts a change of the serving epoch, and says
+	// whether a latched fallback's protection is still served
 	defer func() {
 		decision.ServingChanges = arindbCanaryServingChangesAfter(previous, decision.ServingEpoch, decidedAt)
+		decision.DroppedLatch = arindbCanaryDroppedLatch(previous, decision, settings)
+		decision.FallbackDropped = decision.DroppedLatch != nil ||
+			(decision.Latch != nil && decision.ServingEpoch != decision.Latch.OldEpoch)
 	}()
 	for _, bucket := range ProviderEgressBuckets {
 		decision.Buckets[bucket] = &ArindbCanaryBucket{
@@ -728,10 +760,6 @@ func decideArindbCanary(
 		decision.ServingEpoch = 0
 		decision.ServingBasis = ArindbCanaryBasisSingle
 		decision.SingleReason = pairReason
-		// the protection a fallback gave is gone, which pages until the canary
-		// compares again
-		decision.FallbackDropped = previous != nil &&
-			(previous.State == ArindbCanaryStateFallback || previous.Latch != nil || previous.FallbackDropped)
 		return decision
 	}
 
@@ -1145,6 +1173,9 @@ func (self *ArindbCanaryDecision) logSummary() string {
 	if self.FallbackDropped {
 		b.WriteString(" fallback_dropped")
 	}
+	if self.DroppedLatch != nil {
+		fmt.Fprintf(&b, " dropped_latch=%d/%d", self.DroppedLatch.LatestEpoch, self.DroppedLatch.OldEpoch)
+	}
 	fmt.Fprintf(&b, " coverage latest=%d old=%d paired=%d of %d", self.Coverage.Latest, self.Coverage.Old, self.Coverage.Paired, self.Coverage.Providers)
 	if 0 < self.Cohort.LossRatio {
 		fmt.Fprintf(&b, " cohort_loss=%.4f of %d", self.Cohort.LossRatio, self.Cohort.ReferenceProviders)
@@ -1271,6 +1302,9 @@ func parseArindbCanaryDecision(data []byte) (*ArindbCanaryDecision, error) {
 	// a latch names the pair it latched on
 	if latch := decision.Latch; latch != nil && (latch.LatestEpoch != decision.Latest.BuildEpoch || latch.OldEpoch != decision.Old.BuildEpoch || latch.PassingRuns < 0) {
 		return nil, fmt.Errorf("arindb canary decision latch %+v is not its pair's", *latch)
+	}
+	if dropped := decision.DroppedLatch; dropped != nil && (dropped.LatestEpoch <= dropped.OldEpoch || dropped.OldEpoch <= 0) {
+		return nil, fmt.Errorf("arindb canary decision dropped latch %+v names no pair", *dropped)
 	}
 	// the serving epoch must be one the state can choose
 	switch decision.State {

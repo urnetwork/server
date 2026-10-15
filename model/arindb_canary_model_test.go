@@ -485,6 +485,65 @@ func TestArindbCanaryFlagsSingleRightAfterAFallback(t *testing.T) {
 	}
 }
 
+// A latch held while the decision serves another database than its old one
+// is a dropped fallback, which pages: Connect restarted onto the next release
+// before the Taskworker, the old database's coverage fell below what warming
+// may serve, and warming serves each row's latest slot, the latest the latch
+// holds out included.
+func TestArindbCanaryFlagsALatchHeldWithoutItsOldDatabase(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	fellBack := decideTestCanary(testCanaryPair(), testCanaryLossRun(20), settings)
+	// 60 providers' rows come from Connect on the next release, whose old
+	// database is this pair's latest
+	rows := append(testCanaryLossRun(0)[:40], testCanaryRowsOf(60, testCanaryNewerEpoch, testCanaryLatestEpoch)...)
+	decision := decideTestCanaryAfter(fellBack, testCanaryPair(), rows, settings)
+	if decision.State != ArindbCanaryStateWarming || decision.ServingEpoch != 0 || decision.Latch == nil {
+		t.Fatalf("fixture: state=%s serving=%d latch=%+v", decision.State, decision.ServingEpoch, decision.Latch)
+	}
+	if !decision.FallbackDropped || !decision.Flags()[ArindbCanaryFlagFallbackDropped] {
+		t.Fatal("a held latch whose old database is not served was not flagged")
+	}
+	// while the old database is served the latch is honoured
+	covered := append(testCanaryLossRun(0)[:95], testCanaryRowsOf(5, testCanaryNewerEpoch, testCanaryLatestEpoch)...)
+	if decision := decideTestCanaryAfter(fellBack, testCanaryPair(), covered, settings); decision.ServingEpoch != testCanaryOldEpoch || decision.FallbackDropped {
+		t.Fatalf("an honoured latch: serving=%d fallback_dropped=%t", decision.ServingEpoch, decision.FallbackDropped)
+	}
+}
+
+// A release built without the canary's baseline compares against the latest a
+// latched fallback held out: the latch is dropped, which pages and lasts while
+// the pair's old database is that latest. A release compared against the
+// latch's own old database keeps the protection, and accepting the held-out
+// latest clears the flag.
+func TestArindbCanaryFlagsANewPairWhoseOldDatabaseALatchRejected(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	fellBack := decideTestCanary(testCanaryPair(), testCanaryLossRun(20), settings)
+	rowsOf := func(oldEpoch int64) []*arindbCanaryProvider {
+		rows := testCanaryLossRun(0)
+		for _, provider := range rows {
+			provider.slots.epoch, provider.slots.oldEpoch = testCanaryNewerEpoch, oldEpoch
+		}
+		return rows
+	}
+	ungated := testCanaryPairOf(testCanaryNewerEpoch, testCanaryLatestEpoch)
+	decision := decideTestCanaryAfter(fellBack, ungated, rowsOf(testCanaryLatestEpoch), settings)
+	if decision.State != ArindbCanaryStateLatest || !decision.FallbackDropped || decision.DroppedLatch == nil || *decision.DroppedLatch != *fellBack.Latch {
+		t.Fatalf("an ungated release: state=%s fallback_dropped=%t dropped=%+v", decision.State, decision.FallbackDropped, decision.DroppedLatch)
+	}
+	if again := decideTestCanaryAfter(decision, ungated, rowsOf(testCanaryLatestEpoch), settings); !again.FallbackDropped || again.DroppedLatch == nil {
+		t.Fatal("the dropped latch did not last while the pair's old database was the held-out latest")
+	}
+	accept := settings
+	accept.AcceptLatestBuildEpoch = testCanaryLatestEpoch
+	if accepted := decideTestCanaryAfter(decision, ungated, rowsOf(testCanaryLatestEpoch), accept); accepted.FallbackDropped || accepted.DroppedLatch != nil {
+		t.Fatal("accepting the held-out latest did not clear the dropped latch")
+	}
+	pinned := testCanaryPairOf(testCanaryNewerEpoch, testCanaryOldEpoch)
+	if decision := decideTestCanaryAfter(fellBack, pinned, rowsOf(testCanaryOldEpoch), settings); decision.FallbackDropped || decision.DroppedLatch != nil {
+		t.Fatalf("a release compared against the latch's old database: fallback_dropped=%t dropped=%+v", decision.FallbackDropped, decision.DroppedLatch)
+	}
+}
+
 // A provider whose rows another pair wrote: the latest slot at latestEpoch
 // and the old slot at oldEpoch, 0 for none.
 func testCanaryRowsOf(n int, latestEpoch int64, oldEpoch int64) []*arindbCanaryProvider {
