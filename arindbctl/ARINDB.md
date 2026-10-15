@@ -1970,7 +1970,21 @@ L is blocked while a fallback is latched on the pair, and when the paired
 subset reaches `min_paired_sample` (default 50) and its Quality comparison
 trips, which also sets `warming_tripped` and pages. An empty public cohort
 compares nothing, so it never verifies L: warming carries the previous
-decision's epoch and latch, or serves 0 without a previous decision.
+decision's epoch and latch, or serves 0 without a previous decision. Warming
+that serves L unverified sets `warming_serves_latest`, which warns after 30
+minutes.
+
+Step 5 does not honour a block: with L blocked and O covering less than
+1 − `bucket_loss_threshold`, each row's latest slot applies the blocked L to
+every row a restarted process wrote (in a probe where O covered half the
+cohort, half the rows took L's classification). That case always pages:
+`warming_tripped` for a tripped sample, `fallback_dropped` for a latch. A
+latch held while S is not its old database, as when Connect restarts onto the
+next release before the Taskworker, sets `fallback_dropped`; so does a latch
+the decision can no longer honour, because the canary went single after it or
+the pair changed to one whose old database is the latest it held out. The
+decision carries that latch as `dropped_latch` while it lasts, and accepting
+its latest clears it.
 
 The breaker compares only the providers with facts for both databases. For a
 bucket b with old supply N_O,b > 0, it trips when the net loss
@@ -1979,7 +1993,7 @@ bucket b with old supply N_O,b > 0, it trips when the net loss
 `min_emptied_country_supply` (default 3) providers in b under O and none under
 L; a smaller emptied country is reported, so one provider connecting and
 disconnecting cannot flip the fleet. Gains, gross removals and additions, and
-emptied cities are reported but do not trip; gains and gross churn page (see
+emptied cities are reported but do not trip; gains and gross churn warn (see
 "Signals, alerts and dashboards"). Using net loss tolerates a release that
 moves as many providers into a bucket as out of it.
 
@@ -2072,26 +2086,51 @@ database also admits it.
 | Quality trips | `fallback`: old classification, latest risk, latched on the pair | page |
 | Speed or Online trips | Reported; no fallback | page |
 | Paired sample trips while warming | The latest is not served | page |
-| Gain or gross churn beyond the thresholds | Reported; no fallback | page |
+| Gain or gross churn beyond the thresholds | Reported; no fallback | warn |
+| Warming serves an unverified latest | Served until coverage returns | warn after 30 minutes |
+| A latched fallback is not served, or dropped | Each row's latest slot, or a baseline that is the held-out latest | page (`fallback_dropped`) |
 | Serving epoch switching back and forth | Bounded by the latch and warming's previous choice | page above 4 changes in six hours |
-| Two bad releases in a row | With the published decision the runner pins the served database or pauses the refresh; without it the second compares against the first and can pass | page on the first; pin before the next |
+| Two bad releases in a row | With the published decision the runner pins the protected database or pauses the ARIN refresh; without it the second compares against the first and can pass | page on the first; `fallback_dropped` on the second |
 
 Baseline drift is the main limit of copying the previous latest: after a trip,
 the next release's old file would be the rejected database. The release runner
 therefore follows the published decision when it has one:
 `ARIN_CANARY_DECISION_FILE` names a copy of `{arindb_canary_decision}`, and
-`arindbctl canary-baseline` answers `copy` when the decision serves the
-environment's selected latest (or each row's latest slot), `pin <path>` with
-the release directory's `arin.mmdb` built at the served epoch otherwise, and
+`arindbctl canary-baseline` follows the database the decision protects: a
+latch's old database, held or dropped, whatever the decision serves, else the
+database it serves. It answers `copy` when that is the environment's selected
+latest (or each row's latest slot with no latch), `pin <path>` with the
+release directory's `arin.mmdb` built at that epoch otherwise, and
 `pause <reason>` when the decision is unreadable, of another version, older
-than six hours, or serves a database no release directory holds. A pause
-publishes no GeoLite2 or ARIN version for that release and says why; it never
-fails the release. The builder has no read path to production, so delivering
+than six hours, drops a fallback without naming its database, or protects a
+database no release directory holds. A pause publishes the GeoLite2 refresh
+but no ARIN version for that release, keeps the previous ARIN release
+selected, and says why in the release message; it never fails the release. The builder has no read path to production, so delivering
 the decision to it is an operator step (open decision 8). Without the file the
 copy is not gated and the release message says so; the operator then sets
 `ARIN_PREVIOUS_DATABASE_FILE` for the runner to the last good `arin.mmdb` when
 a trip is judged to be a bad release, and clears the pin once a good release
 ships. The pin always wins over the decision.
+
+#### Accepting a release the breaker trips on
+
+`accept_latest_build_epoch` names one build epoch: the latest it accepts is
+served although it trips, and its latch, held or dropped, is released. The
+next release is compared against whatever its copy-forward selects, and the
+accept does not carry over to it. So accept the epoch actually deployed, read
+from `urnetwork_stats_arindb_database_build_epoch_seconds{database="latest"}`
+or the decision's `latest.build_epoch`, and line the next release's baseline up
+with it:
+
+1. Set `arindb_canary.accept_latest_build_epoch` in provider.yml to that epoch
+   and deploy the config.
+2. If `ARIN_PREVIOUS_DATABASE_FILE` pins the database the fallback served,
+   clear it or point it at the accepted `arin.mmdb`. Left on the old
+   database, the next release compares against it again, trips on the same
+   changes, and needs its own accept. With `ARIN_CANARY_DECISION_FILE` and no
+   pin, the decision serves the accepted latest and `canary-baseline` copies
+   it.
+3. Remove the key once a release that passes on its own has shipped.
 
 ### Signals, alerts and dashboards
 
@@ -2119,6 +2158,7 @@ that published the decision exports the per-country supply, about 900 series:
 | `urnetwork_stats_arindb_gain_ratio{bucket}` and `urnetwork_stats_arindb_churn_ratio{bucket}` | Net gain, and gross removals and additions, against old |
 | `urnetwork_stats_arindb_cohort_providers{reference}` and `urnetwork_stats_arindb_cohort_loss_ratio` | The cohort, its largest size over two hours, and its loss against that |
 | `urnetwork_stats_arindb_serving_changes` and `urnetwork_stats_arindb_latch_passing_runs` | Serving changes over six hours, and a latch's passing runs |
+| `urnetwork_stats_arindb_pair_since_seconds` | When the compared pair was first compared |
 | `urnetwork_stats_arindb_emptied_countries{bucket}` and `urnetwork_stats_arindb_emptied_country{bucket,country_code}` | Countries latest would empty, and old's supply in each |
 | `urnetwork_stats_arindb_emptied_cities{bucket}` | A count; names are in the decision and the indexer log |
 | `urnetwork_stats_arindb_coverage_ratio{database}` | `latest`, `old` and `paired` coverage of the cohort |
@@ -2133,16 +2173,18 @@ warp `grafana/alerting/arindb-canary.yml`:
 | --- | --- | --- |
 | ArinDbFallbackActive | `max(urnetwork_stats_arindb_fallback_active) > 0` for 10m | page |
 | ArinDbRiskSupplyLoss | `max by (bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed\|online"}) > 0.10` with 20 paired providers of old supply, for 10m | page |
-| ArinDbSupplyGain, ArinDbSupplyChurn | gain above 0.10, churn above 0.20, with the same sample, for 10m | page |
+
 | ArinDbWarmingTripped | flag `warming_tripped` for 10m | page |
 | ArinDbProtectionLost | flag `latest_unavailable` or `fallback_dropped` for 10m | page |
-| ArinDbCohortShrink | cohort loss above 0.10 from a reference of 100, for 10m | page |
+| ArinDbCohortShrink | cohort loss above 0.10 from a reference of 100, within 2h of a new pair or with latest lookup errors, for 10m | page |
 | ArinDbServingFlapping | more than 4 serving changes in six hours, for 5m | page |
 | ArinDbDecisionStalled | decision older than 5400 s | page |
 | ArinDbCanaryUnavailable | state `single` for 1h | warn |
 | ArinDbCanaryWarming | state `warming` for 2h | warn |
 | ArinDbDecisionStale | `time() - max(urnetwork_stats_arindb_decision_seconds) > 1800` | warn |
 | ArinDbDecisionReadsNotOk | more than 5% of decision reads not ok over 10m, for 15m | warn |
+| ArinDbSupplyGain, ArinDbSupplyChurn | gain above 0.10, churn above 0.20, with the same sample, for 30m | warn |
+| ArinDbWarmingServesLatest | flag `warming_serves_latest` for 30m | warn |
 
 Monitor signal §2.9d reads the same series through Mimir, pages and warns on
 the same conditions, and names the emptied countries. The providers dashboard
