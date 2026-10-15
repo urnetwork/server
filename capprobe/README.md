@@ -50,7 +50,14 @@ Each provider gets a short tunnel of its own (`providertunnel.Config.CapabilityO
   registration (`ClientKeyRegistrationRequired`), so the provider can resolve
   the probe client's identity key from a contract or its `/key/<client_id>`
   fetch from the first frame, and the probe resolves the provider's key from
-  the platform's store when no contract carries it.
+  the platform's store when no contract carries it;
+- its window dials the provider again after failing to admit a client no
+  sooner than about `measure_timeout_seconds` later (`RedialMin`, which
+  connect's jitter shortens by up to half), so a measurement attempts its
+  provider about once rather than minting, registering and retiring a
+  derived client at every resize pass. A client the window admitted and then
+  lost is dialed again at once, and that measurement has lost its tunnel
+  anyway. The URL tunnel's re-dial stays unpaced.
 
 The recorder holds only what the probe's own ClientHello sessions saw: a
 negotiated session is the provider's responder answering the probe, with the
