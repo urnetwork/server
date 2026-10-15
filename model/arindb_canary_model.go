@@ -76,6 +76,9 @@ const (
 	// latest: the operator accepted this latest database although it trips
 	// or was latched
 	ArindbCanaryBasisAccepted = "accepted"
+	// warming: the public cohort is empty, so nothing is compared and the
+	// previous choice carries, each row's latest slot without one
+	ArindbCanaryBasisEmptyCohort = "empty_cohort"
 )
 
 // Every state, in the order the stats gauge publishes them.
@@ -384,7 +387,8 @@ type ArindbCanaryCoverage struct {
 	Paired    int `json:"paired"`
 }
 
-// The share of the cohort count covers; an empty cohort is fully covered.
+// The share of the cohort count covers; an empty cohort is fully covered,
+// though it compares nothing and the canary warms.
 func (self ArindbCanaryCoverage) Ratio(count int) float64 {
 	if self.Providers == 0 {
 		return 1
@@ -706,6 +710,20 @@ func decideArindbCanary(
 		!(settings.TripOnEmptiedCountry && slices.ContainsFunc(quality.EmptiedCountries, func(country ArindbCanaryEmptiedCountry) bool {
 			return country.Trips
 		}))
+
+	if decision.Coverage.Providers == 0 {
+		// An empty cohort compares nothing and verifies no latest: warming
+		// carries the previous choice and any latch, or serves each row's
+		// latest slot without a previous decision.
+		decision.State = ArindbCanaryStateWarming
+		decision.ServingBasis = ArindbCanaryBasisEmptyCohort
+		decision.Latch = latch
+		if previous != nil {
+			decision.ServingEpoch = previous.ServingEpoch
+		}
+		decision.WarmingServesLatest = decision.ServingEpoch != 0 && decision.ServingEpoch == latestEpoch
+		return decision
+	}
 
 	minimum := settings.MinCoverage * float64(decision.Coverage.Providers)
 	// a database is carried when min_coverage of the cohort has its facts;
@@ -1121,6 +1139,8 @@ func parseArindbCanaryDecision(data []byte) (*ArindbCanaryDecision, error) {
 			valid = 0 < decision.ServingEpoch
 		case ArindbCanaryBasisUncovered:
 			valid = decision.ServingEpoch == 0
+		case ArindbCanaryBasisEmptyCohort:
+			valid = 0 <= decision.ServingEpoch
 		}
 		if !valid {
 			return nil, fmt.Errorf("warming arindb canary decision serves epoch %d on basis %q", decision.ServingEpoch, decision.ServingBasis)

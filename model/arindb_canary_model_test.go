@@ -433,7 +433,6 @@ func TestArindbCanaryWarmingServesTheDatabaseTheRowsCarry(t *testing.T) {
 		{name: "recovery to latest at coverage", pair: testCanaryPair(),
 			rows:  append(testCanaryRowsOf(98, testCanaryLatestEpoch, testCanaryOldEpoch), testCanaryRowsOf(2, testCanaryOldEpoch, testCanaryOlderEpoch)...),
 			state: ArindbCanaryStateLatest, serving: testCanaryLatestEpoch},
-		{name: "an empty cohort is covered", pair: testCanaryPair(), rows: nil, state: ArindbCanaryStateLatest, serving: testCanaryLatestEpoch},
 	} {
 		decision := decideTestCanary(c.pair, c.rows, defaultArindbCanarySettings())
 		if decision.State != c.state || decision.ServingEpoch != c.serving {
@@ -651,6 +650,26 @@ func TestArindbCanaryOperatorAcceptsTheLatestDatabase(t *testing.T) {
 			!decision.Accepted || decision.Latch != nil || !decision.Buckets[RankModeQuality].Tripped {
 			t.Errorf("%s: state=%s serving=%d basis=%s accepted=%t latch=%+v", name, decision.State, decision.ServingEpoch, decision.ServingBasis, decision.Accepted, decision.Latch)
 		}
+	}
+}
+
+// An empty public cohort compares nothing, so it never verifies the latest:
+// the canary warms, carrying the previous choice and its latch, or each row's
+// latest slot without a previous decision.
+func TestArindbCanaryEmptyCohortCarriesThePreviousChoice(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	if decision := decideTestCanary(testCanaryPair(), nil, settings); decision.State != ArindbCanaryStateWarming ||
+		decision.ServingEpoch != 0 || decision.ServingBasis != ArindbCanaryBasisEmptyCohort || decision.WarmingServesLatest {
+		t.Fatalf("without a previous decision: state=%s serving=%d basis=%s", decision.State, decision.ServingEpoch, decision.ServingBasis)
+	}
+	fellBack := decideTestCanary(testCanaryPair(), testCanaryLossRun(20), settings)
+	if decision := decideTestCanaryAfter(fellBack, testCanaryPair(), nil, settings); decision.State != ArindbCanaryStateWarming ||
+		decision.ServingEpoch != testCanaryOldEpoch || decision.Latch == nil || *decision.Latch != *fellBack.Latch {
+		t.Fatalf("after a fallback: state=%s serving=%d latch=%+v", decision.State, decision.ServingEpoch, decision.Latch)
+	}
+	passed := decideTestCanary(testCanaryPair(), testCanaryLossRun(0), settings)
+	if decision := decideTestCanaryAfter(passed, testCanaryPair(), nil, settings); decision.ServingEpoch != testCanaryLatestEpoch || !decision.WarmingServesLatest {
+		t.Fatalf("after a passing decision: serving=%d serves_latest=%t", decision.ServingEpoch, decision.WarmingServesLatest)
 	}
 }
 
