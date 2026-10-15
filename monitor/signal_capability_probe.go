@@ -126,6 +126,11 @@ type capabilityProbeObservation struct {
 	exporting int
 	// the oldest running taskworker's start, zero for none in Mimir
 	oldestStart time.Time
+	// whether the modern provider gate holds Quality and Speed on any
+	// running taskworker, as their stats collectors publish it
+	// (urnetwork_stats_provider_modern_gate_on), and whether any does
+	fleetGateOn    bool
+	fleetGateKnown bool
 }
 
 // One bounded instant query of fleet aggregates, each tagged with its name.
@@ -144,6 +149,7 @@ func capabilityProbeQuery(environment string) string {
 		tag("last_pass", fmt.Sprintf(`max(max_over_time(%s[%dh]))`, lastPass, int(capabilityProbeLastPassLookback/time.Hour))),
 		tag("exporting", fmt.Sprintf(`count(%s)`, lastPass)),
 		tag("oldest_start", fmt.Sprintf(`min(%s)`, selector("process_start_time_seconds", ""))),
+		tag("gate_on", fmt.Sprintf(`max(%s)`, selector("urnetwork_stats_provider_modern_gate_on", ""))),
 	}, " or ")
 }
 
@@ -226,6 +232,9 @@ func parseCapabilityProbeObservation(output string, now time.Time) (capabilityPr
 			observation.lastPass = unixTime()
 		case "exporting":
 			observation.exporting = int(value)
+		case "gate_on":
+			observation.fleetGateOn = 1 <= value
+			observation.fleetGateKnown = true
 		case "oldest_start":
 			observation.oldestStart = unixTime()
 		default:
@@ -260,8 +269,10 @@ func capabilityProbeDisabledPassFinding(observation capabilityProbeObservation) 
 // switches the probe on. A taskworker fleet that restarted since the last
 // pass is given the stall's span from its oldest process's start: a switch
 // on restarts it, and its first pass can take a pass's whole budget. The
-// stall pages past capabilityProbeStallPageAfter while the desired gate is
-// on at now, by its switch or, with the switch absent, from its start.
+// stall pages past capabilityProbeStallPageAfter while the gate is on: on
+// any running taskworker as they publish it, which is what is deployed, or,
+// while none publishes it, the desired gate at now, by its switch or, with
+// the switch absent, from its start.
 func capabilityProbeStalledFinding(now time.Time, desired capabilityProbeDesired, observation capabilityProbeObservation) finding {
 	reference := observation.lastPass
 	if reference.Before(observation.oldestStart) {
@@ -271,7 +282,12 @@ func capabilityProbeStalledFinding(now time.Time, desired capabilityProbeDesired
 	if age <= capabilityProbeStallAfter {
 		return healthyFinding(capabilityProbeProbeId, tierWarn, "capability-probe-stalled", capabilityProbeTarget)
 	}
-	gateOn := desired.gateOn(now)
+	// the gate the running taskworkers decide by, which is what the evidence
+	// matters to; the desired provider.yml while none publishes it
+	gateOn, gateSource := desired.gateOn(now), "desired"
+	if observation.fleetGateKnown {
+		gateOn, gateSource = observation.fleetGateOn, "fleet"
+	}
 	tier := tierWarn
 	if gateOn && capabilityProbeStallPageAfter < age {
 		tier = tierPage
@@ -293,8 +309,8 @@ func capabilityProbeStalledFinding(now time.Time, desired capabilityProbeDesired
 		class: "capability-probe-stalled", target: capabilityProbeTarget, sustain: 1,
 		symptom:   fmt.Sprintf("No taskworker has finished a measured or waiting capability probe pass for %s while capability_probe.yml switches the probe on", age.Round(time.Minute)),
 		mechanism: "The probe is the only writer of the modern provider gate's evidence, and a live chain finishes a pass at least every fifteen minutes. A chain whose task row is gone, whose passes fail (settings, prober shard, funding readiness, a page read or an evidence write), or whose taskworkers run an image without the probe refreshes nothing; with the gate on, providers' evidence ages toward stale_evidence and they leave Quality and Speed.",
-		baseline:  "The newest pass a taskworker finished (urnetwork_capability_probe_last_pass_timestamp_seconds) is under 30 minutes old, counted from the oldest running taskworker's start when none has finished since; PAGE past six hours with the gate on, by quality_speed_requires_modern_provider: true or, with that switch absent from provider.yml, from the gate's start. Evidence stays fresh for seven days after its measurement, so a shorter outage, planned database maintenance included, takes nothing out.",
-		observed:  fmt.Sprintf("last_pass_age_seconds=%s oldest_taskworker_uptime_seconds=%d taskworkers_exporting=%d gate=%s gate_schedule=%s", lastPassAge, int64(now.Sub(observation.oldestStart)/time.Second), observation.exporting, gate, gateSchedule),
+		baseline:  "The newest pass a taskworker finished (urnetwork_capability_probe_last_pass_timestamp_seconds) is under 30 minutes old, counted from the oldest running taskworker's start when none has finished since; PAGE past six hours with the gate on: on any running taskworker as their stats collectors publish it (urnetwork_stats_provider_modern_gate_on), or, while none does, by the desired provider.yml's quality_speed_requires_modern_provider: true or, with that switch absent, from the gate's start. Evidence stays fresh for seven days after its measurement, so a shorter outage, planned database maintenance included, takes nothing out.",
+		observed:  fmt.Sprintf("last_pass_age_seconds=%s oldest_taskworker_uptime_seconds=%d taskworkers_exporting=%d gate=%s gate_source=%s desired_gate_schedule=%s", lastPassAge, int64(now.Sub(observation.oldestStart)/time.Second), observation.exporting, gate, gateSource, gateSchedule),
 		evidence:  "Only fleet aggregates of the probe's pass timestamp and the taskworkers' start times leave Mimir; no host, task or provider identity is included.",
 		action:    "Check that the probe's pending_task row exists (run_once_key capability_probe, capprobe/README.md), then read passes_total{result=\"failed\"}, readiness_failures_total and the taskworker log's [capprobe] and task error lines as SIGNALS.md §2.19g says. taskworkers_exporting=0 means no running taskworker has the probe.",
 		verify:    "passes_total{result=~\"measured|waiting\"} advances and the newest last_pass_timestamp_seconds is under 30 minutes old.",

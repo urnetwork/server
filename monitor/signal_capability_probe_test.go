@@ -100,6 +100,7 @@ func TestCapabilityProbeSignalHealthyWhilePassing(t *testing.T) {
 		`max(max_over_time(urnetwork_capability_probe_last_pass_timestamp_seconds{env="synthetic",job="taskworker"}[6h]))`,
 		`count(urnetwork_capability_probe_last_pass_timestamp_seconds{env="synthetic",job="taskworker"})`,
 		`min(process_start_time_seconds{env="synthetic",job="taskworker"})`,
+		`max(urnetwork_stats_provider_modern_gate_on{env="synthetic",job="taskworker"})`,
 	} {
 		if !strings.Contains(promql, required) {
 			t.Errorf("the query lacks %s: %s", required, promql)
@@ -255,6 +256,47 @@ func TestCapabilityProbeStallPagesOnTheEffectiveGate(t *testing.T) {
 		stalled := capabilityProbeObservation{lastPass: c.now.Add(-7 * time.Hour), exporting: 4, oldestStart: c.now.Add(-48 * time.Hour)}
 		if f := capabilityProbeStalledFinding(c.now, desired, stalled); f.healthy || f.class != "capability-probe-stalled" || f.tier != c.tier {
 			t.Errorf("%s: finding %s at %s (healthy %t), want %s", c.name, f.class, f.tier, f.healthy, c.tier)
+		}
+	}
+}
+
+// The stall pages on the gate the running taskworkers publish, which is
+// what is deployed, whenever one publishes it: on in the fleet pages though
+// the desired provider.yml keeps the gate off, and off in the fleet only
+// warns though the desired gate is on. While none publishes it the desired
+// provider.yml decides.
+func TestCapabilityProbeStallPagesOnTheFleetsGate(t *testing.T) {
+	one, zero := 1.0, 0.0
+	for _, c := range []struct {
+		name      string
+		desiredOn bool
+		fleetGate *float64
+		tier      string
+		source    string
+	}{
+		{name: "on in the fleet, off in the desired config", desiredOn: false, fleetGate: &one, tier: tierPage, source: "fleet"},
+		{name: "off in the fleet, on in the desired config", desiredOn: true, fleetGate: &zero, tier: tierWarn, source: "fleet"},
+		{name: "no fleet gate, on in the desired config", desiredOn: true, tier: tierPage, source: "desired"},
+		{name: "no fleet gate, off in the desired config", desiredOn: false, tier: tierWarn, source: "desired"},
+	} {
+		values := map[string]float64{
+			"disabled_increase": 0,
+			"disabled_running":  0,
+			"last_pass":         capabilityProbeTestUnix(7 * time.Hour),
+			"exporting":         4,
+			"oldest_start":      capabilityProbeTestUnix(48 * time.Hour),
+		}
+		if c.fleetGate != nil {
+			values["gate_on"] = *c.fleetGate
+		}
+		alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true, gate: capabilityProbeTestGate(c.desiredOn)}, nil, capabilityProbeMimirFixture(t, values), nil)
+		if len(alerts) != 1 {
+			t.Errorf("%s: alerts %+v, want only the stall", c.name, alerts)
+			continue
+		}
+		alert := requireAlertClass(t, alerts, "capability-probe-stalled")
+		if alert.Severity != Severity(c.tier) || !strings.Contains(alert.Observed, "gate_source="+c.source) {
+			t.Errorf("%s: severity %s observed %q, want %s from the %s gate", c.name, alert.Severity, alert.Observed, c.tier, c.source)
 		}
 	}
 }

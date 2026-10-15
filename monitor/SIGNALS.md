@@ -15856,11 +15856,14 @@ Signals:
 - `capability-probe-stalled` — WARN when no taskworker has finished a
   measured or waiting pass for 30 minutes while `capability_probe.yml`
   enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
-  PAGE after six hours with the gate on: `quality_speed_requires_modern_provider: true`,
-  or that switch absent from the desired provider.yml and the gate's start
-  (2026-10-21 00:00 UTC by default, `quality_speed_modern_provider_start`)
-  passed at the monitor's clock, as the model's own provider.yml decoder
-  reads them, so the automatic switch-on arms the page. Evidence stays fresh
+  PAGE after six hours with the gate on: on any running taskworker as their
+  stats collectors publish it (`max(urnetwork_stats_provider_modern_gate_on)`),
+  which is what is deployed; while no taskworker publishes it, by the desired
+  provider.yml, `quality_speed_requires_modern_provider: true` or that switch
+  absent and the gate's start (2026-10-21 00:00 UTC by default,
+  `quality_speed_modern_provider_start`) passed at the monitor's clock, as the
+  model's own provider.yml decoder reads them, so the automatic switch-on
+  arms the page. The finding names its `gate_source`. Evidence stays fresh
   for seven days after its measurement, so a shorter stall, planned
   database maintenance included, takes no provider out and only warns. The newest pass is read
   over six hours (`max_over_time`), so a pass of a process that exited
