@@ -408,11 +408,29 @@ holds a failed run's two-cadence `cannot-observe` alert on its first failure,
 so either tick reaches a consumer with no gated alerts. A consumer that tracks
 incidents across ticks takes the run loop's `SignalExecution`, which also
 carries the held alerts and whether the run failed: a held alert is still
-observed, and a failed run or one with a visibility alert, gated or held, is
-incomplete. The Slack notifier (MONITOR.md §3.6) clears an incident only after
-two complete ticks in which nothing observed it. Healthy control: one dip of
-a Sustain 2 alert posts nothing after its raise. Failure control: two complete
-ticks without the alert post one clear.
+observed, and a failed run or one with an unobservable alert, gated or held,
+is incomplete. The Slack notifier (MONITOR.md §3.6) clears an incident only
+after two complete ticks in which nothing observed it. Healthy control: one
+dip of a Sustain 2 alert posts nothing after its raise. Failure control: two
+complete ticks without the alert post one clear.
+
+An unknown state is unobservable whatever signal reports it. The probe id
+`monitor/visibility` and the classes `cannot-observe` and `*-unobservable`
+are reserved for it and mark a finding by name. Another unknown state sets
+the finding's `unobservable` field, as the PG sample's unavailable finding
+and the host-scope partial finding of a run with blocked hosts do. An Alert
+built directly sets the alert's marker, as the provider, crash-report and
+settings-generation visibility alerts do. A new unknown state uses a
+reserved name or sets the marker. The inventory test
+`TestEveryUnobservableAlertConstructorSetsTheMarker` rejects a direct Alert
+constructor with a reserved class or the visibility probe id that does not.
+Accept filters let unobservable findings through, because a probe shared by
+several signals that loses part of its source has lost it for each of them.
+Deterministic controls: a redis node's PAGE is kept, not cleared and raised
+again, while its INFO times out for two runs; and a configured host
+exclusion without blocked hosts, which settings freshness reports every run,
+leaves the run complete.
+
 
 Subnet operators: §17 covers node/gateway infrastructure; §22 covers continuous
 whitepaper-1.0 correctness of pools, head miners, validators, deposits, custody,
@@ -20379,7 +20397,9 @@ confirmation in the run ledger (6.8). The continuous CLI's Slack notifier
 incident on (probe, class, target) per the identity discipline below, and its
 `[CLEARED]` means only that two complete runs no longer reported the incident.
 Its `[ACTIVE AT START]` digest lists what a new watcher's first runs found,
-which can repeat earlier announcements; it does not date the incidents.
+which can repeat earlier announcements; it does not date the incidents. A
+state the configuration chose, such as the PG query sample without its flag,
+is never posted.
 
 Historical ledger class aliases remain readable but must not be emitted by new
 probes:

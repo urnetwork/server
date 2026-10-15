@@ -369,18 +369,22 @@ The watcher's stderr carries one notifier line at startup:
 `vault/main/monitor.yml` `alerts.slack_webhook_url` is set, or
 `monitor: Slack alert notifications disabled: ...` when it is empty or not an
 https URL. An enabled watcher posts one Slack message per alert transition
-(MONITOR.md §3.6), at most 10 messages a minute plus a summary. Every new
-watcher re-announces the alerts active at its start, but as
-`[ACTIVE AT START]` digests rather than one raise each: the raises from each
-signal's first Sustain complete runs, posted two minutes after the last of
-them. With `-min-probe-cadence=15m`, expect a digest a few minutes in for the
-standing logs, then one about two minutes after each Sustain round of the
-active probes, whose rounds start near 15, 30 and 45 minutes; a round without
-incidents posts none. A post that Slack
-answers with a 5xx or a 429, or that times out, is retried once; messages
-that still fail are listed in one `[UNDELIVERED]` message once Slack takes
-posts again. At exit the watcher drains its Slack queue for up to 15 seconds,
-and stderr counts what it abandoned
+(MONITOR.md §3.6), at most 10 messages a minute plus a summary that names the
+rest, pages first. A run that could not observe part of its source, whatever
+the signal, never clears what it did not see. Every new watcher re-announces
+the alerts active at its start, but as `[ACTIVE AT START]` digests rather than
+one raise each: the raises from each signal's first Sustain complete runs,
+within 45 minutes of start under `-min-probe-cadence=15m`. A digest posts two
+minutes after its first raise, or at once when it holds a page. Expect a
+digest a few minutes in for the standing logs, then one about two minutes
+after each Sustain round of the active probes, whose rounds start near 15 and
+30 minutes; a round without incidents posts none. The disabled PG query
+sample is never posted. A post that Slack refuses with a 429 or a 503 is
+retried once; a timeout or another 5xx is not, since Slack may have taken
+it. Messages that fail are listed in one `[UNDELIVERED]` message once Slack
+takes posts again. At exit the watcher releases signal handling, so a second
+Ctrl-C or SIGTERM stops it at once, then drains its Slack queue for up to 15
+seconds; stderr counts what it abandoned
 (`monitor: Slack alert notifier abandoned N unposted message(s) at close`) and
 any undelivered messages it never reported.
 

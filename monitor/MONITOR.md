@@ -358,36 +358,54 @@ transition of an incident keyed by (signal id, class, target), frame excluded
 per SIGNALS.md §7: raised, escalated once to PAGE, and cleared after two
 consecutive complete runs of every signal that reported it in which nothing
 observed it. An alert the gate holds below its Sustain, as it does for the
-first runs after a one-run dip, is still observed. A failed execution, or one
-that carries a visibility alert, gated or held, is incomplete and clears
-nothing (SIGNALS.md, the cadence-mode `Sustain` note before §1). A clear says
-the incident is no longer reported, not that it recovered.
+first runs after a one-run dip, is still observed. A run is incomplete, and
+clears nothing, when it failed or carries an unobservable alert, gated or
+held. Every signal's unknown state is unobservable: class `cannot-observe`
+or `*-unobservable`, probe `monitor/visibility`, the provider, PG sample,
+settings-generation and crash-report visibility alerts, and the
+`monitor/host-scope` partial alert in a run with blocked hosts (not the
+configured exclusion settings freshness reports every run). Accept filters let
+unobservable findings through, so the shared redis memory probe's
+`redis/node-mem` `cannot-observe` also appears under redis-connections and
+redis-buffers. See SIGNALS.md, the cadence-mode `Sustain` note before §1. A
+clear says the incident is no longer reported, not that it recovered.
 
 State is process-local, so a restarted watcher, or a handoff candidate,
 re-announces every active alert. The raises from each signal's first Sustain
-complete runs, which is where such alerts first pass the gate, are folded into
-one `[ACTIVE AT START] N incident(s)` digest, pages first, posted two minutes
-after the last of them or at exit. Failed runs do not use up a signal's start
-window. An escalation of a digest incident before the digest posts is folded
-into it, and a clear of one posts the digest first. Later raises post one by
-one. With the 15-minute floor, expect a digest for each startup wave that has
+complete runs, within the start window, which is where such alerts first pass
+the gate, are folded into one `[ACTIVE AT START] N incident(s)` digest, pages
+first. A digest posts two minutes after its first raise, at once when it gains
+a page (a page raise or the escalation of an incident it holds), and at exit.
+Failed runs do not use up a signal's start window, but the window closes 30
+minutes after start, or after three cadence floors when that is longer (45
+minutes with `-min-probe-cadence=15m`): a signal that fails for hours posts
+its first complete run's raises one by one. A clear of a digest incident
+posts the digest first. An at-start raise carries its incident's latest
+state, so a transition of that incident still held for the summary is
+dropped rather than posted after the digest. Later raises post one by one.
+With the 15-minute floor, expect a digest for each startup wave that has
 incidents: one a few minutes in for the standing logs, then one about two
-minutes after each Sustain round of the active probes.
+minutes after each Sustain round of the active probes. The PG query
+sample's configured-off state (no sample flag) is never posted.
 
-Messages are capped at 10 per sliding minute; transitions over the cap are
-folded into one summary. Posts never block the handler: a bounded queue feeds
-one sender that spaces posts by a second, and a full queue drops and counts.
-A summary or digest the full queue refuses keeps its content for the next
-try. A post that Slack answers with a 5xx or a 429, or that times out, is
-retried once after Slack's Retry-After (1 s without one, at most 30 s); only
-the sender waits. A message that still fails is undelivered: once a post
-succeeds again, one `[UNDELIVERED] N message(s) queued between T1 and T2
-failed to post` message lists them. Without a new message, the sender tries
-that report itself at most once a minute, and once more at exit. At exit the
-CLI drains the notifier for up to 15 s; one stderr line counts what the
-deadline abandoned, and another the undelivered messages never reported.
-Message text gets the same address scrubbing as stdout and stderr. Two
-overlapping watchers both post; there is no poster lease.
+Messages are capped at 10 per sliding minute. Transitions over the cap, or
+refused by a full queue, are held for one summary that names them, incidents
+with a page first, 20 lines and a count of the rest. Posts never block the
+handler: a bounded queue feeds one sender that spaces posts by a second. A
+summary or digest the full queue refuses keeps its content for the next try.
+A post that Slack refuses with a 429 or a 503 is retried once after Slack's
+Retry-After (1 s without one, at most 30 s); only the sender waits. A timeout
+or another 5xx is not retried, because Slack may have taken the post. A
+message that fails is undelivered: once a post succeeds again, one
+`[UNDELIVERED] N message(s) queued between T1 and T2 failed to post` message
+lists them, though some may have reached the channel. Without a new message,
+the sender tries that report itself at most once a minute, and once more at
+exit. At exit the CLI first restores default signal handling, so a second
+Ctrl-C or SIGTERM ends the process at once, then drains the notifier for up
+to 15 s; one stderr line counts what the deadline abandoned, and another the
+undelivered messages never reported. Message text gets the same address
+scrubbing as stdout and stderr. Two overlapping watchers both post; there is
+no poster lease.
 
 An empty webhook disables the notifier with one stderr line at startup;
 `-slack-alerts=false` disables it for a watcher that must not post. `-once`
