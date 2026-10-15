@@ -5498,7 +5498,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		countProviderModernGateShadow(modernGateShadowCounts, decision)
 	}
 	glog.Infof(
-		"[nclm]egress rules: %d providers decided, %d hard excluded from the pool, out of a bucket by reason %v, %d unprobed for the online bucket\n",
+		"[nclm]egress rules: %d providers decided, %d hard excluded from the pool, out of a bucket by reason %v, %d in the online bucket\n",
 		len(clientIdEgressDecisions),
 		len(hardExcludedClientIds),
 		reasonCounts,
@@ -6135,45 +6135,18 @@ func FindProviders2(
 		qualityReadClientIds := map[server.Id]bool{}
 		var nativeClientScores map[server.Id]*ClientScore
 		var clientIds, borrowedClientIds []server.Id
+		// The one instant filterPool judges every pool's URL evidence at, and
+		// with it what the draws below know of each candidate: nil while
+		// rank_measured_first is off or for force_minimum
+		// (network_client_selection_evidence.go). The evidence rank and the
+		// neutral URL weight cannot disagree about an expiry.
+		filterTime := server.NowUtc()
+		evidence := findProviders2Evidence(requestSettings, findProviders2.ForceMinimum, filterTime)
 		// Draws up to n of the candidates by their weight in `mode` and bands
-		// the draw by their tier in `mode`. Weighted selection and tier banding
-		// run within each facet, and the preferred facet fills n first: a
-		// v4-capable request takes every dualstack provider it can before any
-		// v4-only one, so the single-family category only ever tops up a
-		// shortfall.
+		// the draw by their tier in `mode`, each facet in the request's
+		// preference order (selectClientScoresByWeight).
 		selectProviders := func(candidateClientScores map[server.Id]*ClientScore, mode RankMode, n int) []server.Id {
-			clientIds := []server.Id{}
-			for _, facet := range facets {
-				remainingCount := n - len(clientIds)
-				if remainingCount <= 0 {
-					break
-				}
-				facetClientIds := []server.Id{}
-				for clientId, clientScore := range candidateClientScores {
-					if clientScore.ipFamilyFacet() == facet {
-						facetClientIds = append(facetClientIds, clientId)
-					}
-				}
-				mathrand.Shuffle(len(facetClientIds), func(i int, j int) {
-					facetClientIds[i], facetClientIds[j] = facetClientIds[j], facetClientIds[i]
-				})
-
-				connect.WeightedSelectFunc(facetClientIds, remainingCount, func(clientId server.Id) float32 {
-					clientScore := candidateClientScores[clientId]
-					return clientScore.ScaledWeights[mode]
-				})
-				facetClientIds = facetClientIds[:min(remainingCount, len(facetClientIds))]
-
-				// band by tier
-				slices.SortStableFunc(facetClientIds, func(a server.Id, b server.Id) int {
-					clientScoreA := candidateClientScores[a]
-					clientScoreB := candidateClientScores[b]
-
-					return clientScoreA.Tiers[mode] - clientScoreB.Tiers[mode]
-				})
-				clientIds = append(clientIds, facetClientIds...)
-			}
-			return clientIds
+			return selectClientScoresByWeight(candidateClientScores, mode, facets, n, evidence)
 		}
 
 		validation := &providerQualityValidation{parent: session.Ctx}
@@ -6254,7 +6227,7 @@ func FindProviders2(
 					id := provider.ClientId
 					if score := scores[id]; score != nil && !qualityReadClientIds[id] &&
 						!hardExcludedClientIds[id] && score.PassesMinimums[mode] &&
-						score.EgressValidUntil != nil && now.Before(*score.EgressValidUntil) {
+						score.urlEvidenceCurrent(now) {
 						prior = append(prior, id)
 					}
 				}
@@ -6300,9 +6273,11 @@ func FindProviders2(
 		// provider passes exactly what a native one does.
 		filterPool := func(clientScores map[server.Id]*ClientScore, mode RankMode, hardExcludedClientIds map[server.Id]bool) {
 			observation.enter("filter")
-			now := server.NowUtc()
+			now := filterTime
 			for _, clientScore := range clientScores {
-				if clientScore.EgressValidUntil == nil || !now.Before(*clientScore.EgressValidUntil) {
+				// the evidence rank reads the same expiry at the same instant
+				// (clientScoreEvidence)
+				if !clientScore.urlEvidenceCurrent(now) {
 					// Older native cache records may not also set Online. Their
 					// prior native admission also admitted online fallback. Expiry
 					// removes only native evidence; request filters still run below.
@@ -6526,52 +6501,13 @@ func FindProviders2(
 		observation.enter("select")
 
 		// Takes up to n of the online bucket in its order
-		// (connect/GEOMAP.md §10.3): reliability weight, highest first, then
-		// the speed-mode performance adjustment -- the client-measured latency
-		// and throughput, past the speed cutoffs last. Missing measurements
-		// retain their ranking penalties without changing online admission.
-		// Each facet keeps the request's existing preference order.
+		// (connect/GEOMAP.md §10.3): reliability weight times URL weight,
+		// highest first, then the speed-mode performance adjustment, each
+		// facet in the request's preference order; with rank_measured_first,
+		// a draw weighted by that key within each evidence rank
+		// (selectOnlineClientScores).
 		selectOnline := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
-			clientIds := []server.Id{}
-			for _, facet := range facets {
-				remainingCount := n - len(clientIds)
-				if remainingCount <= 0 {
-					break
-				}
-				facetClientIds := []server.Id{}
-				for clientId, clientScore := range candidateClientScores {
-					if clientScore.ipFamilyFacet() == facet {
-						facetClientIds = append(facetClientIds, clientId)
-					}
-				}
-				// full ties in no particular order
-				mathrand.Shuffle(len(facetClientIds), func(i int, j int) {
-					facetClientIds[i], facetClientIds[j] = facetClientIds[j], facetClientIds[i]
-				})
-				slices.SortStableFunc(facetClientIds, func(a server.Id, b server.Id) int {
-					clientScoreA := candidateClientScores[a]
-					clientScoreB := candidateClientScores[b]
-					weightA, weightB := clientScoreA.UrlProbeSuccessWeight, clientScoreB.UrlProbeSuccessWeight
-					if weightA == 0 {
-						weightA = 1
-					}
-					if weightB == 0 {
-						weightB = 1
-					}
-					switch {
-					case clientScoreB.ReliabilityWeight*weightB < clientScoreA.ReliabilityWeight*weightA:
-						return -1
-					case clientScoreA.ReliabilityWeight*weightA < clientScoreB.ReliabilityWeight*weightB:
-						return 1
-					}
-					if d := clientScoreA.Tiers[RankModeSpeed] - clientScoreB.Tiers[RankModeSpeed]; d != 0 {
-						return d
-					}
-					return clientScoreA.Scores[RankModeSpeed] - clientScoreB.Scores[RankModeSpeed]
-				})
-				clientIds = append(clientIds, facetClientIds[:min(remainingCount, len(facetClientIds))]...)
-			}
-			return clientIds
+			return selectOnlineClientScores(candidateClientScores, facets, n, evidence, mathrand.Float64)
 		}
 
 		// Draws up to n members of the online bucket, every one equally likely
@@ -6744,7 +6680,9 @@ func FindProviders2(
 						}
 					}
 					for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
-						borrow(onlineClientScores[clientId], RankModeSpeed, 2*backfillTierOffset)
+						clientScore := onlineClientScores[clientId]
+						findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, clientScoreEvidence(clientScore, filterTime).String()).Inc()
+						borrow(clientScore, RankModeSpeed, 2*backfillTierOffset)
 					}
 				}
 			}
