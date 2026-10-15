@@ -150,11 +150,14 @@ type EgressIndexSettings struct {
 	// while the key is absent: the gate then turns on by itself at
 	// QualitySpeedModernProviderStart (owner decision 2026-10-15). False is
 	// the kill switch and the way to postpone, true turns the gate on at once,
-	// and an unreadable switch is false. RequiresModernProvider applies it.
+	// and a switch that is unreadable or given without a value is false, as
+	// is an absent one beside a start that cannot be read.
+	// RequiresModernProvider applies it.
 	QualitySpeedRequiresModernProvider *bool
 	// When an absent switch turns the gate on, that instant included:
 	// `quality_speed_modern_provider_start` in provider.yml, an RFC 3339
-	// instant, or DefaultQualitySpeedModernProviderStart.
+	// instant or a date (its 00:00 UTC), or
+	// DefaultQualitySpeedModernProviderStart.
 	QualitySpeedModernProviderStart time.Time
 }
 
@@ -245,10 +248,11 @@ type egressIndexSettingsBlock struct {
 // the block. An unreadable kill switch, or a file that is not yaml at all,
 // disables the rule: it may be an attempt to turn the rule off, and the
 // behaviour before the rule is the one to fall back to. For the same reason
-// an unreadable modern provider switch, or such a file, turns that gate off,
-// where an absent switch leaves it to its start. An unreadable start keeps
-// DefaultQualitySpeedModernProviderStart: to postpone the gate for certain,
-// set the switch false.
+// an unreadable modern provider switch, one given without a value, or such a
+// file turns that gate off, where an absent switch leaves it to its start;
+// and while the switch is absent, a start that is given but cannot be read,
+// empty included, turns it off too, since each is most likely a postponement
+// that failed. Each is logged.
 func egressIndexSettings() *EgressIndexSettings {
 	settings := DefaultEgressIndexSettings()
 	resource, err := server.Config.SimpleResource(providerConfigResourceName)
@@ -360,24 +364,43 @@ func egressIndexSettings() *EgressIndexSettings {
 	} else if urlRatioCountryExemption != nil {
 		settings.OnlineUrlRatioCountryExemption = *urlRatioCountryExemption
 	}
+	// A switch given without a value (empty, ~ or null) decodes as absent,
+	// which would leave the gate to its start; like a start that cannot be
+	// read, it is most likely a postponement that failed, so both hold the
+	// gate off. A start only decides while the switch is absent.
 	var modernGate *bool
 	if err := decode("quality_speed_requires_modern_provider", &modernGate); err != nil {
 		glog.Errorf("[egress]provider config quality_speed_requires_modern_provider is unreadable (%s); the modern provider gate is off\n", err)
 		modernGateOff()
 	} else if modernGate != nil {
 		settings.QualitySpeedRequiresModernProvider = modernGate
+	} else if 0 < keyCounts["quality_speed_requires_modern_provider"] {
+		glog.Errorf("[egress]provider config quality_speed_requires_modern_provider has no value; the modern provider gate is off\n")
+		modernGateOff()
+	}
+	modernStartUnreadable := func(reason string) {
+		if settings.QualitySpeedRequiresModernProvider != nil {
+			glog.Errorf("[egress]provider config quality_speed_modern_provider_start %s; quality_speed_requires_modern_provider decides the modern provider gate\n", reason)
+			return
+		}
+		glog.Errorf("[egress]provider config quality_speed_modern_provider_start %s; the modern provider gate is off\n", reason)
+		modernGateOff()
 	}
 	// any scalar decodes into a string as written, so a timestamp yaml
-	// resolves on its own still reaches the parse
+	// resolves on its own still reaches the parse; a date is its 00:00 UTC
 	var modernStart *string
 	if err := decode("quality_speed_modern_provider_start", &modernStart); err != nil {
-		glog.Errorf("[egress]provider config quality_speed_modern_provider_start is unreadable (%s); kept %s\n", err, settings.QualitySpeedModernProviderStart.Format(time.RFC3339))
+		modernStartUnreadable(fmt.Sprintf("is unreadable (%s)", err))
 	} else if modernStart != nil {
 		if start, err := time.Parse(time.RFC3339, *modernStart); err == nil {
 			settings.QualitySpeedModernProviderStart = start.UTC()
+		} else if date, err := time.Parse(time.DateOnly, *modernStart); err == nil {
+			settings.QualitySpeedModernProviderStart = date.UTC()
 		} else {
-			glog.Errorf("[egress]provider config quality_speed_modern_provider_start = %q is not an RFC 3339 instant; kept %s\n", *modernStart, settings.QualitySpeedModernProviderStart.Format(time.RFC3339))
+			modernStartUnreadable(fmt.Sprintf("= %q is neither an RFC 3339 instant nor a date", *modernStart))
 		}
+	} else if 0 < keyCounts["quality_speed_modern_provider_start"] {
+		modernStartUnreadable("has no value")
 	}
 
 	var overrides *egressIndexSettingsBlock

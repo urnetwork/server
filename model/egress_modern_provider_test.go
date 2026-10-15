@@ -455,6 +455,8 @@ func TestGetModernProviderGateSchedule(t *testing.T) {
 		{config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: false, scheduledStart: nil},
 		{config: "quality_speed_requires_modern_provider: true\n", now: start.AddDate(-1, 0, 0), on: true, scheduledStart: nil},
 		{config: "quality_speed_requires_modern_provider: maybe\n", now: start, on: false, scheduledStart: nil},
+		{config: "quality_speed_requires_modern_provider: ~\n", now: start, on: false, scheduledStart: nil},
+		{config: "quality_speed_modern_provider_start: next week\n", now: start, on: false, scheduledStart: nil},
 	} {
 		on, scheduledStart := func() (bool, *time.Time) {
 			pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(c.config))
@@ -477,12 +479,16 @@ func modernGateTestSwitchText(modernSwitch *bool) string {
 
 // provider.yml sets the gate three ways (owner decision 2026-10-15): an
 // absent switch leaves it to its start, false keeps it off and true holds it
-// on. A switch that is not true or false, or the switch given twice, reads as
-// false. quality_speed_modern_provider_start moves the start with an RFC 3339
-// instant; one that is not, or the start given twice, keeps the default.
-// Each key fails alone: a malformed one changes neither the other nor a
-// neighbour, and a malformed neighbour leaves both. A file that is not yaml,
-// here for a tab, reads as false with the default start.
+// on. A switch that is not true or false, given twice, or given without a
+// value (empty, ~ or null) reads as false: the last is most likely a
+// postponement that failed, which read as absent turned the gate on at its
+// start. quality_speed_modern_provider_start moves the start with an RFC 3339
+// instant or a date, its 00:00 UTC; with the switch absent, a start given
+// that cannot be read, given twice or given without a value reads as the
+// switch false for the same reason, and beside a switch it changes nothing.
+// A malformed key changes no neighbour, and a malformed neighbour leaves
+// both. A file that is not yaml, here for a tab, reads as false with the
+// default start.
 func TestEgressIndexSettingsModernProviderGate(t *testing.T) {
 	load := func(config string) *EgressIndexSettings {
 		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
@@ -491,6 +497,7 @@ func TestEgressIndexSettingsModernProviderGate(t *testing.T) {
 	}
 	defaultStart := DefaultQualitySpeedModernProviderStart()
 	moved := time.Date(2026, 11, 2, 12, 30, 0, 0, time.UTC)
+	movedDate := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
 	off, on := false, true
 	neighbours := "online_requires_url_success: false\nonline_success_country_floor: 0.5\negress_index:\n  native_reader_enabled: true\n  max_failure_index: 9\n"
 	for _, c := range []struct {
@@ -510,11 +517,20 @@ func TestEgressIndexSettingsModernProviderGate(t *testing.T) {
 		{name: "a quoted start", config: "quality_speed_modern_provider_start: \"2026-11-02T12:30:00Z\"\n", modernSwitch: nil, start: moved},
 		{name: "a start with an offset", config: "quality_speed_modern_provider_start: 2026-11-02T14:30:00+02:00\n", modernSwitch: nil, start: moved},
 		{name: "false and a start", config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: &off, start: moved},
-		{name: "a date without a time", config: "quality_speed_modern_provider_start: 2026-11-02\n", modernSwitch: nil, start: defaultStart},
-		{name: "a start that is not a time", config: "quality_speed_modern_provider_start: next week\n", modernSwitch: nil, start: defaultStart},
-		{name: "a start in a list", config: "quality_speed_modern_provider_start: [2026-11-02T12:30:00Z]\n", modernSwitch: nil, start: defaultStart},
-		{name: "the start twice", config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: nil, start: defaultStart},
+		{name: "a switch without a value", config: "quality_speed_requires_modern_provider:\n", modernSwitch: &off, start: defaultStart},
+		{name: "a switch of ~", config: "quality_speed_requires_modern_provider: ~\n", modernSwitch: &off, start: defaultStart},
+		{name: "a switch of null", config: "quality_speed_requires_modern_provider: null\n", modernSwitch: &off, start: defaultStart},
+		{name: "a switch without a value and a start", config: "quality_speed_requires_modern_provider:\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: &off, start: moved},
+		{name: "a date", config: "quality_speed_modern_provider_start: 2026-11-02\n", modernSwitch: nil, start: movedDate},
+		{name: "a quoted date", config: "quality_speed_modern_provider_start: \"2026-11-02\"\n", modernSwitch: nil, start: movedDate},
+		{name: "a start that is not a time", config: "quality_speed_modern_provider_start: next week\n", modernSwitch: &off, start: defaultStart},
+		{name: "a time without a zone", config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00\n", modernSwitch: &off, start: defaultStart},
+		{name: "a start in a list", config: "quality_speed_modern_provider_start: [2026-11-02T12:30:00Z]\n", modernSwitch: &off, start: defaultStart},
+		{name: "the start twice", config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: &off, start: defaultStart},
+		{name: "a start without a value", config: "quality_speed_modern_provider_start:\n", modernSwitch: &off, start: defaultStart},
+		{name: "a start of null", config: "quality_speed_modern_provider_start: null\n", modernSwitch: &off, start: defaultStart},
 		{name: "true and a malformed start", config: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: soon\n", modernSwitch: &on, start: defaultStart},
+		{name: "true and a start without a value", config: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start:\n", modernSwitch: &on, start: defaultStart},
 		{name: "a malformed switch and a start", config: "quality_speed_requires_modern_provider: yes please\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: &off, start: moved},
 	} {
 		settings := load(c.config + neighbours)
@@ -542,6 +558,16 @@ func TestEgressIndexSettingsModernProviderGate(t *testing.T) {
 	connect.AssertEqual(t, settings.RequiresModernProvider(moved.Add(-time.Microsecond)), false)
 	connect.AssertEqual(t, settings.RequiresModernProvider(moved), true)
 	connect.AssertEqual(t, settings.RequiresModernProvider(defaultStart), false)
+	// a date starts the gate at its 00:00 UTC
+	settings = load("quality_speed_modern_provider_start: 2026-11-02\n")
+	connect.AssertEqual(t, settings.RequiresModernProvider(movedDate.Add(-time.Microsecond)), false)
+	connect.AssertEqual(t, settings.RequiresModernProvider(movedDate), true)
+	// a failed postponement holds the gate off past the default start
+	for _, config := range []string{"quality_speed_requires_modern_provider:\n", "quality_speed_modern_provider_start: next week\n", "quality_speed_modern_provider_start: ~\n"} {
+		if load(config).RequiresModernProvider(defaultStart.AddDate(0, 0, 7)) {
+			t.Errorf("%q held the gate on after the default start", config)
+		}
+	}
 }
 
 // The ingest records nothing for evidence that observed nothing, and refuses
