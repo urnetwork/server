@@ -133,14 +133,36 @@ func TestArindbCanaryBreakerTripsJustOverTheLossThresholdInEachBucket(t *testing
 					t.Errorf("%s lost %d also tripped %s: %+v", bucket, c.lost, other, decision.Buckets[other])
 				}
 			}
+			// only a Quality trip falls back
 			wantState, wantServing := ArindbCanaryStateLatest, testCanaryLatestEpoch
-			if c.tripped {
+			if c.tripped && bucket == RankModeQuality {
 				wantState, wantServing = ArindbCanaryStateFallback, testCanaryOldEpoch
 			}
 			if decision.State != wantState || decision.ServingEpoch != wantServing {
 				t.Errorf("%s lost %d: state=%s serving=%d, want %s %d", bucket, c.lost, decision.State, decision.ServingEpoch, wantState, wantServing)
 			}
 		}
+	}
+}
+
+// Only a Quality trip falls back. The serving epoch changes only Quality
+// classification, since risk always comes from the latest slot, so a Speed or
+// Online trip, which only risk causes, is reported without switching the
+// fleet to the old database's Quality, which would repair none of it.
+func TestArindbCanaryFallsBackOnlyWhenTheQualityBucketTrips(t *testing.T) {
+	// 20 of 100 Speed providers turn risky under the latest; Quality is empty
+	// under both databases
+	providers := append(
+		testCanaryProviders(20, "aa", true, testCanaryRisky, testCanaryNonQuality),
+		testCanaryProviders(80, "aa", true, testCanaryNonQuality, testCanaryNonQuality)...)
+	providers = append(providers, testCanaryProviders(300, "aa", false, testCanaryClean, testCanaryClean)...)
+	decision := decideTestCanary(testCanaryPair(), providers, defaultArindbCanarySettings())
+	if !decision.Buckets[RankModeSpeed].Tripped || decision.Buckets[RankModeQuality].Tripped || decision.Buckets[ProviderEgressBucketOnline].Tripped {
+		t.Fatalf("fixture trips quality=%t speed=%t online=%t", decision.Buckets[RankModeQuality].Tripped,
+			decision.Buckets[RankModeSpeed].Tripped, decision.Buckets[ProviderEgressBucketOnline].Tripped)
+	}
+	if decision.State != ArindbCanaryStateLatest || decision.ServingEpoch != testCanaryLatestEpoch {
+		t.Fatalf("a Speed-only trip: state=%s serving=%d, want latest", decision.State, decision.ServingEpoch)
 	}
 }
 
@@ -169,7 +191,7 @@ func TestArindbCanaryBreakerTripsOnACountryEmptiedInEachBucket(t *testing.T) {
 			if b.LossRatio > settings.BucketLossThreshold {
 				t.Errorf("%s: the fixture's net loss %v trips on its own", bucket, b.LossRatio)
 			}
-			if b.Tripped != tripOnEmptiedCountry || (decision.State == ArindbCanaryStateFallback) != tripOnEmptiedCountry {
+			if b.Tripped != tripOnEmptiedCountry || (decision.State == ArindbCanaryStateFallback) != (tripOnEmptiedCountry && bucket == RankModeQuality) {
 				t.Errorf("%s trip_on_emptied_country=%t: tripped=%t state=%s", bucket, tripOnEmptiedCountry, b.Tripped, decision.State)
 			}
 			for _, other := range ProviderEgressBuckets {

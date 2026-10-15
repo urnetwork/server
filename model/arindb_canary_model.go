@@ -353,8 +353,9 @@ type ArindbCanaryBucket struct {
 	EmptiedCountries []ArindbCanaryEmptiedCountry `json:"emptied_countries"`
 	EmptiedCityCount int                          `json:"emptied_city_count"`
 	EmptiedCities    []ArindbCanaryEmptiedCity    `json:"emptied_cities"`
-	// the net loss is over the threshold, or an emptied country trips. A
-	// warming run reports it without acting on it
+	// the net loss is over the threshold, or an emptied country trips. Only a
+	// Quality trip falls back; a Speed or Online trip is risk, which the
+	// fallback cannot repair, and pages
 	Tripped bool `json:"tripped"`
 }
 
@@ -511,7 +512,6 @@ func decideArindbCanary(
 		}
 	}
 
-	tripped := false
 	for _, bucket := range ProviderEgressBuckets {
 		b := decision.Buckets[bucket]
 		if 0 < b.Old {
@@ -545,8 +545,12 @@ func decideArindbCanary(
 		lossTrip := 0 < b.Old && settings.BucketLossThreshold < b.LossRatio
 		countryTrip := settings.TripOnEmptiedCountry && 0 < len(b.EmptiedCountries)
 		b.Tripped = lossTrip || countryTrip
-		tripped = tripped || b.Tripped
 	}
+	// Only a Quality trip falls back: the serving epoch changes only Quality
+	// classification, since risk always comes from the latest slot. A Speed
+	// or Online trip, which only risk can cause, is reported and pages
+	// without changing S, as falling back would repair none of it.
+	tripped := decision.Buckets[RankModeQuality].Tripped
 
 	minimum := settings.MinCoverage * float64(decision.Coverage.Providers)
 	// a database is carried when min_coverage of the cohort has its facts;
