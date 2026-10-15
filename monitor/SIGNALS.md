@@ -15776,6 +15776,13 @@ that are modern. Every series below is per taskworker process
 row); sum across the env's taskworkers and remember a process restart resets
 counters.
 
+The probe ships switched off (sn-55) and then schedules nothing: no task
+row, no prober shard, no pass, so every series stays at zero. It is
+switched on by `enabled: true` in `capability_probe.yml` and a restart of
+the taskworkers, whose containers keep the config they started with
+(capprobe/README.md, "Switching it on"). Until then nothing below applies,
+and silence is not a finding.
+
 Healthy shape:
 
 - `passes_total{result="measured"}` advances after every pass of a sweep
@@ -15816,8 +15823,11 @@ Signals:
   (`readiness_failures_total{step}`, the capability probe's own, never the
   URL probe's pass errors); a page read; or an evidence write. A failed pass
   retries the same sweep page after a minute, so a persistent failure
-  repeats once a minute. `passes_total{result="disabled"}` rising is
-  `enabled: false`, deliberate or not.
+  repeats once a minute. A `passes_total{result="disabled"}` pass is the last
+  of a chain that `enabled: false` ended, deliberately or not; nothing runs
+  after it until a taskworker starts with the probe switched on, so check
+  the deployed `capability_probe.yml` before reading the silence as a
+  stall.
 - `capability-probe-no-evidence` — WARN when measurements finish for an hour
   and none records (`providers_total` rising with every `recorded_*` flat).
   The outcome says where: `tunnel_failed` is the probe's own setup (shard

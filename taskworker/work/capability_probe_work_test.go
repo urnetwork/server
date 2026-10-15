@@ -76,10 +76,11 @@ func TestCapabilityProbeShardCredit(t *testing.T) {
 
 // The next pass: within a sweep after the pass interval, between sweeps at
 // the next sweep's start or a waiting pass ten minutes on, whichever is
-// first, a switched-off probe after its recheck, and after a result-less
-// finish with the pass's own sweep.
+// first, and after a result-less finish with the pass's own sweep. A
+// switched-off probe's pass has no successor: the chain ends.
 func TestCapabilityProbeSuccessor(t *testing.T) {
 	settings := capprobe.DefaultSettings()
+	settings.Enabled = true
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	cursor := server.NewId()
 	inSweep := capprobe.Sweep{Cursor: cursor, StartedAt: now.Add(-time.Hour)}
@@ -95,12 +96,16 @@ func TestCapabilityProbeSuccessor(t *testing.T) {
 		{name: "between sweeps", result: &CapabilityProbeResult{Sweep: betweenSweeps}, sweep: betweenSweeps, runAt: now.Add(10 * time.Minute)},
 		{name: "just before the next sweep", result: &CapabilityProbeResult{Sweep: capprobe.Sweep{NextSweepAt: now.Add(7 * time.Minute)}}, sweep: capprobe.Sweep{NextSweepAt: now.Add(7 * time.Minute)}, runAt: now.Add(7 * time.Minute)},
 		{name: "a next sweep already due", result: &CapabilityProbeResult{Sweep: capprobe.Sweep{NextSweepAt: now.Add(-time.Minute)}}, sweep: capprobe.Sweep{NextSweepAt: now.Add(-time.Minute)}, runAt: now.Add(settings.PassInterval())},
-		{name: "switched off", result: &CapabilityProbeResult{Disabled: true, Sweep: inSweep}, sweep: inSweep, runAt: now.Add(capabilityProbeDisabledRecheck)},
 		{name: "no result", args: &CapabilityProbeArgs{Sweep: inSweep}, sweep: inSweep, runAt: now.Add(settings.PassInterval())},
 	} {
-		args, runAt := capabilityProbeSuccessor(c.args, c.result, settings, now)
-		if !reflect.DeepEqual(args.Sweep, c.sweep) || !runAt.Equal(c.runAt) {
-			t.Errorf("%s: next %+v at %s, want %+v at %s", c.name, args.Sweep, runAt, c.sweep, c.runAt)
+		args, runAt, scheduled := capabilityProbeSuccessor(c.args, c.result, settings, now)
+		if !scheduled || !reflect.DeepEqual(args.Sweep, c.sweep) || !runAt.Equal(c.runAt) {
+			t.Errorf("%s: next %+v at %s (scheduled %t), want %+v at %s", c.name, args, runAt, scheduled, c.sweep, c.runAt)
+		}
+	}
+	for _, switchedOff := range []capprobe.Settings{capprobe.DefaultSettings(), settings} {
+		if args, runAt, scheduled := capabilityProbeSuccessor(nil, &CapabilityProbeResult{Disabled: true, Sweep: inSweep}, switchedOff, now); scheduled {
+			t.Errorf("a switched-off probe's pass scheduled a successor at %s with %+v", runAt, args)
 		}
 	}
 }
@@ -130,6 +135,7 @@ func TestCapabilityProbeTaskRunsNothingWhileDisabled(t *testing.T) {
 // error with its cause, retried with the same sweep.
 func TestCapabilityProbeTaskCarriesTheSweep(t *testing.T) {
 	settings := capprobe.DefaultSettings()
+	settings.Enabled = true
 	sweep := capprobe.Sweep{Cursor: server.NewId(), StartedAt: server.NowUtc()}
 	next := capprobe.Sweep{Cursor: server.NewId(), StartedAt: sweep.StartedAt}
 	passErr := errors.New("synthetic pass failure")
@@ -311,6 +317,7 @@ func TestUrlProbeShardCountStopsBeforeTheCapabilityProbeSlot(t *testing.T) {
 // the settings' own; a switched-off probe's row takes the default.
 func TestCapabilityProbePassRunsWithItsScheduledMaxTime(t *testing.T) {
 	scheduledSettings := capprobe.DefaultSettings()
+	scheduledSettings.Enabled = true
 	raised := scheduledSettings
 	raised.MaxTimeSeconds = 2 * scheduledSettings.MaxTimeSeconds
 	sweep := capprobe.Sweep{Cursor: server.NewId(), StartedAt: server.NowUtc()}

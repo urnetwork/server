@@ -318,9 +318,11 @@ func (self *fakeStore) recordedIds() []server.Id {
 	return slices.Clone(self.records)
 }
 
-// Settings for synthetic passes: the defaults, with a small geometry.
+// Settings for synthetic passes: the defaults switched on, with a small
+// geometry.
 func fakeSettings(concurrency int, limit int, pageSize int, maxPages int) Settings {
 	settings := DefaultSettings()
+	settings.Enabled = true
 	settings.Concurrency = concurrency
 	settings.Limit = limit
 	settings.PageSize = pageSize

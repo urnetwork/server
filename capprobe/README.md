@@ -11,6 +11,9 @@ credential parent and balance), tunnels, each with a platform transport
 budget of its own as each URL probe's tunnel has, concurrency and metrics,
 and none of the URL probe's due queue, quota or run history.
 
+It ships switched off: until `capability_probe.yml` says `enabled: true` and
+a taskworker starts with it, nothing is scheduled (see "Switching it on").
+
 ## A pass
 
 One task row runs one pass at a time. A pass continues a **sweep** over the
@@ -113,13 +116,14 @@ from recording one.
 
 ## Settings
 
-`capability_probe.yml`, read at every pass; without it the defaults apply.
-A pass runs on the max time its task row was scheduled with, which rides in
-the task's arguments.
+`capability_probe.yml`, read by every taskworker's startup schedule and at
+every pass; without it the defaults apply, and the probe is off. A pass
+runs on the max time its task row was scheduled with, which rides in the
+task's arguments.
 
 | Key | Default | |
 | --- | --- | --- |
-| `enabled` | `true` | false runs no pass; the task rechecks every ten minutes and keeps its sweep |
+| `enabled` | `false` | true: a taskworker starting with it schedules the probe; false: nothing is scheduled, and a chain already running ends at its next pass |
 | `concurrency` | 16 | providers measured at once |
 | `limit` | 64 | providers one pass measures |
 | `page_size`, `max_pages_per_pass` | 1024, 16 | the sweep's bounded reads |
@@ -135,6 +139,48 @@ Lowering `other_refresh_hours` returns an updated provider to Quality and
 Speed sooner once the gate is on, at the cost of measuring every non-modern
 provider that often; most measurements of a provider without the responder
 take the whole establishment window.
+
+## Switching it on
+
+The probe ships off, and a switched-off probe schedules nothing: no task
+row, no prober shard, no derived client, no reads but its settings. A
+taskworker turns it on in its startup schedule (`ScheduleCapabilityProbe`),
+which schedules the probe's one row due at once when it reads
+`enabled: true`. A taskworker container keeps the config version it was
+created with (warp mounts the newest published config only when it creates
+a container, and config releases go out with `restart: false`), so a running
+taskworker never sees a changed `capability_probe.yml`, in either direction:
+switching the probe on or off takes a taskworker restart.
+
+1. Add `main/capability_probe.yml` to the config repository; every key it
+   leaves out keeps its default:
+
+   ```yaml
+   # server/capprobe, the FP2 modern provider gate's capability probe
+   enabled: true
+   ```
+
+2. Release the config through the config-updater, built with
+   `--config_restart=no` as usual, and wait until every taskworker host has
+   published the new `/srv/warp/main/config/<version>` (not `.tmp`), about
+   100-125 s per host.
+3. Restart every taskworker block (`systemctl restart warp-main-taskworker-g<N>`
+   on each host) and check that each container's `WARP_CONFIG_VERSION` is the
+   new version. Until every taskworker runs the new config, a pass claimed by
+   one still on the old config runs nothing and ends the chain, and the next
+   restart schedules the probe again.
+4. The first taskworker that starts with the new config schedules the row,
+   due at once; a worker claims it a second or so later, and the first pass
+   starts a sweep at once: it reads its pages, takes prober shard 255 and
+   starts measuring. A modern provider reads in seconds, one without the
+   responder after its 60 s establishment window, and none takes longer than
+   `measure_timeout_seconds` (120). `passes_total{result="measured"}` and
+   `last_pass_timestamp_seconds` show it (egress probes dashboard, capability
+   probe row).
+
+To switch it off, set `enabled: false` (or remove the file) and release and
+restart the same way: the next pass on a restarted taskworker runs nothing
+and schedules no successor, and its sweep and held downgrades go with it.
 
 ## Metrics
 

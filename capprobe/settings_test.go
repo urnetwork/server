@@ -11,12 +11,14 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// The defaults validate, measure past the establishment window, refresh well
-// inside the gate's staleness window, and fit a measurement in a pass.
+// The defaults switch the probe off, and switched on they validate, measure
+// past the establishment window, refresh well inside the gate's staleness
+// window, and fit a measurement in a pass.
 func TestDefaultSettingsAreValid(t *testing.T) {
 	settings := DefaultSettings()
+	connect.AssertEqual(t, settings.Enabled, false)
+	settings.Enabled = true
 	connect.AssertEqual(t, settings.Validate(), nil)
-	connect.AssertEqual(t, settings.Enabled, true)
 	if settings.measureTimeout() < tlsTimeout()+minMeasureSetupAllowance {
 		t.Fatalf("the default measurement %s does not outlast the %s establishment window", settings.measureTimeout(), tlsTimeout())
 	}
@@ -73,6 +75,7 @@ func TestSettingsBounds(t *testing.T) {
 		{name: "disabled and broken", change: func(s *Settings) { s.Enabled = false; s.Concurrency = 0; s.MaxTimeSeconds = 0 }, valid: true},
 	} {
 		settings := DefaultSettings()
+		settings.Enabled = true
 		c.change(&settings)
 		if err := settings.Validate(); (err == nil) != c.valid {
 			t.Errorf("%s: validate = %v, want valid %t", c.name, err, c.valid)
@@ -83,18 +86,27 @@ func TestSettingsBounds(t *testing.T) {
 // The deployment resource overlays the defaults; one that does not decode,
 // or does not validate, is an error rather than the defaults.
 func TestLoadSettingsOverlaysTheResource(t *testing.T) {
-	pop := server.Config.PushSimpleResource(SettingsResourceName, []byte("concurrency: 4\nlimit: 8\n"))
+	pop := server.Config.PushSimpleResource(SettingsResourceName, []byte("enabled: true\nconcurrency: 4\nlimit: 8\n"))
 	settings, err := LoadSettings()
 	pop()
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := DefaultSettings()
+	want.Enabled = true
 	want.Concurrency = 4
 	want.Limit = 8
 	connect.AssertEqual(t, settings, want)
 
-	for _, body := range []string{"concurrency: [", "concurrency: 0\n"} {
+	// a file that says nothing of enabled leaves the probe switched off
+	pop = server.Config.PushSimpleResource(SettingsResourceName, []byte("concurrency: 4\nlimit: 8\n"))
+	settings, err = LoadSettings()
+	pop()
+	if err != nil || settings.Enabled {
+		t.Fatalf("a resource without enabled loaded %+v, %v", settings, err)
+	}
+
+	for _, body := range []string{"concurrency: [", "enabled: true\nconcurrency: 0\n"} {
 		pop := server.Config.PushSimpleResource(SettingsResourceName, []byte(body))
 		_, err := LoadSettings()
 		pop()

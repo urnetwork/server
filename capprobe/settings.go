@@ -33,11 +33,13 @@ const minMeasureSetupAllowance = 15 * time.Second
 // A pass's whole budget is a prober shard's lifetime, which is at most a day.
 const maxPassTime = 24 * time.Hour
 
-// The deployment settings, read at every pass's start, so a change applies
-// at the next pass. Only the max time is carried in the task's arguments
-// too, because the task row holds the one it was scheduled with.
+// The deployment settings, read at every pass's start and by the
+// taskworker's startup schedule, so a change applies to the next pass of a
+// process that reads it. Only the max time is carried in the task's
+// arguments too, because the task row holds the one it was scheduled with.
 type Settings struct {
-	// false runs no pass: the task only rechecks the settings
+	// false, the default, switches the probe off: a taskworker schedules no
+	// task for it, and a chain already running ends at its next pass
 	Enabled bool `yaml:"enabled"`
 	// providers one pass measures at once, each in a tunnel of its own
 	Concurrency int `yaml:"concurrency"`
@@ -68,12 +70,14 @@ type Settings struct {
 	MaxTimeSeconds int `yaml:"max_time_seconds"`
 }
 
-// Sixteen tunnels at a time measure about 700 providers an hour, so the
-// fleet's Quality and Speed providers are measured in about two days and
-// refreshed every three, well inside the gate's seven-day staleness window.
+// The probe ships switched off: capability_probe.yml turns it on, and these
+// values stand for every key the file leaves out. Sixteen tunnels at a time
+// measure about 700 providers an hour, so the fleet's Quality and Speed
+// providers are measured in about two days and refreshed every three, well
+// inside the gate's seven-day staleness window.
 func DefaultSettings() Settings {
 	return Settings{
-		Enabled:                 true,
+		Enabled:                 false,
 		Concurrency:             16,
 		Limit:                   64,
 		PageSize:                1024,

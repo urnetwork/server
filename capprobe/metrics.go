@@ -15,7 +15,8 @@ const (
 	PassResultMeasured = "measured"
 	// the sweep's next start had not come: nothing was read
 	PassResultWaiting = "waiting"
-	// the settings switch the probe off
+	// the settings switch the probe off: the pass runs nothing and ends its
+	// chain
 	PassResultDisabled = "disabled"
 	// the pass failed: its settings, prober shard, selection or a write
 	PassResultFailed = "failed"
@@ -68,7 +69,7 @@ var passesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "capability_probe",
 	Name:      "passes_total",
-	Help:      "Capability probe passes by result: measured, waiting (every ten minutes between sweeps), disabled, failed",
+	Help:      "Capability probe passes by result: measured, waiting (every ten minutes between sweeps), disabled (the last of a chain once switched off), failed",
 }, []string{"result"})
 
 var selectionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

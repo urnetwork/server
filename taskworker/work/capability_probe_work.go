@@ -38,9 +38,6 @@ const (
 	capabilityProbeShardCount = maxProviderEgressProbeShardCount
 )
 
-// How long a switched-off probe waits before it reads its settings again.
-const capabilityProbeDisabledRecheck = 10 * time.Minute
-
 // The retry delay of a failed pass.
 const capabilityProbeRetryDelay = time.Minute
 
@@ -55,7 +52,8 @@ type CapabilityProbeArgs struct {
 
 // What one pass did, and the sweep's place after it.
 type CapabilityProbeResult struct {
-	// the settings switched the probe off; the sweep stays where it was
+	// the settings switched the probe off: the pass ran nothing, and no
+	// successor is scheduled
 	Disabled bool                 `json:"disabled,omitempty"`
 	Sweep    capprobe.Sweep       `json:"sweep"`
 	Pass     *capprobe.PassResult `json:"pass,omitempty"`
@@ -71,11 +69,24 @@ func capabilityProbeRunOnce() *task.RunOnceOption {
 	return task.RunOnce("capability_probe")
 }
 
-// Ensures the probe's task row. A row that exists keeps its arguments, so a
-// restart keeps the sweep's place; its run time only moves earlier, and a
-// pass that runs before its sweep's next start waits again.
+// At a taskworker's start, ensures the probe's task row while
+// capability_probe.yml switches the probe on, due at once, and does nothing
+// else. The probe ships switched off, and a switched-off probe schedules
+// nothing, so it is turned on by a taskworker starting with settings that
+// enable it. A row that exists keeps its arguments, so a restart keeps the
+// sweep's place; its run time only moves earlier, and a pass that runs
+// before its sweep's next start waits again. Settings that cannot be read
+// switch nothing on, and are logged.
 func ScheduleCapabilityProbe(clientSession *session.ClientSession, tx server.PgTx) {
-	scheduleCapabilityProbeAt(clientSession, tx, &CapabilityProbeArgs{}, server.NowUtc(), capabilityProbeSettingsOrDefault())
+	settings, err := getCapabilityProbeSettings()
+	if err != nil {
+		glog.Errorf("[capprobe]not scheduled: %s cannot be used: %s\n", capprobe.SettingsResourceName, err)
+		return
+	}
+	if !settings.Enabled {
+		return
+	}
+	scheduleCapabilityProbeAt(clientSession, tx, &CapabilityProbeArgs{}, server.NowUtc(), settings)
 }
 
 // Schedules a pass, merging into the pending row of the probe's key.
@@ -93,8 +104,8 @@ func scheduleCapabilityProbeAt(clientSession *session.ClientSession, tx server.P
 }
 
 // The arguments a pass is scheduled with, and its task row's max time: the
-// settings', or the default one for a switched-off probe, whose settings are
-// not validated. The max time rides in the arguments too, so the pass's
+// settings', or the default one for settings that switch the probe off,
+// which are not validated, as a post-step that could not read the file has. The max time rides in the arguments too, so the pass's
 // budget is its row's whatever the settings say when it runs. A row that
 // merges into a pending one keeps that one's arguments, and the row's max
 // time is then the greater of the two, never less than the arguments'.
@@ -123,8 +134,8 @@ func capabilityProbeSettingsOrDefault() capprobe.Settings {
 }
 
 // One pass of the capability probe. Settings are read at every pass, so a
-// change applies at the next one; a switched-off probe runs nothing and
-// keeps its sweep's place. The pass's budget is the max time its task row
+// change applies at the next one; a switched-off probe runs nothing, and its
+// chain ends there (CapabilityProbePost). The pass's budget is the max time its task row
 // was scheduled with, carried in its arguments: the task cancels the pass at
 // that time whatever the settings say now. A failed pass is retried after a
 // minute with the same sweep.
@@ -160,8 +171,10 @@ func CapabilityProbe(
 }
 
 // Schedules the next pass: within a sweep after the pass interval, between
-// sweeps at the next sweep's start, and a switched-off probe after its
-// recheck interval.
+// sweeps a waiting pass or the next sweep's start, whichever comes first. A
+// switched-off probe's pass schedules nothing, which ends the chain; a
+// taskworker that starts with the probe switched on schedules it again
+// (ScheduleCapabilityProbe).
 func CapabilityProbePost(
 	args *CapabilityProbeArgs,
 	result *CapabilityProbeResult,
@@ -169,24 +182,27 @@ func CapabilityProbePost(
 	tx server.PgTx,
 ) error {
 	settings := capabilityProbeSettingsOrDefault()
-	nextArgs, runAt := capabilityProbeSuccessor(args, result, settings, server.NowUtc())
-	scheduleCapabilityProbeAt(clientSession, tx, nextArgs, runAt, settings)
+	nextArgs, runAt, scheduled := capabilityProbeSuccessor(args, result, settings, server.NowUtc())
+	if scheduled {
+		scheduleCapabilityProbeAt(clientSession, tx, nextArgs, runAt, settings)
+	}
 	return nil
 }
 
-// The next pass's arguments and run time after a pass finished at now.
-func capabilityProbeSuccessor(args *CapabilityProbeArgs, result *CapabilityProbeResult, settings capprobe.Settings, now time.Time) (*CapabilityProbeArgs, time.Time) {
+// The next pass's arguments and run time after a pass finished at now, and
+// false for none: a switched-off probe's pass ends the chain.
+func capabilityProbeSuccessor(args *CapabilityProbeArgs, result *CapabilityProbeResult, settings capprobe.Settings, now time.Time) (*CapabilityProbeArgs, time.Time, bool) {
 	switch {
 	case result == nil:
 		sweep := capprobe.Sweep{}
 		if args != nil {
 			sweep = args.Sweep
 		}
-		return &CapabilityProbeArgs{Sweep: sweep}, now.Add(settings.PassInterval())
+		return &CapabilityProbeArgs{Sweep: sweep}, now.Add(settings.PassInterval()), true
 	case result.Disabled:
-		return &CapabilityProbeArgs{Sweep: result.Sweep}, now.Add(capabilityProbeDisabledRecheck)
+		return nil, time.Time{}, false
 	default:
-		return &CapabilityProbeArgs{Sweep: result.Sweep}, settings.NextPassAt(result.Sweep, now)
+		return &CapabilityProbeArgs{Sweep: result.Sweep}, settings.NextPassAt(result.Sweep, now), true
 	}
 }
 

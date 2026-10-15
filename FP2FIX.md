@@ -348,10 +348,13 @@ provider cannot resolve the probe client's key.
   selects from the database first, and one that measures runs in a prober
   shard of its own (slot 255, which the URL probe's `shard_count`, at most
   255, never reaches): a private network, credential parent and balance, so
-  its load and funding are apart from the URL probe's quota and budget. A pass with
-  nothing to measure takes no shard. Settings are `capability_probe.yml`,
-  enabled by default. Metrics are `urnetwork_capability_probe_*` on the
-  egress probes dashboard, and SIGNALS.md §2.19g reads them.
+  its load and funding are apart from the URL probe's quota and budget. A
+  pass with nothing to measure takes no shard. Settings are
+  `capability_probe.yml`. The probe ships switched off and then schedules
+  nothing at all; `enabled: true` there and a taskworker restart switch it
+  on (capprobe/README.md, "Switching it on"). Metrics are
+  `urnetwork_capability_probe_*` on the egress probes dashboard, and
+  SIGNALS.md §2.19g reads them.
 - **Outcomes.** Each pass classifies a provider's row: `modern`,
   `not_post_quantum`, `no_resizable_windows`, `no_evidence` or
   `stale_evidence`. Age is tested first: evidence exactly seven days old is
@@ -400,10 +403,16 @@ provider cannot resolve the probe client's key.
   own main need connect APIs newer than the branch's base. (2) Migration 836
   is applied on Main, and the gate merged into server main (ebc1f95a9) with
   the switch off, both on 2026-10-14. (3) Deploy the API and the taskworkers
-  with the switch off; the capability probe starts measuring at the
-  taskworkers' next start (`enabled: false` in `capability_probe.yml` stops
-  it at the next pass). There is no API-first constraint any more: nothing
-  new rides the operator submission. (4) Review the shadow counts until
+  with the switch off. The capability probe ships switched off and
+  schedules nothing, so the deploy measures nothing. There is no API-first
+  constraint any more: nothing new rides the operator submission.
+  (3b) Switch the probe on by config in the chosen slot (sn-55: 2026-10-16
+  about 19:30Z or later): `main/capability_probe.yml` with `enabled: true`,
+  released through the config-updater, then a restart of every taskworker,
+  since a running container keeps the config it started with; the first
+  restarted taskworker schedules the first pass due at once
+  (capprobe/README.md, "Switching it on"). Switching it off is the same
+  release and restart with `enabled: false`. (4) Review the shadow counts until
   `no_evidence` is small and the not-modern providers are understood, with
   the capability probe's readings: a large `post_quantum_unsealed` share
   would mean providers whose identity proof the probe could not verify,

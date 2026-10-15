@@ -240,6 +240,7 @@ func TestPassRefusesDisabledOrInvalidSettings(t *testing.T) {
 	disabled := DefaultSettings()
 	disabled.Enabled = false
 	invalid := DefaultSettings()
+	invalid.Enabled = true
 	invalid.Concurrency = 0
 	for _, settings := range []Settings{disabled, invalid} {
 		runner := &passRunner{settings: settings, readPage: store.readPage, filterEligible: store.filterEligible, open: fleet.openTunnel, record: store.record, now: time.Now, after: time.After}
