@@ -30,22 +30,38 @@ type fakeSlackWebhook struct {
 	body   string
 	// when set, the handler holds every request until it is canceled
 	hold bool
+	// when set, each request waits for a receive from it, or for it to close,
+	// before it is answered
+	release chan struct{}
+	// receives once per request, when it arrives
+	arrived chan struct{}
 	// receives once per answered request, after the response is written
 	answered chan struct{}
 }
 
 func newFakeSlackWebhook(t *testing.T) (*fakeSlackWebhook, string) {
-	webhook := &fakeSlackWebhook{answered: make(chan struct{}, 64)}
+	webhook := &fakeSlackWebhook{arrived: make(chan struct{}, 64), answered: make(chan struct{}, 64)}
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		webhook.stateLock.Lock()
 		webhook.requests++
-		hold, status, body := webhook.hold, webhook.status, webhook.body
+		hold, status, body, release := webhook.hold, webhook.status, webhook.body, webhook.release
 		webhook.stateLock.Unlock()
+		select {
+		case webhook.arrived <- struct{}{}:
+		default:
+		}
 		if hold {
 			// the server notices a client disconnect only once the body is read
 			_, _ = io.Copy(io.Discard, request.Body)
 			<-request.Context().Done()
 			return
+		}
+		if release != nil {
+			select {
+			case <-release:
+			case <-request.Context().Done():
+				return
+			}
 		}
 		defer func() {
 			select {
@@ -94,6 +110,27 @@ func (self *fakeSlackWebhook) respond(status int, body string) {
 	defer self.stateLock.Unlock()
 	self.status = status
 	self.body = body
+}
+
+// Makes later requests wait for the returned channel; closing it releases
+// them all.
+func (self *fakeSlackWebhook) holdUntilReleased() chan struct{} {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.release = make(chan struct{})
+	return self.release
+}
+
+// Waits for count receives from a webhook barrier channel.
+func awaitSlackWebhook(t *testing.T, barrier chan struct{}, count int, what string) {
+	t.Helper()
+	for i := 0; i < count; i++ {
+		select {
+		case <-barrier:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("timed out waiting for %s %d of %d", what, i+1, count)
+		}
+	}
 }
 
 // A manually advanced clock and a log sink, shared by the notifier tests.
@@ -369,6 +406,45 @@ func TestSlackAlertNotifierRateLimitsWithASummary(t *testing.T) {
 		if !strings.Contains(texts[3], want) {
 			t.Errorf("summary lacks %q: %q", want, texts[3])
 		}
+	}
+}
+
+// A summary the full queue refuses keeps its held transitions and counts, so
+// the next summary still names them.
+func TestSlackAlertNotifierKeepsTheSummaryWhenTheQueueIsFull(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	release := webhook.holdUntilReleased()
+	harness := newSlackTestHarness()
+	settings := harness.settings(webhookUrl)
+	settings.MaxMessagesPerMinute = 2
+	settings.QueueSize = 1
+	notifier := NewSlackAlertNotifier(settings)
+
+	active := Alerts{slackTestAlert("pg-1", "", SeverityWarn)}
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	// the sender holds pg-1 at the webhook, so the queue is empty again
+	awaitSlackWebhook(t, webhook.arrived, 1, "request")
+	// pg-2 fills the one-message queue, and pg-3 is over the cap
+	active = append(active, slackTestAlert("pg-2", "", SeverityWarn))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	active = append(active, slackTestAlert("pg-3", "", SeverityWarn))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	harness.advance(61 * time.Second)
+	// the cap allows the summary again, but the full queue refuses it
+	notifier.flushSummary()
+	close(release)
+	awaitSlackWebhook(t, webhook.answered, 2, "answer")
+	notifier.flushSummary()
+	closeSlackNotifier(t, notifier)
+
+	texts := webhook.posted()
+	requireSlackTexts(t, texts,
+		"[WARN] raised (synthetic): Active client backends on pg-1",
+		"[WARN] raised (synthetic): Active client backends on pg-2",
+		"[RATE LIMIT] (synthetic) 1 alert transition(s) were not posted one by one",
+	)
+	if !strings.Contains(texts[2], "- [WARN] raised: pg/active-pileup · active-pileup · pg-3") || strings.Contains(texts[2], "dropped") {
+		t.Fatalf("summary = %q", texts[2])
 	}
 }
 

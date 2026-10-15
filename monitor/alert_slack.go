@@ -393,25 +393,27 @@ func (self *SlackAlertNotifier) admitWithLock(now time.Time, transitions []slack
 	allowed := func() bool {
 		return len(self.sentTimes) < self.settings.MaxMessagesPerMinute
 	}
-	offer := func(text string) {
+	offer := func(text string) bool {
 		select {
 		case self.messages <- text:
 			self.sentTimes = append(self.sentTimes, now)
+			return true
 		default:
-			self.droppedCount++
+			return false
 		}
 	}
 
-	if (0 < self.suppressedCount || 0 < self.droppedCount) && allowed() {
-		text := self.summaryTextWithLock()
+	// a summary the full queue refuses keeps what it holds for the next try
+	if (0 < self.suppressedCount || 0 < self.droppedCount) && allowed() && offer(self.summaryTextWithLock()) {
 		self.suppressed = nil
 		self.suppressedCount = 0
 		self.droppedCount = 0
-		offer(text)
 	}
 	for _, transition := range transitions {
 		if self.suppressedCount == 0 && allowed() {
-			offer(slackTransitionText(self.settings.Environment, transition, self.settings.ClearAfterCompleteRuns))
+			if !offer(slackTransitionText(self.settings.Environment, transition, self.settings.ClearAfterCompleteRuns)) {
+				self.droppedCount++
+			}
 			continue
 		}
 		self.suppressedCount++
