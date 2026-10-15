@@ -764,10 +764,10 @@ func (self *Resolver) resolution(relPath string) *resolverResolution {
 				return &resolverResolution{err: err, generation: resolverGeneration.Add(1)}
 			}
 			resolution := self.homeResolution(scope.root, scope.env, relPath)
-			if scope.launcherEndpoint != "" && resolution.err == nil {
-				// the selected launcher file, cached or not, must name the
-				// endpoint of the attestation just read
-				if err := requireTestLauncherResourceEndpoint(resolution.paths[0], scope.launcherEndpoint); err != nil {
+			if resolution.err == nil {
+				// what the lookup selected, cached or not, must stay inside its
+				// scope and, from the launcher, name the attestation just read
+				if err := scope.requireSelected(relPath, resolution.paths); err != nil {
 					return &resolverResolution{err: err, generation: resolverGeneration.Add(1)}
 				}
 			}

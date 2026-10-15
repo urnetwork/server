@@ -63,20 +63,27 @@ var testLauncherResourceNameServices = map[string]string{
 	"redis.yml":                    "redis",
 }
 
-// The homes one vault lookup of a test binary searches. A launcher resource
-// also carries the attested host:port that its selected file must name.
+// The homes one vault lookup of a test binary searches. Every file such a
+// lookup selects must resolve inside containedRoot, unless the lookup has the
+// explicit opt-in, and a launcher resource must also name the attested
+// host:port, launcherEndpoint.
 type testVaultScope struct {
 	root             string
 	env              string
+	containedRoot    string
 	launcherEndpoint string
 }
 
 // Where a test binary's vault lookup of relPath may read, or why it may not.
 // Refusals read as not found, as refuseNonFixtureVault's do.
 func selectTestVaultScope(root string, env string, relPath string) (testVaultScope, error) {
+	// the explicit opt-in reads any vault as before, uncontained
+	if os.Getenv(TestRealVaultEnv) == "1" {
+		return testVaultScope{root: root, env: env}, nil
+	}
 	fixtureErr := refuseNonFixtureVault(root, true)
 	if fixtureErr == nil {
-		return testVaultScope{root: root, env: env}, nil
+		return testVaultScope{root: root, env: env, containedRoot: root}, nil
 	}
 	launcherVaultHome := os.Getenv(testLauncherVaultHomeEnvName)
 	if launcherVaultHome == "" || !filepath.IsAbs(launcherVaultHome) ||
@@ -100,7 +107,8 @@ func selectTestVaultScope(root string, env string, relPath string) (testVaultSco
 				relPath,
 			)
 		}
-		return testVaultScope{root: filepath.Join(syntheticTestResourceRoot, "vault"), env: env}, nil
+		fixtureVault := filepath.Join(syntheticTestResourceRoot, "vault")
+		return testVaultScope{root: fixtureVault, env: env, containedRoot: fixtureVault}, nil
 	}
 	attestation, err := readTestLauncherAttestation()
 	if err != nil {
@@ -142,8 +150,46 @@ func selectTestVaultScope(root string, env string, relPath string) (testVaultSco
 	if service == "redis" {
 		launcherEndpoint = attestation.redisEndpoint
 	}
-	// only the local directory, which the launcher reads
-	return testVaultScope{root: filepath.Join(root, "local"), launcherEndpoint: launcherEndpoint}, nil
+	// Only the local directory, which the launcher reads, and only a real one:
+	// a link there could lead to another environment such as main.
+	resolvedVaultHome, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return testVaultScope{}, fmt.Errorf("%w: resolve the launcher's vault %s: %w", ErrResourceUnavailable, root, err)
+	}
+	localDir := filepath.Join(resolvedVaultHome, "local")
+	if info, err := os.Lstat(localDir); err != nil || !info.IsDir() {
+		return testVaultScope{}, fmt.Errorf(
+			"%w: a test reads the launcher's %s only from a real local directory, and %s is not one",
+			ErrResourceNotFound,
+			relPath,
+			localDir,
+		)
+	}
+	return testVaultScope{root: localDir, containedRoot: localDir, launcherEndpoint: launcherEndpoint}, nil
+}
+
+// Requires every file that a lookup of relPath in this scope selected, its
+// symlinks resolved, to lie inside the contained root, before anything reads
+// it, and a launcher resource then to name the attested endpoint. Runs on every
+// lookup, cached or not.
+func (self testVaultScope) requireSelected(relPath string, paths []string) error {
+	if self.containedRoot != "" {
+		for _, path := range paths {
+			if !pathWithin(path, self.containedRoot) {
+				return fmt.Errorf(
+					"%w: a test reads %s only from inside %s, and %s leads outside it",
+					ErrResourceNotFound,
+					relPath,
+					self.containedRoot,
+					path,
+				)
+			}
+		}
+	}
+	if self.launcherEndpoint != "" {
+		return requireTestLauncherResourceEndpoint(paths[0], self.launcherEndpoint)
+	}
+	return nil
 }
 
 // The endpoints of a valid launcher readiness record: each service's name and
@@ -232,7 +278,7 @@ func readTestLauncherAttestation() (testLauncherAttestation, error) {
 
 // Requires the selected launcher resource's authority, interpolated as
 // SimpleResource.String interpolates it, to be the attested endpoint. Errors
-// name the file and the endpoints, never another value of the file.
+// name the file and the attested endpoint, never a value of the file.
 func requireTestLauncherResourceEndpoint(path string, launcherEndpoint string) error {
 	bytes, err := os.ReadFile(path)
 	if err != nil {
@@ -269,10 +315,9 @@ func requireTestLauncherResourceEndpoint(path string, launcherEndpoint string) e
 	}
 	if authority != launcherEndpoint {
 		return fmt.Errorf(
-			"%w: the launcher's %s names %s, not the attested endpoint %s",
+			"%w: the launcher's %s does not name the attested endpoint %s",
 			ErrResourceNotFound,
 			path,
-			authority,
 			launcherEndpoint,
 		)
 	}

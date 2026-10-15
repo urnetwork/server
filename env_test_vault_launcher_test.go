@@ -42,6 +42,17 @@ func testLauncherReadiness(replacedFieldNameValues map[string]string) string {
 	return record
 }
 
+// The launcher vault's local directory with its symlinks resolved, as the
+// launcher scope reads it (Darwin's temp directory is below the /var link).
+func testLauncherLocalDir(t *testing.T, vaultHome string) string {
+	t.Helper()
+	localDir, err := filepath.EvalSymlinks(filepath.Join(vaultHome, "local"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return localDir
+}
+
 // The endpoints that test-env.sh would attest for the synthetic launcher: its
 // dedicated address with each service's port.
 const testLauncherAttestedAddrs = "192.0.2.10:15432,192.0.2.10:16379"
@@ -122,7 +133,7 @@ func TestTestBinaryLoadsDbSettingsFromTheAttestedLauncherVault(t *testing.T) {
 	}
 	for _, name := range []string{"pg.yml", "redis.yml"} {
 		path, err := Vault.ResourcePath(name)
-		if err != nil || path != filepath.Join(vaultHome, "local", name) {
+		if err != nil || path != filepath.Join(testLauncherLocalDir(t, vaultHome), name) {
 			t.Fatalf("%s resolved to %q, %v; want the launcher's local file", name, path, err)
 		}
 	}
@@ -286,7 +297,7 @@ func TestTestBinaryRefusesLauncherResourcesWithoutAValidAttestation(t *testing.T
 					testEnvManagedEnvironment("192.0.2.10:25432,192.0.2.10:16379"), testEnvUnusedResolver(t)))
 			},
 			refusedNames: []string{"pg.yml"},
-			errorText:    "not the attested endpoint " + testLauncherPostgresHost + ":25432",
+			errorText:    "does not name the attested endpoint " + testLauncherPostgresHost + ":25432",
 		},
 		{
 			name: "another Redis endpoint",
@@ -294,7 +305,7 @@ func TestTestBinaryRefusesLauncherResourcesWithoutAValidAttestation(t *testing.T
 				writeFile(t, filepath.Join(lockDir, "ready"), testLauncherReadiness(map[string]string{"redis_host": "redis.other.example"}))
 			},
 			refusedNames: []string{"redis.yml"},
-			errorText:    "not the attested endpoint redis.other.example:16379",
+			errorText:    "does not name the attested endpoint redis.other.example:16379",
 		},
 		{
 			name: "incomplete test-only lock paths",
@@ -462,7 +473,7 @@ func TestTestBinaryReadsNoMainOrNonLocalResourcesThroughTheLauncher(t *testing.T
 				}
 			},
 			refusedNameErrorTexts: map[string]string{
-				"pg.yml": "names pg.main.example:5432, not the attested endpoint",
+				"pg.yml": "does not name the attested endpoint " + testLauncherPostgresHost + ":15432",
 			},
 		},
 		{
@@ -476,8 +487,8 @@ func TestTestBinaryReadsNoMainOrNonLocalResourcesThroughTheLauncher(t *testing.T
 				}
 			},
 			refusedNameErrorTexts: map[string]string{
-				"pg.yml":    "names pg.main.example:5432, not the attested endpoint",
-				"redis.yml": "resource not found",
+				"pg.yml":    "only from a real local directory",
+				"redis.yml": "only from a real local directory",
 			},
 		},
 	}
@@ -497,8 +508,8 @@ func TestTestBinaryReadsNoMainOrNonLocalResourcesThroughTheLauncher(t *testing.T
 			}
 			if !errors.Is(err, ErrResourceNotFound) || !strings.Contains(err.Error(), errorText) {
 				t.Errorf("%s: %s read %v; want a refusal naming %q", c.name, name, err, errorText)
-			} else if strings.Contains(err.Error(), testLauncherMainPassword) {
-				t.Errorf("%s: the %s refusal names main's password", c.name, name)
+			} else if strings.Contains(err.Error(), testLauncherMainPassword) || strings.Contains(err.Error(), "pg.main.example") {
+				t.Errorf("%s: the %s refusal repeats a value of main's file", c.name, name)
 			}
 		}
 	}
@@ -515,7 +526,7 @@ func TestTestBinaryChecksTheLauncherAttestationAtEveryLookup(t *testing.T) {
 	requireRead := func(phase string) {
 		t.Helper()
 		paths, err := resolver.ResourcePaths("pg.yml")
-		if err != nil || len(paths) == 0 || paths[0] != filepath.Join(vaultHome, "local", "pg.yml") {
+		if err != nil || len(paths) == 0 || paths[0] != filepath.Join(testLauncherLocalDir(t, vaultHome), "pg.yml") {
 			t.Fatalf("%s: pg.yml resolved to %q, %v; want the launcher's", phase, paths, err)
 		}
 	}
@@ -551,7 +562,112 @@ func TestTestBinaryChecksTheLauncherAttestationAtEveryLookup(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(vaultHome, "local", "pg.yml"), []byte(pg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	requireRefused("rewritten", "not the attested endpoint")
+	requireRefused("rewritten", "does not name the attested endpoint")
+}
+
+// A lookup in the launcher's vault reads only files that resolve inside its
+// real local directory, and checks that before reading any of them. A
+// credential linked to a file elsewhere, and a local directory that is itself a
+// link, are refused even when what they lead to names the attested endpoints.
+func TestTestBinaryReadsNoLauncherResourceLinkedOutOfItsLocalDirectory(t *testing.T) {
+	elsewhereNameContents := map[string]string{
+		"pg.yml": "authority: \"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15432\"\n" +
+			"user: elsewhere\npassword: " + testLauncherMainPassword + "\ndb: elsewhere\n",
+		"redis.yml": "authority: \"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379\"\n" +
+			"password: " + testLauncherMainPassword + "\ndb: 0\ncluster: false\n",
+	}
+	cases := []struct {
+		name         string
+		setup        func(t *testing.T, vaultHome string, elsewhere string)
+		refusedNames []string
+		errorText    string
+	}{
+		{
+			name: "a credential linked out of the local directory",
+			setup: func(t *testing.T, vaultHome string, elsewhere string) {
+				local := filepath.Join(vaultHome, "local", "pg.yml")
+				if err := os.Remove(local); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(elsewhere, "pg.yml"), local); err != nil {
+					t.Fatal(err)
+				}
+			},
+			refusedNames: []string{"pg.yml"},
+			errorText:    "leads outside it",
+		},
+		{
+			name: "a local directory that is a link",
+			setup: func(t *testing.T, vaultHome string, elsewhere string) {
+				if err := os.Rename(filepath.Join(vaultHome, "local"), filepath.Join(vaultHome, "local-original")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(elsewhere, filepath.Join(vaultHome, "local")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			refusedNames: []string{"pg.yml", "redis.yml"},
+			errorText:    "only from a real local directory",
+		},
+	}
+	for _, c := range cases {
+		vaultHome, _ := writeTestLauncherVault(t)
+		// not below the temp directory, the vault's local directory or any
+		// other fixture root
+		elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+		writeResolverFixture(t, elsewhere, elsewhereNameContents)
+		c.setup(t, vaultHome, elsewhere)
+		for _, name := range c.refusedNames {
+			resource, err := Vault.SimpleResource(name)
+			if err == nil && strings.Contains(string(resource.Bytes()), testLauncherMainPassword) {
+				t.Errorf("%s: %s read the credentials it links to", c.name, name)
+			}
+			if !errors.Is(err, ErrResourceNotFound) || !strings.Contains(err.Error(), c.errorText) {
+				t.Errorf("%s: %s read %v; want a refusal naming %q", c.name, name, err, c.errorText)
+			}
+		}
+		if _, err := loadTestEnvironmentConfiguration(); err == nil {
+			t.Errorf("%s: a DB test loaded the linked settings", c.name)
+		}
+	}
+}
+
+// A fixture vault reads only files that resolve inside it. A test's own vault
+// below the temp directory whose credential links to a file outside every
+// fixture root, such as a real vault's main/pg.yml, is refused, not read, and
+// the vault's own files are still read.
+func TestTestBinaryReadsNoFixtureFileLinkedOutOfItsVault(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", "")
+	t.Setenv(TestRealVaultEnv, "")
+	t.Setenv("GOTMPDIR", "")
+	t.Setenv("WARP_TEST_ENV_LAUNCHER_VAULT_HOME", "")
+	secretVault := filepath.Join(t.TempDir(), "secret-vault")
+	writeResolverFixture(t, secretVault, map[string]string{
+		"main/pg.yml": "authority: pg.main.example:5432\nuser: main\npassword: " + testLauncherMainPassword + "\ndb: main\n",
+	})
+	// the secret vault is no longer below the temp directory
+	t.Setenv("TMPDIR", t.TempDir())
+	if err := refuseNonFixtureVault(secretVault, true); err == nil {
+		t.Fatal("the secret vault is still a fixture")
+	}
+	fixtureVault := filepath.Join(os.Getenv("TMPDIR"), "vault")
+	writeResolverFixture(t, fixtureVault, map[string]string{"local/placeholder.yml": "key: value\n"})
+	if err := os.Symlink(filepath.Join(secretVault, "main", "pg.yml"), filepath.Join(fixtureVault, "local", "pg.yml")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WARP_VAULT_HOME", fixtureVault)
+
+	resource, err := Vault.SimpleResource("pg.yml")
+	if err == nil && strings.Contains(string(resource.Bytes()), testLauncherMainPassword) {
+		t.Fatal("the fixture vault's linked pg.yml read the secret vault's credentials")
+	}
+	if !errors.Is(err, ErrResourceNotFound) || !strings.Contains(err.Error(), "leads outside it") {
+		t.Fatalf("the linked pg.yml read %v; want a refusal naming %q", err, "leads outside it")
+	}
+	if resource, err := Vault.SimpleResource("placeholder.yml"); err != nil || resource.RequireString("key") != "value" {
+		t.Fatalf("the fixture vault's own placeholder.yml read %v", err)
+	}
 }
 
 // The explicit opt-in still reads the vault as before, its root first,
