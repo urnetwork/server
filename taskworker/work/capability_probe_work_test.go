@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -98,7 +99,7 @@ func TestCapabilityProbeSuccessor(t *testing.T) {
 		{name: "no result", args: &CapabilityProbeArgs{Sweep: inSweep}, sweep: inSweep, runAt: now.Add(settings.PassInterval())},
 	} {
 		args, runAt := capabilityProbeSuccessor(c.args, c.result, settings, now)
-		if args.Sweep != c.sweep || !runAt.Equal(c.runAt) {
+		if !reflect.DeepEqual(args.Sweep, c.sweep) || !runAt.Equal(c.runAt) {
 			t.Errorf("%s: next %+v at %s, want %+v at %s", c.name, args.Sweep, runAt, c.sweep, c.runAt)
 		}
 	}
@@ -119,7 +120,7 @@ func TestCapabilityProbeTaskRunsNothingWhileDisabled(t *testing.T) {
 	defer clientSession.Cancel()
 	sweep := capprobe.Sweep{Cursor: server.NewId(), StartedAt: server.NowUtc()}
 	result, err := CapabilityProbe(&CapabilityProbeArgs{Sweep: sweep}, clientSession)
-	if err != nil || result == nil || !result.Disabled || result.Sweep != sweep {
+	if err != nil || result == nil || !result.Disabled || !reflect.DeepEqual(result.Sweep, sweep) {
 		t.Fatalf("result %+v err %v", result, err)
 	}
 }
@@ -140,7 +141,7 @@ func TestCapabilityProbeTaskCarriesTheSweep(t *testing.T) {
 			if !bounded || time.Until(deadline) > settings.MaxTime() || time.Until(deadline) < settings.MaxTime()-time.Minute || maxTime != settings.MaxTime() {
 				t.Errorf("the pass's deadline is %s away and its budget %s, want about %s", time.Until(deadline), maxTime, settings.MaxTime())
 			}
-			if gotSweep != sweep || gotSettings != settings {
+			if !reflect.DeepEqual(gotSweep, sweep) || gotSettings != settings {
 				t.Errorf("the pass got %+v and %+v", gotSweep, gotSettings)
 			}
 			if fail {
@@ -152,7 +153,7 @@ func TestCapabilityProbeTaskCarriesTheSweep(t *testing.T) {
 	clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
 	defer clientSession.Cancel()
 	result, err := CapabilityProbe(&CapabilityProbeArgs{Sweep: sweep}, clientSession)
-	if err != nil || result.Sweep != next || result.Pass == nil || result.Pass.Recorded != 1 {
+	if err != nil || !reflect.DeepEqual(result.Sweep, next) || result.Pass == nil || result.Pass.Recorded != 1 {
 		t.Fatalf("result %+v err %v", result, err)
 	}
 	fail = true
@@ -243,7 +244,7 @@ func TestCapabilityProbeKeepsAFinishedPassWhoseShardCleanupFailed(t *testing.T) 
 		failedBefore := capabilityProbeCounterValue(t, "urnetwork_capability_probe_passes_total", failedLabels)
 		cleanupBefore := capabilityProbeCounterValue(t, "urnetwork_capability_probe_shard_cleanup_errors_total", map[string]string{})
 		next, result, err := capabilityProbeShardPassResult(sweep, outcome, c.finished, c.finishErr, c.err)
-		if next != c.sweep || result != pass {
+		if !reflect.DeepEqual(next, c.sweep) || result != pass {
 			t.Errorf("%s: returned sweep %+v and %+v, want %+v and the pass's result", c.name, next, result, c.sweep)
 		}
 		if c.returnErr == nil && err != nil || c.returnErr != nil && !errors.Is(err, c.returnErr) {
@@ -314,7 +315,7 @@ func TestCapabilityProbePassRunsWithItsScheduledMaxTime(t *testing.T) {
 	raised.MaxTimeSeconds = 2 * scheduledSettings.MaxTimeSeconds
 	sweep := capprobe.Sweep{Cursor: server.NewId(), StartedAt: server.NowUtc()}
 	scheduledArgs, rowMaxTime := capabilityProbeScheduled(&CapabilityProbeArgs{Sweep: sweep}, scheduledSettings)
-	if scheduledArgs.Sweep != sweep || rowMaxTime != scheduledSettings.MaxTime() || time.Duration(scheduledArgs.MaxTimeSeconds)*time.Second != rowMaxTime {
+	if !reflect.DeepEqual(scheduledArgs.Sweep, sweep) || rowMaxTime != scheduledSettings.MaxTime() || time.Duration(scheduledArgs.MaxTimeSeconds)*time.Second != rowMaxTime {
 		t.Fatalf("scheduled %+v with a row max time of %s, want the sweep and %s in both", scheduledArgs, rowMaxTime, scheduledSettings.MaxTime())
 	}
 	disabled := raised

@@ -28,10 +28,13 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/server"
 )
@@ -191,6 +194,20 @@ const recordProviderModernEvidenceSql = `
 		run_count = evidence.run_count + CASE WHEN evidence.measured_at < excluded.measured_at THEN 1 ELSE 0 END
 `
 
+// recordProviderModernEvidenceSql, except that it leaves a row that is
+// modern and fresh, measured after $7, as it is when the newer observation
+// is not modern. It returns a row when it wrote one, and none when it held
+// the observation back. An observation at the row's instant or older is not
+// a downgrade, and changes the row as recordProviderModernEvidenceSql does.
+const recordProviderModernEvidenceHoldingDowngradeSql = recordProviderModernEvidenceSql + `
+	WHERE NOT (
+		evidence.post_quantum AND evidence.window_resizable AND $7 < evidence.measured_at AND
+		evidence.measured_at < excluded.measured_at AND
+		NOT (excluded.post_quantum AND excluded.window_resizable)
+	)
+	RETURNING true
+`
+
 // Records what one probe measurement observed of the provider's session.
 // Evidence that observed nothing records nothing and is no error; evidence
 // the table must not hold is refused with an error and records nothing. A
@@ -199,14 +216,34 @@ const recordProviderModernEvidenceSql = `
 // advertised one, so an inconsistent observation is stored as the less
 // modern reading.
 func RecordProviderModernEvidence(ctx context.Context, clientId server.Id, evidence ProviderModernEvidence) error {
+	_, err := recordProviderModernEvidence(ctx, clientId, evidence, true)
+	return err
+}
+
+// Records evidence as RecordProviderModernEvidence does, except that a newer
+// observation that is not modern does not replace a row that is modern and
+// fresh at the write unless downgradeConfirmed: nothing is written, and held
+// is true. The capability probe confirms a downgrade with a second negative
+// reading in a later sweep, so one transient negative, a provider restarting
+// or a passing fault on the probe's side, never takes a modern provider out
+// of Quality and Speed. A stale modern row, and any other row, is replaced
+// at once.
+func RecordProviderModernEvidenceHoldingDowngrade(ctx context.Context, clientId server.Id, evidence ProviderModernEvidence, downgradeConfirmed bool) (held bool, returnErr error) {
+	return recordProviderModernEvidence(ctx, clientId, evidence, downgradeConfirmed)
+}
+
+// The write of both: downgradeAllowed false holds a newer observation that is
+// not modern back from a modern, fresh row.
+func recordProviderModernEvidence(ctx context.Context, clientId server.Id, evidence ProviderModernEvidence, downgradeAllowed bool) (held bool, returnErr error) {
 	if !evidence.Observed() {
-		return nil
+		return false, nil
 	}
 	if clientId == (server.Id{}) {
-		return fmt.Errorf("modern provider evidence has no client id")
+		return false, fmt.Errorf("modern provider evidence has no client id")
 	}
-	if err := evidence.validate(server.NowUtc()); err != nil {
-		return err
+	now := server.NowUtc()
+	if err := evidence.validate(now); err != nil {
+		return false, err
 	}
 	postQuantum := evidence.E2eNegotiated && evidence.PostQuantum
 	keyExchange := ""
@@ -218,18 +255,38 @@ func RecordProviderModernEvidence(ctx context.Context, clientId server.Id, evide
 		maxReceiveWindowByteCount = evidence.MaxReceiveWindowByteCount
 	}
 	server.Db(ctx, func(conn server.PgConn) {
-		server.RaisePgResult(conn.Exec(
+		if downgradeAllowed {
+			server.RaisePgResult(conn.Exec(
+				ctx,
+				recordProviderModernEvidenceSql,
+				clientId,
+				postQuantum,
+				keyExchange,
+				evidence.WindowAdvertised,
+				maxReceiveWindowByteCount,
+				evidence.ObservedAt.UTC(),
+			))
+			return
+		}
+		var written bool
+		err := conn.QueryRow(
 			ctx,
-			recordProviderModernEvidenceSql,
+			recordProviderModernEvidenceHoldingDowngradeSql,
 			clientId,
 			postQuantum,
 			keyExchange,
 			evidence.WindowAdvertised,
 			maxReceiveWindowByteCount,
 			evidence.ObservedAt.UTC(),
-		))
+			now.Add(-ProviderModernEvidenceMaxAge),
+		).Scan(&written)
+		if errors.Is(err, pgx.ErrNoRows) {
+			held = true
+			return
+		}
+		server.Raise(err)
 	})
-	return nil
+	return held, nil
 }
 
 // The rows of clientIds, read in batches like the scoped common gates so a

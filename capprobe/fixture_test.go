@@ -224,6 +224,8 @@ type fakeStore struct {
 	readErr     error
 	filterCalls [][]server.Id
 	records     []server.Id
+	// the providers whose reading was held back, in order
+	held []server.Id
 }
 
 // count providers with sorted synthetic ids.
@@ -285,19 +287,29 @@ func (self *fakeStore) filterEligible(ctx context.Context, clientIds []server.Id
 	return eligible, nil
 }
 
-// Implements passRunner.record, refusing what the model refuses.
-func (self *fakeStore) record(ctx context.Context, clientId server.Id, evidence model.ProviderModernEvidence) error {
+// Implements passRunner.record, refusing what the model refuses and holding
+// back what it holds back: a newer reading that is not modern, over modern
+// evidence still fresh at the write, unless downgradeConfirmed.
+func (self *fakeStore) record(ctx context.Context, clientId server.Id, evidence model.ProviderModernEvidence, downgradeConfirmed bool) (bool, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if err := self.recordErr[clientId]; err != nil {
-		return err
+		return false, err
 	}
 	if !evidence.Observed() {
-		return errors.New("synthetic store refuses evidence that observed nothing")
+		return false, errors.New("synthetic store refuses evidence that observed nothing")
+	}
+	if stored, ok := self.evidence[clientId]; ok && !downgradeConfirmed &&
+		modernOutcomeOf(stored) == model.ProviderModernOutcomeModern &&
+		stored.ObservedAt.After(time.Now().Add(-model.ProviderModernEvidenceMaxAge)) &&
+		stored.ObservedAt.Before(evidence.ObservedAt) &&
+		modernOutcomeOf(evidence) != model.ProviderModernOutcomeModern {
+		self.held = append(self.held, clientId)
+		return true, nil
 	}
 	self.evidence[clientId] = evidence
 	self.records = append(self.records, clientId)
-	return nil
+	return false, nil
 }
 
 func (self *fakeStore) recordedIds() []server.Id {

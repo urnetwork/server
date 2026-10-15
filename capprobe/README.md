@@ -87,6 +87,30 @@ capability that was not tested is never recorded, as a negative or
 otherwise. The model reads an unsealed post-quantum session as post-quantum;
 the metrics keep sealed and unsealed apart for the shadow review.
 
+## Negative readings
+
+A negative reading, evidence that is not modern, takes a provider out of
+Quality and Speed once the gate is on, so two guards keep a passing fault
+from recording one.
+
+- **Breaker.** A pass records a negative reading only once one of its
+  measurements has negotiated an end-to-end session with some provider.
+  Until then the reading waits; a pass that negotiates none at all, which is
+  how a fault on the probe's own side shows across the fleet, records none of
+  them (outcome `negative_withheld`, `breaker_trips_total`). Those providers
+  stay due and the next sweep measures them again. A small pass whose
+  providers all lack the responder withholds too, which costs a measurement a
+  sweep, never a wrong record.
+- **Held downgrades.** A negative reading over modern evidence that is still
+  fresh is held back (`model.RecordProviderModernEvidenceHoldingDowngrade`,
+  outcome `downgrade_held`): the row keeps its modern reading and stays due,
+  and the sweep carries the hold in the task's arguments (`HeldDowngrades`,
+  at most 256). A negative reading of that provider in a later sweep, at
+  least `min_sweep_interval_minutes` on, confirms the downgrade and records
+  it; any reading recorded, a modern one included, retires the hold, and a
+  hold as old as the seven-day staleness window, by when the evidence has
+  gone stale anyway, is dropped. `downgrades_total{result}` counts both.
+
 ## Settings
 
 `capability_probe.yml`, read at every pass; without it the defaults apply.
@@ -115,9 +139,10 @@ take the whole establishment window.
 ## Metrics
 
 `urnetwork_capability_probe_*`: passes by result, selection by stage,
-providers by outcome, readings per capability, measurement duration, in
-flight, teardown errors, sweeps and the last sweep's duration, and the last
-pass. The egress probes dashboard charts them all; SIGNALS.md §2.19g says
-what each means. The probe's derived clients are minted and retired by the
+providers by outcome, readings per capability, held and confirmed
+downgrades, breaker trips, measurement duration, in flight, teardown errors,
+funding readiness failures, prober shard cleanup errors, sweeps and the last
+sweep's duration, and the last pass. The egress probes dashboard charts them
+all; SIGNALS.md §2.19g says what each means. The probe's derived clients are minted and retired by the
 same in-process credential owner as the URL probe's, so
 `urnetwork_egress_probe_internal_credentials_total` counts both.

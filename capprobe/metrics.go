@@ -50,6 +50,20 @@ const (
 	capabilityWindow = "window"
 )
 
+// What became of a downgrade of fresh modern evidence, the labels of
+// urnetwork_capability_probe_downgrades_total.
+const (
+	// a negative reading was held back
+	downgradeHeld = "held"
+	// a later sweep's negative reading confirmed a held one and was recorded
+	downgradeConfirmed = "confirmed"
+)
+
+var downgradeResults = []string{
+	downgradeHeld,
+	downgradeConfirmed,
+}
+
 var passesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "capability_probe",
@@ -98,6 +112,20 @@ var closeErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 	Subsystem: "capability_probe",
 	Name:      "close_errors_total",
 	Help:      "Capability tunnel teardowns that returned an error; the derived client's retirement is then for the prober reaper",
+})
+
+var downgradesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "downgrades_total",
+	Help:      "Negative readings of providers with fresh modern evidence: held back for a later sweep to confirm, or confirmed by one and recorded",
+}, []string{"result"})
+
+var breakerTripsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "breaker_trips_total",
+	Help:      "Capability probe passes that negotiated no end-to-end session with any provider and so recorded none of their negative readings",
 })
 
 // The funding readiness steps a pass's check fails at, the labels of
@@ -162,11 +190,16 @@ func init() {
 	for _, step := range readinessSteps {
 		readinessFailuresTotal.WithLabelValues(step)
 	}
+	for _, result := range downgradeResults {
+		downgradesTotal.WithLabelValues(result)
+	}
 	prometheus.MustRegister(
 		passesTotal,
 		selectionTotal,
 		providersTotal,
 		readingsTotal,
+		downgradesTotal,
+		breakerTripsTotal,
 		measureSeconds,
 		inFlight,
 		closeErrorsTotal,

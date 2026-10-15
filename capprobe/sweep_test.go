@@ -4,6 +4,7 @@ package capprobe
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"testing"
 	"testing/synctest"
@@ -166,7 +167,7 @@ func TestNextSweep(t *testing.T) {
 		{name: "all started at the end", started: 2, next: Sweep{NextSweepAt: startedAt.Add(6 * time.Hour)}, completed: true},
 	} {
 		next, completed := nextSweep(sweep, selected, c.started, 6*time.Hour)
-		if next != c.next || completed != c.completed {
+		if !reflect.DeepEqual(next, c.next) || completed != c.completed {
 			t.Errorf("%s: next %+v completed %t, want %+v %t", c.name, next, completed, c.next, c.completed)
 		}
 	}
@@ -223,7 +224,7 @@ func TestPassesSweepThePopulationOnceAnInterval(t *testing.T) {
 		// the next sweep waits its interval, reading nothing
 		reads := store.pageReads
 		next, result, err := runner.run(t.Context(), sweep)
-		if err != nil || !result.Waiting || next != sweep || store.pageReads != reads {
+		if err != nil || !result.Waiting || !reflect.DeepEqual(next, sweep) || store.pageReads != reads {
 			t.Fatalf("a pass before the next sweep's start ran: %+v %+v %v", next, result, err)
 		}
 

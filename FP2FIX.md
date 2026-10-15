@@ -301,8 +301,9 @@ provider cannot resolve the probe client's key.
 
 - **Evidence.** The capability probe (`work.CapabilityProbe`, a recurring
   taskworker task) measures each provider in a short tunnel of its own and
-  records a conclusive measurement through `model.RecordProviderModernEvidence`
-  in `provider_modern_evidence` (migration 836), one row per provider:
+  records a conclusive measurement through
+  `model.RecordProviderModernEvidenceHoldingDowngrade` in
+  `provider_modern_evidence` (migration 836), one row per provider:
   post_quantum, key_exchange, window_resizable,
   max_receive_window_byte_count, measured_at, first_measured_at, run_count.
   The latest observation wins and counts a run. A retried write changes
@@ -312,8 +313,16 @@ provider cannot resolve the probe client's key.
   whatever else it reports. Evidence observed more than a minute ahead, with
   a negative window or an unstorable key exchange name is refused and logged.
   A measurement that observed nothing records nothing, and neither does one
-  where either capability went untested. provider_egress_health_history, the
-  URL due queue and the URL quota are not touched. The URL probe's
+  where either capability went untested. Two guards keep a passing fault from
+  recording a negative, which takes a provider out once the gate is on: a
+  pass records negative readings only once one of its measurements has
+  negotiated a session with some provider, so a fault on the probe's own
+  side, which shows as no provider negotiating, records nothing (the
+  breaker); and a negative reading over modern evidence still fresh is held
+  back until a negative reading in a later sweep confirms it, the hold
+  carried in the task's arguments (capprobe/README.md, "Negative readings").
+  provider_egress_health_history, the URL due queue and the URL quota are
+  not touched. The URL probe's
   submission carries no evidence: the gate's first cut put an optional
   `modern_evidence` on it, read through an `egresshealth.ModernEvidenceSource`
   transport, and the capability probe branch removed that path, since a URL
@@ -353,10 +362,11 @@ provider cannot resolve the probe client's key.
   evidence after three days by default, and its settings refuse a refresh
   that, with one sweep interval's delay, would not land inside the seven, so
   a downgrade shows at the provider's next measurement, within about three
-  days. With 16 tunnels at a time the probe measures several hundred
-  providers an hour, so the first sweep over the fleet's Quality and Speed
-  providers takes about two days, and until it has, the shadow's
-  `no_evidence` is large.
+  days, and a downgrade of modern evidence a sweep later still, when a
+  second negative reading confirms it. With 16 tunnels at a time the probe
+  measures several hundred providers an hour, so the first sweep over the
+  fleet's Quality and Speed providers takes about two days, and until it
+  has, the shadow's `no_evidence` is large.
 - **Shadow counts.** For the providers the other rules admit to Quality and to
   Speed, the passes count the gate's outcome whether the gate is on or off.
   The dashboard counts publish

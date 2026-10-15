@@ -4,6 +4,7 @@ package capprobe
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -17,9 +18,10 @@ import (
 // a time, and measures each provider that is due and eligible as it passes
 // it. A provider that gave no evidence is due again, but the sweep has moved
 // on: the next sweep retries it, and a new sweep starts no sooner than
-// min_sweep_interval_minutes after the last one started. So without any
-// per-provider state, a provider is measured at most once a sweep, and a
-// provider that never answers costs one tunnel a sweep.
+// min_sweep_interval_minutes after the last one started. So a provider is
+// measured at most once a sweep, and a provider that never answers costs one
+// tunnel a sweep. The only per-provider state is the downgrades held back
+// from fresh modern evidence until a later sweep confirms them.
 type Sweep struct {
 	// the last provider the sweep has passed; zero before a sweep starts
 	Cursor server.Id `json:"cursor"`
@@ -27,6 +29,89 @@ type Sweep struct {
 	StartedAt time.Time `json:"started_at,omitempty"`
 	// the earliest a new sweep may start; zero for at once
 	NextSweepAt time.Time `json:"next_sweep_at,omitempty"`
+	// negative readings held back from fresh modern evidence, oldest first,
+	// at most maxHeldDowngrades; carried from sweep to sweep
+	HeldDowngrades []HeldDowngrade `json:"held_downgrades,omitempty"`
+}
+
+// A negative reading held back from a provider's modern evidence while that
+// evidence was fresh (model.RecordProviderModernEvidenceHoldingDowngrade).
+// The provider stays due, so the next sweep measures it again: a negative
+// reading then confirms the downgrade and is recorded, and any reading that
+// is recorded, a modern one included, retires it.
+type HeldDowngrade struct {
+	ClientId server.Id `json:"client_id"`
+	// the start of the sweep that held it
+	SweepStartedAt time.Time `json:"sweep_started_at"`
+}
+
+// The most held downgrades a sweep carries in the task's arguments, a few KiB
+// each pass. A negative reading held past it is held again, untracked, and
+// the sweep after can carry it; it is never recorded unconfirmed.
+const maxHeldDowngrades = 256
+
+// One pass's view of the sweep's held downgrades: whether a negative reading
+// confirms one an earlier sweep held, and which the next pass carries. Not
+// safe for concurrent use; the pass's lock guards it.
+type heldDowngradeSet struct {
+	sweepStartedAt time.Time
+	heldDowngrades []HeldDowngrade
+}
+
+// The held downgrades of sweep still worth carrying at now. One held as long
+// ago as the staleness window is retired: the modern evidence it held up was
+// due for a refresh when it was held, so it has gone stale since, and the
+// gate no longer reads it as modern.
+func newHeldDowngradeSet(sweep Sweep, now time.Time) *heldDowngradeSet {
+	heldDowngrades := []HeldDowngrade{}
+	for _, heldDowngrade := range sweep.HeldDowngrades {
+		if now.Sub(heldDowngrade.SweepStartedAt) < model.ProviderModernEvidenceMaxAge {
+			heldDowngrades = append(heldDowngrades, heldDowngrade)
+		}
+	}
+	return &heldDowngradeSet{
+		sweepStartedAt: sweep.StartedAt,
+		heldDowngrades: heldDowngrades,
+	}
+}
+
+// Whether a negative reading of clientId confirms a downgrade an earlier
+// sweep held.
+func (self *heldDowngradeSet) confirms(clientId server.Id) bool {
+	for _, heldDowngrade := range self.heldDowngrades {
+		if heldDowngrade.ClientId == clientId {
+			return heldDowngrade.SweepStartedAt.Before(self.sweepStartedAt)
+		}
+	}
+	return false
+}
+
+// Carries a downgrade of clientId held now, unless one is carried already or
+// the set is full.
+func (self *heldDowngradeSet) hold(clientId server.Id) {
+	for _, heldDowngrade := range self.heldDowngrades {
+		if heldDowngrade.ClientId == clientId {
+			return
+		}
+	}
+	if len(self.heldDowngrades) < maxHeldDowngrades {
+		self.heldDowngrades = append(self.heldDowngrades, HeldDowngrade{ClientId: clientId, SweepStartedAt: self.sweepStartedAt})
+	}
+}
+
+// Retires the downgrade held for clientId, whose evidence was recorded.
+func (self *heldDowngradeSet) retire(clientId server.Id) {
+	self.heldDowngrades = slices.DeleteFunc(self.heldDowngrades, func(heldDowngrade HeldDowngrade) bool {
+		return heldDowngrade.ClientId == clientId
+	})
+}
+
+// The held downgrades the next pass carries, nil for none.
+func (self *heldDowngradeSet) carried() []HeldDowngrade {
+	if len(self.heldDowngrades) == 0 {
+		return nil
+	}
+	return slices.Clone(self.heldDowngrades)
 }
 
 // Whether a sweep is under way.

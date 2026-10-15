@@ -37,6 +37,12 @@ const (
 	outcomeTunnelLost = "tunnel_lost"
 	// the evidence was conclusive and the model did not store it
 	outcomeRecordFailed = "record_failed"
+	// a negative reading held back from fresh modern evidence until a later
+	// sweep confirms it
+	outcomeDowngradeHeld = "downgrade_held"
+	// a negative reading not recorded because its pass negotiated no
+	// end-to-end session with any provider
+	outcomeNegativeWithheld = "negative_withheld"
 )
 
 // Every outcome, in the order the metrics list them.
@@ -51,6 +57,8 @@ var outcomes = []string{
 	outcomeCanceled,
 	outcomeTunnelLost,
 	outcomeRecordFailed,
+	outcomeDowngradeHeld,
+	outcomeNegativeWithheld,
 }
 
 // One open capability measurement tunnel to one provider. Methods are safe

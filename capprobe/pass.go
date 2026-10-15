@@ -35,6 +35,12 @@ type PassResult struct {
 	Eligible int `json:"eligible"`
 	Started  int `json:"started"`
 	Recorded int `json:"recorded"`
+	// negative readings held back from fresh modern evidence, and held ones
+	// that this pass's negative reading confirmed and recorded
+	DowngradesHeld      int `json:"downgrades_held,omitempty"`
+	DowngradesConfirmed int `json:"downgrades_confirmed,omitempty"`
+	// negative readings not recorded because the pass negotiated no session
+	NegativesWithheld int `json:"negatives_withheld,omitempty"`
 	// the pass reached the end of the connected providers
 	SweepCompleted bool `json:"sweep_completed,omitempty"`
 }
@@ -51,9 +57,12 @@ type passRunner struct {
 	readPage       func(ctx context.Context, afterClientId server.Id, pageSize int, modernRefreshBefore time.Time, otherRefreshBefore time.Time) ([]model.ProviderCapabilityProbeCandidate, error)
 	filterEligible func(ctx context.Context, clientIds []server.Id) ([]server.Id, error)
 	open           openCapabilityTunnel
-	record         func(ctx context.Context, clientId server.Id, evidence model.ProviderModernEvidence) error
-	now            func() time.Time
-	after          func(time.Duration) <-chan time.Time
+	// writes evidence unless it would downgrade fresh modern evidence
+	// without downgradeConfirmed, in which case it writes nothing and held
+	// is true (model.RecordProviderModernEvidenceHoldingDowngrade)
+	record func(ctx context.Context, clientId server.Id, evidence model.ProviderModernEvidence, downgradeConfirmed bool) (held bool, err error)
+	now    func() time.Time
+	after  func(time.Duration) <-chan time.Time
 }
 
 // The production runner, with tunnels from tunnelConfig, nil for a runner
@@ -137,7 +146,7 @@ func (self *passRunner) begin(ctx context.Context, sweep Sweep) (*PassSelection,
 		if startedAt.Before(sweep.NextSweepAt) {
 			return &PassSelection{waiting: true, sweep: sweep, startedAt: startedAt}, nil
 		}
-		sweep = Sweep{StartedAt: startedAt}
+		sweep = Sweep{StartedAt: startedAt, HeldDowngrades: sweep.HeldDowngrades}
 	}
 	selected, err := self.selectDue(ctx, sweep.Cursor, startedAt)
 	if err != nil {
@@ -155,27 +164,32 @@ func (self *passRunner) finish(ctx context.Context, pass *PassSelection) (Sweep,
 		lastPassTimestampSeconds.Set(float64(pass.startedAt.Unix()))
 		return pass.sweep, &PassResult{Waiting: true}, nil
 	}
-	startedCount, recordedCount, measureErr := 0, 0, error(nil)
+	held := newHeldDowngradeSet(pass.sweep, pass.startedAt)
+	counts, measureErr := passCounts{}, error(nil)
 	if 0 < len(pass.selected.dueClientIds) {
 		if self.open == nil {
 			passesTotal.WithLabelValues(PassResultFailed).Inc()
 			return pass.sweep, nil, errors.New("capability probe pass has providers to measure and no tunnels")
 		}
-		startedCount, recordedCount, measureErr = self.measureAll(ctx, pass.selected.dueClientIds)
+		counts, measureErr = self.measureAll(ctx, pass.selected.dueClientIds, held)
 	}
-	observeSelection(pass.selected, startedCount)
+	observeSelection(pass.selected, counts.started)
 	result := &PassResult{
-		Scanned:  pass.selected.scanned,
-		Due:      pass.selected.due,
-		Eligible: pass.selected.eligible,
-		Started:  startedCount,
-		Recorded: recordedCount,
+		Scanned:             pass.selected.scanned,
+		Due:                 pass.selected.due,
+		Eligible:            pass.selected.eligible,
+		Started:             counts.started,
+		Recorded:            counts.recorded,
+		DowngradesHeld:      counts.downgradesHeld,
+		DowngradesConfirmed: counts.downgradesConfirmed,
+		NegativesWithheld:   counts.negativesWithheld,
 	}
 	if measureErr != nil {
 		passesTotal.WithLabelValues(PassResultFailed).Inc()
 		return pass.sweep, result, measureErr
 	}
-	next, completed := nextSweep(pass.sweep, pass.selected, startedCount, self.settings.minSweepInterval())
+	next, completed := nextSweep(pass.sweep, pass.selected, counts.started, self.settings.minSweepInterval())
+	next.HeldDowngrades = held.carried()
 	finishedAt := self.now()
 	if completed {
 		result.SweepCompleted = true
@@ -184,13 +198,23 @@ func (self *passRunner) finish(ctx context.Context, pass *PassSelection) (Sweep,
 	}
 	passesTotal.WithLabelValues(PassResultMeasured).Inc()
 	lastPassTimestampSeconds.Set(float64(finishedAt.Unix()))
-	if 0 < startedCount || completed {
+	if 0 < counts.started || completed {
 		glog.Infof(
-			"[capprobe]pass: scanned=%d due=%d eligible=%d started=%d recorded=%d sweep_completed=%t\n",
-			result.Scanned, result.Due, result.Eligible, result.Started, result.Recorded, result.SweepCompleted,
+			"[capprobe]pass: scanned=%d due=%d eligible=%d started=%d recorded=%d downgrades_held=%d downgrades_confirmed=%d negatives_withheld=%d sweep_completed=%t\n",
+			result.Scanned, result.Due, result.Eligible, result.Started, result.Recorded,
+			result.DowngradesHeld, result.DowngradesConfirmed, result.NegativesWithheld, result.SweepCompleted,
 		)
 	}
 	return next, result, nil
+}
+
+// What one pass's measurements came to.
+type passCounts struct {
+	started             int
+	recorded            int
+	downgradesHeld      int
+	downgradesConfirmed int
+	negativesWithheld   int
 }
 
 // Measures dueClientIds in their order, at most concurrency at once, each in
@@ -199,13 +223,29 @@ func (self *passRunner) finish(ctx context.Context, pass *PassSelection) (Sweep,
 // so the pass ends with every tunnel it opened torn down; the providers it
 // did not start are the first the next pass selects. A failed write stops
 // further starts, and the pass fails with it once every started measurement
-// has finished. Returns how many it started and how many it recorded.
-func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id) (startedCount int, recordedCount int, returnErr error) {
+// has finished.
+//
+// Two guards keep a passing fault from taking modern providers out of
+// Quality and Speed. A negative reading, one that is not modern, is recorded
+// only once some measurement of the pass has negotiated an end-to-end
+// session: until then it waits, and a pass that negotiates none at all, which
+// is how a fault on the probe's own side shows across the fleet, withholds
+// them all and trips the breaker. And a negative reading recorded over
+// modern evidence that is still fresh is held back, unless held, the
+// downgrades the sweep carries, has one an earlier sweep held for the same
+// provider; the pass updates held with what it holds, confirms and records.
+func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id, held *heldDowngradeSet) (passCounts, error) {
 	deadline, bounded := ctx.Deadline()
 	slots := make(chan struct{}, self.settings.Concurrency)
 	var wait sync.WaitGroup
+	startedCount := 0
 	var stateLock sync.Mutex
+	counts := passCounts{}
 	var recordErr error
+	// some measurement of the pass negotiated a session
+	negotiated := false
+	// recordable negative readings waiting for a negotiation
+	waitingNegatives := []measurement{}
 	recordFailed := func() bool {
 		stateLock.Lock()
 		defer stateLock.Unlock()
@@ -216,6 +256,47 @@ func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id
 			return false
 		}
 		return !bounded || self.settings.admissionReserve() <= deadline.Sub(self.now())
+	}
+	// records one recordable reading, and counts it
+	recordReading := func(result measurement) {
+		outcome := result.outcome()
+		confirmed := false
+		if modernOutcomeOf(result.evidence) != model.ProviderModernOutcomeModern {
+			func() {
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				confirmed = held.confirms(result.providerId)
+			}()
+		}
+		wasHeld, err := self.recordEvidence(ctx, result.providerId, result.evidence, confirmed)
+		func() {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			switch {
+			case err != nil:
+				outcome = outcomeRecordFailed
+				recordErr = errors.Join(recordErr, err)
+			case wasHeld:
+				outcome = outcomeDowngradeHeld
+				held.hold(result.providerId)
+				counts.downgradesHeld += 1
+			default:
+				held.retire(result.providerId)
+				counts.recorded += 1
+				if confirmed {
+					counts.downgradesConfirmed += 1
+				}
+			}
+		}()
+		switch {
+		case err != nil:
+			glog.Errorf("[capprobe]evidence of %s not recorded: %s\n", result.providerId, err)
+		case wasHeld:
+			downgradesTotal.WithLabelValues(downgradeHeld).Inc()
+		case confirmed:
+			downgradesTotal.WithLabelValues(downgradeConfirmed).Inc()
+		}
+		observeMeasurement(result, outcome)
 	}
 	for _, providerId := range dueClientIds {
 		acquired := false
@@ -240,25 +321,34 @@ func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id
 			defer inFlight.Dec()
 			server.HandleError(func() {
 				result := self.measure(ctx, providerId)
-				outcome := result.outcome()
-				if result.recordable {
-					if err := self.recordEvidence(ctx, providerId, result.evidence); err != nil {
-						outcome = outcomeRecordFailed
-						glog.Errorf("[capprobe]evidence of %s not recorded: %s\n", providerId, err)
-						func() {
-							stateLock.Lock()
-							defer stateLock.Unlock()
-							recordErr = errors.Join(recordErr, err)
-						}()
-					} else {
-						func() {
-							stateLock.Lock()
-							defer stateLock.Unlock()
-							recordedCount += 1
-						}()
+				recordNow := false
+				var released []measurement
+				func() {
+					stateLock.Lock()
+					defer stateLock.Unlock()
+					if result.reading.negotiated() && !negotiated {
+						// a modern reading has negotiated too
+						negotiated = true
+						released = waitingNegatives
+						waitingNegatives = nil
 					}
+					switch {
+					case !result.recordable:
+					case negotiated:
+						recordNow = true
+					default:
+						waitingNegatives = append(waitingNegatives, result)
+					}
+				}()
+				if !result.recordable {
+					observeMeasurement(result, result.outcome())
 				}
-				observeMeasurement(result, outcome)
+				if recordNow {
+					recordReading(result)
+				}
+				for _, waiting := range released {
+					recordReading(waiting)
+				}
 			}, func(err error) {
 				// the measurement's own teardown has run while unwinding
 				providersTotal.WithLabelValues(outcomeTunnelFailed).Inc()
@@ -267,26 +357,45 @@ func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id
 		}()
 	}
 	wait.Wait()
+	withheld := func() []measurement {
+		stateLock.Lock()
+		defer stateLock.Unlock()
+		if negotiated {
+			return nil
+		}
+		withheld := waitingNegatives
+		waitingNegatives = nil
+		return withheld
+	}()
+	if 0 < len(withheld) {
+		breakerTripsTotal.Inc()
+		for _, result := range withheld {
+			observeMeasurement(result, outcomeNegativeWithheld)
+		}
+		glog.Infof("[capprobe]pass negotiated no end-to-end session with any provider; withheld %d negative readings\n", len(withheld))
+	}
 	stateLock.Lock()
 	defer stateLock.Unlock()
-	return startedCount, recordedCount, recordErr
+	counts.started = startedCount
+	counts.negativesWithheld = len(withheld)
+	return counts, recordErr
 }
 
 // Writes one provider's evidence under a bound of its own, apart from the
-// pass's cancellation.
-func (self *passRunner) recordEvidence(ctx context.Context, providerId server.Id, evidence model.ProviderModernEvidence) error {
+// pass's cancellation; held as passRunner.record says.
+func (self *passRunner) recordEvidence(ctx context.Context, providerId server.Id, evidence model.ProviderModernEvidence, downgradeConfirmed bool) (held bool, err error) {
 	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	return self.record(recordCtx, providerId, evidence)
+	return self.record(recordCtx, providerId, evidence, downgradeConfirmed)
 }
 
-// The production write: model.RecordProviderModernEvidence, with a datastore
-// failure returned rather than raised.
-func recordProviderModernEvidence(ctx context.Context, clientId server.Id, evidence model.ProviderModernEvidence) (returnErr error) {
+// The production write: model.RecordProviderModernEvidenceHoldingDowngrade,
+// with a datastore failure returned rather than raised.
+func recordProviderModernEvidence(ctx context.Context, clientId server.Id, evidence model.ProviderModernEvidence, downgradeConfirmed bool) (held bool, returnErr error) {
 	server.HandleError(func() {
-		returnErr = model.RecordProviderModernEvidence(ctx, clientId, evidence)
+		held, returnErr = model.RecordProviderModernEvidenceHoldingDowngrade(ctx, clientId, evidence, downgradeConfirmed)
 	}, func(err error) {
-		returnErr = err
+		held, returnErr = false, err
 	})
 	return
 }

@@ -132,3 +132,77 @@ func TestCapabilityProbeEligibilityReadsTheDecisionsEvidence(t *testing.T) {
 		connect.AssertEqual(t, FilterProviderCapabilityProbeEligible(ctx, nil), []server.Id{})
 	})
 }
+
+// Through the database (review F8): a newer reading that is not modern does
+// not replace modern evidence that is still fresh until the caller confirms
+// the downgrade, and nothing about the row changes while it is held. A
+// stale modern row, a row that is not modern, and a provider without a row
+// take the reading at once; a modern reading is never held, and a reading
+// at the row's own instant keeps the less modern of the two as before.
+func TestRecordProviderModernEvidenceHoldsAnUnconfirmedDowngrade(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().Truncate(time.Microsecond)
+		read := func(clientId server.Id) *ProviderModernEvidenceRecord {
+			return getProviderModernEvidenceRecords(ctx, []server.Id{clientId})[clientId]
+		}
+		record := func(clientId server.Id, postQuantum bool, windowResizable bool, observedAt time.Time, confirmed bool) bool {
+			held, err := RecordProviderModernEvidenceHoldingDowngrade(ctx, clientId, modernGateTestEvidence(postQuantum, windowResizable, observedAt), confirmed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return held
+		}
+		freshModernAt := now.Add(-80 * time.Hour)
+
+		modern := server.NewId()
+		connect.AssertEqual(t, RecordProviderModernEvidence(ctx, modern, modernGateTestEvidence(true, true, freshModernAt)), nil)
+		before := read(modern)
+		for _, negative := range []struct {
+			postQuantum     bool
+			windowResizable bool
+		}{
+			{postQuantum: false, windowResizable: true},
+			{postQuantum: true, windowResizable: false},
+			{postQuantum: false, windowResizable: false},
+		} {
+			if !record(modern, negative.postQuantum, negative.windowResizable, now.Add(-time.Minute), false) {
+				t.Fatalf("an unconfirmed %+v reading replaced fresh modern evidence", negative)
+			}
+			connect.AssertEqual(t, read(modern), before)
+		}
+		// a modern reading is never held, and refreshes the row
+		connect.AssertEqual(t, record(modern, true, true, now.Add(-2*time.Minute), false), false)
+		if refreshed := read(modern); !refreshed.PostQuantum || !refreshed.WindowResizable || !refreshed.MeasuredAt.Equal(now.Add(-2*time.Minute)) {
+			t.Fatalf("a modern reading stored %+v", refreshed)
+		}
+		// a confirmed downgrade is written
+		connect.AssertEqual(t, record(modern, false, true, now.Add(-time.Minute), true), false)
+		downgraded := read(modern)
+		if downgraded.PostQuantum || !downgraded.WindowResizable || !downgraded.MeasuredAt.Equal(now.Add(-time.Minute)) || downgraded.RunCount != 3 {
+			t.Fatalf("a confirmed downgrade stored %+v", downgraded)
+		}
+
+		// stale modern evidence, other evidence and no evidence take the reading
+		staleModern, legacy, unevidenced := server.NewId(), server.NewId(), server.NewId()
+		connect.AssertEqual(t, RecordProviderModernEvidence(ctx, staleModern, modernGateTestEvidence(true, true, now.Add(-ProviderModernEvidenceMaxAge-time.Hour))), nil)
+		connect.AssertEqual(t, RecordProviderModernEvidence(ctx, legacy, modernGateTestEvidence(false, true, freshModernAt)), nil)
+		for _, clientId := range []server.Id{staleModern, legacy, unevidenced} {
+			if record(clientId, false, false, now.Add(-time.Minute), false) {
+				t.Fatal("a reading was held back from evidence that is not fresh and modern")
+			}
+			if stored := read(clientId); stored == nil || stored.PostQuantum || stored.WindowResizable || !stored.MeasuredAt.Equal(now.Add(-time.Minute)) {
+				t.Fatalf("an unheld reading stored %+v", stored)
+			}
+		}
+
+		// a conflicting reading at the modern row's own instant is not a
+		// downgrade to hold: each capability keeps the less modern reading
+		sameInstant := server.NewId()
+		connect.AssertEqual(t, RecordProviderModernEvidence(ctx, sameInstant, modernGateTestEvidence(true, true, freshModernAt)), nil)
+		connect.AssertEqual(t, record(sameInstant, true, false, freshModernAt, false), false)
+		if stored := read(sameInstant); !stored.PostQuantum || stored.WindowResizable || stored.RunCount != 1 {
+			t.Fatalf("a same-instant reading stored %+v", stored)
+		}
+	})
+}
