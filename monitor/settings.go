@@ -156,8 +156,9 @@ type GrafanaSettings struct {
 // AlertNotificationSettings configures the continuous watcher's optional
 // outbound notifier (alert_slack.go), from vault monitor.yml alerts. It is not
 // a probe input, but it is compared with the rest of the settings so a changed
-// webhook makes a running watcher stale. SlackWebhookUrl is a credential:
-// it is never rendered into an alert, log line, or message.
+// webhook makes a running watcher that posts stale; cli/monitor drops it for a
+// watcher that never posts. SlackWebhookUrl is a credential: it is never
+// rendered into an alert, log line, or message.
 type AlertNotificationSettings struct {
 	SlackWebhookUrl string
 }

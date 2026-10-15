@@ -333,10 +333,15 @@ downstream system's specialization.
 
 ```go
 type AlertHandler func(ctx context.Context, signal Signal, alerts Alerts) error
+type SignalExecutionHandler func(ctx context.Context, signal Signal, execution SignalExecution) error
 ```
 
-The current CLI supplies this handler to `RunLoopWithOptions`, skips empty batches, and
-writes the selected Markdown or JSONL format to stdout. Stderr is diagnostic
+The current CLI supplies a `SignalExecutionHandler` to `RunExecutionLoop`,
+which schedules exactly like `RunLoopWithOptions`. A `SignalExecution` carries
+the gated alerts an `AlertHandler` receives, the alerts the cadence gate still
+holds below their Sustain, and whether the execution failed. The handler
+writes each nonempty set of gated alerts to stdout in the selected Markdown or
+JSONL format. Stderr is diagnostic
 output, not a second machine-readable ticket-event channel. The legacy console
 emitter's lifecycle JSON and the historical webhook/PR proposals are not
 current CLI capabilities; sinks other than the Slack notifier below remain
@@ -345,25 +350,53 @@ described below is bounded collector evidence, not an Alert, ticket event, or
 all-probes heartbeat.
 
 **Slack transition notifier** (`alert_slack.go`, owner decision 2026-10-14).
-In continuous mode the handler also gives every gated batch, empty ones
+In continuous mode the handler also gives every gated execution, empty ones
 included, to a notifier that posts to `vault/<env>/monitor.yml`
 `alerts.slack_webhook_url`, the webhook Grafana's default contact point uses
 (`bringyourctl grafana reconcile-alerting`). It posts one concise message per
 transition of an incident keyed by (signal id, class, target), frame excluded
 per SIGNALS.md §7: raised, escalated once to PAGE, and cleared after two
-consecutive complete runs of every signal that reported it. A batch with a
-visibility alert is incomplete and clears nothing. A clear says the incident
-is no longer reported, not that it recovered. Messages are capped at 10 per
-sliding minute; transitions over the cap are folded into one summary. Posts
-never block the handler: a bounded queue feeds one sender that spaces posts by
-a second, and a full queue drops and counts. State is process-local, so a new
-watcher announces each alert active at its start, and two overlapping
-watchers both post. An empty webhook disables the notifier with one stderr
-line at startup; `-slack-alerts=false` disables it for a watcher that must not
-post. `-once` never posts. The webhook is a credential: it is never logged or
-put in a message, and post failures are logged as a fixed class (net/http
-errors embed the URL), once per run of failures. A changed webhook makes a
-running watcher's settings stale (§1.6 settings freshness).
+consecutive complete runs of every signal that reported it in which nothing
+observed it. An alert the gate holds below its Sustain, as it does for the
+first runs after a one-run dip, is still observed. A failed execution, or one
+that carries a visibility alert, gated or held, is incomplete and clears
+nothing (SIGNALS.md, the cadence-mode `Sustain` note before §1). A clear says
+the incident is no longer reported, not that it recovered.
+
+State is process-local, so a restarted watcher, or a handoff candidate,
+re-announces every active alert. The raises from each signal's first Sustain
+complete runs, which is where such alerts first pass the gate, are folded into
+one `[ACTIVE AT START] N incident(s)` digest, pages first, posted two minutes
+after the last of them or at exit. Failed runs do not use up a signal's start
+window. An escalation of a digest incident before the digest posts is folded
+into it, and a clear of one posts the digest first. Later raises post one by
+one. With the 15-minute floor, expect a digest for each startup wave that has
+incidents: one a few minutes in for the standing logs, then one about two
+minutes after each Sustain round of the active probes.
+
+Messages are capped at 10 per sliding minute; transitions over the cap are
+folded into one summary. Posts never block the handler: a bounded queue feeds
+one sender that spaces posts by a second, and a full queue drops and counts.
+A summary or digest the full queue refuses keeps its content for the next
+try. A post that Slack answers with a 5xx or a 429, or that times out, is
+retried once after Slack's Retry-After (1 s without one, at most 30 s); only
+the sender waits. A message that still fails is undelivered: once a post
+succeeds again, one `[UNDELIVERED] N message(s) queued between T1 and T2
+failed to post` message lists them. Without a new message, the sender tries
+that report itself at most once a minute, and once more at exit. At exit the
+CLI drains the notifier for up to 15 s; one stderr line counts what the
+deadline abandoned, and another the undelivered messages never reported.
+Message text gets the same address scrubbing as stdout and stderr. Two
+overlapping watchers both post; there is no poster lease.
+
+An empty webhook disables the notifier with one stderr line at startup;
+`-slack-alerts=false` disables it for a watcher that must not post. `-once`
+never posts. The webhook is a credential: it is never logged or put in a
+message, and post failures are logged as a fixed class (net/http errors embed
+the URL), once per run of failures. A changed webhook makes a running posting
+watcher's settings stale (§1.6 settings freshness). A watcher that never posts
+leaves the webhook out of its compared settings, so a rotation does not make
+it stale.
 
 Self-health: the monitor distinguishes three states per target — *healthy
 observation*, *broken observation* (ticket about the target), and *cannot
@@ -438,7 +471,8 @@ Escalation batteries pull incident windows non-interactively with
   handler complete. Time spent queued or running therefore cannot create a
   buffered or wall-aligned back-to-back catch-up query against an already-slow
   dependency.
-- `RunLoopWithOptions` accepts a per-watcher `MinimumProbeCadence`; the CLI
+- `RunLoopWithOptions` and `RunExecutionLoop` accept a per-watcher
+  `MinimumProbeCadence`; the CLI
   exposes `-min-probe-cadence=15m` for an explicitly requested 15-minute active
   observation floor. Zero/default preserves immediate active startup and native
   cadences. A positive floor delays the **first active probe** by that floor,

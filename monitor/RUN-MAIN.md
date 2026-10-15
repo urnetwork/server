@@ -369,12 +369,27 @@ The watcher's stderr carries one notifier line at startup:
 `vault/main/monitor.yml` `alerts.slack_webhook_url` is set, or
 `monitor: Slack alert notifications disabled: ...` when it is empty or not an
 https URL. An enabled watcher posts one Slack message per alert transition
-(MONITOR.md §3.6). It announces each alert active at its start, so every new
-watcher re-posts the current alerts once, at most 10 messages a minute plus a
-summary. Start a watcher that must never post, such as a diagnostic second
-watcher, with `-slack-alerts=false`; the flag is fixed for the process
-lifetime. `-once` never posts. Never print the webhook to check it: the
-startup line is the evidence.
+(MONITOR.md §3.6), at most 10 messages a minute plus a summary. Every new
+watcher re-announces the alerts active at its start, but as
+`[ACTIVE AT START]` digests rather than one raise each: the raises from each
+signal's first Sustain complete runs, posted two minutes after the last of
+them. With `-min-probe-cadence=15m`, expect a digest a few minutes in for the
+standing logs, then one about two minutes after each Sustain round of the
+active probes, whose rounds start near 15, 30 and 45 minutes; a round without
+incidents posts none. A post that Slack
+answers with a 5xx or a 429, or that times out, is retried once; messages
+that still fail are listed in one `[UNDELIVERED]` message once Slack takes
+posts again. At exit the watcher drains its Slack queue for up to 15 seconds,
+and stderr counts what it abandoned
+(`monitor: Slack alert notifier abandoned N unposted message(s) at close`) and
+any undelivered messages it never reported.
+
+Start a watcher that must never post, such as a diagnostic second watcher,
+with `-slack-alerts=false`; the flag is fixed for the process lifetime. Such a
+watcher leaves the webhook out of its compared settings, so rotating the
+webhook does not make it stale. A posting watcher does go stale on a rotation
+and needs the normal handoff. `-once` never posts. Never print the webhook to
+check it: the startup line is the evidence.
 
 Treat the exact Warpctl resolved by the watcher as part of the immutable
 observation boundary. Before launch, require its `go version -m` output to carry
@@ -745,9 +760,15 @@ parent and tail processes; a PID-only check cannot certify durable ownership.
 Overlap is allowed only for this bounded handoff. Prolonged duplicate watchers
 distort log coverage and add production load; stopping the old watcher before
 the new one is proven creates an observation gap. During the overlap both
-watchers post Slack transitions, and the candidate announces every alert
-active at its start. Accept those duplicates: a candidate started with
-`-slack-alerts=false` would stay silent after promotion.
+watchers post Slack transitions: there is no poster lease. The candidate
+re-announces the alerts active at its start in `[ACTIVE AT START]` digests,
+and its own transitions duplicate the predecessor's until the predecessor
+stops. A stopped predecessor never posts the clears of its open incidents.
+The candidate clears only incidents it raised itself, so an incident that
+ended before the candidate's first runs keeps its last Slack raise; the
+alert ledger, not the channel, is the record. Accept those duplicates: a
+candidate started with `-slack-alerts=false` would stay silent after
+promotion.
 
 When the operator explicitly prioritizes a no-overlap active-probe interval,
 use this alternative instead of waiting 15 minutes beside an active predecessor:
