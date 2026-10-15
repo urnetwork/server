@@ -270,6 +270,62 @@ func TestArindbCanaryNetLossToleratesAsManyAdditions(t *testing.T) {
 	}
 }
 
+// Gains and gross churn, which the net loss does not trip on, are measured for
+// paging: a flood into a bucket, and a reshuffle that moves as many out as in.
+func TestArindbCanaryMeasuresGainsAndGrossChurn(t *testing.T) {
+	flood := append(
+		testCanaryProviders(100, "aa", true, testCanaryClean, testCanaryClean),
+		testCanaryProviders(30, "aa", true, testCanaryClean, testCanaryNonQuality)...)
+	quality := decideTestCanary(testCanaryPair(), flood, defaultArindbCanarySettings()).Buckets[RankModeQuality]
+	if quality.GainRatio != 0.3 || quality.ChurnRatio != 0.3 || quality.LossRatio != -0.3 || quality.Tripped {
+		t.Fatalf("a flood: %+v", quality)
+	}
+	reshuffle := append(
+		testCanaryProviders(80, "aa", true, testCanaryClean, testCanaryClean),
+		testCanaryProviders(20, "aa", true, testCanaryNonQuality, testCanaryClean)...)
+	reshuffle = append(reshuffle, testCanaryProviders(20, "aa", true, testCanaryClean, testCanaryNonQuality)...)
+	quality = decideTestCanary(testCanaryPair(), reshuffle, defaultArindbCanarySettings()).Buckets[RankModeQuality]
+	if quality.GainRatio != 0 || quality.ChurnRatio != 0.4 || quality.LossRatio != 0 || quality.Tripped {
+		t.Fatalf("a reshuffle: %+v", quality)
+	}
+}
+
+// The cohort is compared with its largest size over the last two hours, from
+// samples the decisions carry at most every ten minutes, so providers that
+// never reach the cohort, such as those whose latest lookup fails, show even
+// when a rolling restart drops them gradually.
+func TestArindbCanaryComparesTheCohortWithItsRecentSize(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	var decision *ArindbCanaryDecision
+	at := func(minutes int, providers int) {
+		t.Helper()
+		rows := testCanaryProviders(providers, "aa", true, testCanaryClean, testCanaryClean)
+		decision = decideArindbCanary(testCanaryPair(), rows, testCanaryMembership, settings, decision,
+			testCanaryClock.Add(time.Duration(minutes-1)*time.Minute), testCanaryClock.Add(time.Duration(minutes)*time.Minute))
+	}
+	at(0, 200)
+	if decision.Cohort.ReferenceProviders != 0 || decision.Cohort.LossRatio != 0 || len(decision.Cohort.History) != 1 {
+		t.Fatalf("first decision: %+v", decision.Cohort)
+	}
+	// within the sample interval no sample is added
+	at(5, 196)
+	at(10, 190)
+	at(40, 170)
+	if len(decision.Cohort.History) != 3 || decision.Cohort.ReferenceProviders != 200 || decision.Cohort.LossRatio != 0.15 {
+		t.Fatalf("a gradual drop: %+v", decision.Cohort)
+	}
+	// the window forgets the larger cohort after two hours
+	at(125, 170)
+	if decision.Cohort.ReferenceProviders != 190 || decision.Cohort.History[0].Providers != 190 {
+		t.Fatalf("after the window: %+v", decision.Cohort)
+	}
+	// a growing cohort is no loss
+	at(140, 400)
+	if decision.Cohort.LossRatio != 0 {
+		t.Fatalf("a growing cohort: %+v", decision.Cohort)
+	}
+}
+
 // The breaker compares only providers with facts for both databases: one
 // classified by a process without an old database cannot count as a loss.
 func TestArindbCanaryComparesOnlyPairedProviders(t *testing.T) {

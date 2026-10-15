@@ -99,6 +99,14 @@ const arindbCanaryDecisionKey = "{arindb_canary_decision}"
 // complete.
 const arindbCanaryEmptiedCityLimit = 100
 
+// The cohort is compared with its largest size over this window, sampled at
+// most once per interval, so a latest database that silently drops providers
+// from the cohort shows even while a rolling restart drops them gradually.
+const (
+	arindbCanaryCohortWindow         = 2 * time.Hour
+	arindbCanaryCohortSampleInterval = 10 * time.Minute
+)
+
 // The tunables of provider.yml `arindb_canary`.
 type ArindbCanarySettings struct {
 	// the breaker trips when a bucket's net loss is strictly greater
@@ -425,6 +433,12 @@ type ArindbCanaryBucket struct {
 	ArindbCanaryCount
 	// the net loss (old - latest) / old; negative is a gain, 0 without old supply
 	LossRatio float64 `json:"loss_ratio"`
+	// the net gain (latest - old) / old, 0 for a loss or without old supply: a
+	// flood the breaker does not trip on, which pages
+	GainRatio float64 `json:"gain_ratio"`
+	// the gross churn (removed + added) / old, 0 without old supply: a
+	// reshuffle the net loss hides, which pages
+	ChurnRatio float64 `json:"churn_ratio"`
 	// gross removals and additions of latest against old
 	Removed int `json:"removed"`
 	Added   int `json:"added"`
@@ -438,6 +452,44 @@ type ArindbCanaryBucket struct {
 	// Quality trip falls back; a Speed or Online trip is risk, which the
 	// fallback cannot repair, and pages
 	Tripped bool `json:"tripped"`
+}
+
+// One sample of the public cohort's size.
+type ArindbCanaryCohortSample struct {
+	At        time.Time `json:"at"`
+	Providers int       `json:"providers"`
+}
+
+// The public cohort against its recent size. Providers whose latest lookup
+// fails never reach the cohort, so the comparison cannot see them; a cohort
+// that shrinks against its recent size can.
+type ArindbCanaryCohort struct {
+	// at most one sample per ten minutes over the last two hours, oldest first
+	History []ArindbCanaryCohortSample `json:"history"`
+	// the largest cohort of the history before this decision, 0 without one
+	ReferenceProviders int `json:"reference_providers"`
+	// (reference - providers) / reference, 0 when the cohort did not shrink
+	LossRatio float64 `json:"loss_ratio"`
+}
+
+// The cohort of this decision against the previous decision's history.
+func arindbCanaryCohortAfter(previous *ArindbCanaryDecision, providers int, decidedAt time.Time) ArindbCanaryCohort {
+	cohort := ArindbCanaryCohort{History: []ArindbCanaryCohortSample{}}
+	if previous != nil {
+		for _, sample := range previous.Cohort.History {
+			if !sample.At.After(decidedAt) && decidedAt.Sub(sample.At) <= arindbCanaryCohortWindow {
+				cohort.History = append(cohort.History, sample)
+				cohort.ReferenceProviders = max(cohort.ReferenceProviders, sample.Providers)
+			}
+		}
+	}
+	if 0 < cohort.ReferenceProviders && providers < cohort.ReferenceProviders {
+		cohort.LossRatio = float64(cohort.ReferenceProviders-providers) / float64(cohort.ReferenceProviders)
+	}
+	if count := len(cohort.History); count == 0 || arindbCanaryCohortSampleInterval <= decidedAt.Sub(cohort.History[count-1].At) {
+		cohort.History = append(cohort.History, ArindbCanaryCohortSample{At: decidedAt, Providers: providers})
+	}
+	return cohort
 }
 
 // A fallback latched on one pair of databases. It holds, and is carried
@@ -483,6 +535,7 @@ type ArindbCanaryDecision struct {
 	Latest       ArindbCanaryDatabase           `json:"latest"`
 	Old          ArindbCanaryDatabase           `json:"old"`
 	Coverage     ArindbCanaryCoverage           `json:"coverage"`
+	Cohort       ArindbCanaryCohort             `json:"cohort"`
 	Settings     ArindbCanarySettings           `json:"settings"`
 	Buckets      map[string]*ArindbCanaryBucket `json:"buckets"`
 	// the start of the score source read the decision counts
@@ -566,6 +619,7 @@ func decideArindbCanary(
 		decision.PairCarriedReason = pairReason
 	}
 	decision.Coverage.Providers = len(providers)
+	decision.Cohort = arindbCanaryCohortAfter(previous, len(providers), decidedAt)
 	for _, provider := range providers {
 		_, _, latestOk := provider.slots.factsUnder(latestEpoch)
 		_, _, oldOk := provider.slots.factsUnder(oldEpoch)
@@ -649,6 +703,8 @@ func decideArindbCanary(
 		b := decision.Buckets[bucket]
 		if 0 < b.Old {
 			b.LossRatio = float64(b.Old-b.Latest) / float64(b.Old)
+			b.GainRatio = max(0, -b.LossRatio)
+			b.ChurnRatio = float64(b.Removed+b.Added) / float64(b.Old)
 		}
 		for countryCode, count := range b.Countries {
 			if 0 < count.Old && count.Latest == 0 {
@@ -989,6 +1045,9 @@ func (self *ArindbCanaryDecision) logSummary() string {
 		b.WriteString(" fallback_dropped")
 	}
 	fmt.Fprintf(&b, " coverage latest=%d old=%d paired=%d of %d", self.Coverage.Latest, self.Coverage.Old, self.Coverage.Paired, self.Coverage.Providers)
+	if 0 < self.Cohort.LossRatio {
+		fmt.Fprintf(&b, " cohort_loss=%.4f of %d", self.Cohort.LossRatio, self.Cohort.ReferenceProviders)
+	}
 	if self.WarmingTripped {
 		b.WriteString(" warming_tripped")
 	}
@@ -1003,7 +1062,7 @@ func (self *ArindbCanaryDecision) logSummary() string {
 	}
 	for _, bucket := range ProviderEgressBuckets {
 		b2 := self.Buckets[bucket]
-		fmt.Fprintf(&b, "; %s old=%d latest=%d loss=%.4f removed=%d added=%d tripped=%t", bucket, b2.Old, b2.Latest, b2.LossRatio, b2.Removed, b2.Added, b2.Tripped)
+		fmt.Fprintf(&b, "; %s old=%d latest=%d loss=%.4f churn=%.4f removed=%d added=%d tripped=%t", bucket, b2.Old, b2.Latest, b2.LossRatio, b2.ChurnRatio, b2.Removed, b2.Added, b2.Tripped)
 		if 0 < len(b2.EmptiedCountries) {
 			countries := []string{}
 			for _, country := range b2.EmptiedCountries {
