@@ -6265,7 +6265,9 @@ func FindProviders2(
 		}
 
 		// Common refusals apply to every bucket. Subscriber refusals apply only
-		// to native Quality, including Quality borrowed by a Speed request.
+		// to native Quality, including Quality borrowed by a Speed request,
+		// except that a candidate read without a live connection leaves every
+		// draw of the request (offlineClientIds).
 		readExclusions := func(scores map[server.Id]*ClientScore, mode RankMode, native bool, namedClientIds []server.Id) error {
 			observation.enter("hard_exclusions")
 			candidateClientIds := requestFilter.unchecked(scores, exclusionReadClientIds)
@@ -6387,6 +6389,7 @@ func FindProviders2(
 			for clientId := range hardExcludedClientIds {
 				delete(clientScores, clientId)
 			}
+			// read without a live connection: out of every pool of this request
 			for clientId := range offlineClientIds {
 				delete(clientScores, clientId)
 			}
