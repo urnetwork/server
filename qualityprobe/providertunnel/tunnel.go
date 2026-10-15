@@ -214,14 +214,19 @@ func providerReturnReceiver(write func([]byte) (int, error), returns *providerRe
 
 // The cause (context.Cause) of Tunnel.Lost when the
 // tunnel's path to its provider went away while the tunnel was open: the
-// pinned provider left the multi-client with nothing added in its place, or
-// the packet pump's read from the tun failed. A measurement in flight when it
+// pinned provider left the multi-client with nothing added in its place, the
+// packet pump's read from the tun failed, or a capability measurement
+// tunnel's window client was replaced. A measurement in flight when it
 // happens is not a measurement of the provider, and the prober reports it as
 // aborted rather than as the failures a dead tunnel produces.
 var ErrTunnelLost = errors.New("providertunnel: the tunnel's path to the provider is gone")
 
 // Lost's cause once the tunnel has been closed on purpose.
 var ErrTunnelClosed = errors.New("providertunnel: the tunnel was closed")
+
+// Joined to ErrTunnelLost in Lost's cause when a capability measurement
+// tunnel's window client was replaced (watchCapabilityWindowClient).
+var ErrTunnelClientReplaced = errors.New("providertunnel: the window's client was replaced")
 
 // Negative reservation targets are malformed, not a request for defaults.
 var ErrContractReservation = errors.New("providertunnel: contract reservation byte count must not be negative")
@@ -519,7 +524,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	// read failure to say why, and it is ended by Close, not by the caller's
 	// ctx -- the caller ending is its own signal, not the tunnel's loss.
 	lost, lose := context.WithCancelCause(context.Background())
-	unwatch := watchProviderPath(multiClient.Monitor(), lose)
+	unwatch := watchTunnelPath(multiClient.Monitor(), lose, cfg.CapabilityObservation != nil)
 	unwatchSetup := setup.watch(multiClient.Monitor())
 
 	// pump tun -> provider
@@ -581,7 +586,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 
 // Returns a context that is done once the tunnel's path to its provider is
 // gone for good while the tunnel is open -- context.Cause says why, wrapping
-// ErrTunnelLost -- and once the tunnel is closed, with ErrTunnelClosed. A probe's egresshealth.Path
+// ErrTunnelLost, and ErrTunnelClientReplaced too when a capability
+// measurement tunnel's window client was replaced -- and once the tunnel is
+// closed, with ErrTunnelClosed. A probe's egresshealth.Path
 // reports it as the current client's loss signal, so a run or check whose
 // tunnel dies part-way re-creates it for the loads it had not finished,
 // instead of failing them: a provider that disconnected mid-run did not refuse
@@ -627,6 +634,67 @@ func watchProviderPath(monitor connect.MultiClientMonitor, lose context.CancelCa
 		}
 		if wasAdded.Load() {
 			lose(fmt.Errorf("%w: the provider left the multi-client and nothing was added in its place", ErrTunnelLost))
+		}
+	})
+}
+
+// Ends lost when the tunnel's path to its provider goes away
+// (watchProviderPath) and, for a capability measurement tunnel, also when
+// its window client is replaced (watchCapabilityWindowClient). Returns the
+// unsubscribe of every watcher it added.
+func watchTunnelPath(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc, capabilityObservation bool) func() {
+	unwatchPath := watchProviderPath(monitor, lose)
+	if !capabilityObservation {
+		return unwatchPath
+	}
+	unwatchClient := watchCapabilityWindowClient(monitor, lose)
+	return func() {
+		unwatchPath()
+		unwatchClient()
+	}
+}
+
+// Ends lost, with ErrTunnelClientReplaced, when a second client takes a
+// capability measurement tunnel's window: a replacement added before the
+// first client leaves, or after it. Returns the unsubscribe.
+//
+// The pinned provider's window holds one client at a time, and the
+// measurement's recorder merges what every client recorded. After a
+// replacement, the first attempt and the first acknowledgement it reads
+// belong to a client that is leaving or gone, and the new client's
+// ClientHello would be read against an establishment window that began
+// before it was sent: the provider could be read as having no responder
+// while the new ClientHello is still within its own window. So the
+// measurement ends there, with what it has. A candidate that never got into
+// the window is no replacement. The first client leaving with nothing in its
+// place is watchProviderPath's loss.
+func watchCapabilityWindowClient(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc) func() {
+	var stateLock sync.Mutex
+	var windowClientId *connect.Id
+	replaced := false
+	return monitor.AddMonitorEventCallback(func(_ *connect.WindowExpandEvent, events map[connect.Id]*connect.ProviderEvent, _ bool) {
+		replacedNow := func() bool {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			if replaced {
+				return false
+			}
+			for clientId, event := range events {
+				// Removed is emitted only for a client that was in the
+				// window, so a coalesced Added still counts
+				if event == nil || !(event.State.IsActive() || event.State == connect.ProviderStateRemoved) {
+					continue
+				}
+				if windowClientId == nil {
+					windowClientId = &clientId
+				} else if *windowClientId != clientId {
+					replaced = true
+				}
+			}
+			return replaced
+		}()
+		if replacedNow {
+			lose(fmt.Errorf("%w: %w", ErrTunnelLost, ErrTunnelClientReplaced))
 		}
 	})
 }

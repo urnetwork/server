@@ -32,6 +32,9 @@ const (
 	outcomeE2ePending = "e2e_pending"
 	// the pass ended the measurement
 	outcomeCanceled = "canceled"
+	// the tunnel's path went away, or its window client was replaced, before
+	// the reading concluded
+	outcomeTunnelLost = "tunnel_lost"
 	// the evidence was conclusive and the model did not store it
 	outcomeRecordFailed = "record_failed"
 )
@@ -46,6 +49,7 @@ var outcomes = []string{
 	outcomeE2eNotAttempted,
 	outcomeE2ePending,
 	outcomeCanceled,
+	outcomeTunnelLost,
 	outcomeRecordFailed,
 }
 
@@ -55,7 +59,8 @@ type capabilityTunnel interface {
 	// what the tunnel's clients have recorded of the provider so far, false
 	// for nothing
 	observation() (connect.PeerCapabilityObservation, bool)
-	// closed once the tunnel's path to the provider is gone for good
+	// closed once the tunnel's path to the provider is gone for good, or its
+	// window client was replaced
 	lost() <-chan struct{}
 	// tears the tunnel down and joins its owners; it is called once
 	close() error
@@ -75,6 +80,8 @@ type measurement struct {
 	evidence   model.ProviderModernEvidence
 	recordable bool
 	canceled   bool
+	// the tunnel was lost by the final read
+	lost bool
 	// from opening the tunnel to reading the evidence, teardown excluded
 	elapsed time.Duration
 	openErr error
@@ -99,6 +106,8 @@ func (self measurement) outcome() string {
 		}
 	case self.canceled:
 		return outcomeCanceled
+	case self.lost:
+		return outcomeTunnelLost
 	case self.reading.window == windowNotTested:
 		return outcomeNoAck
 	case self.reading.e2e == e2eNotTested:
@@ -136,6 +145,14 @@ func modernOutcomeOf(evidence model.ProviderModernEvidence) string {
 // teardown. The tunnel is opened under the pass's ctx, not one bounded by
 // measureTimeout: its teardown must still retire the derived client after
 // the measurement ends.
+//
+// A tunnel lost by the final read, its path gone or its window client
+// replaced, keeps a negotiated session and the window, which the provider
+// showed whichever client saw them, but concludes no unanswered ClientHello:
+// a window that ran out at or after the loss may belong to a client that was
+// leaving or gone, or be read against a replacement's ClientHello sent after
+// it began. A window that had run out by an earlier read ended the
+// measurement there.
 func (self *passRunner) measure(ctx context.Context, providerId server.Id) (result measurement) {
 	result.providerId = providerId
 	startedAt := self.now()
@@ -183,6 +200,14 @@ func (self *passRunner) measure(ctx context.Context, providerId server.Id) (resu
 		if stop {
 			break
 		}
+	}
+	select {
+	case <-tunnel.lost():
+		result.lost = true
+	default:
+	}
+	if result.lost && current.e2e == e2eNoResponder {
+		current.e2e = e2ePending
 	}
 	result.reading = current
 	result.elapsed = now.Sub(startedAt)

@@ -125,7 +125,8 @@ func TestUnsealedSessionStandsAfterTheSealGrace(t *testing.T) {
 	})
 }
 
-// A tunnel that loses its provider ends the measurement at once.
+// A tunnel that loses its provider ends the measurement at once, and says
+// so.
 func TestLostTunnelEndsTheMeasurement(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := newFakeStore(1)
@@ -140,11 +141,54 @@ func TestLostTunnelEndsTheMeasurement(t *testing.T) {
 		tunnel := fleet.tunnel(0)
 		close(tunnel.lostDone)
 		result := <-done
-		if result.elapsed != 5*time.Second || result.recordable || result.outcome() != outcomeNoAck {
+		if result.elapsed != 5*time.Second || result.recordable || result.outcome() != outcomeTunnelLost {
 			t.Fatalf("measured for %s, recordable %t, outcome %s", result.elapsed, result.recordable, result.outcome())
 		}
 		if tunnel.closes() != 1 {
 			t.Fatal("the lost tunnel was not torn down once")
+		}
+	})
+}
+
+// A tunnel lost by the final read, its path gone or its window client
+// replaced (review F6), concludes no unanswered ClientHello. Acknowledged at
+// one second, with its ClientHello accepted at 2.5, a provider's
+// establishment window runs out at 62.5 s, between the read at 62 s and a
+// loss at 62.7 s: the window may be a replaced client's, so the measurement
+// ends at the loss with nothing recorded. A session negotiated by then still
+// stands.
+func TestLostTunnelConcludesNoUnansweredClientHello(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		unanswered := fakeLegacyProvider()
+		unanswered.attemptAt = 2500 * time.Millisecond
+		unsealed := fakeModernProvider()
+		unsealed.sealAt = fakeNever
+		for _, c := range []struct {
+			name       string
+			provider   fakeProvider
+			lostAt     time.Duration
+			reading    reading
+			recordable bool
+			outcome    string
+		}{
+			{name: "unanswered", provider: unanswered, lostAt: 62700 * time.Millisecond, reading: reading{e2e: e2ePending, window: windowFixed}, outcome: outcomeTunnelLost},
+			{name: "negotiated", provider: unsealed, lostAt: 5 * time.Second, reading: reading{e2e: e2ePostQuantumUnsealed, window: windowResizable}, recordable: true, outcome: outcomeRecordedModern},
+		} {
+			store := newFakeStore(1)
+			fleet := newFakeFleet()
+			providerId := store.clientIds[0]
+			fleet.providers[providerId] = c.provider
+			runner := newFakeRunner(t, DefaultSettings(), store, fleet)
+			done := make(chan measurement)
+			go func() { done <- runner.measure(t.Context(), providerId) }()
+			synctest.Wait()
+			time.Sleep(c.lostAt)
+			close(fleet.tunnel(0).lostDone)
+			result := <-done
+			if result.elapsed != c.lostAt || !result.lost || result.reading != c.reading || result.recordable != c.recordable || result.outcome() != c.outcome {
+				t.Errorf("%s: measured for %s, lost %t, read %+v, recordable %t, outcome %s; want %s, %+v, %t, %s",
+					c.name, result.elapsed, result.lost, result.reading, result.recordable, result.outcome(), c.lostAt, c.reading, c.recordable, c.outcome)
+			}
 		}
 	})
 }

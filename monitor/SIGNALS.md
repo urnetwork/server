@@ -15821,8 +15821,12 @@ Signals:
   pings, so the probe client's sessions are off, a code or settings
   regression in which every reading would be wrong, never something to
   record around; `e2e_pending` means
-  setup ate the measurement's margin over the 60 s window; `record_failed`
-  is the database write, and fails the pass.
+  setup ate the measurement's margin over the 60 s window; `tunnel_lost`
+  means the tunnel's path went away, or its window client was replaced,
+  before the reading concluded, so a provider that drops its connection
+  shows it, and a share rising fleet-wide points at the probe's windows or
+  the platform rather than at providers; `record_failed` is the database
+  write, and fails the pass.
 - `capability-probe-unsealed-share` — INFO for the shadow review, WARN above
   10% over a day: of the negotiated post-quantum readings
   (`readings_total{capability="e2e",reading=~"post_quantum_.*"}`), the share

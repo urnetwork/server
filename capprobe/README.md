@@ -65,6 +65,15 @@ the tunnel down. A provider that cannot open the probe's sealed frames
 therefore holds a slot for at most the timeout and the teardown. The URL
 tunnel's encryption stays off.
 
+The pinned provider's window holds one client, and the recorder merges what
+every client of the tunnel saw. So a capability tunnel is also lost when a
+second client takes its window (`providertunnel.ErrTunnelClientReplaced`):
+the first attempt and acknowledgement the measurement read belong to a
+client that is leaving, and a replacement's ClientHello would be read
+against a window that began before it was sent. A measurement whose tunnel
+was lost by its final read keeps a negotiated session and the window, but
+concludes no unanswered ClientHello (outcome `tunnel_lost`).
+
 | Reading | Recorded as |
 | --- | --- |
 | sealed or unsealed session, post-quantum group | `E2eNegotiated`, `PostQuantum` |

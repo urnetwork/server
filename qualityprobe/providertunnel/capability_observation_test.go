@@ -133,3 +133,60 @@ func TestOpenRefusesACapabilityObservationWithoutObserver(t *testing.T) {
 		t.Fatalf("Open = %v, %v; want %v", tunnel, err, ErrCapabilityObservation)
 	}
 }
+
+// Root cause (review F6): a capability measurement merges what every client
+// of its tunnel recorded, and the window's client could be replaced
+// make-before-break without the measurement learning of it. The first
+// attempt and acknowledgement it read then belonged to the replaced client,
+// and the new client's ClientHello was read against a window that began
+// before it was sent, so a provider could be recorded without a responder
+// while the new ClientHello was still within its own window. A capability
+// tunnel's Lost ends when a second client takes the window, made before or
+// after the first leaves; a candidate that never got in is no replacement,
+// and the URL tunnel's rotation stays a live path.
+func TestCapabilityTunnelLostEndsWhenItsWindowClientIsReplaced(t *testing.T) {
+	for _, capabilityObservation := range []bool{false, true} {
+		lostCtx, lose := context.WithCancelCause(context.Background())
+		monitor := newFakeMonitor()
+		unwatch := watchTunnelPath(monitor, lose, capabilityObservation)
+		first, failedCandidate, replacement := connect.NewId(), connect.NewId(), connect.NewId()
+		monitor.emit(failedCandidate, connect.ProviderStateInEvaluation)
+		monitor.emit(failedCandidate, connect.ProviderStateEvaluationFailed)
+		monitor.emit(first, connect.ProviderStateInEvaluation)
+		monitor.emit(first, connect.ProviderStateAdded)
+		monitor.emit(replacement, connect.ProviderStateInEvaluation)
+		if lostCtx.Err() != nil {
+			t.Fatalf("capability %t: the first client's admission, or a candidate, ended lost: %v", capabilityObservation, context.Cause(lostCtx))
+		}
+		// make-before-break: the replacement lands while the first is in
+		monitor.emit(replacement, connect.ProviderStateAdded)
+		if capabilityObservation {
+			cause := context.Cause(lostCtx)
+			if !errors.Is(cause, ErrTunnelClientReplaced) || !errors.Is(cause, ErrTunnelLost) {
+				t.Fatalf("a replaced capability window client left lost with %v, want ErrTunnelClientReplaced and ErrTunnelLost", cause)
+			}
+		} else {
+			monitor.emit(first, connect.ProviderStateRemoved)
+			if lostCtx.Err() != nil {
+				t.Fatalf("a URL tunnel's make-before-break rotation counted as lost: %v", context.Cause(lostCtx))
+			}
+		}
+		unwatch()
+	}
+
+	// a replacement coalesced to its removal, after the first left, is one too
+	lostCtx, lose := context.WithCancelCause(context.Background())
+	monitor := newFakeMonitor()
+	unwatch := watchCapabilityWindowClient(monitor, lose)
+	defer unwatch()
+	first, replacement := connect.NewId(), connect.NewId()
+	monitor.emit(first, connect.ProviderStateAdded)
+	monitor.emit(first, connect.ProviderStateRemoved)
+	if lostCtx.Err() != nil {
+		t.Fatal("the first client leaving counted as a replacement")
+	}
+	monitor.emit(replacement, connect.ProviderStateRemoved)
+	if cause := context.Cause(lostCtx); !errors.Is(cause, ErrTunnelClientReplaced) {
+		t.Fatalf("a coalesced replacement left lost with %v", cause)
+	}
+}
