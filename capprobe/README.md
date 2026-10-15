@@ -204,6 +204,11 @@ when it has none (`chain_restarts_total`, logged): a chain that a stale
 taskworker, a lost row or maintenance ended starts a new sweep within ten
 minutes. A row that exists, waiting or claimed, is left as it is.
 
+So while any taskworker runs a config that switches the probe on, deleting
+the chain's `pending_task` row does not stop the probe: the check schedules
+it again within ten minutes. To stop it, switch it off as above, with a
+config release that sets `enabled: false` and a restart of every taskworker.
+
 ## After maintenance
 
 After any taskworker restart, config release, or maintenance that touches
@@ -216,7 +221,7 @@ while `capability_probe.yml` switches the probe on:
    ```sql
    SELECT task_id, run_at, reschedule_error_count, reschedule_error
    FROM pending_task
-   WHERE run_once_key = 'capability_probe';
+   WHERE run_once_key = '["capability_probe"]';
    ```
 
    No row means the chain has ended: a taskworker with the probe switched on
