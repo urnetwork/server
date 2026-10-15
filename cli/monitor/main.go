@@ -222,15 +222,21 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	var notifier *servermonitor.SlackAlertNotifier
 	if opts.slackAlerts {
 		notifier = servermonitor.NewSlackAlertNotifier(slackNotifierSettings(settings, opts))
-		defer func() {
-			closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			notifier.Close(closeCtx)
-		}()
+		defer drainSlackNotifier(stop, notifier.Close, 15*time.Second)
 	} else {
 		fmt.Fprintln(os.Stderr, "monitor: Slack alert notifications disabled by -slack-alerts=false")
 	}
 	return monitor.RunExecutionLoop(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence}, continuousAlertHandler(stdout, opts.format, notifier))
+}
+
+// Restores default signal handling first, so a second interrupt or SIGTERM
+// ends the process at once, then gives the notifier until timeout to post
+// what it holds.
+func drainSlackNotifier(stopSignals func(), closeNotifier func(context.Context), timeout time.Duration) {
+	stopSignals()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	closeNotifier(ctx)
 }
 
 // The notifier's production settings for this watcher. Its start window

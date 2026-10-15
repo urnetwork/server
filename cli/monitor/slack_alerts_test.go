@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,6 +96,63 @@ func TestEffectiveSettingsGenerationComparesTheWebhookOnlyWhenPosting(t *testing
 		if err != nil || matched == c.wantStale {
 			t.Errorf("%v: after a webhook rotation matched = %t, err = %v; want stale = %t", c.args, matched, err, c.wantStale)
 		}
+	}
+}
+
+// The drain at exit releases signal handling before it waits on the
+// notifier, so a second interrupt or SIGTERM during the drain ends the
+// process. The notifier's one post is held at the webhook to keep Close
+// waiting.
+func TestSlackNotifierDrainReleasesSignalsBeforeItWaits(t *testing.T) {
+	arrived := make(chan struct{}, 1)
+	release := make(chan struct{})
+	webhook := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+		case <-request.Context().Done():
+		}
+	}))
+	defer webhook.Close()
+	settings := servermonitor.DefaultSlackAlertNotifierSettings()
+	settings.WebhookUrl = webhook.URL + "/services/T0SYNTHETIC/B0SYNTHETIC/synthetic"
+	settings.StartDigestHold = 0
+	settings.PostInterval = 0
+	// the held post outlasts the wait below, so only a released signal
+	// handling can end that wait
+	settings.PostTimeout = 10 * time.Minute
+	settings.Logf = func(string, ...any) {}
+	notifier := servermonitor.NewSlackAlertNotifier(settings)
+	handle := continuousAlertHandler(&bytes.Buffer{}, alertFormatMarkdown, notifier)
+	if err := handle(context.Background(), slackHandlerSignal{}, servermonitor.SignalExecution{Alerts: servermonitor.Alerts{slackHandlerAlert}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-arrived:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the notifier never posted")
+	}
+
+	stopped := make(chan struct{})
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		drainSlackNotifier(func() { close(stopped) }, notifier.Close, 10*time.Minute)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(20 * time.Second):
+		t.Error("signal handling was still captured while the notifier drained")
+	}
+	close(release)
+	select {
+	case <-drained:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the drain did not finish")
 	}
 }
 
