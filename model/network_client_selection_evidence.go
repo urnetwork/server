@@ -8,15 +8,22 @@
 // provider without a reliability score gets the source query's neutral
 // lookback, both weights 1 (UpdateClientScores), the weight of a provider
 // steady through the whole window. The Online fallback, which orders by their
-// product, therefore lent the least-known providers first. While
-// rank_measured_first is on, the evidence is the first key of every draw
-// instead: the draws take the candidates rank by rank, best first, and each
-// rank in the order the draw gave it before, the neutral weights included.
-// Supply is unchanged; the providers without evidence fill whatever the
-// measured leave.
+// product, therefore lent the least-known providers first.
+//
+// While rank_measured_first is on, the evidence is the first key within each
+// family facet of every draw. The request's family preference still comes
+// first (connect/IPV6.md B2: dualstack first, so v4-only exits only top up),
+// and within a facet the draws take the candidates rank by rank, best first.
+// The native draws keep their weighted draw within each rank. The Online
+// fallback, a strict sort by its key while the setting is off, draws each
+// rank weighted by that key instead: the measured providers' keys rarely tie,
+// so a sort would lend every answer the same few. Supply is unchanged; the
+// providers without evidence fill whatever the measured leave.
 package model
 
 import (
+	"cmp"
+	"math"
 	mathrand "math/rand"
 	"slices"
 	"time"
@@ -117,26 +124,36 @@ func findProviders2Evidence(settings *EgressIndexSettings, forceMinimum bool, no
 	}
 }
 
-// The candidates by evidence rank, best first, without the empty ranks.
-// Without evidence, one group: the candidates themselves.
+// One facet's candidates by evidence rank, best first, without the empty
+// ranks, each in the order of clientIds. Without evidence, one group: the
+// candidates themselves.
 func clientScoreEvidenceGroups(
-	candidateClientScores map[server.Id]*ClientScore,
+	clientIds []server.Id,
+	clientScores map[server.Id]*ClientScore,
 	evidence func(*ClientScore) clientScoreEvidenceRank,
-) []map[server.Id]*ClientScore {
+) [][]server.Id {
 	if evidence == nil {
-		return []map[server.Id]*ClientScore{candidateClientScores}
+		return [][]server.Id{clientIds}
 	}
-	groups := make([]map[server.Id]*ClientScore, clientScoreEvidenceRankCount)
-	for clientId, clientScore := range candidateClientScores {
-		rank := min(max(evidence(clientScore), 0), clientScoreEvidenceRankCount-1)
-		if groups[rank] == nil {
-			groups[rank] = map[server.Id]*ClientScore{}
-		}
-		groups[rank][clientId] = clientScore
+	groups := make([][]server.Id, clientScoreEvidenceRankCount)
+	for _, clientId := range clientIds {
+		rank := min(max(evidence(clientScores[clientId]), 0), clientScoreEvidenceRankCount-1)
+		groups[rank] = append(groups[rank], clientId)
 	}
-	return slices.DeleteFunc(groups, func(group map[server.Id]*ClientScore) bool {
+	return slices.DeleteFunc(groups, func(group []server.Id) bool {
 		return len(group) == 0
 	})
+}
+
+// The candidates of one family facet.
+func clientScoreFacetClientIds(candidateClientScores map[server.Id]*ClientScore, facet ipFamilyFacet) []server.Id {
+	facetClientIds := []server.Id{}
+	for clientId, clientScore := range candidateClientScores {
+		if clientScore.ipFamilyFacet() == facet {
+			facetClientIds = append(facetClientIds, clientId)
+		}
+	}
+	return facetClientIds
 }
 
 // Draws up to n of the candidates by their weight in `mode` and bands the
@@ -144,7 +161,8 @@ func clientScoreEvidenceGroups(
 // within each facet, and the preferred facet fills n first: a v4-capable
 // request takes every dualstack provider it can before any v4-only one, so
 // the single-family category only ever tops up a shortfall. With evidence,
-// each evidence rank in turn, best first, is drawn this way before the next.
+// each evidence rank of a facet in turn, best first, is drawn this way before
+// the next.
 func selectClientScoresByWeight(
 	candidateClientScores map[server.Id]*ClientScore,
 	mode RankMode,
@@ -153,93 +171,154 @@ func selectClientScoresByWeight(
 	evidence func(*ClientScore) clientScoreEvidenceRank,
 ) []server.Id {
 	clientIds := []server.Id{}
-	for _, group := range clientScoreEvidenceGroups(candidateClientScores, evidence) {
-		for _, facet := range facets {
+	for _, facet := range facets {
+		if n <= len(clientIds) {
+			break
+		}
+		facetClientIds := clientScoreFacetClientIds(candidateClientScores, facet)
+		for _, groupClientIds := range clientScoreEvidenceGroups(facetClientIds, candidateClientScores, evidence) {
 			remainingCount := n - len(clientIds)
 			if remainingCount <= 0 {
 				break
 			}
-			facetClientIds := []server.Id{}
-			for clientId, clientScore := range group {
-				if clientScore.ipFamilyFacet() == facet {
-					facetClientIds = append(facetClientIds, clientId)
-				}
-			}
-			mathrand.Shuffle(len(facetClientIds), func(i int, j int) {
-				facetClientIds[i], facetClientIds[j] = facetClientIds[j], facetClientIds[i]
+			mathrand.Shuffle(len(groupClientIds), func(i int, j int) {
+				groupClientIds[i], groupClientIds[j] = groupClientIds[j], groupClientIds[i]
 			})
 
-			connect.WeightedSelectFunc(facetClientIds, remainingCount, func(clientId server.Id) float32 {
-				clientScore := group[clientId]
+			connect.WeightedSelectFunc(groupClientIds, remainingCount, func(clientId server.Id) float32 {
+				clientScore := candidateClientScores[clientId]
 				return clientScore.ScaledWeights[mode]
 			})
-			facetClientIds = facetClientIds[:min(remainingCount, len(facetClientIds))]
+			groupClientIds = groupClientIds[:min(remainingCount, len(groupClientIds))]
 
 			// band by tier
-			slices.SortStableFunc(facetClientIds, func(a server.Id, b server.Id) int {
-				clientScoreA := group[a]
-				clientScoreB := group[b]
+			slices.SortStableFunc(groupClientIds, func(a server.Id, b server.Id) int {
+				clientScoreA := candidateClientScores[a]
+				clientScoreB := candidateClientScores[b]
 
 				return clientScoreA.Tiers[mode] - clientScoreB.Tiers[mode]
 			})
-			clientIds = append(clientIds, facetClientIds...)
+			clientIds = append(clientIds, groupClientIds...)
 		}
 	}
 	return clientIds
 }
 
-// Takes up to n of the online bucket in its order (connect/GEOMAP.md §10.3):
-// reliability weight times URL weight, highest first, then the speed-mode
-// performance adjustment -- the client-measured latency and throughput, past
-// the speed cutoffs last. Missing measurements retain their ranking penalties
-// without changing online admission. Each facet keeps the request's existing
-// preference order. With evidence, each evidence rank in turn, best first, is
-// taken this way before the next.
+// The URL weight the Online fallback reads: a record written before the
+// weight existed has none, and reads as neutral.
+func onlineFallbackUrlWeight(clientScore *ClientScore) float64 {
+	if clientScore.UrlProbeSuccessWeight == 0 {
+		return 1
+	}
+	return clientScore.UrlProbeSuccessWeight
+}
+
+// The Online fallback's order (connect/GEOMAP.md §10.3): reliability weight
+// times URL weight, highest first, then the speed-mode performance
+// adjustment -- the client-measured latency and throughput, past the speed
+// cutoffs last. Missing measurements retain their ranking penalties without
+// changing online admission.
+func compareOnlineFallback(clientScoreA *ClientScore, clientScoreB *ClientScore) int {
+	weightA := clientScoreA.ReliabilityWeight * onlineFallbackUrlWeight(clientScoreA)
+	weightB := clientScoreB.ReliabilityWeight * onlineFallbackUrlWeight(clientScoreB)
+	switch {
+	case weightB < weightA:
+		return -1
+	case weightA < weightB:
+		return 1
+	}
+	if d := clientScoreA.Tiers[RankModeSpeed] - clientScoreB.Tiers[RankModeSpeed]; d != 0 {
+		return d
+	}
+	return clientScoreA.Scores[RankModeSpeed] - clientScoreB.Scores[RankModeSpeed]
+}
+
+// Draws up to n of the ids without replacement, each with a chance in
+// proportion to its weight: the n largest log(u)/weight for u uniform in
+// (0, 1] (Efraimidis and Spirakis). An id without a positive weight follows
+// every one with, in random order, so the draw fills n whenever there are n
+// ids. uniform returns values in [0, 1), as math/rand's Float64 does; the ids
+// take its values in id order, so a given source draws the same ids whatever
+// order they come in.
+func weightedClientIdDraw(clientIds []server.Id, n int, weight func(server.Id) float64, uniform func() float64) []server.Id {
+	type keyedClientId struct {
+		clientId server.Id
+		positive bool
+		key      float64
+	}
+	orderedClientIds := slices.Clone(clientIds)
+	slices.SortFunc(orderedClientIds, func(a server.Id, b server.Id) int {
+		return a.Cmp(b)
+	})
+	keyed := make([]keyedClientId, 0, len(orderedClientIds))
+	for _, clientId := range orderedClientIds {
+		u := 1 - uniform()
+		if w := weight(clientId); 0 < w {
+			keyed = append(keyed, keyedClientId{clientId: clientId, positive: true, key: math.Log(u) / w})
+		} else {
+			keyed = append(keyed, keyedClientId{clientId: clientId, key: u})
+		}
+	}
+	slices.SortStableFunc(keyed, func(a keyedClientId, b keyedClientId) int {
+		if a.positive != b.positive {
+			if a.positive {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(b.key, a.key)
+	})
+	drawn := make([]server.Id, 0, max(0, min(n, len(keyed))))
+	for _, k := range keyed[:cap(drawn)] {
+		drawn = append(drawn, k.clientId)
+	}
+	return drawn
+}
+
+// Takes up to n of the online bucket, each facet in the request's preference
+// order. Without evidence, a facet is taken in the Online fallback's order
+// (compareOnlineFallback). With evidence, each evidence rank of a facet in
+// turn, best first, is drawn weighted by the same key -- reliability weight
+// times URL weight, from uniform -- and the draw is listed in that order. A
+// sort by the key would lend every answer the same providers, since measured
+// providers' keys rarely tie; the draw spreads the answers over the rank in
+// proportion to the key.
 func selectOnlineClientScores(
 	candidateClientScores map[server.Id]*ClientScore,
 	facets []ipFamilyFacet,
 	n int,
 	evidence func(*ClientScore) clientScoreEvidenceRank,
+	uniform func() float64,
 ) []server.Id {
+	compare := func(a server.Id, b server.Id) int {
+		return compareOnlineFallback(candidateClientScores[a], candidateClientScores[b])
+	}
 	clientIds := []server.Id{}
-	for _, group := range clientScoreEvidenceGroups(candidateClientScores, evidence) {
-		for _, facet := range facets {
+	for _, facet := range facets {
+		if n <= len(clientIds) {
+			break
+		}
+		facetClientIds := clientScoreFacetClientIds(candidateClientScores, facet)
+		for _, groupClientIds := range clientScoreEvidenceGroups(facetClientIds, candidateClientScores, evidence) {
 			remainingCount := n - len(clientIds)
 			if remainingCount <= 0 {
 				break
 			}
-			facetClientIds := []server.Id{}
-			for clientId, clientScore := range group {
-				if clientScore.ipFamilyFacet() == facet {
-					facetClientIds = append(facetClientIds, clientId)
-				}
+			if evidence == nil {
+				// full ties in no particular order
+				mathrand.Shuffle(len(groupClientIds), func(i int, j int) {
+					groupClientIds[i], groupClientIds[j] = groupClientIds[j], groupClientIds[i]
+				})
+				slices.SortStableFunc(groupClientIds, compare)
+				clientIds = append(clientIds, groupClientIds[:min(remainingCount, len(groupClientIds))]...)
+				continue
 			}
-			// full ties in no particular order
-			mathrand.Shuffle(len(facetClientIds), func(i int, j int) {
-				facetClientIds[i], facetClientIds[j] = facetClientIds[j], facetClientIds[i]
-			})
-			slices.SortStableFunc(facetClientIds, func(a server.Id, b server.Id) int {
-				clientScoreA := group[a]
-				clientScoreB := group[b]
-				weightA, weightB := clientScoreA.UrlProbeSuccessWeight, clientScoreB.UrlProbeSuccessWeight
-				if weightA == 0 {
-					weightA = 1
-				}
-				if weightB == 0 {
-					weightB = 1
-				}
-				switch {
-				case clientScoreB.ReliabilityWeight*weightB < clientScoreA.ReliabilityWeight*weightA:
-					return -1
-				case clientScoreA.ReliabilityWeight*weightA < clientScoreB.ReliabilityWeight*weightB:
-					return 1
-				}
-				if d := clientScoreA.Tiers[RankModeSpeed] - clientScoreB.Tiers[RankModeSpeed]; d != 0 {
-					return d
-				}
-				return clientScoreA.Scores[RankModeSpeed] - clientScoreB.Scores[RankModeSpeed]
-			})
-			clientIds = append(clientIds, facetClientIds[:min(remainingCount, len(facetClientIds))]...)
+			drawn := weightedClientIdDraw(groupClientIds, remainingCount, func(clientId server.Id) float64 {
+				clientScore := candidateClientScores[clientId]
+				return clientScore.ReliabilityWeight * onlineFallbackUrlWeight(clientScore)
+			}, uniform)
+			slices.SortStableFunc(drawn, compare)
+			clientIds = append(clientIds, drawn...)
 		}
 	}
 	return clientIds
@@ -254,6 +333,20 @@ var findProviders2OnlineFallbackEvidence = prometheus.NewCounterVec(prometheus.C
 	Help: "Providers the FindProviders2 Online fallback lent, per requested rank mode and the evidence the draw had: url_reliability, url, reliability or none",
 }, []string{"rank_mode", "evidence"})
 
+// Each process's effective rank_measured_first, as its FindProviders2 draws
+// read it (through the request settings, at most RequestSettingsMaxAge old).
+// Configuration, not request outcomes, like the native reader's gauge: a
+// process that answers no discovery reports its configuration all the same.
+var findProviders2RankMeasuredFirstEnabled = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+	Name: "urnetwork_findproviders2_rank_measured_first_enabled",
+	Help: "Effective cached rank_measured_first configuration for non-forced Quality and Speed discovery draws; does not attest request outcomes",
+}, func() float64 {
+	if requestEgressIndexSettings().RankMeasuredFirst {
+		return 1
+	}
+	return 0
+})
+
 // Every label pair is exported from the start, so a share is defined before
 // the first answer.
 func init() {
@@ -262,5 +355,5 @@ func init() {
 			findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, rank.String())
 		}
 	}
-	prometheus.MustRegister(findProviders2OnlineFallbackEvidence)
+	prometheus.MustRegister(findProviders2OnlineFallbackEvidence, findProviders2RankMeasuredFirstEnabled)
 }

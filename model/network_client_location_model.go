@@ -6135,11 +6135,13 @@ func FindProviders2(
 		qualityReadClientIds := map[server.Id]bool{}
 		var nativeClientScores map[server.Id]*ClientScore
 		var clientIds, borrowedClientIds []server.Id
-		// What the draws below know of each candidate, nil while
+		// The one instant filterPool judges every pool's URL evidence at, and
+		// with it what the draws below know of each candidate: nil while
 		// rank_measured_first is off or for force_minimum
-		// (network_client_selection_evidence.go).
-		evidenceTime := server.NowUtc()
-		evidence := findProviders2Evidence(requestSettings, findProviders2.ForceMinimum, evidenceTime)
+		// (network_client_selection_evidence.go). The evidence rank and the
+		// neutral URL weight cannot disagree about an expiry.
+		filterTime := server.NowUtc()
+		evidence := findProviders2Evidence(requestSettings, findProviders2.ForceMinimum, filterTime)
 		// Draws up to n of the candidates by their weight in `mode` and bands
 		// the draw by their tier in `mode`, each facet in the request's
 		// preference order (selectClientScoresByWeight).
@@ -6225,7 +6227,7 @@ func FindProviders2(
 					id := provider.ClientId
 					if score := scores[id]; score != nil && !qualityReadClientIds[id] &&
 						!hardExcludedClientIds[id] && score.PassesMinimums[mode] &&
-						score.EgressValidUntil != nil && now.Before(*score.EgressValidUntil) {
+						score.urlEvidenceCurrent(now) {
 						prior = append(prior, id)
 					}
 				}
@@ -6271,9 +6273,10 @@ func FindProviders2(
 		// provider passes exactly what a native one does.
 		filterPool := func(clientScores map[server.Id]*ClientScore, mode RankMode, hardExcludedClientIds map[server.Id]bool) {
 			observation.enter("filter")
-			now := server.NowUtc()
+			now := filterTime
 			for _, clientScore := range clientScores {
-				// the evidence rank reads the same expiry (clientScoreEvidence)
+				// the evidence rank reads the same expiry at the same instant
+				// (clientScoreEvidence)
 				if !clientScore.urlEvidenceCurrent(now) {
 					// Older native cache records may not also set Online. Their
 					// prior native admission also admitted online fallback. Expiry
@@ -6500,9 +6503,11 @@ func FindProviders2(
 		// Takes up to n of the online bucket in its order
 		// (connect/GEOMAP.md §10.3): reliability weight times URL weight,
 		// highest first, then the speed-mode performance adjustment, each
-		// facet in the request's preference order (selectOnlineClientScores).
+		// facet in the request's preference order; with rank_measured_first,
+		// a draw weighted by that key within each evidence rank
+		// (selectOnlineClientScores).
 		selectOnline := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
-			return selectOnlineClientScores(candidateClientScores, facets, n, evidence)
+			return selectOnlineClientScores(candidateClientScores, facets, n, evidence, mathrand.Float64)
 		}
 
 		// Draws up to n members of the online bucket, every one equally likely
@@ -6676,7 +6681,7 @@ func FindProviders2(
 					}
 					for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
 						clientScore := onlineClientScores[clientId]
-						findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, clientScoreEvidence(clientScore, evidenceTime).String()).Inc()
+						findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, clientScoreEvidence(clientScore, filterTime).String()).Inc()
 						borrow(clientScore, RankModeSpeed, 2*backfillTierOffset)
 					}
 				}

@@ -4,15 +4,18 @@
 package model
 
 import (
+	"fmt"
+	"maps"
+	"math"
 	mathrand "math/rand"
 	"os"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-playground/assert/v2"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
@@ -21,6 +24,9 @@ import (
 // One provider as the score export reads it.
 type evidenceTestProvider struct {
 	name string
+	// a fixed client id, for a draw a seeded source must reproduce; a new
+	// one when zero
+	clientId server.Id
 	// accepted URL outcomes in the evidence window, none when urlTotal is 0
 	urlOk    int
 	urlTotal int
@@ -57,6 +63,10 @@ func evidenceTestExportedPool(
 ) (map[server.Id]*ClientScore, map[server.Id]string) {
 	t.Helper()
 	settings := DefaultEgressIndexSettings()
+	// the modern provider gate turns on by itself on 2026-10-21; these
+	// fixtures rank providers the gate has no say over
+	modernGateOff := false
+	settings.QualitySpeedRequiresModernProvider = &modernGateOff
 	countFilter := providerCountFilter{
 		now:                     now,
 		arinRisk:                map[server.Id]bool{},
@@ -73,7 +83,10 @@ func evidenceTestExportedPool(
 	names := map[server.Id]string{}
 	rows := []clientScoreSourceRow{}
 	for _, provider := range providers {
-		clientId := server.NewId()
+		clientId := provider.clientId
+		if clientId == (server.Id{}) {
+			clientId = server.NewId()
+		}
 		networkId := server.NewId()
 		names[clientId] = provider.name
 		if provider.arinNonQuality {
@@ -164,6 +177,29 @@ func evidenceTestRequestEvidence(config string, forceMinimum bool, now time.Time
 	pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
 	defer pop()
 	return findProviders2Evidence(egressIndexSettings(), forceMinimum, now)
+}
+
+// A uniform source of its own, seeded, so a draw is the same on every run.
+func evidenceTestUniform(seed int64) func() float64 {
+	return mathrand.New(mathrand.NewSource(seed)).Float64
+}
+
+// A uniform source for an order that must draw nothing.
+func evidenceTestNoDraw(t testing.TB) func() float64 {
+	return func() float64 {
+		t.Helper()
+		t.Fatal("the order before rank_measured_first drew from a random source")
+		return 0
+	}
+}
+
+// A fixed client id, the same on every run.
+func evidenceTestFixedId(i int) server.Id {
+	var clientId server.Id
+	clientId[0] = 0xe7
+	clientId[14] = byte(i >> 8)
+	clientId[15] = byte(i)
+	return clientId
 }
 
 func evidenceTestNames(clientIds []server.Id, names map[server.Id]string) []string {
@@ -298,12 +334,12 @@ func legacySelectProvidersForTest(candidateClientScores map[server.Id]*ClientSco
 
 // A Quality request whose own bucket and the Speed bucket are empty lends its
 // answer from the Online fallback, all of it from one country. By the weights
-// alone the least known providers rank first: an unprobed provider has the
+// alone the least-known providers rank first: an unprobed provider has the
 // neutral URL weight 1, the most a measured one reaches, and one without a
 // reliability score the neutral reliability weight 1, a provider's steady
-// best. With
-// rank_measured_first on, URL-probe evidence comes first, then a reliability
-// score, each group in its old order, and the unmeasured still fill the rest.
+// best. With rank_measured_first on, URL-probe evidence comes first, then a
+// reliability score, and the unmeasured still fill the rest. Every rank here
+// is drawn whole or not at all, and a draw is listed in the old order.
 func TestOnlineFallbackLendsMeasuredFirst(t *testing.T) {
 	now := server.NowUtc()
 	pool, names := evidenceTestExportedPool(t, now, RankModeQuality, evidenceTestOnlineProviders())
@@ -330,7 +366,7 @@ func TestOnlineFallbackLendsMeasuredFirst(t *testing.T) {
 	// three, six and nine places left, every provider, and more places than
 	// providers: the answer is never shorter than without the ranking
 	for _, n := range []int{3, 6, 9, 12, 20} {
-		lent := evidenceTestNames(selectOnlineClientScores(pool, facets, n, evidence), names)
+		lent := evidenceTestNames(selectOnlineClientScores(pool, facets, n, evidence, evidenceTestUniform(int64(n))), names)
 		if !slices.Equal(lent, want[:min(n, len(want))]) {
 			t.Fatalf("with %d places the Online fallback lent %v, want %v", n, lent, want[:min(n, len(want))])
 		}
@@ -340,9 +376,9 @@ func TestOnlineFallbackLendsMeasuredFirst(t *testing.T) {
 }
 
 // With rank_measured_first off, the default, the Online fallback's order is
-// exactly the one before, which on this fixture lends the unprobed first:
-// absent, false, and a value that is not a bool, which keeps the block's
-// defaults.
+// exactly the one before, which on this fixture lends the unprobed first, and
+// draws nothing: absent, false, and a value that is not a bool, which keeps
+// the block's defaults.
 func TestOnlineFallbackOrderUnchangedWithRankingOff(t *testing.T) {
 	now := server.NowUtc()
 	pool, names := evidenceTestExportedPool(t, now, RankModeQuality, evidenceTestOnlineProviders())
@@ -356,14 +392,14 @@ func TestOnlineFallbackOrderUnchangedWithRankingOff(t *testing.T) {
 			t.Fatalf("provider.yml %q turned the ranking on", config)
 		}
 		for n := 0; n <= 13; n += 1 {
-			got := selectOnlineClientScores(pool, facets, n, evidence)
+			got := selectOnlineClientScores(pool, facets, n, evidence, evidenceTestNoDraw(t))
 			want := legacySelectOnlineForTest(pool, facets, n)
 			if !slices.Equal(got, want) {
 				t.Fatalf("provider.yml %q, %d places: %v, before %v", config, n, evidenceTestNames(got, names), evidenceTestNames(want, names))
 			}
 		}
 	}
-	assert.Equal(t, evidenceTestNames(selectOnlineClientScores(pool, facets, 3, nil), names), []string{"unprobed_unscored_a", "unprobed_unscored_b", "unprobed_unscored_c"})
+	assert.Equal(t, evidenceTestNames(selectOnlineClientScores(pool, facets, 3, nil, evidenceTestNoDraw(t)), names), []string{"unprobed_unscored_a", "unprobed_unscored_b", "unprobed_unscored_c"})
 }
 
 // force_minimum keeps its draw of every admitted provider alike.
@@ -428,22 +464,154 @@ func TestBorrowedNativesDrawMeasuredFirst(t *testing.T) {
 	assert.Equal(t, len(selectClientScoresByWeight(borrowable, RankModeSpeed, facets, 0, evidence)), 0)
 }
 
-// The evidence is the first key, ahead of the family preference: a measured
-// v4-only provider is lent before an unprobed dualstack one, which the
-// preference alone would put first.
-func TestOnlineFallbackEvidenceOutranksFamilyPreference(t *testing.T) {
+// The family preference stays the first key (connect/IPV6.md B2: the server
+// draws dualstack first, so v4-only exits only top up), and the evidence
+// orders each family: an unprobed dualstack provider is lent before a
+// measured v4-only one, and within each family the measured come first. The
+// Online fallback and the native draw both keep it.
+func TestDrawsKeepTheFamilyPreferenceAheadOfEvidence(t *testing.T) {
 	now := server.NowUtc()
-	pool, names := evidenceTestExportedPool(t, now, RankModeQuality, []*evidenceTestProvider{
-		{name: "measured_v4", urlOk: 5, urlTotal: 10, lookbacks: evidenceTestScored(0.5), hasLatencyTest: true, latencyMillis: 20, bytesPerSecond: 50 * Mib},
-		{name: "unprobed_dualstack", dualstack: true, hasLatencyTest: true, latencyMillis: 20, bytesPerSecond: 50 * Mib},
-	})
 	facets, err := ipFamilyFacetsForFilter("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	on := evidenceTestRequestEvidence(evidenceTestMainConfigRankingOn, false, now)
-	assert.Equal(t, evidenceTestNames(selectOnlineClientScores(pool, facets, 2, on), names), []string{"measured_v4", "unprobed_dualstack"})
-	assert.Equal(t, evidenceTestNames(selectOnlineClientScores(pool, facets, 2, nil), names), []string{"unprobed_dualstack", "measured_v4"})
+
+	online, onlineNames := evidenceTestExportedPool(t, now, RankModeQuality, []*evidenceTestProvider{
+		{name: "measured_dualstack", dualstack: true, urlOk: 5, urlTotal: 10, lookbacks: evidenceTestScored(0.5), hasLatencyTest: true, latencyMillis: 20, bytesPerSecond: 50 * Mib},
+		{name: "unprobed_dualstack", dualstack: true, hasLatencyTest: true, latencyMillis: 20, bytesPerSecond: 50 * Mib},
+		{name: "measured_v4", urlOk: 5, urlTotal: 10, lookbacks: evidenceTestScored(0.5), hasLatencyTest: true, latencyMillis: 20, bytesPerSecond: 50 * Mib},
+		{name: "unprobed_v4", hasLatencyTest: true, latencyMillis: 20, bytesPerSecond: 50 * Mib},
+	})
+	assert.Equal(t, evidenceTestNames(selectOnlineClientScores(online, facets, 4, on, evidenceTestUniform(1)), onlineNames), []string{"measured_dualstack", "unprobed_dualstack", "measured_v4", "unprobed_v4"})
+	// two places: both dualstack providers, the unprobed one included
+	assert.Equal(t, evidenceTestNames(selectOnlineClientScores(online, facets, 2, on, evidenceTestUniform(1)), onlineNames), []string{"measured_dualstack", "unprobed_dualstack"})
+	// off: each family in the order before, the unprobed first
+	assert.Equal(t, evidenceTestNames(selectOnlineClientScores(online, facets, 4, nil, evidenceTestNoDraw(t)), onlineNames), []string{"unprobed_dualstack", "measured_dualstack", "unprobed_v4", "measured_v4"})
+
+	natives, nativeNames := evidenceTestExportedPool(t, now, RankModeSpeed, []*evidenceTestProvider{
+		{name: "scored_dualstack", dualstack: true, urlOk: 10, urlTotal: 10, lookbacks: evidenceTestScored(0.9), hasLatencyTest: true, latencyMillis: 10, bytesPerSecond: 50 * Mib},
+		{name: "unscored_dualstack", dualstack: true, urlOk: 10, urlTotal: 10, hasLatencyTest: true, latencyMillis: 10, bytesPerSecond: 50 * Mib},
+		{name: "scored_v4", urlOk: 10, urlTotal: 10, lookbacks: evidenceTestScored(0.9), hasLatencyTest: true, latencyMillis: 10, bytesPerSecond: 50 * Mib},
+	})
+	speedNatives := map[server.Id]*ClientScore{}
+	for clientId, clientScore := range natives {
+		if clientScore.PassesMinimums[RankModeSpeed] {
+			speedNatives[clientId] = clientScore
+		}
+	}
+	assert.Equal(t, len(speedNatives), 3)
+	assert.Equal(t, evidenceTestNames(selectClientScoresByWeight(speedNatives, RankModeSpeed, facets, 3, on), nativeNames), []string{"scored_dualstack", "unscored_dualstack", "scored_v4"})
+	for range 20 {
+		drawn := evidenceTestNames(selectClientScoresByWeight(speedNatives, RankModeSpeed, facets, 2, on), nativeNames)
+		slices.Sort(drawn)
+		assert.Equal(t, drawn, []string{"scored_dualstack", "unscored_dualstack"})
+	}
+}
+
+// Thirty measured providers with failing URL ratios hold the Online fallback
+// of one country, which lends ten places to each of a thousand Quality
+// answers. Their keys never tie, so a sort would lend every answer the same
+// ten. The draw weighted by the key spreads the answers over all thirty, the
+// better-weighted more often, and every answer still takes ten of them.
+func TestOnlineFallbackSpreadsAnswersOverEachEvidenceRank(t *testing.T) {
+	now := server.NowUtc()
+	providers := []*evidenceTestProvider{}
+	for i := range 30 {
+		providers = append(providers, &evidenceTestProvider{
+			name:           fmt.Sprintf("measured_%02d", i),
+			clientId:       evidenceTestFixedId(i),
+			urlOk:          5 + i%3,
+			urlTotal:       10,
+			lookbacks:      evidenceTestScored(0.8 + 0.005*float64(i)),
+			hasLatencyTest: true,
+			latencyMillis:  20,
+			bytesPerSecond: 50 * Mib,
+		})
+	}
+	pool, names := evidenceTestExportedPool(t, now, RankModeQuality, providers)
+	facets, err := ipFamilyFacetsForFilter("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := evidenceTestRequestEvidence(evidenceTestMainConfigRankingOn, false, now)
+	uniform := evidenceTestUniform(1)
+	lent := map[server.Id]int{}
+	for range 1000 {
+		answer := selectOnlineClientScores(pool, facets, 10, evidence, uniform)
+		distinct := map[server.Id]bool{}
+		for _, clientId := range answer {
+			distinct[clientId] = true
+			lent[clientId] += 1
+		}
+		if len(answer) != 10 || len(distinct) != 10 {
+			t.Fatalf("an answer lent %d providers, %d of them distinct, want 10", len(answer), len(distinct))
+		}
+	}
+
+	byWeight := slices.Collect(maps.Keys(pool))
+	slices.SortFunc(byWeight, func(a server.Id, b server.Id) int {
+		return compareOnlineFallback(pool[a], pool[b])
+	})
+	for _, clientId := range byWeight {
+		if count := lent[clientId]; count < 100 || 700 < count {
+			t.Errorf("%s (weight %.3f) was lent to %d of 1000 answers, want 100 to 700", names[clientId], pool[clientId].ReliabilityWeight*onlineFallbackUrlWeight(pool[clientId]), count)
+		}
+	}
+	best, worst := 0, 0
+	for i := range 10 {
+		best += lent[byWeight[i]]
+		worst += lent[byWeight[len(byWeight)-1-i]]
+	}
+	if best <= worst {
+		t.Errorf("the ten best-weighted providers were lent %d times, the ten worst %d: the draw ignores the weights", best, worst)
+	}
+	counts := []int{}
+	for _, clientId := range byWeight {
+		counts = append(counts, lent[clientId])
+	}
+	t.Logf("1000 answers of 10 from 30 measured providers, lent per provider from the best-weighted: %v (ten best %d, ten worst %d)", counts, best, worst)
+}
+
+// The weighted draw takes up to n distinct ids, every positive weight before
+// any other, each in proportion to its weight, and the same ids from the same
+// source whatever order the ids come in.
+func TestWeightedClientIdDraw(t *testing.T) {
+	ids := []server.Id{evidenceTestFixedId(1), evidenceTestFixedId(2), evidenceTestFixedId(3), evidenceTestFixedId(4)}
+	weights := map[server.Id]float64{ids[0]: 3, ids[1]: 1, ids[2]: 0, ids[3]: math.NaN()}
+	weight := func(clientId server.Id) float64 {
+		return weights[clientId]
+	}
+	uniform := evidenceTestUniform(1)
+	assert.Equal(t, len(weightedClientIdDraw(ids, 0, weight, uniform)), 0)
+	assert.Equal(t, len(weightedClientIdDraw(ids, -1, weight, uniform)), 0)
+	assert.Equal(t, len(weightedClientIdDraw(nil, 2, weight, uniform)), 0)
+	for range 50 {
+		every := weightedClientIdDraw(ids, 9, weight, uniform)
+		assert.Equal(t, len(every), 4)
+		// the positive weights first, then the rest, which still fill
+		positive := slices.Clone(every[:2])
+		slices.SortFunc(positive, func(a server.Id, b server.Id) int { return a.Cmp(b) })
+		assert.Equal(t, positive, ids[:2])
+		rest := slices.Clone(every[2:])
+		slices.SortFunc(rest, func(a server.Id, b server.Id) int { return a.Cmp(b) })
+		assert.Equal(t, rest, ids[2:])
+	}
+	// three to one
+	first := 0
+	for range 4000 {
+		if weightedClientIdDraw(ids, 1, weight, uniform)[0] == ids[0] {
+			first += 1
+		}
+	}
+	if first < 2800 || 3200 < first {
+		t.Errorf("weight 3 against 1 was drawn first %d of 4000 times, want about 3000", first)
+	}
+	reversed := slices.Clone(ids)
+	slices.Reverse(reversed)
+	for seed := range int64(20) {
+		assert.Equal(t, weightedClientIdDraw(ids, 2, weight, evidenceTestUniform(seed)), weightedClientIdDraw(reversed, 2, weight, evidenceTestUniform(seed)))
+	}
 }
 
 // What a draw knows of a score: URL evidence the score still vouches for,
@@ -487,27 +655,47 @@ func TestClientScoreEvidenceRank(t *testing.T) {
 	}, []string{"url_reliability", "url", "reliability", "none"})
 }
 
-// Without evidence the draw sees the candidates themselves, in one group;
-// with it, the ranks best first and no empty group.
+// Without evidence a facet's draw sees its candidates themselves, in one
+// group; with it, the ranks best first, each in the facet's order, and no
+// empty group.
 func TestClientScoreEvidenceGroups(t *testing.T) {
 	now := server.NowUtc()
 	future := now.Add(time.Hour)
-	measured := &ClientScore{ClientId: server.NewId(), EgressValidUntil: &future}
-	unknown := &ClientScore{ClientId: server.NewId(), LookbackClientScores: map[int]*ClientScore{0: {ReliabilityWeight: 1, IndependentReliabilityWeight: 1}}}
-	candidates := map[server.Id]*ClientScore{measured.ClientId: measured, unknown.ClientId: unknown}
+	measured := &ClientScore{ClientId: evidenceTestFixedId(1), EgressValidUntil: &future}
+	unknown := &ClientScore{ClientId: evidenceTestFixedId(2), LookbackClientScores: map[int]*ClientScore{0: {ReliabilityWeight: 1, IndependentReliabilityWeight: 1}}}
+	alsoMeasured := &ClientScore{ClientId: evidenceTestFixedId(3), EgressValidUntil: &future}
+	clientScores := map[server.Id]*ClientScore{measured.ClientId: measured, unknown.ClientId: unknown, alsoMeasured.ClientId: alsoMeasured}
+	clientIds := []server.Id{unknown.ClientId, alsoMeasured.ClientId, measured.ClientId}
 
-	groups := clientScoreEvidenceGroups(candidates, nil)
+	groups := clientScoreEvidenceGroups(clientIds, clientScores, nil)
 	assert.Equal(t, len(groups), 1)
-	assert.Equal(t, reflect.ValueOf(groups[0]).Pointer(), reflect.ValueOf(candidates).Pointer())
+	assert.Equal(t, &groups[0][0] == &clientIds[0], true)
+	assert.Equal(t, len(groups[0]), len(clientIds))
 
-	groups = clientScoreEvidenceGroups(candidates, func(clientScore *ClientScore) clientScoreEvidenceRank {
+	evidence := func(clientScore *ClientScore) clientScoreEvidenceRank {
 		return clientScoreEvidence(clientScore, now)
+	}
+	groups = clientScoreEvidenceGroups(clientIds, clientScores, evidence)
+	assert.Equal(t, groups, [][]server.Id{
+		{alsoMeasured.ClientId, measured.ClientId},
+		{unknown.ClientId},
 	})
-	assert.Equal(t, groups, []map[server.Id]*ClientScore{
-		{measured.ClientId: measured},
-		{unknown.ClientId: unknown},
-	})
-	assert.Equal(t, len(clientScoreEvidenceGroups(map[server.Id]*ClientScore{}, func(*ClientScore) clientScoreEvidenceRank { return 0 })), 0)
+	assert.Equal(t, len(clientScoreEvidenceGroups([]server.Id{}, clientScores, evidence)), 0)
+}
+
+// The setting's gauge reads the request path's settings, as the draws do.
+func TestFindProviders2RankMeasuredFirstGauge(t *testing.T) {
+	read := func(config string) float64 {
+		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
+		defer pop()
+		requestEgressIndexSettingsSnapshot.Store(nil)
+		defer requestEgressIndexSettingsSnapshot.Store(nil)
+		return testutil.ToFloat64(findProviders2RankMeasuredFirstEnabled)
+	}
+	assert.Equal(t, read(evidenceTestMainConfig), float64(0))
+	assert.Equal(t, read(evidenceTestMainConfigRankingOn), float64(1))
+	assert.Equal(t, read(evidenceTestMainConfigRankingOff), float64(0))
+	assert.Equal(t, read(evidenceTestRankingUnreadableBool), float64(0))
 }
 
 // reliabilityUnscored reads the neutral lookback both score source queries

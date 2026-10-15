@@ -93,13 +93,18 @@ type EgressIndexSettings struct {
 	// Whether FindProviders2 takes providers with measured evidence before
 	// those without in every draw of a Quality or Speed request that is not
 	// force_minimum: its own bucket, the bucket it borrows from and the Online
-	// fallback (network_client_selection_evidence.go). URL-probe evidence
-	// comes first, then a reliability score; each group keeps the order the
-	// draw gave it before, and the providers without evidence still fill
-	// whatever the measured leave, so no answer gets shorter. The process
-	// that answers FindProviders2 (the api, and the proxy for its hosted
-	// devices) applies it, as read through RequestSettingsMaxAge. False, the
-	// default, is the order before it. `rank_measured_first` in the block.
+	// fallback (network_client_selection_evidence.go). Within each family
+	// facet, URL-probe evidence comes first, then a reliability score, and the
+	// providers without evidence still fill whatever the measured leave, so
+	// no answer gets shorter. The api, and the proxy for its hosted devices,
+	// apply it as they answer; the taskworker's export does not read it. A
+	// service sees only the config version its container was created with,
+	// so turning it on or off is a config release and a restart of the api
+	// and the proxy. Each restarted process then applies it within
+	// RequestSettingsMaxAge, and
+	// urnetwork_findproviders2_rank_measured_first_enabled shows each
+	// process's value. False, the default, is the order before it.
+	// `rank_measured_first` in the block.
 	RankMeasuredFirst bool
 	// how old the settings a request path reads may be. The passes read
 	// provider.yml on every call; a request path runs far too often to read
