@@ -7,9 +7,11 @@
 # A successful preflight exports WARP_TEST_ENV_ATTESTED_ADDRS, the ip:port
 # endpoints it validated. Go test processes dial PostgreSQL and Redis only at
 # those endpoints for the whole run, because a service name that re-resolves
-# after the launcher exits falls through to public DNS, which answers the local
-# service names with 127.0.0.1. Any failure leaves the variable unset, and the
-# integration fixtures then refuse to start.
+# after the launcher exits falls through to whatever answers next: public DNS
+# answered the local service names with 127.0.0.1 until those records were
+# deleted on 2026-10-14, and a stale cache or a hosts edit still can. Any
+# failure leaves the variable unset, and the integration fixtures then refuse
+# to start.
 #
 # In managed-local mode a successful preflight also exports
 # WARP_TEST_ENV_LAUNCHER_VAULT_HOME: the vault it selected by the launcher's own
@@ -430,7 +432,8 @@ test_env_resolve_host() {
 }
 
 # A launcher-managed name must resolve only to the launcher's dedicated address.
-# Public DNS also answers both local service names with 127.0.0.1, where a
+# Public DNS answered both local service names with 127.0.0.1 until 2026-10-14,
+# and a stale cache or a hosts edit can still answer loopback, where a
 # production data tunnel can listen, so a withdrawn or shadowed hosts mapping
 # stops the run here instead of reaching whatever listens on loopback.
 test_env_require_attested_resolution() {
@@ -496,8 +499,8 @@ test_env_require_managed_resolution() {
 # private portable root, which names its own 127.0.0.1 endpoints; elsewhere a
 # loopback service may be a production data tunnel. A name is resolved once and
 # its single address is pinned for the whole run; a name that resolves to
-# loopback is refused, since public DNS answers the local service names that
-# way.
+# loopback is refused, since public DNS answered the local service names that
+# way until 2026-10-14 and a stale answer still can.
 test_env_pin_unmanaged_service() {
     local service_name="$1"
     local host_name="$2"
