@@ -419,7 +419,8 @@ func hostScopeCoverageFinding(settings SignalSettings, blockedCount int) finding
 	}
 	return finding{
 		probeId: "monitor/host-scope", tier: tierWarn,
-		class: "monitor-host-scope-partial", target: "monitor-host-scope", sustain: 1,
+		// hosts blocked in this run leave it incomplete; a configured exclusion alone does not
+		class: "monitor-host-scope-partial", target: "monitor-host-scope", sustain: 1, unobservable: 0 < blockedCount,
 		symptom:   "Some inventory-target host observations are intentionally excluded by this monitor's immutable policy.",
 		mechanism: "Desired inventory remains complete, but excluded named-host and exact inventory-owned transport operations are denied before their source is contacted. Their direct state is unknown, not failed workload or missing placement.",
 		baseline:  "Required inventory-target observations are enabled, or every explicit operational pause has an owner and re-enable condition.",
