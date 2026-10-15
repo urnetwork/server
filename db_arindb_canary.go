@@ -15,7 +15,7 @@ package server
 // New columns are metadata-only additions with constant defaults; nothing is
 // rewritten.
 
-// 837: the rollup's two slots and their epochs.
+// The first: the rollup's two slots and their epochs.
 const arinDatabaseCanaryRollupSchemaSql = `
 	SET LOCAL lock_timeout = '5s';
 	ALTER TABLE network_client_location_reliability
@@ -25,7 +25,7 @@ const arinDatabaseCanaryRollupSchemaSql = `
 		ADD COLUMN arin_old_epoch bigint NOT NULL DEFAULT 0;
 `
 
-// 838: each connection's old slot and its write guard. The old slot has its
+// The second: each connection's old slot and its write guard. The old slot has its
 // own write token and guard. A writer that predates the old slot still
 // supplies a fresh latest token, so the published v751 guard cannot tell it
 // apart; this guard revokes the old positive and marks the old facts

@@ -8,30 +8,30 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The pinned body is byte for byte the function the 838 migration creates, so
-// a healthy schema can never read as drift and an edited migration cannot
-// pass under the old pin.
+// The pinned body is byte for byte the function the location migration
+// creates, so a healthy schema can never read as drift and an edited migration
+// cannot pass under the old pin.
 func TestArindbCanaryGuardBodyIsThePublishedMigrationBody(t *testing.T) {
 	source, err := os.ReadFile("../db_arindb_canary.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(source), "AS $arin_old_quality$"+arinOldQualityGuardFunctionBody+"$arin_old_quality$;") {
-		t.Fatal("the pinned old-slot guard body differs from the 838 migration's function body")
+		t.Fatal("the pinned old-slot guard body differs from the location migration's function body")
 	}
 }
 
 // The canary's schema is two append-only migrations, each with one contract
-// over the one table it locks: the rollup's slots at 837, then the connection
-// slots and their guard at 838, the head this source tree requires.
+// over the one table it locks: the rollup's slots, then the connection slots
+// and their guard, at the head this source tree requires.
 func TestArindbCanaryContractsAreTheCurrentHead(t *testing.T) {
 	count := len(migrationCurrentSuffixContracts)
 	if count < 2 {
 		t.Fatalf("%d suffix contracts", count)
 	}
 	rollup, location := migrationCurrentSuffixContracts[count-2], migrationCurrentSuffixContracts[count-1]
-	if rollup.artifact.requiredVersion != 837 || location.artifact.requiredVersion != 838 ||
-		rollup.artifact.removedVersion != 0 || location.artifact.removedVersion != 0 || server.MigrationCount() != 838 {
+	if rollup.artifact.requiredVersion != arindbCanaryRollupMigrationVersion || location.artifact.requiredVersion != arindbCanaryLocationMigrationVersion ||
+		rollup.artifact.removedVersion != 0 || location.artifact.removedVersion != 0 || server.MigrationCount() != arindbCanaryLocationMigrationVersion {
 		t.Fatalf("canary contracts %+v and %+v at head %d", rollup.artifact, location.artifact, server.MigrationCount())
 	}
 	for _, c := range []struct {

@@ -1,12 +1,20 @@
-// The v837 and v838 artifact contracts of the dual-database ARIN canary, part
-// of the single migrations signal (arindbctl/ARINDB.md, "Connection and rollup
-// facts"): the rollup's slots at 837, the connection slots and their write
-// guard at 838.
+// The artifact contracts of the dual-database ARIN canary's two migrations,
+// part of the single migrations signal (arindbctl/ARINDB.md, "Connection and
+// rollup facts"): the rollup's slots, then the connection slots and their write
+// guard.
 package monitor
 
 import "strings"
 
-// This body intentionally pins the published v838 function. It does not read
+// The versions of the canary's two migrations, appended in this order at the
+// head. A migration merged ahead of them shifts both: change the rollup's
+// version here, and keep their order at the tail of db_migrations.go.
+const (
+	arindbCanaryRollupMigrationVersion   = 837
+	arindbCanaryLocationMigrationVersion = arindbCanaryRollupMigrationVersion + 1
+)
+
+// This body intentionally pins the function the location migration publishes. It does not read
 // connection rows or infer whether a paired release is deployed.
 const arinOldQualityGuardFunctionBody = `
 	BEGIN
@@ -44,8 +52,8 @@ var arinOldQualityWriteGuardArtifactQuery = `(
 			AND actual.tgoldtable IS NULL AND actual.tgnewtable IS NULL AND NOT actual.tgisinternal)
 )`
 
-// 837: the rollup's old slot and both slots' epochs, with their exact types,
-// nullability and defaults.
+// The rollup migration: the rollup's old slot and both slots' epochs, with
+// their exact types, nullability and defaults.
 func migrationArindbCanaryRollupArtifacts() []string {
 	return []string{
 		snMainnetMigrationColumns("network_client_location_reliability",
@@ -56,8 +64,8 @@ func migrationArindbCanaryRollupArtifacts() []string {
 	}
 }
 
-// 838: each connection's old slot, with its exact types, nullability and
-// defaults, and the old-slot guard.
+// The location migration: each connection's old slot, with its exact types,
+// nullability and defaults, and the old-slot guard.
 func migrationArindbCanaryLocationArtifacts() []string {
 	return []string{
 		snMainnetMigrationColumns("network_client_location",

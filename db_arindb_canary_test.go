@@ -9,14 +9,16 @@ import (
 	"testing"
 )
 
-// The canary schema is appended after version 836, the FP2 modern provider
-// evidence: the rollup's slots at 837, then the connection slots at 838.
-func TestArinDatabaseCanaryMigrationsAreAppendedAfter836(t *testing.T) {
-	if index := sqlMigrationIndex(t, "ADD COLUMN arin_old_epoch"); index != 836 {
-		t.Fatalf("canary rollup migration index=%d, want 836 (version 837)", index)
-	}
-	if index := sqlMigrationIndex(t, "ADD COLUMN arin_old_quality_write_token"); index != 837 {
-		t.Fatalf("canary location migration index=%d, want 837 (version 838)", index)
+// The canary schema is the head: the rollup's slots, then the connection
+// slots, after the FP2 modern provider evidence. A migration merged ahead of
+// them shifts both together.
+func TestArinDatabaseCanaryMigrationsAreTheHead(t *testing.T) {
+	rollup := sqlMigrationIndex(t, "ADD COLUMN arin_old_epoch")
+	location := sqlMigrationIndex(t, "ADD COLUMN arin_old_quality_write_token")
+	evidence := sqlMigrationIndex(t, "CREATE TABLE provider_modern_evidence")
+	if rollup != len(migrations)-2 || location != len(migrations)-1 || rollup <= evidence {
+		t.Fatalf("canary migrations at versions %d and %d of %d, after the modern provider evidence at %d; want the last two",
+			rollup+1, location+1, len(migrations), evidence+1)
 	}
 }
 
@@ -58,12 +60,13 @@ func TestArinDatabaseCanaryMigrationsLockOneTableEach(t *testing.T) {
 	}
 }
 
-// Rows written before the migration read as unavailable in the old slot, and
-// the migration leaves the latest slot's facts and v751 guard untouched.
-func TestArinDatabaseCanaryMigrationFrom836IsAdditive(t *testing.T) {
+// Rows written before the migrations read as unavailable in the old slot, and
+// the migrations leave the latest slot's facts and v751 guard untouched.
+func TestArinDatabaseCanaryMigrationsFromThePreviousHeadAreAdditive(t *testing.T) {
+	rollup := sqlMigrationIndex(t, "ADD COLUMN arin_old_epoch")
 	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		ApplyDbMigrationsUpTo(ctx, 836)
+		ApplyDbMigrationsUpTo(ctx, rollup)
 		connectionId, clientId, locationId := NewId(), NewId(), NewId()
 		Tx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_location
@@ -74,9 +77,9 @@ func TestArinDatabaseCanaryMigrationFrom836IsAdditive(t *testing.T) {
 				(client_id, network_id, update_block_number, connected, client_address_hash_count, location_count)
 				VALUES ($1,$2,1,true,1,1)`, clientId, NewId()))
 		})
-		// 837 alone adds the rollup's slots and leaves the connection rows as
-		// they were
-		ApplyDbMigrationsUpTo(ctx, 837)
+		// the rollup migration alone adds the rollup's slots and leaves the
+		// connection rows as they were
+		ApplyDbMigrationsUpTo(ctx, rollup+1)
 		Db(ctx, func(conn PgConn) {
 			var rollupColumns, locationColumns int
 			Raise(conn.QueryRow(ctx, `SELECT
@@ -84,7 +87,7 @@ func TestArinDatabaseCanaryMigrationFrom836IsAdditive(t *testing.T) {
 				count(*) FILTER (WHERE table_name='network_client_location' AND column_name LIKE 'arin_old_%')
 				FROM information_schema.columns WHERE table_schema='public'`).Scan(&rollupColumns, &locationColumns))
 			if rollupColumns != 4 || locationColumns != 0 {
-				t.Fatalf("version 837 has %d rollup slot columns and %d connection old-slot columns, want 4 and 0", rollupColumns, locationColumns)
+				t.Fatalf("version %d has %d rollup slot columns and %d connection old-slot columns, want 4 and 0", rollup+1, rollupColumns, locationColumns)
 			}
 		}, OptReadOnly(), OptNoRetry())
 		ApplyDbMigrations(ctx)

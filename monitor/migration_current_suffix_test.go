@@ -190,16 +190,16 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"modern provider key exchange widened", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN key_exchange TYPE varchar(65)`},
 		{"modern provider receive window narrowed", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN max_receive_window_byte_count TYPE integer`},
 		{"invented modern provider run count", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN run_count SET DEFAULT 0`},
-		{"old slot verified by default", 838, `ALTER TABLE network_client_location ALTER COLUMN arin_old_quality_verified SET DEFAULT true`},
-		{"missing old slot epoch", 838, `ALTER TABLE network_client_location DROP COLUMN arin_old_database_build_epoch`},
-		{"defaulted old slot token", 838, `ALTER TABLE network_client_location ALTER COLUMN arin_old_quality_write_token SET DEFAULT '00000000-0000-0000-0000-000000000000'::uuid`},
-		{"missing rollup old epoch", 837, `ALTER TABLE network_client_location_reliability DROP COLUMN arin_old_epoch`},
-		{"nullable rollup latest epoch", 837, `ALTER TABLE network_client_location_reliability ALTER COLUMN arin_epoch DROP NOT NULL`},
-		{"disabled old slot guard", 838, `ALTER TABLE network_client_location DISABLE TRIGGER network_client_location_arin_old_quality_guard`},
-		{"narrowed old slot guard", 838, `DROP TRIGGER network_client_location_arin_old_quality_guard ON network_client_location;
+		{"old slot verified by default", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location ALTER COLUMN arin_old_quality_verified SET DEFAULT true`},
+		{"missing old slot epoch", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location DROP COLUMN arin_old_database_build_epoch`},
+		{"defaulted old slot token", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location ALTER COLUMN arin_old_quality_write_token SET DEFAULT '00000000-0000-0000-0000-000000000000'::uuid`},
+		{"missing rollup old epoch", arindbCanaryRollupMigrationVersion, `ALTER TABLE network_client_location_reliability DROP COLUMN arin_old_epoch`},
+		{"nullable rollup latest epoch", arindbCanaryRollupMigrationVersion, `ALTER TABLE network_client_location_reliability ALTER COLUMN arin_epoch DROP NOT NULL`},
+		{"disabled old slot guard", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location DISABLE TRIGGER network_client_location_arin_old_quality_guard`},
+		{"narrowed old slot guard", arindbCanaryLocationMigrationVersion, `DROP TRIGGER network_client_location_arin_old_quality_guard ON network_client_location;
 			CREATE TRIGGER network_client_location_arin_old_quality_guard BEFORE INSERT OR UPDATE OF arin_old_quality_verified
 			ON network_client_location FOR EACH ROW EXECUTE FUNCTION network_client_location_arin_old_quality_guard()`},
-		{"replaced old slot guard", 838, `CREATE OR REPLACE FUNCTION network_client_location_arin_old_quality_guard() RETURNS trigger
+		{"replaced old slot guard", arindbCanaryLocationMigrationVersion, `CREATE OR REPLACE FUNCTION network_client_location_arin_old_quality_guard() RETURNS trigger
 			LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
 	}
 	var observed []snMainnetMigrationAlertObservation
