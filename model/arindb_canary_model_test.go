@@ -166,17 +166,16 @@ func TestArindbCanaryFallsBackOnlyWhenTheQualityBucketTrips(t *testing.T) {
 	}
 }
 
-// A country with supply under the old database and none under the latest trips
-// the breaker in each bucket, however small its share; the switch can turn the
-// rule off without hiding the report.
+// A country with min_emptied_country_supply under the old database and none
+// under the latest trips the breaker in each bucket, however small its share;
+// the switch can turn the rule off without hiding the report.
 func TestArindbCanaryBreakerTripsOnACountryEmptiedInEachBucket(t *testing.T) {
 	scenario := map[string][]*arindbCanaryProvider{
-		RankModeQuality: {testCanaryProvider("bb", nil, true, testCanaryNonQuality, testCanaryClean)},
-		RankModeSpeed: {
-			testCanaryProvider("bb", nil, true, testCanaryRisky, testCanaryNonQuality),
-			testCanaryProvider("bb", nil, false, testCanaryClean, testCanaryClean),
-		},
-		ProviderEgressBucketOnline: {testCanaryProvider("bb", nil, false, testCanaryRisky, testCanaryClean)},
+		RankModeQuality: testCanaryProviders(3, "bb", true, testCanaryNonQuality, testCanaryClean),
+		RankModeSpeed: append(
+			testCanaryProviders(3, "bb", true, testCanaryRisky, testCanaryNonQuality),
+			testCanaryProviders(3, "bb", false, testCanaryClean, testCanaryClean)...),
+		ProviderEgressBucketOnline: testCanaryProviders(3, "bb", false, testCanaryRisky, testCanaryClean),
 	}
 	for _, bucket := range ProviderEgressBuckets {
 		for _, tripOnEmptiedCountry := range []bool{true, false} {
@@ -185,8 +184,8 @@ func TestArindbCanaryBreakerTripsOnACountryEmptiedInEachBucket(t *testing.T) {
 			providers := append(testCanaryProviders(100, "aa", true, testCanaryClean, testCanaryClean), scenario[bucket]...)
 			decision := decideTestCanary(testCanaryPair(), providers, settings)
 			b := decision.Buckets[bucket]
-			if len(b.EmptiedCountries) != 1 || b.EmptiedCountries[0] != (ArindbCanaryEmptiedCountry{CountryCode: "bb", Old: 1}) {
-				t.Errorf("%s: emptied countries %+v, want bb with old supply 1", bucket, b.EmptiedCountries)
+			if len(b.EmptiedCountries) != 1 || b.EmptiedCountries[0] != (ArindbCanaryEmptiedCountry{CountryCode: "bb", Old: 3, Trips: true}) {
+				t.Errorf("%s: emptied countries %+v, want bb with old supply 3", bucket, b.EmptiedCountries)
 			}
 			if b.LossRatio > settings.BucketLossThreshold {
 				t.Errorf("%s: the fixture's net loss %v trips on its own", bucket, b.LossRatio)
@@ -199,6 +198,28 @@ func TestArindbCanaryBreakerTripsOnACountryEmptiedInEachBucket(t *testing.T) {
 					t.Errorf("%s fixture also emptied %s: %+v", bucket, other, decision.Buckets[other].EmptiedCountries)
 				}
 			}
+		}
+	}
+}
+
+// An emptied country trips only with min_emptied_country_supply under the old
+// database, so one provider connecting and disconnecting cannot flip the
+// fleet; a smaller one is reported.
+func TestArindbCanaryEmptiedCountryNeedsTheMinimumOldSupplyToTrip(t *testing.T) {
+	for _, c := range []struct {
+		old   int
+		trips bool
+	}{{old: 1}, {old: 2}, {old: 3, trips: true}} {
+		providers := append(
+			testCanaryProviders(100, "aa", true, testCanaryClean, testCanaryClean),
+			testCanaryProviders(c.old, "bb", true, testCanaryNonQuality, testCanaryClean)...)
+		decision := decideTestCanary(testCanaryPair(), providers, defaultArindbCanarySettings())
+		quality := decision.Buckets[RankModeQuality]
+		if len(quality.EmptiedCountries) != 1 || quality.EmptiedCountries[0] != (ArindbCanaryEmptiedCountry{CountryCode: "bb", Old: c.old, Trips: c.trips}) {
+			t.Errorf("old supply %d: emptied countries %+v", c.old, quality.EmptiedCountries)
+		}
+		if quality.Tripped != c.trips || (decision.State == ArindbCanaryStateFallback) != c.trips {
+			t.Errorf("old supply %d: tripped=%t state=%s, want tripped=%t", c.old, quality.Tripped, decision.State, c.trips)
 		}
 	}
 }
@@ -467,6 +488,103 @@ func TestArindbCanaryWarmingNeverServesALatestItsPairedSampleTrips(t *testing.T)
 	passed := decideTestCanary(testCanaryPair(), testCanaryProviders(100, "aa", true, testCanaryClean, testCanaryClean), settings)
 	if decision := decideTestCanaryAfter(passed, testCanaryPair(), rows(92, 20, 7, 1), settings); decision.ServingEpoch != testCanaryOldEpoch || decision.ServingBasis != ArindbCanaryBasisLatestBlocked {
 		t.Fatalf("after a passing decision: serving=%d basis=%s, want the old", decision.ServingEpoch, decision.ServingBasis)
+	}
+}
+
+// 100 paired providers in one country, of which lost leave Quality under the
+// latest database.
+func testCanaryLossRun(lost int) []*arindbCanaryProvider {
+	return append(
+		testCanaryProviders(lost, "aa", true, testCanaryNonQuality, testCanaryClean),
+		testCanaryProviders(100-lost, "aa", true, testCanaryClean, testCanaryClean)...)
+}
+
+// A fallback latches on its pair: a loss alternating around the threshold no
+// longer switches the fleet every publication. It releases only after
+// release_passing_runs consecutive comparisons pass with release_margin, and a
+// comparison inside the threshold but not the margin starts the count again.
+func TestArindbCanaryFallbackLatchesUntilTheComparisonPassesWithMargin(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	pair := testCanaryPair()
+	decision := decideTestCanary(pair, testCanaryLossRun(11), settings)
+	if decision.State != ArindbCanaryStateFallback || decision.ServingBasis != ArindbCanaryBasisTripped || decision.Latch == nil ||
+		*decision.Latch != (ArindbCanaryLatch{LatestEpoch: testCanaryLatestEpoch, OldEpoch: testCanaryOldEpoch, Since: decision.DecidedAt}) {
+		t.Fatalf("trip: state=%s basis=%s latch=%+v", decision.State, decision.ServingBasis, decision.Latch)
+	}
+	since := decision.DecidedAt
+	run := func(lost int, state string, basis string, passingRuns int) {
+		t.Helper()
+		decision = decideTestCanaryAfter(decision, pair, testCanaryLossRun(lost), settings)
+		if decision.State != state || decision.ServingBasis != basis {
+			t.Fatalf("loss %d%%: state=%s basis=%s, want %s %s", lost, decision.State, decision.ServingBasis, state, basis)
+		}
+		if state == ArindbCanaryStateFallback && (decision.Latch == nil || decision.Latch.PassingRuns != passingRuns || !decision.Latch.Since.Equal(since)) {
+			t.Fatalf("loss %d%%: latch %+v, want %d passing runs since %s", lost, decision.Latch, passingRuns, since)
+		}
+		if state == ArindbCanaryStateLatest && decision.Latch != nil {
+			t.Fatalf("loss %d%%: released with latch %+v", lost, decision.Latch)
+		}
+	}
+	// alternating around the threshold stays on the old database
+	run(9, ArindbCanaryStateFallback, ArindbCanaryBasisLatched, 0)
+	run(11, ArindbCanaryStateFallback, ArindbCanaryBasisLatched, 0)
+	run(9, ArindbCanaryStateFallback, ArindbCanaryBasisLatched, 0)
+	// within the margin it counts, and a run outside it starts again
+	for passing := 1; passing < settings.ReleasePassingRuns; passing += 1 {
+		run(5, ArindbCanaryStateFallback, ArindbCanaryBasisLatched, passing)
+	}
+	run(9, ArindbCanaryStateFallback, ArindbCanaryBasisLatched, 0)
+	for passing := 1; passing < settings.ReleasePassingRuns; passing += 1 {
+		run(8, ArindbCanaryStateFallback, ArindbCanaryBasisLatched, passing)
+	}
+	run(8, ArindbCanaryStateLatest, ArindbCanaryBasisReleased, 0)
+	// released, the next run decides afresh
+	run(9, ArindbCanaryStateLatest, ArindbCanaryBasisPassed, 0)
+}
+
+// A latch belongs to its pair of databases: the next release decides afresh,
+// and warming carries the latch unchanged without serving the latest.
+func TestArindbCanaryLatchIsPerPairAndHoldsThroughWarming(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	fellBack := decideTestCanary(testCanaryPair(), testCanaryLossRun(11), settings)
+	// coverage dips below min_coverage: the latch holds, the latest is blocked
+	dipped := append(testCanaryLossRun(0)[:95], testCanaryRowsOf(5, testCanaryLatestEpoch, 0)...)
+	warming := decideTestCanaryAfter(fellBack, testCanaryPair(), dipped, settings)
+	if warming.State != ArindbCanaryStateWarming || warming.ServingEpoch != testCanaryOldEpoch || warming.Latch == nil || *warming.Latch != *fellBack.Latch {
+		t.Fatalf("warming after a fallback: state=%s serving=%d latch=%+v, want the old with the latch", warming.State, warming.ServingEpoch, warming.Latch)
+	}
+	// the next release's pair is compared without the latch
+	next := testCanaryLossRun(9)
+	for _, provider := range next {
+		provider.slots.epoch, provider.slots.oldEpoch = testCanaryNewerEpoch, testCanaryLatestEpoch
+	}
+	if decision := decideTestCanaryAfter(warming, testCanaryPairOf(testCanaryNewerEpoch, testCanaryLatestEpoch), next, settings); decision.State != ArindbCanaryStateLatest || decision.Latch != nil {
+		t.Fatalf("the next pair: state=%s latch=%+v, want latest without a latch", decision.State, decision.Latch)
+	}
+}
+
+// The operator accepts a latest database by its build epoch in provider.yml:
+// it is served although it trips, and its latch is released. Another epoch's
+// key changes nothing.
+func TestArindbCanaryOperatorAcceptsTheLatestDatabase(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	fellBack := decideTestCanary(testCanaryPair(), testCanaryLossRun(20), settings)
+	if fellBack.State != ArindbCanaryStateFallback || fellBack.Accepted {
+		t.Fatalf("fixture state %s accepted %t", fellBack.State, fellBack.Accepted)
+	}
+	other := settings
+	other.AcceptLatestBuildEpoch = testCanaryNewerEpoch
+	if decision := decideTestCanaryAfter(fellBack, testCanaryPair(), testCanaryLossRun(20), other); decision.State != ArindbCanaryStateFallback || decision.Accepted {
+		t.Fatalf("another epoch's key: state=%s accepted=%t", decision.State, decision.Accepted)
+	}
+	accept := settings
+	accept.AcceptLatestBuildEpoch = testCanaryLatestEpoch
+	for name, previous := range map[string]*ArindbCanaryDecision{"a fresh trip": nil, "a latched fallback": fellBack} {
+		decision := decideTestCanaryAfter(previous, testCanaryPair(), testCanaryLossRun(20), accept)
+		if decision.State != ArindbCanaryStateLatest || decision.ServingEpoch != testCanaryLatestEpoch || decision.ServingBasis != ArindbCanaryBasisAccepted ||
+			!decision.Accepted || decision.Latch != nil || !decision.Buckets[RankModeQuality].Tripped {
+			t.Errorf("%s: state=%s serving=%d basis=%s accepted=%t latch=%+v", name, decision.State, decision.ServingEpoch, decision.ServingBasis, decision.Accepted, decision.Latch)
+		}
 	}
 }
 
@@ -752,7 +870,10 @@ func TestArindbCanaryDecisionWriteFailureIsReturned(t *testing.T) {
 // Absent keys use the defaults; out-of-range or unreadable values keep them.
 func TestArindbCanarySettingsUseDefaultsForAbsentAndInvalidKeys(t *testing.T) {
 	defaults := defaultArindbCanarySettings()
-	if defaults != (ArindbCanarySettings{BucketLossThreshold: 0.10, TripOnEmptiedCountry: true, MinCoverage: 0.98, MinPairedSample: 50}) {
+	if defaults != (ArindbCanarySettings{
+		BucketLossThreshold: 0.10, TripOnEmptiedCountry: true, MinCoverage: 0.98, MinPairedSample: 50,
+		MinEmptiedCountrySupply: 3, ReleasePassingRuns: 6, ReleaseMargin: 0.02,
+	}) {
 		t.Fatalf("defaults %+v", defaults)
 	}
 	if got := arindbCanarySettingsFromResource(nil, server.ErrResourceNotFound); got != defaults {
@@ -764,10 +885,20 @@ func TestArindbCanarySettingsUseDefaultsForAbsentAndInvalidKeys(t *testing.T) {
 	}{
 		{config: "{}", want: defaults},
 		{config: "arindb_canary: {}", want: defaults},
-		{config: "arindb_canary: {bucket_loss_threshold: 0.2, trip_on_emptied_country: false, min_coverage: 0.9, min_paired_sample: 10}",
-			want: ArindbCanarySettings{BucketLossThreshold: 0.2, TripOnEmptiedCountry: false, MinCoverage: 0.9, MinPairedSample: 10}},
-		{config: "arindb_canary: {min_coverage: 0.5}", want: ArindbCanarySettings{BucketLossThreshold: 0.10, TripOnEmptiedCountry: true, MinCoverage: 0.5, MinPairedSample: 50}},
+		{config: "arindb_canary: {bucket_loss_threshold: 0.2, trip_on_emptied_country: false, min_coverage: 0.9, min_paired_sample: 10, " +
+			"min_emptied_country_supply: 5, release_passing_runs: 2, release_margin: 0.05, accept_latest_build_epoch: 1700086400}",
+			want: ArindbCanarySettings{
+				BucketLossThreshold: 0.2, TripOnEmptiedCountry: false, MinCoverage: 0.9, MinPairedSample: 10,
+				MinEmptiedCountrySupply: 5, ReleasePassingRuns: 2, ReleaseMargin: 0.05, AcceptLatestBuildEpoch: 1700086400,
+			}},
+		{config: "arindb_canary: {min_coverage: 0.5}", want: func() ArindbCanarySettings {
+			settings := defaults
+			settings.MinCoverage = 0.5
+			return settings
+		}()},
 		{config: "arindb_canary: {min_paired_sample: 0}", want: defaults},
+		{config: "arindb_canary: {min_emptied_country_supply: 0, release_passing_runs: 0, release_margin: -0.01, accept_latest_build_epoch: -1}", want: defaults},
+		{config: "arindb_canary: {release_margin: 1.5}", want: defaults},
 		{config: "arindb_canary: {bucket_loss_threshold: 1.5, min_coverage: 0}", want: defaults},
 		{config: "arindb_canary: {bucket_loss_threshold: -0.1, min_coverage: 1.01}", want: defaults},
 		{config: "arindb_canary: {bucket_loss_threshold: .nan}", want: defaults},

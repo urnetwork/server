@@ -14,8 +14,10 @@
 // readable decision) is each row's latest slot, as before the canary. Facts
 // that are unavailable under S count as non-Quality, never clean. The indexer
 // publishes the decision before its export, so request-time readers apply the
-// same S while the export rewrites targets. There is no hysteresis: each run
-// decides independently.
+// same S while the export rewrites targets. A fallback latches on its pair of
+// databases until release_passing_runs consecutive comparisons pass with
+// release_margin, or the operator accepts the latest in provider.yml, so a
+// comparison near a threshold cannot switch the fleet back and forth.
 package model
 
 import (
@@ -62,10 +64,18 @@ const (
 	// warming: no database is carried by min_coverage of the cohort, so each
 	// row's latest slot, as before the canary, rather than one most rows lack
 	ArindbCanaryBasisUncovered = "uncovered"
-	// warming: the paired sample trips, so the old database, which the rows
-	// carry short of min_coverage but within the loss the breaker tolerates,
-	// rather than the latest
+	// warming: the paired sample trips or a fallback is latched, so the old
+	// database, which the rows carry short of min_coverage but within the loss
+	// the breaker tolerates, rather than the latest
 	ArindbCanaryBasisLatestBlocked = "latest_blocked"
+	// fallback: the comparison has not yet passed with the release margin
+	// for release_passing_runs consecutive runs since the pair fell back
+	ArindbCanaryBasisLatched = "latched"
+	// latest: a latched fallback released after its passing runs
+	ArindbCanaryBasisReleased = "released"
+	// latest: the operator accepted this latest database although it trips
+	// or was latched
+	ArindbCanaryBasisAccepted = "accepted"
 )
 
 // Every state, in the order the stats gauge publishes them.
@@ -98,14 +108,29 @@ type ArindbCanarySettings struct {
 	// paired providers a warming comparison needs before its trip blocks the
 	// latest database
 	MinPairedSample int `json:"min_paired_sample"`
+	// the old supply an emptied country needs in a bucket to trip; smaller
+	// ones are reported
+	MinEmptiedCountrySupply int `json:"min_emptied_country_supply"`
+	// consecutive comparisons that must pass with ReleaseMargin to release a
+	// latched fallback
+	ReleasePassingRuns int `json:"release_passing_runs"`
+	// a releasing comparison's Quality loss stays at or below
+	// BucketLossThreshold - ReleaseMargin
+	ReleaseMargin float64 `json:"release_margin"`
+	// the build epoch of a latest database the operator accepts: it is served
+	// although it trips, and its latch is released. 0 accepts none
+	AcceptLatestBuildEpoch int64 `json:"accept_latest_build_epoch"`
 }
 
 func defaultArindbCanarySettings() ArindbCanarySettings {
 	return ArindbCanarySettings{
-		BucketLossThreshold:  0.10,
-		TripOnEmptiedCountry: true,
-		MinCoverage:          0.98,
-		MinPairedSample:      50,
+		BucketLossThreshold:     0.10,
+		TripOnEmptiedCountry:    true,
+		MinCoverage:             0.98,
+		MinPairedSample:         50,
+		MinEmptiedCountrySupply: 3,
+		ReleasePassingRuns:      6,
+		ReleaseMargin:           0.02,
 	}
 }
 
@@ -126,10 +151,14 @@ func arindbCanarySettingsFromResource(resource *server.SimpleResource, lookupErr
 	}
 	var document struct {
 		ArindbCanary *struct {
-			BucketLossThreshold  *float64 `yaml:"bucket_loss_threshold"`
-			TripOnEmptiedCountry *bool    `yaml:"trip_on_emptied_country"`
-			MinCoverage          *float64 `yaml:"min_coverage"`
-			MinPairedSample      *int     `yaml:"min_paired_sample"`
+			BucketLossThreshold     *float64 `yaml:"bucket_loss_threshold"`
+			TripOnEmptiedCountry    *bool    `yaml:"trip_on_emptied_country"`
+			MinCoverage             *float64 `yaml:"min_coverage"`
+			MinPairedSample         *int     `yaml:"min_paired_sample"`
+			MinEmptiedCountrySupply *int     `yaml:"min_emptied_country_supply"`
+			ReleasePassingRuns      *int     `yaml:"release_passing_runs"`
+			ReleaseMargin           *float64 `yaml:"release_margin"`
+			AcceptLatestBuildEpoch  *int64   `yaml:"accept_latest_build_epoch"`
 		} `yaml:"arindb_canary"`
 	}
 	if err := resource.UnmarshalYamlE(&document); err != nil {
@@ -162,6 +191,35 @@ func arindbCanarySettingsFromResource(resource *server.SimpleResource, lookupErr
 			settings.MinPairedSample = *value
 		} else {
 			glog.Errorf("[arindb]provider config arindb_canary.min_paired_sample = %d is below 1; kept %d\n", *value, settings.MinPairedSample)
+		}
+	}
+	if value := document.ArindbCanary.MinEmptiedCountrySupply; value != nil {
+		if 1 <= *value {
+			settings.MinEmptiedCountrySupply = *value
+		} else {
+			glog.Errorf("[arindb]provider config arindb_canary.min_emptied_country_supply = %d is below 1; kept %d\n", *value, settings.MinEmptiedCountrySupply)
+		}
+	}
+	if value := document.ArindbCanary.ReleasePassingRuns; value != nil {
+		if 1 <= *value {
+			settings.ReleasePassingRuns = *value
+		} else {
+			glog.Errorf("[arindb]provider config arindb_canary.release_passing_runs = %d is below 1; kept %d\n", *value, settings.ReleasePassingRuns)
+		}
+	}
+	if value := document.ArindbCanary.ReleaseMargin; value != nil {
+		// NaN fails both comparisons
+		if 0 <= *value && *value <= 1 {
+			settings.ReleaseMargin = *value
+		} else {
+			glog.Errorf("[arindb]provider config arindb_canary.release_margin = %v is outside [0, 1]; kept %v\n", *value, settings.ReleaseMargin)
+		}
+	}
+	if value := document.ArindbCanary.AcceptLatestBuildEpoch; value != nil {
+		if 0 <= *value {
+			settings.AcceptLatestBuildEpoch = *value
+		} else {
+			glog.Errorf("[arindb]provider config arindb_canary.accept_latest_build_epoch = %d is negative; accepting none\n", *value)
 		}
 	}
 	return settings
@@ -344,6 +402,9 @@ type ArindbCanaryCount struct {
 type ArindbCanaryEmptiedCountry struct {
 	CountryCode string `json:"country_code"`
 	Old         int    `json:"old"`
+	// the old supply reaches min_emptied_country_supply, so the country trips
+	// when trip_on_emptied_country is set
+	Trips bool `json:"trips"`
 }
 
 // A city with supply under the old database and none under the latest. Cities
@@ -375,6 +436,17 @@ type ArindbCanaryBucket struct {
 	Tripped bool `json:"tripped"`
 }
 
+// A fallback latched on one pair of databases. It holds, and is carried
+// through warming, until release_passing_runs consecutive comparisons of the
+// pair pass with release_margin, or the operator accepts the latest.
+type ArindbCanaryLatch struct {
+	LatestEpoch int64     `json:"latest_epoch"`
+	OldEpoch    int64     `json:"old_epoch"`
+	Since       time.Time `json:"since"`
+	// consecutive comparisons since the last that did not pass with the margin
+	PassingRuns int `json:"passing_runs"`
+}
+
 // One publication's choice, as the indexer published it.
 type ArindbCanaryDecision struct {
 	Version      int    `json:"version"`
@@ -390,6 +462,10 @@ type ArindbCanaryDecision struct {
 	WarmingTripped bool `json:"warming_tripped"`
 	// warming serves the latest database, unverified by a comparison
 	WarmingServesLatest bool `json:"warming_serves_latest"`
+	// the fallback latched on this pair, nil without one
+	Latch *ArindbCanaryLatch `json:"latch,omitempty"`
+	// provider.yml accept_latest_build_epoch names this latest database
+	Accepted bool `json:"accepted"`
 	// why the state is single, "" otherwise
 	SingleReason string                         `json:"single_reason,omitempty"`
 	Latest       ArindbCanaryDatabase           `json:"latest"`
@@ -540,7 +616,11 @@ func decideArindbCanary(
 		}
 		for countryCode, count := range b.Countries {
 			if 0 < count.Old && count.Latest == 0 {
-				b.EmptiedCountries = append(b.EmptiedCountries, ArindbCanaryEmptiedCountry{CountryCode: countryCode, Old: count.Old})
+				b.EmptiedCountries = append(b.EmptiedCountries, ArindbCanaryEmptiedCountry{
+					CountryCode: countryCode,
+					Old:         count.Old,
+					Trips:       settings.MinEmptiedCountrySupply <= count.Old,
+				})
 			}
 		}
 		slices.SortFunc(b.EmptiedCountries, func(x, y ArindbCanaryEmptiedCountry) int {
@@ -562,9 +642,13 @@ func decideArindbCanary(
 		})
 		b.EmptiedCityCount = len(b.EmptiedCities)
 		b.EmptiedCities = b.EmptiedCities[:min(len(b.EmptiedCities), arindbCanaryEmptiedCityLimit)]
-		// net loss, so a release that moves as many providers in as out passes
+		// net loss, so a release that moves as many providers in as out passes.
+		// A country trips only with min_emptied_country_supply under the old
+		// database, so one provider connecting and disconnecting cannot.
 		lossTrip := 0 < b.Old && settings.BucketLossThreshold < b.LossRatio
-		countryTrip := settings.TripOnEmptiedCountry && 0 < len(b.EmptiedCountries)
+		countryTrip := settings.TripOnEmptiedCountry && slices.ContainsFunc(b.EmptiedCountries, func(country ArindbCanaryEmptiedCountry) bool {
+			return country.Trips
+		})
 		b.Tripped = lossTrip || countryTrip
 	}
 	// Only a Quality trip falls back: the serving epoch changes only Quality
@@ -572,6 +656,24 @@ func decideArindbCanary(
 	// or Online trip, which only risk can cause, is reported and pages
 	// without changing S, as falling back would repair none of it.
 	tripped := decision.Buckets[RankModeQuality].Tripped
+
+	// Hysteresis: a fallback latches on its pair. The operator's accept key
+	// overrides a trip and releases the latch.
+	accepted := settings.AcceptLatestBuildEpoch != 0 && settings.AcceptLatestBuildEpoch == latestEpoch
+	decision.Accepted = accepted
+	var latch *ArindbCanaryLatch
+	if !accepted && previous != nil && previous.Latch != nil &&
+		previous.Latch.LatestEpoch == latestEpoch && previous.Latch.OldEpoch == oldEpoch {
+		carriedLatch := *previous.Latch
+		latch = &carriedLatch
+	}
+	// a releasing comparison passes with the margin: Quality's loss stays at
+	// or below threshold - margin and no country with min supply empties
+	quality := decision.Buckets[RankModeQuality]
+	passesWithMargin := (quality.Old == 0 || quality.LossRatio <= settings.BucketLossThreshold-settings.ReleaseMargin) &&
+		!(settings.TripOnEmptiedCountry && slices.ContainsFunc(quality.EmptiedCountries, func(country ArindbCanaryEmptiedCountry) bool {
+			return country.Trips
+		}))
 
 	minimum := settings.MinCoverage * float64(decision.Coverage.Providers)
 	// a database is carried when min_coverage of the cohort has its facts;
@@ -592,8 +694,11 @@ func decideArindbCanary(
 		// that would fall back once covered. Then the old serves while the
 		// providers it lacks are within the loss the breaker tolerates.
 		decision.State = ArindbCanaryStateWarming
-		latestBlocked := settings.MinPairedSample <= decision.Coverage.Paired && tripped
-		decision.WarmingTripped = latestBlocked
+		decision.WarmingTripped = settings.MinPairedSample <= decision.Coverage.Paired && tripped && !accepted
+		// a latch holds through warming unchanged: warming neither passes nor
+		// fails a comparison
+		decision.Latch = latch
+		latestBlocked := decision.WarmingTripped || latch != nil
 		switch {
 		case previous != nil && !(latestBlocked && previous.ServingEpoch == latestEpoch) &&
 			carried(previous.ServingEpoch, arindbCanaryCoverageOf(providers, previous.ServingEpoch)):
@@ -613,10 +718,34 @@ func decideArindbCanary(
 			decision.ServingBasis = ArindbCanaryBasisUncovered
 		}
 		decision.WarmingServesLatest = decision.ServingEpoch == latestEpoch
+	case accepted:
+		decision.State = ArindbCanaryStateLatest
+		decision.ServingEpoch = latestEpoch
+		decision.ServingBasis = ArindbCanaryBasisPassed
+		if tripped || (previous != nil && previous.Latch != nil && previous.Latch.LatestEpoch == latestEpoch && previous.Latch.OldEpoch == oldEpoch) {
+			decision.ServingBasis = ArindbCanaryBasisAccepted
+		}
+	case latch != nil:
+		if passesWithMargin {
+			latch.PassingRuns += 1
+		} else {
+			latch.PassingRuns = 0
+		}
+		if settings.ReleasePassingRuns <= latch.PassingRuns {
+			decision.State = ArindbCanaryStateLatest
+			decision.ServingEpoch = latestEpoch
+			decision.ServingBasis = ArindbCanaryBasisReleased
+		} else {
+			decision.State = ArindbCanaryStateFallback
+			decision.ServingEpoch = oldEpoch
+			decision.ServingBasis = ArindbCanaryBasisLatched
+			decision.Latch = latch
+		}
 	case tripped:
 		decision.State = ArindbCanaryStateFallback
 		decision.ServingEpoch = oldEpoch
 		decision.ServingBasis = ArindbCanaryBasisTripped
+		decision.Latch = &ArindbCanaryLatch{LatestEpoch: latestEpoch, OldEpoch: oldEpoch, Since: decidedAt}
 	default:
 		decision.State = ArindbCanaryStateLatest
 		decision.ServingEpoch = latestEpoch
@@ -807,6 +936,12 @@ func (self *ArindbCanaryDecision) logSummary() string {
 	if self.WarmingServesLatest {
 		b.WriteString(" warming_serves_latest")
 	}
+	if self.Latch != nil {
+		fmt.Fprintf(&b, " latched_since=%s passing_runs=%d", self.Latch.Since.Format(time.RFC3339), self.Latch.PassingRuns)
+	}
+	if self.Accepted {
+		b.WriteString(" accepted")
+	}
 	for _, bucket := range ProviderEgressBuckets {
 		b2 := self.Buckets[bucket]
 		fmt.Fprintf(&b, "; %s old=%d latest=%d loss=%.4f removed=%d added=%d tripped=%t", bucket, b2.Old, b2.Latest, b2.LossRatio, b2.Removed, b2.Added, b2.Tripped)
@@ -913,6 +1048,10 @@ func parseArindbCanaryDecision(data []byte) (*ArindbCanaryDecision, error) {
 		if decision.Buckets[bucket] == nil {
 			return nil, fmt.Errorf("arindb canary decision has no %s bucket", bucket)
 		}
+	}
+	// a latch names the pair it latched on
+	if latch := decision.Latch; latch != nil && (latch.LatestEpoch != decision.Latest.BuildEpoch || latch.OldEpoch != decision.Old.BuildEpoch || latch.PassingRuns < 0) {
+		return nil, fmt.Errorf("arindb canary decision latch %+v is not its pair's", *latch)
 	}
 	// the serving epoch must be one the state can choose
 	switch decision.State {
