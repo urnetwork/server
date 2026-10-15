@@ -121,7 +121,19 @@ func TestCanaryBaselineFollowsALatchTheDecisionNoLongerServes(t *testing.T) {
 	held["latch"], held["fallback_dropped"] = latch, true
 	dropped := testCanaryDecisionDocument("latest", testPreviousNewEpoch, "passed", testCanaryBaselineNow)
 	dropped["dropped_latch"], dropped["fallback_dropped"] = latch, true
-	for name, document := range map[string]map[string]any{"a held latch on each row's latest slot": held, "a dropped latch": dropped} {
+	// warming whose paired sample trips blocks the latest with no latch, and may
+	// serve each row's latest slot when the old covers too little
+	tripped := testCanaryDecisionDocument("warming", 0, "uncovered", testCanaryBaselineNow)
+	tripped["warming_tripped"] = true
+	// a latch held downstream of a dropped one: the dropped latch's old
+	// database is the one before the rejected latest
+	both := testCanaryDecisionDocument("fallback", testPreviousNewEpoch, "tripped", testCanaryBaselineNow)
+	both["latch"] = map[string]any{"latest_epoch": testPreviousNewEpoch + 86400, "old_epoch": testPreviousNewEpoch}
+	both["dropped_latch"], both["fallback_dropped"] = latch, true
+	for name, document := range map[string]map[string]any{
+		"a held latch on each row's latest slot": held, "a dropped latch": dropped,
+		"a tripped warming sample": tripped, "a latch held after a dropped one": both,
+	} {
 		if got := canaryBaseline(writeTestCanaryDecision(t, document), root, "main", canaryBaselineMaxAge, testCanaryBaselineNow); got != "pin "+olderPath {
 			t.Errorf("%s: %q, want the latch's old database %q", name, got, olderPath)
 		}

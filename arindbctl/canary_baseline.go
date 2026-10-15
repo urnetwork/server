@@ -62,6 +62,9 @@ type canaryBaselineDecision struct {
 	Latch           *canaryBaselineLatch `json:"latch"`
 	DroppedLatch    *canaryBaselineLatch `json:"dropped_latch"`
 	FallbackDropped bool                 `json:"fallback_dropped"`
+	// warming's paired sample trips, so the latest is blocked even when no
+	// latch holds and each row's latest slot is served
+	WarmingTripped bool `json:"warming_tripped"`
 }
 
 func runCanaryBaseline(args []string, output io.Writer, now time.Time) error {
@@ -100,12 +103,16 @@ func canaryBaseline(decisionPath string, configRoot string, env string, maxAge t
 	// A latched fallback protects its old database whatever the decision
 	// serves now: warming can serve each row's latest slot while the latch is
 	// held, and a dropped latch's pair compares against the held-out latest.
+	// A dropped latch names the database before the rejected one, so it comes
+	// first; a tripped warming sample blocks the latest without a latch.
 	protected := decision.ServingEpoch
 	switch {
-	case decision.Latch != nil:
-		protected = decision.Latch.OldEpoch
 	case decision.DroppedLatch != nil:
 		protected = decision.DroppedLatch.OldEpoch
+	case decision.Latch != nil:
+		protected = decision.Latch.OldEpoch
+	case decision.WarmingTripped:
+		protected = decision.Old.BuildEpoch
 	case decision.FallbackDropped:
 		return "pause the canary dropped a fallback without naming the database it protected"
 	}
