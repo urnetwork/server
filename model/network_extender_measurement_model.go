@@ -491,8 +491,15 @@ func RefuseNetworkExtenderMeasurementRequest(
 }
 
 // GetPendingNetworkExtenderMeasurements reads the issuance queue (C5, C7):
-// pending requests whose backoff has passed, longest waiting first, each with
-// its extender.
+// pending requests whose backoff has passed, each with its extender. First
+// come the requests the weekly cap does not hold, those for names with an
+// unexpired certificate (HasUnexpiredNetworkExtenderMeasurementCertForNames),
+// which the CA renews outside its weekly budget: a returning extender, a
+// rotated key, an owner turning measurement back on. Then come the rest. Each
+// part is longest waiting first. A pass notes a capped request and leaves it
+// pending, so while the cap is spent the same capped requests come back every
+// pass; without this order, `limit` of them waiting longer would keep every
+// request the cap does not hold from ever being read.
 func GetPendingNetworkExtenderMeasurements(
 	ctx context.Context,
 	now time.Time,
@@ -508,7 +515,16 @@ func GetPendingNetworkExtenderMeasurements(
 			WHERE
 				state = $1 AND
 				(retry_time IS NULL OR retry_time <= $2)
-			ORDER BY pending_time ASC, extender_id ASC
+			ORDER BY
+				EXISTS (
+					SELECT 1
+					FROM network_extender_measurement_cert
+					WHERE
+						network_extender_measurement_cert.names = network_extender_measurement.names AND
+						$2 < network_extender_measurement_cert.not_after
+				) DESC,
+				pending_time ASC,
+				extender_id ASC
 			LIMIT $3
 			`,
 			NetworkExtenderMeasurementStatePending,

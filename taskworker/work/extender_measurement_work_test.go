@@ -609,6 +609,42 @@ func TestExtenderMeasurementWaitsForTheWeeklyCap(t *testing.T) {
 	})
 }
 
+// C7 behind a backlog: while the weekly cap is spent, a pass leaves every
+// new extender's request pending, so the same longest waiting ones come back
+// each pass. A request the cap does not hold, a rotated key's here, is still
+// served at the next pass, however many capped requests wait ahead of it, and
+// more than one pass reads.
+func TestExtenderMeasurementServesAnUncappedRequestBehindACappedBacklog(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newTestMeasurementEnv(t, testMeasurementEnvSettings{issueCapPerWeek: 1})
+		now := server.NowUtc()
+
+		// the week's one new certificate
+		rotating := createTestMeasurementExtender(t, ctx, 1, "203.0.113.1")
+		requestTestMeasurementCert(t, ctx, rotating, now.Add(-2*time.Hour))
+		connect.AssertEqual(t, runTestMeasurementIssue(t, ctx).Issued, 1)
+
+		// new extenders, waiting longer than the rotated key will, and more of
+		// them than a pass reads
+		for i := range ExtenderMeasurementPendingLimit + 1 {
+			extenderId := createTestMeasurementExtender(t, ctx, 2+i, fmt.Sprintf("198.51.100.%d", 1+i%250))
+			requestTestMeasurementCert(t, ctx, extenderId, now.Add(-time.Hour).Add(time.Duration(i)*time.Second))
+		}
+		// the first extender rotates its key: a renewal to the CA
+		requestTestMeasurementCert(t, ctx, rotating, now)
+
+		result := runTestMeasurementIssue(t, ctx)
+		connect.AssertEqual(t, result.Issued, 1)
+		connect.AssertEqual(t, result.Waiting, ExtenderMeasurementPendingLimit-1)
+		certs := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, rotating)
+		connect.AssertEqual(t, len(certs), 2)
+		connect.AssertEqual(t, certs[1].CapCounted, false)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, rotating).State, model.NetworkExtenderMeasurementStateIssued)
+		connect.AssertEqual(t, env.ca.issuedCount(), 2)
+	})
+}
+
 // The zone with every change refused.
 type testRefusingMeasurementRoute53 struct {
 	*testMeasurementRoute53
