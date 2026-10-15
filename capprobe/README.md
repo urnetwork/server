@@ -173,8 +173,9 @@ switching the probe on or off takes a taskworker restart.
 3. Restart every taskworker block (`systemctl restart warp-main-taskworker-g<N>`
    on each host) and check that each container's `WARP_CONFIG_VERSION` is the
    new version. Until every taskworker runs the new config, a pass claimed by
-   one still on the old config runs nothing and ends the chain, and the next
-   restart schedules the probe again.
+   one still on the old config runs nothing and ends the chain; a taskworker
+   with the new config schedules it again within ten minutes (below), and
+   the monitor's `capability-probe` signal reports the disabled pass.
 4. The first taskworker that starts with the new config schedules the row,
    due at once; a worker claims it a second or so later, and the first pass
    starts a sweep at once: it reads its pages, takes prober shard 255 and
@@ -187,6 +188,38 @@ switching the probe on or off takes a taskworker restart.
 To switch it off, set `enabled: false` (or remove the file) and release and
 restart the same way: the next pass on a restarted taskworker runs nothing
 and schedules no successor, and its sweep and held downgrades go with it.
+Until every taskworker has restarted, one still on the old config can
+schedule the chain again, and the next pass on a restarted one ends it.
+
+While the probe is switched on, each taskworker also checks every ten
+minutes that the chain has its task row, and schedules a pass due at once
+when it has none (`chain_restarts_total`, logged): a chain that a stale
+taskworker, a lost row or maintenance ended starts a new sweep within ten
+minutes. A row that exists, waiting or claimed, is left as it is.
+
+## After maintenance
+
+After any taskworker restart, config release, or maintenance that touches
+`pending_task` (a task table cleanup, a database restore or failover),
+while `capability_probe.yml` switches the probe on:
+
+1. The probe's chain has exactly one row, without a stored error that
+   repeats:
+
+   ```sql
+   SELECT task_id, run_at, reschedule_error_count, reschedule_error
+   FROM pending_task
+   WHERE run_once_key = 'capability_probe';
+   ```
+
+   No row means the chain has ended: a taskworker with the probe switched on
+   schedules it again within ten minutes, or at once when one restarts.
+2. Every taskworker runs the current config (`WARP_CONFIG_VERSION`) and
+   reports `urnetwork_capability_probe_passes_total{result="disabled"}` at
+   zero.
+3. `urnetwork_capability_probe_last_pass_timestamp_seconds` advances within
+   fifteen minutes, and the monitor's `capability-probe` signal is healthy
+   (SIGNALS.md §2.19g).
 
 ## Metrics
 
@@ -194,7 +227,8 @@ and schedules no successor, and its sweep and held downgrades go with it.
 providers by outcome, readings per capability, held and confirmed
 downgrades, breaker trips, measurement duration, in flight, teardown errors,
 funding readiness failures, prober shard cleanup errors, sweeps and the last
-sweep's duration, and the last pass. The egress probes dashboard charts them
+sweep's duration, the last pass, and the chains a taskworker found without
+their row and scheduled again. The egress probes dashboard charts them
 all; SIGNALS.md §2.19g says what each means. The probe's derived clients are minted and retired by the
 same in-process credential owner as the URL probe's, so
 `urnetwork_egress_probe_internal_credentials_total` counts both.

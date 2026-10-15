@@ -89,6 +89,42 @@ func ScheduleCapabilityProbe(clientSession *session.ClientSession, tx server.PgT
 	scheduleCapabilityProbeAt(clientSession, tx, &CapabilityProbeArgs{}, server.NowUtc(), settings)
 }
 
+// While capability_probe.yml switches the probe on, schedules a pass due at
+// once when the probe's chain has no task row, and reports whether it did. A
+// row that exists, waiting or claimed, keeps its arguments, run time and
+// backoff. A chain ends at a pass that reads the probe as off, as one on a
+// taskworker still running an older config does after the switch-on, or
+// when maintenance removes its row; a taskworker that reads the probe as on
+// calls this every few minutes (taskworker's ensureCapabilityProbeChain), so
+// such a chain returns, starting a new sweep. Settings that cannot be read
+// schedule nothing, and are logged.
+func EnsureCapabilityProbe(ctx context.Context) bool {
+	settings, err := getCapabilityProbeSettings()
+	if err != nil {
+		glog.Errorf("[capprobe]chain not checked: %s cannot be used: %s\n", capprobe.SettingsResourceName, err)
+		return false
+	}
+	if !settings.Enabled {
+		return false
+	}
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	args, maxTime := capabilityProbeScheduled(&CapabilityProbeArgs{}, settings)
+	scheduled, _ := task.ScheduleTaskIfAbsent(
+		CapabilityProbe,
+		args,
+		clientSession,
+		capabilityProbeRunOnce(),
+		task.RunAt(server.NowUtc()),
+		task.MaxTime(maxTime),
+	)
+	if scheduled {
+		capprobe.ObserveChainRestart()
+		glog.Infof("[capprobe]the probe's chain had no task row; scheduled a pass due at once\n")
+	}
+	return scheduled
+}
+
 // Schedules a pass, merging into the pending row of the probe's key.
 func scheduleCapabilityProbeAt(clientSession *session.ClientSession, tx server.PgTx, args *CapabilityProbeArgs, runAt time.Time, settings capprobe.Settings) {
 	scheduledArgs, maxTime := capabilityProbeScheduled(args, settings)

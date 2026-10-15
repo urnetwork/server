@@ -216,7 +216,6 @@ active missing capability and must not be read as green.
 | 2.6b | Coverage gap | A probe of the contract degradation valve state is missing: `open-contracts` and `contract-rate` show the close backlog and creation rate that drive it, not whether exhausted payers get free contracts or providers go unpaid. |
 | 2.11a | Coverage gap | A monitor reader of the PgBouncer pool exporter is missing: Grafana rules evaluate it, while `pgbouncer-stalls` checks listener admission and app-side 6432 write timeouts and `log-errors` counts queue-timeout lines. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
-| 2.19g | Coverage gap | A monitor reader of the capability probe's urnetwork_capability_probe_* series and of the age of the modern provider gate's evidence is missing: `task-health` sees the probe's task row and `egress-coverage` the URL probe's coverage, and neither says whether the gate's evidence is fresh or whether capability tunnels retire their derived clients. |
 | 3.6a | Coverage gap | A per-channel sharded-subscriber census is missing: `redis-topology` checks membership and phantoms, and `redis-keyevents` checks keyspace-notification patterns, not SSUBSCRIBE channels. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
@@ -15761,7 +15760,7 @@ binaries, independently of the subscriber request-guard switch; keep shadow
 resources separate until every activation gate is reviewed.
 
 ### 2.19g Modern provider evidence — the capability probe must keep measuring
-Planned probe: `capability-probe` (none is registered; the signals below are dashboard reads, and the crosswalk lists the gap)
+Probe: `capability-probe`
 
 WHAT: the FP2 modern provider gate (FP2FIX.md, "Modern provider gate") reads
 `provider_modern_evidence`, and only the capability probe writes it: the
@@ -15809,13 +15808,26 @@ Healthy shape:
   `held` now and then that the next sweep mostly answers with a modern
   reading rather than a `confirmed` one; `readiness_failures_total` and
   `shard_cleanup_errors_total` flat.
+- `chain_restarts_total` flat. Each count is a taskworker with the probe
+  switched on that found the chain without its task row, ended by a pass on
+  a taskworker with an older config or by maintenance, and scheduled a pass
+  due at once, which starts a new sweep. A count right after maintenance is
+  expected; counts while `capability-probe-disabled-pass` holds are its
+  stale taskworker ending the chain again.
 
 Signals:
 
 - `capability-probe-stalled` — WARN when no taskworker has finished a
   measured or waiting pass for 30 minutes while `capability_probe.yml`
   enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
-  PAGE after two hours with the gate switched on. Read
+  PAGE after two hours with the gate switched on. The newest pass is read
+  over six hours (`max_over_time`), so a pass of a process that exited
+  since counts; a fleet whose taskworkers all started after it, as the
+  switch-on restart starts them, is given the 30 minutes from its oldest
+  process's start (`process_start_time_seconds`), since the first pass can
+  take its whole `max_time_seconds`. Running taskworkers that export no
+  probe series (`taskworkers_exporting=0`) run an image without the probe.
+  Read
   `passes_total{result="failed"}` and the taskworker log's `[capprobe]` and
   task error lines: unreadable or invalid settings, the URL probe's
   included, whose `shard_count` past 255 would reach the capability probe's
@@ -15825,9 +15837,21 @@ Signals:
   retries the same sweep page after a minute, so a persistent failure
   repeats once a minute. A `passes_total{result="disabled"}` pass is the last
   of a chain that `enabled: false` ended, deliberately or not; nothing runs
-  after it until a taskworker starts with the probe switched on, so check
-  the deployed `capability_probe.yml` before reading the silence as a
-  stall.
+  after it until a taskworker with the probe switched on schedules the
+  chain again, at its start or within ten minutes after
+  (`chain_restarts_total`), so check the deployed `capability_probe.yml`
+  before reading the silence as a stall.
+- `capability-probe-disabled-pass` — WARN on any disabled pass while
+  `capability_probe.yml` enables the probe: an increase of
+  `passes_total{result="disabled"}` over 30 minutes, or a running
+  taskworker whose total is above zero, which also shows a pass it ran
+  before its first scrape. A taskworker container keeps the config it
+  started with, so one that started before the switch-on, or before its
+  host published the new config, reads the probe as off and ends the chain
+  at each pass it claims; the taskworkers that read it as on schedule the
+  chain again within ten minutes, and its sweep starts over. Find the
+  taskworkers whose disabled total is above zero, confirm their hosts
+  publish the current config (`WARP_CONFIG_VERSION`) and restart them.
 - `capability-probe-no-evidence` — WARN when measurements finish for an hour
   and none records (`providers_total` rising with every `recorded_*` flat).
   The outcome says where: `tunnel_failed` is the probe's own setup (shard
@@ -15907,9 +15931,13 @@ capability that was not tested is never recorded as a negative, and neither
 is a negative reading a pass withheld or a sweep holds, so "missing
 negatives" are not a defect to repair.
 
-Implementation convention: no monitor probe implements these classes yet;
-they are dashboard reads of the series above. A probe for them belongs in
-`signal_capability_probe.go` with the class names here.
+Implementation convention: `signal_capability_probe.go` (probe
+`taskworker/capability-probe`) implements `capability-probe-stalled` and
+`capability-probe-disabled-pass` from fleet aggregates in Mimir, read
+against the desired `capability_probe.yml` and `provider.yml`; while the
+config switches the probe off, both are healthy. The other classes are
+dashboard reads of the series above, and a probe for them belongs in the
+same file with the class names here.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
