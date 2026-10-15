@@ -77,6 +77,8 @@ type testVaultScope struct {
 // Where a test binary's vault lookup of relPath may read, or why it may not.
 // Refusals read as not found, as refuseNonFixtureVault's do.
 func selectTestVaultScope(root string, env string, relPath string) (testVaultScope, error) {
+	// the path that pathWithin judges, and so the one the lookup opens
+	root = filepath.Clean(root)
 	// the explicit opt-in reads any vault as before, uncontained
 	if os.Getenv(TestRealVaultEnv) == "1" {
 		return testVaultScope{root: root, env: env}, nil
