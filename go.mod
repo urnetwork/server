@@ -209,7 +209,7 @@ require (
 
 // Use the same sibling sources in local builds and frozen PERF arms.
 // Replacements in imported modules are not inherited by Go.
-replace github.com/urnetwork/connect => ../connect-wt-client-key-opt-out
+replace github.com/urnetwork/connect => ../connect
 
 replace github.com/pion/sctp => ../connect/sctp
 
