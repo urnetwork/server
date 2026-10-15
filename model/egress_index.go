@@ -83,6 +83,17 @@ type EgressIndexSettings struct {
 	// ClientScoreCutoffTier + 1 (4), the least that keeps every native
 	// ahead of every borrowed provider before demerits.
 	BackfillTierOffset int
+	// Whether FindProviders2 takes providers with measured evidence before
+	// those without in every draw of a Quality or Speed request that is not
+	// force_minimum: its own bucket, the bucket it borrows from and the Online
+	// fallback (network_client_selection_evidence.go). URL-probe evidence
+	// comes first, then a reliability score; each group keeps the order the
+	// draw gave it before, and the providers without evidence still fill
+	// whatever the measured leave, so no answer gets shorter. The process
+	// that answers FindProviders2 (the api, and the proxy for its hosted
+	// devices) applies it, as read through RequestSettingsMaxAge. False, the
+	// default, is the order before it. `rank_measured_first` in the block.
+	RankMeasuredFirst bool
 	// how old the settings a request path reads may be. The passes read
 	// provider.yml on every call; a request path runs far too often to read
 	// and parse a file each time.
@@ -168,6 +179,7 @@ type egressIndexSettingsBlock struct {
 	MinScoredLoads       *int           `yaml:"min_scored_loads"`
 	CountryGate          *bool          `yaml:"country_gate"`
 	BackfillTierOffset   *int           `yaml:"backfill_tier_offset"`
+	RankMeasuredFirst    *bool          `yaml:"rank_measured_first"`
 }
 
 // The defaults with the overrides of provider.yml, read on every call like the
@@ -335,6 +347,9 @@ func egressIndexSettings() *EgressIndexSettings {
 	}
 	if overrides.CountryGate != nil {
 		settings.CountryGate = *overrides.CountryGate
+	}
+	if overrides.RankMeasuredFirst != nil {
+		settings.RankMeasuredFirst = *overrides.RankMeasuredFirst
 	}
 	return settings
 }
