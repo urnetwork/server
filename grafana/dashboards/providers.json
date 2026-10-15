@@ -4981,6 +4981,48 @@
           "legendFormat": "not ok"
         }
       ]
+    },
+    {
+      "id": 94,
+      "type": "stat",
+      "title": "compared pair's age",
+      "description": "Time since the canary first compared its current pair of databases. The cohort-shrink page fires only within two hours of a new pair, or while latest lookups fail, so a Connect outage or a restart is not blamed on a release.",
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 210
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(urnetwork_stats_arindb_pair_since_seconds{env=\"$env\"})",
+          "legendFormat": "pair age"
+        }
+      ]
     }
   ]
 }

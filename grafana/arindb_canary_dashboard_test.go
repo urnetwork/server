@@ -31,6 +31,7 @@ var arindbCanaryStatsMetrics = []string{
 	"urnetwork_stats_arindb_cohort_loss_ratio",
 	"urnetwork_stats_arindb_serving_changes",
 	"urnetwork_stats_arindb_latch_passing_runs",
+	"urnetwork_stats_arindb_pair_since_seconds",
 }
 
 // each process's own ARIN slots, pushed with its own labels
@@ -86,6 +87,7 @@ func TestProvidersDashboardShowsTheArindbCanaryRow(t *testing.T) {
 		"the cohort's loss":             `max(urnetwork_stats_arindb_cohort_loss_ratio{env="$env"})`,
 		"how often the fleet switched":  `max(urnetwork_stats_arindb_serving_changes{env="$env"})`,
 		"how near a latch's release":    `max(urnetwork_stats_arindb_latch_passing_runs{env="$env"})`,
+		"how old the compared pair is":  `time() - max(urnetwork_stats_arindb_pair_since_seconds{env="$env"})`,
 		"how often readers miss it":     `sum(rate(urnetwork_arindb_decision_reads_total{env="$env",outcome!="ok"}[$__rate_interval])) / sum(rate(urnetwork_arindb_decision_reads_total{env="$env"}[$__rate_interval]))`,
 	} {
 		if !strings.Contains(joined, read) {

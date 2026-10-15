@@ -663,6 +663,10 @@ type ArindbCanaryDecision struct {
 	// a latched fallback's protection is not served: a held latch while S is
 	// not its old database, or a dropped latch
 	FallbackDropped bool `json:"fallback_dropped"`
+	// when this pair of databases was first compared: the previous decision's
+	// while the pair is unchanged, this decision's otherwise. A cohort that
+	// shrinks soon after it is attributable to the release
+	PairSince time.Time `json:"pair_since"`
 	// a latch the decision can no longer honour: the canary went single after
 	// it, or the pair changed to one whose old database is the latest the latch
 	// held out. Carried while that lasts; nil otherwise
@@ -742,6 +746,11 @@ func decideArindbCanary(
 	pairReason := resolved.reason
 	decision.Coverage.Providers = len(providers)
 	decision.Cohort = arindbCanaryCohortAfter(previous, len(providers), decidedAt)
+	decision.PairSince = decidedAt
+	if previous != nil && !previous.PairSince.IsZero() &&
+		previous.Latest.BuildEpoch == decision.Latest.BuildEpoch && previous.Old.BuildEpoch == decision.Old.BuildEpoch {
+		decision.PairSince = previous.PairSince
+	}
 	for _, provider := range providers {
 		_, _, latestOk := provider.slots.factsUnder(latestEpoch)
 		_, _, oldOk := provider.slots.factsUnder(oldEpoch)

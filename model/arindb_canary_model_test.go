@@ -328,6 +328,29 @@ func TestArindbCanaryComparesTheCohortWithItsRecentSize(t *testing.T) {
 	}
 }
 
+// A decision records when its pair was first compared, carried while the pair
+// is unchanged, so a cohort that shrinks soon after a release can be told from
+// one that shrinks for another reason.
+func TestArindbCanaryRecordsWhenThePairWasFirstCompared(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	first := decideTestCanary(testCanaryPair(), testCanaryLossRun(0), settings)
+	if !first.PairSince.Equal(first.DecidedAt) {
+		t.Fatalf("first decision: pair since %s, decided %s", first.PairSince, first.DecidedAt)
+	}
+	same := decideTestCanaryAfter(first, testCanaryPair(), testCanaryLossRun(0), settings)
+	if !same.PairSince.Equal(first.DecidedAt) {
+		t.Fatalf("the same pair: pair since %s, want %s", same.PairSince, first.DecidedAt)
+	}
+	next := testCanaryLossRun(0)
+	for _, provider := range next {
+		provider.slots.epoch, provider.slots.oldEpoch = testCanaryNewerEpoch, testCanaryLatestEpoch
+	}
+	changed := decideTestCanaryAfter(same, testCanaryPairOf(testCanaryNewerEpoch, testCanaryLatestEpoch), next, settings)
+	if !changed.PairSince.Equal(changed.DecidedAt) {
+		t.Fatalf("a new pair: pair since %s, decided %s", changed.PairSince, changed.DecidedAt)
+	}
+}
+
 // Each decision that serves another epoch than the previous one is a change,
 // kept for six hours so a canary that switches the fleet back and forth pages.
 func TestArindbCanaryCountsTheServingEpochsChanges(t *testing.T) {

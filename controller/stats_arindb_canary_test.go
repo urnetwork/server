@@ -32,6 +32,7 @@ func testStatsArindbDecision(state string, servingEpoch int64) *model.ArindbCana
 		Old:            model.ArindbCanaryDatabase{State: server.ArinDatabaseLoaded, BuildEpoch: testStatsArindbOldEpoch, Sha256: testStatsArindbOldHash},
 		Coverage:       model.ArindbCanaryCoverage{Providers: 200, Latest: 200, Old: 196, Paired: 196},
 		Cohort:         model.ArindbCanaryCohort{ReferenceProviders: 250, LossRatio: 0.2},
+		PairSince:      testStatsArindbDecidedAt.Add(-time.Hour),
 		Publisher:      model.ArindbCanaryPublisher(),
 		ServingChanges: []time.Time{testStatsArindbDecidedAt.Add(-time.Hour), testStatsArindbDecidedAt},
 		Buckets:        map[string]*model.ArindbCanaryBucket{},
@@ -171,6 +172,9 @@ func TestStatsArindbCanaryExportsTheDecisionsConditions(t *testing.T) {
 	if got := testutil.ToFloat64(statsArindbCohortLossRatioGauge.gauge); got != 0.2 {
 		t.Errorf("cohort loss %v", got)
 	}
+	if got := testutil.ToFloat64(statsArindbPairSinceGauge.gauge); got != float64(testStatsArindbDecidedAt.Add(-time.Hour).Unix()) {
+		t.Errorf("pair since %v", got)
+	}
 	for _, bucket := range model.ProviderEgressBuckets {
 		if got := testutil.ToFloat64(statsArindbChurnRatioGauge.gauge.WithLabelValues(bucket)); got != 0.3 {
 			t.Errorf("%s churn %v", bucket, got)
@@ -186,7 +190,7 @@ func TestStatsArindbCanaryExportsTheDecisionsConditions(t *testing.T) {
 		}
 	}
 	if testutil.ToFloat64(statsArindbLatchPassingRunsGauge.gauge) != 0 || testutil.ToFloat64(statsArindbServingChangesGauge.gauge) != 0 ||
-		testutil.ToFloat64(statsArindbCohortLossRatioGauge.gauge) != 0 {
+		testutil.ToFloat64(statsArindbCohortLossRatioGauge.gauge) != 0 || testutil.ToFloat64(statsArindbPairSinceGauge.gauge) != 0 {
 		t.Error("no decision kept the latch, serving changes or cohort loss")
 	}
 }

@@ -22,6 +22,7 @@ package controller
 //	urnetwork_stats_arindb_database_info                 its state and manifest hash, valued 1 {database, state, sha256}
 //	urnetwork_stats_arindb_cohort_providers              the public cohort and its largest size over two hours {reference}
 //	urnetwork_stats_arindb_cohort_loss_ratio             the cohort's loss against that size
+//	urnetwork_stats_arindb_pair_since_seconds            when the compared pair was first compared
 //	urnetwork_stats_arindb_serving_changes               changes of the serving epoch over six hours
 //	urnetwork_stats_arindb_latch_passing_runs            consecutive comparisons a latched fallback passed with the release margin
 //	urnetwork_stats_arindb_serving_epoch_seconds         the serving epoch, 0 for each row's latest slot
@@ -142,6 +143,11 @@ var statsArindbCohortLossRatioGauge = newStatsGauge(
 	"Loss of the ARIN canary's public cohort against its largest size over the last two hours; providers whose latest lookup fails never reach the cohort",
 )
 
+var statsArindbPairSinceGauge = newStatsGauge(
+	"arindb_pair_since_seconds",
+	"Unix time the ARIN canary first compared its current pair of databases; 0 without a decision",
+)
+
 var statsArindbServingChangesGauge = newStatsGauge(
 	"arindb_serving_changes",
 	"Changes of the ARIN serving epoch over the last six hours, as of the latest decision",
@@ -205,6 +211,7 @@ func statsPublishArindbCanary(decision *model.ArindbCanaryDecision) {
 		statsArindbCohortLossRatioGauge.set(0)
 		statsArindbServingChangesGauge.set(0)
 		statsArindbLatchPassingRunsGauge.set(0)
+		statsArindbPairSinceGauge.set(0)
 		for _, gauge := range []*statsGaugeVec{
 			statsArindbProvidersGauge,
 			statsArindbProvidersByCountryGauge,
@@ -242,6 +249,7 @@ func statsPublishArindbCanary(decision *model.ArindbCanaryDecision) {
 		passingRuns = decision.Latch.PassingRuns
 	}
 	statsArindbLatchPassingRunsGauge.set(float64(passingRuns))
+	statsArindbPairSinceGauge.set(statsSourceTimestampSeconds(decision.PairSince))
 	// the publishing Taskworker alone exports the per-country supply
 	publisher := decision.Publisher == model.ArindbCanaryPublisher()
 
