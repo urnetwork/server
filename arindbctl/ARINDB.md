@@ -1746,8 +1746,10 @@ enables the subscriber predicate through
 `subscriber_quality_policy_version: 2` in `provider.yml`. Missing or zero policy
 retains legacy behavior; invalid policy fails. Native Quality membership
 requires live connection evidence and all live connections to be verified,
-non-risky subscribers. Named-provider and forced-minimum checks retain the
-requested bucket's policy. Discovery, borrowing and refills evaluate the
+non-risky subscribers. Forced-minimum checks retain the requested bucket's
+policy. A named Quality provider needs a live connection without live risk,
+but not verification ([FP2FIX.md](../FP2FIX.md), "Named Quality requests").
+Discovery, borrowing and refills evaluate the
 selected bucket: a Quality request can use independently eligible Speed or
 Online supply without turning an unknown subscriber classification into
 Quality. Common risk and other hard exclusions still apply across every tier,
@@ -2038,7 +2040,8 @@ and evaluate stored facts for S, choosing each row's slot by epoch:
 
 | Reader | Facts | Change |
 | --- | --- | --- |
-| FindProviders2 Quality validation, named providers and force_minimum (`getProviderSubscriberExclusions`) | Live connection rows | Quality uses the slot whose epoch is S, and refuses otherwise; risk unchanged |
+| FindProviders2 Quality validation and force_minimum (`getProviderSubscriberExclusions`) | Live connection rows | Quality uses the slot whose epoch is S, and refuses otherwise; risk unchanged |
+| Named Quality providers (`getProviderNamedSubscriberExclusions`) | Live connection rows | Unchanged: no Quality classification is read, so S does not apply; risk always latest |
 | Provider status and provider-egress dashboard counts | Rollup rows | The same selection |
 | Hard exclusions, probe admission and URL eligibility | Rollup risk | Unchanged: always latest |
 
