@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -409,6 +410,84 @@ func TestProviderEgressHealthResultLeavesProbationFailuresOut(t *testing.T) {
 			health.ClassResults["cdn"] != (model.ProviderEgressHealthClassResult{OK: 3, Total: 4}) ||
 			health.FailedNames != "cachefly" || health.UnscoredFailedNames != "probation-edge" {
 			t.Fatalf("stored health = %+v", health)
+		}
+	})
+}
+
+// A run that observed its provider's session posts the modern provider gate's
+// evidence beside its result, and the ingest records it. Evidence the model
+// refuses, here observed an hour ahead, is logged and records nothing, and the
+// run itself is still stored and answered 200.
+func TestProviderEgressHealthResultRecordsModernEvidence(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		const secret = "correct-operator-secret-0123456789"
+		defer withStubOperatorIngestSecret(secret)()
+		ctx := context.Background()
+		type evidenceRow struct {
+			postQuantum               bool
+			keyExchange               string
+			windowResizable           bool
+			maxReceiveWindowByteCount int64
+			measuredAt                time.Time
+			runCount                  int
+		}
+		readRow := func(clientId server.Id) *evidenceRow {
+			var row *evidenceRow
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(ctx, `
+					SELECT post_quantum, key_exchange, window_resizable, max_receive_window_byte_count, measured_at, run_count
+					FROM provider_modern_evidence WHERE client_id = $1`, clientId)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						row = &evidenceRow{}
+						server.Raise(result.Scan(&row.postQuantum, &row.keyExchange, &row.windowResizable, &row.maxReceiveWindowByteCount, &row.measuredAt, &row.runCount))
+					}
+				})
+			})
+			return row
+		}
+		withEvidence := func(clientId server.Id, observedAt time.Time) map[string]any {
+			body := validEgressHealthBody(clientId)
+			body["modern_evidence"] = map[string]any{
+				"e2e_negotiated":                true,
+				"key_exchange":                  "X25519MLKEM768",
+				"post_quantum":                  true,
+				"window_advertised":             true,
+				"max_receive_window_byte_count": 4 * 1024 * 1024,
+				"observed_at":                   observedAt.Format(time.RFC3339Nano),
+			}
+			return body
+		}
+
+		observedAt := server.NowUtc().Add(-time.Minute).Truncate(time.Second)
+		recorded := server.NewId()
+		if w := postEgressHealth(t, secret, withEvidence(recorded, observedAt)); w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+		}
+		row := readRow(recorded)
+		if row == nil || !row.postQuantum || row.keyExchange != "X25519MLKEM768" || !row.windowResizable || row.maxReceiveWindowByteCount != 4*1024*1024 || !row.measuredAt.Equal(observedAt) || row.runCount != 1 {
+			t.Fatalf("recorded evidence %+v, want the observed session", row)
+		}
+
+		refused := server.NewId()
+		if w := postEgressHealth(t, secret, withEvidence(refused, server.NowUtc().Add(time.Hour))); w.Code != http.StatusOK {
+			t.Fatalf("status = %d for refused evidence, want the run accepted; body = %s", w.Code, w.Body.String())
+		}
+		if model.GetProviderEgressHealth(ctx, refused) == nil {
+			t.Fatal("refused evidence cost the run its stored result")
+		}
+		if row := readRow(refused); row != nil {
+			t.Fatalf("refused evidence recorded %+v", *row)
+		}
+
+		// a run without the field records nothing
+		unobserved := server.NewId()
+		if w := postEgressHealth(t, secret, validEgressHealthBody(unobserved)); w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+		}
+		if row := readRow(unobserved); row != nil {
+			t.Fatalf("a run without evidence recorded %+v", *row)
 		}
 	})
 }

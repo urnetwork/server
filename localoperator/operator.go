@@ -391,6 +391,7 @@ func EgressHealthArgsOf(submission *ingest.EgressHealthSubmission) (*controller.
 		RunId:                    runId,
 		CycleStartedAt:           submission.CycleStartedAt,
 		UrlProbeEvidence:         submission.UrlProbeEvidence,
+		ModernEvidence:           submission.ModernEvidence,
 		OKCount:                  submission.OkCount,
 		TotalCount:               submission.TotalCount,
 		ClassResults:             classResults,

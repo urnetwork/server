@@ -111,6 +111,15 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 		blackholed := connectProvider("192.0.2.13:0")
 		health(blackholed, 0)
 		model.Testing_SetProviderBlackholed(ctx, blackholed, server.NowUtc())
+		// the modern provider gate's evidence for the healthy provider only
+		connect.AssertEqual(t, model.RecordProviderModernEvidence(ctx, healthy, model.ProviderModernEvidence{
+			E2eNegotiated:             true,
+			KeyExchange:               "X25519MLKEM768",
+			PostQuantum:               true,
+			WindowAdvertised:          true,
+			MaxReceiveWindowByteCount: 4 * 1024 * 1024,
+			ObservedAt:                server.NowUtc().Add(-time.Minute),
+		}), nil)
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 
 		statsRefreshProviderEgress(ctx)
@@ -143,6 +152,23 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 		connect.AssertEqual(t, excluded(model.ProviderExcludedHealth), float64(1))
 		connect.AssertEqual(t, excluded(model.ProviderExcludedUnprobed), float64(1))
 		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderExcludedGauge.gauge, "urnetwork_stats_provider_excluded"), len(model.ProviderExcludedReasons))
+		// the gate is off, so it takes nothing out
+		connect.AssertEqual(t, excluded(model.ProviderExcludedNotModern), float64(0))
+
+		// the modern provider gate's shadow: of the two providers quality and
+		// speed admit, the healthy one is modern and the blackholed one has no
+		// evidence; every bucket and outcome is published, zero included
+		shadow := func(bucket string, outcome string) float64 {
+			return testutil.ToFloat64(statsProviderModernGateShadowGauge.gauge.WithLabelValues(bucket, outcome))
+		}
+		for _, bucket := range []string{model.RankModeQuality, model.RankModeSpeed} {
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeModern), float64(1))
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeNoEvidence), float64(1))
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeNotPostQuantum), float64(0))
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeNoResizableWindows), float64(0))
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeStaleEvidence), float64(0))
+		}
+		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderModernGateShadowGauge.gauge, "urnetwork_stats_provider_modern_gate_shadow"), 2*len(model.ProviderModernOutcomes))
 	})
 }
 

@@ -69,6 +69,11 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 				BodyFirstByteWaitMillis: float64(check.BodyFirstByteWait) / float64(time.Millisecond),
 			}
 		}
+		// the session the run measured, through the client its last load
+		// rode, read while the tunnel is still open
+		if current, _ := opts.path(client).Current(); current != nil {
+			result.ModernEvidence = observeModernEvidence(current)
+		}
 	}
 	return result, err
 }

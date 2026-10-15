@@ -38,6 +38,7 @@ CREATE TABLE provider_egress_url_security(client_id uuid NOT NULL,url_key text N
 CREATE TABLE provider_egress_location(client_id uuid PRIMARY KEY,country_code text,observed_at timestamp NOT NULL);
 CREATE TABLE provider_egress_health_history(client_id uuid NOT NULL,measured_at timestamp NOT NULL,ok_count int NOT NULL,total_count int NOT NULL,class_results jsonb NOT NULL,url_probe_policy_version int NOT NULL,PRIMARY KEY(client_id,measured_at));
 CREATE TABLE exclude_network_client_location(network_id uuid,client_location_id uuid);
+CREATE TABLE provider_modern_evidence(client_id uuid PRIMARY KEY,post_quantum bool NOT NULL,key_exchange varchar(64) NOT NULL DEFAULT '',window_resizable bool NOT NULL,max_receive_window_byte_count bigint NOT NULL DEFAULT 0,measured_at timestamp NOT NULL,first_measured_at timestamp NOT NULL,run_count int NOT NULL DEFAULT 1);
 INSERT INTO network_client_location_reliability(client_id,arin_risk,arin_non_quality,payload)
 SELECT lpad(to_hex(n),32,'0')::uuid,n%5=0,n%97=0,repeat('x',128) FROM generate_series(10000,259999)n;
 INSERT INTO client_connection_reliability_score(client_id,lookback_index,independent_reliability_weight) SELECT lpad(to_hex(n),32,'0')::uuid,l,.2 FROM generate_series(10000,11599)n CROSS JOIN generate_series(1,3)l;

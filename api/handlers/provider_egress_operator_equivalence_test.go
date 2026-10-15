@@ -211,11 +211,25 @@ func operatorEquivalenceScenario(t testing.TB, ctx context.Context, newOperator 
 		t.Fatalf("the scenario needs both providers claimed: %+v", due)
 	}
 
-	// one accepted URL outcome, its replay, and every refusal of the health route
+	// one accepted URL outcome, its replay, and every refusal of the health route;
+	// the outcome carries what its session observed for the modern provider
+	// gate, which both transports record once
 	now := time.Now().UTC()
-	err = operator.SubmitEgressHealth(ctx, clientA, operatorEquivalenceUrlResult(operatorEquivalenceRun, claimA.CycleStartedAt, now))
+	observed := func() *egresshealth.Result {
+		result := operatorEquivalenceUrlResult(operatorEquivalenceRun, claimA.CycleStartedAt, now)
+		result.ModernEvidence = &egresshealth.ModernEvidence{
+			E2eNegotiated:             true,
+			KeyExchange:               "X25519MLKEM768",
+			PostQuantum:               true,
+			WindowAdvertised:          true,
+			MaxReceiveWindowByteCount: 4 * 1024 * 1024,
+			ObservedAt:                now,
+		}
+		return result
+	}
+	err = operator.SubmitEgressHealth(ctx, clientA, observed())
 	operatorEquivalenceRecord(&steps, "health", nil, err)
-	err = operator.SubmitEgressHealth(ctx, clientA, operatorEquivalenceUrlResult(operatorEquivalenceRun, claimA.CycleStartedAt, now))
+	err = operator.SubmitEgressHealth(ctx, clientA, observed())
 	operatorEquivalenceRecord(&steps, "health_replay", nil, err)
 	err = operator.SubmitEgressHealth(ctx, clientA, nil)
 	operatorEquivalenceRecord(&steps, "health_nil", nil, err)

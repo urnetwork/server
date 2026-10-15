@@ -3902,6 +3902,9 @@ type providerCountFilter struct {
 	// pass counts its own population under its own settings, a scoped reader
 	// reads the score export's. Nil applies the rule nowhere.
 	onlineSuccessBaseline *providerOnlineSuccessBaseline
+	// The modern provider gate's evidence rows; a provider without one has
+	// no evidence.
+	modernEvidence map[server.Id]*ProviderModernEvidenceRecord
 }
 
 // Complete means disconnected history too. The partial covering index supplies
@@ -3953,6 +3956,7 @@ func newProviderCountFilter(ctx context.Context, loadEgressEvidence bool) provid
 		reliabilityFailed:       map[server.Id]bool{},
 		tlsAuthenticationFailed: GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx),
 		countryCodes:            GetAllProviderEgressCountryCodes(ctx),
+		modernEvidence:          getProviderModernEvidenceRecords(ctx, nil),
 	}
 	f.healthCounts, f.healthWindowEnd = getAllProviderEgressHealthCountsSnapshot(ctx)
 	server.Db(ctx, func(conn server.PgConn) {
@@ -5471,6 +5475,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	clientIdEgressDecisions := map[server.Id]providerEgressDecision{}
 	reasonCounts := map[string]int{}
 	onlineCount := 0
+	// the modern provider gate's shadow over the pool this export decides
+	modernGateShadowCounts := newProviderModernGateShadowCounts()
 	for clientId, egress := range clientIdEgresses {
 		decision := decideProviderEgress(
 			countFilter.egressFacts(
@@ -5489,6 +5495,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if decision.online {
 			onlineCount += 1
 		}
+		countProviderModernGateShadow(modernGateShadowCounts, decision)
 	}
 	glog.Infof(
 		"[nclm]egress rules: %d providers decided, %d hard excluded from the pool, out of a bucket by reason %v, %d unprobed for the online bucket\n",
@@ -5498,6 +5505,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		onlineCount,
 	)
 	glog.Infof("[nclm]online url-success rule: %s\n", onlineSuccessBaseline.logSummary())
+	glog.Infof("[nclm]modern provider gate: %s\n", providerModernGateShadowSummary(modernGateShadowCounts, egressSettings.QualitySpeedRequiresModernProvider))
 
 	// set each client score to its lowest lookback, decided the same way in
 	// every location and group map it sits in

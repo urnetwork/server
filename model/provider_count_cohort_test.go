@@ -68,12 +68,21 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 		}
 		// The source-map census must retain health evidence outside the cohort.
 		cohortTestExec(ctx, `INSERT INTO provider_egress_health_history VALUES($1,now()-interval '1 hour',1,1,'{}',$2)`, cohortTestId(10000), SelectedProviderUrlProbePolicyVersion())
+		// modern provider evidence for one cohort provider and one outside
+		for _, id := range []server.Id{cohortTestId(1), cohortTestId(10000)} {
+			if err := RecordProviderModernEvidence(ctx, id, ProviderModernEvidence{E2eNegotiated: true, KeyExchange: "X25519MLKEM768", PostQuantum: true, WindowAdvertised: true, MaxReceiveWindowByteCount: 1024 * 1024, ObservedAt: server.NowUtc().Add(-time.Hour)}); err != nil {
+				t.Fatal(err)
+			}
+		}
 		fleet := newProviderCountFilter(ctx, true)
 		scoped := newProviderCountFilterForClients(ctx, append(append([]server.Id{}, ids...), ids...))
 		for _, id := range ids {
-			if fleet.arinRisk[id] != scoped.arinRisk[id] || fleet.arinNonQuality[id] != scoped.arinNonQuality[id] || fleet.reliabilityFailed[id] != scoped.reliabilityFailed[id] || fleet.tlsAuthenticationFailed[id] != scoped.tlsAuthenticationFailed[id] || fleet.countryCodes[id] != scoped.countryCodes[id] || fleet.healthCounts[id] != scoped.healthCounts[id] {
+			if fleet.arinRisk[id] != scoped.arinRisk[id] || fleet.arinNonQuality[id] != scoped.arinNonQuality[id] || fleet.reliabilityFailed[id] != scoped.reliabilityFailed[id] || fleet.tlsAuthenticationFailed[id] != scoped.tlsAuthenticationFailed[id] || fleet.countryCodes[id] != scoped.countryCodes[id] || fleet.healthCounts[id] != scoped.healthCounts[id] || !reflect.DeepEqual(fleet.modernEvidence[id], scoped.modernEvidence[id]) {
 				t.Fatal("scoped facts differ from the existing decision evidence")
 			}
+		}
+		if len(fleet.modernEvidence) != 2 || len(scoped.modernEvidence) != 1 || scoped.modernEvidence[cohortTestId(1)] == nil {
+			t.Fatal("modern provider evidence escaped the cohort or lost its row")
 		}
 		if len(fleet.arinRisk) < 50000 || len(scoped.arinRisk) != 3 || len(scoped.healthCounts) != 12 {
 			t.Fatal("fixture did not retain dense unrelated history or precise health scope")
@@ -98,7 +107,7 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 		observer, closeObservation := cohortObserveQueries(t, ctx)
 		defer closeObservation()
 		settings := egressIndexSettings()
-		wantCounts := &ProviderEgressCounts{BucketIndexCounts: map[string]map[string]int64{}, ReasonCounts: map[string]int64{}, MaxIndex: settings.MaxIndex()}
+		wantCounts := &ProviderEgressCounts{BucketIndexCounts: map[string]map[string]int64{}, ReasonCounts: map[string]int64{}, MaxIndex: settings.MaxIndex(), ModernGateShadowCounts: newProviderModernGateShadowCounts()}
 		for _, bucket := range ProviderEgressBuckets {
 			wantCounts.BucketIndexCounts[bucket] = map[string]int64{}
 		}
@@ -124,6 +133,7 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 			if d.reason != "" {
 				wantCounts.ReasonCounts[d.reason]++
 			}
+			countProviderModernGateShadow(wantCounts.ModernGateShadowCounts, d)
 			if !fleet.hasHardEgressFailure(id) && d.counted {
 				wantLocation++
 			}

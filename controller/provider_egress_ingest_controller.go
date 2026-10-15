@@ -336,6 +336,11 @@ type SubmitProviderEgressHealthArgs struct {
 	RunId            server.Id                      `json:"run_id"`
 	CycleStartedAt   time.Time                      `json:"cycle_started_at,omitempty"`
 	UrlProbeEvidence *egresshealth.UrlProbeEvidence `json:"url_probe_evidence,omitempty"`
+	// ModernEvidence is what the run observed of the provider's end of its
+	// session, for the modern provider gate. Optional, and recorded after the
+	// run and apart from it, so evidence the model refuses never refuses the
+	// run (recordProviderModernEvidence).
+	ModernEvidence *egresshealth.ModernEvidence `json:"modern_evidence,omitempty"`
 	// OKCount/TotalCount cover every class over the measured scored loads. A
 	// load that was not measured, and a canary, is in neither.
 	OKCount    int `json:"ok_count"`
@@ -509,7 +514,34 @@ func SubmitProviderEgressHealth(ctx context.Context, args *SubmitProviderEgressH
 	}
 
 	model.SetProviderEgressHealth(ctx, health)
+	recordProviderModernEvidence(ctx, args.ClientId, args.ModernEvidence)
 	return nil
+}
+
+// Records what a stored run observed of the provider's session for the modern
+// provider gate. Evidence the model refuses, or a write that fails, is logged
+// and costs the gate one observation, which the provider's next run repeats;
+// it never fails the run, whose URL result is already stored and which a
+// retry would only replay.
+func recordProviderModernEvidence(ctx context.Context, clientId server.Id, evidence *egresshealth.ModernEvidence) {
+	if evidence == nil {
+		return
+	}
+	server.HandleError(func() {
+		err := model.RecordProviderModernEvidence(ctx, clientId, model.ProviderModernEvidence{
+			E2eNegotiated:             evidence.E2eNegotiated,
+			KeyExchange:               evidence.KeyExchange,
+			PostQuantum:               evidence.PostQuantum,
+			WindowAdvertised:          evidence.WindowAdvertised,
+			MaxReceiveWindowByteCount: evidence.MaxReceiveWindowByteCount,
+			ObservedAt:                evidence.ObservedAt,
+		})
+		if err != nil {
+			glog.Errorf("[pegl]modern provider evidence of %s refused: %s\n", clientId, err)
+		}
+	}, func(err error) {
+		glog.Errorf("[pegl]modern provider evidence of %s not recorded: %s\n", clientId, err)
+	})
 }
 
 // Active bandwidth.
