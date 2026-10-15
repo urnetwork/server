@@ -4,6 +4,7 @@
 package capprobe
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"testing/synctest"
@@ -208,4 +209,66 @@ func TestHeldDowngradesAreCarriedConfirmedAndRetired(t *testing.T) {
 		held.hold(server.NewId())
 	}
 	connect.AssertEqual(t, len(held.carried()), maxHeldDowngrades)
+}
+
+// Root cause (re-review finding 5): a pass whose evidence write failed
+// returned the sweep it started with, held downgrades included. A hold the
+// pass retired, answering a modern reading it recorded, came back with the
+// task's retry, and that provider, fresh now, was not measured again in the
+// sweep; a later sweep's one negative reading then confirmed its downgrade
+// at once. A failed pass keeps the sweep's place, so the retry selects the
+// same page, and carries the held downgrades as the pass left them: the
+// retired hold is gone and a negative reading it held is carried. Its write
+// failures come back as one error, not a join, which the task's retry could
+// not carry the sweep with.
+func TestAFailedPassCarriesItsHeldDowngrades(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := newFakeStore(4)
+		ids := store.clientIds
+		answered, failing, alsoFailing, downgrading := ids[0], ids[1], ids[2], ids[3]
+		modernEvidence := model.ProviderModernEvidence{
+			E2eNegotiated:             true,
+			KeyExchange:               "X25519MLKEM768",
+			PostQuantum:               true,
+			WindowAdvertised:          true,
+			MaxReceiveWindowByteCount: 4 * 1024 * 1024,
+			// due for a refresh, and fresh
+			ObservedAt: time.Now().Add(-80 * time.Hour),
+		}
+		store.evidence[answered] = modernEvidence
+		store.evidence[downgrading] = modernEvidence
+		writeErr := errors.New("synthetic evidence write failure")
+		store.recordErr[failing] = writeErr
+		store.recordErr[alsoFailing] = writeErr
+		fleet := newFakeFleet()
+		fleet.providers[answered] = fakeModernProvider()
+		fleet.providers[failing] = fakeModernProvider()
+		fleet.providers[alsoFailing] = fakeModernProvider()
+		fleet.providers[downgrading] = fakeLegacyProvider()
+		runner := newFakeRunner(t, fakeSettings(4, 4, 4, 1), store, fleet)
+		// a sweep under way, holding a downgrade of answered from an earlier
+		// sweep
+		sweep := Sweep{
+			StartedAt:      time.Now().Add(-time.Hour),
+			HeldDowngrades: []HeldDowngrade{{ClientId: answered, SweepStartedAt: time.Now().Add(-7 * time.Hour)}},
+		}
+
+		next, result, err := runner.run(t.Context(), sweep)
+		if !errors.Is(err, writeErr) {
+			t.Fatalf("the pass returned %v, want its write failure", err)
+		}
+		if _, joined := err.(interface{ Unwrap() []error }); joined {
+			t.Fatalf("the pass's write failures came back joined: %v", err)
+		}
+		if result == nil || result.Started != 4 || result.Recorded != 1 || result.DowngradesHeld != 1 {
+			t.Fatalf("the failed pass counted %+v", result)
+		}
+		if modernOutcomeOf(store.evidence[answered]) != model.ProviderModernOutcomeModern || !store.evidence[answered].ObservedAt.After(modernEvidence.ObservedAt) {
+			t.Fatalf("the modern reading was not recorded: %+v", store.evidence[answered])
+		}
+		connect.AssertEqual(t, next, Sweep{
+			StartedAt:      sweep.StartedAt,
+			HeldDowngrades: []HeldDowngrade{{ClientId: downgrading, SweepStartedAt: sweep.StartedAt}},
+		})
+	})
 }

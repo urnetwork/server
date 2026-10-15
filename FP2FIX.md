@@ -411,14 +411,19 @@ provider cannot resolve the probe client's key.
   released through the config-updater, then a restart of every taskworker,
   since a running container keeps the config it started with; the first
   restarted taskworker schedules the first pass due at once
-  (capprobe/README.md, "Switching it on"). Switching it off is the same
-  release and restart with `enabled: false`. (4) Review the shadow counts until
+  (capprobe/README.md, "Switching it on"). A pass that a taskworker still on
+  the old config claims ends the chain; the taskworkers with the probe
+  switched on schedule it again within ten minutes, and the monitor's
+  `capability-probe` signal (SIGNALS.md §2.19g) reports the disabled pass,
+  and a stall, until every taskworker runs the new config. Switching it off
+  is the same release and restart with `enabled: false`. (4) Review the shadow counts until
   `no_evidence` is small and the not-modern providers are understood, with
   the capability probe's readings: a large `post_quantum_unsealed` share
   would mean providers whose identity proof the probe could not verify,
   which the gate counts as post-quantum and which should be understood
   first, and `capability-probe-breaker` and `capability-probe-downgrades`
-  (SIGNALS.md §2.19g) must be quiet. (5) Switch the gate on only after that
+  (SIGNALS.md §2.19g) must be quiet and the monitor's `capability-probe`
+  signal healthy. (5) Switch the gate on only after that
   review; `quality_speed_requires_modern_provider: false` turns it off again
   at each pass's next settings read. Lowering `other_refresh_hours` before
   the switch returns an updated provider sooner, at a measurement of every

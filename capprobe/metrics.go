@@ -164,6 +164,13 @@ var lastSweepSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
 	Help:      "How long the last sweep this taskworker completed took, from its first pass's start",
 })
 
+var chainRestartsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "chain_restarts_total",
+	Help:      "Capability probe chains this taskworker, with the probe switched on, found without their task row and scheduled again: a disabled pass on a taskworker with an older config, or maintenance, had ended them",
+})
+
 var lastPassTimestampSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "capability_probe",
@@ -208,6 +215,7 @@ func init() {
 		shardCleanupErrorsTotal,
 		sweepsTotal,
 		lastSweepSeconds,
+		chainRestartsTotal,
 		lastPassTimestampSeconds,
 	)
 }
@@ -221,6 +229,11 @@ func ObservePass(result string) {
 // Counts one pass whose prober shard's drain or reap failed after it.
 func ObserveShardCleanupFailure() {
 	shardCleanupErrorsTotal.Inc()
+}
+
+// Counts one chain found without its task row and scheduled again.
+func ObserveChainRestart() {
+	chainRestartsTotal.Inc()
 }
 
 // Counts one pass whose funding readiness check failed at step.

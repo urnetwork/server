@@ -62,6 +62,8 @@ func newProviderCapabilityTunnelOpener(base providertunnel.Config, settings Sett
 		cfg.CapabilityObservation = &providertunnel.CapabilityObservation{
 			Recorder:                      recorder,
 			NewPeerClientPublicKeyFetcher: newLocalPeerClientPublicKeyFetcher,
+			// a measurement attempts its provider about once
+			RedialMin: settings.measureTimeout(),
 		}
 		tunnel, err := openProviderTunnel(ctx, cfg, connect.Id(providerId))
 		if err != nil {
