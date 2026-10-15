@@ -42,11 +42,16 @@ func testLauncherReadiness(replacedFieldNameValues map[string]string) string {
 	return record
 }
 
+// The endpoints that test-env.sh would attest for the synthetic launcher: its
+// dedicated address with each service's port.
+const testLauncherAttestedAddrs = "192.0.2.10:15432,192.0.2.10:16379"
+
 // A launcher's local profile in a vault outside every fixture root, beside
 // stand-ins for the live secrets such a vault also holds, and the launcher's
 // lock with its owner and readiness. Selects both with the environment that
 // test-env.sh exports in managed-local mode, the lock through its test-only
-// local-state paths. Returns the vault and the lock directory.
+// local-state paths, and installs the dial guard that a process started from
+// that environment would have chosen. Returns the vault and the lock directory.
 func writeTestLauncherVault(t *testing.T) (string, string) {
 	t.Helper()
 	t.Setenv("WARP_ENV", "local")
@@ -79,6 +84,7 @@ func writeTestLauncherVault(t *testing.T) (string, string) {
 	t.Setenv("WARP_VAULT_HOME", vaultHome)
 	t.Setenv("WARP_CONFIG_HOME", filepath.Join(syntheticTestResourceRoot, "config"))
 	t.Setenv("WARP_TEST_ENV_LAUNCHER_VAULT_HOME", vaultHome)
+	useTestEnvProcessDialGuard(t, newTestEnvDialGuard(testEnvManagedEnvironment(testLauncherAttestedAddrs), testEnvUnusedResolver(t)))
 	// the vault is no longer below the temp directory, so it is not a fixture
 	t.Setenv("TMPDIR", t.TempDir())
 	if err := refuseNonFixtureVault(vaultHome, true); err == nil {
@@ -255,6 +261,14 @@ func TestTestBinaryRefusesLauncherResourcesWithoutAValidAttestation(t *testing.T
 			errorText:    "not a dedicated non-loopback address",
 		},
 		{
+			name: "mapped unspecified address",
+			mutate: func(t *testing.T, lockDir string) {
+				writeFile(t, filepath.Join(lockDir, "ready"), testLauncherReadiness(map[string]string{"host_ip": "::ffff:0.0.0.0"}))
+			},
+			refusedNames: []string{"pg.yml", "redis.yml"},
+			errorText:    "not a dedicated non-loopback address",
+		},
+		{
 			name: "invalid port",
 			mutate: func(t *testing.T, lockDir string) {
 				writeFile(t, filepath.Join(lockDir, "ready"), testLauncherReadiness(map[string]string{"postgres_port": "015432"}))
@@ -266,6 +280,10 @@ func TestTestBinaryRefusesLauncherResourcesWithoutAValidAttestation(t *testing.T
 			name: "another PostgreSQL endpoint",
 			mutate: func(t *testing.T, lockDir string) {
 				writeFile(t, filepath.Join(lockDir, "ready"), testLauncherReadiness(map[string]string{"postgres_port": "25432"}))
+				// the dial guard attests the moved port too, so only the file's
+				// authority differs
+				useTestEnvProcessDialGuard(t, newTestEnvDialGuard(
+					testEnvManagedEnvironment("192.0.2.10:25432,192.0.2.10:16379"), testEnvUnusedResolver(t)))
 			},
 			refusedNames: []string{"pg.yml"},
 			errorText:    "not the attested endpoint " + testLauncherPostgresHost + ":25432",
@@ -302,6 +320,63 @@ func TestTestBinaryRefusesLauncherResourcesWithoutAValidAttestation(t *testing.T
 				t.Errorf("%s: %s read %v; want a refusal naming %q", c.name, name, err, c.errorText)
 			} else if strings.Contains(err.Error(), testLauncherPassword) || strings.Contains(err.Error(), testLauncherOwnerToken) {
 				t.Errorf("%s: the %s refusal names a credential or the owner token", c.name, name)
+			}
+		}
+		if _, err := loadTestEnvironmentConfiguration(); err == nil {
+			t.Errorf("%s: a DB test loaded the launcher's settings", c.name)
+		}
+	}
+}
+
+// The launcher's credentials load only into a test process whose dial guard,
+// chosen at startup, attests the launcher's address with both of its ports.
+// Setting WARP_ENV=local and the launcher vault by hand, or after startup,
+// leaves a process without a guard, whose pools dial by name and can fall
+// through public DNS to 127.0.0.1, where a production data tunnel listens. That
+// process, one whose guard has no attestation, and one whose guard attests
+// other endpoints read none of the launcher's credentials.
+func TestTestBinaryReadsLauncherResourcesOnlyUnderItsDialGuard(t *testing.T) {
+	cases := []struct {
+		name      string
+		guard     func(t *testing.T) *testEnvDialGuard
+		errorText string
+	}{
+		{
+			name: "no dial guard",
+			guard: func(t *testing.T) *testEnvDialGuard {
+				return nil
+			},
+			errorText: "only in a process whose dial guard attests the launcher's endpoints",
+		},
+		{
+			name: "a guard without an attestation",
+			guard: func(t *testing.T) *testEnvDialGuard {
+				return newTestEnvDialGuard(testEnvManagedEnvironment(""), testEnvUnusedResolver(t))
+			},
+			errorText: "only in a process whose dial guard attests the launcher's endpoints",
+		},
+		{
+			name: "a guard for another address",
+			guard: func(t *testing.T) *testEnvDialGuard {
+				return newTestEnvDialGuard(testEnvManagedEnvironment("192.0.2.11:15432,192.0.2.11:16379"), testEnvUnusedResolver(t))
+			},
+			errorText: "attests the launcher's 192.0.2.10:15432",
+		},
+		{
+			name: "a guard for the PostgreSQL endpoint only",
+			guard: func(t *testing.T) *testEnvDialGuard {
+				return newTestEnvDialGuard(testEnvManagedEnvironment("192.0.2.10:15432"), testEnvUnusedResolver(t))
+			},
+			errorText: "attests the launcher's 192.0.2.10:16379",
+		},
+	}
+	for _, c := range cases {
+		writeTestLauncherVault(t)
+		useTestEnvProcessDialGuard(t, c.guard(t))
+		for _, name := range []string{"pg.yml", "redis.yml"} {
+			_, err := Vault.SimpleResource(name)
+			if !errors.Is(err, ErrResourceNotFound) || !strings.Contains(err.Error(), c.errorText) {
+				t.Errorf("%s: %s read %v; want a refusal naming %q", c.name, name, err, c.errorText)
 			}
 		}
 		if _, err := loadTestEnvironmentConfiguration(); err == nil {

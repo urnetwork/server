@@ -21,8 +21,10 @@
 // here is the record itself: its owner matches the lock in the v2 form, its
 // dedicated address is neither loopback nor unspecified, and its endpoints are
 // complete. test-env.sh has also checked the launcher's live process and its
-// hosts mappings, and the dial guard pins every connection to the attested
-// addresses (test_env_dial_guard.go).
+// hosts mappings. The resources are read only in a test process whose dial
+// guard, chosen at startup, attests the launcher's address with both of its
+// ports, so every connection they open stays pinned to the launcher
+// (test_env_dial_guard.go).
 package server
 
 import (
@@ -33,6 +35,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -110,6 +113,31 @@ func selectTestVaultScope(root string, env string, relPath string) (testVaultSco
 			err,
 		)
 	}
+	// The credentials load only into a test process whose dial guard pins every
+	// connection to the launcher's own address. Without one, a pool that dials
+	// by name can fall through public DNS to 127.0.0.1, where a production data
+	// tunnel listens. The guard is chosen once, at startup, so setting the
+	// environment later does not install it.
+	guard := currentTestEnvDialGuard()
+	if err := guard.requireAttested(); err != nil {
+		return testVaultScope{}, fmt.Errorf(
+			"%w: a test reads the launcher's %s only in a process whose dial guard attests the launcher's endpoints, and %v",
+			ErrResourceNotFound,
+			relPath,
+			err,
+		)
+	}
+	for _, launcherAddrPort := range []netip.AddrPort{attestation.postgresAddrPort, attestation.redisAddrPort} {
+		if !slices.Contains(guard.attestedAddrPorts, launcherAddrPort) {
+			return testVaultScope{}, fmt.Errorf(
+				"%w: a test reads the launcher's %s only while its dial guard attests the launcher's %s, which %s does not list",
+				ErrResourceNotFound,
+				relPath,
+				launcherAddrPort,
+				testEnvAttestedAddrsEnvName,
+			)
+		}
+	}
 	launcherEndpoint := attestation.postgresEndpoint
 	if service == "redis" {
 		launcherEndpoint = attestation.redisEndpoint
@@ -118,10 +146,13 @@ func selectTestVaultScope(root string, env string, relPath string) (testVaultSco
 	return testVaultScope{root: filepath.Join(root, "local"), launcherEndpoint: launcherEndpoint}, nil
 }
 
-// The endpoints of a valid launcher readiness record, each as host:port.
+// The endpoints of a valid launcher readiness record: each service's name and
+// port as host:port, and its dedicated address with that port.
 type testLauncherAttestation struct {
 	postgresEndpoint string
 	redisEndpoint    string
+	postgresAddrPort netip.AddrPort
+	redisAddrPort    netip.AddrPort
 }
 
 // Reads the launcher's lock owner and readiness record with run-local-state.sh's
@@ -174,22 +205,28 @@ func readTestLauncherAttestation() (testLauncherAttestation, error) {
 		return testLauncherAttestation{}, fmt.Errorf("the launcher readiness in %s does not name its lock's owner", lockDir)
 	}
 	hostIp, err := netip.ParseAddr(fieldNameValues["host_ip"])
-	if err != nil || hostIp.Zone() != "" || hostIp.Unmap().IsLoopback() || hostIp.IsUnspecified() || hostIp.IsMulticast() {
+	// an IPv4-mapped spelling is judged as the IPv4 address it maps
+	hostIp = hostIp.Unmap()
+	if err != nil || hostIp.Zone() != "" || hostIp.IsLoopback() || hostIp.IsUnspecified() || hostIp.IsMulticast() {
 		return testLauncherAttestation{}, fmt.Errorf(
 			"the launcher readiness in %s names %s, not a dedicated non-loopback address",
 			lockDir,
 			fieldNameValues["host_ip"],
 		)
 	}
+	namePorts := map[string]uint16{}
 	for _, name := range []string{"postgres_port", "redis_port"} {
 		port, err := strconv.Atoi(fieldNameValues[name])
 		if err != nil || port < 1 || 65535 < port || strconv.Itoa(port) != fieldNameValues[name] {
 			return testLauncherAttestation{}, fmt.Errorf("the launcher readiness in %s has an invalid %s", lockDir, name)
 		}
+		namePorts[name] = uint16(port)
 	}
 	return testLauncherAttestation{
 		postgresEndpoint: net.JoinHostPort(fieldNameValues["postgres_host"], fieldNameValues["postgres_port"]),
 		redisEndpoint:    net.JoinHostPort(fieldNameValues["redis_host"], fieldNameValues["redis_port"]),
+		postgresAddrPort: netip.AddrPortFrom(hostIp, namePorts["postgres_port"]),
+		redisAddrPort:    netip.AddrPortFrom(hostIp, namePorts["redis_port"]),
 	}, nil
 }
 
