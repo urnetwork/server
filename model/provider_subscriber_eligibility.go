@@ -30,9 +30,13 @@ func observeSubscriberEligibilityEvent(event string, count int) {
 	}
 }
 
-// Named providers and force_minimum keep the requested bucket's policy.
-// Discovery evaluates subscriber evidence for native Quality membership;
-// Speed and Online borrowing use the independent common exclusions.
+// The exclusions of a request that names its providers by client id and has no
+// discovery spec. Named providers keep the common exclusions in every mode. A
+// named Quality provider also needs a live connection with no live ARIN risk,
+// but not ARIN quality verification (getProviderNamedSubscriberExclusions).
+// Discovery, force_minimum included, evaluates the full subscriber evidence
+// for native Quality membership; Speed and Online borrowing use the
+// independent common exclusions.
 func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mode RankMode) (map[server.Id]bool, error) {
 	excluded, err := getProviderHardExclusions(ctx, clientIds)
 	if err != nil || mode != RankModeQuality || len(clientIds) == 0 {
@@ -44,7 +48,7 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 			pending = append(pending, id)
 		}
 	}
-	negative, risky, err := getProviderSubscriberExclusions(ctx, pending)
+	negative, risky, err := getProviderNamedSubscriberExclusions(ctx, pending)
 	if err != nil {
 		return nil, err
 	}
