@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -825,6 +827,39 @@ func TestValidateGossipModesAndResourceErrors(t *testing.T) {
 	for _, port := range []int{0, 18083} {
 		if err := validateGossip(port, nil, unreadable); !errors.Is(err, unreadable) {
 			t.Errorf("unreadable resource on port %d: %v", port, err)
+		}
+	}
+}
+
+// The environment variable that makes this test binary run the command's main
+// with the arguments it holds, as the all binary would.
+const allMainTestArgsEnvironment = "URNETWORK_ALL_MAIN_TEST_ARGS"
+
+// A failing command says why on stderr before it exits 1. Its stderr runs
+// through the address scrubber, which forwards from a pipe on a goroutine, and
+// the process used to exit straight after writing its report, before the
+// goroutine forwarded it: `all db migrate` and every other command could fail
+// with exit 1 and no message. Each run here must print its report.
+func TestFailingCommandPrintsItsError(t *testing.T) {
+	if args, ok := os.LookupEnv(allMainTestArgsEnvironment); ok {
+		os.Args = append([]string{"all"}, strings.Fields(args)...)
+		main()
+		return
+	}
+	for run := range 20 {
+		command := exec.Command(os.Args[0], "-test.run=^TestFailingCommandPrintsItsError$")
+		command.Env = append(os.Environ(), allMainTestArgsEnvironment+"=bogus")
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		command.Stdout = &stdout
+		command.Stderr = &stderr
+		err := command.Run()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("run %d: the failing command ended with %v, stderr %q", run, err, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "all: unknown all command or positional argument\n") {
+			t.Fatalf("run %d: the failing command printed %q, stdout %q", run, stderr.String(), stdout.String())
 		}
 	}
 }

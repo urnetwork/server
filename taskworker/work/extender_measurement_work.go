@@ -294,12 +294,15 @@ func renewExtenderMeasurementCerts(
 	}
 }
 
-// Issues for pending requests (C5, C7), longest waiting first. A request is
-// refused when it is not a valid request for its extender's measurement name,
-// or when its extender may not be measured. A request for a name that still
-// has an unexpired certificate is a renewal to the CA and goes past the
-// weekly cap, which is how a rotated key and an extender that came back are
-// served; a new extender's waits while the cap is spent.
+// Issues for pending requests (C5, C7): first those the weekly cap does not
+// hold, then the rest, each longest waiting first
+// (model.GetPendingNetworkExtenderMeasurements). A request is refused when it
+// is not a valid request for its extender's measurement name, or when its
+// extender may not be measured. A request for a name that still has an
+// unexpired certificate is a renewal to the CA and goes past the weekly cap,
+// which is how a rotated key and an extender that came back are served; a
+// new extender's waits while the cap is spent, and is read again each pass,
+// behind the requests the cap does not hold however many wait.
 //
 // A request whose certificate ran out un-renewed is put back in the queue
 // first, so nothing stays issued with no certificate behind it.

@@ -20,8 +20,8 @@ import (
 // smallest block a provider routes to one customer, so the key here is the
 // same peppered hash over the wider prefix. No address, prefix text or
 // address bytes are ever part of a key (amendment 9), and a counter lives in
-// Redis only: server.IncrementRateLimitWindow gives each window's key a TTL
-// of the window, so it is gone one window after its last count at most.
+// Redis only: server.IncrementRateLimitWindowToEnd expires each window's key
+// at the window's end, so no counter outlives the window it limits (A6).
 // Infrastructure subnets (WARP_LIMIT_EXCLUDE_SUBNETS) are not counted, as
 // for every caller limiter. The windows are fixed and epoch aligned.
 
@@ -112,7 +112,7 @@ func checkLagRateLimit(
 	if limit <= 0 || window < time.Millisecond {
 		return LagRateLimitResult{}, fmt.Errorf("invalid lag rate limit %d per %s", limit, window)
 	}
-	count, err := server.IncrementRateLimitWindow(ctx, key, window)
+	count, err := server.IncrementRateLimitWindowToEnd(ctx, key, window)
 	if err != nil {
 		return LagRateLimitResult{}, err
 	}

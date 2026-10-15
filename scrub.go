@@ -28,6 +28,7 @@ import (
 	"os"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // scrubMaxLineSize bounds how much is held waiting for a newline. A writer that
@@ -53,12 +54,14 @@ var scrubPassthroughMarkers = [][]byte{
 }
 
 // ScrubProcessLogs redirects this process's stderr and stdout through an
-// address scrubber. Call it as the first statement of main, before anything
-// has had a chance to log.
+// address scrubber. A command's main calls it through ScrubCommandLogs, as its
+// first statement, before anything has had a chance to log.
 //
-// Returns a restore function, primarily for tests; production calls it once and
-// never restores. An error leaves the process's descriptors untouched, so a
-// failure here degrades to the previous behavior rather than losing logging.
+// Returns a restore function, which forwards everything written so far and
+// puts the original descriptors back; a main restores only as it ends
+// (CommandLogs), so its last lines are not lost. An error leaves the
+// process's descriptors untouched, so a failure here degrades to the previous
+// behavior rather than losing logging.
 func ScrubProcessLogs() (func(), error) {
 	restoreErr, err := scrubDescriptor(syscall.Stderr)
 	if err != nil {
@@ -76,6 +79,69 @@ func ScrubProcessLogs() (func(), error) {
 			restoreErr()
 		})
 	}, nil
+}
+
+// How long a command's exit waits for the scrubber to forward what was
+// written before it: far longer than a failing command's last lines take, and
+// short enough that an exit never hangs on a destination that stopped
+// reading.
+const commandLogsFlushTimeout = 5 * time.Second
+
+// CommandLogs is a command's scrubbed stdout and stderr (ScrubProcessLogs) and
+// the ways out of the process that keep what it wrote. The scrubber forwards
+// from a pipe on a goroutine, so a line written just before the process ends
+// can still be in the pipe when it ends: a main that wrote its failure and
+// called os.Exit at once lost the line, and exited 1 with no message. Every
+// way a scrubbing main ends goes through Flush first: Exit in place of
+// os.Exit, a deferred Flush for a return or a panic in main (the runtime
+// reports a panic after deferred calls run), and DocoptHelp for the exits
+// docopt makes itself on --help, --version and a usage error.
+type CommandLogs struct {
+	restore func()
+}
+
+// ScrubCommandLogs is ScrubProcessLogs for a command's main. Call it as the
+// first statement, before anything can log, and defer Flush. A failure to
+// scrub degrades to unscrubbed logs, as ScrubProcessLogs does, and Flush is
+// then a no-op.
+func ScrubCommandLogs() *CommandLogs {
+	restore, _ := ScrubProcessLogs()
+	return &CommandLogs{restore: restore}
+}
+
+// Flush forwards everything written to stdout and stderr so far and puts the
+// original descriptors back, so whatever is written afterwards, a panic's
+// report included, goes to them directly. It waits at most
+// commandLogsFlushTimeout, and is safe to call more than once.
+func (self *CommandLogs) Flush() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		self.restore()
+	}()
+	select {
+	case <-done:
+	case <-time.After(commandLogsFlushTimeout):
+	}
+}
+
+// Exit flushes and ends the process with code, in place of os.Exit.
+func (self *CommandLogs) Exit(code int) {
+	self.Flush()
+	os.Exit(code)
+}
+
+// DocoptHelp is docopt's PrintHelpAndExit with the logs flushed before the
+// process exits: the usage on stderr and exit 1 for a usage error, and the
+// help or version on stdout and exit 0 when asked for. It is the HelpHandler
+// of a scrubbing main's docopt.Parser.
+func (self *CommandLogs) DocoptHelp(err error, usage string) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, usage)
+		self.Exit(1)
+	}
+	fmt.Println(usage)
+	self.Exit(0)
 }
 
 // scrubDescriptor points fd at a pipe this process owns and starts a reader
