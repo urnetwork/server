@@ -536,6 +536,83 @@ func TestCompetitionRoundBaselineFreezesOnceAndIsReused(t *testing.T) {
 	})
 }
 
+// A staging round freezes a zero takeover margin, and its evaluator records
+// that margin in the round baseline. The round's next claim authenticates
+// the baseline against the round's margin, not the configured production
+// margin, which would refuse every later claim in the round.
+func TestCompetitionClaimAuthenticatesAZeroMarginStagingBaseline(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := validSettings()
+		settings.CompetitionId += "-zero-margin-claim"
+		settings.ArtifactRoot = t.TempDir()
+		currentTime := server.NowUtc().Truncate(time.Second)
+		settings.SeasonEndsAt = currentTime.Add(60 * 24 * time.Hour)
+		settings.RetainUntil = settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
+		store := PostgresStore{now: func() time.Time { return currentTime }}
+		listKey, memberKey := competitionFifoKeys(settings)
+		server.Redis(ctx, func(client server.RedisClient) {
+			server.Raise(client.Del(ctx, listKey, memberKey).Err())
+		})
+		t.Cleanup(func() {
+			server.Redis(context.Background(), func(client server.RedisClient) {
+				_ = client.Del(context.Background(), listKey, memberKey).Err()
+			})
+		})
+
+		round, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
+		if err != nil || policy.EvaluationPolicy.TakeoverMargin != 0 || settings.EvaluationPolicy.TakeoverMargin == 0 {
+			t.Fatalf("staging margin = %v, configured margin = %v, error = %v",
+				policy, settings.EvaluationPolicy.TakeoverMargin, err)
+		}
+		for _, name := range []string{"zero-margin-a", "zero-margin-b"} {
+			patch, patchErr := ValidateAndCanonicalizePatch(testPatch(name), settings.PatchPolicy)
+			if patchErr != nil {
+				t.Fatal(patchErr)
+			}
+			if _, cacheHit, enqueueErr := store.Enqueue(
+				ctx, settings, round.RoundId, patch, "miner-"+name, testApiImageDigest(),
+			); enqueueErr != nil || cacheHit {
+				t.Fatalf("enqueue %s: hit=%t error=%v", name, cacheHit, enqueueErr)
+			}
+		}
+
+		first, err := store.Claim(ctx, settings, "worker-a", testWorkerImageDigest())
+		if err != nil || first == nil || first.RoundBaseline != nil {
+			t.Fatalf("first claim = %#v, %v", first, err)
+		}
+		baselineJson := testRoundBaseline(t, settings, &first.Round, []float64{100, 101, 99})
+		var baseline roundBaselineManifest
+		if err := json.Unmarshal(baselineJson, &baseline); err != nil || baseline.TakeoverMargin != 0 {
+			t.Fatalf("evaluator baseline margin = %v, error = %v", baseline.TakeoverMargin, err)
+		}
+		baselineDigest := sha256.Sum256(baselineJson)
+		outcome := EvaluationOutcome{
+			Error:               submissionError("run_unstable", "synthetic candidate instability"),
+			ArtifactManifest:    json.RawMessage(`{"schema":1}`),
+			RoundBaselineJson:   baselineJson,
+			RoundBaselineSha256: hex.EncodeToString(baselineDigest[:]),
+		}
+		if retry, err := store.Complete(ctx, settings, "worker-a", first.JobId, outcome); err != nil || retry {
+			t.Fatalf("freeze baseline: retry=%t error=%v", retry, err)
+		}
+
+		second, err := store.Claim(ctx, settings, "worker-a", testWorkerImageDigest())
+		if err != nil || second == nil || second.JobId == first.JobId || second.RoundBaseline == nil ||
+			second.RoundBaseline.Sha256 != outcome.RoundBaselineSha256 {
+			t.Fatalf("claim after the zero-margin baseline froze = %#v, %v", second, err)
+		}
+	})
+}
+
 // The competition archive must not inherit the ordinary stats bucket because
 // that bucket predates object locking and cannot satisfy retained submissions.
 func TestArtifactArchiveDefaultsToDedicatedBucket(t *testing.T) {
