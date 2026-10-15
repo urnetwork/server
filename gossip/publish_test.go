@@ -359,7 +359,7 @@ func TestGossipRunPublishDrainsEveryRoundAndEndsWithTheContext(t *testing.T) {
 		go server.HandleError(func() {
 			defer close(done)
 			runPublish(drainCtx, publisher, 5*time.Millisecond, publishBatchSize)
-		}, cancel)
+		})
 
 		nextPublished := func(what string) string {
 			select {
