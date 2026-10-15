@@ -427,8 +427,12 @@ provider cannot resolve the probe client's key.
   `false`. While the switch is absent, a start that is neither an instant nor
   a date, is given twice or is given without a value also reads as `false`,
   where it kept the default start before: each is most likely a postponement
-  that failed, so it keeps the gate off and is logged. Beside a switch the
-  start decides nothing. A provider.yml that is not yaml reads as `false`
+  that failed, so it keeps the gate off and is logged. It also publishes no
+  start, which silences the readiness signal's windows, so the monitor
+  decodes the deployment's desired provider.yml itself and WARNs
+  `modern-gate-schedule-unreadable` with the failure
+  (`model.GetModernProviderGateFailure`). Beside a switch the start decides
+  nothing. A provider.yml that is not yaml reads as `false`
   with the default start, and no key's failure resets a neighbour. Every reader decides at its own instant, never at a fresh
   clock read (`EgressIndexSettings.RequiresModernProvider`): a pass at its
   filter's `now`, set once per pass so a pass decides every provider alike,
@@ -496,9 +500,14 @@ provider cannot resolve the probe client's key.
   WARN when the gate would take more than half of Quality or of Speed out,
   PAGE from 24 hours before, and PAGE when a bucket falls by more than half
   after the start, until 18:00 UTC on the start's day. It reads the gate and
-  its start per running taskworker too: a taskworker that publishes neither,
+  its start per taskworker process too, once a process has run five minutes,
+  so a restart alone does not fire: a taskworker that publishes neither,
   decides the gate differently or schedules another start WARNs before the
-  earliest start and PAGEs from it. To postpone, set
+  earliest start and PAGEs from it until 18:00 UTC, and a gate decided
+  differently WARNs at any other time, with the switch set everywhere too.
+  On the start's day, from the start until 18:00 UTC, no taskworker
+  restarts except to release the kill switch, since every rollout makes the
+  fleet disagree while it runs. To postpone, set
   `quality_speed_requires_modern_provider: false`; to move the instant, set
   `quality_speed_modern_provider_start`. Either is a config release and a
   restart of every taskworker and API block, as for the probe's switch, and

@@ -252,12 +252,14 @@ type egressIndexSettingsBlock struct {
 // file turns that gate off, where an absent switch leaves it to its start;
 // and while the switch is absent, a start that is given but cannot be read,
 // empty included, turns it off too, since each is most likely a postponement
-// that failed. Each is logged.
-func egressIndexSettings() *EgressIndexSettings {
+// that failed. Each is logged, and the first is the second result, "" for
+// none.
+func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	settings := DefaultEgressIndexSettings()
+	var modernGateFailure string
 	resource, err := server.Config.SimpleResource(providerConfigResourceName)
 	if err != nil || resource == nil {
-		return settings
+		return settings, modernGateFailure
 	}
 	// Each top-level key with its value and how many times the file gives it.
 	// A parse into nodes checks no types and no duplicate keys, so only a file
@@ -291,16 +293,20 @@ func egressIndexSettings() *EgressIndexSettings {
 		}
 		return keyValues, keyCounts, nil
 	}()
-	// the modern provider gate's switch, set false
-	modernGateOff := func() {
+	// holds the modern provider gate off for a failure: the switch set false,
+	// and the first failure kept
+	modernGateFailed := func(failure string) {
 		off := false
 		settings.QualitySpeedRequiresModernProvider = &off
+		if modernGateFailure == "" {
+			modernGateFailure = failure
+		}
 	}
 	if err != nil {
 		glog.Errorf("[egress]provider config is unreadable (%s); the egress index keeps its defaults, the online url-success rule is disabled and the modern provider gate is off\n", err)
 		settings.OnlineRequiresUrlSuccess = false
-		modernGateOff()
-		return settings
+		modernGateFailed("provider.yml cannot be read")
+		return settings, modernGateFailure
 	}
 	// decodes one top-level key into target; an absent key leaves it as it is
 	decode := func(key string, target any) error {
@@ -371,45 +377,46 @@ func egressIndexSettings() *EgressIndexSettings {
 	var modernGate *bool
 	if err := decode("quality_speed_requires_modern_provider", &modernGate); err != nil {
 		glog.Errorf("[egress]provider config quality_speed_requires_modern_provider is unreadable (%s); the modern provider gate is off\n", err)
-		modernGateOff()
+		modernGateFailed("quality_speed_requires_modern_provider cannot be read")
 	} else if modernGate != nil {
 		settings.QualitySpeedRequiresModernProvider = modernGate
 	} else if 0 < keyCounts["quality_speed_requires_modern_provider"] {
 		glog.Errorf("[egress]provider config quality_speed_requires_modern_provider has no value; the modern provider gate is off\n")
-		modernGateOff()
+		modernGateFailed("quality_speed_requires_modern_provider has no value")
 	}
-	modernStartUnreadable := func(reason string) {
+	// detail goes to the log only; failure is a fixed text
+	modernStartUnreadable := func(detail string, failure string) {
 		if settings.QualitySpeedRequiresModernProvider != nil {
-			glog.Errorf("[egress]provider config quality_speed_modern_provider_start %s; quality_speed_requires_modern_provider decides the modern provider gate\n", reason)
+			glog.Errorf("[egress]provider config quality_speed_modern_provider_start %s; quality_speed_requires_modern_provider decides the modern provider gate\n", detail)
 			return
 		}
-		glog.Errorf("[egress]provider config quality_speed_modern_provider_start %s; the modern provider gate is off\n", reason)
-		modernGateOff()
+		glog.Errorf("[egress]provider config quality_speed_modern_provider_start %s; the modern provider gate is off\n", detail)
+		modernGateFailed(failure)
 	}
 	// any scalar decodes into a string as written, so a timestamp yaml
 	// resolves on its own still reaches the parse; a date is its 00:00 UTC
 	var modernStart *string
 	if err := decode("quality_speed_modern_provider_start", &modernStart); err != nil {
-		modernStartUnreadable(fmt.Sprintf("is unreadable (%s)", err))
+		modernStartUnreadable(fmt.Sprintf("is unreadable (%s)", err), "quality_speed_modern_provider_start cannot be read")
 	} else if modernStart != nil {
 		if start, err := time.Parse(time.RFC3339, *modernStart); err == nil {
 			settings.QualitySpeedModernProviderStart = start.UTC()
 		} else if date, err := time.Parse(time.DateOnly, *modernStart); err == nil {
 			settings.QualitySpeedModernProviderStart = date.UTC()
 		} else {
-			modernStartUnreadable(fmt.Sprintf("= %q is neither an RFC 3339 instant nor a date", *modernStart))
+			modernStartUnreadable(fmt.Sprintf("= %q is neither an RFC 3339 instant nor a date", *modernStart), "quality_speed_modern_provider_start is neither an RFC 3339 instant nor a date")
 		}
 	} else if 0 < keyCounts["quality_speed_modern_provider_start"] {
-		modernStartUnreadable("has no value")
+		modernStartUnreadable("has no value", "quality_speed_modern_provider_start has no value")
 	}
 
 	var overrides *egressIndexSettingsBlock
 	if err := decode("egress_index", &overrides); err != nil {
 		glog.Errorf("[egress]provider config egress_index is unreadable (%s); the egress index keeps its defaults\n", err)
-		return settings
+		return settings, modernGateFailure
 	}
 	if overrides == nil {
-		return settings
+		return settings, modernGateFailure
 	}
 
 	if overrides.NativeReaderEnabled != nil {
@@ -466,6 +473,12 @@ func egressIndexSettings() *EgressIndexSettings {
 	if overrides.RankMeasuredFirst != nil {
 		settings.RankMeasuredFirst = *overrides.RankMeasuredFirst
 	}
+	return settings, modernGateFailure
+}
+
+// The settings decodeEgressIndexSettings gives.
+func egressIndexSettings() *EgressIndexSettings {
+	settings, _ := decodeEgressIndexSettings()
 	return settings
 }
 
@@ -568,6 +581,18 @@ func GetModernProviderGateSchedule(now time.Time) (on bool, scheduledStart *time
 // (RequiresModernProvider).
 func GetEgressIndexSettings() *EgressIndexSettings {
 	return egressIndexSettings()
+}
+
+// Why this process's provider.yml holds the modern provider gate off by a
+// failure, a fixed text, "" when it does not: a file that cannot be read, a
+// switch that cannot be read or has no value, or, while the switch is
+// absent, a start that cannot be used. Each reads as the kill switch and
+// publishes no start, though it is most likely a postponement that failed,
+// so the monitor's readiness signal reports it from the deployment's
+// desired provider.yml (monitor SIGNALS.md §2.29).
+func GetModernProviderGateFailure() string {
+	_, failure := decodeEgressIndexSettings()
+	return failure
 }
 
 // The part of a provider's latest health run the index reads: its scored
