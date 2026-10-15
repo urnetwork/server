@@ -518,7 +518,8 @@ func stGasStopAfterBroadcast(tb testing.TB, client *CoreStClient, fixture *stDep
 // retires an expired deposit. The deposit key's next send, epoch 8's deposit,
 // signs the reserved deposit instead, once and exactly as reserved, and sends
 // it. The coordinator reverts a deposit past its deadline before any stake
-// moves: no principal moves and the coordinator's deposit nonce stays 3. That
+// moves, rolling back its reentrancy guard's write: no principal moves and the
+// coordinator's deposit nonce stays 3, though the inclusion spends gas. That
 // send reports the revert, the signature adds nothing to the gas ledger, and
 // the nonce is free: the send after it deposits epoch 8's principal at nonce 8.
 func TestStOperatorGasPendingExpiredDepositIsSignedOnceAndFreesTheDepositKey(t *testing.T) {

@@ -489,10 +489,11 @@ func TestStDepositAttemptRejectsChangedAuthorityWithoutRewritingIntent(t *testin
 // execution is refused as any deposit whose staging lacks principal plus the
 // rounding allowance; at block 2000 it is admitted. Nothing broader is: not the
 // deposit signed afresh, as a new deposit's first attempt or a fee replacement
-// is, not a staging transfer, which moves stake whenever it is included, and
-// not a deposit to another address, for another operator or whose calldata is
-// not its immutable original. On the signing path, a fee replacement of the
-// expired deposit's signed execution is refused before any reservation.
+// not yet reserved is, not a staging transfer, which moves stake whenever it is
+// included, and not a deposit to another address, for another operator or
+// whose calldata is not its immutable original. On the signing path, a fee
+// replacement of the expired deposit's signed execution is refused before any
+// reservation.
 func TestStDepositReservedAttemptAdmitsOnlyAnExpiredDeposit(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

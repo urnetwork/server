@@ -264,8 +264,10 @@ func stDepositRetainedCalldata(cfg *StConfig, operation string, to common.Addres
 // admitted when the reservation was taken. Its exact bytes are signed although
 // current custody refuses them in one case: a deposit whose deadline has
 // passed at this finalized boundary. The coordinator reverts it before any
-// stake moves, so its signature only frees the deposit key's nonce; a new
-// deposit or attempt is never reserved for it.
+// stake moves; only its reentrancy guard writes first, and the revert rolls
+// that back. Its inclusion still spends gas, within the reservation's
+// liability, and frees the deposit key's nonce. A new deposit or attempt is
+// never reserved for it.
 func (self *CoreStClient) validateDepositAttempt(ctx context.Context, client *ethclient.Client, intent *model.StTransactionIntent, kind string, reserved bool) error {
 	if self.coordinator == nil || self.cfg == nil || self.cfg.DepositKey == nil || kind != model.StTxAttemptExecution || !strings.EqualFold(intent.FromAddress, crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey).Hex()) {
 		return nil
@@ -287,7 +289,7 @@ func (self *CoreStClient) validateDepositAttempt(ctx context.Context, client *et
 		operation = fmt.Sprintf("deposit-fund:%d:%d:%s", state.boundary.Epoch, self.cfg.NoId, state.nonce)
 	} else if strings.EqualFold(intent.ToAddress, self.cfg.ContractAddress.Hex()) && len(intent.Calldata) == 132 {
 		if reserved {
-			expired, err := self.expiredDepositIntent(intent, crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey), state.boundary.Block)
+			expired, err := self.expiredDepositIntent(intent, crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey), state.boundary.Block, "sign the reserved execution of")
 			if err != nil || expired {
 				return err
 			}

@@ -1548,11 +1548,13 @@ func (self *CoreStClient) expiredCloseIntent(ctx context.Context, client *ethcli
 	return true, nil
 }
 
-// A deposit whose encoded deadline has finalized cannot execute in a
-// later epoch. Keep its immutable intent and consume its EVM nonce through the
-// existing real cancellation path; every original signed attempt is retained
-// and reconciled first, and the coordinator deposit nonce is untouched.
-func (self *CoreStClient) expiredDepositIntent(intent *model.StTransactionIntent, from common.Address, finalized uint64) (bool, error) {
+// A deposit whose encoded deadline has finalized cannot execute in a later
+// epoch. Its immutable intent is kept and its EVM nonce retired: by a
+// cancellation, or, when its execution was reserved and not signed, by that
+// execution signed as reserved, which reverts. Every original signed attempt
+// is retained and reconciled first, and the coordinator deposit nonce is
+// untouched. action, logged for an expired deposit, says what the caller does.
+func (self *CoreStClient) expiredDepositIntent(intent *model.StTransactionIntent, from common.Address, finalized uint64, action string) (bool, error) {
 	if self.cfg == nil || self.coordinator == nil || self.cfg.DepositKey == nil || intent == nil ||
 		intent.Profile != self.cfg.Profile || intent.DeploymentId != self.cfg.DeploymentId || intent.DeploymentKey != self.cfg.DeploymentKey() || intent.ChainId != self.cfg.ChainId ||
 		!strings.EqualFold(intent.GenesisHash, "0x"+hex.EncodeToString(self.cfg.GenesisHash[:])) ||
@@ -1577,14 +1579,16 @@ func (self *CoreStClient) expiredDepositIntent(intent *model.StTransactionIntent
 	if finalized <= deadline.Uint64() {
 		return false, nil
 	}
-	glog.Infof("[st]cancel expired deposit intent %s nonce %d operator %d amount %s deposit_nonce %s finalized_block %d deposit_deadline %d", intent.IntentKey, intent.Nonce, noID.Uint64(), amount, nonce, finalized, deadline.Uint64())
+	glog.Infof("[st]%s expired deposit intent %s nonce %d operator %d amount %s deposit_nonce %s finalized_block %d deposit_deadline %d", action, intent.IntentKey, intent.Nonce, noID.Uint64(), amount, nonce, finalized, deadline.Uint64())
 	return true, nil
 }
 
 // Drains every lower account nonce before a new operation can reserve one. An
-// active-deployment intent resumes its exact stored business transaction;
-// expired closes, deposits and stale coordinators use a same-nonce
-// self-transaction.
+// active-deployment intent resumes its exact stored business transaction. An
+// expired close or deposit, a spent v2 operation and a stale coordinator's
+// intent are retired with a same-nonce self-transaction, except that an
+// expired or spent execution reserved and not signed is signed as reserved and
+// reverts.
 func (self *CoreStClient) reconcileAccountIntents(
 	ctx context.Context,
 	client *ethclient.Client,
@@ -1650,7 +1654,7 @@ func (self *CoreStClient) reconcileAccountIntents(
 		if err != nil {
 			return err
 		}
-		expiredDeposit, err := self.expiredDepositIntent(intent, from, finalized.Number)
+		expiredDeposit, err := self.expiredDepositIntent(intent, from, finalized.Number, "retire")
 		if err != nil {
 			return err
 		}
