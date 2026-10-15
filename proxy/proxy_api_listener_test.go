@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -94,9 +95,10 @@ func (self proxyApiTestAddr) String() string {
 }
 
 // The injected bind seam and the test client's dialer. Each bind of an address
-// serves the production handler on an in-process listener and announces the
-// address on served; an address with no serving listener refuses. Bind
-// failures are fixed before construction. Safe for concurrent use.
+// is recorded with its network, serves the production handler on an
+// in-process listener and announces the address on served; an address with no
+// serving listener refuses. Bind failures are fixed before construction. Safe
+// for concurrent use.
 type proxyApiTestNetwork struct {
 	addrBindErrs map[string]error
 	served       chan string
@@ -105,6 +107,8 @@ type proxyApiTestNetwork struct {
 	addrListeners     map[string]*proxyApiTestListener
 	addrServeCounts   map[string]int
 	addrReturnedBools map[string]bool
+	// "network addr" of every bind
+	binds []string
 }
 
 func newProxyApiTestNetwork(addrBindErrs map[string]error) *proxyApiTestNetwork {
@@ -124,6 +128,7 @@ func newProxyApiTestNetwork(addrBindErrs map[string]error) *proxyApiTestNetwork 
 // shared assembly test.
 func (self *proxyApiTestNetwork) listenAndServeTls(
 	ctx context.Context,
+	network string,
 	addr string,
 	handler http.Handler,
 	reusePort bool,
@@ -134,6 +139,7 @@ func (self *proxyApiTestNetwork) listenAndServeTls(
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.addrServeCounts[addr] += 1
+		self.binds = append(self.binds, network+" "+addr)
 	}()
 	defer func() {
 		self.stateLock.Lock()
@@ -191,6 +197,13 @@ func (self *proxyApiTestNetwork) returned(addr string) bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return self.addrReturnedBools[addr]
+}
+
+// The "network addr" of every bind so far, sorted.
+func (self *proxyApiTestNetwork) bindList() []string {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Sorted(slices.Values(self.binds))
 }
 
 // Assigns the synthetic host addresses and the api's host port, as warp does
@@ -352,5 +365,75 @@ func TestProxyApiListenerFailureCancelsAndIsRetained(t *testing.T) {
 				}
 			}
 		}()
+	}
+}
+
+// Each api address binds with the network of its family, as the socks/http
+// ingress does, and a family warp leaves empty is not bound. With "tcp", the
+// empty ipv4 host of an ipv6-only block was a dual-stack [::] wildcard on the
+// port of the ipv6 listener, and on Linux one of the two binds failed with
+// EADDRINUSE, which exits the process at startup.
+func TestProxyApiBindsEachAddressWithItsFamily(t *testing.T) {
+	hostPort := strconv.Itoa(proxyApiTestHostPort)
+	ipv4Bind := "tcp4 " + net.JoinHostPort(proxyApiTestIpv4, hostPort)
+	ipv6Bind := "tcp6 " + net.JoinHostPort(proxyApiTestIpv6, hostPort)
+	for _, c := range []struct {
+		name     string
+		hostIpv4 string
+		hostIpv6 string
+		binds    []string
+	}{
+		{name: "dual stack", hostIpv4: proxyApiTestIpv4, hostIpv6: proxyApiTestIpv6, binds: []string{ipv4Bind, ipv6Bind}},
+		// warp exports WARP_HOST_IPV4="" for a network without ipv4
+		{name: "ipv6 only", hostIpv4: "", hostIpv6: proxyApiTestIpv6, binds: []string{ipv6Bind}},
+		{name: "ipv4 only", hostIpv4: proxyApiTestIpv4, hostIpv6: "", binds: []string{ipv4Bind}},
+		// without warp's host addresses, the service port on the ipv4
+		// wildcard, as for the socks/http ingress
+		{name: "no host addresses", binds: []string{"tcp4 " + net.JoinHostPort("0.0.0.0", strconv.Itoa(InternalApiPort))}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("WARP_HOST_IPV4", c.hostIpv4)
+			t.Setenv("WARP_HOST_IPV6", c.hostIpv6)
+			t.Setenv("WARP_PORTS", fmt.Sprintf("%d:%d", InternalApiPort, proxyApiTestHostPort))
+			bound, stopBound := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stopBound()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			network := newProxyApiTestNetwork(map[string]error{})
+			api := newApiServer(
+				ctx,
+				cancel,
+				&ProxyDeviceManager{},
+				&server.TransportTls{},
+				nil,
+				InternalApiPort,
+				DefaultProxySettings(),
+				network.listenAndServeTls,
+			)
+			defer func() {
+				cancel()
+				joinCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stop()
+				_ = api.CloseAndWait(joinCtx)
+			}()
+
+			for served := 0; served < len(c.binds); served++ {
+				select {
+				case <-network.served:
+				case <-bound.Done():
+					t.Fatalf("%d of %d listeners serving, binds %q", served, len(c.binds), network.bindList())
+				}
+			}
+			// each listener worker binds before it can join, so once the
+			// workers have joined, the recorded binds are all the api made
+			cancel()
+			if err := api.CloseAndWait(bound); err != nil {
+				t.Fatalf("api listeners did not shut down cleanly: %v", err)
+			}
+			if binds, want := network.bindList(), slices.Sorted(slices.Values(c.binds)); !slices.Equal(binds, want) {
+				t.Errorf("binds %q, want %q", binds, want)
+			}
+		})
 	}
 }
