@@ -15820,7 +15820,13 @@ Signals:
 - `capability-probe-stalled` — WARN when no taskworker has finished a
   measured or waiting pass for 30 minutes while `capability_probe.yml`
   enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
-  PAGE after two hours with the gate switched on. The newest pass is read
+  PAGE after six hours with the gate on: `quality_speed_requires_modern_provider: true`,
+  or that switch absent from the desired provider.yml and the gate's start
+  (2026-10-21 00:00 UTC by default, `quality_speed_modern_provider_start`)
+  passed at the monitor's clock, as the model's own provider.yml decoder
+  reads them, so the automatic switch-on arms the page. Evidence stays fresh
+  for seven days after its measurement, so a shorter stall, planned
+  database maintenance included, takes no provider out and only warns. The newest pass is read
   over six hours (`max_over_time`), so a pass of a process that exited
   since counts; a fleet whose taskworkers all started after it, as the
   switch-on restart starts them, is given the 30 minutes from its oldest
@@ -15869,7 +15875,8 @@ Signals:
   `negative_withheld` everywhere is `capability-probe-breaker`;
   `record_failed` is the database write, and fails the pass.
 - `capability-probe-breaker` — WARN when `breaker_trips_total` rises on most
-  passes for an hour, PAGE after two hours with the gate switched on: the
+  passes for an hour, PAGE after two hours with the gate on (as for
+  `capability-probe-stalled`): the
   probe negotiates no end-to-end session with any provider, so its negative
   readings are all withheld (`providers_total{outcome="negative_withheld"}`)
   and its evidence ages toward `stale_evidence`. That is a fault on the

@@ -470,6 +470,14 @@ func GetModernProviderGateSchedule(now time.Time) (on bool, scheduledStart *time
 	return
 }
 
+// The egress settings this process's provider.yml sets, decoded as every
+// pass decodes them. The monitor reads the deployment's desired modern
+// provider gate with it, deciding the gate at its own clock
+// (RequiresModernProvider).
+func GetEgressIndexSettings() *EgressIndexSettings {
+	return egressIndexSettings()
+}
+
 // The part of a provider's latest health run the index reads: its scored
 // loads and their per-class tally. Nothing of the reputation tally is read;
 // after GEOMAP §11 there is no reputation class, and before it the tally was
