@@ -15795,6 +15795,186 @@ or gains. Publishing candidate MMDB bytes is itself a serving change on current
 binaries, independently of the subscriber request-guard switch; keep shadow
 resources separate until every activation gate is reviewed.
 
+### 2.19g Modern provider evidence — the capability probe must keep measuring
+Probe: `capability-probe`
+
+WHAT: the FP2 modern provider gate (FP2FIX.md, "Modern provider gate") reads
+`provider_modern_evidence`, and only the capability probe writes it: the
+recurring taskworker task `work.CapabilityProbe` (`server/capprobe`), one pass
+at a time fleet-wide, each provider measured in a short tunnel of its own
+whose clients attempt opportunistic end-to-end sessions. The URL probe writes
+no evidence. While the gate's switch is off a stopped probe only freezes the
+shadow; once it is on, a stopped probe ages every provider's evidence toward
+`stale_evidence` and the gate takes Quality and Speed away from providers
+that are modern. Every series below is per taskworker process
+(`urnetwork_capability_probe_*`, egress probes dashboard, capability probe
+row); sum across the env's taskworkers and remember a process restart resets
+counters.
+
+The probe ships switched off (sn-55) and then schedules nothing: no task
+row, no prober shard, no pass, so every series stays at zero. It is
+switched on by `enabled: true` in `capability_probe.yml` and a restart of
+the taskworkers, whose containers keep the config they started with
+(capprobe/README.md, "Switching it on"). Until then nothing below applies,
+and silence is not a finding.
+
+Healthy shape:
+
+- `passes_total{result="measured"}` advances after every pass of a sweep
+  under way, a few seconds apart when nothing is due and a few minutes apart
+  while providers are measured; between sweeps, which start
+  `min_sweep_interval_minutes` (360) after the last one started,
+  `result="waiting"` advances every ten minutes, reading nothing. So
+  `last_pass_timestamp_seconds` is never older than a pass's
+  `max_time_seconds` (900) plus a few seconds.
+- `in_flight` stays at or under `concurrency` (16) on one taskworker at a
+  time.
+- `providers_total` is mostly `recorded_*`: `recorded_not_post_quantum`
+  dominates while most providers run the custom lineage.
+- `measure_seconds` p95 is about 61-65 s (a provider without the end-to-end
+  responder takes the whole establishment window after its first
+  acknowledgement) and never above `measure_timeout_seconds` (120); modern
+  providers read in seconds.
+- `selection_total` in steady state: `scanned` far above `due`; during the
+  first sweep after deployment, about two days, `due` and `eligible` are
+  close to `scanned` and the shadow's `no_evidence` is large. Neither is a
+  finding then.
+- `breaker_trips_total` flat, but for the odd small pass at a sweep's tail
+  whose few providers all lack the responder; `downgrades_total` low, a
+  `held` now and then that the next sweep mostly answers with a modern
+  reading rather than a `confirmed` one; `readiness_failures_total` and
+  `shard_cleanup_errors_total` flat.
+- `chain_restarts_total` flat. Each count is a taskworker with the probe
+  switched on that found the chain without its task row, ended by a pass on
+  a taskworker with an older config or by maintenance, and scheduled a pass
+  due at once, which starts a new sweep. A count right after maintenance is
+  expected; counts while `capability-probe-disabled-pass` holds are its
+  stale taskworker ending the chain again.
+
+Signals:
+
+- `capability-probe-stalled` — WARN when no taskworker has finished a
+  measured or waiting pass for 30 minutes while `capability_probe.yml`
+  enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
+  PAGE after two hours with the gate switched on. The newest pass is read
+  over six hours (`max_over_time`), so a pass of a process that exited
+  since counts; a fleet whose taskworkers all started after it, as the
+  switch-on restart starts them, is given the 30 minutes from its oldest
+  process's start (`process_start_time_seconds`), since the first pass can
+  take its whole `max_time_seconds`. Running taskworkers that export no
+  probe series (`taskworkers_exporting=0`) run an image without the probe.
+  Read
+  `passes_total{result="failed"}` and the taskworker log's `[capprobe]` and
+  task error lines: unreadable or invalid settings, the URL probe's
+  included, whose `shard_count` past 255 would reach the capability probe's
+  prober shard slot 255; shard allocation, identity or funding readiness
+  (`readiness_failures_total{step}`, the capability probe's own, never the
+  URL probe's pass errors); a page read; or an evidence write. A failed pass
+  retries the same sweep page after a minute, so a persistent failure
+  repeats once a minute. A `passes_total{result="disabled"}` pass is the last
+  of a chain that `enabled: false` ended, deliberately or not; nothing runs
+  after it until a taskworker with the probe switched on schedules the
+  chain again, at its start or within ten minutes after
+  (`chain_restarts_total`), so check the deployed `capability_probe.yml`
+  before reading the silence as a stall.
+- `capability-probe-disabled-pass` — WARN on any disabled pass while
+  `capability_probe.yml` enables the probe: an increase of
+  `passes_total{result="disabled"}` over 30 minutes, or a running
+  taskworker whose total is above zero, which also shows a pass it ran
+  before its first scrape. A taskworker container keeps the config it
+  started with, so one that started before the switch-on, or before its
+  host published the new config, reads the probe as off and ends the chain
+  at each pass it claims; the taskworkers that read it as on schedule the
+  chain again within ten minutes, and its sweep starts over. Find the
+  taskworkers whose disabled total is above zero, confirm their hosts
+  publish the current config (`WARP_CONFIG_VERSION`) and restart them.
+- `capability-probe-no-evidence` — WARN when measurements finish for an hour
+  and none records (`providers_total` rising with every `recorded_*` flat).
+  The outcome says where: `tunnel_failed` is the probe's own setup (shard
+  credentials, local control, control plane); `no_ack` everywhere is the
+  probe's tunnels reaching no provider, so compare §2.19's URL probe health
+  before suspecting the fleet; `e2e_not_attempted` means the send path
+  accepted no ClientHello of the probe's while the provider acknowledged its
+  pings, so the probe client's sessions are off, a code or settings
+  regression in which every reading would be wrong, never something to
+  record around; `e2e_pending` means setup ate the measurement's margin over
+  the 60 s window; `tunnel_lost` means the tunnel's path went away, or its
+  window client was replaced, before the reading concluded, so a provider
+  that drops its connection shows it, and a share rising fleet-wide points at
+  the probe's windows or the platform rather than at providers;
+  `negative_withheld` everywhere is `capability-probe-breaker`;
+  `record_failed` is the database write, and fails the pass.
+- `capability-probe-breaker` — WARN when `breaker_trips_total` rises on most
+  passes for an hour, PAGE after two hours with the gate switched on: the
+  probe negotiates no end-to-end session with any provider, so its negative
+  readings are all withheld (`providers_total{outcome="negative_withheld"}`)
+  and its evidence ages toward `stale_evidence`. That is a fault on the
+  probe's side, the probe client's sessions or key registration, a connect or
+  settings change, or its tunnels reaching the wrong peers; the fleet cannot
+  lose its responders at once. `readings_total{capability="e2e"}` then shows
+  only `no_responder`, `pending` and `not_tested`. Fix the probe; never
+  record around the breaker. A trip on the odd small tail pass of a sweep is
+  not a finding.
+- `capability-probe-downgrades` — INFO for the shadow review, WARN when
+  `downgrades_total{result="confirmed"}` over a day exceeds 5% of the
+  `recorded_modern` measurements: a negative reading of a provider whose
+  modern evidence was fresh is held for a later sweep (`held`), and only a
+  second negative reading there records the downgrade (`confirmed`). Held
+  ones that the next sweep answers with a modern reading were transient.
+  Confirmed ones in bulk mean modern providers turned legacy, a downgrading
+  release, or a probe fault the breaker does not see, such as windows read
+  as missing; compare `readings_total{capability="window"}` before
+  attributing it to the fleet.
+- `capability-probe-unsealed-share` — INFO for the shadow review, WARN above
+  10% over a day: of the negotiated post-quantum readings
+  (`readings_total{capability="e2e",reading=~"post_quantum_.*"}`), the share
+  `post_quantum_unsealed`. Those providers negotiated the hybrid group but
+  the probe could not verify their identity proof within the seal grace (no
+  published provider key, or the probe's key read failing). The model counts
+  them post-quantum, so understand the share before the switch goes on.
+- `capability-probe-staleness-risk` — WARN when
+  `last_sweep_seconds` exceeds the seven-day staleness window less
+  `modern_refresh_hours` and the sweep interval (about 3.75 days at the
+  defaults), or when the shadow's
+  `urnetwork_stats_provider_modern_gate_shadow{outcome="stale_evidence"}`
+  rises for a day: the probe no longer refreshes evidence before the gate
+  reads it as stale. Raise `concurrency` or find what fails first; never
+  lengthen the staleness window to hide it.
+- `capability-probe-teardown-errors` — WARN while
+  `close_errors_total` rises for an hour: capability tunnels fail to retire
+  their derived clients, which the prober reaper then owns. Cross-check
+  §2.25's derived-client retirement before attributing it. The capability
+  probe mints and retires its derived clients through the URL probe's
+  in-process credential owner, so
+  `urnetwork_egress_probe_internal_credentials_total` counts both probes;
+  this counter is the capability probe's own. `shard_cleanup_errors_total`
+  rising is a pass's prober shard whose drain or reap failed afterwards: the
+  pass stands, and the prober reaper retries the cleanup, so read the
+  reaper's progress on slot 255 before anything else.
+
+Not signals: a large `no_evidence` share in the first two days after the
+first deployment; `not_post_quantum` dominating the shadow; a provider that
+gives no evidence being measured again only by the next sweep (that is the
+probe's retry spacing, by design); `waiting` passes between sweeps; a
+modern provider's downgrade showing a sweep after its first negative
+reading (the hold, by design).
+
+Do not backfill evidence rows by hand, route evidence through URL probe
+runs, or switch the gate on while the first sweep is incomplete or
+`capability-probe-stalled` or `capability-probe-breaker` holds. A
+measurement records only when both capabilities read conclusively; a
+capability that was not tested is never recorded as a negative, and neither
+is a negative reading a pass withheld or a sweep holds, so "missing
+negatives" are not a defect to repair.
+
+Implementation convention: `signal_capability_probe.go` (probe
+`taskworker/capability-probe`) implements `capability-probe-stalled` and
+`capability-probe-disabled-pass` from fleet aggregates in Mimir, read
+against the desired `capability_probe.yml` and `provider.yml`; while the
+config switches the probe off, both are healthy. The other classes are
+dashboard reads of the series above, and a probe for them belongs in the
+same file with the class names here.
+
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
 

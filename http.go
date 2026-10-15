@@ -432,7 +432,10 @@ func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler h
 	)
 }
 
-func HttpListenAndServeTlsWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions, tlsConfig *tls.Config) error {
+// The network is explicit so that a caller serving each address family on its
+// own listener binds "tcp4" and "tcp6": with "tcp", an empty or wildcard host
+// is a dual-stack [::] socket that overlaps the other family's listener.
+func HttpListenAndServeTlsWithReusePort(ctx context.Context, network string, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions, tlsConfig *tls.Config) error {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -441,7 +444,7 @@ func HttpListenAndServeTlsWithReusePort(ctx context.Context, addr string, handle
 		listenConfig.Control = SoReusePort
 	}
 
-	listener, err := listenConfig.Listen(ctx, "tcp", addr)
+	listener, err := listenConfig.Listen(ctx, network, addr)
 	if err != nil {
 		return err
 	}

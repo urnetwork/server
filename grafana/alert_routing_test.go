@@ -36,7 +36,13 @@ type fakeAlertingGrafana struct {
 	// status and body forced on writes to the default Slack contact point
 	slackContactStatus int
 	slackContactBody   string
-	testResponse       string
+	// status and body forced on writes to the competition contact point
+	competitionContactStatus int
+	competitionContactBody   string
+	// status and body forced on policy writes
+	policyStatus int
+	policyBody   string
+	testResponse string
 }
 
 func newFakeAlertingGrafana(t *testing.T, contacts []grafanaContactPoint, policy map[string]any) (*fakeAlertingGrafana, *httptest.Server) {
@@ -105,6 +111,11 @@ func (self *fakeAlertingGrafana) serve(response http.ResponseWriter, request *ht
 			_, _ = io.WriteString(response, self.slackContactBody)
 			return
 		}
+		if contact.Uid == CompetitionAlertContactUid && self.competitionContactStatus != 0 {
+			response.WriteHeader(self.competitionContactStatus)
+			_, _ = io.WriteString(response, self.competitionContactBody)
+			return
+		}
 		self.contacts = append(self.contacts, contact)
 		response.WriteHeader(http.StatusAccepted)
 	case request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/api/v1/provisioning/contact-points/"):
@@ -124,6 +135,11 @@ func (self *fakeAlertingGrafana) serve(response http.ResponseWriter, request *ht
 	case request.Method == http.MethodGet && request.URL.Path == "/api/v1/provisioning/policies":
 		encode(self.policy)
 	case request.Method == http.MethodPut && request.URL.Path == "/api/v1/provisioning/policies":
+		if self.policyStatus != 0 {
+			response.WriteHeader(self.policyStatus)
+			_, _ = io.WriteString(response, self.policyBody)
+			return
+		}
 		policy := map[string]any{}
 		if err := json.Unmarshal(body, &policy); err != nil {
 			self.t.Error(err)
@@ -185,6 +201,20 @@ func (self *fakeAlertingGrafana) failSlackContactWrites(status int, body string)
 	defer self.stateLock.Unlock()
 	self.slackContactStatus = status
 	self.slackContactBody = body
+}
+
+func (self *fakeAlertingGrafana) failCompetitionContactWrites(status int, body string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.competitionContactStatus = status
+	self.competitionContactBody = body
+}
+
+func (self *fakeAlertingGrafana) failPolicyWrites(status int, body string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.policyStatus = status
+	self.policyBody = body
 }
 
 func (self *fakeAlertingGrafana) respondToTests(body string) {
@@ -462,6 +492,50 @@ func TestAlertRoutingRedactsTheSlackWebhookFromErrors(t *testing.T) {
 	redacted := redactSlackWebhook(`Post "https://hooks.slack.com/services/T0SYNTHETIC/B0SYNTHETIC/staleSecret": EOF`, syntheticSlackWebhookUrl)
 	if strings.Contains(redacted, "staleSecret") || !strings.Contains(redacted, "[redacted]") {
 		t.Fatalf("shape redaction = %q", redacted)
+	}
+}
+
+// Every error ReconcileAlertRouting returns is redacted at its boundary,
+// whichever Grafana write failed: the competition contact point and policy
+// writes quote Grafana's body as well. Redaction comes before the bound, so a
+// webhook that a 512-byte cut would split is not left half quoted.
+func TestAlertRoutingRedactsEveryErrorAtTheBoundary(t *testing.T) {
+	parsed, err := url.Parse(syntheticSlackWebhookUrl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoting := `{"message":"rejected ` + syntheticSlackWebhookUrl + `, ` + parsed.Path +
+		` and https://hooks.slack.com/services/T0SYNTHETIC/B0SYNTHETIC/staleSecret"}`
+	// a 512-byte cut lands inside the webhook's secret
+	split := strings.Repeat("x", 512-80) + syntheticSlackWebhookUrl
+	for _, c := range []struct {
+		name string
+		fail func(*fakeAlertingGrafana)
+	}{
+		{name: "competition contact point", fail: func(fake *fakeAlertingGrafana) {
+			fake.failCompetitionContactWrites(http.StatusBadRequest, quoting)
+		}},
+		{name: "policy", fail: func(fake *fakeAlertingGrafana) { fake.failPolicyWrites(http.StatusBadRequest, quoting) }},
+		{name: "long policy", fail: func(fake *fakeAlertingGrafana) { fake.failPolicyWrites(http.StatusBadRequest, split) }},
+		{name: "long Slack contact point", fail: func(fake *fakeAlertingGrafana) {
+			fake.failSlackContactWrites(http.StatusBadRequest, split)
+		}},
+	} {
+		fake, server := newFakeAlertingGrafana(t, teamCoreContacts(), unroutedToNobodyPolicy())
+		c.fail(fake)
+		_, err := ReconcileAlertRouting(context.Background(), server.URL, "admin", "secret", AlertRoutingSettings{SlackWebhookUrl: syntheticSlackWebhookUrl})
+		if err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+			t.Errorf("%s: error = %v", c.name, err)
+			continue
+		}
+		for _, secret := range []string{syntheticSlackWebhookUrl, parsed.Path, "syntheticWebhookSe", "staleSecret", "hooks.slack.com/services", "services/T0SYNTHETIC"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("%s: error quotes %q: %v", c.name, secret, err)
+			}
+		}
+		if alertRoutingErrorLimit < len(err.Error()) {
+			t.Errorf("%s: error is %d bytes", c.name, len(err.Error()))
+		}
 	}
 }
 

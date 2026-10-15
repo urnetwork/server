@@ -24,12 +24,18 @@ import (
 // (15 minutes), so nothing outlives the retention by more than that.
 
 // Guests removed per batch. Each is removed in its own transaction; batches
-// repeat until the backlog is gone or the run's time is up.
+// repeat until the backlog is gone or the guests' time is up.
 const lagSweepGuestBatchSize = 500
 
-// How long one sweep may keep removing. A backlog left over is the next
-// sweep's.
-const lagSweepTimeout = 5 * time.Minute
+// How long one sweep may keep removing guests. A backlog left over is the
+// next sweep's. The retention deletes come after, within lagSweepMaxTime.
+const lagSweepGuestTimeout = 5 * time.Minute
+
+// The sweep's task limit, above the guests' budget with ten minutes past it
+// for the retention deletes, so retention gets its turn however long the
+// guests take. Under the default limit, two minutes, a guest backlog ran the
+// task out before retention started.
+const lagSweepMaxTime = lagSweepGuestTimeout + 10*time.Minute
 
 type SweepLagArgs struct {
 }
@@ -51,6 +57,7 @@ func ScheduleSweepLag(clientSession *session.ClientSession, tx server.PgTx) {
 		clientSession,
 		task.RunOnce("sweep_lag"),
 		task.RunAt(server.NowUtc().Add(controller.GetLagSettings().GuestSweepInterval)),
+		task.MaxTime(lagSweepMaxTime),
 	)
 }
 
@@ -60,22 +67,24 @@ func SweepLag(
 	_ *SweepLagArgs,
 	clientSession *session.ClientSession,
 ) (*SweepLagResult, error) {
-	result := sweepLag(clientSession.Ctx, server.NowUtc(), controller.GetLagSettings(), lagSweepGuestBatchSize, lagSweepTimeout)
+	result := sweepLag(clientSession.Ctx, server.NowUtc(), controller.GetLagSettings(), lagSweepGuestBatchSize, lagSweepGuestTimeout)
 	// what the sweep removed counts by kind (X9)
 	controller.CountLagSweep(result.RemovedGuests, result.RemovedTickets, result.RemovedResults, result.RemovedTracks)
 	return result, nil
 }
 
 // The sweep as the clock reads `now`; a test moves the clock past an expiry.
+// The guests are removed for at most guestTimeout, and then the retention
+// deletes run.
 func sweepLag(
 	ctx context.Context,
 	now time.Time,
 	settings *controller.LagSettings,
 	batchSize int,
-	timeout time.Duration,
+	guestTimeout time.Duration,
 ) *SweepLagResult {
 	result := &SweepLagResult{}
-	endTime := time.Now().Add(timeout)
+	endTime := time.Now().Add(guestTimeout)
 	for {
 		removed := model.RemoveExpiredLagGuests(ctx, now, batchSize)
 		result.RemovedGuests += removed.Removed

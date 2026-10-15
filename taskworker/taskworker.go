@@ -122,6 +122,9 @@ func initTaskSchedule(ctx context.Context) {
 		// (connect/GEOMAP.md D24), and a pending row drains through the
 		// registered task below without scheduling a successor
 		work.ScheduleProviderEgressProbeTasks(clientSession, tx)
+		// the modern provider gate's evidence (server/capprobe), apart from
+		// the URL probe's shards, quota and budget
+		work.ScheduleCapabilityProbe(clientSession, tx)
 		work.ScheduleRefreshEgressDestinations(clientSession, tx)
 		work.ScheduleRollupProviderEgressTallies(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
@@ -205,6 +208,28 @@ func reapRetiredTasks(ctx context.Context) {
 	reap("contract degradation checks while degraded.yml disables them", func(tx server.PgTx) int64 {
 		return work.RemoveDisabledContractDegradationTasks(ctx, tx)
 	})
+}
+
+// How often a production taskworker checks the capability probe's chain;
+// replaced by tests.
+var capabilityProbeEnsureInterval = 10 * time.Minute
+
+// Every capabilityProbeEnsureInterval until ctx ends, schedules the
+// capability probe's chain again when it has no task row while this
+// taskworker's capability_probe.yml switches the probe on
+// (work.EnsureCapabilityProbe). The startup schedule covers the start; this
+// brings back a chain that a pass on a taskworker with an older config, or
+// maintenance, ended since.
+func ensureCapabilityProbeChain(ctx context.Context) {
+	interval := capabilityProbeEnsureInterval
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+		server.HandleError(func() { work.EnsureCapabilityProbe(ctx) })
+	}
 }
 
 // InitTaskWorker preserves the historical exact Go signature, including
@@ -409,6 +434,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		),
 		work.NewProviderEgressProbeTaskTarget(),
 		work.NewProviderEgressProbeDisabledTaskTarget(),
+		work.NewCapabilityProbeTaskTarget(),
 		task.NewTaskTargetWithPost(work.RollupProviderEgressTallies, work.RollupProviderEgressTalliesPost),
 		task.NewTaskTargetWithPost(
 			work.RefreshEgressDestinations,

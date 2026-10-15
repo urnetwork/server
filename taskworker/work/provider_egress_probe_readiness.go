@@ -21,6 +21,9 @@ var errProviderEgressProbeFundingUnknown = errors.New("provider egress prober tr
 type providerEgressProbeReadiness struct {
 	available func(context.Context) (model.ByteCount, error)
 	minimum   model.ByteCount
+	// Counts a newly latched failure by its step in the metrics of the probe
+	// that owns the pass; nil counts it in the URL probe's pass errors.
+	observeFailure func(step string)
 
 	stateLock sync.Mutex
 	failure   error
@@ -84,7 +87,11 @@ func (self *providerEgressProbeReadiness) check(ctx context.Context) error {
 		return false
 	}()
 	if recorded {
-		egressProbePassErrorsTotal.WithLabelValues(step).Inc()
+		if self.observeFailure != nil {
+			self.observeFailure(step)
+		} else {
+			egressProbePassErrorsTotal.WithLabelValues(step).Inc()
+		}
 	}
 	return self.err()
 }

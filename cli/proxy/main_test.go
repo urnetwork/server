@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -87,5 +90,56 @@ func TestProxyMainUsesCombinedDeploymentHandoff(t *testing.T) {
 	}
 	if strings.Contains(mainSource, "proxy.Prewarm(") {
 		t.Fatal("production main bypasses the combined deployment handoff with direct prewarm")
+	}
+}
+
+// The environment variable that makes this test binary run the proxy's main
+// with the arguments it holds, as the proxy binary would.
+const proxyMainTestArgsEnvironment = "URNETWORK_PROXY_MAIN_TEST_ARGS"
+
+// The ways main ends before it serves keep what they write, though stdout and
+// stderr run through the address scrubber, which forwards from a pipe on a
+// goroutine: docopt's own exits, for a usage error and for --version, and a
+// panic in main, which the runtime reports after the deferred flush. Each
+// used to end the process with the output still in the pipe.
+func TestProxyMainExitsKeepTheirOutput(t *testing.T) {
+	if args, ok := os.LookupEnv(proxyMainTestArgsEnvironment); ok {
+		os.Args = append([]string{"proxy"}, strings.Fields(args)...)
+		main()
+		return
+	}
+	run := func(version string, args string) (int, string, string) {
+		t.Helper()
+		command := exec.Command(os.Args[0], "-test.run=^TestProxyMainExitsKeepTheirOutput$")
+		command.Env = append(os.Environ(), proxyMainTestArgsEnvironment+"="+args, "WARP_VERSION="+version)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		command.Stdout = &stdout
+		command.Stderr = &stderr
+		err := command.Run()
+		code := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("the proxy did not run: %v", err)
+			}
+			code = exitErr.ExitCode()
+		}
+		return code, stdout.String(), stderr.String()
+	}
+	for range 10 {
+		code, _, stderr := run("1.2.3-test", "--bogus")
+		if code != 1 || !strings.Contains(stderr, "proxy -h | --help") {
+			t.Fatalf("a usage error ended with %d and printed %q", code, stderr)
+		}
+		code, stdout, _ := run("1.2.3-test", "--version")
+		if code != 0 || !strings.Contains(stdout, "1.2.3-test") {
+			t.Fatalf("--version ended with %d and printed %q", code, stdout)
+		}
+		// no version to report: main panics
+		code, _, stderr = run("", "--version")
+		if code != 2 || !strings.Contains(stderr, "panic: WARP_VERSION not set") {
+			t.Fatalf("a panic in main ended with %d and printed %q", code, stderr)
+		}
 	}
 }
