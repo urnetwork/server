@@ -482,10 +482,10 @@ func TestStDepositAttemptRejectsChangedAuthorityWithoutRewritingIntent(t *testin
 	}
 }
 
-// SV-1 (retries; the deposit key): custody admits one execution that current
-// custody refuses, a deposit whose deadline has passed at the finalized
-// boundary, and only when it is signed from its gas reservation. At its
-// deadline, block 1999, epoch 7's deposit is not expired, and its reserved
+// SV-1 (retries; the deposit key): custody validation admits one execution
+// that it otherwise refuses, a deposit whose deadline has passed at the
+// finalized boundary, and only when it is signed from its gas reservation. At
+// its deadline, block 1999, epoch 7's deposit is not expired, and its reserved
 // execution is refused as any deposit whose staging lacks principal plus the
 // rounding allowance; at block 2000 it is admitted. Nothing broader is: not the
 // deposit signed afresh, as a new deposit's first attempt or a fee replacement
