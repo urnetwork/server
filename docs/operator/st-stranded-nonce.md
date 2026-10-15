@@ -44,12 +44,21 @@ blocked for good.
 
 An intent with a reservation and no attempt is not stranded. The process
 stopped between the reservation and the signature, and the engine signs the
-reserved bytes on the account's next send. On the root key it does so also
-when the operation has since been spent or its close has expired: that send
-reports the revert, and the next one goes out. On the deposit key, a deposit
-reserved but not signed before its deadline stays refused (`pending original
-signing outcome cannot become a different request`). No operator step frees
-it; it needs a change to the engine.
+reserved bytes on the account's next send. It does so also when the operation
+can no longer succeed, since the reservation refuses the cancellation that
+would otherwise retire it: on the root key when the operation has since been
+spent or its close has expired, and on the deposit key when the deposit's
+deadline has passed at the finalized head. That send reports the revert, and
+the next one goes out. The coordinator reverts a deposit past its deadline
+(`DeadlineExpired`) before it moves any stake or takes its deposit nonce, so
+the expired deposit moves no funds. Custody validation admits exactly its
+reserved bytes, never a new deposit or a fee replacement of it, and validates
+a deposit not yet past its deadline against current custody as before
+(`TestStOperatorGasPendingExpiredDepositIsSignedOnceAndFreesTheDepositKey`,
+`TestStDepositReservedAttemptAdmitsOnlyAnExpiredDeposit`). Before server
+commit ed453384d the expired deposit stayed refused (`pending original signing
+outcome cannot become a different request`), and the deposit key's later sends
+stopped at it.
 
 An intent whose operation can no longer succeed, a v1 close or deposit past
 its window or a spent v2 operation, is retired by a cancellation, a fee
