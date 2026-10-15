@@ -360,15 +360,23 @@ consecutive complete runs of every signal that reported it in which nothing
 observed it. An alert the gate holds below its Sustain, as it does for the
 first runs after a one-run dip, is still observed. A run is incomplete, and
 clears nothing, when it failed or carries an unobservable alert, gated or
-held. Every signal's unknown state is unobservable: class `cannot-observe`
-or `*-unobservable`, probe `monitor/visibility`, the provider, PG sample,
-settings-generation and crash-report visibility alerts, and the
-`monitor/host-scope` partial alert in a run with blocked hosts (not the
-configured exclusion settings freshness reports every run). Accept filters let
-unobservable findings through, so the shared redis memory probe's
-`redis/node-mem` `cannot-observe` also appears under redis-connections and
-redis-buffers. See SIGNALS.md, the cadence-mode `Sustain` note before §1. A
-clear says the incident is no longer reported, not that it recovered.
+held. Every signal's unknown state is unobservable: `alert_classes.go`
+classifies every alert class the monitor emits as visibility, an unknown
+state reported in place of an incident (`cannot-observe`, every
+`*-unobservable`, `pg-cpu-unavailable`, `host-metrics-missing`, the
+`*-schema-unavailable` classes and more), or incident, and a test fails for a
+class it leaves out. Probe `monitor/visibility`, the provider, PG sample,
+settings-generation and crash-report visibility alerts, the proxy public path
+without an allocation, and the `monitor/host-scope` partial alert in a run
+with blocked hosts (not the configured exclusion settings freshness reports
+every run) are unobservable too. The classification errs toward visibility.
+A persistent unknown state, such as service-load's
+`*-capability-unobservable` during a rollout, keeps that signal's other
+incidents from clearing until it resolves. Accept filters let unobservable
+findings through, so the shared redis memory probe's `redis/node-mem`
+`cannot-observe` also appears under redis-connections and redis-buffers. See
+SIGNALS.md, the cadence-mode `Sustain` note before §1. A clear says the
+incident is no longer reported, not that it recovered.
 
 State is process-local, so a restarted watcher, or a handoff candidate,
 re-announces every active alert. The raises from each signal's first Sustain

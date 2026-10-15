@@ -414,22 +414,28 @@ after two complete ticks in which nothing observed it. Healthy control: one
 dip of a Sustain 2 alert posts nothing after its raise. Failure control: two
 complete ticks without the alert post one clear.
 
-An unknown state is unobservable whatever signal reports it. The probe id
-`monitor/visibility` and the classes `cannot-observe` and `*-unobservable`
-are reserved for it and mark a finding by name. Another unknown state sets
-the finding's `unobservable` field, as the PG sample's unavailable finding
-and the host-scope partial finding of a run with blocked hosts do. An Alert
-built directly sets the alert's marker, as the provider, crash-report and
-settings-generation visibility alerts do. A new unknown state uses a
-reserved name or sets the marker. The inventory test
-`TestEveryUnobservableAlertConstructorSetsTheMarker` rejects a direct Alert
-constructor with a reserved class or the visibility probe id that does not.
-Accept filters let unobservable findings through, because a probe shared by
-several signals that loses part of its source has lost it for each of them.
-Deterministic controls: a redis node's PAGE is kept, not cleared and raised
-again, while its INFO times out for two runs; and a configured host
-exclusion without blocked hosts, which settings freshness reports every run,
-leaves the run complete.
+An unknown state is unobservable whatever signal reports it.
+`alert_classes.go` classifies every alert class as visibility, an unknown
+state reported in place of an incident, or incident, and
+`TestEveryAlertClassIsClassified` fails for a class the table leaves out,
+including one a signal computes, which the test lists with every class it can
+take. The classes `cannot-observe` and `*-unobservable` are always
+visibility, and the probe id `monitor/visibility` is reserved for unknown
+states. The classification errs toward visibility: over-marking only delays a
+signal's other clears while the state lasts, but under-marking lets an
+incident clear because its signal could not see it. A class whose findings
+are unknown only in some states stays an incident, and those findings set
+their `unobservable` field, as the host-scope partial finding of a run with
+blocked hosts and the proxy public path without an allocation do. An Alert
+built directly sets the alert's marker exactly when its class is visibility,
+as the provider, crash-report and settings-generation visibility alerts do,
+and the test checks it. Accept filters let unobservable findings through,
+because a probe shared by several signals that loses part of its source has
+lost it for each of them. Deterministic controls: a redis node's PAGE is
+kept, not cleared and raised again, while its INFO times out for two runs; a
+pg-cpu PAGE is kept while its database host does not answer for two runs; and
+a configured host exclusion without blocked hosts, which settings freshness
+reports every run, leaves the run complete.
 
 
 Subnet operators: §17 covers node/gateway infrastructure; §22 covers continuous
