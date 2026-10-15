@@ -3155,7 +3155,7 @@
           "legendFormat": "not_modern"
         }
       ],
-      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero while quality_speed_requires_modern_provider is off in provider.yml; the shadow beside it says what the gate would take out."
+      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero until the gate turns on by itself at 2026-10-21 00:00 UTC while quality_speed_requires_modern_provider is absent from provider.yml (or at quality_speed_modern_provider_start), and while the switch is false; the shadow beside it says what the gate would take out."
     },
     {
       "id": 68,
@@ -3209,7 +3209,7 @@
           "legendFormat": "not modern"
         }
       ],
-      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before switching quality_speed_requires_modern_provider on."
+      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before the gate turns on by itself at 2026-10-21 00:00 UTC, and postpone with quality_speed_requires_modern_provider: false if it would gut the bucket (the monitor warns from 72 hours before, SIGNALS.md §2.29)."
     },
     {
       "id": 69,
@@ -3321,6 +3321,128 @@
       "description": "The share of the providers the other rules admit to quality that the probe has shown to be modern, which is the share of quality the gate would keep. Rises as probes that report the evidence measure the fleet; no value while quality is empty."
     },
     {
+      "id": 73,
+      "type": "stat",
+      "title": "modern gate: on",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 103
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "off",
+                  "index": 0
+                },
+                "1": {
+                  "text": "on",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_modern_gate_on{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "on"
+        }
+      ],
+      "description": "Whether the modern provider gate holds quality and speed to modern providers under the taskworkers' own provider.yml, as their stats collector last read it: on from the scheduled start while quality_speed_requires_modern_provider is absent, never with it false, at once with it true. The largest of the taskworkers, so a config rollout reads on as soon as one has flipped."
+    },
+    {
+      "id": 74,
+      "type": "stat",
+      "title": "modern gate: scheduled start",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 103
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_modern_gate_start_seconds{env=\"$env\"}) * 1000",
+          "refId": "A",
+          "legendFormat": "start"
+        }
+      ],
+      "description": "The instant the modern provider gate turns on by itself, 2026-10-21 00:00 UTC unless quality_speed_modern_provider_start moves it. No value while provider.yml sets quality_speed_requires_modern_provider, true or false, when no flip is scheduled. The monitor's readiness signal (SIGNALS.md §2.29) watches the shadow from 72 hours before it."
+    },
+    {
       "id": 71,
       "type": "timeseries",
       "title": "modern gate shadow: quality by outcome",
@@ -3332,7 +3454,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 103
+        "y": 107
       },
       "fieldConfig": {
         "defaults": {
@@ -3391,7 +3513,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 103
+        "y": 107
       },
       "fieldConfig": {
         "defaults": {
@@ -3447,7 +3569,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 111
+        "y": 115
       },
       "panels": [],
       "description": "The prober's dark verdicts and the destination pool its health runs load (the geomap design, §11.3 and §11.4). The fleet shares are snapshots each taskworker takes for itself, so they are read from the one with the freshest snapshot; the pool gauges are read from the taskworker that ran the latest refresh; the prober's and the refresh's event counters are summed across the taskworkers on the egress probes dashboard."
@@ -3464,7 +3586,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 112
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -3518,7 +3640,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 112
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -3591,7 +3713,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 112
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -3651,7 +3773,7 @@
         "h": 10,
         "w": 6,
         "x": 0,
-        "y": 120
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -3721,7 +3843,7 @@
         "h": 10,
         "w": 9,
         "x": 6,
-        "y": 120
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -3787,7 +3909,7 @@
         "h": 10,
         "w": 9,
         "x": 15,
-        "y": 120
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {

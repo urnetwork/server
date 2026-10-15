@@ -268,12 +268,14 @@ egress_index:
 	assert.Equal(t, load("egress_index:\n  evidence_max_age: soon\n").EvidenceMaxAge, defaults.EvidenceMaxAge)
 
 	// an empty file and no block are the defaults; an unreadable file is the
-	// defaults too, except that the online url-success rule is disabled, since
-	// its kill switch cannot be read
+	// defaults too, except that the online url-success rule is disabled and
+	// the modern provider gate switched off, since neither switch can be read
 	assert.Equal(t, load(""), defaults)
 	assert.Equal(t, load("enable_egress_test: true\n"), defaults)
 	unreadable := DefaultEgressIndexSettings()
 	unreadable.OnlineRequiresUrlSuccess = false
+	modernGateOff := false
+	unreadable.QualitySpeedRequiresModernProvider = &modernGateOff
 	assert.Equal(t, load("egress_index: [unterminated\n"), unreadable)
 }
 

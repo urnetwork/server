@@ -5,15 +5,21 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // ProviderEgressCountsPolicyKey separates shared dashboard snapshots when
 // workers resolve different count rules. This is not a data-generation key:
 // observed providers and accepted health results retain the snapshot's age.
+// It resolves the rules at the moment of the call, so the key changes at the
+// modern provider gate's start; the dashboard cache checks it before and
+// after each fill, so a fill that spans the start is never published.
 func ProviderEgressCountsPolicyKey() string {
 	return providerEgressCountsPolicyKey(
 		egressIndexSettings(), providerEgressTestEnabled(),
 		providerReliabilityMinimums(), SelectedProviderUrlProbePolicyVersion(),
+		server.NowUtc(),
 	)
 }
 
@@ -22,6 +28,7 @@ func providerEgressCountsPolicyKey(
 	enabled bool,
 	minimums map[int]float64,
 	probePolicyVersion int,
+	now time.Time,
 ) string {
 	// Increment the schema when count semantics change. Request-only cache and
 	// routing settings do not change this aggregate and are intentionally absent.
@@ -29,8 +36,11 @@ func providerEgressCountsPolicyKey(
 	// schema 1 snapshot neither applies nor carries. The floor's margin
 	// changes which countries the dashboard counts exempt, so it is part of
 	// the policy too. Schema 3 adds the modern provider gate, its not_modern
-	// reason and its shadow counts; its switch moves providers between the
-	// buckets and that reason, and its evidence window is code.
+	// reason and its shadow counts; whether the gate is on at now moves
+	// providers between the buckets and that reason, and its evidence window
+	// is code. The gate is keyed by that decision, not by its switch and
+	// start, so workers that decide alike share a snapshot and none taken
+	// before the start is read after it.
 	policy := struct {
 		Schema                             int
 		MaxIndex                           int
@@ -55,7 +65,7 @@ func providerEgressCountsPolicyKey(
 		OnlineRequiresUrlSuccess:           settings.OnlineRequiresUrlSuccess,
 		OnlineSuccessCountryFloor:          settings.OnlineSuccessCountryFloor,
 		OnlineSuccessCountryFloorMargin:    settings.OnlineSuccessCountryFloorMargin,
-		QualitySpeedRequiresModernProvider: settings.QualitySpeedRequiresModernProvider,
+		QualitySpeedRequiresModernProvider: settings.RequiresModernProvider(now),
 	}
 	encoded, err := json.Marshal(policy)
 	if err != nil {

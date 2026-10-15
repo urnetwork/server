@@ -6,10 +6,16 @@ measured, on a real client to provider session, negotiating end-to-end
 post-quantum encryption (the TLS 1.3 hybrid X25519MLKEM768) and advertising
 resizable transfer windows (acks carrying `receive_window_byte_count`).**
 Versions are not trusted: about 72% of providers run a custom "v3.23.0-fix"
-lineage. Online does not require it. The gate ships off
-(`quality_speed_requires_modern_provider: false` in provider.yml) while the
-dashboard counts and every score export count what it would take out, and it
-is switched on only after those shadow numbers are reviewed. Its evidence table is migration 836, which Main
+lineage. Online does not require it. The gate ships in shadow while the
+dashboard counts and every score export count what it would take out. Owner
+decision, 2026-10-15: **the gate turns on automatically at 2026-10-21
+00:00 UTC** while `quality_speed_requires_modern_provider` is absent from
+provider.yml, as it is on Main; `false` keeps it off (the kill switch and the
+way to postpone), `true` turns it on at once, and
+`quality_speed_modern_provider_start` moves the instant. The capability probe
+must be deployed and have swept the eligible providers before then, and the
+monitor's readiness signal (monitor SIGNALS.md §2.29) warns from 72 hours
+before if the flip would gut a bucket. Its evidence table is migration 836, which Main
 gets only once the owner approves applying it. See
 [the modern provider gate](#modern-provider-gate-2026-10-14) and the gate
 matrix below.
@@ -165,18 +171,20 @@ reclassifying the fleet.
 | At least one measured URL success in eight hours, or fewer than two measured runs | Required | Required | Required |
 | URL success ratio ≥ 0.8 | Required | Required | Not required |
 | Direct or identified-ISP subscriber evidence and no quality exception | Required under policy two | Not required | Not required |
-| Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Required once switched on | Required once switched on | Not required |
+| Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Required from 2026-10-21 00:00 UTC | Required from 2026-10-21 00:00 UTC | Not required |
 
 This matrix is the bucket admission contract. Probe admission has a different
 purpose: every provider passing reliability and the ARIN **risk** gate is
 eligible for paced URL probes. ARIN quality exceptions do not stop probes;
 security-quarantined providers also need probes to establish recovery.
 
-The modern provider row (2026-10-14) is native bucket membership too, and only
-once `quality_speed_requires_modern_provider` is on; until then the dashboard
-counts and every score export count what it would take out. Probe admission, explicit client ids,
-`force_minimum` and Online never read it. See
-[the modern provider gate](#modern-provider-gate-2026-10-14).
+The modern provider row (2026-10-14) is native bucket membership too, and
+only while the gate is on: from 2026-10-21 00:00 UTC (owner decision
+2026-10-15) while `quality_speed_requires_modern_provider` is absent from
+provider.yml, never with it `false`, and at once with it `true`. Until then
+the dashboard counts and every score export count what it would take out.
+Probe admission, explicit client ids, `force_minimum` and Online never read
+it. See [the modern provider gate](#modern-provider-gate-2026-10-14).
 
 The URL-success row (2026-10-13) is a passing condition on bucket membership,
 not a common gate. Probe admission, the rolling quota and its census never read
@@ -321,17 +329,38 @@ v2026.9.14-1046484290). Versions are not read. The implementation is
   valid public providers) on the providers dashboard. Every score export logs
   one `[nclm]modern provider gate:` line with the totals over its pool. Every
   outcome but `modern` is what the gate takes out once it is on.
-- **Switch.** `quality_speed_requires_modern_provider` in provider.yml, default
-  false. It is decoded on its own key, like the URL-success rule's keys: a
-  value that is not true or false, the key given twice, or a provider.yml
-  that is not yaml leaves the gate off and resets no other key. When on, a
+- **Switch.** Three ways (owner decision 2026-10-15), by
+  `quality_speed_requires_modern_provider` in provider.yml. Absent, as on
+  Main, the gate turns on by itself at its start, 2026-10-21 00:00 UTC by
+  default, that instant included. `false` keeps it off: the kill switch and
+  the way to postpone. `true` turns it on at once.
+  `quality_speed_modern_provider_start`, an RFC 3339 instant such as
+  `2026-10-28T00:00:00Z`, moves the start without a code change. A start that
+  is not one, or is given twice, keeps the code's default and is logged, so
+  `false` is the reliable postponement. Each key is decoded on its own, like
+  the URL-success rule's keys: a switch that is not true or false, or is given
+  twice, reads as `false`, and a provider.yml that is not yaml reads as
+  `false` with the default start; neither key's failure resets the other or
+  a neighbour. Every reader decides at its own instant, never at a fresh
+  clock read (`EgressIndexSettings.RequiresModernProvider`): a pass at its
+  filter's `now`, set once per pass so a pass decides every provider alike,
+  and the provider status and the inspection at their own. When on, a
   provider whose outcome is not `modern` leaves Quality and Speed under the
   `not_modern` reason. That reason comes after reliability, ARIN risk, TLS,
   no_success and unprobed or health, and before arin_non_quality. The
   provider stays Online and in the location counts. The counts policy key is
-  schema 3 and carries the switch. Provider status reports `not_modern` with
+  schema 3 and carries the gate's decision at the key's instant rather than
+  its settings, so the dashboard snapshot flips at the start, workers that
+  decide alike share one, and the cache's key checks before and after a fill
+  keep a fill that spans the start from being published. Every score
+  export's `[nclm]modern provider gate:` line gives the pass's decision and
+  how provider.yml sets the gate. Provider status reports `not_modern` with
   what to do (update the app), and `bringyourctl provider inspect` prints the
-  evidence row, its outcome and the switch.
+  evidence row, its outcome, the decision with its instant, the switch and
+  the start. Each taskworker's stats collector publishes
+  `urnetwork_stats_provider_modern_gate_on` and, only while the switch is
+  absent, `urnetwork_stats_provider_modern_gate_start_seconds` from its own
+  provider.yml.
 - **Request time.** The gate is bucket membership, not a hard exclusion.
   Probe admission, the rolling quota, the hard-exclusion set, explicit client
   ids and `force_minimum` with any rank mode keep only the common gates, as
@@ -340,16 +369,30 @@ v2026.9.14-1046484290). Versions are not read. The implementation is
   buckets.
 - **Rollout.** Apply migration 836 on Main once the owner approves: a server
   built with it requires it, so this work merges into main only after that.
-  Deploy with the switch off. Integrate the connect library's session
-  evidence into the prober: the probe tunnel's HTTP transport implements
-  `egresshealth.ModernEvidenceSource`, the probe client negotiates end-to-end
-  encryption (probe clients run `EncryptionModeOff` today, which would read
-  every provider as not post-quantum), and the API deploys before probers
-  send the field, since the handler refuses unknown keys. Review the shadow
-  counts until `no_evidence` is small and the not-modern providers are
-  understood. Switch the gate on only after that review;
-  `quality_speed_requires_modern_provider: false` turns it off again at each
-  pass's next settings read.
+  Integrate the connect library's session evidence into the prober: the probe
+  tunnel's HTTP transport implements `egresshealth.ModernEvidenceSource`, the
+  probe client negotiates end-to-end encryption (probe clients run
+  `EncryptionModeOff` today, which would read every provider as not
+  post-quantum), and the API deploys before probers send the field, since
+  the handler refuses unknown keys. The gate turns on by itself at
+  2026-10-21 00:00 UTC (owner decision 2026-10-15), so before that instant:
+  the capability probe (server/capprobe) must be deployed and have swept the
+  eligible providers, since a provider without its evidence reads
+  `no_evidence` and the flip takes it out of Quality and Speed; the
+  taskworkers must run the code with the automatic start, since their score
+  export decides the buckets FindProviders2 answers from and their stats
+  collector the dashboard counts, and the API too, so the provider status it
+  decides per request agrees; and the shadow counts should be reviewed until
+  `no_evidence` is small and the not-modern providers are understood. The
+  monitor's readiness signal (monitor SIGNALS.md §2.29,
+  `modern-gate-readiness`) reads the shadow from 72 hours before the start:
+  WARN when the gate would take more than half of Quality or of Speed out,
+  PAGE from 24 hours before, and PAGE when a bucket falls by more than half
+  within an hour after the start. To postpone, set
+  `quality_speed_requires_modern_provider: false`; to move the instant, set
+  `quality_speed_modern_provider_start`. Either takes effect at each pass's
+  next settings read, and `false` after the start turns the gate off again
+  the same way.
 
 ## Metrics derived for ranking
 
