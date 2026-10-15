@@ -168,6 +168,42 @@ func TestTestBinaryRefusesAVaultHomeThatClimbsIntoALink(t *testing.T) {
 	}
 }
 
+// A resource path names a file inside its vault. One that climbs out with ..,
+// such as ../../<elsewhere>/main/pg.yml, reached any file the test could open,
+// from a fixture vault and under the explicit opt-in alike; it is refused
+// before any lookup.
+func TestTestBinaryRefusesAResourcePathThatClimbsOutOfItsVault(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", "")
+	t.Setenv(TestRealVaultEnv, "")
+	t.Setenv("GOTMPDIR", "")
+	t.Setenv("WARP_TEST_ENV_LAUNCHER_VAULT_HOME", "")
+	const marker = "stand-in-for-a-main-secret"
+	secretVault := filepath.Join(t.TempDir(), "secret-vault")
+	writeResolverFixture(t, secretVault, map[string]string{
+		"main/pg.yml": "authority: pg.main.example:5432\nuser: main\npassword: " + marker + "\ndb: main\n",
+	})
+	vaultHome := filepath.Join(t.TempDir(), "vault")
+	writeResolverFixture(t, vaultHome, map[string]string{"local/placeholder.yml": "key: value\n"})
+	t.Setenv("WARP_VAULT_HOME", vaultHome)
+	relPath, err := filepath.Rel(vaultHome, filepath.Join(secretVault, "main", "pg.yml"))
+	if err != nil || filepath.IsLocal(relPath) {
+		t.Fatalf("the resource path %q, %v does not climb out of the vault", relPath, err)
+	}
+	for _, optIn := range []string{"", "1"} {
+		t.Setenv(TestRealVaultEnv, optIn)
+		resource, err := Vault.SimpleResource(relPath)
+		if err == nil && strings.Contains(string(resource.Bytes()), marker) {
+			t.Errorf("opt-in %q: %s read a file outside the vault", optIn, relPath)
+		} else if !errors.Is(err, ErrResourceNotFound) || !strings.Contains(err.Error(), "stays inside its vault") {
+			t.Errorf("opt-in %q: %s read %v, want the refusal of a path that leaves the vault", optIn, relPath, err)
+		}
+	}
+	if resource, err := Vault.SimpleResource("placeholder.yml"); err != nil || resource.RequireString("key") != "value" {
+		t.Fatalf("the vault's own placeholder.yml read %v", err)
+	}
+}
+
 // The guard runs before the resolution cache: a resolution cached while a test
 // opted in to a non-fixture vault is refused once the opt-in is withdrawn, and
 // a refusal is never cached.
