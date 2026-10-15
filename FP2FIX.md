@@ -1191,6 +1191,16 @@ keeps the URL-success rule above exactly, and the owner chooses by config.
   ratio is off the export publishes version 2 exactly as before, which every
   reader trusts as the rule with the ratio off, so a rollout or a rollback
   with the ratio off changes no reader and keeps the margin's previous state.
+  Code from before the ratio cannot follow a ratio that is on: an older
+  taskworker's passes fall back to the plain floor, and an export it runs
+  publishes version 2 with plain-floor verdicts, which drops the exemptions
+  the margin held (JP, LT and HR on 2026-10-15). So switch the ratio on only
+  once every taskworker runs this code, and before rolling a taskworker back
+  past it, switch the ratio off and let one export publish version 2.
+  Provider status and inspect need the api's and bringyourctl's code at or
+  after this change, not only a restart: one with the guard reader from
+  before the ratio refuses version 3 and reports `no_success` and
+  `low_success` providers alike as `egress_failing`.
 - **Visibility.** The counts policy schema is 4 and carries both knobs. The
   provider status reason is `egress_low_success`. `bringyourctl provider
   inspect` prints the ratio the export published with its exemption switch,
