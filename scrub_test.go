@@ -187,6 +187,50 @@ func TestScrubProcessLogsRedirectsTheDescriptor(t *testing.T) {
 	}
 }
 
+// A command's Flush forwards everything written before it, scrubbed, by the
+// time it returns, with no wait for the scrubber's goroutine: what a command
+// writes as it fails reaches the descriptor before its exit, which used to
+// end the process with the line still in the scrubber's pipe. Afterwards the
+// descriptor is the original again, and a second Flush is a no-op.
+func TestCommandLogsFlushForwardsWhatWasWritten(t *testing.T) {
+	captureRead, captureWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %s", err)
+	}
+	defer captureRead.Close()
+
+	realStderr := os.Stderr
+	savedFd, err := dupFd(2)
+	if err != nil {
+		t.Fatalf("dup: %s", err)
+	}
+	if err := dup2(int(captureWrite.Fd()), 2); err != nil {
+		t.Fatalf("redirect: %s", err)
+	}
+	defer func() {
+		dup2(savedFd, 2)
+		closeFd(savedFd)
+		os.Stderr = realStderr
+	}()
+
+	logs := ScrubCommandLogs()
+	os.Stderr.Write([]byte("all: dial 203.0.113.9:5432: connection refused\n"))
+	logs.Flush()
+	logs.Flush()
+	// after the flush the descriptor is the original: this goes straight there
+	os.Stderr.Write([]byte("after\n"))
+	dup2(savedFd, 2)
+	captureWrite.Close()
+
+	got, err := io.ReadAll(captureRead)
+	if err != nil {
+		t.Fatalf("read: %s", err)
+	}
+	if string(got) != "all: dial [scrubbed]:5432: connection refused\nafter\n" {
+		t.Fatalf("the descriptor got %q", got)
+	}
+}
+
 type writerFunc func([]byte) (int, error)
 
 func (self writerFunc) Write(b []byte) (int, error) { return self(b) }
