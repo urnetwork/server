@@ -872,6 +872,44 @@ func incrementRateLimitWindowAt(
 	return incrementRateLimitCounter(ctx, windowKey, duration)
 }
 
+// IncrementRateLimitWindowToEnd is IncrementRateLimitWindow for a counter
+// that must not outlive the window it counts: the window's key expires at the
+// window's end (PEXPIREAT). IncrementRateLimitWindow gives the key a TTL of a
+// whole window from each count instead, so a counter last counted near the
+// end of its window lives almost two. The lag limits keep no counter past
+// its window (lag.dev/PLAN.md A6).
+func IncrementRateLimitWindowToEnd(ctx context.Context, key string, duration time.Duration) (int64, error) {
+	return incrementRateLimitWindowToEndAt(ctx, key, duration, NowUtc())
+}
+
+func incrementRateLimitWindowToEndAt(
+	ctx context.Context,
+	key string,
+	duration time.Duration,
+	now time.Time,
+) (count int64, returnErr error) {
+	windowKey, err := rateLimitWindowKey(key, duration, now)
+	if err != nil {
+		return 0, err
+	}
+	windowMillis := duration.Milliseconds()
+	windowEnd := time.UnixMilli((now.UnixMilli()/windowMillis + 1) * windowMillis)
+	Redis(ctx, func(r RedisClient) {
+		var countCmd *redis.IntCmd
+		_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			countCmd = pipe.Incr(ctx, windowKey)
+			pipe.PExpireAt(ctx, windowKey, windowEnd)
+			return nil
+		})
+		if err != nil {
+			returnErr = err
+			return
+		}
+		count, returnErr = countCmd.Result()
+	})
+	return
+}
+
 // incrementRateLimitCounter owns only the atomic Redis increment and cleanup
 // TTL. Its callers must supply an already window-qualified physical key.
 func incrementRateLimitCounter(

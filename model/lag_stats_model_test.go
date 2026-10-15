@@ -10,8 +10,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// A stored result for the stats tests: one ping, no load, the given end
-// reason, family and figures, stored at createdAt under a track that exists.
+// A stored result for the stats tests: no load, and one ping whose round trip
+// is the given idle latency, lost when there is none; the given end reason,
+// family and speeds; stored at createdAt under a track that exists.
 func testLagStatsResult(
 	trackId server.Id,
 	position int,
@@ -22,6 +23,10 @@ func testLagStatsResult(
 	download *float32,
 	upload *float32,
 ) *LagResult {
+	pingMicros := int32(0)
+	if idle != nil {
+		pingMicros = int32(*idle * 1000)
+	}
 	return &LagResult{
 		LagResultId:             server.NewId(),
 		TrackId:                 trackId,
@@ -32,7 +37,7 @@ func testLagStatsResult(
 		SessionStartTime:        createdAt.Add(-time.Minute),
 		WindowStartTime:         createdAt.Add(-time.Minute),
 		PingOffsetMs:            []int32{0},
-		PingMicros:              []int32{12000},
+		PingMicros:              []int32{pingMicros},
 		IntervalMs:              250,
 		DownloadReceivedBytes:   []int64{},
 		DownloadSentBytes:       []int64{},
@@ -105,14 +110,14 @@ func TestLagStatsCountsAndMedians(t *testing.T) {
 		ipv4 := medians[0]
 		connect.AssertEqual(t, ipv4.IpFamily, 4)
 		connect.AssertEqual(t, ipv4.Count, int64(2))
-		connect.AssertEqual(t, *ipv4.OutsideLoadLatencyP50Ms, float64(15))
+		connect.AssertEqual(t, *ipv4.IdleLatencyP50Ms, float64(15))
 		connect.AssertEqual(t, *ipv4.DownloadP50Mbps, float64(200))
 		// a result with no upload figure is left out of the upload median
 		connect.AssertEqual(t, *ipv4.UploadP50Mbps, float64(40))
 		ipv6 := medians[1]
 		connect.AssertEqual(t, ipv6.IpFamily, 6)
 		connect.AssertEqual(t, ipv6.Count, int64(1))
-		connect.AssertEqual(t, *ipv6.OutsideLoadLatencyP50Ms, float64(30))
+		connect.AssertEqual(t, *ipv6.IdleLatencyP50Ms, float64(30))
 
 		// an end reason with no result in the window has no family at all
 		connect.AssertEqual(t, len(GetLagResultMediansSince(ctx, now.Add(-time.Hour), "busy")), 0)

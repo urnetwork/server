@@ -11,6 +11,7 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 // The lag sweep (lag.dev/PLAN.md A2, A5): the guests it removes, the
@@ -157,5 +158,51 @@ func TestSweepLagChain(t *testing.T) {
 		if until := runAt.Sub(server.NowUtc()); until <= 0 || interval < until {
 			t.Fatalf("the next sweep is %s out, want within %s", until, interval)
 		}
+	})
+}
+
+// The sweep runs under a task limit above its guests' budget, with ten
+// minutes past it for the retention deletes, so a guest backlog cannot run
+// the task out before retention starts, as the default limit of two minutes
+// let it. A chain an earlier server armed under the default limit is raised
+// to it when the chain is armed again, as every worker start and every sweep
+// arms it.
+func TestSweepLagMaxTime(t *testing.T) {
+	connect.AssertEqual(t, lagSweepGuestTimeout+10*time.Minute <= lagSweepMaxTime, true)
+	connect.AssertEqual(t, task.DefaultMaxTime < lagSweepGuestTimeout, true)
+
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		maxTimeSeconds := func() int {
+			t.Helper()
+			var seconds int
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(
+					ctx,
+					`SELECT run_max_time_seconds FROM pending_task WHERE run_once_key = '["sweep_lag"]'`,
+				).Scan(&seconds))
+			})
+			return seconds
+		}
+
+		// the chain as an earlier server armed it
+		server.Tx(ctx, func(tx server.PgTx) {
+			task.ScheduleTaskInTx(
+				tx,
+				SweepLag,
+				&SweepLagArgs{},
+				clientSession,
+				task.RunOnce("sweep_lag"),
+				task.RunAt(server.NowUtc().Add(controller.GetLagSettings().GuestSweepInterval)),
+			)
+		})
+		connect.AssertEqual(t, maxTimeSeconds(), int(task.DefaultMaxTime/time.Second))
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			ScheduleSweepLag(clientSession, tx)
+		})
+		connect.AssertEqual(t, maxTimeSeconds(), int(lagSweepMaxTime/time.Second))
 	})
 }

@@ -131,6 +131,43 @@ func TestNetworkExtenderMeasurementRequestStates(t *testing.T) {
 	})
 }
 
+// The queue reads first the requests the weekly cap does not hold (C7):
+// those for names with an unexpired certificate, which the CA renews outside
+// its budget, as a rotated key's is. While the cap is spent, an issuance pass
+// leaves every capped request pending, so a read that took the longest
+// waiting first would find the same capped requests on every pass, and a
+// backlog of them as long as the read would keep a request the cap does not
+// hold from ever being read. Within each part, the longest waiting is first.
+func TestNetworkExtenderMeasurementPendingReadsUncappedFirst(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().Truncate(time.Second)
+
+		// a backlog of new extenders, all longer waiting than the rotated key
+		const limit = 4
+		backlog := []server.Id{}
+		for i := range limit + 2 {
+			extenderId := testMeasurementActivate(t, ctx, 10+i).Extender.ExtenderId
+			key := []byte(fmt.Sprintf("key-backlog-%d", i))
+			SetNetworkExtenderMeasurementRequest(ctx, extenderId, append([]byte("csr-"), key...), key, testMeasurementNames(extenderId), now.Add(time.Duration(i-20)*time.Minute))
+			backlog = append(backlog, extenderId)
+		}
+		// an extender with a live certificate rotates its key: its name has an
+		// unexpired certificate
+		rotating := testMeasurementActivate(t, ctx, 1).Extender.ExtenderId
+		SetNetworkExtenderMeasurementRequest(ctx, rotating, []byte("csr-key-a"), []byte("key-a"), testMeasurementNames(rotating), now.Add(-time.Hour))
+		connect.AssertEqual(t, AddNetworkExtenderMeasurementCert(ctx, testMeasurementCert(rotating, []byte("key-a"), now.Add(-time.Hour))), true)
+		connect.AssertEqual(t, SetNetworkExtenderMeasurementRequest(ctx, rotating, []byte("csr-key-b"), []byte("key-b"), testMeasurementNames(rotating), now), NetworkExtenderMeasurementStatePending)
+
+		pending := GetPendingNetworkExtenderMeasurements(ctx, now, limit)
+		connect.AssertEqual(t, len(pending), limit)
+		connect.AssertEqual(t, pending[0].Measurement.ExtenderId, rotating)
+		for i, target := range pending[1:] {
+			connect.AssertEqual(t, target.Measurement.ExtenderId, backlog[i])
+		}
+	})
+}
+
 // A request keeps its place in the queue while its extender keeps waiting
 // (C7), and the backoff of its failed orders, so asking again cannot hurry
 // the CA. Another key starts afresh but keeps the place.
