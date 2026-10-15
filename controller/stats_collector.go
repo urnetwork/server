@@ -313,12 +313,14 @@ var statsProviderExcludedGauge = newStatsGaugeVec(
 
 // The countries the URL-success rule exempts because the probe fails for most
 // of their providers, each with the providers the exemption keeps online,
-// under the guard the score export last published. No series while the
-// export applied the rule nowhere (its kill switch) or no trusted guard is
-// published.
+// under the guard the score export last published: those without a success,
+// and while the Online URL ratio is on with its country exemption, those
+// below it; none while the ratio applies in every country. No series while
+// the export applied the rule nowhere (its kill switch) or no trusted guard
+// is published.
 var statsProviderOnlineSuccessExemptGauge = newStatsGaugeVec(
 	"provider_online_success_exempt",
-	"Providers measured without a URL success that the URL-success rule keeps online, per country it exempts",
+	"Providers measured without a URL success, or below the online URL ratio, that the URL-success rule keeps online, per country it exempts",
 	"country_code",
 )
 
