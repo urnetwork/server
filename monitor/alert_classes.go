@@ -13,6 +13,7 @@ package monitor
 // unknown only in some states stays an incident here, and those findings set
 // unobservable themselves: the host-scope partial alert while hosts are
 // blocked, and the proxy public path without a discovered allocation.
+// TestEveryAlertClassIsClassified fails for a class the table leaves out.
 
 // Whether a class reports an unknown state or a measured one.
 type alertClassKind int
