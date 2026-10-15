@@ -46,6 +46,13 @@ func pushModernProviderGateConfig(t testing.TB, keyValues map[string]any) {
 	t.Cleanup(server.Config.PushSimpleResource(providerConfigResourceName, encoded))
 }
 
+// Switches the gate on in the fixture's provider.yml until the test ends,
+// whatever the time, keeping the fixture's other provider settings.
+func enableModernProviderGate(t testing.TB) {
+	t.Helper()
+	pushModernProviderGateConfig(t, map[string]any{"quality_speed_requires_modern_provider": true})
+}
+
 // The stored row of the provider, nil without one.
 func modernGateTestRow(ctx context.Context, clientId server.Id) *ProviderModernEvidenceRecord {
 	return getProviderModernEvidenceRecords(ctx, []server.Id{clientId})[clientId]
