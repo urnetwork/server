@@ -85,9 +85,9 @@ func TestArindbServingEpochRefreshUnderWayServesThePreviousValue(t *testing.T) {
 	}
 }
 
-// A read that panics is recorded as an error serving the latest slot and
-// releases the refresh, so the cache reads again after the ttl instead of
-// serving its previous value forever.
+// A read that panics is recorded as an error, which keeps the last decision
+// read, and releases the refresh, so the cache reads again after the ttl
+// instead of serving its previous value forever.
 func TestArindbServingEpochAPanickingReadNeverStrandsTheCache(t *testing.T) {
 	clock := &testArindbClock{now: testCanaryClock}
 	cache := &arindbServingEpochCache{}
@@ -105,8 +105,8 @@ func TestArindbServingEpochAPanickingReadNeverStrandsTheCache(t *testing.T) {
 			panic("synthetic read failure")
 		})
 	}()
-	if got := cache.get(t.Context(), clock.read, nil); got != 0 {
-		t.Fatalf("after a panicking read: %d, want the latest slot", got)
+	if got := cache.get(t.Context(), clock.read, nil); got != testCanaryOldEpoch {
+		t.Fatalf("after a panicking read: %d, want the last decision read", got)
 	}
 	clock.now = clock.now.Add(arindbServingEpochCacheTtl)
 	if got := cache.get(t.Context(), clock.read, func(context.Context) (int64, string) {
@@ -177,6 +177,38 @@ func TestArindbServingEpochUnreadableDecisionServesTheLatestSlot(t *testing.T) {
 			t.Errorf("%s: %s reads went %v to %v", c.name, c.outcome, before, after)
 		}
 	}
+}
+
+// A Redis error or timeout keeps serving the last decision the process read,
+// so a blip cannot drop an active fallback, but only for a bounded time; a
+// decision that is absent, expired or invalid serves each row's latest slot at
+// once, and a later error cannot bring it back.
+func TestArindbServingEpochKeepsTheLastDecisionThroughReadErrors(t *testing.T) {
+	clock := &testArindbClock{now: testCanaryClock}
+	cache := &arindbServingEpochCache{}
+	read := func(epoch int64, outcome string) func(context.Context) (int64, string) {
+		return func(context.Context) (int64, string) { return epoch, outcome }
+	}
+	step := func(name string, outcome string, epoch int64, want int64) {
+		t.Helper()
+		clock.now = clock.now.Add(arindbServingEpochCacheTtl)
+		if got := cache.get(t.Context(), clock.read, read(epoch, outcome)); got != want {
+			t.Fatalf("%s: served %d, want %d", name, got, want)
+		}
+	}
+	step("a fallback", ArindbDecisionReadOk, testCanaryOldEpoch, testCanaryOldEpoch)
+	lastOk := clock.now
+	step("a Redis error", ArindbDecisionReadError, 0, testCanaryOldEpoch)
+	step("a timeout", ArindbDecisionReadError, 0, testCanaryOldEpoch)
+	// past the hold, errors serve each row's latest slot
+	clock.now = lastOk.Add(arindbServingEpochErrorHold - arindbServingEpochCacheTtl)
+	step("an error at the hold", ArindbDecisionReadError, 0, 0)
+	step("a fallback again", ArindbDecisionReadOk, testCanaryOldEpoch, testCanaryOldEpoch)
+	step("an expired decision", ArindbDecisionReadAbsent, 0, 0)
+	step("an error after expiry", ArindbDecisionReadError, 0, 0)
+	step("a fallback once more", ArindbDecisionReadOk, testCanaryOldEpoch, testCanaryOldEpoch)
+	step("an invalid decision", ArindbDecisionReadInvalid, 0, 0)
+	step("an error after an invalid one", ArindbDecisionReadError, 0, 0)
 }
 
 // Every outcome is exported from the first scrape, zero included.

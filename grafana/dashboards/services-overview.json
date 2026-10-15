@@ -462,7 +462,7 @@
             "id": 13,
             "type": "timeseries",
             "title": "ARIN canary decision reads / s",
-            "description": "Reads of the published ARIN canary decision by the request-time readers of each process (FindProviders2 Quality validation, provider status, the provider-egress counts and inspection), by outcome. A process reads at most once per 5 seconds. Every outcome but ok (absent or expired, invalid, or a Redis error) serves each provider's latest ARIN slot, as before the canary; a sustained non-ok rate during a fallback means readers are not applying it.",
+            "description": "Reads of the published ARIN canary decision by the request-time readers of each process (FindProviders2 Quality validation, provider status, the provider-egress counts and inspection), by outcome. A process reads at most once per 5 seconds. An absent or expired decision, or an invalid one, serves each provider's latest ARIN slot, as before the canary; a Redis error keeps the process's last decision for up to 15 minutes, then does the same. A sustained non-ok rate during a fallback means readers are not applying it.",
             "gridPos": {
                 "h": 8,
                 "w": 12,

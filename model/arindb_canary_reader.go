@@ -2,9 +2,11 @@
 // (arindbctl/ARINDB.md, "Publication and request-time consistency"). Readers
 // evaluate stored facts for the published serving epoch S and choose each
 // row's slot by its epoch, so rows written before and after a restart agree.
-// Without a readable decision (absent, expired, invalid or a Redis error) a
-// reader uses each row's latest slot, as before the canary, and counts the
-// event: refusing Quality instead would let a Redis blip empty it.
+// Without a published decision (absent, expired or invalid) a reader uses each
+// row's latest slot, as before the canary, and counts the event: refusing
+// Quality instead would let a lost key empty it. A Redis error or timeout
+// keeps the last decision the process read for a bounded time, so a blip
+// cannot drop an active fallback either.
 //
 // Hard exclusions, probe admission and URL eligibility do not read the
 // decision: risk always comes from the latest slot.
@@ -28,6 +30,12 @@ const arindbServingEpochCacheTtl = 5 * time.Second
 // to trigger it, so one canceled request cannot decide for every reader.
 const arindbDecisionReadTimeout = 250 * time.Millisecond
 
+// How long failed reads keep serving the epoch of the last read that found a
+// decision. Publications write one every few minutes, so this outlasts a
+// Redis blip but not an outage, after which readers serve each row's latest
+// slot as without a decision.
+const arindbServingEpochErrorHold = 15 * time.Minute
+
 // The outcome of one read of the published decision.
 const (
 	ArindbDecisionReadOk      = "ok"
@@ -45,7 +53,7 @@ var arindbDecisionReadOutcomes = []string{
 
 var arindbDecisionReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_arindb_decision_reads_total",
-	Help: "Reads of the published ARIN canary decision by request-time readers, by outcome; every outcome but ok serves each row's latest ARIN slot",
+	Help: "Reads of the published ARIN canary decision by request-time readers, by outcome; absent and invalid serve each row's latest ARIN slot, error keeps the last decision read for up to 15 minutes",
 }, []string{"outcome"})
 
 func init() {
@@ -64,11 +72,16 @@ type arindbServingEpochCache struct {
 	readAt     time.Time
 	known      bool
 	refreshing bool
+	// the last read that found a decision, which failed reads keep serving
+	// for arindbServingEpochErrorHold
+	lastOkEpoch int64
+	lastOkAt    time.Time
+	hasLastOk   bool
 }
 
 var currentArindbServingEpoch = &arindbServingEpochCache{}
 
-// The published serving epoch, 0 without a readable decision.
+// The published serving epoch, 0 without a published decision.
 func readArindbServingEpoch(ctx context.Context) int64 {
 	return currentArindbServingEpoch.get(ctx, time.Now, readArindbServingEpochFromStore)
 }
@@ -83,13 +96,12 @@ func (self *arindbServingEpochCache) get(
 	ctx context.Context,
 	now func() time.Time,
 	read func(context.Context) (int64, string),
-) int64 {
-	var epoch int64
+) (servedEpoch int64) {
 	refresh := false
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		epoch = self.epoch
+		servedEpoch = self.epoch
 		if self.known && (now().Sub(self.readAt) < arindbServingEpochCacheTtl || self.refreshing) {
 			return
 		}
@@ -97,26 +109,41 @@ func (self *arindbServingEpochCache) get(
 		refresh = true
 	}()
 	if !refresh {
-		return epoch
+		return
 	}
 	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), arindbDecisionReadTimeout)
 	defer cancel()
-	// recorded even if the read panics, as an error serving the latest slot,
-	// so a failed refresh can never leave the cache refreshing forever
+	// recorded even if the read panics, as an error, so a failed refresh can
+	// never leave the cache refreshing forever
 	readEpoch, outcome := int64(0), ArindbDecisionReadError
 	defer func() {
 		func() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
+			readAt := now()
+			switch outcome {
+			case ArindbDecisionReadOk:
+				self.lastOkEpoch, self.lastOkAt, self.hasLastOk = readEpoch, readAt, true
+			case ArindbDecisionReadError:
+				// a failed read or timeout keeps the last decision read, for
+				// a bounded time
+				if self.hasLastOk && readAt.Sub(self.lastOkAt) < arindbServingEpochErrorHold {
+					readEpoch = self.lastOkEpoch
+				}
+			default:
+				// absent, expired or invalid: no decision is published
+				self.hasLastOk = false
+			}
 			self.epoch = readEpoch
-			self.readAt = now()
+			self.readAt = readAt
 			self.known = true
 			self.refreshing = false
+			servedEpoch = readEpoch
 		}()
 		arindbDecisionReads.WithLabelValues(outcome).Inc()
 	}()
 	readEpoch, outcome = read(readCtx)
-	return readEpoch
+	return
 }
 
 // One read of the published decision and its outcome.
