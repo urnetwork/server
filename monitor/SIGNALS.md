@@ -15797,6 +15797,11 @@ Healthy shape:
   first sweep after deployment, about two days, `due` and `eligible` are
   close to `scanned` and the shadow's `no_evidence` is large. Neither is a
   finding then.
+- `breaker_trips_total` flat, but for the odd small pass at a sweep's tail
+  whose few providers all lack the responder; `downgrades_total` low, a
+  `held` now and then that the next sweep mostly answers with a modern
+  reading rather than a `confirmed` one; `readiness_failures_total` and
+  `shard_cleanup_errors_total` flat.
 
 Signals:
 
@@ -15807,10 +15812,11 @@ Signals:
   `passes_total{result="failed"}` and the taskworker log's `[capprobe]` and
   task error lines: unreadable or invalid settings, the URL probe's
   included, whose `shard_count` past 255 would reach the capability probe's
-  prober shard slot 255; shard allocation, identity or readiness; a page
-  read; or an evidence write. A
-  failed pass retries the same sweep page after a minute, so a persistent
-  failure repeats once a minute. `passes_total{result="disabled"}` rising is
+  prober shard slot 255; shard allocation, identity or funding readiness
+  (`readiness_failures_total{step}`, the capability probe's own, never the
+  URL probe's pass errors); a page read; or an evidence write. A failed pass
+  retries the same sweep page after a minute, so a persistent failure
+  repeats once a minute. `passes_total{result="disabled"}` rising is
   `enabled: false`, deliberate or not.
 - `capability-probe-no-evidence` — WARN when measurements finish for an hour
   and none records (`providers_total` rising with every `recorded_*` flat).
@@ -15821,13 +15827,34 @@ Signals:
   accepted no ClientHello of the probe's while the provider acknowledged its
   pings, so the probe client's sessions are off, a code or settings
   regression in which every reading would be wrong, never something to
-  record around; `e2e_pending` means
-  setup ate the measurement's margin over the 60 s window; `tunnel_lost`
-  means the tunnel's path went away, or its window client was replaced,
-  before the reading concluded, so a provider that drops its connection
-  shows it, and a share rising fleet-wide points at the probe's windows or
-  the platform rather than at providers; `record_failed` is the database
-  write, and fails the pass.
+  record around; `e2e_pending` means setup ate the measurement's margin over
+  the 60 s window; `tunnel_lost` means the tunnel's path went away, or its
+  window client was replaced, before the reading concluded, so a provider
+  that drops its connection shows it, and a share rising fleet-wide points at
+  the probe's windows or the platform rather than at providers;
+  `negative_withheld` everywhere is `capability-probe-breaker`;
+  `record_failed` is the database write, and fails the pass.
+- `capability-probe-breaker` — WARN when `breaker_trips_total` rises on most
+  passes for an hour, PAGE after two hours with the gate switched on: the
+  probe negotiates no end-to-end session with any provider, so its negative
+  readings are all withheld (`providers_total{outcome="negative_withheld"}`)
+  and its evidence ages toward `stale_evidence`. That is a fault on the
+  probe's side, the probe client's sessions or key registration, a connect or
+  settings change, or its tunnels reaching the wrong peers; the fleet cannot
+  lose its responders at once. `readings_total{capability="e2e"}` then shows
+  only `no_responder`, `pending` and `not_tested`. Fix the probe; never
+  record around the breaker. A trip on the odd small tail pass of a sweep is
+  not a finding.
+- `capability-probe-downgrades` — INFO for the shadow review, WARN when
+  `downgrades_total{result="confirmed"}` over a day exceeds 5% of the
+  `recorded_modern` measurements: a negative reading of a provider whose
+  modern evidence was fresh is held for a later sweep (`held`), and only a
+  second negative reading there records the downgrade (`confirmed`). Held
+  ones that the next sweep answers with a modern reading were transient.
+  Confirmed ones in bulk mean modern providers turned legacy, a downgrading
+  release, or a probe fault the breaker does not see, such as windows read
+  as missing; compare `readings_total{capability="window"}` before
+  attributing it to the fleet.
 - `capability-probe-unsealed-share` — INFO for the shadow review, WARN above
   10% over a day: of the negotiated post-quantum readings
   (`readings_total{capability="e2e",reading=~"post_quantum_.*"}`), the share
@@ -15850,18 +15877,25 @@ Signals:
   probe mints and retires its derived clients through the URL probe's
   in-process credential owner, so
   `urnetwork_egress_probe_internal_credentials_total` counts both probes;
-  this counter is the capability probe's own.
+  this counter is the capability probe's own. `shard_cleanup_errors_total`
+  rising is a pass's prober shard whose drain or reap failed afterwards: the
+  pass stands, and the prober reaper retries the cleanup, so read the
+  reaper's progress on slot 255 before anything else.
 
 Not signals: a large `no_evidence` share in the first two days after the
 first deployment; `not_post_quantum` dominating the shadow; a provider that
 gives no evidence being measured again only by the next sweep (that is the
-probe's retry spacing, by design); `waiting` passes between sweeps.
+probe's retry spacing, by design); `waiting` passes between sweeps; a
+modern provider's downgrade showing a sweep after its first negative
+reading (the hold, by design).
 
 Do not backfill evidence rows by hand, route evidence through URL probe
 runs, or switch the gate on while the first sweep is incomplete or
-`capability-probe-stalled` holds. A measurement records only when both
-capabilities read conclusively; a capability that was not tested is never
-recorded as a negative, so "missing negatives" are not a defect to repair.
+`capability-probe-stalled` or `capability-probe-breaker` holds. A
+measurement records only when both capabilities read conclusively; a
+capability that was not tested is never recorded as a negative, and neither
+is a negative reading a pass withheld or a sweep holds, so "missing
+negatives" are not a defect to repair.
 
 Implementation convention: no monitor probe implements these classes yet;
 they are dashboard reads of the series above. A probe for them belongs in

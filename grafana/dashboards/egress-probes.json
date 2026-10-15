@@ -6685,7 +6685,7 @@
       "id": 129,
       "type": "timeseries",
       "title": "capability measurements / min by outcome",
-      "description": "Finished capability measurements, each one provider in a short tunnel of its own. recorded_modern, recorded_not_post_quantum and recorded_no_resizable_windows wrote evidence with that gate outcome. The rest recorded nothing: tunnel_failed (the tunnel could not be opened), no_ack (the provider never acknowledged the probe's pings), e2e_not_attempted (acknowledged, but no session was attempted: the probe client's encryption is off), e2e_pending (the ClientHello was still in its establishment window at the measurement's timeout), canceled (the pass ended) and record_failed (the write failed). A provider that recorded nothing is measured again by the next sweep.",
+      "description": "Finished capability measurements, each one provider in a short tunnel of its own. recorded_modern, recorded_not_post_quantum and recorded_no_resizable_windows wrote evidence with that gate outcome. The rest recorded nothing: tunnel_failed (the tunnel could not be opened), no_ack (the provider never acknowledged the probe's pings), e2e_not_attempted (acknowledged, but the send path accepted no ClientHello: the probe client's encryption is off), e2e_pending (the ClientHello was still in its establishment window at the measurement's timeout), canceled (the pass ended), tunnel_lost (the tunnel's path went away, or its window client was replaced, before the reading concluded), record_failed (the write failed), downgrade_held (a negative reading of a provider whose modern evidence is still fresh, held for a later sweep to confirm) and negative_withheld (a negative reading of a pass that negotiated no session with any provider). A provider that recorded nothing is measured again by the next sweep.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -6980,6 +6980,98 @@
           "refId": "A",
           "expr": "sum(increase(urnetwork_capability_probe_sweeps_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1d]))",
           "legendFormat": "sweeps"
+        }
+      ]
+    },
+    {
+      "id": 136,
+      "type": "timeseries",
+      "title": "capability probe guards / min: downgrades held and confirmed, breaker trips",
+      "description": "The two guards that keep a passing fault from recording a negative reading, which takes a provider out of Quality and Speed once the gate is on. Downgrades: held is a negative reading of a provider whose modern evidence is still fresh, held back and carried by the sweep; confirmed is a held one that a negative reading in a later sweep confirmed and recorded. Breaker trips: capability probe passes that negotiated no end-to-end session with any provider and so recorded none of their negative readings (outcome negative_withheld), which is how a fault on the probe's own side shows. Trips on every pass are a probe-side regression (SIGNALS.md §2.19g).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 442
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_capability_probe_downgrades_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "downgrades {{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_capability_probe_breaker_trips_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "breaker trips"
+        }
+      ]
+    },
+    {
+      "id": 137,
+      "type": "timeseries",
+      "title": "capability probe shard readiness failures and cleanup errors / min",
+      "description": "Capability probe passes whose prober shard could not show it was funded, by step: funding_unknown (the balance read failed) and funding_unavailable (no active balance); the pass fails and retries after a minute. These are the capability probe's own, never counted in the URL probe's pass errors. Cleanup errors: passes whose prober shard drain or reap failed after the pass; a finished pass still stands, and the prober reaper retries the cleanup.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 442
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (step) (rate(urnetwork_capability_probe_readiness_failures_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "readiness {{step}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_capability_probe_shard_cleanup_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "shard cleanup errors"
         }
       ]
     }

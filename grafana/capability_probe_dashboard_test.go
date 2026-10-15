@@ -27,6 +27,10 @@ func TestEgressProbeDashboardChartsTheCapabilityProbe(t *testing.T) {
 		{expr: "max(urnetwork_capability_probe_last_sweep_seconds" + selector + ")", unit: "s"},
 		{expr: "time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds" + selector + ")", unit: "s"},
 		{expr: "sum(increase(urnetwork_capability_probe_sweeps_total" + selector + "[1d]))", unit: "short"},
+		{expr: "sum by (result) (rate(urnetwork_capability_probe_downgrades_total" + selector + "[$__rate_interval])) * 60", unit: "short"},
+		{expr: "sum(rate(urnetwork_capability_probe_breaker_trips_total" + selector + "[$__rate_interval])) * 60", unit: "short"},
+		{expr: "sum by (step) (rate(urnetwork_capability_probe_readiness_failures_total" + selector + "[$__rate_interval])) * 60", unit: "short"},
+		{expr: "sum(rate(urnetwork_capability_probe_shard_cleanup_errors_total" + selector + "[$__rate_interval])) * 60", unit: "short"},
 	} {
 		found := 0
 		for _, panel := range dashboard.Panels {
