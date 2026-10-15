@@ -310,12 +310,14 @@ func GetExtenderMeasurementHostsToPublish(ctx context.Context, config *ExtenderC
 // GetExtenderMeasurementHosts reads every extender that serves the
 // measurement api at `now`: one the dns reconcile publishes
 // (GetExtenderMeasurementHostsToPublish) whose name it has published (C8).
-// The lag.dev sample (A4) draws from these. A name is offered only once it
-// resolves on every authoritative server: a resolver asked for it before
-// would cache that it does not exist for the zone's negative ttl, and the
-// browser that asked could not reach the extender until that ran out (C1). An
-// extender whose certificate was just issued is left out until the reconcile
-// that runs right after the issuance has published it. Ordered by name.
+// The lag.dev sample (A4) draws from these, and offers those whose
+// certificate A8 has also handed to them (lagStillServing). A name is offered
+// only once it resolves on every authoritative server: a resolver asked for
+// it before would cache that it does not exist for the zone's negative ttl,
+// and the browser that asked could not reach the extender until that ran out
+// (C1). An extender whose certificate was just issued is left out until the
+// reconcile that runs right after the issuance has published it. Ordered by
+// name.
 func GetExtenderMeasurementHosts(ctx context.Context, config *ExtenderConfig, now time.Time) []*ExtenderMeasurementHost {
 	hosts := []*ExtenderMeasurementHost{}
 	for _, host := range GetExtenderMeasurementHostsToPublish(ctx, config, now) {
@@ -329,10 +331,12 @@ func GetExtenderMeasurementHosts(ctx context.Context, config *ExtenderConfig, no
 // The id a record signed at issueTime carries as its MeasurementId (C10): the
 // extender's own, 16 bytes, when measurement is enabled, the extender may be
 // measured at one of the record's addresses, and it holds a live certificate,
-// unexpired at issueTime, whose name the dns reconcile has published (C8);
-// nil otherwise. A reader computes the measurement name from it (N1), so it
-// is never set before the name resolves. The certificate state is read in the
-// signing transaction (NetworkExtender.MeasurementCertNotAfter).
+// unexpired at issueTime, whose name the dns reconcile has published (C8) and
+// which A8 has handed to it for its current key; nil otherwise. A reader
+// computes the measurement name from it (N1), so it is never set before the
+// name resolves, nor before the extender has the certificate to answer it
+// with. The certificate state is read in the signing transaction
+// (NetworkExtender.MeasurementCertNotAfter).
 func extenderMeasurementId(
 	config *ExtenderConfig,
 	extender *model.NetworkExtender,
@@ -466,7 +470,12 @@ type ExtenderMeasurementCertResult struct {
 // A withdrawn certificate is answered withdrawn, with its name, until the
 // extender's next request arrives, and never none: a request row is never
 // removed, so an extender that once asked is never answered none again.
-// Nothing here writes.
+//
+// The one write is the first issued answer with each certificate, which
+// records its delivery (model.MarkNetworkExtenderMeasurementCertDelivered):
+// the extender installs a chain only from this answer, so only then does its
+// name serve, and only then do the lag.dev sample (A4) and the records'
+// MeasurementId (C10) offer it.
 func ExtenderMeasurementCert(
 	args *ExtenderMeasurementCertArgs,
 	clientSession *session.ClientSession,
@@ -510,6 +519,9 @@ func ExtenderMeasurementCert(
 
 	if measurement.State == model.NetworkExtenderMeasurementStateIssued {
 		if cert != nil {
+			if cert.DeliverTime == nil {
+				model.MarkNetworkExtenderMeasurementCertDelivered(clientSession.Ctx, cert.CertId, now)
+			}
 			notAfter := cert.NotAfter
 			result.Names = cert.Names
 			result.KeySha256 = extenderMeasurementKeySha256(cert.PublicKey)
