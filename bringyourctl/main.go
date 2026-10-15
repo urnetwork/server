@@ -2596,7 +2596,14 @@ func providerInspect(opts docopt.Opts) {
 			evidence.RunCount,
 		)
 	}
-	fmt.Printf("  modern provider evidence %s; outcome %s (evidence is stale at %s); gate %t (quality_speed_requires_modern_provider in this host's provider.yml)\n", modernEvidence, optionalString(inspection.ModernOutcome), model.ProviderModernEvidenceMaxAge, inspection.Settings.QualitySpeedRequiresModernProvider)
+	// the gate as the decision below applied it, at the inspection's
+	// instant, and how this host's provider.yml sets it: an absent switch
+	// turns the gate on at the start
+	modernSwitch := "absent"
+	if value := inspection.Settings.QualitySpeedRequiresModernProvider; value != nil {
+		modernSwitch = strconv.FormatBool(*value)
+	}
+	fmt.Printf("  modern provider evidence %s; outcome %s (evidence is stale at %s); gate %t at %s (this host's provider.yml: quality_speed_requires_modern_provider %s, start %s; %s)\n", modernEvidence, optionalString(inspection.ModernOutcome), model.ProviderModernEvidenceMaxAge, inspection.ModernGate, inspection.ModernGateTime.UTC().Format(time.RFC3339), modernSwitch, inspection.Settings.QualitySpeedModernProviderStart.UTC().Format(time.RFC3339), inspection.Settings.ModernProviderGateSchedule())
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)

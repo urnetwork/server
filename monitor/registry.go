@@ -101,6 +101,7 @@ func NewSignals() []Signal {
 		NewSignupQualitySignal(),
 		NewSubscriptionMetricsSignal(),
 		NewSignupLivenessSignal(),
+		NewModernGateReadinessSignal(),
 		NewRedisMemorySignal(),
 		NewRedisBuffersSignal(),
 		NewKeyFamiliesSignal(),

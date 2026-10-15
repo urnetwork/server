@@ -15856,7 +15856,13 @@ Signals:
 - `capability-probe-stalled` — WARN when no taskworker has finished a
   measured or waiting pass for 30 minutes while `capability_probe.yml`
   enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
-  PAGE after two hours with the gate switched on. The newest pass is read
+  PAGE after six hours with the gate on: `quality_speed_requires_modern_provider: true`,
+  or that switch absent from the desired provider.yml and the gate's start
+  (2026-10-21 00:00 UTC by default, `quality_speed_modern_provider_start`)
+  passed at the monitor's clock, as the model's own provider.yml decoder
+  reads them, so the automatic switch-on arms the page. Evidence stays fresh
+  for seven days after its measurement, so a shorter stall, planned
+  database maintenance included, takes no provider out and only warns. The newest pass is read
   over six hours (`max_over_time`), so a pass of a process that exited
   since counts; a fleet whose taskworkers all started after it, as the
   switch-on restart starts them, is given the 30 minutes from its oldest
@@ -15905,7 +15911,8 @@ Signals:
   `negative_withheld` everywhere is `capability-probe-breaker`;
   `record_failed` is the database write, and fails the pass.
 - `capability-probe-breaker` — WARN when `breaker_trips_total` rises on most
-  passes for an hour, PAGE after two hours with the gate switched on: the
+  passes for an hour, PAGE after two hours with the gate on (as for
+  `capability-probe-stalled`): the
   probe negotiates no end-to-end session with any provider, so its negative
   readings are all withheld (`providers_total{outcome="negative_withheld"}`)
   and its evidence ages toward `stale_evidence`. That is a fault on the
@@ -17456,6 +17463,94 @@ including repeated malformed auth shapes that spend no budget, orphan fields
 that cannot create unintended seedphrase accounts or consume either limiter,
 and corrected exhausted requests retaining 429/Retry-After. Fixed input-shape
 messages omit tokens, identities, provider input, and internal classification.
+
+### 2.29 Modern provider gate readiness — the automatic flip must not empty Quality or Speed
+Probe: `modern-gate-readiness`
+
+The modern provider gate (server/FP2FIX.md, model/egress_modern_provider.go)
+takes every provider the capability probe has not shown to be modern out of
+Quality and Speed under the `not_modern` reason, keeping it Online. Owner
+decision 2026-10-15: it turns on by itself at 2026-10-21 00:00 UTC, the
+code's default start, while `quality_speed_requires_modern_provider` is
+absent from provider.yml; every pass and request decides at its own instant.
+Its evidence comes from the capability probe (server/capprobe), which ships
+switched off and must be switched on and have swept the eligible providers
+before the start. Without
+that evidence a provider reads `no_evidence`, and the flip would empty or
+gut both native buckets. This signal gives the owner warning while turning
+the gate on can still be postponed.
+
+HOW: one Mimir instant query every five minutes, at the monitor's clock,
+through a services gateway, reads five labelled parts from the configured
+environment: `max(urnetwork_stats_provider_modern_gate_on)`,
+`max(urnetwork_stats_provider_modern_gate_start_seconds)`,
+`max(urnetwork_stats_provider_egress_source_started_seconds)`,
+`max by (bucket, outcome) (urnetwork_stats_provider_modern_gate_shadow)` and
+`sum by (bucket) (max by (bucket, index)
+(urnetwork_stats_provider_egress_index))` for quality and speed. The
+taskworkers' stats collector publishes the first two from its own
+provider.yml at every refresh: whether the gate holds Quality and Speed now,
+and, only while the switch is absent, the start. The shadow counts, for the
+connected valid public providers the other rules admit to each bucket, what
+the gate decides for them, whether or not it is on: every outcome but
+`modern` is what it takes out.
+
+- `modern-gate-not-ready` (frame the bucket, sustain 2): from 72 hours before
+  the published start, more than half of a bucket's admitted providers are
+  not `modern` in the shadow (exactly half does not fire). WARN from 72 hours
+  before, PAGE from 24 hours before, under the same identity so the warning
+  escalates. The shadow is judged only on dashboard counts whose source read
+  started within 30 minutes and that carry every bucket and outcome;
+  otherwise the run is `cannot-observe`.
+- `modern-gate-flip-drop` (frame the bucket, sustain 1, PAGE): within the
+  hour after the start, a bucket holds less than half the providers it had
+  in the last sample a second before the start. Counts read before the
+  start, or published by taskworkers that have not flipped, are no verdict
+  yet; a missing sample before the start is `cannot-observe`.
+
+Outside 72 hours before to one hour after the start the signal is quiet,
+whatever the gauges say. No start series means the switch is set, true,
+false or unreadable, so no flip is scheduled and the signal is quiet: the
+owner's postponement silences it, and a moved start moves its windows. When
+no taskworker publishes `urnetwork_stats_provider_modern_gate_on` inside the
+windows of the code's default start, the taskworkers do not run the code
+that flips the gate, or their stats collector is down: the run is
+`cannot-observe`, never quiet. Outside those windows a failed read stays
+quiet.
+
+ACTION: decide before the start. To postpone, set
+`quality_speed_requires_modern_provider: false` in provider.yml: the kill
+switch, after which the next score export restores the buckets. To move the
+flip, set `quality_speed_modern_provider_start` to an RFC 3339 instant such
+as `2026-10-28T00:00:00Z`. Either is a config release through the
+config-updater and a restart of every taskworker and API block, since a
+running container keeps the config version it was created with (the same
+procedure as server/capprobe/README.md, "Switching it on"), and it
+postpones the flip only when the restarts finish before the start. A
+malformed start keeps the code's default, so confirm the moved start on
+`urnetwork_stats_provider_modern_gate_start_seconds` or with
+`bringyourctl provider inspect` after the restart; the switch is the
+reliable postponement. To let it flip, first switch the capability probe on
+and let it sweep the eligible providers until `no_evidence` is small.
+After the start, a `modern-gate-flip-drop` page whose drop the shadow
+explains is answered with the same kill switch; a drop the shadow does not
+explain has another cause (§2.19, §2.23) and the gate is not the thing to
+turn off.
+
+False positive: a URL probe outage or other bucket loss in the hour after
+the start pages `modern-gate-flip-drop` though the gate took little; read the
+shadow beside it. False negative: the dashboard counts cover connected valid
+public providers, the score export's Online population; a mixed fleet whose
+taskworkers disagree about the start reads the largest published start.
+
+Implementation convention: SIGNALS.md §2.29 (`modern-gate-readiness`) maps to
+`signal_modern_gate_readiness.go` and `signal_modern_gate_readiness_test.go`,
+registered by `NewModernGateReadinessSignal`. Pure tests with synthetic gauge
+values cover quiet outside the windows, the warning from 72 hours, the page
+from 24 hours, the page after the flip and its exact-half boundaries, counts
+read before the flip, a set switch, a moved start, an unpublished schedule,
+and stale or incomplete counts; synthetic Mimir answers drive the signal's
+own queries for the page before the start and the page after it.
 
 ---
 
