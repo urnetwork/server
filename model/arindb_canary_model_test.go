@@ -428,6 +428,48 @@ func TestArindbCanaryWarmingKeepsThePreviousChoiceWhileTheRowsCarryIt(t *testing
 	}
 }
 
+// A warming comparison whose paired sample reaches min_paired_sample and
+// trips blocks the latest: warming serves the old while the providers it lacks
+// are within the loss the breaker tolerates, else each row's latest slot, and
+// says that it tripped. A smaller sample cannot block; warming then serves the
+// latest unverified, and says so.
+func TestArindbCanaryWarmingNeverServesALatestItsPairedSampleTrips(t *testing.T) {
+	// tripping of the paired providers lose Quality under the latest
+	rows := func(paired int, tripping int, latestOnly int, oldOnly int) []*arindbCanaryProvider {
+		providers := testCanaryProviders(tripping, "aa", true, testCanaryNonQuality, testCanaryClean)
+		providers = append(providers, testCanaryProviders(paired-tripping, "aa", true, testCanaryClean, testCanaryClean)...)
+		providers = append(providers, testCanaryRowsOf(latestOnly, testCanaryLatestEpoch, 0)...)
+		return append(providers, testCanaryRowsOf(oldOnly, testCanaryOldEpoch, 0)...)
+	}
+	settings := defaultArindbCanarySettings()
+	for _, c := range []struct {
+		name         string
+		rows         []*arindbCanaryProvider
+		serving      int64
+		basis        string
+		tripped      bool
+		servesLatest bool
+	}{
+		{name: "the old within the tolerated loss", rows: rows(92, 20, 7, 1), serving: testCanaryOldEpoch, basis: ArindbCanaryBasisLatestBlocked, tripped: true},
+		{name: "the old short of it", rows: rows(60, 20, 39, 1), serving: 0, basis: ArindbCanaryBasisUncovered, tripped: true},
+		{name: "a sample below the floor", rows: rows(40, 20, 59, 1), serving: testCanaryLatestEpoch, basis: ArindbCanaryBasisLatest, servesLatest: true},
+	} {
+		decision := decideTestCanary(testCanaryPair(), c.rows, settings)
+		if decision.State != ArindbCanaryStateWarming || !decision.Buckets[RankModeQuality].Tripped {
+			t.Fatalf("%s: fixture state=%s quality=%+v", c.name, decision.State, decision.Buckets[RankModeQuality])
+		}
+		if decision.ServingEpoch != c.serving || decision.ServingBasis != c.basis || decision.WarmingTripped != c.tripped || decision.WarmingServesLatest != c.servesLatest {
+			t.Errorf("%s: serving=%d basis=%s warming_tripped=%t serves_latest=%t, want %d %s %t %t", c.name,
+				decision.ServingEpoch, decision.ServingBasis, decision.WarmingTripped, decision.WarmingServesLatest, c.serving, c.basis, c.tripped, c.servesLatest)
+		}
+	}
+	// a latest the previous decision served is not kept once its sample trips
+	passed := decideTestCanary(testCanaryPair(), testCanaryProviders(100, "aa", true, testCanaryClean, testCanaryClean), settings)
+	if decision := decideTestCanaryAfter(passed, testCanaryPair(), rows(92, 20, 7, 1), settings); decision.ServingEpoch != testCanaryOldEpoch || decision.ServingBasis != ArindbCanaryBasisLatestBlocked {
+		t.Fatalf("after a passing decision: serving=%d basis=%s, want the old", decision.ServingEpoch, decision.ServingBasis)
+	}
+}
+
 // A warming run reports what it compared without acting on it.
 func TestArindbCanaryWarmingNeverFallsBack(t *testing.T) {
 	providers := append(
@@ -710,7 +752,7 @@ func TestArindbCanaryDecisionWriteFailureIsReturned(t *testing.T) {
 // Absent keys use the defaults; out-of-range or unreadable values keep them.
 func TestArindbCanarySettingsUseDefaultsForAbsentAndInvalidKeys(t *testing.T) {
 	defaults := defaultArindbCanarySettings()
-	if defaults != (ArindbCanarySettings{BucketLossThreshold: 0.10, TripOnEmptiedCountry: true, MinCoverage: 0.98}) {
+	if defaults != (ArindbCanarySettings{BucketLossThreshold: 0.10, TripOnEmptiedCountry: true, MinCoverage: 0.98, MinPairedSample: 50}) {
 		t.Fatalf("defaults %+v", defaults)
 	}
 	if got := arindbCanarySettingsFromResource(nil, server.ErrResourceNotFound); got != defaults {
@@ -722,9 +764,10 @@ func TestArindbCanarySettingsUseDefaultsForAbsentAndInvalidKeys(t *testing.T) {
 	}{
 		{config: "{}", want: defaults},
 		{config: "arindb_canary: {}", want: defaults},
-		{config: "arindb_canary: {bucket_loss_threshold: 0.2, trip_on_emptied_country: false, min_coverage: 0.9}",
-			want: ArindbCanarySettings{BucketLossThreshold: 0.2, TripOnEmptiedCountry: false, MinCoverage: 0.9}},
-		{config: "arindb_canary: {min_coverage: 0.5}", want: ArindbCanarySettings{BucketLossThreshold: 0.10, TripOnEmptiedCountry: true, MinCoverage: 0.5}},
+		{config: "arindb_canary: {bucket_loss_threshold: 0.2, trip_on_emptied_country: false, min_coverage: 0.9, min_paired_sample: 10}",
+			want: ArindbCanarySettings{BucketLossThreshold: 0.2, TripOnEmptiedCountry: false, MinCoverage: 0.9, MinPairedSample: 10}},
+		{config: "arindb_canary: {min_coverage: 0.5}", want: ArindbCanarySettings{BucketLossThreshold: 0.10, TripOnEmptiedCountry: true, MinCoverage: 0.5, MinPairedSample: 50}},
+		{config: "arindb_canary: {min_paired_sample: 0}", want: defaults},
 		{config: "arindb_canary: {bucket_loss_threshold: 1.5, min_coverage: 0}", want: defaults},
 		{config: "arindb_canary: {bucket_loss_threshold: -0.1, min_coverage: 1.01}", want: defaults},
 		{config: "arindb_canary: {bucket_loss_threshold: .nan}", want: defaults},

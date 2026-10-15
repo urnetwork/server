@@ -62,6 +62,10 @@ const (
 	// warming: no database is carried by min_coverage of the cohort, so each
 	// row's latest slot, as before the canary, rather than one most rows lack
 	ArindbCanaryBasisUncovered = "uncovered"
+	// warming: the paired sample trips, so the old database, which the rows
+	// carry short of min_coverage but within the loss the breaker tolerates,
+	// rather than the latest
+	ArindbCanaryBasisLatestBlocked = "latest_blocked"
 )
 
 // Every state, in the order the stats gauge publishes them.
@@ -91,6 +95,9 @@ type ArindbCanarySettings struct {
 	TripOnEmptiedCountry bool `json:"trip_on_emptied_country"`
 	// the share of the public cohort that must carry facts for a database
 	MinCoverage float64 `json:"min_coverage"`
+	// paired providers a warming comparison needs before its trip blocks the
+	// latest database
+	MinPairedSample int `json:"min_paired_sample"`
 }
 
 func defaultArindbCanarySettings() ArindbCanarySettings {
@@ -98,6 +105,7 @@ func defaultArindbCanarySettings() ArindbCanarySettings {
 		BucketLossThreshold:  0.10,
 		TripOnEmptiedCountry: true,
 		MinCoverage:          0.98,
+		MinPairedSample:      50,
 	}
 }
 
@@ -121,6 +129,7 @@ func arindbCanarySettingsFromResource(resource *server.SimpleResource, lookupErr
 			BucketLossThreshold  *float64 `yaml:"bucket_loss_threshold"`
 			TripOnEmptiedCountry *bool    `yaml:"trip_on_emptied_country"`
 			MinCoverage          *float64 `yaml:"min_coverage"`
+			MinPairedSample      *int     `yaml:"min_paired_sample"`
 		} `yaml:"arindb_canary"`
 	}
 	if err := resource.UnmarshalYamlE(&document); err != nil {
@@ -146,6 +155,13 @@ func arindbCanarySettingsFromResource(resource *server.SimpleResource, lookupErr
 			settings.MinCoverage = *value
 		} else {
 			glog.Errorf("[arindb]provider config arindb_canary.min_coverage = %v is outside (0, 1]; kept %v\n", *value, settings.MinCoverage)
+		}
+	}
+	if value := document.ArindbCanary.MinPairedSample; value != nil {
+		if 1 <= *value {
+			settings.MinPairedSample = *value
+		} else {
+			glog.Errorf("[arindb]provider config arindb_canary.min_paired_sample = %d is below 1; kept %d\n", *value, settings.MinPairedSample)
 		}
 	}
 	return settings
@@ -369,6 +385,11 @@ type ArindbCanaryDecision struct {
 	ServingBasis string `json:"serving_basis"`
 	// the decision this one followed, "" without one
 	PreviousDecisionId string `json:"previous_decision_id,omitempty"`
+	// warming: the paired sample reached min_paired_sample and its Quality
+	// comparison trips, so the latest is not served
+	WarmingTripped bool `json:"warming_tripped"`
+	// warming serves the latest database, unverified by a comparison
+	WarmingServesLatest bool `json:"warming_serves_latest"`
 	// why the state is single, "" otherwise
 	SingleReason string                         `json:"single_reason,omitempty"`
 	Latest       ArindbCanaryDatabase           `json:"latest"`
@@ -566,21 +587,32 @@ func decideArindbCanary(
 		// serves its latest slot, as before the canary. The previous choice
 		// is kept while the rows still carry it, so coverage hovering near
 		// min_coverage cannot switch the fleet between the databases.
+		// A paired sample of min_paired_sample whose Quality comparison trips
+		// blocks the latest: it is evidence enough not to serve a database
+		// that would fall back once covered. Then the old serves while the
+		// providers it lacks are within the loss the breaker tolerates.
 		decision.State = ArindbCanaryStateWarming
+		latestBlocked := settings.MinPairedSample <= decision.Coverage.Paired && tripped
+		decision.WarmingTripped = latestBlocked
 		switch {
-		case previous != nil && carried(previous.ServingEpoch, arindbCanaryCoverageOf(providers, previous.ServingEpoch)):
+		case previous != nil && !(latestBlocked && previous.ServingEpoch == latestEpoch) &&
+			carried(previous.ServingEpoch, arindbCanaryCoverageOf(providers, previous.ServingEpoch)):
 			decision.ServingEpoch = previous.ServingEpoch
 			decision.ServingBasis = ArindbCanaryBasisPrevious
 		case carried(oldEpoch, decision.Coverage.Old):
 			decision.ServingEpoch = oldEpoch
 			decision.ServingBasis = ArindbCanaryBasisOld
-		case carried(latestEpoch, decision.Coverage.Latest):
+		case !latestBlocked && carried(latestEpoch, decision.Coverage.Latest):
 			decision.ServingEpoch = latestEpoch
 			decision.ServingBasis = ArindbCanaryBasisLatest
+		case latestBlocked && (1-settings.BucketLossThreshold)*float64(decision.Coverage.Providers) <= float64(decision.Coverage.Old):
+			decision.ServingEpoch = oldEpoch
+			decision.ServingBasis = ArindbCanaryBasisLatestBlocked
 		default:
 			decision.ServingEpoch = 0
 			decision.ServingBasis = ArindbCanaryBasisUncovered
 		}
+		decision.WarmingServesLatest = decision.ServingEpoch == latestEpoch
 	case tripped:
 		decision.State = ArindbCanaryStateFallback
 		decision.ServingEpoch = oldEpoch
@@ -769,6 +801,12 @@ func (self *ArindbCanaryDecision) logSummary() string {
 		fmt.Fprintf(&b, " reason=%s", self.SingleReason)
 	}
 	fmt.Fprintf(&b, " coverage latest=%d old=%d paired=%d of %d", self.Coverage.Latest, self.Coverage.Old, self.Coverage.Paired, self.Coverage.Providers)
+	if self.WarmingTripped {
+		b.WriteString(" warming_tripped")
+	}
+	if self.WarmingServesLatest {
+		b.WriteString(" warming_serves_latest")
+	}
 	for _, bucket := range ProviderEgressBuckets {
 		b2 := self.Buckets[bucket]
 		fmt.Fprintf(&b, "; %s old=%d latest=%d loss=%.4f removed=%d added=%d tripped=%t", bucket, b2.Old, b2.Latest, b2.LossRatio, b2.Removed, b2.Added, b2.Tripped)
@@ -895,7 +933,7 @@ func parseArindbCanaryDecision(data []byte) (*ArindbCanaryDecision, error) {
 		// previous decision's, or each row's latest slot
 		valid := false
 		switch decision.ServingBasis {
-		case ArindbCanaryBasisOld:
+		case ArindbCanaryBasisOld, ArindbCanaryBasisLatestBlocked:
 			valid = 0 < decision.ServingEpoch && decision.ServingEpoch == decision.Old.BuildEpoch
 		case ArindbCanaryBasisLatest:
 			valid = 0 < decision.ServingEpoch && decision.ServingEpoch == decision.Latest.BuildEpoch
