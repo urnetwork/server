@@ -29,17 +29,19 @@ const (
 	providersBackfillMetric = "urnetwork_provider_backfill"
 	providersAnsweredMetric = "urnetwork_provider_answered_total"
 	providersOutcomesMetric = "urnetwork_findproviders2_outcomes_total"
-	// each process's reads of the published ARIN canary decision
-	providersArindbDecisionReadsMetric = "urnetwork_arindb_decision_reads_total"
 )
 
-// Whether a series is one of the per-process metrics, which are summed as
-// rates rather than read with max.
+// each process's reads of the published ARIN canary decision, summed as a
+// share of every read; TestProvidersDashboardShowsTheArindbCanaryRow pins the
+// read
+const providersArindbDecisionReadsMetric = "urnetwork_arindb_decision_reads_total"
+
+// Whether a series is one of the per-process answer metrics, which are summed
+// as rates rather than read with max.
 func providersPerProcessMetric(metric string) bool {
 	return strings.HasPrefix(metric, providersBackfillMetric+"_") ||
 		metric == providersAnsweredMetric ||
-		metric == providersOutcomesMetric ||
-		metric == providersArindbDecisionReadsMetric
+		metric == providersOutcomesMetric
 }
 
 // The egress row of the providers dashboard: every bucket and every exclusion
