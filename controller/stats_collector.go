@@ -5,17 +5,23 @@ package controller
 // grafana front's public /stats.json feed (warp repo, grafana/stats.go),
 // which implements the network operator stats contract consumed by ur.xyz:
 //
+//	urnetwork_stats_epoch_number                     the current settlement epoch (epoch clock)
+//	urnetwork_stats_epoch_start_seconds              unix time of the current epoch's start block (epoch clock)
+//	urnetwork_stats_epoch_end_seconds                unix time the current epoch ends, projected (epoch clock)
+//	urnetwork_stats_epoch_start_block                the current epoch's first chain block (epoch clock)
+//	urnetwork_stats_epoch_end_block                  the next epoch's first chain block (epoch clock)
+//	urnetwork_stats_prev_epoch_start_seconds         unix time the last finished epoch started (epoch clock)
 //	urnetwork_stats_total_networks                   total networks (db)
-//	urnetwork_stats_block_users                      unique top-level identities with contract usage this block (db)
+//	urnetwork_stats_epoch_users                      unique top-level identities with contract usage this epoch (db)
 //	urnetwork_stats_online_providers                 connected valid public providers (db)
 //	urnetwork_stats_countries                        countries with connected valid providers (db)
-//	urnetwork_stats_staked_alpha                     cumulative α staked in the ST contract (chain)
-//	urnetwork_stats_block_demand_deposits_alpha      demand deposits this block (st_event mirror)
-//	urnetwork_stats_block_miner_emissions_alpha      miner emission captured this block (st_event mirror)
+//	urnetwork_stats_staked_alpha                     cumulative α staked in the ST reserve (chain)
+//	urnetwork_stats_epoch_demand_deposits_alpha      demand deposits this epoch (st_event mirror)
+//	urnetwork_stats_epoch_miner_emissions_alpha      miner emission captured this epoch (st_event mirror)
 //	urnetwork_stats_alpha_usd                        α price in USD (geckoterminal, sourced server side)
-//	urnetwork_stats_prev_block_users                 users of the last finished block (redis snapshot)
-//	urnetwork_stats_prev_block_demand_deposits_alpha demand deposits of the last finished block
-//	urnetwork_stats_prev_block_miner_emissions_alpha miner emission of the last finished block
+//	urnetwork_stats_prev_epoch_users                 users of the last finished epoch (redis snapshot)
+//	urnetwork_stats_prev_epoch_demand_deposits_alpha demand deposits of the last finished epoch
+//	urnetwork_stats_prev_epoch_miner_emissions_alpha miner emission of the last finished epoch
 //
 // and the public grafana dashboard (grafana/dashboards/public-traffic.json)
 // additionally reads:
@@ -28,13 +34,18 @@ package controller
 //	urnetwork_stats_online_extenders_by_country      the same, per country {country_code, country} (db)
 //	urnetwork_stats_online_providers_by_ip_family    online providers by proven family {ip_family} (db)
 //	urnetwork_stats_online_extenders_by_ip_family    online extenders by active address family {ip_family} (db)
-//	urnetwork_stats_block_number                     the current subnet block number (clock)
-//	urnetwork_stats_block_start_seconds              unix open time of the current subnet block (clock)
-//	urnetwork_stats_block_end_seconds                unix close time of the current subnet block (clock)
-//	urnetwork_stats_block_miner_claims_alpha         alpha claimed by miners this block (st_event mirror)
-//	urnetwork_stats_block_miners_claimed             distinct miner coldkeys that claimed this block (st_event mirror)
-//	urnetwork_stats_prev_block_miner_claims_alpha    alpha claimed by miners in the last finished block
-//	urnetwork_stats_prev_block_miners_claimed        distinct miner coldkeys that claimed in the last finished block
+//	urnetwork_stats_epoch_miner_claims_alpha         alpha claimed by miners this epoch (st_event mirror)
+//	urnetwork_stats_epoch_miners_claimed             distinct miner coldkeys that claimed this epoch (st_event mirror)
+//	urnetwork_stats_prev_epoch_miner_claims_alpha    alpha claimed by miners in the last finished epoch
+//	urnetwork_stats_prev_epoch_miners_claimed        distinct miner coldkeys that claimed in the last finished epoch
+//
+// every epoch gauge is also published, with the same value, under the name it
+// had as a "block" gauge (urnetwork_stats_block_number for
+// urnetwork_stats_epoch_number, urnetwork_stats_prev_block_users for
+// urnetwork_stats_prev_epoch_users, and so on). those names are deprecated
+// aliases for feeds deployed before the epoch clock; nothing in this repo reads
+// them, and they can go once no such feed runs. the three epoch clock gauges
+// without a block name (start and end block, previous start) are new.
 //
 // the derived-location gauges are internal (connect/GEOMAP.md §5.4, §5.7)
 // and are read only by grafana/dashboards/extenders.json:
@@ -80,12 +91,17 @@ package controller
 // the original window end, not the cache-hit time; contract_hour_available
 // drops to zero and the three counts become NaN when that source expires.
 //
-// the block accumulators reset when a block rolls over, so the feed also
-// serves the finished block as a stable reference. deposits and emissions
-// recompute exactly from the st_event mirror by chain block range; users
-// come from a per-block redis snapshot frozen forward by this collector
-// (a last-seen activity marker cannot reconstruct a past window), so
-// prev_block_users starts publishing at the first rollover after deploy.
+// the epoch accumulators reset when an epoch rolls over, so the feed also
+// serves the finished epoch as a stable reference. deposits, emissions and
+// claims recompute exactly from the st_event mirror over the epoch's chain
+// blocks; users come from a per-epoch redis snapshot frozen forward by this
+// collector (a last-seen activity marker cannot reconstruct a past window),
+// so prev_epoch_users starts publishing at the first rollover after deploy.
+// the snapshots are keyed by epoch under their own prefix, so a snapshot of a
+// Sunday block, the pre-mainnet clock, is never read as an epoch's. a
+// previous-epoch value that does not apply -- no snapshot of that epoch, or no
+// previous epoch at all -- is withdrawn (NaN, which the push receiver drops,
+// so the series goes stale) rather than left holding the epoch before's.
 //
 // StartStatsCollector is called only by the taskworker
 // (cli/taskworker/main.go), so only taskworker registries export these
@@ -96,15 +112,16 @@ package controller
 // on its first set, so a stat that never has a value here (st disabled,
 // no netuid) is never exported at all rather than exported as 0.
 //
-// the "block" here is the subnet block clock (model/sn_model.go): 1-based,
-// 7 days per block, every block opening and closing at 00:00 UTC Sunday.
-// it is unrelated to the warp deploy block label and to the ST contract
-// epoch; st_event rows are windowed by mapping the block open time to a
-// chain block through the ~12s/block head anchor.
+// the epoch here is the SN25 settlement epoch, from the epoch clock in
+// stats_epoch_clock.go: the coordinator's schedule of chain blocks, with
+// block-derived times. it replaced the Sunday block clock of model/sn_model.go
+// here, which the points leaderboard still uses and which is unchanged; it is
+// unrelated to the warp deploy block label.
 
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -150,6 +167,34 @@ func (self *statsGauge) set(value float64) {
 		self.registered = true
 	}
 	self.gauge.Set(value)
+}
+
+// unset withdraws the value: a gauge never set stays unexported, and an
+// exported one reads NaN. the warp push receiver drops NaN samples, so the
+// series goes stale in mimir and the feed and the dashboards show no value,
+// rather than a value that no longer applies pushed forward
+func (self *statsGauge) unset() {
+	if self.registered {
+		self.gauge.Set(math.NaN())
+	}
+}
+
+// statsEpochGauge publishes an epoch value under its epoch name and, with the
+// same value, under the deprecated block name it had before the epoch clock
+// (see the file comment). set only from the collector goroutine
+type statsEpochGauge struct {
+	epoch *statsGauge
+	block *statsGauge
+}
+
+func (self statsEpochGauge) set(value float64) {
+	self.epoch.set(value)
+	self.block.set(value)
+}
+
+func (self statsEpochGauge) unset() {
+	self.epoch.unset()
+	self.block.unset()
 }
 
 // statsGaugeVec is a labeled stats gauge with the same lazy registration.
@@ -210,42 +255,78 @@ var statsTotalNetworksGauge = newStatsGauge(
 	"total_networks",
 	"Total networks at the operator",
 )
-var statsBlockUsersGauge = newStatsGauge(
-	"block_users",
-	"Unique top-level clients with contract usage this block",
-)
+var statsEpochUsersGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"epoch_users",
+		"Unique top-level clients with contract usage this settlement epoch",
+	),
+	block: newStatsGauge(
+		"block_users",
+		"Deprecated alias of urnetwork_stats_epoch_users",
+	),
+}
 var statsCountriesGauge = newStatsGauge(
 	"countries",
 	"Countries with a connected valid provider",
 )
 var statsStakedAlphaGauge = newStatsGauge(
 	"staked_alpha",
-	"Cumulative alpha staked in the ST contract (buybackTotal)",
+	"Cumulative alpha staked in the ST reserve (the reserve sink's principal)",
 )
-var statsBlockDemandDepositsAlphaGauge = newStatsGauge(
-	"block_demand_deposits_alpha",
-	"Alpha demand deposits this block",
-)
-var statsBlockMinerEmissionsAlphaGauge = newStatsGauge(
-	"block_miner_emissions_alpha",
-	"Alpha miner emission captured this block",
-)
+var statsEpochDemandDepositsAlphaGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"epoch_demand_deposits_alpha",
+		"Alpha demand deposits this settlement epoch",
+	),
+	block: newStatsGauge(
+		"block_demand_deposits_alpha",
+		"Deprecated alias of urnetwork_stats_epoch_demand_deposits_alpha",
+	),
+}
+var statsEpochMinerEmissionsAlphaGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"epoch_miner_emissions_alpha",
+		"Alpha miner emission captured this settlement epoch",
+	),
+	block: newStatsGauge(
+		"block_miner_emissions_alpha",
+		"Deprecated alias of urnetwork_stats_epoch_miner_emissions_alpha",
+	),
+}
 var statsAlphaUsdGauge = newStatsGauge(
 	"alpha_usd",
 	"Alpha price in USD as the operator observes it",
 )
-var statsPrevBlockUsersGauge = newStatsGauge(
-	"prev_block_users",
-	"Unique top-level clients with contract usage in the last finished block",
-)
-var statsPrevBlockDemandDepositsAlphaGauge = newStatsGauge(
-	"prev_block_demand_deposits_alpha",
-	"Alpha demand deposits in the last finished block",
-)
-var statsPrevBlockMinerEmissionsAlphaGauge = newStatsGauge(
-	"prev_block_miner_emissions_alpha",
-	"Alpha miner emission captured in the last finished block",
-)
+var statsPrevEpochUsersGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"prev_epoch_users",
+		"Unique top-level clients with contract usage in the last finished settlement epoch",
+	),
+	block: newStatsGauge(
+		"prev_block_users",
+		"Deprecated alias of urnetwork_stats_prev_epoch_users",
+	),
+}
+var statsPrevEpochDemandDepositsAlphaGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"prev_epoch_demand_deposits_alpha",
+		"Alpha demand deposits in the last finished settlement epoch",
+	),
+	block: newStatsGauge(
+		"prev_block_demand_deposits_alpha",
+		"Deprecated alias of urnetwork_stats_prev_epoch_demand_deposits_alpha",
+	),
+}
+var statsPrevEpochMinerEmissionsAlphaGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"prev_epoch_miner_emissions_alpha",
+		"Alpha miner emission captured in the last finished settlement epoch",
+	),
+	block: newStatsGauge(
+		"prev_block_miner_emissions_alpha",
+		"Deprecated alias of urnetwork_stats_prev_epoch_miner_emissions_alpha",
+	),
+}
 var statsUsers24hGauge = newStatsGauge(
 	"users_24h",
 	"Unique top-level clients with contract usage in the last 24 hours",
@@ -601,34 +682,89 @@ func statsIpFamilyValues(ipv4 int64, ipv6 int64, dualstack int64) []statsLabeled
 	return values
 }
 
-var statsBlockNumberGauge = newStatsGauge(
-	"block_number",
-	"The current subnet block number (1-based, 7 days per block from the genesis Sunday 00:00 UTC)",
+// the settlement epoch clock (stats_epoch_clock.go)
+var statsEpochNumberGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"epoch_number",
+		"The current SN25 settlement epoch, numbered from 0 as the coordinator numbers it",
+	),
+	block: newStatsGauge(
+		"block_number",
+		"Deprecated alias of urnetwork_stats_epoch_number",
+	),
+}
+var statsEpochStartSecondsGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"epoch_start_seconds",
+		"Unix time of the current settlement epoch's start block",
+	),
+	block: newStatsGauge(
+		"block_start_seconds",
+		"Deprecated alias of urnetwork_stats_epoch_start_seconds",
+	),
+}
+var statsEpochEndSecondsGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"epoch_end_seconds",
+		"Unix time the current settlement epoch ends and the next starts, projected from the finalized head",
+	),
+	block: newStatsGauge(
+		"block_end_seconds",
+		"Deprecated alias of urnetwork_stats_epoch_end_seconds",
+	),
+}
+var statsEpochStartBlockGauge = newStatsGauge(
+	"epoch_start_block",
+	"The current settlement epoch's first chain block",
 )
-var statsBlockStartSecondsGauge = newStatsGauge(
-	"block_start_seconds",
-	"Unix time the current subnet block opened",
+var statsEpochEndBlockGauge = newStatsGauge(
+	"epoch_end_block",
+	"The next settlement epoch's first chain block (the coordinator's epochEndBlock)",
 )
-var statsBlockEndSecondsGauge = newStatsGauge(
-	"block_end_seconds",
-	"Unix time the current subnet block closes and the next opens",
+var statsPrevEpochStartSecondsGauge = newStatsGauge(
+	"prev_epoch_start_seconds",
+	"Unix time the last finished settlement epoch started; it ended at the current epoch's start",
 )
-var statsBlockMinerClaimsAlphaGauge = newStatsGauge(
-	"block_miner_claims_alpha",
-	"Alpha claimed by miners this block",
-)
-var statsBlockMinersClaimedGauge = newStatsGauge(
-	"block_miners_claimed",
-	"Distinct miner coldkeys that claimed this block",
-)
-var statsPrevBlockMinerClaimsAlphaGauge = newStatsGauge(
-	"prev_block_miner_claims_alpha",
-	"Alpha claimed by miners in the last finished block",
-)
-var statsPrevBlockMinersClaimedGauge = newStatsGauge(
-	"prev_block_miners_claimed",
-	"Distinct miner coldkeys that claimed in the last finished block",
-)
+var statsEpochMinerClaimsAlphaGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"epoch_miner_claims_alpha",
+		"Alpha claimed by miners this settlement epoch",
+	),
+	block: newStatsGauge(
+		"block_miner_claims_alpha",
+		"Deprecated alias of urnetwork_stats_epoch_miner_claims_alpha",
+	),
+}
+var statsEpochMinersClaimedGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"epoch_miners_claimed",
+		"Distinct miner coldkeys that claimed this settlement epoch",
+	),
+	block: newStatsGauge(
+		"block_miners_claimed",
+		"Deprecated alias of urnetwork_stats_epoch_miners_claimed",
+	),
+}
+var statsPrevEpochMinerClaimsAlphaGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"prev_epoch_miner_claims_alpha",
+		"Alpha claimed by miners in the last finished settlement epoch",
+	),
+	block: newStatsGauge(
+		"prev_block_miner_claims_alpha",
+		"Deprecated alias of urnetwork_stats_prev_epoch_miner_claims_alpha",
+	),
+}
+var statsPrevEpochMinersClaimedGauge = statsEpochGauge{
+	epoch: newStatsGauge(
+		"prev_epoch_miners_claimed",
+		"Distinct miner coldkeys that claimed in the last finished settlement epoch",
+	),
+	block: newStatsGauge(
+		"prev_block_miners_claimed",
+		"Deprecated alias of urnetwork_stats_prev_epoch_miners_claimed",
+	),
+}
 
 // statsRaoToAlpha converts rao (1e-9 α) to whole α
 func statsRaoToAlpha(rao *big.Int) float64 {
@@ -643,12 +779,26 @@ func StartStatsCollector(ctx context.Context) {
 	go server.HandleError(func() {
 		dbTick := 0
 		for {
-			statsRefreshBlockClock()
+			now := time.Now()
+			// the clock projects without a data source, so a failed refresh
+			// still leaves this tick a window
+			window := statsEpochClockState.window(now)
+			server.HandleError(func() {
+				window = statsRefreshEpochClock(ctx, now)
+			})
 			if dbTick == 0 {
 				server.HandleError(func() {
-					statsRefreshDb(ctx)
+					statsRefreshDb(ctx, window)
 				})
 			} else {
+				if !statsEpochUsersState.attempted || statsEpochUsersState.epoch != window.Epoch {
+					// a new epoch publishes its users, and the finished epoch's
+					// final count, on its first tick rather than up to a db
+					// tick later
+					server.HandleError(func() {
+						statsRefreshEpochUsers(ctx, window)
+					})
+				}
 				// A cold follower must pick up the completed shared snapshot on
 				// a later minute tick instead of racing the next five-minute fill.
 				server.HandleError(func() {
@@ -660,7 +810,7 @@ func StartStatsCollector(ctx context.Context) {
 			}
 			dbTick = (dbTick + 1) % statsCollectorDbTicks
 			server.HandleError(func() {
-				statsRefreshChain(ctx)
+				statsRefreshChain(ctx, window)
 			})
 			server.HandleError(func() {
 				statsRefreshPrice(ctx)
@@ -674,20 +824,123 @@ func StartStatsCollector(ctx context.Context) {
 	})
 }
 
-// statsRefreshBlockClock publishes the subnet block clock. it needs no
-// data source, so it refreshes on every tick and is the first stat a fresh
-// deploy exports
-func statsRefreshBlockClock() {
-	now := time.Now()
-	blockStart := model.SubnetBlockStart(now)
-	statsBlockNumberGauge.set(float64(model.SubnetBlockNumber(now)))
-	statsBlockStartSecondsGauge.set(float64(blockStart.Unix()))
-	statsBlockEndSecondsGauge.set(float64(blockStart.Add(model.SubnetBlockDuration).Unix()))
+// statsEpochClockState is the collector's settlement epoch clock
+var statsEpochClockState = newStatsEpochClock()
+
+// statsRefreshEpochClock re-anchors the epoch clock on the chain when the st
+// subsystem is on, then publishes the epoch it projects for now. it refreshes
+// on every tick and is the first stat a fresh deploy exports; without the
+// chain it publishes the built-in mainnet schedule
+func statsRefreshEpochClock(ctx context.Context, now time.Time) statsEpochWindow {
+	if StEnabled() {
+		if cfg, client, err := stRequire(); err == nil {
+			if err := statsEpochClockState.refresh(ctx, client, cfg.BlockSeconds, now); err != nil {
+				glog.Infof("[stats]epoch clock projects from its last anchor (%s)\n", err)
+			}
+		}
+	}
+	window := statsEpochClockState.window(now)
+	statsPublishEpochClock(window)
+	return window
 }
 
-func statsRefreshDb(ctx context.Context) {
+func statsPublishEpochClock(window statsEpochWindow) {
+	statsEpochNumberGauge.set(float64(window.Epoch))
+	statsEpochStartSecondsGauge.set(float64(window.Start.Unix()))
+	statsEpochEndSecondsGauge.set(float64(window.End.Unix()))
+	statsEpochStartBlockGauge.set(float64(window.StartBlock))
+	statsEpochEndBlockGauge.set(float64(window.EndBlock))
+	if window.HasPrev {
+		statsPrevEpochStartSecondsGauge.set(float64(window.PrevStart.Unix()))
+	} else {
+		statsPrevEpochStartSecondsGauge.unset()
+	}
+}
+
+// statsEpochSource is what the epoch accumulators read: the users count, its
+// per-epoch redis snapshots, and the st_event mirror sums over chain blocks
+// [minBlock, maxBlock). tests swap it
+type statsEpochSource struct {
+	countUsersSince  func(ctx context.Context, startTime time.Time) int64
+	setUsersSnapshot func(ctx context.Context, epoch uint64, users int64)
+	getUsersSnapshot func(ctx context.Context, epoch uint64) (int64, bool)
+	depositsRao      func(ctx context.Context, deploymentKey model.StDeploymentKey, minBlock uint64, maxBlock uint64) *big.Int
+	emissionsRao     func(ctx context.Context, deploymentKey model.StDeploymentKey, minBlock uint64, maxBlock uint64) *big.Int
+	claims           func(ctx context.Context, deploymentKey model.StDeploymentKey, minBlock uint64, maxBlock uint64) (*big.Int, int64)
+}
+
+var statsEpochModelSource = statsEpochSource{
+	countUsersSince:  model.CountTopLevelClientsWithContractSince,
+	setUsersSnapshot: model.SetEpochUsersSnapshot,
+	getUsersSnapshot: model.GetEpochUsersSnapshot,
+	depositsRao:      model.SumStDepositedInBlockRangeRao,
+	emissionsRao:     model.SumStEmissionCapturedInBlockRangeRao,
+	claims:           model.SumStMinerClaimedInBlockRange,
+}
+
+// the epoch the users gauges were last refreshed for
+var statsEpochUsersState struct {
+	attempted bool
+	epoch     uint64
+}
+
+func statsRefreshEpochUsers(ctx context.Context, window statsEpochWindow) {
+	// recorded before the read, so a read that fails waits for the next db
+	// tick instead of rescanning network_client on every tick
+	statsEpochUsersState.attempted = true
+	statsEpochUsersState.epoch = window.Epoch
+	statsPublishEpochUsers(ctx, window, statsEpochModelSource)
+}
+
+// statsPublishEpochUsers publishes the users of the current epoch and of the
+// last finished one. the running count is frozen forward into the epoch's
+// snapshot, so the last write before the rollover is the finished epoch's
+// final count; the previous epoch's users are published only from its own
+// snapshot, so they start at the first rollover after deploy and are
+// withdrawn when that snapshot is missing
+func statsPublishEpochUsers(ctx context.Context, window statsEpochWindow, source statsEpochSource) {
+	users := source.countUsersSince(ctx, window.Start)
+	statsEpochUsersGauge.set(float64(users))
+	source.setUsersSnapshot(ctx, window.Epoch, users)
+	if !window.HasPrev {
+		statsPrevEpochUsersGauge.unset()
+		return
+	}
+	if prevUsers, ok := source.getUsersSnapshot(ctx, window.Epoch-1); ok {
+		statsPrevEpochUsersGauge.set(float64(prevUsers))
+	} else {
+		statsPrevEpochUsersGauge.unset()
+	}
+}
+
+// statsPublishEpochAlpha publishes the deposits, emissions and claims of the
+// current epoch, its chain blocks [StartBlock, EndBlock), and of the last
+// finished one, [PrevStartBlock, StartBlock). each recomputes exactly from
+// the event mirror, so the previous epoch is right from the first refresh
+// after deploy
+func statsPublishEpochAlpha(ctx context.Context, deploymentKey model.StDeploymentKey, window statsEpochWindow, source statsEpochSource) {
+	statsEpochDemandDepositsAlphaGauge.set(statsRaoToAlpha(source.depositsRao(ctx, deploymentKey, window.StartBlock, window.EndBlock)))
+	statsEpochMinerEmissionsAlphaGauge.set(statsRaoToAlpha(source.emissionsRao(ctx, deploymentKey, window.StartBlock, window.EndBlock)))
+	claimsRao, minersClaimed := source.claims(ctx, deploymentKey, window.StartBlock, window.EndBlock)
+	statsEpochMinerClaimsAlphaGauge.set(statsRaoToAlpha(claimsRao))
+	statsEpochMinersClaimedGauge.set(float64(minersClaimed))
+
+	if !window.HasPrev {
+		statsPrevEpochDemandDepositsAlphaGauge.unset()
+		statsPrevEpochMinerEmissionsAlphaGauge.unset()
+		statsPrevEpochMinerClaimsAlphaGauge.unset()
+		statsPrevEpochMinersClaimedGauge.unset()
+		return
+	}
+	statsPrevEpochDemandDepositsAlphaGauge.set(statsRaoToAlpha(source.depositsRao(ctx, deploymentKey, window.PrevStartBlock, window.StartBlock)))
+	statsPrevEpochMinerEmissionsAlphaGauge.set(statsRaoToAlpha(source.emissionsRao(ctx, deploymentKey, window.PrevStartBlock, window.StartBlock)))
+	prevClaimsRao, prevMinersClaimed := source.claims(ctx, deploymentKey, window.PrevStartBlock, window.StartBlock)
+	statsPrevEpochMinerClaimsAlphaGauge.set(statsRaoToAlpha(prevClaimsRao))
+	statsPrevEpochMinersClaimedGauge.set(float64(prevMinersClaimed))
+}
+
+func statsRefreshDb(ctx context.Context, window statsEpochWindow) {
 	now := time.Now()
-	blockNumber := model.SubnetBlockNumber(now)
 
 	statsTotalNetworksGauge.set(float64(model.CountNetworks(ctx)))
 
@@ -783,14 +1036,7 @@ func statsRefreshDb(ctx context.Context) {
 
 	statsUsers24hGauge.set(float64(model.CountTopLevelClientsWithContractSince(ctx, now.Add(-24*time.Hour))))
 
-	users := model.CountTopLevelClientsWithContractSince(ctx, model.SubnetBlockStart(now))
-	statsBlockUsersGauge.set(float64(users))
-	// freeze the running count forward; the last write before rollover is
-	// the finished block's final value (see model.SetBlockUsersSnapshot)
-	model.SetBlockUsersSnapshot(ctx, blockNumber, users)
-	if prevUsers, ok := model.GetBlockUsersSnapshot(ctx, blockNumber-1); ok {
-		statsPrevBlockUsersGauge.set(float64(prevUsers))
-	}
+	statsRefreshEpochUsers(ctx, window)
 }
 
 // Publishes the pool as the egress rules decide it, with the rollout flag as
@@ -1089,7 +1335,11 @@ func statsRefreshExtenderPings(ctx context.Context, now time.Time) {
 	}
 }
 
-func statsRefreshChain(ctx context.Context) {
+// statsRefreshChain publishes the epoch's alpha accumulators and the staked
+// total. the accumulators sum the st_event mirror over the epoch's chain
+// blocks, so they need no chain read and follow the clock through a chain
+// outage; only the staked total reads the chain
+func statsRefreshChain(ctx context.Context, window statsEpochWindow) {
 	if !StEnabled() {
 		return
 	}
@@ -1098,50 +1348,16 @@ func statsRefreshChain(ctx context.Context) {
 		return
 	}
 
+	statsPublishEpochAlpha(ctx, cfg.DeploymentKey(), window, statsEpochModelSource)
+
+	// the reserve sink's principal: every deposit credited to the
+	// immutable reserve (CoreStClient.BuybackTotal)
 	buybackRao, err := client.BuybackTotal(ctx)
 	if err != nil {
-		glog.Infof("[stats]buybackTotal read error (%s)\n", err)
+		glog.Infof("[stats]reserve principal read error (%s)\n", err)
 		return
 	}
 	statsStakedAlphaGauge.set(statsRaoToAlpha(buybackRao))
-
-	// map the block open time to a chain block through the head anchor to
-	// window the mirrored events
-	state, err := client.Epoch(ctx)
-	if err != nil {
-		glog.Infof("[stats]chain head read error (%s)\n", err)
-		return
-	}
-	// chain blocks back from the head for a wall-clock time, clamped to
-	// the chain genesis
-	now := time.Now()
-	chainBlockAt := func(t time.Time) uint64 {
-		blocksBack := uint64(int64(now.Sub(t)/time.Second) / cfg.BlockSeconds)
-		if state.HeadBlock <= blocksBack {
-			return 0
-		}
-		return state.HeadBlock - blocksBack
-	}
-
-	blockStart := model.SubnetBlockStart(now)
-	windowStartBlock := chainBlockAt(blockStart)
-	deploymentKey := cfg.DeploymentKey()
-	statsBlockDemandDepositsAlphaGauge.set(statsRaoToAlpha(model.SumStDepositedInBlockRangeRao(ctx, deploymentKey, windowStartBlock, state.HeadBlock+1)))
-	statsBlockMinerEmissionsAlphaGauge.set(statsRaoToAlpha(model.SumStPoolSweptMeasuredInBlockRangeRao(ctx, deploymentKey, windowStartBlock, state.HeadBlock+1)))
-	claimsRao, minersClaimed := model.SumStMinerClaimedInBlockRange(ctx, deploymentKey, windowStartBlock, state.HeadBlock+1)
-	statsBlockMinerClaimsAlphaGauge.set(statsRaoToAlpha(claimsRao))
-	statsBlockMinersClaimedGauge.set(float64(minersClaimed))
-
-	// the last finished block, recomputed exactly from the event mirror.
-	// block 1 has no predecessor
-	if model.SubnetBlockGenesis.Before(blockStart) {
-		prevStartBlock := chainBlockAt(blockStart.Add(-model.SubnetBlockDuration))
-		statsPrevBlockDemandDepositsAlphaGauge.set(statsRaoToAlpha(model.SumStDepositedInBlockRangeRao(ctx, deploymentKey, prevStartBlock, windowStartBlock)))
-		statsPrevBlockMinerEmissionsAlphaGauge.set(statsRaoToAlpha(model.SumStPoolSweptMeasuredInBlockRangeRao(ctx, deploymentKey, prevStartBlock, windowStartBlock)))
-		prevClaimsRao, prevMinersClaimed := model.SumStMinerClaimedInBlockRange(ctx, deploymentKey, prevStartBlock, windowStartBlock)
-		statsPrevBlockMinerClaimsAlphaGauge.set(statsRaoToAlpha(prevClaimsRao))
-		statsPrevBlockMinersClaimedGauge.set(float64(prevMinersClaimed))
-	}
 }
 
 // Returns the external market URL only for mainnet alpha. Testnet alpha has no

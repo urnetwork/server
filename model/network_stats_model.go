@@ -32,33 +32,35 @@ func CountNetworks(ctx context.Context) int64 {
 	return count
 }
 
-// the per-block users snapshot keys (see SetBlockUsersSnapshot)
-const statsBlockUsersRedisKeyPrefix = "stats.block_users."
+// the per-epoch users snapshot keys (see SetEpochUsersSnapshot). The prefix
+// is new with the settlement epoch clock, so a snapshot of a Sunday block
+// (stats.block_users.<n>, the pre-mainnet clock) is never read as an epoch's.
+const statsEpochUsersRedisKeyPrefix = "stats.epoch_users."
 
-// a snapshot outlives its block by a few blocks and then self-expires
-const statsBlockUsersSnapshotTtl = 21 * 24 * time.Hour
+// a snapshot outlives its epoch by a couple of epochs and then self-expires
+const statsEpochUsersSnapshotTtl = 21 * 24 * time.Hour
 
-// SetBlockUsersSnapshot records the running users count for a block. The
-// stats collector overwrites it on every refresh while the block is open,
-// so the last write before rollover is the finished block's final value —
-// the previous-block reference the feed serves. A last-seen activity
-// marker cannot reconstruct a past window, which is why the value is
-// frozen forward rather than recomputed.
-func SetBlockUsersSnapshot(ctx context.Context, block int, users int64) {
+// SetEpochUsersSnapshot records the running users count for a settlement
+// epoch. The stats collector overwrites it on every refresh while the epoch
+// is open, so the last write before the rollover is the finished epoch's
+// final value — the previous-epoch reference the feed serves. A last-seen
+// activity marker cannot reconstruct a past window, which is why the value
+// is frozen forward rather than recomputed.
+func SetEpochUsersSnapshot(ctx context.Context, epoch uint64, users int64) {
 	server.Redis(ctx, func(client server.RedisClient) {
-		key := fmt.Sprintf("%s%d", statsBlockUsersRedisKeyPrefix, block)
-		_, err := client.Set(ctx, key, users, statsBlockUsersSnapshotTtl).Result()
+		key := fmt.Sprintf("%s%d", statsEpochUsersRedisKeyPrefix, epoch)
+		_, err := client.Set(ctx, key, users, statsEpochUsersSnapshotTtl).Result()
 		server.Raise(err)
 	})
 }
 
-// GetBlockUsersSnapshot reads a block's users snapshot; ok is false when
-// no snapshot was recorded (collector not running during that block).
-func GetBlockUsersSnapshot(ctx context.Context, block int) (int64, bool) {
+// GetEpochUsersSnapshot reads an epoch's users snapshot; ok is false when
+// no snapshot was recorded (collector not running during that epoch).
+func GetEpochUsersSnapshot(ctx context.Context, epoch uint64) (int64, bool) {
 	var users int64
 	var ok bool
 	server.Redis(ctx, func(client server.RedisClient) {
-		key := fmt.Sprintf("%s%d", statsBlockUsersRedisKeyPrefix, block)
+		key := fmt.Sprintf("%s%d", statsEpochUsersRedisKeyPrefix, epoch)
 		value, err := client.Get(ctx, key).Result()
 		if err != nil {
 			return
