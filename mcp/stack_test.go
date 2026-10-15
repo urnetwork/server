@@ -57,10 +57,6 @@ import (
 )
 
 const (
-	// distinct from the proxy package harness so both test binaries can run at
-	// the same time without fighting over the exchange service socket
-	fetchTestConnectServicePort = 7310
-
 	fetchTestInitialBalance = model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024)
 
 	// recognizable in the body of the test web server's index page
@@ -410,10 +406,26 @@ func setupFetchTestStackWithOptions(t testing.TB, options *fetchTestStackOptions
 		service := "connect"
 		block := "test"
 		routes := map[string]string{connectHost: "127.0.0.1"}
-		hostToServicePorts := map[int]int{fetchTestConnectServicePort: fetchTestConnectServicePort}
+		// The exchange's service port is the stack's own OS-assigned loopback
+		// listener, which the exchange owns. A fixed port, which connect binds
+		// with SO_REUSEPORT on every address, is shared with every other
+		// process that binds it, such as a second run of this package, and
+		// each one takes a share of the others' resident connections.
+		exchangeListener := listenFetchTestTcp(t)
+		exchangePort := fetchTestTcpPort(exchangeListener)
+		hostToServicePorts := map[int]int{exchangePort: exchangePort}
 
 		exchangeSettings := connectserver.DefaultExchangeSettings()
-		exchange := connectserver.NewExchange(ctx, connectHost, service, block, hostToServicePorts, routes, exchangeSettings)
+		exchange := connectserver.NewExchangeWithListeners(
+			ctx,
+			connectHost,
+			service,
+			block,
+			hostToServicePorts,
+			routes,
+			exchangeSettings,
+			map[int]net.Listener{exchangePort: exchangeListener},
+		)
 		stack.lifecycle.exchange = exchange
 
 		connectHandlerSettings := connectserver.DefaultConnectHandlerSettings()

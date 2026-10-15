@@ -106,7 +106,10 @@ func TestProviderTunnelActualLocalAuthorityWithoutApi(t *testing.T) {
 		defer sa.Close()
 		counted := &countedProbeAuthority{Authority: sa, rejectingApiUrl: trap.URL}
 		host := "localquality"
-		exchange := connectserver.NewExchange(ctx, host, "connect", "test", map[int]int{7300: 7300}, map[string]string{host: "127.0.0.1"}, connectserver.DefaultExchangeSettings())
+		exchange, err := newPrivateTestExchange(ctx, host)
+		if err != nil {
+			tb.Fatal(err)
+		}
 		hs := connectserver.DefaultConnectHandlerSettings()
 		hs.ListenH3Port = 0
 		hs.ListenDnsPort = 0

@@ -107,7 +107,11 @@ func newCapabilityTestStack(tb testing.TB, ctx context.Context) (stack *capabili
 	closes = append(closes, sourceAuthority.Close)
 
 	host := "localcapability"
-	exchange := connectserver.NewExchange(ctx, host, "connect", "test", map[int]int{7300: 7300}, map[string]string{host: "127.0.0.1"}, connectserver.DefaultExchangeSettings())
+	exchange, err := newPrivateTestExchange(ctx, host)
+	if err != nil {
+		closeStack()
+		tb.Fatal(err)
+	}
 	handlerSettings := connectserver.DefaultConnectHandlerSettings()
 	handlerSettings.ListenH3Port = 0
 	handlerSettings.ListenDnsPort = 0
