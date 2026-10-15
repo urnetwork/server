@@ -19,7 +19,7 @@ import (
 )
 
 // Replaces the probe's settings and execution until the test ends.
-func withCapabilityProbeSeams(t *testing.T, settings func() (capprobe.Settings, error), execute func(context.Context, capprobe.Settings, capprobe.Sweep) (capprobe.Sweep, *capprobe.PassResult, error)) {
+func withCapabilityProbeSeams(t *testing.T, settings func() (capprobe.Settings, error), execute func(context.Context, capprobe.Settings, capprobe.Sweep, time.Duration) (capprobe.Sweep, *capprobe.PassResult, error)) {
 	t.Helper()
 	previousSettings, previousExecute := getCapabilityProbeSettings, executeCapabilityProbe
 	getCapabilityProbeSettings, executeCapabilityProbe = settings, execute
@@ -109,7 +109,7 @@ func TestCapabilityProbeTaskRunsNothingWhileDisabled(t *testing.T) {
 	disabled.Enabled = false
 	withCapabilityProbeSeams(t,
 		func() (capprobe.Settings, error) { return disabled, nil },
-		func(context.Context, capprobe.Settings, capprobe.Sweep) (capprobe.Sweep, *capprobe.PassResult, error) {
+		func(context.Context, capprobe.Settings, capprobe.Sweep, time.Duration) (capprobe.Sweep, *capprobe.PassResult, error) {
 			t.Fatal("a disabled probe ran a pass")
 			return capprobe.Sweep{}, nil, nil
 		},
@@ -134,10 +134,10 @@ func TestCapabilityProbeTaskCarriesTheSweep(t *testing.T) {
 	fail := false
 	withCapabilityProbeSeams(t,
 		func() (capprobe.Settings, error) { return settings, nil },
-		func(ctx context.Context, gotSettings capprobe.Settings, gotSweep capprobe.Sweep) (capprobe.Sweep, *capprobe.PassResult, error) {
+		func(ctx context.Context, gotSettings capprobe.Settings, gotSweep capprobe.Sweep, maxTime time.Duration) (capprobe.Sweep, *capprobe.PassResult, error) {
 			deadline, bounded := ctx.Deadline()
-			if !bounded || time.Until(deadline) > settings.MaxTime() || time.Until(deadline) < settings.MaxTime()-time.Minute {
-				t.Errorf("the pass's deadline is %s away, want about %s", time.Until(deadline), settings.MaxTime())
+			if !bounded || time.Until(deadline) > settings.MaxTime() || time.Until(deadline) < settings.MaxTime()-time.Minute || maxTime != settings.MaxTime() {
+				t.Errorf("the pass's deadline is %s away and its budget %s, want about %s", time.Until(deadline), maxTime, settings.MaxTime())
 			}
 			if gotSweep != sweep || gotSettings != settings {
 				t.Errorf("the pass got %+v and %+v", gotSweep, gotSettings)
@@ -166,7 +166,7 @@ func TestCapabilityProbeTaskFailsOnUnreadableSettings(t *testing.T) {
 	settingsErr := errors.New("synthetic unreadable settings")
 	withCapabilityProbeSeams(t,
 		func() (capprobe.Settings, error) { return capprobe.Settings{}, settingsErr },
-		func(context.Context, capprobe.Settings, capprobe.Sweep) (capprobe.Sweep, *capprobe.PassResult, error) {
+		func(context.Context, capprobe.Settings, capprobe.Sweep, time.Duration) (capprobe.Sweep, *capprobe.PassResult, error) {
 			t.Fatal("a pass ran without its settings")
 			return capprobe.Sweep{}, nil, nil
 		},
@@ -295,6 +295,60 @@ func TestUrlProbeShardCountStopsBeforeTheCapabilityProbeSlot(t *testing.T) {
 			if err := capabilityProbeShardAvailable(c.shardCount); err != nil {
 				t.Errorf("an accepted URL shard_count %d reaches the capability probe's slot: %v", c.shardCount, err)
 			}
+		}
+	}
+}
+
+// Root cause (review F10): a pass's deadline came from the settings it read
+// when it ran, while its task row's max time came from those read when it
+// was scheduled. With max_time_seconds raised in between, the pass would
+// admit measurements past the task's max time, which cancels it. The max
+// time a pass is scheduled with rides in its arguments, and the pass's
+// deadline and budget are that whatever the settings say when it runs. A
+// row scheduled without one, or with one no shard could live for, runs on
+// the settings' own; a switched-off probe's row takes the default.
+func TestCapabilityProbePassRunsWithItsScheduledMaxTime(t *testing.T) {
+	scheduledSettings := capprobe.DefaultSettings()
+	raised := scheduledSettings
+	raised.MaxTimeSeconds = 2 * scheduledSettings.MaxTimeSeconds
+	sweep := capprobe.Sweep{Cursor: server.NewId(), StartedAt: server.NowUtc()}
+	scheduledArgs, rowMaxTime := capabilityProbeScheduled(&CapabilityProbeArgs{Sweep: sweep}, scheduledSettings)
+	if scheduledArgs.Sweep != sweep || rowMaxTime != scheduledSettings.MaxTime() || time.Duration(scheduledArgs.MaxTimeSeconds)*time.Second != rowMaxTime {
+		t.Fatalf("scheduled %+v with a row max time of %s, want the sweep and %s in both", scheduledArgs, rowMaxTime, scheduledSettings.MaxTime())
+	}
+	disabled := raised
+	disabled.Enabled = false
+	if disabledArgs, disabledMaxTime := capabilityProbeScheduled(nil, disabled); disabledMaxTime != capprobe.DefaultSettings().MaxTime() || time.Duration(disabledArgs.MaxTimeSeconds)*time.Second != disabledMaxTime {
+		t.Fatalf("a switched-off probe scheduled %+v with %s, want the default max time", disabledArgs, disabledMaxTime)
+	}
+
+	var deadline time.Time
+	var passMaxTime time.Duration
+	withCapabilityProbeSeams(t,
+		func() (capprobe.Settings, error) { return raised, nil },
+		func(ctx context.Context, settings capprobe.Settings, gotSweep capprobe.Sweep, maxTime time.Duration) (capprobe.Sweep, *capprobe.PassResult, error) {
+			deadline, _ = ctx.Deadline()
+			passMaxTime = maxTime
+			return gotSweep, &capprobe.PassResult{}, nil
+		},
+	)
+	clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	for _, c := range []struct {
+		name    string
+		args    *CapabilityProbeArgs
+		maxTime time.Duration
+	}{
+		{name: "scheduled", args: scheduledArgs, maxTime: rowMaxTime},
+		{name: "scheduled without one", args: &CapabilityProbeArgs{Sweep: sweep}, maxTime: raised.MaxTime()},
+		{name: "scheduled past a shard's lifetime", args: &CapabilityProbeArgs{Sweep: sweep, MaxTimeSeconds: 25 * 60 * 60}, maxTime: raised.MaxTime()},
+	} {
+		startedAt := time.Now()
+		if _, err := CapabilityProbe(c.args, clientSession); err != nil {
+			t.Fatal(err)
+		}
+		if passMaxTime != c.maxTime || deadline.Before(startedAt.Add(c.maxTime)) || deadline.After(time.Now().Add(c.maxTime)) {
+			t.Errorf("%s: the pass ran with a budget of %s and a deadline %s after its start, want %s", c.name, passMaxTime, deadline.Sub(startedAt), c.maxTime)
 		}
 	}
 }

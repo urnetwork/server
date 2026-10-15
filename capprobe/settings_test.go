@@ -109,3 +109,24 @@ func TestLoadSettingsOverlaysTheResource(t *testing.T) {
 		t.Fatalf("a disabled resource loaded %+v, %v", settings, err)
 	}
 }
+
+// A pass runs on the max time its task row was scheduled with while a
+// prober shard can live that long, and on the settings' own otherwise.
+func TestPassMaxTimeIsTheScheduledOne(t *testing.T) {
+	settings := DefaultSettings()
+	settings.MaxTimeSeconds = 1200
+	for _, c := range []struct {
+		scheduled int
+		want      time.Duration
+	}{
+		{scheduled: 0, want: 20 * time.Minute},
+		{scheduled: -1, want: 20 * time.Minute},
+		{scheduled: 600, want: 10 * time.Minute},
+		{scheduled: int(maxPassTime / time.Second), want: maxPassTime},
+		{scheduled: int(maxPassTime/time.Second) + 1, want: 20 * time.Minute},
+	} {
+		if got := settings.PassMaxTime(c.scheduled); got != c.want {
+			t.Errorf("scheduled %d s: pass max time %s, want %s", c.scheduled, got, c.want)
+		}
+	}
+}

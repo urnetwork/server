@@ -44,9 +44,13 @@ const capabilityProbeDisabledRecheck = 10 * time.Minute
 // The retry delay of a failed pass.
 const capabilityProbeRetryDelay = time.Minute
 
-// The sweep's place, all a pass needs that its settings do not hold.
+// The sweep's place and the pass's budget, all a pass needs that its
+// settings do not hold.
 type CapabilityProbeArgs struct {
 	Sweep capprobe.Sweep `json:"sweep"`
+	// the max time the pass's task row was scheduled with, the pass's whole
+	// budget; zero for a row scheduled without one
+	MaxTimeSeconds int `json:"max_time_seconds,omitempty"`
 }
 
 // What one pass did, and the sweep's place after it.
@@ -74,23 +78,37 @@ func ScheduleCapabilityProbe(clientSession *session.ClientSession, tx server.PgT
 	scheduleCapabilityProbeAt(clientSession, tx, &CapabilityProbeArgs{}, server.NowUtc(), capabilityProbeSettingsOrDefault())
 }
 
-// Schedules a pass, merging into the pending row of the probe's key. A
-// switched-off probe's settings are not validated, so its row takes the
-// default max time.
+// Schedules a pass, merging into the pending row of the probe's key.
 func scheduleCapabilityProbeAt(clientSession *session.ClientSession, tx server.PgTx, args *CapabilityProbeArgs, runAt time.Time, settings capprobe.Settings) {
-	maxTime := settings.MaxTime()
-	if !settings.Enabled {
-		maxTime = capprobe.DefaultSettings().MaxTime()
-	}
+	scheduledArgs, maxTime := capabilityProbeScheduled(args, settings)
 	task.ScheduleTaskInTx(
 		tx,
 		CapabilityProbe,
-		args,
+		scheduledArgs,
 		clientSession,
 		capabilityProbeRunOnce(),
 		task.RunAt(runAt),
 		task.MaxTime(maxTime),
 	)
+}
+
+// The arguments a pass is scheduled with, and its task row's max time: the
+// settings', or the default one for a switched-off probe, whose settings are
+// not validated. The max time rides in the arguments too, so the pass's
+// budget is its row's whatever the settings say when it runs. A row that
+// merges into a pending one keeps that one's arguments, and the row's max
+// time is then the greater of the two, never less than the arguments'.
+func capabilityProbeScheduled(args *CapabilityProbeArgs, settings capprobe.Settings) (*CapabilityProbeArgs, time.Duration) {
+	maxTime := settings.MaxTime()
+	if !settings.Enabled {
+		maxTime = capprobe.DefaultSettings().MaxTime()
+	}
+	scheduledArgs := CapabilityProbeArgs{}
+	if args != nil {
+		scheduledArgs = *args
+	}
+	scheduledArgs.MaxTimeSeconds = int(maxTime / time.Second)
+	return &scheduledArgs, maxTime
 }
 
 // The deployment's settings, or the defaults when they cannot be read: the
@@ -106,8 +124,10 @@ func capabilityProbeSettingsOrDefault() capprobe.Settings {
 
 // One pass of the capability probe. Settings are read at every pass, so a
 // change applies at the next one; a switched-off probe runs nothing and
-// keeps its sweep's place. A failed pass is retried after a minute with the
-// same sweep.
+// keeps its sweep's place. The pass's budget is the max time its task row
+// was scheduled with, carried in its arguments: the task cancels the pass at
+// that time whatever the settings say now. A failed pass is retried after a
+// minute with the same sweep.
 func CapabilityProbe(
 	args *CapabilityProbeArgs,
 	clientSession *session.ClientSession,
@@ -118,18 +138,21 @@ func CapabilityProbe(
 		return nil, task.WithRetryDelay(fmt.Errorf("capability probe settings: %w", err), capabilityProbeRetryDelay)
 	}
 	sweep := capprobe.Sweep{}
+	scheduledMaxTimeSeconds := 0
 	if args != nil {
 		sweep = args.Sweep
+		scheduledMaxTimeSeconds = args.MaxTimeSeconds
 	}
 	if !settings.Enabled {
 		capprobe.ObservePass(capprobe.PassResultDisabled)
 		return &CapabilityProbeResult{Disabled: true, Sweep: sweep}, nil
 	}
+	maxTime := settings.PassMaxTime(scheduledMaxTimeSeconds)
 	// Task MaxTime cancels the session with a timer but sets no deadline;
 	// the pass's admission needs the deadline to finish what it starts.
-	probeCtx, cancel := context.WithTimeout(clientSession.Ctx, settings.MaxTime())
+	probeCtx, cancel := context.WithTimeout(clientSession.Ctx, maxTime)
 	defer cancel()
-	next, pass, err := executeCapabilityProbe(probeCtx, settings, sweep)
+	next, pass, err := executeCapabilityProbe(probeCtx, settings, sweep, maxTime)
 	if err != nil {
 		return nil, task.WithRetryDelay(err, capabilityProbeRetryDelay)
 	}
@@ -213,11 +236,12 @@ type capabilityProbeOutcome struct {
 	pass  *capprobe.PassResult
 }
 
-// The production pass. It selects first, from the database alone; a pass that
-// waits for the sweep's next start or finds nothing to measure finishes
-// there and costs no prober shard. Otherwise it measures in a fresh prober
-// shard for this task execution (runCapabilityProbeShard).
-func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep capprobe.Sweep) (capprobe.Sweep, *capprobe.PassResult, error) {
+// The production pass, whose whole budget is maxTime. It selects first, from
+// the database alone; a pass that waits for the sweep's next start or finds
+// nothing to measure finishes there and costs no prober shard. Otherwise it
+// measures in a fresh prober shard for this task execution
+// (runCapabilityProbeShard).
+func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep capprobe.Sweep, maxTime time.Duration) (capprobe.Sweep, *capprobe.PassResult, error) {
 	fail := func(err error) (capprobe.Sweep, *capprobe.PassResult, error) {
 		capprobe.ObservePass(capprobe.PassResultFailed)
 		return sweep, nil, err
@@ -247,22 +271,24 @@ func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep c
 		ShardIndex: capabilityProbeShardIndex,
 		ShardCount: capabilityProbeShardCount,
 	}
-	return runCapabilityProbeShard(ctx, key, settings, sweep, urlProbeSettings, func(tunnelConfig providertunnel.Config) (capprobe.Sweep, *capprobe.PassResult, error) {
+	return runCapabilityProbeShard(ctx, key, settings, sweep, maxTime, urlProbeSettings, func(tunnelConfig providertunnel.Config) (capprobe.Sweep, *capprobe.PassResult, error) {
 		return capprobe.FinishPass(ctx, settings, selected, tunnelConfig)
 	})
 }
 
-// One measuring pass of sweep in the prober shard key: the shard's private
-// credit for settings, its identity, derived-client credentials and
-// in-process control, the funding readiness check, and then finish with the
-// pass's tunnel configuration and the URL probe's control-plane endpoints.
-// The shard is drained and reaped when finish returns, after every tunnel
-// has joined; capabilityProbeShardPassResult says what the pass returns.
+// One measuring pass of sweep in the prober shard key, which lives for the
+// pass's budget maxTime: the shard's private credit for settings, its
+// identity, derived-client credentials and in-process control, the funding
+// readiness check, and then finish with the pass's tunnel configuration and
+// the URL probe's control-plane endpoints. The shard is drained and reaped
+// when finish returns, after every tunnel has joined;
+// capabilityProbeShardPassResult says what the pass returns.
 func runCapabilityProbeShard(
 	ctx context.Context,
 	key model.ProberShardKey,
 	settings capprobe.Settings,
 	sweep capprobe.Sweep,
+	maxTime time.Duration,
 	urlProbeSettings providerEgressProbeSettings,
 	finish func(providertunnel.Config) (capprobe.Sweep, *capprobe.PassResult, error),
 ) (capprobe.Sweep, *capprobe.PassResult, error) {
@@ -274,7 +300,7 @@ func runCapabilityProbeShard(
 	// whether finish ran, and what it returned: it counts its own failures
 	finished := false
 	var finishErr error
-	outcome, err := runWithProberShard(ctx, "capability probe", key, credit, settings.MaxTime(), func(identity *model.ProberIdentity) (capabilityProbeOutcome, error) {
+	outcome, err := runWithProberShard(ctx, "capability probe", key, credit, maxTime, func(identity *model.ProberIdentity) (capabilityProbeOutcome, error) {
 		credentials, err := newProviderEgressCredentials(identity)
 		if err != nil {
 			return capabilityProbeOutcome{}, err

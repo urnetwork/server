@@ -33,8 +33,9 @@ const minMeasureSetupAllowance = 15 * time.Second
 // A pass's whole budget is a prober shard's lifetime, which is at most a day.
 const maxPassTime = 24 * time.Hour
 
-// The deployment settings, read at every pass's start. Nothing of them is
-// carried in the task's arguments, so a change applies at the next pass.
+// The deployment settings, read at every pass's start, so a change applies
+// at the next pass. Only the max time is carried in the task's arguments
+// too, because the task row holds the one it was scheduled with.
 type Settings struct {
 	// false runs no pass: the task only rechecks the settings
 	Enabled bool `yaml:"enabled"`
@@ -120,6 +121,16 @@ func (self Settings) PassInterval() time.Duration {
 // A pass's whole budget.
 func (self Settings) MaxTime() time.Duration {
 	return time.Duration(self.MaxTimeSeconds) * time.Second
+}
+
+// The whole budget of a pass scheduled with scheduledMaxTimeSeconds, the max
+// time its task row holds: that, or these settings' own for a pass scheduled
+// without one, or with one no prober shard could live for.
+func (self Settings) PassMaxTime(scheduledMaxTimeSeconds int) time.Duration {
+	if 0 < scheduledMaxTimeSeconds && scheduledMaxTimeSeconds <= int(maxPassTime/time.Second) {
+		return time.Duration(scheduledMaxTimeSeconds) * time.Second
+	}
+	return self.MaxTime()
 }
 
 // What a pass keeps in hand to start one more provider: the measurement,

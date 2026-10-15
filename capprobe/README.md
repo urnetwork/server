@@ -90,6 +90,8 @@ the metrics keep sealed and unsealed apart for the shadow review.
 ## Settings
 
 `capability_probe.yml`, read at every pass; without it the defaults apply.
+A pass runs on the max time its task row was scheduled with, which rides in
+the task's arguments.
 
 | Key | Default | |
 | --- | --- | --- |
@@ -103,7 +105,7 @@ the metrics keep sealed and unsealed apart for the shadow review.
 | `modern_refresh_hours`, `other_refresh_hours` | 72, 72 | each plus the sweep interval must be under the seven-day staleness window |
 | `min_sweep_interval_minutes` | 360 | |
 | `pass_interval_seconds` | 5 | |
-| `max_time_seconds` | 900 | a pass's budget, the task's max time |
+| `max_time_seconds` | 900 | a pass's budget and its task row's max time, both as of when the pass was scheduled |
 
 Lowering `other_refresh_hours` returns an updated provider to Quality and
 Speed sooner once the gate is on, at the cost of measuring every non-modern
