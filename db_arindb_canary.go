@@ -6,15 +6,32 @@
 // serving epoch, and 0 never is.
 package server
 
-// Append after schema 836, the FP2 modern provider evidence. The old slot has
-// its own write token and guard. A writer that predates the old slot still
+// Appended after schema 836, the FP2 modern provider evidence, as two
+// migrations that each lock one table. One transaction over both tables held
+// ACCESS EXCLUSIVE on network_client_location while it waited for the rollup's
+// lock, so every location write and the FP2 Quality guard queued behind it,
+// and update_reliabilities, which reads location rows before it writes the
+// rollup, could deadlock with it.
+// New columns are metadata-only additions with constant defaults; nothing is
+// rewritten.
+
+// 837: the rollup's two slots and their epochs.
+const arinDatabaseCanaryRollupSchemaSql = `
+	SET LOCAL lock_timeout = '5s';
+	ALTER TABLE network_client_location_reliability
+		ADD COLUMN arin_old_risk boolean NOT NULL DEFAULT false,
+		ADD COLUMN arin_old_non_quality boolean NOT NULL DEFAULT false,
+		ADD COLUMN arin_epoch bigint NOT NULL DEFAULT 0,
+		ADD COLUMN arin_old_epoch bigint NOT NULL DEFAULT 0;
+`
+
+// 838: each connection's old slot and its write guard. The old slot has its
+// own write token and guard. A writer that predates the old slot still
 // supplies a fresh latest token, so the published v751 guard cannot tell it
 // apart; this guard revokes the old positive and marks the old facts
 // unavailable whenever a write does not supply a fresh old token. The v751
 // guard is left byte for byte as published.
-// New columns are metadata-only additions with constant defaults; nothing is
-// rewritten.
-const arinDatabaseCanarySchemaSql = `
+const arinDatabaseCanaryLocationSchemaSql = `
 	SET LOCAL lock_timeout = '5s';
 	ALTER TABLE network_client_location
 		ADD COLUMN arin_old_risk boolean NOT NULL DEFAULT false,
@@ -22,11 +39,6 @@ const arinDatabaseCanarySchemaSql = `
 		ADD COLUMN arin_old_quality_verified boolean NOT NULL DEFAULT false,
 		ADD COLUMN arin_old_database_build_epoch bigint NOT NULL DEFAULT 0,
 		ADD COLUMN arin_old_quality_write_token uuid;
-	ALTER TABLE network_client_location_reliability
-		ADD COLUMN arin_old_risk boolean NOT NULL DEFAULT false,
-		ADD COLUMN arin_old_non_quality boolean NOT NULL DEFAULT false,
-		ADD COLUMN arin_epoch bigint NOT NULL DEFAULT 0,
-		ADD COLUMN arin_old_epoch bigint NOT NULL DEFAULT 0;
 	CREATE FUNCTION network_client_location_arin_old_quality_guard() RETURNS trigger LANGUAGE plpgsql AS $arin_old_quality$
 	BEGIN
 		IF TG_OP = 'INSERT' THEN

@@ -2135,9 +2135,12 @@ Where the server branch refines the text above:
   the old slot still supplies a fresh latest token, so only a separate token
   can tell it apart. Without a fresh old token the guard revokes the old
   positive and also sets `arin_old_database_build_epoch` to 0, so stale old
-  facts read as unavailable rather than as facts of their epoch. Migration 837,
-  stacked after the FP2 modern provider evidence at 836, carries the columns
-  and the guard; the monitor pins both.
+  facts read as unavailable rather than as facts of their epoch. Two
+  migrations, stacked after the FP2 modern provider evidence at 836, carry the
+  columns, each locking one table: 837 adds the rollup's slots and 838 the
+  connection slots with their guard. A single transaction over both would hold
+  the connection rows exclusively while it waited for the rollup, which
+  `update_reliabilities` locks in the other order. The monitor pins both.
 - The indexer reads both rollup slots for its cohort in its own primary-key
   query beside the source rows, because the source and count-filter statements
   are pinned by DB tests; the cohort and its rows are the same.

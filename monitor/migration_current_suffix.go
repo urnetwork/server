@@ -546,8 +546,10 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "first_measured_at", kind: "timestamp without time zone", notNull: true},
 			snMainnetMigrationColumn{name: "run_count", kind: "integer", notNull: true, defaultExpression: "1"}),
 		snMainnetMigrationConstraints("provider_modern_evidence", "PRIMARY KEY (client_id)")),
-	migrationCurrentSuffix(837, "dual ARIN database canary slots and old-slot write guard",
-		migrationArindbCanaryArtifacts()...),
+	migrationCurrentSuffix(837, "dual ARIN database canary rollup slots",
+		migrationArindbCanaryRollupArtifacts()...),
+	migrationCurrentSuffix(838, "dual ARIN database canary connection slots and old-slot write guard",
+		migrationArindbCanaryLocationArtifacts()...),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages

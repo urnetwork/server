@@ -1,10 +1,12 @@
-// The v837 artifact contract of the dual-database ARIN canary, part of the
-// single migrations signal (arindbctl/ARINDB.md, "Connection and rollup facts").
+// The v837 and v838 artifact contracts of the dual-database ARIN canary, part
+// of the single migrations signal (arindbctl/ARINDB.md, "Connection and rollup
+// facts"): the rollup's slots at 837, the connection slots and their write
+// guard at 838.
 package monitor
 
 import "strings"
 
-// This body intentionally pins the published v837 function. It does not read
+// This body intentionally pins the published v838 function. It does not read
 // connection rows or infer whether a paired release is deployed.
 const arinOldQualityGuardFunctionBody = `
 	BEGIN
@@ -42,9 +44,21 @@ var arinOldQualityWriteGuardArtifactQuery = `(
 			AND actual.tgoldtable IS NULL AND actual.tgnewtable IS NULL AND NOT actual.tgisinternal)
 )`
 
-// The columns of both slots on connections and rollups, with their exact
-// types, nullability and defaults, and the old-slot guard.
-func migrationArindbCanaryArtifacts() []string {
+// 837: the rollup's old slot and both slots' epochs, with their exact types,
+// nullability and defaults.
+func migrationArindbCanaryRollupArtifacts() []string {
+	return []string{
+		snMainnetMigrationColumns("network_client_location_reliability",
+			snMainnetMigrationColumn{name: "arin_old_risk", kind: "boolean", notNull: true, defaultExpression: "false"},
+			snMainnetMigrationColumn{name: "arin_old_non_quality", kind: "boolean", notNull: true, defaultExpression: "false"},
+			snMainnetMigrationColumn{name: "arin_epoch", kind: "bigint", notNull: true, defaultExpression: "0"},
+			snMainnetMigrationColumn{name: "arin_old_epoch", kind: "bigint", notNull: true, defaultExpression: "0"}),
+	}
+}
+
+// 838: each connection's old slot, with its exact types, nullability and
+// defaults, and the old-slot guard.
+func migrationArindbCanaryLocationArtifacts() []string {
 	return []string{
 		snMainnetMigrationColumns("network_client_location",
 			snMainnetMigrationColumn{name: "arin_old_risk", kind: "boolean", notNull: true, defaultExpression: "false"},
@@ -52,11 +66,6 @@ func migrationArindbCanaryArtifacts() []string {
 			snMainnetMigrationColumn{name: "arin_old_quality_verified", kind: "boolean", notNull: true, defaultExpression: "false"},
 			snMainnetMigrationColumn{name: "arin_old_database_build_epoch", kind: "bigint", notNull: true, defaultExpression: "0"},
 			snMainnetMigrationColumn{name: "arin_old_quality_write_token", kind: "uuid"}),
-		snMainnetMigrationColumns("network_client_location_reliability",
-			snMainnetMigrationColumn{name: "arin_old_risk", kind: "boolean", notNull: true, defaultExpression: "false"},
-			snMainnetMigrationColumn{name: "arin_old_non_quality", kind: "boolean", notNull: true, defaultExpression: "false"},
-			snMainnetMigrationColumn{name: "arin_epoch", kind: "bigint", notNull: true, defaultExpression: "0"},
-			snMainnetMigrationColumn{name: "arin_old_epoch", kind: "bigint", notNull: true, defaultExpression: "0"}),
 		arinOldQualityWriteGuardArtifactQuery,
 	}
 }

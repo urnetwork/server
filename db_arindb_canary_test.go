@@ -2,13 +2,59 @@
 // canary migration (arindbctl/ARINDB.md, "Connection and rollup facts").
 package server
 
-import "testing"
+import (
+	"regexp"
+	"slices"
+	"strings"
+	"testing"
+)
 
 // The canary schema is appended after version 836, the FP2 modern provider
-// evidence.
-func TestArinDatabaseCanaryMigrationIsAppendedAfter836(t *testing.T) {
-	if index := sqlMigrationIndex(t, "ADD COLUMN arin_old_quality_write_token"); index != 836 {
-		t.Fatalf("canary migration index=%d, want 836 after version 836", index)
+// evidence: the rollup's slots at 837, then the connection slots at 838.
+func TestArinDatabaseCanaryMigrationsAreAppendedAfter836(t *testing.T) {
+	if index := sqlMigrationIndex(t, "ADD COLUMN arin_old_epoch"); index != 836 {
+		t.Fatalf("canary rollup migration index=%d, want 836 (version 837)", index)
+	}
+	if index := sqlMigrationIndex(t, "ADD COLUMN arin_old_quality_write_token"); index != 837 {
+		t.Fatalf("canary location migration index=%d, want 837 (version 838)", index)
+	}
+}
+
+var arinCanaryMigrationTablePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)ALTER\s+TABLE\s+(\w+)`),
+	regexp.MustCompile(`(?is)CREATE\s+TRIGGER\s+\w+\s+.*?\s+ON\s+(\w+)`),
+}
+
+// Each canary migration locks one table. One transaction over both held
+// ACCESS EXCLUSIVE on the connection rows while it waited for the rollup,
+// queueing every location write behind update_reliabilities, which takes
+// those locks in the other order.
+func TestArinDatabaseCanaryMigrationsLockOneTableEach(t *testing.T) {
+	lockedTables := []string{}
+	canaryMigrations := 0
+	for i, migration := range migrations {
+		sqlMigration, ok := migration.(*SqlMigration)
+		if !ok || !strings.Contains(sqlMigration.sql, "arin_old_") {
+			continue
+		}
+		canaryMigrations += 1
+		tables := []string{}
+		for _, pattern := range arinCanaryMigrationTablePatterns {
+			for _, match := range pattern.FindAllStringSubmatch(sqlMigration.sql, -1) {
+				if !slices.Contains(tables, match[1]) {
+					tables = append(tables, match[1])
+				}
+			}
+		}
+		if len(tables) != 1 {
+			t.Errorf("canary migration %d locks %v, want exactly one table", i+1, tables)
+			continue
+		}
+		lockedTables = append(lockedTables, tables[0])
+	}
+	slices.Sort(lockedTables)
+	if canaryMigrations != 2 || !slices.Equal(lockedTables, []string{"network_client_location", "network_client_location_reliability"}) {
+		t.Fatalf("%d canary migrations lock %v, want one for the connection rows and one for the rollup", canaryMigrations, lockedTables)
 	}
 }
 
@@ -28,6 +74,19 @@ func TestArinDatabaseCanaryMigrationFrom836IsAdditive(t *testing.T) {
 				(client_id, network_id, update_block_number, connected, client_address_hash_count, location_count)
 				VALUES ($1,$2,1,true,1,1)`, clientId, NewId()))
 		})
+		// 837 alone adds the rollup's slots and leaves the connection rows as
+		// they were
+		ApplyDbMigrationsUpTo(ctx, 837)
+		Db(ctx, func(conn PgConn) {
+			var rollupColumns, locationColumns int
+			Raise(conn.QueryRow(ctx, `SELECT
+				count(*) FILTER (WHERE table_name='network_client_location_reliability' AND column_name IN ('arin_old_risk','arin_old_non_quality','arin_epoch','arin_old_epoch')),
+				count(*) FILTER (WHERE table_name='network_client_location' AND column_name LIKE 'arin_old_%')
+				FROM information_schema.columns WHERE table_schema='public'`).Scan(&rollupColumns, &locationColumns))
+			if rollupColumns != 4 || locationColumns != 0 {
+				t.Fatalf("version 837 has %d rollup slot columns and %d connection old-slot columns, want 4 and 0", rollupColumns, locationColumns)
+			}
+		}, OptReadOnly(), OptNoRetry())
 		ApplyDbMigrations(ctx)
 		assertAppendedMigrationArtifacts(t, ctx)
 		Db(ctx, func(conn PgConn) {
