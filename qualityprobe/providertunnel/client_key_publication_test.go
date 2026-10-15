@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 )
@@ -52,7 +53,7 @@ func captureTunnelClientSettings(t *testing.T, cfg Config) func() *connect.Clien
 // Root cause: each URL probe's derived client published a fresh key nothing
 // reads, and the platform kept a permanent signed registration per probe.
 // With the URL probe's opt-in, every generated client keeps its key local,
-// from settings of its own.
+// from settings of its own, and connect still gives it a key manager.
 func TestUrlTunnelClientsSkipClientKeyPublication(t *testing.T) {
 	cfg := probeTransportBudgetTestConfig()
 	cfg.KeepClientKeysLocal = true
@@ -70,6 +71,19 @@ func TestUrlTunnelClientsSkipClientKeyPublication(t *testing.T) {
 	}
 	if first == second {
 		t.Fatal("two generated clients share one settings value")
+	}
+	// a connect that refused these settings would leave every URL child
+	// without a key manager, signing nothing
+	client := connect.NewClient(t.Context(), connect.NewId(), connect.NewNoContractClientOob(), first)
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer closeCancel()
+		if err := client.CloseAndWait(closeCtx); err != nil {
+			t.Error(err)
+		}
+	}()
+	if client.ClientKeyManager() == nil {
+		t.Fatal("connect built a URL tunnel client without a key manager")
 	}
 }
 
