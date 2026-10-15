@@ -305,8 +305,14 @@ func validSettings() *Settings {
 
 func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, rawScores []float64) []byte {
 	t.Helper()
-	if len(rawScores) != settings.EvaluationPolicy.Replicates {
-		t.Fatalf("baseline raw-score count = %d, want %d", len(rawScores), settings.EvaluationPolicy.Replicates)
+	// The evaluator receives the evaluation policy its round froze, so a
+	// staging round created since the no-margin change records margin zero.
+	evaluationPolicy := settings.EvaluationPolicy
+	if policy, err := decodeRoundPolicySnapshot(round.PolicyJson); err == nil {
+		evaluationPolicy = policy.EvaluationPolicy
+	}
+	if len(rawScores) != evaluationPolicy.Replicates {
+		t.Fatalf("baseline raw-score count = %d, want %d", len(rawScores), evaluationPolicy.Replicates)
 	}
 	replicates := make([]roundBaselineReplicate, 0, len(rawScores))
 	for _, rawScore := range rawScores {
@@ -325,9 +331,9 @@ func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, raw
 	content, err := json.MarshalIndent(roundBaselineManifest{
 		ScoreSchema: ScoreSchema, Kind: "sim-latency-score-baseline", ScorerVersion: ScorerVersion,
 		RoundId: round.RoundId.String(), ConfigSha256: round.ProvidersSha256,
-		RequestTimeoutMs: settings.EvaluationPolicy.RequestTimeoutMs,
+		RequestTimeoutMs: evaluationPolicy.RequestTimeoutMs,
 		RunFlags:         map[string]string{"official": "true"},
-		TakeoverMargin:   settings.EvaluationPolicy.TakeoverMargin, Replicates: replicates,
+		TakeoverMargin:   evaluationPolicy.TakeoverMargin, Replicates: replicates,
 	}, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -885,10 +891,16 @@ func TestStagingAdmissionBypassesProductionReadinessAndEntersQueue(t *testing.T)
 	roundId := server.NewId()
 	jobId := server.NewId()
 	now := server.NowUtc()
+	// Every stored round carries its frozen policy (policy_json is NOT NULL),
+	// and Info authenticates a staging round's policy before publishing it.
+	policyJson, err := policySnapshot(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
 	stagingRound := &roundRecord{RoundResult: RoundResult{
 		RoundId: roundId, Epoch: 0, Staging: true, Status: "open",
 		OpensAt: now.Add(-time.Minute), ClosesAt: now.Add(time.Hour),
-	}}
+	}, CompetitionId: settings.CompetitionId, PolicyJson: policyJson}
 	job := &queuedJob{
 		ScoreJobResult: ScoreJobResult{
 			JobId: jobId, RoundId: roundId, Staging: true, State: "queued",
