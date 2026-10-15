@@ -2,8 +2,8 @@
 // provider negotiates on the wire: connect's per-peer evidence of the
 // end-to-end session and of receive window advertisement (connect
 // DESIGNNOTES §3.13). It is an ordinary provider tunnel whose generated
-// clients attempt end-to-end sessions and record into an observer; the URL
-// probe's tunnels keep their sessions off.
+// clients attempt end-to-end sessions and record what they see in the
+// measurement's recorder; the URL probe's tunnels keep their sessions off.
 package providertunnel
 
 import (
@@ -13,15 +13,15 @@ import (
 	"github.com/urnetwork/connect"
 )
 
-// A capability observation without its observer would attempt sessions and
+// A capability observation without its recorder would attempt sessions and
 // record nothing.
-var ErrCapabilityObservation = errors.New("providertunnel: a capability observation needs its observer")
+var ErrCapabilityObservation = errors.New("providertunnel: a capability observation needs its recorder")
 
 // What a capability measurement tunnel changes in every client it generates.
-// The observer belongs to the measurement that set it, never to the process.
+// The recorder belongs to the measurement that set it, never to the process.
 type CapabilityObservation struct {
 	// every generated client records its peers' evidence here; required
-	Observations *connect.PeerCapabilityObservations
+	Recorder *connect.PeerCapabilityRecorder
 	// Resolves a peer's published identity key when no contract carried
 	// one, so a session can verify that peer's identity proof. Nil leaves a
 	// contract-carried key the only source.
@@ -30,7 +30,7 @@ type CapabilityObservation struct {
 
 // Nil, the URL tunnel's, is valid.
 func (self *CapabilityObservation) validate() error {
-	if self != nil && self.Observations == nil {
+	if self != nil && self.Recorder == nil {
 		return ErrCapabilityObservation
 	}
 	return nil
@@ -40,7 +40,7 @@ func (self *CapabilityObservation) validate() error {
 //
 // Sessions are opportunistic. A provider without the end-to-end responder
 // keeps carrying the probe's pings in plaintext, which is what lets the
-// observer see its ClientHello go unanswered while the provider acknowledges
+// recorder see its ClientHello go unanswered while the provider acknowledges
 // the pings. Once this client has verified the provider, its own traffic is
 // sealed, and the provider can open it only with the identity key the
 // platform holds for this client, from a contract or from its /key/<client_id>
@@ -53,7 +53,7 @@ func (self *CapabilityObservation) apply(settings *connect.ClientSettings) {
 	if self == nil {
 		return
 	}
-	settings.PeerCapabilityObservations = self.Observations
+	settings.PeerCapabilityRecorder = self.Recorder
 	// a copy, so a settings value a caller shares keeps its own encryption
 	encryption := connect.DefaultEncryptionSettings()
 	if settings.EncryptionSettings != nil {

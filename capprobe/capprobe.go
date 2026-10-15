@@ -14,7 +14,7 @@
 // a short tunnel of its own (providertunnel.CapabilityObservation): the
 // tunnel's window pings the provider, its clients attempt opportunistic
 // end-to-end sessions after their key registration, and connect's
-// PeerCapabilityObservations records what the provider did. A measurement
+// PeerCapabilityRecorder records what the provider did. A measurement
 // ends once the reading is conclusive or its time is up (measure), and a
 // conclusive reading is recorded through model.RecordProviderModernEvidence;
 // a capability that was not tested is never recorded (reading).

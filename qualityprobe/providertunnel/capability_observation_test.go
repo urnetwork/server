@@ -56,27 +56,27 @@ func TestUrlTunnelClientSettingsAreUnchanged(t *testing.T) {
 		settings.EncryptionSettings.Mode != defaults.EncryptionSettings.Mode {
 		t.Fatalf("the URL tunnel's encryption mode changed: %+v", settings.EncryptionSettings)
 	}
-	if settings.PeerCapabilityObservations != nil || settings.ClientKeyRegistrationRequired ||
+	if settings.PeerCapabilityRecorder != nil || settings.ClientKeyRegistrationRequired ||
 		settings.EncryptionSettings.NewPeerClientPublicKeyFetcher != nil {
 		t.Fatal("the URL tunnel's clients observe, wait for registration or fetch keys")
 	}
 	var unchanged *CapabilityObservation
 	unchanged.apply(defaults)
-	if defaults.EncryptionSettings.Mode != connect.EncryptionModeOff || defaults.PeerCapabilityObservations != nil || defaults.ClientKeyRegistrationRequired {
+	if defaults.EncryptionSettings.Mode != connect.EncryptionModeOff || defaults.PeerCapabilityRecorder != nil || defaults.ClientKeyRegistrationRequired {
 		t.Fatal("a nil capability observation changed the settings")
 	}
 }
 
 // Every client a capability tunnel generates attempts opportunistic sessions,
-// records into the measurement's observer, resolves peer keys through the
+// records into the measurement's recorder, resolves peer keys through the
 // given fetcher, and is admitted only after its key registration. The TLS
 // timeout capprobe reads a missing answer against stays the default.
 func TestCapabilityTunnelClientSettingsObserveOpportunisticSessions(t *testing.T) {
-	observations := connect.NewPeerCapabilityObservations(4)
+	recorder := connect.NewPeerCapabilityRecorder(4)
 	fetched := []connect.Id{}
 	cfg := probeTransportBudgetTestConfig()
 	cfg.CapabilityObservation = &CapabilityObservation{
-		Observations: observations,
+		Recorder: recorder,
 		NewPeerClientPublicKeyFetcher: func(peerId connect.Id) func(context.Context) ([]byte, error) {
 			fetched = append(fetched, peerId)
 			return func(context.Context) ([]byte, error) { return nil, nil }
@@ -88,8 +88,8 @@ func TestCapabilityTunnelClientSettingsObserveOpportunisticSessions(t *testing.T
 		if settings.EncryptionSettings.Mode != connect.EncryptionModeOpportunistic {
 			t.Errorf("encryption mode %v, want opportunistic", settings.EncryptionSettings.Mode)
 		}
-		if settings.PeerCapabilityObservations != observations {
-			t.Error("a generated client does not record into the measurement's observer")
+		if settings.PeerCapabilityRecorder != recorder {
+			t.Error("a generated client does not record into the measurement's recorder")
 		}
 		if !settings.ClientKeyRegistrationRequired {
 			t.Error("a generated client is admitted before its key registration")
@@ -112,7 +112,7 @@ func TestCapabilityTunnelClientSettingsObserveOpportunisticSessions(t *testing.T
 func TestCapabilityObservationCopiesTheEncryptionSettings(t *testing.T) {
 	settings := providerTunnelClientSettings(0)
 	shared := settings.EncryptionSettings
-	(&CapabilityObservation{Observations: connect.NewPeerCapabilityObservations(1)}).apply(settings)
+	(&CapabilityObservation{Recorder: connect.NewPeerCapabilityRecorder(1)}).apply(settings)
 	if shared.Mode != connect.EncryptionModeOff || shared == settings.EncryptionSettings {
 		t.Fatal("the observation wrote through to the caller's encryption settings")
 	}
@@ -124,7 +124,7 @@ func TestCapabilityObservationCopiesTheEncryptionSettings(t *testing.T) {
 	}
 }
 
-// An observation without its observer is refused before anything is built.
+// An observation without its recorder is refused before anything is built.
 func TestOpenRefusesACapabilityObservationWithoutObserver(t *testing.T) {
 	cfg := probeTransportBudgetTestConfig()
 	cfg.CapabilityObservation = &CapabilityObservation{}

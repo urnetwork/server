@@ -11,7 +11,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// How often a measurement reads its observer. The observer offers no
+// How often a measurement reads its recorder. The recorder offers no
 // notification, and a read is one leaf-lock copy.
 const pollInterval = time.Second
 
@@ -125,7 +125,7 @@ func modernOutcomeOf(evidence model.ProviderModernEvidence) string {
 //
 // The tunnel's window pings the provider as any provider window does, which
 // also opens the end-to-end session: its first send starts the ClientHello.
-// The measurement reads the observer every pollInterval and stops as soon as
+// The measurement reads the recorder every pollInterval and stops as soon as
 // the reading is complete: an acknowledgement read the window, and the
 // session negotiated (and sealed, or had sealGrace to), or its ClientHello
 // went unanswered through a whole establishment window. It stops at

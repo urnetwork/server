@@ -327,7 +327,7 @@ provider cannot resolve the probe client's key.
   `concurrency` (16) at once, each in a tunnel whose window pings the
   provider and whose clients attempt opportunistic end-to-end sessions after
   the platform has processed their key registration, recording into connect's
-  `PeerCapabilityObservations`. A measurement stops once both capabilities
+  `PeerCapabilityRecorder`. A measurement stops once both capabilities
   read conclusively (an acknowledgement read the window; the session
   negotiated, sealed or after a ten-second seal grace, or its ClientHello
   went unanswered for a whole 60 s establishment window counted from both the
@@ -381,7 +381,7 @@ provider cannot resolve the probe client's key.
   reaches a non-modern provider in its Online tier, after both native
   buckets.
 - **Rollout.** In order. (1) Merge the connect accessor
-  (`ClientSettings.PeerCapabilityObservations`, connect
+  (`ClientSettings.PeerCapabilityRecorder`, connect
   feat/modern-provider-evidence) into connect main, and revert the capability
   probe branch's temporary replace of connect with that worktree. (2) Apply
   migration 836 on Main once the owner approves: a server built with it

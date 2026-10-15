@@ -40,7 +40,7 @@ Each provider gets a short tunnel of its own (`providertunnel.Config.CapabilityO
   probe), which also opens the end-to-end session: the first send starts the
   ClientHello;
 - its clients run `EncryptionModeOpportunistic` and record into the
-  measurement's own `connect.PeerCapabilityObservations` (connect DESIGNNOTES
+  measurement's own `connect.PeerCapabilityRecorder` (connect DESIGNNOTES
   §3.13);
 - its clients are admitted only after the platform has processed their key
   registration (`ClientKeyRegistrationRequired`), so the provider can resolve
@@ -48,7 +48,7 @@ Each provider gets a short tunnel of its own (`providertunnel.Config.CapabilityO
   fetch from the first frame, and the probe resolves the provider's key from
   the platform's store when no contract carries it.
 
-The measurement reads the observer every second and stops once the reading
+The measurement reads the recorder every second and stops once the reading
 is conclusive: an acknowledgement read the window, and the session negotiated
 (sealed, or given `seal_grace_seconds` to), or its ClientHello went
 unanswered through a whole establishment window (`TlsTimeout`, 60 s) counted

@@ -16,20 +16,20 @@ import (
 // reserves what a blackhole check reserves.
 const tunnelContractReservationByteCount = connect.ByteCount(1024 * 1024)
 
-// The peers one tunnel's observer records: its provider, with room to spare.
+// The peers one tunnel's recorder holds: its provider, with room to spare.
 const tunnelMaxObservedPeerCount = 8
 
-// One provider's open capability tunnel and the observer its clients record
+// One provider's open capability tunnel and the recorder its clients record
 // into, which belongs to this measurement alone.
 type providerCapabilityTunnel struct {
-	tunnel       *providertunnel.Tunnel
-	observations *connect.PeerCapabilityObservations
-	providerId   connect.Id
+	tunnel     *providertunnel.Tunnel
+	recorder   *connect.PeerCapabilityRecorder
+	providerId connect.Id
 }
 
 // Implements capabilityTunnel.
 func (self *providerCapabilityTunnel) observation() (connect.PeerCapabilityObservation, bool) {
-	return self.observations.Get(self.providerId)
+	return self.recorder.Get(self.providerId)
 }
 
 // Implements capabilityTunnel.
@@ -43,19 +43,19 @@ func (self *providerCapabilityTunnel) close() error {
 }
 
 // Opens tunnels from base, the pass's identity, endpoints, credentials,
-// control and transport budget, each with an observer of its own. The
+// control and transport budget, each with a recorder of its own. The
 // tunnel's window pings its provider (no data-only probe), its contracts
 // reserve little, and its teardown has the configured grace. The pass's
 // tunnels share nothing else, and nothing with the URL probe's.
 func newProviderCapabilityTunnelOpener(base providertunnel.Config, settings Settings) openCapabilityTunnel {
 	return func(ctx context.Context, providerId server.Id) (capabilityTunnel, error) {
-		observations := connect.NewPeerCapabilityObservations(tunnelMaxObservedPeerCount)
+		recorder := connect.NewPeerCapabilityRecorder(tunnelMaxObservedPeerCount)
 		cfg := base
 		cfg.DataOnlyProbe = false
 		cfg.ContractReservationByteCount = tunnelContractReservationByteCount
 		cfg.CloseTimeout = settings.closeTimeout()
 		cfg.CapabilityObservation = &providertunnel.CapabilityObservation{
-			Observations:                  observations,
+			Recorder:                      recorder,
 			NewPeerClientPublicKeyFetcher: newLocalPeerClientPublicKeyFetcher,
 		}
 		tunnel, err := providertunnel.Open(ctx, cfg, connect.Id(providerId))
@@ -63,9 +63,9 @@ func newProviderCapabilityTunnelOpener(base providertunnel.Config, settings Sett
 			return nil, err
 		}
 		return &providerCapabilityTunnel{
-			tunnel:       tunnel,
-			observations: observations,
-			providerId:   connect.Id(providerId),
+			tunnel:     tunnel,
+			recorder:   recorder,
+			providerId: connect.Id(providerId),
 		}, nil
 	}
 }
