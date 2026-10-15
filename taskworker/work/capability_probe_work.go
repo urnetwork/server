@@ -165,7 +165,13 @@ func CapabilityProbe(
 	defer cancel()
 	next, pass, err := executeCapabilityProbe(probeCtx, settings, sweep, maxTime)
 	if err != nil {
-		return nil, task.WithRetryDelay(err, capabilityProbeRetryDelay)
+		// The retry runs from the sweep the pass returned: the same place,
+		// and the held downgrades as a measuring pass left them. The task
+		// keeps the arguments it ran with when it refuses the checkpoint:
+		// for a failure with a cancellation among its causes, one joined
+		// with a prober shard cleanup failure, or arguments past its 4 KiB
+		// bound, which about 38 held downgrades reach.
+		return nil, task.WithRetryDelayAndArgs(err, capabilityProbeRetryDelay, &CapabilityProbeArgs{Sweep: next, MaxTimeSeconds: scheduledMaxTimeSeconds})
 	}
 	return &CapabilityProbeResult{Sweep: next, Pass: pass}, nil
 }
@@ -361,9 +367,11 @@ func runCapabilityProbeShard(
 // afterwards: the prober reaper retries the cleanup, and returning the old
 // sweep would have the retry a minute later measure the pass's providers
 // again, those without evidence at once, and count the pass both measured
-// and failed. Every cleanup failure is counted apart and logged. Any other
-// failure leaves the sweep where it was, counted once: finish counts its
-// own, this the ones before it.
+// and failed. Every cleanup failure is counted apart and logged. A pass that
+// finish failed returns finish's sweep, the pass's place with the held
+// downgrades as it left them; a failure before finish leaves the sweep where
+// it was. Each is counted once: finish counts its own, this the ones before
+// it.
 func capabilityProbeShardPassResult(
 	sweep capprobe.Sweep,
 	outcome capabilityProbeOutcome,
@@ -382,10 +390,12 @@ func capabilityProbeShardPassResult(
 	case finished && finishErr == nil:
 		// the only failure is the cleanup's
 		return outcome.sweep, outcome.pass, nil
+	case finished:
+		// finish failed, and counted it; its sweep keeps the pass's place
+		// and carries the held downgrades as the pass left them
+		return outcome.sweep, outcome.pass, err
 	default:
-		if !finished {
-			capprobe.ObservePass(capprobe.PassResultFailed)
-		}
+		capprobe.ObservePass(capprobe.PassResultFailed)
 		return sweep, outcome.pass, err
 	}
 }

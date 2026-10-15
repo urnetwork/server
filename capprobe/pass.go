@@ -113,9 +113,11 @@ func SelectPass(ctx context.Context, settings Settings, sweep Sweep) (*PassSelec
 // no tunnels. ctx's deadline is the pass's budget: no measurement starts that
 // could not finish, with its teardown, before it.
 //
-// An error leaves the sweep where it was, so the task's retry selects the
-// same page again: the providers this pass recorded are no longer due, and
-// the rest are measured again.
+// An error leaves the sweep's place where it was, so the task's retry
+// selects the same page again: the providers this pass recorded are no
+// longer due, and the rest are measured again. The sweep returned with the
+// error carries the held downgrades as the pass left them, those it retired
+// gone and those it held added, and the retry is to run from it.
 func FinishPass(ctx context.Context, settings Settings, pass *PassSelection, tunnelConfig providertunnel.Config) (Sweep, *PassResult, error) {
 	var runner *passRunner
 	if pass.NeedsTunnels() {
@@ -186,7 +188,14 @@ func (self *passRunner) finish(ctx context.Context, pass *PassSelection) (Sweep,
 	}
 	if measureErr != nil {
 		passesTotal.WithLabelValues(PassResultFailed).Inc()
-		return pass.sweep, result, measureErr
+		// The retry selects the same page from the same place, but the
+		// held downgrades stand as the pass left them. A hold it retired
+		// answered a reading it recorded, whose provider is fresh now and
+		// not measured again, so the old hold would let a later sweep's one
+		// negative reading confirm a downgrade at once.
+		failed := pass.sweep
+		failed.HeldDowngrades = held.carried()
+		return failed, result, measureErr
 	}
 	next, completed := nextSweep(pass.sweep, pass.selected, counts.started, self.settings.minSweepInterval())
 	next.HeldDowngrades = held.carried()
@@ -241,7 +250,10 @@ func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id
 	startedCount := 0
 	var stateLock sync.Mutex
 	counts := passCounts{}
+	// the first failed write, and how many failed: one error rather than a
+	// join, so the task's retry can carry the pass's sweep
 	var recordErr error
+	recordFailures := 0
 	// some measurement of the pass negotiated a session
 	negotiated := false
 	// recordable negative readings waiting for a negotiation
@@ -275,7 +287,10 @@ func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id
 			switch {
 			case err != nil:
 				outcome = outcomeRecordFailed
-				recordErr = errors.Join(recordErr, err)
+				recordFailures += 1
+				if recordErr == nil {
+					recordErr = err
+				}
 			case wasHeld:
 				outcome = outcomeDowngradeHeld
 				held.hold(result.providerId)
@@ -378,6 +393,10 @@ func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id
 	defer stateLock.Unlock()
 	counts.started = startedCount
 	counts.negativesWithheld = len(withheld)
+	if 1 < recordFailures {
+		// each failure is logged with its provider
+		return counts, fmt.Errorf("%d evidence writes failed, the first: %w", recordFailures, recordErr)
+	}
 	return counts, recordErr
 }
 

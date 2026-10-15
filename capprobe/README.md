@@ -112,7 +112,13 @@ from recording one.
   least `min_sweep_interval_minutes` on, confirms the downgrade and records
   it; any reading recorded, a modern one included, retires the hold, and a
   hold as old as the seven-day staleness window, by when the evidence has
-  gone stale anyway, is dropped. `downgrades_total{result}` counts both.
+  gone stale anyway, is dropped. `downgrades_total{result}` counts both. A
+  pass whose evidence write fails is retried a minute later from the same
+  place, and the retry carries the holds as that pass left them, those it
+  retired gone and those it held added. A failure the task cannot
+  checkpoint, one with a cancellation among its causes, one joined with a
+  prober shard cleanup failure, or arguments of about 38 holds or more,
+  keeps the holds the pass started with, as a crashed pass does.
 
 ## Settings
 
