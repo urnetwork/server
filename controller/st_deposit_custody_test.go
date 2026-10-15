@@ -94,6 +94,8 @@ type stDepositCustodyRpc struct {
 	// balance, when set, is the deposit key's native balance: a transaction
 	// whose gas limit at its fee cap exceeds it is refused as underfunded.
 	balance *big.Int
+	// endBlock is the end of the boundary's epoch, the next epoch's first block.
+	endBlock uint64
 }
 
 // Serializes the inherited domain observation with receipt inclusion changes.
@@ -209,7 +211,7 @@ func (self *stDepositCustodyRpc) Call(ctx context.Context, call map[string]hexut
 		{method: "selfColdkey", data: coordinator.PackSelfColdkey(), value: coldkey},
 		{method: "reserveSink", data: coordinator.PackReserveSink(), value: reserve},
 		{method: "nextDepositNonce", data: coordinator.PackNextDepositNonce(noId), value: self.depositNonce},
-		{method: "epochEndBlock", data: coordinator.PackEpochEndBlock(epoch), value: big.NewInt(2_000)},
+		{method: "epochEndBlock", data: coordinator.PackEpochEndBlock(epoch), value: new(big.Int).SetUint64(self.endBlock)},
 		{method: "epochDeposits", data: coordinator.PackEpochDeposits(epoch, noId), value: self.deposited},
 		{method: "campaignReserved", data: coordinator.PackCampaignReserved(), value: self.deposited},
 		{method: "RESERVE_ROUNDING_ALLOWANCE_RAO", data: coordinator.PackRESERVEROUNDINGALLOWANCERAO(), value: allowance},
@@ -329,7 +331,7 @@ func newStDepositCustodyFixture(t testing.TB, noId uint64) (*CoreStClient, *ethc
 	}
 	cfg := &StConfig{Profile: "testnet", Enabled: true, ChainId: 945, GenesisHash: [32]byte{1}, Netuid: 521, NoId: noId, ContractAddress: common.Address{2}, SettlementVault: common.Address{3}, ReserveSink: common.Address{4}, DeploymentId: "deposit-custody-fixture", PolicyHash: [32]byte{5}, DepositHotkey: [32]byte{byte(noId), 6}, DepositKey: keys[0], RootKey: keys[1], ArtifactKey: keys[2], DepositEpochCapRao: 1_000, DeployBlock: 10}
 	domain := protocol.ClientKeyHistoryDomain{ChainID: cfg.ChainId, GenesisHash: cfg.GenesisHash, Netuid: uint16(cfg.Netuid), NoID: cfg.NoId, Coordinator: cfg.ContractAddress, SettlementVault: cfg.SettlementVault, DeploymentIDHash: sha256.Sum256([]byte(cfg.DeploymentId)), PolicyHash: cfg.PolicyHash}
-	fixture := &stDepositCustodyRpc{stClientKeyHistoryRPCFixture: stClientKeyHistoryRPCFixture{domain: domain, boundary: protocol.ClientKeyEffectiveBoundary{Block: 100, Hash: [32]byte(stTransactionReconcileBlockHash(100)), Epoch: 7}, root: crypto.PubkeyToAddress(cfg.RootKey.PublicKey)}, cfg: cfg, staged: new(big.Int), source: big.NewInt(10_000), deposited: new(big.Int), depositNonce: big.NewInt(3), accountNonce: 7, minimumTao: 1, loss: 1, receiptKVs: map[common.Hash]*types.Receipt{}}
+	fixture := &stDepositCustodyRpc{stClientKeyHistoryRPCFixture: stClientKeyHistoryRPCFixture{domain: domain, boundary: protocol.ClientKeyEffectiveBoundary{Block: 100, Hash: [32]byte(stTransactionReconcileBlockHash(100)), Epoch: 7}, root: crypto.PubkeyToAddress(cfg.RootKey.PublicKey)}, cfg: cfg, staged: new(big.Int), source: big.NewInt(10_000), deposited: new(big.Int), depositNonce: big.NewInt(3), accountNonce: 7, minimumTao: 1, loss: 1, receiptKVs: map[common.Hash]*types.Receipt{}, endBlock: 2_000}
 	rpcServer := rpc.NewServer()
 	if err := rpcServer.RegisterName("eth", fixture); err != nil {
 		t.Fatal(err)
@@ -346,6 +348,15 @@ func newStDepositCustodyFixture(t testing.TB, noId uint64) (*CoreStClient, *ethc
 	client := &CoreStClient{cfg: cfg, coordinator: stabi.NewSTCoordinator(), vault: stabi.NewSTSettlementVault(), clients: map[string]*ethclient.Client{httpServer.URL: rpcClient}}
 	t.Cleanup(func() { rpcClient.Close(); httpServer.Close(); rpcServer.Stop() })
 	return client, rpcClient, fixture
+}
+
+// Finalizes block 2000, the first block of epoch 8, which ends at block 4000.
+// Epoch 7's deposits had block 1999 as their deadline.
+func stDepositCustodyExpire(fixture *stDepositCustodyRpc) {
+	fixture.stateLock.Lock()
+	defer fixture.stateLock.Unlock()
+	fixture.boundary = protocol.ClientKeyEffectiveBoundary{Block: 2_000, Hash: [32]byte(stTransactionReconcileBlockHash(2_000)), Epoch: 8}
+	fixture.endBlock = 4_000
 }
 
 // Independent operator keys, hotkeys and coordinator nonce observations remain
@@ -451,7 +462,7 @@ func TestStDepositAttemptRejectsChangedAuthorityWithoutRewritingIntent(t *testin
 		t.Fatal(err)
 	}
 	intent := &model.StTransactionIntent{LogicalKey: logicalKey, DeploymentKey: client.cfg.DeploymentKey(), ChainId: client.cfg.ChainId, GenesisHash: hexutil.Encode(client.cfg.GenesisHash[:]), FromAddress: strings.ToLower(crypto.PubkeyToAddress(client.cfg.DepositKey.PublicKey).Hex()), ToAddress: strings.ToLower(stStakingPrecompileAddress.Hex()), Calldata: data, CalldataHash: crypto.Keccak256Hash(data).Hex(), Nonce: 7}
-	if err := client.validateDepositAttempt(t.Context(), rpcClient, intent, model.StTxAttemptExecution); err != nil {
+	if err := client.validateDepositAttempt(t.Context(), rpcClient, intent, model.StTxAttemptExecution, false); err != nil {
 		t.Fatal(err)
 	}
 	fixture.depositNonce.SetInt64(4)
@@ -463,12 +474,89 @@ func TestStDepositAttemptRejectsChangedAuthorityWithoutRewritingIntent(t *testin
 	if _, err := client.buildTransactionAttempt(t.Context(), rpcClient, client.cfg.DepositKey, intent, nil, model.StTxAttemptExecution); err == nil {
 		t.Fatal("changed operator signed a retained funding intent")
 	}
-	if err := client.validateDepositAttempt(t.Context(), rpcClient, intent, model.StTxAttemptCancellation); err != nil {
+	if err := client.validateDepositAttempt(t.Context(), rpcClient, intent, model.StTxAttemptCancellation, false); err != nil {
 		t.Fatal("obsolete deposit prevented cancellation")
 	}
 	if intent.Nonce != 7 || !bytes.Equal(intent.Calldata, data) || intent.LogicalKey != logicalKey {
 		t.Fatal("admission failure rewrote original intent")
 	}
+}
+
+// SV-1 (retries; the deposit key): custody validation admits one execution
+// that it otherwise refuses, a deposit whose deadline has passed at the
+// finalized boundary, and only when it is signed from its gas reservation. At
+// its deadline, block 1999, epoch 7's deposit is not expired, and its reserved
+// execution is refused as any deposit whose staging lacks principal plus the
+// rounding allowance; at block 2000 it is admitted. Nothing broader is: not the
+// deposit signed afresh, as a new deposit's first attempt or a fee replacement
+// not yet reserved is, not a staging transfer, which moves stake whenever it is
+// included, and not a deposit to another address, for another operator or
+// whose calldata is not its immutable original. On the signing path, a fee
+// replacement of the expired deposit's signed execution is refused before any
+// reservation.
+func TestStDepositReservedAttemptAdmitsOnlyAnExpiredDeposit(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		client, rpcClient, fixture := newStDepositCustodyFixture(t, 1)
+		cfg := client.cfg
+		intent := func(operation string, to common.Address, data []byte) *model.StTransactionIntent {
+			logicalKey, err := stTransactionLogicalKey(cfg, operation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &model.StTransactionIntent{LogicalKey: logicalKey, Profile: cfg.Profile, DeploymentId: cfg.DeploymentId, DeploymentKey: cfg.DeploymentKey(), ChainId: cfg.ChainId, GenesisHash: hexutil.Encode(cfg.GenesisHash[:]), FromAddress: strings.ToLower(crypto.PubkeyToAddress(cfg.DepositKey.PublicKey).Hex()), ToAddress: strings.ToLower(to.Hex()), Calldata: data, CalldataHash: crypto.Keccak256Hash(data).Hex(), Nonce: 7}
+		}
+		depositCall := client.coordinator.PackDeposit(big.NewInt(1), big.NewInt(100), big.NewInt(3), 1_999)
+		deposit := intent("deposit:7:1:3", cfg.ContractAddress, depositCall)
+		fixture.staged.SetInt64(101)
+		fixture.boundary.Block, fixture.boundary.Hash = 1_999, [32]byte(stTransactionReconcileBlockHash(1_999))
+		if err := client.validateDepositAttempt(ctx, rpcClient, deposit, model.StTxAttemptExecution, true); err == nil || err.Error() != "st: deposit staging lacks principal plus exact reserve rounding allowance" {
+			t.Fatalf("reserved deposit at its deadline: %v", err)
+		}
+		stDepositCustodyExpire(fixture)
+		if err := client.validateDepositAttempt(ctx, rpcClient, deposit, model.StTxAttemptExecution, true); err != nil {
+			t.Fatalf("reserved expired deposit: %v", err)
+		}
+		if err := client.validateDepositAttempt(ctx, rpcClient, deposit, model.StTxAttemptExecution, false); err == nil || err.Error() != "st: retained deposit calldata differs from current operator, nonce or deadline" {
+			t.Fatalf("expired deposit signed afresh: %v", err)
+		}
+		staging, err := stPackTransferStake(ss58.EvmMirrorPubkey(cfg.ContractAddress), cfg.DepositHotkey, cfg.Netuid, big.NewInt(103))
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed := intent("deposit:7:1:3", cfg.ContractAddress, client.coordinator.PackDeposit(big.NewInt(1), big.NewInt(101), big.NewInt(3), 1_999))
+		changed.CalldataHash = deposit.CalldataHash
+		for _, refused := range []struct {
+			name   string
+			intent *model.StTransactionIntent
+			err    string
+		}{
+			{"staging of epoch 7", intent("deposit-fund:7:1:3", stStakingPrecompileAddress, staging), "st: retained deposit intent belongs to another immutable operation"},
+			{"deposit to another address", intent("deposit:7:1:3", common.Address{9}, depositCall), "st: deposit custody key cannot sign an unrelated execution intent"},
+			{"deposit for another operator", intent("deposit:7:2:3", cfg.ContractAddress, client.coordinator.PackDeposit(big.NewInt(2), big.NewInt(100), big.NewInt(3), 1_999)), "st: retained deposit calldata differs from current operator, nonce or deadline"},
+			{"deposit whose calldata is not its original", changed, "st: deposit intent has inconsistent immutable calldata hash"},
+		} {
+			if err := client.validateDepositAttempt(ctx, rpcClient, refused.intent, model.StTxAttemptExecution, true); err == nil || err.Error() != refused.err {
+				t.Fatalf("reserved %s: %v", refused.name, err)
+			}
+		}
+
+		stored := stWalletRecoveryIntent(t, client, 7, 1_999, 1)
+		policy, _, _ := stGasFixturePolicy(t, client, nil)
+		previous := model.GetCurrentStTransactionAttempt(ctx, stored.IntentId)
+		if _, err := client.buildTransactionAttempt(ctx, rpcClient, cfg.DepositKey, stored, previous, model.StTxAttemptExecution); err == nil || err.Error() != "st: retained deposit calldata differs from current operator, nonce or deadline" {
+			t.Fatalf("fee replacement of the expired deposit: %v", err)
+		}
+		if pending, err := model.GetPendingStTransactionGasReservation(ctx, stored.IntentId); pending != nil || err != nil || len(model.GetStTransactionAttempts(ctx, stored.IntentId)) != 1 {
+			t.Fatalf("fee replacement of the expired deposit reserved %+v: %v", pending, err)
+		}
+		stGasFixtureSnapshot(t, policy, "600000", 1)
+		fixture.stateLock.Lock()
+		defer fixture.stateLock.Unlock()
+		if len(fixture.sent) != 0 {
+			t.Fatalf("%d sent", len(fixture.sent))
+		}
+	})
 }
 
 // Role-key mistakes are rejected before any native or Evm observation, even
