@@ -27,9 +27,12 @@ import (
 // start's day while the kill switch can still be released. A fleet whose
 // taskworkers do not all publish the gate, decide it differently, or
 // schedule different starts WARNs before the earliest start and PAGEs from
-// it. The start, and whether one is scheduled at all, comes from the
-// taskworkers' own provider.yml as their stats collector publishes it, so
-// postponing the gate or moving its start moves or silences the signal.
+// it until then, judged on the processes that have run for five minutes, so
+// a restart alone does not fire; outside those windows a fleet that decides
+// the gate differently WARNs, whether or not a start is scheduled. The
+// start, and whether one is scheduled at all, comes from the taskworkers'
+// own provider.yml as their stats collector publishes it, so postponing the
+// gate or moving its start moves or silences the signal.
 func NewModernGateReadinessSignal() Signal {
 	return &signalAdapter{number: "2.29", key: "modern-gate-readiness", name: "Modern provider gate readiness", probe: modernGateReadinessProbe{}}
 }
@@ -51,6 +54,11 @@ const (
 	modernGateReadinessMaxShare = 0.5
 	// the oldest dashboard counts the shadow is judged on
 	modernGateReadinessMaxCountsAge = 30 * time.Minute
+	// how long a taskworker process runs before the fleet's agreement is
+	// judged on it: its stats collector registers the gate at its first
+	// refresh, a minute or two after the start, and a drained process's
+	// series stay readable for Mimir's five-minute lookback
+	modernGateReadinessSettleAge = 5 * time.Minute
 	// the largest Mimir answer read
 	modernGateReadinessMaxResponseBytes = 64 * 1024
 	modernGateReadinessProbeId          = "mimir/modern-gate-readiness"
@@ -69,19 +77,16 @@ func (modernGateReadinessProbe) cadence() time.Duration { return 5 * time.Minute
 // What the signal reads from Mimir at one instant.
 type modernGateReadinessObservation struct {
 	// running taskworkers that publish the gate
-	// (urnetwork_stats_provider_modern_gate_on), and whether it holds
-	// Quality and Speed on every one of them (min) and on any (max)
-	publishing int
-	onEvery    bool
-	onAny      bool
-	// running taskworkers by their process series, zero when Mimir has none
+	// (urnetwork_stats_provider_modern_gate_on), and those by their process
+	// series, zero when Mimir has none
+	publishing  int
 	taskworkers int
-	// the latest start the taskworkers schedule, nil while provider.yml sets
-	// the switch on every one and no flip is scheduled
+	// the latest start any running taskworker schedules, nil while
+	// provider.yml sets the switch on every one and no flip is scheduled
 	start *time.Time
-	// the earliest start they schedule, and the taskworkers that schedule one
-	earliestStart *time.Time
-	scheduling    int
+	// the taskworkers that have run for modernGateReadinessSettleAge, on
+	// which the fleet's agreement is judged
+	settled modernGateReadinessFleet
 	// when the dashboard counts' source read started, zero when unknown
 	countsStarted time.Time
 	// bucket, then the gate's outcome, to the providers the other rules admit
@@ -93,26 +98,49 @@ type modernGateReadinessObservation struct {
 	bucketsBefore map[string]float64
 }
 
+// Taskworker processes and what they publish.
+type modernGateReadinessFleet struct {
+	// processes, those of them that publish the gate, and whether it holds
+	// Quality and Speed on every one of those (min) and on any (max)
+	taskworkers int
+	publishing  int
+	onEvery     bool
+	onAny       bool
+	// those that schedule a start, and the earliest and the latest they
+	// schedule, nil for none
+	scheduling    int
+	earliestStart *time.Time
+	latestStart   *time.Time
+}
+
 // One instant query's parts, each a fixed label value, so a single round
 // trip reads the fleet's agreement on the gate, the schedule, the shadow,
 // the buckets and the counts' age. The gate and its start are read per
-// running taskworker, against the running taskworker processes: count, and
-// min against max, so a taskworker without them, or on an older config, is
-// seen.
+// taskworker process against the processes: count, and min against max, so
+// a taskworker without them, or on an older config, is seen. The agreement
+// is read on the processes that started modernGateReadinessSettleAge ago,
+// by their process series' instance, a nonce of each process.
 func modernGateReadinessQuery(environment string) string {
 	selector := "env=" + strconv.Quote(environment)
 	taskworkerSelector := selector + `,job="taskworker"`
 	part := func(expression string, name string) string {
 		return "label_replace(" + expression + `,"monitor_modern_gate_part",` + strconv.Quote(name) + `,"","")`
 	}
+	settledProcesses := "process_start_time_seconds{" + taskworkerSelector + "} < time() - " + strconv.Itoa(int(modernGateReadinessSettleAge/time.Second))
+	settled := func(metric string) string {
+		return metric + "{" + taskworkerSelector + "} and on(instance) (" + settledProcesses + ")"
+	}
 	return strings.Join([]string{
 		part("count(urnetwork_stats_provider_modern_gate_on{"+taskworkerSelector+"})", "on_count"),
-		part("min(urnetwork_stats_provider_modern_gate_on{"+taskworkerSelector+"})", "on_min"),
-		part("max(urnetwork_stats_provider_modern_gate_on{"+taskworkerSelector+"})", "on_max"),
 		part("count(process_start_time_seconds{"+taskworkerSelector+"})", "taskworkers"),
-		part("count(urnetwork_stats_provider_modern_gate_start_seconds{"+taskworkerSelector+"})", "start_count"),
-		part("min(urnetwork_stats_provider_modern_gate_start_seconds{"+taskworkerSelector+"})", "start_min"),
 		part("max(urnetwork_stats_provider_modern_gate_start_seconds{"+taskworkerSelector+"})", "start"),
+		part("count("+settledProcesses+")", "settled_taskworkers"),
+		part("count("+settled("urnetwork_stats_provider_modern_gate_on")+")", "settled_on_count"),
+		part("min("+settled("urnetwork_stats_provider_modern_gate_on")+")", "settled_on_min"),
+		part("max("+settled("urnetwork_stats_provider_modern_gate_on")+")", "settled_on_max"),
+		part("count("+settled("urnetwork_stats_provider_modern_gate_start_seconds")+")", "settled_start_count"),
+		part("min("+settled("urnetwork_stats_provider_modern_gate_start_seconds")+")", "settled_start_min"),
+		part("max("+settled("urnetwork_stats_provider_modern_gate_start_seconds")+")", "settled_start_max"),
 		part("max(urnetwork_stats_provider_egress_source_started_seconds{"+selector+"})", "counts_started"),
 		part("max by (bucket, outcome) (urnetwork_stats_provider_modern_gate_shadow{"+selector+`,bucket=~"quality|speed"})`, "shadow"),
 		part(modernGateReadinessBucketExpression(environment), "bucket"),
@@ -236,28 +264,36 @@ func newModernGateReadinessObservation(parts map[string][]modernGateReadinessSer
 	}
 	for part, series := range parts {
 		switch part {
-		case "on_count", "on_min", "on_max", "taskworkers", "start_count", "start_min", "start", "counts_started":
+		case "on_count", "taskworkers", "start", "settled_taskworkers", "settled_on_count", "settled_on_min", "settled_on_max", "settled_start_count", "settled_start_min", "settled_start_max", "counts_started":
 			if len(series) != 1 {
 				return invalid(part)
 			}
 			value := series[0].value
+			unix := func() *time.Time {
+				at := time.Unix(int64(value), 0).UTC()
+				return &at
+			}
 			switch part {
 			case "on_count":
 				observation.publishing = int(value)
-			case "on_min":
-				observation.onEvery = 1 <= value
-			case "on_max":
-				observation.onAny = 1 <= value
 			case "taskworkers":
 				observation.taskworkers = int(value)
-			case "start_count":
-				observation.scheduling = int(value)
-			case "start_min":
-				earliestStart := time.Unix(int64(value), 0).UTC()
-				observation.earliestStart = &earliestStart
 			case "start":
-				start := time.Unix(int64(value), 0).UTC()
-				observation.start = &start
+				observation.start = unix()
+			case "settled_taskworkers":
+				observation.settled.taskworkers = int(value)
+			case "settled_on_count":
+				observation.settled.publishing = int(value)
+			case "settled_on_min":
+				observation.settled.onEvery = 1 <= value
+			case "settled_on_max":
+				observation.settled.onAny = 1 <= value
+			case "settled_start_count":
+				observation.settled.scheduling = int(value)
+			case "settled_start_min":
+				observation.settled.earliestStart = unix()
+			case "settled_start_max":
+				observation.settled.latestStart = unix()
 			case "counts_started":
 				observation.countsStarted = unixFloatTime(value)
 			}
@@ -294,11 +330,11 @@ func newModernGateReadinessObservation(parts map[string][]modernGateReadinessSer
 
 // The signal's verdict at now, a pure function of the observation. Before
 // the warning lead, after the watch, and while provider.yml schedules no
-// flip, it is healthy whatever the gauges say. An error is a visibility
-// failure: the fleet, the shadow, the counts' age, or the buckets before the
-// start could not be read where the verdict needs them. Where some of the
-// verdict could be read, its findings stand beside a cannot-observe finding
-// for the rest.
+// flip, only a fleet that decides the gate differently fires, a WARN. An
+// error is a visibility failure: the fleet, the shadow, the counts' age, or
+// the buckets before the start could not be read where the verdict needs
+// them. Where some of the verdict could be read, its findings stand beside a
+// cannot-observe finding for the rest.
 func evaluateModernGateReadiness(observation modernGateReadinessObservation, now time.Time) ([]finding, error) {
 	healthy := []finding{healthyFinding(modernGateReadinessProbeId, tierPage, "modern-gate-not-ready", modernGateReadinessTarget)}
 	if observation.publishing == 0 {
@@ -310,8 +346,19 @@ func evaluateModernGateReadiness(observation modernGateReadinessObservation, now
 		}
 		return healthy, nil
 	}
+	// The settled taskworkers decide the gate alike: every one publishes it
+	// and its min equals its max. One that does not publish it decides it
+	// off, which differs while a start is scheduled or the gate is on
+	// anywhere.
+	settled := observation.settled
+	gateDisagrees := settled.onEvery != settled.onAny ||
+		(observation.start != nil || settled.onAny) && settled.publishing < settled.taskworkers
 	if observation.start == nil {
-		// provider.yml sets the switch on every taskworker: no flip is scheduled
+		// provider.yml sets the switch on every taskworker, so no flip is
+		// scheduled, but they must still decide the gate alike
+		if gateDisagrees {
+			return []finding{modernGateFleetDisagreesFinding(observation, nil, now, tierWarn)}, nil
+		}
 		return healthy, nil
 	}
 	// the latest start places the shadow's windows and the watch after it;
@@ -319,10 +366,15 @@ func evaluateModernGateReadiness(observation modernGateReadinessObservation, now
 	// fleet's window sooner
 	start := *observation.start
 	earliest := start
-	if observation.earliestStart != nil && observation.earliestStart.Before(start) {
-		earliest = *observation.earliestStart
+	if settled.earliestStart != nil && settled.earliestStart.Before(start) {
+		earliest = *settled.earliestStart
 	}
 	if now.Before(earliest.Add(-modernGateReadinessWarnLead)) || !now.Before(modernGateReadinessWatchEnd(start)) {
+		// outside the windows a fleet that decides the gate differently
+		// still WARNs
+		if gateDisagrees {
+			return []finding{modernGateFleetDisagreesFinding(observation, &earliest, now, tierWarn)}, nil
+		}
 		return healthy, nil
 	}
 	if observation.taskworkers == 0 {
@@ -330,18 +382,16 @@ func evaluateModernGateReadiness(observation modernGateReadinessObservation, now
 	}
 
 	findings := []finding{}
-	// every running taskworker publishes the gate and decides it alike, and
-	// while a start is ahead every one schedules the same start
-	disagrees := observation.publishing < observation.taskworkers || observation.onEvery != observation.onAny
-	if now.Before(start) && (observation.scheduling < observation.publishing || earliest.Before(start)) {
-		disagrees = true
-	}
-	if disagrees {
+	// inside the windows, while a start is ahead, every settled taskworker
+	// also schedules the same start
+	scheduleDisagrees := settled.scheduling < settled.publishing ||
+		settled.earliestStart != nil && settled.latestStart != nil && settled.earliestStart.Before(*settled.latestStart)
+	if gateDisagrees || now.Before(start) && scheduleDisagrees {
 		tier := tierWarn
 		if !now.Before(earliest) {
 			tier = tierPage
 		}
-		findings = append(findings, modernGateFleetDisagreesFinding(observation, earliest, start, now, tier))
+		findings = append(findings, modernGateFleetDisagreesFinding(observation, &earliest, now, tier))
 	}
 	// what the verdict below cannot read
 	var unobserved error
@@ -372,7 +422,7 @@ func evaluateModernGateReadiness(observation modernGateReadinessObservation, now
 				findings = append(findings, modernGateNotReadyFinding(bucket, outcomes, admitted, removed, start, now, tier))
 			}
 		}
-	case observation.onEvery && !observation.countsStarted.Before(start):
+	case settled.onEvery && !observation.countsStarted.Before(start):
 		// during the watch after the start: only counts read after it, by a
 		// fleet that has flipped, show the flip, so earlier ones are no
 		// verdict yet. A gate off everywhere, the kill switch, ends the watch,
@@ -432,23 +482,30 @@ func modernGateNotReadyFinding(bucket string, outcomes map[string]float64, admit
 	}
 }
 
-// earliest and start are the earliest and the latest start the taskworkers
-// schedule; the tier is WARN before the earliest and PAGE from it.
-func modernGateFleetDisagreesFinding(observation modernGateReadinessObservation, earliest time.Time, start time.Time, now time.Time, tier string) finding {
+// earliest is the earliest start the taskworkers schedule, nil while none
+// does. The tier is WARN outside the windows and before the earliest start,
+// PAGE from it until the watch after the latest start ends.
+func modernGateFleetDisagreesFinding(observation modernGateReadinessObservation, earliest *time.Time, now time.Time, tier string) finding {
+	settled := observation.settled
 	onIn := "none of them"
 	switch {
-	case observation.onEvery:
+	case settled.onEvery:
 		onIn = "all of them"
-	case observation.onAny:
+	case settled.onAny:
 		onIn = "some of them"
 	}
-	when := "before its start at " + earliest.Format(time.RFC3339)
-	if !now.Before(earliest) {
-		when = "since its start at " + earliest.Format(time.RFC3339)
+	when := "while no start is scheduled"
+	if earliest != nil {
+		when = "before its start at " + earliest.Format(time.RFC3339)
+		if !now.Before(*earliest) {
+			when = "since its start at " + earliest.Format(time.RFC3339)
+		}
 	}
-	starts := earliest.Format(time.RFC3339)
-	if earliest.Before(start) {
-		starts = "from " + starts + " to " + start.Format(time.RFC3339)
+	timeText := func(at *time.Time) string {
+		if at == nil {
+			return "none"
+		}
+		return at.Format(time.RFC3339)
 	}
 	boolValue := func(value bool) int {
 		if value {
@@ -459,14 +516,14 @@ func modernGateFleetDisagreesFinding(observation modernGateReadinessObservation,
 	return finding{
 		probeId: modernGateReadinessProbeId, tier: tier, class: "modern-gate-fleet-disagrees",
 		target: modernGateReadinessTarget, sustain: 2,
-		symptom:   fmt.Sprintf("The taskworkers disagree on the modern provider gate %s: of %d running, %d publish the gate, it is on in %s, and %d schedule a start (%s)", when, observation.taskworkers, observation.publishing, onIn, observation.scheduling, starts),
+		symptom:   fmt.Sprintf("The taskworkers disagree on the modern provider gate %s: of %d that have run for five minutes, %d publish the gate, it is on in %s, and %d schedule a start (%s to %s)", when, settled.taskworkers, settled.publishing, onIn, settled.scheduling, timeText(settled.earliestStart), timeText(settled.latestStart)),
 		mechanism: "Each taskworker decides the gate from its own code and config. One running code without the automatic start publishes no gate and never flips; one created before a config release that set the switch or moved the start decides the old way, flipping when the others do not, or at another time. The score export a taskworker runs publishes the buckets FindProviders2 answers from, so where they disagree Quality and Speed follow whichever taskworker ran the last pass, and the dashboard counts the taskworker that filled the last snapshot.",
-		baseline:  "Every running taskworker publishes urnetwork_stats_provider_modern_gate_on and they agree: its count equals the running taskworker processes, its min equals its max, and while a start is ahead every one publishes the same urnetwork_stats_provider_modern_gate_start_seconds. WARN from 72 hours before the earliest start, PAGE from it until 18:00 UTC on the latest start's day.",
-		observed:  fmt.Sprintf("taskworkers=%d publishing=%d gate_on_min=%d gate_on_max=%d scheduling=%d earliest_start=%s start=%s now_minus_earliest_start=%s", observation.taskworkers, observation.publishing, boolValue(observation.onEvery), boolValue(observation.onAny), observation.scheduling, earliest.Format(time.RFC3339), start.Format(time.RFC3339), now.Sub(earliest).Round(time.Minute)),
-		evidence:  "count, min and max of urnetwork_stats_provider_modern_gate_on, count, min and max of urnetwork_stats_provider_modern_gate_start_seconds, and the count of process_start_time_seconds, for job taskworker; no host or process identity leaves Mimir.",
-		context:   "A new taskworker publishes the gate within a minute or two of its start, which the two-read sustain absorbs. A config release that sets the switch or moves the start makes the fleet disagree until its last taskworker has restarted and the drained processes' series have gone stale, up to five minutes after each drain, so the kill switch's own rollout after the start can page until it completes. API processes decide the gate for their own readers but publish no gauge, so this does not see them.",
+		baseline:  "Every taskworker that has run for five minutes publishes urnetwork_stats_provider_modern_gate_on and they agree: its count equals those processes and its min equals its max, and within the windows, while a start is ahead, every one publishes the same urnetwork_stats_provider_modern_gate_start_seconds. Within the windows WARN from 72 hours before the earliest start and PAGE from it until 18:00 UTC on the latest start's day; outside them, and while provider.yml sets the switch on every taskworker, a gate decided differently WARNs.",
+		observed:  fmt.Sprintf("settled_taskworkers=%d settled_publishing=%d gate_on_min=%d gate_on_max=%d settled_scheduling=%d settled_earliest_start=%s settled_latest_start=%s start=%s running_taskworkers=%d running_publishing=%d", settled.taskworkers, settled.publishing, boolValue(settled.onEvery), boolValue(settled.onAny), settled.scheduling, timeText(settled.earliestStart), timeText(settled.latestStart), timeText(observation.start), observation.taskworkers, observation.publishing),
+		evidence:  "count, min and max of urnetwork_stats_provider_modern_gate_on and urnetwork_stats_provider_modern_gate_start_seconds over the taskworker processes whose process_start_time_seconds is five minutes old, matched by instance, against the count of those processes; no host or process identity leaves Mimir.",
+		context:   "Only processes that have run for five minutes are compared: a new process registers the gate at its stats collector's first refresh, a minute or two after it starts, and a drained process's series stay readable for five minutes, so a restart alone does not fire. A config release that sets the switch or moves the start makes the fleet disagree until its last taskworker has restarted and the drained processes' series have gone stale, so on the start's day, until 18:00 UTC, taskworkers restart only for the kill switch, whose rollout can still page until it completes. API processes decide the gate for their own readers but publish no gauge, so this does not see them.",
 		action:    "Find the taskworkers whose urnetwork_stats_provider_modern_gate_on or urnetwork_stats_provider_modern_gate_start_seconds is missing or differs (by host and block), confirm each runs the build with the automatic start and its host publishes the current config (WARP_CONFIG_VERSION), and restart or redeploy those that differ. To keep the gate off fleet-wide instead, " + modernGateReadinessOverrides + ".",
-		verify:    "The count of urnetwork_stats_provider_modern_gate_on equals the running taskworkers, its min equals its max, and the starts agree, on two consecutive reads.",
+		verify:    "Over the taskworkers that have run for five minutes, the count of urnetwork_stats_provider_modern_gate_on equals theirs, its min equals its max, and the starts agree, on two consecutive reads.",
 		playbook:  "SIGNALS.md §2.29 and FP2FIX.md (modern provider gate)",
 	}
 }
