@@ -4973,8 +4973,12 @@ type ProviderLocation struct {
 }
 
 type ClientScore struct {
-	// A cached passing ratio is valid only until its first contributing result
-	// leaves the eight-hour window. A later export recalculates the ratio.
+	// A cached URL verdict, and the native membership it gives, is valid only
+	// until the earlier of its newest contributing result leaving the
+	// eight-hour window and a bounded staleness past the export's read of the
+	// window (clientScoreEgressValidUntil). A later export recalculates it
+	// before then; a stalled export's natives fall back to Online. Nil without
+	// accepted URL outcomes.
 	EgressValidUntil             *time.Time
 	UrlProbeSuccessWeight        float64
 	ClientId                     server.Id
