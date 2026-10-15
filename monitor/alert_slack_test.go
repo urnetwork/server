@@ -206,7 +206,7 @@ func TestSlackAlertNotifierPostsOneMessagePerTransition(t *testing.T) {
 		{},
 		{slackTestAlert("pg-1", "query-a", SeverityWarn)},
 	} {
-		notifier.Handle(slackTestSignal, alerts)
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: alerts})
 		harness.advance(time.Minute)
 	}
 	closeSlackNotifier(t, notifier)
@@ -246,7 +246,7 @@ func TestSlackAlertNotifierEscalatesOnceToPage(t *testing.T) {
 		{},
 		{},
 	} {
-		notifier.Handle(slackTestSignal, alerts)
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: alerts})
 	}
 	closeSlackNotifier(t, notifier)
 
@@ -261,20 +261,27 @@ func TestSlackAlertNotifierEscalatesOnceToPage(t *testing.T) {
 
 // A run that could not observe its source is not evidence of recovery: its
 // absent incidents keep their state until complete runs stop reporting them.
+// The executions are what the run loop hands over: the gate holds the first
+// failed run's visibility alert below its Sustain of 2, so that run's gated
+// alerts are empty.
 func TestSlackAlertNotifierKeepsIncidentsThroughIncompleteRuns(t *testing.T) {
 	webhook, webhookUrl := newFakeSlackWebhook(t)
 	harness := newSlackTestHarness()
 	notifier := NewSlackAlertNotifier(harness.settings(webhookUrl))
 
 	cannotObserve := visibilityAlert(syntheticSettings(nil), slackTestSignal, errors.New("synthetic ssh timeout"))
-	notifier.Handle(slackTestSignal, Alerts{slackTestAlert("pg-1", "", SeverityPage)})
+	if cannotObserve.Sustain != 2 {
+		t.Fatalf("visibility alert Sustain = %d, want 2", cannotObserve.Sustain)
+	}
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityPage)}})
 	// three runs that could not observe: an early clear of pg-1 would
 	// appear here, ahead of the visibility clear
-	for i := 0; i < 3; i++ {
-		notifier.Handle(slackTestSignal, Alerts{cannotObserve})
+	notifier.Handle(slackTestSignal, SignalExecution{HeldAlerts: Alerts{cannotObserve}, Failed: true})
+	for i := 0; i < 2; i++ {
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{cannotObserve}, Failed: true})
 	}
-	notifier.Handle(slackTestSignal, Alerts{})
-	notifier.Handle(slackTestSignal, Alerts{})
+	notifier.Handle(slackTestSignal, SignalExecution{})
+	notifier.Handle(slackTestSignal, SignalExecution{})
 	closeSlackNotifier(t, notifier)
 
 	texts := webhook.posted()
@@ -303,16 +310,16 @@ func TestSlackAlertNotifierClearsASharedIncidentAfterEveryReporter(t *testing.T)
 			Frame: signal.key, Symptom: "Some host observations are excluded",
 		}
 	}
-	notifier.Handle(slackTestSignal, Alerts{shared(slackTestSignal)})
-	notifier.Handle(otherSignal, Alerts{shared(otherSignal)})
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{shared(slackTestSignal)}})
+	notifier.Handle(otherSignal, SignalExecution{Alerts: Alerts{shared(otherSignal)}})
 	// the first signal stops reporting: an early clear would be followed by a
 	// second raise from the other signal
 	for i := 0; i < 3; i++ {
-		notifier.Handle(slackTestSignal, Alerts{})
-		notifier.Handle(otherSignal, Alerts{shared(otherSignal)})
+		notifier.Handle(slackTestSignal, SignalExecution{})
+		notifier.Handle(otherSignal, SignalExecution{Alerts: Alerts{shared(otherSignal)}})
 	}
-	notifier.Handle(otherSignal, Alerts{})
-	notifier.Handle(otherSignal, Alerts{})
+	notifier.Handle(otherSignal, SignalExecution{})
+	notifier.Handle(otherSignal, SignalExecution{})
 	closeSlackNotifier(t, notifier)
 
 	requireSlackTexts(t, webhook.posted(),
@@ -334,17 +341,17 @@ func TestSlackAlertNotifierRateLimitsWithASummary(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		burst = append(burst, slackTestAlert(fmt.Sprintf("pg-%d", i), "", SeverityWarn))
 	}
-	notifier.Handle(slackTestSignal, burst)
-	notifier.Handle(slackTestSignal, burst)
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: burst})
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: burst})
 	harness.advance(30 * time.Second)
 	// still inside the minute of the first three posts
-	notifier.Handle(slackTestSignal, append(append(Alerts{}, burst...), slackTestAlert("pg-6", "", SeverityPage)))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: append(append(Alerts{}, burst...), slackTestAlert("pg-6", "", SeverityPage))})
 	notifier.flushSummary()
 	harness.advance(31 * time.Second)
 	// the window has room again: the periodic flush posts the summary
 	notifier.flushSummary()
 	harness.advance(time.Second)
-	notifier.Handle(slackTestSignal, burst)
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: burst})
 	closeSlackNotifier(t, notifier)
 
 	texts := webhook.posted()
@@ -373,10 +380,10 @@ func TestSlackAlertNotifierPostsHeldTransitionsAtClose(t *testing.T) {
 	settings.MaxMessagesPerMinute = 1
 	notifier := NewSlackAlertNotifier(settings)
 
-	notifier.Handle(slackTestSignal, Alerts{slackTestAlert("pg-1", "", SeverityWarn), slackTestAlert("pg-2", "", SeverityWarn)})
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn), slackTestAlert("pg-2", "", SeverityWarn)}})
 	closeSlackNotifier(t, notifier)
 	// closed: later batches are ignored
-	notifier.Handle(slackTestSignal, Alerts{slackTestAlert("pg-3", "", SeverityWarn)})
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-3", "", SeverityWarn)}})
 
 	texts := webhook.posted()
 	requireSlackTexts(t, texts,
@@ -404,8 +411,8 @@ func TestSlackAlertNotifierIsDisabledWithoutAUsableWebhook(t *testing.T) {
 	} {
 		harness := newSlackTestHarness()
 		notifier := NewSlackAlertNotifier(harness.settings(c.webhookUrl))
-		notifier.Handle(slackTestSignal, Alerts{slackTestAlert("pg-1", "", SeverityPage)})
-		notifier.Handle(slackTestSignal, Alerts{})
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityPage)}})
+		notifier.Handle(slackTestSignal, SignalExecution{})
 		closeSlackNotifier(t, notifier)
 		logs := harness.logLines()
 		if len(logs) != 1 || !strings.Contains(logs[0], "Slack alert notifications disabled") || !strings.Contains(logs[0], c.reason) {
@@ -439,9 +446,9 @@ func TestSlackAlertNotifierNeverLogsTheWebhookUrl(t *testing.T) {
 			prepare(&settings)
 		}
 		notifier := NewSlackAlertNotifier(settings)
-		notifier.Handle(slackTestSignal, alerts)
-		notifier.Handle(slackTestSignal, Alerts{})
-		notifier.Handle(slackTestSignal, Alerts{})
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: alerts})
+		notifier.Handle(slackTestSignal, SignalExecution{})
+		notifier.Handle(slackTestSignal, SignalExecution{})
 		closeSlackNotifier(t, notifier)
 		logs := harness.logLines()
 		joined := strings.Join(logs, "\n")
@@ -504,7 +511,7 @@ func TestSlackAlertNotifierNeverLogsTheWebhookUrl(t *testing.T) {
 	recovering.respond(http.StatusServiceUnavailable, "")
 	harness := newSlackTestHarness()
 	notifier := NewSlackAlertNotifier(harness.settings(recoveringUrl))
-	notifier.Handle(slackTestSignal, alerts)
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: alerts})
 	// barrier: the raise has been answered 503 before the webhook recovers
 	select {
 	case <-recovering.answered:
@@ -512,8 +519,8 @@ func TestSlackAlertNotifierNeverLogsTheWebhookUrl(t *testing.T) {
 		t.Fatal("the raise was never posted")
 	}
 	recovering.respond(0, "")
-	notifier.Handle(slackTestSignal, Alerts{})
-	notifier.Handle(slackTestSignal, Alerts{})
+	notifier.Handle(slackTestSignal, SignalExecution{})
+	notifier.Handle(slackTestSignal, SignalExecution{})
 	closeSlackNotifier(t, notifier)
 	logs := harness.logLines()
 	if len(logs) != 3 || !strings.Contains(logs[1], "(http-503)") || !strings.Contains(logs[2], "recovered after 1 failed post(s)") {

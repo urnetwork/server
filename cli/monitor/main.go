@@ -233,20 +233,21 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	} else {
 		fmt.Fprintln(os.Stderr, "monitor: Slack alert notifications disabled by -slack-alerts=false")
 	}
-	return monitor.RunLoopWithOptions(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence}, continuousAlertHandler(stdout, opts.format, notifier))
+	return monitor.RunExecutionLoop(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence}, continuousAlertHandler(stdout, opts.format, notifier))
 }
 
-// Hands every gated batch, empty ones included (absence is what clears an
-// incident), to the optional notifier, then writes nonempty batches to stdout.
-func continuousAlertHandler(stdout io.Writer, format string, notifier *servermonitor.SlackAlertNotifier) servermonitor.AlertHandler {
-	return func(ctx context.Context, signal servermonitor.Signal, alerts servermonitor.Alerts) error {
+// Hands every gated execution, empty ones included (absence from complete
+// executions is what clears an incident), to the optional notifier, then
+// writes nonempty gated alerts to stdout.
+func continuousAlertHandler(stdout io.Writer, format string, notifier *servermonitor.SlackAlertNotifier) servermonitor.SignalExecutionHandler {
+	return func(ctx context.Context, signal servermonitor.Signal, execution servermonitor.SignalExecution) error {
 		if notifier != nil {
-			notifier.Handle(signal, alerts)
+			notifier.Handle(signal, execution)
 		}
-		if len(alerts) == 0 {
+		if len(execution.Alerts) == 0 {
 			return nil
 		}
-		return writeAlerts(stdout, format, alerts)
+		return writeAlerts(stdout, format, execution.Alerts)
 	}
 }
 

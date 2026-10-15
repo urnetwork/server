@@ -9,11 +9,14 @@ package monitor
 // (signal id, class, target): frame is left out on purpose, because per-
 // incident attribution that varies between observations must not re-raise
 // (SIGNALS.md §7 identity discipline). An incident is
-//   - raised when it first appears in a signal's gated batch;
-//   - escalated, once, when a later batch reports it at page severity;
+//   - raised when it first appears in a signal's gated alerts;
+//   - escalated, once, when a later execution reports it at page severity;
 //   - cleared after it is absent from clearAfterCompleteRuns consecutive
 //     complete executions of every signal that reported it.
-// A batch that carries a visibility alert is incomplete: its signal did not
+// Absent means the execution observed nothing with the incident's key: an
+// alert the cadence gate holds below its Sustain, as it does for the first
+// runs after a one-run dip, is present. An execution is incomplete when it
+// failed or carries a visibility alert, gated or held: its signal did not
 // observe everything, so absent incidents keep their state. Silence is not
 // recovery, and a clear message says only that the incident is no longer
 // reported. State is process-local, so a newly started watcher announces each
@@ -230,9 +233,9 @@ func NewSlackAlertNotifier(settings SlackAlertNotifierSettings) *SlackAlertNotif
 	return notifier
 }
 
-// Handle takes the gated alerts of one completed signal execution, including
-// an empty batch: absence is what clears an incident.
-func (self *SlackAlertNotifier) Handle(signal Signal, alerts Alerts) {
+// Handle takes every gated execution of a signal, empty ones included:
+// absence from complete executions is what clears an incident.
+func (self *SlackAlertNotifier) Handle(signal Signal, execution SignalExecution) {
 	if !self.enabled {
 		return
 	}
@@ -242,7 +245,7 @@ func (self *SlackAlertNotifier) Handle(signal Signal, alerts Alerts) {
 	if self.closed {
 		return
 	}
-	self.admitWithLock(now, self.observeWithLock(signal.Key(), alerts))
+	self.admitWithLock(now, self.observeWithLock(signal.Key(), execution))
 }
 
 // Close stops accepting batches, queues a held summary regardless of the cap,
@@ -291,10 +294,10 @@ func isVisibilityAlert(alert Alert) bool {
 // Applies one signal execution to the incidents and returns its transitions:
 // raises and escalations in severity-then-identity order, then clears in key
 // order.
-func (self *SlackAlertNotifier) observeWithLock(signalKey string, alerts Alerts) []slackTransition {
-	complete := true
+func (self *SlackAlertNotifier) observeWithLock(signalKey string, execution SignalExecution) []slackTransition {
+	complete := !execution.Failed
 	keyAlerts := map[string]Alert{}
-	for _, alert := range alerts {
+	for _, alert := range execution.Alerts {
 		if isVisibilityAlert(alert) {
 			complete = false
 		}
@@ -303,6 +306,14 @@ func (self *SlackAlertNotifier) observeWithLock(signalKey string, alerts Alerts)
 			continue
 		}
 		keyAlerts[key] = alert
+	}
+	// a held alert raises nothing yet, but its incident is still observed
+	heldKeys := map[string]bool{}
+	for _, alert := range execution.HeldAlerts {
+		if isVisibilityAlert(alert) {
+			complete = false
+		}
+		heldKeys[slackIncidentKey(alert)] = true
 	}
 	present := make(Alerts, 0, len(keyAlerts))
 	for _, alert := range keyAlerts {
@@ -329,6 +340,11 @@ func (self *SlackAlertNotifier) observeWithLock(signalKey string, alerts Alerts)
 			transitions = append(transitions, slackTransition{kind: slackEscalated, alert: alert})
 		}
 	}
+	for key := range heldKeys {
+		if incident, ok := self.keyIncidents[key]; ok {
+			incident.signalKeyAbsentRuns[signalKey] = 0
+		}
+	}
 	if !complete {
 		return transitions
 	}
@@ -341,7 +357,8 @@ func (self *SlackAlertNotifier) observeWithLock(signalKey string, alerts Alerts)
 	for _, key := range keys {
 		incident := self.keyIncidents[key]
 		absentRuns, owned := incident.signalKeyAbsentRuns[signalKey]
-		if _, reported := keyAlerts[key]; !owned || reported {
+		_, reported := keyAlerts[key]
+		if !owned || reported || heldKeys[key] {
 			continue
 		}
 		absentRuns++
@@ -575,7 +592,7 @@ func slackTransitionText(environment string, transition slackTransition, clearAf
 	switch transition.kind {
 	case slackCleared:
 		lines = append(lines, fmt.Sprintf(
-			"Absent from %d consecutive complete runs of its signal. This is not proof of recovery: confirm with the alert's verify step.",
+			"Absent from %d consecutive complete runs of each signal that reported it. This is not proof of recovery: confirm with the alert's verify step.",
 			clearAfterCompleteRuns,
 		))
 	default:
