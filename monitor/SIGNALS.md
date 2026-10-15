@@ -9247,24 +9247,36 @@ were not ok over ten minutes. They are the series the providers dashboard's
   net loss of latest against old is above 0.10, with at least 20 paired
   providers of old supply in the bucket. Only risk can cause it, and risk
   always follows the latest database, so the canary does not fall back for it.
-- `arindb-supply-gain` and `arindb-supply-churn` **PAGE**, sustained 10
+- `arindb-supply-gain` and `arindb-supply-churn` **WARN**, sustained 30
   minutes: a bucket's net gain above 0.10, or its gross churn (removals plus
   additions against old) above 0.20, with the same sample floor. The breaker
-  trips only on net losses, so a flood or a wholesale reshuffle passes it.
+  trips only on net losses, so a flood or a wholesale reshuffle passes it; a
+  deliberate catalog expansion does too, so these warn rather than page.
 - `arindb-warming-tripped` **PAGE**, sustained 10 minutes: the canary is
   warming and its paired sample of at least `min_paired_sample` providers
-  trips, so the latest is held out before the cohort is covered.
+  trips, so the latest is held out before the cohort is covered. While the old
+  database covers at least 1 − `bucket_loss_threshold` of the cohort, warming
+  serves it; below that it serves each provider's latest slot, which applies
+  the blocked latest to every row a restarted process wrote (in a probe where
+  the old covered half the cohort, half the rows took the latest's
+  classification). The page is the protection in that case.
+- `arindb-warming-serves-latest` **WARN**, sustained 30 minutes: warming
+  serves the latest unverified, because its paired sample is below
+  `min_paired_sample` or passes.
 - `arindb-protection-lost` **PAGE**, sustained 10 minutes: the publishing
   Taskworker could not open its latest database (`latest_unavailable`; it
   compares the previous decision's epochs while it can, else it is single), or
-  the canary went single right after a fallback (`fallback_dropped`), which
-  serves each provider's latest slot unchecked.
+  a latched fallback's old database is not served (`fallback_dropped`): warming
+  serves each provider's latest slot while the latch is held, as when Connect
+  restarts onto the next release before the Taskworker; the canary went single
+  after the fallback; or a release compares against the latest the latch held
+  out, which the decision carries as its `dropped_latch`.
 - `arindb-cohort-shrink` **PAGE**, sustained 10 minutes: the public cohort is
   more than 10% below its largest of the last two hours, from a reference of
-  at least 100. A provider whose latest lookup fails never writes a location,
-  so it leaves the cohort before the comparison can see it;
-  `urnetwork_arin_lookup_errors_total{slot="latest"}` says whether that is
-  the cause.
+  at least 100, within two hours of a new pair or while latest lookups fail.
+  A provider whose latest lookup fails never writes a location, so it leaves
+  the cohort before the comparison can see it; outside those windows a
+  shrinking cohort is a Connect outage or a restart, which page on their own.
 - `arindb-serving-flapping` **PAGE**, sustained 5 minutes: the serving epoch
   changed more than 4 times in six hours, switching every provider's Quality
   classification back and forth.
@@ -9293,10 +9305,11 @@ Action on a fallback: judge whether the latest database is a bad release from
 the losses and emptied countries, its catalog audit and its Atlas validation.
 If it is, the next all-release build must not compare against it. With
 `ARIN_CANARY_DECISION_FILE` the release runner pins the database the decision
-serves automatically, and pauses the refresh when it cannot; without it, set
-`ARIN_PREVIOUS_DATABASE_FILE` to the last good `arin.mmdb` and clear it once a
-good release ships. If the latest is good after all, set
-`arindb_canary.accept_latest_build_epoch` in provider.yml to its build epoch.
+protects automatically, and pauses the ARIN refresh when it cannot; without
+it, set `ARIN_PREVIOUS_DATABASE_FILE` to the last good `arin.mmdb` and clear it
+once a good release ships. If the latest is good after all, accept it as
+arindbctl/ARINDB.md describes ("Accepting a release the breaker trips on"):
+the accept names one build epoch, so clear or move the pin with it.
 Do not restart processes or delete `arin-old.mmdb` to clear the page: a
 process reads a new pair only at restart, and without the old file the canary
 is single, which pages as `fallback_dropped`.
@@ -9314,9 +9327,9 @@ a fallback.
 Implementation: `signal_arindb_canary.go` and its synthetic test file,
 registered in `NewSignals`. Controls cover a healthy latest state, a fallback
 with named emptied countries, Speed and Online losses at and above the
-threshold with and without their sample, each page the breaker cannot see at
-and below its threshold, the reads warning, the unavailable, warming and stale
-warnings and missing gauges.
+threshold with and without their sample, each page and warning the breaker
+cannot see at and below its threshold, the cohort page's release gate, the
+reads warning, the unavailable, warming and stale warnings and missing gauges.
 
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
@@ -20318,9 +20331,8 @@ Tier-0 (page):
 | postgres-application-backends-collapsed | Grafana rule on postgres_exporter | §2.11a `min by (env,host)(pg_stat_database_numbackends{job="postgres",datname="bringyour"})` | < 300 for 1m | normal 710–770; the series holds its last value through a full PostgreSQL stop |
 | arindb-fallback-active | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_fallback_active)` | > 0 for 10m | emptied countries and per-bucket net losses; serving epoch |
 | arindb-risk-supply-loss | Grafana rule on the published canary decision; monitor §2.9d | `max by (bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed\|online"})` with at least 20 paired providers of old supply | > 0.10 for 10m | emptied countries; no fallback repairs a risk loss |
-| arindb-supply-gain / arindb-supply-churn | Grafana rules on the published canary decision; monitor §2.9d | `max by (bucket)` of `urnetwork_stats_arindb_gain_ratio` and `urnetwork_stats_arindb_churn_ratio`, with at least 20 paired providers of old supply | > 0.10 gain or > 0.20 churn for 10m | per-bucket gain and churn |
 | arindb-warming-tripped / arindb-protection-lost | Grafana rules on the published canary decision; monitor §2.9d | `max by (flag) (urnetwork_stats_arindb_decision_flags)` for warming_tripped, latest_unavailable and fallback_dropped | > 0 for 10m | the flag; losses and emptied countries |
-| arindb-cohort-shrink | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_cohort_loss_ratio)` with a reference of at least 100 | > 0.10 for 10m | cohort and its two-hour reference; latest lookup errors |
+| arindb-cohort-shrink | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_cohort_loss_ratio)` with a reference of at least 100, within 2h of `urnetwork_stats_arindb_pair_since_seconds` or with `urnetwork_arin_lookup_errors_total{slot="latest"}` rising | > 0.10 for 10m | cohort and its two-hour reference; pair age; latest lookup errors |
 | arindb-serving-flapping | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_serving_changes)` | > 4 for 5m | serving changes in six hours |
 | arindb-decision-stalled | Grafana rule on the published canary decision; monitor §2.9d | `time() - max(urnetwork_stats_arindb_decision_seconds)` | > 5400 s | decision time |
 
@@ -20431,6 +20443,8 @@ Tier-1 (warn):
 | edge-auto-upgrades | host | 14.5 APT periodic config and unit masks | any edge with APT periodic enable nonzero or an apt-daily timer/service not masked |
 | arindb-canary-unavailable / arindb-canary-warming / arindb-decision-stale | Grafana rules on the published canary decision; monitor §2.9d | state single, state warming, and `time() - max(urnetwork_stats_arindb_decision_seconds)` | single for 1h; warming for 2h; > 1800 s |
 | arindb-decision-reads-not-ok | Grafana rule on every process's decision reads; monitor §2.9d | `sum(rate(urnetwork_arindb_decision_reads_total{outcome!="ok"}[10m])) / sum(rate(urnetwork_arindb_decision_reads_total[10m]))` | > 0.05 for 15m |
+| arindb-supply-gain / arindb-supply-churn | Grafana rules on the published canary decision; monitor §2.9d | `max by (bucket)` of `urnetwork_stats_arindb_gain_ratio` and `urnetwork_stats_arindb_churn_ratio`, with at least 20 paired providers of old supply | > 0.10 gain or > 0.20 churn for 30m |
+| arindb-warming-serves-latest | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_decision_flags{flag="warming_serves_latest"})` | > 0 for 30m |
 
 ### Fixed emitted-class crosswalk
 

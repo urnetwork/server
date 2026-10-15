@@ -15,12 +15,13 @@ import (
 // Signal arindb-canary implements SIGNALS.md §2.9d. It reads, through Mimir,
 // the ARIN canary gauges that every Taskworker exports from the decision the
 // score export published (arindbctl/ARINDB.md, "Dual-database canary"). It
-// pages on a fallback, a risk-driven Speed or Online loss, a gain or gross
-// churn, a warming comparison that trips, a lost protection, a shrinking
-// cohort, a serving epoch switching back and forth and a decision stalled for
-// 90 minutes; it warns while the canary is unavailable, warming or stale, and
-// while readers miss the decision; and it names the countries the latest
-// database would empty.
+// pages on a fallback, a risk-driven Speed or Online loss, a warming
+// comparison that trips, a lost protection, a cohort shrinking after a release
+// or with failing latest lookups, a serving epoch switching back and forth and
+// a decision stalled for 90 minutes; it warns on a gain or gross churn, while
+// warming serves an unverified latest, while the canary is unavailable,
+// warming or stale, and while readers miss the decision; and it names the
+// countries the latest database would empty.
 func NewArindbCanarySignal() Signal {
 	return &signalAdapter{
 		number: "2.9d", key: "arindb-canary", name: "ARIN database canary decision",
@@ -43,8 +44,10 @@ const (
 	arindbCanaryChurnThreshold = 0.20
 	// the old supply in a bucket below which its loss, gain and churn are noise
 	arindbCanaryMinBucketSample = 20
-	// a cohort shrinking more than this against its recent size pages
+	// a cohort shrinking more than this against its recent size pages, within
+	// this long of a new pair or while latest lookups fail
 	arindbCanaryCohortLossThreshold = 0.10
+	arindbCanaryCohortPairWindow    = 2 * time.Hour
 	// the reference cohort below which its loss is noise
 	arindbCanaryMinCohortReference = 100
 	// more serving changes than this in six hours is a canary switching the
@@ -76,6 +79,7 @@ var arindbCanaryQueries = []struct {
 	{metric: "urnetwork_stats_arindb_cohort_providers", by: "env, reference"},
 	{metric: "urnetwork_stats_arindb_cohort_loss_ratio", by: "env"},
 	{metric: "urnetwork_stats_arindb_serving_changes", by: "env"},
+	{metric: "urnetwork_stats_arindb_pair_since_seconds", by: "env"},
 	{metric: "urnetwork_stats_arindb_serving_epoch_seconds", by: "env"},
 	{metric: "urnetwork_stats_arindb_decision_seconds", by: "env"},
 }
@@ -84,8 +88,12 @@ var arindbCanaryQueries = []struct {
 // minutes, labelled as one more series. Without reads it is absent.
 const arindbCanaryReadsNotOkMetric = "arindb_decision_reads_not_ok_share"
 
+// Every process's failed latest lookups per second over thirty minutes,
+// labelled as one more series.
+const arindbCanaryLatestLookupErrorsMetric = "arin_latest_lookup_error_rate"
+
 func arindbCanaryQuery(environment string) string {
-	parts := make([]string, 0, len(arindbCanaryQueries)+1)
+	parts := make([]string, 0, len(arindbCanaryQueries)+2)
 	for _, query := range arindbCanaryQueries {
 		parts = append(parts, fmt.Sprintf(
 			`label_replace(max by (%s) (%s{env=%s}),"monitor_metric",%s,"env",".*")`,
@@ -100,6 +108,11 @@ func arindbCanaryQuery(environment string) string {
 		strconv.Quote(environment),
 		strconv.Quote(environment),
 		strconv.Quote(arindbCanaryReadsNotOkMetric),
+	))
+	parts = append(parts, fmt.Sprintf(
+		`label_replace(sum by (env) (rate(urnetwork_arin_lookup_errors_total{env=%s,slot="latest"}[30m])),"monitor_metric",%s,"env",".*")`,
+		strconv.Quote(environment),
+		strconv.Quote(arindbCanaryLatestLookupErrorsMetric),
 	))
 	return strings.Join(parts, " or ")
 }
@@ -116,18 +129,23 @@ type arindbCanaryObservation struct {
 	// each bucket's paired supply under the old database, the sample floor
 	oldSupply map[string]float64
 	// bucket to country to the old supply the latest would empty
-	emptied        map[string]map[string]float64
-	coverage       map[string]float64
-	cohort         map[string]float64
-	cohortLoss     float64
-	servingChanges float64
-	readsNotOk     float64
-	hasReadsNotOk  bool
-	servingEpoch   float64
-	decisionAt     time.Time
-	hasDecisionAt  bool
-	hasState       bool
-	observedSeries int
+	emptied    map[string]map[string]float64
+	coverage   map[string]float64
+	cohort     map[string]float64
+	cohortLoss float64
+	// when the compared pair was first compared, and the rate of failed latest
+	// lookups: a shrinking cohort is blamed on a release only with either
+	pairSince          time.Time
+	hasPairSince       bool
+	latestLookupErrors float64
+	servingChanges     float64
+	readsNotOk         float64
+	hasReadsNotOk      bool
+	servingEpoch       float64
+	decisionAt         time.Time
+	hasDecisionAt      bool
+	hasState           bool
+	observedSeries     int
 }
 
 // The buckets whose measure is over threshold with a sample of old supply.
@@ -269,6 +287,13 @@ func (arindbCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			observation.cohort[series.Metric["reference"]] = value
 		case "urnetwork_stats_arindb_cohort_loss_ratio":
 			observation.cohortLoss = value
+		case "urnetwork_stats_arindb_pair_since_seconds":
+			if 0 < value {
+				observation.hasPairSince = true
+				observation.pairSince = unixFloatTime(value)
+			}
+		case arindbCanaryLatestLookupErrorsMetric:
+			observation.latestLookupErrors = value
 		case "urnetwork_stats_arindb_serving_changes":
 			observation.servingChanges = value
 		case arindbCanaryReadsNotOkMetric:
@@ -349,9 +374,9 @@ func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, g
 	}
 	if gains := observation.sampledOver(observation.gains, arindbCanaryGainThreshold, []string{"quality", "speed", "online"}); 0 < len(gains) {
 		add(finding{
-			probeId: probeId, tier: tierPage, class: "arindb-supply-gain", target: target, frame: gateway, sustain: 10,
+			probeId: probeId, tier: tierWarn, class: "arindb-supply-gain", target: target, frame: gateway, sustain: 30,
 			symptom:   fmt.Sprintf("The latest ARIN database adds more than %.0f%% of paired supply in %s", 100*arindbCanaryGainThreshold, strings.Join(gains, " ")),
-			mechanism: "The breaker trips only on losses. A large gain means the latest database stopped classifying addresses the old one held out, such as hosting or VPN ranges lost from a source, which admits them to buckets unchecked.",
+			mechanism: "The breaker trips only on losses. A large gain means the latest database stopped classifying addresses the old one held out, such as hosting or VPN ranges lost from a source, which admits them to buckets unchecked; a deliberate catalog expansion gains too, so this warns rather than pages.",
 			baseline:  "Net gains of latest against old stay at or below 0.10.",
 			observed:  observed,
 			action:    "Compare the latest release's catalog audit and source counts with the previous release's. If ranges were lost, ship a corrected release; to hold the old classification of Quality meanwhile, the previous release can be pinned with ARIN_PREVIOUS_DATABASE_FILE and the latest replaced.",
@@ -361,9 +386,9 @@ func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, g
 	}
 	if churns := observation.sampledOver(observation.churns, arindbCanaryChurnThreshold, []string{"quality", "speed", "online"}); 0 < len(churns) {
 		add(finding{
-			probeId: probeId, tier: tierPage, class: "arindb-supply-churn", target: target, frame: gateway, sustain: 10,
+			probeId: probeId, tier: tierWarn, class: "arindb-supply-churn", target: target, frame: gateway, sustain: 30,
 			symptom:   fmt.Sprintf("The latest ARIN database moves more than %.0f%% of paired supply in or out of %s", 100*arindbCanaryChurnThreshold, strings.Join(churns, " ")),
-			mechanism: "The breaker trips on net loss, so a release that moves as many providers out of a bucket as into it passes however many it moves. Gross churn this large is a wholesale reclassification.",
+			mechanism: "The breaker trips on net loss, so a release that moves as many providers out of a bucket as into it passes however many it moves. Gross churn this large is a wholesale reclassification, deliberate or not, so this warns rather than pages.",
 			baseline:  "Gross churn of latest against old stays at or below 0.20.",
 			observed:  observed,
 			action:    "Review the latest release's rule and source changes against the previous release; if the reclassification is unintended, ship a corrected release.",
@@ -375,7 +400,7 @@ func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, g
 		add(finding{
 			probeId: probeId, tier: tierPage, class: "arindb-warming-tripped", target: target, frame: gateway, sustain: 10,
 			symptom:   fmt.Sprintf("The ARIN canary is warming and its paired sample of at least min_paired_sample providers trips the breaker; losses: %s", observation.lossSummary()),
-			mechanism: "Below min_coverage the canary serves a database the rows carry. A paired sample large enough to judge that already trips blocks the latest: warming serves the old while the providers it lacks are within the tolerated loss, else each provider's latest slot.",
+			mechanism: "Below min_coverage the canary serves a database the rows carry. A paired sample large enough to judge that already trips blocks the latest: warming serves the old while the providers it lacks are within the tolerated loss. Otherwise it serves each provider's latest slot, which applies the blocked latest to every row a restarted process wrote: in a run where the old covers half the cohort, half the rows take the latest's classification.",
 			baseline:  "A warming comparison that passes, then a covered comparison.",
 			observed:  observed,
 			action:    "Treat it as a fallback that has not yet covered the cohort: judge the latest release from the losses and emptied countries, and pin the last good arin.mmdb with ARIN_PREVIOUS_DATABASE_FILE before the next all-release build if it is bad.",
@@ -387,23 +412,39 @@ func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, g
 		add(finding{
 			probeId: probeId, tier: tierPage, class: "arindb-protection-lost", target: target, frame: gateway, sustain: 10,
 			symptom:   fmt.Sprintf("The ARIN canary lost its protection: %s", strings.Join(lost, ", ")),
-			mechanism: "latest_unavailable: the Taskworker that publishes scores could not open its latest database; it compares the previous decision's epochs while it can, else it is single. fallback_dropped: the canary went single right after a fallback, so the comparison that held the latest out is gone and each provider's latest slot is served.",
+			mechanism: "latest_unavailable: the Taskworker that publishes scores could not open its latest database; it compares the previous decision's epochs while it can, else it is single. fallback_dropped: a latched fallback's old database is not served, because warming serves each provider's latest slot while the latch is held (Connect restarted onto the next release before the Taskworker), the canary went single after the fallback, or a release compares against the latest the latch held out.",
 			baseline:  "The publishing Taskworker opens its pair, and a fallback ends only by passing comparisons or the operator's accept key.",
 			observed:  observed,
-			action:    "For latest_unavailable, read the Taskworker's [ip] log for its arindb config tree and restart it only after its host shows the new WARP_CONFIG_VERSION. For fallback_dropped, read the new release's arindb/update-manifest.json previous_database entry; pin the last good arin.mmdb with ARIN_PREVIOUS_DATABASE_FILE and ship a release with the canary.",
+			action:    "For latest_unavailable, read the Taskworker's [ip] log for its arindb config tree and restart it only after its host shows the new WARP_CONFIG_VERSION. For fallback_dropped, read the decision's latch or dropped_latch and the new release's arindb/update-manifest.json previous_database entry; restart the Taskworker onto the release if Connect is ahead of it, else pin the latch's old arin.mmdb with ARIN_PREVIOUS_DATABASE_FILE and ship a release with the canary.",
 			verify:    "Both flags clear and the canary compares again.",
 			playbook:  "SIGNALS.md §2.9d",
 		})
 	}
-	if arindbCanaryCohortLossThreshold < observation.cohortLoss && arindbCanaryMinCohortReference <= observation.cohort["reference"] {
+	// a shrinking cohort is blamed on a release only soon after a new pair or
+	// while latest lookups fail, so a Connect outage or a restart is not
+	recentPair := observation.hasPairSince && now.Sub(observation.pairSince) < arindbCanaryCohortPairWindow
+	if arindbCanaryCohortLossThreshold < observation.cohortLoss && arindbCanaryMinCohortReference <= observation.cohort["reference"] &&
+		(recentPair || 0 < observation.latestLookupErrors) {
 		add(finding{
 			probeId: probeId, tier: tierPage, class: "arindb-cohort-shrink", target: target, frame: gateway, sustain: 10,
 			symptom:   fmt.Sprintf("The ARIN canary's public cohort is %.0f, %.1f%% below its largest of the last two hours (%.0f)", observation.cohort["current"], 100*observation.cohortLoss, observation.cohort["reference"]),
-			mechanism: "A provider whose latest ARIN lookup fails never writes a location, so it leaves the cohort before the canary can compare it: a release whose records fail to decode shrinks the cohort while the comparison passes.",
+			mechanism: "A provider whose latest ARIN lookup fails never writes a location, so it leaves the cohort before the canary can compare it: a release whose records fail to decode shrinks the cohort while the comparison passes. This pages only within two hours of a new pair or while latest lookups fail.",
 			baseline:  "The cohort stays within 10% of its recent size.",
 			observed:  observed,
 			action:    "Check urnetwork_arin_lookup_errors_total{slot=\"latest\"} on the services overview. If the latest release's lookups fail, ship a corrected release; otherwise find why providers left (a Connect outage pages on its own).",
 			verify:    "The cohort recovers and latest lookup errors stay at 0.",
+			playbook:  "SIGNALS.md §2.9d",
+		})
+	}
+	if observation.flags["warming_serves_latest"] {
+		add(finding{
+			probeId: probeId, tier: tierWarn, class: "arindb-warming-serves-latest", target: target, frame: gateway, sustain: 30,
+			symptom:   "The ARIN canary has served an unverified latest database while warming for 30 minutes",
+			mechanism: "Warming serves the latest when the rows carry it and nothing blocks it: the paired sample is below min_paired_sample or passes. No covered comparison has verified it, so a bad release takes effect until coverage returns.",
+			baseline:  "Warming serves the old database, the previous choice or each provider's latest slot, and ends within about an hour.",
+			observed:  observed,
+			action:    "Find why the old database is not carried (a stuck Connect host on an older pair, or a rollup that has not refreshed), and judge the latest from the paired sample's losses on the providers dashboard.",
+			verify:    "warming_serves_latest clears, or the state becomes latest after a covered comparison.",
 			playbook:  "SIGNALS.md §2.9d",
 		})
 	}
@@ -490,8 +531,9 @@ func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, g
 		healthyFinding(probeId, tierWarn, "arindb-canary-warming", target),
 		healthyFinding(probeId, tierWarn, "arindb-decision-stale", target),
 		healthyFinding(probeId, tierPage, "arindb-decision-stalled", target),
-		healthyFinding(probeId, tierPage, "arindb-supply-gain", target),
-		healthyFinding(probeId, tierPage, "arindb-supply-churn", target),
+		healthyFinding(probeId, tierWarn, "arindb-supply-gain", target),
+		healthyFinding(probeId, tierWarn, "arindb-supply-churn", target),
+		healthyFinding(probeId, tierWarn, "arindb-warming-serves-latest", target),
 		healthyFinding(probeId, tierPage, "arindb-warming-tripped", target),
 		healthyFinding(probeId, tierPage, "arindb-protection-lost", target),
 		healthyFinding(probeId, tierPage, "arindb-cohort-shrink", target),

@@ -46,6 +46,9 @@ func arindbCanaryFixture(state string, age time.Duration, losses map[string]floa
 		arindbCanaryFixtureSeries{metric: "urnetwork_stats_arindb_cohort_loss_ratio", value: 0},
 		arindbCanaryFixtureSeries{metric: "urnetwork_stats_arindb_serving_changes", value: 1},
 		arindbCanaryFixtureSeries{metric: arindbCanaryReadsNotOkMetric, value: 0},
+		// a pair compared since yesterday, and no failing latest lookups
+		arindbCanaryFixtureSeries{metric: "urnetwork_stats_arindb_pair_since_seconds", value: float64(arindbCanaryFixtureNow.Add(-24 * time.Hour).Unix())},
+		arindbCanaryFixtureSeries{metric: arindbCanaryLatestLookupErrorsMetric, value: 0},
 		arindbCanaryFixtureSeries{metric: "urnetwork_stats_arindb_serving_epoch_seconds", value: 1700000000},
 		arindbCanaryFixtureSeries{metric: "urnetwork_stats_arindb_decision_seconds", value: float64(arindbCanaryFixtureNow.Add(-age).Unix())},
 		arindbCanaryFixtureSeries{metric: "urnetwork_stats_arindb_coverage_ratio", labels: map[string]string{"database": "paired"}, value: 0.99},
@@ -81,7 +84,8 @@ func runArindbCanaryFixture(t *testing.T, series []arindbCanaryFixtureSeries) Al
 		for _, want := range []string{"urnetwork_stats_arindb_canary_state", "urnetwork_stats_arindb_fallback_active", "urnetwork_stats_arindb_loss_ratio",
 			"urnetwork_stats_arindb_emptied_country", "urnetwork_stats_arindb_decision_seconds", "urnetwork_stats_arindb_decision_flags",
 			"urnetwork_stats_arindb_gain_ratio", "urnetwork_stats_arindb_churn_ratio", "urnetwork_stats_arindb_cohort_loss_ratio",
-			"urnetwork_stats_arindb_serving_changes", "urnetwork_arindb_decision_reads_total", "%22synthetic%22", "monitor_metric"} {
+			"urnetwork_stats_arindb_serving_changes", "urnetwork_arindb_decision_reads_total", "urnetwork_stats_arindb_pair_since_seconds",
+			"urnetwork_arin_lookup_errors_total", "%22synthetic%22", "monitor_metric"} {
 			if host.Name != "metrics-1" || !strings.Contains(command, want) {
 				return "", fmt.Errorf("unexpected Mimir command on %s: %s", host.Name, command)
 			}
@@ -181,10 +185,11 @@ func TestArindbCanarySignalRiskLossNeedsASample(t *testing.T) {
 	requireNoArindbCanaryAlerts(t, runArindbCanaryFixture(t, series))
 }
 
-// A gain or gross churn above its threshold with a sample pages, as do a
-// tripped warming comparison, a lost protection, a shrinking cohort and a
-// serving epoch switching back and forth; readers missing the decision warn;
-// a decision 90 minutes old pages beside its stale warning.
+// A tripped warming comparison, a lost protection, a cohort shrinking after a
+// new pair or with failing latest lookups and a serving epoch switching back
+// and forth page; a gain or gross churn above its threshold with a sample, an
+// unverified latest served while warming and readers missing the decision
+// warn; a decision 90 minutes old pages beside its stale warning.
 func TestArindbCanarySignalPagesOnTheConditionsTheBreakerCannotSee(t *testing.T) {
 	set := func(series []arindbCanaryFixtureSeries, metric string, labels map[string]string, value float64) []arindbCanaryFixtureSeries {
 		for i := range series {
@@ -211,11 +216,11 @@ func TestArindbCanarySignalPagesOnTheConditionsTheBreakerCannotSee(t *testing.T)
 		sustain  int
 		want     string
 	}{
-		{name: "a flood", class: "arindb-supply-gain", severity: SeverityPage, sustain: 10, want: "quality=0.3000(old 100)",
+		{name: "a flood", class: "arindb-supply-gain", severity: SeverityWarn, sustain: 30, want: "quality=0.3000(old 100)",
 			edit: func(s []arindbCanaryFixtureSeries) []arindbCanaryFixtureSeries {
 				return set(s, "urnetwork_stats_arindb_gain_ratio", map[string]string{"bucket": "quality"}, 0.3)
 			}},
-		{name: "a reshuffle", class: "arindb-supply-churn", severity: SeverityPage, sustain: 10, want: "online=0.4000(old 100)",
+		{name: "a reshuffle", class: "arindb-supply-churn", severity: SeverityWarn, sustain: 30, want: "online=0.4000(old 100)",
 			edit: func(s []arindbCanaryFixtureSeries) []arindbCanaryFixtureSeries {
 				return set(s, "urnetwork_stats_arindb_churn_ratio", map[string]string{"bucket": "online"}, 0.4)
 			}},
@@ -231,10 +236,21 @@ func TestArindbCanarySignalPagesOnTheConditionsTheBreakerCannotSee(t *testing.T)
 			edit: func(s []arindbCanaryFixtureSeries) []arindbCanaryFixtureSeries {
 				return set(s, "urnetwork_stats_arindb_decision_flags", map[string]string{"flag": "fallback_dropped"}, 1)
 			}},
-		{name: "a shrinking cohort", class: "arindb-cohort-shrink", severity: SeverityPage, sustain: 10, want: "12.0% below",
+		{name: "a cohort shrinking after a new pair", class: "arindb-cohort-shrink", severity: SeverityPage, sustain: 10, want: "12.0% below",
 			edit: func(s []arindbCanaryFixtureSeries) []arindbCanaryFixtureSeries {
 				s = set(s, "urnetwork_stats_arindb_cohort_providers", map[string]string{"reference": "current"}, 880)
+				s = set(s, "urnetwork_stats_arindb_pair_since_seconds", nil, float64(arindbCanaryFixtureNow.Add(-time.Hour).Unix()))
 				return set(s, "urnetwork_stats_arindb_cohort_loss_ratio", nil, 0.12)
+			}},
+		{name: "a cohort shrinking with failing latest lookups", class: "arindb-cohort-shrink", severity: SeverityPage, sustain: 10, want: "12.0% below",
+			edit: func(s []arindbCanaryFixtureSeries) []arindbCanaryFixtureSeries {
+				s = set(s, "urnetwork_stats_arindb_cohort_providers", map[string]string{"reference": "current"}, 880)
+				s = set(s, arindbCanaryLatestLookupErrorsMetric, nil, 0.5)
+				return set(s, "urnetwork_stats_arindb_cohort_loss_ratio", nil, 0.12)
+			}},
+		{name: "an unverified latest while warming", class: "arindb-warming-serves-latest", severity: SeverityWarn, sustain: 30, want: "unverified latest",
+			edit: func(s []arindbCanaryFixtureSeries) []arindbCanaryFixtureSeries {
+				return set(s, "urnetwork_stats_arindb_decision_flags", map[string]string{"flag": "warming_serves_latest"}, 1)
 			}},
 		{name: "flapping", class: "arindb-serving-flapping", severity: SeverityPage, sustain: 5, want: "changed 5 times",
 			edit: func(s []arindbCanaryFixtureSeries) []arindbCanaryFixtureSeries {
@@ -270,6 +286,12 @@ func TestArindbCanarySignalPagesOnTheConditionsTheBreakerCannotSee(t *testing.T)
 			t.Errorf("unexpected %s alert at the thresholds", alert.Class)
 		}
 	}
+	// a cohort shrinking two hours after its pair, with no failing latest
+	// lookups, is a Connect outage or a restart, not the release
+	unrelated := arindbCanaryFixture("latest", time.Minute, nil, nil)
+	unrelated = set(unrelated, "urnetwork_stats_arindb_pair_since_seconds", nil, float64(arindbCanaryFixtureNow.Add(-2*time.Hour).Unix()))
+	unrelated = set(unrelated, "urnetwork_stats_arindb_cohort_loss_ratio", nil, 0.5)
+	requireNoArindbCanaryAlerts(t, runArindbCanaryFixture(t, unrelated))
 }
 
 // Missing gauges are not a healthy canary.
