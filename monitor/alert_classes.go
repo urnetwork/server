@@ -328,6 +328,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"modern-gate-fleet-disagrees":                         incidentAlertClass,
 	"modern-gate-flip-drop":                               incidentAlertClass,
 	"modern-gate-not-ready":                               incidentAlertClass,
+	"modern-gate-schedule-unreadable":                     visibilityAlertClass,
 	"monitor-host-scope-partial":                          incidentAlertClass,
 	"netescrow-large-drift":                               incidentAlertClass,
 	"netescrow-mirror-write":                              incidentAlertClass,

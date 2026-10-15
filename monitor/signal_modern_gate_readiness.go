@@ -32,9 +32,17 @@ import (
 // the gate differently WARNs, whether or not a start is scheduled. The
 // start, and whether one is scheduled at all, comes from the taskworkers'
 // own provider.yml as their stats collector publishes it, so postponing the
-// gate or moving its start moves or silences the signal.
+// gate or moving its start moves or silences the signal; a postponement
+// that failed in the deployment's desired provider.yml, which holds the gate
+// off and publishes no start, WARNs on its own.
 func NewModernGateReadinessSignal() Signal {
-	return &signalAdapter{number: "2.29", key: "modern-gate-readiness", name: "Modern provider gate readiness", probe: modernGateReadinessProbe{}}
+	return newModernGateReadinessSignal(model.GetModernProviderGateFailure)
+}
+
+// gateFailure reads why the deployment's desired provider.yml holds the gate
+// off by a failure, "" for none.
+func newModernGateReadinessSignal(gateFailure func() string) Signal {
+	return &signalAdapter{number: "2.29", key: "modern-gate-readiness", name: "Modern provider gate readiness", probe: modernGateReadinessProbe{gateFailure: gateFailure}}
 }
 
 const (
@@ -68,7 +76,11 @@ const (
 // the native buckets the gate holds, in the order findings list them
 var modernGateReadinessBuckets = []string{model.RankModeQuality, model.RankModeSpeed}
 
-type modernGateReadinessProbe struct{}
+type modernGateReadinessProbe struct {
+	// why the desired provider.yml holds the gate off by a failure, "" for
+	// none
+	gateFailure func() string
+}
 
 func (modernGateReadinessProbe) id() string             { return modernGateReadinessProbeId }
 func (modernGateReadinessProbe) tier() string           { return tierPage }
@@ -154,7 +166,24 @@ func modernGateReadinessBucketExpression(environment string) string {
 	return `sum by (bucket) (max by (bucket, index) (urnetwork_stats_provider_egress_index{env=` + strconv.Quote(environment) + `,bucket=~"quality|speed"}))`
 }
 
-func (modernGateReadinessProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (self modernGateReadinessProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	findings, err := self.observe(ctx, env)
+	// A postponement that failed in the desired provider.yml holds the gate
+	// off and publishes no start, so the windows above close without a word.
+	// It is read apart from Mimir, which need not answer for it.
+	failure := self.gateFailure()
+	if failure == "" {
+		return findings, err
+	}
+	unreadable := modernGateScheduleUnreadableFinding(failure)
+	if err != nil {
+		return []finding{unreadable, cannotObserveFinding(modernGateReadinessTarget, err)}, nil
+	}
+	return append(findings, unreadable), nil
+}
+
+// The verdict on what the taskworkers publish to Mimir.
+func (modernGateReadinessProbe) observe(ctx context.Context, env *probeEnv) ([]finding, error) {
 	now := env.now()
 	metricHosts := env.cfg.hostsWithRole("services")
 	query := func(expression string, at time.Time) (map[string][]modernGateReadinessSeries, error) {
@@ -524,6 +553,23 @@ func modernGateFleetDisagreesFinding(observation modernGateReadinessObservation,
 		context:   "Only processes that have run for five minutes are compared: a new process registers the gate at its stats collector's first refresh, a minute or two after it starts, and a drained process's series stay readable for five minutes, so a restart alone does not fire. A config release that sets the switch or moves the start makes the fleet disagree until its last taskworker has restarted and the drained processes' series have gone stale, so on the start's day, until 18:00 UTC, taskworkers restart only for the kill switch, whose rollout can still page until it completes. API processes decide the gate for their own readers but publish no gauge, so this does not see them.",
 		action:    "Find the taskworkers whose urnetwork_stats_provider_modern_gate_on or urnetwork_stats_provider_modern_gate_start_seconds is missing or differs (by host and block), confirm each runs the build with the automatic start and its host publishes the current config (WARP_CONFIG_VERSION), and restart or redeploy those that differ. To keep the gate off fleet-wide instead, " + modernGateReadinessOverrides + ".",
 		verify:    "Over the taskworkers that have run for five minutes, the count of urnetwork_stats_provider_modern_gate_on equals theirs, its min equals its max, and the starts agree, on two consecutive reads.",
+		playbook:  "SIGNALS.md §2.29 and FP2FIX.md (modern provider gate)",
+	}
+}
+
+// failure is the decoder's fixed text, never a value from the file.
+func modernGateScheduleUnreadableFinding(failure string) finding {
+	return finding{
+		probeId: modernGateReadinessProbeId, tier: tierWarn, class: "modern-gate-schedule-unreadable",
+		target: modernGateReadinessTarget, frame: "provider.yml", sustain: 1,
+		symptom:   "The deployment's desired provider.yml holds the modern provider gate off by a failure: " + failure,
+		mechanism: "A switch that cannot be read or has no value, or, while the switch is absent, a start that is neither an RFC 3339 instant nor a date, is given twice or has no value, reads as quality_speed_requires_modern_provider: false, and so does a provider.yml that cannot be read. Each is most likely a postponement that failed: the gate stays off and no start is published, so the readiness windows close and the flip that was meant never comes, which the taskworkers' logs alone said before.",
+		baseline:  "provider.yml sets the switch true or false, or leaves it absent with a start that is an RFC 3339 instant or a date, or with none.",
+		observed:  "failure=" + failure,
+		evidence:  "The monitor's own decode of the deployment's desired provider.yml (model.GetModernProviderGateFailure), the decoder every taskworker and API block runs on the config it was created with.",
+		context:   "The taskworkers decide by the config of their last restart, so until the release reaches them they may still publish the earlier schedule; the fleet's own gauges show which.",
+		action:    "Correct the key in provider.yml: `quality_speed_requires_modern_provider: false` keeps the gate off on purpose, and `quality_speed_modern_provider_start:` with an RFC 3339 instant or a date moves the flip. Release the config through the config-updater and restart every taskworker and API block (capprobe/README.md, \"Switching it on\").",
+		verify:    "The finding clears on the next run after the release, and once the taskworkers have restarted urnetwork_stats_provider_modern_gate_start_seconds shows the meant start, or no start for the switch set on purpose.",
 		playbook:  "SIGNALS.md §2.29 and FP2FIX.md (modern provider gate)",
 	}
 }

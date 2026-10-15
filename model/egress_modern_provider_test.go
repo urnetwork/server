@@ -469,6 +469,39 @@ func TestGetModernProviderGateSchedule(t *testing.T) {
 	}
 }
 
+// A provider.yml that holds the gate off by a failure names it, a fixed text
+// without the value given: a file that is not yaml, a switch that cannot be
+// read or has no value, and, while the switch is absent, a start that cannot
+// be used. The switch set on purpose, a usable start, no gate keys, and an
+// unusable start beside a switch, which decides, name none.
+func TestGetModernProviderGateFailure(t *testing.T) {
+	for _, c := range []struct {
+		config  string
+		failure string
+	}{
+		{config: "", failure: ""},
+		{config: "quality_speed_requires_modern_provider: false\n", failure: ""},
+		{config: "quality_speed_requires_modern_provider: true\n", failure: ""},
+		{config: "quality_speed_modern_provider_start: 2026-11-02\n", failure: ""},
+		{config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: next week\n", failure: ""},
+		{config: "egress_index:\n\tmax_failure_index: 3\n", failure: "provider.yml cannot be read"},
+		{config: "quality_speed_requires_modern_provider: maybe\n", failure: "quality_speed_requires_modern_provider cannot be read"},
+		{config: "quality_speed_requires_modern_provider: ~\n", failure: "quality_speed_requires_modern_provider has no value"},
+		{config: "quality_speed_modern_provider_start: next week\n", failure: "quality_speed_modern_provider_start is neither an RFC 3339 instant nor a date"},
+		{config: "quality_speed_modern_provider_start:\n", failure: "quality_speed_modern_provider_start has no value"},
+		{config: "quality_speed_modern_provider_start: [2026-11-02]\n", failure: "quality_speed_modern_provider_start cannot be read"},
+	} {
+		failure := func() string {
+			pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(c.config))
+			defer pop()
+			return GetModernProviderGateFailure()
+		}()
+		if failure != c.failure {
+			t.Errorf("%q: failure %q, want %q", c.config, failure, c.failure)
+		}
+	}
+}
+
 // The switch as a test names it: absent, true or false.
 func modernGateTestSwitchText(modernSwitch *bool) string {
 	if modernSwitch == nil {

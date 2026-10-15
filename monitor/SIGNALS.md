@@ -17544,6 +17544,17 @@ out.
   comes back on an older config after 18:00 UTC on the start's day is seen.
   With no taskworker process series in Mimir inside the windows the run is
   `cannot-observe`.
+- `modern-gate-schedule-unreadable` (frame `provider.yml`, sustain 1, WARN,
+  an unknown state): the deployment's desired provider.yml, as the
+  monitor's own copy of the decoder reads it
+  (`model.GetModernProviderGateFailure`), holds the gate off by a failure: a
+  switch that cannot be read or has no value, or, while the switch is
+  absent, a start that is neither an RFC 3339 instant nor a date, is given
+  twice or has no value, or a provider.yml that cannot be read. Each reads
+  as the kill switch and publishes no start, which silences everything
+  above, though it is most likely a postponement that failed; the finding
+  names the failure as a fixed text, never the value given. It is read
+  apart from Mimir, beside `cannot-observe` when Mimir cannot be read.
 
 Outside 72 hours before the earliest start to the end of the watch after the
 latest the signal is otherwise quiet, whatever the gauges say. A part the
@@ -17566,8 +17577,10 @@ taskworker and API block, since a running container keeps the config version
 it was created with (the same procedure as server/capprobe/README.md,
 "Switching it on"), and it postpones the flip only when the restarts finish
 before the start. A switch given without a value, or a start that cannot be
-read, keeps the gate off and is logged, as a postponement that failed;
-confirm the moved start on
+read, keeps the gate off and is logged, as a postponement that failed, and
+publishes no start, which would silence this signal: the monitor's own
+decode of the desired provider.yml WARNs `modern-gate-schedule-unreadable`
+for it. Confirm the moved start on
 `urnetwork_stats_provider_modern_gate_start_seconds` or with
 `bringyourctl provider inspect` after the restart. To let it flip, first
 switch the capability probe on and let it sweep the eligible providers until
@@ -17604,8 +17617,10 @@ set everywhere, findings kept beside what cannot be read, counts read
 before the flip, a set switch, a moved start, an unpublished schedule, and
 stale or incomplete counts; synthetic Mimir answers, built from taskworker
 processes as the query reads them, drive the signal's own queries for the
-page before the start, the page after it, a disagreeing fleet, and a
-restart that is not judged until its process has settled.
+page before the start, the page after it, a disagreeing fleet, a restart
+that is not judged until its process has settled, and a failed
+postponement in the desired provider.yml, beside a Mimir that answers and
+one that cannot be read.
 
 ---
 

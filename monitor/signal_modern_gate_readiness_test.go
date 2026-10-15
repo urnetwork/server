@@ -522,6 +522,11 @@ func modernGateReadinessTestPayload(t testing.TB, at time.Time, processes []mode
 	return string(payload)
 }
 
+// The signal with the desired provider.yml's failure, "" for none.
+func modernGateReadinessTestSignal(failure string) Signal {
+	return newModernGateReadinessSignal(func() string { return failure })
+}
+
 // Settings whose one services host answers each query by its evaluation time.
 func modernGateReadinessTestSettings(t testing.TB, now time.Time, payloads map[int64]string) SignalSettings {
 	t.Helper()
@@ -566,7 +571,7 @@ func TestModernGateReadinessSignalPagesNamingTheOverrides(t *testing.T) {
 	start := modernGateReadinessTestStart
 	now := start.Add(-23 * time.Hour)
 	payload := modernGateReadinessTestPayload(t, now, modernGateReadinessTestProcesses(4, now, false, &start), now.Add(-4*time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100})
-	alerts, err := NewModernGateReadinessSignal().Run(context.Background(), modernGateReadinessTestSettings(t, now, map[int64]string{now.Unix(): payload}))
+	alerts, err := modernGateReadinessTestSignal("").Run(context.Background(), modernGateReadinessTestSettings(t, now, map[int64]string{now.Unix(): payload}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +599,7 @@ func TestModernGateReadinessSignalPagesAFallAfterTheFlip(t *testing.T) {
 		now.Unix():    modernGateReadinessTestPayload(t, now, modernGateReadinessTestProcesses(4, now, true, &start), start.Add(time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 30, model.RankModeSpeed: 60}),
 		before.Unix(): modernGateReadinessTestPayload(t, before, nil, before, nil, map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100}),
 	}
-	alerts, err := NewModernGateReadinessSignal().Run(context.Background(), modernGateReadinessTestSettings(t, now, payloads))
+	alerts, err := modernGateReadinessTestSignal("").Run(context.Background(), modernGateReadinessTestSettings(t, now, payloads))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +625,7 @@ func TestModernGateReadinessSignalPagesADisagreeingFleet(t *testing.T) {
 		now.Unix():    modernGateReadinessTestPayload(t, now, processes, start.Add(time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 30, model.RankModeSpeed: 60}),
 		before.Unix(): modernGateReadinessTestPayload(t, before, nil, before, nil, map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100}),
 	}
-	alerts, err := NewModernGateReadinessSignal().Run(context.Background(), modernGateReadinessTestSettings(t, now, payloads))
+	alerts, err := modernGateReadinessTestSignal("").Run(context.Background(), modernGateReadinessTestSettings(t, now, payloads))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +663,7 @@ func TestModernGateReadinessSignalJudgesSettledProcesses(t *testing.T) {
 			now.Unix():    modernGateReadinessTestPayload(t, now, processes, start.Add(time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100}),
 			before.Unix(): modernGateReadinessTestPayload(t, before, nil, before, nil, map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100}),
 		}
-		alerts, err := NewModernGateReadinessSignal().Run(context.Background(), modernGateReadinessTestSettings(t, now, payloads))
+		alerts, err := modernGateReadinessTestSignal("").Run(context.Background(), modernGateReadinessTestSettings(t, now, payloads))
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -671,6 +676,48 @@ func TestModernGateReadinessSignalJudgesSettledProcesses(t *testing.T) {
 		if len(alerts) != 1 || alerts[0].Class != "modern-gate-fleet-disagrees" || alerts[0].Severity != SeverityPage {
 			t.Errorf("%s: alerts %+v, want the fleet's page", c.name, alerts)
 		}
+	}
+}
+
+// A postponement that failed in the desired provider.yml WARNs as an
+// unknown state, the schedule that was meant: beside a fleet that holds the
+// gate off as it says, and beside a Mimir that cannot be read. Without a
+// failure nothing fires.
+func TestModernGateReadinessSignalWarnsOnAFailedPostponement(t *testing.T) {
+	start := modernGateReadinessTestStart
+	now := start.Add(-time.Hour)
+	failure := "quality_speed_modern_provider_start is neither an RFC 3339 instant nor a date"
+	// the taskworkers on the failed release: the gate off and no start
+	off := modernGateReadinessTestPayload(t, now, modernGateReadinessTestProcesses(4, now, false, nil), now.Add(-4*time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100})
+
+	alerts, err := modernGateReadinessTestSignal(failure).Run(context.Background(), modernGateReadinessTestSettings(t, now, map[int64]string{now.Unix(): off}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts %+v, want the failure alone", alerts)
+	}
+	alert := requireAlertClass(t, alerts, "modern-gate-schedule-unreadable")
+	if alert.Severity != SeverityWarn || !isVisibilityAlert(alert) || !strings.Contains(alert.Markdown(), "failure="+failure) || !strings.Contains(alert.Markdown(), "quality_speed_modern_provider_start:") {
+		t.Fatalf("alert %+v, want a visibility warning naming the failure and the key to correct", alert)
+	}
+
+	// no answer for the evaluation time: Mimir cannot be read
+	alerts, err = modernGateReadinessTestSignal(failure).Run(context.Background(), modernGateReadinessTestSettings(t, now, map[int64]string{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	classes := []string{}
+	for _, alert := range alerts {
+		classes = append(classes, alert.Class)
+	}
+	if strings.Join(classes, ",") != "modern-gate-schedule-unreadable,cannot-observe" {
+		t.Fatalf("classes %v, want the failure beside cannot-observe", classes)
+	}
+
+	alerts, err = modernGateReadinessTestSignal("").Run(context.Background(), modernGateReadinessTestSettings(t, now, map[int64]string{now.Unix(): off}))
+	if err != nil || len(alerts) != 0 {
+		t.Fatalf("alerts %+v err %v without a failure, want none", alerts, err)
 	}
 }
 
