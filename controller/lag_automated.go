@@ -3,6 +3,9 @@ package controller
 import (
 	"net/http"
 	"strings"
+	"sync/atomic"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server/model"
 )
@@ -88,15 +91,44 @@ func lagSignatureAgent(header http.Header) string {
 // Why a track from this request is automated (one of
 // model.LagAutomatedReasons), or "" when it is a visitor's. A signing agent
 // comes first: it names an agent outright, where a network only says where
-// the request came from.
+// the request came from. A track without a network is checked against the
+// deployment's GeoLite2 ASN database, whose absence is logged
+// (lagReportAsnDatabaseMissing).
 func lagTrackAutomatedReason(header http.Header, asn *int64) string {
 	if lagSignatureAgent(header) != "" {
 		return model.LagAutomatedReasonSignatureAgent
 	}
-	if asn != nil {
-		if _, ok := lagDatacenterAsns[*asn]; ok {
-			return model.LagAutomatedReasonDatacenterAsn
-		}
+	if asn == nil {
+		lagReportAsnDatabaseMissing()
+		return ""
+	}
+	if _, ok := lagDatacenterAsns[*asn]; ok {
+		return model.LagAutomatedReasonDatacenterAsn
 	}
 	return ""
+}
+
+// Whether this process has logged that the GeoLite2 ASN database is missing.
+var lagAsnDatabaseMissingLogged atomic.Bool
+
+// Where that is logged. Tests replace it.
+var lagAsnDatabaseMissingLogf = glog.Errorf
+
+// Logs, once per process, that tracks are issued without the GeoLite2 ASN
+// database, which is optional for my-ip-info (A3) but not for this flag:
+// without it no track has a network, so no track from a hosting or cloud
+// network is flagged automated, and their results count in every aggregate
+// (amendment 12). Nothing else would show the gap. An address the database
+// does not know is no gap, and is not logged.
+func lagReportAsnDatabaseMissing() {
+	if ipAsnDb() != nil {
+		return
+	}
+	if lagAsnDatabaseMissingLogged.CompareAndSwap(false, true) {
+		lagAsnDatabaseMissingLogf(
+			"[lag]no GeoLite2 ASN database (%s): tracks from hosting and cloud networks are not flagged %s and count in every lag.dev aggregate, and tracks keep no network (lag.dev/PLAN.md A3, amendment 12)\n",
+			geoLite2AsnResourcePath,
+			model.LagAutomatedReasonDatacenterAsn,
+		)
+	}
 }
