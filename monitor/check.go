@@ -81,6 +81,19 @@ type finding struct {
 	action    string
 	verify    string
 	playbook  string
+
+	// the finding reports that part of its signal's source could not be
+	// observed (see isUnobservable)
+	unobservable bool
+}
+
+// An unobservable finding says part of its signal's source could not be
+// observed, so the execution that produced it is no evidence that anything
+// else is absent. The probe id monitor/visibility and the classes
+// cannot-observe and *-unobservable are reserved for such findings and mark
+// them by name; an unknown state with any other class sets unobservable.
+func (self finding) isUnobservable() bool {
+	return self.unobservable || self.probeId == "monitor/visibility" || self.class == "cannot-observe" || strings.HasSuffix(self.class, "-unobservable")
 }
 
 // probe is one SIGNALS.md signal encoded as an automated check.
@@ -108,7 +121,7 @@ func cannotObserveFinding(target string, err error) finding {
 	errorClass := classifyObservationError(err)
 	return finding{
 		probeId: "monitor/visibility", tier: tierWarn,
-		class: "cannot-observe", target: target, sustain: 2,
+		class: "cannot-observe", target: target, sustain: 2, unobservable: true,
 		symptom:   "The monitor could not complete an observation for " + target + " (error_class=" + errorClass + ")",
 		mechanism: "The source command, parser, or network path failed, so this target's production state is unknown even if sibling checks completed.",
 		baseline:  "Every configured target returns a bounded, parseable observation at each signal cadence.",

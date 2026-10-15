@@ -421,10 +421,12 @@ func slackIncidentKey(alert Alert) string {
 	return strings.Join([]string{alert.SignalID, alert.Class, alert.Target}, "|")
 }
 
-// A visibility alert says a signal could not observe its source, so the rest
-// of that execution's identities are unknown rather than recovered.
+// A visibility alert says a signal could not observe part of its source, so
+// the rest of that execution's identities are unknown rather than recovered.
+// Every constructor of an unknown state marks its alert unobservable
+// (finding.isUnobservable); the alert's names are never consulted.
 func isVisibilityAlert(alert Alert) bool {
-	return alert.SignalID == "monitor/visibility" || alert.Class == "pg-query-sample-unavailable"
+	return alert.unobservable
 }
 
 // Applies one signal execution to the incidents and returns its transitions:

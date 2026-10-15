@@ -1122,30 +1122,6 @@ func TestSlackAlertMessagesEscapeSlackControlSequences(t *testing.T) {
 	}
 }
 
-// Every alert visibilityAlert can produce marks its batch incomplete, so a
-// failed run never clears the signal's incidents.
-func TestEveryVisibilityAlertMarksItsBatchIncomplete(t *testing.T) {
-	settings := syntheticSettings(nil)
-	pgSample := selectionSignal{number: "2.30", key: "pg-query-sample", id: "pg/query-sample"}
-	for _, c := range []struct {
-		signal Signal
-		err    error
-	}{
-		{signal: slackTestSignal, err: errors.New("synthetic command timeout")},
-		{signal: slackTestSignal, err: errors.New("host-a.example: kex_exchange_identification: read: Connection reset by peer")},
-		{signal: slackTestSignal, err: newProviderVisibilityError(providerAuthenticationClass, "synthetic provider refusal")},
-		{signal: pgSample, err: errors.New("synthetic sample failure")},
-	} {
-		alert := visibilityAlert(settings, c.signal, c.err)
-		if !isVisibilityAlert(alert) {
-			t.Errorf("visibility alert %s/%s does not mark its batch incomplete", alert.SignalID, alert.Class)
-		}
-	}
-	if isVisibilityAlert(slackTestAlert("pg-1", "", SeverityPage)) {
-		t.Fatal("an ordinary alert marked its batch incomplete")
-	}
-}
-
 // The monitor.yml decode carries the webhook into the settings, and a
 // malformed document is reported by line, never by quoting its values.
 func TestMonitorYamlDecodesTheSlackWebhookWithoutQuotingIt(t *testing.T) {

@@ -1004,7 +1004,7 @@ func appleVisibilityAlert(settings SignalSettings, class, symptom, mechanism, ob
 	return Alert{
 		SignalNumber: "20.2", SignalKey: "apple-crashes", SignalID: "mobile/apple-crashes", SignalName: "Apple crash reports",
 		Severity: SeverityWarn, Class: class, Target: "app-store/" + settings.AppleReporting.AppID,
-		Environment: settings.Environment, ObservedAt: settings.Now(), Sustain: 1,
+		Environment: settings.Environment, ObservedAt: settings.Now(), Sustain: 1, unobservable: true,
 		Symptom: symptom, Mechanism: mechanism,
 		Baseline: "An active ONGOING request publishes a recent DAILY App Crashes instance with an observable aggregate or an explicitly understood privacy boundary.",
 		Observed: observed, Action: action,

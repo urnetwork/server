@@ -51,6 +51,12 @@ type Alert struct {
 	Action    string `json:"action"`
 	Verify    string `json:"verify"`
 	Playbook  string `json:"playbook,omitempty"`
+
+	// The alert reports that part of its signal's source could not be
+	// observed, so the execution that produced it is no evidence that any
+	// other incident is absent (finding.isUnobservable). It is not part of the
+	// rendered alert.
+	unobservable bool
 }
 
 // Alerts is the reusable collection returned by signals and monitor runs.

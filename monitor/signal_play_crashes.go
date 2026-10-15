@@ -769,7 +769,7 @@ func playVisibilityAlert(settings SignalSettings, class, symptom, mechanism, obs
 	return Alert{
 		SignalNumber: "20.1", SignalKey: "play-crashes", SignalID: "mobile/play-crashes", SignalName: "Google Play crash reports",
 		Severity: SeverityWarn, Class: class, Target: "google-play/" + settings.GooglePlay.PackageName,
-		Environment: settings.Environment, ObservedAt: settings.Now(), Sustain: 1,
+		Environment: settings.Environment, ObservedAt: settings.Now(), Sustain: 1, unobservable: true,
 		Symptom: symptom, Mechanism: mechanism,
 		Baseline: "Google Play publishes a recent explicit crash metric value and issue search can be interpreted against that visibility boundary.",
 		Observed: observed, Action: action,

@@ -78,7 +78,10 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 	}
 	alerts := make(Alerts, 0, len(findings))
 	for _, finding := range findings {
-		if finding.healthy || (s.accept != nil && finding.class != "monitor-host-scope-partial" && !s.accept(finding)) {
+		// An accept filter selects this signal's detections. A shared probe's
+		// unobservable finding still says this signal's own evidence may be
+		// missing, so it passes: without it the execution would look complete.
+		if finding.healthy || (s.accept != nil && finding.class != "monitor-host-scope-partial" && !finding.isUnobservable() && !s.accept(finding)) {
 			continue
 		}
 		alerts = append(alerts, alertFromFinding(settings, s.number, s.key, s.name, finding))
@@ -152,6 +155,7 @@ func alertFromFinding(settings SignalSettings, number, key, name string, f findi
 		Action:       action,
 		Verify:       verify,
 		Playbook:     f.playbook,
+		unobservable: f.isUnobservable(),
 	}
 }
 

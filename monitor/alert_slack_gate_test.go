@@ -148,10 +148,12 @@ func TestSlackAlertNotifierBehindTheGateKeepsAPageThroughADip(t *testing.T) {
 // signal's other incidents are unknown, not absent.
 func TestSlackAlertNotifierBehindTheGateTreatsAPartialRunAsIncomplete(t *testing.T) {
 	present := scriptedExecution{alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}}
-	unobserved := slackTestAlert("pg-2", "", SeverityWarn)
-	unobserved.SignalID = "monitor/visibility"
-	unobserved.Class = "cannot-observe"
-	unobserved.Sustain = 2
+	// what a signal adapter emits for one target it could not observe
+	unobserved := alertFromFinding(syntheticSettings(nil), slackTestSignal.number, slackTestSignal.key, "PostgreSQL active backends",
+		cannotObserveFinding("pg-2", errors.New("synthetic ssh timeout")))
+	if unobserved.Sustain != 2 {
+		t.Fatalf("cannot-observe Sustain = %d, want 2", unobserved.Sustain)
+	}
 	partial := scriptedExecution{alerts: Alerts{unobserved}}
 	texts := postThroughTheGate(t, []scriptedExecution{present, present, partial, {}, present})
 	requireSlackTexts(t, texts,
