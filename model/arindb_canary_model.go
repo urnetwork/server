@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -80,6 +81,35 @@ const (
 	// previous choice carries, each row's latest slot without one
 	ArindbCanaryBasisEmptyCohort = "empty_cohort"
 )
+
+// The conditions of a decision the stats export publishes and the alerts read.
+const (
+	// warming's paired sample trips, so the latest is not served: page
+	ArindbCanaryFlagWarmingTripped = "warming_tripped"
+	// warming serves the latest unverified
+	ArindbCanaryFlagWarmingServesLatest = "warming_serves_latest"
+	// a fallback is latched on this pair
+	ArindbCanaryFlagLatched = "latched"
+	// the operator's accept key names this latest
+	ArindbCanaryFlagAccepted = "accepted"
+	// the publishing Taskworker could not open its latest: page
+	ArindbCanaryFlagLatestUnavailable = "latest_unavailable"
+	// the pair compared is the previous decision's
+	ArindbCanaryFlagPairCarried = "pair_carried"
+	// single right after a fallback: page
+	ArindbCanaryFlagFallbackDropped = "fallback_dropped"
+)
+
+// Every condition, in the order the stats gauge publishes them.
+var ArindbCanaryFlags = []string{
+	ArindbCanaryFlagWarmingTripped,
+	ArindbCanaryFlagWarmingServesLatest,
+	ArindbCanaryFlagLatched,
+	ArindbCanaryFlagAccepted,
+	ArindbCanaryFlagLatestUnavailable,
+	ArindbCanaryFlagPairCarried,
+	ArindbCanaryFlagFallbackDropped,
+}
 
 // Every state, in the order the stats gauge publishes them.
 var ArindbCanaryStates = []string{
@@ -587,6 +617,10 @@ type ArindbCanaryDecision struct {
 	ServingBasis string `json:"serving_basis"`
 	// the decision this one followed, "" without one
 	PreviousDecisionId string `json:"previous_decision_id,omitempty"`
+	// the process that published it, as ArindbCanaryPublisher names it. Only
+	// that process's stats collector exports the per-country supply, so the
+	// largest series is exported once rather than by every Taskworker
+	Publisher string `json:"publisher"`
 	// when the serving epoch changed over the last six hours, this decision
 	// included, oldest first
 	ServingChanges []time.Time `json:"serving_changes"`
@@ -1037,6 +1071,7 @@ func decideArindbCanaryForPublication(
 	}); r != nil {
 		glog.Errorf("[arindb]emptied city names unavailable: %v\n", r)
 	}
+	decision.Publisher = ArindbCanaryPublisher()
 	applyArindbServingEpoch(countFilter, cohortIds, slots, decision.ServingEpoch)
 	glog.Infof("[arindb]%s\n", decision.logSummary())
 	return decision, nil
@@ -1274,6 +1309,26 @@ func parseArindbCanaryDecision(data []byte) (*ArindbCanaryDecision, error) {
 		return nil, fmt.Errorf("unknown arindb canary state %q", decision.State)
 	}
 	return decision, nil
+}
+
+// Which conditions of the decision hold, keyed by ArindbCanaryFlags.
+func (self *ArindbCanaryDecision) Flags() map[string]bool {
+	return map[string]bool{
+		ArindbCanaryFlagWarmingTripped:      self.WarmingTripped,
+		ArindbCanaryFlagWarmingServesLatest: self.WarmingServesLatest,
+		ArindbCanaryFlagLatched:             self.Latch != nil,
+		ArindbCanaryFlagAccepted:            self.Accepted,
+		ArindbCanaryFlagLatestUnavailable:   self.LatestUnavailable,
+		ArindbCanaryFlagPairCarried:         self.PairCarriedReason != "",
+		ArindbCanaryFlagFallbackDropped:     self.FallbackDropped,
+	}
+}
+
+// This process as the publisher of a decision: its host, block and process id.
+func ArindbCanaryPublisher() string {
+	host, _ := server.Host()
+	block, _ := server.Block()
+	return fmt.Sprintf("%s/%s/%d", host, block, os.Getpid())
 }
 
 // The decision's summary in the native census. Older readers ignore it.

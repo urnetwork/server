@@ -24,20 +24,24 @@ var (
 // A published decision in state, as the indexer writes it.
 func testStatsArindbDecision(state string, servingEpoch int64) *model.ArindbCanaryDecision {
 	decision := &model.ArindbCanaryDecision{
-		Version:      model.ArindbCanaryDecisionVersion,
-		DecisionId:   server.NewId().String(),
-		State:        state,
-		ServingEpoch: servingEpoch,
-		Latest:       model.ArindbCanaryDatabase{State: server.ArinDatabaseLoaded, BuildEpoch: testStatsArindbLatestEpoch, Sha256: testStatsArindbLatestHash},
-		Old:          model.ArindbCanaryDatabase{State: server.ArinDatabaseLoaded, BuildEpoch: testStatsArindbOldEpoch, Sha256: testStatsArindbOldHash},
-		Coverage:     model.ArindbCanaryCoverage{Providers: 200, Latest: 200, Old: 196, Paired: 196},
-		Buckets:      map[string]*model.ArindbCanaryBucket{},
-		DecidedAt:    testStatsArindbDecidedAt,
+		Version:        model.ArindbCanaryDecisionVersion,
+		DecisionId:     server.NewId().String(),
+		State:          state,
+		ServingEpoch:   servingEpoch,
+		Latest:         model.ArindbCanaryDatabase{State: server.ArinDatabaseLoaded, BuildEpoch: testStatsArindbLatestEpoch, Sha256: testStatsArindbLatestHash},
+		Old:            model.ArindbCanaryDatabase{State: server.ArinDatabaseLoaded, BuildEpoch: testStatsArindbOldEpoch, Sha256: testStatsArindbOldHash},
+		Coverage:       model.ArindbCanaryCoverage{Providers: 200, Latest: 200, Old: 196, Paired: 196},
+		Cohort:         model.ArindbCanaryCohort{ReferenceProviders: 250, LossRatio: 0.2},
+		Publisher:      model.ArindbCanaryPublisher(),
+		ServingChanges: []time.Time{testStatsArindbDecidedAt.Add(-time.Hour), testStatsArindbDecidedAt},
+		Buckets:        map[string]*model.ArindbCanaryBucket{},
+		DecidedAt:      testStatsArindbDecidedAt,
 	}
 	for _, bucket := range model.ProviderEgressBuckets {
 		decision.Buckets[bucket] = &model.ArindbCanaryBucket{
 			ArindbCanaryCount: model.ArindbCanaryCount{Latest: 90, Old: 100},
 			LossRatio:         0.1,
+			ChurnRatio:        0.3,
 			Countries:         map[string]model.ArindbCanaryCount{"aa": {Latest: 90, Old: 99}, "bb": {Latest: 0, Old: 1}},
 			EmptiedCountries:  []model.ArindbCanaryEmptiedCountry{{CountryCode: "bb", Old: 1}},
 			EmptiedCityCount:  3,
@@ -131,6 +135,81 @@ func TestStatsArindbCanaryCarriesBothDatabasesAndTheComparison(t *testing.T) {
 	}
 }
 
+// Each condition the alerts read is one series, 1 while it holds; the latch's
+// release progress, the serving changes and the cohort against its recent size
+// are exported beside them.
+func TestStatsArindbCanaryExportsTheDecisionsConditions(t *testing.T) {
+	decision := testStatsArindbDecision(model.ArindbCanaryStateWarming, testStatsArindbOldEpoch)
+	decision.WarmingTripped = true
+	decision.Latch = &model.ArindbCanaryLatch{LatestEpoch: testStatsArindbLatestEpoch, OldEpoch: testStatsArindbOldEpoch, PassingRuns: 2}
+	decision.PairCarriedReason = "latest_invalid"
+	decision.LatestUnavailable = true
+	statsPublishArindbCanary(decision)
+	want := map[string]float64{
+		model.ArindbCanaryFlagWarmingTripped: 1, model.ArindbCanaryFlagWarmingServesLatest: 0, model.ArindbCanaryFlagLatched: 1,
+		model.ArindbCanaryFlagAccepted: 0, model.ArindbCanaryFlagLatestUnavailable: 1, model.ArindbCanaryFlagPairCarried: 1,
+		model.ArindbCanaryFlagFallbackDropped: 0,
+	}
+	if count := testutil.CollectAndCount(statsArindbDecisionFlagsGauge.gauge); count != len(model.ArindbCanaryFlags) || len(want) != count {
+		t.Fatalf("%d flag series, want every flag", count)
+	}
+	for flag, value := range want {
+		if got := testutil.ToFloat64(statsArindbDecisionFlagsGauge.gauge.WithLabelValues(flag)); got != value {
+			t.Errorf("flag %s = %v, want %v", flag, got, value)
+		}
+	}
+	if got := testutil.ToFloat64(statsArindbLatchPassingRunsGauge.gauge); got != 2 {
+		t.Errorf("latch passing runs %v", got)
+	}
+	if got := testutil.ToFloat64(statsArindbServingChangesGauge.gauge); got != 2 {
+		t.Errorf("serving changes %v", got)
+	}
+	if current, reference := testutil.ToFloat64(statsArindbCohortProvidersGauge.gauge.WithLabelValues("current")),
+		testutil.ToFloat64(statsArindbCohortProvidersGauge.gauge.WithLabelValues("reference")); current != 200 || reference != 250 {
+		t.Errorf("cohort %v of %v", current, reference)
+	}
+	if got := testutil.ToFloat64(statsArindbCohortLossRatioGauge.gauge); got != 0.2 {
+		t.Errorf("cohort loss %v", got)
+	}
+	for _, bucket := range model.ProviderEgressBuckets {
+		if got := testutil.ToFloat64(statsArindbChurnRatioGauge.gauge.WithLabelValues(bucket)); got != 0.3 {
+			t.Errorf("%s churn %v", bucket, got)
+		}
+		if got := testutil.ToFloat64(statsArindbGainRatioGauge.gauge.WithLabelValues(bucket)); got != 0 {
+			t.Errorf("%s gain %v", bucket, got)
+		}
+	}
+	statsPublishArindbCanary(nil)
+	for _, flag := range model.ArindbCanaryFlags {
+		if got := testutil.ToFloat64(statsArindbDecisionFlagsGauge.gauge.WithLabelValues(flag)); got != 0 {
+			t.Errorf("flag %s = %v without a decision", flag, got)
+		}
+	}
+	if testutil.ToFloat64(statsArindbLatchPassingRunsGauge.gauge) != 0 || testutil.ToFloat64(statsArindbServingChangesGauge.gauge) != 0 ||
+		testutil.ToFloat64(statsArindbCohortLossRatioGauge.gauge) != 0 {
+		t.Error("no decision kept the latch, serving changes or cohort loss")
+	}
+}
+
+// The per-country supply, about 900 series, is exported only by the Taskworker
+// that published the decision; every Taskworker exports the rest.
+func TestStatsArindbCanaryExportsTheCountrySupplyFromThePublisherOnly(t *testing.T) {
+	decision := testStatsArindbDecision(model.ArindbCanaryStateLatest, testStatsArindbLatestEpoch)
+	decision.Publisher = "another-host/g9/1"
+	statsPublishArindbCanary(decision)
+	if count := testutil.CollectAndCount(statsArindbProvidersByCountryGauge.gauge); count != 0 {
+		t.Fatalf("a Taskworker that did not publish exported %d per-country series", count)
+	}
+	if count := testutil.CollectAndCount(statsArindbProvidersGauge.gauge); count != 6 {
+		t.Fatalf("a Taskworker that did not publish exported %d bucket series, want 6", count)
+	}
+	decision.Publisher = model.ArindbCanaryPublisher()
+	statsPublishArindbCanary(decision)
+	if count := testutil.CollectAndCount(statsArindbProvidersByCountryGauge.gauge); count != 12 {
+		t.Fatalf("the publisher exported %d per-country series, want 12", count)
+	}
+}
+
 // Without a readable decision every reader serves each row's latest slot: no
 // state, no fallback, serving epoch 0 and no comparison series, while the
 // decision time keeps the last decision so its age grows into a stale alert.
@@ -146,6 +225,7 @@ func TestStatsArindbCanaryWithoutADecisionServesTheLatestSlot(t *testing.T) {
 		t.Fatal("no decision kept the fallback or its serving epoch")
 	}
 	for _, vec := range []*statsGaugeVec{statsArindbProvidersGauge, statsArindbProvidersByCountryGauge, statsArindbLossRatioGauge,
+		statsArindbGainRatioGauge, statsArindbChurnRatioGauge, statsArindbCohortProvidersGauge,
 		statsArindbEmptiedCountryGauge, statsArindbCoverageRatioGauge, statsArindbDatabaseInfoGauge} {
 		if count := testutil.CollectAndCount(vec.gauge); count != 0 {
 			t.Errorf("a comparison gauge kept %d series without a decision", count)

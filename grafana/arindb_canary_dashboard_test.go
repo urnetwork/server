@@ -24,6 +24,13 @@ var arindbCanaryStatsMetrics = []string{
 	"urnetwork_stats_arindb_database_info",
 	"urnetwork_stats_arindb_serving_epoch_seconds",
 	"urnetwork_stats_arindb_decision_seconds",
+	"urnetwork_stats_arindb_decision_flags",
+	"urnetwork_stats_arindb_gain_ratio",
+	"urnetwork_stats_arindb_churn_ratio",
+	"urnetwork_stats_arindb_cohort_providers",
+	"urnetwork_stats_arindb_cohort_loss_ratio",
+	"urnetwork_stats_arindb_serving_changes",
+	"urnetwork_stats_arindb_latch_passing_runs",
 }
 
 // each process's own ARIN slots, pushed with its own labels
@@ -72,6 +79,14 @@ func TestProvidersDashboardShowsTheArindbCanaryRow(t *testing.T) {
 		"each process's latest age":     `time() - max by (service, host, block, instance) (urnetwork_arin_database_build_epoch_seconds{env="$env"} > 0)`,
 		"each process's old age":        `time() - max by (service, host, block, instance) (urnetwork_arin_old_database_build_epoch_seconds{env="$env"} > 0)`,
 		"the loss threshold is visible": `urnetwork_stats_arindb_loss_ratio`,
+		"which conditions hold":         `max by (flag) (urnetwork_stats_arindb_decision_flags{env="$env"})`,
+		"net gain":                      `max by (bucket) (urnetwork_stats_arindb_gain_ratio{env="$env"})`,
+		"gross churn":                   `max by (bucket) (urnetwork_stats_arindb_churn_ratio{env="$env"})`,
+		"the cohort and its reference":  `max by (reference) (urnetwork_stats_arindb_cohort_providers{env="$env"})`,
+		"the cohort's loss":             `max(urnetwork_stats_arindb_cohort_loss_ratio{env="$env"})`,
+		"how often the fleet switched":  `max(urnetwork_stats_arindb_serving_changes{env="$env"})`,
+		"how near a latch's release":    `max(urnetwork_stats_arindb_latch_passing_runs{env="$env"})`,
+		"how often readers miss it":     `sum(rate(urnetwork_arindb_decision_reads_total{env="$env",outcome!="ok"}[$__rate_interval])) / sum(rate(urnetwork_arindb_decision_reads_total{env="$env"}[$__rate_interval]))`,
 	} {
 		if !strings.Contains(joined, read) {
 			t.Errorf("the canary row does not answer %q (expected a read of %s)", question, read)
@@ -84,7 +99,11 @@ func TestProvidersDashboardShowsTheArindbCanaryRow(t *testing.T) {
 	}
 
 	// the breaker's default thresholds are drawn where they apply
-	for title, value := range map[string]float64{"net loss of latest against old": 0.10, "coverage of the public cohort": 0.98} {
+	for title, value := range map[string]float64{
+		"net loss of latest against old": 0.10, "coverage of the public cohort": 0.98,
+		"net gain of latest against old": 0.10, "gross churn of latest against old": 0.20,
+		"cohort loss against its recent size": 0.10, "decision reads that were not ok": 0.05,
+	} {
 		found := false
 		for _, panel := range dashboard.Panels {
 			if panel.Title != title {

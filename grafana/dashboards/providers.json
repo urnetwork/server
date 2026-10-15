@@ -4607,6 +4607,380 @@
         }
       ],
       "description": "Time since the build of each process's latest and old ARIN databases; a slot that is not loaded is left out. Processes at different latest ages are a fleet not yet restarted onto a release, which keeps the canary warming."
+    },
+    {
+      "id": 87,
+      "type": "stat",
+      "title": "decision conditions",
+      "description": "The conditions of the latest decision, 1 while each holds (arindbctl/ARINDB.md, Dual-database canary). warming_tripped: warming's paired sample trips, so the latest is not served (page). warming_serves_latest: warming serves the latest unverified. latched: a fallback holds until release_passing_runs comparisons pass with release_margin. accepted: provider.yml accept_latest_build_epoch names the latest. latest_unavailable: the publishing Taskworker could not open its latest (page). pair_carried: the pair compared is the previous decision's. fallback_dropped: single right after a fallback (page).",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 177
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (flag) (urnetwork_stats_arindb_decision_flags{env=\"$env\"})",
+          "legendFormat": "{{flag}}"
+        }
+      ]
+    },
+    {
+      "id": 88,
+      "type": "timeseries",
+      "title": "net gain of latest against old",
+      "description": "The latest database's net gain of paired supply in each bucket, (latest - old) / old. The breaker trips only on losses; a gain above 0.10 with at least 20 paired providers of old supply pages as a possible flood, which the fallback cannot judge.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 183
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (bucket) (urnetwork_stats_arindb_gain_ratio{env=\"$env\"})",
+          "legendFormat": "{{bucket}}"
+        }
+      ]
+    },
+    {
+      "id": 89,
+      "type": "timeseries",
+      "title": "gross churn of latest against old",
+      "description": "The latest database's gross churn of paired supply in each bucket, (removed + added) / old. The net loss hides a release that moves as many providers out of a bucket as into it; churn above 0.20 with at least 20 paired providers of old supply pages.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 183
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (bucket) (urnetwork_stats_arindb_churn_ratio{env=\"$env\"})",
+          "legendFormat": "{{bucket}}"
+        }
+      ]
+    },
+    {
+      "id": 90,
+      "type": "timeseries",
+      "title": "public cohort against its recent size",
+      "description": "The public providers the canary compared, and the largest cohort of the last two hours. A provider whose latest lookup fails never writes a location, so it never reaches the cohort and the comparison cannot see it; a release whose records fail to decode shows as a shrinking cohort and as ARIN lookup errors on the services overview.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 192
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (reference) (urnetwork_stats_arindb_cohort_providers{env=\"$env\"})",
+          "legendFormat": "{{reference}}"
+        }
+      ]
+    },
+    {
+      "id": 91,
+      "type": "timeseries",
+      "title": "cohort loss against its recent size",
+      "description": "The cohort's loss against its largest size over the last two hours. Above 0.10, from a reference of at least 100 providers, it pages: providers are leaving the cohort before the canary can compare them.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 192
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_stats_arindb_cohort_loss_ratio{env=\"$env\"})",
+          "legendFormat": "cohort loss"
+        }
+      ]
+    },
+    {
+      "id": 92,
+      "type": "timeseries",
+      "title": "serving changes and latch release",
+      "description": "Changes of the serving epoch over the last six hours, which page above 4 as a canary switching the fleet back and forth, and the consecutive comparisons a latched fallback has passed with the release margin; it releases at release_passing_runs (default 6).",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 201
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_stats_arindb_serving_changes{env=\"$env\"})",
+          "legendFormat": "serving changes in six hours"
+        },
+        {
+          "refId": "B",
+          "expr": "max(urnetwork_stats_arindb_latch_passing_runs{env=\"$env\"})",
+          "legendFormat": "latch passing runs"
+        }
+      ]
+    },
+    {
+      "id": 93,
+      "type": "timeseries",
+      "title": "decision reads that were not ok",
+      "description": "The share of every process's reads of the published decision that were absent or expired, invalid, or a Redis error. Absent and invalid decisions serve each provider's latest slot; an error keeps the process's last decision for up to 15 minutes. Above 0.05 for 15 minutes it warns.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 201
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_arindb_decision_reads_total{env=\"$env\",outcome!=\"ok\"}[$__rate_interval])) / sum(rate(urnetwork_arindb_decision_reads_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "not ok"
+        }
+      ]
     }
   ]
 }
