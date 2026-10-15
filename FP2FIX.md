@@ -393,22 +393,26 @@ provider cannot resolve the probe client's key.
   buckets.
 - **Rollout.** In order. (1) Merge the connect accessor
   (`ClientSettings.PeerCapabilityRecorder`, connect
-  feat/modern-provider-evidence) into connect main, and revert the capability
-  probe branch's temporary replace of connect with that worktree. (2) Apply
-  migration 836 on Main once the owner approves: a server built with it
-  requires it, so this work merges into main only after that. (3) Deploy the
-  API and the taskworkers with the switch off; the capability probe starts
-  measuring at the taskworkers' next start (`enabled: false` in
-  `capability_probe.yml` stops it at the next pass). There is no API-first
-  constraint any more: nothing new rides the operator submission. (4) Review
-  the shadow counts until `no_evidence` is small and the not-modern providers
-  are understood, with the capability probe's readings: a large
-  `post_quantum_unsealed` share would mean providers whose identity proof the
-  probe could not verify, which the gate counts as post-quantum and which
-  should be understood first. (5) Switch the gate on only after that review;
-  `quality_speed_requires_modern_provider: false` turns it off again at each
-  pass's next settings read. Lowering `other_refresh_hours` before the
-  switch returns an updated provider sooner, at a measurement of every
+  feat/modern-provider-evidence, reviewed and fixed at 4a145681) into connect
+  main, and revert the capability probe branch's temporary replace of
+  connect with that worktree. Until then the branch builds only against
+  connect main with that branch merged in: the sibling sdk and the server's
+  own main need connect APIs newer than the branch's base. (2) Migration 836
+  is applied on Main, and the gate merged into server main (ebc1f95a9) with
+  the switch off, both on 2026-10-14. (3) Deploy the API and the taskworkers
+  with the switch off; the capability probe starts measuring at the
+  taskworkers' next start (`enabled: false` in `capability_probe.yml` stops
+  it at the next pass). There is no API-first constraint any more: nothing
+  new rides the operator submission. (4) Review the shadow counts until
+  `no_evidence` is small and the not-modern providers are understood, with
+  the capability probe's readings: a large `post_quantum_unsealed` share
+  would mean providers whose identity proof the probe could not verify,
+  which the gate counts as post-quantum and which should be understood
+  first, and `capability-probe-breaker` and `capability-probe-downgrades`
+  (SIGNALS.md §2.19g) must be quiet. (5) Switch the gate on only after that
+  review; `quality_speed_requires_modern_provider: false` turns it off again
+  at each pass's next settings read. Lowering `other_refresh_hours` before
+  the switch returns an updated provider sooner, at a measurement of every
   non-modern provider that often.
 
 ## Metrics derived for ranking
