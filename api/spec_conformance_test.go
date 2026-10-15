@@ -38,6 +38,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/urfoundation/sn/payoutartifact"
+	snprotocol "github.com/urfoundation/sn/protocol"
+	"github.com/urnetwork/connect/protocol"
+
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 
 	"github.com/urnetwork/server/controller"
@@ -158,6 +162,14 @@ func registry() []specEndpoint {
 		// oneOf request (VerifySeed|VerifyExtend); VerifyArgs is the superset.
 		// Response is a polymorphic interface{}, so it stays unchecked (nil).
 		{"POST", "/verify", rt(controller.VerifyArgs{}), nil},
+		// the streaming posts (router.NewStreamingRoute): the provider work
+		// intake and the request closure take signed originals. The request
+		// and authority receipts are anonymous structs in the handler.
+		{"POST", "/provider-work/v1/owners", rt(protocol.OriginalWorkOwnerEnrollment{}), rt(protocol.OriginalWorkOwnerReceipt{})},
+		{"POST", "/provider-work/v1/requests", rt(protocol.OriginalWorkRequest{}), nil},
+		{"POST", "/provider-work/v1/cuts", rt(protocol.OriginalWorkCutSubmission{}), rt(protocol.OriginalWorkCutReceipt{})},
+		{"POST", "/provider-work/v1/authorities", rt(payoutartifact.WholeWorkAuthority{}), nil},
+		{"POST", "/verify/original/close", rt(snprotocol.ProviderAttemptRequestClosure{}), rt(model.VerifyRequestClosureResult{})},
 		{"GET", "/key/{clientId}", nil, rt(controller.GetClientKeyResult{})},
 		{"GET", "/key/{clientId}/history", nil, rt(controller.GetClientKeyHistoryResult{})},
 		{"GET", "/hello", nil, rt(controller.HelloResult{})},
