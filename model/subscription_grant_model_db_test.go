@@ -18,6 +18,12 @@ import (
 func TestGrantWritersRecordGrantKind(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// the referrer's grant needs a referral cap; the release gate's
+		// fixture pro.yml sets max_referrals to 0
+		config := Pro()
+		previous := *config
+		defer func() { *config = previous }()
+		config.MaxReferrals = 10
 
 		freeNetworkId := server.NewId()
 		proNetworkId := server.NewId()

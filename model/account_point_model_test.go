@@ -644,8 +644,15 @@ func TestReliabilitySubsidyScalesToPlanWindow(t *testing.T) {
 			},
 		)
 
-		// a 4-day plan, scaled as the planner scales its window
+		// a 30-day period with a reliability subsidy, which this test scales;
+		// the release gate's fixture subsidy.yml has a 1-day period and none
 		subsidyConfig := EnvSubsidyConfig()
+		previous := *subsidyConfig
+		defer func() { *subsidyConfig = previous }()
+		subsidyConfig.Days = 30
+		subsidyConfig.ReliabilitySubsidyPerPayoutUsd = 250
+
+		// a 4-day plan, scaled as the planner scales its window
 		subsidyScale := float64((4*24*time.Hour)/time.Minute) / float64(subsidyConfig.Duration()/time.Minute)
 		if 1 <= subsidyScale {
 			t.Fatalf("a 4-day plan must cover part of the %s subsidy period", subsidyConfig.Duration())
