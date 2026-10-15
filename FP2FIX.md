@@ -1144,7 +1144,11 @@ gate matrix.
     country of a hundred or more providers where the probe works, measured
     0.46.
 - **Kill switch.** `online_requires_url_success: false` in provider.yml takes
-  effect at each pass's next settings read. provider.yml is parsed once and
+  effect at each pass's next settings read once the process sees the new
+  file. A running taskworker or API container keeps the config version it was
+  created with, so the switch is a config release and a restart of the
+  taskworkers and the API, as for the modern provider gate's switch
+  (capprobe/README.md, "Switching it on"). provider.yml is parsed once and
   each of the rule's keys is decoded on its own, so a malformed value, or a key
   the file gives twice, resets nothing else in provider.yml; before this,
   `online_requires_url_success: "false"` or a floor of `36%` reset every egress
