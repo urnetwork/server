@@ -3,8 +3,8 @@
 // end-to-end post-quantum session with a client and advertises resizable
 // transfer windows. It is a recurring taskworker task, separate from the URL
 // probe: its own prober shard (network, credential parent and balance), its
-// own tunnels, budget, concurrency and metrics, none of the URL probe's due
-// queue, quota or history.
+// own tunnels, each with a transport budget of its own, its own concurrency
+// and metrics, none of the URL probe's due queue, quota or history.
 //
 // Each pass continues a sweep over the connected providers (Sweep), a
 // bounded page at a time, and selects the providers the egress rules admit

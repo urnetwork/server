@@ -7,8 +7,9 @@ package measures both, provider by provider, and records what it saw in
 `provider_modern_evidence` (migration 836). It is a recurring taskworker task,
 `work.CapabilityProbe`, and shares nothing with the URL probe but the
 control-plane endpoints: its own prober shard (slot 255: a private network,
-credential parent and balance), tunnels, transport budget, concurrency and
-metrics, and none of the URL probe's due queue, quota or run history.
+credential parent and balance), tunnels, each with a platform transport
+budget of its own as each URL probe's tunnel has, concurrency and metrics,
+and none of the URL probe's due queue, quota or run history.
 
 ## A pass
 

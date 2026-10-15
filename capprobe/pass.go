@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -70,13 +69,7 @@ func newPassRunner(settings Settings, tunnelConfig *providertunnel.Config) *pass
 		after:          time.After,
 	}
 	if tunnelConfig != nil {
-		config := *tunnelConfig
-		if config.PlatformTransportBudget == nil {
-			// the pass's own budget, which its tunnels share and nothing else
-			limits := connect.DefaultPlatformTransportSettings().PlatformTransportBudget.Stats()
-			config.PlatformTransportBudget = connect.NewPlatformTransportBudget(limits.TotalByteCount, limits.MaxTransportCount)
-		}
-		runner.open = newProviderCapabilityTunnelOpener(config, settings)
+		runner.open = newProviderCapabilityTunnelOpener(*tunnelConfig, settings)
 	}
 	return runner
 }

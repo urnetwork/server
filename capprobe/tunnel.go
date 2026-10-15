@@ -42,15 +42,20 @@ func (self *providerCapabilityTunnel) close() error {
 	return self.tunnel.Close()
 }
 
-// Opens tunnels from base, the pass's identity, endpoints, credentials,
-// control and transport budget, each with a recorder of its own. The
-// tunnel's window pings its provider (no data-only probe), its contracts
+// The provider tunnel constructor, a package-level seam like fleetprobe's:
+// immutable in production, replaced by tests that must not open a tunnel.
+var openProviderTunnel = providertunnel.Open
+
+// Opens tunnels from base, the pass's identity, endpoints, credentials and
+// control, each with a recorder and a platform transport budget of its own.
+// The tunnel's window pings its provider (no data-only probe), its contracts
 // reserve little, and its teardown has the configured grace. The pass's
 // tunnels share nothing else, and nothing with the URL probe's.
 func newProviderCapabilityTunnelOpener(base providertunnel.Config, settings Settings) openCapabilityTunnel {
 	return func(ctx context.Context, providerId server.Id) (capabilityTunnel, error) {
 		recorder := connect.NewPeerCapabilityRecorder(tunnelMaxObservedPeerCount)
 		cfg := base
+		cfg.PlatformTransportBudget = newTunnelTransportBudget(base.PlatformTransportBudget)
 		cfg.DataOnlyProbe = false
 		cfg.ContractReservationByteCount = tunnelContractReservationByteCount
 		cfg.CloseTimeout = settings.closeTimeout()
@@ -58,7 +63,7 @@ func newProviderCapabilityTunnelOpener(base providertunnel.Config, settings Sett
 			Recorder:                      recorder,
 			NewPeerClientPublicKeyFetcher: newLocalPeerClientPublicKeyFetcher,
 		}
-		tunnel, err := providertunnel.Open(ctx, cfg, connect.Id(providerId))
+		tunnel, err := openProviderTunnel(ctx, cfg, connect.Id(providerId))
 		if err != nil {
 			return nil, err
 		}
@@ -68,6 +73,21 @@ func newProviderCapabilityTunnelOpener(base providertunnel.Config, settings Sett
 			providerId: connect.Id(providerId),
 		}, nil
 	}
+}
+
+// One tunnel's platform transport budget: a new one with the limits of
+// limitsFrom, or of connect's defaults without one, and never limitsFrom
+// itself. Each tunnel has its own, as each URL probe's does
+// (fleetprobe.providerTunnelOpener): a budget the pass's tunnels shared would
+// hold its default sixteen carriers for them all, and above that many at a
+// time a tunnel would wait for a carrier, its derived client minted and its
+// measurement's time running.
+func newTunnelTransportBudget(limitsFrom *connect.PlatformTransportBudget) *connect.PlatformTransportBudget {
+	if limitsFrom == nil {
+		limitsFrom = connect.DefaultPlatformTransportSettings().PlatformTransportBudget
+	}
+	limits := limitsFrom.Stats()
+	return connect.NewPlatformTransportBudget(limits.TotalByteCount, limits.MaxTransportCount)
 }
 
 // The platform's read of a client's published identity key. A package-level
