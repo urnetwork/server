@@ -2141,7 +2141,7 @@ Each process that opens ARIN pushes its own pair:
 | `urnetwork_arin_database_build_epoch_seconds` | Existing: the latest slot's epoch, 0 until opened |
 | `urnetwork_arin_old_database_build_epoch_seconds` | The old slot's epoch, 0 when not loaded |
 | `urnetwork_arin_database_info{slot,state,sha256}` | 1 for each slot, always both, with its state and manifest hash (`none` when absent) |
-| `urnetwork_arin_lookup_errors_total{slot}` | Pair lookups that failed; a latest failure fails the connection's location write |
+| `urnetwork_arin_lookups_total{slot}` and `urnetwork_arin_lookup_errors_total{slot}` | Pair lookups, and those that failed; a latest failure fails the connection's location write |
 
 Every Taskworker's stats collector exports the indexer's decision from the
 published document, so all hosts report the same values; only the Taskworker
@@ -2176,7 +2176,7 @@ warp `grafana/alerting/arindb-canary.yml`:
 
 | ArinDbWarmingTripped | flag `warming_tripped` for 10m | page |
 | ArinDbProtectionLost | flag `latest_unavailable` or `fallback_dropped` for 10m | page |
-| ArinDbCohortShrink | cohort loss above 0.10 from a reference of 100, within 2h of a new pair or with latest lookup errors, for 10m | page |
+| ArinDbCohortShrink | cohort loss above 0.10 from a reference of 100, within 2h of a new pair or with more than 1% of latest lookups failing over 30m, for 10m | page |
 | ArinDbServingFlapping | more than 4 serving changes in six hours, for 5m | page |
 | ArinDbDecisionStalled | decision older than 5400 s | page |
 | ArinDbCanaryUnavailable | state `single` for 1h | warn |

@@ -45,9 +45,12 @@ const (
 	// the old supply in a bucket below which its loss, gain and churn are noise
 	arindbCanaryMinBucketSample = 20
 	// a cohort shrinking more than this against its recent size pages, within
-	// this long of a new pair or while latest lookups fail
-	arindbCanaryCohortLossThreshold = 0.10
-	arindbCanaryCohortPairWindow    = 2 * time.Hour
+	// this long of a new pair or while more than this share of latest lookups
+	// fails; a background of failures, such as GeoLite2 misses on
+	// classifier-v0 records or unparseable addresses, stays below it
+	arindbCanaryCohortLossThreshold       = 0.10
+	arindbCanaryCohortPairWindow          = 2 * time.Hour
+	arindbCanaryLatestLookupErrorShareMin = 0.01
 	// the reference cohort below which its loss is noise
 	arindbCanaryMinCohortReference = 100
 	// more serving changes than this in six hours is a canary switching the
@@ -88,9 +91,9 @@ var arindbCanaryQueries = []struct {
 // minutes, labelled as one more series. Without reads it is absent.
 const arindbCanaryReadsNotOkMetric = "arindb_decision_reads_not_ok_share"
 
-// Every process's failed latest lookups per second over thirty minutes,
-// labelled as one more series.
-const arindbCanaryLatestLookupErrorsMetric = "arin_latest_lookup_error_rate"
+// The share of every process's latest lookups that failed over thirty
+// minutes, labelled as one more series. Without lookups it is absent.
+const arindbCanaryLatestLookupErrorsMetric = "arin_latest_lookup_error_share"
 
 func arindbCanaryQuery(environment string) string {
 	parts := make([]string, 0, len(arindbCanaryQueries)+2)
@@ -110,7 +113,8 @@ func arindbCanaryQuery(environment string) string {
 		strconv.Quote(arindbCanaryReadsNotOkMetric),
 	))
 	parts = append(parts, fmt.Sprintf(
-		`label_replace(sum by (env) (rate(urnetwork_arin_lookup_errors_total{env=%s,slot="latest"}[30m])),"monitor_metric",%s,"env",".*")`,
+		`label_replace(sum by (env) (rate(urnetwork_arin_lookup_errors_total{env=%s,slot="latest"}[30m])) / sum by (env) (rate(urnetwork_arin_lookups_total{env=%s,slot="latest"}[30m])),"monitor_metric",%s,"env",".*")`,
+		strconv.Quote(environment),
 		strconv.Quote(environment),
 		strconv.Quote(arindbCanaryLatestLookupErrorsMetric),
 	))
@@ -255,8 +259,8 @@ func (arindbCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		if err != nil {
 			return nil, fmt.Errorf("arindb canary: parse %s sample: %w", series.Metric["monitor_metric"], err)
 		}
-		if series.Metric["monitor_metric"] == arindbCanaryReadsNotOkMetric && math.IsNaN(value) {
-			// no reads in the window: 0 / 0
+		if (series.Metric["monitor_metric"] == arindbCanaryReadsNotOkMetric || series.Metric["monitor_metric"] == arindbCanaryLatestLookupErrorsMetric) && math.IsNaN(value) {
+			// no reads or lookups in the window: 0 / 0
 			continue
 		}
 		if math.IsNaN(value) || math.IsInf(value, 0) {
@@ -424,11 +428,11 @@ func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, g
 	// while latest lookups fail, so a Connect outage or a restart is not
 	recentPair := observation.hasPairSince && now.Sub(observation.pairSince) < arindbCanaryCohortPairWindow
 	if arindbCanaryCohortLossThreshold < observation.cohortLoss && arindbCanaryMinCohortReference <= observation.cohort["reference"] &&
-		(recentPair || 0 < observation.latestLookupErrors) {
+		(recentPair || arindbCanaryLatestLookupErrorShareMin < observation.latestLookupErrors) {
 		add(finding{
 			probeId: probeId, tier: tierPage, class: "arindb-cohort-shrink", target: target, frame: gateway, sustain: 10,
 			symptom:   fmt.Sprintf("The ARIN canary's public cohort is %.0f, %.1f%% below its largest of the last two hours (%.0f)", observation.cohort["current"], 100*observation.cohortLoss, observation.cohort["reference"]),
-			mechanism: "A provider whose latest ARIN lookup fails never writes a location, so it leaves the cohort before the canary can compare it: a release whose records fail to decode shrinks the cohort while the comparison passes. This pages only within two hours of a new pair or while latest lookups fail.",
+			mechanism: "A provider whose latest ARIN lookup fails never writes a location, so it leaves the cohort before the canary can compare it: a release whose records fail to decode shrinks the cohort while the comparison passes. This pages only within two hours of a new pair or while more than 1% of latest lookups fail.",
 			baseline:  "The cohort stays within 10% of its recent size.",
 			observed:  observed,
 			action:    "Check urnetwork_arin_lookup_errors_total{slot=\"latest\"} on the services overview. If the latest release's lookups fail, ship a corrected release; otherwise find why providers left (a Connect outage pages on its own).",

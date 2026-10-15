@@ -9274,7 +9274,9 @@ were not ok over ten minutes. They are the series the providers dashboard's
   out, which the decision carries as its `dropped_latch`.
 - `arindb-cohort-shrink` **PAGE**, sustained 10 minutes: the public cohort is
   more than 10% below its largest of the last two hours, from a reference of
-  at least 100, within two hours of a new pair or while latest lookups fail.
+  at least 100, within two hours of a new pair or while more than 1% of latest
+  lookups fail over thirty minutes; a background of failures, such as GeoLite2
+  misses on classifier-v0 records, stays below that.
   A provider whose latest lookup fails never writes a location, so it leaves
   the cohort before the comparison can see it; outside those windows a
   shrinking cohort is a Connect outage or a restart, which page on their own.
@@ -20484,7 +20486,7 @@ Tier-0 (page):
 | arindb-fallback-active | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_fallback_active)` | > 0 for 10m | emptied countries and per-bucket net losses; serving epoch |
 | arindb-risk-supply-loss | Grafana rule on the published canary decision; monitor §2.9d | `max by (bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed\|online"})` with at least 20 paired providers of old supply | > 0.10 for 10m | emptied countries; no fallback repairs a risk loss |
 | arindb-warming-tripped / arindb-protection-lost | Grafana rules on the published canary decision; monitor §2.9d | `max by (flag) (urnetwork_stats_arindb_decision_flags)` for warming_tripped, latest_unavailable and fallback_dropped | > 0 for 10m | the flag; losses and emptied countries |
-| arindb-cohort-shrink | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_cohort_loss_ratio)` with a reference of at least 100, within 2h of `urnetwork_stats_arindb_pair_since_seconds` or with `urnetwork_arin_lookup_errors_total{slot="latest"}` rising | > 0.10 for 10m | cohort and its two-hour reference; pair age; latest lookup errors |
+| arindb-cohort-shrink | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_cohort_loss_ratio)` with a reference of at least 100, within 2h of `urnetwork_stats_arindb_pair_since_seconds` or with more than 1% of latest lookups failing (`urnetwork_arin_lookup_errors_total` over `urnetwork_arin_lookups_total`) | > 0.10 for 10m | cohort and its two-hour reference; pair age; latest lookup error share |
 | arindb-serving-flapping | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_serving_changes)` | > 4 for 5m | serving changes in six hours |
 | arindb-decision-stalled | Grafana rule on the published canary decision; monitor §2.9d | `time() - max(urnetwork_stats_arindb_decision_seconds)` | > 5400 s | decision time |
 

@@ -37,8 +37,9 @@ import (
 )
 
 func init() {
-	prometheus.MustRegister(arinDatabaseBuildEpochGauge, arinOldDatabaseBuildEpochGauge, arinDatabaseInfoCollector{}, arinLookupErrors)
+	prometheus.MustRegister(arinDatabaseBuildEpochGauge, arinOldDatabaseBuildEpochGauge, arinDatabaseInfoCollector{}, arinLookups, arinLookupErrors)
 	for _, slot := range []string{"latest", "old"} {
+		arinLookups.WithLabelValues(slot)
 		arinLookupErrors.WithLabelValues(slot)
 	}
 
@@ -953,11 +954,17 @@ var arinOldDatabaseBuildEpochGauge = prometheus.NewGaugeFunc(prometheus.GaugeOpt
 	return float64(old.loadedBuildEpoch())
 })
 
-// Pair lookups that failed, by slot. A latest failure fails the connection's
+// Pair lookups, and those that failed, by slot. A latest failure fails the connection's
 // location write, so its provider never reaches the score cohort and the
 // canary's comparison cannot see it: a release whose records fail to decode
 // shows here, and as a cohort that shrinks against its recent size. An old
 // failure leaves that connection's old facts unavailable.
+var arinLookups = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Name:      "arin_lookups_total",
+	Help:      "ARIN pair lookups, by slot; with urnetwork_arin_lookup_errors_total, the share that failed",
+}, []string{"slot"})
+
 var arinLookupErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Name:      "arin_lookup_errors_total",
@@ -1157,12 +1164,14 @@ func GetArinInfoPair(addr netip.Addr) (latest *ArinInfo, old *ArinInfo, err erro
 
 // The pair lookup over opened readers.
 func getArinInfoPairFromDatabases(pair *arinDatabasePair, addr netip.Addr) (latest *ArinInfo, old *ArinInfo, err error) {
+	arinLookups.WithLabelValues("latest").Inc()
 	latest, err = getArinInfoFromDatabase(pair.latest, schemaTypeArinDb, addr)
 	if err != nil {
 		arinLookupErrors.WithLabelValues("latest").Inc()
 		return nil, nil, err
 	}
 	if pair.old != nil {
+		arinLookups.WithLabelValues("old").Inc()
 		oldInfo, oldErr := getArinInfoFromDatabase(pair.old, schemaTypeArinDb, addr)
 		if oldErr != nil {
 			arinLookupErrors.WithLabelValues("old").Inc()

@@ -146,6 +146,7 @@ func TestServicesOverviewShowsTheArindbDecisionReadsAndOldAges(t *testing.T) {
 	for _, read := range []string{
 		`sum by (service, outcome) (rate(urnetwork_arindb_decision_reads_total{env="$env",service=~"$service",block=~"$block",host=~"$host"}[$__rate_interval]))`,
 		`sum by (service, slot) (rate(urnetwork_arin_lookup_errors_total{env="$env",service=~"$service",block=~"$block",host=~"$host"}[$__rate_interval]))`,
+		`sum by (service, slot) (rate(urnetwork_arin_lookup_errors_total{env="$env",service=~"$service",block=~"$block",host=~"$host"}[$__rate_interval])) / sum by (service, slot) (rate(urnetwork_arin_lookups_total{env="$env",service=~"$service",block=~"$block",host=~"$host"}[$__rate_interval]))`,
 		`time() - max by (service, host, block, instance) (urnetwork_arin_old_database_build_epoch_seconds{env="$env",service=~"$service",block=~"$block",host=~"$host"} > 0)`,
 		`time() - max by (service, host, block, instance) (urnetwork_arin_database_build_epoch_seconds{env="$env",service=~"$service",block=~"$block",host=~"$host"} > 0)`,
 	} {

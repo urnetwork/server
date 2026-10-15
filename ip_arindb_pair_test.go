@@ -300,12 +300,17 @@ func TestArinDatabasePairOldLookupErrorNeverFailsTheLatest(t *testing.T) {
 		t.Fatalf("fixture old slot not loaded: %+v", pair.oldIdentity)
 	}
 	oldErrors := testutil.ToFloat64(arinLookupErrors.WithLabelValues("old"))
+	latestLookups, oldLookups := testutil.ToFloat64(arinLookups.WithLabelValues("latest")), testutil.ToFloat64(arinLookups.WithLabelValues("old"))
 	latestInfo, oldInfo, err := getArinInfoPairFromDatabases(pair, netip.MustParseAddr("192.0.2.1"))
 	if err != nil || latestInfo == nil || !latestInfo.QualityVerified() || oldInfo != nil {
 		t.Fatalf("old lookup error leaked: latest=%+v old=%+v err=%v", latestInfo, oldInfo, err)
 	}
 	if got := testutil.ToFloat64(arinLookupErrors.WithLabelValues("old")); got != oldErrors+1 {
 		t.Fatalf("old lookup errors went %v to %v, want one more", oldErrors, got)
+	}
+	// every pair lookup counts in each slot it reads, so failures are a share
+	if latest, old := testutil.ToFloat64(arinLookups.WithLabelValues("latest")), testutil.ToFloat64(arinLookups.WithLabelValues("old")); latest != latestLookups+1 || old != oldLookups+1 {
+		t.Fatalf("lookups went %v/%v to %v/%v, want one more in each slot", latestLookups, oldLookups, latest, old)
 	}
 	// the same pair still answers both slots for another address
 	latestInfo, oldInfo, err = getArinInfoPairFromDatabases(pair, netip.MustParseAddr("198.51.100.1"))
