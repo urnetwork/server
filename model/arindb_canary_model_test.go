@@ -331,6 +331,72 @@ func TestArindbCanaryIsSingleWithoutAUsableOldDatabase(t *testing.T) {
 	}
 }
 
+// A Taskworker that cannot use its own pair compares the previous decision's,
+// since the comparison needs only epochs and the rows carry the facts: a
+// damaged file on the publishing host cannot drop a fallback. It says why, and
+// that its latest is unavailable, which pages. Without a compared previous
+// decision, or beside another latest, it is single.
+func TestArindbCanaryComparesThePreviousPairWhenTheTaskworkerCannotUseItsOwn(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	fellBack := decideTestCanary(testCanaryPair(), testCanaryLossRun(20), settings)
+	if fellBack.State != ArindbCanaryStateFallback {
+		t.Fatalf("fixture state %s", fellBack.State)
+	}
+	unopened := arindbCanaryPair{
+		latest: server.ArinDatabaseIdentity{State: server.ArinDatabaseInvalid},
+		old:    server.ArinDatabaseIdentity{State: server.ArinDatabaseUnopened},
+		err:    errors.New("synthetic unopenable latest"),
+	}
+	decision := decideTestCanaryAfter(fellBack, unopened, testCanaryLossRun(20), settings)
+	if decision.State != ArindbCanaryStateFallback || decision.ServingEpoch != testCanaryOldEpoch || decision.Latch == nil ||
+		decision.PairCarriedReason != "latest_unopened" || !decision.LatestUnavailable || decision.Latest != fellBack.Latest || decision.Old != fellBack.Old {
+		t.Fatalf("latest unopened: state=%s serving=%d carried=%q unavailable=%t latch=%+v", decision.State, decision.ServingEpoch,
+			decision.PairCarriedReason, decision.LatestUnavailable, decision.Latch)
+	}
+	// its own latest beside an invalid old borrows the previous old
+	invalidOld := testCanaryPair()
+	invalidOld.old.State = server.ArinDatabaseInvalid
+	decision = decideTestCanaryAfter(fellBack, invalidOld, testCanaryLossRun(20), settings)
+	if decision.State != ArindbCanaryStateFallback || decision.PairCarriedReason != "old_invalid" || decision.LatestUnavailable || decision.Old != fellBack.Old {
+		t.Fatalf("old invalid: state=%s carried=%q unavailable=%t", decision.State, decision.PairCarriedReason, decision.LatestUnavailable)
+	}
+	// another latest cannot borrow the previous pair's old
+	nextInvalidOld := testCanaryPairOf(testCanaryNewerEpoch, testCanaryLatestEpoch)
+	nextInvalidOld.old.State = server.ArinDatabaseInvalid
+	decision = decideTestCanaryAfter(fellBack, nextInvalidOld, testCanaryLossRun(20), settings)
+	if decision.State != ArindbCanaryStateSingle || decision.SingleReason != "old_invalid" || decision.PairCarriedReason != "" {
+		t.Fatalf("another latest: state=%s reason=%s carried=%q", decision.State, decision.SingleReason, decision.PairCarriedReason)
+	}
+	// without a compared previous decision the canary is single
+	for name, previous := range map[string]*ArindbCanaryDecision{"no previous decision": nil, "a single previous decision": decision} {
+		single := decideTestCanaryAfter(previous, unopened, testCanaryLossRun(20), settings)
+		if single.State != ArindbCanaryStateSingle || single.SingleReason != "latest_unopened" || !single.LatestUnavailable || single.PairCarriedReason != "" {
+			t.Errorf("%s: state=%s reason=%s unavailable=%t carried=%q", name, single.State, single.SingleReason, single.LatestUnavailable, single.PairCarriedReason)
+		}
+	}
+}
+
+// Single right after a fallback is flagged, which pages: the comparison that
+// held the latest out is gone. The flag lasts while single does.
+func TestArindbCanaryFlagsSingleRightAfterAFallback(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	fellBack := decideTestCanary(testCanaryPair(), testCanaryLossRun(20), settings)
+	// the next release ships without an old database
+	withoutOld := testCanaryPairOf(testCanaryNewerEpoch, testCanaryLatestEpoch)
+	withoutOld.old = server.ArinDatabaseIdentity{State: server.ArinDatabaseMissing}
+	single := decideTestCanaryAfter(fellBack, withoutOld, testCanaryLossRun(0), settings)
+	if single.State != ArindbCanaryStateSingle || !single.FallbackDropped {
+		t.Fatalf("after a fallback: state=%s fallback_dropped=%t", single.State, single.FallbackDropped)
+	}
+	if again := decideTestCanaryAfter(single, withoutOld, testCanaryLossRun(0), settings); !again.FallbackDropped {
+		t.Fatal("the flag did not last while single did")
+	}
+	passed := decideTestCanary(testCanaryPair(), testCanaryLossRun(0), settings)
+	if after := decideTestCanaryAfter(passed, withoutOld, testCanaryLossRun(0), settings); after.FallbackDropped {
+		t.Fatal("single after a passing decision was flagged")
+	}
+}
+
 // A provider whose rows another pair wrote: the latest slot at latestEpoch
 // and the old slot at oldEpoch, 0 for none.
 func testCanaryRowsOf(n int, latestEpoch int64, oldEpoch int64) []*arindbCanaryProvider {

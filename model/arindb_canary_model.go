@@ -464,6 +464,14 @@ type ArindbCanaryDecision struct {
 	WarmingServesLatest bool `json:"warming_serves_latest"`
 	// the fallback latched on this pair, nil without one
 	Latch *ArindbCanaryLatch `json:"latch,omitempty"`
+	// this Taskworker could not open its latest database
+	LatestUnavailable bool `json:"latest_unavailable"`
+	// the pair compared is the previous decision's because this Taskworker
+	// could not use its own: latest_<state> or old_<state>; "" otherwise
+	PairCarriedReason string `json:"pair_carried_reason,omitempty"`
+	// single right after a fallback or a latch, which the comparison that held
+	// the latest out no longer does; carried while single lasts
+	FallbackDropped bool `json:"fallback_dropped"`
 	// provider.yml accept_latest_build_epoch names this latest database
 	Accepted bool `json:"accepted"`
 	// why the state is single, "" otherwise
@@ -526,6 +534,33 @@ func decideArindbCanary(
 
 	latestEpoch := pair.latestEpoch()
 	oldEpoch := pair.oldEpoch()
+	// why this process's own pair cannot compare, "" when it can
+	pairReason := ""
+	switch {
+	case pair.err != nil:
+		pairReason = "latest_unopened"
+	case latestEpoch == 0:
+		pairReason = "latest_" + pair.latest.State
+	case oldEpoch == 0:
+		pairReason = "old_" + pair.old.State
+	}
+	decision.LatestUnavailable = latestEpoch == 0
+	// The comparison needs only the pair's epochs, since the rows carry the
+	// facts. A Taskworker that cannot use its own pair compares the previous
+	// decision's instead: both epochs when it cannot open its latest, the old
+	// one beside the same latest otherwise. A damaged file on the publishing
+	// host therefore cannot silently drop a fallback.
+	if pairReason != "" && previous != nil && previous.State != ArindbCanaryStateSingle &&
+		0 < previous.Old.BuildEpoch && previous.Old.BuildEpoch < previous.Latest.BuildEpoch &&
+		(latestEpoch == 0 || latestEpoch == previous.Latest.BuildEpoch) {
+		if latestEpoch == 0 {
+			decision.Latest = previous.Latest
+			latestEpoch = previous.Latest.BuildEpoch
+		}
+		decision.Old = previous.Old
+		oldEpoch = previous.Old.BuildEpoch
+		decision.PairCarriedReason = pairReason
+	}
 	decision.Coverage.Providers = len(providers)
 	for _, provider := range providers {
 		_, _, latestOk := provider.slots.factsUnder(latestEpoch)
@@ -544,14 +579,11 @@ func decideArindbCanary(
 		decision.State = ArindbCanaryStateSingle
 		decision.ServingEpoch = 0
 		decision.ServingBasis = ArindbCanaryBasisSingle
-		switch {
-		case pair.err != nil:
-			decision.SingleReason = "latest_unopened"
-		case latestEpoch == 0:
-			decision.SingleReason = "latest_" + pair.latest.State
-		default:
-			decision.SingleReason = "old_" + pair.old.State
-		}
+		decision.SingleReason = pairReason
+		// the protection a fallback gave is gone, which pages until the canary
+		// compares again
+		decision.FallbackDropped = previous != nil &&
+			(previous.State == ArindbCanaryStateFallback || previous.Latch != nil || previous.FallbackDropped)
 		return decision
 	}
 
@@ -928,6 +960,15 @@ func (self *ArindbCanaryDecision) logSummary() string {
 		self.Latest.BuildEpoch, self.Latest.State, self.Old.BuildEpoch, self.Old.State)
 	if self.SingleReason != "" {
 		fmt.Fprintf(&b, " reason=%s", self.SingleReason)
+	}
+	if self.PairCarriedReason != "" {
+		fmt.Fprintf(&b, " pair_carried=%s", self.PairCarriedReason)
+	}
+	if self.LatestUnavailable {
+		b.WriteString(" latest_unavailable")
+	}
+	if self.FallbackDropped {
+		b.WriteString(" fallback_dropped")
 	}
 	fmt.Fprintf(&b, " coverage latest=%d old=%d paired=%d of %d", self.Coverage.Latest, self.Coverage.Old, self.Coverage.Paired, self.Coverage.Providers)
 	if self.WarmingTripped {
