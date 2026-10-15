@@ -23,8 +23,7 @@ type offlineTestFixture struct {
 	natives []server.Id
 	// verified when the export ran, then disconnected: still a Quality and
 	// Speed native and an online member in every published bucket
-	offline             server.Id
-	offlineConnectionId server.Id
+	offline server.Id
 	// live, ARIN non-quality: Speed natives that Quality refuses
 	speedOnly []server.Id
 	// live, with a failing URL ratio: online, in neither native bucket
@@ -43,7 +42,7 @@ func newOfflineTestFixture(ctx context.Context, t testing.TB, name string) *offl
 	}
 	offline := egressTestConnect(ctx, t, fixture.city, egressTestFast, nil, nil)
 	egressTestProbed(ctx, offline, fixture.city, 0, "us")
-	fixture.offline, fixture.offlineConnectionId = offline.clientId, offline.connectionId
+	fixture.offline = offline.clientId
 	for range 2 {
 		fixture.speedOnly = append(fixture.speedOnly, egressTestOverLine(ctx, t, fixture.city, egressTestFast).clientId)
 	}
@@ -74,6 +73,31 @@ func newOfflineTestFixture(ctx context.Context, t testing.TB, name string) *offl
 		t.Fatal(err)
 	}
 	return fixture
+}
+
+// Every live provider of the fixture's location at its tier in a Quality
+// answer: the natives, then the Speed natives Quality refuses at the
+// borrowed tier, then the online member at the Online fallback's.
+func (self *offlineTestFixture) qualityAnswer() map[server.Id]int {
+	offset := egressTestBackfillOffset()
+	return map[server.Id]int{
+		self.natives[0]:   0,
+		self.natives[1]:   0,
+		self.speedOnly[0]: offset,
+		self.speedOnly[1]: offset,
+		self.onlineOnly:   2 * offset,
+	}
+}
+
+// The same in a Speed answer, where all four live Speed natives are native.
+func (self *offlineTestFixture) speedAnswer() map[server.Id]int {
+	return map[server.Id]int{
+		self.natives[0]:   0,
+		self.natives[1]:   0,
+		self.speedOnly[0]: 0,
+		self.speedOnly[1]: 0,
+		self.onlineOnly:   2 * egressTestBackfillOffset(),
+	}
 }
 
 // Runs each case under both cache readers: the union pages, and the native
@@ -115,103 +139,31 @@ func assertOfflineTestAnswer(t testing.TB, label string, providers []*FindProvid
 	}
 }
 
+// A copy of the tiers `want` with clientId at tier.
+func offlineTestWith(want map[server.Id]int, clientId server.Id, tier int) map[server.Id]int {
+	with := maps.Clone(want)
+	with[clientId] = tier
+	return with
+}
+
 // The real export path publishes three Quality natives; one then
 // disconnects. A Quality request's live read finds it without a live
-// connection, and before this change took it out of Quality only: the Speed
-// bucket, where it is still a native, lent it at a borrowed tier, or the
-// Online fallback did. It is now in no draw of the request. A short Speed
-// request draws it as a Speed native before its Quality backfill reads it
-// live; that read revokes it the way a later risk verdict does.
-//
-// The verdict is kept nowhere, not even in the one-second cache of Quality
-// refusals: with that cache's clock held still, the provider's reconnection
-// is seen by the very next request. force_minimum, online and named requests
-// answer as before.
+// connection. Before this change that took it out of Quality only, and the
+// Speed bucket, where it is still a native, lent it at the borrowed tier. It
+// is now in no draw of the request, and the answer is the location's five
+// live providers.
 func TestFindProviders2OfflineNativeIsNotLent(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
-		// a cache of Quality refusals whose entries never expire here
-		_, cacheNow := subscriberCacheTestClock()
-		previousCache := providerSubscriberNegativeCache
-		providerSubscriberNegativeCache = newSubscriberNegativeCache(subscriberNegativeCapacity, cacheNow)
-		providerSubscriberNegativeCache.observe = observeSubscriberEligibilityEvent
-		t.Cleanup(func() { providerSubscriberNegativeCache = previousCache })
+		onlineTestFreshSubscriberCache(t)
 		ctx := t.Context()
 		fixture := newOfflineTestFixture(ctx, t, "Offline")
-		offset := egressTestBackfillOffset()
-
-		// every live provider of the location at its tier in each answer
-		qualityWant := map[server.Id]int{
-			fixture.natives[0]:   0,
-			fixture.natives[1]:   0,
-			fixture.speedOnly[0]: offset,
-			fixture.speedOnly[1]: offset,
-			fixture.onlineOnly:   2 * offset,
-		}
-		speedWant := map[server.Id]int{
-			fixture.natives[0]:   0,
-			fixture.natives[1]:   0,
-			fixture.speedOnly[0]: 0,
-			fixture.speedOnly[1]: 0,
-			fixture.onlineOnly:   2 * offset,
-		}
 		offlineTestForEachReader(t, func(nativeReader bool) {
-			for range 2 {
+			for i := range 2 {
 				quality := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeQuality, 10, false, server.NewId())
-				assertOfflineTestAnswer(t, fmt.Sprintf("reader=%t Quality", nativeReader), quality, fixture.offline, qualityWant)
-				speed := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeSpeed, 10, false, server.NewId())
-				assertOfflineTestAnswer(t, fmt.Sprintf("reader=%t Speed", nativeReader), speed, fixture.offline, speedWant)
-			}
-
-			// force_minimum Quality refused it before and still does; its
-			// forced pool has no minimums, so the verified online member is
-			// in it. Forced Speed reads no live fact and answers it.
-			forced := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeQuality, 10, true, server.NewId())
-			if !slices.Equal(onlineTestSorted(egressTestIds(forced)...), onlineTestSorted(append(slices.Clone(fixture.natives), fixture.onlineOnly)...)) {
-				t.Fatalf("reader=%t: forced Quality changed", nativeReader)
-			}
-			forcedSpeed := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeSpeed, 10, true, server.NewId())
-			if !slices.Contains(egressTestIds(forcedSpeed), fixture.offline) {
-				t.Fatalf("reader=%t: forced Speed changed", nativeReader)
-			}
-			// Online reads no live fact, so it answers the published bucket.
-			online := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeOnline, 10, false, server.NewId())
-			everyone := append(slices.Clone(fixture.natives), fixture.offline, fixture.speedOnly[0], fixture.speedOnly[1], fixture.onlineOnly)
-			if !slices.Equal(onlineTestSorted(egressTestIds(online)...), onlineTestSorted(everyone...)) {
-				t.Fatalf("reader=%t: online changed", nativeReader)
+				assertOfflineTestAnswer(t, fmt.Sprintf("reader=%t request=%d Quality", nativeReader, i), quality, fixture.offline, fixture.qualityAnswer())
 			}
 		})
-
-		// Named, it is answered as before: refused by Quality's live read,
-		// returned by Speed, which reads none, and kept by a Speed discovery
-		// request that names it even after that request's Quality backfill
-		// reads it live.
-		named := []*ProviderSpec{{ClientId: &fixture.offline}}
-		if providers := egressTestFind(ctx, t, named, RankModeQuality, 10, false, server.NewId()); len(providers) != 0 {
-			t.Fatal("named Quality answered the provider without a live connection")
-		}
-		if providers := egressTestFind(ctx, t, named, RankModeSpeed, 10, false, server.NewId()); !slices.Equal(egressTestIds(providers), []server.Id{fixture.offline}) {
-			t.Fatal("named Speed changed")
-		}
-		mixed := egressTestFind(ctx, t, append(slices.Clone(named), egressTestLocationSpec(fixture.city)...), RankModeSpeed, 10, false, server.NewId())
-		if len(mixed) == 0 || mixed[0].ClientId != fixture.offline {
-			t.Fatal("a Speed discovery request lost the provider it names")
-		}
-		assertOfflineTestAnswer(t, "named and discovered Speed", mixed, server.Id{}, offlineTestWith(speedWant, fixture.offline, 0))
-
-		// It reconnects, verified. The next request reads it live again and
-		// draws it as a Quality native: no refusal outlived the requests that
-		// read it, though the refusal cache's clock has not moved.
-		handlerId := CreateNetworkClientHandler(ctx)
-		connectionId, _, _, _, err := ConnectNetworkClient(ctx, fixture.offline, "192.0.2.241:0", handlerId)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := SetConnectionLocation(ctx, connectionId, fixture.city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true}); err != nil {
-			t.Fatal(err)
-		}
-		quality := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeQuality, 10, false, server.NewId())
-		assertOfflineTestAnswer(t, "reconnected Quality", quality, server.Id{}, offlineTestWith(qualityWant, fixture.offline, 0))
 	})
 }
 
@@ -254,9 +206,100 @@ func TestFindProviders2OfflineNativeIsNotLentByTheOnlineFallback(t *testing.T) {
 	})
 }
 
-// A copy of the tiers `want` with clientId at tier.
-func offlineTestWith(want map[server.Id]int, clientId server.Id, tier int) map[server.Id]int {
-	with := maps.Clone(want)
-	with[clientId] = tier
-	return with
+// A short Speed request draws the disconnected provider as one of its own
+// natives, which needs no live read. Its Quality backfill then reads it live
+// as a Quality native the answer already holds, finds no live connection and
+// revokes it, as a risk verdict found there revokes one. The answer is the
+// location's five live providers; before this change it kept the sixth.
+func TestFindProviders2OfflineNativeIsRevokedFromShortSpeedAnswer(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
+		onlineTestFreshSubscriberCache(t)
+		ctx := t.Context()
+		fixture := newOfflineTestFixture(ctx, t, "Offline Speed")
+		offlineTestForEachReader(t, func(nativeReader bool) {
+			speed := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeSpeed, 10, false, server.NewId())
+			assertOfflineTestAnswer(t, fmt.Sprintf("reader=%t Speed", nativeReader), speed, fixture.offline, fixture.speedAnswer())
+		})
+	})
+}
+
+// The verdict lives only in the request that read it: like a risk verdict,
+// it stays out of the one-second cache of Quality refusals. Here that
+// cache's clock is held still, so any refusal it kept would hold for the
+// rest of the test. The provider reconnects, verified, and the very next
+// Quality request reads it live and draws it as a native at tier 0. Before
+// this change the cached refusal from the earlier request kept it out of
+// Quality, and it was borrowed from Speed instead.
+func TestFindProviders2OfflineVerdictIsNotKept(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
+		_, cacheNow := subscriberCacheTestClock()
+		previousCache := providerSubscriberNegativeCache
+		providerSubscriberNegativeCache = newSubscriberNegativeCache(subscriberNegativeCapacity, cacheNow)
+		providerSubscriberNegativeCache.observe = observeSubscriberEligibilityEvent
+		t.Cleanup(func() { providerSubscriberNegativeCache = previousCache })
+		ctx := t.Context()
+		fixture := newOfflineTestFixture(ctx, t, "Offline Verdict")
+
+		// the live read, and with it the refusal a cache could keep
+		named := []*ProviderSpec{{ClientId: &fixture.offline}}
+		if providers := egressTestFind(ctx, t, named, RankModeQuality, 10, false, server.NewId()); len(providers) != 0 {
+			t.Fatal("named Quality answered the provider without a live connection")
+		}
+
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := ConnectNetworkClient(ctx, fixture.offline, "192.0.2.241:0", handlerId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SetConnectionLocation(ctx, connectionId, fixture.city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true}); err != nil {
+			t.Fatal(err)
+		}
+		quality := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeQuality, 10, false, server.NewId())
+		assertOfflineTestAnswer(t, "reconnected Quality", quality, server.Id{}, offlineTestWith(fixture.qualityAnswer(), fixture.offline, 0))
+	})
+}
+
+// The requests that must not change, on the same location. force_minimum
+// Quality refused the disconnected provider before and still does; its
+// forced pool has no minimums, so the verified online member is in it.
+// Forced Speed and online requests read no live fact and answer it. Named,
+// Quality refuses it and Speed returns it, and a Speed discovery request that
+// names it keeps it although that request's Quality backfill reads it live.
+func TestFindProviders2OfflineNativeLeavesOtherRequestsUnchanged(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
+		onlineTestFreshSubscriberCache(t)
+		ctx := t.Context()
+		fixture := newOfflineTestFixture(ctx, t, "Offline Unchanged")
+		everyone := append(slices.Clone(fixture.natives), fixture.offline, fixture.speedOnly[0], fixture.speedOnly[1], fixture.onlineOnly)
+		offlineTestForEachReader(t, func(nativeReader bool) {
+			forced := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeQuality, 10, true, server.NewId())
+			if !slices.Equal(onlineTestSorted(egressTestIds(forced)...), onlineTestSorted(append(slices.Clone(fixture.natives), fixture.onlineOnly)...)) {
+				t.Fatalf("reader=%t: forced Quality changed", nativeReader)
+			}
+			forcedSpeed := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeSpeed, 10, true, server.NewId())
+			if !slices.Equal(onlineTestSorted(egressTestIds(forcedSpeed)...), onlineTestSorted(everyone...)) {
+				t.Fatalf("reader=%t: forced Speed changed", nativeReader)
+			}
+			online := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeOnline, 10, false, server.NewId())
+			if !slices.Equal(onlineTestSorted(egressTestIds(online)...), onlineTestSorted(everyone...)) {
+				t.Fatalf("reader=%t: online changed", nativeReader)
+			}
+
+			named := []*ProviderSpec{{ClientId: &fixture.offline}}
+			if providers := egressTestFind(ctx, t, named, RankModeQuality, 10, false, server.NewId()); len(providers) != 0 {
+				t.Fatalf("reader=%t: named Quality answered the provider without a live connection", nativeReader)
+			}
+			if providers := egressTestFind(ctx, t, named, RankModeSpeed, 10, false, server.NewId()); !slices.Equal(egressTestIds(providers), []server.Id{fixture.offline}) {
+				t.Fatalf("reader=%t: named Speed changed", nativeReader)
+			}
+			mixed := egressTestFind(ctx, t, append(slices.Clone(named), egressTestLocationSpec(fixture.city)...), RankModeSpeed, 10, false, server.NewId())
+			if len(mixed) == 0 || mixed[0].ClientId != fixture.offline {
+				t.Fatalf("reader=%t: a Speed discovery request lost the provider it names", nativeReader)
+			}
+			assertOfflineTestAnswer(t, fmt.Sprintf("reader=%t named and discovered Speed", nativeReader), mixed, server.Id{}, offlineTestWith(fixture.speedAnswer(), fixture.offline, 0))
+		})
+	})
 }
