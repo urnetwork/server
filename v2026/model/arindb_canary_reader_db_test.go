@@ -42,6 +42,9 @@ func publishArindbServingEpochForTest(t testing.TB, servingEpoch int64) {
 // The live-row Quality guard reads each row's slot whose epoch is the
 // published one and refuses a row with neither; risk is always the latest
 // slot's; without a decision it reads the latest slot, as before the canary.
+// A provider without a live connection is offline under every serving epoch,
+// whatever its slots say, and a live row the published epoch refuses is a
+// Quality refusal, never offline.
 func TestSubscriberGuardFollowsThePublishedServingEpochAcrossAMixedFleet(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
@@ -63,7 +66,15 @@ func TestSubscriberGuardFollowsThePublishedServingEpochAcrossAMixedFleet(t *test
 		// risky under the latest only
 		risky := connect(&ConnectionLocationScores{ArinDatabaseBuildEpoch: testCanaryLatestEpoch, ArinRisk: true,
 			ArinOldDatabaseBuildEpoch: testCanaryOldEpoch, ArinOldQualityVerified: true})
-		ids := []server.Id{restarted, lagging, improved, risky}
+		// a subscriber under both slots, disconnected: no live connection
+		disconnected := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, &ConnectionLocationScores{ArinLookupAt: &lookup,
+			ArinDatabaseBuildEpoch: testCanaryLatestEpoch, ArinQualityVerified: true,
+			ArinOldDatabaseBuildEpoch: testCanaryOldEpoch, ArinOldQualityVerified: true})
+		if err := DisconnectNetworkClient(ctx, disconnected.connectionId); err != nil {
+			t.Fatal(err)
+		}
+		offline := disconnected.clientId
+		ids := []server.Id{restarted, lagging, improved, risky, offline}
 		for _, c := range []struct {
 			name         string
 			servingEpoch int64
@@ -74,15 +85,21 @@ func TestSubscriberGuardFollowsThePublishedServingEpochAcrossAMixedFleet(t *test
 			{name: "no decision", servingEpoch: 0, admitted: []server.Id{lagging, improved}},
 		} {
 			publishArindbServingEpochForTest(t, c.servingEpoch)
-			negative, riskyIds, err := getProviderSubscriberExclusions(ctx, ids)
+			negative, riskyIds, offlineIds, err := getProviderSubscriberExclusions(ctx, ids)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !riskyIds[risky] || negative[risky] {
 				t.Errorf("%s: the latest slot's risk was not a common refusal", c.name)
 			}
+			if !offlineIds[offline] || negative[offline] || riskyIds[offline] {
+				t.Errorf("%s: the provider without a live connection was not read offline", c.name)
+			}
 			for _, id := range ids {
-				admitted := !negative[id] && !riskyIds[id]
+				if id != offline && offlineIds[id] {
+					t.Errorf("%s: live provider %s was read offline", c.name, id)
+				}
+				admitted := !negative[id] && !riskyIds[id] && !offlineIds[id]
 				want := false
 				for _, a := range c.admitted {
 					want = want || a == id
