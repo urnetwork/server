@@ -79,7 +79,16 @@ func testCanaryProviders(n int, countryCode string, passing bool, latest testCan
 }
 
 func decideTestCanary(pair arindbCanaryPair, providers []*arindbCanaryProvider, settings ArindbCanarySettings) *ArindbCanaryDecision {
-	return decideArindbCanary(pair, providers, testCanaryMembership, settings, testCanaryClock.Add(-time.Minute), testCanaryClock)
+	return decideTestCanaryAfter(nil, pair, providers, settings)
+}
+
+// The publication after previous, one minute later.
+func decideTestCanaryAfter(previous *ArindbCanaryDecision, pair arindbCanaryPair, providers []*arindbCanaryProvider, settings ArindbCanarySettings) *ArindbCanaryDecision {
+	decidedAt := testCanaryClock
+	if previous != nil {
+		decidedAt = previous.DecidedAt.Add(time.Minute)
+	}
+	return decideArindbCanary(pair, providers, testCanaryMembership, settings, previous, decidedAt.Add(-time.Minute), decidedAt)
 }
 
 // The net loss trips each bucket strictly above the threshold: 10 of 100 lost
@@ -290,9 +299,9 @@ func testCanaryRowsOf(n int, latestEpoch int64, oldEpoch int64) []*arindbCanaryP
 	return providers
 }
 
-// Below paired coverage the indexer serves the database the rows carry: the
-// old if it covers enough, else the latest if it does, else whichever covers
-// more with ties to the old. It recovers to latest once the pair is covered.
+// Below paired coverage the indexer serves a database the rows carry: the old
+// if it covers enough, else the latest if it does. It recovers to latest once
+// the pair is covered.
 func TestArindbCanaryWarmingServesTheDatabaseTheRowsCarry(t *testing.T) {
 	for _, c := range []struct {
 		name    string
@@ -309,15 +318,6 @@ func TestArindbCanaryWarmingServesTheDatabaseTheRowsCarry(t *testing.T) {
 		// old slot is this pair's latest database
 		{name: "taskworker behind connect", pair: testCanaryPair(),
 			rows: testCanaryRowsOf(100, testCanaryNewerEpoch, testCanaryLatestEpoch), state: ArindbCanaryStateWarming, serving: testCanaryLatestEpoch},
-		{name: "neither covers, latest covers more", pair: testCanaryPair(),
-			rows:  append(testCanaryRowsOf(60, testCanaryLatestEpoch, 0), testCanaryRowsOf(40, testCanaryOldEpoch, 0)...),
-			state: ArindbCanaryStateWarming, serving: testCanaryLatestEpoch},
-		{name: "neither covers, old covers more", pair: testCanaryPair(),
-			rows:  append(testCanaryRowsOf(40, testCanaryLatestEpoch, 0), testCanaryRowsOf(60, testCanaryOldEpoch, 0)...),
-			state: ArindbCanaryStateWarming, serving: testCanaryOldEpoch},
-		{name: "neither covers, a tie goes to the old", pair: testCanaryPair(),
-			rows:  append(testCanaryRowsOf(50, testCanaryLatestEpoch, 0), testCanaryRowsOf(50, testCanaryOldEpoch, 0)...),
-			state: ArindbCanaryStateWarming, serving: testCanaryOldEpoch},
 		{name: "a stuck host below coverage stays warming on the old", pair: testCanaryPair(),
 			rows:  append(testCanaryRowsOf(97, testCanaryLatestEpoch, testCanaryOldEpoch), testCanaryRowsOf(3, testCanaryOldEpoch, testCanaryOlderEpoch)...),
 			state: ArindbCanaryStateWarming, serving: testCanaryOldEpoch},
@@ -330,6 +330,79 @@ func TestArindbCanaryWarmingServesTheDatabaseTheRowsCarry(t *testing.T) {
 		if decision.State != c.state || decision.ServingEpoch != c.serving {
 			t.Errorf("%s: state=%s serving=%d coverage=%+v, want %s %d", c.name, decision.State, decision.ServingEpoch, decision.Coverage, c.state, c.serving)
 		}
+	}
+}
+
+// When no database is carried by min_coverage of the cohort, warming serves
+// each row's latest slot, as before the canary, rather than a database most
+// rows lack, whose unavailable facts would make them non-Quality. A rollup
+// that has not refreshed since the migration carries neither.
+func TestArindbCanaryWarmingServesEachRowsLatestSlotWhenNoDatabaseIsCarried(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		rows []*arindbCanaryProvider
+	}{
+		{name: "neither database on any row", rows: testCanaryRowsOf(100, 0, 0)},
+		{name: "the latest on more rows", rows: append(testCanaryRowsOf(60, testCanaryLatestEpoch, 0), testCanaryRowsOf(40, testCanaryOldEpoch, 0)...)},
+		{name: "the old on more rows", rows: append(testCanaryRowsOf(40, testCanaryLatestEpoch, 0), testCanaryRowsOf(60, testCanaryOldEpoch, 0)...)},
+		{name: "a tie", rows: append(testCanaryRowsOf(50, testCanaryLatestEpoch, 0), testCanaryRowsOf(50, testCanaryOldEpoch, 0)...)},
+	} {
+		decision := decideTestCanary(testCanaryPair(), c.rows, defaultArindbCanarySettings())
+		if decision.State != ArindbCanaryStateWarming || decision.ServingEpoch != 0 || decision.ServingBasis != ArindbCanaryBasisUncovered {
+			t.Errorf("%s: state=%s serving=%d basis=%s coverage=%+v, want warming on each row's latest slot",
+				c.name, decision.State, decision.ServingEpoch, decision.ServingBasis, decision.Coverage)
+		}
+		// every row keeps its own latest slot's Quality
+		filter := testCanaryFilter(nil)
+		slots := map[server.Id]arindbRollupSlots{}
+		for _, provider := range c.rows {
+			slots[provider.clientId] = provider.slots
+		}
+		applyArindbServingEpoch(&filter, slots, decision.ServingEpoch)
+		if len(filter.arinNonQuality) != 0 {
+			t.Errorf("%s: %d clean rows became non-Quality", c.name, len(filter.arinNonQuality))
+		}
+	}
+}
+
+// Warming keeps the previous decision's database while the rows still carry
+// it, so coverage hovering near min_coverage cannot switch the fleet between
+// the databases, and a Taskworker restarted onto the next release keeps the
+// database a fallback served while Connect has not restarted.
+func TestArindbCanaryWarmingKeepsThePreviousChoiceWhileTheRowsCarryIt(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	pair := testCanaryPair()
+	passed := decideTestCanary(pair, testCanaryProviders(100, "aa", true, testCanaryClean, testCanaryClean), settings)
+	if passed.State != ArindbCanaryStateLatest {
+		t.Fatalf("fixture state %s", passed.State)
+	}
+	// paired coverage dips to 96 with both databases still at 98
+	hovering := append(testCanaryRowsOf(96, testCanaryLatestEpoch, testCanaryOldEpoch), testCanaryRowsOf(2, testCanaryLatestEpoch, 0)...)
+	hovering = append(hovering, testCanaryRowsOf(2, testCanaryOldEpoch, 0)...)
+	if decision := decideTestCanaryAfter(passed, pair, hovering, settings); decision.State != ArindbCanaryStateWarming ||
+		decision.ServingEpoch != testCanaryLatestEpoch || decision.ServingBasis != ArindbCanaryBasisPrevious {
+		t.Fatalf("hovering coverage: state=%s serving=%d basis=%s, want warming on the previous latest", decision.State, decision.ServingEpoch, decision.ServingBasis)
+	}
+
+	// release N fell back from the old database to the older one
+	lagging := testCanaryProviders(100, "aa", true, testCanaryNonQuality, testCanaryClean)
+	for _, provider := range lagging {
+		provider.slots.epoch, provider.slots.oldEpoch = testCanaryOldEpoch, testCanaryOlderEpoch
+	}
+	fellBack := decideTestCanary(testCanaryPairOf(testCanaryOldEpoch, testCanaryOlderEpoch), lagging, settings)
+	if fellBack.State != ArindbCanaryStateFallback || fellBack.ServingEpoch != testCanaryOlderEpoch {
+		t.Fatalf("fixture state %s serving %d", fellBack.State, fellBack.ServingEpoch)
+	}
+	// the Taskworker restarts onto release N+1, whose old database is the one
+	// that fell back, while Connect still writes release N's slots
+	decision := decideTestCanaryAfter(fellBack, pair, lagging, settings)
+	if decision.State != ArindbCanaryStateWarming || decision.ServingEpoch != testCanaryOlderEpoch || decision.ServingBasis != ArindbCanaryBasisPrevious {
+		t.Fatalf("after the next release: state=%s serving=%d basis=%s, want the database the fallback served", decision.State, decision.ServingEpoch, decision.ServingBasis)
+	}
+	// once no row carries it, warming serves the old
+	uncarried := testCanaryRowsOf(100, testCanaryOldEpoch, 0)
+	if decision := decideTestCanaryAfter(decision, pair, uncarried, settings); decision.ServingEpoch != testCanaryOldEpoch || decision.ServingBasis != ArindbCanaryBasisOld {
+		t.Fatalf("once no row carries it: serving=%d basis=%s, want the old", decision.ServingEpoch, decision.ServingBasis)
 	}
 }
 
@@ -554,6 +627,12 @@ func TestArindbCanaryDecisionIsVersionedJsonWithTheExportTtl(t *testing.T) {
 		"no decision time":              func(d map[string]any) { delete(d, "decided_at") },
 		"a decision before its source":  func(d map[string]any) { d["source_started_at"] = testCanaryClock.Add(time.Hour) },
 		"warming serving neither epoch": func(d map[string]any) { d["state"] = ArindbCanaryStateWarming; d["serving_epoch"] = 7 },
+		"warming old serving another": func(d map[string]any) {
+			d["state"], d["serving_basis"], d["serving_epoch"] = ArindbCanaryStateWarming, ArindbCanaryBasisOld, testCanaryLatestEpoch
+		},
+		"uncovered warming serving a database": func(d map[string]any) {
+			d["state"], d["serving_basis"] = ArindbCanaryStateWarming, ArindbCanaryBasisUncovered
+		},
 	} {
 		var edited map[string]any
 		if err := json.Unmarshal(store.value, &edited); err != nil {
@@ -570,6 +649,29 @@ func TestArindbCanaryDecisionIsVersionedJsonWithTheExportTtl(t *testing.T) {
 	}
 	if _, err := parseArindbCanaryDecision([]byte("{not json")); err == nil {
 		t.Error("malformed decision was accepted")
+	}
+	// warming may serve each row's latest slot, or the previous decision's
+	// database, which need be neither of this pair
+	for name, edit := range map[string]func(map[string]any){
+		"uncovered warming": func(d map[string]any) {
+			d["state"], d["serving_basis"], d["serving_epoch"] = ArindbCanaryStateWarming, ArindbCanaryBasisUncovered, 0
+		},
+		"warming on the previous choice": func(d map[string]any) {
+			d["state"], d["serving_basis"], d["serving_epoch"] = ArindbCanaryStateWarming, ArindbCanaryBasisPrevious, testCanaryOlderEpoch
+		},
+	} {
+		var edited map[string]any
+		if err := json.Unmarshal(store.value, &edited); err != nil {
+			t.Fatal(err)
+		}
+		edit(edited)
+		data, err := json.Marshal(edited)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parseArindbCanaryDecision(data); err != nil {
+			t.Errorf("%s was refused: %s", name, err)
+		}
 	}
 }
 

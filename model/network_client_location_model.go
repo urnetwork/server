@@ -5486,8 +5486,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// provider is decided, and publishes the choice before the export so the
 	// request-time readers apply it while targets are rewritten
 	// (arindb_canary_model.go). Without a readable decision the readers would
-	// fall back to each row's latest slot, so a failed write stops the export.
-	arindbDecision := decideArindbCanaryForPublication(
+	// fall back to each row's latest slot, so a failed write stops the export,
+	// and the choice follows the previous one, so a failed read of it does too.
+	arindbDecision, err := decideArindbCanaryForPublication(
 		ctx,
 		nativeSourceStartedAt,
 		pendingScores,
@@ -5496,6 +5497,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		egressTestEnabled,
 		minIndependentReliabilityWeights,
 	)
+	if err != nil {
+		return err
+	}
 	if err := writeArindbCanaryDecision(ctx, arindbDecision, ttl); err != nil {
 		return fmt.Errorf("publish arindb canary decision: %w", err)
 	}

@@ -19,12 +19,12 @@ func publishArindbServingEpochForTest(t testing.TB, servingEpoch int64) {
 	})
 	if servingEpoch != 0 {
 		pair := testCanaryPairOf(testCanaryLatestEpoch, testCanaryOldEpoch)
-		decision := decideArindbCanary(pair, nil, testCanaryMembership, defaultArindbCanarySettings(), server.NowUtc().Add(-time.Minute), server.NowUtc())
+		decision := decideArindbCanary(pair, nil, testCanaryMembership, defaultArindbCanarySettings(), nil, server.NowUtc().Add(-time.Minute), server.NowUtc())
 		switch servingEpoch {
 		case testCanaryOldEpoch:
-			decision.State = ArindbCanaryStateFallback
+			decision.State, decision.ServingBasis = ArindbCanaryStateFallback, ArindbCanaryBasisTripped
 		case testCanaryLatestEpoch:
-			decision.State = ArindbCanaryStateLatest
+			decision.State, decision.ServingBasis = ArindbCanaryStateLatest, ArindbCanaryBasisPassed
 		default:
 			t.Fatalf("no state serves epoch %d", servingEpoch)
 		}

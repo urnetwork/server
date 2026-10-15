@@ -45,6 +45,25 @@ const (
 	ArindbCanaryStateFallback = "fallback"
 )
 
+// Why a decision serves its epoch.
+const (
+	// single: no comparison, each row's latest slot
+	ArindbCanaryBasisSingle = "single"
+	// latest: the comparison passed
+	ArindbCanaryBasisPassed = "passed"
+	// fallback: the comparison tripped the breaker
+	ArindbCanaryBasisTripped = "tripped"
+	// warming: the previous decision's database, which the rows still carry
+	ArindbCanaryBasisPrevious = "previous"
+	// warming: the old database, which the rows carry
+	ArindbCanaryBasisOld = "old"
+	// warming: the latest database, which the rows carry, unverified
+	ArindbCanaryBasisLatest = "latest"
+	// warming: no database is carried by min_coverage of the cohort, so each
+	// row's latest slot, as before the canary, rather than one most rows lack
+	ArindbCanaryBasisUncovered = "uncovered"
+)
+
 // Every state, in the order the stats gauge publishes them.
 var ArindbCanaryStates = []string{
 	ArindbCanaryStateSingle,
@@ -345,6 +364,10 @@ type ArindbCanaryDecision struct {
 	DecisionId   string `json:"decision_id"`
 	State        string `json:"state"`
 	ServingEpoch int64  `json:"serving_epoch"`
+	// why the state serves its epoch, one of the ArindbCanaryBasis values
+	ServingBasis string `json:"serving_basis"`
+	// the decision this one followed, "" without one
+	PreviousDecisionId string `json:"previous_decision_id,omitempty"`
 	// why the state is single, "" otherwise
 	SingleReason string                         `json:"single_reason,omitempty"`
 	Latest       ArindbCanaryDatabase           `json:"latest"`
@@ -357,15 +380,28 @@ type ArindbCanaryDecision struct {
 	DecidedAt       time.Time `json:"decided_at"`
 }
 
+// The providers of the cohort with facts under the database built at epoch.
+func arindbCanaryCoverageOf(providers []*arindbCanaryProvider, epoch int64) int {
+	count := 0
+	for _, provider := range providers {
+		if _, _, ok := provider.slots.factsUnder(epoch); ok {
+			count += 1
+		}
+	}
+	return count
+}
+
 // Decides one publication. membership applies the unchanged rules
 // (decideProviderEgress and the reliability minimums) with only the ARIN
 // facts substituted; under them risk can remove a provider from every bucket
-// and non-quality only from Quality.
+// and non-quality only from Quality. previous is the decision the last
+// publication wrote, nil without a readable one.
 func decideArindbCanary(
 	pair arindbCanaryPair,
 	providers []*arindbCanaryProvider,
 	membership func(provider *arindbCanaryProvider, risk bool, nonQuality bool) arindbCanaryMembership,
 	settings ArindbCanarySettings,
+	previous *ArindbCanaryDecision,
 	sourceStartedAt time.Time,
 	decidedAt time.Time,
 ) *ArindbCanaryDecision {
@@ -378,6 +414,9 @@ func decideArindbCanary(
 		Buckets:         map[string]*ArindbCanaryBucket{},
 		SourceStartedAt: sourceStartedAt,
 		DecidedAt:       decidedAt,
+	}
+	if previous != nil {
+		decision.PreviousDecisionId = previous.DecisionId
 	}
 	for _, bucket := range ProviderEgressBuckets {
 		decision.Buckets[bucket] = &ArindbCanaryBucket{
@@ -406,6 +445,7 @@ func decideArindbCanary(
 	if oldEpoch == 0 {
 		decision.State = ArindbCanaryStateSingle
 		decision.ServingEpoch = 0
+		decision.ServingBasis = ArindbCanaryBasisSingle
 		switch {
 		case pair.err != nil:
 			decision.SingleReason = "latest_unopened"
@@ -509,27 +549,42 @@ func decideArindbCanary(
 	}
 
 	minimum := settings.MinCoverage * float64(decision.Coverage.Providers)
+	// a database is carried when min_coverage of the cohort has its facts;
+	// epoch 0 names none
+	carried := func(epoch int64, coverage int) bool {
+		return epoch != 0 && minimum <= float64(coverage)
+	}
 	switch {
 	case float64(decision.Coverage.Paired) < minimum:
-		// serve the database the rows carry: a fail-closed transient while
-		// processes restart onto the pair and the rollup refreshes
+		// serve a database the rows carry while processes restart onto the
+		// pair and the rollup refreshes. Serving one most rows lack would make
+		// them unavailable, so non-Quality, so with none carried every row
+		// serves its latest slot, as before the canary. The previous choice
+		// is kept while the rows still carry it, so coverage hovering near
+		// min_coverage cannot switch the fleet between the databases.
 		decision.State = ArindbCanaryStateWarming
 		switch {
-		case minimum <= float64(decision.Coverage.Old):
+		case previous != nil && carried(previous.ServingEpoch, arindbCanaryCoverageOf(providers, previous.ServingEpoch)):
+			decision.ServingEpoch = previous.ServingEpoch
+			decision.ServingBasis = ArindbCanaryBasisPrevious
+		case carried(oldEpoch, decision.Coverage.Old):
 			decision.ServingEpoch = oldEpoch
-		case minimum <= float64(decision.Coverage.Latest):
+			decision.ServingBasis = ArindbCanaryBasisOld
+		case carried(latestEpoch, decision.Coverage.Latest):
 			decision.ServingEpoch = latestEpoch
-		case decision.Coverage.Latest <= decision.Coverage.Old:
-			decision.ServingEpoch = oldEpoch
+			decision.ServingBasis = ArindbCanaryBasisLatest
 		default:
-			decision.ServingEpoch = latestEpoch
+			decision.ServingEpoch = 0
+			decision.ServingBasis = ArindbCanaryBasisUncovered
 		}
 	case tripped:
 		decision.State = ArindbCanaryStateFallback
 		decision.ServingEpoch = oldEpoch
+		decision.ServingBasis = ArindbCanaryBasisTripped
 	default:
 		decision.State = ArindbCanaryStateLatest
 		decision.ServingEpoch = latestEpoch
+		decision.ServingBasis = ArindbCanaryBasisPassed
 	}
 	return decision
 }
@@ -613,7 +668,8 @@ func arindbCanaryMembershipRule(
 // serving epoch to the export's filter, before any provider is decided. The
 // filter must hold the cohort's common gates and the URL-success guard. The
 // slots are read in their own primary-key query beside the source rows; the
-// pinned source and filter statements are unchanged.
+// pinned source and filter statements are unchanged. The decision follows the
+// previous one, so a failed read of it stops the export, like a failed write.
 func decideArindbCanaryForPublication(
 	ctx context.Context,
 	sourceStartedAt time.Time,
@@ -622,7 +678,11 @@ func decideArindbCanaryForPublication(
 	egressSettings *EgressIndexSettings,
 	egressTestEnabled bool,
 	minIndependentReliabilityWeights map[int]float64,
-) *ArindbCanaryDecision {
+) (*ArindbCanaryDecision, error) {
+	previous, err := readPreviousArindbCanaryDecision(ctx)
+	if err != nil {
+		return nil, err
+	}
 	pair := currentArindbCanaryPair()
 	if pair.err != nil {
 		glog.Errorf("[arindb]the latest ARIN database is not open in this process (%s); the canary is single\n", pair.err)
@@ -633,7 +693,7 @@ func decideArindbCanaryForPublication(
 		provider.slots = slots[provider.clientId]
 	}
 	membership := arindbCanaryMembershipRule(countFilter, egressSettings, egressTestEnabled, minIndependentReliabilityWeights)
-	decision := decideArindbCanary(pair, providers, membership, arindbCanarySettings(), sourceStartedAt, server.NowUtc())
+	decision := decideArindbCanary(pair, providers, membership, arindbCanarySettings(), previous, sourceStartedAt, server.NowUtc())
 	// names are best effort; a failed read leaves the ids and counts standing
 	if r := server.HandleError(func() {
 		nameArindbCanaryCities(ctx, decision)
@@ -642,7 +702,28 @@ func decideArindbCanaryForPublication(
 	}
 	applyArindbServingEpoch(countFilter, slots, decision.ServingEpoch)
 	glog.Infof("[arindb]%s\n", decision.logSummary())
-	return decision
+	return decision, nil
+}
+
+// The decision the last publication wrote, nil when none is published. A
+// document this binary cannot read is logged and treated as absent, so it
+// cannot stop every export until it expires; a failed read is an error.
+func readPreviousArindbCanaryDecision(ctx context.Context) (*ArindbCanaryDecision, error) {
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	data, err := arindbCanaryDecisions.get(readCtx)
+	if err != nil {
+		return nil, fmt.Errorf("read the previous arindb canary decision: %w", err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	previous, err := parseArindbCanaryDecision(data)
+	if err != nil {
+		glog.Errorf("[arindb]the previous canary decision is unreadable (%s); deciding without it\n", err)
+		return nil, nil
+	}
+	return previous, nil
 }
 
 // Names the emptied cities of every bucket from their location rows.
@@ -678,7 +759,7 @@ func nameArindbCanaryCities(ctx context.Context, decision *ArindbCanaryDecision)
 // One line for the indexer log, emptied countries and cities named.
 func (self *ArindbCanaryDecision) logSummary() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "canary state=%s serving=%d latest=%d(%s) old=%d(%s)", self.State, self.ServingEpoch,
+	fmt.Fprintf(&b, "canary state=%s serving=%d basis=%s latest=%d(%s) old=%d(%s)", self.State, self.ServingEpoch, self.ServingBasis,
 		self.Latest.BuildEpoch, self.Latest.State, self.Old.BuildEpoch, self.Old.State)
 	if self.SingleReason != "" {
 		fmt.Fprintf(&b, " reason=%s", self.SingleReason)
@@ -806,8 +887,21 @@ func parseArindbCanaryDecision(data []byte) (*ArindbCanaryDecision, error) {
 			return nil, fmt.Errorf("fallback arindb canary decision serves epoch %d, not the old", decision.ServingEpoch)
 		}
 	case ArindbCanaryStateWarming:
-		if decision.ServingEpoch <= 0 || (decision.ServingEpoch != decision.Latest.BuildEpoch && decision.ServingEpoch != decision.Old.BuildEpoch) {
-			return nil, fmt.Errorf("warming arindb canary decision serves epoch %d, neither database", decision.ServingEpoch)
+		// the basis names which epoch warming may serve: either database, the
+		// previous decision's, or each row's latest slot
+		valid := false
+		switch decision.ServingBasis {
+		case ArindbCanaryBasisOld:
+			valid = 0 < decision.ServingEpoch && decision.ServingEpoch == decision.Old.BuildEpoch
+		case ArindbCanaryBasisLatest:
+			valid = 0 < decision.ServingEpoch && decision.ServingEpoch == decision.Latest.BuildEpoch
+		case ArindbCanaryBasisPrevious:
+			valid = 0 < decision.ServingEpoch
+		case ArindbCanaryBasisUncovered:
+			valid = decision.ServingEpoch == 0
+		}
+		if !valid {
+			return nil, fmt.Errorf("warming arindb canary decision serves epoch %d on basis %q", decision.ServingEpoch, decision.ServingBasis)
 		}
 	default:
 		return nil, fmt.Errorf("unknown arindb canary state %q", decision.State)
