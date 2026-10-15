@@ -174,8 +174,9 @@ func TestBackfillQualityLendsSpeedPastItsCutoffsWithoutOnlineFlag(t *testing.T) 
 // whose natives are its own. force_minimum answers its own forced pool, which
 // has no minimums, and borrows nothing: Speed all of it, Quality what the
 // live read admits, without the ARIN non-quality providers. Online answers
-// every online member at one tier. Named, a Speed native past Quality's
-// cutoffs is refused by Quality as ARIN non-quality and returned by Speed.
+// every online member at one tier. Named, a live Speed native past Quality's
+// cutoffs is returned by Quality and Speed alike: a named Quality request needs
+// a live connection, not ARIN quality (FP2FIX.md "Named Quality requests").
 func TestBackfillQualityCutoffsLeaveOtherRequestsUnchanged(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
@@ -229,7 +230,7 @@ func TestBackfillQualityCutoffsLeaveOtherRequestsUnchanged(t *testing.T) {
 			}
 
 			named := []*ProviderSpec{{ClientId: &fixture.past[0]}}
-			if providers := egressTestFind(ctx, t, named, RankModeQuality, 10, false, server.NewId()); len(providers) != 0 {
+			if providers := egressTestFind(ctx, t, named, RankModeQuality, 10, false, server.NewId()); !slices.Equal(egressTestIds(providers), []server.Id{fixture.past[0]}) {
 				t.Fatalf("reader=%t: named Quality changed", nativeReader)
 			}
 			if providers := egressTestFind(ctx, t, named, RankModeSpeed, 10, false, server.NewId()); !slices.Equal(egressTestIds(providers), []server.Id{fixture.past[0]}) {

@@ -540,9 +540,10 @@ func TestEgressIndexTierFormulas(t *testing.T) {
 	})
 }
 
-// ARIN non-quality excludes native and explicitly requested Quality. Eligible
-// native Speed still supplies lower-priority Quality discovery fallback, while
-// the common risk gate excludes a provider from every selection path.
+// ARIN non-quality excludes native and forced Quality, but not a live provider
+// named by client id. Eligible native Speed still supplies lower-priority
+// Quality discovery fallback, while the common risk gate excludes a provider
+// from every selection path.
 func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
@@ -592,20 +593,22 @@ func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 		connect.AssertEqual(t, providers[0].Tier, 0)
 		connect.AssertEqual(t, providers[1].Tier, egressTestBackfillOffset())
 
-		// Forced minimum and named providers retain the requested Quality
-		// policy; neither can use the lower bucket to bypass it or common risk.
+		// Forced minimum retains the requested Quality policy. A named provider
+		// needs a live connection but not ARIN quality. Neither path can use
+		// the lower bucket to bypass common risk.
 		named := []*ProviderSpec{{ClientId: &healthy.clientId}, {ClientId: &nonQuality.clientId}, {ClientId: &risky.clientId}}
 		for _, request := range []struct {
 			specs        []*ProviderSpec
 			forceMinimum bool
+			want         []server.Id
 		}{
-			{egressTestLocationSpec(city), true},
-			{named, false},
-			{named, true},
+			{egressTestLocationSpec(city), true, []server.Id{healthy.clientId}},
+			{named, false, []server.Id{healthy.clientId, nonQuality.clientId}},
+			{named, true, []server.Id{healthy.clientId, nonQuality.clientId}},
 		} {
 			providers := egressTestFind(ctx, t, request.specs, RankModeQuality, 10, request.forceMinimum, server.NewId())
-			if !slices.Equal(egressTestIds(providers), []server.Id{healthy.clientId}) || providers[0].Tier != 0 {
-				t.Fatal("explicit Quality admitted non-quality or risky access")
+			if !slices.Equal(egressTestIds(providers), request.want) || providers[0].Tier != 0 {
+				t.Fatal("explicit Quality admitted risky access, or forced Quality admitted non-quality access")
 			}
 		}
 	})

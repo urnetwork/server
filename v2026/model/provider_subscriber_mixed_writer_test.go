@@ -59,14 +59,14 @@ func TestSubscriberQualityMixedWritersInvalidateWarmRequestAndRollup(t *testing.
 				cacheClock.Add(time.Second.Nanoseconds())
 			}
 			lastWanted = want
-			excluded, err := getProviderRequestExclusions(ctx, []server.Id{provider.clientId}, RankModeQuality)
-			if err != nil || excluded[provider.clientId] == want {
-				t.Fatalf("live Quality guard excluded=%t want=%t error=%v", excluded[provider.clientId], !want, err)
+			if excluded := subscriberQualityTestRefused(ctx, t, provider.clientId); excluded == want {
+				t.Fatalf("live Quality guard excluded=%t want=%t", excluded, !want)
 			}
+			// A named request needs the live connection, not the fact.
 			for _, force := range []bool{false, true} {
 				found := egressTestFind(ctx, t, []*ProviderSpec{{ClientId: &provider.clientId}}, RankModeQuality, 1, force, server.NewId())
-				if (len(found) == 1) != want {
-					t.Fatalf("named Quality force=%t returned=%d want eligible=%t", force, len(found), want)
+				if len(found) != 1 {
+					t.Fatalf("named Quality force=%t returned=%d for a live provider", force, len(found))
 				}
 			}
 		}
@@ -140,21 +140,18 @@ func TestSubscriberQualityOldTransactionAfterNewAttestation(t *testing.T) {
 				0, 0, 0, 0, provider.networkId, nil, nil, false, false, nil, int64(0)))
 			server.Raise(tx.Commit(ctx))
 		}, server.OptNoRetry())
-		excluded, err := getProviderRequestExclusions(ctx, []server.Id{provider.clientId}, RankModeQuality)
-		if err != nil || !excluded[provider.clientId] {
-			t.Fatalf("older transaction retained newer attestation: excluded=%t error=%v", excluded[provider.clientId], err)
+		if !subscriberQualityTestRefused(ctx, t, provider.clientId) {
+			t.Fatal("older transaction retained newer attestation")
 		}
 		if err := SetConnectionLocation(ctx, provider.connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true}); err != nil {
 			t.Fatal(err)
 		}
-		excluded, err = getProviderRequestExclusions(ctx, []server.Id{provider.clientId}, RankModeQuality)
-		if err != nil || !excluded[provider.clientId] {
-			t.Fatalf("bounded negative changed before its expiry: excluded=%t error=%v", excluded[provider.clientId], err)
+		if !subscriberQualityTestRefused(ctx, t, provider.clientId) {
+			t.Fatal("bounded negative changed before its expiry")
 		}
 		cacheClock.Add(time.Second.Nanoseconds())
-		excluded, err = getProviderRequestExclusions(ctx, []server.Id{provider.clientId}, RankModeQuality)
-		if err != nil || excluded[provider.clientId] {
-			t.Fatalf("fresh attestation after old commit was not accepted: excluded=%t error=%v", excluded[provider.clientId], err)
+		if subscriberQualityTestRefused(ctx, t, provider.clientId) {
+			t.Fatal("fresh attestation after old commit was not accepted")
 		}
 	})
 }
