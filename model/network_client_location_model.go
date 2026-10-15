@@ -6626,14 +6626,23 @@ func FindProviders2(
 				observation.backfillClientScores = otherClientScores
 				observation.enter("select")
 
-				// 1. the other bucket's natives
+				// 1. the other bucket's natives. Quality borrows only the Speed
+				// natives within its own latency and throughput cutoffs, their
+				// Quality tier below ClientScoreCutoffTier. Those past the
+				// cutoffs are online members, as every native is, and wait for
+				// the Online fallback.
 				borrowableClientScores := map[server.Id]*ClientScore{}
+				pastCutoffClientScores := map[server.Id]*ClientScore{}
 				for clientId, clientScore := range otherClientScores {
 					if !clientScore.PassesMinimums[otherRankMode] ||
 						(otherRankMode == RankModeQuality && !qualityReadClientIds[clientId]) {
 						continue
 					}
 					if _, native := nativeClientScores[clientId]; native {
+						continue
+					}
+					if rankMode == RankModeQuality && ClientScoreCutoffTier <= clientScore.Tiers[RankModeQuality] {
+						pastCutoffClientScores[clientId] = clientScore
 						continue
 					}
 					borrowableClientScores[clientId] = clientScore
@@ -6696,6 +6705,13 @@ func FindProviders2(
 							if clientScore.Online && answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil && !offlineClientIds[clientId] {
 								onlineClientScores[clientId] = clientScore
 							}
+						}
+					}
+					// The Speed natives held back past Quality's cutoffs stay
+					// candidates even where the pages read above lack them.
+					for clientId, clientScore := range pastCutoffClientScores {
+						if answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil && !offlineClientIds[clientId] {
+							onlineClientScores[clientId] = clientScore
 						}
 					}
 					for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
