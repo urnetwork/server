@@ -37,6 +37,27 @@ func TestParseMonitorOptionsSlackAlertsDefaultOn(t *testing.T) {
 	}
 }
 
+// Under the 15-minute cadence floor the active probes' second round starts
+// near 30 minutes, so the start window stretches to three floors; without a
+// floor it keeps the 30-minute default.
+func TestSlackNotifierStartWindowCoversTwoRoundsOfTheCadenceFloor(t *testing.T) {
+	for _, c := range []struct {
+		args       []string
+		wantWindow time.Duration
+	}{
+		{args: nil, wantWindow: 30 * time.Minute},
+		{args: []string{"-min-probe-cadence=15m"}, wantWindow: 45 * time.Minute},
+	} {
+		opts, err := parseMonitorOptions(c.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if window := slackNotifierSettings(servermonitor.SignalSettings{}, opts).StartWindow; window != c.wantWindow {
+			t.Errorf("%v: start window = %s, want %s", c.args, window, c.wantWindow)
+		}
+	}
+}
+
 // Only a watcher that posts compares the webhook. One started with
 // -slack-alerts=false, or a -once run, stays fresh across a webhook rotation;
 // a posting watcher goes stale.

@@ -221,10 +221,7 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	// own startup line and drains its queue for up to 15s at exit.
 	var notifier *servermonitor.SlackAlertNotifier
 	if opts.slackAlerts {
-		notifierSettings := servermonitor.DefaultSlackAlertNotifierSettings()
-		notifierSettings.WebhookUrl = settings.AlertNotifications.SlackWebhookUrl
-		notifierSettings.Environment = settings.Environment
-		notifier = servermonitor.NewSlackAlertNotifier(notifierSettings)
+		notifier = servermonitor.NewSlackAlertNotifier(slackNotifierSettings(settings, opts))
 		defer func() {
 			closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
@@ -234,6 +231,17 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		fmt.Fprintln(os.Stderr, "monitor: Slack alert notifications disabled by -slack-alerts=false")
 	}
 	return monitor.RunExecutionLoop(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence}, continuousAlertHandler(stdout, opts.format, notifier))
+}
+
+// The notifier's production settings for this watcher. Its start window
+// covers the active probes' first two rounds under the cadence floor, where an
+// alert active at start first passes a Sustain of 2.
+func slackNotifierSettings(settings servermonitor.SignalSettings, opts monitorOptions) servermonitor.SlackAlertNotifierSettings {
+	notifierSettings := servermonitor.DefaultSlackAlertNotifierSettings()
+	notifierSettings.WebhookUrl = settings.AlertNotifications.SlackWebhookUrl
+	notifierSettings.Environment = settings.Environment
+	notifierSettings.StartWindow = max(notifierSettings.StartWindow, 3*opts.minimumProbeCadence)
+	return notifierSettings
 }
 
 // Hands every gated execution, empty ones included (absence from complete
