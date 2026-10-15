@@ -74,9 +74,10 @@ func (self clientScoreEvidenceRank) String() string {
 
 // Whether the score still vouches for URL-probe evidence at now: the export
 // saw accepted URL outcomes in the evidence window, the only case in which it
-// sets EgressValidUntil, and the first of them has not left the window since.
-// filterPool gives a score without it the neutral URL weight and takes its
-// native membership away.
+// sets EgressValidUntil, and neither has the newest of them left the window
+// since nor has the export's verdict outlived its bounded staleness
+// (clientScoreEgressValidUntil). filterPool gives a score without it the
+// neutral URL weight and takes its native membership away.
 func (self *ClientScore) urlEvidenceCurrent(now time.Time) bool {
 	return self.EgressValidUntil != nil && now.Before(*self.EgressValidUntil)
 }
