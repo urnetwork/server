@@ -16,9 +16,13 @@ package grafana
 //     that matches no child route reaches Slack. Before it, the root routed to
 //     a receiver without integrations, and no alert reached anyone.
 //
-// The webhook URL is a credential. It is sent only in the contact-point write.
-// Grafana returns it redacted, and every error this package returns is
-// redacted of it (Grafana error text can quote a URL).
+// The webhook URL is a credential. It is sent only in the contact-point write,
+// and Grafana returns it redacted. Grafana error text can quote a URL, so the
+// exported functions redact every error they return once, at their boundary:
+// of the webhook, its path, and anything shaped like a Slack webhook. Only
+// then is the error bounded to alertRoutingErrorLimit bytes, so the bound
+// cannot cut a secret in half. Inside the package, errors quote Grafana's
+// body whole.
 
 import (
 	"bytes"
@@ -49,6 +53,8 @@ const (
 	DefaultAlertContactUid    = "urnetwork-default-slack"
 	DefaultAlertContactName   = "urnetwork-default"
 	alertRoutingResponseLimit = 1024 * 1024
+	// bytes of an error an exported function returns, after redaction
+	alertRoutingErrorLimit = 1024
 	// Grafana 13 removed the legacy receivers/test route (410). Contact-point
 	// tests use the notifications app's receiver test subresource, addressed
 	// by the receiver uid (the raw url-safe base64 of its name). Org 1 is the
@@ -132,8 +138,13 @@ func ReconcileAlertRouting(
 	username string,
 	password string,
 	settings AlertRoutingSettings,
-) (AlertRoutingResult, error) {
+) (_ AlertRoutingResult, returnErr error) {
 	slackWebhookUrl := strings.TrimSpace(settings.SlackWebhookUrl)
+	defer func() {
+		if returnErr != nil {
+			returnErr = boundaryError(returnErr, slackWebhookUrl)
+		}
+	}()
 	if slackWebhookUrl != "" {
 		if err := validateSlackWebhookUrl(slackWebhookUrl); err != nil {
 			return AlertRoutingResult{}, err
@@ -193,8 +204,13 @@ func SendDefaultAlertTest(
 	username string,
 	password string,
 	settings AlertRoutingSettings,
-) (AlertTestResult, error) {
+) (_ AlertTestResult, returnErr error) {
 	slackWebhookUrl := strings.TrimSpace(settings.SlackWebhookUrl)
+	defer func() {
+		if returnErr != nil {
+			returnErr = boundaryError(returnErr, slackWebhookUrl)
+		}
+	}()
 	client, err := newGrafanaProvisioningClient(grafanaUrl, username, password)
 	if err != nil {
 		return AlertTestResult{}, err
@@ -223,14 +239,10 @@ func SendDefaultAlertTest(
 	receiverUid := base64.RawURLEncoding.EncodeToString([]byte(DefaultAlertContactName))
 	status, body, err := client.request(ctx, http.MethodPost, grafanaReceiversApiPath+"/"+receiverUid+"/test", request)
 	if err != nil {
-		return AlertTestResult{}, errors.New(redactSlackWebhook(err.Error(), slackWebhookUrl))
+		return AlertTestResult{}, err
 	}
 	if status != http.StatusOK {
-		return AlertTestResult{}, fmt.Errorf(
-			"test Grafana default contact point: HTTP %d: %s",
-			status,
-			boundedErrorBody([]byte(redactSlackWebhook(string(body), slackWebhookUrl))),
-		)
+		return AlertTestResult{}, fmt.Errorf("test Grafana default contact point: HTTP %d: %s", status, strings.TrimSpace(string(body)))
 	}
 	var response struct {
 		Status   string  `json:"status"`
@@ -352,7 +364,7 @@ func (self *grafanaProvisioningClient) reconcileCompetitionContact(ctx context.C
 		return err
 	}
 	if status < 200 || 300 <= status {
-		return fmt.Errorf("write Grafana competition contact point: HTTP %d: %s", status, boundedErrorBody(body))
+		return fmt.Errorf("write Grafana competition contact point: HTTP %d: %s", status, strings.TrimSpace(string(body)))
 	}
 	return nil
 }
@@ -383,14 +395,10 @@ func (self *grafanaProvisioningClient) reconcileDefaultSlackContact(ctx context.
 	}
 	status, body, err := self.request(ctx, method, requestPath, desired)
 	if err != nil {
-		return errors.New(redactSlackWebhook(err.Error(), slackWebhookUrl))
+		return err
 	}
 	if status < 200 || 300 <= status {
-		return fmt.Errorf(
-			"write Grafana default Slack contact point: HTTP %d: %s",
-			status,
-			boundedErrorBody([]byte(redactSlackWebhook(string(body), slackWebhookUrl))),
-		)
+		return fmt.Errorf("write Grafana default Slack contact point: HTTP %d: %s", status, strings.TrimSpace(string(body)))
 	}
 	return nil
 }
@@ -445,7 +453,7 @@ func (self *grafanaProvisioningClient) reconcilePolicy(ctx context.Context, defa
 		return "", err
 	}
 	if status < 200 || 300 <= status {
-		return "", fmt.Errorf("write Grafana notification policy: HTTP %d: %s", status, boundedErrorBody(body))
+		return "", fmt.Errorf("write Grafana notification policy: HTTP %d: %s", status, strings.TrimSpace(string(body)))
 	}
 	return previousDefaultReceiver, nil
 }
@@ -518,4 +526,13 @@ func boundedErrorBody(body []byte) string {
 		message = message[:limit]
 	}
 	return message
+}
+
+// An error leaving an exported function: redacted first, then bounded.
+func boundaryError(err error, slackWebhookUrl string) error {
+	message := redactSlackWebhook(err.Error(), slackWebhookUrl)
+	if alertRoutingErrorLimit < len(message) {
+		message = strings.ToValidUTF8(message[:alertRoutingErrorLimit], "")
+	}
+	return errors.New(message)
 }
