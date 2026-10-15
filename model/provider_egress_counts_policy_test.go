@@ -9,6 +9,10 @@ import (
 // below reads the clock.
 var countsPolicyTestNow = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 
+// Every field of the policy changes the key: each count rule below, the
+// resolved enable, the probe policy, the reliability minimums, the modern
+// gate's decision at the key's instant, the Online URL ratio and its country
+// exemption (schema 4), and the published ARIN serving epoch (schema 5).
 func TestProviderEgressCountsPolicyKeySeparatesCountRules(t *testing.T) {
 	settings := DefaultEgressIndexSettings()
 	minimums := map[int]float64{1: .95, 2: .7, 3: .6}
@@ -27,6 +31,10 @@ func TestProviderEgressCountsPolicyKeySeparatesCountRules(t *testing.T) {
 			s.QualitySpeedRequiresModernProvider = &on
 		},
 		"modern start": func(s *EgressIndexSettings) { s.QualitySpeedModernProviderStart = countsPolicyTestNow },
+		"url ratio":    func(s *EgressIndexSettings) { s.OnlineUrlSuccessRatio += 0.1 },
+		"url ratio exemption": func(s *EgressIndexSettings) {
+			s.OnlineUrlRatioCountryExemption = !s.OnlineUrlRatioCountryExemption
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := *settings

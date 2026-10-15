@@ -718,7 +718,7 @@ func TestProviderOnlineSuccessBaselineDocument(t *testing.T) {
 	connect.AssertEqual(t, err, nil)
 	for name, document := range map[string]string{
 		"version 1":           `{"version":1,"compute_time":"2026-10-13T21:00:00Z","countries":{"us":{"measured":2,"succeeded":1,"no_success":1}}}`,
-		"version 3":           `{"version":3,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{}}`,
+		"version 4":           `{"version":4,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{}}`,
 		"no kill switch":      `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","floor":0.36,"margin":0.03,"countries":{}}`,
 		"no floor":            `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"margin":0.03,"countries":{}}`,
 		"floor out of range":  `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":1.5,"margin":0.03,"countries":{}}`,
@@ -848,7 +848,7 @@ func TestProviderOnlineSuccessBaselineReasonsReadAsClauses(t *testing.T) {
 	connect.AssertEqual(t, providerOnlineSuccessBaselineExpectedErr(errors.New("Redis is unavailable (synthetic)")), false)
 
 	for document, reason := range map[string]string{
-		`{"version":3,"compute_time":"2026-10-13T21:00:00Z","countries":{}}`:                                                                                 "it is version 3, not 2",
+		`{"version":4,"compute_time":"2026-10-13T21:00:00Z","countries":{}}`:                                                                                 "it is version 4, not 2 or 3",
 		`{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","floor":0.36,"margin":0.03,"countries":{}}`:                "it does not say how the export applied the rule",
 		`{"version":2,"compute_time":"2026-10-13T19:00:00Z","publish_time":"2026-10-13T19:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{}}`: "it was published 2h0m0s ago, more than 1h0m0s",
 		`{"version":2,`: "it is not json",

@@ -44,8 +44,8 @@ func providerEgressCountsPolicyKey(
 	// providers between the buckets and that reason, and its evidence window
 	// is code. The gate is keyed by that decision, not by its switch and
 	// start, so workers that decide alike share a snapshot and none taken
-	// before the start is read after it. Schema 4 selects Quality by the
-	// published ARIN serving epoch, which a schema 3 snapshot did not.
+	// before the start is read after it. 4 = the URL ratio, 5 = the ARIN
+	// serving epoch.
 	policy := struct {
 		Schema                             int
 		MaxIndex                           int
@@ -60,14 +60,23 @@ func providerEgressCountsPolicyKey(
 		OnlineSuccessCountryFloor          float64
 		OnlineSuccessCountryFloorMargin    float64
 		QualitySpeedRequiresModernProvider bool
-		ArinServingEpoch                   int64
+		// Schema 4 adds the Online URL ratio and its low_success reason: the
+		// ratio and its country exemption move providers out of Online and
+		// the counts, and a schema 3 snapshot carries no such reason.
+		OnlineUrlSuccessRatio          float64
+		OnlineUrlRatioCountryExemption bool
+		// Schema 5 selects Quality by the published ARIN serving epoch, which
+		// a schema 4 snapshot did not.
+		ArinServingEpoch int64
 	}{
-		Schema: 4, MaxIndex: settings.MaxIndex(),
+		Schema: 5, MaxIndex: settings.MaxIndex(),
 		EvidenceMaxAge:   min(settings.EvidenceMaxAge, ProviderEgressHealthMaxAge),
 		QualityNumerator: settings.QualityOkNumerator, QualityDenominator: settings.QualityOkDenominator,
 		CountryGate: settings.CountryGate, EgressEnabled: enabled,
 		ReliabilityMinimum:                 [3]float64{minimums[1], minimums[2], minimums[3]},
 		ProbePolicyVersion:                 probePolicyVersion,
+		OnlineUrlSuccessRatio:              settings.OnlineUrlSuccessRatio,
+		OnlineUrlRatioCountryExemption:     settings.OnlineUrlRatioCountryExemption,
 		OnlineRequiresUrlSuccess:           settings.OnlineRequiresUrlSuccess,
 		OnlineSuccessCountryFloor:          settings.OnlineSuccessCountryFloor,
 		OnlineSuccessCountryFloorMargin:    settings.OnlineSuccessCountryFloorMargin,
