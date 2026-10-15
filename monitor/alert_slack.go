@@ -588,11 +588,19 @@ func (self *SlackAlertNotifier) admitWithLock(now time.Time, transitions []slack
 		index, inDigest := self.startDigestKeyIndex[key]
 		switch {
 		case transition.atStart:
-			if len(self.startDigest) == 0 {
-				self.startDigestFirstTime = now
+			// the digest carries the incident's latest state: a transition of
+			// it still held for the summary, such as its clear behind a
+			// refused digest, would post after the digest and contradict it
+			self.dropHeldWithLock(key)
+			if inDigest {
+				self.startDigest[index] = transition
+			} else {
+				if len(self.startDigest) == 0 {
+					self.startDigestFirstTime = now
+				}
+				self.startDigestKeyIndex[key] = len(self.startDigest)
+				self.startDigest = append(self.startDigest, transition)
 			}
-			self.startDigestKeyIndex[key] = len(self.startDigest)
-			self.startDigest = append(self.startDigest, transition)
 			// a page does not wait for the rest of the start
 			if transition.alert.Severity == SeverityPage {
 				self.startDigestDue = true
@@ -634,6 +642,19 @@ func (self *SlackAlertNotifier) admitWithLock(now time.Time, transitions []slack
 			self.suppressed = append(self.suppressed, transition)
 		}
 	}
+}
+
+// Removes an incident's transitions from those held for the summary.
+func (self *SlackAlertNotifier) dropHeldWithLock(key string) {
+	kept := self.suppressed[:0]
+	for _, transition := range self.suppressed {
+		if slackIncidentKey(transition.alert) == key {
+			self.suppressedCount--
+			continue
+		}
+		kept = append(kept, transition)
+	}
+	self.suppressed = kept
 }
 
 // The summary of the held transitions. Incidents with a page raise or

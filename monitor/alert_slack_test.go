@@ -1228,6 +1228,60 @@ func TestSlackAlertNotifierHoldsAClearBehindARefusedDigest(t *testing.T) {
 	}
 }
 
+// An incident cleared behind a refused digest and raised again at another
+// signal's start keeps only its latest state: the digest names it once as
+// active, and the held clear is not posted after it.
+func TestSlackAlertNotifierKeepsTheLatestStateOfAnIncidentHeldTwice(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	release := webhook.holdUntilReleased()
+	harness := newSlackTestHarness()
+	settings := harness.digestSettings(webhookUrl)
+	settings.QueueSize = 1
+	notifier := NewSlackAlertNotifier(settings)
+	third := selectionSignal{number: "4.1", key: "third", id: "third/probe"}
+	thirdAlert := func(target string) Alert {
+		return Alert{
+			SignalNumber: "4.1", SignalKey: "third", SignalID: "third/probe", SignalName: "Third",
+			Severity: SeverityWarn, Class: "third", Target: target, Symptom: target + " third",
+		}
+	}
+
+	// past its start window, the third signal's raises post one by one; the
+	// sender holds r-1 at the webhook, and r-2 fills the queue
+	notifier.Handle(third, SignalExecution{})
+	notifier.Handle(third, SignalExecution{Alerts: Alerts{thirdAlert("r-1")}})
+	awaitSlackWebhook(t, webhook.arrived, 1, "request")
+	notifier.Handle(third, SignalExecution{Alerts: Alerts{thirdAlert("r-1"), thirdAlert("r-2")}})
+	// pg-1 joins the digest at its signal's start and clears while the queue
+	// is full, so the clear waits behind the refused digest
+	shared := slackTestAlert("pg-1", "", SeverityWarn)
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{shared}})
+	notifier.Handle(slackTestSignal, SignalExecution{})
+	notifier.Handle(slackTestSignal, SignalExecution{})
+	// another signal's first run reports the same incident
+	notifier.Handle(slackOtherTestSignal, SignalExecution{Alerts: Alerts{shared}})
+	close(release)
+	awaitSlackWebhook(t, webhook.answered, 2, "answer")
+	notifier.flushSummary()
+	awaitSlackWebhook(t, webhook.answered, 1, "answer")
+	notifier.flushSummary()
+	closeSlackNotifier(t, notifier)
+
+	texts := webhook.posted()
+	requireSlackTexts(t, texts,
+		"[WARN] raised (synthetic): r-1 third",
+		"[WARN] raised (synthetic): r-2 third",
+		"[ACTIVE AT START] (synthetic) 1 incident(s) reported by this watcher's first runs of their signals:\n"+
+			"- [WARN] pg/active-pileup · active-pileup · pg-1\n",
+	)
+	notifier.stateLock.Lock()
+	_, active := notifier.keyIncidents[slackIncidentKey(shared)]
+	notifier.stateLock.Unlock()
+	if !active {
+		t.Fatal("pg-1 is not active in the notifier, though its signal still reports it")
+	}
+}
+
 // A digest still settling at shutdown is posted by Close.
 func TestSlackAlertNotifierPostsAPendingDigestAtClose(t *testing.T) {
 	webhook, webhookUrl := newFakeSlackWebhook(t)
