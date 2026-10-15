@@ -312,9 +312,12 @@ func TestLagStoresNoClientAddress(t *testing.T) {
 		// the extender's place is the sample's, which these tests set
 		places := map[string]*model.LagPlace{}
 		useLagAddressPlaces(t, places)
+		// The IPv6 visitor is in 3fff::/20, the other documentation range:
+		// the release gate's suite fixture lists 2001:db8::/32 in its
+		// ip_overrides, which GetIpInfo answers before this test's GeoLite2.
 		useIpAsnDb(t, writeTestIpAsnDb(t, geoLite2AsnDatabaseType, map[string]IpAsn{
 			"203.0.113.0/24": {Number: 64500, Organization: "Example Access"},
-			"2001:db8::/32":  {Number: 64501, Organization: "Example Six"},
+			"3fff::/20":      {Number: 64501, Organization: "Example Six"},
 		}))
 		lyonBlock := lagTestCityBlock{
 			countryCode: "fr", country: "France", countryGeonameId: 3017382,
@@ -330,7 +333,7 @@ func TestLagStoresNoClientAddress(t *testing.T) {
 		}
 		useLagTestCityDb(t, map[string]lagTestCityBlock{
 			"203.0.113.0/24": lyonBlock,
-			"2001:db8::/32":  osakaBlock,
+			"3fff::/20":      osakaBlock,
 		})
 		defer model.Testing_PushPlaces(lagTestPlaces)()
 		extender := newLagServingTestExtender(t, ctx, places, lagTestPlace("Hamburg", "de", 53.5, 10.0), "192.0.2.1", "2001:db8:a::1")
@@ -349,7 +352,7 @@ func TestLagStoresNoClientAddress(t *testing.T) {
 			longitude float64
 		}{
 			{netip.MustParseAddr("203.0.113.77"), 4, "203.0.113.", "xcb0071", lyonBlock, 45.7485, 4.8467},
-			{netip.MustParseAddr("2001:db8::77"), 6, "2001:db8:", "x20010db80000", osakaBlock, 34.6937, 135.5022},
+			{netip.MustParseAddr("3fff:db8::77"), 6, "3fff:db8:", "x3fff0db80000", osakaBlock, 34.6937, 135.5022},
 		}
 		for _, visit := range visits {
 			clientAddress := netip.AddrPortFrom(visit.addr, 51000).String()
