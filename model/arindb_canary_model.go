@@ -576,24 +576,36 @@ func arindbCanaryServingChangesAfter(previous *ArindbCanaryDecision, servingEpoc
 	return changes[max(0, len(changes)-arindbCanaryServingChangeLimit):]
 }
 
-// A latch the decision can no longer honour, carried while that lasts: the
-// canary went single after it, or the pair changed to one whose old database
-// is the latest the latch held out, so the comparison's baseline is the
-// rejected database. A latch the decision still holds, or one released by
-// passing comparisons or by a new pair whose old database is the latch's own,
-// is not dropped, and accepting the latch's latest clears it.
+// A latch the decision can no longer honour. A held latch is dropped when the
+// canary goes single after it, or when the pair changes to one whose old
+// database is the latest the latch held out, so the comparison's baseline is
+// the rejected database. A latch released by passing comparisons, or a new
+// pair whose old database is the latch's own, drops nothing.
+//
+// Once dropped, the latch lasts however the pairs move on, since every later
+// baseline descends from the rejected latest, until its latest is accepted or
+// the canary compares against the latch's old database again: a latest
+// decision verifies a release against it, and a latch on such a pair protects
+// it anew.
 func arindbCanaryDroppedLatch(previous *ArindbCanaryDecision, decision *ArindbCanaryDecision, settings ArindbCanarySettings) *ArindbCanaryLatch {
-	if previous == nil || decision.Latch != nil {
+	if previous == nil {
 		return nil
 	}
-	candidate := previous.Latch
-	if candidate == nil {
+	var candidate *ArindbCanaryLatch
+	switch {
+	case previous.DroppedLatch != nil:
 		candidate = previous.DroppedLatch
-	}
-	if candidate == nil || (settings.AcceptLatestBuildEpoch != 0 && settings.AcceptLatestBuildEpoch == candidate.LatestEpoch) {
+	case previous.Latch != nil && decision.Latch == nil &&
+		(decision.State == ArindbCanaryStateSingle || decision.Old.BuildEpoch == previous.Latch.LatestEpoch):
+		candidate = previous.Latch
+	default:
 		return nil
 	}
-	if decision.State != ArindbCanaryStateSingle && decision.Old.BuildEpoch != candidate.LatestEpoch {
+	if settings.AcceptLatestBuildEpoch != 0 && settings.AcceptLatestBuildEpoch == candidate.LatestEpoch {
+		return nil
+	}
+	if decision.State != ArindbCanaryStateSingle && decision.Old.BuildEpoch == candidate.OldEpoch &&
+		(decision.State == ArindbCanaryStateLatest || decision.Latch != nil) {
 		return nil
 	}
 	dropped := *candidate
@@ -669,7 +681,8 @@ type ArindbCanaryDecision struct {
 	PairSince time.Time `json:"pair_since"`
 	// a latch the decision can no longer honour: the canary went single after
 	// it, or the pair changed to one whose old database is the latest the latch
-	// held out. Carried while that lasts; nil otherwise
+	// held out. Carried until its latest is accepted or the canary compares
+	// against its old database again; nil otherwise
 	DroppedLatch *ArindbCanaryLatch `json:"dropped_latch,omitempty"`
 	// provider.yml accept_latest_build_epoch names this latest database
 	Accepted bool `json:"accepted"`

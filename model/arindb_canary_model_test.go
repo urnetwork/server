@@ -567,6 +567,55 @@ func TestArindbCanaryFlagsANewPairWhoseOldDatabaseALatchRejected(t *testing.T) {
 	}
 }
 
+// A dropped latch lasts however the pairs move on, since every later baseline
+// descends from the rejected latest: until its latest is accepted, or the
+// canary compares against the latch's old database again, verifying a latest
+// against it or latching it anew.
+func TestArindbCanaryKeepsADroppedLatchUntilItsOldDatabaseIsComparedAgain(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	newestEpoch := testCanaryNewerEpoch + 86400
+	rowsOf := func(latestEpoch int64, oldEpoch int64, lost int) []*arindbCanaryProvider {
+		rows := testCanaryLossRun(lost)
+		for _, provider := range rows {
+			provider.slots.epoch, provider.slots.oldEpoch = latestEpoch, oldEpoch
+		}
+		return rows
+	}
+	fellBack := decideTestCanary(testCanaryPair(), testCanaryLossRun(20), settings)
+	// an ungated release compares against the held-out latest: dropped
+	dropped := decideTestCanaryAfter(fellBack, testCanaryPairOf(testCanaryNewerEpoch, testCanaryLatestEpoch),
+		rowsOf(testCanaryNewerEpoch, testCanaryLatestEpoch, 0), settings)
+	if dropped.DroppedLatch == nil {
+		t.Fatal("fixture: the latch was not dropped")
+	}
+	// the next ungated release moves the old database past the held-out
+	// latest, but the baseline chain still runs through it
+	moved := decideTestCanaryAfter(dropped, testCanaryPairOf(newestEpoch, testCanaryNewerEpoch),
+		rowsOf(newestEpoch, testCanaryNewerEpoch, 0), settings)
+	if moved.DroppedLatch == nil || *moved.DroppedLatch != *fellBack.Latch || !moved.FallbackDropped {
+		t.Fatalf("a pair past the held-out latest: dropped=%+v fallback_dropped=%t", moved.DroppedLatch, moved.FallbackDropped)
+	}
+	// a latest verified against the latch's old database ends it
+	verified := decideTestCanaryAfter(moved, testCanaryPairOf(newestEpoch, testCanaryOldEpoch),
+		rowsOf(newestEpoch, testCanaryOldEpoch, 0), settings)
+	if verified.State != ArindbCanaryStateLatest || verified.DroppedLatch != nil || verified.FallbackDropped {
+		t.Fatalf("verified against the old database: state=%s dropped=%+v fallback_dropped=%t", verified.State, verified.DroppedLatch, verified.FallbackDropped)
+	}
+	// so does a latch on such a pair, which protects it anew
+	relatched := decideTestCanaryAfter(moved, testCanaryPairOf(newestEpoch, testCanaryOldEpoch),
+		rowsOf(newestEpoch, testCanaryOldEpoch, 20), settings)
+	if relatched.State != ArindbCanaryStateFallback || relatched.DroppedLatch != nil || relatched.FallbackDropped {
+		t.Fatalf("latched anew on the old database: state=%s dropped=%+v fallback_dropped=%t", relatched.State, relatched.DroppedLatch, relatched.FallbackDropped)
+	}
+	// a latch on another pair keeps it: its baseline descends from the
+	// rejected latest
+	downstream := decideTestCanaryAfter(moved, testCanaryPairOf(newestEpoch, testCanaryNewerEpoch),
+		rowsOf(newestEpoch, testCanaryNewerEpoch, 20), settings)
+	if downstream.Latch == nil || downstream.DroppedLatch == nil || !downstream.FallbackDropped {
+		t.Fatalf("a latch downstream of the rejected latest: latch=%+v dropped=%+v", downstream.Latch, downstream.DroppedLatch)
+	}
+}
+
 // A provider whose rows another pair wrote: the latest slot at latestEpoch
 // and the old slot at oldEpoch, 0 for none.
 func testCanaryRowsOf(n int, latestEpoch int64, oldEpoch int64) []*arindbCanaryProvider {
