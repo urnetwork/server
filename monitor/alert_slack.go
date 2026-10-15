@@ -40,13 +40,16 @@ package monitor
 // in the next summary. The sender spaces posts by postInterval, the rate Slack
 // accepts for incoming webhooks.
 //
-// A post that Slack answers with a 5xx or a 429, or that times out, is retried
-// once, after the wait Slack asks for in Retry-After (RetryDelay when it names
-// none), at most MaxRetryDelay. Only the sender waits; Handle keeps offering,
+// A post that Slack refuses with a 429 or a 503 is retried once, after the
+// wait Slack asks for in Retry-After (RetryDelay when it names none), at most
+// MaxRetryDelay. Those answers mean Slack did not take the post. A timeout or
+// any other 5xx is not retried: Slack may have taken the post already, and a
+// retry would post it twice. Only the sender waits; Handle keeps offering,
 // and a queue that fills meanwhile drops and counts as above. A message that
-// still fails is undelivered. Once a post succeeds again, or the periodic
-// report probe finds Slack accepting posts, one report says how many messages
-// failed and when they were queued; Close tries a pending report once more.
+// fails, retry included, is undelivered. Once a post succeeds again, or the
+// periodic report probe finds Slack accepting posts, one report says how many
+// messages failed and when they were queued; Close tries a pending report
+// once more.
 //
 // The webhook URL is a credential. It is never logged, put in a message, or
 // put in an error. net/http errors embed the request URL, so a failed post is
@@ -248,7 +251,8 @@ type slackUndelivered struct {
 // The result of one post attempt.
 type slackPostOutcome struct {
 	delivered bool
-	// a 5xx, a 429 or a timeout: worth one retry after retryDelay
+	// a 429 or a 503: Slack did not take the post, so one retry after
+	// retryDelay cannot post it twice
 	retryable  bool
 	retryDelay time.Duration
 }
@@ -885,7 +889,7 @@ func (self *SlackAlertNotifier) post(text string) slackPostOutcome {
 			return slackPostOutcome{}
 		}
 		self.postFailed(errorClass)
-		return slackPostOutcome{retryable: errorClass == "timeout", retryDelay: self.settings.RetryDelay}
+		return slackPostOutcome{}
 	}
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 256))
 	response.Body.Close()
@@ -896,7 +900,7 @@ func (self *SlackAlertNotifier) post(text string) slackPostOutcome {
 		}
 		self.postFailed(class)
 		return slackPostOutcome{
-			retryable:  response.StatusCode == http.StatusTooManyRequests || 500 <= response.StatusCode && response.StatusCode < 600,
+			retryable:  response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusServiceUnavailable,
 			retryDelay: self.retryDelay(response.Header.Get("Retry-After")),
 		}
 	}

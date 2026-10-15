@@ -644,30 +644,25 @@ func TestSlackAlertNotifierNeverLogsTheWebhookUrl(t *testing.T) {
 	}
 }
 
-// A 5xx, a 429 or a timeout is retried once, after the Retry-After Slack
-// sends, in seconds or as an HTTP date, RetryDelay when it sends none, and at
-// most MaxRetryDelay.
-func TestSlackAlertNotifierRetriesOnceAfterServerErrorsRateLimitsAndTimeouts(t *testing.T) {
+// A 429 or a 503 means Slack did not take the post, so it is retried once,
+// after the Retry-After Slack sends, in seconds or as an HTTP date,
+// RetryDelay when it sends none, and at most MaxRetryDelay.
+func TestSlackAlertNotifierRetriesARateLimitOrUnavailableOnce(t *testing.T) {
 	for _, c := range []struct {
 		first     fakeSlackResponse
 		wantDelay time.Duration
 	}{
 		{first: fakeSlackResponse{status: http.StatusServiceUnavailable}, wantDelay: time.Second},
-		{first: fakeSlackResponse{status: http.StatusInternalServerError, retryAfter: "3"}, wantDelay: 3 * time.Second},
+		{first: fakeSlackResponse{status: http.StatusServiceUnavailable, retryAfter: "3"}, wantDelay: 3 * time.Second},
 		{first: fakeSlackResponse{status: http.StatusTooManyRequests, retryAfter: "7"}, wantDelay: 7 * time.Second},
 		{first: fakeSlackResponse{status: http.StatusTooManyRequests, retryAfter: "120"}, wantDelay: 30 * time.Second},
 		{first: fakeSlackResponse{status: http.StatusTooManyRequests, retryAfter: "Wed, 14 Oct 2026 18:00:12 GMT"}, wantDelay: 12 * time.Second},
-		{first: fakeSlackResponse{status: http.StatusBadGateway, retryAfter: "soon"}, wantDelay: time.Second},
-		{first: fakeSlackResponse{hold: true}, wantDelay: time.Second},
+		{first: fakeSlackResponse{status: http.StatusServiceUnavailable, retryAfter: "soon"}, wantDelay: time.Second},
 	} {
 		webhook, webhookUrl := newFakeSlackWebhook(t)
 		webhook.answerNext(c.first)
 		harness := newSlackTestHarness()
-		settings := harness.settings(webhookUrl)
-		if c.first.hold {
-			settings.PostTimeout = 500 * time.Millisecond
-		}
-		notifier := NewSlackAlertNotifier(settings)
+		notifier := NewSlackAlertNotifier(harness.settings(webhookUrl))
 		notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
 		closeSlackNotifier(t, notifier)
 
@@ -682,17 +677,26 @@ func TestSlackAlertNotifierRetriesOnceAfterServerErrorsRateLimitsAndTimeouts(t *
 }
 
 // Other failures are not retried: the message is undelivered at once, and the
-// report at close names it.
+// report at close names it. A timeout or another 5xx may come after Slack
+// took the post, so a retry could post it twice.
 func TestSlackAlertNotifierDoesNotRetryOtherFailures(t *testing.T) {
 	for _, first := range []fakeSlackResponse{
 		{status: http.StatusNotFound, body: "no_service"},
 		{status: http.StatusBadRequest, body: "invalid_payload"},
 		{status: http.StatusForbidden},
+		{status: http.StatusInternalServerError, retryAfter: "3"},
+		{status: http.StatusBadGateway},
+		{status: http.StatusGatewayTimeout},
+		{hold: true},
 	} {
 		webhook, webhookUrl := newFakeSlackWebhook(t)
 		webhook.answerNext(first)
 		harness := newSlackTestHarness()
-		notifier := NewSlackAlertNotifier(harness.settings(webhookUrl))
+		settings := harness.settings(webhookUrl)
+		if first.hold {
+			settings.PostTimeout = 500 * time.Millisecond
+		}
+		notifier := NewSlackAlertNotifier(settings)
 		notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
 		closeSlackNotifier(t, notifier)
 
@@ -713,6 +717,42 @@ func TestSlackAlertNotifierDoesNotRetryOtherFailures(t *testing.T) {
 	closeSlackNotifier(t, notifier)
 	if delays := harness.retryDelayLog(); len(delays) != 0 {
 		t.Fatalf("refused connection waited %v to retry", delays)
+	}
+}
+
+// A gateway can answer 504 after Slack took the post: the message reaches
+// the channel once, and the report says it may not have.
+func TestSlackAlertNotifierDoesNotRepostAMessageSlackMayHaveTaken(t *testing.T) {
+	var textsLock sync.Mutex
+	received := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		textsLock.Lock()
+		received = append(received, payload.Text)
+		first := len(received) == 1
+		textsLock.Unlock()
+		if first {
+			// delivered, then the gateway timed out
+			response.WriteHeader(http.StatusGatewayTimeout)
+			return
+		}
+		_, _ = io.WriteString(response, "ok")
+	}))
+	defer server.Close()
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.settings(server.URL + "/services/T0SYNTHETIC/B0SYNTHETIC/" + syntheticSlackSecret))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityPage)}})
+	closeSlackNotifier(t, notifier)
+
+	textsLock.Lock()
+	defer textsLock.Unlock()
+	if len(received) != 2 || !strings.HasPrefix(received[0], "[PAGE] raised") || !strings.HasPrefix(received[1], "[UNDELIVERED]") {
+		t.Fatalf("received:\n%s", strings.Join(received, "\n---\n"))
 	}
 }
 
