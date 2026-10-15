@@ -62,3 +62,14 @@ with different `vault/local/pg.yml` credentials. A persistent PostgreSQL volume
 retains its initialized password even if the container environment changes.
 Prefer the matching local profile; see [local setup](local/README.md) before
 reinitializing a volume.
+
+A test binary reads only fixture vaults. When the launcher runs with a sibling
+or `WARP_HOME` vault's `local` credentials, `test-env.sh` names the vault it
+selected by the launcher's rules for the test vault guard, and a test then reads
+only `pg.yml`, `pg_maintenance.yml` and `redis.yml` from that vault's `local`
+directory, while the launcher attestation stays valid and names their
+endpoints, and everything else from `local/testdata/vault`. Run DB tests that
+way, as described in
+[DB tests and the test vault guard](local/README.md#db-tests-and-the-test-vault-guard),
+not with `URNETWORK_TEST_REAL_VAULT=1` and not by cherry-picking a change onto a
+base from before the guard.

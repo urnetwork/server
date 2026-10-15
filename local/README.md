@@ -129,6 +129,84 @@ published ports on the loopback alias rather than the container's network IP.
 On Linux, Docker and host networking changes run through `sudo`; on macOS,
 Docker Desktop runs as the current user. The tests run as the current user.
 
+## DB tests and the test vault guard
+
+A test binary reads a vault only below a fixture root: the release gate's
+private portable root, the checked-in `testdata`, or the temp directory (or
+`GOTMPDIR`) where a test writes its own. Any other vault, such as
+`$WARP_HOME/vault` or a sibling `vault` checkout, can hold live secrets, so its
+resources read as absent (`refuseNonFixtureVault` in [`env.go`](../env.go)).
+
+The launcher, though, starts PostgreSQL and Redis with the credentials in its
+selected vault's `local/pg.yml` and `local/redis.yml`, and on a developer
+machine that is usually such a vault. So in managed-local mode, `test-env.sh`
+selects a vault by the launcher's own rules, checks the authorities of that
+vault's `pg.yml` and `redis.yml` against the launcher's readiness record, and
+exports the vault as `WARP_TEST_ENV_LAUNCHER_VAULT_HOME`. Neither can prove
+that the launcher started from that vault, only that the files name its
+endpoints; credentials from another vault fail to authenticate. While
+`WARP_ENV=local` and the vault home is that vault, a test binary
+([`env_test_vault.go`](../env_test_vault.go)):
+
+- reads `pg.yml`, `pg_maintenance.yml` and `redis.yml` only from the vault's
+  `local` directory, which must be a real directory, and each only when:
+  - the launcher lock holds a v2 owner, and its readiness record is complete
+    and names that owner, a dedicated non-loopback address and the endpoint
+    that the selected file names;
+  - the process's dial guard, chosen at startup from the environment
+    `test-env.sh` exports, attests the record's address with both its ports;
+- reads every other resource from `testdata/vault`;
+- reads nothing else of that vault: not its root or `all` directory, no other
+  environment such as `main`, and no other `local` resource.
+
+Every file a test binary reads from a vault must resolve, through any links,
+inside the scope it was admitted for: a fixture vault's own root, the
+checked-in fixture, or the launcher vault's `local` directory. A vault home is
+judged cleaned, as the resolver opens it, and a resource path that climbs out
+of its vault with `..` is refused.
+
+The readiness record is read again at each lookup of those resources, so a
+launcher that withdraws readiness stops the reads at once. A failure refuses
+with an error that names what is wrong, never a credential or a value from the
+refused file. The suite proxy and the portable services have no launcher, so
+`test-env.sh` names no launcher vault for them, and a test reads their vault
+only if it is a fixture root.
+
+`URNETWORK_TEST_REAL_VAULT=1` still lets a test binary read any vault, as
+before and without the containment above, but DB tests do not use it, and they
+do not run by cherry-picking a change onto a base from before the guard.
+
+### Running a DB test
+
+1. Start `./local/run-local.sh` in its own terminal, wait for `Local environment
+   is up`, and keep it in the foreground for the whole run.
+2. Check that both service names resolve only to the launcher's address
+   (`10.213.0.1` by default), never to `127.0.0.1`:
+
+   ```sh
+   dscacheutil -q host -a name local-pg.bringyour.com      # macOS
+   dscacheutil -q host -a name local-redis.bringyour.com
+   getent ahosts local-pg.bringyour.com                    # Linux
+   getent ahosts local-redis.bringyour.com
+   ```
+
+   `test-env.sh` checks this as well and refuses loopback.
+3. From `server/`, run the test with `test.sh`, which first runs its
+   contract-admission gate, or source `test-env.sh` in Bash for one targeted
+   test. Sourcing it into zsh leaves `WARP_ENV` unset, so wrap it in `bash -c`:
+
+   ```sh
+   ./test.sh -run '^TestName$'
+   bash -c 'source ./test-env.sh && cd model && go test -count=1 -run "^TestName$" .'
+   ```
+
+4. Stop the run at once on a `cluster mode` error, a refused connection to
+   `10.213.0.1`, or any dial to `127.0.0.1`, `::1` or `localhost`: the run is not
+   reaching the local stack.
+
+Do not set `URNETWORK_TEST_REAL_VAULT`, and do not edit, copy or remove the
+launcher's lock or vault files to make a test run.
+
 ## Flags
 
 | Flag | Effect |
