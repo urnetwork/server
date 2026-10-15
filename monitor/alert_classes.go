@@ -168,6 +168,8 @@ var alertClassKinds = map[string]alertClassKind{
 	"backup-archive-writer-active-during-recovery":        incidentAlertClass,
 	"backup-archive-writer-failed":                        incidentAlertClass,
 	"canary-dead":                                         incidentAlertClass,
+	"capability-probe-disabled-pass":                      incidentAlertClass,
+	"capability-probe-stalled":                            incidentAlertClass,
 	"circle-transfer-admission":                           incidentAlertClass,
 	"circle-transfer-admission-error":                     incidentAlertClass,
 	"circle-transfer-admission-failed":                    incidentAlertClass,
