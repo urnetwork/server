@@ -673,15 +673,21 @@ Nothing reads a URL child's key:
   encryption-off session never uses. The provider admits contracts with an
   HMAC under its provide secret, and settlement uses acked byte counts.
 
-`providertunnel.Open` therefore sets connect's `SkipClientKeyPublication` on
-each generated client whose key has no reader (`skipUnreadClientKeyPublication`,
+The URL probe pass (`newProviderUrlProbePass`) therefore opts its tunnels in
+with `providertunnel.Config.KeepClientKeysLocal`. For an opted-in tunnel,
+`providertunnel.Open` sets connect's `SkipClientKeyPublication` on each
+generated client whose key has no reader (`skipUnreadClientKeyPublication`,
 the last change to the settings). The child sends no `ClientKey` control, so
 the platform writes no signed row, evidence blob or Redis `ckey_` key for it.
 
-- **Clients that keep publishing:** any client that can use its key. That
-  includes the capability probe's opportunistic clients, which require
-  registration, and domain-hash clients (the sn validator and miner). connect
-  refuses the skip alongside any reader.
+- **Clients that keep publishing:** every tunnel that does not opt in,
+  including the egress-prober CLI's, and any client that can use its key. The
+  latter includes the capability probe's opportunistic clients, which require
+  registration, and domain-hash clients (the sn validator and miner).
+- **A misapplied skip publishes anyway.** If a reader turns up after the
+  tunnel chose the skip, connect logs an error and publishes, so the mistake
+  costs one registration instead of the reader's traffic. A post-quantum
+  profile raising the sessions to Required is one such reader.
 - **Unchanged:** the key-history domain, policy, registration, observation
   and evidence formats, and the monitor guards.
 - **Rollout:** it ships with the taskworker that runs the prober, in a clear
