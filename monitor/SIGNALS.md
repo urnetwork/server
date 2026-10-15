@@ -17532,10 +17532,13 @@ out.
   is `cannot-observe`.
 - `modern-gate-fleet-disagrees` (sustain 2), judged on the settled
   processes: they decide the gate differently (`min` below `max`); fewer
-  publish the gate than run, while a start is published or the gate is on
-  anywhere, since one without the gate decides it off; or, inside the
-  windows while a start is ahead, fewer schedule a start than publish the
-  gate or their starts differ. Inside the windows WARN from 72 hours before
+  publish the gate than run, inside the windows, where one without the gate
+  will not flip with the rest, or anywhere while the gate is on somewhere,
+  since one without it decides it off; or, inside the windows while a start
+  is ahead, fewer schedule a start than publish the gate or their starts
+  differ. Outside the windows a taskworker without the gate beside a gate
+  off everywhere agrees for now, as in a rollout from code before the gate
+  ahead of the start. Inside the windows WARN from 72 hours before
   the earliest start, since some will not flip with the rest, and PAGE from
   it until the watch after the latest start ends: Quality and Speed then
   follow whichever taskworker ran the last score export. Outside them, and
@@ -17614,7 +17617,8 @@ from 24 hours, the page after the flip and its exact-half boundaries, the
 watch to 18:00 UTC on the start's day and its clears, a fleet that
 disagrees on the gate or the schedule before and after the start, a moved
 start a taskworker missed, the WARN outside the windows and with the switch
-set everywhere, findings kept beside what cannot be read, counts read
+set everywhere, a rollout from code before the gate that stays quiet until
+the windows, findings kept beside what cannot be read, counts read
 before the flip, a set switch, a moved start, an unpublished schedule, and
 stale or incomplete counts; synthetic Mimir answers, built from taskworker
 processes as the query reads them, drive the signal's own queries for the

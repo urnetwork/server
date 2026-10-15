@@ -375,13 +375,14 @@ func evaluateModernGateReadiness(observation modernGateReadinessObservation, now
 		}
 		return healthy, nil
 	}
-	// The settled taskworkers decide the gate alike: every one publishes it
-	// and its min equals its max. One that does not publish it decides it
-	// off, which differs while a start is scheduled or the gate is on
-	// anywhere.
+	// The settled taskworkers decide the gate alike: its min equals its max,
+	// and while it is on anywhere every one publishes it, since one that does
+	// not decides it off. With the gate off everywhere, one without it agrees
+	// for now, as code from before the gate does in a rollout ahead of the
+	// start.
 	settled := observation.settled
 	gateDisagrees := settled.onEvery != settled.onAny ||
-		(observation.start != nil || settled.onAny) && settled.publishing < settled.taskworkers
+		settled.onAny && settled.publishing < settled.taskworkers
 	if observation.start == nil {
 		// provider.yml sets the switch on every taskworker, so no flip is
 		// scheduled, but they must still decide the gate alike
@@ -411,11 +412,12 @@ func evaluateModernGateReadiness(observation modernGateReadinessObservation, now
 	}
 
 	findings := []finding{}
-	// inside the windows, while a start is ahead, every settled taskworker
-	// also schedules the same start
+	// inside the windows every settled taskworker publishes the gate, since
+	// one without it will not flip with the rest, and while a start is ahead
+	// every one schedules the same start
 	scheduleDisagrees := settled.scheduling < settled.publishing ||
 		settled.earliestStart != nil && settled.latestStart != nil && settled.earliestStart.Before(*settled.latestStart)
-	if gateDisagrees || now.Before(start) && scheduleDisagrees {
+	if gateDisagrees || settled.publishing < settled.taskworkers || now.Before(start) && scheduleDisagrees {
 		tier := tierWarn
 		if !now.Before(earliest) {
 			tier = tierPage
@@ -547,7 +549,7 @@ func modernGateFleetDisagreesFinding(observation modernGateReadinessObservation,
 		target: modernGateReadinessTarget, sustain: 2,
 		symptom:   fmt.Sprintf("The taskworkers disagree on the modern provider gate %s: of %d that have run for five minutes, %d publish the gate, it is on in %s, and %d schedule a start (%s to %s)", when, settled.taskworkers, settled.publishing, onIn, settled.scheduling, timeText(settled.earliestStart), timeText(settled.latestStart)),
 		mechanism: "Each taskworker decides the gate from its own code and config. One running code without the automatic start publishes no gate and never flips; one created before a config release that set the switch or moved the start decides the old way, flipping when the others do not, or at another time. The score export a taskworker runs publishes the buckets FindProviders2 answers from, so where they disagree Quality and Speed follow whichever taskworker ran the last pass, and the dashboard counts the taskworker that filled the last snapshot.",
-		baseline:  "Every taskworker that has run for five minutes publishes urnetwork_stats_provider_modern_gate_on and they agree: its count equals those processes and its min equals its max, and within the windows, while a start is ahead, every one publishes the same urnetwork_stats_provider_modern_gate_start_seconds. Within the windows WARN from 72 hours before the earliest start and PAGE from it until 18:00 UTC on the latest start's day; outside them, and while provider.yml sets the switch on every taskworker, a gate decided differently WARNs.",
+		baseline:  "Every taskworker that has run for five minutes publishes urnetwork_stats_provider_modern_gate_on and they agree: its count equals those processes and its min equals its max, and within the windows, while a start is ahead, every one publishes the same urnetwork_stats_provider_modern_gate_start_seconds. Within the windows WARN from 72 hours before the earliest start and PAGE from it until 18:00 UTC on the latest start's day. Outside them, and while provider.yml sets the switch on every taskworker, a gate decided differently WARNs: min below max, or one without the gate while it is on anywhere.",
 		observed:  fmt.Sprintf("settled_taskworkers=%d settled_publishing=%d gate_on_min=%d gate_on_max=%d settled_scheduling=%d settled_earliest_start=%s settled_latest_start=%s start=%s running_taskworkers=%d running_publishing=%d", settled.taskworkers, settled.publishing, boolValue(settled.onEvery), boolValue(settled.onAny), settled.scheduling, timeText(settled.earliestStart), timeText(settled.latestStart), timeText(observation.start), observation.taskworkers, observation.publishing),
 		evidence:  "count, min and max of urnetwork_stats_provider_modern_gate_on and urnetwork_stats_provider_modern_gate_start_seconds over the taskworker processes whose process_start_time_seconds is five minutes old, matched by instance, against the count of those processes; no host or process identity leaves Mimir.",
 		context:   "Only processes that have run for five minutes are compared: a new process registers the gate at its stats collector's first refresh, a minute or two after it starts, and a drained process's series stay readable for five minutes, so a restart alone does not fire. A config release that sets the switch or moves the start makes the fleet disagree until its last taskworker has restarted and the drained processes' series have gone stale, so on the start's day, until 18:00 UTC, taskworkers restart only for the kill switch, whose rollout can still page until it completes. API processes decide the gate for their own readers but publish no gauge, so this does not see them.",

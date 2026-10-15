@@ -328,9 +328,10 @@ func TestModernGateReadinessCatchesADisagreeingFleet(t *testing.T) {
 // Outside the windows, and while provider.yml sets the switch on every
 // taskworker so that no start is published, a fleet whose settled
 // taskworkers decide the gate differently still WARNs: one on another
-// switch, or one that does not publish the gate while a start is published
-// or the gate is on anywhere, since it decides the gate off. A fleet that
-// agrees, or one without the gate beside a gate off everywhere, is quiet.
+// switch, or one that does not publish the gate while the gate is on
+// anywhere, since it decides the gate off. A fleet that agrees is quiet, and
+// so is one without the gate beside a gate off everywhere, as in a rollout
+// from code before the gate days ahead of the start: both decide it off.
 func TestModernGateReadinessWarnsOnADisagreeingFleetOutsideItsWindows(t *testing.T) {
 	start := modernGateReadinessTestStart
 	for _, c := range []struct {
@@ -343,6 +344,7 @@ func TestModernGateReadinessWarnsOnADisagreeingFleetOutsideItsWindows(t *testing
 		warn       bool
 	}{
 		{name: "a start published, a month before, one switched on", now: start.AddDate(0, 0, -30), scheduled: true, publishing: 4, onEvery: false, onAny: true, warn: true},
+		{name: "a start published, five days before, half the fleet on code before the gate", now: start.AddDate(0, 0, -5), scheduled: true, publishing: 2, onEvery: false, onAny: false},
 		{name: "a start published, a week after, one without the gate", now: start.AddDate(0, 0, 7), scheduled: true, publishing: 3, onEvery: true, onAny: true, warn: true},
 		{name: "a start published, a week after, agreeing", now: start.AddDate(0, 0, 7), scheduled: true, publishing: 4, onEvery: true, onAny: true},
 		{name: "no start, one switched on", now: start, publishing: 4, onEvery: false, onAny: true, warn: true},
@@ -635,6 +637,38 @@ func TestModernGateReadinessSignalPagesADisagreeingFleet(t *testing.T) {
 	alert := requireAlertClass(t, alerts, "modern-gate-fleet-disagrees")
 	if alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), "gate_on_min=0 gate_on_max=1") {
 		t.Fatalf("alert %+v, want a page reading the min and the max", alert)
+	}
+}
+
+// Through the signal, five days before the start, in the middle of a
+// rollout from code before the gate: two settled taskworkers publish the
+// gate off and the start, two publish nothing. Both decide the gate off, so
+// nothing fires; three days before the start, inside the windows, the two
+// that will not flip WARN.
+func TestModernGateReadinessSignalIsQuietDuringARolloutFromBeforeTheGate(t *testing.T) {
+	start := modernGateReadinessTestStart
+	for _, c := range []struct {
+		now  time.Time
+		warn bool
+	}{
+		{now: start.AddDate(0, 0, -5)},
+		{now: start.Add(-modernGateReadinessWarnLead + time.Hour), warn: true},
+	} {
+		processes := append(modernGateReadinessTestProcesses(2, c.now, false, &start), modernGateReadinessTestProcess{started: c.now.AddDate(0, 0, -1)}, modernGateReadinessTestProcess{started: c.now.AddDate(0, 0, -1)})
+		payload := modernGateReadinessTestPayload(t, c.now, processes, c.now.Add(-4*time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100})
+		alerts, err := modernGateReadinessTestSignal("").Run(context.Background(), modernGateReadinessTestSettings(t, c.now, map[int64]string{c.now.Unix(): payload}))
+		if err != nil {
+			t.Fatalf("at %s: %v", c.now, err)
+		}
+		fleet := []Alert{}
+		for _, alert := range alerts {
+			if alert.Class == "modern-gate-fleet-disagrees" {
+				fleet = append(fleet, alert)
+			}
+		}
+		if (len(fleet) == 1 && fleet[0].Severity == SeverityWarn) != c.warn || !c.warn && len(fleet) != 0 {
+			t.Errorf("at %s: fleet alerts %+v, want a warning %t", c.now, fleet, c.warn)
+		}
 	}
 }
 
