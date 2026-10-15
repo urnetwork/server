@@ -34,7 +34,11 @@ import (
 
 const (
 	defaultProviderEgressProbeShardCount = 4
-	maxProviderEgressProbeShardCount     = 256
+	// The prober shard registry's slots (model.BeginProberShard).
+	maxProviderEgressProbeShardCount = 256
+	// The most URL probe shards. They take slots [0, shard_count), and the
+	// registry's last slot is the capability probe's.
+	maxProviderUrlProbeShardCount        = maxProviderEgressProbeShardCount - 1
 	providerEgressBlackholeSubmitTimeout = 30 * time.Second
 	// In-process operator calls one pass runs at once (operator_concurrency).
 	// Two 64-worker passes per taskworker, Main's geometry, then run at most 16
@@ -289,8 +293,8 @@ func validateProviderEgressProbeArgsConfig(args *ProviderEgressProbeArgs) error 
 	if args.UrlProbe != nil {
 		return validateProviderUrlProbeArgs(args)
 	}
-	if args.ShardCount < 1 || maxProviderEgressProbeShardCount < args.ShardCount {
-		return fmt.Errorf("provider egress probe shard_count must be in [1,%d] (got %d)", maxProviderEgressProbeShardCount, args.ShardCount)
+	if args.ShardCount < 1 || maxProviderUrlProbeShardCount < args.ShardCount {
+		return fmt.Errorf("provider egress probe shard_count must be in [1,%d] (got %d)", maxProviderUrlProbeShardCount, args.ShardCount)
 	}
 	if args.IdleDelaySeconds < 1 || args.MaxTimeSeconds < 1 {
 		return fmt.Errorf("provider egress probe idle delay and max time must be positive")
@@ -2106,12 +2110,17 @@ func runProviderEgressProbe(
 // provider_egress_probe_metrics.go) every finding -- goes through operator, so
 // with the in-process operator (operator_transport: local) the pass makes no
 // API request.
+//
+// Its tunnels opt in to KeepClientKeysLocal: each URL probe mints a derived
+// client whose identity key nothing reads, and only this pass may skip
+// publishing it.
 func newProviderUrlProbePass(
 	args *ProviderEgressProbeArgs,
 	operator ingest.Operator,
 	tunnelConfig providertunnel.Config,
 	networkId server.Id,
 ) *providerEgressProbePass {
+	tunnelConfig.KeepClientKeysLocal = true
 	return &providerEgressProbePass{
 		urlProbes: true,
 		readiness: newProviderEgressProbeReadiness(networkId),
@@ -2137,14 +2146,41 @@ func newProviderUrlProbePass(
 
 // The callback owns and joins its tunnels/control client before returning. This
 // boundary persists cleanup even when the caller cancels or a callback fails.
-func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, args *ProviderEgressProbeArgs, run func(*model.ProberIdentity) (*ProviderEgressProbeResult, error)) (result *ProviderEgressProbeResult, returnErr error) {
+func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, args *ProviderEgressProbeArgs, run func(*model.ProberIdentity) (*ProviderEgressProbeResult, error)) (*ProviderEgressProbeResult, error) {
 	credit, err := providerUrlProbeShardCredit(args)
 	if err != nil {
 		return nil, err
 	}
-	owner, err := model.BeginProberShard(ctx, key, credit, time.Duration(args.MaxTimeSeconds)*time.Second)
+	return runWithProberShard(ctx, "provider egress", key, credit, time.Duration(args.MaxTimeSeconds)*time.Second, run)
+}
+
+// A prober shard's drain or reap failure after its pass, joined to whatever
+// the pass returned. The recurring prober reaper retries the cleanup, so a
+// caller can tell it from the pass's own failure. Its text is the cleanup
+// step's.
+type proberShardCleanupError struct {
+	err error
+}
+
+func (self *proberShardCleanupError) Error() string {
+	return self.err.Error()
+}
+
+func (self *proberShardCleanupError) Unwrap() error {
+	return self.err
+}
+
+// One prober shard's whole lifetime around run: allocation with credit, the
+// identity, and the drain and reap after run returns, which the probe named
+// by label owns. The callback owns and joins its tunnels/control client
+// before returning; this boundary persists cleanup even when the caller
+// cancels or a callback fails, and joins a cleanup failure to run's result
+// as a proberShardCleanupError. The URL probe and the capability probe each
+// run their passes in one, in shard slots of their own.
+func runWithProberShard[R any](ctx context.Context, label string, key model.ProberShardKey, credit model.ByteCount, lifetime time.Duration, run func(*model.ProberIdentity) (R, error)) (result R, returnErr error) {
+	owner, err := model.BeginProberShard(ctx, key, credit, lifetime)
 	if err != nil {
-		return nil, fmt.Errorf("provider egress shard allocation: %w", err)
+		return result, fmt.Errorf("%s shard allocation: %w", label, err)
 	}
 	defer func() {
 		// runWithProviderEgressControl and its tunnel owners have joined before
@@ -2153,16 +2189,16 @@ func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, a
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		if err := model.DrainProberShard(cleanupCtx, key); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("provider egress shard drain: %w", err))
+			returnErr = errors.Join(returnErr, &proberShardCleanupError{err: fmt.Errorf("%s shard drain: %w", label, err)})
 			return
 		}
 		if _, err := model.ReapProberShard(cleanupCtx, key); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("provider egress shard cleanup: %w", err))
+			returnErr = errors.Join(returnErr, &proberShardCleanupError{err: fmt.Errorf("%s shard cleanup: %w", label, err)})
 		}
 	}()
 	identity, err := model.ProberShardIdentity(ctx, owner)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	return run(identity)
 }

@@ -136,6 +136,13 @@ func statsProviderEgressTestCounts() *model.ProviderEgressCounts {
 	for _, reason := range model.ProviderExcludedReasons {
 		counts.ReasonCounts[reason] = 0
 	}
+	counts.ModernGateShadowCounts = map[string]map[string]int64{}
+	for _, bucket := range model.ProviderModernGateBuckets {
+		counts.ModernGateShadowCounts[bucket] = map[string]int64{}
+		for _, outcome := range model.ProviderModernOutcomes {
+			counts.ModernGateShadowCounts[bucket][outcome] = 0
+		}
+	}
 	return counts
 }
 
@@ -453,7 +460,7 @@ func TestStatsProviderEgressCacheCanceledReadAndEmptyPolicy(t *testing.T) {
 func TestStatsProviderEgressCacheWireValidation(t *testing.T) {
 	store := newStatsProviderEgressTestStore()
 	valid := statsProviderEgressTestWire(t, statsProviderEgressTestCounts(), store.now(), store.now())
-	for _, scenario := range []string{"extra", "version", "null_counts", "null_index", "unknown_bucket", "unknown_reason", "negative", "leading_zero", "index_bound", "max_index", "future", "reversed", "long_fill"} {
+	for _, scenario := range []string{"extra", "version", "null_counts", "null_index", "unknown_bucket", "unknown_reason", "negative", "leading_zero", "index_bound", "max_index", "future", "reversed", "long_fill", "null_shadow", "online_shadow", "missing_shadow_bucket", "unknown_outcome", "missing_outcome", "negative_shadow"} {
 		t.Run(scenario, func(t *testing.T) {
 			var wire map[string]any
 			if err := json.Unmarshal([]byte(valid), &wire); err != nil {
@@ -461,6 +468,7 @@ func TestStatsProviderEgressCacheWireValidation(t *testing.T) {
 			}
 			counts := wire["n"].(map[string]any)
 			buckets, reasons := counts["b"].(map[string]any), counts["r"].(map[string]any)
+			shadow := counts["g"].(map[string]any)
 			switch scenario {
 			case "extra":
 				wire["private_field"] = "untrusted"
@@ -488,6 +496,18 @@ func TestStatsProviderEgressCacheWireValidation(t *testing.T) {
 				wire["c"] = store.now().Add(-time.Second).UnixMilli()
 			case "long_fill":
 				wire["s"] = store.now().Add(-126 * time.Second).UnixMilli()
+			case "null_shadow":
+				counts["g"] = nil
+			case "online_shadow":
+				shadow[model.ProviderEgressBucketOnline] = shadow[model.RankModeQuality]
+			case "missing_shadow_bucket":
+				delete(shadow, model.RankModeSpeed)
+			case "unknown_outcome":
+				shadow[model.RankModeQuality].(map[string]any)["untrusted"] = 0
+			case "missing_outcome":
+				delete(shadow[model.RankModeSpeed].(map[string]any), model.ProviderModernOutcomeStaleEvidence)
+			case "negative_shadow":
+				shadow[model.RankModeQuality].(map[string]any)[model.ProviderModernOutcomeModern] = -1
 			}
 			encoded, err := json.Marshal(wire)
 			if err != nil {
@@ -565,5 +585,29 @@ func TestStatsProviderEgressCacheAcceptsTheNoSuccessReason(t *testing.T) {
 	delete(counts.ReasonCounts, "no_success")
 	if validStatsProviderEgressCounts(counts) {
 		t.Fatal("a snapshot without the no_success reason is valid")
+	}
+}
+
+// The modern provider gate's shadow is part of a complete snapshot: every
+// bucket and outcome round-trips, zero included, and a snapshot without it,
+// as the counts before the gate were, is incomplete.
+func TestStatsProviderEgressCacheCarriesTheModernGateShadow(t *testing.T) {
+	store := newStatsProviderEgressTestStore()
+	counts := statsProviderEgressTestCounts()
+	counts.ReasonCounts[model.ProviderExcludedNotModern] = 4
+	counts.ModernGateShadowCounts[model.RankModeQuality][model.ProviderModernOutcomeModern] = 6
+	counts.ModernGateShadowCounts[model.RankModeSpeed][model.ProviderModernOutcomeNoEvidence] = 3
+	if !validStatsProviderEgressCounts(counts) {
+		t.Fatal("a snapshot with the modern gate's shadow is not valid")
+	}
+	value := statsProviderEgressTestWire(t, counts, store.now(), store.now())
+	decoded, fresh, err := decodeStatsProviderEgressSnapshot(value, store.now())
+	if err != nil || !fresh || !reflect.DeepEqual(decoded.Counts, counts) {
+		t.Fatalf("the modern gate's shadow did not round-trip: %v", err)
+	}
+
+	counts.ModernGateShadowCounts = nil
+	if validStatsProviderEgressCounts(counts) {
+		t.Fatal("a snapshot without the modern gate's shadow is valid")
 	}
 }

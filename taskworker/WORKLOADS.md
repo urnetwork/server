@@ -62,8 +62,8 @@ above performs subnet settlement independently of retail `Payout` and
 `controller.AdvancePayment`; excluding the latter does not disable ST payments.
 
 Public geolocation pin refresh, `ProberBootstrap`, `ProviderEgressProbe`,
-`ExtenderProbe`, `ExtenderPublish`, and web analytics are separate external
-discovery/analytics workloads. Simulator
+`CapabilityProbe`, `ExtenderProbe`, `ExtenderPublish`, and web analytics are
+separate external discovery/analytics workloads. Simulator
 `renderOperatorProviderEgressProbeIsolation` already authenticates an
 `enabled: false` provider probe configuration and removes its ingest credential;
 its bounded miner/validator scenarios supply provider traffic. Simulator

@@ -138,7 +138,10 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
 		return cached
 	}
 	if cached {
-		go server.HandleError(func() { self.performActiveContractRead(pair, sourceId, destinationId) }, self.cancel)
+		// A refresh that raises has already released its read, and the next
+		// check reads again, so its raise ends the refresh only. The cached
+		// allowance keeps its own deadline either way.
+		go server.HandleError(func() { self.performActiveContractRead(pair, sourceId, destinationId) })
 		return time.Now().Before(cachedDeadline)
 	}
 	return self.performActiveContractRead(pair, sourceId, destinationId)

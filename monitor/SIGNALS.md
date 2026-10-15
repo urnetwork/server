@@ -216,6 +216,7 @@ active missing capability and must not be read as green.
 | 2.6b | Coverage gap | A probe of the contract degradation valve state is missing: `open-contracts` and `contract-rate` show the close backlog and creation rate that drive it, not whether exhausted payers get free contracts or providers go unpaid. |
 | 2.11a | Coverage gap | A monitor reader of the PgBouncer pool exporter is missing: Grafana rules evaluate it, while `pgbouncer-stalls` checks listener admission and app-side 6432 write timeouts and `log-errors` counts queue-timeout lines. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
+| 2.19g | Coverage gap | A monitor reader of the capability probe's urnetwork_capability_probe_* series and of the age of the modern provider gate's evidence is missing: `task-health` sees the probe's task row and `egress-coverage` the URL probe's coverage, and neither says whether the gate's evidence is fresh or whether capability tunnels retire their derived clients. |
 | 3.6a | Coverage gap | A per-channel sharded-subscriber census is missing: `redis-topology` checks membership and phantoms, and `redis-keyevents` checks keyspace-notification patterns, not SSUBSCRIBE channels. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
@@ -10728,6 +10729,148 @@ each Connect process whose handler is gone cancels itself on its next
 heartbeat. An outage longer than about 105–110 s therefore drops every Connect
 process. Stop the Taskworker before a planned primary restart (§5.13).
 
+### 2.16a Live handler connection reconcile — rows a running process no longer holds
+Probe: `connection-reconcile`
+
+§2.16 finds open rows whose handler is gone. A row can also stay open under a
+handler that is alive: each announcement writes its connection row once and
+disconnects it once, and before the handler connection reconcile a final
+disconnect that failed (a database outage, a pooler stall) was dropped. Handler
+expiry never reached the row, because the process kept heartbeating its
+handler, so the row stayed connected until that process restarted, and every
+reader of connected rows counted the provider: the location reliability
+writer, FP2 and URL probe admission and census, location and provider counts.
+
+Each Connect handler now reconciles: it holds the rows of the connections its
+process holds, reads the handler's connected rows every five minutes, and
+retires the unheld rows on their second sighting, at most 256 per pass. A
+failed final disconnect moves the next pass up to 15 s after the last one, and
+passes keep that 15 s interval while rows known to be stale remain: rows of
+failed final disconnects, and stale rows not retired yet. A row unheld for a
+moment during ordinary churn (a registration in flight, a disconnect
+committing) waits for the regular pass; before this, any such row kept the
+15 s interval, so a busy handler read its rows every 15 s. A retire takes the
+transport disconnect's fences with try-locks and defers a row whose endpoint
+is busy; a retire that fails leaves its row for a later pass, tried after the
+others, and three consecutive failures end the pass. It exports, per process:
+
+- `urnetwork_connect_connection_reconcile_unheld`: rows the last pass found
+  connected under the handler but not held;
+- `urnetwork_connect_connection_reconcile_retired_total`: rows it retired;
+- `urnetwork_connect_connection_reconcile_passes_total{result="ok|error"}`;
+- `urnetwork_connect_connection_reconcile_unretired_total{reason="failed|busy"}`:
+  stale rows a pass left, because the retire raised or a fence or the row was
+  busy.
+
+The probe evaluates them per block in one Mimir query:
+
+```promql
+label_replace(max by (host,block) (urnetwork_connect_connection_reconcile_unheld{env="main"}),"monitor_metric","unheld","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_retired_total{env="main"}[15m])),"monitor_metric","retired","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env="main",result="ok"}[15m])),"monitor_metric","ok_passes","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env="main",result="error"}[15m])),"monitor_metric","error_passes","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env="main",reason="failed"}[15m])),"monitor_metric","failed_retires","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env="main",reason="busy"}[15m])),"monitor_metric","busy_retires","__name__",".*")
+```
+
+- HEALTHY: every block's unheld count stays below 256, or falls while the
+  reconcile retires rows. After a database outage a block can hold thousands of
+  unheld rows for a few minutes while it drains them.
+- STUCK (`connection-reconcile-stuck`, two probes): a block holds at least 256
+  unheld rows and retired none in 15 minutes. Its retires fail, are deferred
+  behind busy endpoint fences or find nothing, its batch is zero, or a
+  registration it waits for never ends.
+- FAILING (`connection-reconcile-failing`, two probes): in 15 minutes every
+  pass on a block raised, or its retires failed and none succeeded; the
+  database path of that process is down. A failed retire fails only its row
+  and its pass completes, so the pass results alone miss it.
+- UNOBSERVABLE (`connection-reconcile-unobservable`, two probes): no block
+  exports a fresh gauge. Expected until Connect runs an artifact with the
+  reconcile; until then compare a block's connected provider rows with its
+  `urnetwork_connect_provider_connections` gauge.
+
+2026-10-14 production evidence: about 29.6k provider rows were connected under
+live handlers of eight blocks whose processes survived the 2026-10-13 primary
+restarts (06:40Z, 08:10Z) and PgBouncer livelock (16:45-17:30Z). Each block's
+excess over its own provider gauge matched, within 40 rows, its rows of clients
+absent from `client_reliability` plus rows replaced by a newer row of the same
+live client. Connect logged `query_wait_timeout (SQLSTATE 08P01)` and `context
+deadline exceeded` from the final `DisconnectNetworkClient` in those windows.
+About 9.8k providers in the FP2 population were connected only through such
+rows; they took about 12% of URL probe runs and 26% of the no-contact failures.
+
+Do not update connection rows or delete handlers manually. Rows of a process
+that predates the reconcile are retired by restarting that Connect block:
+handler expiry then retires all of its rows, at the cost of its live
+connections reconnecting. The same release keeps a live transport through a
+failed sync read, so an outage no longer disconnects every provider whose sync
+fell in it.
+
+Implementation convention: SIGNALS.md §2.16a (`connection-reconcile`) maps to
+`signal_connection_reconcile.go` and `signal_connection_reconcile_test.go`.
+Synthetic tests cover a healthy fleet, a draining block, a stuck block, a
+failing block, failing retires and an absent gauge. The reconcile itself is tested in
+`connect/transport_announce_reconcile_test.go` and
+`connect/transport_announce_reconcile_db_test.go`.
+
+### 2.16b Live connection announcement failures — reads and writes retried with the transport kept
+Probe: `connection-live-failures`
+
+A live Connect announcement reads its provide key changes every sync round,
+publishes its connection's measurements, and refreshes its verify egress
+lease. Before 2026-10-14 a failed sync read or lease write raised and tore
+the transport down, so a database outage disconnected every provider whose
+sync fell in it, and a failed measurement write ended the publisher for the
+connection's life. Each now keeps the transport and retries with a backoff of
+at most 2 minutes, counting every failure:
+
+- `urnetwork_connect_connection_sync_read_failures_total`;
+- `urnetwork_connect_connection_worker_failures_total{operation="measurement_write|verify_egress_lease"}`.
+
+Each failure is logged at V(1), and the process logs them unconditionally at
+most once a minute, with the failures by operation since its last line and the
+latest error:
+
+```text
+[t]live connection failures retried with the transport kept (in 1m0s): measurement_write=412 sync_read=1803; latest sync_read: <error>
+```
+
+The probe evaluates, per host, block and operation, the failures in the
+fewest-failure 2 minute window of the last 15 minutes and in the whole range:
+
+```promql
+label_replace(label_replace(min_over_time((sum by (host,block) (increase(urnetwork_connect_connection_sync_read_failures_total{env="main"}[2m])))[15m:1m]),"operation","sync_read","__name__",".*"),"monitor_metric","window_min","__name__",".*")
+or label_replace(label_replace(sum by (host,block) (increase(urnetwork_connect_connection_sync_read_failures_total{env="main"}[15m])),"operation","sync_read","__name__",".*"),"monitor_metric","total","__name__",".*")
+or label_replace(min_over_time((sum by (host,block,operation) (increase(urnetwork_connect_connection_worker_failures_total{env="main"}[2m])))[15m:1m]),"monitor_metric","window_min","__name__",".*")
+or label_replace(sum by (host,block,operation) (increase(urnetwork_connect_connection_worker_failures_total{env="main"}[15m])),"monitor_metric","total","__name__",".*")
+```
+
+- HEALTHY: failures are isolated, or only one connection fails. One
+  connection retries at most every 2 minutes, so it fails about 8 times in
+  the range, below the floor of 30.
+- SUSTAINED (`connection-live-failures-sustained`, two probes): a block
+  operation failed in every 2 minute window and at least 30 times in 15
+  minutes. The block's PostgreSQL or Redis path keeps failing: sync_read stops
+  its providers' mode changes and reliability stats, measurement_write stops
+  its measurements reaching the reliability writer, verify_egress_lease lets
+  its leases lapse after their ttl. Read the block's unconditional log line
+  for the latest error, then restore the database path (§2.11, §2.2) or Redis
+  (§3). Do not restart the block for these failures alone: the transports are
+  kept, and a restart reconnects every connection.
+- UNOBSERVABLE (`connection-live-failures-unobservable`, two probes): samples
+  that are unlabeled, stale or negative. Absent counters are §2.16a's: the
+  same processes export the reconcile gauge, whose unobservable class covers a
+  fleet that does not export them.
+
+Panels 58 (sync reads retried) and 59 (worker writes retried, by operation) of
+the Connect dashboard chart the counters.
+
+Implementation convention: SIGNALS.md §2.16b (`connection-live-failures`)
+maps to `signal_connection_live_failures.go` and
+`signal_connection_live_failures_test.go`. Synthetic tests cover a healthy
+fleet, one failing connection below the floor, a sustained block and a stale
+sample. The log is tested in `connect/transport_announce_failure_log_test.go`.
+
 ### 2.17 Missing companion-origin contract rate — return path cannot anchor
 Probe: `missing-origin`
 
@@ -15616,6 +15759,157 @@ or Main policy activation. Missing observation coverage can hide either losses
 or gains. Publishing candidate MMDB bytes is itself a serving change on current
 binaries, independently of the subscriber request-guard switch; keep shadow
 resources separate until every activation gate is reviewed.
+
+### 2.19g Modern provider evidence — the capability probe must keep measuring
+Planned probe: `capability-probe` (none is registered; the signals below are dashboard reads, and the crosswalk lists the gap)
+
+WHAT: the FP2 modern provider gate (FP2FIX.md, "Modern provider gate") reads
+`provider_modern_evidence`, and only the capability probe writes it: the
+recurring taskworker task `work.CapabilityProbe` (`server/capprobe`), one pass
+at a time fleet-wide, each provider measured in a short tunnel of its own
+whose clients attempt opportunistic end-to-end sessions. The URL probe writes
+no evidence. While the gate's switch is off a stopped probe only freezes the
+shadow; once it is on, a stopped probe ages every provider's evidence toward
+`stale_evidence` and the gate takes Quality and Speed away from providers
+that are modern. Every series below is per taskworker process
+(`urnetwork_capability_probe_*`, egress probes dashboard, capability probe
+row); sum across the env's taskworkers and remember a process restart resets
+counters.
+
+The probe ships switched off (sn-55) and then schedules nothing: no task
+row, no prober shard, no pass, so every series stays at zero. It is
+switched on by `enabled: true` in `capability_probe.yml` and a restart of
+the taskworkers, whose containers keep the config they started with
+(capprobe/README.md, "Switching it on"). Until then nothing below applies,
+and silence is not a finding.
+
+Healthy shape:
+
+- `passes_total{result="measured"}` advances after every pass of a sweep
+  under way, a few seconds apart when nothing is due and a few minutes apart
+  while providers are measured; between sweeps, which start
+  `min_sweep_interval_minutes` (360) after the last one started,
+  `result="waiting"` advances every ten minutes, reading nothing. So
+  `last_pass_timestamp_seconds` is never older than a pass's
+  `max_time_seconds` (900) plus a few seconds.
+- `in_flight` stays at or under `concurrency` (16) on one taskworker at a
+  time.
+- `providers_total` is mostly `recorded_*`: `recorded_not_post_quantum`
+  dominates while most providers run the custom lineage.
+- `measure_seconds` p95 is about 61-65 s (a provider without the end-to-end
+  responder takes the whole establishment window after its first
+  acknowledgement) and never above `measure_timeout_seconds` (120); modern
+  providers read in seconds.
+- `selection_total` in steady state: `scanned` far above `due`; during the
+  first sweep after deployment, about two days, `due` and `eligible` are
+  close to `scanned` and the shadow's `no_evidence` is large. Neither is a
+  finding then.
+- `breaker_trips_total` flat, but for the odd small pass at a sweep's tail
+  whose few providers all lack the responder; `downgrades_total` low, a
+  `held` now and then that the next sweep mostly answers with a modern
+  reading rather than a `confirmed` one; `readiness_failures_total` and
+  `shard_cleanup_errors_total` flat.
+
+Signals:
+
+- `capability-probe-stalled` — WARN when no taskworker has finished a
+  measured or waiting pass for 30 minutes while `capability_probe.yml`
+  enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
+  PAGE after two hours with the gate switched on. Read
+  `passes_total{result="failed"}` and the taskworker log's `[capprobe]` and
+  task error lines: unreadable or invalid settings, the URL probe's
+  included, whose `shard_count` past 255 would reach the capability probe's
+  prober shard slot 255; shard allocation, identity or funding readiness
+  (`readiness_failures_total{step}`, the capability probe's own, never the
+  URL probe's pass errors); a page read; or an evidence write. A failed pass
+  retries the same sweep page after a minute, so a persistent failure
+  repeats once a minute. A `passes_total{result="disabled"}` pass is the last
+  of a chain that `enabled: false` ended, deliberately or not; nothing runs
+  after it until a taskworker starts with the probe switched on, so check
+  the deployed `capability_probe.yml` before reading the silence as a
+  stall.
+- `capability-probe-no-evidence` — WARN when measurements finish for an hour
+  and none records (`providers_total` rising with every `recorded_*` flat).
+  The outcome says where: `tunnel_failed` is the probe's own setup (shard
+  credentials, local control, control plane); `no_ack` everywhere is the
+  probe's tunnels reaching no provider, so compare §2.19's URL probe health
+  before suspecting the fleet; `e2e_not_attempted` means the send path
+  accepted no ClientHello of the probe's while the provider acknowledged its
+  pings, so the probe client's sessions are off, a code or settings
+  regression in which every reading would be wrong, never something to
+  record around; `e2e_pending` means setup ate the measurement's margin over
+  the 60 s window; `tunnel_lost` means the tunnel's path went away, or its
+  window client was replaced, before the reading concluded, so a provider
+  that drops its connection shows it, and a share rising fleet-wide points at
+  the probe's windows or the platform rather than at providers;
+  `negative_withheld` everywhere is `capability-probe-breaker`;
+  `record_failed` is the database write, and fails the pass.
+- `capability-probe-breaker` — WARN when `breaker_trips_total` rises on most
+  passes for an hour, PAGE after two hours with the gate switched on: the
+  probe negotiates no end-to-end session with any provider, so its negative
+  readings are all withheld (`providers_total{outcome="negative_withheld"}`)
+  and its evidence ages toward `stale_evidence`. That is a fault on the
+  probe's side, the probe client's sessions or key registration, a connect or
+  settings change, or its tunnels reaching the wrong peers; the fleet cannot
+  lose its responders at once. `readings_total{capability="e2e"}` then shows
+  only `no_responder`, `pending` and `not_tested`. Fix the probe; never
+  record around the breaker. A trip on the odd small tail pass of a sweep is
+  not a finding.
+- `capability-probe-downgrades` — INFO for the shadow review, WARN when
+  `downgrades_total{result="confirmed"}` over a day exceeds 5% of the
+  `recorded_modern` measurements: a negative reading of a provider whose
+  modern evidence was fresh is held for a later sweep (`held`), and only a
+  second negative reading there records the downgrade (`confirmed`). Held
+  ones that the next sweep answers with a modern reading were transient.
+  Confirmed ones in bulk mean modern providers turned legacy, a downgrading
+  release, or a probe fault the breaker does not see, such as windows read
+  as missing; compare `readings_total{capability="window"}` before
+  attributing it to the fleet.
+- `capability-probe-unsealed-share` — INFO for the shadow review, WARN above
+  10% over a day: of the negotiated post-quantum readings
+  (`readings_total{capability="e2e",reading=~"post_quantum_.*"}`), the share
+  `post_quantum_unsealed`. Those providers negotiated the hybrid group but
+  the probe could not verify their identity proof within the seal grace (no
+  published provider key, or the probe's key read failing). The model counts
+  them post-quantum, so understand the share before the switch goes on.
+- `capability-probe-staleness-risk` — WARN when
+  `last_sweep_seconds` exceeds the seven-day staleness window less
+  `modern_refresh_hours` and the sweep interval (about 3.75 days at the
+  defaults), or when the shadow's
+  `urnetwork_stats_provider_modern_gate_shadow{outcome="stale_evidence"}`
+  rises for a day: the probe no longer refreshes evidence before the gate
+  reads it as stale. Raise `concurrency` or find what fails first; never
+  lengthen the staleness window to hide it.
+- `capability-probe-teardown-errors` — WARN while
+  `close_errors_total` rises for an hour: capability tunnels fail to retire
+  their derived clients, which the prober reaper then owns. Cross-check
+  §2.25's derived-client retirement before attributing it. The capability
+  probe mints and retires its derived clients through the URL probe's
+  in-process credential owner, so
+  `urnetwork_egress_probe_internal_credentials_total` counts both probes;
+  this counter is the capability probe's own. `shard_cleanup_errors_total`
+  rising is a pass's prober shard whose drain or reap failed afterwards: the
+  pass stands, and the prober reaper retries the cleanup, so read the
+  reaper's progress on slot 255 before anything else.
+
+Not signals: a large `no_evidence` share in the first two days after the
+first deployment; `not_post_quantum` dominating the shadow; a provider that
+gives no evidence being measured again only by the next sweep (that is the
+probe's retry spacing, by design); `waiting` passes between sweeps; a
+modern provider's downgrade showing a sweep after its first negative
+reading (the hold, by design).
+
+Do not backfill evidence rows by hand, route evidence through URL probe
+runs, or switch the gate on while the first sweep is incomplete or
+`capability-probe-stalled` or `capability-probe-breaker` holds. A
+measurement records only when both capabilities read conclusively; a
+capability that was not tested is never recorded as a negative, and neither
+is a negative reading a pass withheld or a sweep holds, so "missing
+negatives" are not a defect to repair.
+
+Implementation convention: no monitor probe implements these classes yet;
+they are dashboard reads of the series above. A probe for them belongs in
+`signal_capability_probe.go` with the class names here.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`

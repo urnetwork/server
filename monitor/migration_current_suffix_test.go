@@ -184,6 +184,12 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert DROP COLUMN publish_time`},
 		{"required measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN publish_time SET NOT NULL`},
 		{"invented measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN publish_time SET DEFAULT now()`},
+		{"missing modern provider evidence", 836, `DROP TABLE provider_modern_evidence`},
+		{"modern provider evidence not one row per provider", 836, `ALTER TABLE provider_modern_evidence DROP CONSTRAINT provider_modern_evidence_pkey`},
+		{"nullable modern provider observation time", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN measured_at DROP NOT NULL`},
+		{"modern provider key exchange widened", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN key_exchange TYPE varchar(65)`},
+		{"modern provider receive window narrowed", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN max_receive_window_byte_count TYPE integer`},
+		{"invented modern provider run count", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN run_count SET DEFAULT 0`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

@@ -28,8 +28,11 @@ import (
 // still reach the provider. A force_minimum online answer is the Online pool,
 // which does not. Online includes every provider past these gates; quality and
 // speed additionally require a passing ratio of accepted URL outcomes within
-// eight hours. Only quality excludes ARIN non-quality entries. Performance and
-// the success ratio order admitted providers, never add gates.
+// eight hours and, once the modern provider gate is switched on, probe
+// evidence of end-to-end post-quantum encryption with resizable transfer
+// windows (egress_modern_provider.go), which is bucket membership too. Only
+// quality excludes ARIN non-quality entries. Performance and the success ratio
+// order admitted providers, never add gates.
 
 // The weights of the index and the bounds of its evidence, with the other
 // tunables of the egress rules. The `egress_index` block of provider.yml,
@@ -101,6 +104,11 @@ type EgressIndexSettings struct {
 	// (readProviderOnlineSuccessPreviousBaseline). Zero is the plain floor.
 	// `online_success_country_floor_margin` in provider.yml, within [0, 1].
 	OnlineSuccessCountryFloorMargin float64
+	// The modern provider gate (egress_modern_provider.go): a provider the
+	// probe has not shown to be modern leaves Quality and Speed, keeping
+	// Online. Off until the shadow counts are reviewed;
+	// `quality_speed_requires_modern_provider` in provider.yml.
+	QualitySpeedRequiresModernProvider bool
 }
 
 // The most a connect client adds to a provider's tier from what it sees
@@ -141,6 +149,9 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		// the 0.36 floor on 2026-10-13; the margin keeps such a country's
 		// exemption until its share passes the noise of one pass to the next.
 		OnlineSuccessCountryFloorMargin: 0.03,
+		// Shadow first (owner decision 2026-10-14): the gate is switched on
+		// only after its shadow counts are reviewed.
+		QualitySpeedRequiresModernProvider: false,
 	}
 }
 
@@ -165,12 +176,14 @@ type egressIndexSettingsBlock struct {
 // flag; an unreadable value, or one out of range, keeps the default and says
 // so, since a typo in one weight must not take the index away from the whole
 // fleet. The file is parsed once, and each top-level key read here is decoded
-// on its own: the egress_index block, and the URL-success rule's keys beside
-// subscriber_quality_policy_version. A value of the wrong type, or a key the
-// file gives twice, fails only that key; a bad value inside the block fails
-// the block. An unreadable kill switch, or a file that is not yaml at all,
-// disables the rule: it may be an attempt to turn the rule off, and the
-// behaviour before the rule is the one to fall back to.
+// on its own: the egress_index block, the URL-success rule's keys and the
+// modern provider gate's switch beside subscriber_quality_policy_version. A
+// value of the wrong type, or a key the file gives twice, fails only that
+// key; a bad value inside the block fails the block. An unreadable kill
+// switch, or a file that is not yaml at all, disables the rule: it may be an
+// attempt to turn the rule off, and the behaviour before the rule is the one
+// to fall back to. For the same reason an unreadable modern provider switch
+// leaves that gate off.
 func egressIndexSettings() *EgressIndexSettings {
 	settings := DefaultEgressIndexSettings()
 	resource, err := server.Config.SimpleResource(providerConfigResourceName)
@@ -210,8 +223,9 @@ func egressIndexSettings() *EgressIndexSettings {
 		return keyValues, keyCounts, nil
 	}()
 	if err != nil {
-		glog.Errorf("[egress]provider config is unreadable (%s); the egress index keeps its defaults and the online url-success rule is disabled\n", err)
+		glog.Errorf("[egress]provider config is unreadable (%s); the egress index keeps its defaults, the online url-success rule is disabled and the modern provider gate is off\n", err)
 		settings.OnlineRequiresUrlSuccess = false
+		settings.QualitySpeedRequiresModernProvider = false
 		return settings
 	}
 	// decodes one top-level key into target; an absent key leaves it as it is
@@ -253,6 +267,13 @@ func egressIndexSettings() *EgressIndexSettings {
 		} else {
 			glog.Errorf("[egress]provider config online_success_country_floor_margin = %v is outside [0, 1]; kept %v\n", *margin, settings.OnlineSuccessCountryFloorMargin)
 		}
+	}
+	var modernGate *bool
+	if err := decode("quality_speed_requires_modern_provider", &modernGate); err != nil {
+		glog.Errorf("[egress]provider config quality_speed_requires_modern_provider is unreadable (%s); the modern provider gate is off\n", err)
+		settings.QualitySpeedRequiresModernProvider = false
+	} else if modernGate != nil {
+		settings.QualitySpeedRequiresModernProvider = *modernGate
 	}
 
 	var overrides *egressIndexSettingsBlock
@@ -440,8 +461,9 @@ func providerUrlProbeSuccessWeight(counts ProviderEgressHealthCounts) float64 {
 // also excludes every bucket but is no common gate: probes, explicit client
 // ids and force_minimum quality or speed answers keep the provider (a
 // force_minimum online answer is the Online pool, which does not).
-// Health/unprobed and ARIN non-quality explain missing native membership while
-// preserving online supply.
+// Health/unprobed, not modern (the modern provider gate, while it is on) and
+// ARIN non-quality explain missing native membership while preserving online
+// supply.
 // Legacy blackhole/country reason labels remain for metric compatibility only.
 const (
 	ProviderExcludedBlackhole      = "blackhole"
@@ -453,13 +475,14 @@ const (
 	ProviderExcludedArinNonQuality = "arin_non_quality"
 	ProviderExcludedReliability    = "reliability"
 	ProviderExcludedNoSuccess      = "no_success"
+	ProviderExcludedNotModern      = "not_modern"
 )
 
 // Every reason label, in the order the labels were added. A provider counts
 // under the first reason decideProviderEgress finds, in this precedence:
 // reliability, arin_risk, tls, no_success, then unprobed or health (exclusive
-// of each other), then arin_non_quality. Blackhole and country are never
-// reported any more.
+// of each other), then not_modern, then arin_non_quality. Blackhole and
+// country are never reported any more.
 var ProviderExcludedReasons = []string{
 	ProviderExcludedBlackhole,
 	ProviderExcludedTls,
@@ -470,6 +493,7 @@ var ProviderExcludedReasons = []string{
 	ProviderExcludedArinNonQuality,
 	ProviderExcludedReliability,
 	ProviderExcludedNoSuccess,
+	ProviderExcludedNotModern,
 }
 
 // What the rules read about one provider.
@@ -488,6 +512,11 @@ type providerEgressFacts struct {
 	// and the filter's guard applies the rule in the published country (it
 	// is enabled there and the country is not exempt)
 	noUrlSuccess bool
+	// the modern provider gate: the outcome the latest probe evidence gives
+	// the provider, "" read as no evidence, and whether the gate holds
+	// Quality and Speed to it
+	modernOutcome string
+	modernGate    bool
 }
 
 // What the rules do with one provider.
@@ -504,6 +533,13 @@ type providerEgressDecision struct {
 	// advertised supply.
 	online  bool
 	counted bool
+	// Native membership in each mode before the modern provider gate, and
+	// the gate's outcome for a provider admitted to either ("" otherwise).
+	// The gate's shadow counts read them, so they read the same whether the
+	// gate is on or off.
+	qualityBeforeModernGate bool
+	speedBeforeModernGate   bool
+	modernOutcome           string
 }
 
 // Gathers what the rules read about one provider from this pass's bulk loads
@@ -538,6 +574,8 @@ func (self providerCountFilter) egressFacts(
 		// pass's own settings, or the score export's for a scoped reader
 		noUrlSuccess: providerCarriesNoUrl(counts, urlIndex) &&
 			self.onlineSuccessBaseline.appliesIn(publishedCountryCode),
+		modernOutcome: classifyProviderModernEvidence(self.modernEvidence[clientId], self.now),
+		modernGate:    settings.QualitySpeedRequiresModernProvider,
 	}
 }
 
@@ -597,13 +635,29 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			counted: true,
 		}
 	default:
-		decision := providerEgressDecision{
-			quality: !facts.arinNonQuality,
-			speed:   true,
-			online:  true,
-			counted: true,
+		modernOutcome := facts.modernOutcome
+		if modernOutcome == "" {
+			modernOutcome = ProviderModernOutcomeNoEvidence
 		}
-		if facts.arinNonQuality {
+		decision := providerEgressDecision{
+			quality:                 !facts.arinNonQuality,
+			speed:                   true,
+			online:                  true,
+			counted:                 true,
+			qualityBeforeModernGate: !facts.arinNonQuality,
+			speedBeforeModernGate:   true,
+			modernOutcome:           modernOutcome,
+		}
+		switch {
+		case facts.modernGate && modernOutcome != ProviderModernOutcomeModern:
+			// The probe has not shown end-to-end post-quantum encryption with
+			// resizable transfer windows: out of both native buckets, still
+			// online and counted. Probing goes on, and evidence of both
+			// brings the provider back on the next pass.
+			decision.quality = false
+			decision.speed = false
+			decision.reason = ProviderExcludedNotModern
+		case facts.arinNonQuality:
 			decision.reason = ProviderExcludedArinNonQuality
 		}
 		return decision
@@ -873,6 +927,11 @@ type ProviderEgressCounts struct {
 	ReasonCounts map[string]int64
 	// the largest index the settings can produce
 	MaxIndex int
+	// the modern provider gate's shadow: native bucket (quality or speed),
+	// then the gate's outcome, to the providers the other rules admit to
+	// the bucket, whether or not the gate is on; every bucket and outcome
+	// present
+	ModernGateShadowCounts map[string]map[string]int64
 }
 
 // Decides every connected, valid, active, top-level provider with a Public
@@ -883,9 +942,10 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 	egressTestEnabled := providerEgressTestEnabled()
 
 	counts := &ProviderEgressCounts{
-		BucketIndexCounts: map[string]map[string]int64{},
-		ReasonCounts:      map[string]int64{},
-		MaxIndex:          settings.MaxIndex(),
+		BucketIndexCounts:      map[string]map[string]int64{},
+		ReasonCounts:           map[string]int64{},
+		MaxIndex:               settings.MaxIndex(),
+		ModernGateShadowCounts: newProviderModernGateShadowCounts(),
 	}
 	for _, bucket := range ProviderEgressBuckets {
 		counts.BucketIndexCounts[bucket] = map[string]int64{}
@@ -960,6 +1020,7 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 		if decision.reason != "" {
 			counts.ReasonCounts[decision.reason] += 1
 		}
+		countProviderModernGateShadow(counts.ModernGateShadowCounts, decision)
 	}
 	return counts
 }
@@ -1009,8 +1070,13 @@ type ProviderEgressInspection struct {
 	OnlineSuccessCountryMeasured     int
 	OnlineSuccessCountrySucceeded    int
 	OnlineSuccessCountryExempt       bool
-	EgressTestEnabled                bool
-	Settings                         *EgressIndexSettings
+	// the modern provider gate: the provider's evidence row, nil without
+	// one, and the outcome it gives now, which the decision below applies
+	// when Settings switches the gate on
+	ModernEvidence    *ProviderModernEvidenceRecord
+	ModernOutcome     string
+	EgressTestEnabled bool
+	Settings          *EgressIndexSettings
 	// the decision, as the client-score job makes it
 	Reason       string
 	HardExcluded bool
@@ -1102,6 +1168,8 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	inspection.ArinRisk = facts.arinRisk
 	inspection.ArinNonQuality = facts.arinNonQuality
 	inspection.ReliabilityFailed = facts.reliabilityFailed
+	inspection.ModernEvidence = countFilter.modernEvidence[clientId]
+	inspection.ModernOutcome = facts.modernOutcome
 	inspection.Reason = decision.reason
 	inspection.HardExcluded = decision.hardExcluded
 	inspection.Quality = decision.quality

@@ -1455,11 +1455,14 @@ func TestRedisDatabaseLeaseAcquireClaimsOwnTokenAfterLostSetResponse(t *testing.
 
 	token := testRedisLeaseToken()
 
-	client := redis.NewClient(&redis.Options{
+	// Logical db 0 sends no SELECT; only the guard keeps a redial local.
+	options := &redis.Options{
 		Addr:     authority,
 		Password: password,
 		DB:       testRedisLeaseCoordinatorDb,
-	})
+	}
+	configureTestEnvRedisDial(currentTestEnvDialGuard(), options, NewDialer(5*time.Second).DialContext)
+	client := redis.NewClient(options)
 	defer client.Close()
 
 	config, err := client.ConfigGet(ctx, "databases").Result()
@@ -1531,11 +1534,13 @@ func TestRedisDatabaseLeaseReleaseDetectsForeignOwner(t *testing.T) {
 		r := recover()
 		// release closes lease.client before panicking; clean the stomped
 		// key with a fresh client so the db frees up for concurrent runs
-		cleanup := redis.NewClient(&redis.Options{
+		cleanupOptions := &redis.Options{
 			Addr:     authority,
 			Password: password,
 			DB:       testRedisLeaseCoordinatorDb,
-		})
+		}
+		configureTestEnvRedisDial(currentTestEnvDialGuard(), cleanupOptions, NewDialer(5*time.Second).DialContext)
+		cleanup := redis.NewClient(cleanupOptions)
 		cleanup.Del(context.Background(), lease.key)
 		cleanup.Close()
 		if r == nil {

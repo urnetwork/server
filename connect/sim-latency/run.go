@@ -364,7 +364,9 @@ func Run(options *RunOptions) (retErr error) {
 	}
 
 	if options.Reset {
-		resetLocalState(ctx)
+		if err := resetLocalState(ctx); err != nil {
+			return incompleteError("state_reset_refused", "state reset", err)
+		}
 		if ctx.Err() != nil {
 			return incompleteError("interrupted", "state reset", ctx.Err())
 		}

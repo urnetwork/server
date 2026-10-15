@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/urnetwork/server"
 )
 
 const MaxRows = 256
@@ -123,7 +125,9 @@ func (self *ReadError) Unwrap() error     { return self.cause }
 func refuse(code string, err error) error { return &ReadError{Code: code, cause: err} }
 
 // The explicit URI cannot inherit another host/database/user or select failover.
-// TLS is mandatory off loopback; verify-full is the sole remote TLS mode.
+// TLS is mandatory off loopback; verify-full is the sole remote TLS mode. In a
+// WARP_ENV=local process the connection dials only the launcher-attested
+// endpoints, as every local PostgreSQL connection does.
 func connectionConfig(dsn string, source Source) (*pgx.ConnConfig, error) {
 	if err := source.Validate(); err != nil {
 		return nil, refuse("identity", err)
@@ -155,6 +159,7 @@ func connectionConfig(dsn string, source Source) (*pgx.ConnConfig, error) {
 	cfg.ConnectTimeout = ReadAttemptTimeout
 	cfg.DefaultQueryExecMode = pgx.QueryExecModeExec
 	cfg.Fallbacks = nil
+	server.ConfigureLocalPgDial(cfg)
 	return cfg, nil
 }
 

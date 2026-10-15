@@ -244,7 +244,13 @@ func privateResidentHeartbeatResources(t *testing.T) (context.Context, *pgx.Conn
 		popRedisConfig()
 		popRedis()
 	})
-	pg, err := pgx.Connect(ctx, "postgres://postgres:urnetwork-local-test@"+pgAddress+"/postgres?sslmode=disable")
+	// The fixture's own connection dials only attested endpoints, as its pools do.
+	pgConfig, err := pgx.ParseConfig("postgres://postgres:urnetwork-local-test@" + pgAddress + "/postgres?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.ConfigureLocalPgDial(pgConfig)
+	pg, err := pgx.ConnectConfig(ctx, pgConfig)
 	if err != nil {
 		t.Fatal(err)
 	}

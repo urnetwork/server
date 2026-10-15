@@ -140,6 +140,8 @@ Usage:
     bringyourctl st v2-activation
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
+    bringyourctl grafana reconcile-alerting [--grafana_url=<grafana_url>]
+    bringyourctl grafana test-alert [--grafana_url=<grafana_url>]
 
 Options:
     -h --help     Show this screen.
@@ -481,6 +483,10 @@ func main() {
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
 			grafanaLoadDefaults(opts)
+		} else if reconcileAlerting, _ := opts.Bool("reconcile-alerting"); reconcileAlerting {
+			grafanaReconcileAlertingCommand(opts)
+		} else if testAlert, _ := opts.Bool("test-alert"); testAlert {
+			grafanaTestAlertCommand(opts)
 		}
 	} else {
 		fmt.Println(usage)
@@ -2575,6 +2581,22 @@ func providerInspect(opts docopt.Opts) {
 		)
 	}
 	fmt.Printf("  online url-success rule: %s; country exempt %t (this host's provider.yml: rule %t, country floor %v, margin %v)\n", countryGuard, inspection.OnlineSuccessCountryExempt, inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, inspection.Settings.OnlineSuccessCountryFloorMargin)
+	// the evidence the probe recorded of the provider's end of its session,
+	// and what the gate decides from it now
+	modernEvidence := "none"
+	if evidence := inspection.ModernEvidence; evidence != nil {
+		modernEvidence = fmt.Sprintf(
+			"post-quantum %t (key exchange %s), resizable windows %t (largest %d bytes), measured %s, first measured %s, %d runs",
+			evidence.PostQuantum,
+			optionalString(evidence.KeyExchange),
+			evidence.WindowResizable,
+			evidence.MaxReceiveWindowByteCount,
+			optionalTime(&evidence.MeasuredAt),
+			optionalTime(&evidence.FirstMeasuredAt),
+			evidence.RunCount,
+		)
+	}
+	fmt.Printf("  modern provider evidence %s; outcome %s (evidence is stale at %s); gate %t (quality_speed_requires_modern_provider in this host's provider.yml)\n", modernEvidence, optionalString(inspection.ModernOutcome), model.ProviderModernEvidenceMaxAge, inspection.Settings.QualitySpeedRequiresModernProvider)
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)

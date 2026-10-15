@@ -3,6 +3,27 @@
 # Configure and preflight the local PostgreSQL/Redis contract used by server
 # integration tests. Source this before a direct `go test` invocation; test.sh
 # sources it automatically.
+#
+# A successful preflight exports WARP_TEST_ENV_ATTESTED_ADDRS, the ip:port
+# endpoints it validated. Go test processes dial PostgreSQL and Redis only at
+# those endpoints for the whole run, because a service name that re-resolves
+# after the launcher exits falls through to whatever answers next: public DNS
+# answered the local service names with 127.0.0.1 until those records were
+# deleted on 2026-10-14, and a stale cache or a hosts edit still can. Any
+# failure leaves the variable unset, and the integration fixtures then refuse
+# to start.
+#
+# In managed-local mode a successful preflight also exports
+# WARP_TEST_ENV_LAUNCHER_VAULT_HOME: the vault it selected by the launcher's own
+# rules, whose local pg.yml and redis.yml authorities it checked against the
+# launcher attestation. Nothing proves the launcher started from that vault;
+# credentials from another one fail to authenticate. A Go test binary reads
+# only fixture vaults; from that vault it reads just pg.yml, pg_maintenance.yml
+# and redis.yml in its real local directory, while the attestation stays valid
+# and its dial guard attests the launcher's endpoints, and every other resource
+# from local/testdata/vault (env_test_vault.go). That is the sanctioned way to
+# run DB tests on a developer machine whose launcher uses a real vault's local
+# credentials. Do not set URNETWORK_TEST_REAL_VAULT=1 for DB tests.
 
 test_env_error() {
     printf 'test environment: %s\n' "$*" >&2
@@ -360,6 +381,202 @@ test_env_split_authority() {
     fi
 }
 
+# Accepts the dotted IPv4 and colon-hex IPv6 shapes an attested endpoint may
+# carry. The Go dial guard parses every exported endpoint strictly.
+test_env_is_address_literal() {
+    local host="$1"
+    [[ "$host" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && return 0
+    [[ "$host" == *:* && "$host" =~ ^[0-9A-Fa-f:.]+$ ]]
+}
+
+# Matches 127.0.0.0/8 and ::1, including the IPv4-mapped and zero-padded
+# spellings a resolver may print.
+test_env_is_loopback_address() {
+    local address="$1"
+    [[ "$address" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && return 0
+    [[ "$address" =~ ^::[Ff]{4}:127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && return 0
+    [[ "$address" =~ ^[0:]*:0*1$ ]]
+}
+
+# Matches 0.0.0.0 and ::, which name no single service host.
+test_env_is_unspecified_address() {
+    local address="$1"
+    [[ "$address" =~ ^0+(\.0+){3}$ || "$address" =~ ^[0:]+$ ]]
+}
+
+# Prints each address the host's ordinary resolver returns for a name, one per
+# line. WARP_TEST_ENV_HOST_RESOLVER replaces it in hermetic harness tests.
+test_env_resolve_host() {
+    local host_name="$1"
+    local resolver_command="${WARP_TEST_ENV_HOST_RESOLVER:-}"
+    if [[ -n "$resolver_command" ]]; then
+        if [[ ! -x "$resolver_command" ]]; then
+            test_env_error "configured host resolver is not executable: $resolver_command"
+            return 1
+        fi
+        "$resolver_command" "$host_name"
+        return
+    fi
+    if command -v getent >/dev/null 2>&1; then
+        getent ahosts "$host_name" | awk '{ print $1 }' | LC_ALL=C sort -u
+        return "${PIPESTATUS[0]}"
+    fi
+    if command -v dscacheutil >/dev/null 2>&1; then
+        dscacheutil -q host -a name "$host_name" |
+            awk '$1 == "ip_address:" || $1 == "ipv6_address:" { print $2 }' |
+            LC_ALL=C sort -u
+        return "${PIPESTATUS[0]}"
+    fi
+    test_env_error "missing prerequisite: getent or dscacheutil (required to check service-name resolution)"
+    return 1
+}
+
+# A launcher-managed name must resolve only to the launcher's dedicated address.
+# Public DNS answered both local service names with 127.0.0.1 until 2026-10-14,
+# and a stale cache or a hosts edit can still answer loopback, where a
+# production data tunnel can listen, so a withdrawn or shadowed hosts mapping
+# stops the run here instead of reaching whatever listens on loopback.
+test_env_require_attested_resolution() {
+    local service_name="$1"
+    local host_name="$2"
+    local port="$3"
+    local attested_address="$4"
+    local resolved
+    local address
+    local resolved_count=0
+
+    if test_env_is_address_literal "$host_name"; then
+        resolved="$host_name"
+    elif ! resolved="$(test_env_resolve_host "$host_name")"; then
+        test_env_error "$service_name host $host_name did not resolve"
+        return 1
+    fi
+    while IFS= read -r address; do
+        if [[ -z "$address" ]]; then
+            continue
+        fi
+        resolved_count=$((resolved_count + 1))
+        if test_env_is_loopback_address "$address"; then
+            test_env_error \
+                "$service_name host $host_name (port $port) resolves to loopback $address," \
+                "where a production data tunnel can listen; refusing. Is ./local/run-local.sh still up?"
+            return 1
+        fi
+        if [[ "$address" != "$attested_address" ]]; then
+            test_env_error \
+                "$service_name host $host_name (port $port) resolves to $address," \
+                "not the launcher-attested $attested_address"
+            return 1
+        fi
+    done <<< "$resolved"
+    if [[ "$resolved_count" == 0 ]]; then
+        test_env_error "$service_name host $host_name resolved to no address"
+        return 1
+    fi
+}
+
+# The launcher's readiness record names the only address its names may reach.
+test_env_require_managed_resolution() {
+    local postgres_host="$1"
+    local postgres_port="$2"
+    local redis_host="$3"
+    local redis_port="$4"
+    local attested_address="$LOCAL_RUN_READY_HOST_IP"
+
+    if ! test_env_is_address_literal "$attested_address" ||
+        test_env_is_loopback_address "$attested_address" ||
+        test_env_is_unspecified_address "$attested_address"; then
+        test_env_error "launcher-attested address $attested_address is not a dedicated non-loopback address"
+        return 1
+    fi
+    test_env_require_attested_resolution postgres "$postgres_host" "$postgres_port" "$attested_address" || return $?
+    test_env_require_attested_resolution redis "$redis_host" "$redis_port" "$attested_address" || return $?
+    TEST_ENV_DIAL_ADDRESS="$attested_address"
+}
+
+# Unmanaged portable services have no launcher record. An address-literal
+# authority attests itself, except that loopback is accepted only under the
+# private portable root, which names its own 127.0.0.1 endpoints; elsewhere a
+# loopback service may be a production data tunnel. A name is resolved once and
+# its single address is pinned for the whole run; a name that resolves to
+# loopback is refused, since public DNS answered the local service names that
+# way until 2026-10-14 and a stale answer still can.
+test_env_pin_unmanaged_service() {
+    local service_name="$1"
+    local host_name="$2"
+    local resolved
+    local address
+    local addresses=()
+
+    if test_env_is_address_literal "$host_name"; then
+        if test_env_is_loopback_address "$host_name" && [[ -z "${WARP_TEST_ENV_PORTABLE_ROOT:-}" ]]; then
+            test_env_error \
+                "$service_name authority $host_name is loopback, where a production data tunnel can listen;" \
+                "loopback services need the private portable root (WARP_TEST_ENV_PORTABLE_ROOT) with explicit" \
+                "127.0.0.1 authorities"
+            return 1
+        fi
+        TEST_ENV_DIAL_ADDRESS="$host_name"
+        return 0
+    fi
+    if ! resolved="$(test_env_resolve_host "$host_name")"; then
+        test_env_error "$service_name host $host_name did not resolve"
+        return 1
+    fi
+    while IFS= read -r address; do
+        if [[ -n "$address" ]]; then
+            addresses+=("$address")
+        fi
+    done <<< "$resolved"
+    if [[ "${#addresses[@]}" != 1 ]] || ! test_env_is_address_literal "${addresses[0]}"; then
+        test_env_error \
+            "$service_name host $host_name resolves to ${#addresses[@]} addresses;" \
+            "an unmanaged service name must resolve to exactly one address to be pinned"
+        return 1
+    fi
+    if test_env_is_loopback_address "${addresses[0]}"; then
+        test_env_error \
+            "$service_name host $host_name resolves to loopback ${addresses[0]}, where a production data" \
+            "tunnel can listen; name loopback services by explicit 127.0.0.1 authorities through" \
+            "WARP_TEST_ENV_PORTABLE_ROOT"
+        return 1
+    fi
+    TEST_ENV_DIAL_ADDRESS="${addresses[0]}"
+}
+
+# The loopback ports a production data tunnel forwards
+# (xops/bin/by-patch-main-data): PostgreSQL, PgBouncer and the Redis cluster
+# nodes.
+test_env_is_loopback_tunnel_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 1
+    (( 10#$port == 5432 || 10#$port == 6432 || (10#$port >= 6379 && 10#$port <= 6427) ))
+}
+
+# No mode may attest or probe a loopback endpoint on a tunnel port.
+test_env_refuse_loopback_tunnel_endpoint() {
+    local service_name="$1"
+    local address="$2"
+    local port="$3"
+    if test_env_is_loopback_address "$address" && test_env_is_loopback_tunnel_port "$port"; then
+        test_env_error \
+            "$service_name endpoint $address:$port is a loopback production data tunnel port" \
+            "(5432, 6432, 6379-6427); refusing"
+        return 1
+    fi
+}
+
+# Formats one attested endpoint the way the Go guard parses it.
+test_env_format_endpoint() {
+    local address="$1"
+    local port="$2"
+    if [[ "$address" == *:* ]]; then
+        TEST_ENV_ENDPOINT="[$address]:$port"
+    else
+        TEST_ENV_ENDPOINT="$address:$port"
+    fi
+}
+
 test_env_probe_service() {
     local service_name="$1"
     local host="$2"
@@ -626,6 +843,9 @@ test_env_preflight() {
     local pg_port
     local redis_host
     local redis_port
+    local pg_dial_address
+    local redis_dial_address
+    local pg_endpoint
 
     for command_name in go grep find dirname sort awk; do
         if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -721,27 +941,67 @@ test_env_preflight() {
         return 1
     fi
 
+    # Each mode settles the one address per service its clients may dial. The
+    # probes and the exported attestation use those literals, never a name that
+    # could resolve somewhere else later in the run.
     if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then
         test_env_validate_suite_proxy_snapshot || {
             test_env_error "suite proxy state changed before service probes"
             return 1
         }
+        # The snapshot binds both authorities to its direct host-IP endpoint.
+        pg_dial_address="$pg_host"
+        redis_dial_address="$redis_host"
+    elif [[ "${WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES:-0}" == "1" ]]; then
+        test_env_pin_unmanaged_service postgres "$pg_host" || return $?
+        pg_dial_address="$TEST_ENV_DIAL_ADDRESS"
+        test_env_pin_unmanaged_service redis "$redis_host" || return $?
+        redis_dial_address="$TEST_ENV_DIAL_ADDRESS"
     else
         test_env_validate_launcher "$pg_host" "$pg_port" "$redis_host" "$redis_port" || return $?
+        test_env_require_managed_resolution "$pg_host" "$pg_port" "$redis_host" "$redis_port" || return $?
+        pg_dial_address="$TEST_ENV_DIAL_ADDRESS"
+        redis_dial_address="$TEST_ENV_DIAL_ADDRESS"
     fi
-    test_env_probe_service postgres "$pg_host" "$pg_port" || return $?
-    test_env_probe_service redis "$redis_host" "$redis_port" || return $?
+    test_env_refuse_loopback_tunnel_endpoint postgres "$pg_dial_address" "$pg_port" || return $?
+    test_env_refuse_loopback_tunnel_endpoint redis "$redis_dial_address" "$redis_port" || return $?
+    test_env_probe_service postgres "$pg_dial_address" "$pg_port" || return $?
+    test_env_probe_service redis "$redis_dial_address" "$redis_port" || return $?
     if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then
         test_env_validate_suite_proxy_snapshot || {
             test_env_error "suite proxy state changed during service probes"
             return 1
         }
     fi
+
+    # The Go clients refuse every PostgreSQL and Redis dial outside these
+    # endpoints for the rest of the run (test_env_dial_guard.go).
+    test_env_format_endpoint "$pg_dial_address" "$pg_port"
+    pg_endpoint="$TEST_ENV_ENDPOINT"
+    test_env_format_endpoint "$redis_dial_address" "$redis_port"
+    export WARP_TEST_ENV_ATTESTED_ADDRS="$pg_endpoint,$TEST_ENV_ENDPOINT"
+}
+
+# Names the vault selected by the launcher's own rules, whose PostgreSQL and
+# Redis resource authorities the preflight just checked against the launcher
+# attestation, for the Go test vault guard (env_test_vault.go). Only the
+# managed-local mode has a launcher; under the suite proxy or the portable
+# services a test reads its vault only if that vault is a fixture root.
+test_env_export_launcher_vault() {
+    if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ||
+          "${WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES:-0}" == 1 ]]; then
+        return 0
+    fi
+    export WARP_TEST_ENV_LAUNCHER_VAULT_HOME="$WARP_VAULT_HOME"
 }
 
 test_env_main() {
+    # A failed preflight must not leave an earlier attestation exported.
+    unset WARP_TEST_ENV_ATTESTED_ADDRS
+    unset WARP_TEST_ENV_LAUNCHER_VAULT_HOME
     test_env_configure || return $?
     test_env_preflight || return $?
+    test_env_export_launcher_vault
 }
 
 test_env_main

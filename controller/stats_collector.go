@@ -54,6 +54,7 @@ package controller
 //	urnetwork_stats_provider_egress_index            connected valid public providers per bucket and egress index {bucket, index} (db)
 //	urnetwork_stats_provider_excluded                of those, the ones the egress rules leave out of a bucket {reason} (db)
 //	urnetwork_stats_provider_online_success_exempt   per country the URL-success rule exempts, the providers the exemption keeps online {country_code} (redis, written by the score export)
+//	urnetwork_stats_provider_modern_gate_shadow      of the providers the other rules admit to quality and speed, those the modern provider gate keeps and each reason it would take one out {bucket, outcome} (db)
 //
 // the contract gauges are internal (connect/EXTENDER.md M3, M4) and are read
 // only by grafana/dashboards/providers.json:
@@ -319,6 +320,19 @@ var statsProviderOnlineSuccessExemptGauge = newStatsGaugeVec(
 	"provider_online_success_exempt",
 	"Providers measured without a URL success that the URL-success rule keeps online, per country it exempts",
 	"country_code",
+)
+
+// The modern provider gate's shadow (FP2FIX.md, 2026-10-14): of the
+// providers the other rules admit to quality and to speed, how many the probe
+// has shown to be modern and why each other one is not, whether or not
+// quality_speed_requires_modern_provider is on. Every outcome but modern is
+// what the gate takes out of the bucket once it is on. Two buckets and five
+// outcomes, every series published every refresh, zero included.
+var statsProviderModernGateShadowGauge = newStatsGaugeVec(
+	"provider_modern_gate_shadow",
+	"Connected valid public providers the other egress rules admit to quality or speed, by what the modern provider gate decides for them",
+	"bucket",
+	"outcome",
 )
 
 var statsProviderEgressAvailableGauge = newStatsGauge(
@@ -812,6 +826,17 @@ func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {
 		})
 	}
 	statsProviderExcludedGauge.replace(reasonValues)
+
+	shadowValues := []statsLabeledValue{}
+	for _, bucket := range model.ProviderModernGateBuckets {
+		for _, outcome := range model.ProviderModernOutcomes {
+			shadowValues = append(shadowValues, statsLabeledValue{
+				labelValues: []string{bucket, outcome},
+				value:       float64(counts.ModernGateShadowCounts[bucket][outcome]),
+			})
+		}
+	}
+	statsProviderModernGateShadowGauge.replace(shadowValues)
 }
 
 // Publishes the countries the URL-success rule exempts under the guard the

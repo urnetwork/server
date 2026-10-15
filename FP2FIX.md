@@ -1,5 +1,22 @@
 # FindProviders2 supply and quality-probe repair plan
 
+Latest user decision, 2026-10-14: option 4, probe-verified, shadow first.
+**Quality and Speed will require a modern provider: one the capability probe
+has measured, on a real client to provider session, negotiating end-to-end
+post-quantum encryption (the TLS 1.3 hybrid X25519MLKEM768) and advertising
+resizable transfer windows (acks carrying `receive_window_byte_count`).**
+Versions are not trusted: about 72% of providers run a custom "v3.23.0-fix"
+lineage. Online does not require it. The gate ships off
+(`quality_speed_requires_modern_provider: false` in provider.yml) while the
+dashboard counts and every score export count what it would take out, and it
+is switched on only after those shadow numbers are reviewed. Its evidence table is migration 836, which Main
+gets only once the owner approves applying it. Owner decision, the same day:
+the evidence comes from a separate capability probe task
+([server/capprobe](capprobe/README.md)), not from the URL measurement tunnel,
+whose encryption stays off. See
+[the modern provider gate](#modern-provider-gate-2026-10-14) and the gate
+matrix below.
+
 Latest user decision, 2026-10-13: **every bucket, Online included, requires at
 least one accepted measured URL success in the eight-hour evidence window,
 unless the provider has fewer than two measured runs.** A provider with
@@ -151,11 +168,18 @@ reclassifying the fleet.
 | At least one measured URL success in eight hours, or fewer than two measured runs | Required | Required | Required |
 | URL success ratio ≥ 0.8 | Required | Required | Not required |
 | Direct or identified-ISP subscriber evidence and no quality exception | Required under policy two | Not required | Not required |
+| Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Required once switched on | Required once switched on | Not required |
 
 This matrix is the bucket admission contract. Probe admission has a different
 purpose: every provider passing reliability and the ARIN **risk** gate is
 eligible for paced URL probes. ARIN quality exceptions do not stop probes;
 security-quarantined providers also need probes to establish recovery.
+
+The modern provider row (2026-10-14) is native bucket membership too, and only
+once `quality_speed_requires_modern_provider` is on; until then the dashboard
+counts and every score export count what it would take out. Probe admission, explicit client ids,
+`force_minimum` and Online never read it. See
+[the modern provider gate](#modern-provider-gate-2026-10-14).
 
 The URL-success row (2026-10-13) is a passing condition on bucket membership,
 not a common gate. Probe admission, the rolling quota and its census never read
@@ -260,6 +284,145 @@ queue in `model/provider_egress_location_model.go` starts with connected,
 valid, Public-key providers but does not apply the proposed reliability and
 ARIN gates. `model/network_client_location_model.go` already has the intended
 quality/speed/online backfill order; preserve it while fixing membership.
+
+### Modern provider gate (2026-10-14)
+
+Owner decision, 2026-10-14: option 4, probe-verified, shadow first. A provider
+is modern when the capability probe has measured, on a real client to
+provider session, both end-to-end post-quantum encryption (the TLS 1.3 hybrid
+X25519MLKEM768, which providers answer since v2026.7.21-999024260) and
+resizable transfer windows (acks carrying `receive_window_byte_count`, since
+v2026.9.14-1046484290). Versions are not read. The gate is
+`model/egress_modern_provider.go`; its evidence is
+[server/capprobe](capprobe/README.md). A second owner decision the same day
+put the evidence in a separate capability probe task rather than in the URL
+measurement tunnel: sealing a URL measurement would stall it whenever a
+provider cannot resolve the probe client's key.
+
+- **Evidence.** The capability probe (`work.CapabilityProbe`, a recurring
+  taskworker task) measures each provider in a short tunnel of its own and
+  records a conclusive measurement through
+  `model.RecordProviderModernEvidenceHoldingDowngrade` in
+  `provider_modern_evidence` (migration 836), one row per provider:
+  post_quantum, key_exchange, window_resizable,
+  max_receive_window_byte_count, measured_at, first_measured_at, run_count.
+  The latest observation wins and counts a run. A retried write changes
+  nothing, an older delayed one only moves first_measured_at, and a
+  conflicting one at the same instant keeps the less modern reading of each
+  capability. A session without end-to-end encryption is not post-quantum
+  whatever else it reports. Evidence observed more than a minute ahead, with
+  a negative window or an unstorable key exchange name is refused and logged.
+  A measurement that observed nothing records nothing, and neither does one
+  where either capability went untested. Two guards keep a passing fault from
+  recording a negative, which takes a provider out once the gate is on: a
+  pass records negative readings only once one of its measurements has
+  negotiated a session with some provider, so a fault on the probe's own
+  side, which shows as no provider negotiating, records nothing (the
+  breaker); and a negative reading over modern evidence still fresh is held
+  back until a negative reading in a later sweep confirms it, the hold
+  carried in the task's arguments (capprobe/README.md, "Negative readings").
+  provider_egress_health_history, the URL due queue and the URL quota are
+  not touched. The URL probe's
+  submission carries no evidence: the gate's first cut put an optional
+  `modern_evidence` on it, read through an `egresshealth.ModernEvidenceSource`
+  transport, and the capability probe branch removed that path, since a URL
+  tunnel with encryption off could only ever report nothing.
+- **Capability probe.** Each pass continues a sweep over the connected, valid
+  providers in client id order, a bounded page at a time, and keeps the due
+  ones (no evidence, modern evidence older than `modern_refresh_hours`, other
+  evidence older than `other_refresh_hours`, 72 and 72 by default) that the
+  egress rules admit to Quality or Speed before the gate, so a provider the
+  gate takes out still gets measured. It measures up to `limit` (64) of them,
+  `concurrency` (16) at once, each in a tunnel whose window pings the
+  provider and whose clients attempt opportunistic end-to-end sessions after
+  the platform has processed their key registration, recording into connect's
+  `PeerCapabilityRecorder`. A measurement stops once both capabilities
+  read conclusively (an acknowledgement read the window; the session
+  negotiated, sealed or after a ten-second seal grace, or its ClientHello
+  went unanswered for a whole 60 s establishment window counted from both the
+  send path's acceptance of the first ClientHello and the first
+  acknowledgement), and at
+  `measure_timeout_seconds` (120) whatever the reading. A provider that gave
+  no evidence is retried by the next sweep, which starts at least
+  `min_sweep_interval_minutes` (360) after the last one started. A pass
+  selects from the database first, and one that measures runs in a prober
+  shard of its own (slot 255, which the URL probe's `shard_count`, at most
+  255, never reaches): a private network, credential parent and balance, so
+  its load and funding are apart from the URL probe's quota and budget. A
+  pass with nothing to measure takes no shard. Settings are
+  `capability_probe.yml`. The probe ships switched off and then schedules
+  nothing at all; `enabled: true` there and a taskworker restart switch it
+  on (capprobe/README.md, "Switching it on"). Metrics are
+  `urnetwork_capability_probe_*` on the egress probes dashboard, and
+  SIGNALS.md §2.19g reads them.
+- **Outcomes.** Each pass classifies a provider's row: `modern`,
+  `not_post_quantum`, `no_resizable_windows`, `no_evidence` or
+  `stale_evidence`. Age is tested first: evidence exactly seven days old is
+  stale, as a URL outcome exactly eight hours old is. Then post-quantum, then
+  windows, so a row without either is `not_post_quantum`. Seven days outlasts
+  measurements that observe nothing, such as a probe outage or a provider
+  that could not be reached. The capability probe refreshes a provider's
+  evidence after three days by default, and its settings refuse a refresh
+  that, with one sweep interval's delay, would not land inside the seven, so
+  a downgrade shows at the provider's next measurement, within about three
+  days, and a downgrade of modern evidence a sweep later still, when a
+  second negative reading confirms it. With 16 tunnels at a time the probe
+  measures several hundred providers an hour, so the first sweep over the
+  fleet's Quality and Speed providers takes about two days, and until it
+  has, the shadow's `no_evidence` is large.
+- **Shadow counts.** For the providers the other rules admit to Quality and to
+  Speed, the passes count the gate's outcome whether the gate is on or off.
+  The dashboard counts publish
+  `urnetwork_stats_provider_modern_gate_shadow{bucket,outcome}` (connected
+  valid public providers) on the providers dashboard. Every score export logs
+  one `[nclm]modern provider gate:` line with the totals over its pool. Every
+  outcome but `modern` is what the gate takes out once it is on.
+- **Switch.** `quality_speed_requires_modern_provider` in provider.yml, default
+  false. It is decoded on its own key, like the URL-success rule's keys: a
+  value that is not true or false, the key given twice, or a provider.yml
+  that is not yaml leaves the gate off and resets no other key. When on, a
+  provider whose outcome is not `modern` leaves Quality and Speed under the
+  `not_modern` reason. That reason comes after reliability, ARIN risk, TLS,
+  no_success and unprobed or health, and before arin_non_quality. The
+  provider stays Online and in the location counts. The counts policy key is
+  schema 3 and carries the switch. Provider status reports `not_modern` with
+  what to do (update the app), and `bringyourctl provider inspect` prints the
+  evidence row, its outcome and the switch.
+- **Request time.** The gate is bucket membership, not a hard exclusion.
+  Probe admission, the rolling quota, the hard-exclusion set, explicit client
+  ids and `force_minimum` with any rank mode keep only the common gates, as
+  for the URL ratio. Online is unchanged, so a Quality or Speed answer still
+  reaches a non-modern provider in its Online tier, after both native
+  buckets.
+- **Rollout.** In order. (1) Merge the connect accessor
+  (`ClientSettings.PeerCapabilityRecorder`, connect
+  feat/modern-provider-evidence, reviewed and fixed at 4a145681) into connect
+  main, and revert the capability probe branch's temporary replace of
+  connect with that worktree. Until then the branch builds only against
+  connect main with that branch merged in: the sibling sdk and the server's
+  own main need connect APIs newer than the branch's base. (2) Migration 836
+  is applied on Main, and the gate merged into server main (ebc1f95a9) with
+  the switch off, both on 2026-10-14. (3) Deploy the API and the taskworkers
+  with the switch off. The capability probe ships switched off and
+  schedules nothing, so the deploy measures nothing. There is no API-first
+  constraint any more: nothing new rides the operator submission.
+  (3b) Switch the probe on by config in the chosen slot (sn-55: 2026-10-16
+  about 19:30Z or later): `main/capability_probe.yml` with `enabled: true`,
+  released through the config-updater, then a restart of every taskworker,
+  since a running container keeps the config it started with; the first
+  restarted taskworker schedules the first pass due at once
+  (capprobe/README.md, "Switching it on"). Switching it off is the same
+  release and restart with `enabled: false`. (4) Review the shadow counts until
+  `no_evidence` is small and the not-modern providers are understood, with
+  the capability probe's readings: a large `post_quantum_unsealed` share
+  would mean providers whose identity proof the probe could not verify,
+  which the gate counts as post-quantum and which should be understood
+  first, and `capability-probe-breaker` and `capability-probe-downgrades`
+  (SIGNALS.md §2.19g) must be quiet. (5) Switch the gate on only after that
+  review; `quality_speed_requires_modern_provider: false` turns it off again
+  at each pass's next settings read. Lowering `other_refresh_hours` before
+  the switch returns an updated provider sooner, at a measurement of every
+  non-modern provider that often.
 
 ## Metrics derived for ranking
 
@@ -651,6 +814,48 @@ identity only from authoritative historical evidence, never from a guessed
 current catalog position. Removed targets or unknown historical identity must
 remain visible as recovery work, not silently clear or fabricate provider
 errors.
+
+### URL tunnel client keys (2026-10-14)
+
+Each URL probe mints a derived client with a fresh identity key. Until this
+change every child published its key, and the platform turned each one into a
+permanent signed registration: an `st_client_key_history` row of about 5 KB
+plus its evidence blobs. By the incident team's measurement these were 67-72%
+of the table's 50-76 inserts/s on Main, about 21-22 GB/day of Postgres and
+about 18 GB/day of blob writes.
+
+Nothing reads a URL child's key:
+
+- Encryption is off, so the child signs no certificate or identity proof for
+  the provider to verify, and it ignores the provider's handshake.
+- It has no close-report domain, so it never signs an `OriginalCloseReport`,
+  and close admission never reads key history for it.
+- It does not wait for registration (`ClientKeyRegistrationRequired` is off).
+- Contract creation reads the destination's key only as optional metadata. A
+  companion contract to the child then carries no key, which an
+  encryption-off session never uses. The provider admits contracts with an
+  HMAC under its provide secret, and settlement uses acked byte counts.
+
+The URL probe pass (`newProviderUrlProbePass`) therefore opts its tunnels in
+with `providertunnel.Config.KeepClientKeysLocal`. For an opted-in tunnel,
+`providertunnel.Open` sets connect's `SkipClientKeyPublication` on each
+generated client whose key has no reader (`skipUnreadClientKeyPublication`,
+the last change to the settings). The child sends no `ClientKey` control, so
+the platform writes no signed row, evidence blob or Redis `ckey_` key for it.
+
+- **Clients that keep publishing:** every tunnel that does not opt in,
+  including the egress-prober CLI's, and any client that can use its key. The
+  latter includes the capability probe's opportunistic clients, which require
+  registration, and domain-hash clients (the sn validator and miner).
+- **A misapplied skip publishes anyway.** If a reader turns up after the
+  tunnel chose the skip, connect logs an error and publishes, so the mistake
+  costs one registration instead of the reader's traffic. A post-quantum
+  profile raising the sessions to Required is one such reader.
+- **Unchanged:** the key-history domain, policy, registration, observation
+  and evidence formats, and the monitor guards.
+- **Rollout:** it ships with the taskworker that runs the prober, in a clear
+  window. The connect service, which signs registrations, needs no deploy.
+- **Existing rows** stay. Reclaiming them needs a reviewed retention migration.
 
 ## Four-hour scheduler and database budget
 

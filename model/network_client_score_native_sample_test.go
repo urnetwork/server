@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"os"
 	"reflect"
 	"sort"
@@ -182,11 +183,18 @@ func TestNativeSpeedSampleEncodingAndRefusals(t *testing.T) {
 
 // One explicitly owned loopback Redis database, with no Config/profile reads.
 // Refuse pre-existing keys and remove only this test's two keys on completion.
+// The client dials through the process guard, so in a local process the owned
+// fixture must be attested; outside one it is an ordinary dial.
 func TestNativeSpeedSampleRedisCommitGuard(t *testing.T) {
 	if os.Getenv("ARIN_SPEED_SAMPLE_REDIS_FIXTURE") != "owned-loopback-26379-db15" {
 		t.Fatal("explicit owned Redis fixture handoff required")
 	}
-	r := redis.NewClient(&redis.Options{Addr: "127.0.0.1:26379", DB: 15, MaxRetries: -1, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, ContextTimeoutEnabled: true})
+	r := redis.NewClient(&redis.Options{
+		Addr: "127.0.0.1:26379", DB: 15, MaxRetries: -1, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, ContextTimeoutEnabled: true,
+		Dialer: func(ctx context.Context, network string, address string) (net.Conn, error) {
+			return server.Testing_DialTestEnv(ctx, "redis", network, address)
+		},
+	})
 	t.Cleanup(func() { _ = r.Close() })
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()

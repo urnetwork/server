@@ -10379,4 +10379,28 @@ var migrations = []any{
 		ALTER TABLE network_extender_measurement_cert
 			ADD COLUMN publish_time timestamp NULL;
 	`),
+
+	// 836: the FP2 modern provider gate's evidence (FP2FIX.md, 2026-10-14,
+	// option 4: probe-verified, shadow first). One row per provider with
+	// what the URL prober last observed of its end of a real session:
+	// end-to-end post-quantum encryption and resizable transfer windows,
+	// when that was measured, when it first was, and how many runs advanced
+	// it (model.RecordProviderModernEvidence). The passes that decide the
+	// buckets read it by client id. A new table, with no index past its key
+	// so every newer observation can update its row in place: nothing
+	// existing is read, locked or rewritten, provider_egress_health_history
+	// included. A server built with it requires it, so it must be applied
+	// before any such server runs against a database.
+	newSqlMigration(`
+		CREATE TABLE provider_modern_evidence (
+			client_id uuid NOT NULL PRIMARY KEY,
+			post_quantum bool NOT NULL,
+			key_exchange varchar(64) NOT NULL DEFAULT '',
+			window_resizable bool NOT NULL,
+			max_receive_window_byte_count bigint NOT NULL DEFAULT 0,
+			measured_at timestamp NOT NULL,
+			first_measured_at timestamp NOT NULL,
+			run_count int NOT NULL DEFAULT 1
+		);
+	`),
 }

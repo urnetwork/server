@@ -32,8 +32,9 @@ type testEnvironmentChildResources struct {
 // pool. Only the exact live parent's disposable databases may be inherited.
 // Errors deliberately omit resource values, credentials and lease tokens.
 func ValidateTestEnvironmentChildResources(ctx context.Context, pgWire, redisWire []byte) error {
+	lookup := currentTestEnvDialGuard().lookupFunc("postgres", newTestEnvironmentProbeResolver().LookupHost)
 	return validateTestEnvironmentChildResources(ctx, pgWire, redisWire, os.Getppid(),
-		newTestEnvironmentProbeResolver().LookupHost, attestTestEnvironmentChildOwnership)
+		lookup, attestTestEnvironmentChildOwnership)
 }
 
 // Share setup's authority rules and endpoint pinning before checking ownership.
@@ -128,12 +129,14 @@ func checkTestEnvironmentChildOwnership(
 
 // Inspect the coordinator's existing lease without acquiring or renewing one.
 func readTestEnvironmentChildRedisLease(ctx context.Context, child testEnvironmentChildResources) (string, error) {
-	client := redis.NewClient(&redis.Options{
+	options := &redis.Options{
 		Addr: child.redisAuthority, Password: child.redisPassword,
 		DB: testRedisLeaseCoordinatorDb, MaxRetries: -1,
 		DialTimeout: testEnvironmentProbeTimeout, ReadTimeout: testEnvironmentProbeTimeout,
 		WriteTimeout: testEnvironmentProbeTimeout, ContextTimeoutEnabled: true,
-	})
+	}
+	configureTestEnvRedisDial(currentTestEnvDialGuard(), options, NewDialer(options.DialTimeout).DialContext)
+	client := redis.NewClient(options)
 	defer client.Close()
 	return client.Get(ctx, fmt.Sprintf("urnetwork:server-test:redis-db-lease:%d", child.redisDatabase)).Result()
 }
@@ -157,6 +160,7 @@ func readTestEnvironmentChildPgOwner(ctx context.Context, child testEnvironmentC
 	if err != nil {
 		return false, err
 	}
+	configurePgTestEnvDial(currentTestEnvDialGuard(), config)
 	conn, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		return false, err
