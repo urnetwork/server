@@ -43,6 +43,14 @@ func stTransactionEndpointFixture(t testing.TB, operator uint64, hook func(http.
 	return client, fixture
 }
 
+// The handshake is the endpoint dial's chain id probe, one eth_chainId request
+// of its own. A deposit's custody and client-key authority reads also name
+// eth_chainId, as a chain identity witness inside a JSON-RPC batch; that is a
+// read on the verified endpoint, not another handshake.
+func stEndpointHandshake(call stEpochRPCRequest) bool {
+	return call.Method == "eth_chainId" && !call.Batched
+}
+
 // A transient first handshake occurs before any nonce or signing authority.
 // Its read retry reaches one real deposit and one persisted signed attempt.
 func TestStTransactionEndpointTransientHandshakeReachesSingleDeposit(t *testing.T) {
@@ -51,7 +59,7 @@ func TestStTransactionEndpointTransientHandshakeReachesSingleDeposit(t *testing.
 	env.Run(t, func(t testing.TB) {
 		var handshakes atomic.Int32
 		client, fixture := stTransactionEndpointFixture(t, 1, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
-			if call.Method == "eth_chainId" && handshakes.Add(1) == 1 {
+			if stEndpointHandshake(call) && handshakes.Add(1) == 1 {
 				writer.WriteHeader(http.StatusServiceUnavailable)
 				return true
 			}
@@ -93,7 +101,7 @@ func TestStTransactionEndpointTransientHandshakeRecoversStoredDeposit(t *testing
 	env.Run(t, func(t testing.TB) {
 		var handshakes atomic.Int32
 		client, fixture := stTransactionEndpointFixture(t, 1, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
-			if call.Method == "eth_chainId" && handshakes.Add(1) == 1 {
+			if stEndpointHandshake(call) && handshakes.Add(1) == 1 {
 				writer.WriteHeader(http.StatusServiceUnavailable)
 				return true
 			}
@@ -131,7 +139,7 @@ func TestStTransactionEndpointHardHandshakePreservesStoredAttempt(t *testing.T) 
 		var wrongChain atomic.Bool
 		wrongChain.Store(true)
 		client, fixture := stTransactionEndpointFixture(t, 1, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
-			if call.Method != "eth_chainId" {
+			if !stEndpointHandshake(call) {
 				otherReads.Add(1)
 				return false
 			}
@@ -174,7 +182,7 @@ func TestStTransactionEndpointHandshakeBoundRetainsOriginalAttempt(t *testing.T)
 			var handshakes, otherReads atomic.Int32
 			operator := uint64(index + 1)
 			client, fixture := stTransactionEndpointFixture(t, operator, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
-				if call.Method != "eth_chainId" {
+				if !stEndpointHandshake(call) {
 					otherReads.Add(1)
 					return false
 				}
