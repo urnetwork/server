@@ -361,6 +361,48 @@ func TestTestEnvDialGuardSelectsEveryLocalProcess(t *testing.T) {
 	}
 }
 
+// WARP_ENV=local selects the local resources in any case and with surrounding
+// space, since a case-insensitive filesystem such as APFS resolves vault/Local
+// to vault/local, so each spelling is guarded.
+func TestLocalWarpEnvMatchesAnyCaseAndSpace(t *testing.T) {
+	for _, value := range []string{"local", "Local", "LOCAL", " local", "local ", "local\n", "\tLocal "} {
+		values := map[string]string{"WARP_ENV": value, "WARP_VAULT_HOME": "/synthetic/vault"}
+		guard := newTestEnvDialGuard(testEnvGetenv(values), testEnvUnusedResolver(t))
+		if guard == nil {
+			t.Errorf("WARP_ENV=%q got no guard", value)
+			continue
+		}
+		if err := guard.requireAttested(); err == nil || !strings.Contains(err.Error(), testEnvAttestedAddrsEnvName+" is not set") {
+			t.Errorf("WARP_ENV=%q: attestation error = %v; want the missing attestation refused", value, err)
+		}
+	}
+}
+
+// With WARP_ENV unset, a WARP_VAULT_HOME that names a local vault directory
+// itself selects the local resources, so the process is guarded. A process
+// that sets WARP_ENV, production included, keeps its own selection.
+func TestLocalVaultHomeWithoutWarpEnvIsGuarded(t *testing.T) {
+	cases := []struct {
+		values  map[string]string
+		guarded bool
+	}{
+		{values: map[string]string{"WARP_VAULT_HOME": "/synthetic/vault/local"}, guarded: true},
+		{values: map[string]string{"WARP_VAULT_HOME": "/synthetic/vault/local/"}, guarded: true},
+		{values: map[string]string{"WARP_VAULT_HOME": "/synthetic/vault/Local"}, guarded: true},
+		{values: map[string]string{"WARP_ENV": " ", "WARP_VAULT_HOME": "/synthetic/vault/local"}, guarded: true},
+		{values: map[string]string{"WARP_VAULT_HOME": "/synthetic/vault"}},
+		{values: map[string]string{"WARP_VAULT_HOME": "/synthetic/vault/local/main"}},
+		{values: map[string]string{"WARP_ENV": "main", "WARP_VAULT_HOME": "/synthetic/vault/local"}},
+		{values: map[string]string{}},
+	}
+	for _, c := range cases {
+		guard := newTestEnvDialGuard(testEnvGetenv(c.values), testEnvUnusedResolver(t))
+		if (guard != nil) != c.guarded {
+			t.Errorf("%v: guarded = %t; want %t", c.values, guard != nil, c.guarded)
+		}
+	}
+}
+
 // A nil guard is the production case: it hands back the caller's own dial and
 // lookup, which then see the unresolved name exactly as before, and leaves
 // every client configuration untouched.

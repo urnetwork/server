@@ -151,6 +151,11 @@ to its launcher's attested endpoints for its whole run:
   the job's own `postgres` and `redis` Compose services once, requires exactly
   one address that is not loopback for each, and exports that attestation for
   the migrator and the runner.
+- `WARP_ENV=local` matches in any case and with surrounding space, since a
+  case-insensitive filesystem resolves `vault/Local` to `vault/local`. With
+  `WARP_ENV` unset, a `WARP_VAULT_HOME` that names a local vault directory
+  itself (`…/vault/local`) is local too, because the resolver reads that
+  directory's own resources for any environment.
 - Processes in any other `WARP_ENV`, production included, get no guard; their
   dial paths are unchanged.
 

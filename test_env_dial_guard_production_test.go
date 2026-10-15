@@ -148,17 +148,19 @@ func setTestEnvVariable(t *testing.T, name string, value string, unset bool) {
 	}
 }
 
-// Every WARP_ENV value but the exact "local" yields no guard from the real
-// os.Getenv-backed constructor, with stray test markers, an attestation and
-// the portable flags present. The constructor's resolver is never consulted.
+// Every WARP_ENV value that is not local, in any case, yields no guard from the
+// real os.Getenv-backed constructor, with stray test markers, an attestation
+// and the portable flags present. The constructor's resolver is never
+// consulted.
 func TestNonLocalWarpEnvValuesNeverGuard(t *testing.T) {
+	t.Setenv("WARP_VAULT_HOME", "/synthetic/vault")
 	t.Setenv("WARP_SERVICE", "test")
 	t.Setenv("WARP_BLOCK", "test")
 	t.Setenv(testEnvAttestedAddrsEnvName, testEnvFixtureAttestation)
 	t.Setenv("WARP_TEST_ENV_USE_PORTABLE_RESOURCES", "1")
 	t.Setenv("WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES", "1")
 	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", "/synthetic/private-root")
-	for _, value := range []string{"<unset>", "", "main", "Local", "LOCAL", " local", "local ", "local\n", "locals", "beta", "test", "sim-testnet-op-1"} {
+	for _, value := range []string{"<unset>", "", " ", "main", "Main", "locals", "lo cal", "beta", "test", "sim-testnet-op-1"} {
 		setTestEnvVariable(t, "WARP_ENV", value, value == "<unset>")
 		if guard := newTestEnvProcessDialGuard(); guard != nil {
 			t.Errorf("WARP_ENV=%q: the real constructor returned a guard", value)
@@ -175,6 +177,7 @@ func TestNonLocalWarpEnvValuesNeverGuard(t *testing.T) {
 // construction once main selected production. Afterwards a WARP_ENV=local
 // cannot add a guard, and the steady-state lookup allocates nothing.
 func TestProductionProcessLocksNilGuardThroughRealEnvironment(t *testing.T) {
+	t.Setenv("WARP_VAULT_HOME", "/synthetic/vault")
 	t.Setenv("WARP_SERVICE", "api")
 	t.Setenv(testEnvAttestedAddrsEnvName, testEnvFixtureAttestation)
 	for _, startupEnv := range []string{"main", ""} {

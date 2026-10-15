@@ -13,8 +13,9 @@
 // so a resolver change mid-run can only fail closed. A connection that is
 // already open is not re-checked; its peer cannot change.
 //
-// Every WARP_ENV=local process is guarded: tests, the cli/*/run-local.sh
-// services, bringyourctl and sim-latency alike. The attestation is
+// Every local process is guarded: tests, the cli/*/run-local.sh services,
+// bringyourctl and sim-latency alike, with WARP_ENV=local in any case or a
+// local vault home and no WARP_ENV (testEnvLocalEnvironment). The attestation is
 // WARP_TEST_ENV_ATTESTED_ADDRS, which test-env.sh exports after validating the
 // launcher; local/local-env.sh exports the same attestation for a process that
 // is not a test, and the sim-latency evaluator container attests its own
@@ -52,6 +53,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -196,14 +198,30 @@ func chooseTestEnvDialGuard(
 	return choice.Load().guard
 }
 
-// Chooses the guard for one environment. Every WARP_ENV=local process gets a
-// guard, refusing every dial when its attestation is missing or invalid; any
-// other environment, production included, gets nil.
+// Reports whether an environment selects the local resources. WARP_ENV=local
+// matches in any case and with surrounding space: a case-insensitive
+// filesystem such as APFS resolves vault/Local to vault/local. With WARP_ENV
+// unset, a WARP_VAULT_HOME that names a local vault directory itself is local
+// too, since the resolver reads that directory's own resources for any
+// environment.
+func testEnvLocalEnvironment(getenv func(string) string) bool {
+	warpEnv := strings.TrimSpace(getenv("WARP_ENV"))
+	if strings.EqualFold(warpEnv, "local") {
+		return true
+	}
+	vaultHome := getenv("WARP_VAULT_HOME")
+	return warpEnv == "" && vaultHome != "" && strings.EqualFold(filepath.Base(filepath.Clean(vaultHome)), "local")
+}
+
+// Chooses the guard for one environment. Every local process (see
+// testEnvLocalEnvironment) gets a guard, refusing every dial when its
+// attestation is missing or invalid; any other environment, production
+// included, gets nil.
 func newTestEnvDialGuard(
 	getenv func(string) string,
 	lookupNetIp func(ctx context.Context, network string, host string) ([]netip.Addr, error),
 ) *testEnvDialGuard {
-	if getenv("WARP_ENV") != "local" {
+	if !testEnvLocalEnvironment(getenv) {
 		return nil
 	}
 	attestation := getenv(testEnvAttestedAddrsEnvName)
