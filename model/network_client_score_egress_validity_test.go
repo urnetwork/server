@@ -114,7 +114,7 @@ func egressValidityTestExport(
 		}
 	}
 
-	targetMaps := newClientScoreTargetMaps(rows, nil, countFilter.hasHardEgressFailure, nil)
+	targetMaps := newClientScoreTargetMaps(rows, nil, countFilter.hasHardEgressFailure)
 	clientScores := targetMaps.locationClientScores[countryLocationId]
 	minimums := map[int]float64{1: 0.95, 2: 0.7, 3: 0.6}
 	for clientId, clientScore := range clientScores {

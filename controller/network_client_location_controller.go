@@ -48,9 +48,10 @@ func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *m
 	}
 
 	// Legacy net-type columns stay neutral. Reviewed hosting and geographic
-	// exceptions come from the actual connected address's ARIN lookup below;
-	// a location probe cannot substitute its country or vendor flags.
-	arinInfo, err := server.GetArinInfo(addr)
+	// exceptions come from the actual connected address's ARIN lookups below,
+	// in both databases of the pair; a location probe cannot substitute its
+	// country or vendor flags.
+	arinInfo, oldArinInfo, err := server.GetArinInfoPair(addr)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -58,14 +59,17 @@ func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *m
 		NetTypeForeign: arinForeignScore(addr, ipInfo.CountryCode),
 		AccuracyKm:     genesisAccuracyKm(ipInfo),
 	}
-	setArinConnectionFacts(connectionLocationScores, arinInfo)
+	setArinConnectionFacts(connectionLocationScores, arinInfo, oldArinInfo)
 
 	return location, connectionLocationScores, nil
 }
 
 // Successful no-record lookups are explicitly evaluated unknowns. Overrides
 // that never queried the database cannot attest a generation or lookup time.
-func setArinConnectionFacts(scores *model.ConnectionLocationScores, info *server.ArinInfo) {
+// The old slot is the same facts from the old database, and is unavailable,
+// epoch 0, when the process loaded no old database or its lookup failed (old
+// is nil); old facts never change the latest slot.
+func setArinConnectionFacts(scores *model.ConnectionLocationScores, info *server.ArinInfo, old *server.ArinInfo) {
 	scores.ArinRisk = info.Risk
 	scores.ArinQualityVerified = info.QualityVerified()
 	scores.ArinNonQuality = info.NonQuality
@@ -74,6 +78,16 @@ func setArinConnectionFacts(scores *model.ConnectionLocationScores, info *server
 	if info.DatabaseBuildEpoch > 0 {
 		now := server.NowUtc()
 		scores.ArinLookupAt = &now
+	}
+	scores.ArinOldRisk = false
+	scores.ArinOldNonQuality = false
+	scores.ArinOldQualityVerified = false
+	scores.ArinOldDatabaseBuildEpoch = 0
+	if old != nil && old.DatabaseBuildEpoch > 0 {
+		scores.ArinOldRisk = old.Risk
+		scores.ArinOldNonQuality = old.NonQuality
+		scores.ArinOldQualityVerified = old.QualityVerified()
+		scores.ArinOldDatabaseBuildEpoch = old.DatabaseBuildEpoch
 	}
 }
 

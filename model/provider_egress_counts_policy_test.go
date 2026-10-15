@@ -9,10 +9,14 @@ import (
 // below reads the clock.
 var countsPolicyTestNow = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 
+// Every field of the policy changes the key: each count rule below, the
+// resolved enable, the probe policy, the reliability minimums, the modern
+// gate's decision at the key's instant, the Online URL ratio and its country
+// exemption (schema 4), and the published ARIN serving epoch (schema 5).
 func TestProviderEgressCountsPolicyKeySeparatesCountRules(t *testing.T) {
 	settings := DefaultEgressIndexSettings()
 	minimums := map[int]float64{1: .95, 2: .7, 3: .6}
-	base := providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow)
+	base := providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow, 0)
 	for name, change := range map[string]func(*EgressIndexSettings){
 		"index":       func(s *EgressIndexSettings) { s.MaxFailureIndex++ },
 		"evidence":    func(s *EgressIndexSettings) { s.EvidenceMaxAge -= time.Minute },
@@ -27,26 +31,35 @@ func TestProviderEgressCountsPolicyKeySeparatesCountRules(t *testing.T) {
 			s.QualitySpeedRequiresModernProvider = &on
 		},
 		"modern start": func(s *EgressIndexSettings) { s.QualitySpeedModernProviderStart = countsPolicyTestNow },
+		"url ratio":    func(s *EgressIndexSettings) { s.OnlineUrlSuccessRatio += 0.1 },
+		"url ratio exemption": func(s *EgressIndexSettings) {
+			s.OnlineUrlRatioCountryExemption = !s.OnlineUrlRatioCountryExemption
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := *settings
 			change(&changed)
-			if providerEgressCountsPolicyKey(&changed, false, minimums, 2, countsPolicyTestNow) == base {
+			if providerEgressCountsPolicyKey(&changed, false, minimums, 2, countsPolicyTestNow, 0) == base {
 				t.Fatal("different count policy reused the snapshot key")
 			}
 		})
 	}
-	if providerEgressCountsPolicyKey(settings, true, minimums, 2, countsPolicyTestNow) == base ||
-		providerEgressCountsPolicyKey(settings, false, minimums, -1, countsPolicyTestNow) == base ||
-		providerEgressCountsPolicyKey(settings, false, map[int]float64{1: .8, 2: .7, 3: .6}, 2, countsPolicyTestNow) == base {
+	if providerEgressCountsPolicyKey(settings, true, minimums, 2, countsPolicyTestNow, 0) == base ||
+		providerEgressCountsPolicyKey(settings, false, minimums, -1, countsPolicyTestNow, 0) == base ||
+		providerEgressCountsPolicyKey(settings, false, map[int]float64{1: .8, 2: .7, 3: .6}, 2, countsPolicyTestNow, 0) == base {
 		t.Fatal("resolved enable, probe-policy error, or reliability change reused the snapshot key")
+	}
+	// Quality counts follow the published ARIN serving epoch
+	if providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow, 1700000000) == base ||
+		providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow, 1700000000) == providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow, 1700086400) {
+		t.Fatal("a different ARIN serving epoch reused the snapshot key")
 	}
 }
 
 func TestProviderEgressCountsPolicyKeyIgnoresUnrelatedRequestSettings(t *testing.T) {
 	settings := DefaultEgressIndexSettings()
 	minimums := map[int]float64{1: .95, 2: .7, 3: .6}
-	base := providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow)
+	base := providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow, 0)
 	settings.NativeReaderEnabled = !settings.NativeReaderEnabled
 	settings.RequestSettingsMaxAge += time.Minute
 	settings.BackfillTierOffset++
@@ -56,14 +69,14 @@ func TestProviderEgressCountsPolicyKeyIgnoresUnrelatedRequestSettings(t *testing
 	settings.EvidenceMaxAge += time.Hour // Already capped by the accepted-health maximum.
 	// a start moved without passing the key's instant decides alike
 	settings.QualitySpeedModernProviderStart = settings.QualitySpeedModernProviderStart.Add(time.Hour)
-	if providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow) != base {
+	if providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow, 0) != base {
 		t.Fatal("request-only settings or ineffective evidence age split the aggregate cache")
 	}
 	// the gate is keyed by its decision: an explicit false before the start
 	// decides as the absent switch does, so the workers share the snapshot
 	off := false
 	settings.QualitySpeedRequiresModernProvider = &off
-	if providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow) != base {
+	if providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow, 0) != base {
 		t.Fatal("an explicit false that decides as the absent switch split the aggregate cache")
 	}
 }
@@ -77,7 +90,7 @@ func TestProviderEgressCountsPolicyKeyFlipsAtTheModernProviderGateStart(t *testi
 	settings := DefaultEgressIndexSettings()
 	start := settings.QualitySpeedModernProviderStart
 	key := func(settings *EgressIndexSettings, now time.Time) string {
-		return providerEgressCountsPolicyKey(settings, false, minimums, 2, now)
+		return providerEgressCountsPolicyKey(settings, false, minimums, 2, now, 0)
 	}
 	if key(settings, start.Add(-time.Second)) == key(settings, start) {
 		t.Fatal("the key a second before the gate's start is the key at it")

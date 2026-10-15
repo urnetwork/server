@@ -10403,4 +10403,17 @@ var migrations = []any{
 			run_count int NOT NULL DEFAULT 1
 		);
 	`),
+
+	// 837: the dual-database ARIN canary's rollup slots (arindbctl/ARINDB.md).
+	// The rollup carries the latest and the old database's facts with their
+	// epochs. Additive with constant defaults that read as unavailable, never
+	// clean. Only network_client_location_reliability is locked.
+	newSqlMigration(arinDatabaseCanaryRollupSchemaSql),
+
+	// 838: the dual-database ARIN canary's connection slots. Connect stamps each
+	// connection with the facts of the latest and the old database; the old
+	// slot has its own write guard so a writer predating it cannot keep an
+	// earlier positive. Only network_client_location is locked, so this never
+	// waits on the rollup while it holds the location rows.
+	newSqlMigration(arinDatabaseCanaryLocationSchemaSql),
 }

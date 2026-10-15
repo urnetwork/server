@@ -1212,7 +1212,8 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 		})
 	})
 	// Capture the exact dashboard population before loading its evidence.
-	countFilter := newProviderCountFilterForClients(ctx, clientIds)
+	// Quality follows the score export's published ARIN decision.
+	countFilter := newProviderQualityFilterForClients(ctx, clientIds)
 	// the URL-success rule's country guard over this same population, its
 	// margin held against the export's last published guard
 	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(rows), settings, readProviderOnlineSuccessPreviousBaseline(ctx, "the dashboard counts"))
@@ -1267,9 +1268,12 @@ type ProviderEgressInspection struct {
 	TlsAuthenticationFailed bool
 	ArinRisk                bool
 	ArinNonQuality          bool
-	ReliabilityFailed       bool
-	UrlSuccessCount         int
-	UrlErrorCount           int
+	// the published ARIN serving epoch ArinNonQuality follows; 0 is the
+	// provider's latest slot
+	ArinServingEpoch  int64
+	ReliabilityFailed bool
+	UrlSuccessCount   int
+	UrlErrorCount     int
 	// measured at least ProviderOnlineMinMeasuredUrlRuns times in the
 	// evidence window without one success, whatever the rule then decides
 	NoUrlSuccess bool
@@ -1364,7 +1368,7 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 
 	inspection.Settings = egressIndexSettings()
 	inspection.EgressTestEnabled = providerEgressTestEnabled()
-	countFilter := newProviderCountFilterForClients(ctx, []server.Id{clientId})
+	countFilter := newProviderQualityFilterForClients(ctx, []server.Id{clientId})
 	// one provider cannot measure its country, so the guard, its kill switch
 	// and floor included, is the score export's
 	baseline := getProviderOnlineSuccessBaseline(ctx)
@@ -1398,6 +1402,7 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	inspection.TlsAuthenticationFailed = facts.tlsAuthenticationFailed
 	inspection.ArinRisk = facts.arinRisk
 	inspection.ArinNonQuality = facts.arinNonQuality
+	inspection.ArinServingEpoch = countFilter.arindbServingEpoch
 	inspection.ReliabilityFailed = facts.reliabilityFailed
 	inspection.ModernEvidence = countFilter.modernEvidence[clientId]
 	inspection.ModernOutcome = facts.modernOutcome

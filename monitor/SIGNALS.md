@@ -9254,6 +9254,121 @@ healthy lists, thresholds, partial positive evidence, old/missing/stale/reset
 sources, cancellation and redaction; model regressions exercise the actual
 selector and backward-compatible directory cache.
 
+### 2.9d ARIN database canary — fallback, losses the breaker cannot see, protection and staleness
+Probe: `arindb-canary`
+
+Every score publication compares the latest and the previously selected ARIN
+databases and publishes one decision to `{arindb_canary_decision}` before its
+export (arindbctl/ARINDB.md, "Dual-database canary"). Every Taskworker's stats
+collector exports that document as the `urnetwork_stats_arindb_*` gauges, so
+all hosts report the same values; only the publishing Taskworker exports the
+per-country supply. This signal reads those gauges through Mimir, the
+replica-safe max of each, and the share of every process's decision reads that
+were not ok over ten minutes. They are the series the providers dashboard's
+"ARIN database canary" row and the warp rules in
+`grafana/alerting/arindb-canary.yml` read.
+
+- `arindb-fallback-active` **PAGE**, sustained 10 minutes: the latest database
+  tripped the breaker on Quality (its net loss strictly above
+  `bucket_loss_threshold`, or a country of at least
+  `min_emptied_country_supply` providers left with none), so the export serves
+  the old database's Quality classification. The fallback latches on its pair
+  until `release_passing_runs` consecutive comparisons pass with
+  `release_margin`, or `accept_latest_build_epoch` names the latest. The page
+  names the countries the latest would empty, with the old supply of each, and
+  every bucket's net loss. Risk still comes from the latest database: a
+  fallback restores Quality and never readmits a provider the latest calls
+  risky.
+- `arindb-risk-supply-loss` **PAGE**, sustained 10 minutes: the Speed or Online
+  net loss of latest against old is above 0.10, with at least 20 paired
+  providers of old supply in the bucket. Only risk can cause it, and risk
+  always follows the latest database, so the canary does not fall back for it.
+- `arindb-supply-gain` and `arindb-supply-churn` **WARN**, sustained 30
+  minutes: a bucket's net gain above 0.10, or its gross churn (removals plus
+  additions against old) above 0.20, with the same sample floor. The breaker
+  trips only on net losses, so a flood or a wholesale reshuffle passes it; a
+  deliberate catalog expansion does too, so these warn rather than page.
+- `arindb-warming-tripped` **PAGE**, sustained 10 minutes: the canary is
+  warming and its paired sample of at least `min_paired_sample` providers
+  trips, so the latest is held out before the cohort is covered. While the old
+  database covers at least 1 − `bucket_loss_threshold` of the cohort, warming
+  serves it; below that it serves each provider's latest slot, which applies
+  the blocked latest to every row a restarted process wrote (in a probe where
+  the old covered half the cohort, half the rows took the latest's
+  classification). The page is the protection in that case.
+- `arindb-warming-serves-latest` **WARN**, sustained 30 minutes: warming
+  serves the latest unverified, because its paired sample is below
+  `min_paired_sample` or passes.
+- `arindb-protection-lost` **PAGE**, sustained 10 minutes: the publishing
+  Taskworker could not open its latest database (`latest_unavailable`; it
+  compares the previous decision's epochs while it can, else it is single), or
+  a latched fallback's old database is not served (`fallback_dropped`): warming
+  serves each provider's latest slot while the latch is held, as when Connect
+  restarts onto the next release before the Taskworker; the canary went single
+  after the fallback; or a release compares against the latest the latch held
+  out, which the decision carries as its `dropped_latch`.
+- `arindb-cohort-shrink` **PAGE**, sustained 10 minutes: the public cohort is
+  more than 10% below its largest of the last two hours, from a reference of
+  at least 100, within two hours of a new pair or while more than 1% of latest
+  lookups fail over thirty minutes; a background of failures, such as GeoLite2
+  misses on classifier-v0 records, stays below that.
+  A provider whose latest lookup fails never writes a location, so it leaves
+  the cohort before the comparison can see it; outside those windows a
+  shrinking cohort is a Connect outage or a restart, which page on their own.
+- `arindb-serving-flapping` **PAGE**, sustained 5 minutes: the serving epoch
+  changed more than 4 times in six hours, switching every provider's Quality
+  classification back and forth.
+- `arindb-decision-stalled` **PAGE**: the last decision is more than 90 minutes
+  old. A fallback the export published is still served but no longer
+  re-decided.
+- `arindb-canary-unavailable` **WARN**, state `single` for an hour: the
+  publishing Taskworker has no usable old database (a refused or skipped copy
+  at build, an identical copy, or an invalid one), so a bad release takes
+  effect unchecked.
+- `arindb-canary-warming` **WARN**, state `warming` for two hours: fewer than
+  `min_coverage` of the public cohort carry facts for both databases, such as
+  a stuck host on an older pair or a rollup that has not refreshed.
+- `arindb-decision-stale` **WARN**: the last decision is more than 30 minutes
+  old. Every publication writes one, so this is a stalled score export
+  (§2.8); the decision expires with the publication's 300 minute ttl, after
+  which readers serve each provider's latest slot.
+- `arindb-decision-reads-not-ok` **WARN**, sustained 15 minutes: more than 5%
+  of decision reads over ten minutes were absent, invalid or Redis errors.
+  Absent and invalid reads serve each provider's latest slot; an error keeps a
+  process's last decision for up to 15 minutes.
+- `arindb-canary-unobservable` **WARN**, sustained 15 minutes: no Taskworker
+  exports the state and decision time.
+
+Action on a fallback: judge whether the latest database is a bad release from
+the losses and emptied countries, its catalog audit and its Atlas validation.
+If it is, the next all-release build must not compare against it. With
+`ARIN_CANARY_DECISION_FILE` the release runner pins the database the decision
+protects automatically, and pauses the ARIN refresh when it cannot; without
+it, set `ARIN_PREVIOUS_DATABASE_FILE` to the last good `arin.mmdb` and clear it
+once a good release ships. If the latest is good after all, accept it as
+arindbctl/ARINDB.md describes ("Accepting a release the breaker trips on"):
+the accept names one build epoch, so clear or move the pin with it.
+Do not restart processes or delete `arin-old.mmdb` to clear the page: a
+process reads a new pair only at restart, and without the old file the canary
+is single, which pages as `fallback_dropped`.
+
+False-positive qualifiers: thresholds are net losses over the paired
+providers only, so a small cohort can trip on a few providers; an emptied
+country needs `min_emptied_country_supply` providers, and the Speed, Online,
+gain and churn pages need 20 paired providers of old supply. False-negative
+qualifiers: a release that is wrong but removes little supply passes (the
+reviewed rules, catalog audit and Atlas validation remain the quality gates);
+a refused copy at build ships a release without a canary, which is the
+`arindb-canary-unavailable` warning, or the `fallback_dropped` page right after
+a fallback.
+
+Implementation: `signal_arindb_canary.go` and its synthetic test file,
+registered in `NewSignals`. Controls cover a healthy latest state, a fallback
+with named emptied countries, Speed and Online losses at and above the
+threshold with and without their sample, each page and warning the breaker
+cannot see at and below its threshold, the cohort page's release gate, the
+reads warning, the unavailable, warming and stale warnings and missing gauges.
+
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
 
@@ -20602,6 +20717,12 @@ Tier-0 (page):
 | hostpower-suspend-policy-unsafe / hostpower-suspend-observed | host | §21.2 configured and live login1 power policy plus current-boot kernel suspend pairs | configured unsafe, destructive live lid/idle action, or live suspend-capable policy immediately; any unmatched or at least five-minute suspend pair | fixed policy/capability enums and aggregate suspend timestamps/duration only |
 | pgbouncer-pool-starved | Grafana rule on the PgBouncer pool exporter | §2.11a `max by (env,host,pgbouncer)(pgbouncer_pool_starved_seconds)` | > 15 for 30s; no data is OK because exporter-down covers it | host and instance; waiting clients, servers, logins, maximum wait |
 | postgres-application-backends-collapsed | Grafana rule on postgres_exporter | §2.11a `min by (env,host)(pg_stat_database_numbackends{job="postgres",datname="bringyour"})` | < 300 for 1m | normal 710–770; the series holds its last value through a full PostgreSQL stop |
+| arindb-fallback-active | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_fallback_active)` | > 0 for 10m | emptied countries and per-bucket net losses; serving epoch |
+| arindb-risk-supply-loss | Grafana rule on the published canary decision; monitor §2.9d | `max by (bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed\|online"})` with at least 20 paired providers of old supply | > 0.10 for 10m | emptied countries; no fallback repairs a risk loss |
+| arindb-warming-tripped / arindb-protection-lost | Grafana rules on the published canary decision; monitor §2.9d | `max by (flag) (urnetwork_stats_arindb_decision_flags)` for warming_tripped, latest_unavailable and fallback_dropped | > 0 for 10m | the flag; losses and emptied countries |
+| arindb-cohort-shrink | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_cohort_loss_ratio)` with a reference of at least 100, within 2h of `urnetwork_stats_arindb_pair_since_seconds` or with more than 1% of latest lookups failing (`urnetwork_arin_lookup_errors_total` over `urnetwork_arin_lookups_total`) | > 0.10 for 10m | cohort and its two-hour reference; pair age; latest lookup error share |
+| arindb-serving-flapping | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_serving_changes)` | > 4 for 5m | serving changes in six hours |
+| arindb-decision-stalled | Grafana rule on the published canary decision; monitor §2.9d | `time() - max(urnetwork_stats_arindb_decision_seconds)` | > 5400 s | decision time |
 
 Tier-1 (warn):
 | id | source | check | threshold |
@@ -20708,6 +20829,10 @@ Tier-1 (warn):
 | proxy-allocation-unready | host | 14.5 current allocation and internal `/status` | a placed block has running allocations but no 2xx-ready generation for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
 | edge-auto-upgrades | host | 14.5 APT periodic config and unit masks | any edge with APT periodic enable nonzero or an apt-daily timer/service not masked |
+| arindb-canary-unavailable / arindb-canary-warming / arindb-decision-stale | Grafana rules on the published canary decision; monitor §2.9d | state single, state warming, and `time() - max(urnetwork_stats_arindb_decision_seconds)` | single for 1h; warming for 2h; > 1800 s |
+| arindb-decision-reads-not-ok | Grafana rule on every process's decision reads; monitor §2.9d | `sum(rate(urnetwork_arindb_decision_reads_total{outcome!="ok"}[10m])) / sum(rate(urnetwork_arindb_decision_reads_total[10m]))` | > 0.05 for 15m |
+| arindb-supply-gain / arindb-supply-churn | Grafana rules on the published canary decision; monitor §2.9d | `max by (bucket)` of `urnetwork_stats_arindb_gain_ratio` and `urnetwork_stats_arindb_churn_ratio`, with at least 20 paired providers of old supply | > 0.10 gain or > 0.20 churn for 30m |
+| arindb-warming-serves-latest | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_decision_flags{flag="warming_serves_latest"})` | > 0 for 30m |
 
 ### Fixed emitted-class crosswalk
 

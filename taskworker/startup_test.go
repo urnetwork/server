@@ -97,9 +97,6 @@ func TestTaskworkerStartupRetriesUnavailableReadAndInitialization(t *testing.T) 
 			return nil
 		},
 	)
-	if result.closeCapture != nil {
-		defer result.closeCapture()
-	}
 	if result.err != nil || result.worker != runtime || reads != 3 || initializations != 2 || waits != 2 || metrics != 1 {
 		t.Fatalf("temporary startup dependency loss stranded or duplicated the runtime: err=%v reads=%d initializations=%d waits=%d metrics=%d", result.err, reads, initializations, waits, metrics)
 	}
@@ -310,9 +307,6 @@ func TestTaskworkerStartupRetriesPgBouncerQueueTimeout(t *testing.T) {
 			return nil
 		},
 	)
-	if result.closeCapture != nil {
-		defer result.closeCapture()
-	}
 	if result.err != nil || result.worker != runtime || reads != 2 || initializations != 1 || waits != 1 || metrics != 1 {
 		t.Fatalf("pooler refusal stranded the taskworker startup: err=%v reads=%d initializations=%d waits=%d metrics=%d", result.err, reads, initializations, waits, metrics)
 	}

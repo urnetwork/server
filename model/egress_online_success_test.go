@@ -650,7 +650,7 @@ func TestProviderConfigWithADuplicateKeyOrATabPanicsNothing(t *testing.T) {
 				}
 			})
 			noPanic("the counts policy key", func() {
-				ProviderEgressCountsPolicyKey()
+				ProviderEgressCountsPolicyKey(0)
 			})
 			noPanic("the settings", func() {
 				settings := egressIndexSettings()

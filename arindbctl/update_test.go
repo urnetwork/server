@@ -92,6 +92,12 @@ func newUpdateFixture(t *testing.T) *updateFixture {
 
 func (self *updateFixture) run(t *testing.T, output string, catalog string) error {
 	t.Helper()
+	return self.runWith(t, output, catalog)
+}
+
+// run with extra update flags.
+func (self *updateFixture) runWith(t *testing.T, output string, catalog string, extra ...string) error {
+	t.Helper()
 	dependencies := commandDependencies{
 		geoipUpdate: func(_ context.Context, _ string, directory string) error {
 			return os.WriteFile(filepath.Join(directory, "GeoLite2-City.mmdb"), testGeoDatabase(t), 0o600)
@@ -106,6 +112,7 @@ func (self *updateFixture) run(t *testing.T, output string, catalog string) erro
 	if catalog != "" {
 		args = append(args, "--subscriber-catalog", catalog)
 	}
+	args = append(args, extra...)
 	return runCommandWithDependencies(t.Context(), args, io.Discard, dependencies)
 }
 

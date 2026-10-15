@@ -56,6 +56,11 @@ package controller
 //	urnetwork_stats_provider_online_success_exempt   per country the URL-success rule exempts, the providers the exemption keeps online {country_code} (redis, written by the score export)
 //	urnetwork_stats_provider_modern_gate_shadow      of the providers the other rules admit to quality and speed, those the modern provider gate keeps and each reason it would take one out {bucket, outcome} (db)
 //
+// the ARIN database canary gauges are internal (arindbctl/ARINDB.md,
+// "Dual-database canary"), listed in stats_arindb_canary.go and read by
+// grafana/dashboards/providers.json, the warp alert rules and monitor signal
+// §2.9d. They export the decision the score export published (redis).
+//
 // the contract gauges are internal (connect/EXTENDER.md M3, M4) and are read
 // only by grafana/dashboards/providers.json:
 //
@@ -667,6 +672,10 @@ func StartStatsCollector(ctx context.Context) <-chan struct{} {
 		dbTick := 0
 		for {
 			statsRefreshBlockClock()
+			// the canary decision is one Redis read, so every tick exports it
+			server.HandleError(func() {
+				statsRefreshArindbCanary(ctx)
+			})
 			if dbTick == 0 {
 				server.HandleError(func() {
 					statsRefreshDb(ctx)
@@ -823,7 +832,7 @@ func statsRefreshDb(ctx context.Context) {
 func statsRefreshProviderEgress(ctx context.Context) {
 	statsPublishProviderModernGate(server.NowUtc())
 	statsProviderEgressAvailableGauge.set(0)
-	snapshot, err := getStatsProviderEgressSnapshot(ctx, model.ProviderEgressCountsPolicyKey())
+	snapshot, err := getStatsProviderEgressSnapshot(ctx, statsProviderEgressPolicyKey(ctx))
 	server.Raise(err)
 	statsPublishProviderEgressCounts(snapshot.Counts)
 	statsProviderEgressStartedGauge.set(statsSourceTimestampSeconds(snapshot.StartedAt))

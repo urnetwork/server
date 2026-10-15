@@ -146,7 +146,7 @@ func exportClientScoreStaleTargetPass(
 	exportedAt time.Time,
 ) (*clientScoreExportCapture, *clientScoreTargetManifest) {
 	t.Helper()
-	targetMaps := newClientScoreTargetMaps(rows, nil, func(server.Id) bool { return false }, nil)
+	targetMaps := newClientScoreTargetMaps(rows, nil, func(server.Id) bool { return false })
 	for _, clientScores := range targetMaps.locationClientScores {
 		for _, clientScore := range clientScores {
 			clientScore.Online = true
@@ -311,7 +311,6 @@ func TestClientScoreTargetManifestRemembersDepartedTargetsForOneTtl(t *testing.T
 		[]clientScoreSourceRow{clientScoreStaleTargetSourceRow(clientId, networkId, &rowLocationId, &countryId)},
 		[]server.Id{knownGroupId},
 		func(server.Id) bool { return false },
-		nil,
 	)
 	departedAt := now.Add(-time.Hour).Unix()
 	previous := &clientScoreTargetManifest{
@@ -375,7 +374,6 @@ func TestClientScoreTargetManifestRemembersDepartedTargetsForOneTtl(t *testing.T
 		[]clientScoreSourceRow{clientScoreStaleTargetSourceRow(clientId, networkId, &rowLocationId, &countryId)},
 		[]server.Id{knownGroupId},
 		func(server.Id) bool { return false },
-		nil,
 	)
 	retried, _ := nextMaps.departedTargets(writeAhead, now.Add(4*time.Minute), ttl)
 	retriedKeys := map[targetKey]bool{}

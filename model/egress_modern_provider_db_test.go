@@ -331,7 +331,7 @@ func TestModernProviderGateShadowFirstThenOnAcrossThePasses(t *testing.T) {
 		// before the start
 		egressTestPasses(ctx, t)
 		assertGateOff("before the start")
-		offPolicyKey := ProviderEgressCountsPolicyKey()
+		offPolicyKey := ProviderEgressCountsPolicyKey(0)
 
 		// on by time: the start moved to an instant the passes below come
 		// after, the switch still absent
@@ -342,7 +342,7 @@ func TestModernProviderGateShadowFirstThenOnAcrossThePasses(t *testing.T) {
 		if inspection := InspectProviderEgress(ctx, legacy.clientId); inspection.Settings.QualitySpeedRequiresModernProvider != nil || !inspection.Settings.QualitySpeedModernProviderStart.Equal(start) || inspection.ModernGateTime.Before(start) {
 			t.Fatalf("on by time: inspection settings %+v at %s, want the switch absent and the start %s", inspection.Settings, inspection.ModernGateTime, start)
 		}
-		if ProviderEgressCountsPolicyKey() == offPolicyKey {
+		if ProviderEgressCountsPolicyKey(0) == offPolicyKey {
 			t.Fatal("on by time: the dashboard counts kept the key they had before the start")
 		}
 
@@ -350,7 +350,7 @@ func TestModernProviderGateShadowFirstThenOnAcrossThePasses(t *testing.T) {
 		pushModernProviderGateConfig(t, map[string]any{"quality_speed_requires_modern_provider": false})
 		egressTestPasses(ctx, t)
 		assertGateOff("switched off after the start")
-		connect.AssertEqual(t, ProviderEgressCountsPolicyKey(), offPolicyKey)
+		connect.AssertEqual(t, ProviderEgressCountsPolicyKey(0), offPolicyKey)
 
 		// switched on
 		pushModernProviderGateConfig(t, map[string]any{"quality_speed_requires_modern_provider": true})
