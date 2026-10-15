@@ -17561,11 +17561,12 @@ latest the signal is otherwise quiet, whatever the gauges say. A part the
 verdict cannot read is `cannot-observe`, beside the findings the rest of it
 gives. No start series means the switch is set, true, false or unreadable,
 so no flip is scheduled and only the fleet's agreement is judged: the
-owner's postponement silences the rest, and a moved start moves its windows. When no taskworker publishes
-`urnetwork_stats_provider_modern_gate_on` inside the windows of the code's
-default start, the taskworkers do not run the code that flips the gate, or
-their stats collector is down: the run is `cannot-observe`, never quiet.
-Outside those windows a failed read stays quiet.
+owner's postponement silences the rest, and a moved start moves its windows.
+When no taskworker publishes `urnetwork_stats_provider_modern_gate_on`
+inside the windows of the code's default start, the taskworkers do not run
+the code that flips the gate, or their stats collector is down: the run is
+`cannot-observe`, never quiet. Outside those windows a failed read stays
+quiet.
 
 ACTION: decide before the start. To postpone, set
 `quality_speed_requires_modern_provider: false` in provider.yml: the kill
@@ -17592,14 +17593,14 @@ start until 18:00 UTC no taskworker restarts except to release the kill
 switch, since every rollout makes the fleet disagree while it runs.
 
 False positive: a URL probe outage or other bucket loss in the watch after
-the start pages `modern-gate-flip-drop` though the gate took little; read the
-shadow beside it. A restart alone does not fire, since a process is compared
-only once settled, but a config release that sets the switch or moves the
-start makes the fleet disagree until its last taskworker has restarted and
-the drained processes' series have gone stale, up to five minutes after
-each drain: the kill switch's own rollout after the start can page
-`modern-gate-fleet-disagrees` until it completes. A process that disagrees
-is seen only once settled, five minutes after its start. False
+the start pages `modern-gate-flip-drop` though the gate took little; read
+the shadow beside it. A restart alone does not fire, since a process is
+compared only once settled, but a config release that sets the switch or
+moves the start makes the fleet disagree until its last taskworker has
+restarted and the drained processes' series have gone stale, up to five
+minutes after each drain: the kill switch's own rollout after the start can
+page `modern-gate-fleet-disagrees` until it completes. A process that
+disagrees is seen only once settled, five minutes after its start. False
 negative: the dashboard counts cover connected valid public providers, the
 score export's Online population. API processes decide the gate for their
 own readers but publish no gauge, so an API block on an older config is not
