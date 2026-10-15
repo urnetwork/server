@@ -20,10 +20,23 @@ export WARP_ENV="local"
 export BRINGYOUR_POSTGRES_HOSTNAME="local-pg.bringyour.com"
 export BRINGYOUR_REDIS_HOSTNAME="local-redis.bringyour.com"
 
+# baseline with --runs only reads existing artifacts.
+attest=0
 case "${1:-}" in
-    run|fleet|reset|baseline)
-        source "$(dirname -- "${BASH_SOURCE[0]}")/../../local/local-env.sh" || exit 1
+    run|fleet|reset)
+        attest=1
+        ;;
+    baseline)
+        attest=1
+        for arg in "$@"; do
+            case "$arg" in
+                --runs|--runs=*) attest=0 ;;
+            esac
+        done
         ;;
 esac
+if [[ "$attest" == 1 ]]; then
+    source "$(dirname -- "${BASH_SOURCE[0]}")/../../local/local-env.sh" || exit 1
+fi
 
 exec go run . "$@"

@@ -293,3 +293,56 @@ func TestLocalRunScriptsRefuseToStartWithoutLauncher(t *testing.T) {
 		}
 	}
 }
+
+// sim-latency's wrapper attests the launcher only for the commands that reach
+// PostgreSQL and Redis. Without a launcher those refuse before starting the
+// simulator, while the file-only commands, baseline with --runs included,
+// start without an attestation.
+func TestSimLatencyRunLocalAttestsOnlyDatabaseCommands(t *testing.T) {
+	hostsPath := filepath.Join(t.TempDir(), "hosts")
+	if err := os.WriteFile(hostsPath, []byte("127.0.0.1 localhost\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probePath, probeRecordPath := writeLocalEnvironmentRecordingProbe(t)
+	resolverPath, _ := writeTestEnvironmentHostResolver(t, map[string][]string{
+		localPostgresHost: {"127.0.0.1"},
+		localRedisHost:    {"127.0.0.1"},
+	})
+	overrides := localEnvironmentScriptOverrides(filepath.Join(t.TempDir(), "run-local.lock"), hostsPath, resolverPath, probePath)
+	run := func(args []string) ([]string, string, error) {
+		goDirectory, goRecordPath := writeLocalRunRecordingGo(t)
+		overrides["PATH"] = goDirectory + string(os.PathListSeparator) + os.Getenv("PATH")
+		cmd := exec.Command("bash", append([]string{"run-local.sh"}, args...)...)
+		cmd.Dir = filepath.Join("connect", "sim-latency")
+		cmd.Env = testCommandEnvironment(overrides, "WARP_ENV", "WARP_SERVICE", "WARP_BLOCK", "WARP_VERSION", "WARP_DOMAIN", "WARP_VAULT_HOME", "WARP_CONFIG_HOME")
+		output, err := cmd.CombinedOutput()
+		return readLocalEnvironmentRecord(t, goRecordPath), string(output), err
+	}
+	for _, args := range [][]string{
+		{"run", "--epoch", "0"},
+		{"fleet", "--epoch", "0"},
+		{"reset"},
+		{"baseline", "--epoch", "0"},
+		{"baseline", "--epoch", "0", "--replicates", "2"},
+	} {
+		started, output, err := run(args)
+		if err == nil || started != nil || !strings.Contains(output, "start ./local/run-local.sh") {
+			t.Errorf("%q without a launcher = %v, started %q, %q; want a refusal before the simulator starts", args, err, started, output)
+		}
+	}
+	for _, args := range [][]string{
+		{"init", "--out", "providers.yml"},
+		{"analyze", "--run", "results.csv"},
+		{"baseline", "--epoch", "0", "--runs=a.csv,b.csv"},
+		{"baseline", "--epoch", "0", "--runs", "a.csv,b.csv"},
+	} {
+		started, output, err := run(args)
+		expected := []string{"unset|local|sim|sim|" + strings.Join(append([]string{"run", "."}, args...), " ")}
+		if err != nil || !slices.Equal(started, expected) {
+			t.Errorf("%q without a launcher = %v, started %q, %q; want the file-only command started without an attestation", args, err, started, output)
+		}
+	}
+	if probes := readLocalEnvironmentRecord(t, probeRecordPath); probes != nil {
+		t.Errorf("a command without a launcher probed %q", probes)
+	}
+}
