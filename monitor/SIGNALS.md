@@ -17529,36 +17529,36 @@ it is on: every outcome but `modern` is what it takes out.
   taskworker ran the last score export. With no taskworker process series in
   Mimir the run is `cannot-observe`.
 
-Outside 72 hours before the earliest start to the end of the watch after
-the latest the signal is quiet, whatever the gauges say. A part the verdict
-cannot read is `cannot-observe`, beside the findings the rest of it gives. No start series means the switch is set, true,
-false or unreadable, so no flip is scheduled and the signal is quiet: the
-owner's postponement silences it, and a moved start moves its windows. When
-no taskworker publishes `urnetwork_stats_provider_modern_gate_on` inside the
-windows of the code's default start, the taskworkers do not run the code
-that flips the gate, or their stats collector is down: the run is
-`cannot-observe`, never quiet. Outside those windows a failed read stays
-quiet.
+Outside 72 hours before the earliest start to the end of the watch after the
+latest the signal is quiet, whatever the gauges say. A part the verdict
+cannot read is `cannot-observe`, beside the findings the rest of it gives.
+No start series means the switch is set, true, false or unreadable, so no
+flip is scheduled and the signal is quiet: the owner's postponement silences
+it, and a moved start moves its windows. When no taskworker publishes
+`urnetwork_stats_provider_modern_gate_on` inside the windows of the code's
+default start, the taskworkers do not run the code that flips the gate, or
+their stats collector is down: the run is `cannot-observe`, never quiet.
+Outside those windows a failed read stays quiet.
 
 ACTION: decide before the start. To postpone, set
 `quality_speed_requires_modern_provider: false` in provider.yml: the kill
 switch, after which the next score export restores the buckets. To move the
 flip, set `quality_speed_modern_provider_start` to an RFC 3339 instant such
 as `2026-10-28T00:00:00Z`, or a date such as `2026-10-28`, its 00:00 UTC.
-Either is a config release through the
-config-updater and a restart of every taskworker and API block, since a
-running container keeps the config version it was created with (the same
-procedure as server/capprobe/README.md, "Switching it on"), and it
-postpones the flip only when the restarts finish before the start. A switch
-given without a value, or a start that cannot be read, keeps the gate off
-and is logged, as a postponement that failed; confirm the moved start on
+Either is a config release through the config-updater and a restart of every
+taskworker and API block, since a running container keeps the config version
+it was created with (the same procedure as server/capprobe/README.md,
+"Switching it on"), and it postpones the flip only when the restarts finish
+before the start. A switch given without a value, or a start that cannot be
+read, keeps the gate off and is logged, as a postponement that failed;
+confirm the moved start on
 `urnetwork_stats_provider_modern_gate_start_seconds` or with
-`bringyourctl provider inspect` after the restart. To let it flip, first switch the capability probe on
-and let it sweep the eligible providers until `no_evidence` is small.
-After the start, a `modern-gate-flip-drop` page whose drop the shadow
-explains is answered with the same kill switch; a drop the shadow does not
-explain has another cause (§2.19, §2.23) and the gate is not the thing to
-turn off.
+`bringyourctl provider inspect` after the restart. To let it flip, first
+switch the capability probe on and let it sweep the eligible providers until
+`no_evidence` is small. After the start, a `modern-gate-flip-drop` page
+whose drop the shadow explains is answered with the same kill switch; a drop
+the shadow does not explain has another cause (§2.19, §2.23) and the gate is
+not the thing to turn off.
 
 False positive: a URL probe outage or other bucket loss in the watch after
 the start pages `modern-gate-flip-drop` though the gate took little; read the
