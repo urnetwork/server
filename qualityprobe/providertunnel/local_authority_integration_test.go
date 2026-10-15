@@ -203,7 +203,7 @@ func TestProviderTunnelActualLocalAuthorityWithoutApi(t *testing.T) {
 		}))
 		defer payload.Close()
 		defer useHermeticTunnelClientSettings()()
-		cfg := Config{ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: sourceJwt, ClientId: connect.Id(sourceClientId), DataOnlyProbe: true, ClientCredentials: counted, ClientControl: counted, CloseTimeout: 15 * time.Second, DnsResolverSettings: &connect.DnsResolverSettings{EnableRemoteDoh: true, RemoteDohUrlsIpv4: []string{dns.URL + "/dns-query"}}, ContractReservationByteCount: 1 << 20}
+		cfg := Config{ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: sourceJwt, ClientId: connect.Id(sourceClientId), DataOnlyProbe: true, KeepClientKeysLocal: true, ClientCredentials: counted, ClientControl: counted, CloseTimeout: 15 * time.Second, DnsResolverSettings: &connect.DnsResolverSettings{EnableRemoteDoh: true, RemoteDohUrlsIpv4: []string{dns.URL + "/dns-query"}}, ContractReservationByteCount: 1 << 20}
 		tunnel, e := Open(ctx, cfg, connect.Id(providerClientId))
 		if e != nil {
 			tb.Fatal(e)

@@ -742,6 +742,48 @@ current catalog position. Removed targets or unknown historical identity must
 remain visible as recovery work, not silently clear or fabricate provider
 errors.
 
+### URL tunnel client keys (2026-10-14)
+
+Each URL probe mints a derived client with a fresh identity key. Until this
+change every child published its key, and the platform turned each one into a
+permanent signed registration: an `st_client_key_history` row of about 5 KB
+plus its evidence blobs. By the incident team's measurement these were 67-72%
+of the table's 50-76 inserts/s on Main, about 21-22 GB/day of Postgres and
+about 18 GB/day of blob writes.
+
+Nothing reads a URL child's key:
+
+- Encryption is off, so the child signs no certificate or identity proof for
+  the provider to verify, and it ignores the provider's handshake.
+- It has no close-report domain, so it never signs an `OriginalCloseReport`,
+  and close admission never reads key history for it.
+- It does not wait for registration (`ClientKeyRegistrationRequired` is off).
+- Contract creation reads the destination's key only as optional metadata. A
+  companion contract to the child then carries no key, which an
+  encryption-off session never uses. The provider admits contracts with an
+  HMAC under its provide secret, and settlement uses acked byte counts.
+
+The URL probe pass (`newProviderUrlProbePass`) therefore opts its tunnels in
+with `providertunnel.Config.KeepClientKeysLocal`. For an opted-in tunnel,
+`providertunnel.Open` sets connect's `SkipClientKeyPublication` on each
+generated client whose key has no reader (`skipUnreadClientKeyPublication`,
+the last change to the settings). The child sends no `ClientKey` control, so
+the platform writes no signed row, evidence blob or Redis `ckey_` key for it.
+
+- **Clients that keep publishing:** every tunnel that does not opt in,
+  including the egress-prober CLI's, and any client that can use its key. The
+  latter includes the capability probe's opportunistic clients, which require
+  registration, and domain-hash clients (the sn validator and miner).
+- **A misapplied skip publishes anyway.** If a reader turns up after the
+  tunnel chose the skip, connect logs an error and publishes, so the mistake
+  costs one registration instead of the reader's traffic. A post-quantum
+  profile raising the sessions to Required is one such reader.
+- **Unchanged:** the key-history domain, policy, registration, observation
+  and evidence formats, and the monitor guards.
+- **Rollout:** it ships with the taskworker that runs the prober, in a clear
+  window. The connect service, which signs registrations, needs no deploy.
+- **Existing rows** stay. Reclaiming them needs a reviewed retention migration.
+
 ## Four-hour scheduler and database budget
 
 Each shard execution owns one distinct network, credential parent and balance.

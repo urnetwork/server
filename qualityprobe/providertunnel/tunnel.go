@@ -31,6 +31,10 @@ type Config struct {
 	// the caller's DNS and URL traffic owns evaluation, without provider IpPing.
 	// The default retains the ordinary initial/continuous ping behavior.
 	DataOnlyProbe bool
+	// Keeps each generated client's identity key local when nothing reads it
+	// (skipUnreadClientKeyPublication). Only the taskworker's URL probe sets
+	// it; every other caller's clients publish as before.
+	KeepClientKeysLocal bool
 
 	ApiUrl      string
 	PlatformUrl string
@@ -288,6 +292,37 @@ func providerTunnelClientSettings(reservationByteCount connect.ByteCount) *conne
 	return settings
 }
 
+// Keeps a generated client's identity key local when nothing reads it, for a
+// tunnel whose Config opts in with KeepClientKeysLocal.
+//
+// Every URL probe mints a derived client with a fresh key, and each key the
+// client published became a permanent signed registration: one
+// st_client_key_history row plus its evidence blobs, the largest share of the
+// table's growth on 2026-10-14. A URL tunnel's client never uses its key.
+// Encryption is off, so it signs no certificate or identity proof for a
+// provider to verify. It has no close-report domain, so it signs no original
+// close report. It does not wait for registration. Contract creation, the
+// provider's admission (an HMAC under the provide secret) and settlement
+// (acked byte counts) do not read client keys.
+//
+// A client that can use its key keeps publishing: any session mode, a
+// required registration (a capability measurement's opportunistic clients)
+// or a close-report domain. So this runs after every other change to the
+// generated settings. A reader that appears later, such as a post-quantum
+// profile raising the sessions, makes connect log an error and publish anyway.
+func skipUnreadClientKeyPublication(settings *connect.ClientSettings) {
+	if settings.ClientKeyRegistrationRequired {
+		return
+	}
+	if settings.EncryptionSettings != nil && settings.EncryptionSettings.Mode != connect.EncryptionModeOff {
+		return
+	}
+	if settings.ContractManagerSettings != nil && settings.ContractManagerSettings.CloseReportDomainHash != ([32]byte{}) {
+		return
+	}
+	settings.SkipClientKeyPublication = true
+}
+
 // A read failure while the tunnel is live makes the data path silently stop,
 // so it must remain visible. Tunnel.Close cancels this same context before it
 // closes the tun, however, and Tun.Read then returns its ordinary terminal
@@ -426,7 +461,12 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		cfg.Version,
 		&cfg.ClientId,
 		func() *connect.ClientSettings {
-			return newProviderTunnelClientSettings(cfg.ContractReservationByteCount)
+			settings := newProviderTunnelClientSettings(cfg.ContractReservationByteCount)
+			// last, after every other change to the settings
+			if cfg.KeepClientKeysLocal {
+				skipUnreadClientKeyPublication(settings)
+			}
+			return settings
 		},
 		generatorSettings,
 	)
