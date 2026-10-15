@@ -325,6 +325,8 @@ var alertClassKinds = map[string]alertClassKind{
 	"minio-drive-offline":                                 incidentAlertClass,
 	"missing-origin-contract":                             incidentAlertClass,
 	"missing-origin-rate":                                 incidentAlertClass,
+	"modern-gate-flip-drop":                               incidentAlertClass,
+	"modern-gate-not-ready":                               incidentAlertClass,
 	"monitor-host-scope-partial":                          incidentAlertClass,
 	"netescrow-large-drift":                               incidentAlertClass,
 	"netescrow-mirror-write":                              incidentAlertClass,
