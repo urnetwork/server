@@ -63,6 +63,7 @@ func TestProvidersDashboardShowsTheEgressBuckets(t *testing.T) {
 		"borrowed share":          `sum by (rank_mode) (rate(urnetwork_provider_backfill_sum{env="$env"}[5m])) / sum by (rank_mode) (rate(urnetwork_provider_answered_total{env="$env"}[5m]))`,
 		"lent by evidence":        `sum by (rank_mode, evidence) (rate(urnetwork_provider_backfill_online_evidence_total{env="$env"}[5m]))`,
 		"rank measured first":     `max by (service) (urnetwork_findproviders2_rank_measured_first_enabled{env="$env",service=~"api|proxy"})`,
+		"ranked by every process": `min by (service) (max by (service, host, instance) (urnetwork_findproviders2_rank_measured_first_enabled{env="$env",service=~"api|proxy"}))`,
 		"url-success exemptions":  `max by (country_code) (urnetwork_stats_provider_online_success_exempt{env="$env"})`,
 		"modern gate, quality":    `max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env="$env",bucket="quality"})`,
 		"modern gate, speed":      `max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env="$env",bucket="speed"})`,

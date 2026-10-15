@@ -573,6 +573,70 @@ func TestOnlineFallbackSpreadsAnswersOverEachEvidenceRank(t *testing.T) {
 	t.Logf("1000 answers of 10 from 30 measured providers, lent per provider from the best-weighted: %v (ten best %d, ten worst %d)", counts, best, worst)
 }
 
+// Within an evidence rank the Online fallback is taken speed tier by speed
+// tier, past the speed cutoffs last (GEOMAP §10.3), and drawn by the key
+// within a tier. Here the measured providers past the speed cutoffs carry the
+// larger keys, so a draw by the key alone would lend them more often than the
+// fast ones.
+func TestOnlineFallbackDrawsSpeedTierByTier(t *testing.T) {
+	now := server.NowUtc()
+	providers := []*evidenceTestProvider{}
+	add := func(kind string, i int, reliabilityWeight float64, urlOk int, hasLatencyTest bool, latencyMillis int) {
+		providers = append(providers, &evidenceTestProvider{
+			name:           fmt.Sprintf("%s_%d", kind, i),
+			clientId:       evidenceTestFixedId(len(providers)),
+			urlOk:          urlOk,
+			urlTotal:       10,
+			lookbacks:      evidenceTestScored(reliabilityWeight),
+			hasLatencyTest: hasLatencyTest,
+			latencyMillis:  latencyMillis,
+			bytesPerSecond: 50 * Mib,
+		})
+	}
+	for i := range 5 {
+		// speed tier 0, with the smaller keys
+		add("fast", i, 0.80+0.01*float64(i), 5, true, 10)
+		// past the Speed latency cutoff, with the larger keys
+		add("cutoff", i, 0.90+0.01*float64(i), 7, true, 60)
+	}
+	for i := range 2 {
+		// speed tier 2: no latency test
+		add("untested", i, 0.85, 6, false, 0)
+	}
+	pool, names := evidenceTestExportedPool(t, now, RankModeQuality, providers)
+	kinds := func(clientIds []server.Id) []string {
+		kinds := []string{}
+		for _, clientId := range clientIds {
+			name := names[clientId]
+			kinds = append(kinds, name[:strings.LastIndex(name, "_")])
+		}
+		return kinds
+	}
+	tiers := map[string]int{}
+	for clientId, clientScore := range pool {
+		tiers[kinds([]server.Id{clientId})[0]] = clientScore.Tiers[RankModeSpeed]
+	}
+	assert.Equal(t, tiers, map[string]int{"fast": 0, "untested": 2, "cutoff": ClientScoreCutoffTier})
+	facets, err := ipFamilyFacetsForFilter("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := evidenceTestRequestEvidence(evidenceTestMainConfigRankingOn, false, now)
+	uniform := evidenceTestUniform(1)
+	for range 200 {
+		// five places: the five fast providers, whatever the keys
+		if lent := kinds(selectOnlineClientScores(pool, facets, 5, evidence, uniform)); !slices.Equal(lent, []string{"fast", "fast", "fast", "fast", "fast"}) {
+			t.Fatalf("five places lent %v, want the five fast providers", lent)
+		}
+		// eight places: then both untested, then one past the cutoffs
+		if lent := kinds(selectOnlineClientScores(pool, facets, 8, evidence, uniform)); !slices.Equal(lent, []string{"fast", "fast", "fast", "fast", "fast", "untested", "untested", "cutoff"}) {
+			t.Fatalf("eight places lent %v, want the fast, then the untested, then one past the cutoffs", lent)
+		}
+	}
+	// off, the order before: by the key, so past the cutoffs first here
+	assert.Equal(t, kinds(selectOnlineClientScores(pool, facets, 5, nil, evidenceTestNoDraw(t))), []string{"cutoff", "cutoff", "cutoff", "cutoff", "cutoff"})
+}
+
 // The weighted draw takes up to n distinct ids, every positive weight before
 // any other, each in proportion to its weight, and the same ids from the same
 // source whatever order the ids come in.

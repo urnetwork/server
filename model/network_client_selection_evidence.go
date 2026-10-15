@@ -15,14 +15,16 @@
 // first (connect/IPV6.md B2: dualstack first, so v4-only exits only top up),
 // and within a facet the draws take the candidates rank by rank, best first.
 // The native draws keep their weighted draw within each rank. The Online
-// fallback, a strict sort by its key while the setting is off, draws each
-// rank weighted by that key instead: the measured providers' keys rarely tie,
+// fallback, a strict sort by its key while the setting is off, takes each
+// rank speed tier by speed tier, past the speed cutoffs last, and draws each
+// tier weighted by that key instead: the measured providers' keys rarely tie,
 // so a sort would lend every answer the same few. Supply is unchanged; the
 // providers without evidence fill whatever the measured leave.
 package model
 
 import (
 	"cmp"
+	"maps"
 	"math"
 	mathrand "math/rand"
 	"slices"
@@ -275,14 +277,33 @@ func weightedClientIdDraw(clientIds []server.Id, n int, weight func(server.Id) f
 	return drawn
 }
 
+// One evidence rank's candidates by speed-mode tier, lowest first, so that
+// those past the speed cutoffs (ClientScoreCutoffTier) come last, each tier
+// in the order of clientIds.
+func onlineFallbackSpeedTiers(clientIds []server.Id, clientScores map[server.Id]*ClientScore) [][]server.Id {
+	tierClientIds := map[int][]server.Id{}
+	for _, clientId := range clientIds {
+		tier := clientScores[clientId].Tiers[RankModeSpeed]
+		tierClientIds[tier] = append(tierClientIds[tier], clientId)
+	}
+	tiers := slices.Sorted(maps.Keys(tierClientIds))
+	groups := make([][]server.Id, 0, len(tiers))
+	for _, tier := range tiers {
+		groups = append(groups, tierClientIds[tier])
+	}
+	return groups
+}
+
 // Takes up to n of the online bucket, each facet in the request's preference
 // order. Without evidence, a facet is taken in the Online fallback's order
 // (compareOnlineFallback). With evidence, each evidence rank of a facet in
-// turn, best first, is drawn weighted by the same key -- reliability weight
-// times URL weight, from uniform -- and the draw is listed in that order. A
-// sort by the key would lend every answer the same providers, since measured
-// providers' keys rarely tie; the draw spreads the answers over the rank in
-// proportion to the key.
+// turn, best first, is taken speed tier by speed tier, the lowest first and
+// those past the speed cutoffs last, as GEOMAP §10.3 orders them. Each tier is
+// drawn weighted by the order's key -- reliability weight times URL weight,
+// from uniform -- and the draw is listed in that order. A sort by the key
+// would lend every answer the same providers, since measured providers' keys
+// rarely tie; the draw spreads the answers over each tier in proportion to the
+// key, and the tiers are few enough that the spread survives.
 func selectOnlineClientScores(
 	candidateClientScores map[server.Id]*ClientScore,
 	facets []ipFamilyFacet,
@@ -313,12 +334,18 @@ func selectOnlineClientScores(
 				clientIds = append(clientIds, groupClientIds[:min(remainingCount, len(groupClientIds))]...)
 				continue
 			}
-			drawn := weightedClientIdDraw(groupClientIds, remainingCount, func(clientId server.Id) float64 {
-				clientScore := candidateClientScores[clientId]
-				return clientScore.ReliabilityWeight * onlineFallbackUrlWeight(clientScore)
-			}, uniform)
-			slices.SortStableFunc(drawn, compare)
-			clientIds = append(clientIds, drawn...)
+			for _, tierClientIds := range onlineFallbackSpeedTiers(groupClientIds, candidateClientScores) {
+				remainingCount := n - len(clientIds)
+				if remainingCount <= 0 {
+					break
+				}
+				drawn := weightedClientIdDraw(tierClientIds, remainingCount, func(clientId server.Id) float64 {
+					clientScore := candidateClientScores[clientId]
+					return clientScore.ReliabilityWeight * onlineFallbackUrlWeight(clientScore)
+				}, uniform)
+				slices.SortStableFunc(drawn, compare)
+				clientIds = append(clientIds, drawn...)
+			}
 		}
 	}
 	return clientIds

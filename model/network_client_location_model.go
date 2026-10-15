@@ -6222,7 +6222,8 @@ func FindProviders2(
 			// Speed selection. Check that overlap before filterPool removes it.
 			if mode == RankModeQuality && native {
 				prior := []server.Id{}
-				now := server.NowUtc()
+				// the request's one instant, as filterPool reads it
+				now := filterTime
 				for _, provider := range providers {
 					id := provider.ClientId
 					if score := scores[id]; score != nil && !qualityReadClientIds[id] &&
