@@ -5,15 +5,17 @@ package main
 // the canary decision the score export published. Copying the environment's
 // selected latest forward after a fallback would make the rejected database
 // the next release's baseline, so the copy follows the database the decision
-// serves. It prints one line:
+// serves, or the old database of a fallback it latched, whether the latch is
+// still served or was dropped. It prints one line:
 //
 //	copy            copy the database the environment selects (--previous-config)
-//	pin <path>      copy this database instead: the one the decision serves
-//	pause <reason>  publish no new IP databases: the decision cannot be followed
+//	pin <path>      copy this database instead: the one the decision protects
+//	pause <reason>  publish no new ARIN database: the decision cannot be followed
 //
 // A decision that is unreadable, of another version or older than --max-age
-// pauses, as does a served database the config tree no longer holds, since
-// an unchecked release would follow either way.
+// pauses, as does a protected database the config tree no longer holds, or a
+// dropped fallback the decision does not name, since an unchecked release
+// would follow either way.
 
 import (
 	"encoding/json"
@@ -36,6 +38,12 @@ const canaryBaselineDecisionVersion = 1
 // minutes; a decision this old belongs to a stalled export.
 const canaryBaselineMaxAge = 6 * time.Hour
 
+// A latch of the published decision: the pair it held out.
+type canaryBaselineLatch struct {
+	LatestEpoch int64 `json:"latest_epoch"`
+	OldEpoch    int64 `json:"old_epoch"`
+}
+
 // The fields of the published decision the baseline follows.
 type canaryBaselineDecision struct {
 	Version      int    `json:"version"`
@@ -49,6 +57,11 @@ type canaryBaselineDecision struct {
 		BuildEpoch int64 `json:"build_epoch"`
 	} `json:"old"`
 	DecidedAt time.Time `json:"decided_at"`
+	// a fallback latched on the pair, held, or dropped by a single decision or
+	// a pair whose old database is the held-out latest
+	Latch           *canaryBaselineLatch `json:"latch"`
+	DroppedLatch    *canaryBaselineLatch `json:"dropped_latch"`
+	FallbackDropped bool                 `json:"fallback_dropped"`
 }
 
 func runCanaryBaseline(args []string, output io.Writer, now time.Time) error {
@@ -84,13 +97,25 @@ func canaryBaseline(decisionPath string, configRoot string, env string, maxAge t
 	if decision.DecidedAt.IsZero() || maxAge < now.Sub(decision.DecidedAt) {
 		return fmt.Sprintf("pause the canary decision of %s is older than %s", decision.DecidedAt.Format(time.RFC3339), maxAge)
 	}
+	// A latched fallback protects its old database whatever the decision
+	// serves now: warming can serve each row's latest slot while the latch is
+	// held, and a dropped latch's pair compares against the held-out latest.
+	protected := decision.ServingEpoch
+	switch {
+	case decision.Latch != nil:
+		protected = decision.Latch.OldEpoch
+	case decision.DroppedLatch != nil:
+		protected = decision.DroppedLatch.OldEpoch
+	case decision.FallbackDropped:
+		return "pause the canary dropped a fallback without naming the database it protected"
+	}
 	// each row's latest slot is served: the selected latest is the baseline
-	if decision.ServingEpoch == 0 {
+	if protected == 0 {
 		return "copy"
 	}
 	paths, err := server.ResolveResourcePaths(configRoot, env, "arindb/arin.mmdb")
 	if errors.Is(err, server.ErrResourceNotFound) {
-		return fmt.Sprintf("pause the canary serves the database built at %d, and %s selects no arindb/arin.mmdb", decision.ServingEpoch, env)
+		return fmt.Sprintf("pause the canary protects the database built at %d, and %s selects no arindb/arin.mmdb", protected, env)
 	}
 	if err != nil {
 		return "pause the selected database does not resolve: " + err.Error()
@@ -99,13 +124,13 @@ func canaryBaseline(decisionPath string, configRoot string, env string, maxAge t
 	if err != nil {
 		return "pause the selected database does not open: " + err.Error()
 	}
-	if decision.ServingEpoch == selectedEpoch {
+	if protected == selectedEpoch {
 		return "copy"
 	}
-	path := findArinDatabaseBuiltAt(configRoot, decision.ServingEpoch)
+	path := findArinDatabaseBuiltAt(configRoot, protected)
 	if path == "" {
-		return fmt.Sprintf("pause the canary serves the database built at %d (%s, %s), which no release directory beneath the config holds",
-			decision.ServingEpoch, decision.State, decision.ServingBasis)
+		return fmt.Sprintf("pause the canary protects the database built at %d (%s, %s), which no release directory beneath the config holds",
+			protected, decision.State, decision.ServingBasis)
 	}
 	return "pin " + path
 }

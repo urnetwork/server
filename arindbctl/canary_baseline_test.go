@@ -97,10 +97,33 @@ func TestCanaryBaselinePausesOnADecisionItCannotFollow(t *testing.T) {
 		{name: "too old", path: writeTestCanaryDecision(t, testCanaryDecisionDocument("latest", testPreviousNewEpoch, "passed", testCanaryBaselineNow.Add(-7*time.Hour))),
 			want: "pause the canary decision of"},
 		{name: "a served database the tree lacks", path: writeTestCanaryDecision(t, testCanaryDecisionDocument("fallback", testPreviousOldEpoch-86400, "tripped", testCanaryBaselineNow)),
-			want: "pause the canary serves the database built at"},
+			want: "pause the canary protects the database built at"},
+		{name: "a dropped fallback it does not name", path: writeTestCanaryDecision(t, func() map[string]any {
+			document := testCanaryDecisionDocument("single", 0, "single", testCanaryBaselineNow)
+			document["fallback_dropped"] = true
+			return document
+		}()), want: "pause the canary dropped a fallback"},
 	} {
 		if got := canaryBaseline(c.path, root, "main", canaryBaselineMaxAge, testCanaryBaselineNow); !strings.HasPrefix(got, c.want) {
 			t.Errorf("%s: %q, want %q...", c.name, got, c.want)
+		}
+	}
+}
+
+// A latched fallback protects its old database whatever the decision serves:
+// warming serving each row's latest slot while the latch is held, or a
+// release whose old database is the held-out latest, still pins the latch's
+// old database rather than copying the rejected latest forward.
+func TestCanaryBaselineFollowsALatchTheDecisionNoLongerServes(t *testing.T) {
+	root, olderPath := testCanaryBaselineConfig(t)
+	latch := map[string]any{"latest_epoch": testPreviousNewEpoch, "old_epoch": testPreviousOldEpoch}
+	held := testCanaryDecisionDocument("warming", 0, "uncovered", testCanaryBaselineNow)
+	held["latch"], held["fallback_dropped"] = latch, true
+	dropped := testCanaryDecisionDocument("latest", testPreviousNewEpoch, "passed", testCanaryBaselineNow)
+	dropped["dropped_latch"], dropped["fallback_dropped"] = latch, true
+	for name, document := range map[string]map[string]any{"a held latch on each row's latest slot": held, "a dropped latch": dropped} {
+		if got := canaryBaseline(writeTestCanaryDecision(t, document), root, "main", canaryBaselineMaxAge, testCanaryBaselineNow); got != "pin "+olderPath {
+			t.Errorf("%s: %q, want the latch's old database %q", name, got, olderPath)
 		}
 	}
 }
