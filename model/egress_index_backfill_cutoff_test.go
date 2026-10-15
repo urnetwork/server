@@ -7,6 +7,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -20,80 +21,101 @@ import (
 var egressTestPastQualityLatency = egressTestPerformance{latencyMs: 250, bytesPerSecond: 100 * 1024 * 1024}
 var egressTestPastQualityThroughput = egressTestPerformance{latencyMs: 10, bytesPerSecond: 500 * 1024}
 
-// The real export path publishes two verified natives, three Speed natives
-// that Quality refuses within its cutoffs, three it refuses past them (two by
-// latency, one by throughput) and one online member of neither bucket. A
-// Quality request for ten borrows the three within the cutoffs at their Speed
-// tier plus the offset, and lends the three past them only from the Online
-// fallback, at twice the offset with the online member: all nine, as before,
-// where the Speed natives past the cutoffs were borrowed at the borrowed tier.
-// With one place left after the borrowed, the fallback fills it.
+// One location's nine providers as the real export path publishes them.
+type cutoffTestFixture struct {
+	city *Location
+	// verified: Quality and Speed natives
+	natives []server.Id
+	// ARIN non-quality Speed natives within Quality's cutoffs
+	within []server.Id
+	// ARIN non-quality Speed natives past them: two by latency, one by
+	// throughput
+	past []server.Id
+	// a failing URL ratio: online, in neither native bucket
+	onlineOnly server.Id
+	// the non-forced Quality page, which holds all nine
+	published map[server.Id]*ClientScore
+}
+
+func newCutoffTestFixture(ctx context.Context, t testing.TB, name string) *cutoffTestFixture {
+	t.Helper()
+	fixture := &cutoffTestFixture{
+		city: egressTestCity(ctx, name+" City", name+" Region", "United States", "us"),
+	}
+	for range 2 {
+		provider := egressTestConnect(ctx, t, fixture.city, egressTestFast, nil, nil)
+		egressTestProbed(ctx, provider, fixture.city, 0, "us")
+		fixture.natives = append(fixture.natives, provider.clientId)
+	}
+	for range 3 {
+		fixture.within = append(fixture.within, egressTestOverLine(ctx, t, fixture.city, egressTestFast).clientId)
+	}
+	for _, performance := range []egressTestPerformance{egressTestPastQualityLatency, egressTestPastQualityLatency, egressTestPastQualityThroughput} {
+		fixture.past = append(fixture.past, egressTestOverLine(ctx, t, fixture.city, performance).clientId)
+	}
+	onlineOnly := egressTestConnect(ctx, t, fixture.city, egressTestFast, nil, nil)
+	egressTestHealth(ctx, onlineOnly.clientId, server.NowUtc(), 3, 1)
+	fixture.onlineOnly = onlineOnly.clientId
+	egressTestPasses(ctx, t)
+
+	fixture.published = egressTestCachedScores(ctx, t, fixture.city, RankModeQuality, false)
+	member := func(clientId server.Id, quality bool, speed bool, pastCutoffs bool) {
+		score := fixture.published[clientId]
+		if score == nil || !score.Online || score.PassesMinimums[RankModeQuality] != quality || score.PassesMinimums[RankModeSpeed] != speed ||
+			(score.Tiers[RankModeQuality] == ClientScoreCutoffTier) != pastCutoffs {
+			t.Fatal("fixture bucket membership or Quality tier changed")
+		}
+	}
+	for _, clientId := range fixture.natives {
+		member(clientId, true, true, false)
+	}
+	for _, clientId := range fixture.within {
+		member(clientId, false, true, false)
+	}
+	for _, clientId := range fixture.past {
+		member(clientId, false, true, true)
+	}
+	member(fixture.onlineOnly, false, false, false)
+	return fixture
+}
+
+// The fixture publishes two verified natives, three Speed natives that
+// Quality refuses within its cutoffs, three it refuses past them and one
+// online member of neither bucket. A Quality request for ten borrows the
+// three within the cutoffs at their Speed tier plus the offset and lends the
+// three past them only from the Online fallback, at twice the offset with
+// the online member: all nine, the count it answered before, when the three
+// past the cutoffs were borrowed at the borrowed tier too. A request for six
+// keeps its six: the fallback fills the place left after the borrowed, which
+// one of the three past the cutoffs took at the borrowed tier before.
 func TestBackfillQualityBorrowsSpeedWithinItsCutoffs(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
 		onlineTestFreshSubscriberCache(t)
 		ctx := t.Context()
-		city := egressTestCity(ctx, "Cutoff City", "Cutoff Region", "United States", "us")
-		natives := []server.Id{}
-		for range 2 {
-			provider := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
-			egressTestProbed(ctx, provider, city, 0, "us")
-			natives = append(natives, provider.clientId)
-		}
-		within := []server.Id{}
-		for range 3 {
-			within = append(within, egressTestOverLine(ctx, t, city, egressTestFast).clientId)
-		}
-		past := []server.Id{}
-		for _, performance := range []egressTestPerformance{egressTestPastQualityLatency, egressTestPastQualityLatency, egressTestPastQualityThroughput} {
-			past = append(past, egressTestOverLine(ctx, t, city, performance).clientId)
-		}
-		onlineOnly := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
-		egressTestHealth(ctx, onlineOnly.clientId, server.NowUtc(), 3, 1)
-		egressTestPasses(ctx, t)
-
-		published := egressTestCachedScores(ctx, t, city, RankModeQuality, false)
-		member := func(clientId server.Id, quality bool, speed bool, pastCutoffs bool) {
-			score := published[clientId]
-			if score == nil || !score.Online || score.PassesMinimums[RankModeQuality] != quality || score.PassesMinimums[RankModeSpeed] != speed ||
-				(score.Tiers[RankModeQuality] == ClientScoreCutoffTier) != pastCutoffs {
-				t.Fatal("fixture bucket membership or Quality tier changed")
-			}
-		}
-		for _, clientId := range natives {
-			member(clientId, true, true, false)
-		}
-		for _, clientId := range within {
-			member(clientId, false, true, false)
-		}
-		for _, clientId := range past {
-			member(clientId, false, true, true)
-		}
-		member(onlineOnly.clientId, false, false, false)
-
+		fixture := newCutoffTestFixture(ctx, t, "Cutoff")
 		offset := egressTestBackfillOffset()
-		lentByFallback := append(slices.Clone(past), onlineOnly.clientId)
+		lentByFallback := append(slices.Clone(fixture.past), fixture.onlineOnly)
 		offlineTestForEachReader(t, func(nativeReader bool) {
 			for _, count := range []int{10, 6} {
 				label := fmt.Sprintf("reader=%t count=%d", nativeReader, count)
-				providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, count, false, server.NewId())
+				providers := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeQuality, count, false, server.NewId())
 				assertEgressTestNoRepeats(t, providers)
 				assertEgressTestTiersKeepOrder(t, providers)
-				// the location's nine providers, or the six places asked for
 				if len(providers) != min(count, 9) {
 					t.Fatalf("%s: answered %d providers, want %d", label, len(providers), min(count, 9))
 				}
 				for i, provider := range providers {
 					switch {
 					case i < 2:
-						if !slices.Contains(natives, provider.ClientId) || provider.Tier != 0 {
+						if !slices.Contains(fixture.natives, provider.ClientId) || provider.Tier != 0 {
 							t.Fatalf("%s: place %d is not a native at tier 0", label, i)
 						}
 					case i < 5:
-						if !slices.Contains(within, provider.ClientId) {
+						if !slices.Contains(fixture.within, provider.ClientId) {
 							t.Fatalf("%s: place %d is not a Speed native within Quality's cutoffs", label, i)
 						}
-						if want := published[provider.ClientId].Tiers[RankModeSpeed] + offset; provider.Tier != want {
+						if want := fixture.published[provider.ClientId].Tiers[RankModeSpeed] + offset; provider.Tier != want {
 							t.Fatalf("%s: borrowed Speed native at tier %d, want %d", label, provider.Tier, want)
 						}
 					default:
@@ -106,62 +128,7 @@ func TestBackfillQualityBorrowsSpeedWithinItsCutoffs(t *testing.T) {
 					}
 				}
 			}
-
-			// Speed borrows from Quality as before; its own natives come first.
-			speed := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeSpeed, 10, false, server.NewId())
-			if len(speed) != 9 {
-				t.Fatalf("reader=%t: Speed answered %d providers, want 9", nativeReader, len(speed))
-			}
-			for _, provider := range speed {
-				want := published[provider.ClientId].Tiers[RankModeSpeed]
-				if provider.ClientId == onlineOnly.clientId {
-					want = 2 * offset
-				}
-				if provider.Tier != want {
-					t.Fatalf("reader=%t: Speed answered tier %d, want %d", nativeReader, provider.Tier, want)
-				}
-			}
 		})
-
-		// force_minimum answers its own forced pool, which has no minimums,
-		// and borrows nothing: Speed all of it, Quality what the live read
-		// admits, which leaves out the ARIN non-quality providers.
-		for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
-			forcedPool := egressTestCachedScores(ctx, t, city, mode, true)
-			want := slices.Collect(maps.Keys(forcedPool))
-			if mode == RankModeQuality {
-				want = append(slices.Clone(natives), onlineOnly.clientId)
-			}
-			forced := egressTestFind(ctx, t, egressTestLocationSpec(city), mode, 10, true, server.NewId())
-			if !slices.Equal(onlineTestSorted(egressTestIds(forced)...), onlineTestSorted(want...)) {
-				t.Fatalf("forced %s changed: answered %d providers, want %d", mode, len(forced), len(want))
-			}
-			for _, provider := range forced {
-				if provider.Tier != forcedPool[provider.ClientId].Tiers[mode] {
-					t.Fatalf("forced %s answered a borrowed tier", mode)
-				}
-			}
-		}
-		// Online answers every online member at one tier.
-		online := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeOnline, 10, false, server.NewId())
-		everyone := slices.Concat(natives, within, past, []server.Id{onlineOnly.clientId})
-		if !slices.Equal(onlineTestSorted(egressTestIds(online)...), onlineTestSorted(everyone...)) {
-			t.Fatal("online changed")
-		}
-		for _, provider := range online {
-			if provider.Tier != 0 {
-				t.Fatal("online answered a tier")
-			}
-		}
-		// Named, a Speed native past Quality's cutoffs answers as before:
-		// Quality refuses it as ARIN non-quality, Speed returns it.
-		named := []*ProviderSpec{{ClientId: &past[0]}}
-		if providers := egressTestFind(ctx, t, named, RankModeQuality, 10, false, server.NewId()); len(providers) != 0 {
-			t.Fatal("named Quality changed")
-		}
-		if providers := egressTestFind(ctx, t, named, RankModeSpeed, 10, false, server.NewId()); !slices.Equal(egressTestIds(providers), []server.Id{past[0]}) {
-			t.Fatal("named Speed changed")
-		}
 	})
 }
 
@@ -197,6 +164,76 @@ func TestBackfillQualityLendsSpeedPastItsCutoffsWithoutOnlineFlag(t *testing.T) 
 				if provider.ClientId != want[i].ClientId || provider.Tier != want[i].Tier {
 					t.Fatalf("reader=%t: place %d at tier %d, want tier %d", nativeReader, i, provider.Tier, want[i].Tier)
 				}
+			}
+		})
+	})
+}
+
+// The requests that must not change, on the same location. Speed draws its
+// eight natives at their Speed tiers and has nothing to borrow from Quality,
+// whose natives are its own. force_minimum answers its own forced pool, which
+// has no minimums, and borrows nothing: Speed all of it, Quality what the
+// live read admits, without the ARIN non-quality providers. Online answers
+// every online member at one tier. Named, a Speed native past Quality's
+// cutoffs is refused by Quality as ARIN non-quality and returned by Speed.
+func TestBackfillQualityCutoffsLeaveOtherRequestsUnchanged(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
+		onlineTestFreshSubscriberCache(t)
+		ctx := t.Context()
+		fixture := newCutoffTestFixture(ctx, t, "Cutoff Unchanged")
+		offset := egressTestBackfillOffset()
+		everyone := slices.Concat(fixture.natives, fixture.within, fixture.past, []server.Id{fixture.onlineOnly})
+		offlineTestForEachReader(t, func(nativeReader bool) {
+			speed := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeSpeed, 10, false, server.NewId())
+			assertEgressTestNoRepeats(t, speed)
+			assertEgressTestTiersKeepOrder(t, speed)
+			if !slices.Equal(onlineTestSorted(egressTestIds(speed)...), onlineTestSorted(everyone...)) {
+				t.Fatalf("reader=%t: Speed answered %d providers, want 9", nativeReader, len(speed))
+			}
+			for _, provider := range speed {
+				want := fixture.published[provider.ClientId].Tiers[RankModeSpeed]
+				if provider.ClientId == fixture.onlineOnly {
+					want = 2 * offset
+				}
+				if provider.Tier != want {
+					t.Fatalf("reader=%t: Speed answered tier %d, want %d", nativeReader, provider.Tier, want)
+				}
+			}
+
+			for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
+				forcedPool := egressTestCachedScores(ctx, t, fixture.city, mode, true)
+				want := slices.Collect(maps.Keys(forcedPool))
+				if mode == RankModeQuality {
+					want = append(slices.Clone(fixture.natives), fixture.onlineOnly)
+				}
+				forced := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), mode, 10, true, server.NewId())
+				if !slices.Equal(onlineTestSorted(egressTestIds(forced)...), onlineTestSorted(want...)) {
+					t.Fatalf("reader=%t: forced %s answered %d providers, want %d", nativeReader, mode, len(forced), len(want))
+				}
+				for _, provider := range forced {
+					if provider.Tier != forcedPool[provider.ClientId].Tiers[mode] {
+						t.Fatalf("reader=%t: forced %s answered a borrowed tier", nativeReader, mode)
+					}
+				}
+			}
+
+			online := egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeOnline, 10, false, server.NewId())
+			if !slices.Equal(onlineTestSorted(egressTestIds(online)...), onlineTestSorted(everyone...)) {
+				t.Fatalf("reader=%t: online changed", nativeReader)
+			}
+			for _, provider := range online {
+				if provider.Tier != 0 {
+					t.Fatalf("reader=%t: online answered a tier", nativeReader)
+				}
+			}
+
+			named := []*ProviderSpec{{ClientId: &fixture.past[0]}}
+			if providers := egressTestFind(ctx, t, named, RankModeQuality, 10, false, server.NewId()); len(providers) != 0 {
+				t.Fatalf("reader=%t: named Quality changed", nativeReader)
+			}
+			if providers := egressTestFind(ctx, t, named, RankModeSpeed, 10, false, server.NewId()); !slices.Equal(egressTestIds(providers), []server.Id{fixture.past[0]}) {
+				t.Fatalf("reader=%t: named Speed changed", nativeReader)
 			}
 		})
 	})
