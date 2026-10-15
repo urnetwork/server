@@ -140,6 +140,8 @@ Usage:
     bringyourctl st v2-activation
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
+    bringyourctl grafana reconcile-alerting [--grafana_url=<grafana_url>]
+    bringyourctl grafana test-alert [--grafana_url=<grafana_url>]
 
 Options:
     -h --help     Show this screen.
@@ -481,6 +483,10 @@ func main() {
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
 			grafanaLoadDefaults(opts)
+		} else if reconcileAlerting, _ := opts.Bool("reconcile-alerting"); reconcileAlerting {
+			grafanaReconcileAlertingCommand(opts)
+		} else if testAlert, _ := opts.Bool("test-alert"); testAlert {
+			grafanaTestAlertCommand(opts)
 		}
 	} else {
 		fmt.Println(usage)
