@@ -92,6 +92,13 @@ func testEnvLoopbackTunnelPort(port uint16) bool {
 	return port == 5432 || port == 6432 || (6379 <= port && port <= 6427)
 }
 
+// Reports whether a loopback endpoint on port could be the production data
+// tunnel, for fixtures in other packages that validate their own explicit
+// loopback endpoints.
+func Testing_LoopbackTunnelPort(port uint16) bool {
+	return testEnvLoopbackTunnelPort(port)
+}
+
 // A closed listener's endpoint may already belong to another process, so an
 // admission holds only while its listener is open.
 func testEnvListenerLive(listener *net.TCPListener) bool {
