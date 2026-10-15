@@ -90,6 +90,22 @@ type EgressIndexSettings struct {
 	// ClientScoreCutoffTier + 1 (4), the least that keeps every native
 	// ahead of every borrowed provider before demerits.
 	BackfillTierOffset int
+	// Whether FindProviders2 takes providers with measured evidence before
+	// those without in every draw of a Quality or Speed request that is not
+	// force_minimum: its own bucket, the bucket it borrows from and the Online
+	// fallback (network_client_selection_evidence.go). Within each family
+	// facet, URL-probe evidence comes first, then a reliability score, and the
+	// providers without evidence still fill whatever the measured leave, so
+	// no answer gets shorter. The api, and the proxy for its hosted devices,
+	// apply it as they answer; the taskworker's export does not read it. A
+	// service sees only the config version its container was created with,
+	// so turning it on or off is a config release and a restart of the api
+	// and the proxy. Each restarted process then applies it within
+	// RequestSettingsMaxAge, and
+	// urnetwork_findproviders2_rank_measured_first_enabled shows each
+	// process's value. False, the default, is the order before it.
+	// `rank_measured_first` in the block.
+	RankMeasuredFirst bool
 	// how old the settings a request path reads may be. The passes read
 	// provider.yml on every call; a request path runs far too often to read
 	// and parse a file each time.
@@ -214,6 +230,7 @@ type egressIndexSettingsBlock struct {
 	MinScoredLoads       *int           `yaml:"min_scored_loads"`
 	CountryGate          *bool          `yaml:"country_gate"`
 	BackfillTierOffset   *int           `yaml:"backfill_tier_offset"`
+	RankMeasuredFirst    *bool          `yaml:"rank_measured_first"`
 }
 
 // The defaults with the overrides of provider.yml, read on every call like the
@@ -452,6 +469,9 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	}
 	if overrides.CountryGate != nil {
 		settings.CountryGate = *overrides.CountryGate
+	}
+	if overrides.RankMeasuredFirst != nil {
+		settings.RankMeasuredFirst = *overrides.RankMeasuredFirst
 	}
 	return settings, modernGateFailure
 }

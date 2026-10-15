@@ -2923,7 +2923,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 83
       },
@@ -2982,8 +2982,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 83
       },
       "fieldConfig": {
@@ -3044,6 +3044,65 @@
         }
       ],
       "description": "Of every provider non-forced location answers handed out, the share borrowed from outside the requested bucket. Backfill makes every answer look full, so this is the operator's view of how empty the bucket behind it is; above half for an hour is the backfill-sustained finding of SIGNALS.md §2.19b."
+    },
+    {
+      "id": 76,
+      "type": "timeseries",
+      "title": "online fallback lent, by evidence",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 83
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (rank_mode, evidence) (rate(urnetwork_provider_backfill_online_evidence_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{rank_mode}} {{evidence}}"
+        }
+      ],
+      "description": "Providers per second that the Online fallback lent Quality and Speed answers, by what the draw knew of them: url_reliability (URL-probe evidence and a reliability score), url (URL-probe evidence only), reliability (a reliability score only) or none. Summed over every process that answers FindProviders2 (the api, and the proxy for its hosted devices), whether or not egress_index.rank_measured_first orders the draw by it. The none share is the unchecked supply those answers carry; with the setting on, it falls to what the measured providers cannot fill."
     },
     {
       "id": 65,
@@ -3384,7 +3443,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 103
       },
@@ -3454,8 +3513,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 103
       },
       "fieldConfig": {
@@ -3495,6 +3554,85 @@
         }
       ],
       "description": "The instant the modern provider gate turns on by itself, 2026-10-21 00:00 UTC unless quality_speed_modern_provider_start moves it. No value while provider.yml sets quality_speed_requires_modern_provider, true or false, when no flip is scheduled. The monitor's readiness signal (SIGNALS.md §2.29) watches the shadow from 72 hours before it."
+    },
+    {
+      "id": 77,
+      "type": "stat",
+      "title": "rank measured first: on",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 103
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "off",
+                  "index": 0
+                },
+                "1": {
+                  "text": "on",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "min by (service) (max by (service, host, instance) (urnetwork_findproviders2_rank_measured_first_enabled{env=\"$env\",service=~\"api|proxy\"}))",
+          "refId": "A",
+          "legendFormat": "{{service}}: every process"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (service) (urnetwork_findproviders2_rank_measured_first_enabled{env=\"$env\",service=~\"api|proxy\"})",
+          "refId": "B",
+          "legendFormat": "{{service}}: any process"
+        }
+      ],
+      "description": "Whether the api and the proxy order their FindProviders2 draws by evidence (egress_index.rank_measured_first in provider.yml), as each process read it. \"every process\" is on only once all of a service's processes apply it, so through a staggered restart it reads on when the last one has restarted onto the new config; \"any process\" is on as soon as one has. Turning it on or off is a config release and a restart of the api and the proxy; the taskworker needs nothing."
     },
     {
       "id": 71,
