@@ -96,6 +96,9 @@ const slackUndeliveredReportInterval = time.Minute
 // no_service or invalid_payload. Anything else in the body is not logged.
 var slackReasonPattern = regexp.MustCompile(`^[a-z_]{1,64}$`)
 
+// A Retry-After in seconds, of any length.
+var slackRetryAfterSecondsPattern = regexp.MustCompile(`^[0-9]+$`)
+
 // Settings for NewSlackAlertNotifier. Zero values take the defaults, except
 // PostInterval, where zero posts back to back, and StartDigestHold, where
 // zero posts every raise on its own.
@@ -854,8 +857,10 @@ func (self *SlackAlertNotifier) postWithRetry(text string) bool {
 // Slack sends one, RetryDelay otherwise, at most MaxRetryDelay.
 func (self *SlackAlertNotifier) retryDelay(retryAfter string) time.Duration {
 	retryAfter = strings.TrimSpace(retryAfter)
-	if seconds, err := strconv.ParseInt(retryAfter, 10, 64); err == nil && 0 <= seconds {
-		if int64(self.settings.MaxRetryDelay/time.Second) <= seconds {
+	if slackRetryAfterSecondsPattern.MatchString(retryAfter) {
+		// a count past int64 is only a longer wait than the cap
+		seconds, err := strconv.ParseInt(retryAfter, 10, 64)
+		if err != nil || int64(self.settings.MaxRetryDelay/time.Second) <= seconds {
 			return self.settings.MaxRetryDelay
 		}
 		return time.Duration(seconds) * time.Second

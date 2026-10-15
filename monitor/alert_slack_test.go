@@ -720,6 +720,35 @@ func TestSlackAlertNotifierDoesNotRetryOtherFailures(t *testing.T) {
 	}
 }
 
+// Retry-After is seconds of any length or an HTTP date; the wait is at most
+// MaxRetryDelay, and anything else waits RetryDelay.
+func TestSlackAlertNotifierRetryAfterEdges(t *testing.T) {
+	harness := newSlackTestHarness()
+	notifier := &SlackAlertNotifier{settings: SlackAlertNotifierSettings{Now: harness.Now}.withDefaults()}
+	for _, c := range []struct {
+		retryAfter string
+		wantDelay  time.Duration
+	}{
+		{retryAfter: "0", wantDelay: 0},
+		{retryAfter: "7", wantDelay: 7 * time.Second},
+		{retryAfter: "30", wantDelay: 30 * time.Second},
+		{retryAfter: "31", wantDelay: 30 * time.Second},
+		{retryAfter: "  45 ", wantDelay: 30 * time.Second},
+		{retryAfter: "9223372036854775807", wantDelay: 30 * time.Second},
+		{retryAfter: "99999999999999999999", wantDelay: 30 * time.Second},
+		{retryAfter: "-1", wantDelay: time.Second},
+		{retryAfter: "1.5", wantDelay: time.Second},
+		{retryAfter: "", wantDelay: time.Second},
+		{retryAfter: "Wed, 14 Oct 2026 17:59:00 GMT", wantDelay: 0},
+		{retryAfter: "Wed, 14 Oct 2026 18:00:12 GMT", wantDelay: 12 * time.Second},
+		{retryAfter: "Fri, 01 Jan 2100 00:00:00 GMT", wantDelay: 30 * time.Second},
+	} {
+		if delay := notifier.retryDelay(c.retryAfter); delay != c.wantDelay {
+			t.Errorf("Retry-After %q: wait %s, want %s", c.retryAfter, delay, c.wantDelay)
+		}
+	}
+}
+
 // A gateway can answer 504 after Slack took the post: the message reaches
 // the channel once, and the report says it may not have.
 func TestSlackAlertNotifierDoesNotRepostAMessageSlackMayHaveTaken(t *testing.T) {
