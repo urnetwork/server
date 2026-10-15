@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -93,6 +94,12 @@ type monitorYaml struct {
 	// explicitly present null or malformed block. SIGNALS.md §18.3 requires
 	// the former to noop and the latter to fail closed as invalid desired state.
 	DNSAliases yaml.Node `yaml:"dns_aliases"`
+	// Outbound notification. An empty webhook disables the Slack notifier.
+	// bringyourctl reads the same key for Grafana's default contact point
+	// (grafana.AlertRoutingSettingsFromMonitorVault).
+	Alerts struct {
+		SlackWebhookUrl string `yaml:"slack_webhook_url"`
+	} `yaml:"alerts"`
 }
 
 type dnsAliasesYaml struct {
@@ -203,8 +210,12 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	if err != nil {
 		return SignalSettings{}, fmt.Errorf("monitor.yml: %w", err)
 	}
-	var y monitorYaml
-	if err := monitorResource.UnmarshalYamlE(&y); err != nil {
+	monitorData, err := monitorResource.BytesE()
+	if err != nil {
+		return SignalSettings{}, fmt.Errorf("monitor.yml: %w", err)
+	}
+	y, err := decodeMonitorYaml(monitorData)
+	if err != nil {
 		return SignalSettings{}, err
 	}
 
@@ -309,6 +320,9 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		GooglePlay:      loadGooglePlayReportingSettings(),
 		AppleReporting:  loadAppleReportingSettings(),
 		Credentials:     loadCredentialRequirements(env, stConfiguration.status.requiresSTCredentials(), logServices),
+		AlertNotifications: AlertNotificationSettings{
+			SlackWebhookUrl: strings.TrimSpace(y.Alerts.SlackWebhookUrl),
+		},
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()
@@ -405,6 +419,21 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+// decodeMonitorYaml is the non-strict decode of vault monitor.yml. Its errors
+// name only line numbers: YAML errors can quote document values, and the
+// document holds the Slack webhook credential.
+func decodeMonitorYaml(data []byte) (monitorYaml, error) {
+	var y monitorYaml
+	if err := yaml.Unmarshal(data, &y); err != nil {
+		lines := regexp.MustCompile(`line \d+`).FindAllString(err.Error(), 8)
+		if len(lines) == 0 {
+			return monitorYaml{}, errors.New("monitor.yml: invalid YAML")
+		}
+		return monitorYaml{}, fmt.Errorf("monitor.yml: invalid YAML (%s)", strings.Join(lines, ", "))
+	}
+	return y, nil
 }
 
 // The existing narrow LB projection omits router intent. Compare complete

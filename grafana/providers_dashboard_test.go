@@ -73,7 +73,7 @@ func TestProvidersDashboardShowsTheEgressBuckets(t *testing.T) {
 	}
 
 	// every reason the rules report has a panel of its own
-	for _, reason := range []string{"blackhole", "tls", "country", "no_success", "health", "unprobed", "not_modern"} {
+	for _, reason := range []string{"blackhole", "tls", "country", "no_success", "health", "unprobed", "not_modern", "low_success"} {
 		read := `max(urnetwork_stats_provider_excluded{env="$env",reason="` + reason + `"})`
 		if !strings.Contains(joined, read) {
 			t.Errorf("the %s exclusion has no panel of its own (expected %s)", reason, read)

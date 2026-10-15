@@ -216,7 +216,6 @@ active missing capability and must not be read as green.
 | 2.6b | Coverage gap | A probe of the contract degradation valve state is missing: `open-contracts` and `contract-rate` show the close backlog and creation rate that drive it, not whether exhausted payers get free contracts or providers go unpaid. |
 | 2.11a | Coverage gap | A monitor reader of the PgBouncer pool exporter is missing: Grafana rules evaluate it, while `pgbouncer-stalls` checks listener admission and app-side 6432 write timeouts and `log-errors` counts queue-timeout lines. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
-| 2.19g | Coverage gap | A monitor reader of the capability probe's urnetwork_capability_probe_* series and of the age of the modern provider gate's evidence is missing: `task-health` sees the probe's task row and `egress-coverage` the URL probe's coverage, and neither says whether the gate's evidence is fresh or whether capability tunnels retire their derived clients. |
 | 3.6a | Coverage gap | A per-channel sharded-subscriber census is missing: `redis-topology` checks membership and phantoms, and `redis-keyevents` checks keyspace-notification patterns, not SSUBSCRIBE channels. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
@@ -402,6 +401,42 @@ lifecycle event, not loss of production visibility, and must not emit a
 `monitor/visibility` alert. Cadence mode enforces each alert's consecutive-tick
 `Sustain` value and resets that identity after a healthy tick; `--once`
 deliberately reports current violations immediately for diagnosis.
+
+An empty gated tick is therefore not evidence of absence. After a one-tick
+dip the gate holds a returning alert for `Sustain - 1` more ticks, and it
+holds a failed run's two-cadence `cannot-observe` alert on its first failure,
+so either tick reaches a consumer with no gated alerts. A consumer that tracks
+incidents across ticks takes the run loop's `SignalExecution`, which also
+carries the held alerts and whether the run failed: a held alert is still
+observed, and a failed run or one with an unobservable alert, gated or held,
+is incomplete. The Slack notifier (MONITOR.md §3.6) clears an incident only
+after two complete ticks in which nothing observed it. Healthy control: one
+dip of a Sustain 2 alert posts nothing after its raise. Failure control: two
+complete ticks without the alert post one clear.
+
+An unknown state is unobservable whatever signal reports it.
+`alert_classes.go` classifies every alert class as visibility, an unknown
+state reported in place of an incident, or incident, and
+`TestEveryAlertClassIsClassified` fails for a class the table leaves out,
+including one a signal computes, which the test lists with every class it can
+take. The classes `cannot-observe` and `*-unobservable` are always
+visibility, and the probe id `monitor/visibility` is reserved for unknown
+states. The classification errs toward visibility: over-marking only delays a
+signal's other clears while the state lasts, but under-marking lets an
+incident clear because its signal could not see it. A class whose findings
+are unknown only in some states stays an incident, and those findings set
+their `unobservable` field, as the host-scope partial finding of a run with
+blocked hosts and the proxy public path without an allocation do. An Alert
+built directly sets the alert's marker exactly when its class is visibility,
+as the provider, crash-report and settings-generation visibility alerts do,
+and the test checks it. Accept filters let unobservable findings through,
+because a probe shared by several signals that loses part of its source has
+lost it for each of them. Deterministic controls: a redis node's PAGE is
+kept, not cleared and raised again, while its INFO times out for two runs; a
+pg-cpu PAGE is kept while its database host does not answer for two runs; and
+a configured host exclusion without blocked hosts, which settings freshness
+reports every run, leaves the run complete.
+
 
 Subnet operators: §17 covers node/gateway infrastructure; §22 covers continuous
 whitepaper-1.0 correctness of pools, head miners, validators, deposits, custody,
@@ -15761,7 +15796,7 @@ binaries, independently of the subscriber request-guard switch; keep shadow
 resources separate until every activation gate is reviewed.
 
 ### 2.19g Modern provider evidence — the capability probe must keep measuring
-Planned probe: `capability-probe` (none is registered; the signals below are dashboard reads, and the crosswalk lists the gap)
+Probe: `capability-probe`
 
 WHAT: the FP2 modern provider gate (FP2FIX.md, "Modern provider gate") reads
 `provider_modern_evidence`, and only the capability probe writes it: the
@@ -15809,13 +15844,32 @@ Healthy shape:
   `held` now and then that the next sweep mostly answers with a modern
   reading rather than a `confirmed` one; `readiness_failures_total` and
   `shard_cleanup_errors_total` flat.
+- `chain_restarts_total` flat. Each count is a taskworker with the probe
+  switched on that found the chain without its task row, ended by a pass on
+  a taskworker with an older config or by maintenance, and scheduled a pass
+  due at once, which starts a new sweep. A count right after maintenance is
+  expected; counts while `capability-probe-disabled-pass` holds are its
+  stale taskworker ending the chain again.
 
 Signals:
 
 - `capability-probe-stalled` — WARN when no taskworker has finished a
   measured or waiting pass for 30 minutes while `capability_probe.yml`
   enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
-  PAGE after two hours with the gate switched on. Read
+  PAGE after six hours with the gate on: `quality_speed_requires_modern_provider: true`,
+  or that switch absent from the desired provider.yml and the gate's start
+  (2026-10-21 00:00 UTC by default, `quality_speed_modern_provider_start`)
+  passed at the monitor's clock, as the model's own provider.yml decoder
+  reads them, so the automatic switch-on arms the page. Evidence stays fresh
+  for seven days after its measurement, so a shorter stall, planned
+  database maintenance included, takes no provider out and only warns. The newest pass is read
+  over six hours (`max_over_time`), so a pass of a process that exited
+  since counts; a fleet whose taskworkers all started after it, as the
+  switch-on restart starts them, is given the 30 minutes from its oldest
+  process's start (`process_start_time_seconds`), since the first pass can
+  take its whole `max_time_seconds`. Running taskworkers that export no
+  probe series (`taskworkers_exporting=0`) run an image without the probe.
+  Read
   `passes_total{result="failed"}` and the taskworker log's `[capprobe]` and
   task error lines: unreadable or invalid settings, the URL probe's
   included, whose `shard_count` past 255 would reach the capability probe's
@@ -15825,9 +15879,21 @@ Signals:
   retries the same sweep page after a minute, so a persistent failure
   repeats once a minute. A `passes_total{result="disabled"}` pass is the last
   of a chain that `enabled: false` ended, deliberately or not; nothing runs
-  after it until a taskworker starts with the probe switched on, so check
-  the deployed `capability_probe.yml` before reading the silence as a
-  stall.
+  after it until a taskworker with the probe switched on schedules the
+  chain again, at its start or within ten minutes after
+  (`chain_restarts_total`), so check the deployed `capability_probe.yml`
+  before reading the silence as a stall.
+- `capability-probe-disabled-pass` — WARN on any disabled pass while
+  `capability_probe.yml` enables the probe: an increase of
+  `passes_total{result="disabled"}` over 30 minutes, or a running
+  taskworker whose total is above zero, which also shows a pass it ran
+  before its first scrape. A taskworker container keeps the config it
+  started with, so one that started before the switch-on, or before its
+  host published the new config, reads the probe as off and ends the chain
+  at each pass it claims; the taskworkers that read it as on schedule the
+  chain again within ten minutes, and its sweep starts over. Find the
+  taskworkers whose disabled total is above zero, confirm their hosts
+  publish the current config (`WARP_CONFIG_VERSION`) and restart them.
 - `capability-probe-no-evidence` — WARN when measurements finish for an hour
   and none records (`providers_total` rising with every `recorded_*` flat).
   The outcome says where: `tunnel_failed` is the probe's own setup (shard
@@ -15845,7 +15911,8 @@ Signals:
   `negative_withheld` everywhere is `capability-probe-breaker`;
   `record_failed` is the database write, and fails the pass.
 - `capability-probe-breaker` — WARN when `breaker_trips_total` rises on most
-  passes for an hour, PAGE after two hours with the gate switched on: the
+  passes for an hour, PAGE after two hours with the gate on (as for
+  `capability-probe-stalled`): the
   probe negotiates no end-to-end session with any provider, so its negative
   readings are all withheld (`providers_total{outcome="negative_withheld"}`)
   and its evidence ages toward `stale_evidence`. That is a fault on the
@@ -15907,9 +15974,13 @@ capability that was not tested is never recorded as a negative, and neither
 is a negative reading a pass withheld or a sweep holds, so "missing
 negatives" are not a defect to repair.
 
-Implementation convention: no monitor probe implements these classes yet;
-they are dashboard reads of the series above. A probe for them belongs in
-`signal_capability_probe.go` with the class names here.
+Implementation convention: `signal_capability_probe.go` (probe
+`taskworker/capability-probe`) implements `capability-probe-stalled` and
+`capability-probe-disabled-pass` from fleet aggregates in Mimir, read
+against the desired `capability_probe.yml` and `provider.yml`; while the
+config switches the probe off, both are healthy. The other classes are
+dashboard reads of the series above, and a probe for them belongs in the
+same file with the class names here.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
@@ -17392,6 +17463,94 @@ including repeated malformed auth shapes that spend no budget, orphan fields
 that cannot create unintended seedphrase accounts or consume either limiter,
 and corrected exhausted requests retaining 429/Retry-After. Fixed input-shape
 messages omit tokens, identities, provider input, and internal classification.
+
+### 2.29 Modern provider gate readiness — the automatic flip must not empty Quality or Speed
+Probe: `modern-gate-readiness`
+
+The modern provider gate (server/FP2FIX.md, model/egress_modern_provider.go)
+takes every provider the capability probe has not shown to be modern out of
+Quality and Speed under the `not_modern` reason, keeping it Online. Owner
+decision 2026-10-15: it turns on by itself at 2026-10-21 00:00 UTC, the
+code's default start, while `quality_speed_requires_modern_provider` is
+absent from provider.yml; every pass and request decides at its own instant.
+Its evidence comes from the capability probe (server/capprobe), which ships
+switched off and must be switched on and have swept the eligible providers
+before the start. Without
+that evidence a provider reads `no_evidence`, and the flip would empty or
+gut both native buckets. This signal gives the owner warning while turning
+the gate on can still be postponed.
+
+HOW: one Mimir instant query every five minutes, at the monitor's clock,
+through a services gateway, reads five labelled parts from the configured
+environment: `max(urnetwork_stats_provider_modern_gate_on)`,
+`max(urnetwork_stats_provider_modern_gate_start_seconds)`,
+`max(urnetwork_stats_provider_egress_source_started_seconds)`,
+`max by (bucket, outcome) (urnetwork_stats_provider_modern_gate_shadow)` and
+`sum by (bucket) (max by (bucket, index)
+(urnetwork_stats_provider_egress_index))` for quality and speed. The
+taskworkers' stats collector publishes the first two from its own
+provider.yml at every refresh: whether the gate holds Quality and Speed now,
+and, only while the switch is absent, the start. The shadow counts, for the
+connected valid public providers the other rules admit to each bucket, what
+the gate decides for them, whether or not it is on: every outcome but
+`modern` is what it takes out.
+
+- `modern-gate-not-ready` (frame the bucket, sustain 2): from 72 hours before
+  the published start, more than half of a bucket's admitted providers are
+  not `modern` in the shadow (exactly half does not fire). WARN from 72 hours
+  before, PAGE from 24 hours before, under the same identity so the warning
+  escalates. The shadow is judged only on dashboard counts whose source read
+  started within 30 minutes and that carry every bucket and outcome;
+  otherwise the run is `cannot-observe`.
+- `modern-gate-flip-drop` (frame the bucket, sustain 1, PAGE): within the
+  hour after the start, a bucket holds less than half the providers it had
+  in the last sample a second before the start. Counts read before the
+  start, or published by taskworkers that have not flipped, are no verdict
+  yet; a missing sample before the start is `cannot-observe`.
+
+Outside 72 hours before to one hour after the start the signal is quiet,
+whatever the gauges say. No start series means the switch is set, true,
+false or unreadable, so no flip is scheduled and the signal is quiet: the
+owner's postponement silences it, and a moved start moves its windows. When
+no taskworker publishes `urnetwork_stats_provider_modern_gate_on` inside the
+windows of the code's default start, the taskworkers do not run the code
+that flips the gate, or their stats collector is down: the run is
+`cannot-observe`, never quiet. Outside those windows a failed read stays
+quiet.
+
+ACTION: decide before the start. To postpone, set
+`quality_speed_requires_modern_provider: false` in provider.yml: the kill
+switch, after which the next score export restores the buckets. To move the
+flip, set `quality_speed_modern_provider_start` to an RFC 3339 instant such
+as `2026-10-28T00:00:00Z`. Either is a config release through the
+config-updater and a restart of every taskworker and API block, since a
+running container keeps the config version it was created with (the same
+procedure as server/capprobe/README.md, "Switching it on"), and it
+postpones the flip only when the restarts finish before the start. A
+malformed start keeps the code's default, so confirm the moved start on
+`urnetwork_stats_provider_modern_gate_start_seconds` or with
+`bringyourctl provider inspect` after the restart; the switch is the
+reliable postponement. To let it flip, first switch the capability probe on
+and let it sweep the eligible providers until `no_evidence` is small.
+After the start, a `modern-gate-flip-drop` page whose drop the shadow
+explains is answered with the same kill switch; a drop the shadow does not
+explain has another cause (§2.19, §2.23) and the gate is not the thing to
+turn off.
+
+False positive: a URL probe outage or other bucket loss in the hour after
+the start pages `modern-gate-flip-drop` though the gate took little; read the
+shadow beside it. False negative: the dashboard counts cover connected valid
+public providers, the score export's Online population; a mixed fleet whose
+taskworkers disagree about the start reads the largest published start.
+
+Implementation convention: SIGNALS.md §2.29 (`modern-gate-readiness`) maps to
+`signal_modern_gate_readiness.go` and `signal_modern_gate_readiness_test.go`,
+registered by `NewModernGateReadinessSignal`. Pure tests with synthetic gauge
+values cover quiet outside the windows, the warning from 72 hours, the page
+from 24 hours, the page after the flip and its exact-half boundaries, counts
+read before the flip, a set switch, a moved start, an unpublished schedule,
+and stale or incomplete counts; synthetic Mimir answers drive the signal's
+own queries for the page before the start and the page after it.
 
 ---
 
@@ -20514,7 +20673,14 @@ legacy ticket manager's five-healthy-tick resolution events. The current CLI
 does not emit an all-probes heartbeat. Silence is not recovery. Require direct
 healthy observations held for the applicable verification window, including
 the five-minute healthy-band check where specified, and record recovery
-confirmation in the run ledger (6.8).
+confirmation in the run ledger (6.8). The continuous CLI's Slack notifier
+(MONITOR.md §3.6) is a transition sink, not a ticket lifecycle: it keys an
+incident on (probe, class, target) per the identity discipline below, and its
+`[CLEARED]` means only that two complete runs no longer reported the incident.
+Its `[ACTIVE AT START]` digest lists what a new watcher's first runs found,
+which can repeat earlier announcements; it does not date the incidents. A
+state the configuration chose, such as the PG query sample without its flag,
+is never posted.
 
 Historical ledger class aliases remain readable but must not be emitted by new
 probes:

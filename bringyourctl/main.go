@@ -2581,6 +2581,16 @@ func providerInspect(opts docopt.Opts) {
 		)
 	}
 	fmt.Printf("  online url-success rule: %s; country exempt %t (this host's provider.yml: rule %t, country floor %v, margin %v)\n", countryGuard, inspection.OnlineSuccessCountryExempt, inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, inspection.Settings.OnlineSuccessCountryFloorMargin)
+	// the online url ratio as the same guard published it, this host's
+	// provider.yml beside it
+	urlRatio := "no trusted published guard, so the ratio applies nowhere"
+	if inspection.OnlineSuccessBaselineKnown {
+		urlRatio = "off in the score export's guard"
+		if 0 < inspection.OnlineUrlSuccessBaselineRatio {
+			urlRatio = fmt.Sprintf("the score export applied %v, country exemption %t", inspection.OnlineUrlSuccessBaselineRatio, inspection.OnlineUrlRatioBaselineCountryExemption)
+		}
+	}
+	fmt.Printf("  online url ratio: %s; with a success but below it %t (this host's provider.yml: ratio %v, country exemption %t)\n", urlRatio, inspection.BelowOnlineUrlRatio, inspection.Settings.OnlineUrlSuccessRatio, inspection.Settings.OnlineUrlRatioCountryExemption)
 	// the evidence the probe recorded of the provider's end of its session,
 	// and what the gate decides from it now
 	modernEvidence := "none"
@@ -2596,7 +2606,14 @@ func providerInspect(opts docopt.Opts) {
 			evidence.RunCount,
 		)
 	}
-	fmt.Printf("  modern provider evidence %s; outcome %s (evidence is stale at %s); gate %t (quality_speed_requires_modern_provider in this host's provider.yml)\n", modernEvidence, optionalString(inspection.ModernOutcome), model.ProviderModernEvidenceMaxAge, inspection.Settings.QualitySpeedRequiresModernProvider)
+	// the gate as the decision below applied it, at the inspection's
+	// instant, and how this host's provider.yml sets it: an absent switch
+	// turns the gate on at the start
+	modernSwitch := "absent"
+	if value := inspection.Settings.QualitySpeedRequiresModernProvider; value != nil {
+		modernSwitch = strconv.FormatBool(*value)
+	}
+	fmt.Printf("  modern provider evidence %s; outcome %s (evidence is stale at %s); gate %t at %s (this host's provider.yml: quality_speed_requires_modern_provider %s, start %s; %s)\n", modernEvidence, optionalString(inspection.ModernOutcome), model.ProviderModernEvidenceMaxAge, inspection.ModernGate, inspection.ModernGateTime.UTC().Format(time.RFC3339), modernSwitch, inspection.Settings.QualitySpeedModernProviderStart.UTC().Format(time.RFC3339), inspection.Settings.ModernProviderGateSchedule())
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)

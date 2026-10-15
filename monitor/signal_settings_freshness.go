@@ -59,6 +59,7 @@ func (s *settingsFreshnessSignal) Run(ctx context.Context, settings SignalSettin
 			Environment:  settings.Environment,
 			ObservedAt:   settings.Now(),
 			Sustain:      1,
+			unobservable: true,
 			PageSustain:  5,
 			Symptom:      "The monitor cannot determine whether its captured settings still match the effective Config and Vault inputs.",
 			Mechanism:    "The local settings loader failed while checking the current generation. Existing probe results still use the startup snapshot, so configuration-derived targets and expectations are unknown until a fresh loader succeeds.",

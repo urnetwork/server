@@ -28,11 +28,18 @@ import (
 // still reach the provider. A force_minimum online answer is the Online pool,
 // which does not. Online includes every provider past these gates; quality and
 // speed additionally require a passing ratio of accepted URL outcomes within
-// eight hours and, once the modern provider gate is switched on, probe
-// evidence of end-to-end post-quantum encryption with resizable transfer
-// windows (egress_modern_provider.go), which is bucket membership too. Only
+// eight hours and, while the modern provider gate is on (from its start,
+// unless provider.yml switches it), probe evidence of end-to-end
+// post-quantum encryption with resizable transfer windows
+// (egress_modern_provider.go), which is bucket membership too. Only
 // quality excludes ARIN non-quality entries. Performance and the success ratio
 // order admitted providers, never add gates.
+//
+// The Online URL ratio (egress_online_success.go), off by default, is the one
+// exception: while it is on, a provider measured repeatedly with a share of
+// successes below it leaves every bucket, Online included, as one without a
+// success does, under the same kill switch and, unless
+// online_url_ratio_country_exemption is false, the same country guard.
 
 // The weights of the index and the bounds of its evidence, with the other
 // tunables of the egress rules. The `egress_index` block of provider.yml,
@@ -115,11 +122,42 @@ type EgressIndexSettings struct {
 	// (readProviderOnlineSuccessPreviousBaseline). Zero is the plain floor.
 	// `online_success_country_floor_margin` in provider.yml, within [0, 1].
 	OnlineSuccessCountryFloorMargin float64
+	// The Online URL ratio (egress_online_success.go; the owner is
+	// considering it, 2026-10-15): a provider measured
+	// ProviderOnlineMinMeasuredUrlRuns or more times in the evidence window,
+	// with a success but a share of successes below this, leaves every
+	// bucket, Online included, as one without a success does. Compared in
+	// exact millionths, like the country floor. Zero, the default, is off:
+	// Online keeps the rule of one success. `online_url_success_ratio` in
+	// provider.yml, within [0, 1]; a value that cannot be read, or one
+	// outside [0, 1], is off.
+	OnlineUrlSuccessRatio float64
+	// Whether a country the guard exempts keeps its providers below the
+	// Online URL ratio, as it keeps those without a success. False applies
+	// the ratio in every country, which also takes the providers without a
+	// success out of an exempt country's Online.
+	// `online_url_ratio_country_exemption` in provider.yml, default true; a
+	// value that cannot be read keeps true.
+	OnlineUrlRatioCountryExemption bool
 	// The modern provider gate (egress_modern_provider.go): a provider the
 	// probe has not shown to be modern leaves Quality and Speed, keeping
-	// Online. Off until the shadow counts are reviewed;
-	// `quality_speed_requires_modern_provider` in provider.yml.
-	QualitySpeedRequiresModernProvider bool
+	// Online. `quality_speed_requires_modern_provider` in provider.yml, nil
+	// while the key is absent: the gate then turns on by itself at
+	// QualitySpeedModernProviderStart (owner decision 2026-10-15). False is
+	// the kill switch and the way to postpone, true turns the gate on at once,
+	// and an unreadable switch is false. RequiresModernProvider applies it.
+	QualitySpeedRequiresModernProvider *bool
+	// When an absent switch turns the gate on, that instant included:
+	// `quality_speed_modern_provider_start` in provider.yml, an RFC 3339
+	// instant, or DefaultQualitySpeedModernProviderStart.
+	QualitySpeedModernProviderStart time.Time
+}
+
+// When the modern provider gate turns on by itself while provider.yml leaves
+// quality_speed_requires_modern_provider out (owner decision 2026-10-15),
+// unless quality_speed_modern_provider_start moves it.
+func DefaultQualitySpeedModernProviderStart() time.Time {
+	return time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
 }
 
 // The most a connect client adds to a provider's tier from what it sees
@@ -156,13 +194,18 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		// probe worked (the lowest of those, HK, measured 0.46).
 		OnlineRequiresUrlSuccess:  true,
 		OnlineSuccessCountryFloor: 0.36,
+		// Off, Online's rule of one success, until the owner decides
+		// (2026-10-15); measured on Main, 0.8 would leave about half of Online
+		OnlineUrlSuccessRatio:          0,
+		OnlineUrlRatioCountryExemption: true,
 		// Pending the owner's confirmation. IN and ZA measured 0.35 against
 		// the 0.36 floor on 2026-10-13; the margin keeps such a country's
 		// exemption until its share passes the noise of one pass to the next.
 		OnlineSuccessCountryFloorMargin: 0.03,
-		// Shadow first (owner decision 2026-10-14): the gate is switched on
-		// only after its shadow counts are reviewed.
-		QualitySpeedRequiresModernProvider: false,
+		// Shadow first (owner decision 2026-10-14), then on by itself at the
+		// start (owner decision 2026-10-15) unless provider.yml sets the switch.
+		QualitySpeedRequiresModernProvider: nil,
+		QualitySpeedModernProviderStart:    DefaultQualitySpeedModernProviderStart(),
 	}
 }
 
@@ -183,19 +226,24 @@ type egressIndexSettingsBlock struct {
 }
 
 // The defaults with the overrides of provider.yml, read on every call like the
-// rollout flag, so a config change takes effect on the next pass without a
-// restart. A missing provider.yml is the defaults, as it is for the rollout
-// flag; an unreadable value, or one out of range, keeps the default and says
+// rollout flag, so a process applies a changed file at its next pass. A warp
+// container sees only the config version it was created with, so a config
+// release reaches a running service with its restart (capprobe/README.md,
+// "Switching it on"). A missing provider.yml is the defaults, as it is for the
+// rollout flag; an unreadable value, or one out of range, keeps the default and says
 // so, since a typo in one weight must not take the index away from the whole
 // fleet. The file is parsed once, and each top-level key read here is decoded
 // on its own: the egress_index block, the URL-success rule's keys and the
-// modern provider gate's switch beside subscriber_quality_policy_version. A
-// value of the wrong type, or a key the file gives twice, fails only that
-// key; a bad value inside the block fails the block. An unreadable kill
-// switch, or a file that is not yaml at all, disables the rule: it may be an
-// attempt to turn the rule off, and the behaviour before the rule is the one
-// to fall back to. For the same reason an unreadable modern provider switch
-// leaves that gate off.
+// modern provider gate's switch and start beside
+// subscriber_quality_policy_version. A value of the wrong type, or a key the
+// file gives twice, fails only that key; a bad value inside the block fails
+// the block. An unreadable kill switch, or a file that is not yaml at all,
+// disables the rule: it may be an attempt to turn the rule off, and the
+// behaviour before the rule is the one to fall back to. For the same reason
+// an unreadable modern provider switch, or such a file, turns that gate off,
+// where an absent switch leaves it to its start. An unreadable start keeps
+// DefaultQualitySpeedModernProviderStart: to postpone the gate for certain,
+// set the switch false.
 func egressIndexSettings() *EgressIndexSettings {
 	settings := DefaultEgressIndexSettings()
 	resource, err := server.Config.SimpleResource(providerConfigResourceName)
@@ -234,10 +282,15 @@ func egressIndexSettings() *EgressIndexSettings {
 		}
 		return keyValues, keyCounts, nil
 	}()
+	// the modern provider gate's switch, set false
+	modernGateOff := func() {
+		off := false
+		settings.QualitySpeedRequiresModernProvider = &off
+	}
 	if err != nil {
 		glog.Errorf("[egress]provider config is unreadable (%s); the egress index keeps its defaults, the online url-success rule is disabled and the modern provider gate is off\n", err)
 		settings.OnlineRequiresUrlSuccess = false
-		settings.QualitySpeedRequiresModernProvider = false
+		modernGateOff()
 		return settings
 	}
 	// decodes one top-level key into target; an absent key leaves it as it is
@@ -280,12 +333,46 @@ func egressIndexSettings() *EgressIndexSettings {
 			glog.Errorf("[egress]provider config online_success_country_floor_margin = %v is outside [0, 1]; kept %v\n", *margin, settings.OnlineSuccessCountryFloorMargin)
 		}
 	}
+	// A ratio that cannot be read, or one outside [0, 1], NaN included, is
+	// off: Online's rule of one success, the behaviour before the ratio, and
+	// the larger Online.
+	var urlSuccessRatio *float64
+	if err := decode("online_url_success_ratio", &urlSuccessRatio); err != nil {
+		glog.Errorf("[egress]provider config online_url_success_ratio is unreadable (%s); the online url ratio is off\n", err)
+		settings.OnlineUrlSuccessRatio = 0
+	} else if urlSuccessRatio != nil {
+		if 0 <= *urlSuccessRatio && *urlSuccessRatio <= 1 {
+			settings.OnlineUrlSuccessRatio = *urlSuccessRatio
+		} else {
+			glog.Errorf("[egress]provider config online_url_success_ratio = %v is outside [0, 1]; the online url ratio is off\n", *urlSuccessRatio)
+			settings.OnlineUrlSuccessRatio = 0
+		}
+	}
+	// an unreadable exemption switch keeps the exemption, the larger Online
+	var urlRatioCountryExemption *bool
+	if err := decode("online_url_ratio_country_exemption", &urlRatioCountryExemption); err != nil {
+		glog.Errorf("[egress]provider config online_url_ratio_country_exemption is unreadable (%s); kept %t\n", err, settings.OnlineUrlRatioCountryExemption)
+	} else if urlRatioCountryExemption != nil {
+		settings.OnlineUrlRatioCountryExemption = *urlRatioCountryExemption
+	}
 	var modernGate *bool
 	if err := decode("quality_speed_requires_modern_provider", &modernGate); err != nil {
 		glog.Errorf("[egress]provider config quality_speed_requires_modern_provider is unreadable (%s); the modern provider gate is off\n", err)
-		settings.QualitySpeedRequiresModernProvider = false
+		modernGateOff()
 	} else if modernGate != nil {
-		settings.QualitySpeedRequiresModernProvider = *modernGate
+		settings.QualitySpeedRequiresModernProvider = modernGate
+	}
+	// any scalar decodes into a string as written, so a timestamp yaml
+	// resolves on its own still reaches the parse
+	var modernStart *string
+	if err := decode("quality_speed_modern_provider_start", &modernStart); err != nil {
+		glog.Errorf("[egress]provider config quality_speed_modern_provider_start is unreadable (%s); kept %s\n", err, settings.QualitySpeedModernProviderStart.Format(time.RFC3339))
+	} else if modernStart != nil {
+		if start, err := time.Parse(time.RFC3339, *modernStart); err == nil {
+			settings.QualitySpeedModernProviderStart = start.UTC()
+		} else {
+			glog.Errorf("[egress]provider config quality_speed_modern_provider_start = %q is not an RFC 3339 instant; kept %s\n", *modernStart, settings.QualitySpeedModernProviderStart.Format(time.RFC3339))
+		}
 	}
 
 	var overrides *egressIndexSettingsBlock
@@ -411,6 +498,50 @@ func (self *EgressIndexSettings) MaxIndex() int {
 	return min(self.MaxFailureIndex, math.MaxInt16)
 }
 
+// Whether the modern provider gate holds Quality and Speed to modern
+// providers at now: the switch when provider.yml gives one, otherwise from
+// QualitySpeedModernProviderStart on, that instant included. Each reader
+// passes the instant it decides at, a pass's or a request's filter time and
+// never a fresh clock read, so one pass decides every provider alike.
+func (self *EgressIndexSettings) RequiresModernProvider(now time.Time) bool {
+	if self.QualitySpeedRequiresModernProvider != nil {
+		return *self.QualitySpeedRequiresModernProvider
+	}
+	return !now.Before(self.QualitySpeedModernProviderStart)
+}
+
+// How provider.yml sets the modern provider gate, for the logs and the
+// inspection: the switch when it is given, otherwise the start.
+func (self *EgressIndexSettings) ModernProviderGateSchedule() string {
+	if self.QualitySpeedRequiresModernProvider != nil {
+		return fmt.Sprintf("quality_speed_requires_modern_provider: %t", *self.QualitySpeedRequiresModernProvider)
+	}
+	return fmt.Sprintf("quality_speed_requires_modern_provider absent, on from %s", self.QualitySpeedModernProviderStart.UTC().Format(time.RFC3339))
+}
+
+// The modern provider gate as this process's provider.yml sets it, at now:
+// whether it holds Quality and Speed, and while the switch is absent the
+// instant it turns on by itself, nil while the switch is given (true, false
+// or unreadable), when no flip is scheduled. The stats collector publishes
+// both for the monitor's readiness signal.
+func GetModernProviderGateSchedule(now time.Time) (on bool, scheduledStart *time.Time) {
+	settings := egressIndexSettings()
+	on = settings.RequiresModernProvider(now)
+	if settings.QualitySpeedRequiresModernProvider == nil {
+		start := settings.QualitySpeedModernProviderStart
+		scheduledStart = &start
+	}
+	return
+}
+
+// The egress settings this process's provider.yml sets, decoded as every
+// pass decodes them. The monitor reads the deployment's desired modern
+// provider gate with it, deciding the gate at its own clock
+// (RequiresModernProvider).
+func GetEgressIndexSettings() *EgressIndexSettings {
+	return egressIndexSettings()
+}
+
 // The part of a provider's latest health run the index reads: its scored
 // loads and their per-class tally. Nothing of the reputation tally is read;
 // after GEOMAP §11 there is no reputation class, and before it the tally was
@@ -473,9 +604,10 @@ func providerUrlProbeSuccessWeight(counts ProviderEgressHealthCounts) float64 {
 }
 
 // Common gate failures exclude every bucket. No success, the URL-success rule,
-// also excludes every bucket but is no common gate: probes, explicit client
-// ids and force_minimum quality or speed answers keep the provider (a
-// force_minimum online answer is the Online pool, which does not).
+// and low success, the Online URL ratio while it is on, also exclude every
+// bucket but are no common gate: probes, explicit client ids and
+// force_minimum quality or speed answers keep the provider (a force_minimum
+// online answer is the Online pool, which does not).
 // Health/unprobed, not modern (the modern provider gate, while it is on) and
 // ARIN non-quality explain missing native membership while preserving online
 // supply.
@@ -491,13 +623,14 @@ const (
 	ProviderExcludedReliability    = "reliability"
 	ProviderExcludedNoSuccess      = "no_success"
 	ProviderExcludedNotModern      = "not_modern"
+	ProviderExcludedLowSuccess     = "low_success"
 )
 
 // Every reason label, in the order the labels were added. A provider counts
 // under the first reason decideProviderEgress finds, in this precedence:
-// reliability, arin_risk, tls, no_success, then unprobed or health (exclusive
-// of each other), then not_modern, then arin_non_quality. Blackhole and
-// country are never reported any more.
+// reliability, arin_risk, tls, no_success, low_success, then unprobed or
+// health (exclusive of each other), then not_modern, then arin_non_quality.
+// Blackhole and country are never reported any more.
 var ProviderExcludedReasons = []string{
 	ProviderExcludedBlackhole,
 	ProviderExcludedTls,
@@ -509,6 +642,7 @@ var ProviderExcludedReasons = []string{
 	ProviderExcludedReliability,
 	ProviderExcludedNoSuccess,
 	ProviderExcludedNotModern,
+	ProviderExcludedLowSuccess,
 }
 
 // What the rules read about one provider.
@@ -525,11 +659,16 @@ type providerEgressFacts struct {
 	egressQuality *bool
 	// the URL-success rule holds: measured often enough without one success,
 	// and the filter's guard applies the rule in the published country (it
-	// is enabled there and the country is not exempt)
+	// is enabled there and the country is not exempt), or applies the Online
+	// URL ratio there, which every provider without a success is below
 	noUrlSuccess bool
+	// the Online URL ratio holds: measured often enough, with a success but
+	// below the filter's guard's ratio, which applies in the published
+	// country
+	lowUrlSuccess bool
 	// the modern provider gate: the outcome the latest probe evidence gives
 	// the provider, "" read as no evidence, and whether the gate holds
-	// Quality and Speed to it
+	// Quality and Speed to it at the filter's instant
 	modernOutcome string
 	modernGate    bool
 }
@@ -585,12 +724,15 @@ func (self providerCountFilter) egressFacts(
 			observedCountryCode != publishedCountryCode,
 		egressIndex:   egressIndex,
 		egressQuality: urlIndex.QualityVerdict(),
-		// the guard carries the kill switch it was decided under: a fleet
-		// pass's own settings, or the score export's for a scoped reader
+		// the guard carries the kill switch and the ratio it was decided
+		// under: a fleet pass's own settings, or the score export's for a
+		// scoped reader
 		noUrlSuccess: providerCarriesNoUrl(counts, urlIndex) &&
-			self.onlineSuccessBaseline.appliesIn(publishedCountryCode),
+			self.onlineSuccessBaseline.noSuccessAppliesIn(publishedCountryCode),
+		lowUrlSuccess: self.onlineSuccessBaseline.belowUrlRatioIn(counts, urlIndex, publishedCountryCode),
 		modernOutcome: classifyProviderModernEvidence(self.modernEvidence[clientId], self.now),
-		modernGate:    settings.QualitySpeedRequiresModernProvider,
+		// at the filter's instant, so the gate's start flips a pass whole
+		modernGate: settings.RequiresModernProvider(self.now),
 	}
 }
 
@@ -632,6 +774,14 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 		// first success brings the provider back on the next pass.
 		return providerEgressDecision{
 			reason: ProviderExcludedNoSuccess,
+		}
+	case facts.lowUrlSuccess:
+		// Measured repeatedly with successes, but too few for the Online URL
+		// ratio: out of every bucket and the counts as above, and no hard
+		// exclusion either. Probing continues, and a share back at the ratio
+		// brings the provider back on the next pass.
+		return providerEgressDecision{
+			reason: ProviderExcludedLowSuccess,
 		}
 	case facts.egressQuality == nil:
 		// no probe verdict at all, no negative mark but the exclusions and
@@ -1070,6 +1220,10 @@ type ProviderEgressInspection struct {
 	// measured at least ProviderOnlineMinMeasuredUrlRuns times in the
 	// evidence window without one success, whatever the rule then decides
 	NoUrlSuccess bool
+	// measured as often, with a success but below the Online URL ratio the
+	// score export published, whatever the rule then decides; false while
+	// the published ratio is off or no trusted guard is readable
+	BelowOnlineUrlRatio bool
 	// the URL-success rule as the score export last published it, which the
 	// decision below follows rather than Settings: whether a trusted guard
 	// was readable, when it was computed and published, the kill switch,
@@ -1085,11 +1239,18 @@ type ProviderEgressInspection struct {
 	OnlineSuccessCountryMeasured     int
 	OnlineSuccessCountrySucceeded    int
 	OnlineSuccessCountryExempt       bool
+	// the Online URL ratio the score export applied, zero for off, and
+	// whether it kept the country exemption
+	OnlineUrlSuccessBaselineRatio          float64
+	OnlineUrlRatioBaselineCountryExemption bool
 	// the modern provider gate: the provider's evidence row, nil without
-	// one, and the outcome it gives now, which the decision below applies
-	// when Settings switches the gate on
+	// one, the outcome it gives now, and whether the gate holds Quality and
+	// Speed under Settings at ModernGateTime, the instant this inspection
+	// decided at; the decision below applies the outcome when it does
 	ModernEvidence    *ProviderModernEvidenceRecord
 	ModernOutcome     string
+	ModernGate        bool
+	ModernGateTime    time.Time
 	EgressTestEnabled bool
 	Settings          *EgressIndexSettings
 	// the decision, as the client-score job makes it
@@ -1175,6 +1336,8 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 		count := baseline.countryCodeCounts[inspection.PublishedCountryCode]
 		inspection.OnlineSuccessCountryMeasured = count.Measured
 		inspection.OnlineSuccessCountrySucceeded = count.Succeeded
+		inspection.OnlineUrlSuccessBaselineRatio = baseline.urlSuccessRatio
+		inspection.OnlineUrlRatioBaselineCountryExemption = baseline.urlRatioCountryExemption
 	}
 	inspection.OnlineSuccessCountryExempt = baseline.exempt(inspection.PublishedCountryCode)
 	inspection.ObservedCountryCode = countFilter.countryCodes[clientId]
@@ -1185,6 +1348,8 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	inspection.ReliabilityFailed = facts.reliabilityFailed
 	inspection.ModernEvidence = countFilter.modernEvidence[clientId]
 	inspection.ModernOutcome = facts.modernOutcome
+	inspection.ModernGate = facts.modernGate
+	inspection.ModernGateTime = countFilter.now
 	inspection.Reason = decision.reason
 	inspection.HardExcluded = decision.hardExcluded
 	inspection.Quality = decision.quality
@@ -1204,6 +1369,10 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 		}
 	}
 	inspection.NoUrlSuccess = providerCarriesNoUrl(countFilter.urlIndex(clientId, inspection.Settings))
+	if baseline != nil {
+		counts, urlIndex := countFilter.urlIndex(clientId, inspection.Settings)
+		inspection.BelowOnlineUrlRatio = providerBelowOnlineUrlRatio(counts, urlIndex, baseline.urlSuccessRatio)
+	}
 	inspection.CurrentIndex = ComputeEgressIndex(run, server.NowUtc(), inspection.Settings)
 	return inspection
 }

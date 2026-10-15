@@ -6643,8 +6643,8 @@
     {
       "id": 128,
       "type": "timeseries",
-      "title": "capability probe passes / min by result",
-      "description": "Capability probe passes, one task row fleet-wide, by result: measured (a pass read its sweep pages and measured what was due), waiting (between sweeps, every ten minutes, reading nothing; the next sweep starts min_sweep_interval_minutes after the last one started), disabled (the last pass of a chain once capability_probe.yml switches the probe off; nothing runs after it) and failed (its settings, prober shard, a page read or an evidence write; the task retries the same sweep page after a minute). The probe ships switched off, and every series stays at zero until capability_probe.yml enables it and the taskworkers restart. No measured or waiting pass for longer than a pass's max time, with the probe switched on, is a stopped probe (SIGNALS.md §2.19g).",
+      "title": "capability probe passes / min by result, and chain restarts",
+      "description": "Capability probe passes, one task row fleet-wide, by result: measured (a pass read its sweep pages and measured what was due), waiting (between sweeps, every ten minutes, reading nothing; the next sweep starts min_sweep_interval_minutes after the last one started), disabled (the last pass of a chain once capability_probe.yml switches the probe off; nothing runs after it) and failed (its settings, prober shard, a page read or an evidence write; the task retries the same sweep page after a minute). The probe ships switched off, and every series stays at zero until capability_probe.yml enables it and the taskworkers restart. No measured or waiting pass for longer than a pass's max time, with the probe switched on, is a stopped probe (SIGNALS.md §2.19g). Chain restarts: a taskworker with the probe switched on found the chain's task row missing at its ten-minute check and scheduled a pass (urnetwork_capability_probe_chain_restarts_total), so a stale taskworker, a lost row or maintenance had ended the chain.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -6678,6 +6678,11 @@
           "refId": "A",
           "expr": "sum by (result) (rate(urnetwork_capability_probe_passes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
           "legendFormat": "{{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_capability_probe_chain_restarts_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "chain restarts"
         }
       ]
     },

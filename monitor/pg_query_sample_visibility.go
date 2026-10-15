@@ -47,7 +47,7 @@ func pgSampleFailureAlert(settings SignalSettings, signal Signal, err error) Ale
 	return Alert{
 		SignalNumber: signal.Number(), SignalKey: signal.Key(), SignalID: signal.ID(), SignalName: signal.Name(),
 		Severity: SeverityWarn, Class: "pg-query-sample-unavailable", Target: signal.ID(),
-		Environment: settings.Environment, ObservedAt: settings.Now(), Sustain: 1,
+		Environment: settings.Environment, ObservedAt: settings.Now(), Sustain: 1, unobservable: true,
 		Symptom:   "PostgreSQL query/load coverage did not complete its bounded turn",
 		Observed:  fmt.Sprintf("mode=%s phase=%s cause=%s error_class=%s source_contact_attempted=%s last_attempted_at=%s last_completed_at=%s next_eligible_at=%s", mode, phase, cause, classifyObservationError(err), contact, attempted, completed, next),
 		Mechanism: "Shared-slot admission or a local inventory, complete-settings-generation or durable-state prerequisite can stop the sampler before host contact and receipt creation. A later source/adapter error also cannot establish current query coverage. The first missing observation remains visible.",

@@ -374,9 +374,10 @@ func GetLagTicket(ctx context.Context, ticketId server.Id) *LagTicket {
 
 // The client fields of a track (A5): the network and the city-level place of
 // the address the track was issued to, looked up when it was issued, with
-// the city's coordinates as GeoLite2 City gives them. Never the address, a
-// prefix of it or a hash of it (amendment 9). Each is nil or empty when the
-// lookup did not reach it; the coordinates are nil unless it named a city.
+// the city's own point, the same for every address in the city. Never the
+// address, a prefix of it, a hash of it or its network's own coordinates
+// (amendment 9). Each is nil or empty when the lookup did not reach it; the
+// coordinates are nil unless it named a city the place list holds.
 type LagTrackClient struct {
 	Asn         *int64
 	AsnOrg      string

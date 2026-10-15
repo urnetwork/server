@@ -16,8 +16,12 @@ func main() {
 	// Address scrubbing for everything this process writes to stdout and
 	// stderr, installed before anything can log. A failure here is not fatal:
 	// it degrades to the previous unscrubbed behavior rather than losing
-	// logging entirely. See server.ScrubProcessLogs.
-	server.ScrubProcessLogs()
+	// logging entirely. Every way out of main flushes it first, so the last
+	// lines written, a failure's report included, are not lost: the deferred
+	// Flush for a return or a panic, logs.Exit for an exit, and
+	// logs.DocoptHelp for docopt's own. See server.ScrubCommandLogs.
+	logs := server.ScrubCommandLogs()
+	defer logs.Flush()
 
 	usage := `BringYour connect server.
 
@@ -33,7 +37,7 @@ Options:
   --memory-owner-ledger  Enable fixed resident transfer-owner metrics.
   --private-heap-profile-target=<target>  Root-only host/block, disabled, or optional startup Config [default: config].`
 
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
+	opts, err := (&docopt.Parser{HelpHandler: logs.DocoptHelp}).ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
 		panic(err)
 	}

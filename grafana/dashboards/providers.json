@@ -2188,7 +2188,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 3,
         "x": 9,
         "y": 55
       },
@@ -2230,7 +2230,61 @@
           "legendFormat": "no_success"
         }
       ],
-      "description": "Providers measured at least twice in the last eight hours without one URL success, in a country where the probe works: out of every bucket and the counts, Online included, until their first success. Not a hard exclusion: probes, force_minimum and an explicit client id still reach them. A country where fewer than online_success_country_floor of the measured providers have a success is exempt (see the exempt countries panel); online_requires_url_success: false in provider.yml turns the rule off."
+      "description": "Providers measured at least twice in the last eight hours without one URL success, in a country where the probe works: out of every bucket and the counts, Online included, until their first success. Not a hard exclusion: probes, force_minimum and an explicit client id still reach them. A country where fewer than online_success_country_floor of the measured providers have a success is exempt (see the exempt countries panel), unless online_url_success_ratio is on with online_url_ratio_country_exemption: false, which takes them out there too; online_requires_url_success: false in provider.yml turns the rule off."
+    },
+    {
+      "id": 75,
+      "type": "stat",
+      "title": "left out: low url ratio",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_excluded{env=\"$env\",reason=\"low_success\"})",
+          "refId": "A",
+          "legendFormat": "low_success"
+        }
+      ],
+      "description": "Providers measured at least twice in the last eight hours with a URL success but a share of successes below online_url_success_ratio: out of every bucket and the counts, Online included, until their share reaches the ratio. Zero while online_url_success_ratio is 0, the default (off). Not a hard exclusion: probes, force_minimum and an explicit client id still reach them. A country the URL-success rule exempts keeps them unless online_url_ratio_country_exemption is false; online_requires_url_success: false turns the ratio off with the rule."
     },
     {
       "id": 42,
@@ -2242,8 +2296,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 13,
+        "w": 3,
+        "x": 15,
         "y": 55
       },
       "fieldConfig": {
@@ -2296,8 +2350,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 17,
+        "w": 3,
+        "x": 18,
         "y": 55
       },
       "fieldConfig": {
@@ -2392,7 +2446,7 @@
           "legendFormat": "total"
         }
       ],
-      "description": "Every provider left out of at least one bucket, each counted once under the first rule that holds, in the order reliability, arin_risk, tls, no_success, then unprobed or health, then arin_non_quality. Blackhole and country are legacy labels that stay zero."
+      "description": "Every provider left out of at least one bucket, each counted once under the first rule that holds, in the order reliability, arin_risk, tls, no_success, low_success, then unprobed or health, then not_modern, then arin_non_quality. Blackhole and country are legacy labels that stay zero."
     },
     {
       "id": 45,
@@ -2451,7 +2505,7 @@
           "legendFormat": "{{reason}}"
         }
       ],
-      "description": "The providers each rule leaves out over time. Reliability, arin_risk and tls remove a provider from everything; no_success from every bucket and the counts while its probes continue; health, unprobed and not_modern (only while the modern provider gate is on) from quality and speed; arin_non_quality from quality alone. Every reason is published every refresh, zero included."
+      "description": "The providers each rule leaves out over time. Reliability, arin_risk and tls remove a provider from everything; no_success and low_success (only while online_url_success_ratio is on) from every bucket and the counts while their probes continue; health, unprobed and not_modern (only while the modern provider gate is on) from quality and speed; arin_non_quality from quality alone. Every reason is published every refresh, zero included."
     },
     {
       "id": 46,
@@ -3042,7 +3096,7 @@
           "range": false
         }
       ],
-      "description": "The countries the URL-success rule exempts because fewer than online_success_country_floor of their measured Online providers have a URL success in eight hours: the probe itself fails there for most providers, so their providers keep the benefit of the doubt. Each bar is the providers without a success the exemption keeps online, from the guard the last score export published. No bars while the rule is disabled."
+      "description": "The countries the URL-success rule exempts because fewer than online_success_country_floor of their measured Online providers have a URL success in eight hours: the probe itself fails there for most providers, so their providers keep the benefit of the doubt. Each bar is the providers without a success the exemption keeps online, and while online_url_success_ratio is on those below it too, from the guard the last score export published; zero with online_url_ratio_country_exemption: false, which applies the ratio in every country. No bars while the rule is disabled."
     },
     {
       "id": 66,
@@ -3101,7 +3155,7 @@
           "legendFormat": "kept"
         }
       ],
-      "description": "The providers without a URL success the rule keeps online because their country is exempt, over time; the providers it excludes are the no_success reason beside the backfill. A country entering the exempt set is a probe failing there, not its providers; raise online_success_country_floor to exempt more countries, or set online_requires_url_success: false in provider.yml to turn the rule off."
+      "description": "The providers without a URL success, and while online_url_success_ratio is on those below it, the rule keeps online because their country is exempt, over time; the providers it excludes are the no_success and low_success reasons beside the backfill. A country entering the exempt set is a probe failing there, not its providers; raise online_success_country_floor to exempt more countries, or set online_requires_url_success: false in provider.yml to turn the rule off."
     },
     {
       "id": 67,
@@ -3155,7 +3209,7 @@
           "legendFormat": "not_modern"
         }
       ],
-      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero while quality_speed_requires_modern_provider is off in provider.yml; the shadow beside it says what the gate would take out."
+      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero until the gate turns on by itself at 2026-10-21 00:00 UTC while quality_speed_requires_modern_provider is absent from provider.yml (or at quality_speed_modern_provider_start), and while the switch is false; the shadow beside it says what the gate would take out."
     },
     {
       "id": 68,
@@ -3209,7 +3263,7 @@
           "legendFormat": "not modern"
         }
       ],
-      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before switching quality_speed_requires_modern_provider on."
+      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before the gate turns on by itself at 2026-10-21 00:00 UTC, and postpone with quality_speed_requires_modern_provider: false, a config release and a taskworker and API restart, if it would gut the bucket (the monitor warns from 72 hours before, SIGNALS.md §2.29)."
     },
     {
       "id": 69,
@@ -3321,6 +3375,128 @@
       "description": "The share of the providers the other rules admit to quality that the probe has shown to be modern, which is the share of quality the gate would keep. Rises as probes that report the evidence measure the fleet; no value while quality is empty."
     },
     {
+      "id": 73,
+      "type": "stat",
+      "title": "modern gate: on",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 103
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "off",
+                  "index": 0
+                },
+                "1": {
+                  "text": "on",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_modern_gate_on{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "on"
+        }
+      ],
+      "description": "Whether the modern provider gate holds quality and speed to modern providers under the taskworkers' own provider.yml, as their stats collector last read it: on from the scheduled start while quality_speed_requires_modern_provider is absent, never with it false, at once with it true. The largest of the taskworkers, so a config rollout reads on as soon as one has flipped."
+    },
+    {
+      "id": 74,
+      "type": "stat",
+      "title": "modern gate: scheduled start",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 103
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_modern_gate_start_seconds{env=\"$env\"}) * 1000",
+          "refId": "A",
+          "legendFormat": "start"
+        }
+      ],
+      "description": "The instant the modern provider gate turns on by itself, 2026-10-21 00:00 UTC unless quality_speed_modern_provider_start moves it. No value while provider.yml sets quality_speed_requires_modern_provider, true or false, when no flip is scheduled. The monitor's readiness signal (SIGNALS.md §2.29) watches the shadow from 72 hours before it."
+    },
+    {
       "id": 71,
       "type": "timeseries",
       "title": "modern gate shadow: quality by outcome",
@@ -3332,7 +3508,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 103
+        "y": 107
       },
       "fieldConfig": {
         "defaults": {
@@ -3391,7 +3567,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 103
+        "y": 107
       },
       "fieldConfig": {
         "defaults": {
@@ -3447,7 +3623,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 111
+        "y": 115
       },
       "panels": [],
       "description": "The prober's dark verdicts and the destination pool its health runs load (the geomap design, §11.3 and §11.4). The fleet shares are snapshots each taskworker takes for itself, so they are read from the one with the freshest snapshot; the pool gauges are read from the taskworker that ran the latest refresh; the prober's and the refresh's event counters are summed across the taskworkers on the egress probes dashboard."
@@ -3464,7 +3640,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 112
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -3518,7 +3694,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 112
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -3591,7 +3767,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 112
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -3651,7 +3827,7 @@
         "h": 10,
         "w": 6,
         "x": 0,
-        "y": 120
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -3721,7 +3897,7 @@
         "h": 10,
         "w": 9,
         "x": 6,
-        "y": 120
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -3787,7 +3963,7 @@
         "h": 10,
         "w": 9,
         "x": 15,
-        "y": 120
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {

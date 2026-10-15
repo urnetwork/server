@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -146,4 +147,109 @@ func TestStatsRefreshLagExportsGauges(t *testing.T) {
 		// a test env with no extender network offers none
 		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersOfferedGauge.gauge), float64(0))
 	})
+}
+
+// The idle latency gauge reads latency while no load of the track runs, as
+// lag.dev shows it (lag.dev/PLAN.md L4, X9): a dot's pings during its
+// neighbours' loads are not idle, though its report, stored before theirs,
+// can leave out only its own load. This is the review's case of a middle dot
+// on a link with bufferbloat, over a whole track: eight dots load back to
+// back on the current schedule, each load raises every dot's latency from
+// 20 ms to 300 ms, and each dot's minute holds its neighbours' loads.
+func TestStatsLagIdleLatencyLeavesOutNeighboursLoads(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().Truncate(time.Millisecond)
+		trackStart := now.Add(-10 * time.Minute)
+		// L4: dot k's download starts 5 s + 15 s·k into the track, its upload
+		// follows it at once, and each runs 5 s
+		loadStart := func(position int) time.Time {
+			return trackStart.Add(5*time.Second + time.Duration(position)*15*time.Second)
+		}
+		const dots = 8
+		loaded := func(sent time.Time) bool {
+			for position := range dots {
+				start := loadStart(position)
+				if !sent.Before(start) && sent.Before(start.Add(10*time.Second)) {
+					return true
+				}
+			}
+			return false
+		}
+
+		track, tickets := newLagStatsTestTrack(ctx, trackStart, dots)
+		results := []*model.LagResult{}
+		for position, ticket := range tickets {
+			// M8: the minute runs from 25 s before the download's first byte
+			windowStart := loadStart(position).Add(-25 * time.Second)
+			body := &protocol.LagReportBody{
+				TicketId:           ticket.TicketId.Bytes(),
+				TrackId:            track.TrackId.Bytes(),
+				TrackPosition:      uint32(position),
+				IpFamily:           4,
+				SessionStartTimeMs: uint64(trackStart.UnixMilli()),
+				WindowStartTimeMs:  uint64(windowStart.UnixMilli()),
+				DownloadStartMs:    25000,
+				DownloadMs:         5000,
+				UploadStartMs:      30000,
+				UploadMs:           5000,
+				IntervalMs:         250,
+				EndReason:          protocol.LagEndReason_LAG_END_COMPLETE,
+			}
+			for offsetMs := uint32(0); offsetMs < 60000; offsetMs += 250 {
+				micros := uint32(20000)
+				if loaded(windowStart.Add(time.Duration(offsetMs) * time.Millisecond)) {
+					micros = 300000
+				}
+				body.PingOffsetMs = append(body.PingOffsetMs, offsetMs)
+				body.PingMicros = append(body.PingMicros, micros)
+			}
+			for range 20 {
+				body.DownloadReceivedBytes = append(body.DownloadReceivedBytes, 3125000)
+				body.UploadBytes = append(body.UploadBytes, 625000)
+			}
+			// derived as the report endpoint derives it when the report
+			// arrives, its neighbours' reports not yet stored
+			result := newLagResult(body, ticket, now)
+			results = append(results, result)
+			connect.AssertEqual(t, model.AddLagResult(ctx, result), true)
+		}
+		// the review's middle dot: outside its own load, 30 s of its 50 s are
+		// its neighbours' loads, so the latency stored with it is the loaded
+		// latency
+		connect.AssertEqual(t, *results[3].OutsideLoadLatencyP50Ms, float32(300))
+
+		medians := model.GetLagResultMediansSince(ctx, now.Add(-time.Hour), lagEndReasonName(protocol.LagEndReason_LAG_END_COMPLETE))
+		connect.AssertEqual(t, len(medians), 1)
+		connect.AssertEqual(t, medians[0].Count, int64(dots))
+		connect.AssertEqual(t, *medians[0].IdleLatencyP50Ms, float64(20))
+
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagIdleLatencyP50Gauge.gauge.WithLabelValues("ipv4")), float64(20))
+	})
+}
+
+// A track started at startedAt with one ticket per dot, in order.
+func newLagStatsTestTrack(ctx context.Context, startedAt time.Time, dots int) (*model.LagTrack, []*model.LagTicket) {
+	track := &model.LagTrack{
+		TrackId:   server.NewId(),
+		NetworkId: server.NewId(),
+		ClientId:  server.NewId(),
+		StartedAt: startedAt,
+	}
+	tickets := []*model.LagTicket{}
+	for position := range dots {
+		tickets = append(tickets, &model.LagTicket{
+			TicketId:   server.NewId(),
+			TrackId:    track.TrackId,
+			Position:   position,
+			ClientId:   track.ClientId,
+			NetworkId:  track.NetworkId,
+			ExtenderId: server.NewId(),
+			IssuedAt:   startedAt,
+			ExpiresAt:  startedAt.Add(2 * time.Minute),
+		})
+	}
+	model.CreateLagTrack(ctx, track, tickets)
+	return track, tickets
 }
