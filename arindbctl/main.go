@@ -72,10 +72,14 @@ func (self commandDependencies) clock() time.Time {
 // Exercises the complete publication path with explicit command-owned I/O.
 func runCommandWithDependencies(ctx context.Context, args []string, output io.Writer, dependencies commandDependencies) error {
 	if len(args) == 0 {
-		return errors.New("usage: arindbctl {update|refresh|geolite2 refresh|arin refresh|build|augment-subscribers|audit-subscriber-catalog|refresh-subscriber-evidence|validate-database} [flags]")
+		return errors.New("usage: arindbctl {update|refresh|geolite2 refresh|arin refresh|build|augment-subscribers|audit-subscriber-catalog|refresh-subscriber-evidence|validate-database|canary-baseline} [flags]")
 	}
 	command := args[0]
 	args = args[1:]
+	// a read-only answer for the release runner; it publishes nothing
+	if command == "canary-baseline" {
+		return runCanaryBaseline(args, output, dependencies.clock())
+	}
 	if command == "geolite2" || command == "arin" {
 		if len(args) == 0 || args[0] != "refresh" {
 			return errors.New("expected refresh subcommand")
