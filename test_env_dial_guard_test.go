@@ -1645,3 +1645,32 @@ func TestDestructiveLocalEndpointsIgnoreAdmittedListeners(t *testing.T) {
 		t.Fatalf("destructive check of an admitted listener = %v; want a refusal", err)
 	}
 }
+
+// A host that resolves to no address, without a resolver error, is refused
+// with that reason, and a resolver failure keeps its cause; neither leaves a
+// nil error formatted into the refusal.
+func TestDestructiveLocalEndpointsNameUnresolvedHosts(t *testing.T) {
+	failure := errors.New("synthetic resolver failure")
+	cases := []struct {
+		lookupNetIp func(context.Context, string, string) ([]netip.Addr, error)
+		errorText   string
+	}{
+		{
+			lookupNetIp: func(context.Context, string, string) ([]netip.Addr, error) { return nil, nil },
+			errorText:   "postgres host pg.fixture.example resolved to no address",
+		},
+		{
+			lookupNetIp: func(context.Context, string, string) ([]netip.Addr, error) { return nil, failure },
+			errorText:   "postgres host pg.fixture.example did not resolve: synthetic resolver failure",
+		},
+	}
+	for _, c := range cases {
+		guard := newTestEnvDialGuard(testEnvManagedEnvironment(testEnvFixtureAttestation), c.lookupNetIp)
+		err := guard.requireDestructiveEndpoints(t.Context(), []testEnvServiceEndpoint{
+			{service: "postgres", authority: net.JoinHostPort(testEnvFixturePgHost, "5432")},
+		})
+		if err == nil || !strings.Contains(err.Error(), c.errorText) || strings.Contains(err.Error(), "%!") {
+			t.Errorf("destructive check = %v; want a refusal containing %q", err, c.errorText)
+		}
+	}
+}

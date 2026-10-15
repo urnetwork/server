@@ -619,8 +619,11 @@ func (self *testEnvDialGuard) requireDestructiveEndpoints(ctx context.Context, e
 			return fmt.Errorf("destructive local operation refused: %s authority %q has an invalid port", endpoint.service, endpoint.authority)
 		}
 		addrs, err := self.resolveHost(ctx, host)
-		if err != nil || len(addrs) == 0 {
+		if err != nil {
 			return fmt.Errorf("destructive local operation refused: %s host %s did not resolve: %w", endpoint.service, host, err)
+		}
+		if len(addrs) == 0 {
+			return fmt.Errorf("destructive local operation refused: %s host %s resolved to no address", endpoint.service, host)
 		}
 		for _, addr := range addrs {
 			addrPort := netip.AddrPortFrom(addr.Unmap(), uint16(port))
