@@ -237,10 +237,15 @@ func TestCapabilityProbeChainReturnsAfterAStaleTaskworkerEndsIt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The runtime's stats collector and chain check read the st config,
+		// capability_probe.yml and the interval that the deferred calls above
+		// restore, so they are joined first: without that the race detector
+		// reports the stats collector's read against the st config's reset.
 		defer func() {
 			runtimeOwner.Drain()
 			runtimeOwner.WaitFinalHandback()
 			cancelLifetime()
+			runtimeOwner.(*taskworkerRuntimeOwner).Wait()
 		}()
 		if count, _, _ := capabilityProbeTestRow(t, ctx); count != 1 {
 			t.Fatalf("the startup schedule left %d capability probe rows, want one", count)

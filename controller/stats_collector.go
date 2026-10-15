@@ -658,9 +658,12 @@ func statsRaoToAlpha(rao *big.Int) float64 {
 
 // StartStatsCollector refreshes the public stats gauges until the context
 // is done. each refresh is isolated so a transient db, chain, or fetch
-// error never stops the collector
-func StartStatsCollector(ctx context.Context) {
+// error never stops the collector. The returned channel closes once the
+// collector has stopped, so its owner can join it.
+func StartStatsCollector(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
 	go server.HandleError(func() {
+		defer close(done)
 		dbTick := 0
 		for {
 			statsRefreshBlockClock()
@@ -692,6 +695,7 @@ func StartStatsCollector(ctx context.Context) {
 			}
 		}
 	})
+	return done
 }
 
 // statsRefreshBlockClock publishes the subnet block clock. it needs no
