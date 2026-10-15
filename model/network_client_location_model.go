@@ -56,7 +56,8 @@ const (
 	// The score writer only visits targets present in its current SQL result.
 	// Persist the last complete target set so a location that loses its final
 	// eligible provider receives an explicit empty payload instead of leaving
-	// its prior providers selectable for the cache TTL.
+	// its prior providers selectable for the cache TTL
+	// (network_client_score_target_manifest.go).
 	clientScoreTargetManifestKey = "client_score_target_manifest_v1"
 	// Published only after a complete score export whose SQL excludes derived
 	// window clients and inactive top-level clients. Monitoring uses this
@@ -78,16 +79,6 @@ type clientScoreRedisSet struct {
 	key   string
 	value []byte
 	flush bool
-}
-
-type clientScoreTargetManifestDocument struct {
-	LocationIds      []string `json:"location_ids"`
-	LocationGroupIds []string `json:"location_group_ids"`
-}
-
-type clientScoreTargetManifest struct {
-	locationIds      map[server.Id]bool
-	locationGroupIds map[server.Id]bool
 }
 
 // clientScoreTargetKeys builds the payload and alias key families for one
@@ -5580,6 +5571,19 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			emptyTargetCount += 1
 		}
 	}
+	// Also published empty: each target the previous export wrote from rows
+	// that no row names now, so the providers that left it stop being served
+	// before the cache ttl. The manifest of every target this export may leave
+	// readable is published before any document.
+	previousTargetManifest, err := readClientScoreTargetManifest(ctx)
+	if err != nil {
+		return fmt.Errorf("read client score target manifest: %w", err)
+	}
+	departedTargets, targetManifest := targetMaps.departedTargets(previousTargetManifest, server.NowUtc(), ttl)
+	targets = append(targets, departedTargets...)
+	if err := writeClientScoreTargetManifest(ctx, targetManifest, ttl); err != nil {
+		return fmt.Errorf("publish client score target manifest: %w", err)
+	}
 	updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseSourceLoad, sourceRows, 0)
 	sourceLoadSpan.finish()
 
@@ -5686,6 +5690,14 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	returnErr = finishClientScoreExport(ctx, returnErrs)
 
 	if returnErr == nil {
+		// Every departed target now holds encoded-empty documents that outlive
+		// its previous ones, so the next export compares against this export's
+		// row targets only, stamped after their last document.
+		if err := writeClientScoreTargetManifest(ctx, targetMaps.targetManifest(server.NowUtc()), ttl); err != nil {
+			// the manifest published before the documents still names the
+			// departed targets, so the next export clears them again
+			glog.Errorf("[nclm]publish client score target manifest: %s\n", err)
+		}
 		if writeLegacyUnchanged {
 			if err := markClientScoreAliasReady(ctx); err != nil {
 				return fmt.Errorf("publish client score alias migration state: %w", err)
@@ -5714,11 +5726,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		}
 		shadowScoreCapture.publish(nativeCensus, locationClientScores, locationGroupClientScores)
 		glog.Infof(
-			"[nclm]update %d client locations x %d location scores, %d location group scores, %d of them empty\n",
+			"[nclm]update %d client locations x %d location scores, %d location group scores, %d of them empty, %d departed targets cleared\n",
 			len(clientLocationIds),
 			len(locationClientScores),
 			len(locationGroupClientScores),
 			emptyTargetCount,
+			len(departedTargets),
 		)
 	} else {
 		glog.Infof("[nclm]update err = %s\n", returnErr)

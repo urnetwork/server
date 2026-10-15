@@ -51,10 +51,11 @@ type clientScoreTargetMaps struct {
 // without admitted providers, so a reader can tell "no providers" from "never
 // written" (cache_empty, not cache_missing), and a target that lost its last
 // admitted provider stops serving its previous payload instead of keeping it
-// until the cache ttl. A location no row names at all is still not visited.
-// Rows are cleared as they are consumed so their staging references are
-// released early. observe, when set, sees every row before the hard-exclusion
-// check.
+// until the cache ttl. A location no row names at all is not a target here;
+// the export clears one the previous export wrote through the target manifest
+// (departedTargets). Rows are cleared as they are consumed so their staging
+// references are released early. observe, when set, sees every row before the
+// hard-exclusion check.
 func newClientScoreTargetMaps(
 	rows []clientScoreSourceRow,
 	knownLocationGroupIds []server.Id,
