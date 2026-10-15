@@ -19,8 +19,17 @@ package monitor
 // failed or carries a visibility alert, gated or held: its signal did not
 // observe everything, so absent incidents keep their state. Silence is not
 // recovery, and a clear message says only that the incident is no longer
-// reported. State is process-local, so a newly started watcher announces each
-// alert that is active when it starts.
+// reported.
+//
+// State is process-local, so a newly started watcher announces each alert
+// that is active when it starts, including every alert a predecessor already
+// announced. A raise from a signal's first Sustain complete executions is such
+// an alert: the gate let it through at the first chance this process had.
+// Those raises are folded into one start digest, posted once
+// StartDigestSettle passes without another, instead of one message each. An
+// escalation of a digest incident before the digest posts is folded into it;
+// a clear posts the digest first, so the channel never shows a clear ahead of
+// its raise.
 //
 // Messages are capped at maxMessagesPerMinute over a sliding minute. Over the
 // cap, transitions are folded into one summary message, sent as soon as the
@@ -79,7 +88,8 @@ const slackUndeliveredReportInterval = time.Minute
 var slackReasonPattern = regexp.MustCompile(`^[a-z_]{1,64}$`)
 
 // Settings for NewSlackAlertNotifier. Zero values take the defaults, except
-// PostInterval, where zero posts back to back.
+// PostInterval, where zero posts back to back, and StartDigestSettle, where
+// zero posts every raise on its own.
 type SlackAlertNotifierSettings struct {
 	// empty disables the notifier
 	WebhookUrl  string
@@ -88,6 +98,8 @@ type SlackAlertNotifierSettings struct {
 	MaxMessagesPerMinute int
 	// consecutive complete executions without an incident before it clears
 	ClearAfterCompleteRuns int
+	// how long the start digest waits after its latest raise before it posts
+	StartDigestSettle time.Duration
 	// minimum spacing between posts
 	PostInterval time.Duration
 	PostTimeout  time.Duration
@@ -115,6 +127,7 @@ func DefaultSlackAlertNotifierSettings() SlackAlertNotifierSettings {
 	return SlackAlertNotifierSettings{
 		MaxMessagesPerMinute:   10,
 		ClearAfterCompleteRuns: 2,
+		StartDigestSettle:      2 * time.Minute,
 		PostInterval:           time.Second,
 		PostTimeout:            10 * time.Second,
 		RetryDelay:             time.Second,
@@ -146,6 +159,7 @@ func (self SlackAlertNotifierSettings) withDefaults() SlackAlertNotifierSettings
 	if self.ClearAfterCompleteRuns <= 0 {
 		self.ClearAfterCompleteRuns = defaults.ClearAfterCompleteRuns
 	}
+	self.StartDigestSettle = max(self.StartDigestSettle, 0)
 	self.PostInterval = max(self.PostInterval, 0)
 	if self.PostTimeout <= 0 {
 		self.PostTimeout = defaults.PostTimeout
@@ -191,6 +205,8 @@ const (
 type slackTransition struct {
 	kind  slackTransitionKind
 	alert Alert
+	// a raise from its signal's first Sustain complete executions
+	atStart bool
 }
 
 // One announced incident.
@@ -245,6 +261,14 @@ type SlackAlertNotifier struct {
 	suppressed      []slackTransition
 	suppressedCount int
 	droppedCount    int
+	// signal key -> executions that did not fail
+	signalKeyCompleteRuns map[string]int
+	// raises waiting for the start digest, and their index by incident key
+	startDigest         []slackTransition
+	startDigestKeyIndex map[string]int
+	startDigestLastTime time.Time
+	// a clear of a digest incident waits behind the digest
+	startDigestDue bool
 
 	// owned by the sender goroutine
 	postFailing bool
@@ -261,11 +285,13 @@ func NewSlackAlertNotifier(settings SlackAlertNotifierSettings) *SlackAlertNotif
 	settings = settings.withDefaults()
 	ctx, cancel := context.WithCancel(context.Background())
 	notifier := &SlackAlertNotifier{
-		settings:     settings,
-		ctx:          ctx,
-		cancel:       cancel,
-		done:         make(chan struct{}),
-		keyIncidents: map[string]*slackIncident{},
+		settings:              settings,
+		ctx:                   ctx,
+		cancel:                cancel,
+		done:                  make(chan struct{}),
+		keyIncidents:          map[string]*slackIncident{},
+		signalKeyCompleteRuns: map[string]int{},
+		startDigestKeyIndex:   map[string]int{},
 	}
 	settings.WebhookUrl = strings.TrimSpace(settings.WebhookUrl)
 	if settings.WebhookUrl == "" {
@@ -323,11 +349,12 @@ func (self *SlackAlertNotifier) Handle(signal Signal, execution SignalExecution)
 	self.admitWithLock(now, self.observeWithLock(signal.Key(), execution))
 }
 
-// Close stops accepting batches, queues a held summary regardless of the cap,
-// and waits for the sender to post what is queued and a pending undelivered
-// report. When ctx ends first, the remaining posts are abandoned. The first
-// Close logs what was never posted: abandoned messages, including a summary
-// the full queue refused, and undelivered messages never reported in Slack.
+// Close stops accepting batches, queues a pending start digest and a held
+// summary regardless of the cap, and waits for the sender to post what is
+// queued and a pending undelivered report. When ctx ends first, the remaining
+// posts are abandoned. The first Close logs what was never posted: abandoned
+// messages, including a digest or summary the full queue refused, and
+// undelivered messages never reported in Slack.
 func (self *SlackAlertNotifier) Close(ctx context.Context) {
 	if !self.enabled {
 		return
@@ -342,9 +369,16 @@ func (self *SlackAlertNotifier) Close(ctx context.Context) {
 		}
 		first = true
 		self.closed = true
+		heldTexts := []string{}
+		if 0 < len(self.startDigest) {
+			heldTexts = append(heldTexts, self.startDigestTextWithLock())
+		}
 		if 0 < self.suppressedCount || 0 < self.droppedCount {
+			heldTexts = append(heldTexts, self.summaryTextWithLock())
+		}
+		for _, text := range heldTexts {
 			select {
-			case self.messages <- slackMessage{text: self.summaryTextWithLock(), queuedTime: self.settings.Now()}:
+			case self.messages <- slackMessage{text: text, queuedTime: self.settings.Now()}:
 			default:
 				abandonedCount++
 			}
@@ -420,6 +454,23 @@ func (self *SlackAlertNotifier) observeWithLock(signalKey string, execution Sign
 	for _, alert := range keyAlerts {
 		present = append(present, alert)
 	}
+	if !execution.Failed {
+		self.signalKeyCompleteRuns[signalKey]++
+	}
+	completeRuns := self.signalKeyCompleteRuns[signalKey]
+	// A raise is at start when the gate passed it at the first chance this
+	// process had: within the first Sustain complete runs, since the gate
+	// resets a streak at every run without the alert, or for a failed run,
+	// before any complete one.
+	atStart := func(alert Alert) bool {
+		if self.settings.StartDigestSettle <= 0 {
+			return false
+		}
+		if execution.Failed {
+			return completeRuns == 0
+		}
+		return completeRuns <= max(alert.Sustain, 1)
+	}
 
 	transitions := []slackTransition{}
 	for _, alert := range orderedAlerts(present) {
@@ -431,7 +482,7 @@ func (self *SlackAlertNotifier) observeWithLock(signalKey string, execution Sign
 				severity:            alert.Severity,
 				signalKeyAbsentRuns: map[string]int{signalKey: 0},
 			}
-			transitions = append(transitions, slackTransition{kind: slackRaised, alert: alert})
+			transitions = append(transitions, slackTransition{kind: slackRaised, alert: alert, atStart: atStart(alert)})
 			continue
 		}
 		incident.alert = alert
@@ -480,8 +531,10 @@ func (self *SlackAlertNotifier) observeWithLock(signalKey string, execution Sign
 	return transitions
 }
 
-// Offers what the sliding-minute cap allows, a held summary first so the
-// channel keeps transition order, and holds the rest for the next summary.
+// Folds at-start raises into the start digest, then offers what the
+// sliding-minute cap allows: a due digest first, then a held summary, then the
+// new transitions, so the channel keeps transition order. The rest is held for
+// the next summary.
 func (self *SlackAlertNotifier) admitWithLock(now time.Time, transitions []slackTransition) {
 	windowStart := now.Add(-time.Minute)
 	sentTimes := self.sentTimes[:0]
@@ -504,14 +557,42 @@ func (self *SlackAlertNotifier) admitWithLock(now time.Time, transitions []slack
 		}
 	}
 
-	// a summary the full queue refuses keeps what it holds for the next try
-	if (0 < self.suppressedCount || 0 < self.droppedCount) && allowed() && offer(self.summaryTextWithLock()) {
+	posting := make([]slackTransition, 0, len(transitions))
+	for _, transition := range transitions {
+		key := slackIncidentKey(transition.alert)
+		index, inDigest := self.startDigestKeyIndex[key]
+		switch {
+		case transition.atStart:
+			self.startDigestKeyIndex[key] = len(self.startDigest)
+			self.startDigest = append(self.startDigest, transition)
+			self.startDigestLastTime = now
+		case inDigest && transition.kind == slackEscalated:
+			// the digest announces the page
+			self.startDigest[index].alert = transition.alert
+		default:
+			if inDigest {
+				self.startDigestDue = true
+			}
+			posting = append(posting, transition)
+		}
+	}
+
+	// a digest or summary the full queue refuses keeps what it holds for the
+	// next try
+	if 0 < len(self.startDigest) && (self.startDigestDue || self.settings.StartDigestSettle <= now.Sub(self.startDigestLastTime)) &&
+		allowed() && offer(self.startDigestTextWithLock()) {
+		self.startDigest = nil
+		self.startDigestKeyIndex = map[string]int{}
+		self.startDigestDue = false
+	}
+	digestBlocking := 0 < len(self.startDigest) && self.startDigestDue
+	if !digestBlocking && (0 < self.suppressedCount || 0 < self.droppedCount) && allowed() && offer(self.summaryTextWithLock()) {
 		self.suppressed = nil
 		self.suppressedCount = 0
 		self.droppedCount = 0
 	}
-	for _, transition := range transitions {
-		if self.suppressedCount == 0 && allowed() {
+	for _, transition := range posting {
+		if !digestBlocking && self.suppressedCount == 0 && allowed() {
 			if !offer(slackTransitionText(self.settings.Environment, transition, self.settings.ClearAfterCompleteRuns)) {
 				self.droppedCount++
 			}
@@ -559,7 +640,33 @@ func (self *SlackAlertNotifier) summaryTextWithLock() string {
 	return b.String()
 }
 
-// Posts held summaries once the cap allows them.
+// The start digest of the pending at-start raises, pages first.
+func (self *SlackAlertNotifier) startDigestTextWithLock() string {
+	entries := append([]slackTransition(nil), self.startDigest...)
+	sort.SliceStable(entries, func(i, j int) bool {
+		if (entries[i].alert.Severity == SeverityPage) != (entries[j].alert.Severity == SeverityPage) {
+			return entries[i].alert.Severity == SeverityPage
+		}
+		return slackIncidentKey(entries[i].alert) < slackIncidentKey(entries[j].alert)
+	})
+	var b strings.Builder
+	fmt.Fprintf(
+		&b,
+		"[ACTIVE AT START] (%s) %d incident(s) reported by this watcher's first runs of their signals:",
+		slackEscape(slackEnvironment(self.settings.Environment)),
+		len(entries),
+	)
+	for _, entry := range entries[:min(len(entries), slackSummaryLines)] {
+		fmt.Fprintf(&b, "\n- [%s] %s", slackSeverityLabel(entry.alert.Severity), slackIdentityLine(entry.alert))
+	}
+	if hidden := len(entries) - slackSummaryLines; 0 < hidden {
+		fmt.Fprintf(&b, "\n- and %d more", hidden)
+	}
+	b.WriteString("\nAlert state is per watcher, so these can repeat earlier announcements. Later transitions post one by one.")
+	return b.String()
+}
+
+// Posts held summaries and a settled start digest once the cap allows them.
 func (self *SlackAlertNotifier) flushSummary() {
 	now := self.settings.Now()
 	self.stateLock.Lock()

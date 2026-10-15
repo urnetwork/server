@@ -85,7 +85,8 @@ func TestContinuousAlertHandlerNotifiesEmptyBatches(t *testing.T) {
 	notifier, closeAndPosts := newRecordedSlackNotifier(t)
 	var stdout bytes.Buffer
 	handle := continuousAlertHandler(&stdout, alertFormatMarkdown, notifier)
-	for _, alerts := range []servermonitor.Alerts{{slackHandlerAlert}, {}, {}} {
+	// the first, empty run closes the start window, so the raise posts on its own
+	for _, alerts := range []servermonitor.Alerts{{}, {slackHandlerAlert}, {}, {}} {
 		if err := handle(context.Background(), slackHandlerSignal{}, servermonitor.SignalExecution{Alerts: alerts}); err != nil {
 			t.Fatal(err)
 		}
@@ -100,9 +101,27 @@ func TestContinuousAlertHandlerNotifiesEmptyBatches(t *testing.T) {
 	}
 }
 
+// The CLI's notifier folds a new watcher's first raises into one start digest
+// instead of posting each.
+func TestContinuousAlertHandlerFoldsFirstRaisesIntoTheStartDigest(t *testing.T) {
+	notifier, closeAndPosts := newRecordedSlackNotifier(t)
+	var stdout bytes.Buffer
+	handle := continuousAlertHandler(&stdout, alertFormatMarkdown, notifier)
+	second := slackHandlerAlert
+	second.Target = "alpha-2"
+	if err := handle(context.Background(), slackHandlerSignal{}, servermonitor.SignalExecution{Alerts: servermonitor.Alerts{slackHandlerAlert, second}}); err != nil {
+		t.Fatal(err)
+	}
+	posts := closeAndPosts()
+	if len(posts) != 1 || !strings.HasPrefix(posts[0], "[ACTIVE AT START] (synthetic) 2 incident(s)") {
+		t.Fatalf("posts = %q", posts)
+	}
+}
+
 // The notifier gets the whole execution: a failed one, whose visibility alert
 // the gate still holds, is no evidence of absence, so one complete run after
-// it does not clear the incident.
+// it does not clear the incident. The first, empty run closes the start
+// window.
 func TestContinuousAlertHandlerForwardsFailedExecutions(t *testing.T) {
 	notifier, closeAndPosts := newRecordedSlackNotifier(t)
 	var stdout bytes.Buffer
@@ -112,6 +131,7 @@ func TestContinuousAlertHandlerForwardsFailedExecutions(t *testing.T) {
 		Severity: servermonitor.SeverityWarn, Class: "cannot-observe", Target: "probe/alpha", Sustain: 2,
 	}
 	for _, execution := range []servermonitor.SignalExecution{
+		{},
 		{Alerts: servermonitor.Alerts{slackHandlerAlert}},
 		{HeldAlerts: servermonitor.Alerts{cannotObserve}, Failed: true},
 		{},

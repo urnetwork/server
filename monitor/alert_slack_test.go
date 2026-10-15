@@ -897,6 +897,192 @@ func TestSlackAlertNotifierLogsUnreportedUndeliveredMessagesAtClose(t *testing.T
 	}
 }
 
+// The harness settings with the production start digest.
+func (self *slackTestHarness) digestSettings(webhookUrl string) SlackAlertNotifierSettings {
+	settings := self.settings(webhookUrl)
+	settings.StartDigestSettle = DefaultSlackAlertNotifierSettings().StartDigestSettle
+	return settings
+}
+
+var slackOtherTestSignal = selectionSignal{number: "3.1", key: "redis-memory", id: "redis/memory"}
+
+// A new watcher's raises from each signal's first Sustain complete runs are
+// folded into one start digest, posted once the settle time passes without
+// another. A raise past that window posts on its own.
+func TestSlackAlertNotifierFoldsRaisesAtStartIntoOneDigest(t *testing.T) {
+	if settle := DefaultSlackAlertNotifierSettings().StartDigestSettle; settle != 2*time.Minute {
+		t.Fatalf("default start digest settle = %s, want 2m", settle)
+	}
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.digestSettings(webhookUrl))
+
+	pg1, pg2 := slackTestAlert("pg-1", "", SeverityWarn), slackTestAlert("pg-2", "", SeverityPage)
+	slow := slackTestAlert("pg-3", "", SeverityWarn)
+	slow.Sustain = 2
+	redis := Alert{
+		SignalNumber: "3.1", SignalKey: "redis-memory", SignalID: "redis/memory", SignalName: "Redis memory",
+		Severity: SeverityWarn, Class: "node-mem-high", Target: "redis-1", Symptom: "redis-1 memory is high",
+	}
+	// first runs: the gate holds pg-3 below its Sustain of 2
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{pg1, pg2}, HeldAlerts: Alerts{slow}})
+	harness.advance(time.Minute)
+	notifier.Handle(slackOtherTestSignal, SignalExecution{Alerts: Alerts{redis}})
+	harness.advance(time.Minute)
+	// pg-3's second run is still within its Sustain
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{pg1, pg2, slow}})
+	harness.advance(time.Minute)
+	// the latest raise was a minute ago: not settled yet
+	notifier.flushSummary()
+	harness.advance(time.Minute)
+	notifier.flushSummary()
+	// pg-4 first appears in the third run, past its Sustain of 1
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{pg1, pg2, slow, slackTestAlert("pg-4", "", SeverityWarn)}})
+	closeSlackNotifier(t, notifier)
+
+	requireSlackTexts(t, webhook.posted(),
+		"[ACTIVE AT START] (synthetic) 4 incident(s) reported by this watcher's first runs of their signals:\n"+
+			"- [PAGE] pg/active-pileup · active-pileup · pg-2\n"+
+			"- [WARN] pg/active-pileup · active-pileup · pg-1\n"+
+			"- [WARN] pg/active-pileup · active-pileup · pg-3\n"+
+			"- [WARN] redis/memory · node-mem-high · redis-1\n"+
+			"Alert state is per watcher, so these can repeat earlier announcements.",
+		"[WARN] raised (synthetic): Active client backends on pg-4",
+	)
+}
+
+// An at-start incident escalated before the digest posts is announced at page
+// in the digest, without a separate escalation.
+func TestSlackAlertNotifierFoldsAnEscalationIntoThePendingDigest(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.digestSettings(webhookUrl))
+
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
+	harness.advance(time.Minute)
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityPage)}})
+	harness.advance(2 * time.Minute)
+	notifier.flushSummary()
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityPage)}})
+	closeSlackNotifier(t, notifier)
+
+	requireSlackTexts(t, webhook.posted(),
+		"[ACTIVE AT START] (synthetic) 1 incident(s) reported by this watcher's first runs of their signals:\n"+
+			"- [PAGE] pg/active-pileup · active-pileup · pg-1\n",
+	)
+}
+
+// A clear of an at-start incident posts the pending digest first, so the
+// channel never shows a clear ahead of its raise.
+func TestSlackAlertNotifierPostsTheDigestBeforeAClearOfItsIncident(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.digestSettings(webhookUrl))
+
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn), slackTestAlert("pg-2", "", SeverityWarn)}})
+	for i := 0; i < 2; i++ {
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-2", "", SeverityWarn)}})
+	}
+	closeSlackNotifier(t, notifier)
+
+	texts := webhook.posted()
+	requireSlackTexts(t, texts,
+		"[ACTIVE AT START] (synthetic) 2 incident(s) reported by this watcher's first runs of their signals:\n"+
+			"- [WARN] pg/active-pileup · active-pileup · pg-1\n"+
+			"- [WARN] pg/active-pileup · active-pileup · pg-2\n",
+		"[CLEARED] WARN (synthetic): PostgreSQL active backends\npg/active-pileup · active-pileup · pg-1",
+	)
+}
+
+// A digest the full queue refuses holds the clear of its incident behind it:
+// the clear waits in the summary instead of being dropped or posted first.
+func TestSlackAlertNotifierHoldsAClearBehindARefusedDigest(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	release := webhook.holdUntilReleased()
+	harness := newSlackTestHarness()
+	settings := harness.digestSettings(webhookUrl)
+	settings.QueueSize = 1
+	notifier := NewSlackAlertNotifier(settings)
+	redis := func(target string) Alert {
+		return Alert{
+			SignalNumber: "3.1", SignalKey: "redis-memory", SignalID: "redis/memory", SignalName: "Redis memory",
+			Severity: SeverityWarn, Class: "node-mem-high", Target: target, Symptom: target + " memory is high",
+		}
+	}
+
+	// past its start window, the other signal's raises post one by one
+	notifier.Handle(slackOtherTestSignal, SignalExecution{})
+	notifier.Handle(slackOtherTestSignal, SignalExecution{Alerts: Alerts{redis("redis-1")}})
+	// the sender holds redis-1 at the webhook, and redis-2 fills the queue
+	awaitSlackWebhook(t, webhook.arrived, 1, "request")
+	notifier.Handle(slackOtherTestSignal, SignalExecution{Alerts: Alerts{redis("redis-1"), redis("redis-2")}})
+	// pg-1 joins the digest and clears while the queue is full
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
+	notifier.Handle(slackTestSignal, SignalExecution{})
+	notifier.Handle(slackTestSignal, SignalExecution{})
+	close(release)
+	awaitSlackWebhook(t, webhook.answered, 2, "answer")
+	// the one-message queue takes the digest, then the summary
+	notifier.flushSummary()
+	awaitSlackWebhook(t, webhook.answered, 1, "answer")
+	notifier.flushSummary()
+	closeSlackNotifier(t, notifier)
+
+	texts := webhook.posted()
+	requireSlackTexts(t, texts,
+		"[WARN] raised (synthetic): redis-1 memory is high",
+		"[WARN] raised (synthetic): redis-2 memory is high",
+		"[ACTIVE AT START] (synthetic) 1 incident(s) reported by this watcher's first runs of their signals:\n- [WARN] pg/active-pileup · active-pileup · pg-1\n",
+		"[RATE LIMIT] (synthetic) 1 alert transition(s) were not posted one by one",
+	)
+	if !strings.Contains(texts[3], "- [CLEARED] WARN: pg/active-pileup · active-pileup · pg-1") {
+		t.Fatalf("summary = %q", texts[3])
+	}
+}
+
+// A digest still settling at shutdown is posted by Close.
+func TestSlackAlertNotifierPostsAPendingDigestAtClose(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.digestSettings(webhookUrl))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
+	closeSlackNotifier(t, notifier)
+	requireSlackTexts(t, webhook.posted(),
+		"[ACTIVE AT START] (synthetic) 1 incident(s) reported by this watcher's first runs of their signals:\n"+
+			"- [WARN] pg/active-pileup · active-pileup · pg-1\n",
+	)
+}
+
+// Failed runs do not use up a signal's start window, and a visibility raise
+// from runs that all failed is at start. Once a run completed, a later
+// visibility raise is new.
+func TestSlackAlertNotifierStartWindowSkipsFailedRuns(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.digestSettings(webhookUrl))
+	failure := errors.New("synthetic ssh timeout")
+	cannotObserve := visibilityAlert(syntheticSettings(nil), slackTestSignal, failure)
+	otherCannotObserve := visibilityAlert(syntheticSettings(nil), slackOtherTestSignal, failure)
+
+	notifier.Handle(slackTestSignal, SignalExecution{HeldAlerts: Alerts{cannotObserve}, Failed: true})
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{cannotObserve}, Failed: true})
+	notifier.Handle(slackOtherTestSignal, SignalExecution{})
+	notifier.Handle(slackOtherTestSignal, SignalExecution{HeldAlerts: Alerts{otherCannotObserve}, Failed: true})
+	notifier.Handle(slackOtherTestSignal, SignalExecution{Alerts: Alerts{otherCannotObserve}, Failed: true})
+	// the first complete run of the failing signal
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
+	harness.advance(2 * time.Minute)
+	notifier.flushSummary()
+	closeSlackNotifier(t, notifier)
+
+	requireSlackTexts(t, webhook.posted(),
+		"[WARN] raised (synthetic): Signal 3.1 (redis/memory) could not run",
+		"[ACTIVE AT START] (synthetic) 2 incident(s) reported by this watcher's first runs of their signals:\n"+
+			"- [WARN] monitor/visibility · cannot-observe · pg/active-pileup\n"+
+			"- [WARN] pg/active-pileup · active-pileup · pg-1\n",
+	)
+}
+
 // Alert text cannot mention a channel or render a link.
 func TestSlackAlertMessagesEscapeSlackControlSequences(t *testing.T) {
 	alert := slackTestAlert("pg-1", "", SeverityPage)
