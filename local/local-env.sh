@@ -17,8 +17,12 @@
 # requires each local service name to resolve only to the launcher's dedicated
 # address (never to loopback), probes that address, and exports the endpoints.
 # Unlike test-env.sh it keeps the caller's WARP_SERVICE, WARP_BLOCK,
-# WARP_VERSION and WARP_DOMAIN. A failure leaves the attestation unset and
-# returns non-zero; a process started anyway then refuses every dial.
+# WARP_VERSION and WARP_DOMAIN. It does leave test-env.sh's WARP_VAULT_HOME and
+# WARP_CONFIG_HOME exported, so the process reads the vault and config that the
+# preflight validated against the launcher: an explicit value first, then
+# WARP_HOME's, a sibling checkout's, and finally the checked-in testdata. A
+# failure leaves the attestation unset and returns non-zero; a process started
+# anyway then refuses every dial.
 #
 # Start ./local/run-local.sh in its own terminal first and wait for
 # 'Local environment is up'. Requires bash 3.2 or newer.

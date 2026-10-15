@@ -68,8 +68,15 @@ func newNativeFirstTransport(t *testing.T, failure string) (*redis.Client, *nati
 			SourceCompletedAt: time.Unix(1_700_000_010, 0).UTC(),
 		},
 	}
-	// an address literal: go-redis resolves a host name when it builds a client
-	client := redis.NewClient(&redis.Options{Addr: "192.0.2.1:0", MaxRetries: -1})
+	// an address literal: go-redis resolves a host name when it builds a client;
+	// the transport's dial hook replaces every dial, and so does this dialer
+	client := redis.NewClient(&redis.Options{
+		Addr:       "192.0.2.1:0",
+		MaxRetries: -1,
+		Dialer: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("native transport control forbids dialing")
+		},
+	})
 	client.AddHook(transport)
 	t.Cleanup(func() { client.Close() })
 	return client, transport

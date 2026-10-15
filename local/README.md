@@ -19,7 +19,9 @@ cd server
 
 To run a local service or tool against the stack, start it through its
 `run-local.sh`, which attests the launcher first (see
-[Public DNS also answered 127.0.0.1](#public-dns-also-answered-127001)):
+[Public DNS also answered 127.0.0.1](#public-dns-also-answered-127001)).
+That includes `bringyourctl/run-local.sh`, so `./run-local.sh db migrate` now
+needs the launcher too:
 
 ```sh
 cd server/cli/api
@@ -101,7 +103,10 @@ to its launcher's attested endpoints for its whole run:
   endpoints as `WARP_TEST_ENV_ATTESTED_ADDRS` (`10.213.0.1:5432,10.213.0.1:6379`
   by default). Any failure leaves the variable unset. `local-env.sh` runs the
   same preflight as `test-env.sh` but keeps the caller's `WARP_SERVICE`,
-  `WARP_BLOCK`, `WARP_VERSION` and `WARP_DOMAIN`.
+  `WARP_BLOCK`, `WARP_VERSION` and `WARP_DOMAIN`. It leaves `test-env.sh`'s
+  `WARP_VAULT_HOME` and `WARP_CONFIG_HOME` exported, so the service reads the
+  vault and config the preflight validated: an explicit value, then
+  `WARP_HOME`'s, a sibling checkout's, and finally the checked-in testdata.
 - The `cli/*/run-local.sh` services, `bringyourctl/run-local.sh` and
   `connect/sim-latency/run-local.sh` (for `run`, `fleet`, `reset` and a
   measuring `baseline`) source `local/local-env.sh` before they start the
@@ -303,7 +308,7 @@ The escape skips only the launcher attestation and managed-mapping checks; the
 resource-authority checks and first-attempt service probes still run. Each
 service name is resolved once and must resolve to exactly one non-loopback
 address, which is then probed and attested for the whole run. A name that
-resolves to loopback is refused, because public DNS answers the local service
+resolves to loopback is refused, because public DNS answered the local service
 names that way, and so is a `127.0.0.1` literal: loopback services need the
 private portable root (`WARP_TEST_ENV_PORTABLE_ROOT`) with explicit `127.0.0.1`
 authorities, as `local/release-gate-services.sh` sets. No mode accepts a

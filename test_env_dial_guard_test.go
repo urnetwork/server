@@ -11,8 +11,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
+	"maps"
 	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -931,33 +934,46 @@ func TestTestingDialTestEnvGuardsProxyUpstream(t *testing.T) {
 	conn.Close()
 }
 
-// Every go-redis client this package builds dials through an explicit dialer:
-// the guard's (configureTestEnvRedisDial), a pool's, or a test's synthetic or
-// never-dialing one. A client left on go-redis's own dialer resolves its name
-// on every dial outside the guard; two lease tests' db-0 clients did, which
-// sends no SELECT and could run single-key writes on a production node. The
-// source is the observable layer: those clients live in tests that need a
-// live fixture, so a pure test can only find them here.
+// Every go-redis client this module builds dials through an explicit dialer:
+// the guard's (configureTestEnvRedisDial here, server.Testing_DialTestEnv in
+// another package), a pool's, or a test's synthetic or never-dialing one. A
+// client left on go-redis's own dialer resolves its name on every dial outside
+// the guard; two lease tests' db-0 clients did, which sends no SELECT and
+// could run single-key writes on a production node. The source is the
+// observable layer: those clients live in tests that need a live fixture, so
+// a pure test can only find them here.
 func TestRedisClientsDialThroughExplicitDialers(t *testing.T) {
-	paths, err := filepath.Glob("*.go")
+	// Every package of the module, one directory at a time so a package's own
+	// helpers resolve; testdata, hidden directories and nested modules are not
+	// the module's packages.
+	packagePaths := map[string][]string{}
+	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if path == "." {
+				return nil
+			}
+			if name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+				return filepath.SkipDir
+			}
+			if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".go") {
+			packagePaths[filepath.Dir(path)] = append(packagePaths[filepath.Dir(path)], path)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fileSet := token.NewFileSet()
-	files := []*ast.File{}
-	funcDecls := map[string]*ast.FuncDecl{}
-	for _, path := range paths {
-		file, err := parser.ParseFile(fileSet, path, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		files = append(files, file)
-		for _, decl := range file.Decls {
-			if funcDecl, ok := decl.(*ast.FuncDecl); ok && funcDecl.Recv == nil {
-				funcDecls[funcDecl.Name.Name] = funcDecl
-			}
-		}
-	}
+	var funcDecls map[string]*ast.FuncDecl
 	literalHasDialer := func(literal *ast.CompositeLit) bool {
 		for _, element := range literal.Elts {
 			if keyValue, ok := element.(*ast.KeyValueExpr); ok {
@@ -1053,37 +1069,58 @@ func TestRedisClientsDialThroughExplicitDialers(t *testing.T) {
 		"NewClient": true, "NewClusterClient": true, "NewUniversalClient": true,
 		"NewFailoverClient": true, "NewFailoverClusterClient": true, "NewRing": true,
 	}
-	checked := 0
-	for _, file := range files {
-		for _, decl := range file.Decls {
-			funcDecl, ok := decl.(*ast.FuncDecl)
-			if !ok || funcDecl.Body == nil {
-				continue
+	checked, checkedOutsideRoot := 0, 0
+	for _, directory := range slices.Sorted(maps.Keys(packagePaths)) {
+		files := []*ast.File{}
+		funcDecls = map[string]*ast.FuncDecl{}
+		for _, path := range packagePaths[directory] {
+			file, err := parser.ParseFile(fileSet, path, nil, 0)
+			if err != nil {
+				t.Fatal(err)
 			}
-			ast.Inspect(funcDecl.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
+			files = append(files, file)
+			for _, decl := range file.Decls {
+				if funcDecl, ok := decl.(*ast.FuncDecl); ok && funcDecl.Recv == nil {
+					funcDecls[funcDecl.Name.Name] = funcDecl
+				}
+			}
+		}
+		for _, file := range files {
+			for _, decl := range file.Decls {
+				funcDecl, ok := decl.(*ast.FuncDecl)
+				if !ok || funcDecl.Body == nil {
+					continue
+				}
+				ast.Inspect(funcDecl.Body, func(node ast.Node) bool {
+					call, ok := node.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					selector, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok || !constructors[selector.Sel.Name] {
+						return true
+					}
+					if pkg, ok := selector.X.(*ast.Ident); !ok || pkg.Name != "redis" || len(call.Args) != 1 {
+						return true
+					}
+					checked += 1
+					if directory != "." {
+						checkedOutsideRoot += 1
+					}
+					if !givesDialer(funcDecl.Body, call.Args[0], 0) {
+						t.Errorf("%s: redis.%s leaves the client on go-redis's own dialer; route it through the process "+
+							"guard (configureTestEnvRedisDial(currentTestEnvDialGuard(), options, NewDialer(timeout).DialContext) "+
+							"in this package, server.Testing_DialTestEnv elsewhere) or give it an explicit Dialer",
+							fileSet.Position(call.Pos()), selector.Sel.Name)
+					}
 					return true
-				}
-				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || !constructors[selector.Sel.Name] {
-					return true
-				}
-				if pkg, ok := selector.X.(*ast.Ident); !ok || pkg.Name != "redis" || len(call.Args) != 1 {
-					return true
-				}
-				checked += 1
-				if !givesDialer(funcDecl.Body, call.Args[0], 0) {
-					t.Errorf("%s: redis.%s leaves the client on go-redis's own dialer; route it through "+
-						"configureTestEnvRedisDial(currentTestEnvDialGuard(), options, NewDialer(timeout).DialContext) "+
-						"or give it an explicit Dialer", fileSet.Position(call.Pos()), selector.Sel.Name)
-				}
-				return true
-			})
+				})
+			}
 		}
 	}
-	if checked < 20 {
-		t.Fatalf("found only %d go-redis client constructions; the scan no longer sees this package", checked)
+	if checked < 20 || checkedOutsideRoot < 2 {
+		t.Fatalf("found %d go-redis client constructions, %d outside the server package; the scan no longer sees the module",
+			checked, checkedOutsideRoot)
 	}
 }
 
