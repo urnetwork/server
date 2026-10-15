@@ -7,12 +7,12 @@ package model
 // egress decision and the ranking UpdateClientScores publishes, computed for
 // the network's providers with the bulk filter scoped to their client ids. The
 // fleet-wide filter never runs for a status; the URL-success rule is the one
-// UpdateClientScores published, its kill switch, floor and country verdicts
-// included, so the status says what the export did whatever this host's
-// provider.yml says. Ranking numbers are shown with what they mean; the
-// anti-abuse signals (ARIN risk and non-quality, the URL security quarantine,
-// the legacy dark verdict) are one generic reason, and their values never
-// leave this file.
+// UpdateClientScores published, its kill switch, floor, Online URL ratio and
+// country verdicts included, so the status says what the export did whatever
+// this host's provider.yml says. Ranking numbers are shown with what they
+// mean; the anti-abuse signals (ARIN risk and non-quality, the URL security
+// quarantine, the legacy dark verdict) are one generic reason, and their
+// values never leave this file.
 
 import (
 	"context"
@@ -38,6 +38,9 @@ const (
 	ProviderStatusReasonEgressNoSuccess = "egress_no_success"
 	ProviderStatusReasonEgressUnprobed  = "egress_unprobed"
 	ProviderStatusReasonEgressFailing   = "egress_failing"
+	// the Online URL ratio, while it is on: measured repeatedly with a
+	// success, but with too few
+	ProviderStatusReasonEgressLowSuccess = "egress_low_success"
 	// the modern provider gate, while it is on: the probe has not shown
 	// end-to-end post-quantum encryption with resizable transfer windows
 	ProviderStatusReasonNotModern        = "not_modern"
@@ -56,6 +59,7 @@ var ProviderStatusReasons = []string{
 	ProviderStatusReasonReliabilityLow,
 	ProviderStatusReasonNotEligible,
 	ProviderStatusReasonEgressNoSuccess,
+	ProviderStatusReasonEgressLowSuccess,
 	ProviderStatusReasonEgressUnprobed,
 	ProviderStatusReasonEgressFailing,
 	ProviderStatusReasonNotModern,
@@ -73,6 +77,7 @@ var providerStatusReasonTexts = map[string]string{
 	ProviderStatusReasonReliabilityLow:       "Reliability over the last hour is below what clients need. It rises with every minute this device stays connected; disconnects lower it.",
 	ProviderStatusReasonNotEligible:          "This connection isn't eligible to provide right now.",
 	ProviderStatusReasonEgressNoSuccess:      "This connection isn't passing traffic: every network check in the last 8 hours failed to load a test site through it, so clients aren't offered this device. Check that its internet connection works and that no firewall, VPN or DNS filter on it blocks traffic. Checks keep running, and it's offered again shortly after one succeeds.",
+	ProviderStatusReasonEgressLowSuccess:     "Too many test sites failed to load through this connection in the last 8 hours, so clients aren't offered this device. Check that its internet connection is steady and that no firewall, VPN or DNS filter on it blocks sites. Checks keep running, and it's offered again shortly after enough of them load.",
 	ProviderStatusReasonEgressUnprobed:       "The network check hasn't run on this connection yet. Until it passes, clients are offered this device only when checked providers run out.",
 	ProviderStatusReasonEgressFailing:        "Too many test sites failed to load through this connection in the last 8 hours. Clients are offered this device only when checked providers run out.",
 	ProviderStatusReasonNotModern:            "The network check hasn't confirmed end-to-end post-quantum encryption and resizable transfer windows on this device's connection, so clients are offered it only when providers that have both run out. The latest app supports both: update the app on this device. Checks keep running, and it's offered normally again shortly after one confirms both.",
@@ -539,6 +544,8 @@ func evaluateProviderStatus(
 		evaluation.reason = ProviderStatusReasonNotEligible
 	case decision.reason == ProviderExcludedNoSuccess:
 		evaluation.reason = ProviderStatusReasonEgressNoSuccess
+	case decision.reason == ProviderExcludedLowSuccess:
+		evaluation.reason = ProviderStatusReasonEgressLowSuccess
 	case decision.reason == ProviderExcludedUnprobed:
 		evaluation.reason = ProviderStatusReasonEgressUnprobed
 	case decision.reason == ProviderExcludedHealth:
@@ -572,6 +579,8 @@ var providerStatusOutOfPoolReasons = map[string]bool{
 	ProviderStatusReasonLocationInvalid: true,
 	ProviderStatusReasonNotEligible:     true,
 	ProviderStatusReasonEgressNoSuccess: true,
+	// out of every bucket like no_success
+	ProviderStatusReasonEgressLowSuccess: true,
 }
 
 // The wire status of one evaluated provider. Its admission, numbers and

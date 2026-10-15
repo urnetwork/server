@@ -45,13 +45,20 @@ func providerEgressCountsPolicyKey(
 		OnlineSuccessCountryFloor          float64
 		OnlineSuccessCountryFloorMargin    float64
 		QualitySpeedRequiresModernProvider bool
+		// Schema 4 adds the Online URL ratio and its low_success reason: the
+		// ratio and its country exemption move providers out of Online and
+		// the counts, and a schema 3 snapshot carries no such reason.
+		OnlineUrlSuccessRatio          float64
+		OnlineUrlRatioCountryExemption bool
 	}{
-		Schema: 3, MaxIndex: settings.MaxIndex(),
+		Schema: 4, MaxIndex: settings.MaxIndex(),
 		EvidenceMaxAge:   min(settings.EvidenceMaxAge, ProviderEgressHealthMaxAge),
 		QualityNumerator: settings.QualityOkNumerator, QualityDenominator: settings.QualityOkDenominator,
 		CountryGate: settings.CountryGate, EgressEnabled: enabled,
 		ReliabilityMinimum:                 [3]float64{minimums[1], minimums[2], minimums[3]},
 		ProbePolicyVersion:                 probePolicyVersion,
+		OnlineUrlSuccessRatio:              settings.OnlineUrlSuccessRatio,
+		OnlineUrlRatioCountryExemption:     settings.OnlineUrlRatioCountryExemption,
 		OnlineRequiresUrlSuccess:           settings.OnlineRequiresUrlSuccess,
 		OnlineSuccessCountryFloor:          settings.OnlineSuccessCountryFloor,
 		OnlineSuccessCountryFloorMargin:    settings.OnlineSuccessCountryFloorMargin,

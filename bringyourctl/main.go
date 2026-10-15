@@ -2581,6 +2581,16 @@ func providerInspect(opts docopt.Opts) {
 		)
 	}
 	fmt.Printf("  online url-success rule: %s; country exempt %t (this host's provider.yml: rule %t, country floor %v, margin %v)\n", countryGuard, inspection.OnlineSuccessCountryExempt, inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, inspection.Settings.OnlineSuccessCountryFloorMargin)
+	// the online url ratio as the same guard published it, this host's
+	// provider.yml beside it
+	urlRatio := "no trusted published guard, so the ratio applies nowhere"
+	if inspection.OnlineSuccessBaselineKnown {
+		urlRatio = "off in the score export's guard"
+		if 0 < inspection.OnlineUrlSuccessBaselineRatio {
+			urlRatio = fmt.Sprintf("the score export applied %v, country exemption %t", inspection.OnlineUrlSuccessBaselineRatio, inspection.OnlineUrlRatioBaselineCountryExemption)
+		}
+	}
+	fmt.Printf("  online url ratio: %s; with a success but below it %t (this host's provider.yml: ratio %v, country exemption %t)\n", urlRatio, inspection.BelowOnlineUrlRatio, inspection.Settings.OnlineUrlSuccessRatio, inspection.Settings.OnlineUrlRatioCountryExemption)
 	// the evidence the probe recorded of the provider's end of its session,
 	// and what the gate decides from it now
 	modernEvidence := "none"
