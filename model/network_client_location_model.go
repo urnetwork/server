@@ -6131,6 +6131,12 @@ func FindProviders2(
 		}
 		hardExcludedClientIds := map[server.Id]bool{}
 		qualityExcludedClientIds := map[server.Id]bool{}
+		// The candidates this request's live read (readQuality) found
+		// without a live connection. Each is refused Quality and leaves
+		// every draw of this request, native, borrowed and Online fallback;
+		// a named provider stays where its spec put it. Nothing outside the
+		// request keeps the verdict.
+		offlineClientIds := map[server.Id]bool{}
 		exclusionReadClientIds := map[server.Id]bool{}
 		qualityReadClientIds := map[server.Id]bool{}
 		var nativeClientScores map[server.Id]*ClientScore
@@ -6154,8 +6160,13 @@ func FindProviders2(
 		pruneSelected := func() {
 			// A later bucket can expose common risk for an earlier selection.
 			// Revoke it before quota/refill counts or final answers use it.
+			// A drawn provider found offline since is revoked the same way;
+			// a named one is not drawn, and stays.
+			offlineSelections := map[server.Id]bool{}
 			rejectedSelection := func(clientId server.Id) bool {
-				if !hardExcludedClientIds[clientId] {
+				if offlineClientIds[clientId] {
+					offlineSelections[clientId] = true
+				} else if !hardExcludedClientIds[clientId] {
 					return false
 				}
 				delete(clientScores, clientId)
@@ -6164,7 +6175,9 @@ func FindProviders2(
 			}
 			clientIds = slices.DeleteFunc(clientIds, rejectedSelection)
 			borrowedClientIds = slices.DeleteFunc(borrowedClientIds, rejectedSelection)
-			providers = slices.DeleteFunc(providers, func(provider *FindProvidersProvider) bool { return hardExcludedClientIds[provider.ClientId] })
+			providers = slices.DeleteFunc(providers, func(provider *FindProvidersProvider) bool {
+				return hardExcludedClientIds[provider.ClientId] || offlineSelections[provider.ClientId]
+			})
 			observation.explicitReturned = len(providers) - len(clientIds) - len(borrowedClientIds)
 		}
 		readQuality := func(ids []server.Id, strict bool) error {
@@ -6172,7 +6185,7 @@ func FindProviders2(
 				return nil
 			}
 			observation.enter("hard_exclusions")
-			excluded, risky, err := validation.read(ids)
+			excluded, risky, offline, err := validation.read(ids)
 			if err != nil {
 				if session.Ctx.Err() != nil || strict {
 					return err
@@ -6181,6 +6194,8 @@ func FindProviders2(
 				return nil
 			}
 			maps.Copy(qualityExcludedClientIds, excluded)
+			maps.Copy(qualityExcludedClientIds, offline)
+			maps.Copy(offlineClientIds, offline)
 			maps.Copy(hardExcludedClientIds, risky)
 			for _, id := range ids {
 				qualityReadClientIds[id] = true
@@ -6190,7 +6205,9 @@ func FindProviders2(
 		}
 
 		// Common refusals apply to every bucket. Subscriber refusals apply only
-		// to native Quality, including Quality borrowed by a Speed request.
+		// to native Quality, including Quality borrowed by a Speed request,
+		// except that a candidate read without a live connection leaves every
+		// draw of the request (offlineClientIds).
 		readExclusions := func(scores map[server.Id]*ClientScore, mode RankMode, native bool, namedClientIds []server.Id) error {
 			observation.enter("hard_exclusions")
 			candidateClientIds := requestFilter.unchecked(scores, exclusionReadClientIds)
@@ -6312,6 +6329,10 @@ func FindProviders2(
 			for clientId := range hardExcludedClientIds {
 				delete(clientScores, clientId)
 			}
+			// read without a live connection: out of every pool of this request
+			for clientId := range offlineClientIds {
+				delete(clientScores, clientId)
+			}
 			for clientId := range qualityExcludedClientIds {
 				if clientScore := clientScores[clientId]; clientScore != nil {
 					if findProviders2.ForceMinimum && rankMode == RankModeQuality {
@@ -6367,7 +6388,7 @@ func FindProviders2(
 				validated := 0
 				for id, score := range scores {
 					if hardExcludedClientIds[id] || qualityExcludedClientIds[id] {
-						if hardExcludedClientIds[id] || findProviders2.ForceMinimum {
+						if hardExcludedClientIds[id] || offlineClientIds[id] || findProviders2.ForceMinimum {
 							delete(scores, id)
 						} else {
 							score.Online = true
@@ -6608,14 +6629,23 @@ func FindProviders2(
 				observation.backfillClientScores = otherClientScores
 				observation.enter("select")
 
-				// 1. the other bucket's natives
+				// 1. the other bucket's natives. Quality borrows only the Speed
+				// natives within its own latency and throughput cutoffs, their
+				// Quality tier below ClientScoreCutoffTier. Those past the
+				// cutoffs are online members, as every native is, and wait for
+				// the Online fallback.
 				borrowableClientScores := map[server.Id]*ClientScore{}
+				pastCutoffClientScores := map[server.Id]*ClientScore{}
 				for clientId, clientScore := range otherClientScores {
 					if !clientScore.PassesMinimums[otherRankMode] ||
 						(otherRankMode == RankModeQuality && !qualityReadClientIds[clientId]) {
 						continue
 					}
 					if _, native := nativeClientScores[clientId]; native {
+						continue
+					}
+					if rankMode == RankModeQuality && ClientScoreCutoffTier <= clientScore.Tiers[RankModeQuality] {
+						pastCutoffClientScores[clientId] = clientScore
 						continue
 					}
 					borrowableClientScores[clientId] = clientScore
@@ -6675,9 +6705,16 @@ func FindProviders2(
 							return nil, err
 						}
 						for clientId, clientScore := range pool {
-							if clientScore.Online && answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil {
+							if clientScore.Online && answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil && !offlineClientIds[clientId] {
 								onlineClientScores[clientId] = clientScore
 							}
+						}
+					}
+					// The Speed natives held back past Quality's cutoffs stay
+					// candidates even where the pages read above lack them.
+					for clientId, clientScore := range pastCutoffClientScores {
+						if answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil && !offlineClientIds[clientId] {
+							onlineClientScores[clientId] = clientScore
 						}
 					}
 					for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {

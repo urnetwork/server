@@ -106,9 +106,9 @@ FROM network_client_connection`).Scan(&providers, &connections, &connected, &loc
 			for iteration := 0; iteration < 31; iteration++ {
 				start := time.Now()
 				// The native Quality guard; a named request no longer reads it.
-				negative, risky, err := getProviderSubscriberExclusions(ctx, ids)
-				if err != nil || len(negative)+len(risky) != count/10 {
-					t.Fatalf("subscriber guard benchmark changed classification: error=%v exclusions=%d want=%d", err, len(negative)+len(risky), count/10)
+				negative, risky, offline, err := getProviderSubscriberExclusions(ctx, ids)
+				if err != nil || len(negative)+len(risky)+len(offline) != count/10 {
+					t.Fatalf("subscriber guard benchmark changed classification: error=%v exclusions=%d want=%d", err, len(negative)+len(risky)+len(offline), count/10)
 				}
 				if iteration > 0 {
 					times = append(times, time.Since(start))

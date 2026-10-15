@@ -32,15 +32,15 @@ func enableSubscriberQualityPolicy(t testing.TB) {
 }
 
 // Whether the native Quality guard, which discovery reads, refuses the provider
-// now: a subscriber refusal or live risk. A named request no longer reads the
-// subscriber evidence, so it cannot stand in for this guard.
+// now: a subscriber refusal, live risk, or no live connection. A named request
+// no longer reads the subscriber evidence, so it cannot stand in for this guard.
 func subscriberQualityTestRefused(ctx context.Context, t testing.TB, clientId server.Id) bool {
 	t.Helper()
-	negative, risky, err := getProviderSubscriberExclusions(ctx, []server.Id{clientId})
+	negative, risky, offline, err := getProviderSubscriberExclusions(ctx, []server.Id{clientId})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return negative[clientId] || risky[clientId]
+	return negative[clientId] || risky[clientId] || offline[clientId]
 }
 
 func TestQualityRequiresSubscriberAcrossNativeForceAndNamed(t *testing.T) {

@@ -36,7 +36,8 @@ func observeSubscriberEligibilityEvent(event string, count int) {
 // but not ARIN quality verification (getProviderNamedSubscriberExclusions).
 // Discovery, force_minimum included, evaluates the full subscriber evidence
 // for native Quality membership; Speed and Online borrowing use the
-// independent common exclusions.
+// independent common exclusions, and leave out a candidate the request's own
+// read found without a live connection.
 func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mode RankMode) (map[server.Id]bool, error) {
 	excluded, err := getProviderHardExclusions(ctx, clientIds)
 	if err != nil || mode != RankModeQuality || len(clientIds) == 0 {
@@ -48,11 +49,11 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 			pending = append(pending, id)
 		}
 	}
-	negative, risky, err := getProviderNamedSubscriberExclusions(ctx, pending)
+	offline, risky, err := getProviderNamedSubscriberExclusions(ctx, pending)
 	if err != nil {
 		return nil, err
 	}
-	for id := range negative {
+	for id := range offline {
 		excluded[id] = true
 	}
 	for id := range risky {
@@ -63,11 +64,14 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 
 // Separate Quality membership from explicit live risk. A risk observed by this
 // guard remains a common refusal even while the published snapshot is older.
-func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id) (map[server.Id]bool, map[server.Id]bool, error) {
+// A candidate the read finds without any live connection is the third result,
+// offline: a Quality refusal, which discovery also keeps out of every other
+// draw of the request that read it.
+func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id) (negative, risky, offline map[server.Id]bool, returnErr error) {
 	enabled, err := subscriberQualityPolicyEnabled()
 	if err != nil || !enabled {
 		providerSubscriberNegativeCache.reset()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// Positive decisions always read current connection facts on the primary.
 	// A one-second negative-only cache coalesces repeated rejections; its age
@@ -84,9 +88,10 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 		}
 	}
 	if len(pending) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	risky := make(map[server.Id]bool)
+	risky = make(map[server.Id]bool)
+	offline = make(map[server.Id]bool)
 	negative, readErr := providerSubscriberNegativeCache.lookup(ctx, pending, func(ctx context.Context, pending []server.Id, markObserved func()) (map[server.Id]bool, error) {
 		negative := make(map[server.Id]bool)
 		var readErr error
@@ -104,8 +109,8 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 				}
 				for rows.Next() {
 					var id server.Id
-					var risk bool
-					if err := rows.Scan(&id, &risk); err != nil {
+					var risk, noLiveConnection bool
+					if err := rows.Scan(&id, &risk, &noLiveConnection); err != nil {
 						rows.Close()
 						readErr = err
 						return
@@ -115,6 +120,10 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 						// The cache stores Quality-only refusals, not common risk.
 						// Omitting this id makes concurrent followers read fresh;
 						// it cannot lose the reason on a later cached downgrade.
+					} else if noLiveConnection {
+						// Nor the absence of a live connection, for the same
+						// reason: each request that reads it reads it fresh.
+						offline[id] = true
 					} else {
 						negative[id] = true
 					}
@@ -129,9 +138,9 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 		return negative, readErr
 	})
 	if readErr != nil {
-		return nil, nil, readErr
+		return nil, nil, nil, readErr
 	}
-	return negative, risky, nil
+	return negative, risky, offline, nil
 }
 
 // Aggregate the candidate batch together so the live-handler relation is joined
@@ -149,7 +158,8 @@ const providerSubscriberExclusionsSql = `
 		JOIN network_client_handler AS handler ON handler.handler_id = connections.handler_id
 			AND handler.heartbeat_time >= $2
 	)
-	SELECT candidates.client_id, bool_or(COALESCE(location.arin_risk, false)) AS arin_risk
+	SELECT candidates.client_id, bool_or(COALESCE(location.arin_risk, false)) AS arin_risk,
+		count(live.connection_id) = 0 AS no_live_connection
 	FROM candidates
 	LEFT JOIN live ON live.client_id = candidates.client_id
 	LEFT JOIN network_client_location AS location ON location.connection_id = live.connection_id
