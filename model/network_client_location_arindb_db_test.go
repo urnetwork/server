@@ -70,7 +70,9 @@ func TestSetConnectionLocationWritesBothArinSlots(t *testing.T) {
 }
 
 // The rollup folds both slots over live connections and keeps each slot's
-// epoch only when every live connection agrees on it.
+// epoch only when every live connection agrees on it; when the old slots
+// differ, the old slot carries the epoch every live connection carries in
+// either slot.
 func TestClientLocationRollupCarriesBothArinSlotsOverLiveConnections(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -101,8 +103,8 @@ func TestClientLocationRollupCarriesBothArinSlotsOverLiveConnections(t *testing.
 		if _, _, _, _, epoch, oldEpoch := read(lagging.clientId); epoch != 1700000000 || oldEpoch != 0 {
 			t.Fatalf("lagging rollup epochs=%d/%d, want the latest slot's epoch only", epoch, oldEpoch)
 		}
-		// a second live connection classified by another pair makes the
-		// provider's epochs mixed
+		// a second live connection classified by the previous pair, as while
+		// Connect restarts: its latest slot is the first connection's old one
 		handlerId := CreateNetworkClientHandler(ctx)
 		connectionId, _, _, _, err := ConnectNetworkClient(ctx, paired.clientId, "203.0.113.250:0", handlerId)
 		if err != nil {
@@ -110,6 +112,26 @@ func TestClientLocationRollupCarriesBothArinSlotsOverLiveConnections(t *testing.
 		}
 		if err := SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{
 			ArinLookupAt: &lookup, ArinDatabaseBuildEpoch: 1700000000, ArinQualityVerified: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		now = server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		// the latest slots differ, so no latest epoch; both connections carry
+		// 1700000000, the first in its old slot and the second in its latest,
+		// so the old slot is that epoch with both connections' facts under it
+		if _, _, oldRisk, oldNonQuality, epoch, oldEpoch := read(paired.clientId); epoch != 0 || oldEpoch != 1700000000 || !oldRisk || !oldNonQuality {
+			t.Fatalf("rollup across a restart: epochs=%d/%d old risk=%t old nq=%t, want 0/1700000000 with the first connection's old facts",
+				epoch, oldEpoch, oldRisk, oldNonQuality)
+		}
+		// a third live connection classified by neither leaves no epoch every
+		// connection carries
+		thirdId, _, _, _, err := ConnectNetworkClient(ctx, paired.clientId, "203.0.113.251:0", handlerId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SetConnectionLocation(ctx, thirdId, city.LocationId, &ConnectionLocationScores{
+			ArinLookupAt: &lookup, ArinDatabaseBuildEpoch: 1700172800, ArinQualityVerified: true,
 		}); err != nil {
 			t.Fatal(err)
 		}
