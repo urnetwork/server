@@ -2132,6 +2132,12 @@ with it:
    it.
 3. Remove the key once a release that passes on its own has shipped.
 
+The key holds one epoch at a time, so clearing a dropped latch (accepting its
+own latest L) and accepting another release takes two config deploys, one
+after the other. With the decision delivered to the runner this does not
+arise: the gate pins the latch's old database O, and the next comparison
+against it clears the latch.
+
 ### Signals, alerts and dashboards
 
 Each process that opens ARIN pushes its own pair:
