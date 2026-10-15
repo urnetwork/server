@@ -247,6 +247,11 @@ func TestFindProviders2OfflineVerdictIsNotKept(t *testing.T) {
 		if providers := egressTestFind(ctx, t, named, RankModeQuality, 10, false, server.NewId()); len(providers) != 0 {
 			t.Fatal("named Quality answered the provider without a live connection")
 		}
+		// A named request no longer reads the native Quality guard; read it here,
+		// so the cache the guard owns sees the offline verdict.
+		if !subscriberQualityTestRefused(ctx, t, fixture.offline) {
+			t.Fatal("the native Quality read admitted the provider without a live connection")
+		}
 
 		handlerId := CreateNetworkClientHandler(ctx)
 		connectionId, _, _, _, err := ConnectNetworkClient(ctx, fixture.offline, "192.0.2.241:0", handlerId)

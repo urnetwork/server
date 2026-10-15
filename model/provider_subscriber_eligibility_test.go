@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"slices"
 	"testing"
 
@@ -28,6 +29,18 @@ func enableSubscriberQualityPolicy(t testing.TB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(server.Config.PushSimpleResource(providerConfigResourceName, encoded))
+}
+
+// Whether the native Quality guard, which discovery reads, refuses the provider
+// now: a subscriber refusal, live risk, or no live connection. A named request
+// no longer reads the subscriber evidence, so it cannot stand in for this guard.
+func subscriberQualityTestRefused(ctx context.Context, t testing.TB, clientId server.Id) bool {
+	t.Helper()
+	negative, risky, offline, err := getProviderSubscriberExclusions(ctx, []server.Id{clientId})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return negative[clientId] || risky[clientId] || offline[clientId]
 }
 
 func TestQualityRequiresSubscriberAcrossNativeForceAndNamed(t *testing.T) {
@@ -70,8 +83,11 @@ func TestQualityRequiresSubscriberAcrossNativeForceAndNamed(t *testing.T) {
 							t.Fatal("unverified access entered the native Quality tier")
 						}
 					}
-				} else if ids := egressTestIds(providers); !slices.Equal(ids, []server.Id{verified.clientId}) {
+				} else if ids := egressTestIds(providers); index == 0 && !slices.Equal(ids, []server.Id{verified.clientId}) {
 					t.Fatalf("force=%t: Quality returned unverified or excluded access", force)
+				} else if index == 1 && !slices.Equal(ids, []server.Id{verified.clientId, unknown.clientId, excluded.clientId}) {
+					// A named provider needs a live connection, not ARIN quality.
+					t.Fatalf("force=%t: named Quality refused live unverified or non-quality access", force)
 				}
 			}
 		}
