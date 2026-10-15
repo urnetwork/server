@@ -100,6 +100,20 @@ var closeErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 	Help:      "Capability tunnel teardowns that returned an error; the derived client's retirement is then for the prober reaper",
 })
 
+// The funding readiness steps a pass's check fails at, the labels of
+// urnetwork_capability_probe_readiness_failures_total.
+var readinessSteps = []string{
+	"funding_unknown",
+	"funding_unavailable",
+}
+
+var readinessFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "readiness_failures_total",
+	Help:      "Capability probe passes whose prober shard could not show it was funded, by step: funding_unknown (the balance read failed), funding_unavailable (no active balance); the pass fails",
+}, []string{"step"})
+
 var shardCleanupErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "capability_probe",
@@ -145,6 +159,9 @@ func init() {
 	for _, reading := range windowReadings {
 		readingsTotal.WithLabelValues(capabilityWindow, string(reading))
 	}
+	for _, step := range readinessSteps {
+		readinessFailuresTotal.WithLabelValues(step)
+	}
 	prometheus.MustRegister(
 		passesTotal,
 		selectionTotal,
@@ -153,6 +170,7 @@ func init() {
 		measureSeconds,
 		inFlight,
 		closeErrorsTotal,
+		readinessFailuresTotal,
 		shardCleanupErrorsTotal,
 		sweepsTotal,
 		lastSweepSeconds,
@@ -169,6 +187,11 @@ func ObservePass(result string) {
 // Counts one pass whose prober shard's drain or reap failed after it.
 func ObserveShardCleanupFailure() {
 	shardCleanupErrorsTotal.Inc()
+}
+
+// Counts one pass whose funding readiness check failed at step.
+func ObserveReadinessFailure(step string) {
+	readinessFailuresTotal.WithLabelValues(step).Inc()
 }
 
 // Counts a selection's stages.

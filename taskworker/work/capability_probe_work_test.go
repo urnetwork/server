@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/connect"
 
@@ -349,6 +350,44 @@ func TestCapabilityProbePassRunsWithItsScheduledMaxTime(t *testing.T) {
 		}
 		if passMaxTime != c.maxTime || deadline.Before(startedAt.Add(c.maxTime)) || deadline.After(time.Now().Add(c.maxTime)) {
 			t.Errorf("%s: the pass ran with a budget of %s and a deadline %s after its start, want %s", c.name, passMaxTime, deadline.Sub(startedAt), c.maxTime)
+		}
+	}
+}
+
+// Root cause (review F11): a capability pass's funding readiness check is
+// the URL probe's, and a failure counted in the URL probe's
+// urnetwork_egress_probe_pass_errors_total, so a capability probe without
+// funding read as a URL probe failing. Each failure step of a capability
+// pass counts once in the capability probe's own readiness failures and
+// never in the URL probe's pass errors.
+func TestCapabilityProbeReadinessFailuresAreItsOwn(t *testing.T) {
+	for _, c := range []struct {
+		step      string
+		available func(context.Context) (model.ByteCount, error)
+		err       error
+	}{
+		{step: "funding_unknown", available: func(context.Context) (model.ByteCount, error) {
+			return 0, errors.New("synthetic balance read failure")
+		}, err: errProviderEgressProbeFundingUnknown},
+		{step: "funding_unavailable", available: func(context.Context) (model.ByteCount, error) {
+			return 0, nil
+		}, err: errProviderEgressProbeUnfunded},
+	} {
+		readiness := newCapabilityProbeReadiness(server.NewId())
+		readiness.available = c.available
+		labels := map[string]string{"step": c.step}
+		capabilityBefore := capabilityProbeCounterValue(t, "urnetwork_capability_probe_readiness_failures_total", labels)
+		urlBefore := testutil.ToFloat64(egressProbePassErrorsTotal.WithLabelValues(c.step))
+		for range 2 {
+			if err := readiness.check(context.Background()); !errors.Is(err, c.err) {
+				t.Fatalf("%s: check returned %v, want %v", c.step, err, c.err)
+			}
+		}
+		if counted := capabilityProbeCounterValue(t, "urnetwork_capability_probe_readiness_failures_total", labels) - capabilityBefore; counted != 1 {
+			t.Errorf("%s: the capability probe counted %v readiness failures, want 1", c.step, counted)
+		}
+		if counted := testutil.ToFloat64(egressProbePassErrorsTotal.WithLabelValues(c.step)) - urlBefore; counted != 0 {
+			t.Errorf("%s: the URL probe's pass errors counted %v of the capability probe's failures", c.step, counted)
 		}
 	}
 }

@@ -187,6 +187,7 @@ func TestMetricsPublishEveryLabelSet(t *testing.T) {
 	connect.AssertEqual(t, testutil.CollectAndCount(selectionTotal), len(selectionStages))
 	connect.AssertEqual(t, testutil.CollectAndCount(providersTotal), len(outcomes))
 	connect.AssertEqual(t, testutil.CollectAndCount(readingsTotal), len(e2eReadings)+len(windowReadings))
+	connect.AssertEqual(t, testutil.CollectAndCount(readinessFailuresTotal), len(readinessSteps))
 }
 
 // Only a pass with providers to measure needs tunnels, and so a prober

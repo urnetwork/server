@@ -230,6 +230,15 @@ func capabilityProbeShardCredit(settings capprobe.Settings) (model.ByteCount, er
 	return model.ByteCount(max(amount, int64(model.ProberShardTransferHeadroom))), nil
 }
 
+// A capability pass's funding readiness over its shard's network: the URL
+// probe's check, whose failures count in the capability probe's own metrics,
+// never in the URL probe's pass errors.
+func newCapabilityProbeReadiness(networkId server.Id) *providerEgressProbeReadiness {
+	readiness := newProviderEgressProbeReadiness(networkId)
+	readiness.observeFailure = capprobe.ObserveReadinessFailure
+	return readiness
+}
+
 // What one pass of the production probe produced.
 type capabilityProbeOutcome struct {
 	sweep capprobe.Sweep
@@ -306,7 +315,7 @@ func runCapabilityProbeShard(
 			return capabilityProbeOutcome{}, err
 		}
 		return runWithProviderEgressControl(ctx, credentials, func(localControl connect.NetworkClientControl) (capabilityProbeOutcome, error) {
-			if err := newProviderEgressProbeReadiness(*identity.NetworkId).check(ctx); err != nil {
+			if err := newCapabilityProbeReadiness(*identity.NetworkId).check(ctx); err != nil {
 				return capabilityProbeOutcome{}, err
 			}
 			finished = true
