@@ -251,12 +251,18 @@ func continuousAlertHandler(stdout io.Writer, format string, notifier *servermon
 	}
 }
 
+// Applies the CLI's settings options. A watcher that never posts to Slack
+// (-slack-alerts=false or -once) drops the webhook from its effective
+// settings, so a webhook rotation does not make it stale.
 func applyMonitorSettingsOptions(settings servermonitor.SignalSettings, opts monitorOptions) (servermonitor.SignalSettings, error) {
 	if opts.mode != "" {
 		settings.AddressMode = servermonitor.AddressMode(opts.mode)
 	}
 	if len(opts.keys) > 0 {
 		settings.SSHKeyPaths = append([]string(nil), opts.keys...)
+	}
+	if !opts.slackAlerts || opts.once {
+		settings.AlertNotifications = servermonitor.AlertNotificationSettings{}
 	}
 	settings, err := servermonitor.ExcludeEdgeIPv6Hosts(settings, opts.excludedEdgeIPv6Hosts...)
 	if err != nil {

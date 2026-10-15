@@ -37,6 +37,46 @@ func TestParseMonitorOptionsSlackAlertsDefaultOn(t *testing.T) {
 	}
 }
 
+// Only a watcher that posts compares the webhook. One started with
+// -slack-alerts=false, or a -once run, stays fresh across a webhook rotation;
+// a posting watcher goes stale.
+func TestEffectiveSettingsGenerationComparesTheWebhookOnlyWhenPosting(t *testing.T) {
+	const oldWebhook = "https://hooks.slack.example/services/T0SYNTHETIC/B0SYNTHETIC/old"
+	for _, c := range []struct {
+		args      []string
+		wantStale bool
+	}{
+		{args: []string{"-slack-alerts=false"}, wantStale: false},
+		{args: []string{"-once"}, wantStale: false},
+		{args: nil, wantStale: true},
+	} {
+		opts, err := parseMonitorOptions(c.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		current := servermonitor.SignalSettings{
+			Environment:        "synthetic",
+			AlertNotifications: servermonitor.AlertNotificationSettings{SlackWebhookUrl: oldWebhook},
+		}
+		loadEffective := func() (servermonitor.SignalSettings, error) {
+			return applyMonitorSettingsOptions(current, opts)
+		}
+		startup, err := loadEffective()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if posting := startup.AlertNotifications.SlackWebhookUrl == oldWebhook; posting != c.wantStale {
+			t.Errorf("%v: effective settings keep the webhook = %t", c.args, posting)
+		}
+		check := servermonitor.NewSettingsGenerationCheck(loadEffective)
+		current.AlertNotifications.SlackWebhookUrl = "https://hooks.slack.example/services/T0SYNTHETIC/B0SYNTHETIC/new"
+		matched, err := check(context.Background(), startup)
+		if err != nil || matched == c.wantStale {
+			t.Errorf("%v: after a webhook rotation matched = %t, err = %v; want stale = %t", c.args, matched, err, c.wantStale)
+		}
+	}
+}
+
 // A notifier posting to a recording webhook, and a function that closes it
 // and returns what it posted.
 func newRecordedSlackNotifier(t *testing.T) (*servermonitor.SlackAlertNotifier, func() []string) {
