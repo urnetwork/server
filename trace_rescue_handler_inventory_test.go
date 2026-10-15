@@ -49,17 +49,17 @@ type rescueCancelSite struct {
 var reviewedRescueCancelSites = map[rescueCancelSite]int{
 	// The run function's first defer calls the same cancel, so the handler
 	// only repeats it.
-	{path: "connect/resident.go", function: "(*Exchange).handleExchangeConnection", handler: "handleCancel"}:  2,
-	{path: "connect/resident.go", function: "NewExchangeConnection", handler: "cancel"}:                       1,
-	{path: "connect/resident.go", function: "(*ExchangeConnection).Run", handler: "self.cancel"}:              1,
-	{path: "connect/resident.go", function: "newResidentDuringAdmission", handler: "cancel"}:                  1,
-	{path: "connect/transport.go", function: "newConnectHandlerWithPacketConns", handler: "cancel"}:           1,
-	{path: "connect/transport_announce.go", function: "NewConnectionAnnounceWithIpFamily", handler: "cancel"}: 1,
-	{path: "proxy/proxy_api.go", function: "NewApiServer", handler: "cancel"}:                                 1,
-	{path: "proxy/proxy_client_notification.go", function: "newProxyClientNotification", handler: "cancel"}:   1,
-	{path: "proxy/server.go", function: "NewWgServer", handler: "cancel"}:                                     1,
-	{path: "search/search_local.go", function: "NewSearchLocal", handler: "cancel"}:                           1,
-	{path: "session/jwk_validator.go", function: "NewJwkValidator", handler: "cancel"}:                        1,
+	{path: "connect/resident.go", function: "(*Exchange).handleExchangeConnection", handler: "handleCancel"}:   2,
+	{path: "connect/resident.go", function: "NewExchangeConnection", handler: "cancel"}:                        1,
+	{path: "connect/resident.go", function: "(*ExchangeConnection).Run", handler: "self.cancel"}:               1,
+	{path: "connect/resident.go", function: "newResidentDuringAdmission", handler: "cancel"}:                   1,
+	{path: "connect/transport.go", function: "newConnectHandlerWithPacketConns", handler: "cancel"}:            1,
+	{path: "connect/transport_announce.go", function: "newConnectionAnnounceWithReconcile", handler: "cancel"}: 1,
+	{path: "proxy/proxy_api.go", function: "NewApiServer", handler: "cancel"}:                                  1,
+	{path: "proxy/proxy_client_notification.go", function: "newProxyClientNotification", handler: "cancel"}:    1,
+	{path: "proxy/server.go", function: "NewWgServer", handler: "cancel"}:                                      1,
+	{path: "search/search_local.go", function: "NewSearchLocal", handler: "cancel"}:                            1,
+	{path: "session/jwk_validator.go", function: "NewJwkValidator", handler: "cancel"}:                         1,
 }
 
 // The helpers whose trailing arguments are rescue handlers.
