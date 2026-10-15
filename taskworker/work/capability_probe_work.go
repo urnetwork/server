@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/capprobe"
@@ -212,11 +213,8 @@ type capabilityProbeOutcome struct {
 
 // The production pass. It selects first, from the database alone; a pass that
 // waits for the sweep's next start or finds nothing to measure finishes
-// there and costs no prober shard. Otherwise it takes a fresh prober shard
-// for this task execution, its derived-client credentials and in-process
-// control and the URL probe's control-plane endpoints, and measures. The
-// shard is drained and reaped when the pass returns, after every tunnel has
-// joined.
+// there and costs no prober shard. Otherwise it measures in a fresh prober
+// shard for this task execution (runCapabilityProbeShard).
 func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep capprobe.Sweep) (capprobe.Sweep, *capprobe.PassResult, error) {
 	fail := func(err error) (capprobe.Sweep, *capprobe.PassResult, error) {
 		capprobe.ObservePass(capprobe.PassResultFailed)
@@ -241,17 +239,37 @@ func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep c
 	if !selected.NeedsTunnels() {
 		return capprobe.FinishPass(ctx, settings, selected, providertunnel.Config{})
 	}
-	credit, err := capabilityProbeShardCredit(settings)
-	if err != nil {
-		return fail(err)
-	}
 	key := model.ProberShardKey{
 		TaskId:     execution.TaskId,
 		Epoch:      execution.Epoch,
 		ShardIndex: capabilityProbeShardIndex,
 		ShardCount: capabilityProbeShardCount,
 	}
-	// whether FinishPass ran, and what it returned: it counts its own failures
+	return runCapabilityProbeShard(ctx, key, settings, sweep, urlProbeSettings, func(tunnelConfig providertunnel.Config) (capprobe.Sweep, *capprobe.PassResult, error) {
+		return capprobe.FinishPass(ctx, settings, selected, tunnelConfig)
+	})
+}
+
+// One measuring pass of sweep in the prober shard key: the shard's private
+// credit for settings, its identity, derived-client credentials and
+// in-process control, the funding readiness check, and then finish with the
+// pass's tunnel configuration and the URL probe's control-plane endpoints.
+// The shard is drained and reaped when finish returns, after every tunnel
+// has joined; capabilityProbeShardPassResult says what the pass returns.
+func runCapabilityProbeShard(
+	ctx context.Context,
+	key model.ProberShardKey,
+	settings capprobe.Settings,
+	sweep capprobe.Sweep,
+	urlProbeSettings providerEgressProbeSettings,
+	finish func(providertunnel.Config) (capprobe.Sweep, *capprobe.PassResult, error),
+) (capprobe.Sweep, *capprobe.PassResult, error) {
+	credit, err := capabilityProbeShardCredit(settings)
+	if err != nil {
+		capprobe.ObservePass(capprobe.PassResultFailed)
+		return sweep, nil, err
+	}
+	// whether finish ran, and what it returned: it counts its own failures
 	finished := false
 	var finishErr error
 	outcome, err := runWithProberShard(ctx, "capability probe", key, credit, settings.MaxTime(), func(identity *model.ProberIdentity) (capabilityProbeOutcome, error) {
@@ -264,7 +282,7 @@ func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep c
 				return capabilityProbeOutcome{}, err
 			}
 			finished = true
-			next, pass, err := capprobe.FinishPass(ctx, settings, selected, providertunnel.Config{
+			next, pass, err := finish(providertunnel.Config{
 				ApiUrl:            urlProbeSettings.APIURL,
 				PlatformUrl:       urlProbeSettings.PlatformURL,
 				ByJwt:             identity.ByClientJwt,
@@ -279,12 +297,42 @@ func runCapabilityProbe(ctx context.Context, settings capprobe.Settings, sweep c
 			return capabilityProbeOutcome{sweep: next, pass: pass}, err
 		})
 	})
-	if err != nil {
-		// a failure before FinishPass, or of the shard's cleanup after it
-		if !finished || finishErr == nil {
+	return capabilityProbeShardPassResult(sweep, outcome, finished, finishErr, err)
+}
+
+// What a measuring pass returns once its prober shard is released, from what
+// the shard's run returned (outcome, err) and whether finish ran and what it
+// returned (finished, finishErr).
+//
+// A pass that finish finished stands even when the shard's cleanup failed
+// afterwards: the prober reaper retries the cleanup, and returning the old
+// sweep would have the retry a minute later measure the pass's providers
+// again, those without evidence at once, and count the pass both measured
+// and failed. Every cleanup failure is counted apart and logged. Any other
+// failure leaves the sweep where it was, counted once: finish counts its
+// own, this the ones before it.
+func capabilityProbeShardPassResult(
+	sweep capprobe.Sweep,
+	outcome capabilityProbeOutcome,
+	finished bool,
+	finishErr error,
+	err error,
+) (capprobe.Sweep, *capprobe.PassResult, error) {
+	var cleanupErr *proberShardCleanupError
+	if errors.As(err, &cleanupErr) {
+		capprobe.ObserveShardCleanupFailure()
+		glog.Errorf("[capprobe]prober shard cleanup failed, left to the prober reaper: %s\n", cleanupErr)
+	}
+	switch {
+	case err == nil:
+		return outcome.sweep, outcome.pass, nil
+	case finished && finishErr == nil:
+		// the only failure is the cleanup's
+		return outcome.sweep, outcome.pass, nil
+	default:
+		if !finished {
 			capprobe.ObservePass(capprobe.PassResultFailed)
 		}
 		return sweep, outcome.pass, err
 	}
-	return outcome.sweep, outcome.pass, nil
 }

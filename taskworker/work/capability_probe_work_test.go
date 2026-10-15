@@ -4,8 +4,11 @@ package work
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/connect"
 
@@ -174,4 +177,82 @@ func TestCapabilityProbeTaskFailsOnUnreadableSettings(t *testing.T) {
 		t.Fatalf("unreadable settings returned %v", err)
 	}
 	connect.AssertEqual(t, capabilityProbeSettingsOrDefault(), capprobe.DefaultSettings())
+}
+
+// The value of one of the capability probe's counters, by its name and its
+// labels, from the registry the probe registers with.
+func capabilityProbeCounterValue(t testing.TB, name string, labels map[string]string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			matched := len(metric.GetLabel()) == len(labels)
+			for _, pair := range metric.GetLabel() {
+				if labels[pair.GetName()] != pair.GetValue() {
+					matched = false
+				}
+			}
+			if matched {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	t.Fatalf("no counter %s %v", name, labels)
+	return 0
+}
+
+// Root cause (review F3): a pass that FinishPass finished, whose prober
+// shard's drain or reap then failed, returned the old sweep with the cleanup
+// error. The task retried it a minute later, measuring every provider of the
+// pass again, those without evidence at once, and the pass counted both
+// measured and failed. A finished pass stands with its own sweep and result,
+// and the cleanup failure is counted apart; a pass that failed before or in
+// FinishPass still leaves the sweep, counted once.
+func TestCapabilityProbeKeepsAFinishedPassWhoseShardCleanupFailed(t *testing.T) {
+	sweep := capprobe.Sweep{Cursor: server.NewId(), StartedAt: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
+	finishedSweep := capprobe.Sweep{Cursor: server.NewId(), StartedAt: sweep.StartedAt}
+	pass := &capprobe.PassResult{Scanned: 4, Due: 3, Eligible: 2, Started: 2, Recorded: 1}
+	outcome := capabilityProbeOutcome{sweep: finishedSweep, pass: pass}
+	cleanupErr := &proberShardCleanupError{err: errors.New("capability probe shard cleanup: synthetic reap failure")}
+	finishErr := errors.New("synthetic evidence write failure")
+	readinessErr := errors.New("synthetic readiness failure")
+	failedLabels := map[string]string{"result": capprobe.PassResultFailed}
+	for _, c := range []struct {
+		name      string
+		finished  bool
+		finishErr error
+		err       error
+		sweep     capprobe.Sweep
+		returnErr error
+		failed    float64
+		cleanup   float64
+	}{
+		{name: "finished, cleanup failed", finished: true, err: fmt.Errorf("wrapped: %w", cleanupErr), sweep: finishedSweep, failed: 0, cleanup: 1},
+		{name: "finished, cleaned up", finished: true, sweep: finishedSweep},
+		{name: "finish failed, cleanup failed", finished: true, finishErr: finishErr, err: errors.Join(finishErr, cleanupErr), sweep: sweep, returnErr: finishErr, failed: 0, cleanup: 1},
+		{name: "failed before finish", err: readinessErr, sweep: sweep, returnErr: readinessErr, failed: 1},
+		{name: "failed before finish, cleanup failed", err: errors.Join(readinessErr, cleanupErr), sweep: sweep, returnErr: readinessErr, failed: 1, cleanup: 1},
+	} {
+		failedBefore := capabilityProbeCounterValue(t, "urnetwork_capability_probe_passes_total", failedLabels)
+		cleanupBefore := capabilityProbeCounterValue(t, "urnetwork_capability_probe_shard_cleanup_errors_total", map[string]string{})
+		next, result, err := capabilityProbeShardPassResult(sweep, outcome, c.finished, c.finishErr, c.err)
+		if next != c.sweep || result != pass {
+			t.Errorf("%s: returned sweep %+v and %+v, want %+v and the pass's result", c.name, next, result, c.sweep)
+		}
+		if c.returnErr == nil && err != nil || c.returnErr != nil && !errors.Is(err, c.returnErr) {
+			t.Errorf("%s: returned %v, want %v", c.name, err, c.returnErr)
+		}
+		if failed := capabilityProbeCounterValue(t, "urnetwork_capability_probe_passes_total", failedLabels) - failedBefore; failed != c.failed {
+			t.Errorf("%s: counted %v failed passes, want %v", c.name, failed, c.failed)
+		}
+		if cleanup := capabilityProbeCounterValue(t, "urnetwork_capability_probe_shard_cleanup_errors_total", map[string]string{}) - cleanupBefore; cleanup != c.cleanup {
+			t.Errorf("%s: counted %v cleanup failures, want %v", c.name, cleanup, c.cleanup)
+		}
+	}
 }

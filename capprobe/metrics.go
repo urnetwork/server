@@ -100,6 +100,13 @@ var closeErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 	Help:      "Capability tunnel teardowns that returned an error; the derived client's retirement is then for the prober reaper",
 })
 
+var shardCleanupErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "capability_probe",
+	Name:      "shard_cleanup_errors_total",
+	Help:      "Capability probe passes whose prober shard drain or reap failed afterwards; the prober reaper retries it, and a finished pass still stands",
+})
+
 var sweepsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "capability_probe",
@@ -146,6 +153,7 @@ func init() {
 		measureSeconds,
 		inFlight,
 		closeErrorsTotal,
+		shardCleanupErrorsTotal,
 		sweepsTotal,
 		lastSweepSeconds,
 		lastPassTimestampSeconds,
@@ -156,6 +164,11 @@ func init() {
 // it ran: PassResultDisabled or PassResultFailed.
 func ObservePass(result string) {
 	passesTotal.WithLabelValues(result).Inc()
+}
+
+// Counts one pass whose prober shard's drain or reap failed after it.
+func ObserveShardCleanupFailure() {
+	shardCleanupErrorsTotal.Inc()
 }
 
 // Counts a selection's stages.
