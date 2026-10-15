@@ -63,13 +63,13 @@ func newFakeSlackWebhook(t *testing.T) (*fakeSlackWebhook, string) {
 			hold, status, body, retryAfter = next.hold, next.status, next.body, next.retryAfter
 		}
 		webhook.stateLock.Unlock()
+		// the server notices a client disconnect only once the body is read
+		requestBody, readErr := io.ReadAll(request.Body)
 		select {
 		case webhook.arrived <- struct{}{}:
 		default:
 		}
 		if hold {
-			// the server notices a client disconnect only once the body is read
-			_, _ = io.Copy(io.Discard, request.Body)
 			<-request.Context().Done()
 			return
 		}
@@ -91,7 +91,7 @@ func newFakeSlackWebhook(t *testing.T) (*fakeSlackWebhook, string) {
 			UnfurlLinks bool   `json:"unfurl_links"`
 		}
 		if request.Method != http.MethodPost || request.Header.Get("Content-Type") != "application/json" ||
-			json.NewDecoder(request.Body).Decode(&payload) != nil || payload.UnfurlLinks {
+			readErr != nil || json.Unmarshal(requestBody, &payload) != nil || payload.UnfurlLinks {
 			response.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(response, "invalid_payload")
 			return
@@ -843,6 +843,58 @@ func TestSlackAlertNotifierHandleNeverWaitsForARetry(t *testing.T) {
 		"[WARN] raised (synthetic): Active client backends on pg-3",
 		"[RATE LIMIT] (synthetic)\n3 message(s) were dropped while the Slack sender was backlogged.",
 	)
+}
+
+// Close's deadline abandons the post in flight and what is still queued, and
+// a held summary the full queue refuses at close is lost too. Close counts
+// them all in one stderr line.
+func TestSlackAlertNotifierLogsMessagesAbandonedAtClose(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	webhook.holdUntilReleased()
+	harness := newSlackTestHarness()
+	settings := harness.settings(webhookUrl)
+	settings.MaxMessagesPerMinute = 4
+	settings.QueueSize = 3
+	notifier := NewSlackAlertNotifier(settings)
+
+	active := Alerts{slackTestAlert("pg-1", "", SeverityWarn)}
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	// the sender holds pg-1 at the webhook
+	awaitSlackWebhook(t, webhook.arrived, 1, "request")
+	// pg-2 to pg-4 fill the queue, and pg-5 is over the cap
+	for _, target := range []string{"pg-2", "pg-3", "pg-4", "pg-5"} {
+		active = append(active, slackTestAlert(target, "", SeverityWarn))
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	}
+	deadline, cancel := context.WithCancel(context.Background())
+	cancel()
+	notifier.Close(deadline)
+
+	logs := harness.logLines()
+	if len(logs) != 2 || logs[1] != "monitor: Slack alert notifier abandoned 5 unposted message(s) at close" {
+		t.Fatalf("logs = %q", logs)
+	}
+	if posted := webhook.posted(); len(posted) != 0 {
+		t.Fatalf("posted %q", posted)
+	}
+}
+
+// Undelivered messages whose report also fails at close are logged.
+func TestSlackAlertNotifierLogsUnreportedUndeliveredMessagesAtClose(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	webhook.respond(http.StatusNotFound, "no_service")
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.settings(webhookUrl))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn)}})
+	harness.advance(time.Minute)
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{slackTestAlert("pg-1", "", SeverityWarn), slackTestAlert("pg-2", "", SeverityWarn)}})
+	closeSlackNotifier(t, notifier)
+
+	logs := harness.logLines()
+	want := "monitor: 2 Slack alert message(s) queued between 2026-10-14T18:00:00Z and 2026-10-14T18:01:00Z failed to post and were never reported in Slack"
+	if len(logs) != 3 || !strings.Contains(logs[1], "Slack alert post failed (http-404 no_service)") || logs[2] != want {
+		t.Fatalf("logs = %q", logs)
+	}
 }
 
 // Alert text cannot mention a channel or render a link.

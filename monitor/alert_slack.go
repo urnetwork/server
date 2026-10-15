@@ -250,6 +250,8 @@ type SlackAlertNotifier struct {
 	postFailing bool
 	failedPosts int
 	undelivered slackUndelivered
+	// posts cut short by Close's deadline
+	abandonedCount int
 }
 
 // NewSlackAlertNotifier logs one line saying whether notifications are on.
@@ -323,22 +325,28 @@ func (self *SlackAlertNotifier) Handle(signal Signal, execution SignalExecution)
 
 // Close stops accepting batches, queues a held summary regardless of the cap,
 // and waits for the sender to post what is queued and a pending undelivered
-// report. When ctx ends first, the remaining posts are abandoned.
+// report. When ctx ends first, the remaining posts are abandoned. The first
+// Close logs what was never posted: abandoned messages, including a summary
+// the full queue refused, and undelivered messages never reported in Slack.
 func (self *SlackAlertNotifier) Close(ctx context.Context) {
 	if !self.enabled {
 		return
 	}
+	first := false
+	abandonedCount := 0
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		if self.closed {
 			return
 		}
+		first = true
 		self.closed = true
 		if 0 < self.suppressedCount || 0 < self.droppedCount {
 			select {
 			case self.messages <- slackMessage{text: self.summaryTextWithLock(), queuedTime: self.settings.Now()}:
 			default:
+				abandonedCount++
 			}
 		}
 		close(self.messages)
@@ -350,6 +358,26 @@ func (self *SlackAlertNotifier) Close(ctx context.Context) {
 		<-self.done
 	}
 	self.cancel()
+	if !first {
+		return
+	}
+	// the sender has returned, so its state is settled and what is still
+	// queued was never posted
+	for range self.messages {
+		abandonedCount++
+	}
+	abandonedCount += self.abandonedCount
+	if 0 < abandonedCount {
+		self.settings.Logf("monitor: Slack alert notifier abandoned %d unposted message(s) at close", abandonedCount)
+	}
+	if 0 < self.undelivered.count {
+		self.settings.Logf(
+			"monitor: %d Slack alert message(s) queued between %s and %s failed to post and were never reported in Slack",
+			self.undelivered.count,
+			self.undelivered.firstQueuedTime.UTC().Format(time.RFC3339),
+			self.undelivered.lastQueuedTime.UTC().Format(time.RFC3339),
+		)
+	}
 }
 
 // Frame is left out: SIGNALS.md §7 matches resolution on (probe, class,
@@ -581,6 +609,11 @@ func (self *SlackAlertNotifier) deliver(message slackMessage) {
 		}
 		return
 	}
+	if self.ctx.Err() != nil {
+		// Close's deadline cut the post short; Slack did not refuse it
+		self.abandonedCount++
+		return
+	}
 	if self.undelivered.count == 0 {
 		self.undelivered.firstQueuedTime = message.queuedTime
 	}
@@ -716,6 +749,10 @@ func (self *SlackAlertNotifier) post(text string) slackPostOutcome {
 			}
 			return "transport"
 		}()
+		if errorClass == "canceled" {
+			// Close's deadline, not Slack: Close counts the abandoned post
+			return slackPostOutcome{}
+		}
 		self.postFailed(errorClass)
 		return slackPostOutcome{retryable: errorClass == "timeout", retryDelay: self.settings.RetryDelay}
 	}
