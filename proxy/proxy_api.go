@@ -17,6 +17,12 @@ import (
 	"github.com/urnetwork/server/router"
 )
 
+// The tls control api (warmup, device rpc, flow trace) on one service port, on
+// each host address warp assigns: ipv4, ipv6 or both. Each address family is
+// its own listener worker under the same supervisor as the socks/http ingress,
+// so both families serve at once. A listener failure cancels the process
+// context, as for that ingress, and is retained for CloseAndWait. The api is
+// not a drain target: it serves until cancellation.
 type apiServer struct {
 	ctx                context.Context
 	cancel             context.CancelFunc
@@ -25,8 +31,13 @@ type apiServer struct {
 	warmupCallback     func(*model.ProxyClient) error
 	port               int
 	settings           *ProxySettings
+	// binds one address with the network of its family, "tcp4" or "tcp6", and
+	// serves it until ctx is canceled
+	listenAndServeTls func(ctx context.Context, network string, addr string, handler http.Handler, reusePort bool, httpServerOptions server.HttpServerOptions, tlsConfig *tls.Config) error
+	lifecycle         *proxyListenerLifecycle
 }
 
+// Serves the api on the production tls listeners.
 func NewApiServer(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -36,6 +47,30 @@ func NewApiServer(
 	port int,
 	settings *ProxySettings,
 ) *apiServer {
+	return newApiServer(
+		ctx,
+		cancel,
+		proxyDeviceManager,
+		transportTls,
+		warmupCallback,
+		port,
+		settings,
+		server.HttpListenAndServeTlsWithReusePort,
+	)
+}
+
+// Only the per-address bind and serve is replaceable; route assembly, address
+// selection and listener supervision are the production ones.
+func newApiServer(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	proxyDeviceManager *ProxyDeviceManager,
+	transportTls *server.TransportTls,
+	warmupCallback func(*model.ProxyClient) error,
+	port int,
+	settings *ProxySettings,
+	listenAndServeTls func(ctx context.Context, network string, addr string, handler http.Handler, reusePort bool, httpServerOptions server.HttpServerOptions, tlsConfig *tls.Config) error,
+) *apiServer {
 	s := &apiServer{
 		ctx:                ctx,
 		cancel:             cancel,
@@ -44,13 +79,27 @@ func NewApiServer(
 		warmupCallback:     warmupCallback,
 		port:               port,
 		settings:           settings,
+		listenAndServeTls:  listenAndServeTls,
+		lifecycle:          newProxyListenerLifecycle(ctx, cancel),
 	}
 
-	go server.HandleError(s.run, cancel)
+	s.lifecycle.start(s.run)
 
 	return s
 }
 
+// Joins the listener workers after hard cancellation and reports any retained
+// listener failure.
+func (self *apiServer) CloseAndWait(ctx context.Context) error {
+	return self.lifecycle.CloseAndWait(ctx)
+}
+
+// A serve returns only at shutdown, so each address family must start in its
+// own worker: starting ipv6 after the ipv4 serve returned would leave the ipv6
+// address unserved for the life of the process. Each worker binds with the
+// network of its family, as the socks/http ingress does: with "tcp", an empty
+// or wildcard host is a dual-stack [::] socket, which on Linux collides with
+// the other family's bind of the same port.
 func (self *apiServer) run() {
 	defer self.cancel()
 
@@ -59,25 +108,35 @@ func (self *apiServer) run() {
 
 	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.port)
 
-	server.HandleError(func() {
-		defer self.cancel()
-		err := server.HttpListenAndServeTlsWithReusePort(
-			self.ctx,
-			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
-			router,
-			reusePort,
-			httpServerOptions,
-			tlsConfig,
-		)
-		if err != nil {
-			panic(err)
-		}
-	})
-	if listenIpv6 != "" {
-		server.HandleError(func() {
+	// warp exports an empty address for a family the block's network lacks,
+	// and that family gets no listener. For ipv4, a "tcp4" bind of the empty
+	// host would listen on every ipv4 address of the host (warp exports these
+	// addresses only to host-networked containers), none of which warp
+	// assigned to the block or routes its traffic to. Without warp's addresses,
+	// RequireListenIpPort returns 0.0.0.0, so the api always has a listener.
+	if listenIpv4 != "" {
+		self.lifecycle.startListener(func() {
 			defer self.cancel()
-			err := server.HttpListenAndServeTlsWithReusePort(
+			err := self.listenAndServeTls(
 				self.ctx,
+				"tcp4",
+				net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+				router,
+				reusePort,
+				httpServerOptions,
+				tlsConfig,
+			)
+			if err != nil {
+				panic(err)
+			}
+		})
+	}
+	if listenIpv6 != "" {
+		self.lifecycle.startListener(func() {
+			defer self.cancel()
+			err := self.listenAndServeTls(
+				self.ctx,
+				"tcp6",
 				net.JoinHostPort(listenIpv6, strconv.Itoa(listenPort)),
 				router,
 				reusePort,
