@@ -17484,24 +17484,26 @@ gut both native buckets. This signal gives the owner warning while turning
 the gate on can still be postponed.
 
 HOW: one Mimir instant query every five minutes, at the monitor's clock,
-through a services gateway, reads eight labelled parts from the configured
-environment: the `count`, `min` and `max` of
-`urnetwork_stats_provider_modern_gate_on` and the `count` of
-`process_start_time_seconds` over job `taskworker`,
-`max(urnetwork_stats_provider_modern_gate_start_seconds)`,
+through a services gateway, reads ten labelled parts from the configured
+environment: over job `taskworker`, the `count`, `min` and `max` of
+`urnetwork_stats_provider_modern_gate_on` and of
+`urnetwork_stats_provider_modern_gate_start_seconds`, and the `count` of
+`process_start_time_seconds`; then
 `max(urnetwork_stats_provider_egress_source_started_seconds)`,
 `max by (bucket, outcome) (urnetwork_stats_provider_modern_gate_shadow)` and
 `sum by (bucket) (max by (bucket, index)
 (urnetwork_stats_provider_egress_index))` for quality and speed. Each
 taskworker's stats collector publishes the gate and its start from its own
 provider.yml at every refresh: whether the gate holds Quality and Speed now,
-and, only while the switch is absent, the start. Read per taskworker, the
-gate shows a fleet that does not agree: a taskworker on code without the
-automatic start publishes nothing, and one on an older config decides the
-other way, which the `min` catches where the `max` would hide it. The shadow counts, for the
-connected valid public providers the other rules admit to each bucket, what
-the gate decides for them, whether or not it is on: every outcome but
-`modern` is what it takes out.
+and, only while the switch is absent, the start. Read per taskworker against
+the running taskworker processes, they show a fleet that does not agree: a
+taskworker on code without the automatic start publishes neither, one on an
+older config decides the gate the other way, which the `min` catches where
+the `max` would hide it, and one that missed a moved start schedules
+another. The latest start places the shadow's windows and the watch after
+it. The shadow counts, for the connected valid public providers the other
+rules admit to each bucket, what the gate decides for them, whether or not
+it is on: every outcome but `modern` is what it takes out.
 
 - `modern-gate-not-ready` (frame the bucket, sustain 2): from 72 hours before
   the published start, more than half of a bucket's admitted providers are
@@ -17519,14 +17521,17 @@ the gate decides for them, whether or not it is on: every outcome but
   taskworker flipped, are no verdict yet; a missing sample before the start
   is `cannot-observe`.
 - `modern-gate-fleet-disagrees` (sustain 2): fewer running taskworkers
-  publish the gate than run, or they disagree on it (`min` below `max`).
-  WARN from 72 hours before the start, since those will not flip with the
-  rest, and PAGE after it until the watch ends: Quality and Speed then follow
-  whichever taskworker ran the last score export. With no taskworker process
-  series in Mimir the run is `cannot-observe`.
+  publish the gate than run, they decide it differently (`min` below `max`),
+  or, while a start is ahead, fewer schedule a start than publish the gate
+  or their starts differ. WARN from 72 hours before the earliest start,
+  since some will not flip with the rest, and PAGE from it until the watch
+  after the latest start ends: Quality and Speed then follow whichever
+  taskworker ran the last score export. With no taskworker process series in
+  Mimir the run is `cannot-observe`.
 
-Outside 72 hours before the start to the end of the watch after it the
-signal is quiet, whatever the gauges say. No start series means the switch is set, true,
+Outside 72 hours before the earliest start to the end of the watch after
+the latest the signal is quiet, whatever the gauges say. A part the verdict
+cannot read is `cannot-observe`, beside the findings the rest of it gives. No start series means the switch is set, true,
 false or unreadable, so no flip is scheduled and the signal is quiet: the
 owner's postponement silences it, and a moved start moves its windows. When
 no taskworker publishes `urnetwork_stats_provider_modern_gate_on` inside the
@@ -17557,23 +17562,29 @@ turn off.
 
 False positive: a URL probe outage or other bucket loss in the watch after
 the start pages `modern-gate-flip-drop` though the gate took little; read the
-shadow beside it. Taskworker restarts make the fleet disagree for a minute or
-two, which the two-read sustain absorbs. False negative: the dashboard
-counts cover connected valid public providers, the score export's Online
-population; taskworkers that disagree about the start itself read the
-largest published start, though they still disagree on the gate once one
-side has passed it.
+shadow beside it. A new taskworker publishes the gate within a minute or two
+of its start, which the two-read sustain absorbs, but a config release that
+sets the switch or moves the start makes the fleet disagree until its last
+taskworker has restarted and the drained processes' series have gone stale,
+up to five minutes after each drain: the kill switch's own rollout after
+the start can page `modern-gate-fleet-disagrees` until it completes. False
+negative: the dashboard counts cover connected valid public providers, the
+score export's Online population. API processes decide the gate for their
+own readers but publish no gauge, so an API block on an older config is not
+seen.
 
 Implementation convention: SIGNALS.md §2.29 (`modern-gate-readiness`) maps to
 `signal_modern_gate_readiness.go` and `signal_modern_gate_readiness_test.go`,
 registered by `NewModernGateReadinessSignal`. Pure tests with synthetic gauge
 values cover quiet outside the windows, the warning from 72 hours, the page
 from 24 hours, the page after the flip and its exact-half boundaries, the
-watch to 18:00 UTC on the start's day and its clears, a disagreeing fleet
-before and after the start, counts read before the flip, a set switch, a
-moved start, an unpublished schedule, and stale or incomplete counts;
-synthetic Mimir answers drive the signal's own queries for the page before
-the start, the page after it and a disagreeing fleet.
+watch to 18:00 UTC on the start's day and its clears, a fleet that
+disagrees on the gate or the schedule before and after the start, a moved
+start a taskworker missed, findings kept beside what cannot be read, counts
+read before the flip, a set switch, a moved start, an unpublished schedule,
+and stale or incomplete counts; synthetic Mimir answers drive the signal's
+own queries for the page before the start, the page after it and a
+disagreeing fleet.
 
 ---
 

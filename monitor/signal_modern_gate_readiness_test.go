@@ -20,9 +20,9 @@ import (
 // The owner's start, 2026-10-21 00:00 UTC.
 var modernGateReadinessTestStart = time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
 
-// An observation as the taskworkers publish it while the gate is off with
-// the start scheduled: per bucket, providers shown modern and providers
-// without evidence, from counts read five minutes before now.
+// An observation as four taskworkers publish it, all on the same schedule
+// and the gate off until the start: per bucket, providers shown modern and
+// providers without evidence, from counts read five minutes before now.
 func modernGateReadinessTestObservation(now time.Time, qualityModern float64, qualityNoEvidence float64, speedModern float64, speedNoEvidence float64) modernGateReadinessObservation {
 	start := modernGateReadinessTestStart
 	observation := modernGateReadinessObservation{
@@ -31,6 +31,7 @@ func modernGateReadinessTestObservation(now time.Time, qualityModern float64, qu
 		onAny:         !now.Before(start),
 		taskworkers:   4,
 		start:         &start,
+		scheduling:    4,
 		countsStarted: now.Add(-5 * time.Minute),
 		shadow:        map[string]map[string]float64{},
 		buckets:       map[string]float64{},
@@ -176,11 +177,22 @@ func TestModernGateReadinessPagesWhenABucketFallsAfterTheFlip(t *testing.T) {
 			t.Errorf("%s: findings %+v err %v, want no verdict yet", name, findings, err)
 		}
 	}
-	// a missing sample before the start is a visibility failure, not quiet
-	missing := observation
-	missing.bucketsBefore = map[string]float64{model.RankModeQuality: 100}
-	if _, err := evaluateModernGateReadiness(missing, now); err == nil {
-		t.Error("a missing speed sample before the start was judged")
+	// a missing sample is a visibility failure, not quiet, and a bucket that
+	// could be judged keeps its page beside it
+	missingSpeed := observation
+	missingSpeed.bucketsBefore = map[string]float64{model.RankModeQuality: 100}
+	findings, err = evaluateModernGateReadiness(missingSpeed, now)
+	classes := []string{}
+	for _, f := range findings {
+		classes = append(classes, f.class+"/"+f.frame)
+	}
+	if err != nil || strings.Join(classes, ",") != "modern-gate-flip-drop/quality,cannot-observe/" {
+		t.Errorf("a missing speed sample before the start: classes %v err %v, want the quality page and cannot-observe", classes, err)
+	}
+	missingQuality := observation
+	missingQuality.buckets = map[string]float64{model.RankModeSpeed: 50}
+	if _, err := evaluateModernGateReadiness(missingQuality, now); err == nil {
+		t.Error("a missing quality sample now was judged")
 	}
 }
 
@@ -234,31 +246,45 @@ func TestModernGateReadinessWatchesUntilSixPmOnTheStartDay(t *testing.T) {
 	}
 }
 
-// A fleet whose running taskworkers do not all publish the gate, or do not
-// agree on it, WARNs before the start, since those will not flip, and PAGEs
-// after it, until the watch ends: an older taskworker still deciding the
-// gate off is caught by the min, not hidden by the max. A fleet that agrees
-// is quiet, and one without taskworker process series cannot be judged.
+// A fleet whose running taskworkers do not all publish the gate, decide it
+// differently, or schedule different starts WARNs before the earliest start,
+// since some will not flip with the rest, and PAGEs from it until the watch
+// after the latest ends: an older taskworker still deciding the gate off is
+// caught by the min, not hidden by the max, and one still on a start that was
+// moved later flips early. A fleet that agrees is quiet, a schedule that
+// differs no longer matters once every start has passed, and a fleet without
+// taskworker process series cannot be judged.
 func TestModernGateReadinessCatchesADisagreeingFleet(t *testing.T) {
 	start := modernGateReadinessTestStart
+	moved := start.AddDate(0, 0, 7)
 	for _, c := range []struct {
 		name        string
 		now         time.Time
+		taskworkers int
 		publishing  int
 		onEvery     bool
 		onAny       bool
-		taskworkers int
+		scheduling  int
+		earliest    time.Time
+		start       time.Time
 		tier        string
 	}{
-		{name: "agreeing, before the start", now: start.Add(-time.Hour), publishing: 4, taskworkers: 4},
-		{name: "one without the gate, before the start", now: start.Add(-time.Hour), publishing: 3, taskworkers: 4, tier: tierWarn},
-		{name: "agreeing, after the start", now: start.Add(time.Hour), publishing: 4, onEvery: true, onAny: true, taskworkers: 4},
-		{name: "one deciding it off, after the start", now: start.Add(time.Hour), publishing: 4, onEvery: false, onAny: true, taskworkers: 4, tier: tierPage},
-		{name: "one without the gate, after the start", now: start.Add(time.Hour), publishing: 3, onEvery: true, onAny: true, taskworkers: 4, tier: tierPage},
-		{name: "one without the gate, at 18:00 on the start's day", now: start.Add(18 * time.Hour), publishing: 3, onEvery: true, onAny: true, taskworkers: 4},
+		{name: "agreeing, before the start", now: start.Add(-time.Hour), taskworkers: 4, publishing: 4, scheduling: 4, earliest: start, start: start},
+		{name: "one without the gate, before the start", now: start.Add(-time.Hour), taskworkers: 4, publishing: 3, scheduling: 3, earliest: start, start: start, tier: tierWarn},
+		{name: "one with the switch set, before the start", now: start.Add(-time.Hour), taskworkers: 4, publishing: 4, scheduling: 3, earliest: start, start: start, tier: tierWarn},
+		{name: "agreeing, after the start", now: start.Add(time.Hour), taskworkers: 4, publishing: 4, onEvery: true, onAny: true, scheduling: 4, earliest: start, start: start},
+		{name: "one deciding it off, after the start", now: start.Add(time.Hour), taskworkers: 4, publishing: 4, onEvery: false, onAny: true, scheduling: 3, earliest: start, start: start, tier: tierPage},
+		{name: "one without the gate, after the start", now: start.Add(time.Hour), taskworkers: 4, publishing: 3, onEvery: true, onAny: true, scheduling: 3, earliest: start, start: start, tier: tierPage},
+		{name: "one without the gate, at 18:00 on the start's day", now: start.Add(18 * time.Hour), taskworkers: 4, publishing: 3, onEvery: true, onAny: true, scheduling: 3, earliest: start, start: start},
+		{name: "one on a start moved later, 73 hours before its start", now: start.Add(-73 * time.Hour), taskworkers: 4, publishing: 4, scheduling: 4, earliest: start, start: moved},
+		{name: "one on a start moved later, before its start", now: start.Add(-time.Hour), taskworkers: 4, publishing: 4, scheduling: 4, earliest: start, start: moved, tier: tierWarn},
+		{name: "one on a start moved later, after its start", now: start.Add(time.Hour), taskworkers: 4, publishing: 4, onEvery: false, onAny: true, scheduling: 4, earliest: start, start: moved, tier: tierPage},
+		{name: "two starts on one day, both passed", now: start.Add(7 * time.Hour), taskworkers: 4, publishing: 4, onEvery: true, onAny: true, scheduling: 4, earliest: start, start: start.Add(6 * time.Hour)},
 	} {
 		observation := modernGateReadinessTestObservation(c.now, 90, 10, 90, 10)
-		observation.publishing, observation.onEvery, observation.onAny, observation.taskworkers = c.publishing, c.onEvery, c.onAny, c.taskworkers
+		observation.taskworkers, observation.publishing, observation.onEvery, observation.onAny = c.taskworkers, c.publishing, c.onEvery, c.onAny
+		observation.scheduling, observation.earliestStart, observation.start = c.scheduling, &c.earliest, &c.start
+		observation.countsStarted = c.now.Add(-5 * time.Minute)
 		observation.bucketsBefore = map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100}
 		findings, err := evaluateModernGateReadiness(observation, c.now)
 		if err != nil {
@@ -274,6 +300,21 @@ func TestModernGateReadinessCatchesADisagreeingFleet(t *testing.T) {
 	unknown.taskworkers = 0
 	if _, err := evaluateModernGateReadiness(unknown, start.Add(-time.Hour)); err == nil {
 		t.Error("a fleet without taskworker process series was judged")
+	}
+
+	// counts too old to judge the shadow keep the fleet's finding, beside
+	// what could not be observed
+	now := start.Add(-time.Hour)
+	stale := modernGateReadinessTestObservation(now, 90, 10, 90, 10)
+	stale.publishing, stale.scheduling = 3, 3
+	stale.countsStarted = now.Add(-modernGateReadinessMaxCountsAge - time.Second)
+	findings, err := evaluateModernGateReadiness(stale, now)
+	classes := []string{}
+	for _, f := range findings {
+		classes = append(classes, f.class)
+	}
+	if err != nil || strings.Join(classes, ",") != "modern-gate-fleet-disagrees,cannot-observe" {
+		t.Errorf("a disagreeing fleet with stale counts: classes %v err %v, want the fleet and cannot-observe", classes, err)
 	}
 }
 
@@ -294,7 +335,7 @@ func TestModernGateReadinessFollowsThePublishedSchedule(t *testing.T) {
 
 	moved := modernGateReadinessTestObservation(now, 10, 90, 10, 90)
 	movedStart := start.AddDate(0, 0, 7)
-	moved.start = &movedStart
+	moved.start, moved.earliestStart = &movedStart, &movedStart
 	if findings, err := evaluateModernGateReadiness(moved, now); err != nil || len(modernGateReadinessTestFailing(t, findings)) != 0 {
 		t.Errorf("a start moved a week on: findings %+v err %v, want quiet", findings, err)
 	}
@@ -336,17 +377,19 @@ func TestModernGateReadinessNeedsCurrentCounts(t *testing.T) {
 }
 
 // A taskworker fleet as Mimir reads it: those publishing the gate, the
-// gate's min and max over them, and the running taskworkers.
+// gate's min and max over them, the running taskworkers, and those
+// scheduling the start.
 type modernGateReadinessTestFleet struct {
 	publishing  float64
 	onMin       float64
 	onMax       float64
 	taskworkers float64
+	scheduling  float64
 }
 
 // One Mimir answer for the readiness query: the fleet, nil for none of its
-// parts, the schedule and counts' start, the shadow and the buckets, each as
-// its part.
+// parts, the start every scheduling taskworker publishes and the counts'
+// start, the shadow and the buckets, each as its part.
 func modernGateReadinessTestPayload(t testing.TB, at time.Time, start *time.Time, fleet *modernGateReadinessTestFleet, countsStarted time.Time, shadow map[string]map[string]float64, buckets map[string]float64) string {
 	t.Helper()
 	result := []map[string]any{}
@@ -361,6 +404,10 @@ func modernGateReadinessTestPayload(t testing.TB, at time.Time, start *time.Time
 		add(map[string]string{"monitor_modern_gate_part": "on_min"}, fleet.onMin)
 		add(map[string]string{"monitor_modern_gate_part": "on_max"}, fleet.onMax)
 		add(map[string]string{"monitor_modern_gate_part": "taskworkers"}, fleet.taskworkers)
+		if start != nil {
+			add(map[string]string{"monitor_modern_gate_part": "start_count"}, fleet.scheduling)
+			add(map[string]string{"monitor_modern_gate_part": "start_min"}, float64(start.Unix()))
+		}
 	}
 	if start != nil {
 		add(map[string]string{"monitor_modern_gate_part": "start"}, float64(start.Unix()))
@@ -424,7 +471,7 @@ func modernGateReadinessTestGuttedShadow() map[string]map[string]float64 {
 func TestModernGateReadinessSignalPagesNamingTheOverrides(t *testing.T) {
 	start := modernGateReadinessTestStart
 	now := start.Add(-23 * time.Hour)
-	payload := modernGateReadinessTestPayload(t, now, &start, &modernGateReadinessTestFleet{publishing: 4, onMin: 0, onMax: 0, taskworkers: 4}, now.Add(-4*time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100})
+	payload := modernGateReadinessTestPayload(t, now, &start, &modernGateReadinessTestFleet{publishing: 4, onMin: 0, onMax: 0, taskworkers: 4, scheduling: 4}, now.Add(-4*time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100})
 	alerts, err := NewModernGateReadinessSignal().Run(context.Background(), modernGateReadinessTestSettings(t, now, map[int64]string{now.Unix(): payload}))
 	if err != nil {
 		t.Fatal(err)
@@ -450,7 +497,7 @@ func TestModernGateReadinessSignalPagesAFallAfterTheFlip(t *testing.T) {
 	now := start.Add(10 * time.Minute)
 	before := start.Add(-time.Second)
 	payloads := map[int64]string{
-		now.Unix():    modernGateReadinessTestPayload(t, now, &start, &modernGateReadinessTestFleet{publishing: 4, onMin: 1, onMax: 1, taskworkers: 4}, start.Add(time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 30, model.RankModeSpeed: 60}),
+		now.Unix():    modernGateReadinessTestPayload(t, now, &start, &modernGateReadinessTestFleet{publishing: 4, onMin: 1, onMax: 1, taskworkers: 4, scheduling: 4}, start.Add(time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 30, model.RankModeSpeed: 60}),
 		before.Unix(): modernGateReadinessTestPayload(t, before, nil, nil, before, nil, map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100}),
 	}
 	alerts, err := NewModernGateReadinessSignal().Run(context.Background(), modernGateReadinessTestSettings(t, now, payloads))
@@ -474,7 +521,7 @@ func TestModernGateReadinessSignalPagesADisagreeingFleet(t *testing.T) {
 	now := start.Add(6 * time.Hour)
 	before := start.Add(-time.Second)
 	payloads := map[int64]string{
-		now.Unix():    modernGateReadinessTestPayload(t, now, &start, &modernGateReadinessTestFleet{publishing: 4, onMin: 0, onMax: 1, taskworkers: 4}, start.Add(time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 30, model.RankModeSpeed: 60}),
+		now.Unix():    modernGateReadinessTestPayload(t, now, &start, &modernGateReadinessTestFleet{publishing: 4, onMin: 0, onMax: 1, taskworkers: 4, scheduling: 4}, start.Add(time.Minute), modernGateReadinessTestGuttedShadow(), map[string]float64{model.RankModeQuality: 30, model.RankModeSpeed: 60}),
 		before.Unix(): modernGateReadinessTestPayload(t, before, nil, nil, before, nil, map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100}),
 	}
 	alerts, err := NewModernGateReadinessSignal().Run(context.Background(), modernGateReadinessTestSettings(t, now, payloads))
@@ -498,7 +545,9 @@ func TestModernGateReadinessQueryReadsEveryPart(t *testing.T) {
 		`min(urnetwork_stats_provider_modern_gate_on{env="synthetic",job="taskworker"})`,
 		`max(urnetwork_stats_provider_modern_gate_on{env="synthetic",job="taskworker"})`,
 		`count(process_start_time_seconds{env="synthetic",job="taskworker"})`,
-		`max(urnetwork_stats_provider_modern_gate_start_seconds{env="synthetic"})`,
+		`count(urnetwork_stats_provider_modern_gate_start_seconds{env="synthetic",job="taskworker"})`,
+		`min(urnetwork_stats_provider_modern_gate_start_seconds{env="synthetic",job="taskworker"})`,
+		`max(urnetwork_stats_provider_modern_gate_start_seconds{env="synthetic",job="taskworker"})`,
 		`max(urnetwork_stats_provider_egress_source_started_seconds{env="synthetic"})`,
 		`max by (bucket, outcome) (urnetwork_stats_provider_modern_gate_shadow{env="synthetic",bucket=~"quality|speed"})`,
 		`sum by (bucket) (max by (bucket, index) (urnetwork_stats_provider_egress_index{env="synthetic",bucket=~"quality|speed"}))`,
@@ -507,7 +556,7 @@ func TestModernGateReadinessQueryReadsEveryPart(t *testing.T) {
 			t.Errorf("query %q does not read %q", query, part)
 		}
 	}
-	if strings.Count(query, "env=") != 8 {
+	if strings.Count(query, "env=") != 10 {
 		t.Errorf("query %q reads a part outside the environment", query)
 	}
 }
