@@ -3618,12 +3618,21 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max by (service) (urnetwork_findproviders2_rank_measured_first_enabled{env=\"$env\",service=~\"api|proxy\"})",
+          "expr": "min by (service) (max by (service, host, instance) (urnetwork_findproviders2_rank_measured_first_enabled{env=\"$env\",service=~\"api|proxy\"}))",
           "refId": "A",
-          "legendFormat": "{{service}}"
+          "legendFormat": "{{service}}: every process"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (service) (urnetwork_findproviders2_rank_measured_first_enabled{env=\"$env\",service=~\"api|proxy\"})",
+          "refId": "B",
+          "legendFormat": "{{service}}: any process"
         }
       ],
-      "description": "Whether the api and the proxy order their FindProviders2 draws by evidence (egress_index.rank_measured_first in provider.yml), as each process read it: the largest of each service's processes, so a rollout reads on as soon as one process has restarted onto the new config. Turning it on or off is a config release and a restart of the api and the proxy; the taskworker needs nothing."
+      "description": "Whether the api and the proxy order their FindProviders2 draws by evidence (egress_index.rank_measured_first in provider.yml), as each process read it. \"every process\" is on only once all of a service's processes apply it, so through a staggered restart it reads on when the last one has restarted onto the new config; \"any process\" is on as soon as one has. Turning it on or off is a config release and a restart of the api and the proxy; the taskworker needs nothing."
     },
     {
       "id": 71,
