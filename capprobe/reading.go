@@ -16,9 +16,10 @@ import (
 type e2eReading string
 
 const (
-	// no session was attempted or negotiated
+	// the send path accepted no ClientHello of the probe's
 	e2eNotTested e2eReading = "not_tested"
-	// a ClientHello went out and is still within its establishment window
+	// the send path accepted a ClientHello, which is still within its
+	// establishment window
 	e2ePending e2eReading = "pending"
 	// no handshake completed for a whole establishment window after a
 	// ClientHello, while the provider acknowledged the probe's pings: the
@@ -76,13 +77,19 @@ type reading struct {
 // acknowledgement, zero before one.
 //
 // Every flag of the observation is sticky evidence of something the provider
-// did; a false flag is evidence of absence only under its precondition. A
-// negotiated handshake reads by its group and seal, whichever role ran it.
-// An unanswered ClientHello is no_responder only once the establishment
-// window has passed both since the first attempt and since the provider was
-// first seen acknowledging the probe: until the provider demonstrably
-// receives the probe's traffic, silence says nothing, and a ClientHello an
-// earlier, discarded client sent cannot shorten a later client's window.
+// did; a false flag is evidence of absence only under its precondition. The
+// end-to-end fields come only from the probe's own ClientHello sessions, so a
+// negotiated handshake is the provider's responder answering the probe, and
+// reads by the group it chose from the probe's offer and by whether the
+// probe verified its identity proof. An unanswered ClientHello is
+// no_responder only once the establishment window has passed both since the
+// send path first accepted a ClientHello and since the provider was first
+// seen acknowledging the probe: until the provider demonstrably receives the
+// probe's traffic, silence says nothing, and a ClientHello that a client the
+// window discarded while it formed sent cannot shorten the window of the
+// client whose pings were acknowledged. An acknowledgement that advertises a
+// window is recorded with it in one step, so one without a window is a
+// provider that does not advertise, whenever it is read.
 func readObservation(observation connect.PeerCapabilityObservation, found bool, now time.Time, ackSeenAt time.Time, tlsTimeout time.Duration) reading {
 	if !found {
 		return reading{e2e: e2eNotTested, window: windowNotTested}

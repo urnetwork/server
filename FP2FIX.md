@@ -331,7 +331,8 @@ provider cannot resolve the probe client's key.
   read conclusively (an acknowledgement read the window; the session
   negotiated, sealed or after a ten-second seal grace, or its ClientHello
   went unanswered for a whole 60 s establishment window counted from both the
-  first attempt and the first acknowledgement), and at
+  send path's acceptance of the first ClientHello and the first
+  acknowledgement), and at
   `measure_timeout_seconds` (120) whatever the reading. A provider that gave
   no evidence is retried by the next sweep, which starts at least
   `min_sweep_interval_minutes` (360) after the last one started. A pass

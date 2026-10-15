@@ -24,9 +24,12 @@ import (
 const fakeNever = time.Duration(-1)
 
 // What a synthetic provider does on the wire, as offsets from the tunnel's
-// opening: when the tunnel's ClientHello goes out, when the provider first
-// acknowledges the pings, when a handshake completes and when it seals.
-// fakeNever leaves an event out.
+// opening: when the send path accepts the tunnel's ClientHello, when the
+// provider first acknowledges the pings, when a handshake completes and when
+// it seals. fakeNever leaves an event out. It is read as connect's recorder
+// records it: an answer or a seal implies the attempt, recorded at the answer
+// when no earlier one was, and an acknowledgement records its window, if it
+// carries one, in the same step.
 type fakeProvider struct {
 	attemptAt   time.Duration
 	ackAt       time.Duration
@@ -52,7 +55,7 @@ func fakeSilentProvider() fakeProvider {
 	return fakeProvider{attemptAt: 500 * time.Millisecond, ackAt: fakeNever, negotiateAt: fakeNever, sealAt: fakeNever}
 }
 
-// The observer's record elapsed after the tunnel opened at openedAt.
+// The recorder's record elapsed after the tunnel opened at openedAt.
 func (self fakeProvider) observe(openedAt time.Time, elapsed time.Duration) (connect.PeerCapabilityObservation, bool) {
 	happened := func(at time.Duration) bool {
 		return at != fakeNever && at <= elapsed
@@ -61,9 +64,13 @@ func (self fakeProvider) observe(openedAt time.Time, elapsed time.Duration) (con
 		return connect.PeerCapabilityObservation{}, false
 	}
 	observation := connect.PeerCapabilityObservation{}
-	if happened(self.attemptAt) {
-		observation.E2eAttempted = true
-		observation.E2eFirstAttemptTime = openedAt.Add(self.attemptAt)
+	// the first of the attempt and the answer: an answer recorded before its
+	// sender recorded the hand-over is the attempt's time
+	for _, at := range []time.Duration{self.attemptAt, self.negotiateAt} {
+		if happened(at) && (!observation.E2eAttempted || openedAt.Add(at).Before(observation.E2eFirstAttemptTime)) {
+			observation.E2eAttempted = true
+			observation.E2eFirstAttemptTime = openedAt.Add(at)
+		}
 	}
 	if happened(self.ackAt) {
 		observation.AckObserved = true

@@ -26,7 +26,7 @@ const (
 	outcomeTunnelFailed = "tunnel_failed"
 	// no acknowledgement of the probe's pings arrived
 	outcomeNoAck = "no_ack"
-	// acknowledged, but no session was attempted
+	// acknowledged, but the send path accepted no ClientHello
 	outcomeE2eNotAttempted = "e2e_not_attempted"
 	// acknowledged, and the ClientHello was still in its window at the end
 	outcomeE2ePending = "e2e_pending"

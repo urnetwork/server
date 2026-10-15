@@ -15816,9 +15816,11 @@ Signals:
   The outcome says where: `tunnel_failed` is the probe's own setup (shard
   credentials, local control, control plane); `no_ack` everywhere is the
   probe's tunnels reaching no provider, so compare §2.19's URL probe health
-  before suspecting the fleet; `e2e_not_attempted` means the probe client's
-  sessions are off, a code or settings regression in which every reading
-  would be wrong, never something to record around; `e2e_pending` means
+  before suspecting the fleet; `e2e_not_attempted` means the send path
+  accepted no ClientHello of the probe's while the provider acknowledged its
+  pings, so the probe client's sessions are off, a code or settings
+  regression in which every reading would be wrong, never something to
+  record around; `e2e_pending` means
   setup ate the measurement's margin over the 60 s window; `record_failed`
   is the database write, and fails the pass.
 - `capability-probe-unsealed-share` — INFO for the shadow review, WARN above

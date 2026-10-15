@@ -48,15 +48,21 @@ Each provider gets a short tunnel of its own (`providertunnel.Config.CapabilityO
   fetch from the first frame, and the probe resolves the provider's key from
   the platform's store when no contract carries it.
 
-The measurement reads the recorder every second and stops once the reading
-is conclusive: an acknowledgement read the window, and the session negotiated
-(sealed, or given `seal_grace_seconds` to), or its ClientHello went
-unanswered through a whole establishment window (`TlsTimeout`, 60 s) counted
-from both the first attempt and the first observed acknowledgement. It stops
-at `measure_timeout_seconds` whatever the reading, at the tunnel's loss and at
-the pass's end, then tears the tunnel down. A provider that cannot open the
-probe's sealed frames therefore holds a slot for at most the timeout and the
-teardown. The URL tunnel's encryption stays off.
+The recorder holds only what the probe's own ClientHello sessions saw: a
+negotiated session is the provider's responder answering the probe, with the
+group it chose from the probe's offer. An attempt is a ClientHello the send
+path accepted, and an acknowledgement that advertises a window is recorded
+with it in one step, so a window is never read as missing while it is on its
+way. The measurement reads the recorder every second and stops once the
+reading is conclusive: an acknowledgement read the window, and the session
+negotiated (sealed, or given `seal_grace_seconds` to), or its ClientHello
+went unanswered through a whole establishment window (`TlsTimeout`, 60 s)
+counted from both the send path's acceptance of the first ClientHello and the
+first observed acknowledgement. It stops at `measure_timeout_seconds`
+whatever the reading, at the tunnel's loss and at the pass's end, then tears
+the tunnel down. A provider that cannot open the probe's sealed frames
+therefore holds a slot for at most the timeout and the teardown. The URL
+tunnel's encryption stays off.
 
 | Reading | Recorded as |
 | --- | --- |
