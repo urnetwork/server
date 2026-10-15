@@ -234,7 +234,7 @@ func TestTunnelCloseRetiresDerivedClientOnlyAfterProviderFlowsEnd(t *testing.T) 
 			}
 		}}
 		defer useHermeticTunnelClientSettings()()
-		cfg := Config{ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: sourceJwt, ClientId: connect.Id(sourceClientId), DataOnlyProbe: true,
+		cfg := Config{ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: sourceJwt, ClientId: connect.Id(sourceClientId), DataOnlyProbe: true, KeepClientKeysLocal: true,
 			ClientCredentials: authority, ClientControl: authority, CloseTimeout: 15 * time.Second,
 			DnsResolverSettings: &connect.DnsResolverSettings{EnableRemoteDoh: true, RemoteDohUrlsIpv4: []string{dns.URL + "/dns-query"}}, ContractReservationByteCount: 1024 * 1024}
 		tunnel, err := Open(ctx, cfg, connect.Id(providerClientId))

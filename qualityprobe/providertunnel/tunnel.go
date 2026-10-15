@@ -31,6 +31,10 @@ type Config struct {
 	// the caller's DNS and URL traffic owns evaluation, without provider IpPing.
 	// The default retains the ordinary initial/continuous ping behavior.
 	DataOnlyProbe bool
+	// Keeps each generated client's identity key local when nothing reads it
+	// (skipUnreadClientKeyPublication). Only the taskworker's URL probe sets
+	// it; every other caller's clients publish as before.
+	KeepClientKeysLocal bool
 
 	ApiUrl      string
 	PlatformUrl string
@@ -288,9 +292,10 @@ func providerTunnelClientSettings(reservationByteCount connect.ByteCount) *conne
 	return settings
 }
 
-// Keeps a generated client's identity key local when nothing reads it.
+// Keeps a generated client's identity key local when nothing reads it, for a
+// tunnel whose Config opts in with KeepClientKeysLocal.
 //
-// Every probe mints a derived client with a fresh key, and each key the
+// Every URL probe mints a derived client with a fresh key, and each key the
 // client published became a permanent signed registration: one
 // st_client_key_history row plus its evidence blobs, the largest share of the
 // table's growth on 2026-10-14. A URL tunnel's client never uses its key.
@@ -303,7 +308,8 @@ func providerTunnelClientSettings(reservationByteCount connect.ByteCount) *conne
 // A client that can use its key keeps publishing: any session mode, a
 // required registration (a capability measurement's opportunistic clients)
 // or a close-report domain. So this runs after every other change to the
-// generated settings. connect refuses a skip that contradicts them.
+// generated settings. A reader that appears later, such as a post-quantum
+// profile raising the sessions, makes connect log an error and publish anyway.
 func skipUnreadClientKeyPublication(settings *connect.ClientSettings) {
 	if settings.ClientKeyRegistrationRequired {
 		return
@@ -457,7 +463,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		func() *connect.ClientSettings {
 			settings := newProviderTunnelClientSettings(cfg.ContractReservationByteCount)
 			// last, after every other change to the settings
-			skipUnreadClientKeyPublication(settings)
+			if cfg.KeepClientKeysLocal {
+				skipUnreadClientKeyPublication(settings)
+			}
 			return settings
 		},
 		generatorSettings,

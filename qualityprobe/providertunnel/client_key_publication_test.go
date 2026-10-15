@@ -1,6 +1,7 @@
-// A URL tunnel's generated clients keep their unread identity key local; a
-// tunnel whose clients can use their key keeps publishing it. Both are read
-// through the real Open path, stopped before the tun.
+// With the URL probe's opt-in, a tunnel's generated clients keep their unread
+// identity key local. Without it, or when a client can use its key, they
+// publish. Every case is read through the real Open path, stopped before the
+// tun.
 package providertunnel
 
 import (
@@ -50,9 +51,12 @@ func captureTunnelClientSettings(t *testing.T, cfg Config) func() *connect.Clien
 
 // Root cause: each URL probe's derived client published a fresh key nothing
 // reads, and the platform kept a permanent signed registration per probe.
-// Every generated client now keeps its key local, from settings of its own.
+// With the URL probe's opt-in, every generated client keeps its key local,
+// from settings of its own.
 func TestUrlTunnelClientsSkipClientKeyPublication(t *testing.T) {
-	newSettings := captureTunnelClientSettings(t, probeTransportBudgetTestConfig())
+	cfg := probeTransportBudgetTestConfig()
+	cfg.KeepClientKeysLocal = true
+	newSettings := captureTunnelClientSettings(t, cfg)
 	first, second := newSettings(), newSettings()
 	for _, settings := range []*connect.ClientSettings{first, second} {
 		if !settings.SkipClientKeyPublication {
@@ -69,10 +73,28 @@ func TestUrlTunnelClientsSkipClientKeyPublication(t *testing.T) {
 	}
 }
 
-// A tunnel whose generated clients can use their key keeps publishing it. The
-// first reader is a capability measurement's: opportunistic sessions admitted
-// only after their key registration. Clients built outside the tunnel keep
-// the publishing default.
+// Only a tunnel that opts in keeps its clients' keys local. Without the
+// opt-in, a client with no reader of its key publishes as before, and so does
+// every client built outside the tunnel.
+func TestTunnelClientsPublishWithoutTheOptIn(t *testing.T) {
+	settings := captureTunnelClientSettings(t, probeTransportBudgetTestConfig())()
+	if settings.SkipClientKeyPublication {
+		t.Error("a tunnel that did not opt in keeps its clients' keys local")
+	}
+	// with the opt-in, this exact client would skip
+	if settings.EncryptionSettings.Mode != connect.EncryptionModeOff || settings.ClientKeyRegistrationRequired ||
+		settings.ContractManagerSettings.CloseReportDomainHash != ([32]byte{}) {
+		t.Error("the tunnel client has a reader of its key, so it proves nothing about the opt-in")
+	}
+	if connect.DefaultClientSettings().SkipClientKeyPublication {
+		t.Error("a client built outside the tunnel skips publication by default")
+	}
+}
+
+// Even with the URL probe's opt-in, a tunnel whose generated clients can use
+// their key keeps publishing it. The first reader is a capability
+// measurement's: opportunistic sessions admitted only after their key
+// registration.
 func TestTunnelClientsThatUseTheirKeyKeepPublishing(t *testing.T) {
 	readers := []struct {
 		reader    string
@@ -95,6 +117,8 @@ func TestTunnelClientsThatUseTheirKeyKeepPublishing(t *testing.T) {
 			settings.ContractManagerSettings.CloseReportDomainHash = [32]byte{7}
 		}},
 	}
+	cfg := probeTransportBudgetTestConfig()
+	cfg.KeepClientKeysLocal = true
 	original := newProviderTunnelClientSettings
 	defer func() { newProviderTunnelClientSettings = original }()
 	for _, reader := range readers {
@@ -103,11 +127,8 @@ func TestTunnelClientsThatUseTheirKeyKeepPublishing(t *testing.T) {
 			reader.configure(settings)
 			return settings
 		}
-		if captureTunnelClientSettings(t, probeTransportBudgetTestConfig())().SkipClientKeyPublication {
+		if captureTunnelClientSettings(t, cfg)().SkipClientKeyPublication {
 			t.Errorf("a tunnel client with %s skips publishing its key", reader.reader)
 		}
-	}
-	if connect.DefaultClientSettings().SkipClientKeyPublication {
-		t.Error("a client built outside the tunnel skips publication by default")
 	}
 }

@@ -2106,12 +2106,17 @@ func runProviderEgressProbe(
 // provider_egress_probe_metrics.go) every finding -- goes through operator, so
 // with the in-process operator (operator_transport: local) the pass makes no
 // API request.
+//
+// Its tunnels opt in to KeepClientKeysLocal: each URL probe mints a derived
+// client whose identity key nothing reads, and only this pass may skip
+// publishing it.
 func newProviderUrlProbePass(
 	args *ProviderEgressProbeArgs,
 	operator ingest.Operator,
 	tunnelConfig providertunnel.Config,
 	networkId server.Id,
 ) *providerEgressProbePass {
+	tunnelConfig.KeepClientKeysLocal = true
 	return &providerEgressProbePass{
 		urlProbes: true,
 		readiness: newProviderEgressProbeReadiness(networkId),
