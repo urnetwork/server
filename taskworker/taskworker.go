@@ -122,6 +122,9 @@ func initTaskSchedule(ctx context.Context) {
 		// (connect/GEOMAP.md D24), and a pending row drains through the
 		// registered task below without scheduling a successor
 		work.ScheduleProviderEgressProbeTasks(clientSession, tx)
+		// the modern provider gate's evidence (server/capprobe), apart from
+		// the URL probe's shards, quota and budget
+		work.ScheduleCapabilityProbe(clientSession, tx)
 		work.ScheduleRefreshEgressDestinations(clientSession, tx)
 		work.ScheduleRollupProviderEgressTallies(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
@@ -409,6 +412,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		),
 		work.NewProviderEgressProbeTaskTarget(),
 		work.NewProviderEgressProbeDisabledTaskTarget(),
+		work.NewCapabilityProbeTaskTarget(),
 		task.NewTaskTargetWithPost(work.RollupProviderEgressTallies, work.RollupProviderEgressTalliesPost),
 		task.NewTaskTargetWithPost(
 			work.RefreshEgressDestinations,

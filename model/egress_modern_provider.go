@@ -1,15 +1,17 @@
 // The modern provider gate of the Quality and Speed buckets (FP2FIX.md,
 // 2026-10-14, option 4: probe-verified, shadow first). A provider is modern
-// when the FP2 URL prober has measured, on a real client to provider session,
-// both end-to-end post-quantum encryption (the TLS 1.3 hybrid X25519MLKEM768,
-// which providers answer since v2026.7.21-999024260) and resizable transfer
-// windows (acks that carry receive_window_byte_count, since
-// v2026.9.14-1046484290). Versions are not read: most providers run a custom
-// lineage whose version says nothing of either.
+// when the capability probe (server/capprobe) has measured, on a real client
+// to provider session, both end-to-end post-quantum encryption (the TLS 1.3
+// hybrid X25519MLKEM768, which providers answer since v2026.7.21-999024260)
+// and resizable transfer windows (acks that carry receive_window_byte_count,
+// since v2026.9.14-1046484290). Versions are not read: most providers run a
+// custom lineage whose version says nothing of either.
 //
-// Each probe run that observed its session reports what it saw with its URL
-// result, and the ingest records it in provider_modern_evidence, one row per
-// provider holding the latest observation (RecordProviderModernEvidence).
+// The capability probe measures each provider in a short tunnel of its own,
+// apart from the URL probe, whose tunnels keep end-to-end encryption off,
+// and records each conclusive measurement in provider_modern_evidence, one
+// row per provider holding the latest observation
+// (RecordProviderModernEvidence).
 // Every pass that decides the buckets classifies each provider's row into one
 // outcome (classifyProviderModernEvidence) and counts, over the providers the
 // other rules admit to Quality and to Speed, what the gate decides for them:
@@ -26,10 +28,13 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/server"
 )
@@ -60,15 +65,15 @@ var ProviderModernGateBuckets = []string{
 	RankModeSpeed,
 }
 
-// How long the latest observation decides a provider. The prober measures an
-// eligible provider about ten times in four hours and every run that sees its
-// session replaces the observation, so a provider in Quality or Speed, which
-// already needs URL evidence within eight hours, is measured far more often
-// than this. The window only has to outlast runs that observe nothing, a
-// prober outage or a rollout of probers without the evidence, while a
-// capability changes only when the provider's app changes; a downgrade shows
-// at its next run whatever the window. Evidence exactly this old is stale, as
-// a URL outcome exactly eight hours old is.
+// How long the latest observation decides a provider. The capability probe
+// measures a provider of Quality or Speed again once its evidence is three
+// days old by default (capability_probe.yml), and its settings refuse a
+// refresh that, delayed by one sweep interval, would not land inside this
+// window. The window only has to outlast measurements that observe nothing,
+// a probe outage or a provider that could not be reached, while a capability
+// changes only when the provider's app changes; a downgrade shows at the
+// provider's next measurement. Evidence exactly this old is stale, as a URL
+// outcome exactly eight hours old is.
 const ProviderModernEvidenceMaxAge = 7 * 24 * time.Hour
 
 // The furthest ahead of the server an observation may claim to be, as for URL
@@ -80,11 +85,13 @@ const providerModernEvidenceMaxFutureSkew = time.Minute
 // names crypto/tls gives a curve are a few ASCII characters.
 const providerModernEvidenceKeyExchangeMaxLength = 64
 
-// What one probe run observed of the provider's end of its session: the
-// end-to-end encryption the two negotiated and the transfer window the
+// What one probe measurement observed of the provider's end of its session:
+// the end-to-end encryption the two negotiated and the transfer window the
 // provider's acks advertised. The zero value observed nothing and records
-// nothing. The prober must report a negative only from a session that asked
-// for end-to-end encryption and finished negotiating it: a probe with
+// nothing. The probe reports a negative only from a session that asked for
+// end-to-end encryption and concluded: negotiated, or unanswered for a whole
+// establishment window while the provider acknowledged the probe's traffic,
+// and only once an acknowledgement has read the window. A probe with
 // encryption off, or one whose handshake had not concluded, observed nothing
 // about the provider's encryption and reports the zero value.
 type ProviderModernEvidence struct {
@@ -187,22 +194,56 @@ const recordProviderModernEvidenceSql = `
 		run_count = evidence.run_count + CASE WHEN evidence.measured_at < excluded.measured_at THEN 1 ELSE 0 END
 `
 
-// Records what one probe run observed of the provider's session. Evidence
-// that observed nothing records nothing and is no error; evidence the table
-// must not hold is refused with an error and records nothing. A database
-// failure raises, as every model write does. Post-quantum needs an
+// recordProviderModernEvidenceSql, except that it leaves a row that is
+// modern and fresh, measured after $7, as it is when the newer observation
+// is not modern. It returns a row when it wrote one, and none when it held
+// the observation back. An observation at the row's instant or older is not
+// a downgrade, and changes the row as recordProviderModernEvidenceSql does.
+const recordProviderModernEvidenceHoldingDowngradeSql = recordProviderModernEvidenceSql + `
+	WHERE NOT (
+		evidence.post_quantum AND evidence.window_resizable AND $7 < evidence.measured_at AND
+		evidence.measured_at < excluded.measured_at AND
+		NOT (excluded.post_quantum AND excluded.window_resizable)
+	)
+	RETURNING true
+`
+
+// Records what one probe measurement observed of the provider's session.
+// Evidence that observed nothing records nothing and is no error; evidence
+// the table must not hold is refused with an error and records nothing. A
+// database failure raises, as every model write does. Post-quantum needs an
 // established end-to-end session, and a window needs the provider to have
 // advertised one, so an inconsistent observation is stored as the less
 // modern reading.
 func RecordProviderModernEvidence(ctx context.Context, clientId server.Id, evidence ProviderModernEvidence) error {
+	_, err := recordProviderModernEvidence(ctx, clientId, evidence, true)
+	return err
+}
+
+// Records evidence as RecordProviderModernEvidence does, except that a newer
+// observation that is not modern does not replace a row that is modern and
+// fresh at the write unless downgradeConfirmed: nothing is written, and held
+// is true. The capability probe confirms a downgrade with a second negative
+// reading in a later sweep, so one transient negative, a provider restarting
+// or a passing fault on the probe's side, never takes a modern provider out
+// of Quality and Speed. A stale modern row, and any other row, is replaced
+// at once.
+func RecordProviderModernEvidenceHoldingDowngrade(ctx context.Context, clientId server.Id, evidence ProviderModernEvidence, downgradeConfirmed bool) (held bool, returnErr error) {
+	return recordProviderModernEvidence(ctx, clientId, evidence, downgradeConfirmed)
+}
+
+// The write of both: downgradeAllowed false holds a newer observation that is
+// not modern back from a modern, fresh row.
+func recordProviderModernEvidence(ctx context.Context, clientId server.Id, evidence ProviderModernEvidence, downgradeAllowed bool) (held bool, returnErr error) {
 	if !evidence.Observed() {
-		return nil
+		return false, nil
 	}
 	if clientId == (server.Id{}) {
-		return fmt.Errorf("modern provider evidence has no client id")
+		return false, fmt.Errorf("modern provider evidence has no client id")
 	}
-	if err := evidence.validate(server.NowUtc()); err != nil {
-		return err
+	now := server.NowUtc()
+	if err := evidence.validate(now); err != nil {
+		return false, err
 	}
 	postQuantum := evidence.E2eNegotiated && evidence.PostQuantum
 	keyExchange := ""
@@ -214,18 +255,38 @@ func RecordProviderModernEvidence(ctx context.Context, clientId server.Id, evide
 		maxReceiveWindowByteCount = evidence.MaxReceiveWindowByteCount
 	}
 	server.Db(ctx, func(conn server.PgConn) {
-		server.RaisePgResult(conn.Exec(
+		if downgradeAllowed {
+			server.RaisePgResult(conn.Exec(
+				ctx,
+				recordProviderModernEvidenceSql,
+				clientId,
+				postQuantum,
+				keyExchange,
+				evidence.WindowAdvertised,
+				maxReceiveWindowByteCount,
+				evidence.ObservedAt.UTC(),
+			))
+			return
+		}
+		var written bool
+		err := conn.QueryRow(
 			ctx,
-			recordProviderModernEvidenceSql,
+			recordProviderModernEvidenceHoldingDowngradeSql,
 			clientId,
 			postQuantum,
 			keyExchange,
 			evidence.WindowAdvertised,
 			maxReceiveWindowByteCount,
 			evidence.ObservedAt.UTC(),
-		))
+			now.Add(-ProviderModernEvidenceMaxAge),
+		).Scan(&written)
+		if errors.Is(err, pgx.ErrNoRows) {
+			held = true
+			return
+		}
+		server.Raise(err)
 	})
-	return nil
+	return held, nil
 }
 
 // The rows of clientIds, read in batches like the scoped common gates so a
