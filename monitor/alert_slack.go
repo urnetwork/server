@@ -447,8 +447,9 @@ func slackIncidentKey(alert Alert) string {
 
 // A visibility alert says a signal could not observe part of its source, so
 // the rest of that execution's identities are unknown rather than recovered.
-// Every constructor of an unknown state marks its alert unobservable
-// (finding.isUnobservable); the alert's names are never consulted.
+// An alert from a finding is marked by its class (alertClassKinds, see
+// finding.isUnobservable), and a direct constructor of an unknown state marks
+// its own alert.
 func isVisibilityAlert(alert Alert) bool {
 	return alert.unobservable
 }

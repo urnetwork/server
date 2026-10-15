@@ -855,7 +855,7 @@ func playIssueOverflowAlert(settings SignalSettings, packageName string, total, 
 	return Alert{
 		SignalNumber: "20.1", SignalKey: "play-crashes", SignalID: "mobile/play-crashes", SignalName: "Google Play crash reports",
 		Severity: SeverityWarn, Class: "play-crash-overflow", Target: "google-play/" + packageName,
-		Environment: settings.Environment, ObservedAt: settings.Now(), Sustain: 1,
+		Environment: settings.Environment, ObservedAt: settings.Now(), Sustain: 1, unobservable: true,
 		Symptom:   fmt.Sprintf("Google Play returned %d advancing crash groups; detailed alerts were bounded to %d", total, included),
 		Mechanism: "A broad crash wave exceeded the monitor's per-run evidence cap. Every observed cursor was persisted, but downloading an unbounded sample per issue would amplify a provider or application incident.",
 		Baseline:  fmt.Sprintf("At most %d crash issue/version groups advance in one 30-minute cadence.", playCrashAlertLimit),

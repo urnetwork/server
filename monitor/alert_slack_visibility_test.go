@@ -168,6 +168,40 @@ func TestSlackAlertNotifierKeepsARedisSpikeWhileItsHostIsUnreachable(t *testing.
 	}
 }
 
+// pg-cpu reports a database host it cannot read as pg-cpu-unavailable, an
+// unknown state named neither cannot-observe nor *-unobservable: its
+// pg-cpu-high PAGE is kept while the host does not answer instead of clearing
+// and being raised again.
+func TestSlackAlertNotifierKeepsAPgCpuPageWhileItsHostIsUnavailable(t *testing.T) {
+	var run atomic.Int32
+	page := pgCpuTestOutput(syntheticSettings(nil).Now(), 34000000000)
+	// the PAGE reaches its Sustain of 2, the host stops answering for two runs,
+	// the Sustain of pg-cpu-unavailable, then the PAGE is back
+	unavailable := []bool{false, false, true, true, false, false}
+	source := &syntheticSource{hostTimeoutFn: func(HostSettings, string, time.Duration) (string, error) {
+		if unavailable[run.Load()] {
+			return "", errors.New("synthetic ssh timeout")
+		}
+		return page, nil
+	}}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "database-a.example", Roles: []string{"pg-primary"}}}
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.settings(webhookUrl))
+	postSignalRunsThroughTheGate(t, NewPgCpuSignal(), settings, len(unavailable), func(i int) { run.Store(int32(i)) }, notifier)
+	closeSlackNotifier(t, notifier)
+
+	texts := webhook.posted()
+	high := "pg/cpu · pg-cpu-high · database-a.example"
+	if countSlackPosts(texts, "[CLEARED]", high) != 0 || countSlackPosts(texts, "[PAGE] raised", high) != 1 {
+		t.Fatalf("pg-cpu-high was not raised once and kept while its host was unavailable:\n%s", strings.Join(texts, "\n---\n"))
+	}
+	if countSlackPosts(texts, "[WARN] raised", "pg/cpu · pg-cpu-unavailable · database-a.example") != 1 {
+		t.Fatalf("the unavailable host was not raised:\n%s", strings.Join(texts, "\n---\n"))
+	}
+}
+
 // While hosts are blocked, global findings are withheld from the run and the
 // host-scope partial alert stands in for them: the run is incomplete, so a
 // withheld global PAGE is kept. A configured exclusion without blocked hosts,
@@ -224,8 +258,9 @@ func TestSlackAlertNotifierIgnoresAConfiguredOffQuerySample(t *testing.T) {
 	}
 }
 
-// The direct alert constructors of unknown states mark their alerts, and
-// ordinary alerts stay unmarked.
+// The direct alert constructors of unknown states mark their alerts, as does
+// the proxy path that discovered no allocation, and ordinary alerts, including
+// a measured proxy handshake failure, stay unmarked.
 func TestEveryVisibilityAlertConstructorMarksItsAlert(t *testing.T) {
 	settings := syntheticSettings(nil)
 	pgSample := selectionSignal{number: "2.30", key: "pg-query-sample", id: "pg/query-sample"}
@@ -243,9 +278,19 @@ func TestEveryVisibilityAlertConstructorMarksItsAlert(t *testing.T) {
 	}
 	alerts = append(alerts,
 		appleVisibilityAlert(settings, "apple-crash-data-stale", "symptom", "mechanism", "observed", "action"),
+		appleBacklogAlert(settings, 3, 9),
 		playVisibilityAlert(settings, "play-crash-data-stale", "symptom", "mechanism", "observed", "action"),
+		playIssueOverflowAlert(settings, "com.example.app", 40, 20),
 		alertFromFinding(settings, "1.3", "active-pileup", "PostgreSQL active backends", cannotObserveFinding("pg-1", errors.New("synthetic ssh timeout"))),
 	)
+	proxyPath := func(observed finding) Alert {
+		return alertFromFinding(settings, "14.5", "proxy-path", "Public proxy path", observed)
+	}
+	noAllocation := evaluateProxyHandshakes(context.Background(), &probeEnv{cfg: &monitorConfig{env: "main"}}, &host{name: "proxy-1"}, nil, nil)
+	if len(noAllocation) != 1 || noAllocation[0].class != "proxy-public-handshake" {
+		t.Fatalf("proxy path without an allocation = %+v", noAllocation)
+	}
+	alerts = append(alerts, proxyPath(noAllocation[0]))
 	freshness := settings
 	freshness.SSHUser = "monitor"
 	freshness.SettingsGenerationCheck = func(context.Context, SignalSettings) (bool, error) {
@@ -263,6 +308,10 @@ func TestEveryVisibilityAlertConstructorMarksItsAlert(t *testing.T) {
 	}
 	if isVisibilityAlert(slackTestAlert("pg-1", "", SeverityPage)) {
 		t.Fatal("an ordinary alert is marked unobservable")
+	}
+	handshake := finding{probeId: "proxy/public-path", tier: tierWarn, class: "proxy-public-handshake", target: "proxy-1", frame: "main-proxy-g1/tcp4", sustain: 2}
+	if isVisibilityAlert(proxyPath(handshake)) {
+		t.Fatal("a measured proxy handshake failure is marked unobservable")
 	}
 }
 

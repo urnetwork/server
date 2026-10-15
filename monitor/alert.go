@@ -54,8 +54,8 @@ type Alert struct {
 
 	// The alert reports that part of its signal's source could not be
 	// observed, so the execution that produced it is no evidence that any
-	// other incident is absent (finding.isUnobservable). It is not part of the
-	// rendered alert.
+	// other incident is absent (alertClassKinds, finding.isUnobservable). It
+	// is not part of the rendered alert.
 	unobservable bool
 	// The alert reports an observation the configuration turned off, such as
 	// the PG query sample without its flag: a standing state of this watcher,

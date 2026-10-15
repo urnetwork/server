@@ -614,7 +614,7 @@ done`, lo, hi)
 		// per-node ping is the tier-0 probe's page; here just visibility
 		findings = append(findings, finding{
 			probeId: "redis/node-mem", tier: tierWarn,
-			class: "cannot-observe", target: observed.host.name, unobservable: true,
+			class: "cannot-observe", target: observed.host.name,
 			frame:    strings.Join(observed.unreachable, ","),
 			sustain:  2,
 			symptom:  fmt.Sprintf("INFO unavailable from %d node(s): %s", len(observed.unreachable), strings.Join(observed.unreachable, ",")),
