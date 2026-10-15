@@ -2519,8 +2519,12 @@ type clientLocationReliability struct {
 	// each slot's epoch when every folded row has the same one, otherwise 0
 	arinEpoch    arinRollupEpoch
 	arinOldEpoch arinRollupEpoch
-	networkId    server.Id
-	connected    bool
+	// the rows folded, and per build epoch the rows that carry it in either
+	// slot with their facts under it
+	rowCount       int
+	arinEpochFacts map[int64]*arinEpochFacts
+	networkId      server.Id
+	connected      bool
 	// locations is bucketed by what each connection proved (connect/IPV6.md
 	// A8): the location row is taken from the v4-proven and legacy
 	// connections when any exist, else from the rest (v6-proven or
@@ -2568,9 +2572,38 @@ func newClientLocationReliability(networkId server.Id, connected bool) *clientLo
 	}
 }
 
+// One database's facts over the rows that carry its epoch in either slot.
+type arinEpochFacts struct {
+	rows       int
+	risk       bool
+	nonQuality bool
+}
+
+// The old slot the rollup stores: the rows' common old epoch with its facts.
+// When the old slots differ, as while Connect restarts onto a new release and
+// a provider's connections span restarted and waiting hosts, it is the newest
+// epoch other than the common latest that every row carries in one slot or the
+// other, with the facts of whichever slot carries it: the restarted rows' old
+// slot and the waiting rows' latest slot both name the release the fleet is
+// leaving. Every row is classified under that epoch, so the facts are exact;
+// without one the slot is unavailable (epoch 0).
+func (self *clientLocationReliability) oldSlot() (epoch int64, risk bool, nonQuality bool) {
+	if !self.arinOldEpoch.mixed {
+		return self.arinOldEpoch.value(), self.arinOldRisk, self.arinOldNonQuality
+	}
+	latestEpoch := self.arinEpoch.value()
+	for candidate, facts := range self.arinEpochFacts {
+		if candidate != latestEpoch && facts.rows == self.rowCount && epoch < candidate {
+			epoch, risk, nonQuality = candidate, facts.risk, facts.nonQuality
+		}
+	}
+	return
+}
+
 // One slot's epoch over a client's rows: the common epoch when every row has
-// the same one, 0 when they differ. A mixed client is unavailable under every
-// serving epoch rather than taking either row's facts.
+// the same one, 0 when they differ. A client mixed in its latest slot is
+// unavailable under every serving epoch but the one oldSlot finds rather than
+// taking either row's facts.
 type arinRollupEpoch struct {
 	epoch int64
 	seen  bool
@@ -2653,6 +2686,29 @@ func (self *clientLocationReliability) add(row clientLocationReliabilityRow) {
 	self.arinOldNonQuality = self.arinOldNonQuality || row.arinOldNonQuality
 	self.arinEpoch.add(row.arinEpoch)
 	self.arinOldEpoch.add(row.arinOldEpoch)
+	self.rowCount += 1
+	if self.arinEpochFacts == nil {
+		self.arinEpochFacts = map[int64]*arinEpochFacts{}
+	}
+	for _, slot := range []struct {
+		epoch            int64
+		risk, nonQuality bool
+	}{
+		{epoch: row.arinEpoch, risk: row.arinRisk, nonQuality: row.arinNonQuality},
+		{epoch: row.arinOldEpoch, risk: row.arinOldRisk, nonQuality: row.arinOldNonQuality},
+	} {
+		if slot.epoch == 0 {
+			continue
+		}
+		facts, ok := self.arinEpochFacts[slot.epoch]
+		if !ok {
+			facts = &arinEpochFacts{}
+			self.arinEpochFacts[slot.epoch] = facts
+		}
+		facts.rows += 1
+		facts.risk = facts.risk || slot.risk
+		facts.nonQuality = facts.nonQuality || slot.nonQuality
+	}
 	switch ConnectionProvenIpFamily(row.ipVersion, row.ipFamilyIntent) {
 	case 4:
 		self.ipv4Proven = true
@@ -2771,10 +2827,11 @@ func (self *clientLocationReliability) Values() []any {
 	values[17] = self.egressEvidenceTime
 	values[18] = self.arinRisk
 	values[19] = self.arinNonQuality
-	values[20] = self.arinOldRisk
-	values[21] = self.arinOldNonQuality
+	oldEpoch, oldRisk, oldNonQuality := self.oldSlot()
+	values[20] = oldRisk
+	values[21] = oldNonQuality
 	values[22] = self.arinEpoch.value()
-	values[23] = self.arinOldEpoch.value()
+	values[23] = oldEpoch
 
 	return values
 }

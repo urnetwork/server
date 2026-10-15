@@ -46,8 +46,8 @@ func TestClientLocationReliabilityEpochsAreCommonOrZero(t *testing.T) {
 	}{
 		{rows: []clientLocationReliabilityRow{{arinEpoch: 20, arinOldEpoch: 10}}, wantEpoch: 20, wantOldEp: 10},
 		{rows: []clientLocationReliabilityRow{{arinEpoch: 20, arinOldEpoch: 10}, {arinEpoch: 20, arinOldEpoch: 10}}, wantEpoch: 20, wantOldEp: 10},
-		// a restarted and a not yet restarted process
-		{rows: []clientLocationReliabilityRow{{arinEpoch: 20, arinOldEpoch: 10}, {arinEpoch: 10, arinOldEpoch: 5}}},
+		// a restarted and a not yet restarted process: both carry 10
+		{rows: []clientLocationReliabilityRow{{arinEpoch: 20, arinOldEpoch: 10}, {arinEpoch: 10, arinOldEpoch: 5}}, wantOldEp: 10},
 		// one connection without old facts
 		{rows: []clientLocationReliabilityRow{{arinEpoch: 20, arinOldEpoch: 10}, {arinEpoch: 20}}, wantEpoch: 20},
 		// a mixed first row cannot be restored by later agreeing rows
@@ -57,5 +57,43 @@ func TestClientLocationReliabilityEpochsAreCommonOrZero(t *testing.T) {
 		if values[22] != c.wantEpoch || values[23] != c.wantOldEp {
 			t.Errorf("rows %+v: epochs %v/%v, want %d/%d", c.rows, values[22], values[23], c.wantEpoch, c.wantOldEp)
 		}
+	}
+}
+
+// While Connect restarts onto a new release, a provider whose connections span
+// a restarted and a waiting host carries the release the fleet is leaving in
+// every row: in the old slot of one and the latest slot of the other. The
+// rollup keeps it available under that epoch with the facts of whichever slot
+// carries it in each row, so a rolling restart does not make multi-host
+// providers unavailable, while the new latest stays unavailable until every
+// row carries it. The latest columns keep every row's latest slot, as before.
+func TestClientLocationReliabilityKeepsTheEpochEveryRowCarries(t *testing.T) {
+	values := foldArinRollupRowsForTest(
+		clientLocationReliabilityRow{arinEpoch: 20, arinOldEpoch: 10, arinOldNonQuality: true},
+		clientLocationReliabilityRow{arinEpoch: 10, arinOldEpoch: 5, arinRisk: true},
+	)
+	if values[22] != int64(0) || values[23] != int64(10) || values[20] != true || values[21] != true {
+		t.Fatalf("spanning a restart: epochs %v/%v, old facts risk=%v non-quality=%v, want 0/10 with both rows' facts under 10",
+			values[22], values[23], values[20], values[21])
+	}
+	if values[18] != true || values[19] != false {
+		t.Fatalf("the latest columns changed: risk=%v non-quality=%v", values[18], values[19])
+	}
+	// an epoch one row does not carry is not available
+	values = foldArinRollupRowsForTest(
+		clientLocationReliabilityRow{arinEpoch: 20, arinOldEpoch: 10},
+		clientLocationReliabilityRow{arinEpoch: 10, arinOldEpoch: 5},
+		clientLocationReliabilityRow{arinEpoch: 20},
+	)
+	if values[22] != int64(0) || values[23] != int64(0) {
+		t.Fatalf("an epoch one row lacks: epochs %v/%v, want 0/0", values[22], values[23])
+	}
+	// the newest epoch every row carries, other than the common latest
+	values = foldArinRollupRowsForTest(
+		clientLocationReliabilityRow{arinEpoch: 20, arinOldEpoch: 10},
+		clientLocationReliabilityRow{arinEpoch: 20, arinOldEpoch: 5},
+	)
+	if values[22] != int64(20) || values[23] != int64(0) {
+		t.Fatalf("common latest, differing old: epochs %v/%v, want 20/0", values[22], values[23])
 	}
 }
