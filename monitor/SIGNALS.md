@@ -17402,8 +17402,9 @@ Quality and Speed under the `not_modern` reason, keeping it Online. Owner
 decision 2026-10-15: it turns on by itself at 2026-10-21 00:00 UTC, the
 code's default start, while `quality_speed_requires_modern_provider` is
 absent from provider.yml; every pass and request decides at its own instant.
-Its evidence comes from the capability probe (server/capprobe), which must be
-deployed and have swept the eligible providers before the start. Without
+Its evidence comes from the capability probe (server/capprobe), which ships
+switched off and must be switched on and have swept the eligible providers
+before the start. Without
 that evidence a provider reads `no_evidence`, and the flip would empty or
 gut both native buckets. This signal gives the owner warning while turning
 the gate on can still be postponed.
@@ -17448,14 +17449,18 @@ quiet.
 
 ACTION: decide before the start. To postpone, set
 `quality_speed_requires_modern_provider: false` in provider.yml: the kill
-switch, read at every pass's next settings read, so the next score export
-restores the buckets. To move the flip, set
-`quality_speed_modern_provider_start` to an RFC 3339 instant such as
-`2026-10-28T00:00:00Z`. A malformed start keeps the code's default, so
-confirm the moved start on `urnetwork_stats_provider_modern_gate_start_seconds`
-or with `bringyourctl provider inspect` after the config deploy; the switch
-is the reliable postponement. To let it flip, first deploy the capability
-probe and let it sweep the eligible providers until `no_evidence` is small.
+switch, after which the next score export restores the buckets. To move the
+flip, set `quality_speed_modern_provider_start` to an RFC 3339 instant such
+as `2026-10-28T00:00:00Z`. Either is a config release through the
+config-updater and a restart of every taskworker and API block, since a
+running container keeps the config version it was created with (the same
+procedure as server/capprobe/README.md, "Switching it on"), and it
+postpones the flip only when the restarts finish before the start. A
+malformed start keeps the code's default, so confirm the moved start on
+`urnetwork_stats_provider_modern_gate_start_seconds` or with
+`bringyourctl provider inspect` after the restart; the switch is the
+reliable postponement. To let it flip, first switch the capability probe on
+and let it sweep the eligible providers until `no_evidence` is small.
 After the start, a `modern-gate-flip-drop` page whose drop the shadow
 explains is answered with the same kill switch; a drop the shadow does not
 explain has another cause (§2.19, §2.23) and the gate is not the thing to

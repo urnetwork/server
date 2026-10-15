@@ -187,9 +187,11 @@ type egressIndexSettingsBlock struct {
 }
 
 // The defaults with the overrides of provider.yml, read on every call like the
-// rollout flag, so a config change takes effect on the next pass without a
-// restart. A missing provider.yml is the defaults, as it is for the rollout
-// flag; an unreadable value, or one out of range, keeps the default and says
+// rollout flag, so a process applies a changed file at its next pass. A warp
+// container sees only the config version it was created with, so a config
+// release reaches a running service with its restart (capprobe/README.md,
+// "Switching it on"). A missing provider.yml is the defaults, as it is for the
+// rollout flag; an unreadable value, or one out of range, keeps the default and says
 // so, since a typo in one weight must not take the index away from the whole
 // fleet. The file is parsed once, and each top-level key read here is decoded
 // on its own: the egress_index block, the URL-success rule's keys and the
