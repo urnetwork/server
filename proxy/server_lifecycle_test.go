@@ -10,8 +10,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"net"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -319,62 +321,82 @@ func TestProxyListenerConstructorsRetainBindFailure(t *testing.T) {
 	}
 }
 
-// Pins both real constructors and every address-family worker to the tested
-// supervisor seam rather than qualifying an unused helper.
+// Pins every real constructor and address-family worker of the socks/http
+// ingress and of the api (proxy_api.go, embedded as proxyApiAssemblySource) to
+// the tested supervisor seam rather than qualifying an unused helper.
 //
 //go:embed server.go
 var proxyListenerSource string
 
 // Direct untracked goroutine launches cannot silently bypass lifecycle joins.
 func TestProxyListenerProductionRunsUseOwnedWorkers(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "server.go", proxyListenerSource, 0)
-	if err != nil {
-		t.Fatal(err)
+	// the owned launches of each production function: a constructor starts its
+	// supervisor, and a run starts one listener worker per address family and
+	// port. NewApiServer only delegates to newApiServer.
+	wantLaunches := map[string]struct {
+		target string
+		count  int
+	}{
+		"NewHttpServer":    {target: "start", count: 1},
+		"NewSocks5Server":  {target: "start", count: 1},
+		"NewApiServer":     {target: "start", count: 0},
+		"newApiServer":     {target: "start", count: 1},
+		"httpServer.run":   {target: "startListener", count: 4},
+		"socks5Server.run": {target: "startListener", count: 2},
+		"apiServer.run":    {target: "startListener", count: 2},
 	}
 	seen := map[string]int{}
-	for _, declaration := range file.Decls {
-		function, ok := declaration.(*ast.FuncDecl)
-		if !ok {
-			continue
+	for _, source := range []struct {
+		name string
+		text string
+	}{
+		{name: "server.go", text: proxyListenerSource},
+		{name: "proxy_api.go", text: proxyApiAssemblySource},
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), source.name, source.text, 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-		name := function.Name.Name
-		want := 1
-		target := "start"
-		if name == "run" && function.Recv != nil {
-			pointer, ok := function.Recv.List[0].Type.(*ast.StarExpr)
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
-			receiver, ok := pointer.X.(*ast.Ident)
-			if !ok || (receiver.Name != "httpServer" && receiver.Name != "socks5Server") {
+			name := function.Name.Name
+			if function.Recv != nil {
+				pointer, ok := function.Recv.List[0].Type.(*ast.StarExpr)
+				if !ok {
+					continue
+				}
+				receiver, ok := pointer.X.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				name = receiver.Name + "." + name
+			}
+			want, ok := wantLaunches[name]
+			if !ok {
 				continue
 			}
-			name = receiver.Name + ".run"
-			target, want = "startListener", 2
-			if receiver.Name == "httpServer" {
-				want = 4
-			}
-		} else if name != "NewHttpServer" && name != "NewSocks5Server" {
-			continue
-		}
-		count := 0
-		ast.Inspect(function.Body, func(node ast.Node) bool {
-			if _, ok := node.(*ast.GoStmt); ok {
-				t.Errorf("%s launches a goroutine outside its listener supervisor", name)
-			}
-			if call, ok := node.(*ast.CallExpr); ok {
-				if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == target {
-					count++
+			count := 0
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				if _, ok := node.(*ast.GoStmt); ok {
+					t.Errorf("%s launches a goroutine outside its listener supervisor", name)
 				}
+				if call, ok := node.(*ast.CallExpr); ok {
+					if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == want.target {
+						count++
+					}
+				}
+				return true
+			})
+			if count != want.count {
+				t.Errorf("%s owned launches = %d, want %d", name, count, want.count)
 			}
-			return true
-		})
-		if count != want {
-			t.Errorf("%s owned launches = %d, want %d", name, count, want)
+			seen[name]++
 		}
-		seen[name]++
 	}
-	for _, name := range []string{"NewHttpServer", "NewSocks5Server", "httpServer.run", "socks5Server.run"} {
+	for _, name := range slices.Sorted(maps.Keys(wantLaunches)) {
 		if seen[name] != 1 {
 			t.Errorf("actual production wiring %s was not checked exactly once", name)
 		}

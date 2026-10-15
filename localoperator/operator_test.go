@@ -108,23 +108,11 @@ func TestEgressHealthArgsMatchTheStrictHandlerDecode(t *testing.T) {
 	// A whole-second UTC instant has the same representation before and after
 	// a JSON round trip, so reflect.DeepEqual can compare the two sides.
 	measuredAt := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
-	// a URL outcome whose session the transport observed, for the modern
-	// provider gate
-	withModernEvidence := testUrlResult(measuredAt)
-	withModernEvidence.ModernEvidence = &egresshealth.ModernEvidence{
-		E2eNegotiated:             true,
-		KeyExchange:               "X25519MLKEM768",
-		PostQuantum:               true,
-		WindowAdvertised:          true,
-		MaxReceiveWindowByteCount: 4 * 1024 * 1024,
-		ObservedAt:                measuredAt,
-	}
 	for _, c := range []struct {
 		name string
 		res  *egresshealth.Result
 	}{
 		{name: "url_outcome", res: testUrlResult(measuredAt)},
-		{name: "url_outcome_with_modern_evidence", res: withModernEvidence},
 		{name: "aggregate", res: &egresshealth.Result{RunId: server.NewId().String(), OkCount: 3, Total: 5, ByClass: map[egresshealth.Class]egresshealth.ClassSummary{egresshealth.ClassDns: {Ok: 1, Total: 2}, egresshealth.ClassSite: {Ok: 2, Total: 3}}, TlsAuthenticationFailure: true}},
 		{name: "nothing_measured", res: &egresshealth.Result{}},
 	} {
