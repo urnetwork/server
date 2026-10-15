@@ -99,6 +99,13 @@ const arindbCanaryDecisionKey = "{arindb_canary_decision}"
 // complete.
 const arindbCanaryEmptiedCityLimit = 100
 
+// The serving epoch's changes are kept over this window, at most the limit of
+// them, so a canary switching the fleet back and forth pages.
+const (
+	arindbCanaryServingChangeWindow = 6 * time.Hour
+	arindbCanaryServingChangeLimit  = 64
+)
+
 // The cohort is compared with its largest size over this window, sampled at
 // most once per interval, so a latest database that silently drops providers
 // from the cohort shows even while a rolling restart drops them gradually.
@@ -472,6 +479,24 @@ type ArindbCanaryCohort struct {
 	LossRatio float64 `json:"loss_ratio"`
 }
 
+// The serving epoch's changes over the window, this decision's included: a
+// decision serving another epoch than the previous one is a change.
+func arindbCanaryServingChangesAfter(previous *ArindbCanaryDecision, servingEpoch int64, decidedAt time.Time) []time.Time {
+	changes := []time.Time{}
+	if previous == nil {
+		return changes
+	}
+	for _, at := range previous.ServingChanges {
+		if !at.After(decidedAt) && decidedAt.Sub(at) <= arindbCanaryServingChangeWindow {
+			changes = append(changes, at)
+		}
+	}
+	if previous.ServingEpoch != servingEpoch {
+		changes = append(changes, decidedAt)
+	}
+	return changes[max(0, len(changes)-arindbCanaryServingChangeLimit):]
+}
+
 // The cohort of this decision against the previous decision's history.
 func arindbCanaryCohortAfter(previous *ArindbCanaryDecision, providers int, decidedAt time.Time) ArindbCanaryCohort {
 	cohort := ArindbCanaryCohort{History: []ArindbCanaryCohortSample{}}
@@ -513,6 +538,9 @@ type ArindbCanaryDecision struct {
 	ServingBasis string `json:"serving_basis"`
 	// the decision this one followed, "" without one
 	PreviousDecisionId string `json:"previous_decision_id,omitempty"`
+	// when the serving epoch changed over the last six hours, this decision
+	// included, oldest first
+	ServingChanges []time.Time `json:"serving_changes"`
 	// warming: the paired sample reached min_paired_sample and its Quality
 	// comparison trips, so the latest is not served
 	WarmingTripped bool `json:"warming_tripped"`
@@ -567,8 +595,8 @@ func decideArindbCanary(
 	previous *ArindbCanaryDecision,
 	sourceStartedAt time.Time,
 	decidedAt time.Time,
-) *ArindbCanaryDecision {
-	decision := &ArindbCanaryDecision{
+) (decision *ArindbCanaryDecision) {
+	decision = &ArindbCanaryDecision{
 		Version:         ArindbCanaryDecisionVersion,
 		DecisionId:      server.NewId().String(),
 		Latest:          ArindbCanaryDatabase{State: pair.latest.State, BuildEpoch: pair.latest.BuildEpoch, Sha256: pair.latest.Sha256},
@@ -581,6 +609,10 @@ func decideArindbCanary(
 	if previous != nil {
 		decision.PreviousDecisionId = previous.DecisionId
 	}
+	// every state below counts a change of the serving epoch
+	defer func() {
+		decision.ServingChanges = arindbCanaryServingChangesAfter(previous, decision.ServingEpoch, decidedAt)
+	}()
 	for _, bucket := range ProviderEgressBuckets {
 		decision.Buckets[bucket] = &ArindbCanaryBucket{
 			Countries:        map[string]ArindbCanaryCount{},

@@ -326,6 +326,36 @@ func TestArindbCanaryComparesTheCohortWithItsRecentSize(t *testing.T) {
 	}
 }
 
+// Each decision that serves another epoch than the previous one is a change,
+// kept for six hours so a canary that switches the fleet back and forth pages.
+func TestArindbCanaryCountsTheServingEpochsChanges(t *testing.T) {
+	settings := defaultArindbCanarySettings()
+	settings.ReleasePassingRuns = 1
+	var decision *ArindbCanaryDecision
+	at := func(minutes int, lost int) {
+		t.Helper()
+		decision = decideArindbCanary(testCanaryPair(), testCanaryLossRun(lost), testCanaryMembership, settings, decision,
+			testCanaryClock.Add(time.Duration(minutes-1)*time.Minute), testCanaryClock.Add(time.Duration(minutes)*time.Minute))
+	}
+	at(0, 0)
+	if len(decision.ServingChanges) != 0 {
+		t.Fatalf("the first decision counted %v", decision.ServingChanges)
+	}
+	// a trip, a release and another trip switch the fleet three times
+	at(10, 20)
+	at(20, 0)
+	at(30, 0)
+	at(40, 20)
+	if len(decision.ServingChanges) != 3 || !decision.ServingChanges[2].Equal(testCanaryClock.Add(40*time.Minute)) {
+		t.Fatalf("serving changes %v, want three", decision.ServingChanges)
+	}
+	// the window forgets changes older than six hours
+	at(400, 20)
+	if len(decision.ServingChanges) != 1 {
+		t.Fatalf("after the window: %v", decision.ServingChanges)
+	}
+}
+
 // The breaker compares only providers with facts for both databases: one
 // classified by a process without an old database cannot count as a loss.
 func TestArindbCanaryComparesOnlyPairedProviders(t *testing.T) {
