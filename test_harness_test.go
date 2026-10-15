@@ -15,6 +15,9 @@ import (
 
 const testServerRunnerChildMode = "URNETWORK_TEST_SERVER_RUNNER_CHILD_MODE"
 
+// Pins the mandatory, caller-independent admission selection in the real script.
+const testServerRunnerAdmissionPattern = "^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$"
+
 // These lists pin the checked-in manifest to the resources used by the local
 // full-suite environment rather than deriving the fixture from its subject.
 var (
@@ -562,8 +565,9 @@ func TestConnectTestScriptPropagatesDiscoveryFailure(t *testing.T) {
 	}
 }
 
-// Builds an isolated copy of the root runner with four synthetic package tiers
-// and injected go/grep commands; no repository test or service preflight runs.
+// Models the mandatory admission command separately from the four output-filter
+// tiers; every synthetic go invocation records its exact directory and arguments.
+// No repository test or service preflight runs.
 func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, string, string) {
 	t.Helper()
 	workspaceRoot := t.TempDir()
@@ -594,6 +598,20 @@ func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, stri
 		filepath.Join(serverDir, "test-dirs.sh"):                                 "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n'\n",
 		filepath.Join(workspaceRoot, "tests", "network-intensive-suite-lock.sh"): "#!/bin/sh\n[ \"$1\" = --verify-held ] && [ \"$2\" = run-all ]\n",
 		filepath.Join(binDir, "go"): `#!/bin/sh
+printf '%s\0' "${PWD#"$URNETWORK_ROOT"/}" "${WARP_TEST_ENV_FAIL_FAST:-}" "$@" >> "$URNETWORK_ROOT/go-invocations"
+printf '\n' >> "$URNETWORK_ROOT/go-invocations"
+if [ "$PWD" = "$URNETWORK_ROOT/server" ]; then
+  if [ "$#" -ne 9 ] || [ "$1" != test ] || [ "$2" != -p=1 ] ||
+     [ "$3" != -race ] || [ "$4" != -count=1 ] || [ "$5" != -timeout=5m ] ||
+     [ "$6" != ./model ] || [ "$7" != ./taskworker/work ] || [ "$8" != -run ] ||
+     [ "$9" != '^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$' ] ||
+     [ "${WARP_TEST_ENV_FAIL_FAST:-}" != 1 ]; then
+    printf 'unexpected admission invocation\n' >&2
+    exit 86
+  fi
+  printf 'test-runner-admission\n'
+  exit "${TEST_SERVER_RUNNER_ADMISSION_STATUS:-0}"
+fi
 "$TEST_SERVER_RUNNER_BINARY" -test.run="^${TEST_SERVER_RUNNER_TEST_NAME}$" -test.count=1
 test_status=$?
 if [ -n "${TEST_SERVER_RUNNER_UPSTREAM_STATUS:-}" ]; then
@@ -609,6 +627,30 @@ exit "$test_status"
 		}
 	}
 	return runnerPath, binDir, workspaceRoot
+}
+
+// Captures the exact first command independently of caller-supplied test flags.
+func testServerRunnerAdmissionInvocation() []string {
+	return []string{
+		"server", "1", "test", "-p=1", "-race", "-count=1", "-timeout=5m",
+		"./model", "./taskworker/work", "-run", testServerRunnerAdmissionPattern,
+	}
+}
+
+// Checks every command in order, including argument boundaries and fail-fast scope.
+func requireTestServerRunnerInvocations(t *testing.T, workspaceRoot string, invocations [][]string) {
+	t.Helper()
+	record, err := os.ReadFile(filepath.Join(workspaceRoot, "go-invocations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRecord := ""
+	for _, invocation := range invocations {
+		wantRecord += strings.Join(invocation, "\x00") + "\x00\n"
+	}
+	if string(record) != wantRecord {
+		t.Fatalf("runner invocations = %q; want %q", record, wantRecord)
+	}
 }
 
 // Binary-looking test output remains text throughout all four runner tiers, so
@@ -642,16 +684,19 @@ exec "$TEST_SERVER_RUNNER_CAT"`
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", runnerPath)
+	callerArgs := []string{"-run", "^Test selected fixture$", "-count=2", "-short"}
+	cmd := exec.Command("bash", append([]string{runnerPath}, callerArgs...)...)
 	cmd.Env = testCommandEnvironment(map[string]string{
-		"PATH":                             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"TEST_SERVER_RUNNER_BINARY":        testBinary,
-		"TEST_SERVER_RUNNER_CAT":           catPath,
-		"TEST_SERVER_RUNNER_TEST_NAME":     "TestServerTestScriptTreatsBinaryOutputAsText",
-		"URNETWORK_NETWORK_TEST_LOCK_HELD": "1",
-		"URNETWORK_ROOT":                   workspaceRoot,
-		testServerRunnerChildMode:          "binary",
-	})
+		"WARP_TEST_ENV_FAIL_FAST":             "0",
+		"TEST_SERVER_RUNNER_ADMISSION_STATUS": "0",
+		"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TEST_SERVER_RUNNER_BINARY":           testBinary,
+		"TEST_SERVER_RUNNER_CAT":              catPath,
+		"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptTreatsBinaryOutputAsText",
+		"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+		"URNETWORK_ROOT":                      workspaceRoot,
+		testServerRunnerChildMode:             "binary",
+	}, "TEST_SERVER_RUNNER_UPSTREAM_STATUS")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("runner rejected binary test output: %v\n%s", err, output)
@@ -664,6 +709,16 @@ exec "$TEST_SERVER_RUNNER_CAT"`
 		if count := bytes.Count(output, signature); count != 4 {
 			t.Fatalf("binary runner signature %q count = %d; want 4", signature, count)
 		}
+	}
+	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
+		testServerRunnerAdmissionInvocation(),
+		append([]string{"server/proxy", "0", "test", "-timeout", "30m", "-v"}, callerArgs...),
+		append([]string{"server/connect/perfvar", "0", "test", "-timeout", "0", "-p=1", "-parallel=1", "-v"}, callerArgs...),
+		append([]string{"server/connect/perfvar", "0", "test", "-timeout", "30m", "-p=1", "-parallel=1", "-short", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
+		append([]string{"server/fixture", "0", "test", "-timeout", "0", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
+	})
+	if count := bytes.Count(output, []byte("test-runner-admission\n")); count != 1 {
+		t.Fatalf("admission completion count = %d; want 1", count)
 	}
 	if bytes.Contains(output, []byte("--- FAIL")) || bytes.Contains(output, []byte("[flaky]")) {
 		t.Fatal("captured binary fixture leaked a synthetic failure signature")
@@ -692,19 +747,25 @@ func TestServerTestScriptReportsSignaledOutputFilter(t *testing.T) {
 	runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nkill -TERM \"$$\"\n")
 	cmd := exec.Command("bash", runnerPath)
 	cmd.Env = testCommandEnvironment(map[string]string{
-		"PATH":                               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"TEST_SERVER_RUNNER_BINARY":          testBinary,
-		"TEST_SERVER_RUNNER_TEST_NAME":       "TestServerTestScriptReportsSignaledOutputFilter",
-		"TEST_SERVER_RUNNER_UPSTREAM_STATUS": upstreamStatusPath,
-		"URNETWORK_NETWORK_TEST_LOCK_HELD":   "1",
-		"URNETWORK_ROOT":                     workspaceRoot,
-		testServerRunnerChildMode:            "filter-signal",
+		"WARP_TEST_ENV_FAIL_FAST":             "0",
+		"TEST_SERVER_RUNNER_ADMISSION_STATUS": "0",
+		"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TEST_SERVER_RUNNER_BINARY":           testBinary,
+		"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptReportsSignaledOutputFilter",
+		"TEST_SERVER_RUNNER_UPSTREAM_STATUS":  upstreamStatusPath,
+		"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+		"URNETWORK_ROOT":                      workspaceRoot,
+		testServerRunnerChildMode:             "filter-signal",
 	})
 	output, err := cmd.CombinedOutput()
 	exitErr, ok := err.(*exec.ExitError)
 	if !ok || exitErr.ExitCode() != 143 {
 		t.Fatalf("runner filter failure = %v, %q; want exit 143", err, output)
 	}
+	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
+		testServerRunnerAdmissionInvocation(),
+		{"server/proxy", "0", "test", "-timeout", "30m", "-v"},
+	})
 	upstreamStatusBytes, readErr := os.ReadFile(upstreamStatusPath)
 	if readErr != nil {
 		t.Fatal(readErr)
@@ -717,6 +778,104 @@ func TestServerTestScriptReportsSignaledOutputFilter(t *testing.T) {
 	}
 	if bytes.Contains(output, []byte("--- FAIL")) || bytes.Contains(output, []byte("[flaky]")) {
 		t.Fatal("captured filter fixture leaked a synthetic failure signature")
+	}
+}
+
+// A failed mandatory admission command forwards its exact status and prevents
+// every filtered package, even when the caller requested a narrow test subset.
+func TestServerTestScriptPropagatesAdmissionFailure(t *testing.T) {
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []int{53, 143} {
+		runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nprintf 'unexpected-filter\\n' >> \"$URNETWORK_ROOT/filter-invocations\"\nexit 87\n")
+		upstreamStatusPath := filepath.Join(workspaceRoot, "upstream-status")
+		cmd := exec.Command("bash", runnerPath, "-run", "^Test selected fixture$", "-short")
+		cmd.Env = testCommandEnvironment(map[string]string{
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"TEST_SERVER_RUNNER_BINARY":           testBinary,
+			"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptTreatsBinaryOutputAsText",
+			"TEST_SERVER_RUNNER_ADMISSION_STATUS": strconv.Itoa(status),
+			"TEST_SERVER_RUNNER_UPSTREAM_STATUS":  upstreamStatusPath,
+			"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+			"URNETWORK_ROOT":                      workspaceRoot,
+			"WARP_TEST_ENV_FAIL_FAST":             "0",
+			testServerRunnerChildMode:             "binary",
+		})
+		output, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != status {
+			t.Fatalf("admission status %d: runner = %v, %q", status, err, output)
+		}
+		requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{testServerRunnerAdmissionInvocation()})
+		for _, path := range []string{upstreamStatusPath, filepath.Join(workspaceRoot, "filter-invocations")} {
+			if record, err := os.ReadFile(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("admission status %d ran a later child: record=%q err=%v", status, record, err)
+			}
+		}
+		if bytes.Count(output, []byte("test-runner-admission\n")) != 1 ||
+			bytes.Contains(output, []byte("test-runner-binary-prefix")) ||
+			bytes.Contains(output, []byte("test output filter failed")) {
+			t.Fatalf("admission status %d crossed the filtered-output boundary: %q", status, output)
+		}
+	}
+}
+
+// A successful filter must not mask a test failure or permit the next package.
+func TestServerTestScriptPreservesUpstreamFailure(t *testing.T) {
+	if os.Getenv(testServerRunnerChildMode) == "upstream-failure" {
+		payload := []byte("test-runner-upstream-failure\n")
+		writtenByteCount, err := os.Stdout.Write(payload)
+		if err != nil || writtenByteCount != len(payload) {
+			os.Exit(141)
+		}
+		os.Exit(70)
+	}
+
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catPath, err := exec.LookPath("cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nexec \"$TEST_SERVER_RUNNER_CAT\"\n")
+	upstreamStatusPath := filepath.Join(workspaceRoot, "upstream-status")
+	cmd := exec.Command("bash", runnerPath)
+	cmd.Env = testCommandEnvironment(map[string]string{
+		"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TEST_SERVER_RUNNER_BINARY":           testBinary,
+		"TEST_SERVER_RUNNER_CAT":              catPath,
+		"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptPreservesUpstreamFailure",
+		"TEST_SERVER_RUNNER_ADMISSION_STATUS": "0",
+		"TEST_SERVER_RUNNER_UPSTREAM_STATUS":  upstreamStatusPath,
+		"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+		"URNETWORK_ROOT":                      workspaceRoot,
+		"WARP_TEST_ENV_FAIL_FAST":             "0",
+		testServerRunnerChildMode:             "upstream-failure",
+	})
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 70 {
+		t.Fatalf("runner upstream failure = %v, %q; want exit 70", err, output)
+	}
+	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
+		testServerRunnerAdmissionInvocation(),
+		{"server/proxy", "0", "test", "-timeout", "30m", "-v"},
+	})
+	upstreamStatusBytes, err := os.ReadFile(upstreamStatusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(upstreamStatusBytes) != "70\n" {
+		t.Fatalf("upstream status = %q; want 70", upstreamStatusBytes)
+	}
+	if bytes.Count(output, []byte("test-runner-admission\n")) != 1 ||
+		bytes.Count(output, []byte("test-runner-upstream-failure\n")) != 1 ||
+		bytes.Contains(output, []byte("test output filter failed")) {
+		t.Fatalf("successful filter masked the upstream boundary: %q", output)
 	}
 }
 
