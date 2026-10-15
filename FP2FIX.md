@@ -472,7 +472,10 @@ provider cannot resolve the probe client's key.
   `modern-gate-readiness`) reads the shadow from 72 hours before the start:
   WARN when the gate would take more than half of Quality or of Speed out,
   PAGE from 24 hours before, and PAGE when a bucket falls by more than half
-  within an hour after the start. To postpone, set
+  after the start, until 18:00 UTC on the start's day. It reads the gate and
+  its start per running taskworker too: a taskworker that publishes neither,
+  decides the gate differently or schedules another start WARNs before the
+  earliest start and PAGEs from it. To postpone, set
   `quality_speed_requires_modern_provider: false`; to move the instant, set
   `quality_speed_modern_provider_start`. Either is a config release and a
   restart of every taskworker and API block, as for the probe's switch, and

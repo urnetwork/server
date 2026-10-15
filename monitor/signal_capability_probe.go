@@ -128,7 +128,8 @@ type capabilityProbeObservation struct {
 	oldestStart time.Time
 	// whether the modern provider gate holds Quality and Speed on any
 	// running taskworker, as their stats collectors publish it
-	// (urnetwork_stats_provider_modern_gate_on), and whether any does
+	// (urnetwork_stats_provider_modern_gate_on), and whether any publishes it
+	// at all
 	fleetGateOn    bool
 	fleetGateKnown bool
 }
@@ -311,7 +312,7 @@ func capabilityProbeStalledFinding(now time.Time, desired capabilityProbeDesired
 		mechanism: "The probe is the only writer of the modern provider gate's evidence, and a live chain finishes a pass at least every fifteen minutes. A chain whose task row is gone, whose passes fail (settings, prober shard, funding readiness, a page read or an evidence write), or whose taskworkers run an image without the probe refreshes nothing; with the gate on, providers' evidence ages toward stale_evidence and they leave Quality and Speed.",
 		baseline:  "The newest pass a taskworker finished (urnetwork_capability_probe_last_pass_timestamp_seconds) is under 30 minutes old, counted from the oldest running taskworker's start when none has finished since; PAGE past six hours with the gate on: on any running taskworker as their stats collectors publish it (urnetwork_stats_provider_modern_gate_on), or, while none does, by the desired provider.yml's quality_speed_requires_modern_provider: true or, with that switch absent, from the gate's start. Evidence stays fresh for seven days after its measurement, so a shorter outage, planned database maintenance included, takes nothing out.",
 		observed:  fmt.Sprintf("last_pass_age_seconds=%s oldest_taskworker_uptime_seconds=%d taskworkers_exporting=%d gate=%s gate_source=%s desired_gate_schedule=%s", lastPassAge, int64(now.Sub(observation.oldestStart)/time.Second), observation.exporting, gate, gateSource, gateSchedule),
-		evidence:  "Only fleet aggregates of the probe's pass timestamp and the taskworkers' start times leave Mimir; no host, task or provider identity is included.",
+		evidence:  "Only fleet aggregates of the probe's pass timestamp, the taskworkers' start times and their modern provider gate leave Mimir; no host, task or provider identity is included.",
 		action:    "Check that the probe's pending_task row exists (run_once_key capability_probe, capprobe/README.md), then read passes_total{result=\"failed\"}, readiness_failures_total and the taskworker log's [capprobe] and task error lines as SIGNALS.md §2.19g says. taskworkers_exporting=0 means no running taskworker has the probe.",
 		verify:    "passes_total{result=~\"measured|waiting\"} advances and the newest last_pass_timestamp_seconds is under 30 minutes old.",
 		playbook:  "SIGNALS.md §2.19g and capprobe/README.md",
