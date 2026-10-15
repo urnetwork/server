@@ -463,6 +463,11 @@ func (self *SlackAlertNotifier) observeWithLock(now time.Time, signalKey string,
 		if isVisibilityAlert(alert) {
 			complete = false
 		}
+		// a state the configuration chose, reported every run, is not an
+		// incident: it would only fill every start digest
+		if alert.configuredOff {
+			continue
+		}
 		key := slackIncidentKey(alert)
 		if previous, ok := keyAlerts[key]; ok && (previous.Severity == SeverityPage || alert.Severity != SeverityPage) {
 			continue

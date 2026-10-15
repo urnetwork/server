@@ -197,6 +197,33 @@ func TestSlackAlertNotifierKeepsAGlobalPageWhileHostsAreBlocked(t *testing.T) {
 	}
 }
 
+// Without its flag the PG query sample reports pg-query-sample-unavailable
+// every run. That standing, configured state never raises an incident or
+// joins a start digest; it still marks its runs unobservable.
+func TestSlackAlertNotifierIgnoresAConfiguredOffQuerySample(t *testing.T) {
+	settings := syntheticSettings(&syntheticSource{})
+	settings.SSHUser = "monitor"
+	for _, digest := range []bool{false, true} {
+		webhook, webhookUrl := newFakeSlackWebhook(t)
+		harness := newSlackTestHarness()
+		notifierSettings := harness.settings(webhookUrl)
+		if digest {
+			notifierSettings = harness.digestSettings(webhookUrl)
+		}
+		notifier := NewSlackAlertNotifier(notifierSettings)
+		postSignalRunsThroughTheGate(t, NewPgQuerySampleSignal(), settings, 3, func(int) {}, notifier)
+		closeSlackNotifier(t, notifier)
+		if texts := webhook.posted(); len(texts) != 0 {
+			t.Errorf("digest %t: posted %q", digest, texts)
+		}
+	}
+	// the alert itself is what the disabled sampler reports
+	sample, err := NewPgQuerySampleSignal().Run(context.Background(), settings)
+	if err != nil || len(sample) != 1 || sample[0].Class != "pg-query-sample-unavailable" || !sample[0].configuredOff || !sample[0].unobservable {
+		t.Fatalf("disabled sample = %+v, %v", sample, err)
+	}
+}
+
 // The direct alert constructors of unknown states mark their alerts, and
 // ordinary alerts stay unmarked.
 func TestEveryVisibilityAlertConstructorMarksItsAlert(t *testing.T) {

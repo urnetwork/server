@@ -133,7 +133,7 @@ func alertFromFinding(settings SignalSettings, number, key, name string, f findi
 		// Use the public probe key, never selectors or changing coverage counts.
 		f.frame = key
 	}
-	return Alert{
+	alert := Alert{
 		SignalNumber: number,
 		SignalKey:    key,
 		SignalID:     f.probeId,
@@ -157,6 +157,8 @@ func alertFromFinding(settings SignalSettings, number, key, name string, f findi
 		Playbook:     f.playbook,
 		unobservable: f.isUnobservable(),
 	}
+	alert.configuredOff = f.configuredOff
+	return alert
 }
 
 func acceptProbeIDs(ids ...string) func(finding) bool {

@@ -85,6 +85,9 @@ type finding struct {
 	// the finding reports that part of its signal's source could not be
 	// observed (see isUnobservable)
 	unobservable bool
+	// the configuration turned the observation off: a standing state of this
+	// watcher, not an incident
+	configuredOff bool
 }
 
 // An unobservable finding says part of its signal's source could not be
