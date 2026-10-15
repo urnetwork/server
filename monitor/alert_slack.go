@@ -36,20 +36,20 @@ package monitor
 // cap, transitions are folded into one summary message, sent as soon as the
 // cap allows. Handle never waits on the network: it decides transitions under
 // stateLock and hands messages to the one sender goroutine through a bounded
-// queue with a zero-wait offer. A full queue drops the message and counts it
-// in the next summary. The sender spaces posts by postInterval, the rate Slack
-// accepts for incoming webhooks.
+// queue with a zero-wait offer. A transition the full queue refuses is held
+// for the summary like one over the cap, pages first. The sender spaces posts
+// by postInterval, the rate Slack accepts for incoming webhooks.
 //
 // A post that Slack refuses with a 429 or a 503 is retried once, after the
 // wait Slack asks for in Retry-After (RetryDelay when it names none), at most
 // MaxRetryDelay. Those answers mean Slack did not take the post. A timeout or
 // any other 5xx is not retried: Slack may have taken the post already, and a
 // retry would post it twice. Only the sender waits; Handle keeps offering,
-// and a queue that fills meanwhile drops and counts as above. A message that
-// fails, retry included, is undelivered. Once a post succeeds again, or the
-// periodic report probe finds Slack accepting posts, one report says how many
-// messages failed and when they were queued; Close tries a pending report
-// once more.
+// and a queue that fills meanwhile holds transitions for the summary. A
+// message that fails, retry included, is undelivered. Once a post succeeds
+// again, or the periodic report probe finds Slack accepting posts, one report
+// says how many messages failed and when they were queued; Close tries a
+// pending report once more.
 //
 // The webhook URL is a credential. It is never logged, put in a message, or
 // put in an error. net/http errors embed the request URL, so a failed post is
@@ -83,6 +83,10 @@ import (
 
 // Lines of a rate-limit summary that name a transition; the rest are counted.
 const slackSummaryLines = 20
+
+// Transitions kept for the next summary, which picks the lines it shows from
+// them; beyond this they are only counted.
+const slackSummaryHeldLimit = 1000
 
 // Spacing of undelivered reports while Slack keeps refusing them. Each report
 // is also the probe for whether Slack takes posts again.
@@ -267,13 +271,14 @@ type SlackAlertNotifier struct {
 	messages   chan slackMessage
 	done       chan struct{}
 
-	stateLock       sync.Mutex
-	closed          bool
-	keyIncidents    map[string]*slackIncident
-	sentTimes       []time.Time
+	stateLock    sync.Mutex
+	closed       bool
+	keyIncidents map[string]*slackIncident
+	sentTimes    []time.Time
+	// transitions held for the next summary, over the cap or refused by the
+	// full queue
 	suppressed      []slackTransition
 	suppressedCount int
-	droppedCount    int
 	// when the notifier started, for StartWindow
 	startTime time.Time
 	// signal key -> executions that did not fail
@@ -390,7 +395,7 @@ func (self *SlackAlertNotifier) Close(ctx context.Context) {
 		if 0 < len(self.startDigest) {
 			heldTexts = append(heldTexts, self.startDigestTextWithLock())
 		}
-		if 0 < self.suppressedCount || 0 < self.droppedCount {
+		if 0 < self.suppressedCount {
 			heldTexts = append(heldTexts, self.summaryTextWithLock())
 		}
 		for _, text := range heldTexts {
@@ -613,55 +618,62 @@ func (self *SlackAlertNotifier) admitWithLock(now time.Time, transitions []slack
 		self.startDigestDue = false
 		digestBlocking = false
 	}
-	if !digestBlocking && (0 < self.suppressedCount || 0 < self.droppedCount) && allowed() && offer(self.summaryTextWithLock()) {
+	if !digestBlocking && 0 < self.suppressedCount && allowed() && offer(self.summaryTextWithLock()) {
 		self.suppressed = nil
 		self.suppressedCount = 0
-		self.droppedCount = 0
 	}
 	for _, transition := range posting {
-		if !digestBlocking && self.suppressedCount == 0 && allowed() {
-			if !offer(slackTransitionText(self.settings.Environment, transition, self.settings.ClearAfterCompleteRuns)) {
-				self.droppedCount++
-			}
+		// a transition the full queue refuses is held like one over the cap,
+		// so the summary names it and later transitions stay behind it
+		if !digestBlocking && self.suppressedCount == 0 && allowed() &&
+			offer(slackTransitionText(self.settings.Environment, transition, self.settings.ClearAfterCompleteRuns)) {
 			continue
 		}
 		self.suppressedCount++
-		if len(self.suppressed) < slackSummaryLines {
+		if len(self.suppressed) < slackSummaryHeldLimit {
 			self.suppressed = append(self.suppressed, transition)
 		}
 	}
 }
 
-// The rate-limit summary of the held transitions and dropped messages.
+// The summary of the held transitions. Incidents with a page raise or
+// escalation lead, each incident's lines in order, so a page is named even
+// when the summary has more lines than it shows.
 func (self *SlackAlertNotifier) summaryTextWithLock() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[RATE LIMIT] (%s)", slackEscape(slackEnvironment(self.settings.Environment)))
-	if 0 < self.suppressedCount {
-		fmt.Fprintf(
-			&b,
-			" %d alert transition(s) were not posted one by one (at most %d messages per minute):",
-			self.suppressedCount,
-			self.settings.MaxMessagesPerMinute,
-		)
-		label := func(transition slackTransition) string {
-			switch transition.kind {
-			case slackEscalated:
-				return "[PAGE] escalated"
-			case slackCleared:
-				return "[CLEARED] " + slackSeverityLabel(transition.alert.Severity)
-			default:
-				return "[" + slackSeverityLabel(transition.alert.Severity) + "] raised"
-			}
-		}
-		for _, transition := range self.suppressed {
-			fmt.Fprintf(&b, "\n- %s: %s", label(transition), slackIdentityLine(transition.alert))
-		}
-		if hidden := self.suppressedCount - len(self.suppressed); 0 < hidden {
-			fmt.Fprintf(&b, "\n- and %d more", hidden)
+	fmt.Fprintf(
+		&b,
+		"[RATE LIMIT] (%s) %d alert transition(s) were not posted one by one (at most %d messages per minute, or the sender was backlogged):",
+		slackEscape(slackEnvironment(self.settings.Environment)),
+		self.suppressedCount,
+		self.settings.MaxMessagesPerMinute,
+	)
+	pageKeys := map[string]bool{}
+	for _, transition := range self.suppressed {
+		if transition.kind == slackEscalated || (transition.kind == slackRaised && transition.alert.Severity == SeverityPage) {
+			pageKeys[slackIncidentKey(transition.alert)] = true
 		}
 	}
-	if 0 < self.droppedCount {
-		fmt.Fprintf(&b, "\n%d message(s) were dropped while the Slack sender was backlogged.", self.droppedCount)
+	held := append([]slackTransition(nil), self.suppressed...)
+	sort.SliceStable(held, func(i, j int) bool {
+		return pageKeys[slackIncidentKey(held[i].alert)] && !pageKeys[slackIncidentKey(held[j].alert)]
+	})
+	label := func(transition slackTransition) string {
+		switch transition.kind {
+		case slackEscalated:
+			return "[PAGE] escalated"
+		case slackCleared:
+			return "[CLEARED] " + slackSeverityLabel(transition.alert.Severity)
+		default:
+			return "[" + slackSeverityLabel(transition.alert.Severity) + "] raised"
+		}
+	}
+	shown := held[:min(len(held), slackSummaryLines)]
+	for _, transition := range shown {
+		fmt.Fprintf(&b, "\n- %s: %s", label(transition), slackIdentityLine(transition.alert))
+	}
+	if hidden := self.suppressedCount - len(shown); 0 < hidden {
+		fmt.Fprintf(&b, "\n- and %d more", hidden)
 	}
 	b.WriteString("\nThe monitor's alert output carries every alert.")
 	return b.String()

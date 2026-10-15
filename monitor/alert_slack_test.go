@@ -440,7 +440,7 @@ func TestSlackAlertNotifierRateLimitsWithASummary(t *testing.T) {
 		"[WARN] raised (synthetic): Active client backends on pg-1",
 		"[WARN] raised (synthetic): Active client backends on pg-2",
 		"[WARN] raised (synthetic): Active client backends on pg-3",
-		"[RATE LIMIT] (synthetic) 3 alert transition(s) were not posted one by one (at most 3 messages per minute):",
+		"[RATE LIMIT] (synthetic) 3 alert transition(s) were not posted one by one (at most 3 messages per minute, or the sender was backlogged):",
 	)
 	for _, want := range []string{
 		"- [WARN] raised: pg/active-pileup · active-pileup · pg-4",
@@ -834,7 +834,7 @@ func TestSlackAlertNotifierProbesWithTheUndeliveredReport(t *testing.T) {
 }
 
 // Handle returns while the sender waits to retry. Executions meanwhile fill
-// the bounded queue, and what does not fit is dropped and counted.
+// the bounded queue, and what does not fit is held for the summary.
 func TestSlackAlertNotifierHandleNeverWaitsForARetry(t *testing.T) {
 	webhook, webhookUrl := newFakeSlackWebhook(t)
 	webhook.answerNext(fakeSlackResponse{status: http.StatusServiceUnavailable})
@@ -877,12 +877,86 @@ func TestSlackAlertNotifierHandleNeverWaitsForARetry(t *testing.T) {
 	notifier.flushSummary()
 	closeSlackNotifier(t, notifier)
 
-	requireSlackTexts(t, webhook.posted(),
+	texts := webhook.posted()
+	requireSlackTexts(t, texts,
 		"[WARN] raised (synthetic): Active client backends on pg-1",
 		"[WARN] raised (synthetic): Active client backends on pg-2",
 		"[WARN] raised (synthetic): Active client backends on pg-3",
-		"[RATE LIMIT] (synthetic)\n3 message(s) were dropped while the Slack sender was backlogged.",
+		"[RATE LIMIT] (synthetic) 3 alert transition(s) were not posted one by one",
 	)
+	for _, target := range []string{"pg-4", "pg-5", "pg-6"} {
+		if !strings.Contains(texts[3], "- [WARN] raised: pg/active-pileup · active-pileup · "+target) {
+			t.Errorf("summary does not name %s: %q", target, texts[3])
+		}
+	}
+}
+
+// A transition the full queue refuses is held like one over the cap: the
+// summary names it, an incident with a page first, instead of counting a drop.
+func TestSlackAlertNotifierNamesTransitionsTheFullQueueRefused(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	release := webhook.holdUntilReleased()
+	harness := newSlackTestHarness()
+	settings := harness.settings(webhookUrl)
+	settings.QueueSize = 1
+	settings.MaxMessagesPerMinute = 100
+	notifier := NewSlackAlertNotifier(settings)
+
+	active := Alerts{slackTestAlert("pg-1", "", SeverityWarn)}
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	// the sender holds pg-1 at the webhook, and pg-2 fills the queue
+	awaitSlackWebhook(t, webhook.arrived, 1, "request")
+	active = append(active, slackTestAlert("pg-2", "", SeverityWarn))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	// the full queue refuses a warning, then a page
+	active = append(active, slackTestAlert("pg-3", "", SeverityWarn))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	active = append(active, slackTestAlert("pg-4", "", SeverityPage))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	close(release)
+	awaitSlackWebhook(t, webhook.answered, 2, "answer")
+	notifier.flushSummary()
+	closeSlackNotifier(t, notifier)
+
+	requireSlackTexts(t, webhook.posted(),
+		"[WARN] raised (synthetic): Active client backends on pg-1",
+		"[WARN] raised (synthetic): Active client backends on pg-2",
+		"[RATE LIMIT] (synthetic) 2 alert transition(s) were not posted one by one (at most 100 messages per minute, or the sender was backlogged):\n"+
+			"- [PAGE] raised: pg/active-pileup · active-pileup · pg-4\n"+
+			"- [WARN] raised: pg/active-pileup · active-pileup · pg-3\n",
+	)
+}
+
+// A summary shows 20 lines; an incident with a page leads them, so a page held
+// after many warnings is still named.
+func TestSlackAlertNotifierListsHeldPagesFirst(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	settings := harness.settings(webhookUrl)
+	settings.MaxMessagesPerMinute = 1
+	notifier := NewSlackAlertNotifier(settings)
+
+	active := Alerts{}
+	for i := 1; i <= 26; i++ {
+		active = append(active, slackTestAlert(fmt.Sprintf("pg-%02d", i), "", SeverityWarn))
+		notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	}
+	active = append(active, slackTestAlert("pg-27", "", SeverityPage))
+	notifier.Handle(slackTestSignal, SignalExecution{Alerts: active})
+	harness.advance(61 * time.Second)
+	notifier.flushSummary()
+	closeSlackNotifier(t, notifier)
+
+	texts := webhook.posted()
+	requireSlackTexts(t, texts,
+		"[WARN] raised (synthetic): Active client backends on pg-01",
+		"[RATE LIMIT] (synthetic) 26 alert transition(s) were not posted one by one (at most 1 messages per minute, or the sender was backlogged):\n"+
+			"- [PAGE] raised: pg/active-pileup · active-pileup · pg-27\n"+
+			"- [WARN] raised: pg/active-pileup · active-pileup · pg-02\n",
+	)
+	if !strings.Contains(texts[1], "\n- and 6 more\n") {
+		t.Fatalf("summary = %q", texts[1])
+	}
 }
 
 // Close's deadline abandons the post in flight and what is still queued, and
