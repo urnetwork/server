@@ -1275,9 +1275,10 @@ func TestAttestedLocalServiceRedialRefusesNameMovedToLoopback(t *testing.T) {
 	}
 }
 
-// A test binary, or any process that starts in the local environment, chooses
-// its guard at startup. Any other service binary defers the choice to its first
-// guarded construction.
+// A test binary, and any process that starts with WARP_ENV set, chooses its
+// guard at startup; a WARP_ENV=main service locks in nil there. Only a service
+// binary that starts without WARP_ENV defers the choice to its first guarded
+// construction.
 func TestStartupDialGuardChoice(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -1286,14 +1287,15 @@ func TestStartupDialGuardChoice(t *testing.T) {
 		chosen     bool
 		guarded    bool
 	}{
-		{name: "production service", values: map[string]string{"WARP_ENV": "main", "WARP_SERVICE": "api"}},
+		{name: "production service", values: map[string]string{"WARP_ENV": "main", "WARP_SERVICE": "api"}, chosen: true},
+		{name: "other environment", values: map[string]string{"WARP_ENV": "sim-testnet-op-1"}, chosen: true},
 		{name: "service without an environment", values: map[string]string{}},
 		{name: "local service", values: map[string]string{"WARP_ENV": "local", "WARP_SERVICE": "api"}, chosen: true, guarded: true},
 		{name: "test binary outside the local environment", testBinary: true, values: map[string]string{}, chosen: true},
 		{name: "local test binary", testBinary: true, values: map[string]string{"WARP_ENV": "local"}, chosen: true, guarded: true},
 	}
 	for _, c := range cases {
-		choice := chooseTestEnvStartupDialGuard(c.testBinary, func() *testEnvDialGuard {
+		choice := chooseTestEnvStartupDialGuard(c.testBinary, c.values["WARP_ENV"], func() *testEnvDialGuard {
 			return newTestEnvDialGuard(testEnvGetenv(c.values), testEnvUnusedResolver(t))
 		})
 		if (choice != nil) != c.chosen {
@@ -1303,6 +1305,25 @@ func TestStartupDialGuardChoice(t *testing.T) {
 		if choice != nil && (choice.guard != nil) != c.guarded {
 			t.Errorf("%s: guarded = %t; want %t", c.name, choice.guard != nil, c.guarded)
 		}
+	}
+}
+
+// A service binary that starts with WARP_ENV=main locks in a nil guard at
+// startup: a WARP_ENV=local written before its first pool open, by main or a
+// library, cannot install a guard that would refuse every production dial.
+func TestProductionServiceLocksNilGuardAtStartup(t *testing.T) {
+	values := map[string]string{"WARP_ENV": "main", "WARP_SERVICE": "api"}
+	newGuard := func() *testEnvDialGuard {
+		return newTestEnvDialGuard(testEnvGetenv(values), testEnvUnusedResolver(t))
+	}
+	var choice atomic.Pointer[testEnvDialGuardChoice]
+	choice.Store(chooseTestEnvStartupDialGuard(false, values["WARP_ENV"], newGuard))
+	if choice.Load() == nil {
+		t.Fatal("a WARP_ENV=main service deferred its guard choice past startup")
+	}
+	values["WARP_ENV"] = "local"
+	if guard := chooseTestEnvDialGuard(&choice, newGuard); guard != nil {
+		t.Fatalf("a WARP_ENV=local written after startup installed a guard on a production service: %v", guard.requireAttested())
 	}
 }
 
@@ -1316,7 +1337,7 @@ func TestServiceBinaryChoosesGuardAfterMainSetsLocalEnvironment(t *testing.T) {
 		return newTestEnvDialGuard(testEnvGetenv(values), testEnvUnusedResolver(t))
 	}
 	var choice atomic.Pointer[testEnvDialGuardChoice]
-	choice.Store(chooseTestEnvStartupDialGuard(false, newGuard))
+	choice.Store(chooseTestEnvStartupDialGuard(false, values["WARP_ENV"], newGuard))
 
 	// main's defaults (sim-latency setDefaultEnv)
 	values["WARP_ENV"], values["WARP_SERVICE"], values["WARP_BLOCK"] = "local", "sim", "sim"
@@ -1333,18 +1354,22 @@ func TestServiceBinaryChoosesGuardAfterMainSetsLocalEnvironment(t *testing.T) {
 	}
 }
 
-// A production service chooses at its first guarded construction and gets a
+// A service binary that starts without WARP_ENV and whose main then selects a
+// production environment chooses at its first guarded construction and gets a
 // nil guard, so its pool dial and lookup stay the callers' own functions; a
 // later environment change cannot add a guard to it.
 func TestProductionServiceChoosesNilGuardAtFirstUse(t *testing.T) {
-	values := map[string]string{
-		"WARP_ENV": "main", "WARP_SERVICE": "api", "WARP_BLOCK": "g1", testEnvAttestedAddrsEnvName: testEnvFixtureAttestation,
-	}
+	values := map[string]string{}
 	newGuard := func() *testEnvDialGuard {
 		return newTestEnvDialGuard(testEnvGetenv(values), testEnvUnusedResolver(t))
 	}
 	var choice atomic.Pointer[testEnvDialGuardChoice]
-	choice.Store(chooseTestEnvStartupDialGuard(false, newGuard))
+	choice.Store(chooseTestEnvStartupDialGuard(false, values["WARP_ENV"], newGuard))
+	if choice.Load() != nil {
+		t.Fatal("a service binary without WARP_ENV chose its guard before main ran")
+	}
+	values["WARP_ENV"], values["WARP_SERVICE"], values["WARP_BLOCK"] = "main", "api", "g1"
+	values[testEnvAttestedAddrsEnvName] = testEnvFixtureAttestation
 	guard := chooseTestEnvDialGuard(&choice, newGuard)
 	if guard != nil {
 		t.Fatal("a production service got a dial guard")

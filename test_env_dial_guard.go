@@ -23,11 +23,12 @@
 // a nil guard returns the caller's own dial and lookup functions, so those dial
 // paths are unchanged.
 //
-// A test binary, and any process that starts in the local environment, chooses
-// its guard once at startup, so a later environment change (a test's
-// t.Setenv) cannot remove it. Any other binary chooses once, at its first
-// guarded construction: its main may still configure the environment, as
-// sim-latency defaults WARP_ENV=local after package initialization.
+// A test binary, and any process that starts with WARP_ENV set, chooses its
+// guard once at startup: a later environment change (a test's t.Setenv, or a
+// write in main) can neither remove a local guard nor install one in a
+// WARP_ENV=main process. Only a binary that starts without WARP_ENV chooses at
+// its first guarded construction: its main may still default WARP_ENV=local,
+// as sim-latency does after package initialization.
 //
 // Only real I/O entry points consult the process guard: the pool constructors,
 // the fixture's own probe, lease and owner connections, connections that tools
@@ -141,7 +142,7 @@ var testEnvProcessDialGuard atomic.Pointer[testEnvDialGuardChoice]
 // Chooses this process's guard before any pool can open, unless the choice
 // must wait for main.
 func init() {
-	testEnvProcessDialGuard.Store(chooseTestEnvStartupDialGuard(testing.Testing(), newTestEnvProcessDialGuard))
+	testEnvProcessDialGuard.Store(chooseTestEnvStartupDialGuard(testing.Testing(), os.Getenv("WARP_ENV"), newTestEnvProcessDialGuard))
 }
 
 // The guard for this process's environment as it stands now. Its resolver is
@@ -157,12 +158,14 @@ func newTestEnvProcessDialGuard() *testEnvDialGuard {
 	return newTestEnvDialGuard(os.Getenv, lookupNetIp)
 }
 
-// The startup choice. A test binary or a process that starts in the local
-// environment chooses now; any other process defers to its first guarded
-// construction, returning nil.
-func chooseTestEnvStartupDialGuard(testBinary bool, newGuard func() *testEnvDialGuard) *testEnvDialGuardChoice {
+// The startup choice. A test binary, and a process that starts with WARP_ENV
+// set, chooses now: a local process gets its guard, and any other, such as a
+// WARP_ENV=main service, locks in nil. Only a process that starts without
+// WARP_ENV defers to its first guarded construction, returning nil.
+func chooseTestEnvStartupDialGuard(testBinary bool, warpEnv string, newGuard func() *testEnvDialGuard) *testEnvDialGuardChoice {
 	guard := newGuard()
-	if guard == nil && !testBinary {
+	if guard == nil && !testBinary && warpEnv == "" {
+		// main may still default WARP_ENV=local (sim-latency)
 		return nil
 	}
 	return &testEnvDialGuardChoice{guard: guard}

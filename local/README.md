@@ -131,9 +131,10 @@ to its launcher's attested endpoints for its whole run:
   that says to start `./local/run-local.sh` and restart the process through its
   `run-local.sh` (or source `test-env.sh` for tests). That includes a process
   started directly with `go run .`, one whose `main` sets `WARP_ENV=local`
-  itself (sim-latency's defaults; such a process chooses its guard at its first
-  pool open rather than at startup), and a shell that sourced an older
-  `test-env.sh`. Integration fixtures (`TestEnv`) refuse to start without the
+  itself (sim-latency's defaults; a process that starts without `WARP_ENV`
+  chooses its guard at its first pool open rather than at startup), and a shell
+  that sourced an older `test-env.sh`. A process that starts with any other
+  `WARP_ENV`, production included, locks in no guard at startup. Integration fixtures (`TestEnv`) refuse to start without the
   attestation, so DB tests run only through `./test.sh` or a sourced
   `test-env.sh`.
 - `sim-latency reset` and `run --reset` truncate tables with `CASCADE` and run
