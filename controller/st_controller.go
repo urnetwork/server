@@ -1052,7 +1052,7 @@ func (self *CoreStClient) buildTransactionAttempt(
 			return self.signReservedStTransaction(ctx, client, key, intent, kind, pending, gasPolicy, gasAuthority)
 		}
 	}
-	if err := self.validateDepositAttempt(ctx, client, intent, kind); err != nil {
+	if err := self.validateDepositAttempt(ctx, client, intent, kind, false); err != nil {
 		return nil, err
 	}
 	to, calldata, gasLimit, err := stTransactionAttemptPayload(intent, from, kind)
@@ -1661,13 +1661,13 @@ func (self *CoreStClient) reconcileAccountIntents(
 			desiredKind = model.StTxAttemptCancellation
 		}
 		replaceImmediately := cancelIntent
-		if expiredClose || spent {
+		if expiredClose || expiredDeposit || spent {
 			// The process may have stopped between an execution's gas
 			// reservation and its signature, and a cancellation cannot take
-			// that reservation's place. The root key's execution is signed and
-			// sent as reserved: its close has expired or its operation is
-			// spent, so it reverts and frees the nonce. Only a fee replacement
-			// of it is the cancellation.
+			// that reservation's place. The execution is signed and sent as
+			// reserved: its close has expired, its deposit's deadline has
+			// passed or its operation is spent, so it reverts and frees the
+			// nonce. Only a fee replacement of it is the cancellation.
 			pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
 			if err != nil {
 				return err
@@ -1799,7 +1799,7 @@ func (self *CoreStClient) reserveSignableIntent(ctx context.Context, client *eth
 	planned := &model.StTransactionIntent{LogicalKey: logicalKey, Profile: self.cfg.Profile, DeploymentId: self.cfg.DeploymentId, DeploymentKey: self.cfg.DeploymentKey(),
 		ChainId: self.cfg.ChainId, GenesisHash: "0x" + hex.EncodeToString(self.cfg.GenesisHash[:]), FromAddress: strings.ToLower(from.Hex()), ToAddress: strings.ToLower(to.Hex()),
 		CalldataHash: strings.ToLower(crypto.Keccak256Hash(calldata).Hex()), Calldata: calldata}
-	if err := self.validateDepositAttempt(ctx, client, planned, model.StTxAttemptExecution); err != nil {
+	if err := self.validateDepositAttempt(ctx, client, planned, model.StTxAttemptExecution, false); err != nil {
 		return nil, err
 	}
 	envelope, err := self.transactionEnvelope(ctx, client, planned, from, to, calldata, 0, nil, model.StTxAttemptExecution, gasPolicy)

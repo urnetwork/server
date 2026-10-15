@@ -132,7 +132,7 @@ func (self *CoreStClient) signReservedStTransaction(ctx context.Context, client 
 	if strings.ToLower(signer.Hash(&unsigned).Hex()) != reservation.SigningHash || maximum.String() != reservation.MaximumLiabilityWei || unsigned.Nonce() != intent.Nonce {
 		return nil, errors.New("operator gas original reservation bytes or liability changed")
 	}
-	if err := self.validateDepositAttempt(ctx, client, intent, reservation.Kind); err != nil {
+	if err := self.validateDepositAttempt(ctx, client, intent, reservation.Kind, true); err != nil {
 		return nil, err
 	}
 	if err := stPayoutAdmission(ctx, self.cfg); err != nil {
