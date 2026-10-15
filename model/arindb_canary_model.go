@@ -353,6 +353,55 @@ func (self arindbCanaryPair) oldEpoch() int64 {
 	return self.old.BuildEpoch
 }
 
+// The pair a decision compares, and why.
+type arindbCanaryResolvedPair struct {
+	latest      ArindbCanaryDatabase
+	old         ArindbCanaryDatabase
+	latestEpoch int64
+	// 0 when nothing can be compared: the canary is single
+	oldEpoch int64
+	// why this process's own pair cannot compare, "" when it can
+	reason string
+	// reason, when the previous decision's epochs stand in for this process's
+	carriedReason     string
+	latestUnavailable bool
+}
+
+// The comparison needs only the pair's epochs, since the rows carry the facts.
+// A Taskworker that cannot use its own pair compares the previous decision's
+// instead: both epochs when it cannot open its latest, the old one beside the
+// same latest otherwise. A damaged file on the publishing host therefore
+// cannot silently drop a fallback.
+func resolveArindbCanaryPair(pair arindbCanaryPair, previous *ArindbCanaryDecision) arindbCanaryResolvedPair {
+	resolved := arindbCanaryResolvedPair{
+		latest:      ArindbCanaryDatabase{State: pair.latest.State, BuildEpoch: pair.latest.BuildEpoch, Sha256: pair.latest.Sha256},
+		old:         ArindbCanaryDatabase{State: pair.old.State, BuildEpoch: pair.old.BuildEpoch, Sha256: pair.old.Sha256},
+		latestEpoch: pair.latestEpoch(),
+		oldEpoch:    pair.oldEpoch(),
+	}
+	switch {
+	case pair.err != nil:
+		resolved.reason = "latest_unopened"
+	case resolved.latestEpoch == 0:
+		resolved.reason = "latest_" + pair.latest.State
+	case resolved.oldEpoch == 0:
+		resolved.reason = "old_" + pair.old.State
+	}
+	resolved.latestUnavailable = resolved.latestEpoch == 0
+	if resolved.reason != "" && previous != nil && previous.State != ArindbCanaryStateSingle &&
+		0 < previous.Old.BuildEpoch && previous.Old.BuildEpoch < previous.Latest.BuildEpoch &&
+		(resolved.latestEpoch == 0 || resolved.latestEpoch == previous.Latest.BuildEpoch) {
+		if resolved.latestEpoch == 0 {
+			resolved.latest = previous.Latest
+			resolved.latestEpoch = previous.Latest.BuildEpoch
+		}
+		resolved.old = previous.Old
+		resolved.oldEpoch = previous.Old.BuildEpoch
+		resolved.carriedReason = resolved.reason
+	}
+	return resolved
+}
+
 // One public provider of the cohort as the canary compares it.
 type arindbCanaryProvider struct {
 	clientId server.Id
@@ -599,8 +648,6 @@ func decideArindbCanary(
 	decision = &ArindbCanaryDecision{
 		Version:         ArindbCanaryDecisionVersion,
 		DecisionId:      server.NewId().String(),
-		Latest:          ArindbCanaryDatabase{State: pair.latest.State, BuildEpoch: pair.latest.BuildEpoch, Sha256: pair.latest.Sha256},
-		Old:             ArindbCanaryDatabase{State: pair.old.State, BuildEpoch: pair.old.BuildEpoch, Sha256: pair.old.Sha256},
 		Settings:        settings,
 		Buckets:         map[string]*ArindbCanaryBucket{},
 		SourceStartedAt: sourceStartedAt,
@@ -621,35 +668,12 @@ func decideArindbCanary(
 		}
 	}
 
-	latestEpoch := pair.latestEpoch()
-	oldEpoch := pair.oldEpoch()
-	// why this process's own pair cannot compare, "" when it can
-	pairReason := ""
-	switch {
-	case pair.err != nil:
-		pairReason = "latest_unopened"
-	case latestEpoch == 0:
-		pairReason = "latest_" + pair.latest.State
-	case oldEpoch == 0:
-		pairReason = "old_" + pair.old.State
-	}
-	decision.LatestUnavailable = latestEpoch == 0
-	// The comparison needs only the pair's epochs, since the rows carry the
-	// facts. A Taskworker that cannot use its own pair compares the previous
-	// decision's instead: both epochs when it cannot open its latest, the old
-	// one beside the same latest otherwise. A damaged file on the publishing
-	// host therefore cannot silently drop a fallback.
-	if pairReason != "" && previous != nil && previous.State != ArindbCanaryStateSingle &&
-		0 < previous.Old.BuildEpoch && previous.Old.BuildEpoch < previous.Latest.BuildEpoch &&
-		(latestEpoch == 0 || latestEpoch == previous.Latest.BuildEpoch) {
-		if latestEpoch == 0 {
-			decision.Latest = previous.Latest
-			latestEpoch = previous.Latest.BuildEpoch
-		}
-		decision.Old = previous.Old
-		oldEpoch = previous.Old.BuildEpoch
-		decision.PairCarriedReason = pairReason
-	}
+	resolved := resolveArindbCanaryPair(pair, previous)
+	latestEpoch, oldEpoch := resolved.latestEpoch, resolved.oldEpoch
+	decision.Latest, decision.Old = resolved.latest, resolved.old
+	decision.LatestUnavailable = resolved.latestUnavailable
+	decision.PairCarriedReason = resolved.carriedReason
+	pairReason := resolved.reason
 	decision.Coverage.Providers = len(providers)
 	decision.Cohort = arindbCanaryCohortAfter(previous, len(providers), decidedAt)
 	for _, provider := range providers {
@@ -892,22 +916,27 @@ func decideArindbCanary(
 	return decision
 }
 
-// Quality facts follow the serving epoch for every provider of the
-// publication, Network-only included; risk keeps each row's latest slot. S = 0
-// leaves the filter as the rollup's latest slots loaded it.
-func applyArindbServingEpoch(filter *providerCountFilter, slots map[server.Id]arindbRollupSlots, servingEpoch int64) {
+// Quality facts follow the serving epoch for every client of the
+// publication, Network-only included; risk keeps each row's latest slot. A
+// client the slot read did not return, such as a rollup row replaced between
+// the source read and the slot read, has no facts under S and is non-Quality.
+// S = 0 leaves the filter as the rollup's latest slots loaded it.
+func applyArindbServingEpoch(filter *providerCountFilter, clientIds []server.Id, slots map[server.Id]arindbRollupSlots, servingEpoch int64) {
 	filter.arindbServingEpoch = servingEpoch
 	if servingEpoch == 0 {
 		return
 	}
-	for clientId, s := range slots {
-		if s.servingNonQuality(servingEpoch) {
+	for _, clientId := range clientIds {
+		if s, ok := slots[clientId]; !ok || s.servingNonQuality(servingEpoch) {
 			filter.arinNonQuality[clientId] = true
 		} else {
 			delete(filter.arinNonQuality, clientId)
 		}
 	}
 }
+
+// Reads the rollup's two slots; replaced in tests.
+var arindbCanaryLoadSlots = loadArindbRollupSlots
 
 // One comparison provider per public client, placed by its location row,
 // with every lookback weight its rows carry; and every client of the cohort,
@@ -991,7 +1020,12 @@ func decideArindbCanaryForPublication(
 		glog.Errorf("[arindb]the latest ARIN database is not open in this process (%s); the canary is single\n", pair.err)
 	}
 	providers, cohortIds := arindbCanaryProvidersFromRows(rows)
-	slots := loadArindbRollupSlots(ctx, cohortIds)
+	// single compares nothing and serves each row's latest slot, so it skips
+	// the slot read
+	slots := map[server.Id]arindbRollupSlots{}
+	if resolveArindbCanaryPair(pair, previous).oldEpoch != 0 {
+		slots = arindbCanaryLoadSlots(ctx, cohortIds)
+	}
 	for _, provider := range providers {
 		provider.slots = slots[provider.clientId]
 	}
@@ -1003,7 +1037,7 @@ func decideArindbCanaryForPublication(
 	}); r != nil {
 		glog.Errorf("[arindb]emptied city names unavailable: %v\n", r)
 	}
-	applyArindbServingEpoch(countFilter, slots, decision.ServingEpoch)
+	applyArindbServingEpoch(countFilter, cohortIds, slots, decision.ServingEpoch)
 	glog.Infof("[arindb]%s\n", decision.logSummary())
 	return decision, nil
 }

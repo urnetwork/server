@@ -143,7 +143,7 @@ func newProviderQualityFilterForClients(ctx context.Context, clientIds []server.
 	servingEpoch := readArindbServingEpoch(ctx)
 	f := newProviderCountFilterForClients(ctx, clientIds)
 	if servingEpoch != 0 && len(clientIds) != 0 {
-		applyArindbServingEpoch(&f, loadArindbRollupSlots(ctx, clientIds), servingEpoch)
+		applyArindbServingEpoch(&f, clientIds, loadArindbRollupSlots(ctx, clientIds), servingEpoch)
 	}
 	return f
 }

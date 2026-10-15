@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -552,7 +554,7 @@ func TestArindbCanaryWarmingServesEachRowsLatestSlotWhenNoDatabaseIsCarried(t *t
 		for _, provider := range c.rows {
 			slots[provider.clientId] = provider.slots
 		}
-		applyArindbServingEpoch(&filter, slots, decision.ServingEpoch)
+		applyArindbServingEpoch(&filter, testCanarySlotIds(slots), slots, decision.ServingEpoch)
 		if len(filter.arinNonQuality) != 0 {
 			t.Errorf("%s: %d clean rows became non-Quality", c.name, len(filter.arinNonQuality))
 		}
@@ -770,6 +772,10 @@ func TestArindbCanaryWarmingNeverFallsBack(t *testing.T) {
 	}
 }
 
+func testCanarySlotIds(slots map[server.Id]arindbRollupSlots) []server.Id {
+	return slices.Collect(maps.Keys(slots))
+}
+
 func testCanaryFilter(slots map[server.Id]arindbRollupSlots) providerCountFilter {
 	filter := providerCountFilter{
 		now: testCanaryClock, arinRisk: map[server.Id]bool{}, arinNonQuality: map[server.Id]bool{},
@@ -797,14 +803,79 @@ func TestArindbCanaryFallbackServesTheOldClassificationToEveryProvider(t *testin
 		worseUnderLatest:  {epoch: testCanaryLatestEpoch, oldEpoch: testCanaryOldEpoch, nonQuality: true},
 	}
 	filter := testCanaryFilter(slots)
-	applyArindbServingEpoch(&filter, slots, testCanaryOldEpoch)
+	applyArindbServingEpoch(&filter, testCanarySlotIds(slots), slots, testCanaryOldEpoch)
 	if !filter.arinNonQuality[betterUnderLatest] || filter.arinNonQuality[worseUnderLatest] || filter.arindbServingEpoch != testCanaryOldEpoch {
 		t.Fatalf("fallback decided providers separately: better=%t worse=%t", filter.arinNonQuality[betterUnderLatest], filter.arinNonQuality[worseUnderLatest])
 	}
 	filter = testCanaryFilter(slots)
-	applyArindbServingEpoch(&filter, slots, testCanaryLatestEpoch)
+	applyArindbServingEpoch(&filter, testCanarySlotIds(slots), slots, testCanaryLatestEpoch)
 	if filter.arinNonQuality[betterUnderLatest] || !filter.arinNonQuality[worseUnderLatest] {
 		t.Fatal("latest did not serve the latest classification")
+	}
+}
+
+// A client of the publication the slot read did not return has no facts under
+// S, so it is non-Quality rather than keeping its latest slot's Quality.
+func TestArindbCanaryClientMissingFromTheSlotReadIsNotQuality(t *testing.T) {
+	read, missed := server.NewId(), server.NewId()
+	slots := map[server.Id]arindbRollupSlots{read: {epoch: testCanaryLatestEpoch, oldEpoch: testCanaryOldEpoch}}
+	filter := testCanaryFilter(slots)
+	applyArindbServingEpoch(&filter, []server.Id{read, missed}, slots, testCanaryOldEpoch)
+	if filter.arinNonQuality[read] || !filter.arinNonQuality[missed] {
+		t.Fatalf("read=%t missed=%t, want only the missed client non-Quality", filter.arinNonQuality[read], filter.arinNonQuality[missed])
+	}
+	// each row's latest slot, S = 0, reads no slots at all
+	filter = testCanaryFilter(slots)
+	applyArindbServingEpoch(&filter, []server.Id{read, missed}, slots, 0)
+	if len(filter.arinNonQuality) != 0 {
+		t.Fatalf("S = 0 changed Quality: %v", filter.arinNonQuality)
+	}
+}
+
+// The publication reads the rollup's slots for its cohort only when it can
+// compare: single serves each row's latest slot and skips the read.
+func TestArindbCanaryPublicationSkipsTheSlotReadWhenSingle(t *testing.T) {
+	useTestArindbCanaryDecisionStore(t)
+	pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte("{}"))
+	defer pop()
+	var reads [][]server.Id
+	previousLoad := arindbCanaryLoadSlots
+	arindbCanaryLoadSlots = func(ctx context.Context, clientIds []server.Id) map[server.Id]arindbRollupSlots {
+		reads = append(reads, clientIds)
+		return map[server.Id]arindbRollupSlots{}
+	}
+	defer func() { arindbCanaryLoadSlots = previousLoad }()
+	previousPair := arindbCanaryPairIdentities
+	defer func() { arindbCanaryPairIdentities = previousPair }()
+
+	country := "aa"
+	rows := []clientScoreSourceRow{{
+		score:  &ClientScore{ClientId: server.NewId(), LookbackIndex: 1, IndependentReliabilityWeight: 1},
+		egress: &clientScoreEgress{publishedCountryCode: &country},
+	}}
+	for _, c := range []struct {
+		name  string
+		pair  arindbCanaryPair
+		reads int
+	}{
+		{name: "single", pair: func() arindbCanaryPair {
+			p := testCanaryPair()
+			p.old = server.ArinDatabaseIdentity{State: server.ArinDatabaseMissing}
+			return p
+		}(), reads: 0},
+		{name: "a comparable pair", pair: testCanaryPair(), reads: 1},
+	} {
+		reads = nil
+		arindbCanaryPairIdentities = func() (server.ArinDatabaseIdentity, server.ArinDatabaseIdentity, error) {
+			return c.pair.latest, c.pair.old, c.pair.err
+		}
+		filter := testCanaryFilter(nil)
+		if _, err := decideArindbCanaryForPublication(t.Context(), testCanaryClock, rows, &filter, DefaultEgressIndexSettings(), false, map[int]float64{}); err != nil {
+			t.Fatal(err)
+		}
+		if len(reads) != c.reads || (c.reads == 1 && (len(reads[0]) != 1 || reads[0][0] != rows[0].score.ClientId)) {
+			t.Errorf("%s: slot reads %v, want %d of the cohort", c.name, reads, c.reads)
+		}
 	}
 }
 
@@ -816,7 +887,7 @@ func TestArindbCanaryFallbackKeepsTheLatestRiskVeto(t *testing.T) {
 		riskyUnderLatest: {epoch: testCanaryLatestEpoch, oldEpoch: testCanaryOldEpoch, risk: true},
 	}
 	filter := testCanaryFilter(slots)
-	applyArindbServingEpoch(&filter, slots, testCanaryOldEpoch)
+	applyArindbServingEpoch(&filter, testCanarySlotIds(slots), slots, testCanaryOldEpoch)
 	passing := true
 	facts := filter.egressFacts(riskyUnderLatest, nil, nil, &passing, DefaultEgressIndexSettings())
 	decision := decideProviderEgress(facts, false)
