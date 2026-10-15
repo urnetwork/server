@@ -5498,7 +5498,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		countProviderModernGateShadow(modernGateShadowCounts, decision)
 	}
 	glog.Infof(
-		"[nclm]egress rules: %d providers decided, %d hard excluded from the pool, out of a bucket by reason %v, %d unprobed for the online bucket\n",
+		"[nclm]egress rules: %d providers decided, %d hard excluded from the pool, out of a bucket by reason %v, %d in the online bucket\n",
 		len(clientIdEgressDecisions),
 		len(hardExcludedClientIds),
 		reasonCounts,
