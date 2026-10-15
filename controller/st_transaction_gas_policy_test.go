@@ -483,6 +483,33 @@ func stGasFixtureChain(fixture *stDepositCustodyRpc) (sent []*types.Transaction,
 	return append([]*types.Transaction(nil), fixture.sent...), fixture.staged.Int64(), fixture.source.Int64(), fixture.deposited.Int64(), fixture.depositNonce.Int64()
 }
 
+// Routes client through an endpoint at which the send run under stopCtx stops
+// after its broadcast, as a process stopped there leaves it: its first receipt
+// read after a broadcast is answered with no receipt and cancels stopCtx.
+// resume ends the stop, and later sends see every receipt.
+func stGasStopAfterBroadcast(tb testing.TB, client *CoreStClient, fixture *stDepositCustodyRpc) (stopCtx context.Context, resume func()) {
+	tb.Helper()
+	stopCtx, stop := context.WithCancel(context.Background())
+	tb.Cleanup(stop)
+	var stopping, broadcast atomic.Bool
+	stopping.Store(true)
+	url, endpoint := stWalletRecoveryEndpoint(tb, fixture, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
+		switch {
+		case !stopping.Load():
+		case call.Method == "eth_sendRawTransaction":
+			broadcast.Store(true)
+		case call.Method == "eth_getTransactionReceipt" && broadcast.Load():
+			stop()
+			stWalletRecoveryReply(writer, call, nil, false)
+			return true
+		}
+		return false
+	})
+	client.cfg.RpcUrls = []string{url}
+	client.clients = map[string]*ethclient.Client{url: endpoint}
+	return stopCtx, func() { stopping.Store(false) }
+}
+
 // SV-1 (retries; the deposit key): a deposit takes its nonce together with
 // its first attempt's reservation, and the process may stop before the
 // signature. Here epoch 7's deposit, whose deadline is block 1999, is reserved
@@ -591,10 +618,10 @@ func TestStOperatorGasPendingDepositBeforeItsDeadlineKeepsCustodyValidation(t *t
 
 // SV-1 (retries; the deposit key): the revert of an expired deposit's
 // reserved execution is reported once across restarts. The process signs and
-// broadcasts the reserved deposit, which is included, and stops before its
-// receipt: the deposit reverts while it is down. Of the restarted process's
-// sends, exactly one reports the revert, and the others deposit epoch 8's
-// principal once, at nonce 8.
+// broadcasts the reserved deposit, which is included, and stops before it
+// reads the receipt: the deposit reverts while it is down. Of the restarted
+// process's sends, exactly one reports the revert, and the others deposit
+// epoch 8's principal once, at nonce 8.
 func TestStOperatorGasRevertOfAPendingExpiredDepositIsReportedOnceAcrossRestarts(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx := context.Background()
@@ -603,26 +630,14 @@ func TestStOperatorGasRevertOfAPendingExpiredDepositIsReportedOnceAcrossRestarts
 		stGasFixturePolicy(tb, client, nil)
 		stGasReserveUnsignedDeposit(tb, client)
 		stDepositCustodyExpire(fixture)
-		var withheld atomic.Bool
-		withheld.Store(true)
-		url, endpoint := stWalletRecoveryEndpoint(tb, fixture, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
-			if call.Method == "eth_getTransactionReceipt" && withheld.Load() {
-				stWalletRecoveryReply(writer, call, nil, false)
-				return true
-			}
-			return false
-		})
-		client.cfg.RpcUrls = []string{url}
-		client.clients = map[string]*ethclient.Client{url: endpoint}
-		stopCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		stopCtx, resume := stGasStopAfterBroadcast(tb, client, fixture)
 		_, err := client.DepositCredit(stopCtx, 8, 1, big.NewInt(100))
-		cancel()
 		sent, _, _, _, _ := stGasFixtureChain(fixture)
-		if err == nil || len(sent) != 1 || sent[0].Nonce() != 7 {
+		if !errors.Is(err, context.Canceled) || len(sent) != 1 || sent[0].Nonce() != 7 {
 			tb.Fatalf("the reserved deposit before the stop: %v, %d sent", err, len(sent))
 		}
 		deposit := sent[0]
-		withheld.Store(false)
+		resume()
 
 		reports, credited := 0, 0
 		restarted := client
@@ -650,12 +665,12 @@ func TestStOperatorGasRevertOfAPendingExpiredDepositIsReportedOnceAcrossRestarts
 // at nonce 7 twice, with its 3,400,000-gas floor at 10 and 12 wei, neither
 // sent, and its third attempt, at 14 wei, is reserved and not signed. Once its
 // deadline has finalized, the deposit key's next send signs that third attempt
-// exactly as reserved, which adds no reservation to the gas ledger, and the
-// node refuses its broadcast as underfunded. A cancellation would be a fourth
-// signature, which the cap refuses, so the send after it signs nothing and
-// sends the third attempt's stored bytes again: the deposit reverts without
-// moving principal, that send reports the revert, and the send after it
-// deposits epoch 8's principal at nonce 8.
+// exactly as reserved, which adds no reservation to the gas ledger; the node
+// refuses its broadcast as underfunded, and the process stops. A cancellation
+// would be a fourth signature, which the cap refuses, so the send after it
+// signs nothing and sends the third attempt's stored bytes again: the deposit
+// reverts without moving principal, that send reports the revert, and the
+// send after it deposits epoch 8's principal at nonce 8.
 func TestStOperatorGasPendingExpiredDepositAtTheAttemptCapSignsNothingMore(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx := context.Background()
@@ -692,16 +707,16 @@ func TestStOperatorGasPendingExpiredDepositAtTheAttemptCapSignsNothingMore(t *te
 		fixture.stateLock.Lock()
 		fixture.balance = new(big.Int)
 		fixture.stateLock.Unlock()
-		stopCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		stopCtx, resume := stGasStopAfterBroadcast(tb, client, fixture)
 		_, err = client.DepositCredit(stopCtx, 8, 1, big.NewInt(100))
-		cancel()
 		attempts := model.GetStTransactionAttempts(ctx, intent.IntentId)
 		sent, _, _, _, _ := stGasFixtureChain(fixture)
-		if err == nil || len(attempts) != stTxMaxAttempts || attempts[0].Attempt != stTxMaxAttempts || attempts[0].Kind != model.StTxAttemptExecution || len(sent) != 0 {
+		if !errors.Is(err, context.Canceled) || len(attempts) != stTxMaxAttempts || attempts[0].Attempt != stTxMaxAttempts || attempts[0].Kind != model.StTxAttemptExecution || len(sent) != 0 {
 			tb.Fatalf("the reserved third attempt: %v, %d attempts, %d sent", err, len(attempts), len(sent))
 		}
 		stGasFixtureSnapshot(tb, p, "47600000", 3)
 
+		resume()
 		fixture.stateLock.Lock()
 		fixture.balance = nil
 		fixture.stateLock.Unlock()
