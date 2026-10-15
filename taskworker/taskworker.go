@@ -210,6 +210,28 @@ func reapRetiredTasks(ctx context.Context) {
 	})
 }
 
+// How often a production taskworker checks the capability probe's chain;
+// replaced by tests.
+var capabilityProbeEnsureInterval = 10 * time.Minute
+
+// Every capabilityProbeEnsureInterval until ctx ends, schedules the
+// capability probe's chain again when it has no task row while this
+// taskworker's capability_probe.yml switches the probe on
+// (work.EnsureCapabilityProbe). The startup schedule covers the start; this
+// brings back a chain that a pass on a taskworker with an older config, or
+// maintenance, ended since.
+func ensureCapabilityProbeChain(ctx context.Context) {
+	interval := capabilityProbeEnsureInterval
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+		server.HandleError(func() { work.EnsureCapabilityProbe(ctx) })
+	}
+}
+
 // InitTaskWorker preserves the historical exact Go signature, including
 // assignability to func(context.Context) *task.TaskWorker. New callers that
 // need non-default settings use InitTaskWorkerWithSettings.

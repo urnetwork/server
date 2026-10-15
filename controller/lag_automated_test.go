@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,52 @@ func TestLagTrackAutomatedReason(t *testing.T) {
 	} {
 		connect.AssertEqual(t, lagTrackAutomatedReason(c.header, c.asn), c.want)
 	}
+}
+
+// Without the GeoLite2 ASN database no track has a network, so none from a
+// hosting or cloud network is flagged automated, and nothing else would show
+// it: the first track issued so logs it, loudly, once per process
+// (amendment 12). A database that does not know an address is no gap, and
+// logs nothing.
+func TestLagTrackLogsAMissingAsnDatabase(t *testing.T) {
+	logged := []string{}
+	previousLogf := lagAsnDatabaseMissingLogf
+	lagAsnDatabaseMissingLogf = func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() {
+		lagAsnDatabaseMissingLogf = previousLogf
+	})
+	previousLogged := lagAsnDatabaseMissingLogged.Load()
+	t.Cleanup(func() {
+		lagAsnDatabaseMissingLogged.Store(previousLogged)
+	})
+	lagAsnDatabaseMissingLogged.Store(false)
+
+	// the database is there and does not know the address
+	useIpAsnDb(t, writeTestIpAsnDb(t, geoLite2AsnDatabaseType, map[string]IpAsn{
+		"192.0.2.0/24": {Number: 64500, Organization: "Example"},
+	}))
+	connect.AssertEqual(t, lagTrackAutomatedReason(http.Header{}, nil), "")
+	connect.AssertEqual(t, len(logged), 0)
+
+	// no database: one line however many tracks, naming the file and the
+	// flag that goes unset
+	useIpAsnDb(t, "")
+	for range 3 {
+		connect.AssertEqual(t, lagTrackAutomatedReason(http.Header{}, nil), "")
+	}
+	connect.AssertEqual(t, len(logged), 1)
+	for _, want := range []string{geoLite2AsnResourcePath, model.LagAutomatedReasonDatacenterAsn} {
+		if !strings.Contains(logged[0], want) {
+			t.Fatalf("the missing database is logged as %q, without %q", logged[0], want)
+		}
+	}
+	// a signing agent is flagged without the database, and logs nothing
+	signed := http.Header{}
+	signed.Set("Signature-Agent", `"https://chatgpt.com"`)
+	connect.AssertEqual(t, lagTrackAutomatedReason(signed, nil), model.LagAutomatedReasonSignatureAgent)
+	connect.AssertEqual(t, len(logged), 1)
 }
 
 // The hosting list names real autonomous systems, each with its network, and

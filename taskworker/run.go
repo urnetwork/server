@@ -139,6 +139,8 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 	// sibling candidates and live workers need, nor delay readiness.
 	if options.WorkloadProfile == WorkloadProfileProduction {
 		go server.HandleError(func() { reapRetiredTasks(ctx) })
+		// a chain a stale taskworker or maintenance ended returns
+		go server.HandleError(func() { ensureCapabilityProbeChain(ctx) })
 	}
 	// Retention is a best-effort lifetime observer. Its local reaper must not
 	// inherit the finite scheduling attempt, and storage I/O cannot gate work.

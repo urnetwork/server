@@ -449,21 +449,26 @@ provider cannot resolve the probe client's key.
   released through the config-updater, then a restart of every taskworker,
   since a running container keeps the config it started with; the first
   restarted taskworker schedules the first pass due at once
-  (capprobe/README.md, "Switching it on"). Switching it off is the same
-  release and restart with `enabled: false`. (4) Review the shadow counts until
+  (capprobe/README.md, "Switching it on"). A pass that a taskworker still on
+  the old config claims ends the chain; the taskworkers with the probe
+  switched on schedule it again within ten minutes, and the monitor's
+  `capability-probe` signal (SIGNALS.md §2.19g) reports the disabled pass,
+  and a stall, until every taskworker runs the new config. Switching it off
+  is the same release and restart with `enabled: false`. (4) Review the shadow counts until
   `no_evidence` is small and the not-modern providers are understood, with
   the capability probe's readings: a large `post_quantum_unsealed` share
   would mean providers whose identity proof the probe could not verify,
   which the gate counts as post-quantum and which should be understood
   first, and `capability-probe-breaker` and `capability-probe-downgrades`
-  (SIGNALS.md §2.19g) must be quiet. (5) The gate turns on by itself at
-  2026-10-21 00:00 UTC while `quality_speed_requires_modern_provider` is
-  absent from provider.yml, as on Main, so the probe's sweep and the review
-  must be done by then. The monitor's readiness signal (monitor SIGNALS.md
-  §2.29, `modern-gate-readiness`) reads the shadow from 72 hours before the
-  start: WARN when the gate would take more than half of Quality or of Speed
-  out, PAGE from 24 hours before, and PAGE when a bucket falls by more than
-  half within an hour after the start. To postpone, set
+  (SIGNALS.md §2.19g) must be quiet and the monitor's `capability-probe`
+  signal healthy. (5) The gate turns on by itself at 2026-10-21 00:00 UTC
+  while `quality_speed_requires_modern_provider` is absent from provider.yml,
+  as on Main, so the probe's sweep and the review must be done by then. The
+  monitor's readiness signal (monitor SIGNALS.md §2.29,
+  `modern-gate-readiness`) reads the shadow from 72 hours before the start:
+  WARN when the gate would take more than half of Quality or of Speed out,
+  PAGE from 24 hours before, and PAGE when a bucket falls by more than half
+  within an hour after the start. To postpone, set
   `quality_speed_requires_modern_provider: false`; to move the instant, set
   `quality_speed_modern_provider_start`. Either is a config release and a
   restart of every taskworker and API block, as for the probe's switch, and

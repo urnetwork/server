@@ -29,10 +29,11 @@ import (
 // A report is stored only when its signature verifies under the identity key
 // the operator holds for an extender the calling client activated, its ticket
 // was issued for that extender at that track position and has no report yet,
-// and its series are inside the bounds below. The browser's address it names
-// becomes the track's client fields on the track's first report -- a peppered
-// hash, the /24 (/48), the autonomous system and the GeoLite2 City place --
-// and is then dropped: no table, log or answer carries it.
+// and its series are inside the bounds below. A report names no browser
+// address, only the family it arrived on (amendment 9): the track's client
+// fields, its network and city-level place, were looked up from the request
+// that issued the track (newLagTrackClient), and no table, log or answer
+// carries an address.
 
 // The bounds a report's series must be inside (A7).
 const (
