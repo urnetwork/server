@@ -47,6 +47,20 @@ exclude 14,164 of 63,581 Online providers (22.3%) and leave 49,417. 27 countries
 would be exempt and none emptied. See [the decision](#resolved-decisions-and-remaining-research)
 and the gate matrix below.
 
+Owner consideration, 2026-10-15, not decided: **Online may also require the
+URL success ratio that Quality and Speed use (0.8).** It is built as a
+provider.yml knob that is off by default, so the default keeps the rule above
+exactly: `online_url_success_ratio` (default `0`, off) with
+`online_url_ratio_country_exemption` (default `true`). With the ratio on, a
+provider measured at least twice in the eight hours, with a success but a
+share of successes below the ratio, leaves Quality, Speed, Online and the
+counts under the `low_success` reason until its share reaches the ratio.
+Unprobed providers and those with a single run keep Online. Measured on Main
+on 2026-10-15 at 00:14 UTC, 0.8 would leave 20,508 to 23,987 of the 43,730
+Online providers, depending on the variant. See
+[the consideration](#resolved-decisions-and-remaining-research) and the gate
+matrix below.
+
 Census implementation checkpoint, 2026-10-07: the transaction-local server
 statement deadline now has a qualified native control for snapshot release when
 the separate cancellation connection stalls. This is source qualification;
@@ -174,7 +188,7 @@ reclassifying the fleet.
 | No ARIN risk exception | Required | Required | Required |
 | No probe security exception | Required | Required | Required |
 | At least one measured URL success in eight hours, or fewer than two measured runs | Required | Required | Required |
-| URL success ratio ≥ 0.8 | Required | Required | Not required |
+| URL success ratio ≥ 0.8 | Required | Required | Not required; required at `online_url_success_ratio` once set (off by default, 2026-10-15) |
 | Direct or identified-ISP subscriber evidence and no quality exception | Required under policy two | Not required | Not required |
 | Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Required from 2026-10-21 00:00 UTC | Required from 2026-10-21 00:00 UTC | Not required |
 
@@ -206,6 +220,15 @@ provider.yml turns the row off. Explicit client ids, and `force_minimum` with
 ratio row. `force_minimum` with `rank_mode` online changes nothing, so that
 answer is the Online pool without the providers the row excludes; no current
 caller sends it.
+
+The ratio row's Online cell (2026-10-15) is a knob the owner is considering,
+off by default: `online_url_success_ratio` in provider.yml. Once set, it is a
+passing condition on bucket membership like the URL-success row, under the
+same kill switch, the same request-time exceptions and the same probing, for
+providers with at least two measured runs only; unprobed providers and those
+with a single run keep Online. A country the URL-success row exempts keeps its
+providers below the ratio too, unless `online_url_ratio_country_exemption` is
+`false`. See [the consideration](#resolved-decisions-and-remaining-research).
 
 The probe records URL successes, errors, and security exceptions. There is no
 separate blackhole definition or cheap-blackhole admission gate. The indexer
@@ -1187,6 +1210,89 @@ gate matrix.
     of 460 regions (31 providers).
   - Largest exclusions: US 8,471, GB 1,814, DE 990, FR 727, ES 565, BR 479,
     CA 365, IT 270, TH 111 and HK 79.
+
+Under consideration, 2026-10-15, not decided: **Online may also require the
+URL success ratio (0.8) that Quality and Speed use.** The owner has not chosen
+between the variants below, so the ratio is a provider.yml knob whose default
+keeps the URL-success rule above exactly, and the owner chooses by config.
+
+- **Knobs.** `online_url_success_ratio`, within [0, 1], default `0` (off). A
+  value that cannot be read (`80%`, `"0.8"`, a key the file gives twice) or
+  one outside [0, 1] is off, the behaviour before the ratio, and is logged.
+  `online_url_ratio_country_exemption`, default `true`; a value that cannot
+  be read keeps `true`. Each key is decoded on its own, so neither resets a
+  neighbour, and a provider.yml that is not yaml disables the rule, and the
+  ratio with it. Setting or clearing either is a config release through the
+  config-updater and a restart of every taskworker block, whose passes (the
+  score export, the location counts, the dashboard counts) apply it, since a
+  running container keeps the config it was created with (the procedure of
+  server/capprobe/README.md, "Switching it on"). Provider status and inspect
+  follow the score export's published guard, not their own provider.yml.
+- **Rule.** With the ratio on, a provider with `N >= 2` measured runs and
+  `S >= 1` successes whose `S / N` is below the ratio, compared in exact
+  millionths like the country floor (19 of 24 is below 0.8, 4 of 5 is not),
+  leaves Quality, Speed, Online and the location and dashboard counts under
+  the `low_success` reason, after `no_success` and before unprobed or health.
+  It is no hard exclusion: probes, the rolling quota, explicit client ids and
+  `force_minimum` with quality or speed keep the provider, and it returns at
+  the next publication once its share reaches the ratio. `S = 0` stays
+  `no_success`. Unprobed providers and those with `N = 1` keep Online.
+  `online_requires_url_success: false` turns the ratio off with the rule.
+- **Country guard.** The exemption stays computed on the share of measured
+  providers with a success, not on the share at the ratio: a guard on the
+  share passing 0.8 would exempt 78 of the 93 countries, the US among them,
+  and leave Online at 51,410, more than today. With
+  `online_url_ratio_country_exemption: true` an exempt country keeps its
+  providers below the ratio as it keeps those without a success (variant c).
+  With `false` the ratio applies in every country, which also takes an exempt
+  country's `S = 0` providers out of Online, as `no_success`, since they are
+  below every ratio (variant a).
+- **Published guard.** While the ratio is on, the score export publishes its
+  guard as version 3, adding the ratio, the exemption switch and each
+  country's providers below the ratio, so provider status, inspect and the
+  exempt-country gauge decide by the ratio the export applied. A reader from
+  before the ratio refuses version 3 and exempts every country. While the
+  ratio is off the export publishes version 2 exactly as before, which every
+  reader trusts as the rule with the ratio off, so a rollout or a rollback
+  with the ratio off changes no reader and keeps the margin's previous state.
+  Code from before the ratio cannot follow a ratio that is on: an older
+  taskworker's passes fall back to the plain floor, and an export it runs
+  publishes version 2 with plain-floor verdicts, which drops the exemptions
+  the margin held (JP, LT and HR on 2026-10-15). So switch the ratio on only
+  once every taskworker runs this code, and before rolling a taskworker back
+  past it, switch the ratio off and let one export publish version 2.
+  Provider status and inspect need the api's and bringyourctl's code at or
+  after this change, not only a restart: one with the guard reader from
+  before the ratio refuses version 3 and reports `no_success` and
+  `low_success` providers alike as `egress_failing`.
+- **Visibility.** The counts policy schema is 4 and carries both knobs. The
+  provider status reason is `egress_low_success`. `bringyourctl provider
+  inspect` prints the ratio the export published with its exemption switch,
+  this host's, and whether the provider is below it. The providers dashboard
+  has a `low_success` panel beside `no_success`. The exempt-country gauge
+  counts the providers an exemption keeps, those below the ratio included,
+  and none while the ratio applies in every country. Each export's
+  `[nclm]online url-success rule:` line names the ratio while it is on.
+- **Measured.** Read-only on the Main primary on 2026-10-15 at 00:14 UTC:
+  the eight-hour window of policy-1 URL outcomes over the common-gate passes,
+  with the plain floor of 0.36.
+
+  | Online | Providers | Change | provider.yml |
+  | --- | ---: | ---: | --- |
+  | Today: one success is enough | 43,730 | | nothing (the default) |
+  | (a) `N >= 2` below 0.8 out in every country; unprobed and `N = 1` kept | 20,508 | −23,222 | `online_url_success_ratio: 0.8` and `online_url_ratio_country_exemption: false` |
+  | (b) as (a), with unprobed and `N = 1` out too | 16,686 | −27,044 | none: unprobed and `N = 1` providers keep Online by design |
+  | (c) as (a), with today's country exemption | 23,987 | −19,743 | `online_url_success_ratio: 0.8` |
+
+  - The dashboard would read `no_success` 15,155 and `low_success` 20,016
+    under (a), and `no_success` 11,949 and `low_success` 19,743 under (c).
+  - Countries with an Online provider: 93 today, 59 under (a) and 75 under
+    (c). (a) empties 34 countries (189 providers), (c) 18.
+  - (c) takes the exempt set of the plain floor, 34 countries. If the margin
+    also holds JP, LT and HR, (c) is 24,249.
+  - Of the 51,857 providers with `N >= 2`, 16,686 pass 0.8 (32.2%), 15,155
+    have no success and 20,016 are in between. The US keeps 11,887 of its
+    29,302 Online providers under both (a) and (c).
 
 The remaining research concerns evidence-backed virtual/hosting ISP rules and
 legitimate multinational exceptions, particularly AFRINIC allocations. Do not
