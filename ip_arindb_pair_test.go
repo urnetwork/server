@@ -16,6 +16,7 @@ import (
 
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 const (
@@ -298,14 +299,47 @@ func TestArinDatabasePairOldLookupErrorNeverFailsTheLatest(t *testing.T) {
 	if pair.oldIdentity.State != ArinDatabaseLoaded {
 		t.Fatalf("fixture old slot not loaded: %+v", pair.oldIdentity)
 	}
+	oldErrors := testutil.ToFloat64(arinLookupErrors.WithLabelValues("old"))
 	latestInfo, oldInfo, err := getArinInfoPairFromDatabases(pair, netip.MustParseAddr("192.0.2.1"))
 	if err != nil || latestInfo == nil || !latestInfo.QualityVerified() || oldInfo != nil {
 		t.Fatalf("old lookup error leaked: latest=%+v old=%+v err=%v", latestInfo, oldInfo, err)
+	}
+	if got := testutil.ToFloat64(arinLookupErrors.WithLabelValues("old")); got != oldErrors+1 {
+		t.Fatalf("old lookup errors went %v to %v, want one more", oldErrors, got)
 	}
 	// the same pair still answers both slots for another address
 	latestInfo, oldInfo, err = getArinInfoPairFromDatabases(pair, netip.MustParseAddr("198.51.100.1"))
 	if err != nil || oldInfo == nil || oldInfo.QualityState != "excluded" || latestInfo.DatabaseBuildEpoch != testArinLatestEpoch {
 		t.Fatalf("pair lookup lost a healthy old record: latest=%+v old=%+v err=%v", latestInfo, oldInfo, err)
+	}
+}
+
+// A latest record that fails to decode fails the lookup, and so the
+// connection's location write: its provider never reaches the cohort the
+// canary compares. Each failure is counted by slot so a release that drops
+// providers this way shows.
+func TestArinDatabasePairCountsLatestLookupErrors(t *testing.T) {
+	latest := testArinDatabaseBytes(t, string(schemaTypeArinDb), testArinLatestEpoch, map[string]mmdbtype.Map{
+		"192.0.2.0/24": {"risk": mmdbtype.String("false")},
+	})
+	old := testArinDatabaseBytes(t, string(schemaTypeArinDb), testArinOldEpoch, testArinPairRecords("subscriber", false))
+	path := writeTestArinRelease(t, t.TempDir(),
+		latest, testArinManifest(t, latest, time.Unix(testArinLatestEpoch, 0)),
+		old, testArinManifest(t, old, time.Unix(testArinOldEpoch, 0)))
+	pair, err := openArinDatabasePair(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestArinPair(pair)
+	latestErrors, oldErrors := testutil.ToFloat64(arinLookupErrors.WithLabelValues("latest")), testutil.ToFloat64(arinLookupErrors.WithLabelValues("old"))
+	if latestInfo, oldInfo, err := getArinInfoPairFromDatabases(pair, netip.MustParseAddr("192.0.2.1")); err == nil || latestInfo != nil || oldInfo != nil {
+		t.Fatalf("a malformed latest record answered: latest=%+v old=%+v err=%v", latestInfo, oldInfo, err)
+	}
+	if got := testutil.ToFloat64(arinLookupErrors.WithLabelValues("latest")); got != latestErrors+1 {
+		t.Fatalf("latest lookup errors went %v to %v, want one more", latestErrors, got)
+	}
+	if got := testutil.ToFloat64(arinLookupErrors.WithLabelValues("old")); got != oldErrors {
+		t.Fatalf("a latest failure counted an old one: %v to %v", oldErrors, got)
 	}
 }
 

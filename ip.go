@@ -37,7 +37,10 @@ import (
 )
 
 func init() {
-	prometheus.MustRegister(arinDatabaseBuildEpochGauge, arinOldDatabaseBuildEpochGauge, arinDatabaseInfoCollector{})
+	prometheus.MustRegister(arinDatabaseBuildEpochGauge, arinOldDatabaseBuildEpochGauge, arinDatabaseInfoCollector{}, arinLookupErrors)
+	for _, slot := range []string{"latest", "old"} {
+		arinLookupErrors.WithLabelValues(slot)
+	}
 
 	OnWarmup(WarmupTargetIPDatabase, func() {
 		db, _ := ipDb()
@@ -950,6 +953,17 @@ var arinOldDatabaseBuildEpochGauge = prometheus.NewGaugeFunc(prometheus.GaugeOpt
 	return float64(old.loadedBuildEpoch())
 })
 
+// Pair lookups that failed, by slot. A latest failure fails the connection's
+// location write, so its provider never reaches the score cohort and the
+// canary's comparison cannot see it: a release whose records fail to decode
+// shows here, and as a cohort that shrinks against its recent size. An old
+// failure leaves that connection's old facts unavailable.
+var arinLookupErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Name:      "arin_lookup_errors_total",
+	Help:      "ARIN pair lookups that failed, by slot: a latest failure fails the connection's location write, an old failure leaves its old facts unavailable",
+}, []string{"slot"})
+
 var arinDatabaseInfoDesc = prometheus.NewDesc(
 	"urnetwork_arin_database_info",
 	"1 for each ARIN slot the process holds, latest and old, with its state and manifest SHA-256 (none when unknown)",
@@ -1145,11 +1159,13 @@ func GetArinInfoPair(addr netip.Addr) (latest *ArinInfo, old *ArinInfo, err erro
 func getArinInfoPairFromDatabases(pair *arinDatabasePair, addr netip.Addr) (latest *ArinInfo, old *ArinInfo, err error) {
 	latest, err = getArinInfoFromDatabase(pair.latest, schemaTypeArinDb, addr)
 	if err != nil {
+		arinLookupErrors.WithLabelValues("latest").Inc()
 		return nil, nil, err
 	}
 	if pair.old != nil {
 		oldInfo, oldErr := getArinInfoFromDatabase(pair.old, schemaTypeArinDb, addr)
 		if oldErr != nil {
+			arinLookupErrors.WithLabelValues("old").Inc()
 			// the connection's old facts are unavailable, and nothing else
 			if glog.V(1) {
 				glog.Infof("[ip]old ARIN lookup failed; old facts unavailable: %s\n", oldErr)

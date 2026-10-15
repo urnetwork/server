@@ -116,13 +116,15 @@ func TestProvidersDashboardShowsTheArindbCanaryRow(t *testing.T) {
 	}
 }
 
-// Each process's decision reads are a counter, read as a rate summed across
-// the processes of a service, beside each process's database ages.
+// Each process's decision reads and lookup errors are counters, read as rates
+// summed across the processes of a service, beside each process's database
+// ages.
 func TestServicesOverviewShowsTheArindbDecisionReadsAndOldAges(t *testing.T) {
 	expressions := dashboardExpressions(readTestDashboard(t, "services-overview.json"))
 	joined := strings.Join(expressions, "\n")
 	for _, read := range []string{
 		`sum by (service, outcome) (rate(urnetwork_arindb_decision_reads_total{env="$env",service=~"$service",block=~"$block",host=~"$host"}[$__rate_interval]))`,
+		`sum by (service, slot) (rate(urnetwork_arin_lookup_errors_total{env="$env",service=~"$service",block=~"$block",host=~"$host"}[$__rate_interval]))`,
 		`time() - max by (service, host, block, instance) (urnetwork_arin_old_database_build_epoch_seconds{env="$env",service=~"$service",block=~"$block",host=~"$host"} > 0)`,
 		`time() - max by (service, host, block, instance) (urnetwork_arin_database_build_epoch_seconds{env="$env",service=~"$service",block=~"$block",host=~"$host"} > 0)`,
 	} {
