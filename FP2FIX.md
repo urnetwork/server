@@ -393,16 +393,20 @@ provider cannot resolve the probe client's key.
   default, that instant included. `false` keeps it off: the kill switch and
   the way to postpone. `true` turns it on at once.
   `quality_speed_modern_provider_start`, an RFC 3339 instant such as
-  `2026-10-28T00:00:00Z`, moves the start without a code change. Either
-  override reaches a running taskworker or API only with its restart, since a
-  container keeps the config version it was created with, so it is a config
-  release and a restart (capprobe/README.md, "Switching it on"). A start that
-  is not one, or is given twice, keeps the code's default and is logged, so
-  `false` is the reliable postponement. Each key is decoded on its own, like
-  the URL-success rule's keys: a switch that is not true or false, or is given
-  twice, reads as `false`, and a provider.yml that is not yaml reads as
-  `false` with the default start; neither key's failure resets the other or
-  a neighbour. Every reader decides at its own instant, never at a fresh
+  `2026-10-28T00:00:00Z` or a date such as `2026-10-28`, its 00:00 UTC,
+  moves the start without a code change. Either override reaches a running
+  taskworker or API only with its restart, since a container keeps the
+  config version it was created with, so it is a config release and a
+  restart (capprobe/README.md, "Switching it on"). Each key is decoded on its
+  own, like the URL-success rule's keys: a switch that is not true or false,
+  is given twice, or is given without a value
+  (`quality_speed_requires_modern_provider:` alone, `~` or `null`) reads as
+  `false`. While the switch is absent, a start that is neither an instant nor
+  a date, is given twice or is given without a value also reads as `false`,
+  where it kept the default start before: each is most likely a postponement
+  that failed, so it keeps the gate off and is logged. Beside a switch the
+  start decides nothing. A provider.yml that is not yaml reads as `false`
+  with the default start, and no key's failure resets a neighbour. Every reader decides at its own instant, never at a fresh
   clock read (`EgressIndexSettings.RequiresModernProvider`): a pass at its
   filter's `now`, set once per pass so a pass decides every provider alike,
   and the provider status and the inspection at their own. When on, a
