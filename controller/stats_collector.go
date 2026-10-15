@@ -329,15 +329,33 @@ var statsProviderOnlineSuccessExemptGauge = newStatsGaugeVec(
 
 // The modern provider gate's shadow (FP2FIX.md, 2026-10-14): of the
 // providers the other rules admit to quality and to speed, how many the probe
-// has shown to be modern and why each other one is not, whether or not
-// quality_speed_requires_modern_provider is on. Every outcome but modern is
-// what the gate takes out of the bucket once it is on. Two buckets and five
-// outcomes, every series published every refresh, zero included.
+// has shown to be modern and why each other one is not, whether or not the
+// gate is on. Every outcome but modern is what the gate takes out of the
+// bucket once it is on. Two buckets and five outcomes, every series published
+// every refresh, zero included.
 var statsProviderModernGateShadowGauge = newStatsGaugeVec(
 	"provider_modern_gate_shadow",
 	"Connected valid public providers the other egress rules admit to quality or speed, by what the modern provider gate decides for them",
 	"bucket",
 	"outcome",
+)
+
+// The modern provider gate under this process's provider.yml at the last
+// refresh (FP2FIX.md, owner decision 2026-10-15): one while it holds quality
+// and speed to modern providers. The monitor's readiness signal (monitor
+// SIGNALS.md §2.29) reads it with the start below, so a postponed or moved
+// flip moves the signal's windows with it.
+var statsProviderModernGateOnGauge = newStatsGauge(
+	"provider_modern_gate_on",
+	"One while the modern provider gate holds quality and speed to modern providers under this process's provider.yml",
+)
+
+// While quality_speed_requires_modern_provider is absent from provider.yml,
+// the instant the gate turns on by itself, in unix seconds. No series while
+// the switch is given, true, false or unreadable, when no flip is scheduled.
+var statsProviderModernGateStartGauge = newStatsGaugeVec(
+	"provider_modern_gate_start_seconds",
+	"Unix time the modern provider gate turns on by itself, published only while quality_speed_requires_modern_provider is absent from provider.yml",
 )
 
 var statsProviderEgressAvailableGauge = newStatsGauge(
@@ -803,8 +821,10 @@ func statsRefreshDb(ctx context.Context) {
 }
 
 // Publishes the pool as the egress rules decide it, with the rollout flag as
-// it is now (model.CountProviderEgress).
+// it is now (model.CountProviderEgress), and the modern provider gate's
+// schedule first, so it stays current while a refresh is unavailable.
 func statsRefreshProviderEgress(ctx context.Context) {
+	statsPublishProviderModernGate(server.NowUtc())
 	statsProviderEgressAvailableGauge.set(0)
 	snapshot, err := getStatsProviderEgressSnapshot(ctx, statsProviderEgressPolicyKey(ctx))
 	server.Raise(err)
@@ -812,6 +832,25 @@ func statsRefreshProviderEgress(ctx context.Context) {
 	statsProviderEgressStartedGauge.set(statsSourceTimestampSeconds(snapshot.StartedAt))
 	statsProviderEgressCompletedGauge.set(statsSourceTimestampSeconds(snapshot.CompletedAt))
 	statsProviderEgressAvailableGauge.set(1)
+}
+
+// Publishes the modern provider gate under this process's provider.yml at
+// now: whether it is on, and the start while one is scheduled.
+func statsPublishProviderModernGate(now time.Time) {
+	on, scheduledStart := model.GetModernProviderGateSchedule(now)
+	onValue := 0.0
+	if on {
+		onValue = 1
+	}
+	statsProviderModernGateOnGauge.set(onValue)
+	startValues := []statsLabeledValue{}
+	if scheduledStart != nil {
+		startValues = append(startValues, statsLabeledValue{
+			labelValues: []string{},
+			value:       float64(scheduledStart.Unix()),
+		})
+	}
+	statsProviderModernGateStartGauge.replace(startValues)
 }
 
 func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {

@@ -5,19 +5,24 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // ProviderEgressCountsPolicyKey separates shared dashboard snapshots when
 // workers resolve different count rules. This is not a data-generation key:
 // observed providers and accepted health results retain the snapshot's age.
-// The ARIN serving epoch the counts follow (ArindbServingEpoch) is part of the
-// rules, so a canary switch starts a fresh snapshot instead of serving the
-// previous choice's. The caller reads it; the key itself does no I/O.
+// It resolves the rules at the moment of the call, so the key changes at the
+// modern provider gate's start; the dashboard cache checks it before and
+// after each fill, so a fill that spans the start is never published. The ARIN
+// serving epoch the counts follow (ArindbServingEpoch) is part of the rules,
+// so a canary switch starts a fresh snapshot instead of serving the previous
+// choice's. The caller reads it; the key itself does no I/O.
 func ProviderEgressCountsPolicyKey(arinServingEpoch int64) string {
 	return providerEgressCountsPolicyKey(
 		egressIndexSettings(), providerEgressTestEnabled(),
 		providerReliabilityMinimums(), SelectedProviderUrlProbePolicyVersion(),
-		arinServingEpoch,
+		server.NowUtc(), arinServingEpoch,
 	)
 }
 
@@ -26,6 +31,7 @@ func providerEgressCountsPolicyKey(
 	enabled bool,
 	minimums map[int]float64,
 	probePolicyVersion int,
+	now time.Time,
 	arinServingEpoch int64,
 ) string {
 	// Increment the schema when count semantics change. Request-only cache and
@@ -34,10 +40,12 @@ func providerEgressCountsPolicyKey(
 	// schema 1 snapshot neither applies nor carries. The floor's margin
 	// changes which countries the dashboard counts exempt, so it is part of
 	// the policy too. Schema 3 adds the modern provider gate, its not_modern
-	// reason and its shadow counts; its switch moves providers between the
-	// buckets and that reason, and its evidence window is code. Schema 4
-	// selects Quality by the published ARIN serving epoch, which a schema 3
-	// snapshot did not.
+	// reason and its shadow counts; whether the gate is on at now moves
+	// providers between the buckets and that reason, and its evidence window
+	// is code. The gate is keyed by that decision, not by its switch and
+	// start, so workers that decide alike share a snapshot and none taken
+	// before the start is read after it. Schema 4 selects Quality by the
+	// published ARIN serving epoch, which a schema 3 snapshot did not.
 	policy := struct {
 		Schema                             int
 		MaxIndex                           int
@@ -63,7 +71,7 @@ func providerEgressCountsPolicyKey(
 		OnlineRequiresUrlSuccess:           settings.OnlineRequiresUrlSuccess,
 		OnlineSuccessCountryFloor:          settings.OnlineSuccessCountryFloor,
 		OnlineSuccessCountryFloorMargin:    settings.OnlineSuccessCountryFloorMargin,
-		QualitySpeedRequiresModernProvider: settings.QualitySpeedRequiresModernProvider,
+		QualitySpeedRequiresModernProvider: settings.RequiresModernProvider(now),
 		ArinServingEpoch:                   arinServingEpoch,
 	}
 	encoded, err := json.Marshal(policy)

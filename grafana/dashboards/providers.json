@@ -3155,7 +3155,7 @@
           "legendFormat": "not_modern"
         }
       ],
-      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero while quality_speed_requires_modern_provider is off in provider.yml; the shadow beside it says what the gate would take out."
+      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero until the gate turns on by itself at 2026-10-21 00:00 UTC while quality_speed_requires_modern_provider is absent from provider.yml (or at quality_speed_modern_provider_start), and while the switch is false; the shadow beside it says what the gate would take out."
     },
     {
       "id": 68,
@@ -3209,7 +3209,7 @@
           "legendFormat": "not modern"
         }
       ],
-      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before switching quality_speed_requires_modern_provider on."
+      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before the gate turns on by itself at 2026-10-21 00:00 UTC, and postpone with quality_speed_requires_modern_provider: false, a config release and a taskworker and API restart, if it would gut the bucket (the monitor warns from 72 hours before, SIGNALS.md §2.29)."
     },
     {
       "id": 69,
@@ -3321,6 +3321,128 @@
       "description": "The share of the providers the other rules admit to quality that the probe has shown to be modern, which is the share of quality the gate would keep. Rises as probes that report the evidence measure the fleet; no value while quality is empty."
     },
     {
+      "id": 73,
+      "type": "stat",
+      "title": "modern gate: on",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 103
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "off",
+                  "index": 0
+                },
+                "1": {
+                  "text": "on",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_modern_gate_on{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "on"
+        }
+      ],
+      "description": "Whether the modern provider gate holds quality and speed to modern providers under the taskworkers' own provider.yml, as their stats collector last read it: on from the scheduled start while quality_speed_requires_modern_provider is absent, never with it false, at once with it true. The largest of the taskworkers, so a config rollout reads on as soon as one has flipped."
+    },
+    {
+      "id": 74,
+      "type": "stat",
+      "title": "modern gate: scheduled start",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 103
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_modern_gate_start_seconds{env=\"$env\"}) * 1000",
+          "refId": "A",
+          "legendFormat": "start"
+        }
+      ],
+      "description": "The instant the modern provider gate turns on by itself, 2026-10-21 00:00 UTC unless quality_speed_modern_provider_start moves it. No value while provider.yml sets quality_speed_requires_modern_provider, true or false, when no flip is scheduled. The monitor's readiness signal (SIGNALS.md §2.29) watches the shadow from 72 hours before it."
+    },
+    {
       "id": 71,
       "type": "timeseries",
       "title": "modern gate shadow: quality by outcome",
@@ -3332,7 +3454,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 103
+        "y": 107
       },
       "fieldConfig": {
         "defaults": {
@@ -3391,7 +3513,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 103
+        "y": 107
       },
       "fieldConfig": {
         "defaults": {
@@ -3447,7 +3569,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 111
+        "y": 115
       },
       "panels": [],
       "description": "The prober's dark verdicts and the destination pool its health runs load (the geomap design, §11.3 and §11.4). The fleet shares are snapshots each taskworker takes for itself, so they are read from the one with the freshest snapshot; the pool gauges are read from the taskworker that ran the latest refresh; the prober's and the refresh's event counters are summed across the taskworkers on the egress probes dashboard."
@@ -3464,7 +3586,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 112
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -3518,7 +3640,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 112
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -3591,7 +3713,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 112
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -3651,7 +3773,7 @@
         "h": 10,
         "w": 6,
         "x": 0,
-        "y": 120
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -3721,7 +3843,7 @@
         "h": 10,
         "w": 9,
         "x": 6,
-        "y": 120
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -3787,7 +3909,7 @@
         "h": 10,
         "w": 9,
         "x": 15,
-        "y": 120
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -3835,7 +3957,7 @@
       "description": "Destination pool rows per class after the latest refresh, by state: scored sites count toward the index and the 90 % rule, probation sites are loaded and recorded but not yet counted, and candidates are promotable now. Read from the taskworker that ran the latest refresh. An active pool under the class's pool size, or no candidates left to promote, is the pool-thin finding of monitor signal §2.19b."
     },
     {
-      "id": 73,
+      "id": 75,
       "type": "row",
       "title": "ARIN database canary",
       "collapsed": false,
@@ -3843,12 +3965,12 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 130
+        "y": 134
       },
       "panels": []
     },
     {
-      "id": 74,
+      "id": 76,
       "type": "stat",
       "title": "canary state",
       "datasource": {
@@ -3859,7 +3981,7 @@
         "h": 5,
         "w": 6,
         "x": 0,
-        "y": 131
+        "y": 135
       },
       "fieldConfig": {
         "defaults": {
@@ -3900,7 +4022,7 @@
       "description": "The state the latest score publication's ARIN canary decision ended in (arindbctl/ARINDB.md, Dual-database canary): single when the indexer has no usable old database, warming while too few providers carry facts for both databases, latest when the comparison passes, fallback when the latest tripped the breaker and the export serves the old database's Quality classification. Risk always comes from the latest database. Read from the published decision by every taskworker; nothing shows while no decision is readable, when readers serve each provider's latest slot."
     },
     {
-      "id": 75,
+      "id": 77,
       "type": "stat",
       "title": "fallback active",
       "datasource": {
@@ -3911,7 +4033,7 @@
         "h": 5,
         "w": 6,
         "x": 6,
-        "y": 131
+        "y": 135
       },
       "fieldConfig": {
         "defaults": {
@@ -3964,7 +4086,7 @@
       "description": "1 while the score export serves the old ARIN database's Quality classification because the latest tripped the breaker: a bucket's net loss above bucket_loss_threshold or a country with no supply left in a bucket. Pages (ArinDbFallbackActive). A fallback restores Quality only; a Speed or Online loss comes from risk, which always follows the latest database and pages separately."
     },
     {
-      "id": 76,
+      "id": 78,
       "type": "stat",
       "title": "serving database",
       "datasource": {
@@ -3975,7 +4097,7 @@
         "h": 5,
         "w": 6,
         "x": 12,
-        "y": 131
+        "y": 135
       },
       "fieldConfig": {
         "defaults": {
@@ -4015,7 +4137,7 @@
       "description": "Build time of the ARIN database whose Quality classification the score export and every request-time reader serve. The epoch 0 (shown as 1970) means each provider's latest slot, as before the canary: the single state, or no readable decision."
     },
     {
-      "id": 77,
+      "id": 79,
       "type": "stat",
       "title": "decision age",
       "datasource": {
@@ -4026,7 +4148,7 @@
         "h": 5,
         "w": 6,
         "x": 18,
-        "y": 131
+        "y": 135
       },
       "fieldConfig": {
         "defaults": {
@@ -4079,7 +4201,7 @@
       "description": "Time since the indexer last published a canary decision; every score publication publishes one before its export. Over 30 minutes is ArinDbDecisionStale: the indexer is stalled, and its decision expires with the publication's 300 minute ttl, after which readers serve each provider's latest slot."
     },
     {
-      "id": 78,
+      "id": 80,
       "type": "timeseries",
       "title": "bucket supply under each database",
       "datasource": {
@@ -4090,7 +4212,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 136
+        "y": 140
       },
       "fieldConfig": {
         "defaults": {
@@ -4137,7 +4259,7 @@
       "description": "Public providers with facts for both ARIN databases in each bucket under the latest and under the old database, counted by the export's unchanged rules with only the ARIN facts substituted. Risk removes a provider from every bucket and non-quality only from Quality, so Speed and Online differ between the databases only through risk."
     },
     {
-      "id": 79,
+      "id": 81,
       "type": "timeseries",
       "title": "net loss of latest against old",
       "datasource": {
@@ -4148,7 +4270,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 136
+        "y": 140
       },
       "fieldConfig": {
         "defaults": {
@@ -4210,7 +4332,7 @@
       "description": "(old - latest) / old supply per bucket over the paired providers; negative is a gain and 0 means no old supply. The breaker trips when a bucket is strictly above bucket_loss_threshold (0.10 by default, the line). A Speed or Online loss above it pages (ArinDbRiskSupplyLoss) without an automatic repair, because only risk causes it and risk always follows the latest database."
     },
     {
-      "id": 80,
+      "id": 82,
       "type": "timeseries",
       "title": "coverage of the public cohort",
       "datasource": {
@@ -4221,7 +4343,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 145
+        "y": 149
       },
       "fieldConfig": {
         "defaults": {
@@ -4284,7 +4406,7 @@
       "description": "Share of the public score cohort whose rollup carries facts for the latest database, the old database, or both (paired). Below min_coverage (0.98 by default, the line) the run is warming and serves the database the rows carry: processes not yet restarted onto the pair, a rollup not yet refreshed after a release, or a stuck host. Warming for two hours warns (ArinDbCanaryWarming)."
     },
     {
-      "id": 81,
+      "id": 83,
       "type": "timeseries",
       "title": "emptied countries and cities",
       "datasource": {
@@ -4295,7 +4417,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 145
+        "y": 149
       },
       "fieldConfig": {
         "defaults": {
@@ -4351,7 +4473,7 @@
       "description": "Countries and cities with supply in a bucket under the old ARIN database and none under the latest. An emptied country trips the breaker when trip_on_emptied_country is set (the default); emptied cities are reported only, and their names are in the published decision and the indexer log."
     },
     {
-      "id": 82,
+      "id": 84,
       "type": "table",
       "title": "countries the latest would empty",
       "datasource": {
@@ -4362,7 +4484,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 154
+        "y": 158
       },
       "fieldConfig": {
         "defaults": {
@@ -4396,7 +4518,7 @@
       "description": "Each country the latest database would empty, per bucket, with the old database's supply there. Monitor signal §2.9d names these countries in its page."
     },
     {
-      "id": 83,
+      "id": 85,
       "type": "table",
       "title": "supply by country under each database",
       "datasource": {
@@ -4407,7 +4529,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 154
+        "y": 158
       },
       "fieldConfig": {
         "defaults": {
@@ -4441,7 +4563,7 @@
       "description": "Paired public providers per bucket and published country under each database. Providers without a published country count only in the bucket totals."
     },
     {
-      "id": 84,
+      "id": 86,
       "type": "table",
       "title": "the indexer's pair",
       "datasource": {
@@ -4452,7 +4574,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 162
+        "y": 166
       },
       "fieldConfig": {
         "defaults": {
@@ -4497,7 +4619,7 @@
       "description": "The latest and old databases the score export compared, from its own loader: build epoch, state and the SHA-256 their manifests record. The old database is the byte copy arindbctl update made of the previously selected release (arin-old.mmdb); a refused copy ships the release without one, and the state is then missing."
     },
     {
-      "id": 85,
+      "id": 87,
       "type": "table",
       "title": "each process's slots",
       "datasource": {
@@ -4508,7 +4630,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 162
+        "y": 166
       },
       "fieldConfig": {
         "defaults": {
@@ -4542,7 +4664,7 @@
       "description": "Both ARIN slots of every process that opened a pair, pushed with the process's own labels: loaded, missing, identical, invalid or unopened, with the manifest hash (none when unknown). Connect, API, MCP and Alt open the pair at warmup; Taskworker at its first score publication. A process keeps its pair until it restarts."
     },
     {
-      "id": 86,
+      "id": 88,
       "type": "timeseries",
       "title": "each process's database ages",
       "datasource": {
@@ -4553,7 +4675,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 169
+        "y": 173
       },
       "fieldConfig": {
         "defaults": {
@@ -4609,7 +4731,7 @@
       "description": "Time since the build of each process's latest and old ARIN databases; a slot that is not loaded is left out. Processes at different latest ages are a fleet not yet restarted onto a release, which keeps the canary warming."
     },
     {
-      "id": 87,
+      "id": 89,
       "type": "stat",
       "title": "decision conditions",
       "description": "The conditions of the latest decision, 1 while each holds (arindbctl/ARINDB.md, Dual-database canary). warming_tripped: warming's paired sample trips, so the latest is not served (page). warming_serves_latest: warming serves the latest unverified. latched: a fallback holds until release_passing_runs comparisons pass with release_margin. accepted: provider.yml accept_latest_build_epoch names the latest. latest_unavailable: the publishing Taskworker could not open its latest (page). pair_carried: the pair compared is the previous decision's. fallback_dropped: single right after a fallback (page).",
@@ -4617,7 +4739,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 177
+        "y": 181
       },
       "datasource": {
         "type": "prometheus",
@@ -4663,7 +4785,7 @@
       ]
     },
     {
-      "id": 88,
+      "id": 90,
       "type": "timeseries",
       "title": "net gain of latest against old",
       "description": "The latest database's net gain of paired supply in each bucket, (latest - old) / old. The breaker trips only on losses; a gain above 0.10 with at least 20 paired providers of old supply pages as a possible flood, which the fallback cannot judge.",
@@ -4671,7 +4793,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 183
+        "y": 187
       },
       "datasource": {
         "type": "prometheus",
@@ -4721,7 +4843,7 @@
       ]
     },
     {
-      "id": 89,
+      "id": 91,
       "type": "timeseries",
       "title": "gross churn of latest against old",
       "description": "The latest database's gross churn of paired supply in each bucket, (removed + added) / old. The net loss hides a release that moves as many providers out of a bucket as into it; churn above 0.20 with at least 20 paired providers of old supply pages.",
@@ -4729,7 +4851,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 183
+        "y": 187
       },
       "datasource": {
         "type": "prometheus",
@@ -4779,7 +4901,7 @@
       ]
     },
     {
-      "id": 90,
+      "id": 92,
       "type": "timeseries",
       "title": "public cohort against its recent size",
       "description": "The public providers the canary compared, and the largest cohort of the last two hours. A provider whose latest lookup fails never writes a location, so it never reaches the cohort and the comparison cannot see it; a release whose records fail to decode shows as a shrinking cohort and as ARIN lookup errors on the services overview.",
@@ -4787,7 +4909,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 192
+        "y": 196
       },
       "datasource": {
         "type": "prometheus",
@@ -4820,7 +4942,7 @@
       ]
     },
     {
-      "id": 91,
+      "id": 93,
       "type": "timeseries",
       "title": "cohort loss against its recent size",
       "description": "The cohort's loss against its largest size over the last two hours. Above 0.10, from a reference of at least 100 providers, it pages: providers are leaving the cohort before the canary can compare them.",
@@ -4828,7 +4950,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 192
+        "y": 196
       },
       "datasource": {
         "type": "prometheus",
@@ -4878,7 +5000,7 @@
       ]
     },
     {
-      "id": 92,
+      "id": 94,
       "type": "timeseries",
       "title": "serving changes and latch release",
       "description": "Changes of the serving epoch over the last six hours, which page above 4 as a canary switching the fleet back and forth, and the consecutive comparisons a latched fallback has passed with the release margin; it releases at release_passing_runs (default 6).",
@@ -4886,7 +5008,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 201
+        "y": 205
       },
       "datasource": {
         "type": "prometheus",
@@ -4925,7 +5047,7 @@
       ]
     },
     {
-      "id": 93,
+      "id": 95,
       "type": "timeseries",
       "title": "decision reads that were not ok",
       "description": "The share of every process's reads of the published decision that were absent or expired, invalid, or a Redis error. Absent and invalid decisions serve each provider's latest slot; an error keeps the process's last decision for up to 15 minutes. Above 0.05 for 15 minutes it warns.",
@@ -4933,7 +5055,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 201
+        "y": 205
       },
       "datasource": {
         "type": "prometheus",
@@ -4983,7 +5105,7 @@
       ]
     },
     {
-      "id": 94,
+      "id": 96,
       "type": "stat",
       "title": "compared pair's age",
       "description": "Time since the canary first compared its current pair of databases. The cohort-shrink page fires only within two hours of a new pair, or while latest lookups fail, so a Connect outage or a restart is not blamed on a release.",
@@ -4991,7 +5113,7 @@
         "h": 5,
         "w": 12,
         "x": 0,
-        "y": 210
+        "y": 214
       },
       "datasource": {
         "type": "prometheus",

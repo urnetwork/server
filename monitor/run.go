@@ -54,6 +54,13 @@ func newCadenceAlertGate() *cadenceAlertGate {
 }
 
 func (g *cadenceAlertGate) filter(signal Signal, alerts Alerts) Alerts {
+	ready, _ := g.split(signal, alerts)
+	return ready
+}
+
+// Returns the alerts that reached their Sustain, and the alerts this execution
+// observed that are still held below it.
+func (g *cadenceAlertGate) split(signal Signal, alerts Alerts) (Alerts, Alerts) {
 	signalKey := signal.Key()
 	streaks := g.streaks[signalKey]
 	if streaks == nil {
@@ -63,6 +70,7 @@ func (g *cadenceAlertGate) filter(signal Signal, alerts Alerts) Alerts {
 
 	seen := make(map[string]struct{}, len(alerts))
 	ready := make(Alerts, 0, len(alerts))
+	held := Alerts{}
 	for _, alert := range alerts {
 		identity := alert.Identity()
 		if _, duplicate := seen[identity]; duplicate {
@@ -80,6 +88,8 @@ func (g *cadenceAlertGate) filter(signal Signal, alerts Alerts) Alerts {
 				readyAlert.Severity = SeverityPage
 			}
 			ready = append(ready, readyAlert)
+		} else {
+			held = append(held, alert)
 		}
 	}
 	for identity := range streaks {
@@ -87,11 +97,29 @@ func (g *cadenceAlertGate) filter(signal Signal, alerts Alerts) Alerts {
 			delete(streaks, identity)
 		}
 	}
-	return ready
+	return ready, held
 }
 
 // AlertHandler consumes the active alerts from one signal execution.
 type AlertHandler func(ctx context.Context, signal Signal, alerts Alerts) error
+
+// One signal execution as the cadence gate saw it. A consumer that tracks
+// incidents across executions needs more than the gated alerts: an empty
+// gated batch can come from a failed execution, or from an alert the gate
+// holds again after a one-run dip, and neither means the incident is gone.
+type SignalExecution struct {
+	// the alerts that reached their Sustain, as AlertHandler receives them
+	Alerts Alerts
+	// alerts this execution observed that the gate still holds below their
+	// Sustain. They are present, not absent.
+	HeldAlerts Alerts
+	// the signal returned an error. Its visibility alert is in Alerts or
+	// HeldAlerts, and whatever else the signal observes is unknown.
+	Failed bool
+}
+
+// Consumes every gated signal execution, empty ones included.
+type SignalExecutionHandler func(ctx context.Context, signal Signal, execution SignalExecution) error
 
 // Per-watcher scheduling policy; zero preserves the registered cadences and
 // immediate active startup. Standing log streams and their drains are exempt.
@@ -187,9 +215,18 @@ func (m *Monitor) RunLoop(ctx context.Context, handle AlertHandler) error {
 // least max(floor, native cadence) after each completed probe and handler.
 // Consecutive-observation Sustain state stays local to this running watcher.
 func (self *Monitor) RunLoopWithOptions(ctx context.Context, options RunLoopOptions, handle AlertHandler) error {
-	return self.runLoopWithOptions(ctx, options, handle, func(cadence time.Duration) runLoopTicker {
-		return &wallClockRunLoopTicker{ticker: time.NewTicker(cadence)}
-	})
+	return self.runLoopWithOptions(ctx, options, handle, newWallClockRunLoopTicker)
+}
+
+// The RunLoopWithOptions schedule, with a handler that also learns which
+// alerts the gate held and whether the execution failed.
+func (self *Monitor) RunExecutionLoop(ctx context.Context, options RunLoopOptions, handle SignalExecutionHandler) error {
+	return self.runExecutionLoop(ctx, options, handle, newWallClockRunLoopTicker)
+}
+
+// The production ticker factory.
+func newWallClockRunLoopTicker(cadence time.Duration) runLoopTicker {
+	return &wallClockRunLoopTicker{ticker: time.NewTicker(cadence)}
 }
 
 // runLoop carries an injected ticker factory so cadence/slot interactions can
@@ -198,9 +235,20 @@ func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker ru
 	return m.runLoopWithOptions(ctx, RunLoopOptions{}, handle, newTicker)
 }
 
+// Hands each execution's gated alerts to an AlertHandler.
+func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOptions, handle AlertHandler, newTicker runLoopTickerFactory) error {
+	var handleExecution SignalExecutionHandler
+	if handle != nil {
+		handleExecution = func(ctx context.Context, signal Signal, execution SignalExecution) error {
+			return handle(ctx, signal, execution.Alerts)
+		}
+	}
+	return self.runExecutionLoop(ctx, options, handleExecution, newTicker)
+}
+
 // Testable scheduling boundary; reject invalid options before preparing any
 // streams or remote observations. Options are never stored on the Monitor.
-func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOptions, handle AlertHandler, newTicker runLoopTickerFactory) error {
+func (self *Monitor) runExecutionLoop(ctx context.Context, options RunLoopOptions, handle SignalExecutionHandler, newTicker runLoopTickerFactory) error {
 	if options.MinimumProbeCadence < 0 {
 		return fmt.Errorf("monitor: minimum probe cadence must not be negative")
 	}
@@ -295,8 +343,12 @@ func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOpti
 					alerts = append(alerts, visibilityAlert(self.settings, signal, err))
 				}
 				handleLock.Lock()
-				alerts = alertGate.filter(signal, alerts)
-				handleErr := handle(ctx, signal, alerts)
+				ready, held := alertGate.split(signal, alerts)
+				handleErr := handle(ctx, signal, SignalExecution{
+					Alerts:     ready,
+					HeldAlerts: held,
+					Failed:     err != nil,
+				})
 				handleLock.Unlock()
 				if handleErr != nil {
 					select {

@@ -32,6 +32,12 @@ func isAddrByte(b byte) bool {
 	return false
 }
 
+// ScrubAddrsText applies the descriptor scrubber to text that leaves the
+// process another way, such as a monitor alert posted to Slack.
+func ScrubAddrsText(text string) string {
+	return string(scrubAddrs([]byte(text)))
+}
+
 // scrubAddrs replaces every IPv4 and IPv6 literal in b with `[scrubbed]`,
 // keeping an ipv4 port. The input is arbitrary text: the scan finds maximal
 // runs of address bytes and keeps only the runs that actually parse, so

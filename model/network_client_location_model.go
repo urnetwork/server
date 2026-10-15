@@ -5548,7 +5548,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		onlineCount,
 	)
 	glog.Infof("[nclm]online url-success rule: %s\n", onlineSuccessBaseline.logSummary())
-	glog.Infof("[nclm]modern provider gate: %s\n", providerModernGateShadowSummary(modernGateShadowCounts, egressSettings.QualitySpeedRequiresModernProvider))
+	// at the filter's instant, the one the decisions above were made at
+	glog.Infof("[nclm]modern provider gate: %s\n", providerModernGateShadowSummary(modernGateShadowCounts, egressSettings, countFilter.now))
 
 	// set each client score to its lowest lookback, decided the same way in
 	// every location and group map it sits in

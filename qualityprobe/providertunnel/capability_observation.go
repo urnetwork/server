@@ -9,6 +9,7 @@ package providertunnel
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/urnetwork/connect"
 )
@@ -26,6 +27,16 @@ type CapabilityObservation struct {
 	// one, so a session can verify that peer's identity proof. Nil leaves a
 	// contract-carried key the only source.
 	NewPeerClientPublicKeyFetcher func(peerId connect.Id) func(context.Context) ([]byte, error)
+	// The least time from a failed attempt to admit the window's client to
+	// the next attempt, before connect's jitter, which defers it by half to
+	// all of this. About the measurement's own timeout, so a measurement
+	// attempts its provider about once: each attempt mints, registers and
+	// retires a derived client, and unpaced, an unreachable provider is
+	// dialed again at every resize pass for the whole measurement, in each of
+	// a pass's measurements at once. A client the window admitted and then
+	// lost is dialed again at once whatever this is, and that measurement has
+	// lost its tunnel anyway. Zero keeps a probe tunnel's unpaced re-dial.
+	RedialMin time.Duration
 }
 
 // Nil, the URL tunnel's, is valid.
@@ -34,6 +45,16 @@ func (self *CapabilityObservation) validate() error {
 		return ErrCapabilityObservation
 	}
 	return nil
+}
+
+// Paces the window's re-dial of a provider whose client it failed to admit
+// (RedialMin); nil, or no RedialMin, changes nothing.
+func (self *CapabilityObservation) paceRedial(settings *connect.MultiClientSettings) {
+	if self == nil || self.RedialMin <= 0 {
+		return
+	}
+	settings.FixedDestinationRetryMin = self.RedialMin
+	settings.FixedDestinationRetryMax = max(settings.FixedDestinationRetryMax, self.RedialMin)
 }
 
 // Changes one generated client's settings in place; nil changes nothing.

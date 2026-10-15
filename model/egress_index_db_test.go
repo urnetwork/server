@@ -124,7 +124,19 @@ func egressTestConnect(
 
 // Records explicit individual policy-one outcomes. The aggregate latest row is
 // retained only as a legacy diagnostic; it cannot satisfy the URL-policy gate.
+// The provider is modern as well, as an upgraded provider is: the capability
+// probe measured both capabilities just now, so the modern provider gate
+// keeps it in Quality and Speed whichever side of the gate's start a test
+// runs on. egressTestForgetModernEvidence takes that away.
 func egressTestHealth(ctx context.Context, clientId server.Id, measuredAt time.Time, total int, failed int) {
+	server.Raise(RecordProviderModernEvidence(ctx, clientId, ProviderModernEvidence{
+		E2eNegotiated:             true,
+		KeyExchange:               "X25519MLKEM768",
+		PostQuantum:               true,
+		WindowAdvertised:          true,
+		MaxReceiveWindowByteCount: 4 * 1024 * 1024,
+		ObservedAt:                server.NowUtc(),
+	}))
 	SetProviderEgressHealth(ctx, &ProviderEgressHealth{
 		ClientId:   clientId,
 		MeasuredAt: measuredAt,
@@ -148,6 +160,15 @@ func egressTestHealth(ctx context.Context, clientId server.Id, measuredAt time.T
 				(run_id,client_id,measured_at,ok_count,total_count,class_results,tls_authentication_failure,url_probe_evidence,url_probe_policy_version)
 				VALUES($1,$2,$3,$4,1,'{}',false,$5::jsonb,$6)`, server.NewId(), clientId, measuredAt.UTC(), ok, string(encoded), evidence.PolicyVersion))
 		}
+	})
+}
+
+// Removes the capability probe's evidence of the providers, which
+// egressTestHealth records for every provider it probes, so the modern
+// provider gate sees them as never measured.
+func egressTestForgetModernEvidence(ctx context.Context, clientIds ...server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provider_modern_evidence WHERE client_id = ANY($1)`, clientIds))
 	})
 }
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 
@@ -100,5 +101,30 @@ func TestEachCapabilityTunnelHasItsOwnTransportBudget(t *testing.T) {
 				t.Errorf("%s: tunnel %d budget limits %d bytes and %d transports, want %d and %d", c.name, index, limits.TotalByteCount, limits.MaxTransportCount, c.byteCount, c.transportCount)
 			}
 		}
+	}
+}
+
+// Re-review finding 3: each capability tunnel paces its window's re-dial of
+// a provider it failed to admit at the measurement's own timeout, so a
+// measurement attempts its provider about once rather than minting a derived
+// client at every resize pass.
+func TestEachCapabilityTunnelPacesItsRedialAtTheMeasureTimeout(t *testing.T) {
+	var opened *providertunnel.Config
+	stopBeforeTunnel := errors.New("synthetic stop before the tunnel")
+	previous := openProviderTunnel
+	openProviderTunnel = func(ctx context.Context, cfg providertunnel.Config, providerClientId connect.Id) (*providertunnel.Tunnel, error) {
+		opened = &cfg
+		return nil, stopBeforeTunnel
+	}
+	t.Cleanup(func() { openProviderTunnel = previous })
+
+	settings := DefaultSettings()
+	settings.MeasureTimeoutSeconds = 90
+	runner := newPassRunner(settings, &providertunnel.Config{})
+	if tunnel, err := runner.open(t.Context(), server.NewId()); tunnel != nil || !errors.Is(err, stopBeforeTunnel) {
+		t.Fatalf("the synthetic open returned %v, %v", tunnel, err)
+	}
+	if opened == nil || opened.CapabilityObservation == nil || opened.CapabilityObservation.RedialMin != 90*time.Second {
+		t.Fatalf("the tunnel opened with %+v, want its re-dial paced at the 90 s measure timeout", opened)
 	}
 }

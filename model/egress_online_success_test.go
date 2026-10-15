@@ -540,9 +540,12 @@ func TestEgressIndexSettingsOnlineUrlSuccess(t *testing.T) {
 		}
 	}
 	// a document that is not yaml keeps every default of the egress index, and
-	// since its kill switch cannot be read either, the rule is disabled
+	// since its kill switch cannot be read either, the rule is disabled, as is
+	// the modern provider gate for its own switch
 	unreadable := DefaultEgressIndexSettings()
 	unreadable.OnlineRequiresUrlSuccess = false
+	modernGateOff := false
+	unreadable.QualitySpeedRequiresModernProvider = &modernGateOff
 	connect.AssertEqual(t, load("online_requires_url_success: [unterminated\n"), unreadable)
 	connect.AssertEqual(t, load("egress_index:\n  max_failure_index: [9\nonline_requires_url_success: true\n"), unreadable)
 }

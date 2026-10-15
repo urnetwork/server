@@ -358,9 +358,10 @@ func TestReleaseGateServicesPrivateResourcesAndNoRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("private resource setup: %v\n%s", err, output)
 	}
-	// The real private generator owns only these documentation/loopback
-	// locations. Reject extra settings, especially ambient env_vars that
-	// could redirect the isolated database or Redis transports.
+	// The real private generator owns only these documentation, loopback and
+	// connect's default local TUN allocator locations (sn f4f1fd452). Reject
+	// extra settings, especially ambient env_vars that could redirect the
+	// isolated database or Redis transports.
 	var settings struct {
 		All struct {
 			IPOverrides []struct {
@@ -380,7 +381,7 @@ func TestReleaseGateServicesPrivateResourcesAndNoRestart(t *testing.T) {
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		t.Fatalf("private settings have trailing content: %v", err)
 	}
-	expectedSubnets := []string{"192.0.2.0/24", "2001:db8::/32", "127.0.0.0/8", "::1/128"}
+	expectedSubnets := []string{"192.0.2.0/24", "2001:db8::/32", "127.0.0.0/8", "::1/128", "169.254.0.0/16", "fd75:726e:6574::/96"}
 	if len(settings.All.IPOverrides) != len(expectedSubnets) {
 		t.Fatalf("private settings override count=%d, want %d", len(settings.All.IPOverrides), len(expectedSubnets))
 	}
