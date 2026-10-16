@@ -4,6 +4,7 @@ package connect
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	// "fmt"
 	"math"
@@ -182,9 +183,33 @@ type LatencyTest struct {
 	TestId server.Id
 }
 
+// The writer sends the requested bytes as probes between a start and a stop
+// control. A response counts only when the probes the reader got back between
+// the echoed controls total exactly that.
 type SpeedTest struct {
 	TestId         uint32
 	TotalByteCount model.ByteCount
+}
+
+// Each speed test probe is a zero byte, the big-endian test id, then random
+// bytes. While a test runs, the client echoes every frame over 16 bytes,
+// including user frames the platform interleaves with the probes, and keeps
+// sending its own traffic, so the reader must tell the test's probes apart. No
+// Transfer frame starts with a zero byte, which as a protobuf tag would be
+// field number zero.
+const speedTestProbeByteCount = 1024
+
+// Writes the probe header of the test over the start of the probe.
+func setSpeedTestProbeHeader(probe []byte, testId uint32) {
+	probe[0] = 0
+	binary.BigEndian.PutUint32(probe[1:5], testId)
+}
+
+// Reports whether the frame is a probe of the test.
+func isSpeedTestProbe(message []byte, testId uint32) bool {
+	return len(message) == speedTestProbeByteCount &&
+		message[0] == 0 &&
+		binary.BigEndian.Uint32(message[1:5]) == testId
 }
 
 func DefaultTestConfig() *TestConfig {

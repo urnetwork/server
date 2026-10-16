@@ -3,7 +3,7 @@
 `run-main.sh` is the fail-closed agent harness for the six-epoch competition.
 It drives the continuously deployed main API and one-shot worker while keeping
 the complete evaluator source graph—`server`, `connect`, `sdk`, `proxy`,
-`glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, and `warp`—isolated
+`glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, `warp`, and `gvisor`—isolated
 in temporary clones. Every repository is pinned per epoch on its `sim-latency` branch.
 Neither evaluation nor promotion changes the operator's product checkouts.
 
@@ -38,14 +38,14 @@ the worker is run from this host. Set an exact control-plane image identity in
 `WARP_IMAGE_DIGEST`; this is recorded per evaluation but is not a scoring input.
 
 Every epoch checkpoint in `config/main/sim-latency.yml` must list exactly these
-ten repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
-`goidenticons`, `userwireguard`, `sn`, `operator-proxy`, and `warp`. Each commit
+eleven repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
+`goidenticons`, `userwireguard`, `sn`, `operator-proxy`, `warp`, and `gvisor`. Each commit
 must be reachable from that repository's remote `sim-latency` branch, and the active epoch commit must
 be the branch head before promotion begins. Never fill a missing dependency
 from a local checkout, its default branch, or the evaluator builder's current
 `HEAD`; those sources are deliberately excluded from the evaluation identity.
 Before staging, each repository must also expose a `sim-latency-staging` branch
-whose head exactly equals its epoch-zero commit. The harness verifies all ten
+whose head exactly equals its epoch-zero commit. The harness verifies all eleven
 remote aliases before it creates, evaluates, or advances a staging epoch.
 Staging branches never receive a winner or advance automatically; they isolate
 the name used for pre-production coordination while retaining the exact frozen
@@ -54,18 +54,20 @@ a separate release operation at a drained staging-round boundary, not a
 winner promotion or a change to a round already accepting/evaluating work.
 
 The frozen evaluator module graph requires `operator-proxy` and `warp` in addition
-to the earlier eight repositories. Current tools reject incomplete checkpoints
-and source locks; they never infer the two missing commits. Prepare a reviewed
-complete checkpoint, matching remote aliases, and a new evaluator image at the
-drained release boundary. Preserve old eight-repository images, locks, baseline
-artifacts, and round evidence as historical records; do not rewrite them to
-claim the new source identity.
+to the earlier eight repositories, and `gvisor` in addition to those ten: server's
+`go.mod` replaces `gvisor.dev/gvisor` with the `../gvisor` sibling. Current tools
+reject incomplete checkpoints and source locks; they never infer a missing
+commit. Prepare a reviewed complete checkpoint, matching remote aliases, and a
+new evaluator image at the drained release boundary. Preserve old eight- and
+ten-repository images, locks, baseline artifacts, and round evidence as
+historical records; do not rewrite them to claim the new source identity.
 
 The continuously deployed main control-plane graph can later remove a module
 without changing that frozen evaluator checkpoint. Current-main coverage checks
 must still reject newly required unpinned local repositories, but cannot shrink
 an existing lock. Source loading, shell validators, image copies, and the epoch
-ledger continue to require the exact frozen ten-repository set, including Warp.
+ledger continue to require the exact frozen eleven-repository set, including Warp
+and gvisor.
 
 Create a mode-0600 file containing the operator bearer token, then export:
 
@@ -236,7 +238,7 @@ with status 20; run `./run-main.sh candidate --epoch N` to materialize that
 candidate before reviewing it. If candidates are exhausted, it records
 a no-winner transition and carries the exact incumbent commits and significance
 threshold into the next epoch. Approval authenticates the reviewed score and
-patch, clones all ten locked repositories into a new temporary directory,
+patch, clones all eleven locked repositories into a new temporary directory,
 checks out the frozen `sim-latency` branch heads, applies the winner to the
 evaluated server surface, verifies every dependency and the protected runner
 tree are unchanged, pushes changed source branches, and pushes the config ledger

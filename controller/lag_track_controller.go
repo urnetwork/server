@@ -294,7 +294,7 @@ func lagTrack(
 		issued[extender.ExtenderId] = true
 		dots = append(dots, &lagTrackDot{extender: extender, position: position})
 	}
-	dots = lagDotsStillIssued(ctx, dots)
+	dots = lagDotsStillServing(ctx, dots, now)
 	if len(dots) == 0 {
 		return lagTrackUnavailable("None of the extenders can be measured now."), nil
 	}
@@ -412,7 +412,7 @@ func lagTrackReissue(
 		}
 		dots = append(dots, &lagTrackDot{extender: extender, position: key.position})
 	}
-	dots = lagDotsStillIssued(ctx, dots)
+	dots = lagDotsStillServing(ctx, dots, now)
 	if len(dots) == 0 {
 		return lagTrackUnavailable("None of the extenders can be measured now."), nil
 	}
@@ -432,20 +432,21 @@ func lagTrackReissue(
 	return result, nil
 }
 
-// The dots whose extender's request is still answered issued, read now, so a
-// withdrawal or an opt-out within the serving set's cache gets no ticket.
-func lagDotsStillIssued(ctx context.Context, dots []*lagTrackDot) []*lagTrackDot {
+// The dots whose extender still serves, read at `now` (lagStillServing), so
+// a withdrawal or an opt-out within the serving set's cache gets no ticket,
+// and nor does an extender yet to read its certificate.
+func lagDotsStillServing(ctx context.Context, dots []*lagTrackDot, now time.Time) []*lagTrackDot {
 	extenders := make([]*lagServingExtender, 0, len(dots))
 	for _, dot := range dots {
 		extenders = append(extenders, dot.extender)
 	}
-	issued := map[server.Id]bool{}
-	for _, extender := range lagStillIssued(ctx, extenders) {
-		issued[extender.ExtenderId] = true
+	serving := map[server.Id]bool{}
+	for _, extender := range lagStillServing(ctx, extenders, now) {
+		serving[extender.ExtenderId] = true
 	}
 	kept := []*lagTrackDot{}
 	for _, dot := range dots {
-		if issued[dot.extender.ExtenderId] {
+		if serving[dot.extender.ExtenderId] {
 			kept = append(kept, dot)
 		}
 	}

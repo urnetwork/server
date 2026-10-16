@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"slices"
 	"strings"
 	"testing"
@@ -469,6 +470,155 @@ func TestLagExtendersOnlyIssued(t *testing.T) {
 		// and when it is read again
 		sameIds(served(true), issued)
 		sameIds(ticketed(true), issued)
+	})
+}
+
+// An extender whose certificate is issued and whose name is published, but
+// which has not yet read the certificate from its poll (A8), is neither
+// offered nor ticketed: it installs the chain only from that answer, up to
+// half an hour after the dns reconcile publishes its name, and until then
+// its name answers without it (lag.dev/PLAN.md A8, A4). Once its poll
+// answers issued with the chain it is both. A renewal it has yet to read
+// leaves it offered, since the certificate it holds is still valid, but a
+// certificate for a new key is one it must read before it serves again, and
+// that holds at once, through the cached serving set.
+func TestLagExtendersOnlyDelivered(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installLagTestExtenderConfig(t, true)
+		settings := DefaultLagSettings()
+		defer Testing_SetLagSettings(settings)()
+		places := map[string]*model.LagPlace{}
+		useLagAddressPlaces(t, places)
+
+		serving := newLagServingTestExtender(t, ctx, places, lagTestPlace("Hamburg", "de", 53.5, 10.0), "192.0.2.1")
+		fresh := newLagTestExtender(t, ctx, "192.0.2.2")
+		places["192.0.2.2"] = lagTestPlace("Osaka", "jp", 34.7, 135.5)
+		cert := addLagTestUndeliveredCert(t, ctx, fresh)
+		connect.AssertEqual(t, model.PublishNetworkExtenderMeasurementNames(ctx, cert.Names, server.NowUtc()), 1)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, fresh.extenderId).State, model.NetworkExtenderMeasurementStateIssued)
+
+		guest := newLagTestGuestSession(t, ctx, "198.51.100.30:1234")
+		offered := func(reset bool) map[server.Id]bool {
+			t.Helper()
+			if reset {
+				Testing_ResetLagServing()
+			}
+			result, err := LagExtenders(guest)
+			connect.AssertEqual(t, err, nil)
+			extenderIds := map[server.Id]bool{}
+			for _, extender := range result.Extenders {
+				extenderIds[extender.ExtenderId] = true
+			}
+			return extenderIds
+		}
+		ticketed := func(reset bool) map[server.Id]bool {
+			t.Helper()
+			if reset {
+				Testing_ResetLagServing()
+			}
+			result, err := lagTrack(&LagTrackArgs{Extenders: []*LagTrackExtenderArgs{
+				{ExtenderId: serving.extenderId},
+				{ExtenderId: fresh.extenderId},
+			}}, guest, server.NowUtc(), settings)
+			connect.AssertEqual(t, err, nil)
+			extenderIds := map[server.Id]bool{}
+			for _, ticket := range result.Tickets {
+				extenderIds[ticket.ExtenderId] = true
+			}
+			return extenderIds
+		}
+		ids := func(extenders ...*lagTestExtender) map[server.Id]bool {
+			extenderIds := map[server.Id]bool{}
+			for _, extender := range extenders {
+				extenderIds[extender.extenderId] = true
+			}
+			return extenderIds
+		}
+		// the extender's poll, with its own credential
+		poll := func() *ExtenderMeasurementCertResult {
+			t.Helper()
+			result, err := ExtenderMeasurementCert(
+				&ExtenderMeasurementCertArgs{PublicKeyHex: hex.EncodeToString(fresh.publicKey)},
+				fresh.clientSession,
+			)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, result.State, model.NetworkExtenderMeasurementStateIssued)
+			return result
+		}
+		deliverTime := func(certId server.Id) *time.Time {
+			t.Helper()
+			for _, stored := range model.Testing_GetNetworkExtenderMeasurementCerts(ctx, fresh.extenderId) {
+				if stored.CertId == certId {
+					return stored.DeliverTime
+				}
+			}
+			t.Fatalf("no certificate %s", certId)
+			return nil
+		}
+
+		// issued and published, not yet read: neither
+		connect.AssertEqual(t, offered(true), ids(serving))
+		connect.AssertEqual(t, ticketed(false), ids(serving))
+
+		// its poll reads the chain, and from then on it serves
+		connect.AssertEqual(t, poll().ChainPem, cert.ChainPem)
+		firstDelivery := deliverTime(cert.CertId)
+		if firstDelivery == nil {
+			t.Fatal("the poll that answered with the chain recorded no delivery")
+		}
+		connect.AssertEqual(t, offered(true), ids(serving, fresh))
+		connect.AssertEqual(t, ticketed(false), ids(serving, fresh))
+		// a later poll keeps the first delivery
+		poll()
+		connect.AssertEqual(t, deliverTime(cert.CertId).Equal(*firstDelivery), true)
+
+		now := server.NowUtc()
+		newCert := func(publicKey []byte) *model.NetworkExtenderMeasurementCert {
+			return &model.NetworkExtenderMeasurementCert{
+				CertId:     server.NewId(),
+				ExtenderId: fresh.extenderId,
+				Names:      cert.Names,
+				Csr:        []byte{1},
+				PublicKey:  publicKey,
+				ChainPem:   "-",
+				SerialHex:  "02",
+				NotBefore:  now,
+				NotAfter:   now.Add(90 * 24 * time.Hour),
+				IssueTime:  now,
+				CapCounted: false,
+				RenewTime:  now.Add(60 * 24 * time.Hour),
+			}
+		}
+
+		// a renewal, published and not yet read: the certificate it holds
+		// still serves
+		renewal := newCert(cert.PublicKey)
+		connect.AssertEqual(t, model.AddNetworkExtenderMeasurementCert(ctx, renewal), true)
+		model.PublishNetworkExtenderMeasurementNames(ctx, cert.Names, server.NowUtc())
+		connect.AssertEqual(t, deliverTime(renewal.CertId) == nil, true)
+		connect.AssertEqual(t, offered(false), ids(serving, fresh))
+		connect.AssertEqual(t, ticketed(false), ids(serving, fresh))
+		connect.AssertEqual(t, offered(true), ids(serving, fresh))
+
+		// a new key's request, answered by a certificate for the new key,
+		// published and not yet read: the extender holds no certificate for
+		// its key, so neither, at once
+		newKey := server.NewId().Bytes()
+		model.SetNetworkExtenderMeasurementRequest(ctx, fresh.extenderId, []byte{3}, newKey, cert.Names, server.NowUtc())
+		rotated := newCert(newKey)
+		connect.AssertEqual(t, model.AddNetworkExtenderMeasurementCert(ctx, rotated), true)
+		model.PublishNetworkExtenderMeasurementNames(ctx, cert.Names, server.NowUtc())
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, fresh.extenderId).State, model.NetworkExtenderMeasurementStateIssued)
+		connect.AssertEqual(t, offered(false), ids(serving))
+		connect.AssertEqual(t, ticketed(false), ids(serving))
+		connect.AssertEqual(t, offered(true), ids(serving))
+
+		// its poll reads the new key's certificate
+		connect.AssertEqual(t, poll().KeySha256, extenderMeasurementKeySha256(newKey))
+		connect.AssertEqual(t, deliverTime(rotated.CertId) != nil, true)
+		connect.AssertEqual(t, offered(true), ids(serving, fresh))
+		connect.AssertEqual(t, ticketed(false), ids(serving, fresh))
 	})
 }
 

@@ -23,15 +23,15 @@ func TestArindbCanaryGuardBodyIsThePublishedMigrationBody(t *testing.T) {
 
 // The canary's schema is two append-only migrations, each with one contract
 // over the one table it locks: the rollup's slots, then the connection slots
-// and their guard, at the head this source tree requires.
-func TestArindbCanaryContractsAreTheCurrentHead(t *testing.T) {
+// and their guard. Later appends do not change these published contracts.
+func TestArindbCanaryContractsKeepPublishedOrder(t *testing.T) {
 	count := len(migrationCurrentSuffixContracts)
 	if count < 2 {
 		t.Fatalf("%d suffix contracts", count)
 	}
 	rollup, location := migrationCurrentSuffixContracts[count-2], migrationCurrentSuffixContracts[count-1]
 	if rollup.artifact.requiredVersion != arindbCanaryRollupMigrationVersion || location.artifact.requiredVersion != arindbCanaryLocationMigrationVersion ||
-		rollup.artifact.removedVersion != 0 || location.artifact.removedVersion != 0 || server.MigrationCount() != arindbCanaryLocationMigrationVersion {
+		rollup.artifact.removedVersion != 0 || location.artifact.removedVersion != 0 || server.MigrationCount() < arindbCanaryLocationMigrationVersion {
 		t.Fatalf("canary contracts %+v and %+v at head %d", rollup.artifact, location.artifact, server.MigrationCount())
 	}
 	for _, c := range []struct {

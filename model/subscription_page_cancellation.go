@@ -5,11 +5,17 @@ package model
 import (
 	"context"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/urnetwork/server"
 )
 
 // A database stop preserves both its historical marker and physical cause.
 // Hard siblings, custom matchers and incomplete graphs cannot donate a yield.
+// A statement the stop let finish (server.PgStatementStopTimeout) can end in
+// its own lock or statement timeout, which rolls its transaction back as the
+// stop would have; that refusal joins a stop but cannot yield by itself.
 func isSettlementPageCancellation(err error) bool {
 	causes := server.InspectErrorCauses(err)
 	if !causes.Complete || causes.NilBranches != 0 {
@@ -24,7 +30,11 @@ func isSettlementPageCancellation(err error) bool {
 		case context.Canceled, context.DeadlineExceeded, server.DbContextDoneError:
 			found = true
 		default:
-			return false
+			// the server's refusal at the statement's own lock or statement timeout
+			pgErr, ok := cause.Err.(*pgconn.PgError)
+			if !ok || pgErr.Code != pgerrcode.LockNotAvailable && pgErr.Code != pgerrcode.QueryCanceled {
+				return false
+			}
 		}
 	}
 	return found

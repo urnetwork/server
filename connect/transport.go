@@ -1924,12 +1924,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						connect.MessagePoolReturn(message)
 						continue
 					}
-					// during a speed test, count all incoming bytes (both
-					// the client's echoed chunks and any user traffic the
-					// client is concurrently sending) toward the throughput
-					// total. user traffic continues to flow rather than being
-					// dropped — speed test runs in parallel.
-					if speedTest != nil {
+					// during a speed test only the test's echoed probes count.
+					// The client also echoes the user frames written between
+					// the probes, and keeps sending its own; every frame still
+					// continues to the resident, so the test runs in parallel.
+					if speedTest != nil && isSpeedTestProbe(message, speedTest.TestId) {
 						speedTest.TotalByteCount += model.ByteCount(len(message))
 					}
 
@@ -2034,7 +2033,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			// user packets aren't blocked. mirrors the client-side behavior.
 			var speedTestId uint32
 			speedTestChunksRemaining := 0
-			chunk := make([]byte, 1024)
+			chunk := make([]byte, speedTestProbeByteCount)
 
 			// reusable ping timer (hot-path timer reuse): the slow select arms a
 			// timer each iteration user traffic is briefly idle between bursts.
@@ -2059,6 +2058,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					default:
 					}
 					mathrand.Read(chunk)
+					setSpeedTestProbeHeader(chunk, speedTestId)
 					chunkCopy := connect.MessagePoolCopy(chunk)
 					if write(chunkCopy, true) != nil {
 						return
@@ -2131,8 +2131,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					// client should echo control values and packets in speed test mode.
 					// after starting, the writer interleaves chunk writes with
 					// user traffic above so user packets aren't blocked. on the
-					// reader side, all bytes received during the test (chunks +
-					// user) count toward the throughput total.
+					// reader side, only the echoed probes of the test count
+					// toward its total.
 
 					if announce.SendSpeed(speedTest) {
 						startMessage := connect.MessagePoolGet(5)

@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/urnetwork/server"
 )
 
@@ -218,27 +221,42 @@ func TestPayerAdmissionQueueRollbackRetryAndPosts(t *testing.T) {
 		defer unblockRetry.Do(func() { close(continueRetry) })
 		first := make(chan error, 1)
 		var posts []func() any
+		attempt := func(tx server.PgTx) {
+			if attempts.Add(1) == 1 {
+				server.RaisePgResult(tx.Exec(ctx, `DO $$ BEGIN RAISE SQLSTATE '40001'; END $$`))
+			}
+			close(retryEntered)
+			select {
+			case <-continueRetry:
+			case <-ctx.Done():
+				server.Raise(ctx.Err())
+			}
+			var err error
+			_, posts, err = createTransferEscrowInTx(ctx, tx, f.sourceNetworkId, f.sourceId,
+				f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 1, nil)
+			server.Raise(err)
+		}
 		go func() {
-			first <- transferEscrowTx(ctx, f.sourceNetworkId, 1, func(tx server.PgTx) {
-				if attempts.Add(1) == 1 {
-					server.RaisePgResult(tx.Exec(ctx, `DO $$ BEGIN RAISE SQLSTATE '40001'; END $$`))
-				}
-				close(retryEntered)
-				select {
-				case <-continueRetry:
-				case <-ctx.Done():
-					server.Raise(ctx.Err())
-				}
-				var err error
-				_, posts, err = createTransferEscrowInTx(ctx, tx, f.sourceNetworkId, f.sourceId,
-					f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 1, nil)
-				server.Raise(err)
+			// transferEscrowTx never reruns its transaction: the transient
+			// failure reaches its caller with the turn released, and the
+			// caller's retry takes a new turn
+			var err error
+			refusal := server.HandleError(func() {
+				err = transferEscrowTx(ctx, f.sourceNetworkId, 1, attempt)
 			})
+			var pgErr *pgconn.PgError
+			if refusalErr, ok := refusal.(error); err != nil || !ok || !errors.As(refusalErr, &pgErr) || pgErr.Code != pgerrcode.SerializationFailure {
+				first <- fmt.Errorf("transient failure did not reach its caller: err=%v refusal=%v", err, refusal)
+				return
+			}
+			first <- transferEscrowTx(ctx, f.sourceNetworkId, 1, attempt)
 		}()
 		select {
 		case <-retryEntered:
+		case err := <-first:
+			t.Fatal("the caller's retry did not start", err)
 		case <-ctx.Done():
-			t.Fatal("transaction did not retry")
+			t.Fatal("the caller's retry did not start")
 		}
 		second := make(chan error, 1)
 		go func() { _, err := payerQueueCreate(ctx, f, 1); second <- err }()
@@ -251,7 +269,7 @@ func TestPayerAdmissionQueueRollbackRetryAndPosts(t *testing.T) {
 			t.Fatal(err)
 		}
 		if attempts.Load() != 2 {
-			t.Fatalf("retry attempts=%d", attempts.Load())
+			t.Fatalf("attempts=%d, want the failed one and the caller's retry", attempts.Load())
 		}
 
 		postEntered := make(chan struct{})
@@ -322,9 +340,12 @@ func TestPayerAdmissionQueueBoundsPostgresWaiters(t *testing.T) {
 		deadline := time.Now().Add(time.Second)
 		for time.Now().Before(deadline) {
 			var waiting int
+			// the grant's locking read, which constrains itself to the
+			// ownership-admitted ids it appends to this fixed statement
 			server.Raise(observer.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
-				WHERE datname=current_database() AND state='active' AND wait_event_type='Lock' AND query=$1`,
-				escrowTransferBalanceSql+` ORDER BY balance_id FOR UPDATE`).Scan(&waiting))
+				WHERE datname=current_database() AND state='active' AND wait_event_type='Lock'
+					AND starts_with(query, $1) AND right(query, length($2))=$2`,
+				escrowTransferBalanceSql, ` ORDER BY balance_id FOR UPDATE`).Scan(&waiting))
 			maxWaiters = max(maxWaiters, waiting)
 			time.Sleep(10 * time.Millisecond)
 		}

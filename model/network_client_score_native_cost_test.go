@@ -36,6 +36,12 @@ type nativeCostRedis struct {
 
 // Observes protocol-sized page batches without changing Redis execution.
 func (self *nativeCostRedis) Eval(ctx context.Context, script string, keys []string, args ...any) *redis.Cmd {
+	self.observeEval(script, args)
+	return self.RedisClient.Eval(ctx, script, keys, args...)
+}
+
+// Counts one writer script, sent alone or in the staging pipeline.
+func (self *nativeCostRedis) observeEval(script string, args []any) {
 	switch script {
 	case clientScoreNativeBeginScript:
 		self.beginCalls++
@@ -59,7 +65,6 @@ func (self *nativeCostRedis) Eval(ctx context.Context, script string, keys []str
 	default:
 		self.t.Fatalf("unexpected native writer script")
 	}
-	return self.RedisClient.Eval(ctx, script, keys, args...)
 }
 
 // Wraps reads without changing command scheduling or server responses.
@@ -70,7 +75,15 @@ func (self *nativeCostRedis) Pipeline() redis.Pipeliner {
 // Checks page read uniqueness and bounded command counts on actual responses.
 type nativeCostPipeline struct {
 	redis.Pipeliner
-	audit *nativeCostRedis
+	audit   *nativeCostRedis
+	scripts int
+}
+
+// The writer submits staging with its first page batch in one pipeline.
+func (self *nativeCostPipeline) Eval(ctx context.Context, script string, keys []string, args ...any) *redis.Cmd {
+	self.audit.observeEval(script, args)
+	self.scripts++
+	return self.Pipeliner.Eval(ctx, script, keys, args...)
 }
 
 // Measures the completed batch, not speculative queued work.
@@ -78,6 +91,13 @@ func (self *nativeCostPipeline) Exec(ctx context.Context) ([]redis.Cmder, error)
 	commands, err := self.Pipeliner.Exec(ctx)
 	if err != nil {
 		return commands, err
+	}
+	if self.scripts != 0 {
+		// a writer submission, observed as each script was queued
+		if self.scripts != len(commands) {
+			self.audit.t.Fatalf("native writer pipeline mixed %d scripts into %d commands", self.scripts, len(commands))
+		}
+		return commands, nil
 	}
 	self.audit.maxReadBatchPages = max(self.audit.maxReadBatchPages, len(commands))
 	for _, command := range commands {

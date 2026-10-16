@@ -201,6 +201,9 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			ON network_client_location FOR EACH ROW EXECUTE FUNCTION network_client_location_arin_old_quality_guard()`},
 		{"replaced old slot guard", arindbCanaryLocationMigrationVersion, `CREATE OR REPLACE FUNCTION network_client_location_arin_old_quality_guard() RETURNS trigger
 			LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+		{"missing measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert DROP COLUMN deliver_time`},
+		{"required measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN deliver_time SET NOT NULL`},
+		{"invented measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN deliver_time SET DEFAULT now()`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

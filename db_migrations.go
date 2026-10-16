@@ -10417,11 +10417,24 @@ var migrations = []any{
 	// waits on the rollup while it holds the location rows.
 	newSqlMigration(arinDatabaseCanaryLocationSchemaSql),
 
-	// 839: retain original registration authority for idempotent session replay.
+	// 839: when A8 first handed each measurement certificate to its extender
+	// (lag.dev/PLAN.md A8, A4, C10). The dns reconcile publishes a new name
+	// within a minute or two of its issuance, but the extender installs the
+	// chain only when its next A8 poll reads it, up to half an hour later,
+	// and its name answers without it until then. The lag.dev sample and the
+	// records' MeasurementId wait for this time. No existing column records a
+	// delivery. A nullable column on a small table: nothing is rewritten.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_extender_measurement_cert
+			ADD COLUMN deliver_time timestamp NULL;
+	`),
+
+	// 840: retain original registration authority for idempotent session replay.
 	// No historical binding is inferred or backfilled from mutable client rows.
 	newSqlMigration(clientRegistrationSessionSchemaSql),
 
-	// 840: immutable seed-window recovery metadata; signed receipt bytes stay
+	// 841: immutable seed-window recovery metadata; signed receipt bytes stay
 	// unchanged. The existing original-transition trigger protects the column.
 	newSqlMigration(verifyOriginalWindowSchemaSql),
 }

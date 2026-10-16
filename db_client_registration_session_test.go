@@ -8,9 +8,11 @@ import (
 
 // The existing published catalog retains its exact positions and SQL identity.
 func TestClientRegistrationSessionMigrationFollowsPublishedCatalog(t *testing.T) {
+	deliveryIndex := sqlMigrationIndex(t, "ADD COLUMN deliver_time")
 	index := sqlMigrationIndex(t, "ADD COLUMN session_accept_until")
-	if index != 839 || index != sqlMigrationIndex(t, "ADD COLUMN arin_old_quality_write_token")+1 {
-		t.Fatal("registration session schema changed published migration order", index)
+	windowIndex := sqlMigrationIndex(t, "ADD COLUMN head_window")
+	if deliveryIndex != 839 || deliveryIndex != sqlMigrationIndex(t, "ADD COLUMN arin_old_quality_write_token")+1 || index != deliveryIndex+1 || windowIndex != index+1 {
+		t.Fatal("registration session schema changed published migration order", deliveryIndex, index, windowIndex)
 	}
 	value, ok := migrations[index].(*SqlMigration)
 	if !ok || value.sql != clientRegistrationSessionSchemaSql {
