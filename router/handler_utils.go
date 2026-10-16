@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/urnetwork/glog"
 
@@ -130,6 +131,9 @@ func implName[R any](impl ImplFunction[R]) string {
 	name := runtime.FuncForPC(reflect.ValueOf(impl).Pointer()).Name()
 	// remove all /vXXXX paths in the canonical module
 	name = implNameVersionRegex.ReplaceAllString(name, "")
+	// A generic impl's name carries "[...]", whose "]" would end the tag early:
+	// no status after it could be read, and the tagged text would be sent.
+	name = strings.ReplaceAll(name, "[...]", "")
 	return name
 }
 
@@ -553,6 +557,47 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 
 	http.Error(w, message, statusCode)
 	return
+}
+
+// The answer to an impl error that declares no status: the router's answer to
+// a done error that escapes a route.
+var errUndeclaredImpl = fmt.Errorf("%d Service temporarily unavailable.", http.StatusServiceUnavailable)
+
+// Reports whether RaiseHttpError answers err with a status err chose, by the
+// "<code> message" convention or as an authentication outage.
+func declaresHttpStatus(err error) bool {
+	return errors.Is(err, session.ErrAuthUnavailable) || httpErrorCodeRegex.MatchString(err.Error())
+}
+
+// An impl error that declares no status is an unexpected internal failure,
+// such as storage, signing or a canceled dependency, and RaiseHttpError would
+// send its raw text with a 500. Here the text stays in the server log and the
+// caller is answered 503 with a fixed message, as the provider work routes
+// answer theirs. A declared status passes unchanged, with its message, retry
+// hint and result body.
+func PrivateErrors[R any](impl ImplFunction[R]) ImplFunction[R] {
+	return func(clientSession *session.ClientSession) (R, error) {
+		result, err := impl(clientSession)
+		if err == nil || declaresHttpStatus(err) {
+			return result, err
+		}
+		glog.Infof("[h]impl error: [%s]%s\n", implName(impl), err)
+		var empty R
+		return empty, errUndeclaredImpl
+	}
+}
+
+// The same, for an impl that takes the decoded request body.
+func PrivateErrorsWithInput[T any, R any](impl ImplWithInputFunction[T, R]) ImplWithInputFunction[T, R] {
+	return func(input T, clientSession *session.ClientSession) (R, error) {
+		result, err := impl(input, clientSession)
+		if err == nil || declaresHttpStatus(err) {
+			return result, err
+		}
+		glog.Infof("[h]request impl error (%T): %s\n", input, err)
+		var empty R
+		return empty, errUndeclaredImpl
+	}
 }
 
 func RequestBodyFormatter(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
