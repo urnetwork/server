@@ -20,7 +20,9 @@ func TestNativePublisherSeparatesGateCountsFromOnlineUnion(t *testing.T) {
 		ctx := t.Context()
 		city := testing_healthGateCity(ctx, t)
 		clientIds := testing_connectQualifyingProviders(ctx, t, city, 3)
-		testing_setProviderEgressHealth(ctx, clientIds[0], 1, 1)
+		// three passing runs, as many as Quality reads a verdict from
+		// (egress_native_min_runs.go)
+		testing_setProviderEgressHealth(ctx, clientIds[0], 3, 3)
 		testing_setProviderEgressHealth(ctx, clientIds[1], 0, 1)
 		testing_rollUpEgress(ctx)
 		caller := countryCodeLocationIds()[city.CountryCode]
@@ -44,9 +46,9 @@ func TestNativePublisherSeparatesGateCountsFromOnlineUnion(t *testing.T) {
 		for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			scores, cursor, available, err := loadNativeClientScoresWithCursor(ctx, mode, map[server.Id]bool{city.LocationId: true}, nil, server.Id{}, 100, ipFamilyFacets, nil)
 			if err != nil || !available || len(scores) != 1 || scores[clientIds[0]] == nil || cursor.hasMore() {
-				t.Fatalf("native publication includes online dilution or excludes 1/1: mode=%s available=%t count=%d err=%v", mode, available, len(scores), err)
+				t.Fatalf("native publication includes online dilution or excludes 3/3: mode=%s available=%t count=%d err=%v", mode, available, len(scores), err)
 			}
-			if count := census.Buckets[mode]; count.Providers != 1 || count.Denominators["one"] != 1 {
+			if count := census.Buckets[mode]; count.Providers != 1 || count.Denominators["three_to_four"] != 1 {
 				t.Fatalf("native census does not match selected-policy admission: mode=%s count=%+v", mode, count)
 			}
 			filtered, filteredCursor, available, err := loadNativeClientScoresWithCursor(ctx, mode, map[server.Id]bool{city.LocationId: true}, nil, caller, 100, ipFamilyFacets, nil)
@@ -61,7 +63,7 @@ func TestNativePublisherSeparatesGateCountsFromOnlineUnion(t *testing.T) {
 				}
 			})
 		}
-		if count := census.Buckets["online"]; count.Providers != 3 || count.Denominators["zero"] != 1 || count.Denominators["one"] != 2 {
+		if count := census.Buckets["online"]; count.Providers != 3 || count.Denominators["zero"] != 1 || count.Denominators["one"] != 1 || count.Denominators["three_to_four"] != 1 {
 			t.Fatalf("online census summed overlapping targets or invented evidence: %+v", count)
 		}
 		if ratio := census.EgressRatio; ratio == nil || ratio.UnavailableReason != "" || *ratio.PublicOnline != (ClientScoreNativeEgressRatioCount{Providers: 3, Observed: 2, Passed: 1, Failed: 1, NoEvidence: 1}) || *ratio.SourceMap != (ClientScoreNativeEgressRatioCount{Providers: 2, Observed: 2, Passed: 1, Failed: 1}) {

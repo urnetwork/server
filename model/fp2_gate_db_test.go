@@ -155,8 +155,12 @@ func TestFp2UrlHistoryIsIdempotentAndWindowed(t *testing.T) {
 		latest := &ProviderEgressHealth{RunId: server.NewId(), ClientId: clientId, MeasuredAt: now.Add(-time.Hour), OKCount: 1, Total: 1}
 		latest.UrlProbeEvidence = fp2TestUrlProbeEvidence(latest.MeasuredAt, true)
 		SetProviderEgressHealth(ctx, latest)
-		egressTestHealth(ctx, clientId, now.Add(-2*time.Hour), 2, 0)
-		egressTestHealth(ctx, clientId, now.Add(-90*time.Minute), 2, 2)
+		// one run per call, so each lands exactly at its instant: the window
+		// is read at its exclusive cutoff (egressTestRunAt spreads two or more)
+		for range 2 {
+			egressTestHealth(ctx, clientId, now.Add(-2*time.Hour), 1, 0)
+			egressTestHealth(ctx, clientId, now.Add(-90*time.Minute), 1, 1)
+		}
 		egressTestHealth(ctx, clientId, now.Add(-9*time.Hour), 100, 100)
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{RunId: server.NewId(), ClientId: clientId, MeasuredAt: now.Add(-30 * time.Minute), NotMeasuredCount: 20})
 		replay := *latest

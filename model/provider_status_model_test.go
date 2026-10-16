@@ -370,9 +370,10 @@ func TestProviderStatusMatchesExportRanking(t *testing.T) {
 		1: {reliabilityWeight: 0.97, independentReliabilityWeight: 0.97},
 		2: {reliabilityWeight: 0.8, independentReliabilityWeight: 0.8},
 	}
-	// 19 of 20 checks: passing, with a URL weight of 0.1 + 0.9·0.95
+	// 19 of 20 checks over four hours: passing, with a URL weight of
+	// 0.1 + 0.9·0.95
 	countFilter := testingProviderStatusFilter(facts)
-	countFilter.healthCounts[facts.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow, FirstMeasuredAt: testingProviderStatusNow, OKCount: 19, Total: 20}
+	countFilter.healthCounts[facts.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow, FirstMeasuredAt: testingProviderStatusNow.Add(-4 * time.Hour), OKCount: 19, Total: 20}
 	urlWeight := 0.1 + 0.9*0.95
 	evaluation, status := testingProviderStatus(facts, countFilter)
 	clientScore := evaluation.clientScore
