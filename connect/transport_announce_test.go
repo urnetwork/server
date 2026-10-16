@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/connect/protocol"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/urnetwork/server/model"
 )
 
@@ -85,4 +88,45 @@ func TestConnectionAnnounceRejectsSpeedStopWithoutReaderState(t *testing.T) {
 	if announce.ReceiveSpeed(nil) {
 		t.Fatal("malformed speed stop was accepted for an active test")
 	}
+}
+
+// While a speed test runs the client echoes every frame over 16 bytes, so the
+// reader counts a frame only when it is a probe of that test.
+func TestSpeedTestProbeMatchesOnlyItsTestProbes(t *testing.T) {
+	const testId uint32 = 7
+	probe := make([]byte, speedTestProbeByteCount)
+	for i := range probe {
+		probe[i] = byte(i)
+	}
+	setSpeedTestProbeHeader(probe, testId)
+	connect.AssertEqual(t, true, isSpeedTestProbe(probe, testId))
+	// the probe of another test, and a probe cut short
+	connect.AssertEqual(t, false, isSpeedTestProbe(probe, testId+1))
+	connect.AssertEqual(t, false, isSpeedTestProbe(probe[:len(probe)-1], testId))
+	probe[0] = 1
+	connect.AssertEqual(t, false, isSpeedTestProbe(probe, testId))
+
+	// a Transfer frame of exactly the probe length is user traffic: it starts
+	// with a protobuf tag, which is never zero
+	var frameBytes []byte
+	for payloadByteCount := 0; len(frameBytes) < speedTestProbeByteCount; payloadByteCount += 1 {
+		var err error
+		frameBytes, err = proto.Marshal(&protocol.TransferFrame{
+			TransferPath: connect.NewTransferPath(connect.NewId(), connect.NewId(), connect.Id{}).ToProtobuf(),
+			Pack: &protocol.Pack{
+				MessageId:      connect.NewId().Bytes(),
+				SequenceId:     connect.NewId().Bytes(),
+				SequenceNumber: 1,
+				Frames: []*protocol.Frame{{
+					MessageType:  protocol.MessageType_TestSimpleMessage,
+					MessageBytes: make([]byte, payloadByteCount),
+				}},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	connect.AssertEqual(t, speedTestProbeByteCount, len(frameBytes))
+	connect.AssertEqual(t, false, isSpeedTestProbe(frameBytes, testId))
 }

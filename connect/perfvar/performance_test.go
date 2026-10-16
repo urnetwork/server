@@ -478,12 +478,15 @@ func perfvarPlatformReceiveFailureReason(
 			)
 		}
 	}
-	if snapshot.H1ControlRefusalCount != 0 || snapshot.H1ControlRefusalBytes != 0 {
+	// The harness configures no speed or latency test, so nothing asks the H1
+	// reader for an echo. An echo it held behind a full control queue is
+	// measurement traffic stalling the carrier reader.
+	if snapshot.H1ControlBackpressureMessageCount != 0 || snapshot.H1ControlBackpressureByteCount != 0 {
 		return fmt.Sprintf(
-			"%s h1 control queue refused %d message(s) / %d byte(s)",
+			"%s h1 reader held %d control echo(es) / %d byte(s) behind a full control queue",
 			endpoint,
-			snapshot.H1ControlRefusalCount,
-			snapshot.H1ControlRefusalBytes,
+			snapshot.H1ControlBackpressureMessageCount,
+			snapshot.H1ControlBackpressureByteCount,
 		)
 	}
 	return ""
@@ -1185,12 +1188,12 @@ func subtractPlatformTransportReceiveStats(
 		}
 	}
 	return clientconnect.PlatformTransportReceiveStatsSnapshot{
-		H1:                    subtractMode(before.H1, after.H1),
-		H3:                    subtractMode(before.H3, after.H3),
-		H3Dns:                 subtractMode(before.H3Dns, after.H3Dns),
-		H3DnsPump:             subtractMode(before.H3DnsPump, after.H3DnsPump),
-		H1ControlRefusalCount: after.H1ControlRefusalCount - before.H1ControlRefusalCount,
-		H1ControlRefusalBytes: after.H1ControlRefusalBytes - before.H1ControlRefusalBytes,
+		H1:                                subtractMode(before.H1, after.H1),
+		H3:                                subtractMode(before.H3, after.H3),
+		H3Dns:                             subtractMode(before.H3Dns, after.H3Dns),
+		H3DnsPump:                         subtractMode(before.H3DnsPump, after.H3DnsPump),
+		H1ControlBackpressureMessageCount: after.H1ControlBackpressureMessageCount - before.H1ControlBackpressureMessageCount,
+		H1ControlBackpressureByteCount:    after.H1ControlBackpressureByteCount - before.H1ControlBackpressureByteCount,
 	}
 }
 
@@ -2019,8 +2022,8 @@ func TestObservePerfvarCarrierIncludesReceiveHandoffIntervals(t *testing.T) {
 			},
 		},
 		providerPlatformReceive: clientconnect.PlatformTransportReceiveStatsSnapshot{
-			H1ControlRefusalCount: 3,
-			H1ControlRefusalBytes: 30,
+			H1ControlBackpressureMessageCount: 3,
+			H1ControlBackpressureByteCount:    30,
 		},
 		deviceH3Datagrams: clientconnect.H3DatagramStatsSnapshot{
 			SentMessageCount: 2,
@@ -2070,8 +2073,8 @@ func TestObservePerfvarCarrierIncludesReceiveHandoffIntervals(t *testing.T) {
 	after.capturedAt = startTime.Add(time.Second)
 	after.devicePlatformReceive.H3Dns.QueueDropMessageCount = 7
 	after.devicePlatformReceive.H3Dns.QueueDropByteCount = 90
-	after.providerPlatformReceive.H1ControlRefusalCount = 5
-	after.providerPlatformReceive.H1ControlRefusalBytes = 80
+	after.providerPlatformReceive.H1ControlBackpressureMessageCount = 5
+	after.providerPlatformReceive.H1ControlBackpressureByteCount = 80
 	after.deviceH3Datagrams.SentMessageCount = 7
 	after.providerH3Datagrams.StreamSentMessageCount = 9
 	after.devicePacketStats.RemoteEgressPacketCount = 7
@@ -2092,8 +2095,8 @@ func TestObservePerfvarCarrierIncludesReceiveHandoffIntervals(t *testing.T) {
 	observation := observePerfvarCarrierAt(&fullTunPath{}, before, after)
 	if observation.DevicePlatformReceive.H3Dns.QueueDropMessageCount != 5 ||
 		observation.DevicePlatformReceive.H3Dns.QueueDropByteCount != 70 ||
-		observation.ProviderPlatformReceive.H1ControlRefusalCount != 2 ||
-		observation.ProviderPlatformReceive.H1ControlRefusalBytes != 50 ||
+		observation.ProviderPlatformReceive.H1ControlBackpressureMessageCount != 2 ||
+		observation.ProviderPlatformReceive.H1ControlBackpressureByteCount != 50 ||
 		observation.DeviceH3Datagrams.SentMessageCount != 5 ||
 		observation.ProviderH3Datagrams.StreamSentMessageCount != 6 ||
 		observation.DevicePacketStats.RemoteEgressPacketCount != 5 ||
@@ -2417,7 +2420,7 @@ func TestPerfvarCarrierBaselinePassStableCoversEveryRouteCarrier(t *testing.T) {
 			H3: clientconnect.PlatformTransportReceiveModeStatsSnapshot{QueueDropMessageCount: 1},
 		},
 		providerPlatformReceive: clientconnect.PlatformTransportReceiveStatsSnapshot{
-			H1ControlRefusalCount: 1,
+			H1ControlBackpressureMessageCount: 1,
 		},
 		deviceReceive: perfvarClientReceiveBoundary{
 			client: deviceReceiveClient,
@@ -2528,7 +2531,7 @@ func TestPerfvarCarrierBaselinePassStableCoversEveryRouteCarrier(t *testing.T) {
 			boundary.devicePlatformReceive.H3.QueueDropMessageCount += 1
 		}},
 		{name: "provider platform receive", mutate: func(boundary *perfvarCarrierBoundary) {
-			boundary.providerPlatformReceive.H1ControlRefusalCount += 1
+			boundary.providerPlatformReceive.H1ControlBackpressureMessageCount += 1
 		}},
 		{name: "device H3 DATAGRAM lane", mutate: func(boundary *perfvarCarrierBoundary) {
 			boundary.deviceH3Datagrams.SentMessageCount += 1
@@ -4011,9 +4014,11 @@ func TestPerfvarHarnessRejectsEveryPlatformReceiveRefusal(t *testing.T) {
 		{name: "h3 DNS pump data", mutate: func(snapshot *clientconnect.PlatformTransportReceiveStatsSnapshot) {
 			snapshot.H3DnsPump.QueueDropMessageCount = 1
 		}},
+		// the H1 reader holds an echo for a full control queue instead of
+		// refusing it, so the refusal counters can no longer move
 		{name: "h1 control", mutate: func(snapshot *clientconnect.PlatformTransportReceiveStatsSnapshot) {
-			snapshot.H1ControlRefusalCount = 1
-			snapshot.H1ControlRefusalBytes = 10
+			snapshot.H1ControlBackpressureMessageCount = 1
+			snapshot.H1ControlBackpressureByteCount = 10
 		}},
 	}
 	for _, testCase := range cases {
@@ -4042,6 +4047,19 @@ func TestPerfvarHarnessRejectsEveryPlatformReceiveRefusal(t *testing.T) {
 		perfvarCarrierObservation{},
 	); reason != "" {
 		t.Fatalf("empty platform receive telemetry was rejected: %s", reason)
+	}
+	// reliable data backpressure is the measured system's own flow control
+	backpressure := perfvarCarrierObservation{}
+	backpressure.DevicePlatformReceive.H1.QueueBackpressureMessageCount = 1
+	backpressure.DevicePlatformReceive.H1.QueueBackpressureByteCount = 10
+	backpressure.ProviderPlatformReceive.H3.QueueBackpressureMessageCount = 1
+	backpressure.ProviderPlatformReceive.H3.QueueBackpressureByteCount = 10
+	if reason := perfvarHarnessDropReason(
+		perfvarScenario{},
+		workloadResult{},
+		backpressure,
+	); reason != "" {
+		t.Fatalf("reliable receive backpressure was rejected: %s", reason)
 	}
 }
 
