@@ -172,10 +172,10 @@ type ConnectionAnnounceSettings struct {
 	connectionDisconnectedForTest func(server.Id, error)
 	// Replaces connectionVerifySettings.
 	verifySettingsForTest func() (*model.VerifySettings, bool)
-	// Observes each provider liveness lease write's outcome.
+	// Observes each provider liveness lease write's outcome for the connection.
 	livenessLeaseWrittenForTest func(outcome string)
-	// Replaces model.ProviderLivenessLeaseRefreshInterval when set.
-	livenessLeaseRefreshIntervalForTest time.Duration
+	// Replaces the process's lease writer.
+	livenessLeaseWriterForTest *providerLivenessLeaseWriter
 }
 
 type LatencyTest struct {
@@ -582,15 +582,14 @@ func (self *ConnectionAnnounce) run() {
 	// sync below reads anyway
 	providerVersion := newProviderVersionConnection(defaultProviderVersionConnections, self.appVersion)
 	defer providerVersion.release()
-	// the client's provider liveness lease, refreshed by a worker of its own
-	// while the rounds below find the client providing for discovery
-	// (transport_announce_liveness_lease.go)
-	livenessLease := newProviderLivenessLeaseConnection(
-		self.clientId,
-		self.settings.livenessLeaseRefreshIntervalForTest,
-		self.startWorker,
-		self.settings.livenessLeaseWrittenForTest,
-	)
+	// the client's provider liveness lease, written by the process's writer
+	// from now, pending the rounds below finding the client providing for
+	// discovery (transport_announce_liveness_lease.go)
+	livenessLeaseWriter := defaultProviderLivenessLeaseWriter
+	if self.settings.livenessLeaseWriterForTest != nil {
+		livenessLeaseWriter = self.settings.livenessLeaseWriterForTest
+	}
+	livenessLease := livenessLeaseWriter.begin(self.clientId, self.settings.livenessLeaseWrittenForTest)
 	defer livenessLease.end()
 
 	// register this client in the network peer registry, now that the
@@ -722,7 +721,7 @@ func (self *ConnectionAnnounce) run() {
 
 			provideEnabled := currentProvideModes[model.ProvideModePublic]
 			providerVersion.update(provideEnabled, nextStartTime)
-			livenessLease.afterRead(self.ctx, currentProvideModes)
+			livenessLease.afterRead(currentProvideModes)
 			// stats only matter for providers
 			// avoid populating stats for non-providers
 			if provideEnabled || 0 < changedCount {
