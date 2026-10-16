@@ -954,6 +954,8 @@ type contractExtenderPayoutSpec struct {
 // which keeps the at-most-one-unit remainder observable, and the extenders are
 // attached to alternating sides to show the payout does not depend on the party.
 func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		const usedByteCount = ByteCount(121)
@@ -1152,6 +1154,8 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 // companion stream is created, and the odd byte count keeps the remainder
 // observable.
 func TestCompanionContractExtenderPayoutPaysTheReversedParties(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		const usedByteCount = ByteCount(121)

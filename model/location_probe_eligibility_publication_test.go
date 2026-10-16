@@ -96,6 +96,8 @@ func TestLocationProbeEligibilityPrecomputePreservesConcurrentProvide(t *testing
 // Every fixture but the unscored one has passing history, so each other
 // rejection has exactly one cause.
 func TestLocationProbeEligibilityPrecomputeMatchesAuthoritativeRollup(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
