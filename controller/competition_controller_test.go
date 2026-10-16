@@ -2496,7 +2496,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	prepare := string(prepareBytes)
 	for _, required := range []string{
-		`readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)`,
+		`readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
 		`docker cp "$source_container:/workspace/$repository" "$destination/"`,
 		`checkout --quiet -B sim-latency "$expected_commit"`,
 		`source_lock_sha256`,
@@ -2522,7 +2522,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 		`--destination "$baseline_source_root"`,
 		`--destination "$candidate_source_root"`,
 		`--source-root "$candidate_source_root"`,
-		`for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp; do`,
+		`for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor; do`,
 		`rev-parse --verify HEAD:connect/sim-latency`,
 		`candidate changed the protected sim-latency source tree`,
 		`EVALUATION_SOURCE_DIR=$source`,
@@ -2542,7 +2542,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	if !strings.Contains(
 		string(buildSubmissionBytes),
-		"for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp; do",
+		"for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor; do",
 	) {
 		t.Fatal("submission builder does not authenticate the complete source graph")
 	}
@@ -2667,7 +2667,7 @@ func TestEvaluatorMountsOnlyLocalConfigAndVault(t *testing.T) {
 	}
 	if !strings.Contains(
 		string(buildBaseBytes),
-		"readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)",
+		"readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)",
 	) {
 		t.Fatal("evaluator base repository allowlist changed; re-audit config/vault exclusion")
 	}
