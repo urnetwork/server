@@ -6079,10 +6079,12 @@ func FindProviders2(
 		hardExcludedClientIds := map[server.Id]bool{}
 		qualityExcludedClientIds := map[server.Id]bool{}
 		// The candidates this request's live read (readQuality) found
-		// without a live connection. Each is refused Quality and leaves
-		// every draw of this request, native, borrowed and Online fallback;
-		// a named provider stays where its spec put it. Nothing outside the
-		// request keeps the verdict.
+		// without a live connection, and those with no current liveness
+		// lease (provider_liveness_lease.go). Each leaves every draw of this
+		// request, native, borrowed and Online fallback. A named provider
+		// without a lease is refused; one the live read finds offline later
+		// stays where its spec put it. Nothing outside the request keeps the
+		// verdict.
 		offlineClientIds := map[server.Id]bool{}
 		exclusionReadClientIds := map[server.Id]bool{}
 		qualityReadClientIds := map[server.Id]bool{}
@@ -6195,13 +6197,27 @@ func FindProviders2(
 				return err
 			}
 			maps.Copy(hardExcludedClientIds, excluded)
+			// A candidate without a current liveness lease leaves every draw
+			// of the request like one the live read finds offline. The lease
+			// read fails open (provider_liveness_lease_read.go).
+			leaseClientIds := make([]server.Id, 0, len(candidateClientIds))
+			for _, clientId := range candidateClientIds {
+				if !hardExcludedClientIds[clientId] {
+					leaseClientIds = append(leaseClientIds, clientId)
+				}
+			}
+			offline, err := readFindProviders2Liveness(session.Ctx, leaseClientIds, filterTime, rankMode)
+			if err != nil {
+				return err
+			}
+			maps.Copy(offlineClientIds, offline)
 			for _, clientId := range candidateClientIds {
 				exclusionReadClientIds[clientId] = true
 			}
 			qualityClientIds := []server.Id{}
 			if rankMode == RankModeQuality {
 				for _, id := range namedClientIds {
-					if !hardExcludedClientIds[id] && !qualityReadClientIds[id] {
+					if !hardExcludedClientIds[id] && !offlineClientIds[id] && !qualityReadClientIds[id] {
 						qualityClientIds = append(qualityClientIds, id)
 					}
 				}
@@ -6234,6 +6250,8 @@ func FindProviders2(
 			return nil, err
 		}
 		namedExcludedClientIds := maps.Clone(hardExcludedClientIds)
+		// a named provider without a current lease, in every mode
+		maps.Copy(namedExcludedClientIds, offlineClientIds)
 		if rankMode == RankModeQuality {
 			maps.Copy(namedExcludedClientIds, qualityExcludedClientIds)
 		}
