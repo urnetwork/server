@@ -295,3 +295,49 @@ func TestProviderLivenessLeaseIsTheClients(t *testing.T) {
 		}
 	})
 }
+
+// The contract between connect writers and API readers, in time. A healthy
+// connection survives one failed write without its process withholding the
+// stamp; a process whose refreshes stop, for one connection or all, has its
+// last stamp lapse at every reader, through the coverage cache, before any
+// lease it refreshed lapses; and stamps renew well within their window. The
+// refresh runs on its own interval: a refresh tied to sync rounds waited out
+// a failed read's retries (up to a minute) and the longest backoff (two
+// minutes), 180 s, past the lease window.
+func TestProviderLivenessBudgetStaysUnderTheLeaseWindow(t *testing.T) {
+	worstRefreshGap := ProviderLivenessLeaseRefreshInterval + ProviderLivenessLeaseWriteTimeout
+	if ProviderLivenessWriterWithholdAge <= 2*worstRefreshGap {
+		t.Fatalf("a connection that misses one refresh reaches the withhold age: %s <= 2 x %s", ProviderLivenessWriterWithholdAge, worstRefreshGap)
+	}
+	lastEnforced := ProviderLivenessWriterWithholdAge + ProviderLivenessLeaseWriteTimeout + ProviderLivenessWriterWindow + ProviderLivenessCoverageCacheAge
+	if ProviderLivenessLeaseWindow <= lastEnforced {
+		t.Fatalf("readers may enforce until %s after a connection's last refresh, past the %s lease window", lastEnforced, ProviderLivenessLeaseWindow)
+	}
+	if ProviderLivenessWriterWindow <= 2*(ProviderLivenessWriterInterval+ProviderLivenessLeaseWriteTimeout) {
+		t.Fatalf("one failed stamp lapses the writer: %s window, %s interval", ProviderLivenessWriterWindow, ProviderLivenessWriterInterval)
+	}
+	if ProviderLivenessLeaseWindow <= worstRefreshGap {
+		t.Fatalf("a healthy lease lapses between refreshes: %s window, %s gap", ProviderLivenessLeaseWindow, worstRefreshGap)
+	}
+}
+
+// A lease write takes its own deadline and runs no retry loop: on a canceled
+// context each write fails at once, where the shared pool's wrapper would
+// raise and its client would retry.
+func TestProviderLivenessLeaseWriteIsBounded(t *testing.T) {
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if err := RefreshProviderLivenessLease(canceledCtx, server.NewId()); err == nil {
+		t.Fatal("a refresh on a canceled context succeeded")
+	}
+	if err := PublishProviderLivenessWriter(canceledCtx, server.NewId()); err == nil {
+		t.Fatal("a stamp on a canceled context succeeded")
+	}
+	if err := ReleaseProviderLivenessLease(canceledCtx, server.NewId()); err == nil {
+		t.Fatal("a release on a canceled context succeeded")
+	}
+	if elapsed := time.Since(started); ProviderLivenessLeaseWriteTimeout < elapsed {
+		t.Fatalf("writes on a canceled context took %s", elapsed)
+	}
+}

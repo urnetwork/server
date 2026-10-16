@@ -6,8 +6,8 @@
 // offline when it answered.
 //
 // Every announcement of a client that provides for discovery (Public or
-// Network mode) refreshes the client's lease once per sync round
-// (connect/transport_announce_liveness_lease.go). A lease is the client's
+// Network mode) refreshes the client's lease from a worker of its own, every
+// ProviderLivenessLeaseRefreshInterval (connect/transport_announce_liveness_lease.go). A lease is the client's
 // member in one of providerLivenessLeaseShardCount sorted sets,
 // `{provider_live:NN}`, scored by its last refresh in unix milliseconds of the
 // Redis node's clock (TIME in the refresh script), so the clocks of the connect
@@ -16,10 +16,12 @@
 // prunes its shard of members older than an hour now and then.
 //
 // Every connect process also stamps its handler in the writer set,
-// `{provider_live_writers}`, every few seconds (PublishProviderLivenessWriter).
-// The reader (provider_liveness_lease_read.go) enforces leases only while every
-// live connect handler is stamped, so a connect process without this writer,
-// mid-rollout, rolled back or built without it, fails every read open rather
+// `{provider_live_writers}`, every few seconds (PublishProviderLivenessWriter),
+// while each of its providing connections has refreshed within
+// ProviderLivenessWriterWithholdAge. The reader (provider_liveness_lease_read.go)
+// enforces leases only while every live connect handler is stamped, so a
+// connect process without this writer, mid-rollout, rolled back or built
+// without it, or one whose lease writes stopped, fails every read open rather
 // than leaving its providers without a lease.
 //
 // The lease is the client's, not one connection's. A connection that ends
@@ -52,9 +54,7 @@ import (
 // members and takes about 60 refreshes a second at Main's scale.
 const providerLivenessLeaseShardCount = 32
 
-// How long a refresh keeps a provider live: five sync rounds of 30 s. It
-// exceeds the longest round, SyncRetryMaxTimeout of two minutes, so a
-// connection whose sync reads back off still keeps its lease with each round.
+// How long a refresh keeps a provider live: five refresh intervals of 30 s.
 const providerLivenessLeaseWindow = 150 * time.Second
 
 // A refresh prunes members older than this from its shard.
@@ -66,10 +66,37 @@ const providerLivenessLeasePruneInterval = time.Minute
 // How often a connect process stamps its handler in the writer set.
 const ProviderLivenessWriterInterval = 5 * time.Second
 
-// A handler's stamp counts as current within this window. It is shorter than
-// the lease window less a sync round (120 s), so a process whose Redis writes
-// stop loses its stamp, and with it enforcement, before any lease it refreshed
-// lapses.
+// The constants below are the cross-build contract between connect writers and
+// API readers; TestProviderLivenessBudgetStaysUnderTheLeaseWindow holds them
+// to it.
+
+// How long a refresh keeps a provider live.
+const ProviderLivenessLeaseWindow = providerLivenessLeaseWindow
+
+// How long a handler's stamp counts as current.
+const ProviderLivenessWriterWindow = providerLivenessWriterWindow
+
+// How often each providing connection's worker refreshes its client's lease,
+// whatever its sync rounds do.
+const ProviderLivenessLeaseRefreshInterval = 30 * time.Second
+
+// The bound of one lease write or stamp, which is never retried: the next
+// interval writes again.
+const ProviderLivenessLeaseWriteTimeout = 5 * time.Second
+
+// A connect process withholds its handler's stamp while any of its providing
+// connections has gone this long without a successful refresh, so a process
+// whose lease writes stop, for one connection or all, stops vouching for its
+// leases before any of them lapses.
+const ProviderLivenessWriterWithholdAge = 75 * time.Second
+
+// How long an API process reuses its verdict on writer coverage.
+const ProviderLivenessCoverageCacheAge = 5 * time.Second
+
+// A handler's stamp counts as current within this window. With the withhold
+// age, a write's bound and the readers' coverage cache it stays under the
+// lease window, so a process whose lease writes stop loses its stamp, and with
+// it enforcement, before any lease it refreshed lapses.
 const providerLivenessWriterWindow = 60 * time.Second
 
 // The key of the writer set. Its hash tag is the whole key: one cluster slot.
@@ -101,17 +128,22 @@ redis.call('ZADD', KEYS[1], string.format('%.0f', now), ARGV[1])
 return now
 `)
 
-// Scores the client's lease with the Redis node's clock. Each connection of a
-// client that provides for discovery calls it once per sync round. The error
-// is a failed write, which the caller counts and writes again next round; a
-// lease outlives four missed rounds.
+// Removes ARGV[1]. One key, so one slot.
+var providerLivenessLeaseReleaseScript = redis.NewScript(`
+return redis.call('ZREM', KEYS[1], ARGV[1])
+`)
+
+// Scores the client's lease with the Redis node's clock. Each providing
+// connection's worker calls it every ProviderLivenessLeaseRefreshInterval.
+// The error is a failed write, bounded by ProviderLivenessLeaseWriteTimeout
+// and never retried, which the caller counts and writes again next interval.
 func RefreshProviderLivenessLease(ctx context.Context, clientId server.Id) error {
 	shard := providerLivenessLeaseShard(clientId)
 	pruneAge := int64(0)
 	if providerLivenessLeasePruneDue(shard, time.Now()) {
 		pruneAge = providerLivenessLeasePruneAge.Milliseconds()
 	}
-	return providerLivenessLeaseRedis(ctx, func(r server.RedisClient) error {
+	return providerLivenessLeaseWrite(ctx, func(ctx context.Context, r server.RedisClient) error {
 		return providerLivenessLeaseStampScript.Run(
 			ctx,
 			r,
@@ -122,21 +154,26 @@ func RefreshProviderLivenessLease(ctx context.Context, clientId server.Id) error
 	})
 }
 
-// Removes the client's lease. Only a client that stopped providing is
-// released; a connection that ends leaves the lease to lapse within the window
-// (see the file comment).
+// Removes the client's lease, bounded like a refresh. Only a client that
+// stopped providing is released; a connection that ends leaves the lease to
+// lapse within the window (see the file comment).
 func ReleaseProviderLivenessLease(ctx context.Context, clientId server.Id) error {
-	return providerLivenessLeaseRedis(ctx, func(r server.RedisClient) error {
-		return r.ZRem(ctx, providerLivenessLeaseKey(providerLivenessLeaseShard(clientId)), clientId.String()).Err()
+	return providerLivenessLeaseWrite(ctx, func(ctx context.Context, r server.RedisClient) error {
+		return providerLivenessLeaseReleaseScript.Run(
+			ctx,
+			r,
+			[]string{providerLivenessLeaseKey(providerLivenessLeaseShard(clientId))},
+			clientId.String(),
+		).Err()
 	})
 }
 
 // Stamps the connect handler in the writer set with the Redis node's clock,
-// pruning stamps older than the prune age. A connect process calls it every
-// ProviderLivenessWriterInterval for as long as its handler lives, starting
-// as soon as the handler exists.
+// pruning stamps older than the prune age, bounded like a refresh. A connect
+// process calls it every ProviderLivenessWriterInterval for as long as its
+// handler lives, unless it withholds the stamp.
 func PublishProviderLivenessWriter(ctx context.Context, handlerId server.Id) error {
-	return providerLivenessLeaseRedis(ctx, func(r server.RedisClient) error {
+	return providerLivenessLeaseWrite(ctx, func(ctx context.Context, r server.RedisClient) error {
 		return providerLivenessLeaseStampScript.Run(
 			ctx,
 			r,
@@ -144,6 +181,19 @@ func PublishProviderLivenessWriter(ctx context.Context, handlerId server.Id) err
 			handlerId.String(),
 			providerLivenessLeasePruneAge.Milliseconds(),
 		).Err()
+	})
+}
+
+// Runs one lease write within ProviderLivenessLeaseWriteTimeout on the
+// deadline-bound pool, which retries no command or redirect and applies the
+// deadline to its socket I/O: a write never waits out the shared pool's
+// 15 s timeouts and retries. Each write is a one-key script, which that
+// pool's routing serves. The callback must use the context it is given.
+func providerLivenessLeaseWrite(ctx context.Context, callback func(context.Context, server.RedisClient) error) error {
+	writeCtx, writeCancel := context.WithTimeout(ctx, ProviderLivenessLeaseWriteTimeout)
+	defer writeCancel()
+	return server.RedisWithDeadline(writeCtx, func(r server.RedisClient) error {
+		return callback(writeCtx, r)
 	})
 }
 
