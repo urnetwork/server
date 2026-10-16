@@ -87,7 +87,8 @@ func onlineUrlRatioTestPopulation() []*onlineUrlRatioTestProvider {
 		{name: "us 0 of 5", countryCode: "us", ok: 0, total: 5, want: onlineUrlRatioTestOut(ProviderExcludedNoSuccess)},
 		{name: "us 0 of 2", countryCode: "us", ok: 0, total: 2, want: onlineUrlRatioTestOut(ProviderExcludedNoSuccess)},
 		{name: "us 0 of 1", countryCode: "us", ok: 0, total: 1, want: onlineUrlRatioTestOnlineOnly(ProviderExcludedHealth)},
-		{name: "us 1 of 1", countryCode: "us", ok: 1, total: 1, want: onlineUrlRatioTestNative},
+		// one run is no native verdict (egress_native_min_runs.go)
+		{name: "us 1 of 1", countryCode: "us", ok: 1, total: 1, want: onlineUrlRatioTestOnlineOnly(ProviderExcludedUnprobed)},
 		{name: "us unprobed", countryCode: "us", want: onlineUrlRatioTestOnlineOnly(ProviderExcludedUnprobed)},
 		{name: "us arin non-quality 5 of 5", countryCode: "us", ok: 5, total: 5, arinNonQuality: true, want: onlineUrlRatioTestDecision{reason: ProviderExcludedArinNonQuality, speed: true, online: true, counted: true}},
 		{name: "us unreliable 5 of 5", countryCode: "us", ok: 5, total: 5, reliabilityFailed: true, want: onlineUrlRatioTestHard(ProviderExcludedReliability)},

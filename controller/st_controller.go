@@ -775,6 +775,9 @@ type CoreStClient struct {
 	// clients caches one dialed (chain-id-verified) client per rpc url
 	clients   map[string]*ethclient.Client
 	readHooks stRpcReadHooks
+	// Zero selects stClientKeyAuthorityAttemptBudget. Tests shorten the bound
+	// on one endpoint's client-key read; it never changes what is verified.
+	clientKeyAttemptBudget time.Duration
 	// Tests inject only the independent public authority bytes and the actual
 	// signer boundary; neither hook skips policy or durable reservation checks.
 	gasAuthority      func(context.Context) ([]byte, error)

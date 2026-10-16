@@ -272,8 +272,10 @@ Speed requests take native speed first, then native quality, then online.
 Subscriber evidence applies to native Quality membership, including Quality
 borrowed by a Speed request. A Quality request cannot carry that Quality-only
 refusal into its lower Speed or Online tiers. Those borrowed rows keep their
-own bucket's common security gates and lower client-visible priority. Explicit
-provider IDs and force_minimum retain the explicitly requested Quality policy.
+own bucket's common security gates and lower client-visible priority.
+force_minimum retains the explicitly requested Quality policy. Explicit
+provider IDs keep its live-connection requirement and live ARIN risk, but not
+ARIN quality verification ([named Quality requests](#named-quality-requests-2026-10-15)).
 Read enough pages to fill the requested native limit after request filters,
 or establish actual exhaustion of that native source, before borrowing from
 the next bucket. Online rows cannot count toward a native quota. An initial
@@ -515,6 +517,42 @@ provider cannot resolve the probe client's key.
   turns the gate off again the same way. Lowering `other_refresh_hours`
   before the start returns an updated provider sooner, at a measurement of
   every non-modern provider that often.
+
+### Named Quality requests (2026-10-15)
+
+Owner decision, 2026-10-15. Connect's fixed-IP feature keeps a user on the
+same exit. After a transport loss, the window asks again for the exit it lost:
+one client-id spec, count 1, its rank mode and exclusions
+(`NextDestinationsForClientId`, `ip_remote_multi_client_sticky.go`).
+
+Under policy two, that request with rank mode quality (or empty) used to
+refuse a provider without a live connection, and also one whose live
+connections were not all ARIN-quality verified. Then 20,818 of 21,069 Speed
+providers were ARIN non-quality, and Quality answers borrowed 59% of their
+providers from Speed and Online. So most Quality windows held a non-quality
+exit, its redial was refused, and the user's IP changed. Discovery would have
+handed out the same provider as a borrowed member anyway.
+
+A request that names its providers and has no discovery spec now skips only
+the ARIN quality verification
+(`getProviderNamedSubscriberExclusions`, `model/provider_named_subscriber_eligibility.go`).
+It always applies; there is no setting. It keeps:
+
+- the live-connection requirement: a connected connection on a handler that
+  heartbeated within two heartbeat timeouts, the same live relation the
+  native Quality read uses;
+- ARIN risk on a live connection (an unclassified live connection is no
+  risk, as the common gate reads it);
+- the common exclusions: reliability below 0.95, 0.7 or 0.6 on the one hour,
+  12 hour or third lookback, ARIN risk, and TLS findings;
+- the request's own `exclude_client_ids` and `exclude_destinations`.
+
+A named refusal is not cached, so a provider that reconnects is answered on
+the next redial. With policy two off, a named request still reads no
+subscriber facts. Unchanged: discovery (location, group and best-available)
+and its force_minimum, which keep the full subscriber policy for native
+Quality; a client-id spec sent together with a discovery spec; and Speed and
+Online requests.
 
 ## Metrics derived for ranking
 

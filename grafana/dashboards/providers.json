@@ -2289,7 +2289,7 @@
     {
       "id": 42,
       "type": "stat",
-      "title": "out of quality: health",
+      "title": "out of quality and speed: health",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2338,12 +2338,12 @@
           "legendFormat": "health"
         }
       ],
-      "description": "Probed providers that failed more than one in ten of their real-site loads: out of quality, still in speed and in the counts, and borrowed first by a short quality answer."
+      "description": "Probed providers that failed more than one in five of their real-site loads: out of quality and speed, still in the online bucket and the counts."
     },
     {
       "id": 43,
       "type": "stat",
-      "title": "out of quality and speed: unprobed",
+      "title": "out of quality or speed: unprobed or warming up",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2392,7 +2392,7 @@
           "legendFormat": "unprobed"
         }
       ],
-      "description": "Providers with no probe evidence -- none within the evidence age, or a run of too few loads: out of quality and speed, in the online bucket, and counted. A wave here is a probe outage, not a quality problem."
+      "description": "Providers with no native verdict yet, all in the online bucket and counted. Unprobed: no probe evidence within the evidence age, out of quality and speed. Warming up: URL checks that pass, on too few runs for the native minimums (quality needs 3 runs spanning 30 minutes, speed 2): out of quality, and out of speed below 2 runs. A new provider's paced runs meet both about 40 minutes after its first. A wave that drains within the hour is new providers warming up; one that holds is the prober or its capacity. Neither is a quality problem."
     },
     {
       "id": 44,
@@ -2446,7 +2446,7 @@
           "legendFormat": "total"
         }
       ],
-      "description": "Every provider left out of at least one bucket, each counted once under the first rule that holds, in the order reliability, arin_risk, tls, no_success, low_success, then unprobed or health, then not_modern, then arin_non_quality. Blackhole and country are legacy labels that stay zero."
+      "description": "Every provider left out of at least one bucket, each counted once under the first rule that holds, in the order reliability, arin_risk, tls, no_success, low_success, then unprobed with no evidence or health, then not_modern, then unprobed while warming up (passing URL checks on too few runs), then arin_non_quality. Blackhole and country are legacy labels that stay zero."
     },
     {
       "id": 45,
@@ -2505,7 +2505,7 @@
           "legendFormat": "{{reason}}"
         }
       ],
-      "description": "The providers each rule leaves out over time. Reliability, arin_risk and tls remove a provider from everything; no_success and low_success (only while online_url_success_ratio is on) from every bucket and the counts while their probes continue; health, unprobed and not_modern (only while the modern provider gate is on) from quality and speed; arin_non_quality from quality alone. Every reason is published every refresh, zero included."
+      "description": "The providers each rule leaves out over time. Reliability, arin_risk and tls remove a provider from everything; no_success and low_success (only while online_url_success_ratio is on) from every bucket and the counts while their probes continue; health, unprobed with no evidence and not_modern (only while the modern provider gate is on) from quality and speed; unprobed while warming up (passing URL checks on too few runs) from quality, and from speed below 2 runs; arin_non_quality from quality alone. Every reason is published every refresh, zero included."
     },
     {
       "id": 46,

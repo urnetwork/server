@@ -44,12 +44,56 @@ const ProviderUrlProbeSlotCount = 1024
 // that a stalled worker finishes. Admission still owns one 15-minute claim.
 const ProviderUrlProbeRenewalHeadroom = 6 * time.Minute
 
+// Owner decision 2026-10-15 (task #57, option A): a quota-full renewal is due
+// at the earlier of its replacement horizon, the oldest counted run plus
+// RefreshAge-RenewalHeadroom (3h54m), and the latest accepted result plus this
+// spacing, a tenth of RefreshAge (24 minutes). Anchoring every renewal to the
+// oldest run alone kept a cohort measured together, such as an outage catch-up
+// at the one-minute recovery pace, due together in every later cycle: its ten
+// runs were replaced in one burst every 3h54m. The spacing pulls renewals into
+// the gap that follows such a cluster, so the cluster dissolves within one
+// cycle, with no timer, random draw or setting.
+//
+// Bounds, with latest the newest accepted result and oldest the oldest of the
+// latest ten runs:
+//   - never later than oldest+3h54m, the deadline before this change, so no
+//     deadline moves later and the six-minute RenewalHeadroom is untouched;
+//   - never earlier than latest+24m unless that horizon is earlier still, so a
+//     quota-full provider is not admitted again within 24 minutes of its
+//     latest result.
+//
+// With no turn latency no run expires before its renewal. A provider has one
+// claim at a time, though, so the renewals that the horizon decides back to
+// back at the tail of a cluster, in the first cycle after it, land a turn
+// latency apart, and the last of them can land a few minutes after the run it
+// replaces expired. Under the oldest-run anchor all ten renewals of a cluster
+// queued that way, every cycle.
+//
+// Once a provider is spread, its ten gaps are at most 24 minutes plus a turn
+// latency and sum to 3h54m plus one, so both bounds meet and each renewal is
+// again due at its horizon: the steady-state rate is the rate before this
+// change. A per-provider offset would have no room there, and in the
+// transient it only slows the spread.
+//
+// A row without a latest result (NULL) keeps the horizon alone.
+const ProviderUrlProbeRenewalSpacing = ProviderEgressProbeRefreshAge / ProviderUrlProbeRunTarget
+
+// The one quota-full renewal deadline. The accepted-history writer stores it,
+// admission tests it and re-parks a row found early at it, and completion
+// gates a local retry on it. The census reads only the stored deadline, so all
+// of them agree on dueness. LEAST ignores a NULL latest result.
+func providerUrlProbeRenewalAtSql(oldestRunExpression, latestResultExpression string) string {
+	return fmt.Sprintf("LEAST(%s + interval '%d seconds', %s + interval '%d seconds')",
+		oldestRunExpression, int((ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)/time.Second),
+		latestResultExpression, int(ProviderUrlProbeRenewalSpacing/time.Second))
+}
+
 // The latest ten accepted measurements suffice to decide whether at least ten
 // will remain at the replacement horizon; any older measurements expire first.
-// Full cohorts outside that horizon do not receive another measured turn.
-func providerUrlProbeMeasuredWorkDueSql(recentAlias, nowExpression, targetExpression string) string {
-	return fmt.Sprintf("(%s.run_count < %s OR %s.oldest_run_at <= %s::timestamp - interval '%d seconds')",
-		recentAlias, targetExpression, recentAlias, nowExpression, int((ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)/time.Second))
+// Full cohorts before their renewal deadline do not receive another measured turn.
+func providerUrlProbeMeasuredWorkDueSql(recentAlias, latestResultExpression, nowExpression, targetExpression string) string {
+	return fmt.Sprintf("(%s.run_count < %s OR %s <= %s::timestamp)", recentAlias, targetExpression,
+		providerUrlProbeRenewalAtSql(recentAlias+".oldest_run_at", latestResultExpression), nowExpression)
 }
 
 // Compatibility readers share the exact slot-to-shard mapping with indexed
@@ -252,7 +296,7 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 		countProjection = "candidates.completed_run_count"
 	}
 	head := fmt.Sprintf(`WITH head AS MATERIALIZED (
-				SELECT cycle.client_id, cycle.next_attempt_at, cycle.completed_run_count
+				SELECT cycle.client_id, cycle.next_attempt_at, cycle.completed_run_count, cycle.latest_result_at
 				FROM provider_egress_probe_cycle AS cycle
 				WHERE cycle.eligible AND cycle.next_attempt_at <= $1%s
 				AND $4=1 AND $5=0
@@ -274,9 +318,9 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 		head = fmt.Sprintf(`WITH slot_candidates AS MATERIALIZED (
 				%s ORDER BY %s LIMIT $3
 			), head AS MATERIALIZED (
-				SELECT cycle.client_id,cycle.next_attempt_at,cycle.completed_run_count
+				SELECT cycle.client_id,cycle.next_attempt_at,cycle.completed_run_count,cycle.latest_result_at
 				FROM slot_candidates CROSS JOIN LATERAL (
-					SELECT cycle.client_id,cycle.next_attempt_at,cycle.completed_run_count
+					SELECT cycle.client_id,cycle.next_attempt_at,cycle.completed_run_count,cycle.latest_result_at
 					FROM provider_egress_probe_cycle AS cycle
 					WHERE cycle.client_id=slot_candidates.client_id
 					AND cycle.eligible AND cycle.next_attempt_at<=$1%s AND $4=%d AND $5=%d
@@ -312,7 +356,7 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				RETURNING cycle.client_id
 			), measured AS MATERIALIZED (
 				SELECT candidates.*, recent.run_count, recent.oldest_run_at, successes.success_count,
-					`+providerUrlProbeMeasuredWorkDueSql("recent", "$1", "$6")+` AS measured_work_due,
+					`+providerUrlProbeMeasuredWorkDueSql("recent", "candidates.latest_result_at", "$1", "$6")+` AS measured_work_due,
 					security.security_exception
 				FROM candidates CROSS JOIN LATERAL (%s) AS recent
 				CROSS JOIN LATERAL (%s) AS successes
@@ -323,7 +367,7 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 					completed_priority_ready = false,
 					claim_ordinal = cycle.claim_ordinal + CASE WHEN measured.measured_work_due OR measured.security_exception THEN 1 ELSE 0 END,
 					next_attempt_at = CASE WHEN NOT measured.measured_work_due AND NOT measured.security_exception
-						THEN measured.oldest_run_at + interval '%d seconds' ELSE $7 END
+						THEN %s ELSE $7 END
 				FROM measured WHERE cycle.client_id=measured.client_id
 				AND cycle.client_id=ANY(ARRAY(SELECT client_id FROM measured))
 				RETURNING cycle.client_id, cycle.cycle_started_at, cycle.success_count, cycle.outcome_count, cycle.claim_ordinal,
@@ -351,5 +395,6 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 			ORDER BY %s
 		`, providerUrlProbeAdmissionSql("provider"), providerUrlProbeRunWindowSql("candidates.client_id", "$1"),
 		providerUrlProbeSuccessWindowSql("candidates.client_id", "$1"),
-		providerHasUrlSecurityExceptionSql("candidates.client_id"), int((ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)/time.Second), countProjection, resultOrder)
+		providerHasUrlSecurityExceptionSql("candidates.client_id"), providerUrlProbeRenewalAtSql("measured.oldest_run_at", "measured.latest_result_at"),
+		countProjection, resultOrder)
 }

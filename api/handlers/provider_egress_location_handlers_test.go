@@ -413,6 +413,13 @@ func TestProviderEgressLocationDueHonoursStalenessCutoff(t *testing.T) {
 		for _, clientId := range []server.Id{complete, expired} {
 			for index := range 10 {
 				measuredAt := now.Add(-time.Hour + time.Duration(index)*time.Minute)
+				if clientId == complete {
+					// The latest success is within 24 minutes, so the complete
+					// provider's quota-full renewal is not yet due. The expired
+					// provider keeps its older runs, whose one-minute recovery
+					// pace is already due.
+					measuredAt = now.Add(-10*time.Minute + time.Duration(index)*time.Minute)
+				}
 				if clientId == expired && index == 0 {
 					measuredAt = now.Add(-model.ProviderEgressProbeRefreshAge - time.Minute)
 				}

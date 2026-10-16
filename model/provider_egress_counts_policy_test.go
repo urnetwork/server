@@ -106,3 +106,37 @@ func TestProviderEgressCountsPolicyKeyFlipsAtTheModernProviderGateStart(t *testi
 		}
 	}
 }
+
+// The native URL-run minimums are code, not settings, held in a var
+// (providerNativeMinRuns) beside the policy: a worker built with other
+// minimums, or none, counts the buckets differently, so each minimum, and
+// their absence, changes the key, and the same minimums give the same key.
+func TestProviderEgressCountsPolicyKeySeparatesNativeMinRuns(t *testing.T) {
+	settings := DefaultEgressIndexSettings()
+	minimums := map[int]float64{1: .95, 2: .7, 3: .6}
+	key := func() string {
+		return providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow, 0)
+	}
+	original := providerNativeMinRuns
+	t.Cleanup(func() { providerNativeMinRuns = original })
+	base := key()
+	for _, c := range []struct {
+		name   string
+		change func(*providerNativeMinRunsPolicy)
+	}{
+		{name: "quality runs", change: func(p *providerNativeMinRunsPolicy) { p.QualityMinMeasuredUrlRuns++ }},
+		{name: "quality span", change: func(p *providerNativeMinRunsPolicy) { p.QualityMinMeasuredUrlSpan += time.Minute }},
+		{name: "speed runs", change: func(p *providerNativeMinRunsPolicy) { p.SpeedMinMeasuredUrlRuns++ }},
+		{name: "no minimums", change: func(p *providerNativeMinRunsPolicy) { *p = providerNativeMinRunsPolicy{} }},
+	} {
+		providerNativeMinRuns = original
+		c.change(&providerNativeMinRuns)
+		if key() == base {
+			t.Errorf("%s: other native URL-run minimums reused the snapshot key", c.name)
+		}
+	}
+	providerNativeMinRuns = original
+	if key() != base {
+		t.Fatal("the same native URL-run minimums changed the snapshot key")
+	}
+}

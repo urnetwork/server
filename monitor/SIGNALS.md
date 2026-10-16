@@ -14160,7 +14160,11 @@ loaded there anyway, unscored — and is unmarked after `SiteRegionCooldown`
 Action: a sustained backfill is a degradation with a cause, and the alert
 is closed by finding it, never by the answers looking full. Read the
 exclusion-reason and index panels beside the backfill metric: a wave of
-"unprobed" is the prober or its capacity (§2.19, §2.19a); a wave over the
+"unprobed" that holds is the prober or its capacity (§2.19, §2.19a), while
+one that drains within the hour is new providers warming up, whose URL
+checks pass on too few runs yet for the native minimums (Quality: 3 runs
+spanning 30 minutes; Speed: 2; model/egress_native_min_runs.go), which a
+new provider's paced runs meet about 40 minutes after its first; a wave over the
 one-in-ten line with the pool healthy is the exits — new evidence is needed
 before ranking them again, whether more sites, a longer window, or a source
 of quality this design does not yet read; a wave in one place is the
