@@ -61,15 +61,15 @@ func (v *providerQualityValidation) close() {
 	}
 }
 
-func (v *providerQualityValidation) read(ids []server.Id) (excluded, risky map[server.Id]bool, err error) {
+func (v *providerQualityValidation) read(ids []server.Id) (excluded, risky, offline map[server.Id]bool, err error) {
 	if len(ids) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	if v.parent.Err() != nil {
-		return nil, nil, v.parent.Err()
+		return nil, nil, nil, v.parent.Err()
 	}
 	if v.unavailable != nil {
-		return nil, nil, v.unavailable
+		return nil, nil, nil, v.unavailable
 	}
 	if v.ctx == nil {
 		v.ctx, v.cancel = context.WithTimeout(v.parent, providerQualityValidationTimeout)
