@@ -372,6 +372,7 @@ func lockLegacySettlementGrantsInTx(ctx context.Context, tx server.PgTx, contrac
 }
 
 // Classify only errors returned by the bounded grant query, never later DML.
+// isSettlementPageCancellation applies the same rule to a stopped statement.
 func legacySettlementGrantWaitExpired(err error) bool {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
