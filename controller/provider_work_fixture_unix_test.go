@@ -34,7 +34,10 @@ func TestProviderWorkFixtureCreationStoreOwnsPhysicalRoot(t *testing.T) {
 	if err := os.Symlink(realDirectory, alias); err != nil {
 		t.Fatal(err)
 	}
+	// t.TempDir creates below GOTMPDIR instead of TMPDIR when GOTMPDIR is set,
+	// as the release gate sets it, so both must name the alias.
 	t.Setenv("TMPDIR", alias)
+	t.Setenv("GOTMPDIR", alias)
 	root := filepath.Join(providerWorkPhysicalTempDir(t), "requests")
 	scope := connect.OriginalContractStoreScope{DomainHash: [32]byte{1}, ClientId: [16]byte{2}, PublicKey: [32]byte{3}, SourceGeneration: [16]byte{4}}
 	providerWorkPrepareCreationStore(t, root, scope)
