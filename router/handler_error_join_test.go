@@ -72,7 +72,7 @@ func TestRaiseHttpErrorRejectsLaterLineStatus(t *testing.T) {
 		"unclassified failure\n408 nested", "408\nmissing horizontal separator",
 	} {
 		response := httptest.NewRecorder()
-		if RaiseHttpError(errors.New(message), response) || response.Code != http.StatusInternalServerError || response.Body.String() != message+"\n" {
+		if RaiseHttpError(errors.New(message), response) || response.Code != http.StatusInternalServerError || response.Body.String() != UnexpectedErrorMessage+"\n" {
 			t.Fatalf("later-line status was promoted: input=%q code=%d body=%q", message, response.Code, response.Body.String())
 		}
 	}
@@ -91,7 +91,7 @@ func TestRaiseHttpErrorRejectsNonErrorOrNoncanonicalCodes(t *testing.T) {
 			defer func() { recovered = recover() }()
 			explicit = RaiseHttpError(errors.New(message), response)
 		}()
-		if recovered != nil || explicit || response.Code != http.StatusInternalServerError || response.Body.String() != message+"\n" {
+		if recovered != nil || explicit || response.Code != http.StatusInternalServerError || response.Body.String() != UnexpectedErrorMessage+"\n" {
 			t.Errorf("non-error status prefix was admitted: prefix=%s panic=%v code=%d explicit=%t", prefix, recovered, response.Code, explicit)
 		}
 	}
@@ -126,13 +126,13 @@ func TestRaiseHttpErrorJoinedRetryHintsPreserveStatus(t *testing.T) {
 }
 
 // A nested rate-limit error is not authority to label an unclassified outer
-// failure retryable. Its diagnostic bytes remain visible without a new hint.
+// failure retryable. It is the fixed 500, without a new hint.
 func TestRaiseHttpErrorRefusesNestedRetryHintWithoutStatus(t *testing.T) {
 	t.Parallel()
 	for _, prefix := range []string{"unclassified failure", "[impl]unclassified failure", "0408 invalid prefix"} {
 		err := errors.Join(errors.New(prefix), &retryAfterTestError{message: "429 nested hint", seconds: 60})
 		response := httptest.NewRecorder()
-		if RaiseHttpError(err, response) || response.Code != http.StatusInternalServerError || response.Body.String() != err.Error()+"\n" || response.Header().Get("Retry-After") != "" {
+		if RaiseHttpError(err, response) || response.Code != http.StatusInternalServerError || response.Body.String() != UnexpectedErrorMessage+"\n" || response.Header().Get("Retry-After") != "" {
 			t.Fatalf("nested retry hint escaped unrecognized error: code=%d retry=%q", response.Code, response.Header().Get("Retry-After"))
 		}
 	}

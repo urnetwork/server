@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
@@ -332,7 +334,13 @@ func TestProductionSocketReadersDeclareExactReceiveLanes(t *testing.T) {
 	}
 }
 
-func TestResidentForwardCallbackRetiresFullIngressWithoutWaiting(t *testing.T) {
+// A full forward shard refuses the one frame that found it full and keeps the
+// generation. The callback returns on the receive loop's own goroutine with the
+// shard still full, so it cannot have waited; the frame is counted at its
+// boundary and its pooled bytes go back to the caller. Retiring here used to
+// discard every frame the generation held, in both directions, for a refusal
+// the frame's source recovers end to end by resending this one frame.
+func TestResidentForwardCallbackRefusesFullIngressWithoutRetiring(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	clientId := server.NewId()
@@ -353,28 +361,29 @@ func TestResidentForwardCallbackRetiresFullIngressWithoutWaiting(t *testing.T) {
 		},
 	}
 	resident.forwardIngress[0].startOnce.Do(func() {})
+	droppedMessages := receiveQueueDroppedMessagesCounter.WithLabelValues(receiveQueueBoundaryResidentClientForward)
+	droppedBytes := receiveQueueDroppedBytesCounter.WithLabelValues(receiveQueueBoundaryResidentClientForward)
+	messagesBefore, bytesBefore := testutil.ToFloat64(droppedMessages), testutil.ToFloat64(droppedBytes)
 	message := clientconnect.MessagePoolGet(211)
 	witness := clientconnect.MessagePoolShareReadOnly(message)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		resident.handleClientForward(
-			clientconnect.TransferPath{
-				SourceId:      clientconnect.Id(clientId),
-				DestinationId: clientconnect.Id(destinationId),
-			},
-			message,
-		)
-	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("resident forward callback waited for ingress capacity")
+	resident.handleClientForward(
+		clientconnect.TransferPath{
+			SourceId:      clientconnect.Id(clientId),
+			DestinationId: clientconnect.Id(destinationId),
+		},
+		message,
+	)
+	if len(queue) != 1 {
+		t.Fatalf("forward shard holds %d frames, want the one it held before the refusal", len(queue))
 	}
-	select {
-	case <-ctx.Done():
-	default:
-		t.Fatal("reliable forward refusal did not retire the resident generation")
+	if ctx.Err() != nil {
+		t.Fatal("a full forward shard retired the resident generation")
+	}
+	if got := testutil.ToFloat64(droppedMessages) - messagesBefore; got != 1 {
+		t.Errorf("forward refusal counted %v dropped messages, want 1", got)
+	}
+	if got := testutil.ToFloat64(droppedBytes) - bytesBefore; got != float64(len(message)) {
+		t.Errorf("forward refusal counted %v dropped bytes, want %d", got, len(message))
 	}
 	clientconnect.MessagePoolReturn(message)
 	if !clientconnect.MessagePoolReturn(witness) {
@@ -495,7 +504,7 @@ func TestResidentClientCallbacksContainOnlyZeroWaitIngressWork(t *testing.T) {
 				"MessagePoolShareReadOnly(transferFrameBytes)",
 				"case queue <- message:",
 				"default:",
-				"self.cancel()",
+				"recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward",
 			},
 			forbidden: []string{
 				"stateLock.",
@@ -520,6 +529,13 @@ func TestResidentClientCallbacksContainOnlyZeroWaitIngressWork(t *testing.T) {
 			if strings.Contains(source, snippet) {
 				t.Errorf("callback %s performs blocking work %q", check.name, snippet)
 			}
+		}
+	}
+	// A refused forward frame is recovered end to end by its source; retiring
+	// the generation for it would discard everything else the generation holds.
+	for _, snippet := range []string{"self.cancel()", "self.Cancel()"} {
+		if strings.Contains(functionSource["handleClientForward"], snippet) {
+			t.Errorf("callback handleClientForward retires the resident generation with %q on a refused frame", snippet)
 		}
 	}
 }

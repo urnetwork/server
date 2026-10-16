@@ -738,6 +738,22 @@ func SetStClient(client StClient) {
 	stClientInstance = client
 }
 
+// Installs the release client the API builds from st.yml, for cfg, so a test
+// in another package reaches actual chain reads against its own synthetic
+// endpoint. The returned function closes its dialed clients and removes it.
+func Testing_SetCoreStClient(cfg *StConfig) func() {
+	client := &CoreStClient{cfg: cfg, coordinator: stabi.NewSTCoordinator(), clients: map[string]*ethclient.Client{}, clientKeyRegistrations: newStClientKeyRegistrationCohorts(0)}
+	SetStClient(client)
+	return func() {
+		SetStClient(nil)
+		client.stateLock.Lock()
+		defer client.stateLock.Unlock()
+		for _, rpcClient := range client.clients {
+			rpcClient.Close()
+		}
+	}
+}
+
 var coreStClientFromConfig = sync.OnceValue(func() StClient {
 	cfg := stConfig()
 	if cfg == nil {

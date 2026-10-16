@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"strings"
 
 	bip39 "github.com/tyler-smith/go-bip39"
@@ -150,6 +149,9 @@ func RegenerateSeedphrase(ctx context.Context, userId server.Id) (string, error)
 	return newSeedphrase, nil
 }
 
+// The user already has a seedphrase auth: a concurrent generate won.
+var ErrSeedphraseAuthExists = errors.New("seedphrase auth already exists for user")
+
 func GenerateSeedphrase(ctx context.Context, userId server.Id) (string, error) {
 	entropy, err := bip39.NewEntropy(256)
 	if err != nil {
@@ -184,7 +186,7 @@ func GenerateSeedphrase(ctx context.Context, userId server.Id) (string, error) {
 		server.Raise(CreateSeedphraseAuthInTx(tx, ctx, userId, seedphrase))
 	})
 	if alreadyExists {
-		return "", fmt.Errorf("seedphrase auth already exists for user")
+		return "", ErrSeedphraseAuthExists
 	}
 
 	return seedphrase, nil

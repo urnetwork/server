@@ -68,7 +68,7 @@ func TestRaiseHttpErrorResultBodyKeepsTheRefusalStatus(t *testing.T) {
 			statusError: false,
 			status:      http.StatusInternalServerError,
 			contentType: plainText,
-			body:        "unclassified failure\n",
+			body:        UnexpectedErrorMessage + "\n",
 		},
 		{
 			err:         &resultBodyTestError{message: "500 internal failure", body: result},

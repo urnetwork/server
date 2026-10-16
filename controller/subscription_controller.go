@@ -71,10 +71,16 @@ func (self *Sku) BalanceByteCount() model.ByteCount {
 	return byteCount
 }
 
-var coinbaseWebhookSharedSecret = sync.OnceValue(func() string {
-	c := server.Vault.RequireSimpleResource("coinbase.yml").Parse()
-	return c["webhook"].(map[string]any)["shared_secret"].(string)
-})
+// The key Coinbase signs each webhook body with.
+func coinbaseWebhookSharedSecret() (string, error) {
+	return vaultNonblankString("coinbase.yml", "webhook", "shared_secret")
+}
+
+// Why a Coinbase webhook cannot be verified now, or nil.
+func CoinbaseWebhookVerifiable() error {
+	_, err := coinbaseWebhookSharedSecret()
+	return err
+}
 
 var coinbaseSkus = sync.OnceValue(func() map[string]*Sku {
 	var skus Skus
@@ -86,10 +92,16 @@ var coinbaseSkus = sync.OnceValue(func() map[string]*Sku {
 // carry coinbase.yml. Production always delegates to the cached config.
 var coinbaseSkusFunc = func() map[string]*Sku { return coinbaseSkus() }
 
-var playPublisherEmail = sync.OnceValue(func() string {
-	c := server.Vault.RequireSimpleResource("google.yml").Parse()
-	return c["webhook"].(map[string]any)["publisher_email"].(string)
-})
+// The service account whose Google id token authenticates each Play push.
+func playPublisherEmail() (string, error) {
+	return vaultNonblankString("google.yml", "webhook", "publisher_email")
+}
+
+// Why a Play push cannot be verified now, or nil.
+func PlayWebhookVerifiable() error {
+	_, err := playPublisherEmail()
+	return err
+}
 
 var playPackageName = sync.OnceValue(func() string {
 	c := server.Vault.RequireSimpleResource("google.yml").Parse()
@@ -1586,14 +1598,23 @@ func PlaySubscriptionRenewalPost(
 	return nil
 }
 
+// Fails closed. Anyone can compute an HMAC under an absent or blank key, so
+// without a configured secret every webhook is refused as unavailable, before
+// its body is read.
 func VerifyCoinbaseBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
+	secret, err := coinbaseWebhookSharedSecret()
+	if err != nil {
+		glog.Warningf("[coinbase]webhook refused, verification secret unavailable: %s\n", err)
+		return nil, errWebhookVerificationUnavailable
+	}
+
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	// see https://docs.cloud.coinbase.com/commerce-onchain/docs/webhooks-security
-	err = coinbaseSignature(bodyBytes, req.Header.Get("X-CC-Webhook-Signature"), coinbaseWebhookSharedSecret())
+	err = coinbaseSignature(bodyBytes, req.Header.Get("X-CC-Webhook-Signature"), secret)
 	if err != nil {
 		return nil, err
 	}
@@ -1602,6 +1623,10 @@ func VerifyCoinbaseBody(_ *session.ClientSession, req *http.Request) (io.Reader,
 }
 
 func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
+	// an HMAC under an empty key authenticates nothing
+	if secret == "" {
+		return errors.New("Invalid authentication.")
+	}
 	// see https://docs.cloud.coinbase.com/commerce-onchain/docs/webhooks-security
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(bodyBytes)
@@ -1617,7 +1642,30 @@ func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
 	return errors.New("Invalid authentication.")
 }
 
+// The claims Google's tokeninfo endpoint returns for an id token. Replaceable
+// only by hermetic tests; production never mutates it.
+var playIdTokenClaims = func(ctx context.Context, idToken string) (map[string]any, error) {
+	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", idToken)
+	claimBytes, err := server.HttpGetRawRequireStatusOk(ctx, url, server.NoCustomHeaders)
+	if err != nil {
+		return nil, err
+	}
+	// parse the body as a claim map
+	var claims map[string]any
+	if err := json.Unmarshal(claimBytes, &claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+// Fails closed: without a configured publisher every push is refused as
+// unavailable, before Google is asked about its token.
 func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
+	publisherEmail, err := playPublisherEmail()
+	if err != nil {
+		glog.Warningf("[play]webhook refused, verification publisher unavailable: %s\n", err)
+		return nil, errWebhookVerificationUnavailable
+	}
 
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -1631,7 +1679,7 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, err
 	}
 
 	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
-	err = verifyPlayAuth(req.Context(), authHeader)
+	err = verifyPlayAuth(req.Context(), authHeader, publisherEmail)
 	if err != nil {
 		glog.Infof("verifyPlayAuth failed: %v", err)
 		return nil, err
@@ -1640,26 +1688,15 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, err
 	return bytes.NewReader(bodyBytes), nil
 }
 
-func verifyPlayAuth(ctx context.Context, auth string) error {
+func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string) error {
 	bearerPrefix := "Bearer "
 
 	if strings.HasPrefix(auth, bearerPrefix) {
-		jwt := auth[len(bearerPrefix):len(auth)]
-		url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", jwt)
-
-		claimBytes, err := server.HttpGetRawRequireStatusOk(ctx, url, server.NoCustomHeaders)
+		claims, err := playIdTokenClaims(ctx, auth[len(bearerPrefix):])
 		if err != nil {
 			return err
 		}
-
-		// parse the body as a claim map
-		var claims map[string]any
-		err = json.Unmarshal(claimBytes, &claims)
-		if err != nil {
-			return err
-		}
-
-		if claims["email"] == playPublisherEmail() {
+		if claims["email"] == publisherEmail {
 			return nil
 		}
 	}
@@ -1963,21 +2000,34 @@ type AppleNotificationDecodedPayload struct {
  * Helius Webhooks for Solana payments
  */
 
-var heliusAuthSecret = sync.OnceValue(func() string {
-	c := server.Vault.RequireSimpleResource("helius.yml").Parse()
-	return c["helius"].(map[string]any)["webhook_auth_header"].(string)
-})
+// The Authorization value Helius sends with every webhook.
+func heliusWebhookAuthorization() (string, error) {
+	return vaultNonblankString("helius.yml", "helius", "webhook_auth_header")
+}
 
+// Why a Helius webhook cannot be verified now, or nil.
+func HeliusWebhookVerifiable() error {
+	_, err := heliusWebhookAuthorization()
+	return err
+}
+
+// Fails closed. An absent or blank configured value would otherwise match a
+// request that sends no Authorization, so without one every webhook is refused
+// as unavailable, before its body is read.
 func VerifyHeliusBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
+	secret, err := heliusWebhookAuthorization()
+	if err != nil {
+		glog.Warningf("[helius]webhook refused, verification secret unavailable: %s\n", err)
+		return nil, errWebhookVerificationUnavailable
+	}
+
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	secret := req.Header.Get("Authorization")
-
-	if secret != heliusAuthSecret() {
-		glog.Infof("[helius] Invalid authentication; dumping all headers")
+	if !hmac.Equal([]byte(req.Header.Get("Authorization")), []byte(secret)) {
+		glog.Infof("[helius]Invalid authentication\n")
 		return nil, errors.New("Invalid authentication.")
 	}
 

@@ -143,11 +143,11 @@ const extenderDirectorySecretDomain = "ur-extender-directory-secret-v1"
 // rotates with the root key. It is never served.
 func (self *ExtenderConfig) DirectorySecret() ([]byte, error) {
 	if strings.TrimSpace(self.RootPrivateKeyHex) == "" {
-		return nil, fmt.Errorf("the extender network has no root key")
+		return nil, &extenderConfigError{message: "the extender network has no root key"}
 	}
 	seed, err := connect.ParseExtenderKeySeedHex(self.RootPrivateKeyHex)
 	if err != nil {
-		return nil, fmt.Errorf("the extender root key is not readable: %w", err)
+		return nil, &extenderConfigError{message: "the extender root key is not readable", cause: err}
 	}
 	mac := hmac.New(sha256.New, seed)
 	mac.Write([]byte(extenderDirectorySecretDomain))
@@ -210,6 +210,25 @@ type extenderConfigResult struct {
 
 var envExtenderConfigOnce = sync.OnceValue(readExtenderConfig)
 
+// An extender configuration error. A refusal may quote its message but never
+// its cause, which can quote the vault's paths, the api url or a character of
+// a key.
+type extenderConfigError struct {
+	message string
+	cause   error
+}
+
+func (self *extenderConfigError) Error() string {
+	if self.cause == nil {
+		return self.message
+	}
+	return fmt.Sprintf("%s: %s", self.message, self.cause)
+}
+
+func (self *extenderConfigError) Unwrap() error {
+	return self.cause
+}
+
 // EnvExtenderConfig reads `extender.yml` once per process.
 //
 // The error is the resource being absent or unparseable, which is a deployment
@@ -231,13 +250,13 @@ func readExtenderConfig() *extenderConfigResult {
 	resource, err := server.Vault.SimpleResource("extender.yml")
 	if err != nil {
 		return &extenderConfigResult{
-			err: fmt.Errorf("the extender network is not configured: %w", err),
+			err: &extenderConfigError{message: "the extender network is not configured", cause: err},
 		}
 	}
 	config := &ExtenderConfig{}
 	if err := resource.UnmarshalYamlE(config); err != nil {
 		return &extenderConfigResult{
-			err: fmt.Errorf("the extender configuration is not readable: %w", err),
+			err: &extenderConfigError{message: "the extender configuration is not readable", cause: err},
 		}
 	}
 	return &extenderConfigResult{config: config}
@@ -246,11 +265,11 @@ func readExtenderConfig() *extenderConfigResult {
 // RootPrivateKey derives the signing key of the configured seed.
 func (self *ExtenderConfig) RootPrivateKey() (ed25519.PrivateKey, error) {
 	if strings.TrimSpace(self.RootPrivateKeyHex) == "" {
-		return nil, fmt.Errorf("the extender network has no root key")
+		return nil, &extenderConfigError{message: "the extender network has no root key"}
 	}
 	seed, err := connect.ParseExtenderKeySeedHex(self.RootPrivateKeyHex)
 	if err != nil {
-		return nil, fmt.Errorf("the extender root key is not readable: %w", err)
+		return nil, &extenderConfigError{message: "the extender root key is not readable", cause: err}
 	}
 	return connect.ExtenderPrivateKeyFromSeed(seed)
 }
@@ -345,14 +364,14 @@ func (self *ExtenderConfig) AllowedHosts() []string {
 // whitelist, which AllowedHosts is what put it there.
 func (self *ExtenderConfig) ApiHost() (string, error) {
 	if strings.TrimSpace(self.ApiUrl) == "" {
-		return "", fmt.Errorf("the extender network has no api url")
+		return "", &extenderConfigError{message: "the extender network has no api url"}
 	}
 	apiUrl, err := url.Parse(self.ApiUrl)
 	if err != nil {
-		return "", fmt.Errorf("the extender network api url is not readable: %w", err)
+		return "", &extenderConfigError{message: "the extender network api url is not readable", cause: err}
 	}
 	if apiUrl.Hostname() == "" {
-		return "", fmt.Errorf("the extender network api url has no host")
+		return "", &extenderConfigError{message: "the extender network api url has no host"}
 	}
 	return apiUrl.Hostname(), nil
 }
@@ -371,7 +390,7 @@ func (self *ExtenderConfig) ProbeServerName() (string, error) {
 	}
 	networkHost := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(self.NetworkHost), "."))
 	if networkHost == "" {
-		return "", fmt.Errorf("the extender network has no host")
+		return "", &extenderConfigError{message: "the extender network has no host"}
 	}
 	label := make([]byte, 8)
 	if _, err := rand.Read(label); err != nil {

@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,9 +53,11 @@ func TestReserveBulkClientRemovalSlotRejectsWhenDailyBudgetExhausted(t *testing.
 			assert.Equal(t, err, nil)
 		}
 
-		// every bucket in the lookahead window is now full
+		// every bucket in the lookahead window is now full: a 429, declared so
+		// the router answers its text
 		_, _, err := ReserveBulkClientRemovalSlot(ctx, server.NewId(), 1)
 		assert.NotEqual(t, err, nil)
+		assert.Equal(t, strings.HasPrefix(err.Error(), "429 The bulk client removal limit"), true)
 	})
 }
 

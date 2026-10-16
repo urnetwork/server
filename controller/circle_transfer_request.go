@@ -17,11 +17,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
 
-var ErrCircleTransferRequestId = errors.New("customer transfer requires a caller-retained request_id; reuse it for every retry")
+var ErrCircleTransferRequestId = errors.New("400 customer transfer requires a caller-retained request_id; reuse it for every retry")
+
+// Answered with this text and no cause: the causes joined to it are Circle's
+// transport and the journal's failures, which stay in the log.
 var ErrCircleTransferUnknown = errors.New("customer challenge outcome is unknown; original request is retained, retry only with the same request_id")
+
+func circleTransferUnknown(causes ...error) error {
+	return router.PrivateCause(http.StatusInternalServerError, ErrCircleTransferUnknown.Error(), errors.Join(append([]error{ErrCircleTransferUnknown}, causes...)...))
+}
 
 type circleUserClientKey struct{}
 
@@ -59,7 +67,7 @@ func (self *circleUserClient) transfer(args *WalletCircleTransferOutArgs, owner 
 		return nil, ErrCircleTransferRequestId
 	}
 	if !args.Terms || args.ToAddress == "" || len(args.ToAddress) > 256 || strings.TrimSpace(args.ToAddress) != args.ToAddress {
-		return nil, fmt.Errorf("transfer requires accepted terms and an exact bounded destination")
+		return nil, fmt.Errorf("400 transfer requires accepted terms and an exact bounded destination")
 	}
 	if _, err := model.CircleTransferAmount(args.AmountUsdcNanoCents); err != nil {
 		return nil, err
@@ -111,7 +119,7 @@ func (self *circleUserClient) transfer(args *WalletCircleTransferOutArgs, owner 
 			}
 		}
 		if wallet == nil || wallet.TokenId == "" {
-			return nil, fmt.Errorf("no transferable customer wallet")
+			return nil, fmt.Errorf("409 no transferable customer wallet")
 		}
 		request, err = model.RetainCircleTransferRequest(ctx, owner.ByJwt.NetworkId, owner.ByJwt.UserId, *args.RequestId, model.CircleTransferBasis{
 			CircleUserId: userToken.circleUserId, WalletId: wallet.WalletId, TokenId: wallet.TokenId, Blockchain: wallet.Blockchain, Destination: args.ToAddress, Amount: args.AmountUsdcNanoCents})
@@ -202,7 +210,7 @@ func (self *circleUserClient) submitChallenge(ctx context.Context, request *mode
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, errors.Join(ErrCircleTransferUnknown, transportErr, readErr, closeErr, observationErr, err)
+		return nil, circleTransferUnknown(transportErr, readErr, closeErr, observationErr, err)
 	}
 	digest := sha256.Sum256(body)
 	challengeStatus := "UNKNOWN"
@@ -211,7 +219,7 @@ func (self *circleUserClient) submitChallenge(ctx context.Context, request *mode
 	}
 	retained, journalErr := model.ObserveCircleTransfer(ctx, request, challengeId, challengeStatus, hex.EncodeToString(digest[:]), status)
 	if err := errors.Join(transportErr, readErr, closeErr, observationErr, journalErr, attempt.Err()); err != nil || challengeId == "" {
-		return nil, errors.Join(ErrCircleTransferUnknown, err)
+		return nil, circleTransferUnknown(err)
 	}
 	return retained, nil
 }

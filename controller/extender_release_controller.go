@@ -87,15 +87,15 @@ func ExtenderRelease(
 
 	config, err := EnvExtenderConfig()
 	if err != nil {
-		return refuse(err.Error())
+		return refuse(extenderConfigRefusal(err))
 	}
 	rootPrivateKey, err := config.RootPrivateKey()
 	if err != nil {
-		return refuse(err.Error())
+		return refuse(extenderConfigRefusal(err))
 	}
 	secret, err := config.DirectorySecret()
 	if err != nil {
-		return refuse(err.Error())
+		return refuse(extenderConfigRefusal(err))
 	}
 
 	clientIpStr, _, err := server.SplitClientAddress(clientSession.ClientAddress)

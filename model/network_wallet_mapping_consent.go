@@ -118,7 +118,7 @@ func CreateNetworkWalletMappingChallenge(ctx context.Context, owner NetworkWalle
 		var pending int
 		server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM network_wallet_mapping_challenge c WHERE domain_hash=$1 AND network_id=$2 AND expires_at>=$3 AND NOT EXISTS (SELECT 1 FROM network_wallet_mapping_consent s WHERE s.nonce=c.nonce)`, domain[:], owner.NetworkId, now).Scan(&pending))
 		if pending >= 16 {
-			panic(walletMappingAbort{cause: errors.New("network wallet mapping challenge capacity is temporarily full")})
+			panic(walletMappingAbort{cause: ErrNetworkWalletMappingChallengeCapacity})
 		}
 		message, err = statement.Message()
 		if err != nil {
@@ -191,7 +191,7 @@ func AcceptNetworkWalletMappingConsent(ctx context.Context, owner NetworkWalletM
 		}
 		now := server.NowUtc()
 		if now.Unix() < statement.IssuedAt || now.Unix() > statement.ExpiresAt {
-			panic(walletMappingAbort{cause: errors.New("network wallet mapping original challenge is expired or not yet effective")})
+			panic(walletMappingAbort{cause: ErrNetworkWalletMappingChallengeExpired})
 		}
 		var previous []byte
 		var generation uint64

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
@@ -24,6 +25,7 @@ import (
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/validator"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 )
 
 // Discovery references and deployment/runtime hashes are non-secret approved
@@ -247,7 +249,8 @@ func (self *StReservedAttemptUpload) Begin(ctx context.Context, credential, head
 	}
 	lease, err := self.admission.Begin(ctx, header, sessionHash, objectKind, contentHash, size)
 	if err != nil {
-		return nil, fmt.Errorf("403 Validator staging authority refused: %w", err)
+		// the admission's reason can carry chain endpoint errors; it is logged
+		return nil, router.PrivateCause(http.StatusForbidden, "Validator staging authority refused.", err)
 	}
 	return lease, nil
 }

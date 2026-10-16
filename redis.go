@@ -194,6 +194,17 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 			dialRetries, maxRetries, maxRedirects = 1, -1, 2
 			maxConnections = max(16, redisConfigKeys.RequireInt("max_connections"))
 		}
+		// go-redis refuses a dial with ErrPoolExhausted, without waiting for
+		// PoolTimeout, once its counted connections reach MaxActiveConns. Its
+		// refill of idle connections counts a slot before dialing it, so with
+		// the cap at the pool size a refill can take the last slot between a
+		// turn holder's miss and its dial. Pool turns already bound the pool,
+		// so a pool that keeps idle connections leaves the cap off; a raced
+		// dial is then used once and closed.
+		maxActiveConnections := maxConnections
+		if 0 < minConnections {
+			maxActiveConnections = 0
+		}
 
 		dialer := NewDialer(dialTimeout)
 		authority := redisKeys.RequireString("authority")
@@ -215,7 +226,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				MinIdleConns:    minConnections,
 				MaxIdleConns:    maxConnections,
 				PoolSize:        maxConnections,
-				MaxActiveConns:  maxConnections,
+				MaxActiveConns:  maxActiveConnections,
 				ConnMaxLifetime: connectionMaxLifetimeDuration,
 				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
@@ -249,7 +260,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				MinIdleConns:    minConnections,
 				MaxIdleConns:    maxConnections,
 				PoolSize:        maxConnections,
-				MaxActiveConns:  maxConnections,
+				MaxActiveConns:  maxActiveConnections,
 				ConnMaxLifetime: connectionMaxLifetimeDuration,
 				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts

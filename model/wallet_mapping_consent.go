@@ -39,6 +39,18 @@ type WalletMappingProspectiveOwner struct {
 // Only this private refusal unwinds an uncommitted semantic transaction.
 type walletMappingAbort struct{ cause error }
 
+// Refusals the apps and the SDK read by their text: a challenge that cannot be
+// accepted yet or any longer, and challenge issuance at its bound. Each keeps
+// its words; the network consent's expiry is matched exactly by the SDK.
+var (
+	ErrWalletMappingChallengeCapacity           = errors.New("wallet mapping challenge capacity is temporarily full")
+	ErrWalletMappingChallengeExpired            = errors.New("wallet mapping original challenge is expired or not yet effective")
+	ErrNetworkWalletMappingChallengeCapacity    = errors.New("network wallet mapping challenge capacity is temporarily full")
+	ErrNetworkWalletMappingChallengeExpired     = errors.New("network wallet mapping original challenge is expired or not yet effective")
+	ErrHotkeyNetworkDelegationChallengeCapacity = errors.New("hotkey network delegation challenge capacity is temporarily full")
+	ErrHotkeyNetworkDelegationChallengeExpired  = errors.New("hotkey network delegation original challenge is expired or not yet effective")
+)
+
 // Serializing one original client/domain prevents two accepted successors from
 // acquiring the same predecessor. Different provider owners remain independent.
 func lockWalletMapping(ctx context.Context, tx server.PgTx, domain [32]byte, clientId server.Id) {
@@ -124,7 +136,7 @@ func CreateWalletMappingChallenge(ctx context.Context, owner WalletMappingOwner,
 		var pending int
 		server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM wallet_mapping_challenge c WHERE domain_hash=$1 AND client_id=$2 AND expires_at>=$3 AND NOT EXISTS (SELECT 1 FROM wallet_mapping_consent s WHERE s.nonce=c.nonce)`, domain[:], owner.ClientId, now).Scan(&pending))
 		if pending >= 16 {
-			panic(walletMappingAbort{cause: errors.New("wallet mapping challenge capacity is temporarily full")})
+			panic(walletMappingAbort{cause: ErrWalletMappingChallengeCapacity})
 		}
 		message, err = statement.Message()
 		if err != nil {
@@ -205,7 +217,7 @@ func AcceptWalletMappingConsent(ctx context.Context, owner WalletMappingOwner, o
 		}
 		now := server.NowUtc()
 		if now.Unix() < statement.IssuedAt || now.Unix() > statement.ExpiresAt {
-			panic(walletMappingAbort{cause: errors.New("wallet mapping original challenge is expired or not yet effective")})
+			panic(walletMappingAbort{cause: ErrWalletMappingChallengeExpired})
 		}
 		var previous []byte
 		var generation uint64

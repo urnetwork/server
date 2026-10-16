@@ -44,27 +44,34 @@ const (
 
 var errSealExpired = errors.New("sealed state expired")
 
-var sealKey = sync.OnceValue(func() []byte {
+// The seal cipher, keyed from the first non-blank proxy.yml secret, the one
+// that signs proxy ids, under the seal label. A blank secret would leave the
+// key a hash of public constants, so without a non-blank one nothing is sealed
+// or unsealed.
+func loadSealAead() (cipher.AEAD, error) {
 	proxy := server.Vault.RequireSimpleResource("proxy.yml")
-	secrets := proxy.RequireStringList("secrets")
+	secret := ""
+	for _, candidate := range proxy.RequireStringList("secrets") {
+		if strings.TrimSpace(candidate) != "" {
+			secret = candidate
+			break
+		}
+	}
+	if secret == "" {
+		return nil, errors.New("proxy.yml has no non-blank secret to derive the seal key from")
+	}
 
 	h := sha256.New()
 	h.Write([]byte(sealKeyLabel))
-	h.Write([]byte(secrets[0]))
-	return h.Sum(nil)
-})
+	h.Write([]byte(secret))
+	block, err := aes.NewCipher(h.Sum(nil))
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
 
-var sealAead = sync.OnceValue(func() cipher.AEAD {
-	block, err := aes.NewCipher(sealKey())
-	if err != nil {
-		panic(err)
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		panic(err)
-	}
-	return aead
-})
+var sealAead = sync.OnceValues(loadSealAead)
 
 type sealedEnvelope struct {
 	Version   int             `json:"v"`
@@ -93,7 +100,10 @@ func seal(label string, binding string, v any, ttl time.Duration) (string, error
 		return "", err
 	}
 
-	aead := sealAead()
+	aead, err := sealAead()
+	if err != nil {
+		return "", err
+	}
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
@@ -121,7 +131,10 @@ func unseal(label string, binding string, sealedStr string, v any) error {
 		return err
 	}
 
-	aead := sealAead()
+	aead, err := sealAead()
+	if err != nil {
+		return err
+	}
 	if len(sealed) < aead.NonceSize() {
 		return fmt.Errorf("sealed state too short")
 	}

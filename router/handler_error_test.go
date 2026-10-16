@@ -39,16 +39,16 @@ func TestRaiseHttpError(t *testing.T) {
 	connect.AssertEqual(t, message, "Rate limited.")
 	connect.AssertEqual(t, statusError, true)
 
-	// no status code: internal error, message passed through
+	// no status code: an internal error, answered with the fixed message
 	code, message, statusError = raise("something broke")
 	connect.AssertEqual(t, code, http.StatusInternalServerError)
-	connect.AssertEqual(t, message, "something broke")
+	connect.AssertEqual(t, message, UnexpectedErrorMessage)
 	connect.AssertEqual(t, statusError, false)
 
-	// tag without a status code stays a 500 with the full message
+	// tag without a status code stays a 500 with the fixed message
 	code, message, statusError = raise("[impl]something broke")
 	connect.AssertEqual(t, code, http.StatusInternalServerError)
-	connect.AssertEqual(t, message, "[impl]something broke")
+	connect.AssertEqual(t, message, UnexpectedErrorMessage)
 	connect.AssertEqual(t, statusError, false)
 
 	// a message that merely starts with a number is not a status code...

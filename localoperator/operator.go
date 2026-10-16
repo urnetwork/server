@@ -139,7 +139,10 @@ func refusalOf(err error) error {
 	if refusal := controller.ProviderEgressIngestRefusalOf(err); refusal != nil {
 		return &handlerRefusal{status: refusal.Status, message: refusal.Message, retryAfter: refusal.RetryAfter}
 	}
-	return &handlerRefusal{status: http.StatusBadRequest, message: err.Error()}
+	// the handlers answer any other failure with a fixed message, and so does
+	// this transport; the failure's own text stays in the log
+	glog.Infof("[localoperator]ingest error: %s\n", err)
+	return &handlerRefusal{status: http.StatusBadRequest, message: controller.ProviderEgressIngestFailedMessage}
 }
 
 // A body field the handler's JSON decoder would have refused.

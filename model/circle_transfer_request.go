@@ -17,7 +17,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-var ErrCircleTransferRequestChanged = errors.New("customer transfer request ID already binds different immutable terms")
+var ErrCircleTransferRequestChanged = errors.New("409 customer transfer request ID already binds different immutable terms")
 var ErrCircleTransferObservation = errors.New("customer transfer challenge contradicts retained evidence")
 var ErrCircleTransferCapacity = errors.New("customer transfer observation capacity requires review; original request retained")
 
@@ -48,7 +48,7 @@ type CircleTransferRequest struct {
 // int64 through float64 or silently sending a different monetary amount.
 func CircleTransferAmount(amount NanoCents) (string, error) {
 	if amount <= 0 || amount%1000 != 0 {
-		return "", fmt.Errorf("USDC transfer requires a positive exact six-decimal amount")
+		return "", fmt.Errorf("400 USDC transfer requires a positive exact six-decimal amount")
 	}
 	return fmt.Sprintf("%d.%06d", int64(amount)/1_000_000_000, (int64(amount)%1_000_000_000)/1000), nil
 }

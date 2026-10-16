@@ -35,6 +35,10 @@ func (self *ProviderEgressIngestRefusal) Error() string {
 	return self.Message
 }
 
+// The message of the 400 an ingest failure that is not a declared refusal is
+// answered with, over HTTP and in process alike.
+const ProviderEgressIngestFailedMessage = "Provider ingest failed."
+
 // A 400 with the message the handler has always written.
 func refuseProviderEgressIngest(message string) error {
 	return &ProviderEgressIngestRefusal{Status: http.StatusBadRequest, Message: message}

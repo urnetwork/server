@@ -44,7 +44,8 @@ func snNetworkWalletMappingOwner(clientSession *session.ClientSession) (model.Ne
 
 // This public authenticated request cannot override the configured deployment,
 // the session's network, the original predecessor or the challenge expiry.
-func SnNetworkWalletMappingChallenge(args *SnNetworkWalletMappingChallengeArgs, clientSession *session.ClientSession) (*SnWalletMappingChallengeResult, error) {
+func SnNetworkWalletMappingChallenge(args *SnNetworkWalletMappingChallengeArgs, clientSession *session.ClientSession) (result *SnWalletMappingChallengeResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	if args == nil {
 		return nil, protocol.ErrWalletMappingIntegrity
 	}
@@ -130,7 +131,8 @@ type SnNetworkWalletMappingHistoryArgs struct {
 
 // Signature-bearing originals are public evidence. Missing history stays
 // unavailable rather than known-empty.
-func SnNetworkWalletMappingHistory(args *SnNetworkWalletMappingHistoryArgs, clientSession *session.ClientSession) (*SnWalletMappingHistoryResult, error) {
+func SnNetworkWalletMappingHistory(args *SnNetworkWalletMappingHistoryArgs, clientSession *session.ClientSession) (result *SnWalletMappingHistoryResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	if args == nil || clientSession == nil || clientSession.Ctx == nil {
 		return nil, protocol.ErrWalletMappingUnavailable
 	}
