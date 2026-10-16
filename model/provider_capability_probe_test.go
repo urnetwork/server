@@ -60,3 +60,15 @@ func TestCapabilityProbeEligibilityIsTheModernGatePopulation(t *testing.T) {
 	connect.AssertEqual(t, providerCapabilityProbeEligible(filter, []server.Id{nonQuality, modern}, modernGateTestSettings(false), false), []server.Id{nonQuality, modern})
 	connect.AssertEqual(t, providerCapabilityProbeEligible(filter, nil, modernGateTestSettings(false), false), []server.Id{})
 }
+
+// The native URL-run minimums come before the probe, as before the gate it
+// serves (by choice): one passing URL run is no native verdict, so a provider
+// is first measured after its second run admits it to Speed.
+func TestCapabilityProbeWaitsForTheSpeedRunMinimum(t *testing.T) {
+	once, twice := server.NewId(), server.NewId()
+	filter := modernGateTestFilter(map[server.Id]*ProviderModernEvidenceRecord{once: nil, twice: nil})
+	measuredAt := modernGateTestNow.Add(-time.Minute)
+	filter.healthCounts[once] = ProviderEgressHealthCounts{MeasuredAt: measuredAt, FirstMeasuredAt: measuredAt, OKCount: 1, Total: 1}
+	filter.healthCounts[twice] = ProviderEgressHealthCounts{MeasuredAt: measuredAt, FirstMeasuredAt: measuredAt.Add(-20 * time.Minute), OKCount: 2, Total: 2}
+	connect.AssertEqual(t, providerCapabilityProbeEligible(filter, []server.Id{once, twice}, modernGateTestSettings(true), false), []server.Id{twice})
+}
