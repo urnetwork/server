@@ -478,6 +478,10 @@ func verifySeedWithAdmission(
 	if verify.M > 255 {
 		return nil, fmt.Errorf("400 M must be at most 255")
 	}
+	// the zero id names no client and cannot locate an original request
+	if verify.ClientId == (server.Id{}) {
+		return nil, fmt.Errorf("400 client_id must not be zero")
+	}
 	if beforeState != nil {
 		if err := beforeState(); err != nil {
 			return nil, err
@@ -564,9 +568,11 @@ func verifySeedWithAdmission(
 	}
 	var assignmentExclusions []server.Id
 	if keyOk {
+		// An unreadable filter is the operator's failure; its text, which can
+		// name the filter's path, stays private (router.PrivateErrorsWithInput).
 		assignmentExclusions, err = verifySimulationAssignmentExclusions(verify.Vpk)
 		if err != nil {
-			return nil, fmt.Errorf("500 %s", err)
+			return nil, err
 		}
 		if seedClientId != nil && verifySimulationAssignmentExcluded(assignmentExclusions, *seedClientId) {
 			return nil, fmt.Errorf("503 validator-local simulated route unavailable")
@@ -825,7 +831,9 @@ func verifyExtend(
 			verifyConnectIds(verify.Trail),
 		)
 		if err != nil {
-			return nil, true, fmt.Errorf("400 %s", err)
+			// the caller's hops are already bounded, so this is stored state
+			// that cannot rebuild its own message: an internal failure
+			return nil, true, err
 		}
 		if !connect.VerifyVerifyMessageSignature(trail.Vpk, replayMessage, verify.ExtendSig) {
 			return nil, true, fmt.Errorf("400 invalid extend signature")
@@ -873,7 +881,7 @@ func verifyExtend(
 	}
 	assignmentExclusions, err := verifySimulationAssignmentExclusions(trail.Vpk)
 	if err != nil {
-		return nil, fmt.Errorf("500 %s", err)
+		return nil, err
 	}
 
 	// §4.2 step 2: require active and not expired

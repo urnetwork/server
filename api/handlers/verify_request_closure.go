@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/urfoundation/sn/protocol"
-	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
@@ -79,12 +78,9 @@ func (self *VerifyRequestClosureHandlers) ServeHTTP(w http.ResponseWriter, r *ht
 		http.Error(w, "Noncanonical verification closure.", http.StatusBadRequest)
 		return
 	}
-	// Storage and signing failures raise as well as return. Each is answered
-	// as the provider work routes answer theirs, never with its own text.
-	router.WrapNoAuth(router.PrivateErrors(func(owner *session.ClientSession) (result *model.VerifyRequestClosureResult, err error) {
-		server.HandleError(func() {
-			result, err = controller.CloseVerifyOriginalRequest(&closure, owner)
-		}, func(cause error) { err = cause })
-		return
+	// Storage and signing failures, returned or raised, are answered as the
+	// provider work routes answer theirs, never with their own text.
+	router.WrapNoAuth(router.PrivateErrors(func(owner *session.ClientSession) (*model.VerifyRequestClosureResult, error) {
+		return controller.CloseVerifyOriginalRequest(&closure, owner)
 	}), w, r.WithContext(ctx))
 }

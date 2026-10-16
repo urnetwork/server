@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -152,20 +151,6 @@ func postVerifyRequestClosure(t testing.TB, handler http.Handler, body []byte) (
 		t.Fatal(readErr, closeErr)
 	}
 	return response.StatusCode, string(encoded)
-}
-
-// An unexpected failure is answered as the provider work routes answer theirs:
-// 503 and a fixed message, so the caller retries. No cause text reaches it.
-func requirePrivateUnavailable(t testing.TB, status int, body string, causes ...string) {
-	t.Helper()
-	for _, cause := range causes {
-		if strings.Contains(body, cause) {
-			t.Fatalf("raw error text reached the caller: status=%d %q in %q", status, cause, body)
-		}
-	}
-	if status != http.StatusServiceUnavailable || body != "Service temporarily unavailable.\n" {
-		t.Fatalf("unexpected failure was not answered as unavailable: status=%d body=%q", status, body)
-	}
 }
 
 // The database refuses the receipt write, an unexpected storage failure. Its
