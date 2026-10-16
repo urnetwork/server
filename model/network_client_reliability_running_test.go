@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
@@ -215,6 +216,106 @@ func TestReliabilityRunningReanchorDefersForNewConcurrentIndex(t *testing.T) {
 	if reliabilityRunningReanchorAllowedForMaintenance(false, true, false) {
 		t.Fatal("new concurrent index build allowed an optional reliability re-anchor")
 	}
+}
+
+// An index build waiting on an old snapshot in another database cannot wait
+// on this database's full-window scan, so it leaves the optional re-anchor
+// allowed; the same build in this database still defers it. Each build is held
+// by a repeatable read snapshot until the gate has been read.
+func TestReliabilityRunningReanchorIgnoresAnotherDatabasesIndexBuild(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		reanchorAllowed := func() (allowed bool) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				allowed = reliabilityRunningPeriodicReanchorAllowed(ctx, tx)
+			}, server.TxReadCommitted, server.OptNoRetry())
+			return
+		}
+		if !reanchorAllowed() {
+			t.Fatal("fixture deferred the optional re-anchor before any index build")
+		}
+		otherDatabase := fmt.Sprintf("test_%d_%x", server.NowUtc().UnixMilli(), server.NewId().Bytes())
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `CREATE DATABASE `+otherDatabase))
+		}, server.OptReadWrite())
+		defer server.Db(context.WithoutCancel(ctx), func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(context.WithoutCancel(ctx), `DROP DATABASE IF EXISTS `+otherDatabase+` WITH (FORCE)`))
+		}, server.OptReadWrite())
+		// Holds a concurrent index build in its old-snapshot wait in database,
+		// or in this test's database when database is empty.
+		holdIndexBuild := func(database string) (release func()) {
+			connect := func() *pgx.Conn {
+				var config *pgx.ConnConfig
+				server.Db(ctx, func(conn server.PgConn) {
+					config = conn.Conn().Config().Copy()
+				})
+				if database != "" {
+					config.Database = database
+				}
+				conn, err := pgx.ConnectConfig(ctx, config)
+				server.Raise(err)
+				return conn
+			}
+			snapshotConn, buildConn := connect(), connect()
+			table := fmt.Sprintf("synthetic_reanchor_build_%x", server.NewId().Bytes())
+			server.RaisePgResult(snapshotConn.Exec(ctx, `CREATE TABLE `+table+` (value integer)`))
+			snapshot, err := snapshotConn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+			server.Raise(err)
+			var count int
+			server.Raise(snapshot.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&count))
+			buildPid := buildConn.PgConn().PID()
+			built := make(chan error, 1)
+			go func() {
+				_, err := buildConn.Exec(ctx, `CREATE INDEX CONCURRENTLY `+table+`_value ON `+table+` (value)`)
+				built <- err
+			}()
+			release = func() {
+				server.Raise(snapshot.Rollback(ctx))
+				if err := <-built; err != nil {
+					t.Error("held index build failed", err)
+				}
+				buildConn.Close(context.WithoutCancel(ctx))
+				snapshotConn.Close(context.WithoutCancel(ctx))
+			}
+			// the build cannot finish while the snapshot is held, so it stays
+			// in its old-snapshot wait until release
+			tick := time.NewTicker(10 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				var waiting bool
+				server.Db(ctx, func(conn server.PgConn) {
+					server.Raise(conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_progress_create_index
+						WHERE pid = $1 AND phase = 'waiting for old snapshots')`, buildPid).Scan(&waiting))
+				})
+				if waiting {
+					return release
+				}
+				select {
+				case err := <-built:
+					t.Fatal("index build finished before its held snapshot", err)
+				case <-ctx.Done():
+					t.Fatal("index build did not reach its old-snapshot wait", ctx.Err())
+				case <-tick.C:
+				}
+			}
+		}
+
+		release := holdIndexBuild(otherDatabase)
+		allowed := reanchorAllowed()
+		release()
+		if !allowed {
+			t.Fatal("another database's index build deferred the optional re-anchor")
+		}
+		release = holdIndexBuild("")
+		allowed = reanchorAllowed()
+		release()
+		if allowed {
+			t.Fatal("this database's index build did not defer the optional re-anchor")
+		}
+	})
 }
 
 // Small routine vacuums should not suppress the periodic correction. The live

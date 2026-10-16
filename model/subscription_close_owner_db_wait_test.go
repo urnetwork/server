@@ -5,7 +5,10 @@ package model
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -185,13 +188,17 @@ type legacyCloseDBWaitObserver struct {
 	previousBackends map[legacyCloseDBWaitIdentity]legacyCloseDBWaitBackend
 }
 
-func newLegacyCloseDBWaitObserver(t testing.TB, ctx context.Context) *legacyCloseDBWaitObserver {
+// configure may change the session's identity before it connects.
+func newLegacyCloseDBWaitObserver(t testing.TB, ctx context.Context, configure ...func(*pgx.ConnConfig)) *legacyCloseDBWaitObserver {
 	t.Helper()
 	var config *pgx.ConnConfig
 	// Clone the direct maintenance endpoint before protocol rebinding. This
 	// extra session consumes no application pool slot and receives no modeled
 	// Ready delay. Its actual query cost remains in the measured workload.
 	server.MaintenanceDb(ctx, func(pooled server.PgConn) { config = pooled.Conn().Config().Copy() }, server.OptNoRetry())
+	for _, c := range configure {
+		c(config)
+	}
 	config.Tracer = nil
 	if config.RuntimeParams == nil {
 		config.RuntimeParams = map[string]string{}
@@ -531,14 +538,37 @@ func TestContractCloseDBWaitObserverRejectsDisabledActivity(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 		defer cancel()
-		backend := acquireContractLifecycleTestConnection(t, ctx)
-		defer backend.Release()
-		server.RaisePgResult(backend.Exec(ctx, `SET track_activities=off`))
-		defer func() {
-			cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
-			defer stop()
-			server.RaisePgResult(backend.Exec(cleanup, `RESET track_activities`))
-		}()
+		// Only a superuser can turn activity tracking off. The administration
+		// session turns it off for the application role's logins to this
+		// test's database while one new session connects. A role default
+		// applies only at login, so that session alone keeps it, and the
+		// application role gains no privilege.
+		adminConfig := legacyCloseDBWaitAdminConfig(t)
+		admin, err := pgx.ConnectConfig(ctx, adminConfig)
+		if err != nil {
+			t.Fatal("connect the test environment's administration session", err)
+		}
+		defer admin.Close(context.WithoutCancel(ctx))
+		resource := server.Vault.RequireSimpleResource(server.DefaultPgVaultResourceName)
+		roleSetting := `ALTER ROLE ` + pgx.Identifier{resource.RequireString("user")}.Sanitize() +
+			` IN DATABASE ` + pgx.Identifier{adminConfig.Database}.Sanitize()
+		var backendConfig *pgx.ConnConfig
+		server.MaintenanceDb(ctx, func(pooled server.PgConn) { backendConfig = pooled.Conn().Config().Copy() }, server.OptNoRetry())
+		server.RaisePgResult(admin.Exec(ctx, roleSetting+` SET track_activities = off`))
+		backend, err := pgx.ConnectConfig(ctx, backendConfig)
+		_, resetErr := admin.Exec(ctx, roleSetting+` RESET track_activities`)
+		if err != nil {
+			t.Fatal("connect a new application session", err)
+		}
+		defer backend.Close(context.WithoutCancel(ctx))
+		if resetErr != nil {
+			t.Fatal("reset the application role's activity tracking", resetErr)
+		}
+		var tracking string
+		server.Raise(backend.QueryRow(ctx, `SHOW track_activities`).Scan(&tracking))
+		if tracking != "off" {
+			t.Fatal("the new application session kept activity tracking", tracking)
+		}
 		observer := newLegacyCloseDBWaitObserver(t, ctx)
 		defer observer.close()
 		observer.start(t)
@@ -566,7 +596,13 @@ func TestContractCloseDBWaitObserverRejectsHiddenBackendType(t *testing.T) {
 		backend := acquireContractLifecycleTestConnection(t, ctx)
 		defer backend.Release()
 		server.RaisePgResult(backend.Exec(ctx, `SELECT 1`))
-		observer := newLegacyCloseDBWaitObserver(t, ctx)
+		// Only a member can assume pg_signal_backend, and the application role
+		// is none. The observer's session authenticates as the administration
+		// user, which may assume any role.
+		adminConfig := legacyCloseDBWaitAdminConfig(t)
+		observer := newLegacyCloseDBWaitObserver(t, ctx, func(config *pgx.ConnConfig) {
+			config.User, config.Password = adminConfig.User, adminConfig.Password
+		})
 		defer observer.close()
 		server.RaisePgResult(observer.conn.Exec(ctx, `SET ROLE pg_signal_backend`))
 		observer.start(t)
@@ -580,6 +616,32 @@ func TestContractCloseDBWaitObserverRejectsHiddenBackendType(t *testing.T) {
 			t.Fatal("hidden activity became a startup exception or zero-wait success")
 		}
 	})
+}
+
+// The privileged steps use an explicit administration URL for this test
+// environment's own disposable PostgreSQL, never an application role grant:
+// the URL must name the server in this environment's pg.yml. Its session
+// opens this test's database and dials only the attested endpoints.
+const legacyCloseDBWaitAdminUrlEnv = "WARP_TEST_ENV_POSTGRES_ADMIN_URL"
+
+func legacyCloseDBWaitAdminConfig(t testing.TB) *pgx.ConnConfig {
+	t.Helper()
+	raw := os.Getenv(legacyCloseDBWaitAdminUrlEnv)
+	if raw == "" {
+		t.Fatalf("%s must name the administration URL of this test environment's PostgreSQL", legacyCloseDBWaitAdminUrlEnv)
+	}
+	// the URL carries a password, so no error repeats it
+	config, err := pgx.ParseConfig(raw)
+	if err != nil {
+		t.Fatalf("%s is not a PostgreSQL URL", legacyCloseDBWaitAdminUrlEnv)
+	}
+	resource := server.Vault.RequireSimpleResource(server.DefaultPgVaultResourceName)
+	if net.JoinHostPort(config.Host, strconv.Itoa(int(config.Port))) != resource.RequireString("authority") {
+		t.Fatalf("%s names another PostgreSQL than this test environment's %s", legacyCloseDBWaitAdminUrlEnv, resource.RequireString("authority"))
+	}
+	config.Database = resource.RequireString("db")
+	server.ConfigureLocalPgDial(config)
+	return config
 }
 
 func legacyCloseDBWaitRequireThreeSamples(t testing.TB, ctx context.Context, observer *legacyCloseDBWaitObserver) {

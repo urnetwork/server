@@ -23,7 +23,9 @@ import (
 // descriptor is redirected rather than os.Stderr, so concurrent writers keep
 // their file and the race detector sees no shared variable change. glog writes
 // synchronously, so every line run produced is captured when it returns. The
-// capture is replayed to the original stderr so test output keeps it.
+// capture is replayed to the original stderr so test output keeps it. Under
+// go test -json the testing package points os.Stderr at os.Stdout, so glog
+// then writes through descriptor 1.
 func captureStderr(t testing.TB, run func()) string {
 	t.Helper()
 	capture, err := os.CreateTemp(t.TempDir(), "stderr-*")
@@ -31,11 +33,15 @@ func captureStderr(t testing.TB, run func()) string {
 		t.Fatal(err)
 	}
 	defer capture.Close()
-	original, err := unix.Dup(2)
+	descriptor := 2
+	if os.Stderr == os.Stdout {
+		descriptor = 1
+	}
+	original, err := unix.Dup(descriptor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := unix.Dup2(int(capture.Fd()), 2); err != nil {
+	if err := unix.Dup2(int(capture.Fd()), descriptor); err != nil {
 		unix.Close(original)
 		t.Fatal(err)
 	}
@@ -43,7 +49,7 @@ func captureStderr(t testing.TB, run func()) string {
 	func() {
 		defer func() {
 			// restore first, so a failing run still reports to the real stderr
-			if err := unix.Dup2(original, 2); err != nil {
+			if err := unix.Dup2(original, descriptor); err != nil {
 				t.Errorf("restore stderr: %v", err)
 			}
 			unix.Close(original)

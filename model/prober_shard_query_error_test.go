@@ -28,6 +28,10 @@ func TestProberShardCanceledAdmissionQueryRollsBack(t *testing.T) {
 			server.RaisePgResult(conn.Exec(ctx, `CREATE TABLE prober_shard_run (
 				network_id uuid PRIMARY KEY, state text NOT NULL, deadline timestamp NOT NULL)`))
 			server.RaisePgResult(conn.Exec(ctx, `INSERT INTO prober_shard_run VALUES ($1,'active',$2)`, network, server.NowUtc().Add(time.Hour)))
+			// a paid admission reads the capped client set before the registry
+			server.RaisePgResult(conn.Exec(ctx, `CREATE TABLE network_client_data_cap (
+				client_id uuid NOT NULL, network_id uuid NOT NULL, total_capped bool NOT NULL,
+				monthly_capped_period_start timestamp, monthly_byte_limit bigint)`))
 		}, server.OptReadWrite())
 		conn := acquireContractLifecycleTestConnection(t, ctx)
 		defer conn.Release()

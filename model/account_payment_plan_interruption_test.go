@@ -57,6 +57,16 @@ func newPaymentPlanInterruptionCohort(t testing.TB, ctx context.Context) *paymen
 	return cohort
 }
 
+// Pins a nonzero account points policy for a test that asserts a plan's
+// points; the release gate's fixture subsidy.yml configures none. The
+// returned function restores the process's configuration.
+func pinPaymentPlanAccountPoints() (restore func()) {
+	subsidyConfig := EnvSubsidyConfig()
+	previous := *subsidyConfig
+	subsidyConfig.AccountPointsPerPayout = 1000000
+	return func() { *subsidyConfig = previous }
+}
+
 // Inserts count contracts and their unpaid sweeps. Each sweep pays enough to
 // clear the wallet minimum on its own, so the payee is never withheld.
 func (self *paymentPlanInterruptionCohort) insert(t testing.TB, ctx context.Context, count int, createTime time.Time, closeTime time.Time) {
@@ -158,6 +168,8 @@ func TestPaymentPlanInterruptedSweepAssignmentKeepsCommittedSlice(t *testing.T) 
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
+		// the committed slice's points are part of what must survive
+		defer pinPaymentPlanAccountPoints()()
 		ctx := context.Background()
 		const sweepCount = 6
 		cohort := newPaymentPlanInterruptionCohort(t, ctx)

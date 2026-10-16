@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
 	"slices"
@@ -186,6 +187,19 @@ func TestNetworkClientRegistrationConflictingScopeAndAuthority(t *testing.T) {
 				claims.UserId = server.NewId()
 			case "new-request-same-scope":
 				changed.RegistrationId = strings.Repeat("78", 32)
+			}
+			if field == "user" {
+				// Only the network's admin user holds a network session, so the
+				// session check refuses another user's token before it reaches
+				// the registration.
+				refusal := server.HandleError(func() {
+					result, err := RegisterNetworkClient(&changed, &ownSession)
+					t.Errorf("%s conflict was not refused: error=%v result=%+v", field, err, result)
+				})
+				if refusalErr, ok := refusal.(error); !ok || !errors.Is(refusalErr, session.ErrByJwtInactive) {
+					t.Fatalf("%s conflict refusal = %v, want an inactive session", field, refusal)
+				}
+				continue
 			}
 			result, err := RegisterNetworkClient(&changed, &ownSession)
 			if err != nil || result == nil || result.Error == nil || result.Error.Code != "registration_conflict" || result.ClientId != nil || result.ByClientJwt != nil {
