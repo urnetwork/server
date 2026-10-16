@@ -1060,8 +1060,9 @@ func TestArindbCanaryUnavailableFactsAreNotQuality(t *testing.T) {
 func TestArindbCanaryMembershipIsTheExportRule(t *testing.T) {
 	healthy, failing, unreliable := server.NewId(), server.NewId(), server.NewId()
 	filter := testCanaryFilter(nil)
-	filter.healthCounts[healthy] = ProviderEgressHealthCounts{MeasuredAt: testCanaryClock, FirstMeasuredAt: testCanaryClock, OKCount: 10, Total: 10}
-	filter.healthCounts[failing] = ProviderEgressHealthCounts{MeasuredAt: testCanaryClock, FirstMeasuredAt: testCanaryClock, OKCount: 1, Total: 10}
+	// ten runs over four hours, enough for Quality (egress_native_min_runs.go)
+	filter.healthCounts[healthy] = ProviderEgressHealthCounts{MeasuredAt: testCanaryClock, FirstMeasuredAt: testCanaryClock.Add(-4 * time.Hour), OKCount: 10, Total: 10}
+	filter.healthCounts[failing] = ProviderEgressHealthCounts{MeasuredAt: testCanaryClock, FirstMeasuredAt: testCanaryClock.Add(-4 * time.Hour), OKCount: 1, Total: 10}
 	filter.healthCounts[unreliable] = filter.healthCounts[healthy]
 	minimums := map[int]float64{1: 0.95, 2: 0.7, 3: 0.6}
 	membership := arindbCanaryMembershipRule(&filter, DefaultEgressIndexSettings(), false, minimums)
