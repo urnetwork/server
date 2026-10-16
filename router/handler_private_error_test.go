@@ -121,3 +121,55 @@ func TestPrivateErrorsKeepsEveryDeclaredAnswer(t *testing.T) {
 		}
 	}
 }
+
+// A storage failure raised inside the impl, rather than returned, is the same
+// unexpected failure. It escaped to the router as a panic.
+func TestPrivateErrorsAnswersARaisedFailureWithAFixedUnavailable(t *testing.T) {
+	response := privateErrorTestServe(PrivateErrors(func(clientSession *session.ClientSession) (string, error) {
+		defer clientSession.Cancel()
+		panic(errors.New(privateErrorTestCause))
+	}))
+	if strings.Contains(response.body, "synthetic") || response.code != http.StatusServiceUnavailable || response.body != "Service temporarily unavailable.\n" {
+		t.Fatalf("raised failure was not answered as unavailable: %+v", response)
+	}
+}
+
+// A refusal declared deep in a model call and raised from there keeps its own
+// status and message. It escaped to the router as a panic, a generic 500.
+func TestPrivateErrorsKeepsARaisedDeclaredRefusal(t *testing.T) {
+	response := privateErrorTestServeWithInput(PrivateErrorsWithInput(func(input map[string]string, clientSession *session.ClientSession) (string, error) {
+		defer clientSession.Cancel()
+		panic(errors.New("409 synthetic request permanently closed"))
+	}))
+	if response.code != http.StatusConflict || response.body != "synthetic request permanently closed\n" {
+		t.Fatalf("raised declared refusal lost its status: %+v", response)
+	}
+}
+
+// A declared answer keeps its status and message without the cause's text,
+// and the cause's identity, here a cancellation, survives for errors.Is.
+func TestPrivateCauseAnswersOnlyTheDeclaredMessage(t *testing.T) {
+	cause := errors.Join(errors.New(privateErrorTestCause), context.Canceled)
+	err := PrivateCause(http.StatusRequestTimeout, "Synthetic upload canceled.", cause)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal("private cause lost its identity", err)
+	}
+	response := privateErrorTestServe(func(clientSession *session.ClientSession) (string, error) {
+		defer clientSession.Cancel()
+		return "", err
+	})
+	if response.code != http.StatusRequestTimeout || response.body != "Synthetic upload canceled.\n" {
+		t.Fatalf("private cause changed the declared answer or sent its text: %+v", response)
+	}
+}
+
+// A cause that carries a retry hint keeps it on the declared answer.
+func TestPrivateCauseKeepsTheRetryHint(t *testing.T) {
+	response := privateErrorTestServe(func(clientSession *session.ClientSession) (string, error) {
+		defer clientSession.Cancel()
+		return "", PrivateCause(http.StatusTooManyRequests, "Synthetic budget exhausted.", &retryAfterTestError{message: privateErrorTestCause, seconds: 9})
+	})
+	if response.code != http.StatusTooManyRequests || response.body != "Synthetic budget exhausted.\n" || response.retryAfter != "9" {
+		t.Fatalf("private cause lost the retry hint: %+v", response)
+	}
+}

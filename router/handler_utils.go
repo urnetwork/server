@@ -43,6 +43,16 @@ const MaxJsonRequestBytes int64 = 16 * 1024 * 1024
 
 // const BanMessage = "This client has been temporarily banned by bandit. support@ur.io"
 
+// The fixed answer to a failure the caller cannot act on, as a panic gets.
+const UnexpectedErrorMessage = "Error. Please email support@ur.io for help."
+
+// The fixed answers to a request body that does not decode, and to one that
+// cannot be read. The decoder's and the reader's own errors stay in the log.
+const (
+	InvalidRequestBodyMessage    = "Invalid request body."
+	UnreadableRequestBodyMessage = "The request body could not be read."
+)
+
 type ImplFunction[R any] func(*session.ClientSession) (R, error)
 type ImplWithInputFunction[T any, R any] func(T, *session.ClientSession) (R, error)
 type BodyFormatFunction func(*session.ClientSession, *http.Request) (io.Reader, error)
@@ -55,7 +65,8 @@ type FormatFunction[R any] func(*session.ClientSession, R) (complete bool)
 func writeJsonResponse[R any](w http.ResponseWriter, result R) {
 	responseJson, err := json.Marshal(result)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		glog.Infof("[h]response encoding error (%T): %s\n", result, err)
+		http.Error(w, UnexpectedErrorMessage, http.StatusInternalServerError)
 		return
 	}
 
@@ -83,7 +94,8 @@ func wrap[R any](
 ) {
 	clientSession, err := session.NewClientSessionFromRequest(req)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		glog.Infof("[h]client session error: %s\n", err)
+		http.Error(w, UnexpectedErrorMessage, http.StatusInternalServerError)
 		return
 	}
 
@@ -220,7 +232,8 @@ func wrapWithInput[T any, R any](
 ) {
 	clientSession, err := session.NewClientSessionFromRequest(req)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		glog.Infof("[h]client session error: %s\n", err)
+		http.Error(w, UnexpectedErrorMessage, http.StatusInternalServerError)
 		return
 	}
 
@@ -245,7 +258,7 @@ func wrapWithInput[T any, R any](
 			return
 		}
 		glog.Infof("[h]request body formatter error %s\n", err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, InvalidRequestBodyMessage, http.StatusBadRequest)
 		return
 	}
 
@@ -263,7 +276,7 @@ func wrapWithInput[T any, R any](
 		if glog.V(1) {
 			glog.Infof("[h]request read error %s\n", err)
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, UnreadableRequestBodyMessage, http.StatusBadRequest)
 		return
 	}
 
@@ -278,7 +291,7 @@ func wrapWithInput[T any, R any](
 		if glog.V(1) {
 			glog.Infof("[h]request decoding error %s\n", err)
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, InvalidRequestBodyMessage, http.StatusBadRequest)
 		return
 	}
 
@@ -565,7 +578,7 @@ var errUndeclaredImpl = fmt.Errorf("%d Service temporarily unavailable.", http.S
 
 // Reports whether RaiseHttpError answers err with a status err chose, by the
 // "<code> message" convention or as an authentication outage.
-func declaresHttpStatus(err error) bool {
+func DeclaresHttpStatus(err error) bool {
 	return errors.Is(err, session.ErrAuthUnavailable) || httpErrorCodeRegex.MatchString(err.Error())
 }
 
@@ -575,10 +588,16 @@ func declaresHttpStatus(err error) bool {
 // caller is answered 503 with a fixed message, as the provider work routes
 // answer theirs. A declared status passes unchanged, with its message, retry
 // hint and result body.
+//
+// A raise inside impl is returned the same way (server.HandleError logs it), so
+// a storage failure raised from a model call is a 503 and a refusal declared
+// and raised there, such as a 409, keeps its own answer.
 func PrivateErrors[R any](impl ImplFunction[R]) ImplFunction[R] {
-	return func(clientSession *session.ClientSession) (R, error) {
-		result, err := impl(clientSession)
-		if err == nil || declaresHttpStatus(err) {
+	return func(clientSession *session.ClientSession) (result R, err error) {
+		server.HandleError(func() {
+			result, err = impl(clientSession)
+		}, func(cause error) { err = cause })
+		if err == nil || DeclaresHttpStatus(err) {
 			return result, err
 		}
 		glog.Infof("[h]impl error: [%s]%s\n", implName(impl), err)
@@ -589,15 +608,42 @@ func PrivateErrors[R any](impl ImplFunction[R]) ImplFunction[R] {
 
 // The same, for an impl that takes the decoded request body.
 func PrivateErrorsWithInput[T any, R any](impl ImplWithInputFunction[T, R]) ImplWithInputFunction[T, R] {
-	return func(input T, clientSession *session.ClientSession) (R, error) {
-		result, err := impl(input, clientSession)
-		if err == nil || declaresHttpStatus(err) {
+	return func(input T, clientSession *session.ClientSession) (result R, err error) {
+		server.HandleError(func() {
+			result, err = impl(input, clientSession)
+		}, func(cause error) { err = cause })
+		if err == nil || DeclaresHttpStatus(err) {
 			return result, err
 		}
 		glog.Infof("[h]request impl error (%T): %s\n", input, err)
 		var empty R
 		return empty, errUndeclaredImpl
 	}
+}
+
+// A declared answer whose cause stays private. RaiseHttpError sends only the
+// status and message; the cause, which can name a socket, a path, a store or
+// chain endpoint, goes to the server log here. errors.Is and errors.As still
+// reach the cause.
+func PrivateCause(status int, message string, cause error) error {
+	if cause != nil {
+		glog.Infof("[h]%d %s: %s\n", status, message, cause)
+	}
+	return &privateCauseError{message: fmt.Sprintf("%d %s", status, message), cause: cause}
+}
+
+// The declared "<code> message" and the cause it does not print.
+type privateCauseError struct {
+	message string
+	cause   error
+}
+
+func (self *privateCauseError) Error() string {
+	return self.message
+}
+
+func (self *privateCauseError) Unwrap() error {
+	return self.cause
 }
 
 func RequestBodyFormatter(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
