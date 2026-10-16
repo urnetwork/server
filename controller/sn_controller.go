@@ -91,7 +91,8 @@ type SnSetWalletResult struct {
 func SnSetWallet(
 	setWallet *SnSetWalletArgs,
 	clientSession *session.ClientSession,
-) (*SnSetWalletResult, error) {
+) (result *SnSetWalletResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	if setWallet == nil {
 		return nil, protocol.ErrWalletMappingIntegrity
 	}
