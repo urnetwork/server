@@ -602,10 +602,6 @@ type ConnectHandlerSettings struct {
 	refusalHoldTickForTest   <-chan time.Time
 	refusalHoldHeldForTest   func(outcome string)
 	refusalHoldTickedForTest func()
-	// Nil outside package tests. Runs on the H1 writer after it writes a speed
-	// test's start control and before the test's first probe, with the
-	// connection's resident transport.
-	afterH1SpeedTestStartForTest func(*ResidentTransport)
 }
 
 // Keeps server-resident Transfer recovery symmetric with the client H3 path.
@@ -2147,9 +2143,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						}
 						speedTestId = speedTest.TestId
 						speedTestChunksRemaining = int((speedTest.TotalByteCount + model.ByteCount(len(chunk)-1)) / model.ByteCount(len(chunk)))
-						if afterStart := self.settings.afterH1SpeedTestStartForTest; afterStart != nil {
-							afterStart(residentTransport)
-						}
 					}
 				}
 			}

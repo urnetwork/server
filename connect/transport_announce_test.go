@@ -90,8 +90,8 @@ func TestConnectionAnnounceRejectsSpeedStopWithoutReaderState(t *testing.T) {
 	}
 }
 
-// While a speed test runs the client echoes every frame over 16 bytes, so the
-// reader counts a frame only when it is a probe of that test.
+// A speed test counts a frame only when it is a probe of that test.
+// Older clients may still echo interleaved user traffic.
 func TestSpeedTestProbeMatchesOnlyItsTestProbes(t *testing.T) {
 	const testId uint32 = 7
 	probe := make([]byte, speedTestProbeByteCount)
