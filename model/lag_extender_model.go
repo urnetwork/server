@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -81,13 +82,33 @@ func GetLagExtenderDerivedPlaces(ctx context.Context, extenderIds []server.Id) m
 	return places
 }
 
+// An extender's latest measurement request as the lag.dev sample reads it
+// (lag.dev/PLAN.md A4, A8, C9), with whether the extender holds a
+// certificate for it.
+type LagExtenderMeasurement struct {
+	*NetworkExtenderMeasurement
+	// whether a live certificate for the request's names and key has its name
+	// published (C8) and has been handed to the extender by A8 (deliver_time),
+	// which installs it only when it reads it there
+	Delivered bool
+}
+
+// Whether the extender serves its measurement name now, as far as its
+// request says: the request is answered `issued`, and its certificate is
+// published and delivered. A pending, refused or withdrawn request, an
+// owner's opt-out included, is one that does not.
+func (self *LagExtenderMeasurement) Serving() bool {
+	return self.State == NetworkExtenderMeasurementStateIssued && self.Delivered
+}
+
 // The latest measurement request of each of the given extenders, by extender
-// id, as the certificate model keeps it (lag.dev/PLAN.md A4, A8, C9): its
-// state is A8's answer, so `issued` is an extender serving its certificate,
-// and a pending, refused or withdrawn request, an owner's opt-out included,
-// is one that is not. An extender with no request is absent.
-func GetLagExtenderMeasurements(ctx context.Context, extenderIds []server.Id) map[server.Id]*NetworkExtenderMeasurement {
-	measurements := map[server.Id]*NetworkExtenderMeasurement{}
+// id, as the certificate model keeps it, with whether a certificate for it is
+// delivered at `now`: its state is A8's answer, and an issued request serves
+// only once A8 has handed the extender its certificate. Until then, up to
+// half an hour after its name is published, the name answers without it. An
+// extender with no request is absent.
+func GetLagExtenderMeasurements(ctx context.Context, extenderIds []server.Id, now time.Time) map[server.Id]*LagExtenderMeasurement {
+	measurements := map[server.Id]*LagExtenderMeasurement{}
 	if len(extenderIds) == 0 {
 		return measurements
 	}
@@ -95,15 +116,30 @@ func GetLagExtenderMeasurements(ctx context.Context, extenderIds []server.Id) ma
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT `+networkExtenderMeasurementColumns+`
-			FROM network_extender_measurement
-			WHERE extender_id = ANY($1)
+			SELECT
+				`+networkExtenderMeasurementColumns+`,
+				EXISTS (
+					SELECT 1
+					FROM network_extender_measurement_cert
+					WHERE
+						network_extender_measurement_cert.extender_id = request.extender_id AND
+						network_extender_measurement_cert.names = request.names AND
+						network_extender_measurement_cert.public_key = request.public_key AND
+						network_extender_measurement_cert.withdraw_time IS NULL AND
+						network_extender_measurement_cert.publish_time IS NOT NULL AND
+						network_extender_measurement_cert.deliver_time IS NOT NULL AND
+						$2 < network_extender_measurement_cert.not_after
+				)
+			FROM network_extender_measurement AS request
+			WHERE request.extender_id = ANY($1)
 			`,
 			extenderIds,
+			now.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				measurement := scanNetworkExtenderMeasurement(result)
+				measurement := &LagExtenderMeasurement{}
+				measurement.NetworkExtenderMeasurement = scanNetworkExtenderMeasurement(result, &measurement.Delivered)
 				measurements[measurement.ExtenderId] = measurement
 			}
 		})

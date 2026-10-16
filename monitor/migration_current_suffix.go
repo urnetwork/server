@@ -550,6 +550,9 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationArindbCanaryRollupArtifacts()...),
 	migrationCurrentSuffix(arindbCanaryLocationMigrationVersion, "dual ARIN database canary connection slots and old-slot write guard",
 		migrationArindbCanaryLocationArtifacts()...),
+	migrationCurrentSuffix(839, "lag.dev measurement certificate deliver time",
+		snMainnetMigrationColumns("network_extender_measurement_cert",
+			snMainnetMigrationColumn{name: "deliver_time", kind: "timestamp without time zone"})),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
