@@ -20,6 +20,8 @@ import (
 // find-providers2 draws the preferred facet first and labels every provider
 // with its proven category (connect/IPV6.md A8).
 func TestFindProviders2IpFamily(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

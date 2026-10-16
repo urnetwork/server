@@ -13,6 +13,8 @@ import (
 // A provider with a fresh probed egress location must be located from that
 // entry, not from the mmdb lookup on its control ip.
 func TestSetConnectionLocationPrefersEgressLocation(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -61,6 +63,8 @@ func TestSetConnectionLocationPrefersEgressLocation(t *testing.T) {
 
 // With no probed entry, the existing mmdb path still applies.
 func TestSetConnectionLocationFallsBackToMmdb(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -97,6 +101,8 @@ func TestSetConnectionLocationFallsBackToMmdb(t *testing.T) {
 // must be ignored, falling back to the mmdb lookup exactly as if there were no
 // probed entry at all.
 func TestSetConnectionLocationStaleProbedFallsBackToMmdb(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -162,6 +168,8 @@ func TestSetConnectionLocationStaleProbedFallsBackToMmdb(t *testing.T) {
 // must still end up located via the mmdb path, and SetConnectionLocation
 // itself must not panic or error out on this.
 func TestSetConnectionLocationProbedWriteErrorFallsBackToMmdb(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -223,6 +231,8 @@ func TestSetConnectionLocationProbedWriteErrorFallsBackToMmdb(t *testing.T) {
 // (egress country differs from control-ip country) foreign=1 instead of the
 // correct foreign=0.
 func TestSetConnectionLocationProbedNetTypeForeignMatchesMmdbParity(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -280,6 +290,8 @@ func TestSetConnectionLocationProbedNetTypeForeignMatchesMmdbParity(t *testing.T
 // wins -- even for a row written with the deprecated flags set, which the
 // model neither stores nor reads back.
 func TestSetConnectionLocationStoresNoProbedNetTypes(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -446,6 +458,8 @@ func testing_connectionLocationIds(ctx context.Context, connectionId server.Id) 
 // country-only probe agreeing that the provider is in CA adds nothing, so the
 // mmdb city has to survive.
 func TestSetConnectionLocationProbedCountryDoesNotCoarsenMmdbCity(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -510,6 +524,8 @@ func TestSetConnectionLocationProbedCountryDoesNotCoarsenMmdbCity(t *testing.T) 
 // reason the feature exists and must not be lost to the anti-coarsening rule
 // above.
 func TestSetConnectionLocationProbedCountryCorrectsMmdbCityInAnotherCountry(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -566,6 +582,8 @@ func TestSetConnectionLocationProbedCountryCorrectsMmdbCityInAnotherCountry(t *t
 // another country. Nothing is coarsened, so the anti-coarsening rule does not
 // apply.
 func TestSetConnectionLocationProbedCityWinsOverMmdbCity(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -634,6 +652,8 @@ func TestSetConnectionLocationProbedCityWinsOverMmdbCity(t *testing.T) {
 // a mock, because the thing under test is what server.Db does with a real
 // postgres error, not what the call site does with a fabricated one.
 func TestSetConnectionLocationEgressLookupErrorFallsBackToMmdb(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 

@@ -132,6 +132,8 @@ func testDerivedRow(nodeKind int, nodeId server.Id, location *model.Location) *m
 // the next derivation anchors to. The probe's flags still apply: they describe
 // the egress, not a location.
 func TestSetConnectionLocationPrefersTheDerivedLocation(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientIp := testDerivedClientIp
@@ -189,6 +191,8 @@ func TestSetConnectionLocationPrefersTheDerivedLocation(t *testing.T) {
 // genesis, and an extender's row that shares the client's id is not the
 // client's.
 func TestSetConnectionLocationRecordsTheGenesisOnTheMmdbPath(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientIp := testDerivedClientIp
@@ -215,6 +219,8 @@ func TestSetConnectionLocationRecordsTheGenesisOnTheMmdbPath(t *testing.T) {
 // connection unlocated: the connection falls through to the mmdb path, as if
 // it had no derived location.
 func TestSetConnectionLocationDerivedWriteErrorFallsBackToMmdb(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientIp := testDerivedClientIp
@@ -294,6 +300,8 @@ func TestSignExtenderRecordCarriesTheDerivedCountry(t *testing.T) {
 // in the derived country (§6); the activation history keeps where the address
 // resolved to.
 func TestExtenderActivateSignsTheDerivedCountry(t *testing.T) {
+	useGeolocationThatPlacesNothing(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newTestExtenderFixture(t)

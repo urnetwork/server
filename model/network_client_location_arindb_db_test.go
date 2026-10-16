@@ -74,6 +74,8 @@ func TestSetConnectionLocationWritesBothArinSlots(t *testing.T) {
 // differ, the old slot carries the epoch every live connection carries in
 // either slot.
 func TestClientLocationRollupCarriesBothArinSlotsOverLiveConnections(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		lookup := server.NowUtc().Truncate(time.Microsecond)
