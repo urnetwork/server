@@ -228,31 +228,36 @@ func verifySeekerNftHolder(
 		}, nil
 	}
 
-	searchAssets, returnErr := lookup.searchAssets(
+	// A failed lookup is answered with its code in the body, as the apps
+	// expect. Returning the transport error as well made the router drop this
+	// result and send the error's text, whose url carries the Helius key.
+	searchAssets, err := lookup.searchAssets(
 		session.Ctx,
 		verify.PublicKey,
 	)
 
-	if returnErr != nil {
+	if err != nil {
+		glog.Infof("[wallet]seeker asset lookup failed: %s\n", err)
 		return &VerifySeekerNftHolderResult{
 			Success: false,
 			Error: &VerifySeekerNftHolderError{
 				Code:    VerifySeekerNftHolderErrorCodeLookupFailed,
 				Message: "Error fetching fungible assets by owner",
 			},
-		}, returnErr
+		}, nil
 	}
 
-	sagaAssets, returnErr := lookup.searchSagaAssets(session.Ctx, verify.PublicKey)
+	sagaAssets, err := lookup.searchSagaAssets(session.Ctx, verify.PublicKey)
 
-	if returnErr != nil {
+	if err != nil {
+		glog.Infof("[wallet]seeker saga lookup failed: %s\n", err)
 		return &VerifySeekerNftHolderResult{
 			Success: false,
 			Error: &VerifySeekerNftHolderError{
 				Code:    VerifySeekerNftHolderErrorCodeLookupFailed,
 				Message: "Error fetching saga assets by owner",
 			},
-		}, returnErr
+		}, nil
 	}
 
 	isSeekerHolder := isSeekerNftHolder(searchAssets)
@@ -337,6 +342,15 @@ func isSagaNftHolder(
 
 }
 
+// A Helius request url carries the api key, and a transport error quotes its
+// url. The error that leaves a lookup names the key only as redacted.
+func heliusError(apiKey string, err error) error {
+	if err == nil || apiKey == "" {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), apiKey, "[redacted]"))
+}
+
 var heliusConfig = sync.OnceValue(func() map[string]any {
 	c := server.Vault.RequireSimpleResource("helius.yml").Parse()
 	return c["helius"].(map[string]any)
@@ -415,7 +429,7 @@ func heliusSearchAssets(
 
 	}
 
-	return assets, heliusErr
+	return assets, heliusError(apiKey, heliusErr)
 
 }
 
@@ -433,7 +447,7 @@ func heliusSearchAssetsSaga(
 		apiKey,
 	)
 
-	return server.HttpPostRequireStatusOk(
+	result, err := server.HttpPostRequireStatusOk(
 		ctx,
 		url,
 		map[string]any{
@@ -465,5 +479,5 @@ func heliusSearchAssetsSaga(
 			return &heliusResp, nil
 		},
 	)
-
+	return result, heliusError(apiKey, err)
 }
