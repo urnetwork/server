@@ -87,6 +87,15 @@ func providerEgressCountsPolicyKey(
 	if err != nil {
 		panic(err)
 	}
-	sum := sha256.Sum256(encoded)
+	// The native URL-run minimums (egress_native_min_runs.go) move a provider
+	// whose passing ratio rests on too few runs out of Quality and Speed to
+	// unprobed, which a snapshot of any schema above counted in both. The key
+	// covers them beside the policy rather than in a new schema, so the change
+	// applies alike to every line of workers that carries one schema.
+	nativeMinRuns, err := json.Marshal(providerNativeMinRuns)
+	if err != nil {
+		panic(err)
+	}
+	sum := sha256.Sum256(append(encoded, nativeMinRuns...))
 	return hex.EncodeToString(sum[:])
 }

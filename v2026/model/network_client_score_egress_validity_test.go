@@ -238,11 +238,13 @@ func TestScoreExportVerdictEndsWithItsNewestRun(t *testing.T) {
 	for _, evidenceMaxAge := range []time.Duration{ProviderEgressHealthMaxAge, 12 * time.Hour} {
 		settings := DefaultEgressIndexSettings()
 		settings.EvidenceMaxAge = evidenceMaxAge
-		// the newest run leaves the eight-hour window ten minutes after the export
+		// the newest run leaves the eight-hour window ten minutes after the
+		// export, so the runs left in it span less than Quality's thirty
+		// minutes (egress_native_min_runs.go): the verdict is Speed's
 		newest := &egressValidityTestProvider{name: "fading", newestAge: ProviderEgressHealthMaxAge - 10*time.Minute, oldestAge: ProviderEgressHealthMaxAge - time.Minute, urlOk: 5, urlTotal: 5}
-		union, native := egressValidityTestExport(t, settings, RankModeQuality, []*egressValidityTestProvider{newest})
+		union, native := egressValidityTestExport(t, settings, RankModeSpeed, []*egressValidityTestProvider{newest})
 		clientScore := union["fading"]
-		if !clientScore.PassesMinimums[RankModeQuality] || native["fading"] == nil {
+		if !clientScore.PassesMinimums[RankModeSpeed] || native["fading"] == nil {
 			t.Fatalf("evidence max age %s: the provider was exported with native=%v", evidenceMaxAge, clientScore.PassesMinimums)
 		}
 		end := snapshot.Add(-newest.newestAge).Add(ProviderEgressHealthMaxAge)
