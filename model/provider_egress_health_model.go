@@ -340,14 +340,14 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 				UPDATE provider_egress_probe_cycle AS cycle SET
 					success_count = recent.success_count,
 					error_count = error_count + $4,
-					outcome_count = outcome_count + $8,
+					outcome_count = outcome_count + $7,
 					latest_result_at = GREATEST(latest_result_at, $5),
 					next_attempt_at = CASE WHEN latest_result_at > $5 THEN next_attempt_at
-						WHEN recent.run_count >= $6 AND NOT (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`) THEN recent.oldest_run_at + ($7 * interval '1 second')
+						WHEN recent.run_count >= $6 AND NOT (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`) THEN `+providerUrlProbeRenewalAtSql("recent.oldest_run_at", "$5::timestamp")+`
 						ELSE `+providerUrlProbePacedAttemptSql("cycle", "$5", "$3", "recent.run_count < $6")+` END
 				FROM recent WHERE cycle.client_id = recent.client_id`,
 				health.ClientId, cycleStartedAt, health.OKCount, health.Total-health.OKCount,
-				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, (ProviderEgressProbeRefreshAge - ProviderUrlProbeRenewalHeadroom).Seconds(), health.Total))
+				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, health.Total))
 		}
 	})
 }
